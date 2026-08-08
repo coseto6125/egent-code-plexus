@@ -206,28 +206,18 @@ pub fn drain_and_render_peer_payload() -> Option<String> {
         Ok(_) => {}
     }
 
-    let meta_path = session_dir.join("session_meta.json");
-    let mut meta = ecp_core::session::SessionMeta::read(&meta_path).ok()?;
-
-    let (entries, _new_offset) =
-        ecp_core::peer::inbox::drain(&inbox, meta.last_drained_offset).ok()?;
-    if entries.is_empty() {
-        return None;
-    }
-    let payload = crate::peer::render::render_payload(&entries);
-    if payload.is_empty() {
-        return None;
-    }
-
-    // Truncating is safe again because `render_payload` never drops a message:
-    // it trims SOFT, then HARD detail, then message bodies, and a concern is
-    // re-derived from the peer's manifest on its next write. Keeping the file
-    // instead turned it into a durable log needing rotation, 64-bit offsets and
-    // promotion awareness — see FU-2026-08-09-90261c6d6d7f.
-    let _ = ecp_core::peer::inbox::truncate_inbox(&inbox);
-    meta.last_drained_offset = 0;
-    if let Err(e) = ecp_core::session::SessionMeta::write_atomic(&meta_path, &meta) {
-        eprintln!("[ecp peers] could not reset the inbox watermark ({e})");
-    }
-    Some(payload)
+    // The hook no longer touches session_meta: consumption is recorded by
+    // removing the delivered lines, not by a watermark. That also removes a
+    // whole-file rewrite that raced the watcher's own updates to the same file.
+    // Read, render and consume in ONE critical section. Holding the lock only
+    // for the read let a sender append between the drain and the clear, and
+    // that message was then erased unseen. Only what the payload actually
+    // represented is removed; the rest waits for the next hook.
+    ecp_core::peer::inbox::deliver_and_consume(&inbox, |entries| {
+        let (payload, shown) = crate::peer::render::render_payload(entries);
+        (payload, shown)
+    })
+    .ok()
+    .flatten()
+    .filter(|p: &String| !p.is_empty())
 }

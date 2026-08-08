@@ -141,6 +141,63 @@ impl InboxLock {
     }
 }
 
+/// Read every entry, hand them to `deliver`, and remove exactly the ones it
+/// reports as delivered — all inside one lock.
+///
+/// The lock has to span the read AND the rewrite. Releasing it in between is
+/// what let a sender's append land in the window and be erased by the caller's
+/// truncate, which is the bug this whole path exists to prevent. `deliver`
+/// returns the indices it actually represented; everything else is written
+/// back, so an entry the payload could not fit is still there next time.
+///
+/// Lines that do not parse (a writer killed mid-write leaves a partial tail)
+/// are dropped rather than carried forward, so they cannot fuse with the next
+/// append into one corrupt line.
+pub fn deliver_and_consume<T>(
+    path: &Path,
+    deliver: impl FnOnce(&[InboxEntry]) -> (T, std::collections::HashSet<usize>),
+) -> io::Result<Option<T>> {
+    let _guard = InboxLock::acquire(path)?;
+    let content = match std::fs::read(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let mut entries = Vec::new();
+    let mut raw = Vec::new();
+    for line in content.split(|b| *b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(line);
+        match serde_json::from_str::<InboxEntry>(text.trim_end()) {
+            Ok(entry) => {
+                entries.push(entry);
+                raw.push(text.into_owned());
+            }
+            Err(e) => tracing::warn!(error = %e, "dropping unparseable inbox line"),
+        }
+    }
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let (value, consumed) = deliver(&entries);
+    let kept: Vec<&String> = raw
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !consumed.contains(i))
+        .map(|(_, l)| l)
+        .collect();
+    let mut out = String::new();
+    for line in kept {
+        out.push_str(line);
+        out.push('\n');
+    }
+    std::fs::write(path, out.as_bytes())?;
+    bump_gen(path)?;
+    Ok(Some(value))
+}
+
 // Watermark encoding: upper 32 bits = generation counter, lower 32 bits =
 // byte offset (max 4 GiB per inbox file — sufficient for JSONL inboxes).
 const OFFSET_MASK: u64 = u32::MAX as u64;

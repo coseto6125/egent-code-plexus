@@ -24,12 +24,12 @@ fn dirty_hard() -> InboxEntry {
 
 #[test]
 fn empty_input_renders_empty_string() {
-    assert!(render_payload(&[]).is_empty());
+    assert!(render_payload(&[]).0.is_empty());
 }
 
 #[test]
 fn single_hard_event_renders_header_and_delta() {
-    let out = render_payload(&[dirty_hard()]);
+    let out = render_payload(&[dirty_hard()]).0;
     assert!(out.contains("HARD overlap"), "missing HARD header: {out}");
     assert!(out.contains("verify_token"));
     assert!(out.contains("src/auth.rs:42-58"));
@@ -49,7 +49,7 @@ fn message_event_renders_msg_id_body_and_beta_marker() {
         reply_to: None,
         body: "hello peers".into(),
     };
-    let out = render_payload(&[msg]);
+    let out = render_payload(&[msg]).0;
     assert!(out.contains("[m_001]"));
     assert!(out.contains("hello peers"));
     assert!(
@@ -84,7 +84,7 @@ fn hard_payload_prefers_agent_name_keeps_session_id() {
         },
         other => panic!("dirty_hard returned wrong variant: {other:?}"),
     };
-    let out = render_payload(&[named]);
+    let out = render_payload(&[named]).0;
     assert!(
         out.contains("Peer:   rust-parser (session abc12, pid 1234)"),
         "named peer line wrong: {out}"
@@ -94,7 +94,7 @@ fn hard_payload_prefers_agent_name_keeps_session_id() {
         "named HARD must carry an actionable coordinate hint: {out}"
     );
 
-    let anon = render_payload(&[dirty_hard()]);
+    let anon = render_payload(&[dirty_hard()]).0;
     assert!(
         anon.contains("Peer:   abc12 (pid 1234)"),
         "anon peer line wrong: {anon}"
@@ -116,7 +116,7 @@ fn message_renders_from_name_when_present() {
         reply_to: None,
         body: "ping".into(),
     };
-    let out = render_payload(&[msg]);
+    let out = render_payload(&[msg]).0;
     assert!(out.contains("graph-lead"), "from_name not shown: {out}");
 }
 
@@ -153,7 +153,7 @@ fn enforces_4kb_cap_with_hard_priority() {
         });
     }
     bulk.insert(0, dirty_hard());
-    let out = render_payload(&bulk);
+    let out = render_payload(&bulk).0;
     assert!(out.len() <= 4096, "payload exceeds 4 KB cap: {}", out.len());
     assert!(out.contains("HARD overlap"), "HARD must survive trimming");
 }
@@ -163,7 +163,7 @@ fn duplicate_dirty_events_same_peer_symbol_render_once() {
     // The watcher's self-dirty rescan can re-dispatch an overlap a peer
     // event already delivered; the payload must not show the same
     // (peer, symbol) concern twice.
-    let out = render_payload(&[dirty_hard(), dirty_hard()]);
+    let out = render_payload(&[dirty_hard(), dirty_hard()]).0;
     assert!(
         out.contains("HARD overlap (1 event)"),
         "duplicates must collapse: {out}"

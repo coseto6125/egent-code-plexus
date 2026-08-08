@@ -8,30 +8,32 @@
 //! message away is therefore the one loss nothing can undo.
 
 use ecp_core::peer::inbox::{ConcernKindSer, InboxEntry};
+use std::collections::HashSet;
 use std::fmt::Write;
 
 const PAYLOAD_CAP_BYTES: usize = 4096;
 const HARD_DELTA_LOC_CAP: usize = 30;
-const SOFT_EVENTS_DEFAULT_CAP: usize = 10;
 
-pub fn render_payload(entries: &[InboxEntry]) -> String {
+/// Returns the payload and the indices of `entries` it actually represented.
+/// The caller removes exactly those; anything that did not fit stays in the
+/// inbox for the next hook rather than being cleared unseen.
+pub fn render_payload(entries: &[InboxEntry]) -> (String, HashSet<usize>) {
     if entries.is_empty() {
-        return String::new();
+        return (String::new(), HashSet::new());
     }
-    // The watcher's self-dirty rescan (and repeated peer re-saves) can
-    // deliver the same (peer, symbol, kind) concern more than once between
-    // drains. Keep only the LAST occurrence — it carries the freshest
-    // peer_delta — by scanning in reverse with a seen-set.
-    // HARD's identity is the shared FILE, so its witness declaration is not
-    // part of the key: a peer that gains a declaration between two events
-    // would otherwise render as two concerns about one file. SOFT does key on
-    // the declaration, since that is what it actually claims.
-    let mut seen: std::collections::HashSet<(&str, &str, &str, ConcernKindSer)> =
-        std::collections::HashSet::new();
-    let mut deduped: Vec<&InboxEntry> = entries
-        .iter()
-        .rev()
-        .filter(|e| match e {
+    // A repeated (peer, file, name, kind) concern is the same concern: the
+    // watcher's self-dirty rescan and repeated peer saves both re-raise it.
+    // Only the LAST occurrence is rendered — it carries the freshest delta —
+    // and the earlier ones count as represented, so they are consumed too.
+    // HARD's identity is the file, so its witness declaration is not part of
+    // the key; SOFT keys on the declaration, which is what it claims.
+    let mut seen: HashSet<(&str, &str, &str, ConcernKindSer)> = HashSet::new();
+    let mut superseded: HashSet<usize> = HashSet::new();
+    let mut hard: Vec<(usize, &InboxEntry)> = Vec::new();
+    let mut soft: Vec<(usize, &InboxEntry)> = Vec::new();
+    let mut msgs: Vec<(usize, &InboxEntry)> = Vec::new();
+    for (i, e) in entries.iter().enumerate().rev() {
+        match e {
             InboxEntry::DirtyEvent {
                 peer_session,
                 symbol,
@@ -42,55 +44,47 @@ pub fn render_payload(entries: &[InboxEntry]) -> String {
                     ConcernKindSer::Hard => "",
                     ConcernKindSer::Soft => symbol.name.as_str(),
                 };
-                seen.insert((peer_session.as_str(), symbol.file.as_str(), witness, *kind))
+                if !seen.insert((peer_session.as_str(), symbol.file.as_str(), witness, *kind)) {
+                    superseded.insert(i);
+                    continue;
+                }
+                match kind {
+                    ConcernKindSer::Hard => hard.push((i, e)),
+                    ConcernKindSer::Soft => soft.push((i, e)),
+                }
             }
-            InboxEntry::Message { .. } => true,
-        })
-        .collect();
-    deduped.reverse();
+            InboxEntry::Message { .. } => msgs.push((i, e)),
+        }
+    }
+    hard.reverse();
+    soft.reverse();
+    msgs.reverse();
 
-    let (mut hard, mut soft, mut msgs) = (Vec::new(), Vec::new(), Vec::new());
-    for e in deduped {
-        match e {
-            InboxEntry::DirtyEvent {
-                kind: ConcernKindSer::Hard,
-                ..
-            } => hard.push(e),
-            InboxEntry::DirtyEvent {
-                kind: ConcernKindSer::Soft,
-                ..
-            } => soft.push(e),
-            InboxEntry::Message { .. } => msgs.push(e),
+    // Plans in order of what each sacrifices; the first that represents
+    // everything wins. Concerns are re-derivable — the peer's manifest is on
+    // disk and the watcher raises them again — so they are given up before a
+    // message, which exists only in this batch.
+    let total = hard.len() + soft.len() + msgs.len();
+    let mut best = compose(&hard, &soft, &msgs, ATTEMPTS[0]);
+    for plan in &ATTEMPTS[1..] {
+        if best.1.len() == total {
+            break;
+        }
+        let attempt = compose(&hard, &soft, &msgs, *plan);
+        if attempt.1.len() > best.1.len() {
+            best = attempt;
         }
     }
-    // Attempts in order of what each sacrifices, stopping at the first that
-    // fits: full detail, then SOFT dropped, then HARD reduced to one line each,
-    // then message bodies squeezed. Messages always survive at least as an id
-    // and sender, because nothing else holds a copy after this returns.
-    let last = ATTEMPTS.len() - 1;
-    for (attempt, plan) in ATTEMPTS.iter().enumerate() {
-        let buf = compose(&hard, &soft, &msgs, *plan);
-        if buf.len() <= PAYLOAD_CAP_BYTES {
-            return buf;
-        }
-        if attempt == last {
-            // Even id-and-sender lines overflow: clamp, and say how much of the
-            // batch the agent is not seeing rather than cutting silently.
-            let mut clamped = buf;
-            clamped.truncate(floor_char_boundary(
-                &clamped,
-                PAYLOAD_CAP_BYTES.saturating_sub(96),
-            ));
-            let _ = writeln!(
-                clamped,
-                "\n... batch too large for the 4KB cap ({} concern(s), {} message(s)) — `ecp peers inbox`",
-                hard.len() + soft.len(),
-                msgs.len()
-            );
-            return clamped;
-        }
+    let (mut buf, mut shown) = best;
+    let unseen = total - shown.len();
+    if unseen > 0 {
+        let _ = writeln!(
+            buf,
+            "\n[ecp peers] {unseen} more held back by the 4KB cap — they stay in the inbox for the next turn (`ecp peers inbox` to read now)"
+        );
     }
-    unreachable!("ATTEMPTS is non-empty")
+    shown.extend(superseded);
+    (buf, shown)
 }
 
 #[derive(Clone, Copy)]
@@ -107,82 +101,104 @@ const ATTEMPTS: &[Plan] = &[
         body_budget: 500,
     },
     Plan {
-        soft: false,
-        hard_detail: true,
+        soft: true,
+        hard_detail: false,
         body_budget: 500,
     },
     Plan {
-        soft: false,
+        soft: true,
         hard_detail: false,
         body_budget: 240,
     },
     Plan {
-        soft: false,
+        soft: true,
         hard_detail: false,
         body_budget: 60,
     },
     Plan {
-        soft: false,
+        soft: true,
         hard_detail: false,
         body_budget: 0,
     },
 ];
 
-fn compose(hard: &[&InboxEntry], soft: &[&InboxEntry], msgs: &[&InboxEntry], plan: Plan) -> String {
-    let body_budget = plan.body_budget;
+/// Build a payload under `plan`, appending an item only while it still fits.
+/// Nothing is ever cut mid-item, so every index reported was rendered whole.
+fn compose(
+    hard: &[(usize, &InboxEntry)],
+    soft: &[(usize, &InboxEntry)],
+    msgs: &[(usize, &InboxEntry)],
+    plan: Plan,
+) -> (String, HashSet<usize>) {
     let mut buf = String::new();
-    if !hard.is_empty() {
-        let _ = writeln!(
-            buf,
-            "[ecp peers] HARD overlap ({} event{})",
-            hard.len(),
-            if hard.len() == 1 { "" } else { "s" }
-        );
-        for e in hard {
-            if plan.hard_detail {
-                render_hard(&mut buf, e);
-            } else {
-                render_soft_one_line(&mut buf, e);
+    let mut shown = HashSet::new();
+    // Messages first: they are the only content with no other copy once the
+    // caller consumes them, so they claim the budget before any concern does.
+    let section = |buf: &mut String,
+                   shown: &mut HashSet<usize>,
+                   header: String,
+                   items: &[(usize, &InboxEntry)],
+                   render: &dyn Fn(&mut String, &InboxEntry)| {
+        if items.is_empty() {
+            return;
+        }
+        let mut pending = header;
+        for (i, e) in items {
+            let mut block = String::new();
+            render(&mut block, e);
+            if buf.len() + pending.len() + block.len() > PAYLOAD_CAP_BYTES {
+                break;
             }
+            buf.push_str(&pending);
+            pending = String::new();
+            buf.push_str(&block);
+            shown.insert(*i);
         }
-    }
-    if plan.soft && !soft.is_empty() {
-        let cap = SOFT_EVENTS_DEFAULT_CAP.min(soft.len());
-        let _ = writeln!(
-            buf,
-            "\n[ecp peers] SOFT overlap ({} event{})",
-            soft.len(),
-            if soft.len() == 1 { "" } else { "s" }
-        );
-        for e in soft.iter().take(cap) {
-            render_soft_one_line(&mut buf, e);
-        }
-        if soft.len() > cap {
-            let _ = writeln!(
-                buf,
-                "  ... +{} more, run `ecp peers status`",
-                soft.len() - cap
-            );
-        }
-    } else if !soft.is_empty() {
-        let _ = writeln!(
-            buf,
-            "\n[ecp peers] SOFT overlap ({}) omitted to fit the 4KB cap — `ecp peers status`",
-            soft.len()
-        );
-    }
-    if !msgs.is_empty() {
-        let _ = writeln!(
-            buf,
-            "\n[ecp peers] {} new message{} Ƀ",
+    };
+    let budget = plan.body_budget;
+    section(
+        &mut buf,
+        &mut shown,
+        format!(
+            "[ecp peers] {} new message{} Ƀ\n",
             msgs.len(),
             if msgs.len() == 1 { "" } else { "s" }
+        ),
+        msgs,
+        &move |b, e| render_message(b, e, budget),
+    );
+    let detail = plan.hard_detail;
+    section(
+        &mut buf,
+        &mut shown,
+        format!(
+            "\n[ecp peers] HARD overlap ({} event{})\n",
+            hard.len(),
+            if hard.len() == 1 { "" } else { "s" }
+        ),
+        hard,
+        &move |b, e| {
+            if detail {
+                render_hard(b, e)
+            } else {
+                render_soft_one_line(b, e)
+            }
+        },
+    );
+    if plan.soft {
+        section(
+            &mut buf,
+            &mut shown,
+            format!(
+                "\n[ecp peers] SOFT overlap ({} event{})\n",
+                soft.len(),
+                if soft.len() == 1 { "" } else { "s" }
+            ),
+            soft,
+            &render_soft_one_line,
         );
-        for e in msgs {
-            render_message(&mut buf, e, body_budget);
-        }
     }
-    buf
+    (buf, shown)
 }
 
 fn render_hard(buf: &mut String, e: &InboxEntry) {
@@ -292,17 +308,4 @@ fn render_message(buf: &mut String, e: &InboxEntry, body_budget: usize) {
             let _ = writeln!(buf, "    {truncated}");
         }
     }
-}
-
-/// Last-resort clamp for the final attempt. `String::truncate` panics on a
-/// non-boundary index and message bodies carry arbitrary user text, so a
-/// multi-byte character straddling the cap would take the hook down.
-fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
-    if idx >= s.len() {
-        return s.len();
-    }
-    while idx > 0 && !s.is_char_boundary(idx) {
-        idx -= 1;
-    }
-    idx
 }
