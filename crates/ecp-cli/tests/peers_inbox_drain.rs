@@ -70,7 +70,7 @@ fn pre_tool_use_silent_when_inbox_empty() {
 }
 
 #[test]
-fn pre_tool_use_truncates_inbox_after_drain() {
+fn pre_tool_use_marks_the_inbox_drained_without_destroying_it() {
     let dir = tempdir().unwrap();
     let me = "test_drain_truncate";
     let session_dir = dir.path().join("sessions").join(me);
@@ -91,10 +91,21 @@ fn pre_tool_use_truncates_inbox_after_drain() {
     child.stdin.as_mut().unwrap().write_all(b"{}").unwrap();
     let _ = child.wait_with_output();
 
+    // The payload is capped at 4 KB and drops the overflow, so blanking the
+    // file lost delivered messages. The watermark is what stops a repeat, and
+    // the surviving file is what `ecp peers inbox` recovers from.
     let after = std::fs::read_to_string(session_dir.join("inbox.jsonl")).unwrap_or_default();
     assert!(
-        after.is_empty() || !after.contains("truncate-me"),
-        "inbox should be truncated after drain. after: {after}"
+        after.contains("truncate-me"),
+        "inbox must survive the drain. after: {after}"
+    );
+    let meta: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(session_dir.join("session_meta.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        meta["last_drained_offset"].as_u64().unwrap_or(0) > 0,
+        "the watermark must advance past the delivered entry: {meta}"
     );
 }
 
