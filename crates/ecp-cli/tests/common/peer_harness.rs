@@ -13,6 +13,15 @@ use tempfile::TempDir;
 pub struct PeerHarness {
     pub repo_root: TempDir,
     pub watchers: Vec<SpawnedSession>,
+    /// Set by [`PeerHarness::backed_by`] when the test needs the watcher to
+    /// reach a real indexed graph (SOFT concerns); `None` keeps the default
+    /// no-graph setup every other peers test runs on.
+    graph: Option<GraphBacking>,
+}
+
+struct GraphBacking {
+    home: PathBuf,
+    worktree: PathBuf,
 }
 
 pub struct SpawnedSession {
@@ -29,7 +38,19 @@ impl PeerHarness {
         Self {
             repo_root,
             watchers: Vec::new(),
+            graph: None,
         }
+    }
+
+    /// Point every session spawned afterwards at an indexed worktree: sessions
+    /// record it as `source_worktree` and watchers run with `HOME=home`, which
+    /// is how the watcher resolves the published graph for SOFT concerns.
+    pub fn backed_by(mut self, home: &Path, worktree: &Path) -> Self {
+        self.graph = Some(GraphBacking {
+            home: home.to_path_buf(),
+            worktree: worktree.to_path_buf(),
+        });
+        self
     }
 
     pub fn spawn_session(&mut self, id: &str) -> &SpawnedSession {
@@ -46,7 +67,10 @@ impl PeerHarness {
             started_at: Utc::now().to_rfc3339(),
             last_touched: Utc::now().to_rfc3339(),
             base_sha: "0".repeat(40),
-            source_worktree: "/tmp".into(),
+            source_worktree: match &self.graph {
+                Some(g) => g.worktree.to_string_lossy().into_owned(),
+                None => "/tmp".into(),
+            },
             overlay_version: 1,
             watcher_pid: None,
             last_drained_offset: 0,
@@ -55,20 +79,24 @@ impl PeerHarness {
         SessionMeta::write_atomic(&session_dir.join("session_meta.json"), &meta).unwrap();
 
         let bin: PathBuf = env!("CARGO_BIN_EXE_ecp").into();
-        let child = Command::new(&bin)
-            .args([
-                "watch",
-                "--foreground",
-                "--repo",
-                self.repo_root.path().to_str().unwrap(),
-            ])
-            .env("ECP_SESSION_ID", id)
-            .env("CLAUDE_CODE_SESSION_ID", id)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn watcher");
+        let mut cmd = Command::new(&bin);
+        cmd.args([
+            "watch",
+            "--foreground",
+            "--repo",
+            self.repo_root.path().to_str().unwrap(),
+        ])
+        .env("ECP_SESSION_ID", id)
+        .env("CLAUDE_CODE_SESSION_ID", id)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+        if let Some(g) = &self.graph {
+            cmd.env("HOME", &g.home)
+                .env_remove("ECP_HOME")
+                .env("ECP_SKIP_BG_REBUILD", "1");
+        }
+        let child = cmd.spawn().expect("spawn watcher");
         let pid = child.id();
         self.watchers.push(SpawnedSession {
             id: id.into(),

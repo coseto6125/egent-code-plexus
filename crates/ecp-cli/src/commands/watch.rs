@@ -99,7 +99,14 @@ fn start_background(repo_root: PathBuf, sid: String, session_dir: PathBuf) -> Re
         started_at: chrono::Utc::now().to_rfc3339(),
         last_touched: chrono::Utc::now().to_rfc3339(),
         base_sha: "0".repeat(40),
-        source_worktree: String::new(),
+        // `ecp watch --start` runs at SessionStart, ahead of the first query
+        // that would enroll the session, so this is often the meta the watcher
+        // ends up reading — and `ensure_session_meta` never repairs a file that
+        // already exists. Left empty, the watcher can't find the worktree, so
+        // it can't open the graph and SOFT concerns stay off for the session.
+        source_worktree: std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
         overlay_version: 0,
         watcher_pid: None,
         last_drained_offset: 0,

@@ -100,6 +100,7 @@ pub fn run(args: ImpactArgs) -> Result<(), EcpError> {
         &engine,
         &alias.dir_name,
         &args.target,
+        None,
         &args.direction,
         args.max_depth,
         timeout_ms,
