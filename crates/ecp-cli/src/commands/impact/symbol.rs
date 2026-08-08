@@ -59,13 +59,20 @@ impl LocalImpact {
 /// only to resolve the confidence threshold from the repo config — the Engine
 /// is provided by the caller, so no graph loading happens here.
 ///
+/// `file` narrows the target to one path (substring match, as `--file` does).
+/// Callers that know which file the symbol lives in should pass it: a bare name
+/// with several definitions is rejected as `AmbiguousSymbol`, and the common
+/// names (`run`, `new`, `handle`) are precisely the ambiguous ones.
+///
 /// Returns `Ok(LocalImpact)` even when the symbol is not found in the graph
 /// (the payload will carry an `"error"` field in that case), matching the
 /// same graceful-degradation behaviour as `ecp impact --target X`.
+#[allow(clippy::too_many_arguments)]
 pub fn run_for_symbol(
     engine: &Engine,
     member_repo: &str,
     target: &str,
+    file: Option<&str>,
     direction: &str,
     max_depth: Option<u32>,
     timeout_ms: Option<u64>,
@@ -80,7 +87,7 @@ pub fn run_for_symbol(
         name: Some(target.to_string()),
         target: None,
         baseline: None,
-        file: None,
+        file: file.map(str::to_string),
         kind: None,
         direction: dir,
         depth: max_depth.unwrap_or(5) as usize,

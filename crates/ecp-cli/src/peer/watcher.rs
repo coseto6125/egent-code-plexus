@@ -253,42 +253,38 @@ const SOFT_IMPACT_MAX_NAMES: usize = 20_000;
 
 /// Graph handle backing SOFT classification.
 ///
-/// Loaded at most once per watcher and reused for every rebuild: the daemon
-/// lives for the whole coding session, so re-resolving and re-mmapping the
-/// graph on each save would put repeated I/O behind an ordinary file write.
-/// The trade is that a graph published mid-session stays unseen until the
-/// watcher restarts — acceptable for a heuristic whose miss mode is "no SOFT
-/// hint", and the HARD path never consults it.
+/// Held for the watcher's life once opened: the daemon runs for a whole coding
+/// session, so re-mmapping the graph on each save would put repeated I/O behind
+/// an ordinary file write. The trade is that a graph published mid-session
+/// stays unseen until the watcher restarts — acceptable for a heuristic whose
+/// miss mode is "no SOFT hint", and the HARD path never consults it.
 struct ImpactSource {
     engine: crate::engine::Engine,
     member_repo: String,
 }
 
-/// Everything the SOFT half of `classify` reads: the impacted-name set, and
-/// the graph it was derived from.
+/// One dirty symbol to traverse from. The file qualifies the name: bare
+/// `run` / `new` / `handle` match many definitions, and `run_for_symbol`
+/// rejects an ambiguous target outright — which would silently drop SOFT
+/// coverage for exactly the names agents edit most.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Seed {
+    name: String,
+    file: String,
+}
+
+/// Everything the SOFT half of `classify` reads: the impacted-name set, the
+/// graph it was derived from, and the seeds it was derived from.
 #[derive(Default)]
 struct SoftState {
     cache: ImpactCache,
-    source: ImpactSlot,
-}
-
-/// One-shot lazy slot. `attempted` distinguishes "not loaded yet" from "load
-/// failed", so a session whose repo has no published graph pays the resolution
-/// cost once and then runs HARD-only.
-#[derive(Default)]
-struct ImpactSlot {
-    attempted: bool,
     source: Option<ImpactSource>,
-}
-
-impl ImpactSlot {
-    fn get(&mut self, my_session_dir: &Path) -> Option<&ImpactSource> {
-        if !self.attempted {
-            self.attempted = true;
-            self.source = load_impact_source(my_session_dir);
-        }
-        self.source.as_ref()
-    }
+    /// Seeds behind the current cache. An agent iterating inside one function
+    /// rewrites `dirty_files.json` on every save without changing which symbols
+    /// are dirty; recomputing the same radius each time would run dozens of
+    /// graph traversals on the watcher's single event-loop thread for a result
+    /// that cannot have changed.
+    seeds: Vec<Seed>,
 }
 
 impl SoftState {
@@ -296,15 +292,26 @@ impl SoftState {
     /// empty, which degrades to the HARD-only behaviour this watcher had before
     /// the graph was wired in.
     fn rebuild(&mut self, my_session_dir: &Path) {
-        self.cache.invalidate();
         let seeds = seed_symbols(my_session_dir);
-        if seeds.is_empty() {
+        if seeds == self.seeds {
             return;
         }
-        let Some(source) = self.source.get(my_session_dir) else {
+        self.seeds = seeds;
+        self.cache.invalidate();
+        if self.seeds.is_empty() {
+            return;
+        }
+        // Retried while it keeps failing rather than latched off after one
+        // attempt: a session that starts before its first index finishes would
+        // otherwise run the next several hours with SOFT disabled against a
+        // graph that has been on disk the whole time.
+        if self.source.is_none() {
+            self.source = load_impact_source(my_session_dir);
+        }
+        let Some(source) = self.source.as_ref() else {
             return;
         };
-        self.cache.refresh(impacted_names(source, &seeds));
+        self.cache.refresh(impacted_names(source, &self.seeds));
     }
 }
 
@@ -330,10 +337,10 @@ fn load_impact_source(my_session_dir: &Path) -> Option<ImpactSource> {
     })
 }
 
-/// Distinct dirty symbol names, capped. Order follows `DirtyFiles`' BTreeMap,
-/// so the surviving prefix is stable across rebuilds instead of shuffling on
-/// every save.
-fn seed_symbols(my_session_dir: &Path) -> Vec<String> {
+/// Distinct dirty symbols, capped. Order follows `DirtyFiles`' BTreeMap, so
+/// the surviving prefix is stable across rebuilds instead of shuffling on every
+/// save — which is what lets `rebuild` compare seed lists for equality.
+fn seed_symbols(my_session_dir: &Path) -> Vec<Seed> {
     let Ok(dirty) = DirtyFiles::read(&my_session_dir.join("dirty_files.json")) else {
         return Vec::new();
     };
@@ -343,23 +350,27 @@ fn seed_symbols(my_session_dir: &Path) -> Vec<String> {
         if seeds.len() >= SOFT_IMPACT_MAX_SEEDS {
             break;
         }
-        if seen.insert(symbol.name.as_str()) {
-            seeds.push(symbol.name.clone());
+        if seen.insert((symbol.name.as_str(), symbol.file.as_str())) {
+            seeds.push(Seed {
+                name: symbol.name.clone(),
+                file: symbol.file.clone(),
+            });
         }
     }
     seeds
 }
 
-/// Union of every seed's blast radius. A seed the graph can't resolve
-/// (ambiguous bare name, symbol newer than the graph) is skipped: one
+/// Union of every seed's blast radius. A seed the graph can't resolve (still
+/// ambiguous within its file, or newer than the graph) is skipped: one
 /// unresolvable name must not cost the others their SOFT coverage.
-fn impacted_names(source: &ImpactSource, seeds: &[String]) -> Vec<String> {
-    let mut names = Vec::new();
+fn impacted_names(source: &ImpactSource, seeds: &[Seed]) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
     for seed in seeds {
         let Ok(local) = run_for_symbol(
             &source.engine,
             &source.member_repo,
-            seed,
+            &seed.name,
+            Some(seed.file.as_str()),
             "both",
             Some(SOFT_IMPACT_DEPTH),
             None,
@@ -367,26 +378,35 @@ fn impacted_names(source: &ImpactSource, seeds: &[String]) -> Vec<String> {
         ) else {
             continue;
         };
-        collect_impact_names(local.as_json(), &mut names);
-        if names.len() >= SOFT_IMPACT_MAX_NAMES {
+        if collect_impact_names(local.as_json(), &mut names) {
             break;
         }
     }
     names
 }
 
-/// Names reached by one impact traversal. The seed sits at depth 0 and is kept:
-/// a peer touching it is already HARD, and `classify` checks HARD first.
-fn collect_impact_names(payload: &serde_json::Value, out: &mut Vec<String>) {
+/// Names reached by one impact traversal, deduped into `out`. Returns true once
+/// `out` is full, so a single hub seed reaching six figures of nodes stops the
+/// traversal instead of being counted after the fact.
+///
+/// The seed sits at depth 0 and is kept: a peer touching it is already HARD,
+/// and `classify` checks HARD first.
+fn collect_impact_names(
+    payload: &serde_json::Value,
+    out: &mut std::collections::HashSet<String>,
+) -> bool {
     let Some(items) = payload["impact"].as_array() else {
-        return;
+        return out.len() >= SOFT_IMPACT_MAX_NAMES;
     };
-    out.extend(
-        items
-            .iter()
-            .filter_map(|item| item["name"].as_str())
-            .map(str::to_string),
-    );
+    for item in items {
+        if out.len() >= SOFT_IMPACT_MAX_NAMES {
+            return true;
+        }
+        if let Some(name) = item["name"].as_str() {
+            out.insert(name.to_string());
+        }
+    }
+    out.len() >= SOFT_IMPACT_MAX_NAMES
 }
 
 fn log_watcher_error(context: &str, err: &dyn std::fmt::Debug) {
@@ -402,10 +422,10 @@ mod tests {
     use ecp_core::session::overlay::{DirtyEntry, SymbolKind, SymbolRef};
     use std::collections::BTreeMap;
 
-    fn write_dirty(dir: &Path, symbols: &[&str]) {
+    fn write_dirty_in(dir: &Path, file: &str, symbols: &[&str]) {
         let mut entries = BTreeMap::new();
         entries.insert(
-            "src/a.rs".to_string(),
+            file.to_string(),
             DirtyEntry {
                 mtime_ns: 1,
                 content_hash: "h".into(),
@@ -418,7 +438,7 @@ mod tests {
                     .map(|n| SymbolRef {
                         name: (*n).into(),
                         kind: SymbolKind::Function,
-                        file: "src/a.rs".into(),
+                        file: file.into(),
                         line_start: 1,
                         line_end: 2,
                     })
@@ -435,11 +455,35 @@ mod tests {
         .expect("write dirty_files.json");
     }
 
+    fn write_dirty(dir: &Path, symbols: &[&str]) {
+        write_dirty_in(dir, "src/a.rs", symbols);
+    }
+
+    fn seed(name: &str, file: &str) -> Seed {
+        Seed {
+            name: name.into(),
+            file: file.into(),
+        }
+    }
+
     #[test]
     fn seed_symbols_dedupes_repeated_names() {
         let dir = tempfile::tempdir().expect("tempdir");
         write_dirty(dir.path(), &["foo", "bar", "foo"]);
-        assert_eq!(seed_symbols(dir.path()), vec!["foo", "bar"]);
+        assert_eq!(
+            seed_symbols(dir.path()),
+            vec![seed("foo", "src/a.rs"), seed("bar", "src/a.rs")]
+        );
+    }
+
+    /// The file travels with the name: `run_for_symbol` rejects a bare name
+    /// with several definitions, so a seed that lost its file would contribute
+    /// nothing for exactly the common names agents edit most.
+    #[test]
+    fn seed_symbols_keeps_the_file_that_disambiguates_the_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_dirty_in(dir.path(), "src/b.rs", &["run"]);
+        assert_eq!(seed_symbols(dir.path()), vec![seed("run", "src/b.rs")]);
     }
 
     #[test]
@@ -470,19 +514,35 @@ mod tests {
                 {"name": "callee", "depth": 2},
             ]
         });
-        let mut out = Vec::new();
-        collect_impact_names(&payload, &mut out);
-        assert_eq!(out, vec!["seed", "caller", "callee"]);
+        let mut out = std::collections::HashSet::new();
+        assert!(!collect_impact_names(&payload, &mut out));
+        let mut got: Vec<&String> = out.iter().collect();
+        got.sort();
+        assert_eq!(got, vec!["callee", "caller", "seed"]);
     }
 
-    /// `run_for_symbol` answers an unresolvable target with an `error` payload
-    /// rather than `Err`. Reading names off it must yield nothing — a bogus
-    /// entry here would classify an unrelated peer edit as SOFT.
+    /// The cap has to stop the walk mid-payload. Counting after a whole seed's
+    /// traversal would let one hub symbol seat six figures of names in a daemon
+    /// documented to hold 20k.
+    #[test]
+    fn collect_impact_names_stops_inside_an_oversized_payload() {
+        let items: Vec<serde_json::Value> = (0..SOFT_IMPACT_MAX_NAMES + 500)
+            .map(|i| serde_json::json!({"name": format!("n{i}")}))
+            .collect();
+        let payload = serde_json::json!({ "impact": items });
+        let mut out = std::collections::HashSet::new();
+        assert!(collect_impact_names(&payload, &mut out));
+        assert_eq!(out.len(), SOFT_IMPACT_MAX_NAMES);
+    }
+
+    /// A payload with no `impact` array (the shape an unresolvable target
+    /// produces) must yield nothing — a bogus entry here would classify an
+    /// unrelated peer edit as SOFT.
     #[test]
     fn collect_impact_names_on_an_error_payload_adds_nothing() {
         let payload = serde_json::json!({"error": "No symbol named `nope`"});
-        let mut out = Vec::new();
-        collect_impact_names(&payload, &mut out);
+        let mut out = std::collections::HashSet::new();
+        assert!(!collect_impact_names(&payload, &mut out));
         assert!(out.is_empty(), "error payload leaked names: {out:?}");
     }
 
@@ -495,5 +555,40 @@ mod tests {
         let mut state = SoftState::default();
         state.rebuild(dir.path());
         assert!(!state.cache.contains("foo"));
+    }
+
+    /// The cache is derived from the seeds, so a rebuild that sees the same
+    /// seeds must be a no-op. An agent iterating inside one function rewrites
+    /// the manifest on every save without changing which symbols are dirty.
+    #[test]
+    fn rebuild_tracks_the_seeds_its_cache_was_built_from() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_dirty(dir.path(), &["foo"]);
+        let mut state = SoftState::default();
+        state.rebuild(dir.path());
+        assert_eq!(state.seeds, vec![seed("foo", "src/a.rs")]);
+
+        write_dirty(dir.path(), &["foo", "bar"]);
+        state.rebuild(dir.path());
+        assert_eq!(
+            state.seeds,
+            vec![seed("foo", "src/a.rs"), seed("bar", "src/a.rs")]
+        );
+    }
+
+    /// A dirty set emptied between saves must clear the cache, not leave the
+    /// previous radius firing SOFT concerns for symbols we no longer touch.
+    #[test]
+    fn rebuild_clears_the_cache_when_the_dirty_set_empties() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_dirty(dir.path(), &["foo"]);
+        let mut state = SoftState::default();
+        state.cache.refresh(["stale".to_string()]);
+        state.seeds = vec![seed("foo", "src/a.rs")];
+
+        write_dirty(dir.path(), &[]);
+        state.rebuild(dir.path());
+        assert!(state.seeds.is_empty());
+        assert!(!state.cache.contains("stale"));
     }
 }

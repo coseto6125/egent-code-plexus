@@ -196,8 +196,17 @@ fn test_build_payload_depth_limit_stops_traversal_before_full_chain() {
 fn test_run_for_symbol_wraps_build_payload_and_exposes_direct_symbol_uids() {
     let (_tmp, engine) = engine_from_bytes(&build_chain_graph());
 
-    let local = run_for_symbol(&engine, "member-repo", "leaf", "up", Some(5), None, false)
-        .expect("run_for_symbol should resolve `leaf`");
+    let local = run_for_symbol(
+        &engine,
+        "member-repo",
+        "leaf",
+        None,
+        "up",
+        Some(5),
+        None,
+        false,
+    )
+    .expect("run_for_symbol should resolve `leaf`");
 
     assert!(
         local.direct_count() >= 2,

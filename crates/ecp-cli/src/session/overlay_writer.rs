@@ -271,17 +271,20 @@ fn write_fragment_file(
     let fragment_id = content_hash.clone();
     let fragment_path = overlay_dir.join(format!("{fragment_id}.bin"));
 
-    let parse_failed = match parse_to_fragment(&input.rel_path, &input.content) {
-        Ok(archive_bytes) => {
+    // Same forward-slash invariant as `write_fragment_from_graph`.
+    let rel_path = input.rel_path.replace('\\', "/");
+    let (parse_failed, dirty_symbols) = match parse_graph(&input.rel_path, &input.content) {
+        Ok(graph) => {
+            let archive_bytes = archive_fragments(&graph)?;
             let tmp = overlay_dir.join(format!("{fragment_id}.{batch_seq}.{input_idx}.tmp"));
             fs::write(&tmp, &archive_bytes)?;
             let f = fs::OpenOptions::new().write(true).open(&tmp)?;
             f.sync_all()?;
             drop(f);
             replace_file(&tmp, &fragment_path)?;
-            false
+            (false, symbols_from_graph(&graph, &rel_path))
         }
-        Err(_) => true,
+        Err(_) => (true, Vec::new()),
     };
 
     let entry = DirtyEntry {
@@ -290,7 +293,7 @@ fn write_fragment_file(
         fragment_id: fragment_id.clone(),
         tantivy_delta_segment: None,
         parse_failed,
-        dirty_symbols: vec![],
+        dirty_symbols,
         format: ecp_core::session::overlay::FRAGMENT_FORMAT_V2,
     };
 
@@ -299,16 +302,14 @@ fn write_fragment_file(
         parse_failed,
     };
 
-    // Same forward-slash invariant as `write_fragment_from_graph`.
-    Ok((input.rel_path.replace('\\', "/"), entry, outcome))
+    Ok((rel_path, entry, outcome))
 }
 
-fn parse_to_fragment(rel_path: &str, content: &[u8]) -> io::Result<Vec<u8>> {
+fn parse_graph(rel_path: &str, content: &[u8]) -> io::Result<LocalGraph> {
     let path = std::path::Path::new(rel_path);
-    let graph = pipeline()
+    pipeline()
         .parse_file_raw(path, content)
-        .map_err(io::Error::other)?;
-    archive_fragments(&graph)
+        .map_err(io::Error::other)
 }
 
 /// rkyv-serialise a graph's v2 fragment file. Shared by the re-parse route
@@ -360,7 +361,7 @@ fn write_fragment_from_graph(
         fragment_id: fragment_id.clone(),
         tantivy_delta_segment: None,
         parse_failed,
-        dirty_symbols: vec![],
+        dirty_symbols: symbols_from_graph(graph, &rel_path),
         format: ecp_core::session::overlay::FRAGMENT_FORMAT_V2,
     };
     let outcome = FragmentOutcome {
@@ -472,6 +473,31 @@ fn relativise(session_dir: &Path, path: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// The symbol surface a peer session can collide on.
+///
+/// Load-bearing for `ecp peers`: `peer::concern::classify` reads
+/// `dirty_symbols` and nothing else, so an entry written without them is
+/// invisible to HARD and SOFT alike — both routes into `dirty_files.json`
+/// have to fill it.
+///
+/// `File` nodes are dropped: two sessions each editing their own `mod.rs`
+/// would otherwise collide on the file's own name, and the manifest key
+/// already carries the path that actually distinguishes them.
+fn symbols_from_graph(graph: &LocalGraph, file_str: &str) -> Vec<SymbolRef> {
+    graph
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind, NodeKind::File))
+        .map(|n| SymbolRef {
+            name: n.name.clone(),
+            kind: map_node_kind(&n.kind),
+            file: file_str.to_string(),
+            line_start: n.span.0 + 1, // tree-sitter 0-based → 1-based
+            line_end: n.span.2 + 1,
+        })
+        .collect()
+}
+
 /// Run the pipeline on `path` and convert nodes to `SymbolRef`s.
 /// Returns `(symbols, parse_failed)` — `parse_failed` is true when the
 /// pipeline has no provider for the extension or returns no graph.
@@ -483,19 +509,6 @@ fn extract_symbols(path: &Path, file_str: &str) -> (Vec<SymbolRef>, bool) {
     let graphs = pipeline().analyze(vec![(abs, rel)]);
     match graphs.into_iter().next() {
         None => (vec![], true),
-        Some(graph) => {
-            let symbols = graph
-                .nodes
-                .iter()
-                .map(|n| SymbolRef {
-                    name: n.name.clone(),
-                    kind: map_node_kind(&n.kind),
-                    file: file_str.to_string(),
-                    line_start: n.span.0 + 1, // tree-sitter 0-based → 1-based
-                    line_end: n.span.2 + 1,
-                })
-                .collect();
-            (symbols, false)
-        }
+        Some(graph) => (symbols_from_graph(&graph, file_str), false),
     }
 }

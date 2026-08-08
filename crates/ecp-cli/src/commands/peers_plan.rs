@@ -49,6 +49,7 @@ pub fn cmd_plan(
             &engine,
             &member_repo,
             t,
+            None,
             direction,
             Some(depth),
             None,

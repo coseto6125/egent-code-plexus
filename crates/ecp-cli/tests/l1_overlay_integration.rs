@@ -175,6 +175,24 @@ fn stale_path_emits_l1_fragments_per_dirty_file() {
         dirty_content.contains("main.rs"),
         "dirty_files.json should reference main.rs; got: {dirty_content}"
     );
+
+    // `ecp peers` classifies HARD and SOFT concerns off `dirty_symbols` and
+    // nothing else, so an entry written without them makes every peer overlap
+    // invisible. The pre-parsed write route left the field empty, which is
+    // exactly the path this query takes.
+    let manifest: serde_json::Value =
+        serde_json::from_str(&dirty_content).expect("dirty_files.json parses");
+    let symbols: Vec<&str> = manifest["entries"]
+        .as_object()
+        .expect("entries object")
+        .values()
+        .flat_map(|e| e["dirty_symbols"].as_array().into_iter().flatten())
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    assert!(
+        symbols.contains(&"added"),
+        "dirty_symbols should carry the edited file's symbols; got {symbols:?} from {dirty_content}"
+    );
 }
 
 /// End-to-end: a brand-new symbol added to the working tree (never committed,
