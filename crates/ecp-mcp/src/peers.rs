@@ -16,7 +16,6 @@
 
 use crate::schema::DerivedTool;
 use serde_json::json;
-use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Return the single `ecp_peers` MCP tool fronting all peer sub-subcommands.
@@ -99,7 +98,7 @@ fn tool_peers() -> DerivedTool {
                 },
                 "pairs": {
                     "type": "boolean",
-                    "description": "[status] Lead overview: pairwise HARD dirty-overlap matrix across all alive sessions instead of the per-session list."
+                    "description": "[status] Lead overview: which alive sessions share a dirty FILE (HARD), pairwise, instead of the per-session list."
                 },
                 "repo": {
                     "type": "string",
@@ -109,7 +108,13 @@ fn tool_peers() -> DerivedTool {
             "required": ["subcmd"],
             "additionalProperties": false
         })),
-        flag_args: HashSet::new(),
+        // `--pairs` and `--include-tests` are clap bare flags (SetTrue), so
+        // emitting `--pairs true` makes clap reject the call. Both are boolean
+        // in the schema above; without this the MCP surface cannot use them.
+        flag_args: ["pairs", "include_tests"]
+            .into_iter()
+            .map(String::from)
+            .collect(),
         // Union of positional sets across subcmds; each subcmd uses a disjoint
         // subset, so the LLM's JSON object will only carry the relevant keys.
         // Order matters within a subcmd (diff: peer→symbol); across subcmds

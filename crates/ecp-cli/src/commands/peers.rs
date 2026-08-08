@@ -401,6 +401,11 @@ fn cmd_gc(repo_root: &std::path::Path) -> std::io::Result<()> {
         MSG_LOG_KEEP_ROTATED,
     );
     let _ = rotate_if_needed(
+        &session_dir.join("inbox.jsonl"),
+        INBOX_ROTATE_BYTES,
+        INBOX_KEEP_ROTATED,
+    );
+    let _ = rotate_if_needed(
         &session_dir.join("watcher.log"),
         WATCHER_LOG_ROTATE_BYTES,
         WATCHER_LOG_KEEP_ROTATED,

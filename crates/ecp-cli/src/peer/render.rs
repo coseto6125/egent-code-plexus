@@ -148,7 +148,7 @@ fn render_hard(buf: &mut String, e: &InboxEntry) {
         }
         let _ = writeln!(
             buf,
-            "  Suggest: Review peer delta before saving conflicting edits"
+            "  Suggest: Review the peer's version of this file before saving over it"
         );
         // Actionable only with a team name — session ids aren't addressable
         // by the harness's SendMessage, so no hint rather than a dead one.
@@ -216,7 +216,7 @@ fn enforce_cap(mut buf: String, hard: &[&InboxEntry]) -> String {
             &buf,
             PAYLOAD_CAP_BYTES.saturating_sub(80),
         ));
-        buf.push_str("\n... (truncated to fit the 4KB cap; run `ecp peers inbox`)\n");
+        buf.push_str("\n... (truncated to fit the 4KB cap; full text: `ecp peers inbox`)\n");
         return buf;
     }
     buf.clear();
@@ -232,7 +232,7 @@ fn enforce_cap(mut buf: String, hard: &[&InboxEntry]) -> String {
                 &buf,
                 PAYLOAD_CAP_BYTES.saturating_sub(80),
             ));
-            buf.push_str("\n... (truncated)\n");
+            buf.push_str("\n... (truncated; SOFT and messages: `ecp peers inbox`)\n");
             break;
         }
     }

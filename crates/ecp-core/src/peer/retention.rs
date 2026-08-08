@@ -6,6 +6,11 @@ use std::path::{Path, PathBuf};
 
 pub const MSG_LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
 pub const MSG_LOG_KEEP_ROTATED: usize = 7;
+/// The hook advances a watermark instead of blanking `inbox.jsonl`, so the
+/// file is the recoverable record behind every truncated payload. Rotation is
+/// what bounds it.
+pub const INBOX_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
+pub const INBOX_KEEP_ROTATED: usize = 3;
 pub const WATCHER_LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
 pub const WATCHER_LOG_KEEP_ROTATED: usize = 3;
 pub const SESSION_STALE_DAYS: i64 = 30;

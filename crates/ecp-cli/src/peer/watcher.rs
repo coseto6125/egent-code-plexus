@@ -93,6 +93,11 @@ pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
                 ecp_core::peer::retention::MSG_LOG_KEEP_ROTATED,
             );
             let _ = ecp_core::peer::retention::rotate_if_needed(
+                &cfg.my_session_dir.join("inbox.jsonl"),
+                ecp_core::peer::retention::INBOX_ROTATE_BYTES,
+                ecp_core::peer::retention::INBOX_KEEP_ROTATED,
+            );
+            let _ = ecp_core::peer::retention::rotate_if_needed(
                 &cfg.my_session_dir.join("watcher.log"),
                 ecp_core::peer::retention::WATCHER_LOG_ROTATE_BYTES,
                 ecp_core::peer::retention::WATCHER_LOG_KEEP_ROTATED,

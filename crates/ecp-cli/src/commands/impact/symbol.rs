@@ -264,6 +264,14 @@ pub(super) fn impact_by_name(
     let mut hidden_heuristic_total: u64 = 0;
     let mut per_match_bfs: Vec<(usize, Vec<Value>)> = Vec::new();
     for start_idx in &matches {
+        // A budget across the WHOLE call, not per match: a name with k
+        // definitions would otherwise materialise k x max_results nodes.
+        let remaining = args
+            .max_results
+            .map(|cap| cap.saturating_sub(all_results.len()));
+        if remaining == Some(0) {
+            break;
+        }
         let (det_results, heur_results, hidden_conf, hidden_heur) = run_bfs(
             graph,
             view,
@@ -274,7 +282,7 @@ pub(super) fn impact_by_name(
             effective_include_tests,
             &rel_filter,
             !args.no_heuristic,
-            args.max_results,
+            remaining,
         );
         all_results.extend(det_results.iter().cloned());
         per_match_bfs.push((*start_idx, det_results));
