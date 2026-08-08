@@ -12,6 +12,9 @@ use std::collections::HashSet;
 use std::fmt::Write;
 
 const PAYLOAD_CAP_BYTES: usize = 4096;
+/// Room kept for the "N more held back" trailer, which is only written when
+/// something did not fit — so it is reserved only on the pass that needs it.
+const TRAILER_RESERVE: usize = 176;
 const HARD_DELTA_LOC_CAP: usize = 30;
 
 /// Returns the payload and the indices of `entries` it actually represented.
@@ -65,15 +68,24 @@ pub fn render_payload(entries: &[InboxEntry]) -> (String, HashSet<usize>) {
     // disk and the watcher raises them again — so they are given up before a
     // message, which exists only in this batch.
     let total = hard.len() + soft.len() + msgs.len();
-    let mut best = compose(&hard, &soft, &msgs, ATTEMPTS[0]);
-    for plan in &ATTEMPTS[1..] {
-        if best.1.len() == total {
-            break;
+    let ladder = |cap: usize| {
+        let mut best = compose(&hard, &soft, &msgs, ATTEMPTS[0], cap);
+        for plan in &ATTEMPTS[1..] {
+            if best.1.len() == total {
+                break;
+            }
+            let attempt = compose(&hard, &soft, &msgs, *plan, cap);
+            if attempt.1.len() > best.1.len() {
+                best = attempt;
+            }
         }
-        let attempt = compose(&hard, &soft, &msgs, *plan);
-        if attempt.1.len() > best.1.len() {
-            best = attempt;
-        }
+        best
+    };
+    let mut best = ladder(PAYLOAD_CAP_BYTES);
+    if best.1.len() < total {
+        // Something is being held back, so the trailer will be written — redo
+        // the ladder with its room reserved rather than overflowing the cap.
+        best = ladder(PAYLOAD_CAP_BYTES.saturating_sub(TRAILER_RESERVE));
     }
     let (mut buf, mut shown) = best;
     let unseen = total - shown.len();
@@ -129,6 +141,7 @@ fn compose(
     soft: &[(usize, &InboxEntry)],
     msgs: &[(usize, &InboxEntry)],
     plan: Plan,
+    cap: usize,
 ) -> (String, HashSet<usize>) {
     let mut buf = String::new();
     let mut shown = HashSet::new();
@@ -146,7 +159,7 @@ fn compose(
         for (i, e) in items {
             let mut block = String::new();
             render(&mut block, e);
-            if buf.len() + pending.len() + block.len() > PAYLOAD_CAP_BYTES {
+            if buf.len() + pending.len() + block.len() > cap {
                 break;
             }
             buf.push_str(&pending);
