@@ -400,14 +400,6 @@ fn cmd_gc(repo_root: &std::path::Path) -> std::io::Result<()> {
         MSG_LOG_ROTATE_BYTES,
         MSG_LOG_KEEP_ROTATED,
     );
-    if let Ok(meta) = ecp_core::session::SessionMeta::read(&session_dir.join("session_meta.json")) {
-        let _ = ecp_core::peer::inbox::rotate_if_drained(
-            &session_dir.join("inbox.jsonl"),
-            meta.last_drained_offset,
-            INBOX_ROTATE_BYTES,
-            INBOX_KEEP_ROTATED,
-        );
-    }
     let _ = rotate_if_needed(
         &session_dir.join("watcher.log"),
         WATCHER_LOG_ROTATE_BYTES,

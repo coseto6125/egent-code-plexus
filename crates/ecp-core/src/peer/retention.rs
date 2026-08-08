@@ -6,11 +6,6 @@ use std::path::{Path, PathBuf};
 
 pub const MSG_LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
 pub const MSG_LOG_KEEP_ROTATED: usize = 7;
-/// The hook advances a watermark instead of blanking `inbox.jsonl`, so the
-/// file is the recoverable record behind every truncated payload. Rotation is
-/// what bounds it.
-pub const INBOX_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
-pub const INBOX_KEEP_ROTATED: usize = 3;
 pub const WATCHER_LOG_ROTATE_BYTES: u64 = 10 * 1024 * 1024;
 pub const WATCHER_LOG_KEEP_ROTATED: usize = 3;
 pub const SESSION_STALE_DAYS: i64 = 30;
@@ -29,13 +24,6 @@ pub fn rotate_if_needed(log: &Path, threshold_bytes: u64, keep: usize) -> io::Re
     if meta.len() < threshold_bytes {
         return Ok(false);
     }
-    rotate_now(log, keep)
-}
-
-/// The rename cascade with no size check — for callers that decided to rotate
-/// on their own terms (see peer::inbox::rotate_if_drained, which gates on the
-/// reader's watermark and holds the inbox lock across this).
-pub fn rotate_now(log: &Path, keep: usize) -> io::Result<bool> {
     let dir = log.parent().unwrap_or_else(|| Path::new("."));
     let stem = log.file_name().and_then(|s| s.to_str()).unwrap_or("log");
     let path_n = |n: usize| -> PathBuf { dir.join(format!("{stem}.{n}")) };

@@ -141,35 +141,6 @@ impl InboxLock {
     }
 }
 
-/// Rotate the inbox, but only once every entry in it has been delivered.
-///
-/// The generic log rotation cannot be used here: it moves the whole file aside,
-/// and the hook only ever drains the CURRENT file, so any undelivered entry in
-/// a rotated generation was never shown and eventually aged out. The
-/// watermark passed in is the reader's last_drained_offset; rotation is
-/// skipped whenever it does not already cover the whole file.
-pub fn rotate_if_drained(
-    inbox: &Path,
-    watermark: u64,
-    threshold_bytes: u64,
-    keep: usize,
-) -> io::Result<bool> {
-    let _guard = InboxLock::acquire(inbox)?;
-    let len = match std::fs::metadata(inbox) {
-        Ok(m) => m.len(),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e),
-    };
-    if len < threshold_bytes {
-        return Ok(false);
-    }
-    let (drained_to, gen) = unpack_watermark(watermark);
-    if drained_to < len || gen != read_gen(inbox)? {
-        return Ok(false);
-    }
-    crate::peer::retention::rotate_now(inbox, keep)
-}
-
 // Watermark encoding: upper 32 bits = generation counter, lower 32 bits =
 // byte offset (max 4 GiB per inbox file — sufficient for JSONL inboxes).
 const OFFSET_MASK: u64 = u32::MAX as u64;
@@ -206,12 +177,15 @@ pub fn truncate_inbox(path: &Path) -> io::Result<()> {
 /// truncation is detected.  Corrupt / non-JSON lines are skipped with a
 /// warning.
 pub fn drain(path: &Path, start_offset: u64) -> io::Result<(Vec<InboxEntry>, u64)> {
+    // Lock BEFORE opening: taking it after leaves a window in which the file we
+    // hold and the generation we read can come from different inodes, and the
+    // watermark we return then mixes one file's offset with another's counter.
+    let _guard = InboxLock::acquire(path)?;
     let mut f = match OpenOptions::new().read(true).open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((Vec::new(), 0)),
         Err(e) => return Err(e),
     };
-    let _guard = InboxLock::acquire(path)?;
     let len = f.metadata()?.len();
     let cur_gen = read_gen(path)?;
 
@@ -227,19 +201,34 @@ pub fn drain(path: &Path, start_offset: u64) -> io::Result<(Vec<InboxEntry>, u64
     // this streams would otherwise be delivered here and still fall after the
     // returned watermark, so the next drain would deliver it a second time —
     // and a non-empty append does not bump `.gen`, so nothing else catches it.
-    let reader = BufReader::new((&mut f).take(len.saturating_sub(from)));
+    let mut reader = BufReader::new((&mut f).take(len.saturating_sub(from)));
     let mut out = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
+    // The watermark advances to the last COMPLETE line, not to the snapshot
+    // length. A writer killed mid-line leaves a partial tail; consuming up to
+    // `len` would step over it, and the bytes that later complete that line
+    // would then be unreachable — taking the next message down with them.
+    let mut complete = from;
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        let n = reader.read_until(b'\n', &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        if !buf.ends_with(b"\n") {
+            break; // partial tail — leave it for the next drain
+        }
+        complete += n as u64;
+        let line = String::from_utf8_lossy(&buf);
         if line.trim().is_empty() {
             continue;
         }
-        match serde_json::from_str::<InboxEntry>(&line) {
+        match serde_json::from_str::<InboxEntry>(line.trim_end()) {
             Ok(entry) => out.push(entry),
             Err(e) => {
                 tracing::warn!(error = %e, "skipping corrupt inbox line");
             }
         }
     }
-    Ok((out, pack_watermark(len, cur_gen)))
+    Ok((out, pack_watermark(complete, cur_gen)))
 }
