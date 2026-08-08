@@ -7,10 +7,14 @@ use rustc_hash::FxHashSet;
 use tempfile::tempdir;
 
 fn sym(name: &str) -> SymbolRef {
+    sym_in(name, "src/a.rs")
+}
+
+fn sym_in(name: &str, file: &str) -> SymbolRef {
     SymbolRef {
         name: name.into(),
         kind: SymbolKind::Function,
-        file: "src/a.rs".into(),
+        file: file.into(),
         line_start: 1,
         line_end: 2,
     }
@@ -93,10 +97,11 @@ fn soft_dispatches_event() {
     let receiver_dir = dir.path().to_path_buf();
     let inbox = receiver_dir.join("inbox.jsonl");
 
-    let peer_entry = entry_with(vec![sym("login_handler")]);
+    // SOFT only reachable when the files differ — a shared file is HARD first.
+    let peer_entry = entry_with(vec![sym_in("login_handler", "src/login.rs")]);
     let my_dirty = vec![sym("verify_token")];
     let mut impacted = FxHashSet::default();
-    impacted.insert(("src/a.rs".to_string(), "login_handler".to_string()));
+    impacted.insert(("src/login.rs".to_string(), "login_handler".to_string()));
     let cache = ImpactCache::from_set(impacted);
 
     dispatch_peer_dirty_event(
@@ -121,7 +126,9 @@ fn ignore_writes_nothing() {
     let receiver_dir = dir.path().to_path_buf();
     let inbox = receiver_dir.join("inbox.jsonl");
 
-    let peer_entry = entry_with(vec![sym("unrelated")]);
+    // A different FILE, not just a different name: HARD is a shared dirty file,
+    // so a peer symbol in `src/a.rs` would be a hit however it is named.
+    let peer_entry = entry_with(vec![sym_in("unrelated", "src/z.rs")]);
     let my_dirty = vec![sym("verify_token")];
     let cache = ImpactCache::from_set(FxHashSet::default());
 
