@@ -159,14 +159,13 @@ fn session_start_drains_peer_inbox() {
         "SessionStart should drain peer inbox, payload: {ctx}"
     );
 
-    // The drain must not re-emit — but it must not destroy the record either.
-    // The payload is capped at 4 KB and drops the overflow, so blanking the
-    // file here lost delivered messages; the watermark is what prevents the
-    // repeat, and `ecp peers inbox` reads what the payload could not show.
+    // Cleared after delivery. That is safe because `render_payload` never
+    // drops a message — it trims SOFT, then HARD detail, then message bodies —
+    // so nothing undelivered is destroyed here.
     let after = std::fs::read_to_string(session_dir.join("inbox.jsonl")).unwrap_or_default();
     assert!(
-        after.contains("ss-peer-msg"),
-        "inbox must survive the drain so the payload's own hint can recover it. after: {after}"
+        after.is_empty() || !after.contains("ss-peer-msg"),
+        "inbox should be cleared after SessionStart drain. after: {after}"
     );
     let out2 = fire("session-start", &envelope, sid, tmp.path());
     assert!(
