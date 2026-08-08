@@ -219,7 +219,10 @@ fn cmd_status_pairs(repo_root: &std::path::Path, format: StatusFormat) -> std::i
 
     // Empty exclude id matches no session dir → own session included.
     let sessions = alive_peers(repo_root, "");
-    let dirty: Vec<HashSet<String>> = sessions
+    // Keyed `(file, name)` to match `concern::classify` — a bare name is not an
+    // identity, so name-only intersection reports overlaps between sessions
+    // that merely both have a function called `run`.
+    let dirty: Vec<HashSet<(String, String)>> = sessions
         .iter()
         .map(|s| {
             DirtyFiles::read(
@@ -232,7 +235,7 @@ fn cmd_status_pairs(repo_root: &std::path::Path, format: StatusFormat) -> std::i
                 d.entries
                     .into_values()
                     .flat_map(|e| e.dirty_symbols)
-                    .map(|sym| sym.name)
+                    .map(|sym| (sym.file, sym.name))
                     .collect()
             })
             .unwrap_or_default()
@@ -246,10 +249,13 @@ fn cmd_status_pairs(repo_root: &std::path::Path, format: StatusFormat) -> std::i
             None => sessions[i].session_id.clone(),
         }
     };
-    let mut rows = Vec::new();
+    let mut rows: Vec<(usize, usize, Vec<String>)> = Vec::new();
     for i in 0..sessions.len() {
         for j in (i + 1)..sessions.len() {
-            let mut shared: Vec<&String> = dirty[i].intersection(&dirty[j]).collect();
+            let mut shared: Vec<String> = dirty[i]
+                .intersection(&dirty[j])
+                .map(|(file, name)| format!("{name} ({file})"))
+                .collect();
             if shared.is_empty() {
                 continue;
             }

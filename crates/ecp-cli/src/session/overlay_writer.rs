@@ -273,9 +273,14 @@ fn write_fragment_file(
 
     // Same forward-slash invariant as `write_fragment_from_graph`.
     let rel_path = input.rel_path.replace('\\', "/");
-    let (parse_failed, dirty_symbols) = match parse_graph(&input.rel_path, &input.content) {
-        Ok(graph) => {
-            let archive_bytes = archive_fragments(&graph)?;
+    // Parse and archive stay one fallible unit, as they were when this called a
+    // combined `parse_to_fragment`: an rkyv failure marks the entry
+    // `parse_failed` like a parse failure does, rather than aborting the whole
+    // batch write.
+    let parsed = parse_graph(&input.rel_path, &input.content)
+        .and_then(|graph| archive_fragments(&graph).map(|bytes| (graph, bytes)));
+    let (parse_failed, dirty_symbols) = match parsed {
+        Ok((graph, archive_bytes)) => {
             let tmp = overlay_dir.join(format!("{fragment_id}.{batch_seq}.{input_idx}.tmp"));
             fs::write(&tmp, &archive_bytes)?;
             let f = fs::OpenOptions::new().write(true).open(&tmp)?;
@@ -381,16 +386,17 @@ static WRITE_BATCH_SEQ: AtomicU64 = AtomicU64::new(0);
 // overlay writes and reanalyze hot path) via `crate::reanalyze::pipeline()`.
 use crate::reanalyze::pipeline;
 
-fn map_node_kind(k: &NodeKind) -> SymbolKind {
+/// `None` for kinds that are not a peer-collision surface — File, Variable,
+/// Import, Route, Process, Document, Section, EntryPoint, Property. `NodeKind`
+/// has no Module/Namespace/Struct/Enum/Trait/Type variants.
+fn map_node_kind(k: &NodeKind) -> Option<SymbolKind> {
     match k {
-        NodeKind::Function => SymbolKind::Function,
-        NodeKind::Method | NodeKind::Constructor => SymbolKind::Method,
-        NodeKind::Class => SymbolKind::Struct,
-        NodeKind::Interface => SymbolKind::Trait,
-        NodeKind::Const => SymbolKind::Const,
-        // File, Variable, Import, Route, Process, Document, Section, EntryPoint, Property
-        // NodeKind has no Module/Namespace/Struct/Enum/Trait/Type variants.
-        _ => SymbolKind::Unknown,
+        NodeKind::Function => Some(SymbolKind::Function),
+        NodeKind::Method | NodeKind::Constructor => Some(SymbolKind::Method),
+        NodeKind::Class => Some(SymbolKind::Struct),
+        NodeKind::Interface => Some(SymbolKind::Trait),
+        NodeKind::Const => Some(SymbolKind::Const),
+        _ => None,
     }
 }
 
@@ -480,20 +486,25 @@ fn relativise(session_dir: &Path, path: &Path) -> String {
 /// invisible to HARD and SOFT alike — both routes into `dirty_files.json`
 /// have to fill it.
 ///
-/// `File` nodes are dropped: two sessions each editing their own `mod.rs`
-/// would otherwise collide on the file's own name, and the manifest key
-/// already carries the path that actually distinguishes them.
+/// Only the kinds `map_node_kind` recognises are kept. The manifest is read on
+/// the agent-blocking query path and rewritten on every save, so it pays to
+/// carry declarations two sessions can meaningfully both edit rather than every
+/// node the parser emits — locals, imports and expression-level nodes land in
+/// `SymbolKind::Unknown`, where "both sessions modified it" means nothing an
+/// agent can act on.
 fn symbols_from_graph(graph: &LocalGraph, file_str: &str) -> Vec<SymbolRef> {
     graph
         .nodes
         .iter()
-        .filter(|n| !matches!(n.kind, NodeKind::File))
-        .map(|n| SymbolRef {
-            name: n.name.clone(),
-            kind: map_node_kind(&n.kind),
-            file: file_str.to_string(),
-            line_start: n.span.0 + 1, // tree-sitter 0-based → 1-based
-            line_end: n.span.2 + 1,
+        .filter_map(|n| {
+            let kind = map_node_kind(&n.kind)?;
+            Some(SymbolRef {
+                name: n.name.clone(),
+                kind,
+                file: file_str.to_string(),
+                line_start: n.span.0 + 1, // tree-sitter 0-based → 1-based
+                line_end: n.span.2 + 1,
+            })
         })
         .collect()
 }

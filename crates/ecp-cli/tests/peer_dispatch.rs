@@ -96,7 +96,7 @@ fn soft_dispatches_event() {
     let peer_entry = entry_with(vec![sym("login_handler")]);
     let my_dirty = vec![sym("verify_token")];
     let mut impacted = FxHashSet::default();
-    impacted.insert("login_handler".to_string());
+    impacted.insert(("src/a.rs".to_string(), "login_handler".to_string()));
     let cache = ImpactCache::from_set(impacted);
 
     dispatch_peer_dirty_event(
