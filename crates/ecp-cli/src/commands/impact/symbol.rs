@@ -266,9 +266,8 @@ pub(super) fn impact_by_name(
     for start_idx in &matches {
         // A budget across the WHOLE call, not per match: a name with k
         // definitions would otherwise materialise k x max_results nodes.
-        let remaining = args
-            .max_results
-            .map(|cap| cap.saturating_sub(all_results.len()));
+        let spent = all_results.len() + all_heuristic_results.len();
+        let remaining = args.max_results.map(|cap| cap.saturating_sub(spent));
         if remaining == Some(0) {
             break;
         }

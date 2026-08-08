@@ -226,6 +226,11 @@ pub fn drain_and_render_peer_payload() -> Option<String> {
     // the whole file, which is what makes that hint recoverable; `peers gc`
     // and the watcher's periodic sweep rotate it.
     meta.last_drained_offset = new_offset;
-    let _ = ecp_core::session::SessionMeta::write_atomic(&meta_path, &meta);
+    // A failed write means the next hook re-delivers everything shown here.
+    // Duplicated beats dropped, so the payload still goes out — but silently
+    // swallowing the error left the repeat unexplainable.
+    if let Err(e) = ecp_core::session::SessionMeta::write_atomic(&meta_path, &meta) {
+        eprintln!("[ecp peers] could not persist the inbox watermark ({e}); these entries will be shown again");
+    }
     Some(payload)
 }

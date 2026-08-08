@@ -169,7 +169,11 @@ pub fn drain(path: &Path, start_offset: u64) -> io::Result<(Vec<InboxEntry>, u64
     let from = if truncated { 0 } else { prev_byte_off };
 
     f.seek(SeekFrom::Start(from))?;
-    let reader = BufReader::new(&mut f);
+    // Read only as far as the length we snapshotted. A sender appending while
+    // this streams would otherwise be delivered here and still fall after the
+    // returned watermark, so the next drain would deliver it a second time —
+    // and a non-empty append does not bump `.gen`, so nothing else catches it.
+    let reader = BufReader::new((&mut f).take(len.saturating_sub(from)));
     let mut out = Vec::new();
     for line in reader.lines() {
         let line = line?;

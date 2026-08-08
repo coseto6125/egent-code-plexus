@@ -105,14 +105,44 @@ pub fn cmd_say(
     Ok(())
 }
 
+/// This is the recovery path behind every truncated hook payload, so it shows
+/// the MOST RECENT  entries, not the oldest: the payload drops what did
+/// not fit at the end, which is exactly what an oldest-first window hid. It
+/// also reads back through the rotated generations, since rotation moves the
+/// whole file aside and the entries a payload just dropped can land there.
 pub fn cmd_inbox(repo_root: &Path, limit: usize) -> std::io::Result<()> {
-    let me = crate::session::resolver::resolve_session_id(None);
-    let inbox = repo_root.join("sessions").join(&me).join("inbox.jsonl");
-    let Ok(content) = std::fs::read_to_string(&inbox) else {
+    let inbox = repo_root
+        .join("sessions")
+        .join(crate::session::resolver::resolve_session_id(None))
+        .join("inbox.jsonl");
+
+    // Oldest generation first so the concatenation stays chronological.
+    let mut lines: Vec<String> = Vec::new();
+    let mut generations: Vec<std::path::PathBuf> = (1
+        ..=ecp_core::peer::retention::INBOX_KEEP_ROTATED)
+        .map(|n| inbox.with_file_name(format!("inbox.jsonl.{n}")))
+        .filter(|p| p.exists())
+        .collect();
+    generations.reverse();
+    generations.push(inbox.clone());
+    for path in &generations {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            lines.extend(content.lines().map(str::to_string));
+        }
+    }
+
+    if lines.is_empty() {
         println!("inbox empty");
         return Ok(());
-    };
-    for line in content.lines().take(limit) {
+    }
+    let skipped = lines.len().saturating_sub(limit);
+    if skipped > 0 {
+        println!(
+            "... {skipped} older entr{} not shown (raise --limit)",
+            if skipped == 1 { "y" } else { "ies" }
+        );
+    }
+    for line in lines.iter().skip(skipped) {
         println!("{line}");
     }
     Ok(())
