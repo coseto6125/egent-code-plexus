@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.9.0 - 2026-08-09
+
+### Bug Fixes
+
+- identify a symbol by (file, name), not by name alone (#687)
+- make HARD and SOFT concerns actually fire (#686)
+- emit the cache hints 2026-07-28 requires on tools/list (#685)
 ## v0.8.9 - 2026-08-06
 
 Two fixes you can observe, and an internals pass with no behaviour change.
