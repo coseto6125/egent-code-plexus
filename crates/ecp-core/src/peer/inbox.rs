@@ -114,9 +114,15 @@ pub fn append_entry(path: &Path, entry: &InboxEntry) -> io::Result<()> {
     // the caller can report it; writing into a doomed inode is silent.
     let _guard = InboxLock::require(path)?;
     let mut f = OpenOptions::new().create(true).append(true).open(path)?;
+    let len = f.metadata()?.len();
     // Bump generation when appending to an empty file (fresh create or truncation).
-    if f.metadata()?.len() == 0 {
+    if len == 0 {
         bump_gen(path)?;
+    } else if !ends_with_newline(path, len)? {
+        // A writer killed mid-line leaves a tail with no terminator. Appending
+        // straight onto it fuses the two into one unparseable line, and the
+        // reader then drops BOTH — losing this message, which is intact.
+        f.write_all(b"\n")?;
     }
     f.write_all(&line)?;
     Ok(())
@@ -131,6 +137,14 @@ pub fn append_entry(path: &Path, entry: &InboxEntry) -> io::Result<()> {
 /// a single sub-PIPE_BUF line and a drain runs once per hook, so contention is
 /// not a factor.
 ///
+fn ends_with_newline(path: &Path, len: u64) -> io::Result<bool> {
+    let mut f = OpenOptions::new().read(true).open(path)?;
+    f.seek(SeekFrom::Start(len - 1))?;
+    let mut last = [0u8; 1];
+    f.read_exact(&mut last)?;
+    Ok(last[0] == b'\n')
+}
+
 /// The guard is held for its Drop side effect only; the field is never read.
 pub struct InboxLock(#[allow(dead_code)] Option<crate::registry::FileLock>);
 
@@ -255,9 +269,10 @@ fn unpack_watermark(w: u64) -> (u64, u32) {
 /// the gen mismatch and reset to byte 0, rather than silently missing entries
 /// that were appended between our drain-read and our truncate.
 pub fn truncate_inbox(path: &Path) -> io::Result<()> {
-    // Same lock as `append_entry` and `drain`: without it a sender's line can
-    // land between this write and a reader's length snapshot and be erased.
-    let _guard = InboxLock::acquire(path)?;
+    // Required, like every other path that removes entries: reporting "cleared"
+    // while a concurrent append survives, or erasing one that arrived during
+    // the write, are both lies about what the user just did.
+    let _guard = InboxLock::require(path)?;
     std::fs::write(path, "")?;
     bump_gen(path)?;
     Ok(())

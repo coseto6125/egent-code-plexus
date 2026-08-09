@@ -72,12 +72,23 @@ pub fn cmd_say(
         let inbox = repo_root.join("sessions").join(target).join("inbox.jsonl");
         append_entry(&inbox, &entry)?;
     } else {
+        // Deliver to every peer before reporting: aborting on the first failure
+        // left a broadcast half-sent with no record of who received it.
+        let mut failed = Vec::new();
         for p in alive_peers(repo_root, &me) {
             let inbox = repo_root
                 .join("sessions")
                 .join(&p.session_id)
                 .join("inbox.jsonl");
-            append_entry(&inbox, &entry)?;
+            if let Err(e) = append_entry(&inbox, &entry) {
+                failed.push(format!("{}: {e}", p.session_id));
+            }
+        }
+        if !failed.is_empty() {
+            return Err(std::io::Error::other(format!(
+                "broadcast incomplete — undelivered to {}",
+                failed.join(", ")
+            )));
         }
     }
 

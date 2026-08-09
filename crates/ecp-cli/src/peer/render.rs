@@ -100,7 +100,10 @@ pub fn render_payload(entries: &[InboxEntry]) -> (String, HashSet<usize>) {
         if let Some((_, e)) = msgs.first() {
             let mut preview = String::new();
             render_message(&mut preview, e, OVERSIZED_PREVIEW_CHARS);
-            buf = format!("[ecp peers] 1 message too large for the 4KB cap Ƀ\n{preview}");
+            let header = "[ecp peers] 1 message too large for the 4KB cap Ƀ\n";
+            let room = PAYLOAD_CAP_BYTES.saturating_sub(header.len() + TRAILER_RESERVE);
+            preview.truncate(floor_char_boundary(&preview, room));
+            buf = format!("{header}{preview}");
         }
     }
     let unseen = total - shown.len();
@@ -325,4 +328,16 @@ fn render_message(buf: &mut String, e: &InboxEntry, preview: usize) {
             let _ = writeln!(buf, "    {truncated}");
         }
     }
+}
+
+/// `String::truncate` panics on a non-boundary index, and a message body is
+/// arbitrary user text.
+fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
 }

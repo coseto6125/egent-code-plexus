@@ -46,5 +46,12 @@ pub fn dispatch_peer_dirty_event(
         your_overlap_range: None,
     };
     let inbox = receiver_session_dir.join("inbox.jsonl");
-    append_entry(&inbox, &entry)
+    // A concern is re-derivable — the peer's manifest is on disk and the next
+    // write raises it again — so a failed append is survivable, but it must not
+    // be silent: the watcher's fail-open loop would otherwise swallow it.
+    if let Err(e) = append_entry(&inbox, &entry) {
+        tracing::warn!(error = %e, peer = peer_session, "could not deliver concern to inbox");
+        return Err(e);
+    }
+    Ok(())
 }
