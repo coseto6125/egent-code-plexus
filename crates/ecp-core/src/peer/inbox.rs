@@ -108,7 +108,11 @@ pub fn append_entry(path: &Path, entry: &InboxEntry) -> io::Result<()> {
         line.len() < 4096,
         "inbox entry must fit in PIPE_BUF for atomic append"
     );
-    let _guard = InboxLock::acquire(path)?;
+    // Required, not best-effort: `deliver_and_consume` replaces the file by
+    // rename, so an unlocked writer can hold a file descriptor on an inode that
+    // is about to be replaced and write into nothing. Failing here is loud and
+    // the caller can report it; writing into a doomed inode is silent.
+    let _guard = InboxLock::require(path)?;
     let mut f = OpenOptions::new().create(true).append(true).open(path)?;
     // Bump generation when appending to an empty file (fresh create or truncation).
     if f.metadata()?.len() == 0 {

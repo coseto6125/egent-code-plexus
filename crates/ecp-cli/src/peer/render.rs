@@ -15,9 +15,11 @@ const PAYLOAD_CAP_BYTES: usize = 4096;
 /// Room kept for the "N more held back" trailer, which is only written when
 /// something did not fit — so it is reserved only on the pass that needs it.
 const TRAILER_RESERVE: usize = 176;
-/// Bodies longer than this are shown abridged with the elided count — the full
-/// text stays readable via `ecp peers thread <id>` on the sender's log.
-const MESSAGE_BODY_CHARS: usize = 500;
+/// Only used when a single message is itself larger than the whole payload
+/// budget. It is shown abridged and deliberately NOT consumed, because the
+/// receiver has no other copy — `peers thread` reads this session's own
+/// msg.log, which never holds an inbound body.
+const OVERSIZED_PREVIEW_CHARS: usize = 500;
 const HARD_DELTA_LOC_CAP: usize = 30;
 
 /// Returns the payload and the indices of `entries` it actually represented.
@@ -91,11 +93,21 @@ pub fn render_payload(entries: &[InboxEntry]) -> (String, HashSet<usize>) {
         best = ladder(PAYLOAD_CAP_BYTES.saturating_sub(TRAILER_RESERVE));
     }
     let (mut buf, mut shown) = best;
+    // A message bigger than the entire budget can never fit, and dropping it
+    // would be the loss everything here exists to prevent. Show a preview,
+    // keep it queued, and say so.
+    if shown.is_empty() {
+        if let Some((_, e)) = msgs.first() {
+            let mut preview = String::new();
+            render_message(&mut preview, e, OVERSIZED_PREVIEW_CHARS);
+            buf = format!("[ecp peers] 1 message too large for the 4KB cap Ƀ\n{preview}");
+        }
+    }
     let unseen = total - shown.len();
     if unseen > 0 {
         let _ = writeln!(
             buf,
-            "\n[ecp peers] {unseen} more held back by the 4KB cap — they stay in the inbox for the next turn (`ecp peers inbox` to read now)"
+            "\n[ecp peers] {unseen} held back by the 4KB cap — still queued; `ecp peers inbox` reads them in full, `ecp peers inbox --clear` discards them"
         );
     }
     shown.extend(superseded);
@@ -170,7 +182,7 @@ fn compose(
             if msgs.len() == 1 { "" } else { "s" }
         ),
         msgs,
-        &render_message,
+        &|b, e| render_message(b, e, usize::MAX),
     );
     let detail = plan.hard_detail;
     section(
@@ -280,7 +292,7 @@ fn render_soft_one_line(buf: &mut String, e: &InboxEntry) {
     }
 }
 
-fn render_message(buf: &mut String, e: &InboxEntry) {
+fn render_message(buf: &mut String, e: &InboxEntry, preview: usize) {
     if let InboxEntry::Message {
         msg_id,
         from,
@@ -300,7 +312,7 @@ fn render_message(buf: &mut String, e: &InboxEntry) {
             .as_ref()
             .map(|r| format!(" (reply to {r})"))
             .unwrap_or_default();
-        let truncated: String = body.chars().take(MESSAGE_BODY_CHARS).collect();
+        let truncated: String = body.chars().take(preview).collect();
         let elided = body
             .chars()
             .count()

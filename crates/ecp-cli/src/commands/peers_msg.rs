@@ -111,15 +111,24 @@ pub fn cmd_say(
 ///
 /// The file is never rotated or truncated — see `peer::inbox` — so everything
 /// ever delivered to this session is here.
-pub fn cmd_inbox(repo_root: &Path, limit: usize) -> std::io::Result<()> {
+pub fn cmd_inbox(repo_root: &Path, limit: usize, clear: bool) -> std::io::Result<()> {
     let inbox = repo_root
         .join("sessions")
         .join(crate::session::resolver::resolve_session_id(None))
         .join("inbox.jsonl");
-    let Ok(content) = std::fs::read_to_string(&inbox) else {
+    if clear {
+        ecp_core::peer::inbox::truncate_inbox(&inbox)?;
+        println!("inbox cleared");
+        return Ok(());
+    }
+    // Lossy rather than fallible: a writer killed mid-line can leave invalid
+    // UTF-8, and reporting "inbox empty" over a file full of valid messages
+    // would break the one recovery path the payload points at.
+    let Ok(bytes) = std::fs::read(&inbox) else {
         println!("inbox empty");
         return Ok(());
     };
+    let content = String::from_utf8_lossy(&bytes);
     let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
     if lines.is_empty() {
         println!("inbox empty");

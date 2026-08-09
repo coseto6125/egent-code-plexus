@@ -55,10 +55,15 @@ pub enum PeersCmd {
         #[arg(long)]
         reply: Option<String>,
     },
-    /// Ƀ Inspect inbox without draining (debug)
+    /// Ƀ Read the inbox in full without consuming it. This is where content
+    /// the 4 KB hook payload could not fit stays queued — nothing is ever
+    /// discarded automatically, so `--clear` is the only way to drop it.
     Inbox {
         #[arg(long, default_value_t = 50)]
         limit: usize,
+        /// Discard everything in the inbox, including entries never shown.
+        #[arg(long, default_value_t = false)]
+        clear: bool,
     },
     /// Ƀ Print message thread by msg_id (current session msg.log)
     Thread { msg_id: String },
@@ -124,7 +129,7 @@ pub fn run(args: PeersArgs) -> std::io::Result<()> {
         PeersCmd::Say { body, to, reply } => {
             super::peers_msg::cmd_say(&repo_root, &body, to.as_deref(), reply.as_deref())
         }
-        PeersCmd::Inbox { limit } => super::peers_msg::cmd_inbox(&repo_root, limit),
+        PeersCmd::Inbox { limit, clear } => super::peers_msg::cmd_inbox(&repo_root, limit, clear),
         PeersCmd::Name { name } => cmd_name(&repo_root, &name),
         PeersCmd::Plan {
             targets,
