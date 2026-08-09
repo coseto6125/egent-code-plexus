@@ -127,17 +127,28 @@ pub fn append_entry(path: &Path, entry: &InboxEntry) -> io::Result<()> {
 /// a single sub-PIPE_BUF line and a drain runs once per hook, so contention is
 /// not a factor.
 ///
-/// Fail-open: a lock we cannot take must not stop a peer message from being
-/// written, so the caller proceeds unlocked rather than erroring.
 /// The guard is held for its Drop side effect only; the field is never read.
 pub struct InboxLock(#[allow(dead_code)] Option<crate::registry::FileLock>);
 
 impl InboxLock {
+    /// Best-effort, for writers. A lock we cannot take must not stop a peer
+    /// message from being written: an unsynchronised append is worse than
+    /// nothing only in theory, a dropped message is worse in practice.
     pub fn acquire(inbox: &Path) -> io::Result<Self> {
         let lock_path = inbox.with_extension("jsonl.lock");
         Ok(Self(
             crate::registry::FileLock::acquire_exclusive(&lock_path).ok(),
         ))
+    }
+
+    /// Required, for anything that REMOVES entries. Proceeding unlocked there
+    /// would erase a concurrent append; failing instead costs one turn of
+    /// latency and the entries are still in the file.
+    pub fn require(inbox: &Path) -> io::Result<Self> {
+        let lock_path = inbox.with_extension("jsonl.lock");
+        Ok(Self(Some(crate::registry::FileLock::acquire_exclusive(
+            &lock_path,
+        )?)))
     }
 }
 
@@ -157,7 +168,7 @@ pub fn deliver_and_consume<T>(
     path: &Path,
     deliver: impl FnOnce(&[InboxEntry]) -> (T, std::collections::HashSet<usize>),
 ) -> io::Result<Option<T>> {
-    let _guard = InboxLock::acquire(path)?;
+    let _guard = InboxLock::require(path)?;
     let content = match std::fs::read(path) {
         Ok(c) => c,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -179,6 +190,12 @@ pub fn deliver_and_consume<T>(
         }
     }
     if entries.is_empty() {
+        // Nothing deliverable, but the file may still hold an unparseable tail
+        // from a killed writer. Clearing it here is what stops the next append
+        // fusing onto it into one corrupt line.
+        if !content.is_empty() {
+            let _ = write_lines(path, &[]);
+        }
         return Ok(None);
     }
     let (value, consumed) = deliver(&entries);
@@ -188,14 +205,29 @@ pub fn deliver_and_consume<T>(
         .filter(|(i, _)| !consumed.contains(i))
         .map(|(_, l)| l)
         .collect();
+    write_lines(path, &kept)?;
+    Ok(Some(value))
+}
+
+/// Replace the inbox with `lines`, atomically. An in-place `write` that is
+/// interrupted leaves the file truncated, which would lose every entry the
+/// payload deliberately held back — the opposite of the point.
+fn write_lines(path: &Path, lines: &[&String]) -> io::Result<()> {
     let mut out = String::new();
-    for line in kept {
+    for line in lines {
         out.push_str(line);
         out.push('\n');
     }
-    std::fs::write(path, out.as_bytes())?;
-    bump_gen(path)?;
-    Ok(Some(value))
+    let tmp = path.with_extension("jsonl.tmp");
+    std::fs::write(&tmp, out.as_bytes())?;
+    crate::registry::replace_file(&tmp, path)?;
+    // Best-effort: the generation sidecar only guards watermark readers, and
+    // there are none left on this path. Losing the bump must not discard a
+    // payload the agent is about to be shown.
+    if let Err(e) = bump_gen(path) {
+        tracing::warn!(error = %e, "inbox generation bump failed");
+    }
+    Ok(())
 }
 
 // Watermark encoding: upper 32 bits = generation counter, lower 32 bits =

@@ -15,6 +15,9 @@ const PAYLOAD_CAP_BYTES: usize = 4096;
 /// Room kept for the "N more held back" trailer, which is only written when
 /// something did not fit — so it is reserved only on the pass that needs it.
 const TRAILER_RESERVE: usize = 176;
+/// Bodies longer than this are shown abridged with the elided count — the full
+/// text stays readable via `ecp peers thread <id>` on the sender's log.
+const MESSAGE_BODY_CHARS: usize = 500;
 const HARD_DELTA_LOC_CAP: usize = 30;
 
 /// Returns the payload and the indices of `entries` it actually represented.
@@ -103,34 +106,24 @@ pub fn render_payload(entries: &[InboxEntry]) -> (String, HashSet<usize>) {
 struct Plan {
     soft: bool,
     hard_detail: bool,
-    body_budget: usize,
 }
 
+/// A message body is never shortened to make room. Squeezing it and then
+/// consuming the entry destroyed the rest of the text, which is exactly the
+/// loss this path exists to prevent — so the only lever left is how much
+/// concern detail is rendered. A message that does not fit simply waits.
 const ATTEMPTS: &[Plan] = &[
     Plan {
         soft: true,
         hard_detail: true,
-        body_budget: 500,
     },
     Plan {
         soft: true,
         hard_detail: false,
-        body_budget: 500,
     },
     Plan {
-        soft: true,
+        soft: false,
         hard_detail: false,
-        body_budget: 240,
-    },
-    Plan {
-        soft: true,
-        hard_detail: false,
-        body_budget: 60,
-    },
-    Plan {
-        soft: true,
-        hard_detail: false,
-        body_budget: 0,
     },
 ];
 
@@ -168,7 +161,6 @@ fn compose(
             shown.insert(*i);
         }
     };
-    let budget = plan.body_budget;
     section(
         &mut buf,
         &mut shown,
@@ -178,7 +170,7 @@ fn compose(
             if msgs.len() == 1 { "" } else { "s" }
         ),
         msgs,
-        &move |b, e| render_message(b, e, budget),
+        &render_message,
     );
     let detail = plan.hard_detail;
     section(
@@ -288,7 +280,7 @@ fn render_soft_one_line(buf: &mut String, e: &InboxEntry) {
     }
 }
 
-fn render_message(buf: &mut String, e: &InboxEntry, body_budget: usize) {
+fn render_message(buf: &mut String, e: &InboxEntry) {
     if let InboxEntry::Message {
         msg_id,
         from,
@@ -308,7 +300,7 @@ fn render_message(buf: &mut String, e: &InboxEntry, body_budget: usize) {
             .as_ref()
             .map(|r| format!(" (reply to {r})"))
             .unwrap_or_default();
-        let truncated: String = body.chars().take(body_budget).collect();
+        let truncated: String = body.chars().take(MESSAGE_BODY_CHARS).collect();
         let elided = body
             .chars()
             .count()
