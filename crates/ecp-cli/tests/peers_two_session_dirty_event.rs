@@ -47,3 +47,33 @@ fn late_writer_learns_existing_peer_overlap() {
         "dave (late writer) never learned about carol's pre-existing overlap"
     );
 }
+
+/// The startup rescan walks every session directory, so a peer that crashed
+/// and left its manifest behind would be replayed as a live concern — an alarm
+/// the event-driven path never raises, because a write proves the writer alive.
+#[test]
+fn dead_peers_leftover_dirty_file_raises_nothing() {
+    let mut h = PeerHarness::new();
+    // A session dir with a manifest and a pid that cannot be running.
+    let dead = h.session_dir("ghost");
+    std::fs::create_dir_all(&dead).unwrap();
+    let meta = serde_json::json!({
+        "version": 1, "session_id": "ghost", "pid": 999_999_998u32,
+        "started_at": "2026-01-01T00:00:00Z", "last_touched": "2026-01-01T00:00:00Z",
+        "base_sha": "0".repeat(40), "source_worktree": "/tmp",
+        "overlay_version": 1, "watcher_pid": null,
+        "last_drained_offset": 0, "agent_name": null,
+    });
+    std::fs::write(dead.join("session_meta.json"), meta.to_string()).unwrap();
+    h.write_dirty("ghost", "src/shared.rs", &[("shared_fn", "src/shared.rs")]);
+
+    h.spawn_session("bob");
+    h.write_dirty("bob", "src/shared.rs", &[("shared_fn", "src/shared.rs")]);
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+
+    assert!(
+        h.read_inbox("bob").is_empty(),
+        "a dead peer's leftover manifest must not raise a concern: {:?}",
+        h.read_inbox("bob")
+    );
+}

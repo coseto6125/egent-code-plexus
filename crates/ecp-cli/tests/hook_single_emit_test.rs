@@ -159,10 +159,18 @@ fn session_start_drains_peer_inbox() {
         "SessionStart should drain peer inbox, payload: {ctx}"
     );
 
-    // Inbox should be truncated post-drain.
+    // Cleared after delivery. That is safe because `render_payload` never
+    // drops a message — it trims SOFT, then HARD detail, then message bodies —
+    // so nothing undelivered is destroyed here.
     let after = std::fs::read_to_string(session_dir.join("inbox.jsonl")).unwrap_or_default();
     assert!(
         after.is_empty() || !after.contains("ss-peer-msg"),
-        "inbox should be truncated after SessionStart drain. after: {after}"
+        "inbox should be cleared after SessionStart drain. after: {after}"
+    );
+    let out2 = fire("session-start", &envelope, sid, tmp.path());
+    assert!(
+        !String::from_utf8_lossy(&out2).contains("ss-peer-msg"),
+        "a second drain must not re-emit an already delivered message: {}",
+        String::from_utf8_lossy(&out2)
     );
 }

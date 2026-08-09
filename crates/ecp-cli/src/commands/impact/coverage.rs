@@ -146,6 +146,7 @@ fn coverage_bfs_for_symbol(
         include_tests,
         rel_filter,
         false, // include_heuristic
+        None,  // max_results — coverage needs the exhaustive walk
     );
     det_results
 }

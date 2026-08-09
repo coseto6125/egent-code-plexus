@@ -105,6 +105,7 @@ pub fn run(args: ImpactArgs) -> Result<(), EcpError> {
         args.max_depth,
         timeout_ms,
         args.include_tests,
+        None,
     )?;
 
     // 5. Read contracts.rkyv via zero-copy mmap.

@@ -2,10 +2,10 @@
 //! symbols must reach our inbox.
 //!
 //! The watcher classified SOFT against an always-empty impact cache until the
-//! graph was wired in, so only HARD (same-symbol) overlaps ever fired. Here
-//! bob is dirty on `caller_one` and alice touches `target_fn`, which bob only
-//! reaches through a Calls edge — no name intersection, so a HARD-only watcher
-//! stays silent.
+//! graph was wired in, so only HARD overlaps ever fired. Here bob is dirty on
+//! `caller_one` in one file and alice touches `target_fn` in another, which bob
+//! reaches only through a Calls edge. Separate files matter: HARD is a shared
+//! dirty file and wins over SOFT, so a same-file fixture would prove nothing.
 
 mod common;
 
@@ -17,11 +17,13 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-/// Two symbols, one Calls edge between them, indexed under a private HOME.
+/// Two symbols in SEPARATE files with one Calls edge between them, indexed
+/// under a private HOME.
 fn index_repo(repo: &Path, home: &Path) {
+    fs::write(repo.join("target.rs"), "pub fn target_fn() {}\n").unwrap();
     fs::write(
-        repo.join("lib.rs"),
-        "pub fn target_fn() {}\npub fn caller_one() { target_fn(); }\n",
+        repo.join("caller.rs"),
+        "mod target;\npub fn caller_one() { target::target_fn(); }\n",
     )
     .unwrap();
     run_git(repo, &["init", "-q", "-b", "main"]);
@@ -63,11 +65,11 @@ fn peer_touching_a_graph_neighbour_delivers_a_soft_concern() {
     h.spawn_session("bob");
     std::thread::sleep(Duration::from_millis(800));
 
-    // bob is dirty on the caller; alice then touches the callee. No name
-    // overlap → HARD cannot fire, only the graph edge can.
-    h.write_dirty("bob", "lib.rs", &[("caller_one", "lib.rs")]);
+    // bob is dirty on the caller; alice then touches the callee, in a file bob
+    // has NOT touched → HARD cannot fire, only the graph edge can.
+    h.write_dirty("bob", "caller.rs", &[("caller_one", "caller.rs")]);
     std::thread::sleep(Duration::from_millis(500));
-    h.write_dirty("alice", "lib.rs", &[("target_fn", "lib.rs")]);
+    h.write_dirty("alice", "target.rs", &[("target_fn", "target.rs")]);
 
     let delivered = h.assert_within(Duration::from_secs(5), || {
         h.read_inbox("bob").iter().any(is_soft_target_fn)

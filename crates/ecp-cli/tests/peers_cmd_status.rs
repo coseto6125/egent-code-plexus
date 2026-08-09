@@ -42,16 +42,21 @@ fn write_session(root: &std::path::Path, id: &str, agent_name: Option<&str>) {
 }
 
 fn write_dirty(root: &std::path::Path, id: &str, symbols: &[&str]) {
+    write_dirty_in(root, id, "src/a.ts", symbols);
+}
+
+fn write_dirty_in(root: &std::path::Path, id: &str, file: &str, symbols: &[&str]) {
     let syms: Vec<String> = symbols
         .iter()
         .map(|s| {
             format!(
-                r#"{{"name":"{s}","kind":"function","file":"src/a.ts","line_start":1,"line_end":2}}"#
+                r#"{{"name":"{s}","kind":"function","file":"{file}","line_start":1,"line_end":2}}"#
             )
         })
         .collect();
     let json = format!(
-        r#"{{"version":1,"entries":{{"src/a.ts":{{"mtime_ns":0,"content_hash":"h","fragment_id":"f","tantivy_delta_segment":null,"dirty_symbols":[{}]}}}}}}"#,
+        r#"{{"version":1,"entries":{{"{}":{{"mtime_ns":0,"content_hash":"h","fragment_id":"f","tantivy_delta_segment":null,"dirty_symbols":[{}]}}}}}}"#,
+        file,
         syms.join(",")
     );
     std::fs::write(
@@ -67,9 +72,11 @@ fn peers_status_pairs_reports_hard_overlap_matrix() {
     write_session(dir.path(), "s-one", Some("worker-a"));
     write_session(dir.path(), "s-two", Some("worker-b"));
     write_session(dir.path(), "s-three", None);
+    // HARD is a shared dirty FILE: s-one and s-two collide on src/a.ts,
+    // s-three is alone in src/z.ts.
     write_dirty(dir.path(), "s-one", &["verify_token", "parse_call"]);
     write_dirty(dir.path(), "s-two", &["verify_token"]);
-    write_dirty(dir.path(), "s-three", &["unrelated_fn"]);
+    write_dirty_in(dir.path(), "s-three", "src/z.ts", &["unrelated_fn"]);
 
     let out = Command::new(bin())
         .args([
@@ -93,11 +100,11 @@ fn peers_status_pairs_reports_hard_overlap_matrix() {
         "overlapping pair must be named: {stdout}"
     );
     assert!(
-        stdout.contains("verify_token"),
-        "overlap symbol must be listed: {stdout}"
+        stdout.contains("src/a.ts"),
+        "the shared dirty file must be listed: {stdout}"
     );
     assert!(
-        !stdout.contains("unrelated_fn"),
+        !stdout.contains("src/z.ts"),
         "disjoint session must not appear as overlap: {stdout}"
     );
 }
@@ -107,8 +114,8 @@ fn peers_status_pairs_disjoint_says_none() {
     let dir = tempdir().unwrap();
     write_session(dir.path(), "s-one", None);
     write_session(dir.path(), "s-two", None);
-    write_dirty(dir.path(), "s-one", &["fn_a"]);
-    write_dirty(dir.path(), "s-two", &["fn_b"]);
+    write_dirty_in(dir.path(), "s-one", "src/a.ts", &["fn_a"]);
+    write_dirty_in(dir.path(), "s-two", "src/b.ts", &["fn_b"]);
 
     let out = Command::new(bin())
         .args([

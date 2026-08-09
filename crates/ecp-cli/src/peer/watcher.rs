@@ -7,16 +7,25 @@
 use crate::commands::impact::run_for_symbol;
 use crate::peer::dispatch::dispatch_peer_dirty_event;
 use chrono::Utc;
-use ecp_core::peer::concern::ImpactCache;
+use ecp_core::peer::concern::{ImpactCache, SymbolKey};
 use ecp_core::session::overlay::DirtyFiles;
 use ecp_core::session::SessionMeta;
 use fs2::FileExt;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
+use rustc_hash::FxHashSet;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// Our own manifest, split the way `classify` consumes it: entry keys decide
+/// HARD, declaration lists feed SOFT.
+#[derive(Default, Clone)]
+struct MyDirtySurface {
+    files: Vec<String>,
+    symbols: Vec<ecp_core::session::overlay::SymbolRef>,
+}
 
 pub struct WatcherCfg {
     pub repo_root: PathBuf,
@@ -48,8 +57,7 @@ pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
     // Cached copy of our own dirty symbols. Invalidated whenever our own
     // dirty_files.json changes (same trigger as impact_cache), avoiding N
     // reads of the same file when N peers fire dirty events in a burst.
-    let my_dirty_cache: Arc<Mutex<Option<Vec<ecp_core::session::overlay::SymbolRef>>>> =
-        Arc::new(Mutex::new(None));
+    let my_dirty_cache: Arc<Mutex<Option<MyDirtySurface>>> = Arc::new(Mutex::new(None));
 
     let (tx, rx) = channel::<notify::Result<Event>>();
     let mut watcher = notify::recommended_watcher(tx).map_err(std::io::Error::other)?;
@@ -58,6 +66,12 @@ pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
     watcher
         .watch(&sessions_dir, RecursiveMode::Recursive)
         .map_err(std::io::Error::other)?;
+
+    // Concerns are edge-triggered on writes, so every peer that went dirty
+    // before this point is invisible until it happens to save again. That is
+    // the normal case for a watcher restarted mid-session, and for the window
+    // between process start and the `watch` call above.
+    rescan_peers(&cfg, &soft, &my_dirty_cache);
 
     let mut event_count: u32 = 0;
     loop {
@@ -91,7 +105,7 @@ pub fn run_watcher(cfg: WatcherCfg) -> std::io::Result<()> {
 fn handle_event(
     cfg: &WatcherCfg,
     soft: &Arc<Mutex<SoftState>>,
-    my_dirty_cache: &Arc<Mutex<Option<Vec<ecp_core::session::overlay::SymbolRef>>>>,
+    my_dirty_cache: &Arc<Mutex<Option<MyDirtySurface>>>,
     ev: Event,
 ) -> std::io::Result<()> {
     if !matches!(ev.kind, EventKind::Modify(_) | EventKind::Create(_)) {
@@ -109,7 +123,7 @@ fn handle_event(
             continue;
         };
         if sid == cfg.my_session_id {
-            let prev: Option<Vec<ecp_core::session::overlay::SymbolRef>> = {
+            let prev: Option<MyDirtySurface> = {
                 let mut s = soft.lock().expect("soft state lock poisoned");
                 s.rebuild(&cfg.my_session_dir);
                 // Invalidate my_dirty_cache so next dispatch_peer re-reads the updated file.
@@ -127,7 +141,7 @@ fn handle_event(
             // but only when the set actually GAINED symbols, else every
             // re-save of the same symbol would spam N duplicate concerns
             // into our inbox between hook drains.
-            if my_dirty_gained_symbols(&cfg.my_session_dir, prev.as_deref()) {
+            if my_dirty_gained_symbols(&cfg.my_session_dir, prev.as_ref()) {
                 rescan_peers(cfg, soft, my_dirty_cache);
             }
             continue;
@@ -137,33 +151,43 @@ fn handle_event(
     Ok(())
 }
 
-/// True when the current dirty set contains a symbol name absent from the
+/// True when the current dirty set contains a `(file, name)` absent from the
 /// previous cached set. `prev = None` (startup / first write) counts as
 /// gained — rescanning once too often is safe; missing the first transition
 /// recreates the late-writer blind spot.
-fn my_dirty_gained_symbols(
-    my_session_dir: &Path,
-    prev: Option<&[ecp_core::session::overlay::SymbolRef]>,
-) -> bool {
+///
+/// Keyed on the pair, not the name: going dirty on `run` in a second file has
+/// to count as a gain, or the new file's overlap never reaches our inbox.
+fn my_dirty_gained_symbols(my_session_dir: &Path, prev: Option<&MyDirtySurface>) -> bool {
     let Some(prev) = prev else {
         return true;
     };
     let Ok(now) = DirtyFiles::read(&my_session_dir.join("dirty_files.json")) else {
         return false;
     };
-    let prev_names: std::collections::HashSet<&str> =
-        prev.iter().map(|s| s.name.as_str()).collect();
+    // A newly dirty FILE counts even when it declares nothing, since that is
+    // exactly what HARD keys on now.
+    let prev_files: std::collections::HashSet<&str> =
+        prev.files.iter().map(String::as_str).collect();
+    if now.entries.keys().any(|f| !prev_files.contains(f.as_str())) {
+        return true;
+    }
+    let prev_keys: std::collections::HashSet<(&str, &str)> = prev
+        .symbols
+        .iter()
+        .map(|s| (s.file.as_str(), s.name.as_str()))
+        .collect();
     now.entries
         .values()
         .flat_map(|e| &e.dirty_symbols)
-        .any(|s| !prev_names.contains(s.name.as_str()))
+        .any(|s| !prev_keys.contains(&(s.file.as_str(), s.name.as_str())))
 }
 
 /// Fail-open per peer: one unreadable peer must not block the rest.
 fn rescan_peers(
     cfg: &WatcherCfg,
     soft: &Arc<Mutex<SoftState>>,
-    my_dirty_cache: &Arc<Mutex<Option<Vec<ecp_core::session::overlay::SymbolRef>>>>,
+    my_dirty_cache: &Arc<Mutex<Option<MyDirtySurface>>>,
 ) {
     let sessions_dir = cfg.repo_root.join("sessions");
     let Ok(read) = std::fs::read_dir(&sessions_dir) else {
@@ -193,40 +217,63 @@ fn rescan_peers(
 fn dispatch_peer(
     cfg: &WatcherCfg,
     soft: &Arc<Mutex<SoftState>>,
-    my_dirty_cache: &Arc<Mutex<Option<Vec<ecp_core::session::overlay::SymbolRef>>>>,
+    my_dirty_cache: &Arc<Mutex<Option<MyDirtySurface>>>,
     peer_sid: &str,
     peer_dirty_path: &Path,
 ) -> std::io::Result<()> {
     let peer_dirty = DirtyFiles::read(peer_dirty_path)?;
     // Populate cache on first call after invalidation; reuse across burst of peer events.
-    let my_dirty = {
+    let (my_files, my_dirty) = {
         let mut guard = my_dirty_cache.lock().expect("my_dirty_cache lock poisoned");
         if guard.is_none() {
             *guard = Some(
                 DirtyFiles::read(&cfg.my_session_dir.join("dirty_files.json"))
                     .map(|d| {
-                        d.entries
+                        // Entry KEYS decide HARD, so they are read directly —
+                        // a file whose parse yielded no declarations still
+                        // counts, and `dirty_symbols` would have dropped it.
+                        let files: Vec<String> = d.entries.keys().cloned().collect();
+                        let symbols: Vec<ecp_core::session::overlay::SymbolRef> = d
+                            .entries
                             .into_values()
                             .flat_map(|e| e.dirty_symbols)
-                            .collect()
+                            .collect();
+                        MyDirtySurface { files, symbols }
                     })
                     .unwrap_or_default(),
             );
         }
-        guard.clone().unwrap_or_default()
+        let surface = guard.clone().unwrap_or_default();
+        (surface.files, surface.symbols)
     };
     let peer_meta = SessionMeta::read(&peer_dirty_path.with_file_name("session_meta.json"))?;
+    // A session that crashed leaves its dirty manifest behind. On the
+    // event-driven path a write proves the peer is alive, but the startup
+    // rescan walks the directory unconditionally and would replay a dead
+    // session's file as a live concern — an alarm `main` never raises.
+    //
+    // Only PROVABLY dead peers are skipped. A `pid: null` session is a
+    // watch-path enrolment, not a corpse, and filtering those out is the
+    // discovery bug recorded as FU-2026-06-10-cc120f78889c.
+    if peer_meta
+        .pid
+        .is_some_and(|pid| !ecp_core::peer::registry::pid_alive(pid))
+    {
+        return Ok(());
+    }
     let peer_pid = peer_meta.pid.unwrap_or(0);
     let ts = Utc::now().to_rfc3339();
     let soft_guard = soft.lock().expect("soft state lock poisoned");
-    for entry in peer_dirty.entries.values() {
+    for (peer_file, entry) in &peer_dirty.entries {
         dispatch_peer_dirty_event(
             &cfg.my_session_dir,
             peer_sid,
             peer_pid,
             peer_meta.agent_name.as_deref(),
             &ts,
+            peer_file,
             entry,
+            &my_files,
             &my_dirty,
             &soft_guard.cache,
         )?;
@@ -285,6 +332,11 @@ struct SoftState {
     /// graph traversals on the watcher's single event-loop thread for a result
     /// that cannot have changed.
     seeds: Vec<Seed>,
+    /// Graph path the last failed load resolved to. A session whose index is
+    /// still building must keep retrying, but once the answer is "that exact
+    /// path does not load", repeating the resolve + mmap + header-validate on
+    /// every save buys nothing — the retry waits for the path to move.
+    failed_graph: Option<PathBuf>,
 }
 
 impl SoftState {
@@ -293,20 +345,31 @@ impl SoftState {
     /// the graph was wired in.
     fn rebuild(&mut self, my_session_dir: &Path) {
         let seeds = seed_symbols(my_session_dir);
-        if seeds == self.seeds {
+        // The `source.is_some()` half matters: an unchanged seed list must not
+        // short-circuit the load retry below, or a session whose first rebuild
+        // ran before its index finished would stay SOFT-less for as long as it
+        // keeps editing the same symbols.
+        if self.source.is_some() && seeds == self.seeds {
             return;
         }
+        let seeds_changed = seeds != self.seeds;
         self.seeds = seeds;
         self.cache.invalidate();
         if self.seeds.is_empty() {
             return;
         }
-        // Retried while it keeps failing rather than latched off after one
-        // attempt: a session that starts before its first index finishes would
-        // otherwise run the next several hours with SOFT disabled against a
-        // graph that has been on disk the whole time.
+        if seeds_changed {
+            warn_on_truncated_seeds(my_session_dir, self.seeds.len());
+        }
         if self.source.is_none() {
-            self.source = load_impact_source(my_session_dir);
+            match load_impact_source(my_session_dir, self.failed_graph.as_deref()) {
+                LoadOutcome::Loaded(source) => {
+                    self.failed_graph = None;
+                    self.source = Some(*source);
+                }
+                LoadOutcome::Failed(path) => self.failed_graph = path,
+                LoadOutcome::SameFailurePath => {}
+            }
         }
         let Some(source) = self.source.as_ref() else {
             return;
@@ -315,26 +378,73 @@ impl SoftState {
     }
 }
 
+enum LoadOutcome {
+    // Boxed: the engine holds an mmap handle and dwarfs the other variants,
+    // which clippy's `large_enum_variant` flags — the value is moved into
+    // `SoftState` once and never matched in a hot loop.
+    Loaded(Box<ImpactSource>),
+    /// Resolution or open failed; carries the path so the next attempt can tell
+    /// whether anything moved. `None` when we never got as far as a path.
+    Failed(Option<PathBuf>),
+    /// The same path that already failed — skipped without touching the disk.
+    SameFailurePath,
+}
+
 /// Resolve the session's own worktree, then open the graph published for it.
 ///
 /// Deliberately `Engine::load` rather than `load_ensured`: the watcher is a
 /// passive observer of other sessions and must never kick off an index build
 /// behind the agent's back — a background rebuild fired from here would land
 /// on the same disk as the edit that triggered it.
-fn load_impact_source(my_session_dir: &Path) -> Option<ImpactSource> {
-    let meta = SessionMeta::read(&my_session_dir.join("session_meta.json")).ok()?;
+fn load_impact_source(my_session_dir: &Path, failed_graph: Option<&Path>) -> LoadOutcome {
+    let Ok(meta) = SessionMeta::read(&my_session_dir.join("session_meta.json")) else {
+        return LoadOutcome::Failed(None);
+    };
     if meta.source_worktree.is_empty() {
-        return None;
+        return LoadOutcome::Failed(None);
     }
     let worktree = PathBuf::from(&meta.source_worktree);
-    let member_repo = crate::repo_identity::repo_dir_name_for_cwd(&worktree).ok()?;
+    let Ok(member_repo) = crate::repo_identity::repo_dir_name_for_cwd(&worktree) else {
+        return LoadOutcome::Failed(None);
+    };
     let graph_path = crate::graph_path::resolve(Path::new(".ecp/graph.bin"), &worktree);
-    let engine = crate::engine::Engine::load(&graph_path).ok()?;
+    if failed_graph == Some(graph_path.as_path()) {
+        return LoadOutcome::SameFailurePath;
+    }
+    let Ok(engine) = crate::engine::Engine::load(&graph_path) else {
+        return LoadOutcome::Failed(Some(graph_path));
+    };
     tracing::info!(graph = %graph_path.display(), "watcher attached graph for SOFT concerns");
-    Some(ImpactSource {
+    LoadOutcome::Loaded(Box::new(ImpactSource {
         engine,
         member_repo,
-    })
+    }))
+}
+
+/// The seed cap makes SOFT narrower than the `IMPACT(MY_DIRTY_SYMBOLS)` it
+/// documents. Emitted only when the seed set actually changed, so a save loop
+/// on an over-cap dirty set does not write the same line hundreds of times.
+fn warn_on_truncated_seeds(my_session_dir: &Path, kept: usize) {
+    if kept < SOFT_IMPACT_MAX_SEEDS {
+        return;
+    }
+    let Ok(dirty) = DirtyFiles::read(&my_session_dir.join("dirty_files.json")) else {
+        return;
+    };
+    let total = dirty
+        .entries
+        .values()
+        .flat_map(|e| &e.dirty_symbols)
+        .map(|s| (s.file.as_str(), s.name.as_str()))
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    if total > kept {
+        tracing::warn!(
+            kept,
+            dropped = total - kept,
+            "dirty set exceeds the SOFT seed cap — declarations past the cap get no SOFT coverage"
+        );
+    }
 }
 
 /// Distinct dirty symbols, capped. Order follows `DirtyFiles`' BTreeMap, so
@@ -363,8 +473,8 @@ fn seed_symbols(my_session_dir: &Path) -> Vec<Seed> {
 /// Union of every seed's blast radius. A seed the graph can't resolve (still
 /// ambiguous within its file, or newer than the graph) is skipped: one
 /// unresolvable name must not cost the others their SOFT coverage.
-fn impacted_names(source: &ImpactSource, seeds: &[Seed]) -> std::collections::HashSet<String> {
-    let mut names = std::collections::HashSet::new();
+fn impacted_names(source: &ImpactSource, seeds: &[Seed]) -> FxHashSet<SymbolKey> {
+    let mut keys = FxHashSet::default();
     for seed in seeds {
         let Ok(local) = run_for_symbol(
             &source.engine,
@@ -375,35 +485,49 @@ fn impacted_names(source: &ImpactSource, seeds: &[Seed]) -> std::collections::Ha
             Some(SOFT_IMPACT_DEPTH),
             None,
             false,
+            Some(SOFT_IMPACT_MAX_NAMES),
         ) else {
             continue;
         };
-        if collect_impact_names(local.as_json(), &mut names) {
+        if collect_impact_keys(local.as_json(), &seed.file, &mut keys) {
             break;
         }
     }
-    names
+    keys
 }
 
-/// Names reached by one impact traversal, deduped into `out`. Returns true once
-/// `out` is full, so a single hub seed reaching six figures of nodes stops the
-/// traversal instead of being counted after the fact.
+/// `(file, name)` pairs reached by one impact traversal, deduped into `out`.
+/// Returns true once `out` is full, so a single hub seed reaching six figures
+/// of nodes stops the walk instead of being counted after the fact.
 ///
-/// The seed sits at depth 0 and is kept: a peer touching it is already HARD,
-/// and `classify` checks HARD first.
-fn collect_impact_names(
+/// The depth-0 entries are the definitions `--file` resolved to, and `--file`
+/// matches by substring: `src/lib.rs` also selects `vendor/x/src/lib.rs`. A
+/// payload that resolved to any other file unioned a foreign definition's
+/// radius into ours, so it is dropped whole rather than pruned — the seed loses
+/// its SOFT coverage, which beats attributing a stranger's callers to it.
+///
+/// The seed itself sits at depth 0 and is kept: a peer touching it is already
+/// HARD, and `classify` checks HARD first.
+fn collect_impact_keys(
     payload: &serde_json::Value,
-    out: &mut std::collections::HashSet<String>,
+    seed_file: &str,
+    out: &mut FxHashSet<SymbolKey>,
 ) -> bool {
     let Some(items) = payload["impact"].as_array() else {
         return out.len() >= SOFT_IMPACT_MAX_NAMES;
     };
+    let resolved_elsewhere = items.iter().any(|item| {
+        item["depth"].as_u64() == Some(0) && item["filePath"].as_str() != Some(seed_file)
+    });
+    if resolved_elsewhere {
+        return out.len() >= SOFT_IMPACT_MAX_NAMES;
+    }
     for item in items {
         if out.len() >= SOFT_IMPACT_MAX_NAMES {
             return true;
         }
-        if let Some(name) = item["name"].as_str() {
-            out.insert(name.to_string());
+        if let (Some(file), Some(name)) = (item["filePath"].as_str(), item["name"].as_str()) {
+            out.insert((file.to_string(), name.to_string()));
         }
     }
     out.len() >= SOFT_IMPACT_MAX_NAMES
@@ -505,33 +629,62 @@ mod tests {
         assert!(seed_symbols(dir.path()).is_empty());
     }
 
+    fn key(file: &str, name: &str) -> SymbolKey {
+        (file.to_string(), name.to_string())
+    }
+
     #[test]
-    fn collect_impact_names_takes_every_reached_node() {
+    fn collect_impact_keys_takes_every_reached_node_with_its_file() {
         let payload = serde_json::json!({
             "impact": [
-                {"name": "seed", "depth": 0},
-                {"name": "caller", "depth": 1},
-                {"name": "callee", "depth": 2},
+                {"name": "seed", "filePath": "src/a.rs", "depth": 0},
+                {"name": "caller", "filePath": "src/b.rs", "depth": 1},
+                {"name": "callee", "filePath": "src/c.rs", "depth": 2},
             ]
         });
-        let mut out = std::collections::HashSet::new();
-        assert!(!collect_impact_names(&payload, &mut out));
-        let mut got: Vec<&String> = out.iter().collect();
+        let mut out = FxHashSet::default();
+        assert!(!collect_impact_keys(&payload, "src/a.rs", &mut out));
+        let mut got: Vec<&SymbolKey> = out.iter().collect();
         got.sort();
-        assert_eq!(got, vec!["callee", "caller", "seed"]);
+        assert_eq!(
+            got,
+            vec![
+                &key("src/a.rs", "seed"),
+                &key("src/b.rs", "caller"),
+                &key("src/c.rs", "callee"),
+            ]
+        );
+    }
+
+    /// `--file` matches by substring, so `src/lib.rs` also selects
+    /// `vendor/x/src/lib.rs` and the payload unions both definitions' radii.
+    /// A payload that resolved anywhere but the seed's own file is dropped
+    /// whole rather than attributing a stranger's callers to our seed.
+    #[test]
+    fn collect_impact_keys_drops_a_payload_that_resolved_to_another_file() {
+        let payload = serde_json::json!({
+            "impact": [
+                {"name": "run", "filePath": "src/lib.rs", "depth": 0},
+                {"name": "run", "filePath": "vendor/x/src/lib.rs", "depth": 0},
+                {"name": "foreign_caller", "filePath": "vendor/x/src/main.rs", "depth": 1},
+            ]
+        });
+        let mut out = FxHashSet::default();
+        assert!(!collect_impact_keys(&payload, "src/lib.rs", &mut out));
+        assert!(out.is_empty(), "foreign radius leaked in: {out:?}");
     }
 
     /// The cap has to stop the walk mid-payload. Counting after a whole seed's
     /// traversal would let one hub symbol seat six figures of names in a daemon
     /// documented to hold 20k.
     #[test]
-    fn collect_impact_names_stops_inside_an_oversized_payload() {
+    fn collect_impact_keys_stops_inside_an_oversized_payload() {
         let items: Vec<serde_json::Value> = (0..SOFT_IMPACT_MAX_NAMES + 500)
-            .map(|i| serde_json::json!({"name": format!("n{i}")}))
+            .map(|i| serde_json::json!({"name": format!("n{i}"), "filePath": "src/a.rs"}))
             .collect();
         let payload = serde_json::json!({ "impact": items });
-        let mut out = std::collections::HashSet::new();
-        assert!(collect_impact_names(&payload, &mut out));
+        let mut out = FxHashSet::default();
+        assert!(collect_impact_keys(&payload, "src/a.rs", &mut out));
         assert_eq!(out.len(), SOFT_IMPACT_MAX_NAMES);
     }
 
@@ -539,10 +692,10 @@ mod tests {
     /// produces) must yield nothing — a bogus entry here would classify an
     /// unrelated peer edit as SOFT.
     #[test]
-    fn collect_impact_names_on_an_error_payload_adds_nothing() {
+    fn collect_impact_keys_on_an_error_payload_adds_nothing() {
         let payload = serde_json::json!({"error": "No symbol named `nope`"});
-        let mut out = std::collections::HashSet::new();
-        assert!(!collect_impact_names(&payload, &mut out));
+        let mut out = FxHashSet::default();
+        assert!(!collect_impact_keys(&payload, "src/a.rs", &mut out));
         assert!(out.is_empty(), "error payload leaked names: {out:?}");
     }
 
@@ -554,7 +707,7 @@ mod tests {
         write_dirty(dir.path(), &["foo"]);
         let mut state = SoftState::default();
         state.rebuild(dir.path());
-        assert!(!state.cache.contains("foo"));
+        assert!(!state.cache.contains("src/a.rs", "foo"));
     }
 
     /// The cache is derived from the seeds, so a rebuild that sees the same
@@ -583,12 +736,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         write_dirty(dir.path(), &["foo"]);
         let mut state = SoftState::default();
-        state.cache.refresh(["stale".to_string()]);
+        state.cache.refresh([key("src/a.rs", "stale")]);
         state.seeds = vec![seed("foo", "src/a.rs")];
 
         write_dirty(dir.path(), &[]);
         state.rebuild(dir.path());
         assert!(state.seeds.is_empty());
-        assert!(!state.cache.contains("stale"));
+        assert!(!state.cache.contains("src/a.rs", "stale"));
     }
 }

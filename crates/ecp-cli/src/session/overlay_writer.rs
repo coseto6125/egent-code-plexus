@@ -273,9 +273,14 @@ fn write_fragment_file(
 
     // Same forward-slash invariant as `write_fragment_from_graph`.
     let rel_path = input.rel_path.replace('\\', "/");
-    let (parse_failed, dirty_symbols) = match parse_graph(&input.rel_path, &input.content) {
-        Ok(graph) => {
-            let archive_bytes = archive_fragments(&graph)?;
+    // Parse and archive stay one fallible unit, as they were when this called a
+    // combined `parse_to_fragment`: an rkyv failure marks the entry
+    // `parse_failed` like a parse failure does, rather than aborting the whole
+    // batch write.
+    let parsed = parse_graph(&input.rel_path, &input.content)
+        .and_then(|graph| archive_fragments(&graph).map(|bytes| (graph, bytes)));
+    let (parse_failed, dirty_symbols) = match parsed {
+        Ok((graph, archive_bytes)) => {
             let tmp = overlay_dir.join(format!("{fragment_id}.{batch_seq}.{input_idx}.tmp"));
             fs::write(&tmp, &archive_bytes)?;
             let f = fs::OpenOptions::new().write(true).open(&tmp)?;
@@ -381,16 +386,33 @@ static WRITE_BATCH_SEQ: AtomicU64 = AtomicU64::new(0);
 // overlay writes and reanalyze hot path) via `crate::reanalyze::pipeline()`.
 use crate::reanalyze::pipeline;
 
-fn map_node_kind(k: &NodeKind) -> SymbolKind {
+/// `None` for nodes that are not a declaration two sessions can both edit —
+/// File, Import, Route, Process, Document, Section, EntryPoint, PathLiteral and
+/// the rest of the reference-level tail.
+///
+/// `Property`, `EnumVariant` and `Variable` ARE kept: a struct field is a real
+/// declaration with `field_read` impact edges, so dropping it made a peer
+/// editing `Config.token` invisible to a session whose dirty function reads it.
+/// (Function-body locals never reach here — the indexer drops them by design.)
+///
+/// The declaration variants at the end of `NodeKind` (Struct, Enum, Typedef,
+/// Namespace, Module, Trait, Impl, Macro, Annotation) were appended after this
+/// mapping was first written — the schema is append-only — so they used to fall
+/// through the catch-all. A Rust file holding only `pub struct Config` would
+/// then produce an empty declaration list and be invisible to `ecp peers`.
+fn map_node_kind(k: &NodeKind) -> Option<SymbolKind> {
     match k {
-        NodeKind::Function => SymbolKind::Function,
-        NodeKind::Method | NodeKind::Constructor => SymbolKind::Method,
-        NodeKind::Class => SymbolKind::Struct,
-        NodeKind::Interface => SymbolKind::Trait,
-        NodeKind::Const => SymbolKind::Const,
-        // File, Variable, Import, Route, Process, Document, Section, EntryPoint, Property
-        // NodeKind has no Module/Namespace/Struct/Enum/Trait/Type variants.
-        _ => SymbolKind::Unknown,
+        NodeKind::Function => Some(SymbolKind::Function),
+        NodeKind::Method | NodeKind::Constructor => Some(SymbolKind::Method),
+        NodeKind::Class | NodeKind::Struct | NodeKind::Impl => Some(SymbolKind::Struct),
+        NodeKind::Interface | NodeKind::Trait => Some(SymbolKind::Trait),
+        NodeKind::Enum => Some(SymbolKind::Enum),
+        NodeKind::Typedef => Some(SymbolKind::Type),
+        NodeKind::Module | NodeKind::Namespace => Some(SymbolKind::Module),
+        NodeKind::Const | NodeKind::EnumVariant => Some(SymbolKind::Const),
+        NodeKind::Property | NodeKind::Variable => Some(SymbolKind::Unknown),
+        NodeKind::Macro | NodeKind::Annotation => Some(SymbolKind::Unknown),
+        _ => None,
     }
 }
 
@@ -473,29 +495,59 @@ fn relativise(session_dir: &Path, path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// The symbol surface a peer session can collide on.
+/// Declarations per dirty file. Bounded so one generated or bundled file
+/// cannot dominate the manifest, which is deserialized on the agent-blocking
+/// query path and rewritten on every save.
+///
+/// Truncation is visible rather than silent: the entry keeps a final
+/// `SymbolKind::Unknown` marker named `…+N more (truncated)`, so a reader that
+/// finds no overlap can tell "no overlap" from "we stopped looking".
+const MAX_SYMBOLS_PER_ENTRY: usize = 400;
+
+/// The declaration surface a peer session can collide on.
 ///
 /// Load-bearing for `ecp peers`: `peer::concern::classify` reads
 /// `dirty_symbols` and nothing else, so an entry written without them is
 /// invisible to HARD and SOFT alike — both routes into `dirty_files.json`
 /// have to fill it.
 ///
-/// `File` nodes are dropped: two sessions each editing their own `mod.rs`
-/// would otherwise collide on the file's own name, and the manifest key
-/// already carries the path that actually distinguishes them.
+/// This is the file's declaration list, NOT a change set: the file is
+/// re-parsed whole and nothing is compared against the base graph, so it
+/// cannot say which of these the session actually edited. `classify` states
+/// HARD at that granularity deliberately.
 fn symbols_from_graph(graph: &LocalGraph, file_str: &str) -> Vec<SymbolRef> {
-    graph
+    let mut symbols: Vec<SymbolRef> = graph
         .nodes
         .iter()
-        .filter(|n| !matches!(n.kind, NodeKind::File))
-        .map(|n| SymbolRef {
-            name: n.name.clone(),
-            kind: map_node_kind(&n.kind),
-            file: file_str.to_string(),
-            line_start: n.span.0 + 1, // tree-sitter 0-based → 1-based
-            line_end: n.span.2 + 1,
+        .filter_map(|n| {
+            let kind = map_node_kind(&n.kind)?;
+            Some(SymbolRef {
+                name: n.name.clone(),
+                kind,
+                file: file_str.to_string(),
+                line_start: n.span.0 + 1, // tree-sitter 0-based → 1-based
+                line_end: n.span.2 + 1,
+            })
         })
-        .collect()
+        .take(MAX_SYMBOLS_PER_ENTRY + 1)
+        .collect();
+    if symbols.len() > MAX_SYMBOLS_PER_ENTRY {
+        let dropped = graph
+            .nodes
+            .iter()
+            .filter(|n| map_node_kind(&n.kind).is_some())
+            .count()
+            - MAX_SYMBOLS_PER_ENTRY;
+        symbols.truncate(MAX_SYMBOLS_PER_ENTRY);
+        symbols.push(SymbolRef {
+            name: format!("…+{dropped} more (truncated)"),
+            kind: SymbolKind::Unknown,
+            file: file_str.to_string(),
+            line_start: 0,
+            line_end: 0,
+        });
+    }
+    symbols
 }
 
 /// Run the pipeline on `path` and convert nodes to `SymbolRef`s.

@@ -338,6 +338,7 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
             effective_include_tests,
             &rel_filter,
             !args.no_heuristic,
+            args.max_results,
         );
         let mut sym_entry = ImpactBySymbol {
             symbol: sym_name,
@@ -365,6 +366,7 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
                 effective_include_tests,
                 &rel_filter,
                 !args.no_heuristic,
+                args.max_results,
             );
             if downstream_results.len() > 1 {
                 sym_entry.downstream_callees = Some(downstream_results);

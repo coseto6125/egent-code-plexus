@@ -26,8 +26,8 @@ pub enum PeersCmd {
     Status {
         #[arg(long, value_enum, default_value_t = StatusFormat::Text)]
         format: StatusFormat,
-        /// Lead overview: pairwise HARD dirty-symbol overlap across ALL alive
-        /// sessions (own session included), instead of the per-session list
+        /// Lead overview: pairwise HARD overlap (shared dirty files) across ALL
+        /// alive sessions (own session included), instead of the per-session list
         #[arg(long, default_value_t = false)]
         pairs: bool,
     },
@@ -55,10 +55,15 @@ pub enum PeersCmd {
         #[arg(long)]
         reply: Option<String>,
     },
-    /// Ƀ Inspect inbox without draining (debug)
+    /// Ƀ Read the inbox in full without consuming it. This is where content
+    /// the 4 KB hook payload could not fit stays queued — nothing is ever
+    /// discarded automatically, so `--clear` is the only way to drop it.
     Inbox {
         #[arg(long, default_value_t = 50)]
         limit: usize,
+        /// Discard everything in the inbox, including entries never shown.
+        #[arg(long, default_value_t = false)]
+        clear: bool,
     },
     /// Ƀ Print message thread by msg_id (current session msg.log)
     Thread { msg_id: String },
@@ -124,7 +129,7 @@ pub fn run(args: PeersArgs) -> std::io::Result<()> {
         PeersCmd::Say { body, to, reply } => {
             super::peers_msg::cmd_say(&repo_root, &body, to.as_deref(), reply.as_deref())
         }
-        PeersCmd::Inbox { limit } => super::peers_msg::cmd_inbox(&repo_root, limit),
+        PeersCmd::Inbox { limit, clear } => super::peers_msg::cmd_inbox(&repo_root, limit, clear),
         PeersCmd::Name { name } => cmd_name(&repo_root, &name),
         PeersCmd::Plan {
             targets,
@@ -209,7 +214,11 @@ fn cmd_status(repo_root: &std::path::Path, format: StatusFormat) -> std::io::Res
 }
 
 /// Pairwise HARD-overlap matrix across all alive sessions — the lead's
-/// global view. Reuses concern.rs's HARD definition (dirty-name intersection);
+/// global view. Reuses `concern::classify`'s HARD definition: a shared dirty
+/// FILE. The manifest lists every declaration of a re-parsed file and never
+/// which ones changed, so intersecting declarations would claim a shared edit
+/// nobody recorded.
+///
 /// SOFT (impact-neighbor) pairs are not computed here: that needs the graph
 /// engine, and an honest omission beats an empty column (`peers plan` covers
 /// the proactive impact-level question).
@@ -228,28 +237,22 @@ fn cmd_status_pairs(repo_root: &std::path::Path, format: StatusFormat) -> std::i
                     .join(&s.session_id)
                     .join("dirty_files.json"),
             )
-            .map(|d| {
-                d.entries
-                    .into_values()
-                    .flat_map(|e| e.dirty_symbols)
-                    .map(|sym| sym.name)
-                    .collect()
-            })
+            .map(|d| d.entries.into_keys().collect())
             .unwrap_or_default()
         })
         .collect();
 
-    const SYMBOLS_CAP: usize = 10;
+    const FILES_CAP: usize = 10;
     let label = |i: usize| -> String {
         match sessions[i].agent_name.as_deref() {
             Some(n) => format!("{}({n})", sessions[i].session_id),
             None => sessions[i].session_id.clone(),
         }
     };
-    let mut rows = Vec::new();
+    let mut rows: Vec<(usize, usize, Vec<String>)> = Vec::new();
     for i in 0..sessions.len() {
         for j in (i + 1)..sessions.len() {
-            let mut shared: Vec<&String> = dirty[i].intersection(&dirty[j]).collect();
+            let mut shared: Vec<String> = dirty[i].intersection(&dirty[j]).cloned().collect();
             if shared.is_empty() {
                 continue;
             }
@@ -267,21 +270,18 @@ fn cmd_status_pairs(repo_root: &std::path::Path, format: StatusFormat) -> std::i
                 if rows.len() == 1 { "" } else { "s" }
             );
             if rows.is_empty() {
-                println!("no overlapping pairs — dirty sets are disjoint");
+                println!("no overlapping pairs — no two sessions share a dirty file");
                 return Ok(());
             }
             for (i, j, shared) in &rows {
-                let names: Vec<&str> = shared
-                    .iter()
-                    .take(SYMBOLS_CAP)
-                    .map(|s| s.as_str())
-                    .collect();
+                let files: Vec<&str> = shared.iter().take(FILES_CAP).map(|s| s.as_str()).collect();
                 println!(
-                    "{} ↔ {}: HARD {} — {}",
+                    "{} ↔ {}: HARD {} shared dirty file{} — {}",
                     label(*i),
                     label(*j),
                     shared.len(),
-                    names.join(", ")
+                    if shared.len() == 1 { "" } else { "s" },
+                    files.join(", ")
                 );
             }
         }
@@ -297,8 +297,8 @@ fn cmd_status_pairs(repo_root: &std::path::Path, format: StatusFormat) -> std::i
                     "b": sessions[*j].session_id,
                     "b_name": sessions[*j].agent_name,
                     "hard_count": shared.len(),
-                    "symbols": shared.iter().take(SYMBOLS_CAP).collect::<Vec<_>>(),
-                    "symbols_capped": shared.len() > SYMBOLS_CAP,
+                    "files": shared.iter().take(FILES_CAP).collect::<Vec<_>>(),
+                    "files_capped": shared.len() > FILES_CAP,
                 })).collect::<Vec<_>>(),
             });
             println!(

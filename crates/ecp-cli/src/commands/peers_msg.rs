@@ -72,12 +72,23 @@ pub fn cmd_say(
         let inbox = repo_root.join("sessions").join(target).join("inbox.jsonl");
         append_entry(&inbox, &entry)?;
     } else {
+        // Deliver to every peer before reporting: aborting on the first failure
+        // left a broadcast half-sent with no record of who received it.
+        let mut failed = Vec::new();
         for p in alive_peers(repo_root, &me) {
             let inbox = repo_root
                 .join("sessions")
                 .join(&p.session_id)
                 .join("inbox.jsonl");
-            append_entry(&inbox, &entry)?;
+            if let Err(e) = append_entry(&inbox, &entry) {
+                failed.push(format!("{}: {e}", p.session_id));
+            }
+        }
+        if !failed.is_empty() {
+            return Err(std::io::Error::other(format!(
+                "broadcast incomplete — undelivered to {}",
+                failed.join(", ")
+            )));
         }
     }
 
@@ -105,14 +116,43 @@ pub fn cmd_say(
     Ok(())
 }
 
-pub fn cmd_inbox(repo_root: &Path, limit: usize) -> std::io::Result<()> {
-    let me = crate::session::resolver::resolve_session_id(None);
-    let inbox = repo_root.join("sessions").join(&me).join("inbox.jsonl");
-    let Ok(content) = std::fs::read_to_string(&inbox) else {
+/// The recovery path behind every truncated hook payload, so it shows the MOST
+/// RECENT `limit` entries: the payload drops what did not fit at the END, which
+/// is exactly what an oldest-first window hid.
+///
+/// The file is never rotated or truncated — see `peer::inbox` — so everything
+/// ever delivered to this session is here.
+pub fn cmd_inbox(repo_root: &Path, limit: usize, clear: bool) -> std::io::Result<()> {
+    let inbox = repo_root
+        .join("sessions")
+        .join(crate::session::resolver::resolve_session_id(None))
+        .join("inbox.jsonl");
+    if clear {
+        ecp_core::peer::inbox::truncate_inbox(&inbox)?;
+        println!("inbox cleared");
+        return Ok(());
+    }
+    // Lossy rather than fallible: a writer killed mid-line can leave invalid
+    // UTF-8, and reporting "inbox empty" over a file full of valid messages
+    // would break the one recovery path the payload points at.
+    let Ok(bytes) = std::fs::read(&inbox) else {
         println!("inbox empty");
         return Ok(());
     };
-    for line in content.lines().take(limit) {
+    let content = String::from_utf8_lossy(&bytes);
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() {
+        println!("inbox empty");
+        return Ok(());
+    }
+    let skipped = lines.len().saturating_sub(limit);
+    if skipped > 0 {
+        println!(
+            "... {skipped} older entr{} not shown (raise --limit)",
+            if skipped == 1 { "y" } else { "ies" }
+        );
+    }
+    for line in lines.iter().skip(skipped) {
         println!("{line}");
     }
     Ok(())

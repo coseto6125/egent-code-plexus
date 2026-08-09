@@ -70,7 +70,7 @@ fn pre_tool_use_silent_when_inbox_empty() {
 }
 
 #[test]
-fn pre_tool_use_truncates_inbox_after_drain() {
+fn pre_tool_use_clears_the_inbox_after_drain() {
     let dir = tempdir().unwrap();
     let me = "test_drain_truncate";
     let session_dir = dir.path().join("sessions").join(me);
@@ -91,10 +91,13 @@ fn pre_tool_use_truncates_inbox_after_drain() {
     child.stdin.as_mut().unwrap().write_all(b"{}").unwrap();
     let _ = child.wait_with_output();
 
+    // Cleared after delivery: `render_payload` keeps every message (trimming
+    // SOFT, then HARD detail, then bodies), so clearing destroys nothing the
+    // agent has not been shown.
     let after = std::fs::read_to_string(session_dir.join("inbox.jsonl")).unwrap_or_default();
     assert!(
         after.is_empty() || !after.contains("truncate-me"),
-        "inbox should be truncated after drain. after: {after}"
+        "inbox should be cleared after drain. after: {after}"
     );
 }
 

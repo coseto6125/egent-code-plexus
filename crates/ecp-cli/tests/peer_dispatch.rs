@@ -7,10 +7,14 @@ use rustc_hash::FxHashSet;
 use tempfile::tempdir;
 
 fn sym(name: &str) -> SymbolRef {
+    sym_in(name, "src/a.rs")
+}
+
+fn sym_in(name: &str, file: &str) -> SymbolRef {
     SymbolRef {
         name: name.into(),
         kind: SymbolKind::Function,
-        file: "src/a.rs".into(),
+        file: file.into(),
         line_start: 1,
         line_end: 2,
     }
@@ -34,8 +38,10 @@ fn hard_dispatches_event() {
     let receiver_dir = dir.path().to_path_buf();
     let inbox = receiver_dir.join("inbox.jsonl");
 
+    let peer_file = "src/a.rs";
     let peer_entry = entry_with(vec![sym("verify_token")]);
     let my_dirty = vec![sym("verify_token")];
+    let my_files: Vec<String> = my_dirty.iter().map(|s| s.file.clone()).collect();
     let cache = ImpactCache::from_set(FxHashSet::default());
 
     dispatch_peer_dirty_event(
@@ -44,7 +50,9 @@ fn hard_dispatches_event() {
         1234,
         None,
         &Utc::now().to_rfc3339(),
+        peer_file,
         &peer_entry,
+        &my_files,
         &my_dirty,
         &cache,
     )
@@ -61,8 +69,10 @@ fn dispatch_carries_peer_name_into_entry() {
     let receiver_dir = dir.path().to_path_buf();
     let inbox = receiver_dir.join("inbox.jsonl");
 
+    let peer_file = "src/a.rs";
     let peer_entry = entry_with(vec![sym("verify_token")]);
     let my_dirty = vec![sym("verify_token")];
+    let my_files: Vec<String> = my_dirty.iter().map(|s| s.file.clone()).collect();
     let cache = ImpactCache::from_set(FxHashSet::default());
 
     dispatch_peer_dirty_event(
@@ -71,7 +81,9 @@ fn dispatch_carries_peer_name_into_entry() {
         1234,
         Some("rust-parser"),
         &Utc::now().to_rfc3339(),
+        peer_file,
         &peer_entry,
+        &my_files,
         &my_dirty,
         &cache,
     )
@@ -93,10 +105,13 @@ fn soft_dispatches_event() {
     let receiver_dir = dir.path().to_path_buf();
     let inbox = receiver_dir.join("inbox.jsonl");
 
-    let peer_entry = entry_with(vec![sym("login_handler")]);
+    // SOFT only reachable when the files differ — a shared file is HARD first.
+    let peer_file = "src/login.rs";
+    let peer_entry = entry_with(vec![sym_in("login_handler", "src/login.rs")]);
     let my_dirty = vec![sym("verify_token")];
+    let my_files: Vec<String> = my_dirty.iter().map(|s| s.file.clone()).collect();
     let mut impacted = FxHashSet::default();
-    impacted.insert("login_handler".to_string());
+    impacted.insert(("src/login.rs".to_string(), "login_handler".to_string()));
     let cache = ImpactCache::from_set(impacted);
 
     dispatch_peer_dirty_event(
@@ -105,7 +120,9 @@ fn soft_dispatches_event() {
         1234,
         None,
         &Utc::now().to_rfc3339(),
+        peer_file,
         &peer_entry,
+        &my_files,
         &my_dirty,
         &cache,
     )
@@ -121,8 +138,12 @@ fn ignore_writes_nothing() {
     let receiver_dir = dir.path().to_path_buf();
     let inbox = receiver_dir.join("inbox.jsonl");
 
-    let peer_entry = entry_with(vec![sym("unrelated")]);
+    // A different FILE, not just a different name: HARD is a shared dirty file,
+    // so a peer symbol in `src/a.rs` would be a hit however it is named.
+    let peer_file = "src/z.rs";
+    let peer_entry = entry_with(vec![sym_in("unrelated", "src/z.rs")]);
     let my_dirty = vec![sym("verify_token")];
+    let my_files: Vec<String> = my_dirty.iter().map(|s| s.file.clone()).collect();
     let cache = ImpactCache::from_set(FxHashSet::default());
 
     dispatch_peer_dirty_event(
@@ -131,7 +152,9 @@ fn ignore_writes_nothing() {
         1234,
         None,
         &Utc::now().to_rfc3339(),
+        peer_file,
         &peer_entry,
+        &my_files,
         &my_dirty,
         &cache,
     )
@@ -147,8 +170,12 @@ fn empty_dirty_symbols_writes_nothing() {
     let receiver_dir = dir.path().to_path_buf();
     let inbox = receiver_dir.join("inbox.jsonl");
 
-    let peer_entry = entry_with(vec![]); // peer parse_failed scenario
+    // A parse-failed peer entry in a file we have NOT touched: no declarations
+    // to match and no shared file, so nothing should be written.
+    let peer_file = "src/parse_failed.rs";
+    let peer_entry = entry_with(vec![]);
     let my_dirty = vec![sym("foo")];
+    let my_files: Vec<String> = my_dirty.iter().map(|s| s.file.clone()).collect();
     let cache = ImpactCache::from_set(FxHashSet::default());
 
     dispatch_peer_dirty_event(
@@ -157,7 +184,9 @@ fn empty_dirty_symbols_writes_nothing() {
         1234,
         None,
         &Utc::now().to_rfc3339(),
+        peer_file,
         &peer_entry,
+        &my_files,
         &my_dirty,
         &cache,
     )

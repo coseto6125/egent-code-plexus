@@ -77,6 +77,7 @@ pub fn run_for_symbol(
     max_depth: Option<u32>,
     timeout_ms: Option<u64>,
     include_tests: bool,
+    max_results: Option<usize>,
 ) -> Result<LocalImpact, EcpError> {
     let dir = match direction.to_ascii_lowercase().as_str() {
         "downstream" | "down" => Direction::Down,
@@ -104,6 +105,7 @@ pub fn run_for_symbol(
         literal: None,
         literal_coherence: false,
         batch: false,
+        max_results,
     };
     let _ = timeout_ms; // timeout enforcement is caller-side; passed for API parity
     let (payload, _hints) = super::build_payload_with_hints(&args, engine)?;
@@ -262,6 +264,13 @@ pub(super) fn impact_by_name(
     let mut hidden_heuristic_total: u64 = 0;
     let mut per_match_bfs: Vec<(usize, Vec<Value>)> = Vec::new();
     for start_idx in &matches {
+        // A budget across the WHOLE call, not per match: a name with k
+        // definitions would otherwise materialise k x max_results nodes.
+        let spent = all_results.len() + all_heuristic_results.len();
+        let remaining = args.max_results.map(|cap| cap.saturating_sub(spent));
+        if remaining == Some(0) {
+            break;
+        }
         let (det_results, heur_results, hidden_conf, hidden_heur) = run_bfs(
             graph,
             view,
@@ -272,6 +281,7 @@ pub(super) fn impact_by_name(
             effective_include_tests,
             &rel_filter,
             !args.no_heuristic,
+            remaining,
         );
         all_results.extend(det_results.iter().cloned());
         per_match_bfs.push((*start_idx, det_results));
