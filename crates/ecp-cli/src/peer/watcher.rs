@@ -247,6 +247,20 @@ fn dispatch_peer(
         (surface.files, surface.symbols)
     };
     let peer_meta = SessionMeta::read(&peer_dirty_path.with_file_name("session_meta.json"))?;
+    // A session that crashed leaves its dirty manifest behind. On the
+    // event-driven path a write proves the peer is alive, but the startup
+    // rescan walks the directory unconditionally and would replay a dead
+    // session's file as a live concern — an alarm `main` never raises.
+    //
+    // Only PROVABLY dead peers are skipped. A `pid: null` session is a
+    // watch-path enrolment, not a corpse, and filtering those out is the
+    // discovery bug recorded as FU-2026-06-10-cc120f78889c.
+    if peer_meta
+        .pid
+        .is_some_and(|pid| !ecp_core::peer::registry::pid_alive(pid))
+    {
+        return Ok(());
+    }
     let peer_pid = peer_meta.pid.unwrap_or(0);
     let ts = Utc::now().to_rfc3339();
     let soft_guard = soft.lock().expect("soft state lock poisoned");
