@@ -96,6 +96,10 @@ fn tool_peers() -> DerivedTool {
                     "enum": ["text", "json"],
                     "description": "[status] Output format. `json` returns an array with session_id, agent_name, pid, last_touched, base_sha, watcher (alive|dead|not-started), watcher_pid. [plan] also honored."
                 },
+                "clear": {
+                    "type": "boolean",
+                    "description": "[inbox] Discard everything in the inbox, including entries the 4KB hook payload never showed. Nothing is discarded automatically, so this is the only way to drop queued content."
+                },
                 "pairs": {
                     "type": "boolean",
                     "description": "[status] Lead overview: which alive sessions share a dirty FILE (HARD), pairwise, instead of the per-session list."
@@ -111,7 +115,7 @@ fn tool_peers() -> DerivedTool {
         // `--pairs` and `--include-tests` are clap bare flags (SetTrue), so
         // emitting `--pairs true` makes clap reject the call. Both are boolean
         // in the schema above; without this the MCP surface cannot use them.
-        flag_args: ["pairs", "include_tests"]
+        flag_args: ["pairs", "include_tests", "clear"]
             .into_iter()
             .map(String::from)
             .collect(),
