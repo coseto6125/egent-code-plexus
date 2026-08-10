@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.9.2 - 2026-08-10
+
+### Features
+
+- prerender one page per locale and give crawlers something to read (#691)
+
+### Bug Fixes
+
+- stop naming a declaration HARD cannot have observed (#693)
 ## v0.9.1 - 2026-08-10
 
 ### Bug Fixes
