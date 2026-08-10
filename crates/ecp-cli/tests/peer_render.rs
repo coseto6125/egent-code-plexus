@@ -146,6 +146,35 @@ fn old_inbox_line_without_peer_name_still_parses() {
     }
 }
 
+/// An inbox written by 0.9.1 carries `symbol` and no `file`. Dropping those
+/// entries as unparseable would lose a peer's concerns at exactly the moment
+/// an upgrade lands, so the field defaults and the entry still renders.
+#[test]
+fn inbox_written_by_the_previous_version_still_decodes_and_renders() {
+    let line = r#"{"type":"dirty_event","ts":"2026-08-10T18:20:36Z","peer_session":"bob","peer_pid":86152,"kind":"hard","symbol":{"name":"alpha","kind":"function","file":"lib.py","line_start":1,"line_end":2},"reason":"Both sessions have lib.py in their overlay.","peer_delta":null,"your_overlap_range":null}"#;
+    let e: InboxEntry = serde_json::from_str(line).expect("0.9.1 line must still parse");
+    match &e {
+        InboxEntry::DirtyEvent { file, symbol, .. } => {
+            assert_eq!(
+                file, "",
+                "absent file defaults rather than failing the parse"
+            );
+            assert!(
+                symbol.is_some(),
+                "0.9.1 wrote a symbol; it survives decoding"
+            );
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+    // Rendering it must not panic and must not resurrect the old claim.
+    let out = render_payload(&[e]).0;
+    assert!(out.contains("HARD overlap"), "{out}");
+    assert!(
+        !out.contains("Symbol:"),
+        "old entry must not print a symbol: {out}"
+    );
+}
+
 #[test]
 fn enforces_4kb_cap_with_hard_priority() {
     let mut bulk: Vec<InboxEntry> = Vec::new();
