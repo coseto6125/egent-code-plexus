@@ -26,7 +26,7 @@
 //! still collapse together — `SymbolRef` carries no owner — which can only
 //! widen SOFT within one file, never across files.
 
-use crate::session::overlay::{SymbolKind, SymbolRef};
+use crate::session::overlay::SymbolRef;
 use rustc_hash::FxHashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,7 +39,15 @@ pub enum ConcernKind {
 pub enum ConcernResult {
     Hit {
         kind: ConcernKind,
-        symbol: SymbolRef,
+        /// The peer's dirty file. Always known — it is what the manifest
+        /// records.
+        file: String,
+        /// The declaration the classification actually rests on. `None` for
+        /// HARD, whose evidence is the shared file and nothing finer: the
+        /// manifest lists every declaration in a re-parsed file and compares
+        /// none of them against the base graph, so naming one would assert an
+        /// edit no one observed.
+        symbol: Option<SymbolRef>,
         reason: String,
     },
     Ignore,
@@ -93,13 +101,6 @@ pub fn classify(
 ) -> ConcernResult {
     // HARD first — wins over SOFT.
     if my_dirty_files.iter().any(|f| f == peer_file) {
-        let witness = peer_symbols.first().cloned().unwrap_or_else(|| SymbolRef {
-            name: "(no indexed declarations)".to_string(),
-            kind: SymbolKind::Unknown,
-            file: peer_file.to_string(),
-            line_start: 0,
-            line_end: 0,
-        });
         let reason = format!(
             "Both sessions have {peer_file} in their overlay. Neither manifest records WHICH \
              declarations changed — and an overlay entry means \"differs from the published \
@@ -108,7 +109,8 @@ pub fn classify(
         );
         return ConcernResult::Hit {
             kind: ConcernKind::Hard,
-            symbol: witness,
+            file: peer_file.to_string(),
+            symbol: None,
             reason,
         };
     }
@@ -119,7 +121,8 @@ pub fn classify(
         if impact_cache.contains(&p.file, &p.name) {
             return ConcernResult::Hit {
                 kind: ConcernKind::Soft,
-                symbol: p.clone(),
+                file: p.file.clone(),
+                symbol: Some(p.clone()),
                 reason: format!(
                     "Peer has {} dirty; its `{}` is a graph neighbor of your dirty symbols",
                     p.file, p.name

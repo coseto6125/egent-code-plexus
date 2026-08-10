@@ -44,15 +44,18 @@ pub fn render_payload(entries: &[InboxEntry]) -> (String, HashSet<usize>) {
         match e {
             InboxEntry::DirtyEvent {
                 peer_session,
+                file,
                 symbol,
                 kind,
                 ..
             } => {
+                // HARD collapses to the file: two events about the same file
+                // carry the same evidence however many declarations it holds.
                 let witness = match kind {
                     ConcernKindSer::Hard => "",
-                    ConcernKindSer::Soft => symbol.name.as_str(),
+                    ConcernKindSer::Soft => symbol.as_ref().map_or("", |s| s.name.as_str()),
                 };
-                if !seen.insert((peer_session.as_str(), symbol.file.as_str(), witness, *kind)) {
+                if !seen.insert((peer_session.as_str(), file.as_str(), witness, *kind)) {
                     superseded.insert(i);
                     continue;
                 }
@@ -227,7 +230,7 @@ fn render_hard(buf: &mut String, e: &InboxEntry) {
         peer_pid,
         peer_name,
         ts,
-        symbol,
+        file,
         reason,
         peer_delta,
         your_overlap_range,
@@ -242,11 +245,10 @@ fn render_hard(buf: &mut String, e: &InboxEntry) {
             None => writeln!(buf, "  Peer:   {peer_session} (pid {peer_pid})"),
         };
         let _ = writeln!(buf, "  When:   {ts}");
-        let _ = writeln!(
-            buf,
-            "  Symbol: {} · {:?} · {}:{}-{}",
-            symbol.name, symbol.kind, symbol.file, symbol.line_start, symbol.line_end
-        );
+        // Deliberately the file and not a declaration: the manifest cannot say
+        // which declarations changed, and a name with exact line numbers reads
+        // as if it could — the field would contradict the reason beneath it.
+        let _ = writeln!(buf, "  File:   {file}");
         let _ = writeln!(buf, "  Reason: {reason}");
         if let Some(d) = peer_delta {
             let lines: Vec<&str> = d.lines().take(HARD_DELTA_LOC_CAP).collect();
@@ -258,7 +260,7 @@ fn render_hard(buf: &mut String, e: &InboxEntry) {
                 let _ = writeln!(
                     buf,
                     "    ... (truncated, see `ecp peers diff {peer_session} {}`)",
-                    symbol.name
+                    file
                 );
             }
         }
@@ -282,16 +284,20 @@ fn render_soft_one_line(buf: &mut String, e: &InboxEntry) {
         peer_session,
         peer_name,
         ts,
+        file,
         symbol,
         ..
     } = e
     {
         let by = peer_name.as_deref().unwrap_or(peer_session);
-        let _ = writeln!(
-            buf,
-            "  · {} ({:?}, {}:{}) by {by} ({ts})",
-            symbol.name, symbol.kind, symbol.file, symbol.line_start
-        );
+        let _ = match symbol {
+            Some(s) => writeln!(
+                buf,
+                "  · {} ({:?}, {}:{}) by {by} ({ts})",
+                s.name, s.kind, s.file, s.line_start
+            ),
+            None => writeln!(buf, "  · {file} by {by} ({ts})"),
+        };
     }
 }
 

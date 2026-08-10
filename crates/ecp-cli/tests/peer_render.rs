@@ -9,14 +9,9 @@ fn dirty_hard() -> InboxEntry {
         peer_pid: 1234,
         peer_name: None,
         kind: ConcernKindSer::Hard,
-        symbol: SymbolRef {
-            name: "verify_token".into(),
-            kind: SymbolKind::Function,
-            file: "src/auth.rs".into(),
-            line_start: 42,
-            line_end: 58,
-        },
-        reason: "Both sessions modified verify_token".into(),
+        file: "src/auth.rs".into(),
+        symbol: None,
+        reason: "Both sessions have src/auth.rs in their overlay".into(),
         peer_delta: Some("-old\n+new".into()),
         your_overlap_range: Some((45, 50)),
     }
@@ -31,11 +26,30 @@ fn empty_input_renders_empty_string() {
 fn single_hard_event_renders_header_and_delta() {
     let out = render_payload(&[dirty_hard()]).0;
     assert!(out.contains("HARD overlap"), "missing HARD header: {out}");
-    assert!(out.contains("verify_token"));
-    assert!(out.contains("src/auth.rs:42-58"));
+    assert!(
+        out.contains("src/auth.rs"),
+        "missing the shared file: {out}"
+    );
     assert!(out.contains("-old"));
     assert!(out.contains("+new"));
     assert!(out.contains("Suggest"));
+}
+
+/// HARD knows the file and nothing finer. Printing a declaration with exact
+/// lines above a reason that says which declarations changed is unknown puts
+/// the two lines in contradiction, and an agent believes the specific one.
+#[test]
+fn hard_render_names_no_declaration_and_no_line_range() {
+    let out = render_payload(&[dirty_hard()]).0;
+    assert!(
+        !out.contains("Symbol:"),
+        "HARD must not present a symbol field: {out}"
+    );
+    assert!(
+        !out.contains("42-58"),
+        "a line range asserts a located edit: {out}"
+    );
+    assert!(out.contains("File:"), "expected a file line: {out}");
 }
 
 #[test]
@@ -70,6 +84,7 @@ fn hard_payload_prefers_agent_name_keeps_session_id() {
             reason,
             peer_delta,
             your_overlap_range,
+            file,
             ..
         } => InboxEntry::DirtyEvent {
             ts,
@@ -77,6 +92,7 @@ fn hard_payload_prefers_agent_name_keeps_session_id() {
             peer_pid,
             peer_name: Some("rust-parser".into()),
             kind,
+            file,
             symbol,
             reason,
             peer_delta,
@@ -130,6 +146,35 @@ fn old_inbox_line_without_peer_name_still_parses() {
     }
 }
 
+/// An inbox written by 0.9.1 carries `symbol` and no `file`. Dropping those
+/// entries as unparseable would lose a peer's concerns at exactly the moment
+/// an upgrade lands, so the field defaults and the entry still renders.
+#[test]
+fn inbox_written_by_the_previous_version_still_decodes_and_renders() {
+    let line = r#"{"type":"dirty_event","ts":"2026-08-10T18:20:36Z","peer_session":"bob","peer_pid":86152,"kind":"hard","symbol":{"name":"alpha","kind":"function","file":"lib.py","line_start":1,"line_end":2},"reason":"Both sessions have lib.py in their overlay.","peer_delta":null,"your_overlap_range":null}"#;
+    let e: InboxEntry = serde_json::from_str(line).expect("0.9.1 line must still parse");
+    match &e {
+        InboxEntry::DirtyEvent { file, symbol, .. } => {
+            assert_eq!(
+                file, "",
+                "absent file defaults rather than failing the parse"
+            );
+            assert!(
+                symbol.is_some(),
+                "0.9.1 wrote a symbol; it survives decoding"
+            );
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+    // Rendering it must not panic and must not resurrect the old claim.
+    let out = render_payload(&[e]).0;
+    assert!(out.contains("HARD overlap"), "{out}");
+    assert!(
+        !out.contains("Symbol:"),
+        "old entry must not print a symbol: {out}"
+    );
+}
+
 #[test]
 fn enforces_4kb_cap_with_hard_priority() {
     let mut bulk: Vec<InboxEntry> = Vec::new();
@@ -140,13 +185,14 @@ fn enforces_4kb_cap_with_hard_priority() {
             peer_pid: 1,
             peer_name: None,
             kind: ConcernKindSer::Soft,
-            symbol: SymbolRef {
+            file: "src/x.rs".into(),
+            symbol: Some(SymbolRef {
                 name: format!("sym_{i}"),
                 kind: SymbolKind::Function,
                 file: "src/x.rs".into(),
                 line_start: 1,
                 line_end: 2,
-            },
+            }),
             reason: "neighbor".into(),
             peer_delta: None,
             your_overlap_range: None,
@@ -173,4 +219,49 @@ fn duplicate_dirty_events_same_peer_symbol_render_once() {
         1,
         "one Peer block expected: {out}"
     );
+}
+
+/// A second session measured a real inbox at 92% duplicates — 40 entries, 3
+/// distinct concerns — and asked whether the 4 KB payload could be filled by
+/// repetition, starving a genuinely new peer. It cannot: duplicates are
+/// collapsed before the size ladder runs, not after.
+#[test]
+fn duplicate_flood_does_not_crowd_out_a_new_peer() {
+    let dup = |peer: &str| InboxEntry::DirtyEvent {
+        ts: "2026-08-10T18:20:36Z".into(),
+        peer_session: peer.into(),
+        peer_pid: 1,
+        peer_name: None,
+        kind: ConcernKindSer::Hard,
+        file: "lib.py".into(),
+        symbol: None,
+        reason: "Both sessions have lib.py in their overlay. ".repeat(6),
+        peer_delta: None,
+        your_overlap_range: None,
+    };
+    let mut entries: Vec<InboxEntry> = Vec::new();
+    for _ in 0..13 {
+        for peer in ["bob", "carol", "dave"] {
+            entries.push(dup(peer));
+        }
+    }
+    assert_eq!(entries.len(), 39, "the measured flood was 40 entries");
+    let mut fresh = dup("erin");
+    if let InboxEntry::DirtyEvent { file, .. } = &mut fresh {
+        *file = "other.py".into();
+    }
+    entries.push(fresh);
+
+    let (out, _) = render_payload(&entries);
+    assert!(
+        out.contains("erin"),
+        "the one new concern must survive a flood of repeats: {out}"
+    );
+    for peer in ["bob", "carol", "dave"] {
+        assert_eq!(
+            out.matches(peer).count(),
+            1,
+            "each repeated concern renders once: {out}"
+        );
+    }
 }

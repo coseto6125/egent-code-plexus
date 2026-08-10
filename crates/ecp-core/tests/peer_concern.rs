@@ -108,12 +108,74 @@ fn hard_takes_precedence_over_soft() {
     match classify(&peer[0].file, &peer, &my_files, &mine, &cache) {
         ConcernResult::Hit {
             kind: ConcernKind::Hard,
+            file,
             symbol,
             ..
         } => {
-            assert_eq!(symbol.name, "verify_token");
+            assert_eq!(file, "src/auth.rs");
+            assert!(
+                symbol.is_none(),
+                "HARD rests on the shared file; naming a declaration asserts an \
+                 edit the manifest never observed"
+            );
         }
         other => panic!("expected Hard, got {other:?}"),
+    }
+}
+
+/// The manifest lists every declaration in a re-parsed file and compares none
+/// of them against the base graph. Reporting the first one as though it were
+/// the changed one is how a file-level fact becomes a symbol-level claim: the
+/// peer edits `gamma` and the payload names `alpha`, which is the first thing
+/// in the file and the only thing an agent reading the field would see.
+#[test]
+fn hard_names_no_declaration_even_when_the_file_has_many() {
+    let mine = vec![sym("alpha", "lib.py")];
+    let my_files = vec!["lib.py".to_string()];
+    let peer = vec![
+        sym("alpha", "lib.py"),
+        sym("beta", "lib.py"),
+        sym("gamma", "lib.py"),
+    ];
+    match classify("lib.py", &peer, &my_files, &mine, &cache_of(&[])) {
+        ConcernResult::Hit {
+            kind: ConcernKind::Hard,
+            file,
+            symbol,
+            reason,
+        } => {
+            assert_eq!(file, "lib.py");
+            assert!(symbol.is_none(), "got {symbol:?}");
+            for name in ["alpha", "beta", "gamma"] {
+                assert!(
+                    !reason.contains(name),
+                    "reason must not name a declaration either: {reason}"
+                );
+            }
+        }
+        other => panic!("expected Hard, got {other:?}"),
+    }
+}
+
+/// SOFT is the one kind that does rest on a declaration — it matched a specific
+/// `(file, name)` in the impact set — so it keeps the symbol.
+#[test]
+fn soft_carries_the_declaration_it_matched() {
+    let mine = vec![sym("caller", "src/a.rs")];
+    let my_files = vec!["src/a.rs".to_string()];
+    let peer = vec![sym("callee", "src/b.rs")];
+    let cache = cache_of(&[("src/b.rs", "callee")]);
+    match classify("src/b.rs", &peer, &my_files, &mine, &cache) {
+        ConcernResult::Hit {
+            kind: ConcernKind::Soft,
+            file,
+            symbol,
+            ..
+        } => {
+            assert_eq!(file, "src/b.rs");
+            assert_eq!(symbol.expect("SOFT names its match").name, "callee");
+        }
+        other => panic!("expected Soft, got {other:?}"),
     }
 }
 
@@ -210,9 +272,15 @@ fn shared_file_with_no_declarations_is_still_hard() {
     match classify("src/prelude.rs", &peer, &my_files, &mine, &empty_cache()) {
         ConcernResult::Hit {
             kind: ConcernKind::Hard,
+            file,
             symbol,
             ..
-        } => assert_eq!(symbol.file, "src/prelude.rs"),
+        } => {
+            assert_eq!(file, "src/prelude.rs");
+            // The old shape had to invent a placeholder declaration to carry
+            // the path; the path is a field of its own now.
+            assert!(symbol.is_none(), "got {symbol:?}");
+        }
         other => panic!("expected Hard, got {other:?}"),
     }
 }

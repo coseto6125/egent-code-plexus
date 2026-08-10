@@ -1,5 +1,4 @@
 use ecp_core::peer::inbox::{append_entry, drain, truncate_inbox, ConcernKindSer, InboxEntry};
-use ecp_core::session::overlay::{SymbolKind, SymbolRef};
 use tempfile::tempdir;
 
 fn dirty_event_fixture() -> InboxEntry {
@@ -9,14 +8,9 @@ fn dirty_event_fixture() -> InboxEntry {
         peer_pid: 1234,
         peer_name: None,
         kind: ConcernKindSer::Hard,
-        symbol: SymbolRef {
-            name: "verify_token".into(),
-            kind: SymbolKind::Function,
-            file: "src/auth.rs".into(),
-            line_start: 1,
-            line_end: 10,
-        },
-        reason: "Both sessions modified verify_token".into(),
+        file: "src/auth.rs".into(),
+        symbol: None,
+        reason: "Both sessions have src/auth.rs in their overlay".into(),
         peer_delta: Some("-old\n+new".into()),
         your_overlap_range: Some((5, 7)),
     }

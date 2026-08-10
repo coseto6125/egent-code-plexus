@@ -26,12 +26,13 @@ pub fn dispatch_peer_dirty_event(
         my_dirty_symbols,
         impact_cache,
     );
-    let (kind, symbol, reason) = match result {
+    let (kind, file, symbol, reason) = match result {
         ConcernResult::Hit {
             kind,
+            file,
             symbol,
             reason,
-        } => (kind, symbol, reason),
+        } => (kind, file, symbol, reason),
         ConcernResult::Ignore => return Ok(()),
     };
     let entry = InboxEntry::DirtyEvent {
@@ -40,6 +41,7 @@ pub fn dispatch_peer_dirty_event(
         peer_pid,
         peer_name: peer_name.map(str::to_string),
         kind: ConcernKindSer::from(kind),
+        file,
         symbol,
         reason,
         peer_delta: None,
