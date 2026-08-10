@@ -94,7 +94,30 @@ function loadSiteData() {
 
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
 const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ESCAPES[c]);
-const stripTags = (s) => String(s).replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+/**
+ * Plain text from a fragment of HTML.
+ *
+ * Runs to a fixed point rather than once: removing an inner tag can splice its
+ * neighbours into a new one (`<scr<b>ipt>` becomes `<script>` after a single
+ * pass), so one replace leaves exactly the markup it was meant to remove.
+ */
+const stripTags = (s) => {
+  let out = String(s);
+  for (let prev = null; prev !== out; ) {
+    prev = out;
+    out = out.replace(/<[^>]*>/g, '');
+  }
+  return out.replace(/\s+/g, ' ').trim();
+};
+
+/**
+ * JSON for embedding inside a `<script>` element. `</script>` anywhere in a
+ * string would close the element early and drop the rest of the page into
+ * markup, so `<` never reaches the document as itself. Escaping here rather
+ * than trusting the text to be clean keeps the guarantee independent of what
+ * the Q&A file happens to contain.
+ */
+const scriptJson = (value) => JSON.stringify(value).replace(/</g, '\\u003c');
 
 /** End index of the element opened at `openEnd`, counting nested same-name tags. */
 function closingIndex(html, tag, openEnd) {
@@ -304,10 +327,10 @@ ${alternates}
     <meta name="twitter:title" content="${escapeHtml(meta.ogTitle)}">
     <meta name="twitter:description" content="${escapeHtml(meta.ogDescription)}">
     <meta name="twitter:image" content="${BASE}og.png">
-    <script type="application/ld+json">${JSON.stringify(appLd)}</script>
-    <script type="application/ld+json">${JSON.stringify(faqLd)}</script>
-    <script type="application/ld+json">${JSON.stringify(siteLd)}</script>
-    <script type="application/ld+json">${JSON.stringify(howToLd)}</script>
+    <script type="application/ld+json">${scriptJson(appLd)}</script>
+    <script type="application/ld+json">${scriptJson(faqLd)}</script>
+    <script type="application/ld+json">${scriptJson(siteLd)}</script>
+    <script type="application/ld+json">${scriptJson(howToLd)}</script>
 `;
 }
 
@@ -421,7 +444,7 @@ function comparePage(locale, version) {
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;700&family=Inter:wght@400;500;600;800&display=swap" rel="stylesheet">
-    <script type="application/ld+json">${JSON.stringify(articleLd)}</script>
+    <script type="application/ld+json">${scriptJson(articleLd)}</script>
 </head>
 <body class="theme-dark">
 ${chrome.header}
