@@ -37,6 +37,13 @@ const BUILD_DATE = execFileSync(
   .toString()
   .trim();
 
+// When the count was read. Without it the number reads as "stars right now",
+// which it is not — it is a snapshot taken at deploy time and frozen until the
+// next release. Supplied alongside the count so both describe one moment.
+const STARS_AT = /^\d{4}-\d{2}-\d{2}$/.test(process.env.ECP_STARS_AT ?? '')
+  ? process.env.ECP_STARS_AT
+  : BUILD_DATE;
+
 const seo = JSON.parse(readFileSync(join(SITE, 'seo.json'), 'utf8'));
 const BASE = seo.baseUrl;
 const OG_LOCALE = {
@@ -225,6 +232,7 @@ function headHtml(locale, meta, version, qas, qaLocale) {
             '@type': 'InteractionCounter',
             interactionType: 'https://schema.org/LikeAction',
             userInteractionCount: STARS,
+            endTime: STARS_AT,
           },
         }
       : {}),

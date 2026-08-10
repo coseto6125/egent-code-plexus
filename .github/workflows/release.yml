@@ -740,8 +740,11 @@ jobs:
           # generator so a local build stays offline and deterministic; a
           # failed lookup drops the field instead of failing the deploy.
           ECP_STARS="$(gh api repos/${GITHUB_REPOSITORY} --jq .stargazers_count 2>/dev/null || echo 0)"
-          export ECP_STARS
-          echo "stars=${ECP_STARS}"
+          # Stamp when the count was read, so the published number says "as of
+          # this date" rather than implying it is live.
+          ECP_STARS_AT="$(date -u +%Y-%m-%d)"
+          export ECP_STARS ECP_STARS_AT
+          echo "stars=${ECP_STARS} as of ${ECP_STARS_AT}"
           node scripts/site/build_site.mjs
 
       - name: Publish
