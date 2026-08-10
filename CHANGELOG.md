@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.9.1 - 2026-08-10
+
+### Bug Fixes
+
+- make session liveness mean the agent is still there (#689)
 ## v0.9.0 - 2026-08-09
 
 ### Bug Fixes
