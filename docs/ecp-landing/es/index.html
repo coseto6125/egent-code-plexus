@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- head:start -->
+    <title>Egent Code Plexus — grafo de código para agentes de IA</title>
+    <meta name="description" content="Consultas estructurales para agentes de IA: quién llama a un símbolo, el alcance de un cambio, rutas y contratos entre repositorios. 31 lenguajes, respuestas en menos de 100 ms, 7,5 veces menos tokens que grep, y registros BlindSpot en lugar de conjeturas.">
+    <link rel="canonical" href="https://coseto6125.github.io/egent-code-plexus/es/">
+    <link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/">
+    <link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/">
+    <link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/">
+    <link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/">
+    <link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/">
+    <link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/">
+    <link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/">
+    <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large">
+    <link rel="icon" href="https://coseto6125.github.io/egent-code-plexus/favicon.svg" type="image/svg+xml">
+    <link rel="alternate icon" href="https://coseto6125.github.io/egent-code-plexus/favicon.ico" sizes="32x32">
+    <link rel="apple-touch-icon" href="https://coseto6125.github.io/egent-code-plexus/apple-touch-icon.png">
+    <meta name="theme-color" content="#000000">
+    <meta property="og:site_name" content="Egent Code Plexus">
+    <meta property="og:locale" content="es_ES">
+    <meta property="og:title" content="Egent Code Plexus — hecho para agentes, no para IDEs">
+    <meta property="og:description" content="Pregunta quién llama a X, qué rompe un cambio, qué rutas existen. Un grafo sobre 31 lenguajes, respondido en milisegundos.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://coseto6125.github.io/egent-code-plexus/es/">
+    <meta property="og:image" content="https://coseto6125.github.io/egent-code-plexus/og.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="Egent Code Plexus — built for agents, not IDEs">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Egent Code Plexus — hecho para agentes, no para IDEs">
+    <meta name="twitter:description" content="Pregunta quién llama a X, qué rompe un cambio, qué rutas existen. Un grafo sobre 31 lenguajes, respondido en milisegundos.">
+    <meta name="twitter:image" content="https://coseto6125.github.io/egent-code-plexus/og.png">
+    <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Egent Code Plexus","alternateName":"ecp","applicationCategory":"DeveloperApplication","applicationSubCategory":"Code intelligence graph","operatingSystem":"Linux, macOS, Windows","softwareVersion":"0.9.1","inLanguage":"es","url":"https://coseto6125.github.io/egent-code-plexus/es/","codeRepository":"https://github.com/coseto6125/egent-code-plexus","downloadUrl":"https://github.com/coseto6125/egent-code-plexus/releases/latest","license":"https://opensource.org/licenses/MIT","programmingLanguage":"Rust","description":"Consultas estructurales para agentes de IA: quién llama a un símbolo, el alcance de un cambio, rutas y contratos entre repositorios. 31 lenguajes, respuestas en menos de 100 ms, 7,5 veces menos tokens que grep, y registros BlindSpot en lugar de conjeturas.","sameAs":["https://github.com/coseto6125/egent-code-plexus","https://www.npmjs.com/package/egent-code-plexus","https://pypi.org/project/egent-code-plexus/"],"dateModified":"2026-08-10","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"featureList":["Callers and callees of any symbol across 31 languages","Blast radius of a diff before the refactor lands","HTTP routes and cross-repo contract extraction","SQL tables reached from code, including raw query strings","BlindSpot records naming what the graph cannot see"]}</script>
+    <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","inLanguage":"es","mainEntity":[{"@type":"Question","name":"¿Por qué «no saber honestamente» importa más que «suponer vagamente»?","acceptedAnswer":{"@type":"Answer","text":"En la comunicación entre agentes, un LLM cae con facilidad en la hipótesis de mundo cerrado: para él, lo desconocido tiende a tratarse como inexistente. Por eso es fundamental que el modelo reconozca que «no lo sabe». Eso es lo que evita las alucinaciones.Solo sabiendo qué ignora puede el LLM profundizar hasta encontrar la respuesta real. Si la herramienta tapa ese desconocimiento, el modelo acaba creyendo que lo que no sabe sencillamente no existe.Así, el valor de BlindSpot no está en completar el grafo, sino en mostrar con honestidad sus límites. Sin BlindSpots marcados, un ingeniero humano al menos sospecharía que hay una trampa; un agente puede interpretar directamente «no hay arista» como «no hay dependencia». En sistemas grandes eso es peligrosísimo."}},{"@type":"Question","name":"¿Significa `ecp peers` que el futuro es el desarrollo paralelo con varios agentes?","acceptedAnswer":{"@type":"Answer","text":"De hecho, los Agentic Developers y los equipos más avanzados ya están adoptando este mecanismo poco a poco, aunque casi siempre implementado en la capa de flujo de trabajo. Construir flujos de trabajo suele ser complejo y voluminoso, pero con un diseño de peers sencillo los agentes de código pueden compartir al instante en qué están trabajando, y así evitar trabajo duplicado o conflictos entre sus cambios.Hoy tenemos el modelo de subagentes, pero ese mecanismo es apenas una extensión de una sola sesión: el subagente se limita a completar la tarea que le pasa el agente principal.Con ecp peers lo que busco es que un conjunto amplio de agentes principales, intercambiando información entre sí, complete planes mucho mayores, en lugar de comunicarse a través de documentos. Un diseño así permite que cada uno haga avanzar al otro en tiempo real y que se sostenga una planificación de mayor escala."}},{"@type":"Question","name":"¿Por qué una arquitectura sin estado con mmap y rkyv?","acceptedAnswer":{"@type":"Answer","text":"La idea de no tener estado, con mmap y rkyv, viene del rendimiento y de la estabilidad.Un servidor en marcha puede tener estado, pero mantenerlo exige procesos y código complejos para garantizar la consistencia de todo ese estado. Cada interacción con el servidor es un coste, y las cachés necesarias son coste de memoria. Esas restricciones acumuladas degradan el rendimiento.Con mmap, todos los agentes comparten el mismo recurso de base: ninguno necesita estado propio y todos trabajan sobre datos estáticos consultables de forma casi inmediata. En mediciones reales, construir el grafo de 16.000 archivos y del orden de 300.000 nodos lleva de 2 a 3 segundos, y el graph.bin resultante ocupa menos de 70 MB. Al ser un mmap compartido, las consultas del CLI se quedan en general por debajo de 100 ms.Este modelo importa para los agentes porque sus sistemas son de por sí muy concurrentes, de vida corta, propensos a reiniciarse y a cruzar sesiones. Prescindir del estado no busca solo velocidad: busca reducir las formas en que algo puede fallar."}},{"@type":"Question","name":"¿Está pasando ECP de analizar código a entender arquitectura?","acceptedAnswer":{"@type":"Answer","text":"Sí. En el desarrollo de software, el reto mayor de los agentes de IA se está desplazando de «¿sabe escribir bien una función?» a «¿es capaz de no romper las restricciones arquitectónicas ya existentes en un sistema grande?».La corrección de una función suelta se resuelve con tipos, pruebas, lint y contexto local. Pero el riesgo de un sistema real suele esconderse en restricciones que cruzan archivos, servicios, lenguajes y tiempo.Un LLM puede deducirlo por su cuenta a partir de consultas básicas al grafo, pero esa no es una solución estable. El problema no es que el LLM no razone, sino que hacerle redescubrir cada vez los patrones arquitectónicos desde nodos y aristas de bajo nivel sale caro, da resultados inconsistentes y deja escapar el «espacio negativo». Por eso ECP incorpora detección de patrones como Saga o EventTopic: eleva de antemano a señal de primera clase el conocimiento arquitectónico que es arriesgado, frecuente y estructurable. Dicho con más precisión, debería ser el radar de arquitectura del agente: antes de tocar el código, deja a la vista las restricciones de alta confianza, los acoplamientos implícitos posibles y las heurísticas que requieren verificación humana."}},{"@type":"Question","name":"¿Qué relación hay entre ECP y GitNexus?","acceptedAnswer":{"@type":"Answer","text":"GitNexus no es mi proyecto: es el origen de mi proyecto. Usándolo me encontré con varios problemas — rendimiento, múltiples servidores demonio y varios cuellos de botella de arquitectura — y a partir de ahí desarrollé por mi cuenta la arquitectura en Rust.El primer punto de inflexión fue que el estado residente empezó a limitar el propio flujo de trabajo del agente. Cuando varios agentes consultan a la vez desde distintos worktrees, repositorios y ramas, el modelo de demonio se convierte fácilmente en un problema de coordinación implícita. El segundo fue que cambió mi idea de la frecuencia de consulta: quería algo parecido a una caché L1 / L2 para el agente, capaz de responder en milisegundos antes de cada edición, de cada renombrado, de cada revisión, de cada análisis de impacto. A esa frecuencia, el coste de un demonio en Node.js se vuelve chirriante.De ahí el juicio central de la arquitectura sin estado en Rust: dejar el grafo en un graph.bin de formato fijo y hacer mmap directo en cada consulta de CLI o MCP. Sin calentamiento, sin estado de demonio y sin depender de que un proceso de vida larga sea de fiar."}},{"@type":"Question","name":"¿Cuál es la historia de `ecp dev pr-analyze` y la cola de fusión?","acceptedAnswer":{"@type":"Answer","text":"Al principio no pretendía rehacer la cola de fusión. Solo quería alimentar la cola existente con las señales de ecp impact, así que hice ecp dev pr-analyze para que el flujo de trabajo etiquetara automáticamente area, risk y cross-pr-conflict.Pero al usarlo a diario descubrí que lo valioso no era la cola en sí, sino «decidir con el grafo si dos PR pueden convivir sin riesgo». Aunque dos PR toquen archivos distintos, si uno modifica un símbolo dentro del radio de impacto del otro, eso cuenta como conflicto semántico. A la inversa, si están en áreas sin relación y sus conjuntos de impacto no se cruzan, pueden marcarse como de bajo riesgo y sin conflicto entre PR, y dejar que el flujo de trabajo fusione con más soltura.Lo que esto ahorra de verdad no es el tiempo de una ejecución de CI, sino el ciclo de rebases y reejecuciones que aparece cuando los PR se van desalineando entre sí. La aspiración de ECP aquí es elevar la cola de fusión de «hacer fila por orden de llegada» a «planificar según el riesgo estructural»."}},{"@type":"Question","name":"¿Cuál es el verdadero cuello de botella del desarrollo con agentes?","acceptedAnswer":{"@type":"Answer","text":"No se puede decir que el ritmo con el que los equipos humanos gestionan los cambios sea un error; lo que hace falta es que todo el proceso esté más automatizado para que no frene el desarrollo.Hoy los agentes escriben código muy rápido, y sin embargo lo que frena es el miedo de las personas: miedo a que el código entre en conflicto, a que el LLM arregle A y rompa B, a los errores de todo tipo. Ese miedo se ha convertido en el mayor obstáculo del desarrollo.A medida que los proyectos de cada persona, cada equipo y cada empresa crezcan de forma exponencial, herramientas como esta serán más importantes y el rendimiento será la clave decisiva. Lo relativamente importante pasa a ser cómo lograr que el LLM entienda la arquitectura actual más rápido, en lugar de depender del contexto como memoria a largo plazo. La arquitectura hay que dársela a entender a través del código fuente y no de un registro escrito, porque lo único cierto es el código fuente."}},{"@type":"Question","name":"¿En qué se convertirá la documentación en la era de los agentes?","acceptedAnswer":{"@type":"Answer","text":"En la era de los agentes, el documento más importante pasará a ser el diagrama de flujo, porque lo que una persona tiene que gestionar son los procesos y el diseño de la arquitectura. Con diagramas se capta rápido cada decisión de diseño, mientras que cómo se genera el código, cómo lo verifica una herramienta y cómo lo consume un agente irá perdiendo importancia.Aun así, los diseños de fondo deben seguir documentándose: cómo aprovechar la caché, si conviene un calentamiento, qué tiempo de espera fijar en el cliente. Esos documentos siguen importando, solo que se abstraen a un alcance mayor. Dicho con precisión, toda la documentación se desplaza hacia un diseño de dimensión más alta.Igual que hoy escribimos programas sin entrar en cómo se compila o se ejecuta el código máquina. El propio Egent Code Plexus que estoy diseñando no es más que un producto de transición, ajustado a la corriente de este momento."}},{"@type":"Question","name":"¿Cuáles son los límites de ECP como producto?","acceptedAnswer":{"@type":"Answer","text":"ECP debe concentrarse en ser una capa de percepción estructural extremadamente rápida, fiable y anclada en el código fuente.Este proyecto no va a ser —ni necesita ser— otro Codex, Claude Code u OpenClaw. Basta con que sea la herramienta que esos marcos de trabajo, cuando ejecutan flujos con agentes de código, puedan elegir en el momento en que necesitan entender el código. Es un grep y un read pensados para un LLM.Las herramientas tradicionales responden «¿dónde está esta cadena?» y «¿qué contiene este archivo?». Lo que ECP debe responder es «¿qué es este símbolo?», «¿quién lo llama?», «¿a qué afecta aguas arriba y aguas abajo?», «¿qué riesgo estructural tiene este diff?». El núcleo de ECP no es decidir por el agente, sino entregarle los hechos estructurales que necesita conocer antes de decidir."}},{"@type":"Question","name":"¿Qué compensaciones hay entre CLI, MCP y las interfaces de herramienta?","acceptedAnswer":{"@type":"Answer","text":"La interfaz de producto más importante es la CLI.MCP da bastante trabajo de mantenimiento, pero como no todos los marcos de agentes de código pueden invocar una CLI de forma nativa, adopté una arquitectura doble en la que MCP encamina hacia la llamada al CLI. Aun así, lo mejor sería poder integrar la herramienta directamente como herramienta de CLI, igual que read. Eso ayuda mucho tanto al rendimiento como al ahorro de tokens.La ventaja de la CLI es que es simple, barata de mantener, fácil de probar y fácil de meter en CI, y que no arrastra ciclo de vida de servidor, registro de herramientas, compatibilidad de esquemas ni estado de sesión. El valor de MCP es el de una capa de compatibilidad, no el de una abstracción central."}},{"@type":"Question","name":"¿Una Skill debe ser una restricción o una guía?","acceptedAnswer":{"@type":"Answer","text":"Mientras el LLM no haya interiorizado estos diseños, hacen falta skills que los encuadren y los guíen. Igual que el ser humano, antes de aprender a usar el fuego, no sabía para qué servía; pero una vez que ese conocimiento se extendió, casi nadie ha recibido un curso sobre cómo usar el fuego.Por ahora siguen haciendo falta esa pauta y esa guía, salvo que algún día el LLM traiga incorporado este tipo de conocimiento. Aun así, prefiero que una skill no sirva para imponer al LLM cómo usar una herramienta, sino para orientarlo. La herramienta describe lo que hace; cómo usarla lo sugiere la skill a grandes rasgos, y cada cual puede ajustarlo a sus necesidades. Lo deseable, claro, es que el LLM lo entienda por sí mismo y lo aplique de forma más amplia."}},{"@type":"Question","name":"¿Cuál es el primer principio central de la Skill de ECP?","acceptedAnswer":{"@type":"Answer","text":"«Toda acción debe partir de hechos estructurales verificables, no de alucinaciones del contexto.»Cualquier cosa dicha antes puede ser una alucinación; solo lo que se comprueba en el momento es verificable. De ahí viene la idea de diseñar los peers: alcanzar una interacción casi en tiempo real mediante hooks y peers para evitar que aparezcan conflictos de desarrollo."}}]}</script>
+    <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Egent Code Plexus","url":"https://coseto6125.github.io/egent-code-plexus/es/","inLanguage":"es","description":"Consultas estructurales para agentes de IA: quién llama a un símbolo, el alcance de un cambio, rutas y contratos entre repositorios. 31 lenguajes, respuestas en menos de 100 ms, 7,5 veces menos tokens que grep, y registros BlindSpot en lugar de conjeturas.","sameAs":["https://github.com/coseto6125/egent-code-plexus","https://www.npmjs.com/package/egent-code-plexus","https://pypi.org/project/egent-code-plexus/"]}</script>
+    <script type="application/ld+json">{"@context":"https://schema.org","@type":"HowTo","name":"Install Egent Code Plexus and index a repository","inLanguage":"es","step":[{"@type":"HowToStep","name":"Install the binary","text":"curl -sSfL https://github.com/coseto6125/egent-code-plexus/releases/latest/download/install.sh | sh"},{"@type":"HowToStep","name":"Index a repository","text":"ecp admin index --repo ."},{"@type":"HowToStep","name":"Ask a structural question","text":"ecp impact --target \u003csymbol> --direction upstream"}]}</script>
+<!-- head:end -->
+    <link rel="stylesheet" href="../css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;700&family=Inter:wght@400;500;600;800&display=swap" rel="stylesheet">
+</head>
+<body class="theme-dark">
+    <!-- Top Navigation -->
+    <header class="navbar">
+        <div class="nav-container">
+            <div class="nav-logo">
+                <span class="logo-icon"></span>
+                <span class="logo-text">Egent Code Plexus</span>
+            </div>
+            <div class="nav-actions">
+                <a href="https://github.com/coseto6125/egent-code-plexus" target="_blank" rel="noopener noreferrer" class="github-link">
+                    <svg height="24" width="24" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+                    GitHub
+                </a>
+                <div id="lang-selector-container"></div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Hero Section -->
+    <section class="hero">
+        <div class="hero-bg-glow"></div>
+        <div class="container hero-content">
+            <h1 class="hero-title">
+                Egent Code Plexus
+                <span class="hero-version">v0.9.1</span>
+            </h1>
+            <p class="hero-tagline mono" data-i18n="hero.tagline">Built for agents, not IDEs.</p>
+            <p class="hero-subtitle" data-i18n="hero.subtitle">Conciencia de la estructura del código y radar de arquitectura diseñado para Agentes de IA.</p>
+            <p class="hero-answer"><!-- answer:start -->Egent Code Plexus (<strong>ecp</strong>) es un grafo de inteligencia de código de línea de comandos para agentes de IA. Indexa un repositorio como grafo de símbolos y responde preguntas estructurales directamente: <em>qué funciones llaman a esta</em>, <em>qué rompe este cambio</em>, <em>a qué rutas HTTP y tablas de base de datos llega este servicio</em>, en 31 lenguajes, en milisegundos y sin demonio. Donde el grafo no ve algo lo dice con un registro BlindSpot en lugar de devolver un resultado vacío que parece prueba de ausencia.<!-- answer:end --></p>
+
+            <!-- Install Box -->
+            <div class="install-box">
+                <div class="install-tabs">
+                    <button class="install-tab active" data-os="mac-linux" data-i18n="install.mac_linux">macOS / Linux</button>
+                    <button class="install-tab" data-os="windows" data-i18n="install.windows">Windows (PowerShell)</button>
+                    <button class="install-tab" data-os="cargo" data-i18n="install.cargo">Cargo (Construir desde fuente)</button>
+                </div>
+                <div class="install-content">
+                    <div class="install-pane active" id="pane-mac-linux">
+                        <code class="mono">curl -sSfL https://github.com/coseto6125/egent-code-plexus/releases/latest/download/install.sh | sh</code>
+                        <button class="copy-btn" data-clipboard="curl -sSfL https://github.com/coseto6125/egent-code-plexus/releases/latest/download/install.sh | sh">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                        </button>
+                    </div>
+                    <div class="install-pane" id="pane-windows">
+                        <code class="mono">iwr https://github.com/coseto6125/egent-code-plexus/releases/latest/download/install.ps1 -UseBasicParsing | iex</code>
+                        <button class="copy-btn" data-clipboard="iwr https://github.com/coseto6125/egent-code-plexus/releases/latest/download/install.ps1 -UseBasicParsing | iex">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                        </button>
+                    </div>
+                    <div class="install-pane" id="pane-cargo">
+                        <code class="mono">cargo install --git https://github.com/coseto6125/egent-code-plexus egent-code-plexus --bin ecp --locked</code>
+                        <button class="copy-btn" data-clipboard="cargo install --git https://github.com/coseto6125/egent-code-plexus egent-code-plexus --bin ecp --locked">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Main Content Navigation -->
+    <div class="content-nav-wrapper sticky">
+        <nav class="content-nav container">
+            <button class="section-btn active" data-target="setup" data-i18n="nav.setup">Inicio rápido</button>
+            <button class="section-btn" data-target="highlights" data-i18n="nav.highlights">Destacados</button>
+            <button class="section-btn" data-target="matrix" data-i18n="nav.matrix">Lenguajes</button>
+            <button class="section-btn" data-target="benchmarks" data-i18n="nav.benchmarks">Métricas</button>
+            <button class="section-btn" data-target="interview" data-i18n="nav.interview">Q&A de Desarrollo</button>
+            <button class="section-btn" data-target="vision" data-i18n="nav.vision">Visión</button>
+        </nav>
+    </div>
+
+    <!-- Sections -->
+    <main class="container main-content">
+        <!-- SETUP -->
+        <section id="setup" class="content-section active">
+            <h2 class="section-heading" data-i18n="nav.setup">Inicio rápido</h2>
+            <div class="bento-grid">
+                <div class="bento-card">
+                    <h3 class="mono accent" data-i18n="setup.step1.title">1. Inicia el asistente de incorporación</h3>
+                    <p data-i18n="setup.step1.desc">Pega el comando en tu agente de IA (p. ej. Claude Code) para activar un asistente interactivo que verifica el entorno e instala todo por ti.</p>
+                    <code class="mono code-block">/chat Fetch https://raw.githubusercontent.com/coseto6125/egent-code-plexus/main/docs/skills/ecp-onboard/SKILL.md and follow it as my onboarding wizard</code>
+                </div>
+                <div class="bento-card">
+                    <h3 class="mono accent" data-i18n="setup.step2.title">2. Construye el índice (opcional / automático)</h3>
+                    <p data-i18n="setup.step2.desc">ECP incluye un mecanismo auto-ensure: el grafo se construye automáticamente en tu primera consulta, por lo que indexar manualmente suele ser innecesario.</p>
+                    <code class="mono code-block">ecp admin index --repo &lt;path&gt;</code>
+                </div>
+                <div class="bento-card">
+                    <h3 class="mono accent" data-i18n="setup.step3.title">3. Grupos multi-repo</h3>
+                    <p data-i18n="setup.step3.desc">Para microservicios o arquitecturas con frontend/backend separados, crea un grupo para habilitar consultas entre repos.</p>
+                    <code class="mono code-block">ecp admin group add &lt;group_name&gt; &lt;path&gt;</code>
+                </div>
+                <div class="bento-card">
+                    <h3 class="mono accent" data-i18n="setup.step4.title">4. Verifica la integración MCP</h3>
+                    <p data-i18n="setup.step4.desc">El asistente escribe la configuración MCP de tu IDE automáticamente. Después, lista las herramientas expuestas a tu agente desde la CLI.</p>
+                    <code class="mono code-block">ecp admin mcp tools</code>
+                </div>
+            </div>
+        </section>
+
+        <!-- HIGHLIGHTS -->
+        <section id="highlights" class="content-section">
+            <h2 class="section-heading" data-i18n="nav.highlights">Destacados</h2>
+            <div class="bento-grid">
+                <div class="bento-card">
+                    <div class="card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle><line x1="3" y1="3" x2="21" y2="21"></line></svg>
+                    </div>
+                    <h3 class="mono" data-i18n="highlights.blindspot.title">Conciencia de BlindSpot</h3>
+                    <p data-i18n="highlights.blindspot.desc">La "ignorancia honesta" es mejor que las "conjeturas vagas". Marca límites del grafo para evitar que los Agentes asuman falsas dependencias.</p>
+                </div>
+                <div class="bento-card">
+                    <div class="card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
+                    </div>
+                    <h3 class="mono" data-i18n="highlights.stateless.title">Sin estado & mmap</h3>
+                    <p data-i18n="highlights.stateless.desc">Sin demonios que cuidar. Sobre Rust + rkyv, cada consulta hace mmap del grafo y termina — 65–76 ms medidos, coste de arranque incluido. Hecho para consultas de agentes concurrentes y de alta frecuencia.</p>
+                </div>
+                <div class="bento-card">
+                    <div class="card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
+                    </div>
+                    <h3 class="mono" data-i18n="highlights.radar.title">Radar de Arquitectura</h3>
+                    <p data-i18n="highlights.radar.desc">Detección integrada de patrones como Saga, EventTopics y contratos de API. Elevando la conciencia a las restricciones arquitectónicas.</p>
+                </div>
+                <div class="bento-card">
+                    <div class="card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polyline></svg>
+                    </div>
+                    <h3 class="mono" data-i18n="strengths.tokens.title">7,5× menos tokens que grep</h3>
+                    <p data-i18n="strengths.tokens.desc">Una cadena de llamadas de 3 saltos de <code>ecp impact</code> cuesta ~111 tokens; el volcado equivalente de grep ~830 — antes de las lecturas de archivos que grep aún necesita. Medido en vivo en este repositorio.</p>
+                </div>
+                <div class="bento-card">
+                    <div class="card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="6" y1="3" x2="6" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg>
+                    </div>
+                    <h3 class="mono" data-i18n="strengths.refactor.title">Semántica de aristas segura para refactors</h3>
+                    <p data-i18n="strengths.refactor.desc">Los flags <code>is_test</code> / <code>is_direct</code> excluyen llamadores de test y exponen el dispatch dinámico; <code>impact --literal</code> distingue lecturas de escrituras — algo que grep estructuralmente no puede.</p>
+                </div>
+                <div class="bento-card">
+                    <div class="card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="6"></circle><circle cx="12" cy="12" r="2"></circle></svg>
+                    </div>
+                    <h3 class="mono" data-i18n="strengths.dispatch.title">Intercepta en el momento del despacho</h3>
+                    <p data-i18n="strengths.dispatch.desc">Un tripwire PreToolUse redirige los despachos de agentes "explora el código" a una sola consulta del grafo — actuando justo cuando la guía estática ya se ha perdido de la atención del modelo.</p>
+                </div>
+                <div class="bento-card">
+                    <div class="card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
+                    </div>
+                    <h3 class="mono" data-i18n="strengths.polyglot.title">31 lenguajes, un solo recorrido</h3>
+                    <p data-i18n="strengths.polyglot.desc">Código de servicios, IaC y SQL dentro de literales se resuelven en un solo grafo (aristas <code>QueriesTable</code>) — el grafo sigue iluminado justo donde los repos políglotas dejan a oscuras a las herramientas monolenguaje.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- MATRIX -->
+        <section id="matrix" class="content-section">
+            <h2 class="section-heading" data-i18n="nav.matrix">Lenguajes</h2>
+            <span class="legend mono" data-i18n="matrix.legend">✓ soportado | — planificado | n/a no aplica al lenguaje</span>
+            <div class="table-container" style="overflow-x: auto; max-width: 100%;">
+                <table class="saas-table mono" style="font-size: 0.85rem; white-space: nowrap;">
+                    <thead>
+                        <tr>
+                            <th data-i18n="matrix.th.lang">Lenguaje</th>
+                            <th>Imports</th><th>Named</th><th>Exports</th><th>Heritage</th><th>Types</th><th>Ctor</th><th>Config</th><th>Frameworks</th><th>Entry</th><th>Call</th><th>Rename</th><th>Group Extractor</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr><td class="label">TypeScript</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓ (HTTP+gRPC)</td></tr>
+                        <tr><td class="label">JavaScript</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>✓</td><td>✓</td><td>✓ (HTTP+gRPC)</td></tr>
+                        <tr><td class="label">Python</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓ (HTTP+gRPC)</td></tr>
+                        <tr><td class="label">Java</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓ (HTTP+gRPC)</td></tr>
+                        <tr><td class="label">Go</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓ (HTTP+gRPC)</td></tr>
+                        <tr><td class="label">Rust</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓ (HTTP+gRPC)</td></tr>
+                        <tr><td class="label">C#</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">C++</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Ruby</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">PHP</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Swift</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Kotlin</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Dart</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">C</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>✓</td><td>—</td><td>✓</td><td>—</td><td>✓</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr style="background: rgba(0,242,255,0.05);"><td colspan="13" class="dim" style="text-align: center; font-size: 0.8rem; letter-spacing: 2px;">─── STRUCTURAL & CONFIG ───</td></tr>
+                        <tr><td class="label">Bash</td><td>✓</td><td>✓</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Lua</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>n/a</td><td>—</td><td>n/a</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Solidity</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>—</td><td>n/a</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Crystal</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>—</td><td>n/a</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Nim</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>—</td><td>n/a</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Cairo</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>—</td><td>—</td><td>n/a</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Move</td><td>✓</td><td>✓</td><td>✓</td><td>n/a</td><td>—</td><td>n/a</td><td>n/a</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Zig</td><td>✓</td><td>✓</td><td>✓</td><td>n/a</td><td>—</td><td>—</td><td>n/a</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">HCL</td><td>✓</td><td>✓</td><td>✓</td><td>n/a</td><td>—</td><td>n/a</td><td>✓</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">SQL</td><td>n/a</td><td>✓</td><td>n/a</td><td>✓</td><td>—</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Verilog</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>—</td><td>—</td><td>n/a</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Vyper</td><td>✓</td><td>✓</td><td>✓</td><td>n/a</td><td>—</td><td>—</td><td>n/a</td><td>—</td><td>—</td><td>✓</td><td>✓</td><td>—</td></tr>
+                        <tr><td class="label">Markdown</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>—</td></tr>
+                        <tr><td class="label">GitHub Actions</td><td>✓</td><td>n/a</td><td>✓</td><td>n/a</td><td>n/a</td><td>n/a</td><td>✓</td><td>n/a</td><td>—</td><td>n/a</td><td>n/a</td><td>—</td></tr>
+                        <tr><td class="label">Docker Compose</td><td>—</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>✓</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>—</td></tr>
+                        <tr><td class="label">Dockerfile</td><td>✓</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>✓</td><td>n/a</td><td>—</td><td>n/a</td><td>n/a</td><td>—</td></tr>
+                        <tr><td class="label">YAML</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>✓</td><td>n/a</td><td>n/a</td><td>n/a</td><td>n/a</td><td>—</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="accordion" style="margin-top: 2rem;">
+                <div class="acc-item">
+                    <button class="acc-trigger">
+                        <span class="acc-q" data-i18n="matrix.rationale.title">Justificación por celda</span>
+                        <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                    </button>
+                    <div class="acc-content" style="background: rgba(10,10,10,0.8);">
+                        <div class="acc-inner" style="padding: 1.5rem; line-height: 1.8; color: #bbb;">
+<p><strong>Imports</strong></p><p><ul><li><em>Bash:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">source</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">.</code></li>
+</ul><ul><li><em>Lua:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">require</code> + binding alias</li>
+</ul><ul><li><em>Dockerfile:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">FROM &lt;base&gt;</code></li>
+</ul><ul><li><em>GitHub Actions:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">uses:</code> directives — public tag/SHA refs, local composites, reusable workflows, cross-repo workflows</li>
+</ul>
+<strong>Named</strong></p><p><ul><li><em>Bash:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">alias</code> command</li>
+</ul><ul><li><em>Lua:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">local M = require(...)</code> and dotted-path bindings (plain literal RHS filtered)</li>
+</ul><ul><li><em>Cairo:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">use X as Y</code> + <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">type X = Y</code></li>
+</ul><ul><li><em>Move:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">use ... as</code> alias clause (module + braced-member forms)</li>
+</ul><ul><li><em>Zig:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">const X = @import(...)</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">const X = Identifier</code> (numeric/string/bool literal RHS filtered via parser-side priority promotion)</li>
+</ul><ul><li><em>Crystal:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">alias X = Y</code></li>
+</ul><ul><li><em>Nim:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">type X = Y</code> with object/distinct/ref-type/tuple-object shapes filtered out (those stay Class)</li>
+</ul><ul><li><em>Vyper:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">from X import Y as Z</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">import X as Y</code> (source-line scan — grammar can't AST-parse the <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">as</code> clause)</li>
+</ul><ul><li><em>Solidity:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">using L for T</code> directives + <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">type C is uint256</code> user-defined value types</li>
+</ul><ul><li><em>HCL:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">locals { }</code> block attributes (<code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">output</code> blocks remain Const)</li>
+</ul><ul><li><em>SQL:</em> top-level <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">CREATE VIEW v AS …</code> (column aliases <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">SELECT x AS y</code> not captured)</li>
+</ul><ul><li><em>Verilog:</em> SystemVerilog <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">typedef</code> declarations</li>
+</ul><ul><li><em>C:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">typedef</code> + <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">#define</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">preproc_function_def</code> + <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">extern</code> declarations (include-guard macros filtered; classified as Alias/Constant/Macro/Flag)</li>
+</ul><ul><li><em>Swift:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">typealias</code> declarations + <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">@objc(extName)</code> rename attributes</li>
+</ul><ul><li><em>Ruby:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">alias</code> keyword + <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">alias_method</code> + constant assignment (<code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">MyConst = Other::Constant</code>) + <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">def_delegator</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">def_delegators</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">delegate</code> (with Forwardable mixin detection; cross-file <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">include Foo</code> propagation resolved via resolver Tier 2.75 HeritageScoped)</li>
+</ul><ul><li><em>GitHub Actions / Docker Compose / Dockerfile</em> show <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">n/a</code> because these YAML/Dockerfile formats use keyed top-level entries (services, jobs, <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">ARG</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">LABEL</code>) — those are configuration keys already captured by the Config column, not re-bindable alias declarations.</li>
+</ul>
+<strong>Exports</strong></p><p><ul><li><em>Lua:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">function foo()</code> (top-level non-<code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">local</code>)</li>
+</ul><ul><li><em>Crystal:</em> default-public minus <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">private</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">protected</code> modifier</li>
+</ul><ul><li><em>Nim:</em> trailing <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">*</code> marker</li>
+</ul><ul><li><em>Cairo / Zig / Move:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">pub</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">public</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">entry</code> keyword</li>
+</ul><ul><li><em>HCL:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">output</code> block</li>
+</ul><ul><li><em>Vyper:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">@external</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">@view</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">@payable</code> decorators</li>
+</ul><ul><li><em>Verilog:</em> SystemVerilog <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">class_property</code> minus <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">local</code> / <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">protected</code> qualifier</li>
+</ul><ul><li><em>GitHub Actions:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">jobs.*.outputs</code> + <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">on.workflow_call.outputs</code></li>
+</ul>
+<strong>Heritage</strong></p><p><ul><li><em>Lua:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">setmetatable(..., {__index=Parent})</code> heuristic</li>
+</ul><ul><li><em>Solidity:</em> <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">is X, Y, Z</code></li>
+</ul><ul><li><em>SQL:</em> FK <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">REFERENCES</code> clauses — inline column-level, table-level, and named-constraint forms</li>
+</ul>
+<strong>Ctor <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">—</code> on Go and Rust</strong></p><p>Neither language has a language-level constructor. Go uses factory functions (<code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">NewFoo()</code>) and Rust uses associated functions (<code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">Foo::new()</code>) as idiomatic substitutes, but the cross-language Ctor extractor only emits <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">NodeKind::Constructor</code> for languages with a reserved ctor name (<code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">__init__</code>, <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">initialize</code>, <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">__construct</code>, <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">constructor</code>, <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">Class::Class</code>).</p><p><strong>Entry <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">—</code> on JavaScript and Ruby</strong></p><p>Absence of a language-level <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">main</code> convention (per <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">entry_points.rs</code> coverage table). Entry points still surface for these languages via route handlers and framework decorators — just not via a <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">main()</code> symbol.</p><p><strong>Rename <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">n/a</code> on markup/config rows</strong></p><p>Markdown, GitHub Actions, Docker Compose, Dockerfile, and YAML carry keys / literal strings, not re-bindable code identifiers — <code class="mono" style="background:#111;padding:2px 4px;border-radius:4px;">ecp rename</code> would have nothing to rewrite.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- BENCHMARKS -->
+        <section id="benchmarks" class="content-section">
+            <h2 class="section-heading" data-i18n="nav.benchmarks">Métricas</h2>
+            <div class="table-container">
+                <table class="saas-table">
+                    <thead>
+                        <tr>
+                            <th data-i18n="table.header.item">Ítem</th>
+                            <th data-i18n="table.header.sample">.sample_repo (22k archivos)</th>
+                            <th class="dim" data-i18n="table.header.vscode">VS Code (14k archivos)</th>
+                        </tr>
+                    </thead>
+                    <tbody class="mono">
+                        <tr><td class="label" data-i18n="table.row.r1">Archivos del repositorio</td><td>22,859</td><td class="dim">14,874</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r2">Nodos Graph File</td><td>15,722</td><td class="dim">12,185</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r3">Tamaño del Grafo</td><td>~55.3 MiB</td><td class="dim">~65.1 MiB</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r4">Pico RSS (force index)</td><td>~1.13 GiB</td><td class="dim">~1.23 GiB</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r5">Cold index</td><td>2.49s</td><td class="dim">3.29s</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r6">Incremental analyze</td><td>4.4ms</td><td class="dim">4.4ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r7">Cypher Class->Method</td><td>29.5ms</td><td class="dim">30.3ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r8">Routes</td><td>10.7ms</td><td class="dim">14.3ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r9">Inspect Class</td><td>18.5ms</td><td class="dim">26.5ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r10">Find bm25</td><td>16.9ms</td><td class="dim">22.5ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r11">Impact downstream</td><td>15.3ms</td><td class="dim">22.2ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r12">Impact baseline HEAD~1</td><td>670.5ms</td><td class="dim">702.8ms</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <p class="table-caption" data-i18n="table.note">※ Hardware: AMD Ryzen 9 9950X, 39.2 GiB RAM, Linux 6.6.87</p>
+        </section>
+
+        <!-- INTERVIEW -->
+        <section id="interview" class="content-section">
+            <h2 class="section-heading" data-i18n="nav.interview">Q&A de Desarrollo</h2>
+            <div class="accordion" id="qa-container">
+                <!-- faq:start -->
+                        <div class="acc-item">
+                            <button class="acc-trigger">
+                                <span class="acc-q">¿Por qué «no saber honestamente» importa más que «suponer vagamente»?</span>
+                                <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                            </button>
+                            <div class="acc-content">
+                                <div class="acc-inner"><p>En la comunicación entre agentes, un LLM cae con facilidad en la hipótesis de mundo cerrado: para él, lo desconocido tiende a tratarse como inexistente. Por eso es fundamental que el modelo reconozca que «no lo sabe». Eso es lo que evita las alucinaciones.</p><p>Solo sabiendo qué ignora puede el LLM profundizar hasta encontrar la respuesta real. Si la herramienta tapa ese desconocimiento, el modelo acaba creyendo que lo que no sabe sencillamente no existe.</p><p>Así, el valor de BlindSpot no está en completar el grafo, sino en mostrar con honestidad sus límites. Sin BlindSpots marcados, un ingeniero humano al menos sospecharía que hay una trampa; un agente puede interpretar directamente «no hay arista» como «no hay dependencia». En sistemas grandes eso es peligrosísimo.</p></div>
+                            </div>
+                        </div>
+                        <div class="acc-item">
+                            <button class="acc-trigger">
+                                <span class="acc-q">¿Significa `ecp peers` que el futuro es el desarrollo paralelo con varios agentes?</span>
+                                <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                            </button>
+                            <div class="acc-content">
+                                <div class="acc-inner"><p>De hecho, los Agentic Developers y los equipos más avanzados ya están adoptando este mecanismo poco a poco, aunque casi siempre implementado en la capa de flujo de trabajo. Construir flujos de trabajo suele ser complejo y voluminoso, pero con un diseño de peers sencillo los agentes de código pueden compartir al instante en qué están trabajando, y así evitar trabajo duplicado o conflictos entre sus cambios.</p><p>Hoy tenemos el modelo de subagentes, pero ese mecanismo es apenas una extensión de una sola sesión: el subagente se limita a completar la tarea que le pasa el agente principal.</p><p>Con <code>ecp peers</code> lo que busco es que un conjunto amplio de agentes principales, intercambiando información entre sí, complete planes mucho mayores, en lugar de comunicarse a través de documentos. Un diseño así permite que cada uno haga avanzar al otro en tiempo real y que se sostenga una planificación de mayor escala.</p></div>
+                            </div>
+                        </div>
+                        <div class="acc-item">
+                            <button class="acc-trigger">
+                                <span class="acc-q">¿Por qué una arquitectura sin estado con mmap y rkyv?</span>
+                                <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                            </button>
+                            <div class="acc-content">
+                                <div class="acc-inner"><p>La idea de no tener estado, con <code>mmap</code> y <code>rkyv</code>, viene del rendimiento y de la estabilidad.</p><p>Un servidor en marcha puede tener estado, pero mantenerlo exige procesos y código complejos para garantizar la consistencia de todo ese estado. Cada interacción con el servidor es un coste, y las cachés necesarias son coste de memoria. Esas restricciones acumuladas degradan el rendimiento.</p><p>Con <code>mmap</code>, todos los agentes comparten el mismo recurso de base: ninguno necesita estado propio y todos trabajan sobre datos estáticos consultables de forma casi inmediata. En mediciones reales, construir el grafo de 16.000 archivos y del orden de 300.000 nodos lleva de 2 a 3 segundos, y el <code>graph.bin</code> resultante ocupa menos de 70 MB. Al ser un <code>mmap</code> compartido, las consultas del CLI se quedan en general por debajo de 100 ms.</p><p>Este modelo importa para los agentes porque sus sistemas son de por sí muy concurrentes, de vida corta, propensos a reiniciarse y a cruzar sesiones. Prescindir del estado no busca solo velocidad: busca reducir las formas en que algo puede fallar.</p></div>
+                            </div>
+                        </div>
+                        <div class="acc-item">
+                            <button class="acc-trigger">
+                                <span class="acc-q">¿Está pasando ECP de analizar código a entender arquitectura?</span>
+                                <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                            </button>
+                            <div class="acc-content">
+                                <div class="acc-inner"><p>Sí. En el desarrollo de software, el reto mayor de los agentes de IA se está desplazando de «¿sabe escribir bien una función?» a «¿es capaz de no romper las restricciones arquitectónicas ya existentes en un sistema grande?».</p><p>La corrección de una función suelta se resuelve con tipos, pruebas, lint y contexto local. Pero el riesgo de un sistema real suele esconderse en restricciones que cruzan archivos, servicios, lenguajes y tiempo.</p><p>Un LLM puede deducirlo por su cuenta a partir de consultas básicas al grafo, pero esa no es una solución estable. El problema no es que el LLM no razone, sino que hacerle redescubrir cada vez los patrones arquitectónicos desde nodos y aristas de bajo nivel sale caro, da resultados inconsistentes y deja escapar el «espacio negativo». Por eso ECP incorpora detección de patrones como Saga o EventTopic: eleva de antemano a señal de primera clase el conocimiento arquitectónico que es arriesgado, frecuente y estructurable. Dicho con más precisión, debería ser el radar de arquitectura del agente: antes de tocar el código, deja a la vista las restricciones de alta confianza, los acoplamientos implícitos posibles y las heurísticas que requieren verificación humana.</p></div>
+                            </div>
+                        </div>
+                        <div class="acc-item">
+                            <button class="acc-trigger">
+                                <span class="acc-q">¿Qué relación hay entre ECP y GitNexus?</span>
+                                <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                            </button>
+                            <div class="acc-content">
+                                <div class="acc-inner"><p>GitNexus no es mi proyecto: es el origen de mi proyecto. Usándolo me encontré con varios problemas — rendimiento, múltiples servidores demonio y varios cuellos de botella de arquitectura — y a partir de ahí desarrollé por mi cuenta la arquitectura en Rust.</p><p>El primer punto de inflexión fue que el estado residente empezó a limitar el propio flujo de trabajo del agente. Cuando varios agentes consultan a la vez desde distintos worktrees, repositorios y ramas, el modelo de demonio se convierte fácilmente en un problema de coordinación implícita. El segundo fue que cambió mi idea de la frecuencia de consulta: quería algo parecido a una caché L1 / L2 para el agente, capaz de responder en milisegundos antes de cada edición, de cada renombrado, de cada revisión, de cada análisis de impacto. A esa frecuencia, el coste de un demonio en Node.js se vuelve chirriante.</p><p>De ahí el juicio central de la arquitectura sin estado en Rust: dejar el grafo en un <code>graph.bin</code> de formato fijo y hacer <code>mmap</code> directo en cada consulta de CLI o MCP. Sin calentamiento, sin estado de demonio y sin depender de que un proceso de vida larga sea de fiar.</p></div>
+                            </div>
+                        </div>
+                        <div class="acc-item">
+                            <button class="acc-trigger">
+                                <span class="acc-q">¿Cuál es la historia de `ecp dev pr-analyze` y la cola de fusión?</span>
+                                <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                            </button>
+                            <div class="acc-content">
+                                <div class="acc-inner"><p>Al principio no pretendía rehacer la cola de fusión. Solo quería alimentar la cola existente con las señales de <code>ecp impact</code>, así que hice <code>ecp dev pr-analyze</code> para que el flujo de trabajo etiquetara automáticamente area, risk y cross-pr-conflict.</p><p>Pero al usarlo a diario descubrí que lo valioso no era la cola en sí, sino «decidir con el grafo si dos PR pueden convivir sin riesgo». Aunque dos PR toquen archivos distintos, si uno modifica un símbolo dentro del radio de impacto del otro, eso cuenta como conflicto semántico. A la inversa, si están en áreas sin relación y sus conjuntos de impacto no se cruzan, pueden marcarse como de bajo riesgo y sin conflicto entre PR, y dejar que el flujo de trabajo fusione con más soltura.</p><p>Lo que esto ahorra de verdad no es el tiempo de una ejecución de CI, sino el ciclo de rebases y reejecuciones que aparece cuando los PR se van desalineando entre sí. La aspiración de ECP aquí es elevar la cola de fusión de «hacer fila por orden de llegada» a «planificar según el riesgo estructural».</p></div>
+                            </div>
+                        </div>
+                        <div class="acc-item">
+                            <button class="acc-trigger">
+                                <span class="acc-q">¿Cuál es el verdadero cuello de botella del desarrollo con agentes?</span>
+                                <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                            </button>
+                            <div class="acc-content">
+                                <div class="acc-inner"><p>No se puede decir que el ritmo con el que los equipos humanos gestionan los cambios sea un error; lo que hace falta es que todo el proceso esté más automatizado para que no frene el desarrollo.</p><p>Hoy los agentes escriben código muy rápido, y sin embargo lo que frena es el miedo de las personas: miedo a que el código entre en conflicto, a que el LLM arregle A y rompa B, a los errores de todo tipo. Ese miedo se ha convertido en el mayor obstáculo del desarrollo.</p><p>A medida que los proyectos de cada persona, cada equipo y cada empresa crezcan de forma exponencial, herramientas como esta serán más importantes y el rendimiento será la clave decisiva. Lo relativamente importante pasa a ser cómo lograr que el LLM entienda la arquitectura actual más rápido, en lugar de depender del contexto como memoria a largo plazo. La arquitectura hay que dársela a entender a través del código fuente y no de un registro escrito, porque lo único cierto es el código fuente.</p></div>
+                            </div>
+                        </div>
+                        <div class="acc-item">
+                            <button class="acc-trigger">
+                                <span class="acc-q">¿En qué se convertirá la documentación en la era de los agentes?</span>
+                                <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                            </button>
+                            <div class="acc-content">
+                                <div class="acc-inner"><p>En la era de los agentes, el documento más importante pasará a ser el diagrama de flujo, porque lo que una persona tiene que gestionar son los procesos y el diseño de la arquitectura. Con diagramas se capta rápido cada decisión de diseño, mientras que cómo se genera el código, cómo lo verifica una herramienta y cómo lo consume un agente irá perdiendo importancia.</p><p>Aun así, los diseños de fondo deben seguir documentándose: cómo aprovechar la caché, si conviene un calentamiento, qué tiempo de espera fijar en el cliente. Esos documentos siguen importando, solo que se abstraen a un alcance mayor. Dicho con precisión, toda la documentación se desplaza hacia un diseño de dimensión más alta.</p><p>Igual que hoy escribimos programas sin entrar en cómo se compila o se ejecuta el código máquina. El propio Egent Code Plexus que estoy diseñando no es más que un producto de transición, ajustado a la corriente de este momento.</p></div>
+                            </div>
+                        </div>
+                        <div class="acc-item">
+                            <button class="acc-trigger">
+                                <span class="acc-q">¿Cuáles son los límites de ECP como producto?</span>
+                                <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                            </button>
+                            <div class="acc-content">
+                                <div class="acc-inner"><p>ECP debe concentrarse en ser una capa de percepción estructural extremadamente rápida, fiable y anclada en el código fuente.</p><p>Este proyecto no va a ser —ni necesita ser— otro Codex, Claude Code u OpenClaw. Basta con que sea la herramienta que esos marcos de trabajo, cuando ejecutan flujos con agentes de código, puedan elegir en el momento en que necesitan entender el código. Es un <code>grep</code> y un <code>read</code> pensados para un LLM.</p><p>Las herramientas tradicionales responden «¿dónde está esta cadena?» y «¿qué contiene este archivo?». Lo que ECP debe responder es «¿qué es este símbolo?», «¿quién lo llama?», «¿a qué afecta aguas arriba y aguas abajo?», «¿qué riesgo estructural tiene este diff?». El núcleo de ECP no es decidir por el agente, sino entregarle los hechos estructurales que necesita conocer antes de decidir.</p></div>
+                            </div>
+                        </div>
+                        <div class="acc-item">
+                            <button class="acc-trigger">
+                                <span class="acc-q">¿Qué compensaciones hay entre CLI, MCP y las interfaces de herramienta?</span>
+                                <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                            </button>
+                            <div class="acc-content">
+                                <div class="acc-inner"><p>La interfaz de producto más importante es la CLI.</p><p>MCP da bastante trabajo de mantenimiento, pero como no todos los marcos de agentes de código pueden invocar una CLI de forma nativa, adopté una arquitectura doble en la que MCP encamina hacia la llamada al CLI. Aun así, lo mejor sería poder integrar la herramienta directamente como herramienta de CLI, igual que <code>read</code>. Eso ayuda mucho tanto al rendimiento como al ahorro de tokens.</p><p>La ventaja de la CLI es que es simple, barata de mantener, fácil de probar y fácil de meter en CI, y que no arrastra ciclo de vida de servidor, registro de herramientas, compatibilidad de esquemas ni estado de sesión. El valor de MCP es el de una capa de compatibilidad, no el de una abstracción central.</p></div>
+                            </div>
+                        </div>
+                        <div class="acc-item">
+                            <button class="acc-trigger">
+                                <span class="acc-q">¿Una Skill debe ser una restricción o una guía?</span>
+                                <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                            </button>
+                            <div class="acc-content">
+                                <div class="acc-inner"><p>Mientras el LLM no haya interiorizado estos diseños, hacen falta skills que los encuadren y los guíen. Igual que el ser humano, antes de aprender a usar el fuego, no sabía para qué servía; pero una vez que ese conocimiento se extendió, casi nadie ha recibido un curso sobre cómo usar el fuego.</p><p>Por ahora siguen haciendo falta esa pauta y esa guía, salvo que algún día el LLM traiga incorporado este tipo de conocimiento. Aun así, prefiero que una skill no sirva para imponer al LLM cómo usar una herramienta, sino para orientarlo. La herramienta describe lo que hace; cómo usarla lo sugiere la skill a grandes rasgos, y cada cual puede ajustarlo a sus necesidades. Lo deseable, claro, es que el LLM lo entienda por sí mismo y lo aplique de forma más amplia.</p></div>
+                            </div>
+                        </div>
+                        <div class="acc-item">
+                            <button class="acc-trigger">
+                                <span class="acc-q">¿Cuál es el primer principio central de la Skill de ECP?</span>
+                                <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                            </button>
+                            <div class="acc-content">
+                                <div class="acc-inner"><p>«Toda acción debe partir de hechos estructurales verificables, no de alucinaciones del contexto.»</p><p>Cualquier cosa dicha antes puede ser una alucinación; solo lo que se comprueba en el momento es verificable. De ahí viene la idea de diseñar los peers: alcanzar una interacción casi en tiempo real mediante hooks y peers para evitar que aparezcan conflictos de desarrollo.</p></div>
+                            </div>
+                        </div><!-- faq:end -->
+            </div>
+        </section>
+
+        <!-- VISION -->
+        <section id="vision" class="content-section">
+            <h2 class="section-heading" data-i18n="nav.vision">Visión</h2>
+            <div class="vision-box">
+                <blockquote data-i18n="vision.quote">"Todas las acciones deben partir de hechos estructurales verificables, no de alucinaciones de contexto."</blockquote>
+                <p class="vision-desc" data-i18n="vision.p1">En la era de la IA, el cuello de botella es la <strong>confianza</strong>. Egent Code Plexus asegura que los Agentes siempre regresen a la única verdad: <strong>el Código Fuente</strong>.</p>
+                <br>
+                <p class="vision-desc" data-i18n="vision.p2">A medida que impulsamos más Agentes y repositorios, lo que importa no es llenar la ventana de contexto, sino tener una herramienta fundacional ultra rápida y consciente de la estructura.</p>
+            </div>
+        </section>
+    </main>
+
+    <footer class="site-footer">
+        <div class="container footer-inner">
+            <div class="footer-brand">
+                <span class="logo-icon small"></span>
+                <span>Egent Code Plexus</span>
+            </div>
+            <p class="footer-links"><a href="compare/">ecp vs codegraph vs GitNexus</a></p>
+            <p class="footer-copy" data-i18n="footer.text">&copy; 2026 Proyecto Egent Code Plexus.</p>
+        </div>
+    </footer>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast">
+        <span class="toast-icon">✓</span>
+        <span class="toast-msg" data-i18n="install.copied">¡Copiado!</span>
+    </div>
+
+    <script>window.__ECP_LOCALE__ = "es"; window.__ECP_ROOT__ = "../"; window.__ECP_PAGE__ = "";</script>
+    <script src="../js/qa_data.js"></script>
+    <script src="../js/app.js"></script>
+</body>
+</html>

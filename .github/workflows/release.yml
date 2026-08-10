@@ -571,7 +571,11 @@ jobs:
       - name: Upgrade npm for trusted publishing (OIDC)
         # Trusted publishing (token-free OIDC) needs npm >= 11.5.1; Node 22 ships
         # npm 10. Without this, publish falls back to NODE_AUTH_TOKEN.
-        run: npm install -g npm@latest
+        #
+        # Pinned rather than `@latest`: a release should be publishable by the
+        # same tooling that published the last one. This is the version
+        # `@latest` resolved to when v0.9.1 went out. Bump deliberately.
+        run: npm install -g npm@12.0.2
 
       - name: Download release artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -689,17 +693,22 @@ jobs:
       - name: Publish to PyPI (Trusted Publishing)
         run: uv publish wheelhouse/*.whl
 
-  # ==================== Update landing-page version badge ====================
+  # ==================== Deploy the landing site ====================
   # The landing page lives on the orphan gh-pages branch (GitHub Pages serves it
-  # directly). Its hero-version <span> used to be bumped by a manual push on
-  # every release. This job replaces that manual step: after the release exists,
-  # rewrite the badge to the tag version and push back to gh-pages.
+  # directly) and used to be edited there by hand, with this job rewriting only
+  # the hero-version span. That split is what let the two copies drift: a later
+  # "sync from main" overwrote gh-pages and silently deleted the three-way
+  # benchmark tables that had only ever existed on the deployed branch.
+  #
+  # gh-pages is now a pure build output. Everything is generated from the tagged
+  # commit, including the version, so a hand edit here does not survive the next
+  # release — edit docs/ecp-landing on main instead.
   #
   # PAT (not GITHUB_TOKEN) so the gh-pages push is attributed to a real actor —
   # GITHUB_TOKEN pushes here would be fine functionally, but the repo already
   # standardizes on AUTO_MERGE_PAT for write pushes (keeps GITHUB_TOKEN minimal).
-  update-pages-version:
-    name: Update gh-pages version badge
+  deploy-pages:
+    name: Deploy landing site
     needs: [github-release]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true')
@@ -712,28 +721,73 @@ jobs:
         with:
           egress-policy: audit
 
+      - name: Checkout the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: src
+          persist-credentials: false
+
       - name: Checkout gh-pages
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: gh-pages
+          path: site
           token: ${{ secrets.AUTO_MERGE_PAT }}
 
-      - name: Bump hero-version badge to ${{ github.ref_name }}
+      # A re-run of an older tag would regenerate the whole site from that
+      # tag's sources and fast-forward push it, silently rolling the live site
+      # back a version. Concurrency does not help: it groups by ref, so two
+      # different tags never queue against each other.
+      - name: Refuse to publish anything but the newest release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          latest="$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName --jq .tagName 2>/dev/null || echo '')"
+          if [ -n "$latest" ] && [ "$latest" != "${GITHUB_REF_NAME}" ]; then
+            echo "::notice::latest release is ${latest}, this run is ${GITHUB_REF_NAME} — skipping deploy"
+            echo "SKIP_DEPLOY=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build the site from the tagged sources
+        if: env.SKIP_DEPLOY != '1'
+        working-directory: src
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Stars are a bookmark count, published as an InteractionCounter
+          # rather than folded into a rating. Read here rather than inside the
+          # generator so a local build stays offline and deterministic; a
+          # failed lookup drops the field instead of failing the deploy.
+          ECP_STARS="$(gh api "repos/${GITHUB_REPOSITORY}" --jq .stargazers_count 2>/dev/null || echo 0)"
+          # Stamp when the count was read, so the published number says "as of
+          # this date" rather than implying it is live.
+          ECP_STARS_AT="$(date -u +%Y-%m-%d)"
+          export ECP_STARS ECP_STARS_AT
+          echo "stars=${ECP_STARS} as of ${ECP_STARS_AT}"
+          node scripts/site/build_site.mjs
+
+      - name: Publish
+        if: env.SKIP_DEPLOY != '1'
         shell: bash
         run: |
-          tag="${GITHUB_REF_NAME}"
-          # Match only the hero-version span so the benchmark caption versions
-          # (ecp 0.4.2 · codegraph … — those are fixed test-run records) are left
-          # untouched. The vN.N.N is replaced wholesale, not pattern-stripped.
-          sed -i -E "s#(<span class=\"hero-version\">)v[0-9]+\.[0-9]+\.[0-9]+(</span>)#\1${tag}\2#" index.html
+          # template.html and seo.json are build inputs; serving them would put
+          # an unrendered page with {{VERSION}} placeholders on a crawlable URL.
+          # --delete so a removed page actually disappears; without it a
+          # deleted locale stays live for ever while the sitemap stops listing
+          # it. .git is excluded for the obvious reason.
+          rsync -a --delete --exclude '.git' \
+            --exclude template.html --exclude seo.json --exclude compare.json \
+            src/docs/ecp-landing/ site/
 
-          if git diff --quiet -- index.html; then
-            echo "hero-version already at ${tag}; nothing to push."
+          cd site
+          if git diff --quiet && [ -z "$(git status --porcelain)" ]; then
+            echo "site already matches ${GITHUB_REF_NAME}; nothing to push."
             exit 0
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add index.html
-          git commit -m "docs(gh-pages): bump hero-version to ${tag}"
+          git add -A
+          git commit -m "deploy(site): rebuild for ${GITHUB_REF_NAME}"
           git push

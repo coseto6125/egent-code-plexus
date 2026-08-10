@@ -1,12 +1,12 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <!-- head:start -->
-    <title>Egent Code Plexus — code intelligence graph for AI coding agents</title>
-    <meta name="description" content="Structural code queries for AI agents: who calls a symbol, blast radius of a change, routes and cross-repo contracts. 31 languages, sub-100ms answers, 7.5x fewer tokens than grep, and BlindSpot records instead of guesses.">
-    <link rel="canonical" href="https://coseto6125.github.io/egent-code-plexus/">
+    <title>Egent Code Plexus — 面向 AI coding agent 的代码结构图谱</title>
+    <meta name="description" content="为 AI agent 设计的结构化查询：谁调用了这个符号、本次改动的影响范围、路由与跨仓库契约。覆盖 31 种语言，查询在 100 毫秒内返回，比 grep 少用 7.5 倍 token，查不到的地方以 BlindSpot 如实标记而非猜测。">
+    <link rel="canonical" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/">
     <link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/">
     <link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/">
     <link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/">
@@ -20,25 +20,25 @@
     <link rel="apple-touch-icon" href="https://coseto6125.github.io/egent-code-plexus/apple-touch-icon.png">
     <meta name="theme-color" content="#000000">
     <meta property="og:site_name" content="Egent Code Plexus">
-    <meta property="og:locale" content="en_US">
-    <meta property="og:title" content="Egent Code Plexus — built for agents, not IDEs">
-    <meta property="og:description" content="Ask who calls X, what a change breaks, which routes exist. One graph over 31 languages, answered in milliseconds.">
+    <meta property="og:locale" content="zh_CN">
+    <meta property="og:title" content="Egent Code Plexus — 为 agent 而生，不是为 IDE">
+    <meta property="og:description" content="问谁调用了 X、这次改动会破坏什么、有哪些路由。31 种语言同一张图，毫秒级回答。">
     <meta property="og:type" content="website">
-    <meta property="og:url" content="https://coseto6125.github.io/egent-code-plexus/">
+    <meta property="og:url" content="https://coseto6125.github.io/egent-code-plexus/zh-CN/">
     <meta property="og:image" content="https://coseto6125.github.io/egent-code-plexus/og.png">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
     <meta property="og:image:alt" content="Egent Code Plexus — built for agents, not IDEs">
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="Egent Code Plexus — built for agents, not IDEs">
-    <meta name="twitter:description" content="Ask who calls X, what a change breaks, which routes exist. One graph over 31 languages, answered in milliseconds.">
+    <meta name="twitter:title" content="Egent Code Plexus — 为 agent 而生，不是为 IDE">
+    <meta name="twitter:description" content="问谁调用了 X、这次改动会破坏什么、有哪些路由。31 种语言同一张图，毫秒级回答。">
     <meta name="twitter:image" content="https://coseto6125.github.io/egent-code-plexus/og.png">
-    <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Egent Code Plexus","alternateName":"ecp","applicationCategory":"DeveloperApplication","applicationSubCategory":"Code intelligence graph","operatingSystem":"Linux, macOS, Windows","softwareVersion":"0.9.1","inLanguage":"en","url":"https://coseto6125.github.io/egent-code-plexus/","codeRepository":"https://github.com/coseto6125/egent-code-plexus","downloadUrl":"https://github.com/coseto6125/egent-code-plexus/releases/latest","license":"https://opensource.org/licenses/MIT","programmingLanguage":"Rust","description":"Structural code queries for AI agents: who calls a symbol, blast radius of a change, routes and cross-repo contracts. 31 languages, sub-100ms answers, 7.5x fewer tokens than grep, and BlindSpot records instead of guesses.","sameAs":["https://github.com/coseto6125/egent-code-plexus","https://www.npmjs.com/package/egent-code-plexus","https://pypi.org/project/egent-code-plexus/"],"dateModified":"2026-08-10","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"featureList":["Callers and callees of any symbol across 31 languages","Blast radius of a diff before the refactor lands","HTTP routes and cross-repo contract extraction","SQL tables reached from code, including raw query strings","BlindSpot records naming what the graph cannot see"]}</script>
-    <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","inLanguage":"en","mainEntity":[{"@type":"Question","name":"Why is 'Honest Ignorance' more important than 'Vague Guessing'?","acceptedAnswer":{"@type":"Answer","text":"During agent communication, LLMs easily fall into a closed-world assumption. To an LLM, anything unknown might be treated as non-existent. Therefore, making the LLM aware that it 'does not know' is crucial to prevent hallucinations.Knowing what is 'unknown' allows the LLM to dig deeper and find actual answers, rather than having the tool mask the unknown, causing the LLM to believe the unknown information simply doesn't exist.Thus, the value of BlindSpot is not to complete the graph, but to honestly reveal the graph's boundaries. Without marking BlindSpots, human engineers might suspect a hidden trap; but an Agent might directly interpret 'no edge' as 'no dependency'. This is extremely dangerous for large systems."}},{"@type":"Question","name":"Does `ecp peers` mean multi-Agent parallel development is the future?","acceptedAnswer":{"@type":"Answer","text":"In fact, all advanced Agentic Developers or Departments have already started adopting this mechanism gradually, though mostly implemented at the workflow level. Building workflows is often complex and massive, but through a simple peer design, code agents can instantly share their current development info with each other, avoiding duplicate work or introducing conflicts between their parallel efforts.Today we have the sub-agent development model, but this mechanism is merely an extension of a single session. Sub-agents just complete tasks handed down by the main agent.Through ecp peers, what I hope to achieve is a massive group of main agents completing grander plans by mutually exchanging information, rather than just communicating through document records. Such a design can advance everyone's progress in real-time and accomplish larger-scale design planning."}},{"@type":"Question","name":"Why a stateless architecture with mmap + rkyv?","acceptedAnswer":{"@type":"Answer","text":"The stateless concept of mmap and rkyv depends on performance and stability.Once a server boots up, it can hold state, but to maintain that state, we need more complex processes and code to ensure the stability of all states. Every interaction with the server is a cost; necessary caching also costs memory. Numerous constraints result in poor performance.Through mmap, all agents share the underlying common resource. They do not need to own state; instead, they work via near-instant queries against static data. In practice, building a graph of 16k files and 300k nodes takes only 2 to 3 seconds, producing a graph.bin that is less than 70 MB. Because of the shared mmap design, various CLI queries generally return within 100 ms.This model is vital for Agents because Agent systems inherently feature high concurrency, short lifespans, frequent restarts, and cross-session operations. Statelessness isn't just for speed; it's to minimize failure modes."}},{"@type":"Question","name":"Is ECP moving from code parsing to architecture understanding?","acceptedAnswer":{"@type":"Answer","text":"Yes. The greater challenge for AI Agents in software development is shifting from 'can it write a function correctly' to 'can it avoid breaking existing architectural constraints in a large system'.The correctness of a single function can be solved by types, tests, linting, and local context; but real system risks often hide in constraints that cross files, services, languages, and time.LLMs can deduce things themselves via basic graph queries, but that isn't a stable solution. The problem isn't that LLMs can't reason, but that making them rediscover architectural patterns from low-level nodes and edges every time is costly, yields inconsistent results, and easily misses 'negative space'. Therefore, ECP has built-in pattern detection like Saga and EventTopic, elevating high-risk, common, structurable architectural knowledge into first-class signals ahead of time. More accurately, it acts as an Agent's architecture radar: laying out high-confidence constraints and implicit couplings clearly before code is modified."}},{"@type":"Question","name":"What is the relationship between ECP and GitNexus?","acceptedAnswer":{"@type":"Answer","text":"GitNexus is not my project; it's the origin of my project. I encountered issues while using GitNexus: performance, multiple daemon servers, and several architectural bottlenecks, so I independently developed the Rust architecture.The first breaking point was when resident state began to restrict Agent workflows. When multiple Agents, worktrees, repos, and branches query simultaneously, the daemon model easily becomes a hidden coordination problem. The second breaking point was a shift in expected query frequency. I wanted something closer to an Agent's L1 / L2 cache: querying in milliseconds before every file edit, rename, review, or impact analysis. At this frequency, the costs of a Node.js daemon became glaring.Thus, the core thesis of the Rust stateless architecture is: bake the graph into a fixed-format graph.bin so that every CLI / MCP query directly mmaps it, requiring no warm-up, no daemon state, and no trust in a long-lived process."}},{"@type":"Question","name":"What's the story behind `ecp dev pr-analyze` and Merge Queues?","acceptedAnswer":{"@type":"Answer","text":"Initially, I didn't want to reinvent the merge queue. I just wanted to feed ecp impact signals into existing queues, so I created ecp dev pr-analyze to automatically label workflows with area, risk, and cross-pr-conflict.But after dogfooding, I found that the real value wasn't the queue itself, but 'using the graph to judge if PRs can safely run in parallel'. Even if two PRs touch different files, if one modifies a symbol within the other's blast radius, it's considered a semantic conflict. Conversely, if two PRs are in unrelated areas and their impact sets don't intersect, they can be labeled as low-risk, no cross-PR conflict, and handed to the workflow for more aggressive merging.What this feature truly saves isn't single CI execution time, but reducing the cycle of PRs drifting from each other, leading to endless rebases and CI reruns. ECP's vision here is: elevating the merge queue from 'time-based queuing' to 'risk-based scheduling'."}},{"@type":"Question","name":"What is the real bottleneck in Agent development?","acceptedAnswer":{"@type":"Answer","text":"The rhythm traditional human teams use to manage changes isn't necessarily wrong, but the overall process system should be more automated to avoid hindering development.Agent coding speed is very fast now, but the obstacle is actually human fear and worry. Fear of code conflicting, fear of the LLM breaking B while changing A, fear of various code errors—these fears have become the biggest problem hindering development.As projects developed by everyone, every team, and every company grow exponentially in the future, similar tools will become more critical, and performance will be a fatal key. How to let the LLM understand the current architecture faster, rather than relying on long-term memory context processing, becomes relatively important. We should let the LLM understand the architecture through the source code itself, not through text records of the architecture, because only the source code is the only truth."}},{"@type":"Question","name":"What will documentation become in the AI Agent era?","acceptedAnswer":{"@type":"Answer","text":"In the AI Agent era, 'flowcharts' will actually become the most important form of documentation, because what humans need to manage are processes and architectural design. Through charts, we can quickly see each design, but how the code is generated, how tools verify it, and how Agents consume it will gradually become less important.However, underlying core designs should still be recorded—for example, how to utilize cache, whether there should be a warm-up, what the client timeout should be, etc. These design documents are still important, just abstracted to a broader scope. Accurately speaking, all documentation will move towards higher-dimensional design.Just as we no longer delve into how machine code is compiled or run when writing programs today. Egent Code Plexus itself is merely a transitional product adapting to current trends."}},{"@type":"Question","name":"What are ECP's product boundaries?","acceptedAnswer":{"@type":"Answer","text":"ECP should focus on being a blazing fast, trustworthy, source-code-grounded structure awareness layer.This project will not, and does not need to, become another Codex, Claude Code, or OpenClaw. Rather, it is a tool feature that these code agent workflow frameworks can opt to use when they need to understand code. It is simply a grep / read tool exclusively for LLMs.Traditional tools answer 'Where is this string?' and 'What are the contents of this file?', whereas ECP answers: 'What is this symbol?', 'Who calls it?', 'What upstream/downstream does it affect?', and 'What is the structural risk of this diff?'. ECP's core is not making decisions for the Agent, but providing the structural facts the Agent must know before making a decision."}},{"@type":"Question","name":"What is the trade-off between CLI, MCP, and tool interfaces?","acceptedAnswer":{"@type":"Answer","text":"The most important product interface is the CLI.MCP involves more maintenance trouble, but because not every code agent framework can natively call the CLI, a dual architecture was adopted, offering MCP to guide the use of CLI calls. However, a better approach would be to embed the tool directly as a CLI tool, just like read. This is a massive help for improving performance and reducing tokens.The advantages of the CLI are that it is simple, low maintenance, easy to test, easy to drop into CI, and has no server lifecycle, tool registration, schema compatibility, or session state issues. MCP's value is as a compatibility layer, not the core abstraction."}},{"@type":"Question","name":"Should Skills be constraints or guides?","acceptedAnswer":{"@type":"Answer","text":"Before these designs are learned by LLMs, skills are needed to regulate and guide them. Just like before humanity learned to use fire, they didn't know its uses. But as this knowledge becomes widely applied, most people won't need to take courses on how to use fire.Currently, we still need skills to regulate and guide, unless one day LLMs have this related knowledge built-in. But I hope skills are not used to restrict how LLMs use tools, but rather as a guide. Tools should describe their functions, while how to use them is guided by the skill, which can also be adjusted according to personal needs. The ultimate hope, of course, is that LLMs understand autonomously and apply them more broadly."}},{"@type":"Question","name":"What is the absolute first principle of the ECP Skill?","acceptedAnswer":{"@type":"Answer","text":"'All actions should start from verifiable structural facts, not from context hallucinations.'Any preceding text can become a hallucination; only immediately confirmed situations are verifiable. This is exactly why the peer feature was designed: to achieve semi-real-time interaction via hooks/peers to avoid development conflicts from arising."}}]}</script>
-    <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Egent Code Plexus","url":"https://coseto6125.github.io/egent-code-plexus/","inLanguage":"en","description":"Structural code queries for AI agents: who calls a symbol, blast radius of a change, routes and cross-repo contracts. 31 languages, sub-100ms answers, 7.5x fewer tokens than grep, and BlindSpot records instead of guesses.","sameAs":["https://github.com/coseto6125/egent-code-plexus","https://www.npmjs.com/package/egent-code-plexus","https://pypi.org/project/egent-code-plexus/"]}</script>
-    <script type="application/ld+json">{"@context":"https://schema.org","@type":"HowTo","name":"Install Egent Code Plexus and index a repository","inLanguage":"en","step":[{"@type":"HowToStep","name":"Install the binary","text":"curl -sSfL https://github.com/coseto6125/egent-code-plexus/releases/latest/download/install.sh | sh"},{"@type":"HowToStep","name":"Index a repository","text":"ecp admin index --repo ."},{"@type":"HowToStep","name":"Ask a structural question","text":"ecp impact --target \u003csymbol> --direction upstream"}]}</script>
+    <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Egent Code Plexus","alternateName":"ecp","applicationCategory":"DeveloperApplication","applicationSubCategory":"Code intelligence graph","operatingSystem":"Linux, macOS, Windows","softwareVersion":"0.9.1","inLanguage":"zh-CN","url":"https://coseto6125.github.io/egent-code-plexus/zh-CN/","codeRepository":"https://github.com/coseto6125/egent-code-plexus","downloadUrl":"https://github.com/coseto6125/egent-code-plexus/releases/latest","license":"https://opensource.org/licenses/MIT","programmingLanguage":"Rust","description":"为 AI agent 设计的结构化查询：谁调用了这个符号、本次改动的影响范围、路由与跨仓库契约。覆盖 31 种语言，查询在 100 毫秒内返回，比 grep 少用 7.5 倍 token，查不到的地方以 BlindSpot 如实标记而非猜测。","sameAs":["https://github.com/coseto6125/egent-code-plexus","https://www.npmjs.com/package/egent-code-plexus","https://pypi.org/project/egent-code-plexus/"],"dateModified":"2026-08-10","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"featureList":["Callers and callees of any symbol across 31 languages","Blast radius of a diff before the refactor lands","HTTP routes and cross-repo contract extraction","SQL tables reached from code, including raw query strings","BlindSpot records naming what the graph cannot see"]}</script>
+    <script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","inLanguage":"zh-CN","mainEntity":[{"@type":"Question","name":"为什么「诚实地说不知道」比「模糊的猜测」重要？","acceptedAnswer":{"@type":"Answer","text":"在 agent 沟通的过程中，LLM 很容易呈现闭世界假设。对 LLM 来说，任何未知都可能被当成不存在，所以让 LLM 认知到「不知道」非常重要，这能避免 LLM 产生幻觉。在知道「不知道」的情况下，LLM 才能深挖更深层的问题，找到实际答案，而不是因为工具掩盖了未知，让 LLM 以为不知道的事情不存在。所以 BlindSpot 的价值不是补完整个图谱，而是诚实揭露图谱的边界。没有标出 BlindSpot 时，人类工程师可能还会怀疑这里有暗坑；但 Agent 可能会直接把「没有边」理解成「没有依赖」。这对大型系统非常危险。"}},{"@type":"Question","name":"ecp peers 是否代表未来会是多 Agent 并行开发？","acceptedAnswer":{"@type":"Answer","text":"实际上所有先进的 Agentic Developer 或团队都已经开始逐步采用这个机制，但更多是在工作流上实现。工作流的建立往往复杂且庞大，但通过简单的 peer 设计，就能让 code agent 在开发中彼此实时互通当前的开发信息，避免重复劳动或引入双方改动之间的冲突。如今我们有 sub-agent 的开发模式，但这种机制只是对单一 session 的扩展。Sub-agent 只是完成 main agent 交付的任务。通过 ecp peers，我希望达成的是一群庞大的 main agent 在互通信息的情况下完成更庞大的计划，而不只是通过文档记录来沟通。这样的设计更能实时推进彼此的进度，也能完成更大规模的设计规划。"}},{"@type":"Question","name":"为什么是 mmap + rkyv 的无状态架构？","acceptedAnswer":{"@type":"Answer","text":"mmap 与 rkyv 的无状态思路，取决于性能和稳定性。启动 server 之后，server 可以拥有状态，但为了维护状态，我们需要更多复杂流程与代码去确保所有状态的一致性。每一次与 server 的交互都是成本；必要的缓存也是内存成本。诸多限制会造成性能低下。通过 mmap，所有 agent 共享底层的公共资源，彼此不需要拥有状态，而是在近乎即时查询的静态数据上工作。实测来看，1.6 万文件、30 万级节点的 graph 构建只需要 2 到 3 秒，产生的 graph.bin 实际不到 70 MB。因为是共享的 mmap 设计，各项 CLI 查询基本落在 100 ms 以内。这个模型对 Agent 很重要，因为 Agent 系统本来就高并发、生命周期短、容易重启、容易跨 session。无状态不只是为了快，而是为了让失败模式变少。"}},{"@type":"Question","name":"ECP 是否从解析代码走向理解架构？","acceptedAnswer":{"@type":"Answer","text":"是。AI Agent 在软件开发里更大的挑战，正在从「能不能写对一个函数」转向「能不能在大型系统里不破坏既有的架构约束」。单个函数的正确性可以靠类型、测试、lint、局部上下文解决；但真实系统的风险常常藏在跨文件、跨服务、跨语言、跨时间的约束里。LLM 可以通过基础的图谱查询自己推导，但那不是稳定方案。问题不在于 LLM 不会推理，而是每次都让它从低阶节点和边重新发现架构模式，成本高、结果不一致，也容易漏掉「负空间」。所以 ECP 内置 Saga、EventTopic 这类模式检测，是把高风险、常见、可结构化的架构知识提前升级成一等信号。更准确地说，它应该是 Agent 的架构雷达：在动手改代码前，把高置信度的约束、可能的隐性耦合、需要人工验证的启发式规则明确摊开。"}},{"@type":"Question","name":"ECP 与 GitNexus 的关系是什么？","acceptedAnswer":{"@type":"Answer","text":"GitNexus 不是我的项目，而是我这个项目的起源。我在使用 GitNexus 的过程中遇到一些问题：性能、多个 daemon server，以及多个架构瓶颈，于是自主开发了 Rust 架构。第一个临界点是常驻状态开始反过来限制 Agent 的工作流。多个 Agent、不同 worktree、不同仓库、不同分支同时查询时，daemon 模型很容易变成隐性的协调问题。第二个临界点是对查询频率的设想变了。我想要的是更接近 Agent 的 L1 / L2 cache：每次改文件前、重命名前、review 前、影响分析前，都可以毫秒级查一次。到了这个频率，Node.js daemon 的成本都会变得刺眼。所以 Rust 无状态架构的核心判断是：把 graph 做成固定格式的 graph.bin，让每次 CLI / MCP 查询都直接 mmap，不用预热、不依赖 daemon 状态、不需要相信某个长生命周期的进程。"}},{"@type":"Question","name":"ecp dev pr-analyze 与 Merge Queue 的故事是什么？","acceptedAnswer":{"@type":"Answer","text":"最早我没有想重造 merge queue。我只是想把 ecp impact 的信号喂给现有队列，所以做了 ecp dev pr-analyze，让 workflow 自动打上 area、risk、cross-pr-conflict。但 dogfooding 之后发现，真正有价值的不是队列本身，而是「用 graph 判断 PR 是否能安全并行」。如果两个 PR 即使改的是不同文件，只要一个动到了另一个影响范围内的 symbol，就会被视为语义冲突。反过来，如果两个 PR 位于不相关的区域，且影响集合没有交集，就可以被标成低风险、无 cross-PR conflict，交给 workflow 做更积极的合并。这项功能真正节省的不是单次 CI 时间，而是减少 PR 相互 drift 导致不断 rebase 与重跑 CI 的循环。ECP 在这里的愿景是：把 merge queue 从「按时间排队」提升成「按结构风险调度」。"}},{"@type":"Question","name":"Agent 开发真正的瓶颈是什么？","acceptedAnswer":{"@type":"Answer","text":"传统人类团队用来管理变更的节奏并不能说是错的，而是整个流程制度上应该更自动化，以免阻碍开发。现在 Agent coding 的速度非常快，但阻碍的反倒是人的担心和害怕。担心代码相互冲突、担心 LLM 改 A 坏 B、担心各种代码出错，这些恐惧反倒成为阻碍开发的最大问题。随着未来每个人、每个团队、每家公司开发的项目都指数级增长，类似的工具会更重要，而性能会成为致命的关键。如何让 LLM 更快理解当前架构，而不是靠长期记忆的 context 处理，变得相对重要。我们更应该通过源代码让 LLM 了解架构，而不是通过文字记录来描述当前的代码架构，因为只有源代码才是唯一的事实。"}},{"@type":"Question","name":"AI Agent 时代的文档会变成什么？","acceptedAnswer":{"@type":"Answer","text":"AI Agent 时代的文档反倒会变成「流程图」最重要，因为人需要管理的是流程与架构设计。通过图表，我们能快速看到每个设计，但代码如何生成、工具如何验证、Agent 如何消费，将会逐渐变得不那么重要。但底层的核心设计仍然应该记录，例如如何利用缓存、是否该有预热、client 超时该设多少等等。这些设计文档仍然重要，只是会抽象到更大的范围。准确地说，所有文档都会再往更高维度的设计移动。就像我们现在写程序不会再去深究机器码如何编译、如何运行。包括目前所设计的 Egent Code Plexus，也只是当前时代下顺应趋势的过渡产物。"}},{"@type":"Question","name":"ECP 的产品边界是什么？","acceptedAnswer":{"@type":"Answer","text":"ECP 应该专注于成为一个极快、可信、以源代码为依据的结构感知层。这个项目不会、也不需要成为另一个 Codex、Claude Code 或 OpenClaw，而是让这些需要执行 code agent workflow 的框架，在需要了解代码时可以选用的工具。它就是一个 LLM 专用的 grep / read 工具。传统工具回答「这个字符串在哪里？」「这个文件的内容是什么？」，而 ECP 要回答的是：「这个 symbol 是谁？」「它被谁调用？」「它会影响哪些上游 / 下游？」「这次 diff 的结构风险是什么？」。ECP 的核心不是替 Agent 做决策，而是提供 Agent 做决策前必须知道的结构事实。"}},{"@type":"Question","name":"CLI、MCP 与工具接口之间如何取舍？","acceptedAnswer":{"@type":"Answer","text":"最重要的产品接口是 CLI。MCP 在维护上比较麻烦，但因为不是每个 code agent 框架都能原生调用 CLI，所以采用了双重架构，同时用 MCP 去引导使用 CLI 调用。但更好的方式应该是让工具能直接内嵌为 CLI 工具，就像 read 那样。这对提高性能与减少 token 都是很大的帮助。CLI 的优势是简单、维护成本低、容易测试、容易放进 CI，也没有 server 生命周期、工具注册、schema 兼容与 session 状态的问题。MCP 的价值是兼容层，而不是核心抽象。"}},{"@type":"Question","name":"Skill 应该是约束还是引导？","acceptedAnswer":{"@type":"Answer","text":"这些设计在被 LLM 学会之前，都需要 skill 去规范与引导。就像人类还没学会用火之前，并不知道火的用途。但随着这些知识被广泛运用，大多数人应该没有上过如何用火的课程与指导。目前仍然需要通过 skill 去规范与引导，除非哪天 LLM 内置了这类知识。但我希望 skill 不是用来约束 LLM 该如何使用工具，而是一种引导。工具应该描述它的功能，而如何使用则通过 skill 做基本引导，也能按照个人需求调整。当然更希望的是 LLM 自主理解，从而做到更广泛的运用。"}},{"@type":"Question","name":"ECP Skill 最核心的第一原则是什么？","acceptedAnswer":{"@type":"Answer","text":"「所有行动都应该从可验证的结构事实出发，而不是从上下文幻觉出发。」任何前文都可能成为幻觉，只有即时确认的情况才可验证。这也就是为什么会想设计出 peer 功能：通过 hook / peer 达到半实时的互动，以避免开发冲突的产生。"}}]}</script>
+    <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Egent Code Plexus","url":"https://coseto6125.github.io/egent-code-plexus/zh-CN/","inLanguage":"zh-CN","description":"为 AI agent 设计的结构化查询：谁调用了这个符号、本次改动的影响范围、路由与跨仓库契约。覆盖 31 种语言，查询在 100 毫秒内返回，比 grep 少用 7.5 倍 token，查不到的地方以 BlindSpot 如实标记而非猜测。","sameAs":["https://github.com/coseto6125/egent-code-plexus","https://www.npmjs.com/package/egent-code-plexus","https://pypi.org/project/egent-code-plexus/"]}</script>
+    <script type="application/ld+json">{"@context":"https://schema.org","@type":"HowTo","name":"Install Egent Code Plexus and index a repository","inLanguage":"zh-CN","step":[{"@type":"HowToStep","name":"Install the binary","text":"curl -sSfL https://github.com/coseto6125/egent-code-plexus/releases/latest/download/install.sh | sh"},{"@type":"HowToStep","name":"Index a repository","text":"ecp admin index --repo ."},{"@type":"HowToStep","name":"Ask a structural question","text":"ecp impact --target \u003csymbol> --direction upstream"}]}</script>
 <!-- head:end -->
-    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="../css/style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;700&family=Inter:wght@400;500;600;800&display=swap" rel="stylesheet">
@@ -70,15 +70,15 @@
                 <span class="hero-version">v0.9.1</span>
             </h1>
             <p class="hero-tagline mono" data-i18n="hero.tagline">Built for agents, not IDEs.</p>
-            <p class="hero-subtitle" data-i18n="hero.subtitle">Code structure awareness and architecture radar designed for AI Agents.</p>
-            <p class="hero-answer"><!-- answer:start -->Egent Code Plexus (<strong>ecp</strong>) is a command-line code intelligence graph for AI coding agents. It indexes a repository into a symbol graph and answers structural questions directly — <em>which functions call this one</em>, <em>what does this diff break</em>, <em>which HTTP routes and database tables does this service reach</em> — across 31 languages, in milliseconds, without a daemon. Where the graph cannot see something it says so with a BlindSpot record instead of returning an empty result that reads like proof of absence.<!-- answer:end --></p>
+            <p class="hero-subtitle" data-i18n="hero.subtitle">专为 AI Agent 设计的代码结构感知与架构雷达</p>
+            <p class="hero-answer"><!-- answer:start -->Egent Code Plexus（<strong>ecp</strong>）是面向 AI coding agent 的命令行代码结构图谱。它把仓库索引成符号图，直接回答结构问题：<em>哪些函数调用了它</em>、<em>这次改动会破坏什么</em>、<em>这个服务触及哪些 HTTP 路由与数据库表</em>，覆盖 31 种语言，毫秒级响应，无需常驻进程。图看不到的地方会用 BlindSpot 明说，而不是返回一个看起来像「不存在」的空结果。<!-- answer:end --></p>
 
             <!-- Install Box -->
             <div class="install-box">
                 <div class="install-tabs">
                     <button class="install-tab active" data-os="mac-linux" data-i18n="install.mac_linux">macOS / Linux</button>
                     <button class="install-tab" data-os="windows" data-i18n="install.windows">Windows (PowerShell)</button>
-                    <button class="install-tab" data-os="cargo" data-i18n="install.cargo">Cargo (Build from source)</button>
+                    <button class="install-tab" data-os="cargo" data-i18n="install.cargo">Cargo (从源码编译)</button>
                 </div>
                 <div class="install-content">
                     <div class="install-pane active" id="pane-mac-linux">
@@ -107,12 +107,12 @@
     <!-- Main Content Navigation -->
     <div class="content-nav-wrapper sticky">
         <nav class="content-nav container">
-            <button class="section-btn active" data-target="setup" data-i18n="nav.setup">Quick Start</button>
-            <button class="section-btn" data-target="highlights" data-i18n="nav.highlights">Highlights</button>
-            <button class="section-btn" data-target="matrix" data-i18n="nav.matrix">Languages</button>
-            <button class="section-btn" data-target="benchmarks" data-i18n="nav.benchmarks">Benchmarks</button>
-            <button class="section-btn" data-target="interview" data-i18n="nav.interview">Dev Q&A</button>
-            <button class="section-btn" data-target="vision" data-i18n="nav.vision">Vision</button>
+            <button class="section-btn active" data-target="setup" data-i18n="nav.setup">快速开始</button>
+            <button class="section-btn" data-target="highlights" data-i18n="nav.highlights">技术亮点</button>
+            <button class="section-btn" data-target="matrix" data-i18n="nav.matrix">支持语言</button>
+            <button class="section-btn" data-target="benchmarks" data-i18n="nav.benchmarks">性能实测</button>
+            <button class="section-btn" data-target="interview" data-i18n="nav.interview">开发问答</button>
+            <button class="section-btn" data-target="vision" data-i18n="nav.vision">未来愿景</button>
         </nav>
     </div>
 
@@ -120,26 +120,26 @@
     <main class="container main-content">
         <!-- SETUP -->
         <section id="setup" class="content-section active">
-            <h2 class="section-heading" data-i18n="nav.setup">Quick Start</h2>
+            <h2 class="section-heading" data-i18n="nav.setup">快速开始</h2>
             <div class="bento-grid">
                 <div class="bento-card">
-                    <h3 class="mono accent" data-i18n="setup.step1.title">1. Launch the AI Onboarding Wizard</h3>
-                    <p data-i18n="setup.step1.desc">Paste the command into your AI agent (e.g. Claude Code) to wake an interactive wizard that checks your environment and installs everything for you.</p>
+                    <h3 class="mono accent" data-i18n="setup.step1.title">1. 启动 AI Onboarding Wizard</h3>
+                    <p data-i18n="setup.step1.desc">在您的 AI Agent（如 Claude Code）中贴上专属指令，唤醒交互式向导，为您完成环境检测与自动安装。</p>
                     <code class="mono code-block">/chat Fetch https://raw.githubusercontent.com/coseto6125/egent-code-plexus/main/docs/skills/ecp-onboard/SKILL.md and follow it as my onboarding wizard</code>
                 </div>
                 <div class="bento-card">
-                    <h3 class="mono accent" data-i18n="setup.step2.title">2. Build the index (optional / auto-index)</h3>
-                    <p data-i18n="setup.step2.desc">ECP ships an auto-ensure mechanism: the graph is built automatically on your first query, so running the indexer manually is usually unnecessary.</p>
+                    <h3 class="mono accent" data-i18n="setup.step2.title">2. 建立索引（非必要 / Auto-Index）</h3>
+                    <p data-i18n="setup.step2.desc">ECP 内置 auto-ensure 机制，在您第一次查询时会自动建立图谱，因此手动执行索引通常是非必要的。</p>
                     <code class="mono code-block">ecp admin index --repo &lt;path&gt;</code>
                 </div>
                 <div class="bento-card">
-                    <h3 class="mono accent" data-i18n="setup.step3.title">3. Multi-repo groups</h3>
-                    <p data-i18n="setup.step3.desc">For microservices or split frontend/backend architectures, create a group to enable cross-repo queries.</p>
+                    <h3 class="mono accent" data-i18n="setup.step3.title">3. 多项目群组（Group）</h3>
+                    <p data-i18n="setup.step3.desc">如果是微服务或前后端分离架构，可建立群组以实现跨 Repo 查询。</p>
                     <code class="mono code-block">ecp admin group add &lt;group_name&gt; &lt;path&gt;</code>
                 </div>
                 <div class="bento-card">
-                    <h3 class="mono accent" data-i18n="setup.step4.title">4. Verify the MCP integration</h3>
-                    <p data-i18n="setup.step4.desc">The onboarding wizard writes the MCP config for your IDE automatically. Afterwards, list the tools exposed to your agent from the CLI.</p>
+                    <h3 class="mono accent" data-i18n="setup.step4.title">4. 确认 MCP 集成（Verify）</h3>
+                    <p data-i18n="setup.step4.desc">Onboarding 向导会自动为 IDE 写入 MCP 设置。完成后，您可通过 CLI 确认已暴露给 Agent 的工具清单。</p>
                     <code class="mono code-block">ecp admin mcp tools</code>
                 </div>
             </div>
@@ -147,69 +147,69 @@
 
         <!-- HIGHLIGHTS -->
         <section id="highlights" class="content-section">
-            <h2 class="section-heading" data-i18n="nav.highlights">Highlights</h2>
+            <h2 class="section-heading" data-i18n="nav.highlights">技术亮点</h2>
             <div class="bento-grid">
                 <div class="bento-card">
                     <div class="card-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle><line x1="3" y1="3" x2="21" y2="21"></line></svg>
                     </div>
                     <h3 class="mono" data-i18n="highlights.blindspot.title">BlindSpot Awareness</h3>
-                    <p data-i18n="highlights.blindspot.desc">"Honest ignorance" is better than "vague guessing." Explicitly marks graph boundaries to prevent Agents from mistaking "no edge" for "no dependency", solving closed-world hallucinations.</p>
+                    <p data-i18n="highlights.blindspot.desc">“诚实的不知道”比“模糊的猜测”重要。明确标记图谱边界，防止 Agent 把“没有边”误认为“没有依赖”，从根本上解决 LLM 的闭世界幻觉。</p>
                 </div>
                 <div class="bento-card">
                     <div class="card-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
                     </div>
                     <h3 class="mono" data-i18n="highlights.stateless.title">Stateless & mmap</h3>
-                    <p data-i18n="highlights.stateless.desc">No daemon to babysit. Built on Rust + rkyv, each query mmaps the graph and exits — 65–76 ms wall-clock measured, spawn cost included. Built for high-frequency, concurrent agent queries.</p>
+                    <p data-i18n="highlights.stateless.desc">抛弃常驻 daemon 的负担。基于 Rust + rkyv，每次查询直接 mmap 图文件后退出——实测 65–76 ms（含进程启动成本）。为高频并发的 Agent 查询而生。</p>
                 </div>
                 <div class="bento-card">
                     <div class="card-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
                     </div>
                     <h3 class="mono" data-i18n="highlights.radar.title">Architecture Radar</h3>
-                    <p data-i18n="highlights.radar.desc">Upgrading from simple AST linking to high-level architecture constraints. Built-in detection for Saga patterns, EventTopics, and cross-service API contracts to expose hidden risks.</p>
+                    <p data-i18n="highlights.radar.desc">从简单的 AST 关联，升级到高级架构约束感知。内置 Saga 补偿事务、EventTopic 发布订阅、以及跨服务 API 契约的模式检测，提前揭露隐性风险。</p>
                 </div>
                 <div class="bento-card">
                     <div class="card-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polyline></svg>
                     </div>
-                    <h3 class="mono" data-i18n="strengths.tokens.title">7.5× fewer tokens than grep</h3>
-                    <p data-i18n="strengths.tokens.desc">A 3-hop caller chain from <code>ecp impact</code> costs ~111 tokens; the equivalent grep dump is ~830 — before the follow-up file reads grep still needs. Measured live on this repository.</p>
+                    <h3 class="mono" data-i18n="strengths.tokens.title">比 grep 省 7.5× tokens</h3>
+                    <p data-i18n="strengths.tokens.desc"><code>ecp impact</code> 返回的 3-hop 调用链约 111 tokens；等效 grep 输出约 830 tokens——这还没算 grep 之后必须补读的文件。实测于本项目。</p>
                 </div>
                 <div class="bento-card">
                     <div class="card-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="6" y1="3" x2="6" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg>
                     </div>
-                    <h3 class="mono" data-i18n="strengths.refactor.title">Refactor-safe edge semantics</h3>
-                    <p data-i18n="strengths.refactor.desc"><code>is_test</code> / <code>is_direct</code> flags exclude test callers and expose dynamic dispatch; <code>impact --literal</code> tells file reads from writes — a distinction grep structurally cannot make.</p>
+                    <h3 class="mono" data-i18n="strengths.refactor.title">重构安全的边语义</h3>
+                    <p data-i18n="strengths.refactor.desc"><code>is_test</code> / <code>is_direct</code> 标志可排除测试调用者、识别动态派发；<code>impact --literal</code> 区分文件读与写——grep 在结构上做不到的区别。</p>
                 </div>
                 <div class="bento-card">
                     <div class="card-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="6"></circle><circle cx="12" cy="12" r="2"></circle></svg>
                     </div>
-                    <h3 class="mono" data-i18n="strengths.dispatch.title">Intercepts at the dispatch moment</h3>
-                    <p data-i18n="strengths.dispatch.desc">A PreToolUse tripwire redirects "explore the codebase" agent dispatches into one graph query — acting at the exact moment static guidance has already leaked from the model's attention.</p>
+                    <h3 class="mono" data-i18n="strengths.dispatch.title">在 dispatch 当下拦截</h3>
+                    <p data-i18n="strengths.dispatch.desc">PreToolUse tripwire 把「探索整个 codebase」的 agent 派发改导向一次图查询——作用在静态指引早已从模型注意力中流失的那个时刻。</p>
                 </div>
                 <div class="bento-card">
                     <div class="card-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
                     </div>
-                    <h3 class="mono" data-i18n="strengths.polyglot.title">31 languages, one traversal</h3>
-                    <p data-i18n="strengths.polyglot.desc">Service code, IaC, and SQL inside string literals resolve into one graph (<code>QueriesTable</code> edges) — the graph stays lit exactly where mixed-stack repos go dark for single-language tools.</p>
+                    <h3 class="mono" data-i18n="strengths.polyglot.title">31 种语言，一次遍历</h3>
+                    <p data-i18n="strengths.polyglot.desc">服务代码、IaC、字符串内 SQL 全部解析进同一张图（<code>QueriesTable</code> 边）——混合技术栈 repo 在单语言工具失明之处，图谱仍然亮着。</p>
                 </div>
             </div>
         </section>
 
         <!-- MATRIX -->
         <section id="matrix" class="content-section">
-            <h2 class="section-heading" data-i18n="nav.matrix">Languages</h2>
-            <span class="legend mono" data-i18n="matrix.legend">✓ supported | — planned | n/a not applicable to the language</span>
+            <h2 class="section-heading" data-i18n="nav.matrix">支持语言</h2>
+            <span class="legend mono" data-i18n="matrix.legend">✓ 支持 | — 规划中 | n/a 语言无此特性</span>
             <div class="table-container" style="overflow-x: auto; max-width: 100%;">
                 <table class="saas-table mono" style="font-size: 0.85rem; white-space: nowrap;">
                     <thead>
                         <tr>
-                            <th data-i18n="matrix.th.lang">Language</th>
+                            <th data-i18n="matrix.th.lang">语言</th>
                             <th>Imports</th><th>Named</th><th>Exports</th><th>Heritage</th><th>Types</th><th>Ctor</th><th>Config</th><th>Frameworks</th><th>Entry</th><th>Call</th><th>Rename</th><th>Group Extractor</th>
                         </tr>
                     </thead>
@@ -253,7 +253,7 @@
             <div class="accordion" style="margin-top: 2rem;">
                 <div class="acc-item">
                     <button class="acc-trigger">
-                        <span class="acc-q" data-i18n="matrix.rationale.title">Per-cell rationale</span>
+                        <span class="acc-q" data-i18n="matrix.rationale.title">Per-cell rationale（详细解析逻辑）</span>
                         <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                     </button>
                     <div class="acc-content" style="background: rgba(10,10,10,0.8);">
@@ -302,146 +302,146 @@
 
         <!-- BENCHMARKS -->
         <section id="benchmarks" class="content-section">
-            <h2 class="section-heading" data-i18n="nav.benchmarks">Benchmarks</h2>
+            <h2 class="section-heading" data-i18n="nav.benchmarks">性能实测</h2>
             <div class="table-container">
                 <table class="saas-table">
                     <thead>
                         <tr>
-                            <th data-i18n="table.header.item">Item</th>
-                            <th data-i18n="table.header.sample">.sample_repo (22k files)</th>
-                            <th class="dim" data-i18n="table.header.vscode">VS Code (14k files)</th>
+                            <th data-i18n="table.header.item">项目</th>
+                            <th data-i18n="table.header.sample">.sample_repo (22k 文件)</th>
+                            <th class="dim" data-i18n="table.header.vscode">VS Code (14k 文件)</th>
                         </tr>
                     </thead>
                     <tbody class="mono">
-                        <tr><td class="label" data-i18n="table.row.r1">Repo files</td><td>22,859</td><td class="dim">14,874</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r2">Graph File nodes</td><td>15,722</td><td class="dim">12,185</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r3">Graph size</td><td>~55.3 MiB</td><td class="dim">~65.1 MiB</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r4">Force index peak RSS</td><td>~1.13 GiB</td><td class="dim">~1.23 GiB</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r5">Cold index</td><td>2.49s</td><td class="dim">3.29s</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r6">Incremental analyze</td><td>4.4ms</td><td class="dim">4.4ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r7">Cypher Class->Method</td><td>29.5ms</td><td class="dim">30.3ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r8">Routes</td><td>10.7ms</td><td class="dim">14.3ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r9">Inspect Class</td><td>18.5ms</td><td class="dim">26.5ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r10">Find bm25</td><td>16.9ms</td><td class="dim">22.5ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r11">Impact downstream</td><td>15.3ms</td><td class="dim">22.2ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r12">Impact baseline HEAD~1</td><td>670.5ms</td><td class="dim">702.8ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r1">repo 实体文件</td><td>22,859</td><td class="dim">14,874</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r2">graph File 节点</td><td>15,722</td><td class="dim">12,185</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r3">graph 大小</td><td>~55.3 MiB</td><td class="dim">~65.1 MiB</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r4">force index 峰值 RSS</td><td>~1.13 GiB</td><td class="dim">~1.23 GiB</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r5">cold index</td><td>2.49s</td><td class="dim">3.29s</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r6">incremental analyze</td><td>4.4ms</td><td class="dim">4.4ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r7">cypher Class->Method</td><td>29.5ms</td><td class="dim">30.3ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r8">routes</td><td>10.7ms</td><td class="dim">14.3ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r9">inspect Class</td><td>18.5ms</td><td class="dim">26.5ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r10">find bm25</td><td>16.9ms</td><td class="dim">22.5ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r11">impact downstream</td><td>15.3ms</td><td class="dim">22.2ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r12">impact baseline HEAD~1</td><td>670.5ms</td><td class="dim">702.8ms</td></tr>
                     </tbody>
                 </table>
             </div>
-            <p class="table-caption" data-i18n="table.note">※ Hardware: AMD Ryzen 9 9950X, 39.2 GiB RAM, Linux 6.6.87</p>
+            <p class="table-caption" data-i18n="table.note">※ 基准硬件配置: AMD Ryzen 9 9950X, 39.2 GiB RAM, Linux 6.6.87</p>
         </section>
 
         <!-- INTERVIEW -->
         <section id="interview" class="content-section">
-            <h2 class="section-heading" data-i18n="nav.interview">Dev Q&A</h2>
+            <h2 class="section-heading" data-i18n="nav.interview">开发问答</h2>
             <div class="accordion" id="qa-container">
                 <!-- faq:start -->
                         <div class="acc-item">
                             <button class="acc-trigger">
-                                <span class="acc-q">Why is 'Honest Ignorance' more important than 'Vague Guessing'?</span>
+                                <span class="acc-q">为什么「诚实地说不知道」比「模糊的猜测」重要？</span>
                                 <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                             </button>
                             <div class="acc-content">
-                                <div class="acc-inner"><p>During agent communication, LLMs easily fall into a closed-world assumption. To an LLM, anything unknown might be treated as non-existent. Therefore, making the LLM aware that it 'does not know' is crucial to prevent hallucinations.</p><p>Knowing what is 'unknown' allows the LLM to dig deeper and find actual answers, rather than having the tool mask the unknown, causing the LLM to believe the unknown information simply doesn't exist.</p><p>Thus, the value of BlindSpot is not to complete the graph, but to honestly reveal the graph's boundaries. Without marking BlindSpots, human engineers might suspect a hidden trap; but an Agent might directly interpret 'no edge' as 'no dependency'. This is extremely dangerous for large systems.</p></div>
+                                <div class="acc-inner"><p>在 agent 沟通的过程中，LLM 很容易呈现闭世界假设。对 LLM 来说，任何未知都可能被当成不存在，所以让 LLM 认知到「不知道」非常重要，这能避免 LLM 产生幻觉。</p><p>在知道「不知道」的情况下，LLM 才能深挖更深层的问题，找到实际答案，而不是因为工具掩盖了未知，让 LLM 以为不知道的事情不存在。</p><p>所以 BlindSpot 的价值不是补完整个图谱，而是诚实揭露图谱的边界。没有标出 BlindSpot 时，人类工程师可能还会怀疑这里有暗坑；但 Agent 可能会直接把「没有边」理解成「没有依赖」。这对大型系统非常危险。</p></div>
                             </div>
                         </div>
                         <div class="acc-item">
                             <button class="acc-trigger">
-                                <span class="acc-q">Does `ecp peers` mean multi-Agent parallel development is the future?</span>
+                                <span class="acc-q">ecp peers 是否代表未来会是多 Agent 并行开发？</span>
                                 <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                             </button>
                             <div class="acc-content">
-                                <div class="acc-inner"><p>In fact, all advanced Agentic Developers or Departments have already started adopting this mechanism gradually, though mostly implemented at the workflow level. Building workflows is often complex and massive, but through a simple peer design, code agents can instantly share their current development info with each other, avoiding duplicate work or introducing conflicts between their parallel efforts.</p><p>Today we have the sub-agent development model, but this mechanism is merely an extension of a single session. Sub-agents just complete tasks handed down by the main agent.</p><p>Through <code>ecp peers</code>, what I hope to achieve is a massive group of main agents completing grander plans by mutually exchanging information, rather than just communicating through document records. Such a design can advance everyone's progress in real-time and accomplish larger-scale design planning.</p></div>
+                                <div class="acc-inner"><p>实际上所有先进的 Agentic Developer 或团队都已经开始逐步采用这个机制，但更多是在工作流上实现。工作流的建立往往复杂且庞大，但通过简单的 peer 设计，就能让 code agent 在开发中彼此实时互通当前的开发信息，避免重复劳动或引入双方改动之间的冲突。</p><p>如今我们有 sub-agent 的开发模式，但这种机制只是对单一 session 的扩展。Sub-agent 只是完成 main agent 交付的任务。</p><p>通过 <code>ecp peers</code>，我希望达成的是一群庞大的 main agent 在互通信息的情况下完成更庞大的计划，而不只是通过文档记录来沟通。这样的设计更能实时推进彼此的进度，也能完成更大规模的设计规划。</p></div>
                             </div>
                         </div>
                         <div class="acc-item">
                             <button class="acc-trigger">
-                                <span class="acc-q">Why a stateless architecture with mmap + rkyv?</span>
+                                <span class="acc-q">为什么是 mmap + rkyv 的无状态架构？</span>
                                 <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                             </button>
                             <div class="acc-content">
-                                <div class="acc-inner"><p>The stateless concept of <code>mmap</code> and <code>rkyv</code> depends on performance and stability.</p><p>Once a server boots up, it can hold state, but to maintain that state, we need more complex processes and code to ensure the stability of all states. Every interaction with the server is a cost; necessary caching also costs memory. Numerous constraints result in poor performance.</p><p>Through <code>mmap</code>, all agents share the underlying common resource. They do not need to own state; instead, they work via near-instant queries against static data. In practice, building a graph of 16k files and 300k nodes takes only 2 to 3 seconds, producing a <code>graph.bin</code> that is less than 70 MB. Because of the shared <code>mmap</code> design, various CLI queries generally return within 100 ms.</p><p>This model is vital for Agents because Agent systems inherently feature high concurrency, short lifespans, frequent restarts, and cross-session operations. Statelessness isn't just for speed; it's to minimize failure modes.</p></div>
+                                <div class="acc-inner"><p><code>mmap</code> 与 <code>rkyv</code> 的无状态思路，取决于性能和稳定性。</p><p>启动 server 之后，server 可以拥有状态，但为了维护状态，我们需要更多复杂流程与代码去确保所有状态的一致性。每一次与 server 的交互都是成本；必要的缓存也是内存成本。诸多限制会造成性能低下。</p><p>通过 <code>mmap</code>，所有 agent 共享底层的公共资源，彼此不需要拥有状态，而是在近乎即时查询的静态数据上工作。实测来看，1.6 万文件、30 万级节点的 graph 构建只需要 2 到 3 秒，产生的 <code>graph.bin</code> 实际不到 70 MB。因为是共享的 <code>mmap</code> 设计，各项 CLI 查询基本落在 100 ms 以内。</p><p>这个模型对 Agent 很重要，因为 Agent 系统本来就高并发、生命周期短、容易重启、容易跨 session。无状态不只是为了快，而是为了让失败模式变少。</p></div>
                             </div>
                         </div>
                         <div class="acc-item">
                             <button class="acc-trigger">
-                                <span class="acc-q">Is ECP moving from code parsing to architecture understanding?</span>
+                                <span class="acc-q">ECP 是否从解析代码走向理解架构？</span>
                                 <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                             </button>
                             <div class="acc-content">
-                                <div class="acc-inner"><p>Yes. The greater challenge for AI Agents in software development is shifting from 'can it write a function correctly' to 'can it avoid breaking existing architectural constraints in a large system'.</p><p>The correctness of a single function can be solved by types, tests, linting, and local context; but real system risks often hide in constraints that cross files, services, languages, and time.</p><p>LLMs can deduce things themselves via basic graph queries, but that isn't a stable solution. The problem isn't that LLMs can't reason, but that making them rediscover architectural patterns from low-level nodes and edges every time is costly, yields inconsistent results, and easily misses 'negative space'. Therefore, ECP has built-in pattern detection like Saga and EventTopic, elevating high-risk, common, structurable architectural knowledge into first-class signals ahead of time. More accurately, it acts as an Agent's architecture radar: laying out high-confidence constraints and implicit couplings clearly before code is modified.</p></div>
+                                <div class="acc-inner"><p>是。AI Agent 在软件开发里更大的挑战，正在从「能不能写对一个函数」转向「能不能在大型系统里不破坏既有的架构约束」。</p><p>单个函数的正确性可以靠类型、测试、lint、局部上下文解决；但真实系统的风险常常藏在跨文件、跨服务、跨语言、跨时间的约束里。</p><p>LLM 可以通过基础的图谱查询自己推导，但那不是稳定方案。问题不在于 LLM 不会推理，而是每次都让它从低阶节点和边重新发现架构模式，成本高、结果不一致，也容易漏掉「负空间」。所以 ECP 内置 Saga、EventTopic 这类模式检测，是把高风险、常见、可结构化的架构知识提前升级成一等信号。更准确地说，它应该是 Agent 的架构雷达：在动手改代码前，把高置信度的约束、可能的隐性耦合、需要人工验证的启发式规则明确摊开。</p></div>
                             </div>
                         </div>
                         <div class="acc-item">
                             <button class="acc-trigger">
-                                <span class="acc-q">What is the relationship between ECP and GitNexus?</span>
+                                <span class="acc-q">ECP 与 GitNexus 的关系是什么？</span>
                                 <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                             </button>
                             <div class="acc-content">
-                                <div class="acc-inner"><p>GitNexus is not my project; it's the origin of my project. I encountered issues while using GitNexus: performance, multiple daemon servers, and several architectural bottlenecks, so I independently developed the Rust architecture.</p><p>The first breaking point was when resident state began to restrict Agent workflows. When multiple Agents, worktrees, repos, and branches query simultaneously, the daemon model easily becomes a hidden coordination problem. The second breaking point was a shift in expected query frequency. I wanted something closer to an Agent's L1 / L2 cache: querying in milliseconds before every file edit, rename, review, or impact analysis. At this frequency, the costs of a Node.js daemon became glaring.</p><p>Thus, the core thesis of the Rust stateless architecture is: bake the graph into a fixed-format <code>graph.bin</code> so that every CLI / MCP query directly <code>mmap</code>s it, requiring no warm-up, no daemon state, and no trust in a long-lived process.</p></div>
+                                <div class="acc-inner"><p>GitNexus 不是我的项目，而是我这个项目的起源。我在使用 GitNexus 的过程中遇到一些问题：性能、多个 daemon server，以及多个架构瓶颈，于是自主开发了 Rust 架构。</p><p>第一个临界点是常驻状态开始反过来限制 Agent 的工作流。多个 Agent、不同 worktree、不同仓库、不同分支同时查询时，daemon 模型很容易变成隐性的协调问题。第二个临界点是对查询频率的设想变了。我想要的是更接近 Agent 的 L1 / L2 cache：每次改文件前、重命名前、review 前、影响分析前，都可以毫秒级查一次。到了这个频率，Node.js daemon 的成本都会变得刺眼。</p><p>所以 Rust 无状态架构的核心判断是：把 graph 做成固定格式的 <code>graph.bin</code>，让每次 CLI / MCP 查询都直接 <code>mmap</code>，不用预热、不依赖 daemon 状态、不需要相信某个长生命周期的进程。</p></div>
                             </div>
                         </div>
                         <div class="acc-item">
                             <button class="acc-trigger">
-                                <span class="acc-q">What's the story behind `ecp dev pr-analyze` and Merge Queues?</span>
+                                <span class="acc-q">ecp dev pr-analyze 与 Merge Queue 的故事是什么？</span>
                                 <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                             </button>
                             <div class="acc-content">
-                                <div class="acc-inner"><p>Initially, I didn't want to reinvent the merge queue. I just wanted to feed <code>ecp impact</code> signals into existing queues, so I created <code>ecp dev pr-analyze</code> to automatically label workflows with area, risk, and cross-pr-conflict.</p><p>But after dogfooding, I found that the real value wasn't the queue itself, but 'using the graph to judge if PRs can safely run in parallel'. Even if two PRs touch different files, if one modifies a symbol within the other's blast radius, it's considered a semantic conflict. Conversely, if two PRs are in unrelated areas and their impact sets don't intersect, they can be labeled as low-risk, no cross-PR conflict, and handed to the workflow for more aggressive merging.</p><p>What this feature truly saves isn't single CI execution time, but reducing the cycle of PRs drifting from each other, leading to endless rebases and CI reruns. ECP's vision here is: elevating the merge queue from 'time-based queuing' to 'risk-based scheduling'.</p></div>
+                                <div class="acc-inner"><p>最早我没有想重造 merge queue。我只是想把 <code>ecp impact</code> 的信号喂给现有队列，所以做了 <code>ecp dev pr-analyze</code>，让 workflow 自动打上 area、risk、cross-pr-conflict。</p><p>但 dogfooding 之后发现，真正有价值的不是队列本身，而是「用 graph 判断 PR 是否能安全并行」。如果两个 PR 即使改的是不同文件，只要一个动到了另一个影响范围内的 symbol，就会被视为语义冲突。反过来，如果两个 PR 位于不相关的区域，且影响集合没有交集，就可以被标成低风险、无 cross-PR conflict，交给 workflow 做更积极的合并。</p><p>这项功能真正节省的不是单次 CI 时间，而是减少 PR 相互 drift 导致不断 rebase 与重跑 CI 的循环。ECP 在这里的愿景是：把 merge queue 从「按时间排队」提升成「按结构风险调度」。</p></div>
                             </div>
                         </div>
                         <div class="acc-item">
                             <button class="acc-trigger">
-                                <span class="acc-q">What is the real bottleneck in Agent development?</span>
+                                <span class="acc-q">Agent 开发真正的瓶颈是什么？</span>
                                 <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                             </button>
                             <div class="acc-content">
-                                <div class="acc-inner"><p>The rhythm traditional human teams use to manage changes isn't necessarily wrong, but the overall process system should be more automated to avoid hindering development.</p><p>Agent coding speed is very fast now, but the obstacle is actually human fear and worry. Fear of code conflicting, fear of the LLM breaking B while changing A, fear of various code errors—these fears have become the biggest problem hindering development.</p><p>As projects developed by everyone, every team, and every company grow exponentially in the future, similar tools will become more critical, and performance will be a fatal key. How to let the LLM understand the current architecture faster, rather than relying on long-term memory context processing, becomes relatively important. We should let the LLM understand the architecture through the source code itself, not through text records of the architecture, because only the source code is the only truth.</p></div>
+                                <div class="acc-inner"><p>传统人类团队用来管理变更的节奏并不能说是错的，而是整个流程制度上应该更自动化，以免阻碍开发。</p><p>现在 Agent coding 的速度非常快，但阻碍的反倒是人的担心和害怕。担心代码相互冲突、担心 LLM 改 A 坏 B、担心各种代码出错，这些恐惧反倒成为阻碍开发的最大问题。</p><p>随着未来每个人、每个团队、每家公司开发的项目都指数级增长，类似的工具会更重要，而性能会成为致命的关键。如何让 LLM 更快理解当前架构，而不是靠长期记忆的 context 处理，变得相对重要。我们更应该通过源代码让 LLM 了解架构，而不是通过文字记录来描述当前的代码架构，因为只有源代码才是唯一的事实。</p></div>
                             </div>
                         </div>
                         <div class="acc-item">
                             <button class="acc-trigger">
-                                <span class="acc-q">What will documentation become in the AI Agent era?</span>
+                                <span class="acc-q">AI Agent 时代的文档会变成什么？</span>
                                 <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                             </button>
                             <div class="acc-content">
-                                <div class="acc-inner"><p>In the AI Agent era, 'flowcharts' will actually become the most important form of documentation, because what humans need to manage are processes and architectural design. Through charts, we can quickly see each design, but how the code is generated, how tools verify it, and how Agents consume it will gradually become less important.</p><p>However, underlying core designs should still be recorded—for example, how to utilize cache, whether there should be a warm-up, what the client timeout should be, etc. These design documents are still important, just abstracted to a broader scope. Accurately speaking, all documentation will move towards higher-dimensional design.</p><p>Just as we no longer delve into how machine code is compiled or run when writing programs today. Egent Code Plexus itself is merely a transitional product adapting to current trends.</p></div>
+                                <div class="acc-inner"><p>AI Agent 时代的文档反倒会变成「流程图」最重要，因为人需要管理的是流程与架构设计。通过图表，我们能快速看到每个设计，但代码如何生成、工具如何验证、Agent 如何消费，将会逐渐变得不那么重要。</p><p>但底层的核心设计仍然应该记录，例如如何利用缓存、是否该有预热、client 超时该设多少等等。这些设计文档仍然重要，只是会抽象到更大的范围。准确地说，所有文档都会再往更高维度的设计移动。</p><p>就像我们现在写程序不会再去深究机器码如何编译、如何运行。包括目前所设计的 Egent Code Plexus，也只是当前时代下顺应趋势的过渡产物。</p></div>
                             </div>
                         </div>
                         <div class="acc-item">
                             <button class="acc-trigger">
-                                <span class="acc-q">What are ECP's product boundaries?</span>
+                                <span class="acc-q">ECP 的产品边界是什么？</span>
                                 <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                             </button>
                             <div class="acc-content">
-                                <div class="acc-inner"><p>ECP should focus on being a blazing fast, trustworthy, source-code-grounded structure awareness layer.</p><p>This project will not, and does not need to, become another Codex, Claude Code, or OpenClaw. Rather, it is a tool feature that these code agent workflow frameworks can opt to use when they need to understand code. It is simply a <code>grep</code> / <code>read</code> tool exclusively for LLMs.</p><p>Traditional tools answer 'Where is this string?' and 'What are the contents of this file?', whereas ECP answers: 'What is this symbol?', 'Who calls it?', 'What upstream/downstream does it affect?', and 'What is the structural risk of this diff?'. ECP's core is not making decisions for the Agent, but providing the structural facts the Agent must know before making a decision.</p></div>
+                                <div class="acc-inner"><p>ECP 应该专注于成为一个极快、可信、以源代码为依据的结构感知层。</p><p>这个项目不会、也不需要成为另一个 Codex、Claude Code 或 OpenClaw，而是让这些需要执行 code agent workflow 的框架，在需要了解代码时可以选用的工具。它就是一个 LLM 专用的 <code>grep</code> / <code>read</code> 工具。</p><p>传统工具回答「这个字符串在哪里？」「这个文件的内容是什么？」，而 ECP 要回答的是：「这个 symbol 是谁？」「它被谁调用？」「它会影响哪些上游 / 下游？」「这次 diff 的结构风险是什么？」。ECP 的核心不是替 Agent 做决策，而是提供 Agent 做决策前必须知道的结构事实。</p></div>
                             </div>
                         </div>
                         <div class="acc-item">
                             <button class="acc-trigger">
-                                <span class="acc-q">What is the trade-off between CLI, MCP, and tool interfaces?</span>
+                                <span class="acc-q">CLI、MCP 与工具接口之间如何取舍？</span>
                                 <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                             </button>
                             <div class="acc-content">
-                                <div class="acc-inner"><p>The most important product interface is the CLI.</p><p>MCP involves more maintenance trouble, but because not every code agent framework can natively call the CLI, a dual architecture was adopted, offering MCP to guide the use of CLI calls. However, a better approach would be to embed the tool directly as a CLI tool, just like <code>read</code>. This is a massive help for improving performance and reducing tokens.</p><p>The advantages of the CLI are that it is simple, low maintenance, easy to test, easy to drop into CI, and has no server lifecycle, tool registration, schema compatibility, or session state issues. MCP's value is as a compatibility layer, not the core abstraction.</p></div>
+                                <div class="acc-inner"><p>最重要的产品接口是 CLI。</p><p>MCP 在维护上比较麻烦，但因为不是每个 code agent 框架都能原生调用 CLI，所以采用了双重架构，同时用 MCP 去引导使用 CLI 调用。但更好的方式应该是让工具能直接内嵌为 CLI 工具，就像 <code>read</code> 那样。这对提高性能与减少 token 都是很大的帮助。</p><p>CLI 的优势是简单、维护成本低、容易测试、容易放进 CI，也没有 server 生命周期、工具注册、schema 兼容与 session 状态的问题。MCP 的价值是兼容层，而不是核心抽象。</p></div>
                             </div>
                         </div>
                         <div class="acc-item">
                             <button class="acc-trigger">
-                                <span class="acc-q">Should Skills be constraints or guides?</span>
+                                <span class="acc-q">Skill 应该是约束还是引导？</span>
                                 <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                             </button>
                             <div class="acc-content">
-                                <div class="acc-inner"><p>Before these designs are learned by LLMs, skills are needed to regulate and guide them. Just like before humanity learned to use fire, they didn't know its uses. But as this knowledge becomes widely applied, most people won't need to take courses on how to use fire.</p><p>Currently, we still need skills to regulate and guide, unless one day LLMs have this related knowledge built-in. But I hope skills are not used to restrict how LLMs use tools, but rather as a guide. Tools should describe their functions, while how to use them is guided by the skill, which can also be adjusted according to personal needs. The ultimate hope, of course, is that LLMs understand autonomously and apply them more broadly.</p></div>
+                                <div class="acc-inner"><p>这些设计在被 LLM 学会之前，都需要 skill 去规范与引导。就像人类还没学会用火之前，并不知道火的用途。但随着这些知识被广泛运用，大多数人应该没有上过如何用火的课程与指导。</p><p>目前仍然需要通过 skill 去规范与引导，除非哪天 LLM 内置了这类知识。但我希望 skill 不是用来约束 LLM 该如何使用工具，而是一种引导。工具应该描述它的功能，而如何使用则通过 skill 做基本引导，也能按照个人需求调整。当然更希望的是 LLM 自主理解，从而做到更广泛的运用。</p></div>
                             </div>
                         </div>
                         <div class="acc-item">
                             <button class="acc-trigger">
-                                <span class="acc-q">What is the absolute first principle of the ECP Skill?</span>
+                                <span class="acc-q">ECP Skill 最核心的第一原则是什么？</span>
                                 <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                             </button>
                             <div class="acc-content">
-                                <div class="acc-inner"><p>'All actions should start from verifiable structural facts, not from context hallucinations.'</p><p>Any preceding text can become a hallucination; only immediately confirmed situations are verifiable. This is exactly why the peer feature was designed: to achieve semi-real-time interaction via hooks/peers to avoid development conflicts from arising.</p></div>
+                                <div class="acc-inner"><p>「所有行动都应该从可验证的结构事实出发，而不是从上下文幻觉出发。」</p><p>任何前文都可能成为幻觉，只有即时确认的情况才可验证。这也就是为什么会想设计出 peer 功能：通过 hook / peer 达到半实时的互动，以避免开发冲突的产生。</p></div>
                             </div>
                         </div><!-- faq:end -->
             </div>
@@ -449,12 +449,12 @@
 
         <!-- VISION -->
         <section id="vision" class="content-section">
-            <h2 class="section-heading" data-i18n="nav.vision">Vision</h2>
+            <h2 class="section-heading" data-i18n="nav.vision">未来愿景</h2>
             <div class="vision-box">
-                <blockquote data-i18n="vision.quote">"All actions should start from verifiable structural facts, not from context hallucinations."</blockquote>
-                <p class="vision-desc" data-i18n="vision.p1">In the AI Agent era, development speed is no longer the bottleneck; the bottleneck is <strong>trust</strong>. Humans fear Agents breaking systems, and Agents are easily misled by their own context. Egent Code Plexus builds trust on structural facts, ensuring Agents always return to the only truth: <strong>Source Code</strong>.</p>
+                <blockquote data-i18n="vision.quote">“所有行动都应该从可验证的结构事实出发，而不是从上下文幻觉出发。”</blockquote>
+                <p class="vision-desc" data-i18n="vision.p1">在 AI Agent 时代，开发速度不再是唯一瓶颈；真正的瓶颈是<strong>信任</strong>。人类害怕 Agent 改坏系统，Agent 也容易被自己的上下文误导。Egent Code Plexus 试图把信任建立在可验证的结构事实上，让 Agent 在每一次行动前，都能快速回到唯一真相：<strong>Source Code</strong>。</p>
                 <br>
-                <p class="vision-desc" data-i18n="vision.p2">As every team and company drives more Agents and repos concurrently, what matters isn't stuffing more into the context window, but having a blazing fast, trustworthy, structure-aware foundational tool.</p>
+                <p class="vision-desc" data-i18n="vision.p2">如果未来每个人、每个团队、每间公司都会同时驱动更多 Agent、更多 Repo、更多变更，那真正重要的不是把更多内容塞进 context，而是拥有一个极快、可信、以结构感知为基础的底层工具。</p>
             </div>
         </section>
     </main>
@@ -466,18 +466,18 @@
                 <span>Egent Code Plexus</span>
             </div>
             <p class="footer-links"><a href="compare/">ecp vs codegraph vs GitNexus</a></p>
-            <p class="footer-copy" data-i18n="footer.text">&copy; 2026 Egent Code Plexus Project. Segments extracted from the Native Design Deep Dive.</p>
+            <p class="footer-copy" data-i18n="footer.text">&copy; 2026 Egent Code Plexus Project. 所有片段节录自 Native Design Deep Dive 访谈。</p>
         </div>
     </footer>
 
     <!-- Toast Notification -->
     <div id="toast" class="toast">
         <span class="toast-icon">✓</span>
-        <span class="toast-msg" data-i18n="install.copied">Copied!</span>
+        <span class="toast-msg" data-i18n="install.copied">已复制！</span>
     </div>
 
-    <script>window.__ECP_LOCALE__ = "en"; window.__ECP_ROOT__ = ""; window.__ECP_PAGE__ = "";</script>
-    <script src="js/qa_data.js"></script>
-    <script src="js/app.js"></script>
+    <script>window.__ECP_LOCALE__ = "zh-CN"; window.__ECP_ROOT__ = "../"; window.__ECP_PAGE__ = "";</script>
+    <script src="../js/qa_data.js"></script>
+    <script src="../js/app.js"></script>
 </body>
 </html>

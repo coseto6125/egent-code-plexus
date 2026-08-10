@@ -1,0 +1,66 @@
+{
+  "baseUrl": "https://coseto6125.github.io/egent-code-plexus/",
+  "repoUrl": "https://github.com/coseto6125/egent-code-plexus",
+  "defaultLocale": "en",
+  "localePaths": {
+    "en": "",
+    "zh-TW": "zh-TW/",
+    "zh-CN": "zh-CN/",
+    "ja": "ja/",
+    "ko": "ko/",
+    "es": "es/"
+  },
+  "meta": {
+    "en": {
+      "title": "Egent Code Plexus — code intelligence graph for AI coding agents",
+      "description": "Structural code queries for AI agents: who calls a symbol, blast radius of a change, routes and cross-repo contracts. 31 languages, sub-100ms answers, 7.5x fewer tokens than grep, and BlindSpot records instead of guesses.",
+      "ogTitle": "Egent Code Plexus — built for agents, not IDEs",
+      "ogDescription": "Ask who calls X, what a change breaks, which routes exist. One graph over 31 languages, answered in milliseconds."
+    },
+    "zh-TW": {
+      "title": "Egent Code Plexus — 給 AI coding agent 的程式碼結構圖譜",
+      "description": "為 AI agent 而生的結構化查詢：誰呼叫這個符號、這次改動的影響範圍、路由與跨 repo 契約。涵蓋 31 種語言，查詢在 100 毫秒內回應，比 grep 省 7.5 倍 token，查不到的地方以 BlindSpot 誠實標記而非猜測。",
+      "ogTitle": "Egent Code Plexus — 為 agent 而生，不是為 IDE",
+      "ogDescription": "問誰呼叫了 X、這次改動會壞掉什麼、有哪些路由。31 種語言同一張圖，毫秒級回答。"
+    },
+    "zh-CN": {
+      "title": "Egent Code Plexus — 面向 AI coding agent 的代码结构图谱",
+      "description": "为 AI agent 设计的结构化查询：谁调用了这个符号、本次改动的影响范围、路由与跨仓库契约。覆盖 31 种语言，查询在 100 毫秒内返回，比 grep 少用 7.5 倍 token，查不到的地方以 BlindSpot 如实标记而非猜测。",
+      "ogTitle": "Egent Code Plexus — 为 agent 而生，不是为 IDE",
+      "ogDescription": "问谁调用了 X、这次改动会破坏什么、有哪些路由。31 种语言同一张图，毫秒级回答。"
+    },
+    "ja": {
+      "title": "Egent Code Plexus — AI コーディングエージェントのためのコード構造グラフ",
+      "description": "AI エージェント向けの構造化クエリ。シンボルの呼び出し元、変更の影響範囲、ルートとリポジトリ横断の契約を照会できます。31 言語対応、100 ミリ秒未満で応答、grep より 7.5 倍少ないトークン。分からない箇所は推測せず BlindSpot として記録します。",
+      "ogTitle": "Egent Code Plexus — IDE ではなくエージェントのために",
+      "ogDescription": "誰が X を呼んでいるか、この変更が何を壊すか、どんなルートがあるか。31 言語をひとつのグラフで、ミリ秒で答えます。"
+    },
+    "ko": {
+      "title": "Egent Code Plexus — AI 코딩 에이전트를 위한 코드 구조 그래프",
+      "description": "AI 에이전트를 위한 구조 질의. 심볼의 호출자, 변경의 영향 범위, 라우트와 저장소 간 계약을 조회합니다. 31개 언어 지원, 100밀리초 이내 응답, grep 대비 7.5배 적은 토큰. 알 수 없는 부분은 추측하지 않고 BlindSpot으로 기록합니다.",
+      "ogTitle": "Egent Code Plexus — IDE가 아니라 에이전트를 위해",
+      "ogDescription": "누가 X를 호출하는지, 이 변경이 무엇을 깨뜨리는지, 어떤 라우트가 있는지. 31개 언어를 하나의 그래프로, 밀리초 만에 답합니다."
+    },
+    "es": {
+      "title": "Egent Code Plexus — grafo de código para agentes de IA",
+      "description": "Consultas estructurales para agentes de IA: quién llama a un símbolo, el alcance de un cambio, rutas y contratos entre repositorios. 31 lenguajes, respuestas en menos de 100 ms, 7,5 veces menos tokens que grep, y registros BlindSpot en lugar de conjeturas.",
+      "ogTitle": "Egent Code Plexus — hecho para agentes, no para IDEs",
+      "ogDescription": "Pregunta quién llama a X, qué rompe un cambio, qué rutas existen. Un grafo sobre 31 lenguajes, respondido en milisegundos."
+    }
+  },
+  "sameAs": [
+    "https://github.com/coseto6125/egent-code-plexus",
+    "https://www.npmjs.com/package/egent-code-plexus",
+    "https://pypi.org/project/egent-code-plexus/"
+  ],
+  "answer": {
+    "en": "Egent Code Plexus (<strong>ecp</strong>) is a command-line code intelligence graph for AI coding agents. It indexes a repository into a symbol graph and answers structural questions directly — <em>which functions call this one</em>, <em>what does this diff break</em>, <em>which HTTP routes and database tables does this service reach</em> — across 31 languages, in milliseconds, without a daemon. Where the graph cannot see something it says so with a BlindSpot record instead of returning an empty result that reads like proof of absence.",
+    "zh-TW": "Egent Code Plexus（<strong>ecp</strong>）是給 AI coding agent 用的命令列程式碼結構圖譜。它把 repo 索引成符號圖，直接回答結構問題：<em>哪些函式呼叫了它</em>、<em>這次改動會壞掉什麼</em>、<em>這個服務碰到哪些 HTTP 路由與資料庫表</em>，涵蓋 31 種語言，毫秒級回應，不需要常駐程序。圖看不到的地方會以 BlindSpot 明講，而不是回一個看起來像「不存在」的空結果。",
+    "zh-CN": "Egent Code Plexus（<strong>ecp</strong>）是面向 AI coding agent 的命令行代码结构图谱。它把仓库索引成符号图，直接回答结构问题：<em>哪些函数调用了它</em>、<em>这次改动会破坏什么</em>、<em>这个服务触及哪些 HTTP 路由与数据库表</em>，覆盖 31 种语言，毫秒级响应，无需常驻进程。图看不到的地方会用 BlindSpot 明说，而不是返回一个看起来像「不存在」的空结果。",
+    "ja": "Egent Code Plexus（<strong>ecp</strong>）は、AI コーディングエージェント向けのコマンドライン型コード構造グラフです。リポジトリをシンボルグラフとして索引し、<em>この関数を呼んでいるのは誰か</em>、<em>この差分は何を壊すか</em>、<em>このサービスはどの HTTP ルートとデータベーステーブルに到達するか</em>といった構造的な問いに、31 言語にわたりミリ秒で、デーモンなしで答えます。グラフに見えない部分は空の結果ではなく BlindSpot として明示します。",
+    "ko": "Egent Code Plexus(<strong>ecp</strong>)는 AI 코딩 에이전트를 위한 명령줄 코드 구조 그래프입니다. 저장소를 심볼 그래프로 색인하고 <em>이 함수를 호출하는 것은 무엇인지</em>, <em>이 변경이 무엇을 깨뜨리는지</em>, <em>이 서비스가 어떤 HTTP 라우트와 데이터베이스 테이블에 닿는지</em>를 31개 언어에 걸쳐 밀리초 단위로, 데몬 없이 답합니다. 그래프가 보지 못하는 부분은 빈 결과 대신 BlindSpot으로 명시합니다.",
+    "es": "Egent Code Plexus (<strong>ecp</strong>) es un grafo de inteligencia de código de línea de comandos para agentes de IA. Indexa un repositorio como grafo de símbolos y responde preguntas estructurales directamente: <em>qué funciones llaman a esta</em>, <em>qué rompe este cambio</em>, <em>a qué rutas HTTP y tablas de base de datos llega este servicio</em>, en 31 lenguajes, en milisegundos y sin demonio. Donde el grafo no ve algo lo dice con un registro BlindSpot en lugar de devolver un resultado vacío que parece prueba de ausencia."
+  },
+  "indexNowKey": "fca60b3c39ca4cdc97727c91f4253c95",
+  "contentDate": "2026-08-10"
+}

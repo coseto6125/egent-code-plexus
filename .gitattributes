@@ -1,0 +1,15 @@
+# The landing site is generated and byte-compared by scripts/site/build_site.mjs
+# --check. A CRLF checkout would report a current tree as stale.
+docs/ecp-landing/** text eol=lf
+scripts/site/** text eol=lf
+
+# ...except the binaries under them. `text eol=lf` on a PNG rewrites every
+# 0x0d 0x0a pair in the image data and corrupts it — verified: the committed
+# og.png came back as "improper image header".
+*.png binary
+*.ico binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.woff binary
+*.woff2 binary

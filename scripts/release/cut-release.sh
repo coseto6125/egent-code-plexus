@@ -198,6 +198,26 @@ prepend_changelog "$(changelog_section "$NEW" "$SINCE")"
 # keep Cargo.lock's workspace entries in step with the new version
 cargo update --workspace --offline >/dev/null 2>&1 || true
 
+# The landing pages carry the version, so the bump has to regenerate them or
+# CI's site --check fails on the Release PR itself.
+if command -v node >/dev/null 2>&1; then
+  # The pages carry a content date. It lives in seo.json rather than being read
+  # from a clock so that `--check` stays reproducible; a release is the moment
+  # it legitimately advances.
+  today="$(date -u +%Y-%m-%d)"
+  node -e '
+    const fs = require("fs");
+    const p = "docs/ecp-landing/seo.json";
+    const d = JSON.parse(fs.readFileSync(p, "utf8"));
+    d.contentDate = process.argv[1];
+    fs.writeFileSync(p, JSON.stringify(d, null, 2) + "\n");
+  ' "$today"
+  node scripts/site/build_site.mjs >/dev/null
+  git add docs/ecp-landing
+else
+  echo "warning: node not found — landing pages left at ${CUR}; run scripts/site/build_site.mjs" >&2
+fi
+
 git add "$CARGO_TOML" "$CHANGELOG" Cargo.lock 2>/dev/null || git add "$CARGO_TOML" "$CHANGELOG"
 git commit -m "release: ${CUR} -> ${NEW} — bump workspace + internal dep versions"
 git push -u origin "$BRANCH"

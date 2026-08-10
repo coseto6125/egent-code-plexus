@@ -1,0 +1,106 @@
+{
+  "note": "Numbers copied from README.md 'Performance receipts'. Every value is a measurement, not a claim — keep the methodology attached to them wherever they travel.",
+  "methodology": {
+    "versions": "ecp 0.4.2 · codegraph 0.9.4 · gitnexus 1.6.5",
+    "hardware": "AMD Ryzen 9 9950X (16 logical), Linux",
+    "protocol": "Same checkouts, same machine. All tools capped at a 1 MiB max-file-size threshold where configurable (gitnexus hard-codes 512 KB). ecp medians over 5–7 runs. ecp is a stateless one-shot CLI, so every latency includes full process startup — no daemon, no warm-up."
+  },
+  "tools": [
+    { "name": "ecp", "url": "https://github.com/coseto6125/egent-code-plexus", "stack": "Rust" },
+    { "name": "codegraph", "url": "https://github.com/colbymchenry/codegraph", "stack": "Node + SQLite" },
+    { "name": "gitnexus", "url": "https://github.com/abhigyanpatwari/GitNexus", "stack": "Node" }
+  ],
+  "suites": [
+    {
+      "id": "vscode",
+      "repo": "microsoft/vscode",
+      "shape": "14,874 files, dense single-language TypeScript",
+      "footnote": "gitnexus did not finish — killed after 27 min stuck in its in-memory graph-resolution phase (RSS 4.6 GiB, no output written).",
+      "rows": [
+        { "metric": "Cold index", "values": ["4.6 s", "166.9 s", "DNF — killed at 27 min"], "best": 0 },
+        { "metric": "Peak RSS", "values": ["~1.0 GiB", "1.7 GiB", "4.6 GiB (still climbing)"], "best": 0 },
+        { "metric": "Symbol find / query", "values": ["34.6 ms", "169.5 ms", "—"], "best": 0 },
+        { "metric": "Callers / impact", "values": ["27.2 ms", "172.4 ms", "—"], "best": 0 },
+        { "metric": "Inspect / context", "values": ["35.0 ms", "415.9 ms", "—"], "best": 0 },
+        { "metric": "Impact baseline (git diff)", "values": ["725.9 ms", "no such mode", "—"], "best": 0 },
+        { "metric": "Graph nodes", "values": ["507,257", "315,498", "—"], "best": 0 },
+        { "metric": "Graph edges", "values": ["916,380", "986,709", "—"], "best": 1 },
+        { "metric": "Index size on disk", "values": ["87 MiB", "671 MiB", "—"], "best": 0 },
+        { "metric": "Files indexed", "values": ["14,874", "10,814", "—"], "best": 0 }
+      ]
+    },
+    {
+      "id": "gitnexus-repo",
+      "repo": "abhigyanpatwari/GitNexus",
+      "shape": "3,232 files, polyglot — the corpus all three can finish",
+      "footnote": "",
+      "rows": [
+        { "metric": "Cold index", "values": ["0.74 s", "11.2 s", "77.6 s"], "best": 0 },
+        { "metric": "Peak RSS", "values": ["264 MiB", "501 MiB", "2.5 GiB"], "best": 0 },
+        { "metric": "Find / query", "values": ["9.4 ms", "103.5 ms", "—"], "best": 0 },
+        { "metric": "Callers / impact", "values": ["9.2 ms", "104.2 ms", "297.6 ms"], "best": 0 },
+        { "metric": "Inspect / context", "values": ["9.4 ms", "—", "295.5 ms"], "best": 0 },
+        { "metric": "Graph nodes", "values": ["49,122", "19,604", "30,223"], "best": 0 },
+        { "metric": "Graph edges", "values": ["48,271", "39,155", "47,218"], "best": 0 },
+        { "metric": "Index size on disk", "values": ["7.7 MiB", "37 MiB", "306 MiB"], "best": 0 },
+        { "metric": "Files indexed", "values": ["3,232", "2,968", "3,232"], "best": 0 }
+      ]
+    }
+  ],
+  "i18n": {
+    "en": {
+      "title": "ecp vs codegraph vs GitNexus",
+      "subtitle": "Three code-graph tools, same checkouts, same machine.",
+      "intro": "All three build a graph of a repository and answer structural questions about it. They differ in what they are optimised for: <strong>codegraph</strong> and <strong>GitNexus</strong> are Node services that keep a graph in memory or in SQLite, while <strong>ecp</strong> is a stateless Rust binary that memory-maps a prebuilt graph, so a query costs one process start rather than a warm-up. The numbers below are the project's own measurements, published with the conditions that produced them.",
+      "methodologyHeading": "How these were measured",
+      "limitsHeading": "What these numbers do not tell you",
+      "limits": "They are one machine, one set of versions, two corpora. They say nothing about which tool has the API you want, whether its language coverage matches your stack, or how it behaves on a repository shaped unlike these two. A tool that loses on cold index may still be the right choice if it answers a question the others cannot. <strong>Re-run them on your own repository before deciding</strong> — the commands are in each project's README.",
+      "footer": "Numbers last updated for ecp {version}. Corrections welcome as issues."
+    },
+    "zh-TW": {
+      "title": "ecp 對比 codegraph 與 GitNexus",
+      "subtitle": "三個程式碼圖譜工具，同一份 checkout，同一台機器。",
+      "intro": "三者都會把 repo 建成圖並回答結構性問題，差別在最佳化的方向：<strong>codegraph</strong> 與 <strong>GitNexus</strong> 是 Node 服務，把圖放在記憶體或 SQLite 裡；<strong>ecp</strong> 是無狀態的 Rust binary，用 mmap 讀預先建好的圖，所以一次查詢的成本是一次行程啟動而不是暖機。下面的數字是本專案自己的實測，連同產生它們的條件一起公布。",
+      "methodologyHeading": "測量條件",
+      "limitsHeading": "這些數字沒有告訴你的事",
+      "limits": "它們來自一台機器、一組版本、兩個 corpus。它們沒有回答哪個工具的 API 比較合你的用法、語言覆蓋是否對得上你的技術棧，也沒有回答在跟這兩份形狀不同的 repo 上會怎樣。冷索引輸掉的工具，如果它能回答其他兩者答不出的問題，仍然可能是對的選擇。<strong>決定之前請在你自己的 repo 上重跑一次</strong>，指令在各專案的 README 裡。",
+      "footer": "數字對應 ecp {version}。有誤請開 issue 指正。"
+    },
+    "zh-CN": {
+      "title": "ecp 对比 codegraph 与 GitNexus",
+      "subtitle": "三个代码图谱工具，同一份 checkout，同一台机器。",
+      "intro": "三者都会把仓库建成图并回答结构性问题，差别在优化方向：<strong>codegraph</strong> 与 <strong>GitNexus</strong> 是 Node 服务，把图放在内存或 SQLite 里；<strong>ecp</strong> 是无状态的 Rust binary，用 mmap 读预先建好的图，所以一次查询的成本是一次进程启动而不是预热。下面的数字是本项目自己的实测，连同产生它们的条件一起公布。",
+      "methodologyHeading": "测量条件",
+      "limitsHeading": "这些数字没有告诉你的事",
+      "limits": "它们来自一台机器、一组版本、两个 corpus。它们没有回答哪个工具的 API 更合你的用法、语言覆盖是否对得上你的技术栈，也没有回答在与这两份形状不同的仓库上会怎样。冷索引输掉的工具，如果它能回答其他两者答不出的问题，仍然可能是对的选择。<strong>决定之前请在你自己的仓库上重跑一次</strong>，命令在各项目的 README 里。",
+      "footer": "数字对应 ecp {version}。有误请开 issue 指正。"
+    },
+    "ja": {
+      "title": "ecp と codegraph と GitNexus の比較",
+      "subtitle": "3 つのコードグラフツール、同じチェックアウト、同じマシン。",
+      "intro": "3 つともリポジトリをグラフ化して構造的な問いに答えますが、最適化の方向が異なります。<strong>codegraph</strong> と <strong>GitNexus</strong> はグラフをメモリや SQLite に保持する Node のサービスで、<strong>ecp</strong> は事前構築したグラフを mmap で読むステートレスな Rust バイナリです。つまり 1 回のクエリのコストはウォームアップではなくプロセス起動 1 回分です。以下の数値は本プロジェクト自身の計測で、測定条件を添えて公開しています。",
+      "methodologyHeading": "測定条件",
+      "limitsHeading": "この数値が語らないこと",
+      "limits": "1 台のマシン、1 組のバージョン、2 つのコーパスの結果にすぎません。どのツールの API が自分の用途に合うか、言語カバレッジが自分のスタックに合うか、この 2 つとは形の異なるリポジトリでどう振る舞うかには答えていません。コールドインデックスで負けるツールでも、他が答えられない問いに答えられるなら適切な選択でありえます。<strong>決める前に自分のリポジトリで再実行してください</strong>。コマンドは各プロジェクトの README にあります。",
+      "footer": "数値は ecp {version} 時点のものです。誤りがあれば issue でご指摘ください。"
+    },
+    "ko": {
+      "title": "ecp와 codegraph, GitNexus 비교",
+      "subtitle": "세 가지 코드 그래프 도구, 같은 체크아웃, 같은 머신.",
+      "intro": "셋 다 저장소를 그래프로 만들어 구조적 질문에 답하지만 최적화 방향이 다릅니다. <strong>codegraph</strong>와 <strong>GitNexus</strong>는 그래프를 메모리나 SQLite에 두는 Node 서비스이고, <strong>ecp</strong>는 미리 만든 그래프를 mmap으로 읽는 무상태 Rust 바이너리입니다. 따라서 질의 한 번의 비용은 워밍업이 아니라 프로세스 시작 한 번입니다. 아래 수치는 이 프로젝트가 직접 측정한 값이며 측정 조건과 함께 공개합니다.",
+      "methodologyHeading": "측정 조건",
+      "limitsHeading": "이 수치가 말해주지 않는 것",
+      "limits": "머신 한 대, 버전 한 조합, 코퍼스 두 개의 결과일 뿐입니다. 어떤 도구의 API가 내 용도에 맞는지, 언어 지원이 내 스택과 맞는지, 이 둘과 다른 모양의 저장소에서 어떻게 동작하는지는 답하지 않습니다. 콜드 인덱스에서 지는 도구라도 다른 둘이 답하지 못하는 질문에 답한다면 옳은 선택일 수 있습니다. <strong>결정하기 전에 자신의 저장소에서 다시 실행해 보세요</strong>. 명령은 각 프로젝트 README에 있습니다.",
+      "footer": "수치는 ecp {version} 기준입니다. 오류는 이슈로 알려주세요."
+    },
+    "es": {
+      "title": "ecp frente a codegraph y GitNexus",
+      "subtitle": "Tres herramientas de grafo de código, mismos checkouts, misma máquina.",
+      "intro": "Las tres construyen un grafo del repositorio y responden preguntas estructurales, pero se optimizan para cosas distintas: <strong>codegraph</strong> y <strong>GitNexus</strong> son servicios Node que mantienen el grafo en memoria o en SQLite, mientras que <strong>ecp</strong> es un binario Rust sin estado que mapea en memoria un grafo ya construido, de modo que una consulta cuesta un arranque de proceso y no un calentamiento. Las cifras siguientes son mediciones del propio proyecto, publicadas junto con las condiciones que las produjeron.",
+      "methodologyHeading": "Cómo se midieron",
+      "limitsHeading": "Lo que estas cifras no dicen",
+      "limits": "Son una máquina, un conjunto de versiones y dos corpus. No dicen qué herramienta tiene la API que necesitas, si su cobertura de lenguajes encaja con tu stack, ni cómo se comporta en un repositorio con otra forma. Una herramienta que pierde en indexado en frío puede seguir siendo la correcta si responde algo que las otras no. <strong>Vuelve a medirlas en tu propio repositorio antes de decidir</strong>: los comandos están en el README de cada proyecto.",
+      "footer": "Cifras correspondientes a ecp {version}. Se agradecen correcciones como issues."
+    }
+  }
+}
