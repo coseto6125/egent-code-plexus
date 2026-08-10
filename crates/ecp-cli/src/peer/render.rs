@@ -44,18 +44,18 @@ pub fn render_payload(entries: &[InboxEntry]) -> (String, HashSet<usize>) {
         match e {
             InboxEntry::DirtyEvent {
                 peer_session,
-                file,
                 symbol,
                 kind,
                 ..
             } => {
+                let file = e.event_file();
                 // HARD collapses to the file: two events about the same file
                 // carry the same evidence however many declarations it holds.
                 let witness = match kind {
                     ConcernKindSer::Hard => "",
                     ConcernKindSer::Soft => symbol.as_ref().map_or("", |s| s.name.as_str()),
                 };
-                if !seen.insert((peer_session.as_str(), file.as_str(), witness, *kind)) {
+                if !seen.insert((peer_session.as_str(), file, witness, *kind)) {
                     superseded.insert(i);
                     continue;
                 }
@@ -230,7 +230,6 @@ fn render_hard(buf: &mut String, e: &InboxEntry) {
         peer_pid,
         peer_name,
         ts,
-        file,
         reason,
         peer_delta,
         your_overlap_range,
@@ -248,7 +247,7 @@ fn render_hard(buf: &mut String, e: &InboxEntry) {
         // Deliberately the file and not a declaration: the manifest cannot say
         // which declarations changed, and a name with exact line numbers reads
         // as if it could — the field would contradict the reason beneath it.
-        let _ = writeln!(buf, "  File:   {file}");
+        let _ = writeln!(buf, "  File:   {}", e.event_file());
         let _ = writeln!(buf, "  Reason: {reason}");
         if let Some(d) = peer_delta {
             let lines: Vec<&str> = d.lines().take(HARD_DELTA_LOC_CAP).collect();
@@ -260,7 +259,7 @@ fn render_hard(buf: &mut String, e: &InboxEntry) {
                 let _ = writeln!(
                     buf,
                     "    ... (truncated, see `ecp peers diff {peer_session} {}`)",
-                    file
+                    e.event_file()
                 );
             }
         }
@@ -284,7 +283,6 @@ fn render_soft_one_line(buf: &mut String, e: &InboxEntry) {
         peer_session,
         peer_name,
         ts,
-        file,
         symbol,
         ..
     } = e
@@ -296,7 +294,7 @@ fn render_soft_one_line(buf: &mut String, e: &InboxEntry) {
                 "  · {} ({:?}, {}:{}) by {by} ({ts})",
                 s.name, s.kind, s.file, s.line_start
             ),
-            None => writeln!(buf, "  · {file} by {by} ({ts})"),
+            None => writeln!(buf, "  · {} by {by} ({ts})", e.event_file()),
         };
     }
 }
