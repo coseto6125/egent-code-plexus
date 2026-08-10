@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.9.3 - 2026-08-10
+
+### Bug Fixes
+
+- recover the file from a pre-upgrade entry instead of blanking it (#695)
 ## v0.9.2 - 2026-08-10
 
 ### Features
