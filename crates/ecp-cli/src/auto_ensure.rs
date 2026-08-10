@@ -483,6 +483,7 @@ pub fn ensure_fresh(
     graph_path: &Path,
     worktree_root: &Path,
 ) -> Result<EnsureFreshOutcome, String> {
+    beat_session_heartbeat(worktree_root);
     let state =
         ensure_index(graph_path, worktree_root).map_err(|e| format!("ensure_index probe: {e}"))?;
     // `ExactSha` carries the commit to build; `NearCurrent` builds HEAD.
@@ -1077,9 +1078,44 @@ fn apply_l1_overlay_updates(
 /// an agent works and the query path pays one extra write per minute at most.
 const SESSION_HEARTBEAT_SECS: u64 = 60;
 
+/// Record that this session is still being worked in.
+///
+/// The pid in `session_meta.json` belongs to the process writing it, which
+/// exits in milliseconds, so `last_touched` is the only evidence a peer can
+/// read to tell a working agent from an abandoned overlay
+/// (FU-2026-06-10-cc120f78889c). Every query beats, not just the ones that
+/// re-parse a file: an agent that edits and then spends half an hour reading
+/// still holds those files dirty, and must not vanish from `peers status`
+/// while it does.
+///
+/// A session that was never enrolled stays un-enrolled — beating would mint a
+/// session dir for every read-only query and hand peers a crowd of sessions
+/// with nothing dirty in them. The `mtime` throttle keeps the cost at one
+/// read+write per minute; every other invocation pays a single stat.
+fn beat_session_heartbeat(worktree_root: &Path) {
+    if let Some(dir) = resolve_session_overlay_dir(worktree_root) {
+        beat_meta_heartbeat(&dir.join("session_meta.json"));
+    }
+}
+
+fn beat_meta_heartbeat(meta_path: &Path) {
+    let fresh = fs::metadata(meta_path)
+        .and_then(|s| s.modified())
+        .ok()
+        .and_then(|m| m.elapsed().ok())
+        .is_some_and(|age| age.as_secs() < SESSION_HEARTBEAT_SECS);
+    if fresh {
+        return;
+    }
+    if let Ok(mut meta) = SessionMeta::read(meta_path) {
+        meta.last_touched = chrono::Utc::now().to_rfc3339();
+        let _ = SessionMeta::write_atomic(meta_path, &meta);
+    }
+}
+
 fn ensure_session_meta(session_dir: &Path, worktree: &Path) -> io::Result<()> {
     let meta_path = session_dir.join("session_meta.json");
-    if let Ok(stat) = fs::metadata(&meta_path) {
+    if meta_path.exists() {
         // Team harnesses may export ECP_AGENT_NAME / CLAUDE_AGENT_NAME after
         // this session's meta was first written — refresh so peers see the
         // name. The env check gates the extra read: solo sessions (no env)
@@ -1093,27 +1129,12 @@ fn ensure_session_meta(session_dir: &Path, worktree: &Path) -> io::Result<()> {
             .lock()
             .map(|mut s| s.insert(session_dir.to_path_buf()))
             .unwrap_or(true);
-        // The pid in this file belongs to the process writing it, which exits
-        // in milliseconds — `last_touched` is the only thing that can tell a
-        // peer this session is still being worked in. The stat above already
-        // paid for the mtime, so refreshing costs a read+write once a minute
-        // instead of on every query (FU-2026-06-10-cc120f78889c).
-        let heartbeat_due = stat
-            .modified()
-            .ok()
-            .and_then(|m| m.elapsed().ok())
-            .is_none_or(|age| age.as_secs() >= SESSION_HEARTBEAT_SECS);
-        let name = first_visit
-            .then(crate::session::resolver::resolve_agent_name)
-            .flatten();
-        if heartbeat_due || name.is_some() {
-            if let Ok(mut meta) = SessionMeta::read(&meta_path) {
-                let renamed = meta.apply_agent_name(name);
-                if heartbeat_due {
-                    meta.last_touched = chrono::Utc::now().to_rfc3339();
-                }
-                if renamed || heartbeat_due {
-                    SessionMeta::write_atomic(&meta_path, &meta)?;
+        if first_visit {
+            if let Some(name) = crate::session::resolver::resolve_agent_name() {
+                if let Ok(mut meta) = SessionMeta::read(&meta_path) {
+                    if meta.apply_agent_name(Some(name)) {
+                        SessionMeta::write_atomic(&meta_path, &meta)?;
+                    }
                 }
             }
         }
@@ -1386,7 +1407,7 @@ mod session_heartbeat_tests {
         let path = write_meta(dir.path(), stamp);
         age_file(&path, SESSION_HEARTBEAT_SECS + 5);
 
-        ensure_session_meta(dir.path(), Path::new("/x")).unwrap();
+        beat_meta_heartbeat(&path);
 
         let after = SessionMeta::read(&path).unwrap();
         assert_ne!(
@@ -1396,13 +1417,26 @@ mod session_heartbeat_tests {
         assert_eq!(after.started_at, stamp, "started_at is not a heartbeat");
     }
 
+    /// A read-only query must beat too: an agent that edited an hour ago and
+    /// has been reading since still holds those files dirty.
+    #[test]
+    fn heartbeat_does_not_enrol_a_session_that_never_existed() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("session_meta.json");
+        beat_meta_heartbeat(&path);
+        assert!(
+            !path.exists(),
+            "beating must never mint a session dir for a query-only agent"
+        );
+    }
+
     #[test]
     fn heartbeat_leaves_a_fresh_meta_untouched() {
         let dir = tempdir().unwrap();
         let stamp = "2020-01-01T00:00:00+00:00";
         let path = write_meta(dir.path(), stamp);
 
-        ensure_session_meta(dir.path(), Path::new("/x")).unwrap();
+        beat_meta_heartbeat(&path);
 
         assert_eq!(
             SessionMeta::read(&path).unwrap().last_touched,
