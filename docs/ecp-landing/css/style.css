@@ -345,3 +345,16 @@ body {
     padding-bottom: 0.75rem;
     border-bottom: 1px solid var(--border-color);
 }
+
+/* The one paragraph that defines the product in full sentences. Generative
+   engines quote a self-contained definition; a reader skimming gets the same
+   answer without opening a tab. */
+.hero-answer {
+    max-width: 760px;
+    margin: 1.5rem auto 0;
+    color: var(--text-secondary);
+    font-size: 0.98rem;
+    line-height: 1.75;
+}
+.hero-answer strong { color: var(--text-primary); }
+.hero-answer em { color: var(--accent-color); font-style: normal; }

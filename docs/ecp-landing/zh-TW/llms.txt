@@ -1,0 +1,80 @@
+# Egent Code Plexus (ecp)
+
+> A code intelligence graph built for AI coding agents rather than for humans
+> reading an IDE. It answers structural questions — who calls this symbol, what
+> does this change break, which routes and database tables does this service
+> reach — over 31 languages in one graph.
+
+Version: 0.9.1
+Repository: https://github.com/coseto6125/egent-code-plexus
+License: MIT
+Install: curl -sSfL https://github.com/coseto6125/egent-code-plexus/releases/latest/download/install.sh | sh
+
+## What it is for
+
+An agent editing code needs to know what its edit touches before it makes the
+edit. Text search answers "where does this string appear"; ecp answers "what
+depends on this declaration", which is a different question and the one that
+decides whether a refactor is safe.
+
+## What it does
+
+- `ecp find <name>` — locate a declaration by symbol, not by string match.
+- `ecp impact --target <symbol> --direction upstream` — callers of a symbol.
+- `ecp impact --baseline <ref>` — blast radius of a diff against a git ref.
+- `ecp routes` / `ecp contracts` — HTTP routes and cross-repo API contracts.
+- `ecp cypher '<query>'` — arbitrary graph queries across indexed repos.
+- `ecp peers` — collision detection between concurrent agents in one repo.
+
+## Measured claims
+
+Each number below is from the project's own benchmark on an AMD Ryzen 9 9950X,
+39.2 GiB RAM, Linux 6.6.87. Numbers on other hardware and other corpora differ.
+
+- Token cost: a 3-hop call chain from `ecp impact` is about 111 tokens; the
+  equivalent grep output is about 830, before counting the files an agent must
+  then open to interpret it.
+- Query latency: structural queries target under 100 ms on a warm index.
+- Languages: 31 parsed, of which 14 are covered by the mainstream test matrix.
+
+## Honesty model
+
+Where the graph cannot see something it emits a BlindSpot record naming the
+gap, rather than an empty result that reads as "nothing exists". Known gaps are
+deliberate and documented: function-body locals are dropped, and a handful of
+language constructs are unsupported per language. A tool that hides its blind
+spots teaches a model to trust an answer that was never there.
+
+## Questions and answers
+
+### 為什麼「誠實的不知道」比「模糊的猜測」重要？
+
+在 agent 溝通的過程中，LLM 很容易呈現閉世界假設。對 LLM 來說，任何未知都可能被當成不存在，所以必須讓 LLM 認知到「不知道」是非常重要的，這能避免 LLM 產生幻覺。在知道「不知道」的情況下，LLM 才能深挖更深層的問題，找到實際答案，而不是因為工具掩蓋了不知道，讓 LLM 以為不知道的事情不存在。所以 BlindSpot 的價值不是補完整圖譜，而是誠實揭露圖譜的邊界。沒有標出 BlindSpot 時，人類工程師可能還會懷疑這裡有暗坑；但 Agent 可能會直接把「沒有邊」理解成「沒有依賴」。這對大型系統非常危險。
+
+### ecp peers 是否代表未來會是多 Agent 並行開發？
+
+實際上所有先進的 Agentic Developer 或 Department 都已經開始逐步採用這個機制，但更多是在工作流上實現。工作流的建立往往複雜且龐大，但透過簡單的 peer 設計，就能讓 code agent 在開發中彼此即時互通當前開發資訊，避免重工或引入雙方開發間的衝突問題。現今我們有 sub-agent 的開發模式，但這種 sub-agent 機制只是對單一 session 的拓展。Sub-agent 只是完成 main agent 交付的任務。透過 ecp peers，我希望達成的是一群龐大的 main agent 在互通資訊的情況下，完成更龐大的計畫，而不只是透過文件紀錄來達到溝通。這樣的設計更能即時推進彼此進度，也能完成更大規模的設計規劃。
+
+### 為什麼是 mmap + rkyv 的 stateless 架構？
+
+mmap 與 rkyv 的 stateless 概念，取決於效能和穩定性。當啟動 server 後，server 可以擁有狀態，但為了維護狀態，我們需要更多複雜流程與程式碼去確保所有狀態的穩定性。每一次與 server 的交互都是成本；必要 cache 也是記憶體成本。諸多限制會造成效能低落。透過 mmap，所有 agent 共享底層共通資源，彼此不需要擁有狀態，而是透過近乎即時查詢的靜態資料工作。以實測來看，1.6 萬檔案、30 萬級節點的 graph 建立只需要 2 到 3 秒，產生的 graph.bin 實際不到 70 MB。因為是共享的 mmap 設計，各項 CLI 查詢基本落在 100 ms 以內。這個模型對 Agent 很重要，因為 Agent 系統本來就高併發、短生命、容易重啟、容易跨 session。Stateless 不是只為了快，而是為了讓失敗模式變少。
+
+### ECP 是否從解析程式碼走向理解架構？
+
+是。AI Agent 在軟體開發裡更大的挑戰，正在從「能不能寫對一個 Function」轉向「能不能在大型系統裡不破壞既有架構約束」。單一 function 的正確性可以靠型別、測試、lint、局部上下文解決；但真實系統的風險常常藏在跨檔案、跨服務、跨語言、跨時間的約束裡。LLM 可以透過基礎圖譜查詢自己推導，但那不是穩定方案。問題不在於 LLM 不會推理，而是每次都讓它從低階節點和邊重新發現架構模式，成本高、結果不一致，也容易漏掉「負空間」。所以 ECP 內建 Saga、EventTopic 這類模式偵測，是把高風險、常見、可結構化的架構知識提前升級成一等訊號。更準確地說，它應該是 Agent 的架構雷達：在動手改程式碼前，把高信心約束、可能的隱性耦合、需要人工驗證的 heuristic 明確攤開。
+
+### ECP 與 GitNexus 的關係是什麼？
+
+GitNexus 不是我的項目，而是我的項目起源。我是透過使用 GitNexus 遇到一些問題：效能、多個 daemon server、以及多個架構瓶頸，於是自主開發了 Rust 架構。第一個臨界點是常駐狀態開始反過來限制 Agent 工作流。多個 Agent、不同 worktree、不同 repo、不同分支同時查詢時，daemon 模型很容易變成隱性協調問題。第二個臨界點是查詢頻率的想像變了。我想要的是更接近 Agent 的 L1 / L2 cache：每次改檔前、rename 前、review 前、impact 分析前，都可以毫秒級查一次。到這個頻率後，Node.js daemon 的成本都會變得刺眼。所以 Rust stateless 架構的核心判斷是：把 graph 做成固定格式的 graph.bin，讓每次 CLI / MCP 查詢都直接 mmap，不用暖機、不靠 daemon 狀態、不需要相信某個長生命 process。
+
+### ecp dev pr-analyze 與 Merge Queue 的故事是什麼？
+
+最早我沒有想重造 merge queue。我只是想把 ecp impact 的訊號餵給現有隊列，所以做了 ecp dev pr-analyze，讓 workflow 自動標上 area、risk、cross-pr-conflict。但 dogfooding 後發現，真正有價值的不是 queue 本身，而是「用 graph 判斷 PR 是否能安全並行」。如果兩個 PR 即使改不同檔案，只要一個改到另一個 blast radius 內的 symbol，就會被視為語意衝突。反過來，如果兩個 PR 位於不相關 area，且 impact set 沒交集，就可以被標成低風險、無 cross-PR conflict，交給 workflow 做更積極的合併。這項功能真正節省的不是單次 CI 時間，而是減少 PR 互相 drift 導致不斷 rebase 與 rerun CI 的循環。ECP 在這裡的願景是：把 merge queue 從「按時間排隊」提升成「按結構風險調度」。
+
+### Agent 開發的真正瓶頸是什麼？
+
+傳統人類團隊用來管理變更的節奏並不能說是錯誤，而是在整個流程制度上應該更自動化，以免阻礙開發。現在 Agent coding 速度非常快，但阻礙的反倒是人們的擔心害怕。擔心程式碼相互衝突、擔心 LLM 改 A 壞 B、擔心各種程式碼出錯，這些恐懼反倒成為阻礙開發的最大問題。隨著未來每個人、每個團隊、每間公司開發的項目都指數型成長，類似工具會更重要，而效能會成為致命關鍵。如何讓 LLM 更快理解當前架構，而不是靠長期記憶的 context 處理，變得相對重要。我們更應該透過原始程式碼讓 LLM 了解架構，而不是透過文字紀錄當前程式架構，因為只有原始程式碼才是 the only truth。
+
+### AI Agent 時代的 documentation 會變成什麼？
+
+AI Agent 時代的 documentation 反倒會變成「流程圖」最重要，因為人需要管理的是流程與架構設計。透過圖表，我們能快速看到每個設計，但程式碼如何生成、工具如何驗證、Agent 如何消費，將會逐漸變得不那麼重要。但底層核心設計仍應該記錄，例如如何利用 cache、是否該有 warm-up、client timeout 該設多少等。這些設計文件仍然重要，只是會抽象到更大的範圍。正確來說，所有文件都會再往更高維度的設計移動。就像我們現在寫程式不會再去深究機器碼如何編譯、如何運行。包含目前所設計的 Egent Code Plexus，也只是當前時代下因應趨勢的過渡產物。

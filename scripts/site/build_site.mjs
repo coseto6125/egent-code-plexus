@@ -15,10 +15,16 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createContext, runInContext } from 'node:vm';
+import { execFileSync } from 'node:child_process';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const SITE = join(ROOT, 'docs/ecp-landing');
 const CHECK = process.argv.includes('--check');
+// Freshness is a citation signal. Sourced from the newest git commit so a
+// rebuild without content changes does not claim the page is newer.
+const BUILD_DATE = execFileSync('git', ['log', '-1', '--format=%cs'], { cwd: ROOT })
+  .toString()
+  .trim();
 
 const seo = JSON.parse(readFileSync(join(SITE, 'seo.json'), 'utf8'));
 const BASE = seo.baseUrl;
@@ -152,7 +158,7 @@ function faqHtml(qas) {
     .join('');
 }
 
-function headHtml(locale, meta, version, qas) {
+function headHtml(locale, meta, version, qas, qaLocale) {
   const path = seo.localePaths[locale];
   const canonical = BASE + path;
   const alternates = Object.entries(seo.localePaths)
@@ -164,10 +170,14 @@ function headHtml(locale, meta, version, qas) {
 
   // Answer engines lift Q&A pairs verbatim; give them the same text the page
   // renders, in this locale, rather than making them infer it from prose.
+  // `qaLocale` is the language the answers are actually written in, which is
+  // not always this page's locale: qa_data.js carries the English text under
+  // ja / ko / es. Declaring inLanguage: "ja" over English prose would be a
+  // false claim in the one place a machine is most likely to believe it.
   const faqLd = {
     '@context': 'https://schema.org',
     '@type': 'FAQPage',
-    inLanguage: locale,
+    inLanguage: qaLocale,
     mainEntity: qas.map((qa) => ({
       '@type': 'Question',
       name: stripTags(qa.q),
@@ -191,6 +201,8 @@ function headHtml(locale, meta, version, qas) {
     license: 'https://opensource.org/licenses/MIT',
     programmingLanguage: 'Rust',
     description: meta.description,
+    sameAs: seo.sameAs,
+    dateModified: BUILD_DATE,
     offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
     featureList: [
       'Callers and callees of any symbol across 31 languages',
@@ -198,6 +210,38 @@ function headHtml(locale, meta, version, qas) {
       'HTTP routes and cross-repo contract extraction',
       'SQL tables reached from code, including raw query strings',
       'BlindSpot records naming what the graph cannot see',
+    ],
+  };
+
+  const siteLd = {
+    '@context': 'https://schema.org',
+    '@type': 'WebSite',
+    name: 'Egent Code Plexus',
+    url: canonical,
+    inLanguage: locale,
+    description: meta.description,
+    sameAs: seo.sameAs,
+  };
+
+  // The install block is the thing a reader is most likely to ask an assistant
+  // for; give it as steps rather than leaving it inside a tab.
+  const howToLd = {
+    '@context': 'https://schema.org',
+    '@type': 'HowTo',
+    name: 'Install Egent Code Plexus and index a repository',
+    inLanguage: locale,
+    step: [
+      {
+        '@type': 'HowToStep',
+        name: 'Install the binary',
+        text: `curl -sSfL ${seo.repoUrl}/releases/latest/download/install.sh | sh`,
+      },
+      { '@type': 'HowToStep', name: 'Index a repository', text: 'ecp admin index --repo .' },
+      {
+        '@type': 'HowToStep',
+        name: 'Ask a structural question',
+        text: 'ecp impact --target <symbol> --direction upstream',
+      },
     ],
   };
 
@@ -228,13 +272,15 @@ ${alternates}
     <meta name="twitter:image" content="${BASE}og.png">
     <script type="application/ld+json">${JSON.stringify(appLd)}</script>
     <script type="application/ld+json">${JSON.stringify(faqLd)}</script>
+    <script type="application/ld+json">${JSON.stringify(siteLd)}</script>
+    <script type="application/ld+json">${JSON.stringify(howToLd)}</script>
 `;
 }
 
 // ── crawler files ────────────────────────────────────────────────────────────
 
 function sitemapXml() {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = BUILD_DATE;
   const urls = Object.entries(seo.localePaths)
     .map(([code, p]) => {
       const links = Object.entries(seo.localePaths)
@@ -261,10 +307,27 @@ ${urls}
 }
 
 function robotsTxt() {
+  // Answer engines are the audience this site is written for, so say yes by
+  // name rather than relying on the wildcard: Google-Extended and
+  // Applebot-Extended in particular are read as opt-OUT switches, and a site
+  // that never mentions them is easy to treat as undecided.
+  const agents = [
+    'GPTBot', 'OAI-SearchBot', 'ChatGPT-User',
+    'ClaudeBot', 'Claude-User', 'Claude-SearchBot', 'anthropic-ai',
+    'PerplexityBot', 'Perplexity-User',
+    'Google-Extended', 'Applebot-Extended', 'Bingbot',
+    'CCBot', 'cohere-ai', 'Meta-ExternalAgent', 'Amazonbot', 'DuckAssistBot',
+  ];
+  const blocks = agents.map((a) => `User-agent: ${a}\nAllow: /\n`).join('\n');
   return `User-agent: *
 Allow: /
 
+${blocks}
 Sitemap: ${BASE}sitemap.xml
+
+# Plain-text summaries for language models:
+# ${BASE}llms.txt
+# ${BASE}llms-full.txt
 `;
 }
 
@@ -331,6 +394,23 @@ ${faq}
 `;
 }
 
+/**
+ * Everything an answer engine could want in one fetch: the summary above plus
+ * every Q&A pair in every language, unabridged. `llms.txt` is the index;
+ * this is the corpus.
+ */
+function llmsFull(version, allQas) {
+  const sections = Object.keys(seo.localePaths)
+    .map((locale) => {
+      const rows = (allQas[locale] ?? [])
+        .map((qa) => `### ${stripTags(qa.q)}\n\n${stripTags(qa.a)}`)
+        .join('\n\n');
+      return `## Questions and answers (${locale})\n\nCanonical page: ${BASE}${seo.localePaths[locale]}\n\n${rows}`;
+    })
+    .join('\n\n');
+  return `${llmsTxt(version, allQas[seo.defaultLocale])}\n\n---\n\n${sections}\n`;
+}
+
 // ── build ────────────────────────────────────────────────────────────────────
 
 const version = workspaceVersion();
@@ -353,12 +433,20 @@ function emit(relPath, content) {
 for (const [locale, path] of Object.entries(seo.localePaths)) {
   const dict = translations[locale] ?? {};
   const localeQas = qas[locale] ?? qas[seo.defaultLocale];
+  // Identity against the English set is the only honest test available: these
+  // locales ship the English answers verbatim rather than a translation.
+  const qaLocale =
+    locale !== seo.defaultLocale &&
+    JSON.stringify(localeQas) === JSON.stringify(qas[seo.defaultLocale])
+      ? seo.defaultLocale
+      : locale;
   const meta = seo.meta[locale];
   const depth = path ? '../' : '';
 
   let html = applyTranslations(template, dict);
-  html = replaceRegion(html, 'head', headHtml(locale, meta, version, localeQas));
+  html = replaceRegion(html, 'head', headHtml(locale, meta, version, localeQas, qaLocale));
   html = replaceRegion(html, 'faq', faqHtml(localeQas));
+  html = replaceRegion(html, 'answer', seo.answer[locale]);
   html = html
     .replace('<html lang="en">', `<html lang="${locale}">`)
     .replace(/\{\{VERSION\}\}/g, version)
@@ -370,6 +458,11 @@ for (const [locale, path] of Object.entries(seo.localePaths)) {
 emit('sitemap.xml', sitemapXml());
 emit('robots.txt', robotsTxt());
 emit('llms.txt', llmsTxt(version, qas[seo.defaultLocale]));
+emit('llms-full.txt', llmsFull(version, qas));
+for (const [locale, path] of Object.entries(seo.localePaths)) {
+  if (!path) continue;
+  emit(`${path}llms.txt`, llmsTxt(version, qas[locale] ?? qas[seo.defaultLocale]));
+}
 
 if (CHECK && stale.length) {
   console.error(`site is stale, re-run scripts/site/build_site.mjs:\n  ${stale.join('\n  ')}`);
