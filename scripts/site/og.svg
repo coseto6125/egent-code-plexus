@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <radialGradient id="glow" cx="18%" cy="12%" r="85%">
+      <stop offset="0%" stop-color="#00F2FF" stop-opacity="0.20"/>
+      <stop offset="55%" stop-color="#00F2FF" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#00F2FF" stop-opacity="0.65"/>
+      <stop offset="100%" stop-color="#00F2FF" stop-opacity="0.12"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="#000000"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+
+  <!-- call graph, the thing the product actually returns -->
+  <g stroke="url(#edge)" stroke-width="1.5" fill="none">
+    <path d="M902 196 L1014 148"/>
+    <path d="M902 196 L1046 236"/>
+    <path d="M902 196 L968 302"/>
+    <path d="M968 302 L1082 352"/>
+    <path d="M968 302 L906 412"/>
+    <path d="M968 302 L1030 452"/>
+  </g>
+  <g fill="#00F2FF">
+    <circle cx="902" cy="196" r="9"/>
+    <circle cx="1014" cy="148" r="5" fill-opacity="0.75"/>
+    <circle cx="1046" cy="236" r="5" fill-opacity="0.75"/>
+    <circle cx="968" cy="302" r="6" fill-opacity="0.85"/>
+    <circle cx="1082" cy="352" r="4" fill-opacity="0.6"/>
+    <circle cx="906" cy="412" r="4" fill-opacity="0.6"/>
+    <circle cx="1030" cy="452" r="4" fill-opacity="0.6"/>
+  </g>
+
+  <g font-family="Fira Code, DejaVu Sans Mono, monospace">
+    <rect x="80" y="96" width="14" height="14" rx="3" fill="#00F2FF"/>
+    <text x="106" y="109" font-size="19" fill="#A1A1AA" letter-spacing="2.5">EGENT CODE PLEXUS</text>
+  </g>
+
+  <g font-family="Inter, DejaVu Sans, sans-serif">
+    <text x="80" y="228" font-size="72" font-weight="800" fill="#EDEDED">Built for agents,</text>
+    <text x="80" y="308" font-size="72" font-weight="800" fill="#EDEDED">not IDEs.</text>
+    <text x="80" y="372" font-size="27" fill="#A1A1AA">A code intelligence graph for AI coding agents.</text>
+  </g>
+
+  <g font-family="Fira Code, DejaVu Sans Mono, monospace" font-size="18">
+    <rect x="80" y="416" width="664" height="60" rx="10" fill="#18181B" fill-opacity="0.75" stroke="#27272A"/>
+    <text x="104" y="452" fill="#00F2FF">$ ecp impact --target parse_config --direction upstream</text>
+  </g>
+
+  <g font-family="Inter, DejaVu Sans, sans-serif" font-size="20" fill="#A1A1AA">
+    <text x="80" y="540">31 languages</text>
+    <text x="284" y="540">sub-100ms queries</text>
+    <text x="556" y="540">7.5&#215; fewer tokens than grep</text>
+  </g>
+  <rect x="80" y="562" width="1040" height="1" fill="#27272A"/>
+  <text x="80" y="596" font-family="Fira Code, DejaVu Sans Mono, monospace" font-size="17" fill="#52525B">github.com/coseto6125/egent-code-plexus</text>
+</svg>

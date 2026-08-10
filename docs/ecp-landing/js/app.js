@@ -538,7 +538,14 @@ class I18nManager {
     constructor(defaultFallback = 'en') {
         this.translations = TRANSLATIONS;
         this.locales = LOCALES;
-        this.currentLang = this.detectBrowserLanguage(defaultFallback);
+        // Every locale is its own URL, so the URL wins. Without this a reader
+        // arriving on /ja/ from a search result would be switched to whatever
+        // their browser prefers, leaving the address bar and the canonical tag
+        // describing a page they are not reading.
+        const pageLocale = window.__ECP_LOCALE__;
+        this.currentLang = this.translations[pageLocale]
+            ? pageLocale
+            : this.detectBrowserLanguage(defaultFallback);
         this.init();
     }
 
@@ -568,8 +575,28 @@ class I18nManager {
         this.updateDOM();
     }
 
+    /** Path of each locale's prerendered page, relative to the site root. */
+    static LOCALE_PATHS = {
+        'en': '', 'zh-TW': 'zh-TW/', 'zh-CN': 'zh-CN/',
+        'ja': 'ja/', 'ko': 'ko/', 'es': 'es/'
+    };
+
+    /** Site root, derived from where this page sits under it. */
+    siteRoot() {
+        const here = I18nManager.LOCALE_PATHS[this.currentLang] || '';
+        const depth = here ? here.split('/').filter(Boolean).length : 0;
+        return depth ? '../'.repeat(depth) : './';
+    }
+
     setLanguage(lang) {
         if (!this.translations[lang]) return;
+        // Navigate rather than swap in place: the reader ends up on the URL
+        // that search engines and shared links point at for this language.
+        const target = I18nManager.LOCALE_PATHS[lang];
+        if (window.__ECP_LOCALE__ && lang !== this.currentLang && target !== undefined) {
+            window.location.href = this.siteRoot() + target;
+            return;
+        }
         this.currentLang = lang;
         document.documentElement.lang = lang;
         this.updateDOM();

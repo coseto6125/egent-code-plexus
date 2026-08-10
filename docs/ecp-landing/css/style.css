@@ -331,3 +331,17 @@ body {
     overflow-x: auto; white-space: pre;
 }
 .legend { color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem; display: block; }
+
+/* Section headings: the page went h1 → h3 with nothing between, so neither a
+   crawler nor a screen reader could tell where one section ended. */
+.section-heading {
+    font-family: var(--mono-font);
+    font-size: 0.8rem;
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    margin-bottom: 1.5rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--border-color);
+}

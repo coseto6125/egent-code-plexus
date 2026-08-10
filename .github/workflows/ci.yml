@@ -448,3 +448,35 @@ jobs:
         uses: reviewdog/action-actionlint@50842263c20a7c46bd0065b9e624d3c569db061e # v1.73.0
         with:
           fail_level: error
+
+  site:
+    name: Landing site is in sync
+    runs-on: ubuntu-latest
+    if: ${{ !(contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]')) }}
+
+    # The hero version, the six locale pages, the sitemap and llms.txt are all
+    # generated from Cargo.toml + the translation tables. Nothing stops a
+    # version bump from landing without a rebuild, which is how the page came
+    # to advertise v0.6.7 while the release was v0.9.0.
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Diagnose checkout failure
+        if: steps.checkout.conclusion == 'failure'
+        uses: ./.github/actions/diagnose-checkout-failure
+
+      - name: Verify generated pages match their sources
+        run: node scripts/site/build_site.mjs --check
