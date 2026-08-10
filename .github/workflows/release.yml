@@ -734,7 +734,23 @@ jobs:
           path: site
           token: ${{ secrets.AUTO_MERGE_PAT }}
 
+      # A re-run of an older tag would regenerate the whole site from that
+      # tag's sources and fast-forward push it, silently rolling the live site
+      # back a version. Concurrency does not help: it groups by ref, so two
+      # different tags never queue against each other.
+      - name: Refuse to publish anything but the newest release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          latest="$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName --jq .tagName 2>/dev/null || echo '')"
+          if [ -n "$latest" ] && [ "$latest" != "${GITHUB_REF_NAME}" ]; then
+            echo "::notice::latest release is ${latest}, this run is ${GITHUB_REF_NAME} — skipping deploy"
+            echo "SKIP_DEPLOY=1" >> "$GITHUB_ENV"
+          fi
+
       - name: Build the site from the tagged sources
+        if: env.SKIP_DEPLOY != '1'
         working-directory: src
         env:
           GH_TOKEN: ${{ github.token }}
@@ -752,11 +768,16 @@ jobs:
           node scripts/site/build_site.mjs
 
       - name: Publish
+        if: env.SKIP_DEPLOY != '1'
         shell: bash
         run: |
           # template.html and seo.json are build inputs; serving them would put
           # an unrendered page with {{VERSION}} placeholders on a crawlable URL.
-          rsync -a --exclude template.html --exclude seo.json \
+          # --delete so a removed page actually disappears; without it a
+          # deleted locale stays live for ever while the sitemap stops listing
+          # it. .git is excluded for the obvious reason.
+          rsync -a --delete --exclude '.git' \
+            --exclude template.html --exclude seo.json --exclude compare.json \
             src/docs/ecp-landing/ site/
 
           cd site

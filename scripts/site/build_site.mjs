@@ -15,28 +15,30 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createContext, runInContext } from 'node:vm';
-import { execFileSync } from 'node:child_process';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const SITE = join(ROOT, 'docs/ecp-landing');
 const CHECK = process.argv.includes('--check');
+
+const seo = JSON.parse(readFileSync(join(SITE, 'seo.json'), 'utf8'));
+const compare = JSON.parse(readFileSync(join(SITE, 'compare.json'), 'utf8'));
+
+// Freshness is a citation signal, and it is committed rather than computed.
+// Deriving it from git put a clock in the build: CI checks out the synthetic
+// merge commit GitHub creates for a pull request, whose date is the moment the
+// check runs, so an unchanged tree went stale the moment the UTC day rolled
+// over. A value in seo.json is the same for every builder on every day —
+// `cut-release.sh` advances it when a release ships.
+const BUILD_DATE = seo.contentDate;
+if (!/^\d{4}-\d{2}-\d{2}$/.test(BUILD_DATE ?? '')) {
+  throw new Error('seo.json needs contentDate as YYYY-MM-DD');
+}
+
 // Star count comes from the environment, never from a live fetch: a build that
 // reaches the network produces different output every time the count moves,
 // which would make --check fail on a tree that is in fact current. The deploy
 // job supplies it; a local build simply omits the field.
 const STARS = Number(process.env.ECP_STARS) || 0;
-// Freshness is a citation signal. Sourced from the newest git commit so a
-// rebuild without content changes does not claim the page is newer — pinned to
-// UTC because `%cs` renders in the local zone, which made the same commit
-// produce a different date here than on a CI runner and failed --check.
-const BUILD_DATE = execFileSync(
-  'git',
-  ['log', '-1', '--format=%cd', '--date=format-local:%Y-%m-%d'],
-  { cwd: ROOT, env: { ...process.env, TZ: 'UTC0' } },
-)
-  .toString()
-  .trim();
-
 // When the count was read. Without it the number reads as "stars right now",
 // which it is not — it is a snapshot taken at deploy time and frozen until the
 // next release. Supplied alongside the count so both describe one moment.
@@ -44,8 +46,6 @@ const STARS_AT = /^\d{4}-\d{2}-\d{2}$/.test(process.env.ECP_STARS_AT ?? '')
   ? process.env.ECP_STARS_AT
   : BUILD_DATE;
 
-const seo = JSON.parse(readFileSync(join(SITE, 'seo.json'), 'utf8'));
-const compare = JSON.parse(readFileSync(join(SITE, 'compare.json'), 'utf8'));
 const BASE = seo.baseUrl;
 const OG_LOCALE = {
   en: 'en_US',
@@ -368,6 +368,9 @@ function comparePage(locale, version) {
     `<link rel="alternate" hreflang="x-default" href="${BASE}compare/">`,
     '<meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large">',
     `<link rel="icon" href="${BASE}favicon.svg" type="image/svg+xml">`,
+    '<meta property="og:type" content="article">',
+    `<meta property="og:locale" content="${OG_LOCALE[locale]}">`,
+    '<meta property="og:site_name" content="Egent Code Plexus">',
     `<meta property="og:title" content="${escapeHtml(t.title)}">`,
     `<meta property="og:description" content="${escapeHtml(t.subtitle)}">`,
     `<meta property="og:url" content="${canonical}">`,
@@ -431,7 +434,13 @@ function comparePage(locale, version) {
   // reader on the home page of another locale.
   const chrome = {
     header: applyTranslations(templateElement('header'), compare.dict ?? {}),
-    footer: templateElement('footer'),
+    // The template's footer links to `compare/`, which is relative to a
+    // landing page; on the comparison page itself that resolves to
+    // /<locale>/compare/compare/ and 404s. This page already links home.
+    footer: templateElement('footer').replace(
+      /\s*<p class="footer-links">[\s\S]*?<\/p>/,
+      '',
+    ),
   };
 
   return `<!DOCTYPE html>
@@ -667,8 +676,13 @@ let stale = [];
 function emit(relPath, content) {
   const target = join(SITE, relPath);
   mkdirSync(dirname(target), { recursive: true });
+  // Compared with line endings normalised: a Windows checkout with
+  // core.autocrlf=true rewrites the committed files to CRLF while the
+  // generator still produces LF, which would report a fully current tree as
+  // entirely stale. `.gitattributes` pins LF as well; this is the belt.
+  const lf = (t) => t.replace(/\r\n/g, '\n');
   const current = existsSync(target) ? readFileSync(target, 'utf8') : null;
-  if (current !== content) {
+  if (current === null || lf(current) !== lf(content)) {
     if (CHECK) stale.push(relPath);
     else writeFileSync(target, content);
   }
@@ -707,6 +721,18 @@ for (const [locale, path] of Object.entries(seo.localePaths)) {
 // every submission has to carry `keyLocation` and can only vouch for URLs
 // under this prefix.
 if (seo.indexNowKey) emit(`${seo.indexNowKey}.txt`, seo.indexNowKey);
+// Assets the pages reference but the generator does not produce. Not compared
+// byte-for-byte — they are binaries built from scripts/site/og.svg — but their
+// absence has to fail the check, since every page's og:image points at one and
+// a missing file is a 404 on every share.
+for (const asset of ['og.png', 'favicon.svg', 'favicon.ico', 'apple-touch-icon.png']) {
+  const path = join(SITE, asset);
+  if (!existsSync(path) || readFileSync(path).length === 0) {
+    stale.push(`${asset} (missing or empty)`);
+  }
+  written.push(asset);
+}
+
 emit('sitemap.xml', sitemapXml());
 emit('robots.txt', robotsTxt());
 emit('llms.txt', llmsTxt(version, qas[seo.defaultLocale]));
