@@ -1347,3 +1347,67 @@ mod fingerprint_drift_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod session_heartbeat_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn write_meta(dir: &Path, last_touched: &str) -> PathBuf {
+        let path = dir.join("session_meta.json");
+        let meta = SessionMeta {
+            version: 1,
+            session_id: "sid".into(),
+            pid: Some(999_999_999),
+            started_at: last_touched.into(),
+            last_touched: last_touched.into(),
+            base_sha: "0".repeat(40),
+            source_worktree: "/x".into(),
+            overlay_version: 0,
+            watcher_pid: None,
+            last_drained_offset: 0,
+            agent_name: None,
+        };
+        SessionMeta::write_atomic(&path, &meta).unwrap();
+        path
+    }
+
+    fn age_file(path: &Path, secs: u64) {
+        let t = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(secs),
+        );
+        filetime::set_file_mtime(path, t).unwrap();
+    }
+
+    #[test]
+    fn heartbeat_refreshes_last_touched_once_the_interval_has_passed() {
+        let dir = tempdir().unwrap();
+        let stamp = "2020-01-01T00:00:00+00:00";
+        let path = write_meta(dir.path(), stamp);
+        age_file(&path, SESSION_HEARTBEAT_SECS + 5);
+
+        ensure_session_meta(dir.path(), Path::new("/x")).unwrap();
+
+        let after = SessionMeta::read(&path).unwrap();
+        assert_ne!(
+            after.last_touched, stamp,
+            "peers has no other evidence that this session is still active"
+        );
+        assert_eq!(after.started_at, stamp, "started_at is not a heartbeat");
+    }
+
+    #[test]
+    fn heartbeat_leaves_a_fresh_meta_untouched() {
+        let dir = tempdir().unwrap();
+        let stamp = "2020-01-01T00:00:00+00:00";
+        let path = write_meta(dir.path(), stamp);
+
+        ensure_session_meta(dir.path(), Path::new("/x")).unwrap();
+
+        assert_eq!(
+            SessionMeta::read(&path).unwrap().last_touched,
+            stamp,
+            "the query path must not pay a write per invocation"
+        );
+    }
+}
