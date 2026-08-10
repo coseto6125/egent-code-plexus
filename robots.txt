@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://coseto6125.github.io/egent-code-plexus/sitemap.xml
