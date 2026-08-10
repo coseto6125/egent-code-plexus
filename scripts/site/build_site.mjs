@@ -21,8 +21,14 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const SITE = join(ROOT, 'docs/ecp-landing');
 const CHECK = process.argv.includes('--check');
 // Freshness is a citation signal. Sourced from the newest git commit so a
-// rebuild without content changes does not claim the page is newer.
-const BUILD_DATE = execFileSync('git', ['log', '-1', '--format=%cs'], { cwd: ROOT })
+// rebuild without content changes does not claim the page is newer — pinned to
+// UTC because `%cs` renders in the local zone, which made the same commit
+// produce a different date here than on a CI runner and failed --check.
+const BUILD_DATE = execFileSync(
+  'git',
+  ['log', '-1', '--format=%cd', '--date=format-local:%Y-%m-%d'],
+  { cwd: ROOT, env: { ...process.env, TZ: 'UTC0' } },
+)
   .toString()
   .trim();
 
