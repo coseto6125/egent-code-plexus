@@ -1092,7 +1092,7 @@ const SESSION_HEARTBEAT_SECS: u64 = 60;
 /// session dir for every read-only query and hand peers a crowd of sessions
 /// with nothing dirty in them. The `mtime` throttle keeps the cost at one
 /// read+write per minute; every other invocation pays a single stat.
-fn beat_session_heartbeat(worktree_root: &Path) {
+pub(crate) fn beat_session_heartbeat(worktree_root: &Path) {
     if let Some(dir) = resolve_session_overlay_dir(worktree_root) {
         beat_meta_heartbeat(&dir.join("session_meta.json"));
     }
