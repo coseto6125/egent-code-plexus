@@ -220,3 +220,48 @@ fn duplicate_dirty_events_same_peer_symbol_render_once() {
         "one Peer block expected: {out}"
     );
 }
+
+/// A second session measured a real inbox at 92% duplicates — 40 entries, 3
+/// distinct concerns — and asked whether the 4 KB payload could be filled by
+/// repetition, starving a genuinely new peer. It cannot: duplicates are
+/// collapsed before the size ladder runs, not after.
+#[test]
+fn duplicate_flood_does_not_crowd_out_a_new_peer() {
+    let dup = |peer: &str| InboxEntry::DirtyEvent {
+        ts: "2026-08-10T18:20:36Z".into(),
+        peer_session: peer.into(),
+        peer_pid: 1,
+        peer_name: None,
+        kind: ConcernKindSer::Hard,
+        file: "lib.py".into(),
+        symbol: None,
+        reason: "Both sessions have lib.py in their overlay. ".repeat(6),
+        peer_delta: None,
+        your_overlap_range: None,
+    };
+    let mut entries: Vec<InboxEntry> = Vec::new();
+    for _ in 0..13 {
+        for peer in ["bob", "carol", "dave"] {
+            entries.push(dup(peer));
+        }
+    }
+    assert_eq!(entries.len(), 39, "the measured flood was 40 entries");
+    let mut fresh = dup("erin");
+    if let InboxEntry::DirtyEvent { file, .. } = &mut fresh {
+        *file = "other.py".into();
+    }
+    entries.push(fresh);
+
+    let (out, _) = render_payload(&entries);
+    assert!(
+        out.contains("erin"),
+        "the one new concern must survive a flood of repeats: {out}"
+    );
+    for peer in ["bob", "carol", "dave"] {
+        assert_eq!(
+            out.matches(peer).count(),
+            1,
+            "each repeated concern renders once: {out}"
+        );
+    }
+}
