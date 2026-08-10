@@ -67,8 +67,8 @@
                 Egent Code Plexus
                 <span class="hero-version">v0.9.1</span>
             </h1>
-            <p class="hero-tagline mono" data-i18n="hero.tagline">Built for agents, not IDEs, not Humans.</p>
-            <p class="hero-subtitle" data-i18n="hero.subtitle">Live-synced graph · God-mode view of code · Agent ↔ code ↔ Agent</p>
+            <p class="hero-tagline mono" data-i18n="hero.tagline">Built for agents, not IDEs.</p>
+            <p class="hero-subtitle" data-i18n="hero.subtitle">Code structure awareness and architecture radar designed for AI Agents.</p>
 
             <!-- Install Box -->
             <div class="install-box">
@@ -121,22 +121,22 @@
             <div class="bento-grid">
                 <div class="bento-card">
                     <h3 class="mono accent" data-i18n="setup.step1.title">1. Launch the AI Onboarding Wizard</h3>
-                    <p data-i18n="setup.step1.desc">Paste a single command into your AI Agent (e.g. Claude Code) to trigger an interactive wizard that detects your environment and installs ECP for you.</p>
+                    <p data-i18n="setup.step1.desc">Paste the command into your AI agent (e.g. Claude Code) to wake an interactive wizard that checks your environment and installs everything for you.</p>
                     <code class="mono code-block">/chat Fetch https://raw.githubusercontent.com/coseto6125/egent-code-plexus/main/docs/skills/ecp-onboard/SKILL.md and follow it as my onboarding wizard</code>
                 </div>
                 <div class="bento-card">
-                    <h3 class="mono accent" data-i18n="setup.step2.title">2. Build the index (optional / Auto-Index)</h3>
-                    <p data-i18n="setup.step2.desc">ECP ships with an auto-ensure mechanism that builds the graph on your first query, so manually indexing is usually unnecessary.</p>
+                    <h3 class="mono accent" data-i18n="setup.step2.title">2. Build the index (optional / auto-index)</h3>
+                    <p data-i18n="setup.step2.desc">ECP ships an auto-ensure mechanism: the graph is built automatically on your first query, so running the indexer manually is usually unnecessary.</p>
                     <code class="mono code-block">ecp admin index --repo &lt;path&gt;</code>
                 </div>
                 <div class="bento-card">
-                    <h3 class="mono accent" data-i18n="setup.step3.title">3. Multi-project group</h3>
-                    <p data-i18n="setup.step3.desc">For microservice or split frontend/backend layouts, create a group to enable cross-repo queries.</p>
+                    <h3 class="mono accent" data-i18n="setup.step3.title">3. Multi-repo groups</h3>
+                    <p data-i18n="setup.step3.desc">For microservices or split frontend/backend architectures, create a group to enable cross-repo queries.</p>
                     <code class="mono code-block">ecp admin group add &lt;group_name&gt; &lt;path&gt;</code>
                 </div>
                 <div class="bento-card">
-                    <h3 class="mono accent" data-i18n="setup.step4.title">4. Verify MCP integration</h3>
-                    <p data-i18n="setup.step4.desc">The onboarding wizard writes the MCP config into your IDE automatically. Use the CLI afterwards to confirm which tools are exposed to the agent.</p>
+                    <h3 class="mono accent" data-i18n="setup.step4.title">4. Verify the MCP integration</h3>
+                    <p data-i18n="setup.step4.desc">The onboarding wizard writes the MCP config for your IDE automatically. Afterwards, list the tools exposed to your agent from the CLI.</p>
                     <code class="mono code-block">ecp admin mcp tools</code>
                 </div>
             </div>
@@ -146,7 +146,6 @@
         <section id="highlights" class="content-section">
             <h2 class="section-heading" data-i18n="nav.highlights">Highlights</h2>
             <div class="bento-grid">
-                <!-- Card 1: BlindSpot -->
                 <div class="bento-card">
                     <div class="card-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle><line x1="3" y1="3" x2="21" y2="21"></line></svg>
@@ -154,23 +153,13 @@
                     <h3 class="mono" data-i18n="highlights.blindspot.title">BlindSpot Awareness</h3>
                     <p data-i18n="highlights.blindspot.desc">"Honest ignorance" is better than "vague guessing." Explicitly marks graph boundaries to prevent Agents from mistaking "no edge" for "no dependency", solving closed-world hallucinations.</p>
                 </div>
-                <!-- Card 2: Agent Peers -->
-                <div class="bento-card">
-                    <div class="card-icon">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
-                    </div>
-                    <h3 class="mono" data-i18n="highlights.peers.title">Agent Peers [BETA]</h3>
-                    <p data-i18n="highlights.peers.desc">Break out of single-session limits. Multiple agents share Dirty Surface state so they sidestep semantic conflicts and rework before writing any code — enabling large-scale agent parallelism.</p>
-                </div>
-                <!-- Card 3: Stateless & mmap -->
                 <div class="bento-card">
                     <div class="card-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
                     </div>
                     <h3 class="mono" data-i18n="highlights.stateless.title">Stateless & mmap</h3>
-                    <p data-i18n="highlights.stateless.desc">Discarding traditional daemon burdens. Built on Rust + rkyv, queries directly mmap the graph file completing in <150ms—perfect for high-frequency, concurrent Agent queries.</p>
+                    <p data-i18n="highlights.stateless.desc">No daemon to babysit. Built on Rust + rkyv, each query mmaps the graph and exits — 65–76 ms wall-clock measured, spawn cost included. Built for high-frequency, concurrent agent queries.</p>
                 </div>
-                <!-- Card 4: Architecture Radar -->
                 <div class="bento-card">
                     <div class="card-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
@@ -178,13 +167,41 @@
                     <h3 class="mono" data-i18n="highlights.radar.title">Architecture Radar</h3>
                     <p data-i18n="highlights.radar.desc">Upgrading from simple AST linking to high-level architecture constraints. Built-in detection for Saga patterns, EventTopics, and cross-service API contracts to expose hidden risks.</p>
                 </div>
+                <div class="bento-card">
+                    <div class="card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polyline></svg>
+                    </div>
+                    <h3 class="mono" data-i18n="strengths.tokens.title">7.5× fewer tokens than grep</h3>
+                    <p data-i18n="strengths.tokens.desc">A 3-hop caller chain from <code>ecp impact</code> costs ~111 tokens; the equivalent grep dump is ~830 — before the follow-up file reads grep still needs. Measured live on this repository.</p>
+                </div>
+                <div class="bento-card">
+                    <div class="card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="6" y1="3" x2="6" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg>
+                    </div>
+                    <h3 class="mono" data-i18n="strengths.refactor.title">Refactor-safe edge semantics</h3>
+                    <p data-i18n="strengths.refactor.desc"><code>is_test</code> / <code>is_direct</code> flags exclude test callers and expose dynamic dispatch; <code>impact --literal</code> tells file reads from writes — a distinction grep structurally cannot make.</p>
+                </div>
+                <div class="bento-card">
+                    <div class="card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="6"></circle><circle cx="12" cy="12" r="2"></circle></svg>
+                    </div>
+                    <h3 class="mono" data-i18n="strengths.dispatch.title">Intercepts at the dispatch moment</h3>
+                    <p data-i18n="strengths.dispatch.desc">A PreToolUse tripwire redirects "explore the codebase" agent dispatches into one graph query — acting at the exact moment static guidance has already leaked from the model's attention.</p>
+                </div>
+                <div class="bento-card">
+                    <div class="card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
+                    </div>
+                    <h3 class="mono" data-i18n="strengths.polyglot.title">31 languages, one traversal</h3>
+                    <p data-i18n="strengths.polyglot.desc">Service code, IaC, and SQL inside string literals resolve into one graph (<code>QueriesTable</code> edges) — the graph stays lit exactly where mixed-stack repos go dark for single-language tools.</p>
+                </div>
             </div>
         </section>
 
         <!-- MATRIX -->
         <section id="matrix" class="content-section">
             <h2 class="section-heading" data-i18n="nav.matrix">Languages</h2>
-            <span class="legend mono" data-i18n="matrix.legend">✓ supported | — planned | n/a not applicable to this language</span>
+            <span class="legend mono" data-i18n="matrix.legend">✓ supported | — planned | n/a not applicable to the language</span>
             <div class="table-container" style="overflow-x: auto; max-width: 100%;">
                 <table class="saas-table mono" style="font-size: 0.85rem; white-space: nowrap;">
                     <thead>
@@ -233,7 +250,7 @@
             <div class="accordion" style="margin-top: 2rem;">
                 <div class="acc-item">
                     <button class="acc-trigger">
-                        <span class="acc-q" data-i18n="matrix.rationale.title">Per-cell rationale (detailed analysis logic)</span>
+                        <span class="acc-q" data-i18n="matrix.rationale.title">Per-cell rationale</span>
                         <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                     </button>
                     <div class="acc-content" style="background: rgba(10,10,10,0.8);">
@@ -293,77 +310,22 @@
                         </tr>
                     </thead>
                     <tbody class="mono">
-                        <tr><td class="label" data-i18n="table.row.r1">Repo files</td><td>22,858</td><td class="dim">14,874</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r2">Graph nodes (total)</td><td>346,514</td><td class="dim">503,060</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r2b">Graph File nodes</td><td>15,728</td><td class="dim">12,189</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r3">Graph size</td><td>~65 MiB</td><td class="dim">~87 MiB</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r4">Force index peak RSS</td><td>~1.17 GiB</td><td class="dim">~1.02 GiB</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r5">Cold index</td><td>2.96s</td><td class="dim">4.57s</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r6">Incremental analyze</td><td>4.1ms</td><td class="dim">4.2ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r7">Cypher Class->Method</td><td>50.6ms</td><td class="dim">52.6ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r8">Routes</td><td>11.6ms</td><td class="dim">17.1ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r9">Inspect Class</td><td>22.8ms</td><td class="dim">35.0ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r10">Find bm25</td><td>20.8ms</td><td class="dim">34.6ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r11">Impact downstream</td><td>16.9ms</td><td class="dim">27.2ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r12">Impact baseline HEAD~1</td><td>N/A</td><td class="dim">725.9ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r1">Repo files</td><td>22,859</td><td class="dim">14,874</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r2">Graph File nodes</td><td>15,722</td><td class="dim">12,185</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r3">Graph size</td><td>~55.3 MiB</td><td class="dim">~65.1 MiB</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r4">Force index peak RSS</td><td>~1.13 GiB</td><td class="dim">~1.23 GiB</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r5">Cold index</td><td>2.49s</td><td class="dim">3.29s</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r6">Incremental analyze</td><td>4.4ms</td><td class="dim">4.4ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r7">Cypher Class->Method</td><td>29.5ms</td><td class="dim">30.3ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r8">Routes</td><td>10.7ms</td><td class="dim">14.3ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r9">Inspect Class</td><td>18.5ms</td><td class="dim">26.5ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r10">Find bm25</td><td>16.9ms</td><td class="dim">22.5ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r11">Impact downstream</td><td>15.3ms</td><td class="dim">22.2ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r12">Impact baseline HEAD~1</td><td>670.5ms</td><td class="dim">702.8ms</td></tr>
                     </tbody>
                 </table>
             </div>
             <p class="table-caption" data-i18n="table.note">※ Hardware: AMD Ryzen 9 9950X, 39.2 GiB RAM, Linux 6.6.87</p>
-
-            <!-- Table A: microsoft/vscode 3-way comparison -->
-            <h3 class="table-heading" data-i18n="table.vscode3w.heading">microsoft/vscode — 14,874 files</h3>
-            <div class="table-container">
-                <table class="saas-table">
-                    <thead>
-                        <tr>
-                            <th data-i18n="table.3way.metric">Metric</th>
-                            <th>ecp</th>
-                            <th>codegraph</th>
-                            <th>gitnexus</th>
-                        </tr>
-                    </thead>
-                    <tbody class="mono">
-                        <tr><td class="label" data-i18n="table.row.cold_index">Cold index</td><td>4.6 s</td><td>166.9 s</td><td>DNF (killed at 27 min)</td></tr>
-                        <tr><td class="label" data-i18n="table.row.peak_rss">Peak RSS</td><td>~1.0 GiB</td><td>1.7 GiB</td><td>4.6 GiB</td></tr>
-                        <tr><td class="label" data-i18n="table.row.find_query">Find / query</td><td>34.6 ms</td><td>169.5 ms</td><td>—</td></tr>
-                        <tr><td class="label" data-i18n="table.row.callers_impact">Callers / impact</td><td>27.2 ms</td><td>172.4 ms</td><td>—</td></tr>
-                        <tr><td class="label" data-i18n="table.row.inspect_ctx">Inspect / context</td><td>35.0 ms</td><td>415.9 ms</td><td>—</td></tr>
-                        <tr><td class="label" data-i18n="table.row.impact_baseline">Impact baseline (git-diff)</td><td>725.9 ms</td><td>N/A</td><td>—</td></tr>
-                        <tr><td class="label" data-i18n="table.row.graph_nodes">Graph nodes</td><td>507,257</td><td>315,498</td><td>—</td></tr>
-                        <tr><td class="label" data-i18n="table.row.graph_edges">Graph edges</td><td>916,380</td><td>986,709</td><td>—</td></tr>
-                        <tr><td class="label" data-i18n="table.row.index_size">Index size</td><td>87 MiB</td><td>671 MiB</td><td>—</td></tr>
-                        <tr><td class="label" data-i18n="table.row.files_indexed">Files indexed</td><td>14,874</td><td>10,814</td><td>—</td></tr>
-                    </tbody>
-                </table>
-            </div>
-
-            <!-- Table B: abhigyanpatwari/GitNexus 3-way comparison -->
-            <h3 class="table-heading" style="margin-top:2rem;" data-i18n="table.gitnexus3w.heading">abhigyanpatwari/GitNexus — 3,232 files (polyglot)</h3>
-            <div class="table-container">
-                <table class="saas-table">
-                    <thead>
-                        <tr>
-                            <th data-i18n="table.3way.metric">Metric</th>
-                            <th>ecp</th>
-                            <th>codegraph</th>
-                            <th>gitnexus</th>
-                        </tr>
-                    </thead>
-                    <tbody class="mono">
-                        <tr><td class="label" data-i18n="table.row.cold_index">Cold index</td><td>0.74 s</td><td>11.2 s</td><td>77.6 s</td></tr>
-                        <tr><td class="label" data-i18n="table.row.peak_rss">Peak RSS</td><td>264 MiB</td><td>501 MiB</td><td>2.5 GiB</td></tr>
-                        <tr><td class="label" data-i18n="table.row.find_query">Find / query</td><td>9.4 ms</td><td>103.5 ms</td><td>—</td></tr>
-                        <tr><td class="label" data-i18n="table.row.callers_impact">Callers / impact</td><td>9.2 ms</td><td>104.2 ms</td><td>297.6 ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.inspect_ctx">Inspect / context</td><td>9.4 ms</td><td>—</td><td>295.5 ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.graph_nodes">Graph nodes</td><td>49,122</td><td>19,604</td><td>30,223</td></tr>
-                        <tr><td class="label" data-i18n="table.row.graph_edges">Graph edges</td><td>48,271</td><td>39,155</td><td>47,218</td></tr>
-                        <tr><td class="label" data-i18n="table.row.index_size">Index size</td><td>7.7 MiB</td><td>37 MiB</td><td>306 MiB</td></tr>
-                        <tr><td class="label" data-i18n="table.row.files_indexed">Files indexed</td><td>3,232</td><td>2,968</td><td>3,232</td></tr>
-                    </tbody>
-                </table>
-            </div>
-            <p class="table-caption" data-i18n="table.3way.caption">※ ecp 0.4.2 · codegraph 0.9.4 · gitnexus 1.6.5; all tools capped at 1 MiB max-file-size where configurable (gitnexus hard-codes 512 KB); ecp = stateless CLI, every latency includes full process startup; ecp medians over 5–7 runs.</p>
         </section>
 
         <!-- INTERVIEW -->
@@ -500,7 +462,7 @@
                 <span class="logo-icon small"></span>
                 <span>Egent Code Plexus</span>
             </div>
-            <p class="footer-copy" data-i18n="footer.text">&copy; 2026 Egent Code Plexus Project · Developer <a href="https://github.com/coseto6125" target="_blank" rel="noopener noreferrer">@coseto6125</a> (E-NoR) · <a href="mailto:cosetoenor@gmail.com">cosetoenor@gmail.com</a></p>
+            <p class="footer-copy" data-i18n="footer.text">&copy; 2026 Egent Code Plexus Project. Segments extracted from the Native Design Deep Dive.</p>
         </div>
     </footer>
 

@@ -285,7 +285,6 @@ body {
 .saas-table td.label { color: var(--text-primary); }
 .saas-table td.dim { color: var(--text-secondary); }
 .table-caption { text-align: center; color: var(--text-secondary); font-size: 0.85rem; }
-.table-heading { font-family: var(--font-mono); font-size: 0.95rem; font-weight: 500; color: var(--text-primary); max-width: 900px; margin: 2rem auto 0.75rem; padding: 0 0.25rem; }
 
 /* Vision */
 .vision-box { max-width: 800px; margin: 0 auto; text-align: center; padding: 2rem 0; }
@@ -301,9 +300,7 @@ body {
 .footer-inner { display: flex; flex-direction: column; align-items: center; gap: 1rem; }
 .footer-brand { display: flex; align-items: center; gap: 0.5rem; font-weight: 600; font-size: 1.1rem; }
 .logo-icon.small { width: 16px; height: 16px; border-radius: 3px; }
-.footer-copy { color: var(--text-secondary); font-size: 0.85rem; text-align: center; }
-.footer-copy a { color: var(--text-primary); text-decoration: none; border-bottom: 1px dashed var(--border-hover); transition: color 0.15s ease, border-color 0.15s ease; }
-.footer-copy a:hover { color: var(--accent-color); border-bottom-color: var(--accent-color); }
+.footer-copy { color: var(--text-secondary); font-size: 0.85rem; }
 
 /* Toast */
 .toast {

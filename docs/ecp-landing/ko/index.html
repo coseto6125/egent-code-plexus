@@ -67,8 +67,8 @@
                 Egent Code Plexus
                 <span class="hero-version">v0.9.1</span>
             </h1>
-            <p class="hero-tagline mono" data-i18n="hero.tagline">Built for agents, not IDEs, not Humans.</p>
-            <p class="hero-subtitle" data-i18n="hero.subtitle">실시간 동기화 그래프 · 코드를 위에서 한눈에 · Agent ↔ code ↔ Agent</p>
+            <p class="hero-tagline mono" data-i18n="hero.tagline">Built for agents, not IDEs.</p>
+            <p class="hero-subtitle" data-i18n="hero.subtitle">AI 에이전트를 위해 특별히 설계된 코드 구조 인식 및 아키텍처 레이더</p>
 
             <!-- Install Box -->
             <div class="install-box">
@@ -120,23 +120,23 @@
             <h2 class="section-heading" data-i18n="nav.setup">빠른 시작</h2>
             <div class="bento-grid">
                 <div class="bento-card">
-                    <h3 class="mono accent" data-i18n="setup.step1.title">1. AI Onboarding Wizard 시작</h3>
-                    <p data-i18n="setup.step1.desc">AI Agent (예: Claude Code)에 전용 명령을 붙여넣어 대화형 마법사를 실행하면, 환경 감지와 자동 설치가 진행됩니다.</p>
+                    <h3 class="mono accent" data-i18n="setup.step1.title">1. AI 온보딩 마법사 실행</h3>
+                    <p data-i18n="setup.step1.desc">AI 에이전트(예: Claude Code)에 명령을 붙여넣으면 대화형 마법사가 환경 점검과 자동 설치를 수행합니다.</p>
                     <code class="mono code-block">/chat Fetch https://raw.githubusercontent.com/coseto6125/egent-code-plexus/main/docs/skills/ecp-onboard/SKILL.md and follow it as my onboarding wizard</code>
                 </div>
                 <div class="bento-card">
-                    <h3 class="mono accent" data-i18n="setup.step2.title">2. 인덱스 빌드 (선택 / Auto-Index)</h3>
-                    <p data-i18n="setup.step2.desc">ECP는 auto-ensure 메커니즘을 내장하고 있어 첫 쿼리 시 자동으로 그래프를 빌드하므로, 수동 인덱싱은 보통 필요하지 않습니다.</p>
+                    <h3 class="mono accent" data-i18n="setup.step2.title">2. 인덱스 생성(선택 / 자동)</h3>
+                    <p data-i18n="setup.step2.desc">ECP는 auto-ensure 메커니즘을 내장해 첫 쿼리 시 그래프를 자동 생성하므로 수동 인덱싱은 대개 불필요합니다.</p>
                     <code class="mono code-block">ecp admin index --repo &lt;path&gt;</code>
                 </div>
                 <div class="bento-card">
-                    <h3 class="mono accent" data-i18n="setup.step3.title">3. 멀티 프로젝트 그룹</h3>
-                    <p data-i18n="setup.step3.desc">마이크로서비스나 프론트엔드/백엔드 분리 아키텍처라면, 그룹을 만들어 저장소 간 쿼리를 활성화할 수 있습니다.</p>
+                    <h3 class="mono accent" data-i18n="setup.step3.title">3. 멀티 레포 그룹</h3>
+                    <p data-i18n="setup.step3.desc">마이크로서비스나 프런트/백엔드 분리 구조라면 그룹을 만들어 레포 간 쿼리를 활성화하세요.</p>
                     <code class="mono code-block">ecp admin group add &lt;group_name&gt; &lt;path&gt;</code>
                 </div>
                 <div class="bento-card">
                     <h3 class="mono accent" data-i18n="setup.step4.title">4. MCP 통합 확인</h3>
-                    <p data-i18n="setup.step4.desc">Onboarding 마법사가 IDE에 MCP 설정을 자동으로 기록합니다. 완료 후 CLI로 Agent에 노출된 도구 목록을 확인할 수 있습니다.</p>
+                    <p data-i18n="setup.step4.desc">온보딩 마법사가 IDE의 MCP 설정을 자동으로 작성합니다. 완료 후 CLI에서 에이전트에 노출된 도구 목록을 확인하세요.</p>
                     <code class="mono code-block">ecp admin mcp tools</code>
                 </div>
             </div>
@@ -146,37 +146,54 @@
         <section id="highlights" class="content-section">
             <h2 class="section-heading" data-i18n="nav.highlights">하이라이트</h2>
             <div class="bento-grid">
-                <!-- Card 1: BlindSpot -->
                 <div class="bento-card">
                     <div class="card-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle><line x1="3" y1="3" x2="21" y2="21"></line></svg>
                     </div>
-                    <h3 class="mono" data-i18n="highlights.blindspot.title">BlindSpot Awareness</h3>
+                    <h3 class="mono" data-i18n="highlights.blindspot.title">BlindSpot 인식</h3>
                     <p data-i18n="highlights.blindspot.desc">"솔직한 모름"이 "모호한 추측"보다 중요합니다. 그래프 경계를 명시하여 에이전트가 의존성이 없다고 착각하는 것을 방지합니다.</p>
                 </div>
-                <!-- Card 2: Agent Peers -->
-                <div class="bento-card">
-                    <div class="card-icon">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
-                    </div>
-                    <h3 class="mono" data-i18n="highlights.peers.title">Agent Peers [BETA]</h3>
-                    <p data-i18n="highlights.peers.desc">단일 세션의 한계를 돌파합니다. 여러 Agent가 Dirty Surface 상태를 공유함으로써, 코드를 작성하기 전에 의미적 충돌과 중복 작업을 피하고 대규모 Agent 병렬 개발을 실현합니다.</p>
-                </div>
-                <!-- Card 3: Stateless & mmap -->
                 <div class="bento-card">
                     <div class="card-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
                     </div>
-                    <h3 class="mono" data-i18n="highlights.stateless.title">Stateless & mmap</h3>
-                    <p data-i18n="highlights.stateless.desc">서버 데몬의 부담을 제거. Rust + rkyv 기반으로 직접 mmap하여 150ms 이내에 분석을 완료, 에이전트 쿼리에 최적화되었습니다.</p>
+                    <h3 class="mono" data-i18n="highlights.stateless.title">상태 비저장 & mmap</h3>
+                    <p data-i18n="highlights.stateless.desc">상주 데몬의 부담 제거. Rust + rkyv 기반으로 각 쿼리는 그래프를 mmap 후 종료 — 실측 65–76 ms(프로세스 기동 비용 포함). 고빈도 병렬 에이전트 쿼리를 위한 설계.</p>
                 </div>
-                <!-- Card 4: Architecture Radar -->
                 <div class="bento-card">
                     <div class="card-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
                     </div>
-                    <h3 class="mono" data-i18n="highlights.radar.title">Architecture Radar</h3>
+                    <h3 class="mono" data-i18n="highlights.radar.title">아키텍처 레이더</h3>
                     <p data-i18n="highlights.radar.desc">단순한 AST를 넘어 고급 아키텍처 제약 조건 인식. Saga, EventTopic, API 계약 패턴을 감지하여 위험을 조기에 드러냅니다.</p>
+                </div>
+                <div class="bento-card">
+                    <div class="card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polyline></svg>
+                    </div>
+                    <h3 class="mono" data-i18n="strengths.tokens.title">grep보다 7.5× 적은 토큰</h3>
+                    <p data-i18n="strengths.tokens.desc"><code>ecp impact</code>의 3홉 호출 체인은 약 111 토큰. 동등한 grep 출력은 약 830 토큰이며 이후 파일 읽기는 별도입니다. 본 저장소에서 실측.</p>
+                </div>
+                <div class="bento-card">
+                    <div class="card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="6" y1="3" x2="6" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg>
+                    </div>
+                    <h3 class="mono" data-i18n="strengths.refactor.title">리팩터링 안전한 엣지 시맨틱</h3>
+                    <p data-i18n="strengths.refactor.desc"><code>is_test</code> / <code>is_direct</code> 플래그로 테스트 호출자를 제외하고 동적 디스패치를 드러냅니다. <code>impact --literal</code>은 파일 읽기와 쓰기를 구분 — grep은 구조적으로 불가능.</p>
+                </div>
+                <div class="bento-card">
+                    <div class="card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="6"></circle><circle cx="12" cy="12" r="2"></circle></svg>
+                    </div>
+                    <h3 class="mono" data-i18n="strengths.dispatch.title">디스패치 순간에 개입</h3>
+                    <p data-i18n="strengths.dispatch.desc">PreToolUse 트립와이어가 '코드 탐색' 에이전트 디스패치를 그래프 쿼리 한 번으로 전환 — 정적 가이드가 모델의 주의에서 사라진 바로 그 순간에 작동.</p>
+                </div>
+                <div class="bento-card">
+                    <div class="card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
+                    </div>
+                    <h3 class="mono" data-i18n="strengths.polyglot.title">31개 언어, 단일 순회</h3>
+                    <p data-i18n="strengths.polyglot.desc">서비스 코드, IaC, 문자열 안의 SQL까지 하나의 그래프로 해석(<code>QueriesTable</code> 엣지). 단일 언어 도구가 어두워지는 혼합 스택에서도 그래프는 밝게 유지됩니다.</p>
                 </div>
             </div>
         </section>
@@ -184,7 +201,7 @@
         <!-- MATRIX -->
         <section id="matrix" class="content-section">
             <h2 class="section-heading" data-i18n="nav.matrix">지원 언어</h2>
-            <span class="legend mono" data-i18n="matrix.legend">✓ 지원 | — 계획 중 | n/a 해당 언어에 없는 기능</span>
+            <span class="legend mono" data-i18n="matrix.legend">✓ 지원 | — 계획됨 | n/a 해당 언어에 없음</span>
             <div class="table-container" style="overflow-x: auto; max-width: 100%;">
                 <table class="saas-table mono" style="font-size: 0.85rem; white-space: nowrap;">
                     <thead>
@@ -233,7 +250,7 @@
             <div class="accordion" style="margin-top: 2rem;">
                 <div class="acc-item">
                     <button class="acc-trigger">
-                        <span class="acc-q" data-i18n="matrix.rationale.title">Per-cell rationale (상세 분석 로직)</span>
+                        <span class="acc-q" data-i18n="matrix.rationale.title">셀별 판정 근거</span>
                         <svg class="acc-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                     </button>
                     <div class="acc-content" style="background: rgba(10,10,10,0.8);">
@@ -293,77 +310,22 @@
                         </tr>
                     </thead>
                     <tbody class="mono">
-                        <tr><td class="label" data-i18n="table.row.r1">리포지토리 실제 파일</td><td>22,858</td><td class="dim">14,874</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r2">Graph 노드 (total)</td><td>346,514</td><td class="dim">503,060</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r2b">Graph File 노드</td><td>15,728</td><td class="dim">12,189</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r3">Graph 크기</td><td>~65 MiB</td><td class="dim">~87 MiB</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r4">Force index 피크 RSS</td><td>~1.17 GiB</td><td class="dim">~1.02 GiB</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r5">Cold index</td><td>2.96s</td><td class="dim">4.57s</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r6">Incremental analyze</td><td>4.1ms</td><td class="dim">4.2ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r7">Cypher Class->Method</td><td>50.6ms</td><td class="dim">52.6ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r8">Routes</td><td>11.6ms</td><td class="dim">17.1ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r9">Inspect Class</td><td>22.8ms</td><td class="dim">35.0ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r10">Find bm25</td><td>20.8ms</td><td class="dim">34.6ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r11">Impact downstream</td><td>16.9ms</td><td class="dim">27.2ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r12">Impact baseline HEAD~1</td><td>N/A</td><td class="dim">725.9ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r1">리포지토리 실제 파일</td><td>22,859</td><td class="dim">14,874</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r2">Graph File 노드</td><td>15,722</td><td class="dim">12,185</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r3">Graph 크기</td><td>~55.3 MiB</td><td class="dim">~65.1 MiB</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r4">Force index 피크 RSS</td><td>~1.13 GiB</td><td class="dim">~1.23 GiB</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r5">Cold index</td><td>2.49s</td><td class="dim">3.29s</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r6">Incremental analyze</td><td>4.4ms</td><td class="dim">4.4ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r7">Cypher Class->Method</td><td>29.5ms</td><td class="dim">30.3ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r8">Routes</td><td>10.7ms</td><td class="dim">14.3ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r9">Inspect Class</td><td>18.5ms</td><td class="dim">26.5ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r10">Find bm25</td><td>16.9ms</td><td class="dim">22.5ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r11">Impact downstream</td><td>15.3ms</td><td class="dim">22.2ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r12">Impact baseline HEAD~1</td><td>670.5ms</td><td class="dim">702.8ms</td></tr>
                     </tbody>
                 </table>
             </div>
             <p class="table-caption" data-i18n="table.note">※ 하드웨어: AMD Ryzen 9 9950X, 39.2 GiB RAM, Linux 6.6.87</p>
-
-            <!-- Table A: microsoft/vscode 3-way comparison -->
-            <h3 class="table-heading" data-i18n="table.vscode3w.heading">microsoft/vscode — 14,874 개 파일</h3>
-            <div class="table-container">
-                <table class="saas-table">
-                    <thead>
-                        <tr>
-                            <th data-i18n="table.3way.metric">지표</th>
-                            <th>ecp</th>
-                            <th>codegraph</th>
-                            <th>gitnexus</th>
-                        </tr>
-                    </thead>
-                    <tbody class="mono">
-                        <tr><td class="label" data-i18n="table.row.cold_index">Cold index</td><td>4.6 s</td><td>166.9 s</td><td>DNF (killed at 27 min)</td></tr>
-                        <tr><td class="label" data-i18n="table.row.peak_rss">피크 RSS</td><td>~1.0 GiB</td><td>1.7 GiB</td><td>4.6 GiB</td></tr>
-                        <tr><td class="label" data-i18n="table.row.find_query">Find / query</td><td>34.6 ms</td><td>169.5 ms</td><td>—</td></tr>
-                        <tr><td class="label" data-i18n="table.row.callers_impact">Callers / impact</td><td>27.2 ms</td><td>172.4 ms</td><td>—</td></tr>
-                        <tr><td class="label" data-i18n="table.row.inspect_ctx">Inspect / context</td><td>35.0 ms</td><td>415.9 ms</td><td>—</td></tr>
-                        <tr><td class="label" data-i18n="table.row.impact_baseline">Impact baseline (git-diff)</td><td>725.9 ms</td><td>N/A</td><td>—</td></tr>
-                        <tr><td class="label" data-i18n="table.row.graph_nodes">Graph 노드</td><td>507,257</td><td>315,498</td><td>—</td></tr>
-                        <tr><td class="label" data-i18n="table.row.graph_edges">Graph 엣지</td><td>916,380</td><td>986,709</td><td>—</td></tr>
-                        <tr><td class="label" data-i18n="table.row.index_size">인덱스 크기</td><td>87 MiB</td><td>671 MiB</td><td>—</td></tr>
-                        <tr><td class="label" data-i18n="table.row.files_indexed">인덱싱된 파일</td><td>14,874</td><td>10,814</td><td>—</td></tr>
-                    </tbody>
-                </table>
-            </div>
-
-            <!-- Table B: abhigyanpatwari/GitNexus 3-way comparison -->
-            <h3 class="table-heading" style="margin-top:2rem;" data-i18n="table.gitnexus3w.heading">abhigyanpatwari/GitNexus — 3,232 개 파일 (다중 언어)</h3>
-            <div class="table-container">
-                <table class="saas-table">
-                    <thead>
-                        <tr>
-                            <th data-i18n="table.3way.metric">지표</th>
-                            <th>ecp</th>
-                            <th>codegraph</th>
-                            <th>gitnexus</th>
-                        </tr>
-                    </thead>
-                    <tbody class="mono">
-                        <tr><td class="label" data-i18n="table.row.cold_index">Cold index</td><td>0.74 s</td><td>11.2 s</td><td>77.6 s</td></tr>
-                        <tr><td class="label" data-i18n="table.row.peak_rss">피크 RSS</td><td>264 MiB</td><td>501 MiB</td><td>2.5 GiB</td></tr>
-                        <tr><td class="label" data-i18n="table.row.find_query">Find / query</td><td>9.4 ms</td><td>103.5 ms</td><td>—</td></tr>
-                        <tr><td class="label" data-i18n="table.row.callers_impact">Callers / impact</td><td>9.2 ms</td><td>104.2 ms</td><td>297.6 ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.inspect_ctx">Inspect / context</td><td>9.4 ms</td><td>—</td><td>295.5 ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.graph_nodes">Graph 노드</td><td>49,122</td><td>19,604</td><td>30,223</td></tr>
-                        <tr><td class="label" data-i18n="table.row.graph_edges">Graph 엣지</td><td>48,271</td><td>39,155</td><td>47,218</td></tr>
-                        <tr><td class="label" data-i18n="table.row.index_size">인덱스 크기</td><td>7.7 MiB</td><td>37 MiB</td><td>306 MiB</td></tr>
-                        <tr><td class="label" data-i18n="table.row.files_indexed">인덱싱된 파일</td><td>3,232</td><td>2,968</td><td>3,232</td></tr>
-                    </tbody>
-                </table>
-            </div>
-            <p class="table-caption" data-i18n="table.3way.caption">※ ecp 0.4.2 · codegraph 0.9.4 · gitnexus 1.6.5; 설정 가능한 경우 모든 도구의 max-file-size를 1 MiB로 제한 (gitnexus는 512 KB 고정); ecp = 무상태 CLI, 모든 지연 시간에 전체 프로세스 시작 포함; ecp는 5–7회 실행의 중앙값.</p>
         </section>
 
         <!-- INTERVIEW -->
@@ -500,7 +462,7 @@
                 <span class="logo-icon small"></span>
                 <span>Egent Code Plexus</span>
             </div>
-            <p class="footer-copy" data-i18n="footer.text">&copy; 2026 Egent Code Plexus 프로젝트 · 개발자 <a href="https://github.com/coseto6125" target="_blank" rel="noopener noreferrer">@coseto6125</a> (E-NoR) · <a href="mailto:cosetoenor@gmail.com">cosetoenor@gmail.com</a></p>
+            <p class="footer-copy" data-i18n="footer.text">&copy; 2026 Egent Code Plexus 프로젝트. Native Design Deep Dive에서 발췌.</p>
         </div>
     </footer>
 
