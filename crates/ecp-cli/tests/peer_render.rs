@@ -9,14 +9,9 @@ fn dirty_hard() -> InboxEntry {
         peer_pid: 1234,
         peer_name: None,
         kind: ConcernKindSer::Hard,
-        symbol: SymbolRef {
-            name: "verify_token".into(),
-            kind: SymbolKind::Function,
-            file: "src/auth.rs".into(),
-            line_start: 42,
-            line_end: 58,
-        },
-        reason: "Both sessions modified verify_token".into(),
+        file: "src/auth.rs".into(),
+        symbol: None,
+        reason: "Both sessions have src/auth.rs in their overlay".into(),
         peer_delta: Some("-old\n+new".into()),
         your_overlap_range: Some((45, 50)),
     }
@@ -70,6 +65,7 @@ fn hard_payload_prefers_agent_name_keeps_session_id() {
             reason,
             peer_delta,
             your_overlap_range,
+            file,
             ..
         } => InboxEntry::DirtyEvent {
             ts,
@@ -77,6 +73,7 @@ fn hard_payload_prefers_agent_name_keeps_session_id() {
             peer_pid,
             peer_name: Some("rust-parser".into()),
             kind,
+            file,
             symbol,
             reason,
             peer_delta,
@@ -140,13 +137,14 @@ fn enforces_4kb_cap_with_hard_priority() {
             peer_pid: 1,
             peer_name: None,
             kind: ConcernKindSer::Soft,
-            symbol: SymbolRef {
+            file: "src/x.rs".into(),
+            symbol: Some(SymbolRef {
                 name: format!("sym_{i}"),
                 kind: SymbolKind::Function,
                 file: "src/x.rs".into(),
                 line_start: 1,
                 line_end: 2,
-            },
+            }),
             reason: "neighbor".into(),
             peer_delta: None,
             your_overlap_range: None,

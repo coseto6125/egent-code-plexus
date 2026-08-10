@@ -18,7 +18,14 @@ pub enum InboxEntry {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         peer_name: Option<String>,
         kind: ConcernKindSer,
-        symbol: SymbolRef,
+        /// The peer's dirty file. Defaulted for entries written before the
+        /// field existed, which a mid-upgrade inbox can still hold.
+        #[serde(default)]
+        file: String,
+        /// Present only when the concern rests on a declaration — SOFT. HARD
+        /// knows the file and nothing finer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        symbol: Option<SymbolRef>,
         reason: String,
         peer_delta: Option<String>,
         your_overlap_range: Option<(u32, u32)>,

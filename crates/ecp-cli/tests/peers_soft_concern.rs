@@ -46,8 +46,8 @@ fn index_repo(repo: &Path, home: &Path) {
 fn is_soft_target_fn(e: &InboxEntry) -> bool {
     matches!(
         e,
-        InboxEntry::DirtyEvent { kind: ConcernKindSer::Soft, symbol, .. }
-            if symbol.name == "target_fn"
+        InboxEntry::DirtyEvent { kind: ConcernKindSer::Soft, symbol: Some(s), .. }
+            if s.name == "target_fn"
     )
 }
 
