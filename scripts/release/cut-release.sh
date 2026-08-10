@@ -198,6 +198,15 @@ prepend_changelog "$(changelog_section "$NEW" "$SINCE")"
 # keep Cargo.lock's workspace entries in step with the new version
 cargo update --workspace --offline >/dev/null 2>&1 || true
 
+# The landing pages carry the version, so the bump has to regenerate them or
+# CI's site --check fails on the Release PR itself.
+if command -v node >/dev/null 2>&1; then
+  node scripts/site/build_site.mjs >/dev/null
+  git add docs/ecp-landing
+else
+  echo "warning: node not found — landing pages left at ${CUR}; run scripts/site/build_site.mjs" >&2
+fi
+
 git add "$CARGO_TOML" "$CHANGELOG" Cargo.lock 2>/dev/null || git add "$CARGO_TOML" "$CHANGELOG"
 git commit -m "release: ${CUR} -> ${NEW} — bump workspace + internal dep versions"
 git push -u origin "$BRANCH"
