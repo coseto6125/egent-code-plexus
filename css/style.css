@@ -358,3 +358,15 @@ body {
 }
 .hero-answer strong { color: var(--text-primary); }
 .hero-answer em { color: var(--accent-color); font-style: normal; }
+
+/* Comparison page. Reuses the landing tables; only the parts that page does
+   not have are defined here. */
+.compare-main { padding: 7rem 2rem 4rem; }
+.compare-main h1 { font-size: 2.4rem; font-weight: 800; margin-bottom: 0.5rem; }
+.compare-main h3 { margin: 2.5rem 0 0.25rem; }
+.compare-shape { color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 1rem; }
+.compare-stack { font-size: 0.72rem; color: var(--text-secondary); font-weight: 400; }
+.compare-best { color: var(--accent-color); font-weight: 600; }
+.compare-method { color: var(--text-secondary); font-size: 0.92rem; line-height: 1.9; margin: 0 0 1rem 1.2rem; }
+.compare-method strong { color: var(--text-primary); }
+.logo-link { display: flex; align-items: center; gap: 0.6rem; text-decoration: none; color: inherit; }
