@@ -571,7 +571,11 @@ jobs:
       - name: Upgrade npm for trusted publishing (OIDC)
         # Trusted publishing (token-free OIDC) needs npm >= 11.5.1; Node 22 ships
         # npm 10. Without this, publish falls back to NODE_AUTH_TOKEN.
-        run: npm install -g npm@latest
+        #
+        # Pinned rather than `@latest`: a release should be publishable by the
+        # same tooling that published the last one. This is the version
+        # `@latest` resolved to when v0.9.1 went out. Bump deliberately.
+        run: npm install -g npm@12.0.2
 
       - name: Download release artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
