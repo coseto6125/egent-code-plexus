@@ -5,15 +5,28 @@ use chrono::{DateTime, Utc};
 use std::fs;
 use std::path::Path;
 
-/// How long a session stays visible after its last `ecp` invocation.
+/// How long a session stays visible after its last sign of activity.
 ///
 /// `session_meta.pid` is the pid of the one-shot `ecp` process that wrote the
 /// file — it dies before any peer can probe it, so it proves nothing about the
 /// agent that owns the session. The heartbeat in `last_touched` is the only
 /// evidence a stateless CLI leaves behind, and this window is what turns it
-/// into a liveness answer. Longer than the heartbeat interval by two orders of
-/// magnitude so an agent that pauses to think does not blink out of existence.
-pub const SESSION_LIVE_TTL_MINS: i64 = 30;
+/// into a liveness answer.
+///
+/// Deliberately generous, because the two failure directions do not cost the
+/// same. Too short and a working agent is judged dead: its targets drop out of
+/// `peers plan`, the answer comes back `overlaps: []`, and two agents edit the
+/// same symbol believing they are alone — the feature failing silently at the
+/// one moment it exists for. Too long and a departed agent stays listed, which
+/// costs one extra warning about a file whose overlay entry is still on disk
+/// and therefore still genuinely differs from the published graph.
+///
+/// Two hours covers the case that actually goes quiet: a single long tool call
+/// (a 40-minute test run, a background build) beats once on dispatch and then
+/// emits nothing while the worktree stays dirty. `admin gc` still archives a
+/// session after `SESSION_IDLE_HOURS`, so this window bounds visibility, not
+/// disk.
+pub const SESSION_LIVE_TTL_MINS: i64 = 120;
 
 #[derive(Debug, Clone)]
 pub struct PeerSession {
