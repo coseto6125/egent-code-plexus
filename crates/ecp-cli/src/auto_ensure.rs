@@ -483,6 +483,7 @@ pub fn ensure_fresh(
     graph_path: &Path,
     worktree_root: &Path,
 ) -> Result<EnsureFreshOutcome, String> {
+    beat_session_heartbeat(worktree_root);
     let state =
         ensure_index(graph_path, worktree_root).map_err(|e| format!("ensure_index probe: {e}"))?;
     // `ExactSha` carries the commit to build; `NearCurrent` builds HEAD.
@@ -1072,6 +1073,46 @@ fn apply_l1_overlay_updates(
     Ok(())
 }
 
+/// Smallest gap between two `last_touched` rewrites. Two orders of magnitude
+/// under `SESSION_LIVE_TTL_MINS`, so a session stays continuously live while
+/// an agent works and the query path pays one extra write per minute at most.
+const SESSION_HEARTBEAT_SECS: u64 = 60;
+
+/// Record that this session is still being worked in.
+///
+/// The pid in `session_meta.json` belongs to the process writing it, which
+/// exits in milliseconds, so `last_touched` is the only evidence a peer can
+/// read to tell a working agent from an abandoned overlay
+/// (FU-2026-06-10-cc120f78889c). Every query beats, not just the ones that
+/// re-parse a file: an agent that edits and then spends half an hour reading
+/// still holds those files dirty, and must not vanish from `peers status`
+/// while it does.
+///
+/// A session that was never enrolled stays un-enrolled — beating would mint a
+/// session dir for every read-only query and hand peers a crowd of sessions
+/// with nothing dirty in them. The `mtime` throttle keeps the cost at one
+/// read+write per minute; every other invocation pays a single stat.
+pub(crate) fn beat_session_heartbeat(worktree_root: &Path) {
+    if let Some(dir) = resolve_session_overlay_dir(worktree_root) {
+        beat_meta_heartbeat(&dir.join("session_meta.json"));
+    }
+}
+
+fn beat_meta_heartbeat(meta_path: &Path) {
+    let fresh = fs::metadata(meta_path)
+        .and_then(|s| s.modified())
+        .ok()
+        .and_then(|m| m.elapsed().ok())
+        .is_some_and(|age| age.as_secs() < SESSION_HEARTBEAT_SECS);
+    if fresh {
+        return;
+    }
+    if let Ok(mut meta) = SessionMeta::read(meta_path) {
+        meta.last_touched = chrono::Utc::now().to_rfc3339();
+        let _ = SessionMeta::write_atomic(meta_path, &meta);
+    }
+}
+
 fn ensure_session_meta(session_dir: &Path, worktree: &Path) -> io::Result<()> {
     let meta_path = session_dir.join("session_meta.json");
     if meta_path.exists() {
@@ -1324,6 +1365,83 @@ mod fingerprint_drift_tests {
         assert!(
             fingerprint_drifted(&graph),
             "drift must be detected from meta.json when the sidecar is absent"
+        );
+    }
+}
+
+#[cfg(test)]
+mod session_heartbeat_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn write_meta(dir: &Path, last_touched: &str) -> PathBuf {
+        let path = dir.join("session_meta.json");
+        let meta = SessionMeta {
+            version: 1,
+            session_id: "sid".into(),
+            pid: Some(999_999_999),
+            started_at: last_touched.into(),
+            last_touched: last_touched.into(),
+            base_sha: "0".repeat(40),
+            source_worktree: "/x".into(),
+            overlay_version: 0,
+            watcher_pid: None,
+            last_drained_offset: 0,
+            agent_name: None,
+        };
+        SessionMeta::write_atomic(&path, &meta).unwrap();
+        path
+    }
+
+    fn age_file(path: &Path, secs: u64) {
+        let t = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(secs),
+        );
+        filetime::set_file_mtime(path, t).unwrap();
+    }
+
+    #[test]
+    fn heartbeat_refreshes_last_touched_once_the_interval_has_passed() {
+        let dir = tempdir().unwrap();
+        let stamp = "2020-01-01T00:00:00+00:00";
+        let path = write_meta(dir.path(), stamp);
+        age_file(&path, SESSION_HEARTBEAT_SECS + 5);
+
+        beat_meta_heartbeat(&path);
+
+        let after = SessionMeta::read(&path).unwrap();
+        assert_ne!(
+            after.last_touched, stamp,
+            "peers has no other evidence that this session is still active"
+        );
+        assert_eq!(after.started_at, stamp, "started_at is not a heartbeat");
+    }
+
+    /// A read-only query must beat too: an agent that edited an hour ago and
+    /// has been reading since still holds those files dirty.
+    #[test]
+    fn heartbeat_does_not_enrol_a_session_that_never_existed() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("session_meta.json");
+        beat_meta_heartbeat(&path);
+        assert!(
+            !path.exists(),
+            "beating must never mint a session dir for a query-only agent"
+        );
+    }
+
+    #[test]
+    fn heartbeat_leaves_a_fresh_meta_untouched() {
+        let dir = tempdir().unwrap();
+        let stamp = "2020-01-01T00:00:00+00:00";
+        let path = write_meta(dir.path(), stamp);
+
+        beat_meta_heartbeat(&path);
+
+        assert_eq!(
+            SessionMeta::read(&path).unwrap().last_touched,
+            stamp,
+            "the query path must not pay a write per invocation"
         );
     }
 }

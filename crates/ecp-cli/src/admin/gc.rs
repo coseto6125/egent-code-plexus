@@ -201,33 +201,17 @@ pub fn sweep_sessions(repo_root: &Path) -> io::Result<SweepStats> {
             continue;
         };
 
-        let mut should_mark = false;
-
-        #[cfg(unix)]
-        {
-            if let Some(pid) = sm.pid {
-                // SAFETY: kill(pid, 0) is a safe signal-zero probe; returns 0 if pid
-                // is alive, -1 with errno=ESRCH if not. No state changes.
-                unsafe {
-                    if libc::kill(pid as i32, 0) != 0 {
-                        let e = std::io::Error::last_os_error();
-                        if e.raw_os_error() == Some(libc::ESRCH) {
-                            should_mark = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        if !should_mark {
-            if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&sm.last_touched) {
-                let age =
-                    chrono::Utc::now().signed_duration_since(parsed.with_timezone(&chrono::Utc));
-                if age.num_hours() > SESSION_IDLE_HOURS {
-                    should_mark = true;
-                }
-            }
-        }
+        // Idle age is the whole test. Probing `sm.pid` used to short-circuit
+        // this, but that pid is the one-shot `ecp` process that wrote the
+        // meta: it is always dead, so every session was marked on the first
+        // sweep after enrolment (FU-2026-06-10-cc120f78889c). A live watcher
+        // or a live agent keeps `last_touched` moving instead.
+        let should_mark = chrono::DateTime::parse_from_rfc3339(&sm.last_touched).is_ok_and(|t| {
+            chrono::Utc::now()
+                .signed_duration_since(t.with_timezone(&chrono::Utc))
+                .num_hours()
+                > SESSION_IDLE_HOURS
+        });
 
         if should_mark {
             let ts = chrono::Utc::now().timestamp();

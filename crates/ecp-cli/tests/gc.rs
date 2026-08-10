@@ -207,7 +207,7 @@ fn sweep_sessions_marks_idle_sessions_dead() {
     let sm = SessionMeta {
         version: 1,
         session_id: "old-sid".into(),
-        pid: None, // skip pid check on Unix
+        pid: None,
         started_at: old.to_rfc3339(),
         last_touched: old.to_rfc3339(),
         base_sha: "0".repeat(40),
@@ -374,4 +374,34 @@ fn sweep_retired_repos_removes_dead() {
     assert!(!home_ecp
         .join("other__def456.dead.222.1.1700000000001")
         .exists());
+}
+
+/// The pid in session_meta belongs to the one-shot `ecp` process that enrolled
+/// the session, so it is dead within milliseconds. Sweeping on that probe
+/// marked every live session dead on the first pass (FU-2026-06-10-cc120f78889c).
+#[test]
+fn sweep_sessions_keeps_recently_touched_session_with_dead_pid() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_root = tmp.path();
+    let sessions = repo_root.join("sessions").join("live-sid");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    let sm = SessionMeta {
+        version: 1,
+        session_id: "live-sid".into(),
+        pid: Some(999_999_999),
+        started_at: now.clone(),
+        last_touched: now,
+        base_sha: "0".repeat(40),
+        source_worktree: "/x".into(),
+        overlay_version: 0,
+        watcher_pid: None,
+        last_drained_offset: 0,
+        agent_name: None,
+    };
+    SessionMeta::write_atomic(&sessions.join("session_meta.json"), &sm).unwrap();
+
+    let stats = sweep_sessions(repo_root).unwrap();
+    assert_eq!(stats.marked, 0, "an active session must survive the sweep");
+    assert!(sessions.exists());
 }

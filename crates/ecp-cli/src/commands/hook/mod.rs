@@ -51,6 +51,13 @@ pub fn run(args: HookArgs) -> Result<(), EcpError> {
         ));
     }
     let input = common::read_stdin_envelope()?;
+    // Any hook event means an agent is doing something in this worktree, which
+    // is the signal peers actually needs: an agent editing for an hour without
+    // running a graph-backed command is exactly when its dirty surface is
+    // growing, and it must not expire out of `peers status` while that happens.
+    // Costs one stat per event; the write is throttled to once a minute and a
+    // session that was never enrolled is left alone.
+    crate::auto_ensure::beat_session_heartbeat(std::path::Path::new(&input.cwd));
     match args.event {
         HookEvent::UserPromptSubmit => user_prompt_submit::handle(&input),
         HookEvent::PreToolUse => pre_tool_use::handle(&input),
