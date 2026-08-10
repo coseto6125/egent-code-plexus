@@ -67,8 +67,8 @@
                 Egent Code Plexus
                 <span class="hero-version">v0.9.1</span>
             </h1>
-            <p class="hero-tagline mono" data-i18n="hero.tagline">Built for agents, not IDEs.</p>
-            <p class="hero-subtitle" data-i18n="hero.subtitle">專為 AI Agent 設計的程式碼結構感知與架構雷達</p>
+            <p class="hero-tagline mono" data-i18n="hero.tagline">Built for agents, not IDEs, not Humans.</p>
+            <p class="hero-subtitle" data-i18n="hero.subtitle">圖譜即時同步 · 上帝視角看 code · Agent ↔ code ↔ Agent</p>
 
             <!-- Install Box -->
             <div class="install-box">
@@ -146,6 +146,7 @@
         <section id="highlights" class="content-section">
             <h2 class="section-heading" data-i18n="nav.highlights">技術亮點</h2>
             <div class="bento-grid">
+                <!-- Card 1: BlindSpot -->
                 <div class="bento-card">
                     <div class="card-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle><line x1="3" y1="3" x2="21" y2="21"></line></svg>
@@ -153,47 +154,29 @@
                     <h3 class="mono" data-i18n="highlights.blindspot.title">BlindSpot Awareness</h3>
                     <p data-i18n="highlights.blindspot.desc">「誠實的不知道」比「模糊的猜測」重要。ECP 明確標記圖譜邊界，防止 Agent 把「沒有邊」誤認為「沒有依賴」，從根本上解決 LLM 的閉世界幻覺。</p>
                 </div>
+                <!-- Card 2: Agent Peers -->
+                <div class="bento-card">
+                    <div class="card-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+                    </div>
+                    <h3 class="mono" data-i18n="highlights.peers.title">Agent Peers [BETA]</h3>
+                    <p data-i18n="highlights.peers.desc">突破單一 Session 限制。讓多個 Agent 互通髒資料 (Dirty surface) 狀態，在編寫程式碼前就能避開語意衝突與重工，實現大規模 Agent 並行開發。</p>
+                </div>
+                <!-- Card 3: Stateless & mmap -->
                 <div class="bento-card">
                     <div class="card-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
                     </div>
                     <h3 class="mono" data-i18n="highlights.stateless.title">Stateless & mmap</h3>
-                    <p data-i18n="highlights.stateless.desc">拋棄常駐 daemon 的負擔。基於 Rust + rkyv，每次查詢直接 mmap 圖檔後退出——實測 65–76 ms（含進程啟動成本）。為高頻並發的 Agent 查詢而生。</p>
+                    <p data-i18n="highlights.stateless.desc">拋棄傳統 Server Daemon 負擔。基於 Rust + rkyv 的無狀態架構，每次查詢直接 mmap 圖譜檔案，150ms 內完成分析，完美契合 Agent 頻繁且高併發的呼叫需求。</p>
                 </div>
+                <!-- Card 4: Architecture Radar -->
                 <div class="bento-card">
                     <div class="card-icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
                     </div>
                     <h3 class="mono" data-i18n="highlights.radar.title">Architecture Radar</h3>
                     <p data-i18n="highlights.radar.desc">從簡單的 AST 關聯，升級到高階架構約束感知。內建 Saga 補償交易、EventTopic 發布訂閱、以及跨服務 API 契約的模式偵測，提前揭露隱性風險。</p>
-                </div>
-                <div class="bento-card">
-                    <div class="card-icon">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polyline></svg>
-                    </div>
-                    <h3 class="mono" data-i18n="strengths.tokens.title">比 grep 省 7.5× tokens</h3>
-                    <p data-i18n="strengths.tokens.desc"><code>ecp impact</code> 回傳的 3-hop 呼叫鏈約 111 tokens；等效 grep 輸出約 830 tokens——這還沒算 grep 之後必須補讀的檔案。實測於本專案。</p>
-                </div>
-                <div class="bento-card">
-                    <div class="card-icon">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="6" y1="3" x2="6" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg>
-                    </div>
-                    <h3 class="mono" data-i18n="strengths.refactor.title">重構安全的邊語意</h3>
-                    <p data-i18n="strengths.refactor.desc"><code>is_test</code> / <code>is_direct</code> 旗標可排除測試呼叫者、辨識動態派發；<code>impact --literal</code> 區分檔案讀與寫——grep 在結構上做不到的區別。</p>
-                </div>
-                <div class="bento-card">
-                    <div class="card-icon">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="6"></circle><circle cx="12" cy="12" r="2"></circle></svg>
-                    </div>
-                    <h3 class="mono" data-i18n="strengths.dispatch.title">在 dispatch 當下攔截</h3>
-                    <p data-i18n="strengths.dispatch.desc">PreToolUse tripwire 把「探索整個 codebase」的 agent 派發改導向一次圖查詢——作用在靜態指引早已從模型注意力中流失的那個時刻。</p>
-                </div>
-                <div class="bento-card">
-                    <div class="card-icon">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
-                    </div>
-                    <h3 class="mono" data-i18n="strengths.polyglot.title">31 種語言，一次遍歷</h3>
-                    <p data-i18n="strengths.polyglot.desc">服務程式碼、IaC、字串內 SQL 全部解析進同一張圖（<code>QueriesTable</code> 邊）——混合技術棧 repo 在單語言工具失明之處，圖譜仍然亮著。</p>
                 </div>
             </div>
         </section>
@@ -310,22 +293,77 @@
                         </tr>
                     </thead>
                     <tbody class="mono">
-                        <tr><td class="label" data-i18n="table.row.r1">repo 實體檔案</td><td>22,859</td><td class="dim">14,874</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r2">graph File 節點</td><td>15,722</td><td class="dim">12,185</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r3">graph 大小</td><td>~55.3 MiB</td><td class="dim">~65.1 MiB</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r4">force index 峰值 RSS</td><td>~1.13 GiB</td><td class="dim">~1.23 GiB</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r5">cold index</td><td>2.49s</td><td class="dim">3.29s</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r6">incremental analyze</td><td>4.4ms</td><td class="dim">4.4ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r7">cypher Class->Method</td><td>29.5ms</td><td class="dim">30.3ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r8">routes</td><td>10.7ms</td><td class="dim">14.3ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r9">inspect Class</td><td>18.5ms</td><td class="dim">26.5ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r10">find bm25</td><td>16.9ms</td><td class="dim">22.5ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r11">impact downstream</td><td>15.3ms</td><td class="dim">22.2ms</td></tr>
-                        <tr><td class="label" data-i18n="table.row.r12">impact baseline HEAD~1</td><td>670.5ms</td><td class="dim">702.8ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r1">repo 實體檔案</td><td>22,858</td><td class="dim">14,874</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r2">graph 節點 (total)</td><td>346,514</td><td class="dim">503,060</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r2b">graph File 節點</td><td>15,728</td><td class="dim">12,189</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r3">graph 大小</td><td>~65 MiB</td><td class="dim">~87 MiB</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r4">force index 峰值 RSS</td><td>~1.17 GiB</td><td class="dim">~1.02 GiB</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r5">cold index</td><td>2.96s</td><td class="dim">4.57s</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r6">incremental analyze</td><td>4.1ms</td><td class="dim">4.2ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r7">cypher Class->Method</td><td>50.6ms</td><td class="dim">52.6ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r8">routes</td><td>11.6ms</td><td class="dim">17.1ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r9">inspect Class</td><td>22.8ms</td><td class="dim">35.0ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r10">find bm25</td><td>20.8ms</td><td class="dim">34.6ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r11">impact downstream</td><td>16.9ms</td><td class="dim">27.2ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.r12">impact baseline HEAD~1</td><td>N/A</td><td class="dim">725.9ms</td></tr>
                     </tbody>
                 </table>
             </div>
             <p class="table-caption" data-i18n="table.note">※ 基準硬體配置: AMD Ryzen 9 9950X, 39.2 GiB RAM, Linux 6.6.87</p>
+
+            <!-- Table A: microsoft/vscode 3-way comparison -->
+            <h3 class="table-heading" data-i18n="table.vscode3w.heading">microsoft/vscode — 14,874 個檔案</h3>
+            <div class="table-container">
+                <table class="saas-table">
+                    <thead>
+                        <tr>
+                            <th data-i18n="table.3way.metric">指標</th>
+                            <th>ecp</th>
+                            <th>codegraph</th>
+                            <th>gitnexus</th>
+                        </tr>
+                    </thead>
+                    <tbody class="mono">
+                        <tr><td class="label" data-i18n="table.row.cold_index">Cold index</td><td>4.6 s</td><td>166.9 s</td><td>DNF (killed at 27 min)</td></tr>
+                        <tr><td class="label" data-i18n="table.row.peak_rss">峰值 RSS</td><td>~1.0 GiB</td><td>1.7 GiB</td><td>4.6 GiB</td></tr>
+                        <tr><td class="label" data-i18n="table.row.find_query">Find / query</td><td>34.6 ms</td><td>169.5 ms</td><td>—</td></tr>
+                        <tr><td class="label" data-i18n="table.row.callers_impact">Callers / impact</td><td>27.2 ms</td><td>172.4 ms</td><td>—</td></tr>
+                        <tr><td class="label" data-i18n="table.row.inspect_ctx">Inspect / context</td><td>35.0 ms</td><td>415.9 ms</td><td>—</td></tr>
+                        <tr><td class="label" data-i18n="table.row.impact_baseline">Impact baseline (git-diff)</td><td>725.9 ms</td><td>N/A</td><td>—</td></tr>
+                        <tr><td class="label" data-i18n="table.row.graph_nodes">Graph 節點</td><td>507,257</td><td>315,498</td><td>—</td></tr>
+                        <tr><td class="label" data-i18n="table.row.graph_edges">Graph 邊</td><td>916,380</td><td>986,709</td><td>—</td></tr>
+                        <tr><td class="label" data-i18n="table.row.index_size">索引大小</td><td>87 MiB</td><td>671 MiB</td><td>—</td></tr>
+                        <tr><td class="label" data-i18n="table.row.files_indexed">已索引檔案</td><td>14,874</td><td>10,814</td><td>—</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Table B: abhigyanpatwari/GitNexus 3-way comparison -->
+            <h3 class="table-heading" style="margin-top:2rem;" data-i18n="table.gitnexus3w.heading">abhigyanpatwari/GitNexus — 3,232 個檔案（多語言）</h3>
+            <div class="table-container">
+                <table class="saas-table">
+                    <thead>
+                        <tr>
+                            <th data-i18n="table.3way.metric">指標</th>
+                            <th>ecp</th>
+                            <th>codegraph</th>
+                            <th>gitnexus</th>
+                        </tr>
+                    </thead>
+                    <tbody class="mono">
+                        <tr><td class="label" data-i18n="table.row.cold_index">Cold index</td><td>0.74 s</td><td>11.2 s</td><td>77.6 s</td></tr>
+                        <tr><td class="label" data-i18n="table.row.peak_rss">峰值 RSS</td><td>264 MiB</td><td>501 MiB</td><td>2.5 GiB</td></tr>
+                        <tr><td class="label" data-i18n="table.row.find_query">Find / query</td><td>9.4 ms</td><td>103.5 ms</td><td>—</td></tr>
+                        <tr><td class="label" data-i18n="table.row.callers_impact">Callers / impact</td><td>9.2 ms</td><td>104.2 ms</td><td>297.6 ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.inspect_ctx">Inspect / context</td><td>9.4 ms</td><td>—</td><td>295.5 ms</td></tr>
+                        <tr><td class="label" data-i18n="table.row.graph_nodes">Graph 節點</td><td>49,122</td><td>19,604</td><td>30,223</td></tr>
+                        <tr><td class="label" data-i18n="table.row.graph_edges">Graph 邊</td><td>48,271</td><td>39,155</td><td>47,218</td></tr>
+                        <tr><td class="label" data-i18n="table.row.index_size">索引大小</td><td>7.7 MiB</td><td>37 MiB</td><td>306 MiB</td></tr>
+                        <tr><td class="label" data-i18n="table.row.files_indexed">已索引檔案</td><td>3,232</td><td>2,968</td><td>3,232</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <p class="table-caption" data-i18n="table.3way.caption">※ ecp 0.4.2 · codegraph 0.9.4 · gitnexus 1.6.5；所有工具於可設定時限制 max-file-size 為 1 MiB（gitnexus 固定為 512 KB）；ecp = 無狀態 CLI，每次延遲含完整行程啟動；ecp 為 5–7 次運行的中位數。</p>
         </section>
 
         <!-- INTERVIEW -->
@@ -462,7 +500,7 @@
                 <span class="logo-icon small"></span>
                 <span>Egent Code Plexus</span>
             </div>
-            <p class="footer-copy" data-i18n="footer.text">&copy; 2026 Egent Code Plexus Project. 所有片段節錄自 Native Design Deep Dive 訪談。</p>
+            <p class="footer-copy" data-i18n="footer.text">&copy; 2026 Egent Code Plexus Project · 開發者 <a href="https://github.com/coseto6125" target="_blank" rel="noopener noreferrer">@coseto6125</a> (E-NoR) · <a href="mailto:cosetoenor@gmail.com">cosetoenor@gmail.com</a></p>
         </div>
     </footer>
 
