@@ -173,6 +173,29 @@ fn inbox_written_by_the_previous_version_still_decodes_and_renders() {
         !out.contains("Symbol:"),
         "old entry must not print a symbol: {out}"
     );
+    // The path is in the old entry, inside `symbol`. Leaving `File:` blank
+    // because the new field is absent throws away information the reader needs
+    // and the entry is carrying — the upgrade would show LESS than 0.9.1 did.
+    assert!(
+        out.contains("File:   lib.py"),
+        "the file must be recovered from the old entry, not left blank: {out}"
+    );
+}
+
+/// The dedupe key is the file, and every pre-upgrade entry defaults it to the
+/// empty string. Without recovering the path from `symbol`, two concerns about
+/// DIFFERENT files key identically and one is silently dropped.
+#[test]
+fn old_entries_about_different_files_do_not_collapse() {
+    let old = |file: &str| {
+        let line = format!(
+            r#"{{"type":"dirty_event","ts":"t","peer_session":"carol","peer_pid":1,"kind":"hard","symbol":{{"name":"a","kind":"function","file":"{file}","line_start":1,"line_end":2}},"reason":"r","peer_delta":null,"your_overlap_range":null}}"#
+        );
+        serde_json::from_str::<InboxEntry>(&line).expect("0.9.1 line parses")
+    };
+    let (out, _) = render_payload(&[old("lib.py"), old("other.py")]);
+    assert!(out.contains("lib.py"), "{out}");
+    assert!(out.contains("other.py"), "both files must survive: {out}");
 }
 
 #[test]

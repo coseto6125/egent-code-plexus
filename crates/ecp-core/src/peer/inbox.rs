@@ -52,6 +52,26 @@ pub enum ConcernKindSer {
     Soft,
 }
 
+impl InboxEntry {
+    /// The file a dirty event is about.
+    ///
+    /// Entries written before `file` existed carry the path inside `symbol`
+    /// instead. Reading it back from there keeps an upgrade from rendering a
+    /// blank `File:` line, and — more importantly — keeps two entries about
+    /// different files from collapsing into one, since the dedupe key is the
+    /// file and every pre-upgrade entry would otherwise key on the empty
+    /// string.
+    pub fn event_file(&self) -> &str {
+        match self {
+            InboxEntry::DirtyEvent { file, symbol, .. } if file.is_empty() => {
+                symbol.as_ref().map_or("", |s| s.file.as_str())
+            }
+            InboxEntry::DirtyEvent { file, .. } => file,
+            _ => "",
+        }
+    }
+}
+
 impl From<ConcernKind> for ConcernKindSer {
     fn from(k: ConcernKind) -> Self {
         match k {
