@@ -679,6 +679,11 @@ for (const [locale, path] of Object.entries(seo.localePaths)) {
   emit(`${path}compare/index.html`, comparePage(locale, version));
 }
 
+// IndexNow verification. The key lives at the site's own path rather than the
+// host root, because the host root is a different repository — which is why
+// every submission has to carry `keyLocation` and can only vouch for URLs
+// under this prefix.
+if (seo.indexNowKey) emit(`${seo.indexNowKey}.txt`, seo.indexNowKey);
 emit('sitemap.xml', sitemapXml());
 emit('robots.txt', robotsTxt());
 emit('llms.txt', llmsTxt(version, qas[seo.defaultLocale]));

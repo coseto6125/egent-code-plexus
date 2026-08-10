@@ -60,5 +60,6 @@
     "ja": "Egent Code Plexus（<strong>ecp</strong>）は、AI コーディングエージェント向けのコマンドライン型コード構造グラフです。リポジトリをシンボルグラフとして索引し、<em>この関数を呼んでいるのは誰か</em>、<em>この差分は何を壊すか</em>、<em>このサービスはどの HTTP ルートとデータベーステーブルに到達するか</em>といった構造的な問いに、31 言語にわたりミリ秒で、デーモンなしで答えます。グラフに見えない部分は空の結果ではなく BlindSpot として明示します。",
     "ko": "Egent Code Plexus(<strong>ecp</strong>)는 AI 코딩 에이전트를 위한 명령줄 코드 구조 그래프입니다. 저장소를 심볼 그래프로 색인하고 <em>이 함수를 호출하는 것은 무엇인지</em>, <em>이 변경이 무엇을 깨뜨리는지</em>, <em>이 서비스가 어떤 HTTP 라우트와 데이터베이스 테이블에 닿는지</em>를 31개 언어에 걸쳐 밀리초 단위로, 데몬 없이 답합니다. 그래프가 보지 못하는 부분은 빈 결과 대신 BlindSpot으로 명시합니다.",
     "es": "Egent Code Plexus (<strong>ecp</strong>) es un grafo de inteligencia de código de línea de comandos para agentes de IA. Indexa un repositorio como grafo de símbolos y responde preguntas estructurales directamente: <em>qué funciones llaman a esta</em>, <em>qué rompe este cambio</em>, <em>a qué rutas HTTP y tablas de base de datos llega este servicio</em>, en 31 lenguajes, en milisegundos y sin demonio. Donde el grafo no ve algo lo dice con un registro BlindSpot en lugar de devolver un resultado vacío que parece prueba de ausencia."
-  }
+  },
+  "indexNowKey": "fca60b3c39ca4cdc97727c91f4253c95"
 }
