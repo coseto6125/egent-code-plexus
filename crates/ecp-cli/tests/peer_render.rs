@@ -26,11 +26,30 @@ fn empty_input_renders_empty_string() {
 fn single_hard_event_renders_header_and_delta() {
     let out = render_payload(&[dirty_hard()]).0;
     assert!(out.contains("HARD overlap"), "missing HARD header: {out}");
-    assert!(out.contains("verify_token"));
-    assert!(out.contains("src/auth.rs:42-58"));
+    assert!(
+        out.contains("src/auth.rs"),
+        "missing the shared file: {out}"
+    );
     assert!(out.contains("-old"));
     assert!(out.contains("+new"));
     assert!(out.contains("Suggest"));
+}
+
+/// HARD knows the file and nothing finer. Printing a declaration with exact
+/// lines above a reason that says which declarations changed is unknown puts
+/// the two lines in contradiction, and an agent believes the specific one.
+#[test]
+fn hard_render_names_no_declaration_and_no_line_range() {
+    let out = render_payload(&[dirty_hard()]).0;
+    assert!(
+        !out.contains("Symbol:"),
+        "HARD must not present a symbol field: {out}"
+    );
+    assert!(
+        !out.contains("42-58"),
+        "a line range asserts a located edit: {out}"
+    );
+    assert!(out.contains("File:"), "expected a file line: {out}");
 }
 
 #[test]
