@@ -177,7 +177,7 @@ jobs:
 
       - name: Cache cargo
         if: needs.detect-changes.outputs.code == 'true'
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: linux-build   # 與 test-ubuntu 共用 target/，避免互相覆蓋
           cache-on-failure: true
@@ -293,7 +293,7 @@ jobs:
 
       - name: Cache cargo
         if: needs.detect-changes.outputs.code == 'true'
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           # ubuntu 與 code-quality 共用 cache，macos/windows 獨立
           shared-key: ${{ matrix.os == 'ubuntu-latest' && 'linux-build' || matrix.os }}
@@ -378,7 +378,7 @@ jobs:
 
       - name: Cache cargo registry & advisory-db
         if: needs.detect-changes.outputs.code == 'true'
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           # Swatinem v2.9 already folds Cargo.lock hash into the final key
           # suffix (-<lockfile-hash>); wrapping the shared-key in hashFiles()
@@ -445,6 +445,6 @@ jobs:
         uses: ./.github/actions/diagnose-checkout-failure
 
       - name: Run actionlint
-        uses: reviewdog/action-actionlint@50842263c20a7c46bd0065b9e624d3c569db061e # v1.73.0
+        uses: reviewdog/action-actionlint@d63ba7532e0942965320cd8d73cbae4c7b3c5283 # v1.73.1
         with:
           fail_level: error
