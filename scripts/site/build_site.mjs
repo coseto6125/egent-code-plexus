@@ -20,6 +20,11 @@ import { execFileSync } from 'node:child_process';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const SITE = join(ROOT, 'docs/ecp-landing');
 const CHECK = process.argv.includes('--check');
+// Star count comes from the environment, never from a live fetch: a build that
+// reaches the network produces different output every time the count moves,
+// which would make --check fail on a tree that is in fact current. The deploy
+// job supplies it; a local build simply omits the field.
+const STARS = Number(process.env.ECP_STARS) || 0;
 // Freshness is a citation signal. Sourced from the newest git commit so a
 // rebuild without content changes does not claim the page is newer — pinned to
 // UTC because `%cs` renders in the local zone, which made the same commit
@@ -209,6 +214,20 @@ function headHtml(locale, meta, version, qas, qaLocale) {
     description: meta.description,
     sameAs: seo.sameAs,
     dateModified: BUILD_DATE,
+    // GitHub stars are a bookmark count, not a rating: there is no scale and
+    // no negative pole, so `aggregateRating` cannot be derived from them
+    // without inventing a score — the exact fabrication Google penalises, and
+    // a poor look for a tool whose pitch is that it says "I don't know".
+    // `interactionStatistic` states the count as the fact it is.
+    ...(STARS
+      ? {
+          interactionStatistic: {
+            '@type': 'InteractionCounter',
+            interactionType: 'https://schema.org/LikeAction',
+            userInteractionCount: STARS,
+          },
+        }
+      : {}),
     offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
     featureList: [
       'Callers and callees of any symbol across 31 languages',

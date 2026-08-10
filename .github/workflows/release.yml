@@ -732,7 +732,17 @@ jobs:
 
       - name: Build the site from the tagged sources
         working-directory: src
-        run: node scripts/site/build_site.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Stars are a bookmark count, published as an InteractionCounter
+          # rather than folded into a rating. Read here rather than inside the
+          # generator so a local build stays offline and deterministic; a
+          # failed lookup drops the field instead of failing the deploy.
+          ECP_STARS="$(gh api repos/${GITHUB_REPOSITORY} --jq .stargazers_count 2>/dev/null || echo 0)"
+          export ECP_STARS
+          echo "stars=${ECP_STARS}"
+          node scripts/site/build_site.mjs
 
       - name: Publish
         shell: bash
