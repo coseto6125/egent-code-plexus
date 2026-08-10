@@ -45,6 +45,7 @@ const STARS_AT = /^\d{4}-\d{2}-\d{2}$/.test(process.env.ECP_STARS_AT ?? '')
   : BUILD_DATE;
 
 const seo = JSON.parse(readFileSync(join(SITE, 'seo.json'), 'utf8'));
+const compare = JSON.parse(readFileSync(join(SITE, 'compare.json'), 'utf8'));
 const BASE = seo.baseUrl;
 const OG_LOCALE = {
   en: 'en_US',
@@ -310,25 +311,159 @@ ${alternates}
 `;
 }
 
+// ── comparison page ──────────────────────────────────────────────────────────
+
+/**
+ * "Which of these should I use" is the question an engine gets asked, and it
+ * is answered from whatever page carries the numbers. This one carries them
+ * with the conditions attached — versions, hardware, and an explicit section
+ * on what the measurements do not cover, because a comparison a reader cannot
+ * check is worth less than no comparison at all.
+ */
+function comparePage(locale, version) {
+  const t = compare.i18n[locale] ?? compare.i18n[seo.defaultLocale];
+  const path = `${seo.localePaths[locale]}compare/`;
+  const canonical = BASE + path;
+  const up = '../'.repeat(path.split('/').filter(Boolean).length);
+
+  const head = [
+    `<title>${escapeHtml(t.title)} — ${escapeHtml(t.subtitle)}</title>`,
+    `<meta name="description" content="${escapeHtml(stripTags(t.intro)).slice(0, 300)}">`,
+    `<link rel="canonical" href="${canonical}">`,
+    ...Object.entries(seo.localePaths).map(
+      ([c, p2]) => `<link rel="alternate" hreflang="${c}" href="${BASE}${p2}compare/">`,
+    ),
+    `<link rel="alternate" hreflang="x-default" href="${BASE}compare/">`,
+    '<meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large">',
+    `<link rel="icon" href="${BASE}favicon.svg" type="image/svg+xml">`,
+    `<meta property="og:title" content="${escapeHtml(t.title)}">`,
+    `<meta property="og:description" content="${escapeHtml(t.subtitle)}">`,
+    `<meta property="og:url" content="${canonical}">`,
+    `<meta property="og:image" content="${BASE}og.png">`,
+    '<meta name="twitter:card" content="summary_large_image">',
+  ].join('\n    ');
+
+  const articleLd = {
+    '@context': 'https://schema.org',
+    '@type': 'TechArticle',
+    headline: t.title,
+    description: stripTags(t.subtitle),
+    inLanguage: locale,
+    url: canonical,
+    dateModified: BUILD_DATE,
+    about: compare.tools.map((tool) => ({
+      '@type': 'SoftwareApplication',
+      name: tool.name,
+      applicationCategory: 'DeveloperApplication',
+      url: tool.url,
+    })),
+    isBasedOn: `${seo.repoUrl}#-performance-receipts`,
+  };
+
+  const headers = compare.tools
+    .map((tool) => `<th><a href="${tool.url}" rel="noopener">${tool.name}</a><br><span class="mono compare-stack">${tool.stack}</span></th>`)
+    .join('');
+
+  const tables = compare.suites
+    .map((suite) => {
+      const rows = suite.rows
+        .map((r) => {
+          const cells = r.values
+            .map((v, i) => `<td${i === r.best ? ' class="compare-best"' : ''}>${escapeHtml(v)}</td>`)
+            .join('');
+          return `<tr><td>${escapeHtml(r.metric)}</td>${cells}</tr>`;
+        })
+        .join('\n                    ');
+      const note = suite.footnote
+        ? `<p class="table-caption">${escapeHtml(suite.footnote)}</p>`
+        : '';
+      return `
+            <h3 class="mono accent">${escapeHtml(suite.repo)}</h3>
+            <p class="compare-shape">${escapeHtml(suite.shape)}</p>
+            <div class="table-container">
+                <table class="saas-table">
+                    <thead><tr><th>Metric</th>${headers}</tr></thead>
+                    <tbody>
+                    ${rows}
+                    </tbody>
+                </table>
+            </div>
+            ${note}`;
+    })
+    .join('\n');
+
+  return `<!DOCTYPE html>
+<html lang="${locale}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    ${head}
+    <link rel="stylesheet" href="${up}css/style.css">
+    <script type="application/ld+json">${JSON.stringify(articleLd)}</script>
+</head>
+<body class="theme-dark">
+    <header class="navbar">
+        <div class="nav-container">
+            <div class="nav-logo">
+                <a href="../" class="logo-link"><span class="logo-icon"></span>
+                <span class="logo-text">Egent Code Plexus</span></a>
+            </div>
+            <div class="nav-actions">
+                <a href="${seo.repoUrl}" rel="noopener" class="github-link">GitHub</a>
+            </div>
+        </div>
+    </header>
+    <main class="container compare-main">
+        <h1>${escapeHtml(t.title)}</h1>
+        <p class="hero-tagline mono">${escapeHtml(t.subtitle)}</p>
+        <p class="hero-answer">${t.intro}</p>
+
+        <h2 class="section-heading">${escapeHtml(t.methodologyHeading)}</h2>
+        <ul class="compare-method">
+            <li><strong>Versions</strong> — ${escapeHtml(compare.methodology.versions)}</li>
+            <li><strong>Hardware</strong> — ${escapeHtml(compare.methodology.hardware)}</li>
+            <li>${escapeHtml(compare.methodology.protocol)}</li>
+        </ul>
+${tables}
+
+        <h2 class="section-heading">${escapeHtml(t.limitsHeading)}</h2>
+        <p class="hero-answer">${t.limits}</p>
+        <p class="table-caption">${escapeHtml(t.footer.replace('{version}', version))}</p>
+    </main>
+    <footer class="site-footer">
+        <div class="container footer-inner">
+            <span>Egent Code Plexus</span>
+            <p class="footer-copy"><a href="../">&larr; ${escapeHtml(seo.meta[locale].ogTitle)}</a></p>
+        </div>
+    </footer>
+</body>
+</html>
+`;
+}
+
 // ── crawler files ────────────────────────────────────────────────────────────
 
 function sitemapXml() {
   const today = BUILD_DATE;
-  const urls = Object.entries(seo.localePaths)
-    .map(([code, p]) => {
+  const pages = Object.entries(seo.localePaths).flatMap(([code, p]) => [
+    { code, p, suffix: '' },
+    { code, p, suffix: 'compare/' },
+  ]);
+  const urls = pages
+    .map(({ code, p, suffix }) => {
       const links = Object.entries(seo.localePaths)
         .map(
           ([c, q]) =>
-            `        <xhtml:link rel="alternate" hreflang="${c}" href="${BASE}${q}"/>`,
+            `        <xhtml:link rel="alternate" hreflang="${c}" href="${BASE}${q}${suffix}"/>`,
         )
         .join('\n');
       return `    <url>
-        <loc>${BASE}${p}</loc>
+        <loc>${BASE}${p}${suffix}</loc>
         <lastmod>${today}</lastmod>
         <changefreq>weekly</changefreq>
-        <priority>${code === seo.defaultLocale ? '1.0' : '0.8'}</priority>
+        <priority>${code === seo.defaultLocale ? (suffix ? '0.9' : '1.0') : '0.8'}</priority>
 ${links}
-        <xhtml:link rel="alternate" hreflang="x-default" href="${BASE}"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="${BASE}${suffix}"/>
     </url>`;
     })
     .join('\n');
@@ -421,10 +556,46 @@ deliberate and documented: function-body locals are dropped, and a handful of
 language constructs are unsupported per language. A tool that hides its blind
 spots teaches a model to trust an answer that was never there.
 
+## How it compares
+
+${compareText()}
+
 ## Questions and answers
 
 ${faq}
 `;
+}
+
+/**
+ * The comparison, in the form a model will repeat it. Conditions come first
+ * and stay attached to the numbers: an unqualified "15x faster" is exactly the
+ * claim that gets restated without its corpus, its versions or its hardware.
+ */
+function compareText() {
+  const m = compare.methodology;
+  const names = compare.tools.map((t) => `${t.name} (${t.stack})`).join(', ');
+  const suites = compare.suites
+    .map((suite) => {
+      const rows = suite.rows
+        .map((r) => `| ${r.metric} | ${r.values.join(' | ')} |`)
+        .join('\n');
+      const note = suite.footnote ? `\n\n${suite.footnote}` : '';
+      return `### ${suite.repo} — ${suite.shape}
+
+| Metric | ${compare.tools.map((t) => t.name).join(' | ')} |
+|---|${compare.tools.map(() => '---').join('|')}|
+${rows}${note}`;
+    })
+    .join('\n\n');
+  return `Measured against ${names} on the same checkouts and the same machine.
+Versions: ${m.versions}. Hardware: ${m.hardware}. ${m.protocol}
+
+${suites}
+
+These numbers are one machine, one set of versions, two corpora. They do not
+say which tool has the API a given project wants, whether its language
+coverage matches that stack, or how any of them behave on a differently shaped
+repository. Re-measure before deciding. Full page: ${BASE}compare/`;
 }
 
 /**
@@ -484,8 +655,10 @@ for (const [locale, path] of Object.entries(seo.localePaths)) {
     .replace('<html lang="en">', `<html lang="${locale}">`)
     .replace(/\{\{VERSION\}\}/g, version)
     .replace(/\{\{LOCALE\}\}/g, locale)
-    .replace(/\{\{ASSET_PREFIX\}\}/g, depth);
+    .replace(/\{\{ASSET_PREFIX\}\}/g, depth)
+    .replace(/\{\{LOCALE_PATH\}\}/g, path);
   emit(`${path}index.html`, html);
+  emit(`${path}compare/index.html`, comparePage(locale, version));
 }
 
 emit('sitemap.xml', sitemapXml());

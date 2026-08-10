@@ -45,6 +45,47 @@ deliberate and documented: function-body locals are dropped, and a handful of
 language constructs are unsupported per language. A tool that hides its blind
 spots teaches a model to trust an answer that was never there.
 
+## How it compares
+
+Measured against ecp (Rust), codegraph (Node + SQLite), gitnexus (Node) on the same checkouts and the same machine.
+Versions: ecp 0.4.2 · codegraph 0.9.4 · gitnexus 1.6.5. Hardware: AMD Ryzen 9 9950X (16 logical), Linux. Same checkouts, same machine. All tools capped at a 1 MiB max-file-size threshold where configurable (gitnexus hard-codes 512 KB). ecp medians over 5–7 runs. ecp is a stateless one-shot CLI, so every latency includes full process startup — no daemon, no warm-up.
+
+### microsoft/vscode — 14,874 files, dense single-language TypeScript
+
+| Metric | ecp | codegraph | gitnexus |
+|---|---|---|---|
+| Cold index | 4.6 s | 166.9 s | DNF — killed at 27 min |
+| Peak RSS | ~1.0 GiB | 1.7 GiB | 4.6 GiB (still climbing) |
+| Symbol find / query | 34.6 ms | 169.5 ms | — |
+| Callers / impact | 27.2 ms | 172.4 ms | — |
+| Inspect / context | 35.0 ms | 415.9 ms | — |
+| Impact baseline (git diff) | 725.9 ms | no such mode | — |
+| Graph nodes | 507,257 | 315,498 | — |
+| Graph edges | 916,380 | 986,709 | — |
+| Index size on disk | 87 MiB | 671 MiB | — |
+| Files indexed | 14,874 | 10,814 | — |
+
+gitnexus did not finish — killed after 27 min stuck in its in-memory graph-resolution phase (RSS 4.6 GiB, no output written).
+
+### abhigyanpatwari/GitNexus — 3,232 files, polyglot — the corpus all three can finish
+
+| Metric | ecp | codegraph | gitnexus |
+|---|---|---|---|
+| Cold index | 0.74 s | 11.2 s | 77.6 s |
+| Peak RSS | 264 MiB | 501 MiB | 2.5 GiB |
+| Find / query | 9.4 ms | 103.5 ms | — |
+| Callers / impact | 9.2 ms | 104.2 ms | 297.6 ms |
+| Inspect / context | 9.4 ms | — | 295.5 ms |
+| Graph nodes | 49,122 | 19,604 | 30,223 |
+| Graph edges | 48,271 | 39,155 | 47,218 |
+| Index size on disk | 7.7 MiB | 37 MiB | 306 MiB |
+| Files indexed | 3,232 | 2,968 | 3,232 |
+
+These numbers are one machine, one set of versions, two corpora. They do not
+say which tool has the API a given project wants, whether its language
+coverage matches that stack, or how any of them behave on a differently shaped
+repository. Re-measure before deciding. Full page: https://coseto6125.github.io/egent-code-plexus/compare/
+
 ## Questions and answers
 
 ### 為什麼「誠實的不知道」比「模糊的猜測」重要？
