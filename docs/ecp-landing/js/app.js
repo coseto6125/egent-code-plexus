@@ -581,8 +581,12 @@ class I18nManager {
         'ja': 'ja/', 'ko': 'ko/', 'es': 'es/'
     };
 
-    /** Site root, derived from where this page sits under it. */
+    /** Site root. The page states it; guessing from the locale breaks as soon
+     *  as a locale has more than one page under it. */
     siteRoot() {
+        // Empty string is a real answer here — it means "this page is at the
+        // site root" — so test for the declaration, not for truthiness.
+        if (typeof window.__ECP_ROOT__ === 'string') return window.__ECP_ROOT__ || './';
         const here = I18nManager.LOCALE_PATHS[this.currentLang] || '';
         const depth = here ? here.split('/').filter(Boolean).length : 0;
         return depth ? '../'.repeat(depth) : './';
@@ -594,7 +598,7 @@ class I18nManager {
         // that search engines and shared links point at for this language.
         const target = I18nManager.LOCALE_PATHS[lang];
         if (window.__ECP_LOCALE__ && lang !== this.currentLang && target !== undefined) {
-            window.location.href = this.siteRoot() + target;
+            window.location.href = this.siteRoot() + target + (window.__ECP_PAGE__ || '');
             return;
         }
         this.currentLang = lang;

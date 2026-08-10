@@ -311,6 +311,15 @@ ${alternates}
 `;
 }
 
+/** Slice an element out of the template so both pages share one chrome. */
+function templateElement(tag) {
+  const open = template.search(new RegExp(`<${tag}[\\s>]`));
+  if (open < 0) throw new Error(`template has no <${tag}>`);
+  const openEnd = template.indexOf('>', open) + 1;
+  const close = closingIndex(template, tag, openEnd);
+  return template.slice(open, close + `</${tag}>`.length);
+}
+
 // ── comparison page ──────────────────────────────────────────────────────────
 
 /**
@@ -392,6 +401,16 @@ function comparePage(locale, version) {
     })
     .join('\n');
 
+  // The chrome is the landing page's own markup, fonts included, so the two
+  // pages cannot drift apart visually. app.js runs here too: it reads the
+  // locale and page from the globals below, so the language selector works and
+  // switching language stays on the comparison page instead of dropping the
+  // reader on the home page of another locale.
+  const chrome = {
+    header: applyTranslations(templateElement('header'), compare.dict ?? {}),
+    footer: templateElement('footer'),
+  };
+
   return `<!DOCTYPE html>
 <html lang="${locale}">
 <head>
@@ -399,25 +418,24 @@ function comparePage(locale, version) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     ${head}
     <link rel="stylesheet" href="${up}css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;700&family=Inter:wght@400;500;600;800&display=swap" rel="stylesheet">
     <script type="application/ld+json">${JSON.stringify(articleLd)}</script>
 </head>
 <body class="theme-dark">
-    <header class="navbar">
-        <div class="nav-container">
-            <div class="nav-logo">
-                <a href="../" class="logo-link"><span class="logo-icon"></span>
-                <span class="logo-text">Egent Code Plexus</span></a>
-            </div>
-            <div class="nav-actions">
-                <a href="${seo.repoUrl}" rel="noopener" class="github-link">GitHub</a>
-            </div>
-        </div>
-    </header>
-    <main class="container compare-main">
-        <h1>${escapeHtml(t.title)}</h1>
-        <p class="hero-tagline mono">${escapeHtml(t.subtitle)}</p>
-        <p class="hero-answer">${t.intro}</p>
+${chrome.header}
 
+    <section class="hero compare-hero">
+        <div class="hero-bg-glow"></div>
+        <div class="container hero-content">
+            <h1 class="hero-title">${escapeHtml(t.title)}</h1>
+            <p class="hero-tagline mono">${escapeHtml(t.subtitle)}</p>
+            <p class="hero-answer">${t.intro}</p>
+        </div>
+    </section>
+
+    <main class="container compare-main">
         <h2 class="section-heading">${escapeHtml(t.methodologyHeading)}</h2>
         <ul class="compare-method">
             <li><strong>Versions</strong> — ${escapeHtml(compare.methodology.versions)}</li>
@@ -427,15 +445,15 @@ function comparePage(locale, version) {
 ${tables}
 
         <h2 class="section-heading">${escapeHtml(t.limitsHeading)}</h2>
-        <p class="hero-answer">${t.limits}</p>
+        <p class="hero-answer compare-limits">${t.limits}</p>
         <p class="table-caption">${escapeHtml(t.footer.replace('{version}', version))}</p>
+        <p class="compare-back"><a href="../">&larr; ${escapeHtml(seo.meta[locale].ogTitle)}</a></p>
     </main>
-    <footer class="site-footer">
-        <div class="container footer-inner">
-            <span>Egent Code Plexus</span>
-            <p class="footer-copy"><a href="../">&larr; ${escapeHtml(seo.meta[locale].ogTitle)}</a></p>
-        </div>
-    </footer>
+
+${chrome.footer}
+    <script>window.__ECP_LOCALE__ = "${locale}"; window.__ECP_ROOT__ = "${up}"; window.__ECP_PAGE__ = "compare/";</script>
+    <script src="${up}js/qa_data.js"></script>
+    <script src="${up}js/app.js"></script>
 </body>
 </html>
 `;
