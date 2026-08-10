@@ -183,7 +183,7 @@ fn cmd_status(repo_root: &std::path::Path, format: StatusFormat) -> std::io::Res
                     "session={}\tname={}\tpid={}\tlast_touched={}\twatcher={}",
                     p.session_id,
                     p.agent_name.as_deref().unwrap_or("-"),
-                    p.pid,
+                    p.pid.map_or_else(|| "-".to_string(), |v| v.to_string()),
                     p.last_touched,
                     watcher_state(p)
                 );

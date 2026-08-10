@@ -252,13 +252,11 @@ fn dispatch_peer(
     // rescan walks the directory unconditionally and would replay a dead
     // session's file as a live concern — an alarm `main` never raises.
     //
-    // Only PROVABLY dead peers are skipped. A `pid: null` session is a
-    // watch-path enrolment, not a corpse, and filtering those out is the
-    // discovery bug recorded as FU-2026-06-10-cc120f78889c.
-    if peer_meta
-        .pid
-        .is_some_and(|pid| !ecp_core::peer::registry::pid_alive(pid))
-    {
+    // Only PROVABLY dead peers are skipped, and a dead pid alone does not
+    // prove it: the recorded pid is the one-shot `ecp` process that enrolled
+    // the session, so probing it rejected every peer that has ever existed
+    // (FU-2026-06-10-cc120f78889c).
+    if !ecp_core::peer::registry::meta_alive(&peer_meta) {
         return Ok(());
     }
     let peer_pid = peer_meta.pid.unwrap_or(0);

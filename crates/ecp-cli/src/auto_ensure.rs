@@ -1072,9 +1072,14 @@ fn apply_l1_overlay_updates(
     Ok(())
 }
 
+/// Smallest gap between two `last_touched` rewrites. Two orders of magnitude
+/// under `SESSION_LIVE_TTL_MINS`, so a session stays continuously live while
+/// an agent works and the query path pays one extra write per minute at most.
+const SESSION_HEARTBEAT_SECS: u64 = 60;
+
 fn ensure_session_meta(session_dir: &Path, worktree: &Path) -> io::Result<()> {
     let meta_path = session_dir.join("session_meta.json");
-    if meta_path.exists() {
+    if let Ok(stat) = fs::metadata(&meta_path) {
         // Team harnesses may export ECP_AGENT_NAME / CLAUDE_AGENT_NAME after
         // this session's meta was first written — refresh so peers see the
         // name. The env check gates the extra read: solo sessions (no env)
@@ -1088,12 +1093,27 @@ fn ensure_session_meta(session_dir: &Path, worktree: &Path) -> io::Result<()> {
             .lock()
             .map(|mut s| s.insert(session_dir.to_path_buf()))
             .unwrap_or(true);
-        if first_visit {
-            if let Some(name) = crate::session::resolver::resolve_agent_name() {
-                if let Ok(mut meta) = SessionMeta::read(&meta_path) {
-                    if meta.apply_agent_name(Some(name)) {
-                        SessionMeta::write_atomic(&meta_path, &meta)?;
-                    }
+        // The pid in this file belongs to the process writing it, which exits
+        // in milliseconds — `last_touched` is the only thing that can tell a
+        // peer this session is still being worked in. The stat above already
+        // paid for the mtime, so refreshing costs a read+write once a minute
+        // instead of on every query (FU-2026-06-10-cc120f78889c).
+        let heartbeat_due = stat
+            .modified()
+            .ok()
+            .and_then(|m| m.elapsed().ok())
+            .is_none_or(|age| age.as_secs() >= SESSION_HEARTBEAT_SECS);
+        let name = first_visit
+            .then(crate::session::resolver::resolve_agent_name)
+            .flatten();
+        if heartbeat_due || name.is_some() {
+            if let Ok(mut meta) = SessionMeta::read(&meta_path) {
+                let renamed = meta.apply_agent_name(name);
+                if heartbeat_due {
+                    meta.last_touched = chrono::Utc::now().to_rfc3339();
+                }
+                if renamed || heartbeat_due {
+                    SessionMeta::write_atomic(&meta_path, &meta)?;
                 }
             }
         }
