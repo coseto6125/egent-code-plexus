@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ecp와 codegraph, GitNexus 비교 · ecp vs codegraph — 세 가지 코드 그래프 도구, 같은 체크아웃, 같은 머신.</title>
+    <meta name="description" content="셋 다 저장소를 그래프로 만들어 구조적 질문에 답하지만 최적화 방향이 다릅니다. codegraph와 GitNexus는 그래프를 메모리나 SQLite에 두는 Node 서비스이고, ecp는 미리 만든 그래프를 mmap으로 읽는 무상태 Rust 바이너리입니다. 따라서 질의 한 번의 비용은 워밍업이 아니라 프로세스 시작 한 번입니다. 아래 수치는 이 프로젝트가 직접 측정한 값이며 측정 조건과 함께 공개합니다.">
+    <link rel="canonical" href="https://coseto6125.github.io/egent-code-plexus/ko/compare/codegraph/">
+    <link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/compare/codegraph/">
+    <link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/compare/codegraph/">
+    <link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/compare/codegraph/">
+    <link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/compare/codegraph/">
+    <link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/compare/codegraph/">
+    <link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/compare/codegraph/">
+    <link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/compare/codegraph/">
+    <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large">
+    <link rel="icon" href="https://coseto6125.github.io/egent-code-plexus/favicon.svg" type="image/svg+xml">
+    <meta property="og:type" content="article">
+    <meta property="og:locale" content="ko_KR">
+    <meta property="og:site_name" content="Egent Code Plexus">
+    <meta property="og:title" content="ecp와 codegraph, GitNexus 비교 · ecp vs codegraph">
+    <meta property="og:description" content="세 가지 코드 그래프 도구, 같은 체크아웃, 같은 머신.">
+    <meta property="og:url" content="https://coseto6125.github.io/egent-code-plexus/ko/compare/codegraph/">
+    <meta property="og:image" content="https://coseto6125.github.io/egent-code-plexus/og.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <link rel="stylesheet" href="../../../css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;700&family=Inter:wght@400;500;600;800&display=swap" rel="stylesheet">
+    <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"ecp와 codegraph, GitNexus 비교 · ecp vs codegraph","description":"세 가지 코드 그래프 도구, 같은 체크아웃, 같은 머신.","inLanguage":"ko","url":"https://coseto6125.github.io/egent-code-plexus/ko/compare/codegraph/","dateModified":"2026-08-10","about":[{"@type":"SoftwareApplication","name":"ecp","applicationCategory":"DeveloperApplication","url":"https://github.com/coseto6125/egent-code-plexus"},{"@type":"SoftwareApplication","name":"codegraph","applicationCategory":"DeveloperApplication","url":"https://github.com/colbymchenry/codegraph"}],"isBasedOn":"https://github.com/coseto6125/egent-code-plexus#-performance-receipts"}</script>
+</head>
+<body class="theme-dark">
+<header class="navbar">
+        <div class="nav-container">
+            <div class="nav-logo">
+                <span class="logo-icon"></span>
+                <span class="logo-text">Egent Code Plexus</span>
+            </div>
+            <div class="nav-actions">
+                <a href="https://github.com/coseto6125/egent-code-plexus" target="_blank" rel="noopener noreferrer" class="github-link">
+                    <svg height="24" width="24" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+                    GitHub
+                </a>
+                <div id="lang-selector-container"></div>
+            </div>
+        </div>
+    </header>
+
+    <section class="hero compare-hero">
+        <div class="hero-bg-glow"></div>
+        <div class="container hero-content">
+            <h1 class="hero-title">ecp와 codegraph, GitNexus 비교</h1>
+            <p class="hero-tagline mono">세 가지 코드 그래프 도구, 같은 체크아웃, 같은 머신.</p>
+            <p class="hero-answer">셋 다 저장소를 그래프로 만들어 구조적 질문에 답하지만 최적화 방향이 다릅니다. <strong>codegraph</strong>와 <strong>GitNexus</strong>는 그래프를 메모리나 SQLite에 두는 Node 서비스이고, <strong>ecp</strong>는 미리 만든 그래프를 mmap으로 읽는 무상태 Rust 바이너리입니다. 따라서 질의 한 번의 비용은 워밍업이 아니라 프로세스 시작 한 번입니다. 아래 수치는 이 프로젝트가 직접 측정한 값이며 측정 조건과 함께 공개합니다.</p>
+        </div>
+    </section>
+
+    <main class="container compare-main">
+        <h2 class="section-heading">측정 조건</h2>
+        <ul class="compare-method">
+            <li><strong>Versions</strong> — ecp 0.4.2 · codegraph 0.9.4 · gitnexus 1.6.5</li>
+            <li><strong>Hardware</strong> — AMD Ryzen 9 9950X (16 logical), Linux</li>
+            <li>Same checkouts, same machine. All tools capped at a 1 MiB max-file-size threshold where configurable (gitnexus hard-codes 512 KB). ecp medians over 5–7 runs. ecp is a stateless one-shot CLI, so every latency includes full process startup — no daemon, no warm-up.</li>
+        </ul>
+
+            <h3 class="mono accent">microsoft/vscode</h3>
+            <p class="compare-shape">14,874 files, dense single-language TypeScript</p>
+            <div class="table-container">
+                <table class="saas-table">
+                    <thead><tr><th>Metric</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th></tr></thead>
+                    <tbody>
+                    <tr><td>Cold index</td><td class="compare-best">4.6 s</td><td>166.9 s</td></tr>
+                    <tr><td>Peak RSS</td><td class="compare-best">~1.0 GiB</td><td>1.7 GiB</td></tr>
+                    <tr><td>Symbol find / query</td><td class="compare-best">34.6 ms</td><td>169.5 ms</td></tr>
+                    <tr><td>Callers / impact</td><td class="compare-best">27.2 ms</td><td>172.4 ms</td></tr>
+                    <tr><td>Inspect / context</td><td class="compare-best">35.0 ms</td><td>415.9 ms</td></tr>
+                    <tr><td>Impact baseline (git diff)</td><td class="compare-best">725.9 ms</td><td>no such mode</td></tr>
+                    <tr><td>Graph nodes</td><td class="compare-best">507,257</td><td>315,498</td></tr>
+                    <tr><td>Graph edges</td><td>916,380</td><td class="compare-best">986,709</td></tr>
+                    <tr><td>Index size on disk</td><td class="compare-best">87 MiB</td><td>671 MiB</td></tr>
+                    <tr><td>Files indexed</td><td class="compare-best">14,874</td><td>10,814</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <p class="table-caption">gitnexus did not finish — killed after 27 min stuck in its in-memory graph-resolution phase (RSS 4.6 GiB, no output written).</p>
+
+            <h3 class="mono accent">abhigyanpatwari/GitNexus</h3>
+            <p class="compare-shape">3,232 files, polyglot — the corpus all three can finish</p>
+            <div class="table-container">
+                <table class="saas-table">
+                    <thead><tr><th>Metric</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th></tr></thead>
+                    <tbody>
+                    <tr><td>Cold index</td><td class="compare-best">0.74 s</td><td>11.2 s</td></tr>
+                    <tr><td>Peak RSS</td><td class="compare-best">264 MiB</td><td>501 MiB</td></tr>
+                    <tr><td>Find / query</td><td class="compare-best">9.4 ms</td><td>103.5 ms</td></tr>
+                    <tr><td>Callers / impact</td><td class="compare-best">9.2 ms</td><td>104.2 ms</td></tr>
+                    <tr><td>Inspect / context</td><td class="compare-best">9.4 ms</td><td>—</td></tr>
+                    <tr><td>Graph nodes</td><td class="compare-best">49,122</td><td>19,604</td></tr>
+                    <tr><td>Graph edges</td><td class="compare-best">48,271</td><td>39,155</td></tr>
+                    <tr><td>Index size on disk</td><td class="compare-best">7.7 MiB</td><td>37 MiB</td></tr>
+                    <tr><td>Files indexed</td><td class="compare-best">3,232</td><td>2,968</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            
+
+
+        <h2 class="section-heading">이 수치가 말해주지 않는 것</h2>
+        <p class="hero-answer compare-limits">머신 한 대, 버전 한 조합, 코퍼스 두 개의 결과일 뿐입니다. 어떤 도구의 API가 내 용도에 맞는지, 언어 지원이 내 스택과 맞는지, 이 둘과 다른 모양의 저장소에서 어떻게 동작하는지는 답하지 않습니다. 콜드 인덱스에서 지는 도구라도 다른 둘이 답하지 못하는 질문에 답한다면 옳은 선택일 수 있습니다. <strong>결정하기 전에 자신의 저장소에서 다시 실행해 보세요</strong>. 명령은 각 프로젝트 README에 있습니다.</p>
+        <p class="table-caption">수치는 ecp 0.9.3 기준입니다. 오류는 이슈로 알려주세요.</p>
+        <p class="compare-back"><a href="../../">&larr; Egent Code Plexus — IDE가 아니라 에이전트를 위해</a></p>
+    </main>
+
+<footer class="site-footer">
+        <div class="container footer-inner">
+            <div class="footer-brand">
+                <span class="logo-icon small"></span>
+                <span>Egent Code Plexus</span>
+            </div>
+            <p class="footer-copy" data-i18n="footer.text">&copy; 2026 Egent Code Plexus Project. Segments extracted from the Native Design Deep Dive.</p>
+        </div>
+    </footer>
+    <script>window.__ECP_LOCALE__ = "ko"; window.__ECP_ROOT__ = "../../../"; window.__ECP_PAGE__ = "compare/codegraph/";</script>
+    <script src="../../../js/qa_data.js"></script>
+    <script src="../../../js/app.js"></script>
+</body>
+</html>

@@ -15,6 +15,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createContext, runInContext } from 'node:vm';
+import { createHash } from 'node:crypto';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const SITE = join(ROOT, 'docs/ecp-landing');
@@ -22,6 +23,7 @@ const CHECK = process.argv.includes('--check');
 
 const seo = JSON.parse(readFileSync(join(SITE, 'seo.json'), 'utf8'));
 const compare = JSON.parse(readFileSync(join(SITE, 'compare.json'), 'utf8'));
+const integrations = JSON.parse(readFileSync(join(SITE, 'integrations.json'), 'utf8'));
 
 // Freshness is a citation signal, and it is committed rather than computed.
 // Deriving it from git put a clock in the build: CI checks out the synthetic
@@ -45,6 +47,17 @@ const STARS = Number(process.env.ECP_STARS) || 0;
 const STARS_AT = /^\d{4}-\d{2}-\d{2}$/.test(process.env.ECP_STARS_AT ?? '')
   ? process.env.ECP_STARS_AT
   : BUILD_DATE;
+
+/**
+ * Version used when hashing a page for change detection. Every page carries the
+ * real version, so hashing the shipped bytes says "everything changed" at every
+ * release; the v0.9.3 deploy rewrote 19 files and 25 lines, all of them the
+ * version. Rendering a second time with a sentinel is exact where a search for
+ * the version string is not: `compare.json` records `codegraph 0.9.4`, so once
+ * ecp reaches 0.9.4 a textual normaliser would eat a third party's version and
+ * churn every comparison page.
+ */
+const FINGERPRINT_VERSION = '0.0.0-fingerprint';
 
 const BASE = seo.baseUrl;
 const OG_LOCALE = {
@@ -352,26 +365,44 @@ function templateElement(tag) {
  * on what the measurements do not cover, because a comparison a reader cannot
  * check is worth less than no comparison at all.
  */
-function comparePage(locale, version) {
+/** Every tool in the table except ecp itself, which is column 0 everywhere. */
+const RIVALS = compare.tools.slice(1);
+
+/**
+ * One page per rival on top of the hub page that carries all of them. "ecp vs
+ * <tool>" is the query people actually type and the shape an answer engine
+ * quotes, and a two-column table is the thing it can lift whole; the hub's
+ * four-column table answers a question nobody asked in those words.
+ *
+ * No new prose: the head, the intro and the methodology are the same localized
+ * strings the hub uses, and the numbers are the same measurements with the
+ * other tool's column dropped. A per-rival paragraph would have to be invented
+ * in six languages, and an invented sentence is worth less than a URL.
+ */
+function comparePage(locale, version, rival = null) {
   const t = compare.i18n[locale] ?? compare.i18n[seo.defaultLocale];
-  const path = `${seo.localePaths[locale]}compare/`;
+  const leaf = rival ? `compare/${rival.slug}/` : 'compare/';
+  const path = `${seo.localePaths[locale]}${leaf}`;
   const canonical = BASE + path;
   const up = '../'.repeat(path.split('/').filter(Boolean).length);
+  const columns = rival ? [compare.tools[0], rival] : compare.tools;
+  const keep = rival ? [0, compare.tools.indexOf(rival)] : compare.tools.map((_, i) => i);
+  const title = rival ? `${t.title} · ecp vs ${rival.name}` : t.title;
 
   const head = [
-    `<title>${escapeHtml(t.title)} — ${escapeHtml(t.subtitle)}</title>`,
+    `<title>${escapeHtml(title)} — ${escapeHtml(t.subtitle)}</title>`,
     `<meta name="description" content="${escapeHtml(stripTags(t.intro)).slice(0, 300)}">`,
     `<link rel="canonical" href="${canonical}">`,
     ...Object.entries(seo.localePaths).map(
-      ([c, p2]) => `<link rel="alternate" hreflang="${c}" href="${BASE}${p2}compare/">`,
+      ([c, p2]) => `<link rel="alternate" hreflang="${c}" href="${BASE}${p2}${leaf}">`,
     ),
-    `<link rel="alternate" hreflang="x-default" href="${BASE}compare/">`,
+    `<link rel="alternate" hreflang="x-default" href="${BASE}${leaf}">`,
     '<meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large">',
     `<link rel="icon" href="${BASE}favicon.svg" type="image/svg+xml">`,
     '<meta property="og:type" content="article">',
     `<meta property="og:locale" content="${OG_LOCALE[locale]}">`,
     '<meta property="og:site_name" content="Egent Code Plexus">',
-    `<meta property="og:title" content="${escapeHtml(t.title)}">`,
+    `<meta property="og:title" content="${escapeHtml(title)}">`,
     `<meta property="og:description" content="${escapeHtml(t.subtitle)}">`,
     `<meta property="og:url" content="${canonical}">`,
     `<meta property="og:image" content="${BASE}og.png">`,
@@ -381,12 +412,12 @@ function comparePage(locale, version) {
   const articleLd = {
     '@context': 'https://schema.org',
     '@type': 'TechArticle',
-    headline: t.title,
+    headline: title,
     description: stripTags(t.subtitle),
     inLanguage: locale,
     url: canonical,
     dateModified: BUILD_DATE,
-    about: compare.tools.map((tool) => ({
+    about: columns.map((tool) => ({
       '@type': 'SoftwareApplication',
       name: tool.name,
       applicationCategory: 'DeveloperApplication',
@@ -395,7 +426,7 @@ function comparePage(locale, version) {
     isBasedOn: `${seo.repoUrl}#-performance-receipts`,
   };
 
-  const headers = compare.tools
+  const headers = columns
     .map((tool) => `<th><a href="${tool.url}" rel="noopener">${tool.name}</a><br><span class="mono compare-stack">${tool.stack}</span></th>`)
     .join('');
 
@@ -403,8 +434,11 @@ function comparePage(locale, version) {
     .map((suite) => {
       const rows = suite.rows
         .map((r) => {
-          const cells = r.values
-            .map((v, i) => `<td${i === r.best ? ' class="compare-best"' : ''}>${escapeHtml(v)}</td>`)
+          // `best` indexes the full row, so it has to be remapped once a column
+          // is dropped — and dropped entirely when the winner is the tool this
+          // page does not show, rather than silently crowning the runner-up.
+          const cells = keep
+            .map((column) => `<td${column === r.best ? ' class="compare-best"' : ''}>${escapeHtml(r.values[column])}</td>`)
             .join('');
           return `<tr><td>${escapeHtml(r.metric)}</td>${cells}</tr>`;
         })
@@ -426,6 +460,15 @@ function comparePage(locale, version) {
             ${note}`;
     })
     .join('\n');
+
+  // Tool names, not a sentence: these links carry the one phrase every locale
+  // shares, so the hub reaches its per-rival pages without a translated label.
+  const rivalLinks = rival
+    ? ''
+    : `
+        <ul class="compare-method compare-rivals">
+${RIVALS.map((tool) => `            <li><a href="${tool.slug}/">ecp vs ${escapeHtml(tool.name)}</a></li>`).join('\n')}
+        </ul>`;
 
   // The chrome is the landing page's own markup, fonts included, so the two
   // pages cannot drift apart visually. app.js runs here too: it reads the
@@ -476,14 +519,15 @@ ${chrome.header}
         </ul>
 ${tables}
 
+${rivalLinks}
         <h2 class="section-heading">${escapeHtml(t.limitsHeading)}</h2>
         <p class="hero-answer compare-limits">${t.limits}</p>
         <p class="table-caption">${escapeHtml(t.footer.replace('{version}', version))}</p>
-        <p class="compare-back"><a href="../">&larr; ${escapeHtml(seo.meta[locale].ogTitle)}</a></p>
+        <p class="compare-back"><a href="${rival ? '../../' : '../'}">&larr; ${escapeHtml(seo.meta[locale].ogTitle)}</a></p>
     </main>
 
 ${chrome.footer}
-    <script>window.__ECP_LOCALE__ = "${locale}"; window.__ECP_ROOT__ = "${up}"; window.__ECP_PAGE__ = "compare/";</script>
+    <script>window.__ECP_LOCALE__ = "${locale}"; window.__ECP_ROOT__ = "${up}"; window.__ECP_PAGE__ = "${leaf}";</script>
     <script src="${up}js/qa_data.js"></script>
     <script src="${up}js/app.js"></script>
 </body>
@@ -491,13 +535,231 @@ ${chrome.footer}
 `;
 }
 
+
+/**
+ * One page per agent host, plus a hub carrying the channel matrix.
+ *
+ * "how do I give <agent> codebase awareness" is a question with a host in it,
+ * and the answer is a different set of commands for each one. The hub's matrix
+ * is the part worth quoting; the host pages are the part worth following.
+ *
+ * Every command is copied from the shipped binary's own `--help`, and a host
+ * whose installer still prints a placeholder is described as manual rather
+ * than supported — an install page that lies costs more than the traffic it
+ * earns.
+ */
+function integrationPage(locale, version, host = null) {
+  const t = integrations.i18n[locale] ?? integrations.i18n[seo.defaultLocale];
+  const leaf = host ? `integrations/${host.slug}/` : 'integrations/';
+  const path = `${seo.localePaths[locale]}${leaf}`;
+  const canonical = BASE + path;
+  const up = '../'.repeat(path.split('/').filter(Boolean).length);
+  const copy = host ? t.hosts[host.slug] : null;
+  const title = host ? `${host.name} — ${t.title}` : `${t.title} — ${seo.meta[locale].ogTitle}`;
+  const description = stripTags(host ? copy.intro : t.intro).slice(0, 300);
+
+  const head = [
+    `<title>${escapeHtml(title)}</title>`,
+    `<meta name="description" content="${escapeHtml(description)}">`,
+    `<link rel="canonical" href="${canonical}">`,
+    ...Object.entries(seo.localePaths).map(
+      ([c, p2]) => `<link rel="alternate" hreflang="${c}" href="${BASE}${p2}${leaf}">`,
+    ),
+    `<link rel="alternate" hreflang="x-default" href="${BASE}${leaf}">`,
+    '<meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large">',
+    `<link rel="icon" href="${BASE}favicon.svg" type="image/svg+xml">`,
+    '<meta property="og:type" content="article">',
+    `<meta property="og:locale" content="${OG_LOCALE[locale]}">`,
+    '<meta property="og:site_name" content="Egent Code Plexus">',
+    `<meta property="og:title" content="${escapeHtml(title)}">`,
+    `<meta property="og:description" content="${escapeHtml(stripTags(t.subtitle))}">`,
+    `<meta property="og:url" content="${canonical}">`,
+    `<meta property="og:image" content="${BASE}og.png">`,
+    '<meta name="twitter:card" content="summary_large_image">',
+  ].join('\n    ');
+
+  // HowTo only where there are steps to follow. The hub is a table, and a
+  // HowTo without steps is structured data describing nothing.
+  const howToLd = host?.steps
+    ? {
+        '@context': 'https://schema.org',
+        '@type': 'HowTo',
+        name: title,
+        inLanguage: locale,
+        description,
+        step: host.steps.map((command, i) => ({
+          '@type': 'HowToStep',
+          position: i + 1,
+          name: command,
+          text: command,
+        })),
+      }
+    : null;
+
+  const articleLd = {
+    '@context': 'https://schema.org',
+    '@type': 'TechArticle',
+    headline: title,
+    description,
+    inLanguage: locale,
+    url: canonical,
+    dateModified: BUILD_DATE,
+    about: {
+      '@type': 'SoftwareApplication',
+      name: host ? host.name : 'Egent Code Plexus',
+      applicationCategory: 'DeveloperApplication',
+      url: host ? host.url : seo.repoUrl,
+    },
+    isBasedOn: seo.repoUrl,
+  };
+
+  const matrix = `
+            <div class="table-container">
+                <table class="saas-table">
+                    <thead><tr><th>Host</th>${Object.values(integrations.channelLabels)
+                      .map((label) => `<th>${escapeHtml(label)}</th>`)
+                      .join('')}</tr></thead>
+                    <tbody>
+                    ${integrations.hosts
+                      .map(
+                        (h) =>
+                          `<tr><td><a href="${host ? '../' : ''}${h.slug}/">${escapeHtml(h.name)}</a></td>${Object.keys(
+                            integrations.channelLabels,
+                          )
+                            .map(
+                              (channel) =>
+                                `<td${h.channels.includes(channel) ? ' class="compare-best"' : ''}>${
+                                  h.channels.includes(channel) ? '✓' : '—'
+                                }</td>`,
+                            )
+                            .join('')}</tr>`,
+                      )
+                      .join('\n                    ')}
+                    </tbody>
+                </table>
+            </div>`;
+
+  const block = (heading, body) =>
+    body ? `\n        <h2 class="section-heading">${escapeHtml(heading)}</h2>\n${body}` : '';
+  const commands = (lines) =>
+    `        <ul class="compare-method">${lines
+      .map((line) => `<li><code class="mono">${escapeHtml(line)}</code></li>`)
+      .join('')}</ul>`;
+
+  const body = host
+    ? [
+        block(t.stepsHeading, host.steps ? commands(host.steps) : ''),
+        block(
+          t.configHeading,
+          host.config
+            ? `        <pre class="code-block mono">${escapeHtml(host.config)}</pre>` +
+                (host.configPaths ? commands(host.configPaths) : '')
+            : '',
+        ),
+        block(t.verifyHeading, commands([host.verify])),
+        block(t.caveatHeading, `        <p class="hero-answer compare-limits">${copy.caveat}</p>`),
+      ].join('')
+    : block(t.matrixHeading, matrix) +
+      block(
+        t.hostsHeading,
+        commands(integrations.hosts.map((h) => h.name)).replace(
+          /<li><code class="mono">([^<]+)<\/code><\/li>/g,
+          (_, name) => {
+            const h = integrations.hosts.find((x) => x.name === name);
+            return `<li><a href="${h.slug}/">${escapeHtml(h.name)}</a></li>`;
+          },
+        ),
+      );
+
+  const chrome = {
+    header: applyTranslations(templateElement('header'), {}),
+    footer: templateElement('footer').replace(/\s*<p class="footer-links">[\s\S]*?<\/p>/, ''),
+  };
+
+  return `<!DOCTYPE html>
+<html lang="${locale}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    ${head}
+    <link rel="stylesheet" href="${up}css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;700&family=Inter:wght@400;500;600;800&display=swap" rel="stylesheet">
+    <script type="application/ld+json">${scriptJson(articleLd)}</script>${
+      howToLd ? `\n    <script type="application/ld+json">${scriptJson(howToLd)}</script>` : ''
+    }
+</head>
+<body class="theme-dark">
+${chrome.header}
+
+    <section class="hero compare-hero">
+        <div class="hero-bg-glow"></div>
+        <div class="container hero-content">
+            <h1 class="hero-title">${escapeHtml(host ? host.name : t.title)}</h1>
+            <p class="hero-tagline mono">${escapeHtml(t.subtitle)}</p>
+            <p class="hero-answer">${host ? copy.intro : t.intro}</p>
+        </div>
+    </section>
+
+    <main class="container compare-main">${body}
+        <p class="table-caption">${escapeHtml(t.sourceLabel.replace('{version}', version))}</p>
+        <p class="compare-back"><a href="${host ? '../../' : '../'}">&larr; ${escapeHtml(seo.meta[locale].ogTitle)}</a></p>
+    </main>
+
+${chrome.footer}
+    <script>window.__ECP_LOCALE__ = "${locale}"; window.__ECP_ROOT__ = "${up}"; window.__ECP_PAGE__ = "${leaf}";</script>
+    <script src="${up}js/qa_data.js"></script>
+    <script src="${up}js/app.js"></script>
+</body>
+</html>
+`;
+}
+
+
+/**
+ * The integrations tab on the landing page. Cards carry the host name and the
+ * channels it takes, which are facts rather than sentences, so this section
+ * needs no translation beyond the lead the integrations hub already ships and
+ * the tab label in `app.js`.
+ */
+function integrationsSection(locale) {
+  const t = integrations.i18n[locale] ?? integrations.i18n[seo.defaultLocale];
+  const cards = integrations.hosts
+    .map(
+      (host) => `
+                <div class="bento-card">
+                    <h3 class="mono accent"><a href="integrations/${host.slug}/">${escapeHtml(host.name)}</a></h3>
+                    <p class="mono">${host.channels
+                      .map((channel) => escapeHtml(integrations.channelLabels[channel]))
+                      .join(' · ')}</p>
+                </div>`,
+    )
+    .join('');
+  return `
+            <p class="hero-answer">${t.intro}</p>
+            <div class="bento-grid">${cards}
+            </div>
+            <p class="compare-back"><a href="integrations/">${escapeHtml(t.matrixHeading)} &rarr;</a></p>`;
+}
+
 // ── crawler files ────────────────────────────────────────────────────────────
+
+/** Home outranks the comparison hub, which outranks one rival's slice of it. */
+function priority(code, suffix) {
+  const depth = suffix.split('/').filter(Boolean).length;
+  const base = [1.0, 0.9, 0.7][depth];
+  return (code === seo.defaultLocale ? base : base - 0.1).toFixed(1);
+}
 
 function sitemapXml() {
   const today = BUILD_DATE;
   const pages = Object.entries(seo.localePaths).flatMap(([code, p]) => [
     { code, p, suffix: '' },
     { code, p, suffix: 'compare/' },
+    ...RIVALS.map((tool) => ({ code, p, suffix: `compare/${tool.slug}/` })),
+    { code, p, suffix: 'integrations/' },
+    ...integrations.hosts.map((host) => ({ code, p, suffix: `integrations/${host.slug}/` })),
   ]);
   const urls = pages
     .map(({ code, p, suffix }) => {
@@ -511,7 +773,7 @@ function sitemapXml() {
         <loc>${BASE}${p}${suffix}</loc>
         <lastmod>${today}</lastmod>
         <changefreq>weekly</changefreq>
-        <priority>${code === seo.defaultLocale ? (suffix ? '0.9' : '1.0') : '0.8'}</priority>
+        <priority>${priority(code, suffix)}</priority>
 ${links}
         <xhtml:link rel="alternate" hreflang="x-default" href="${BASE}${suffix}"/>
     </url>`;
@@ -524,6 +786,22 @@ ${urls}
 `;
 }
 
+/**
+ * Written, served, and read by nobody — for now.
+ *
+ * A crawler fetches robots.txt from the host root and nowhere else, and this
+ * site lives on a project path, so the file below sits at
+ * `<host>/egent-code-plexus/robots.txt` while every crawler asks
+ * `<host>/robots.txt`, which is a different repository and currently 404s. A
+ * 404 there means "no rules", so nothing is blocked; what is lost is the
+ * `Sitemap:` line and the AI-crawler allowlist, and those crawlers default to
+ * allowed anyway. Sitemap discovery therefore rests on Search Console and on
+ * the IndexNow submission, not on this file.
+ *
+ * It stays because it costs nothing and becomes load-bearing the moment the
+ * site answers at a host root — a custom domain, or a robots.txt in the user
+ * site repository that points here.
+ */
 function robotsTxt() {
   // Answer engines are the audience this site is written for, so say yes by
   // name rather than relying on the wildcard: Google-Extended and
@@ -610,6 +888,14 @@ spots teaches a model to trust an answer that was never there.
 
 ${compareText()}
 
+One page per comparison, same measurements, two columns:
+
+${RIVALS.map((tool) => `- ecp vs ${tool.name}: ${BASE}compare/${tool.slug}/`).join('\n')}
+
+## Wiring it into an agent
+
+${integrations.hosts.map((host) => `- ${host.name} (${host.channels.join(', ')}): ${BASE}integrations/${host.slug}/`).join('\n')}
+
 ## Questions and answers
 
 ${faq}
@@ -671,7 +957,21 @@ const version = workspaceVersion();
 const { translations, qas } = loadSiteData();
 const template = readFileSync(join(SITE, 'template.html'), 'utf8');
 const written = [];
+const fingerprints = {};
 let stale = [];
+
+/**
+ * Content identity of a page, ignoring the two inputs that move without the
+ * page saying anything new: the version (rendered with a sentinel by the
+ * caller) and the star count, which is an environment value the deploy
+ * supplies and a reader never asked about.
+ */
+function fingerprint(relPath, html) {
+  fingerprints[`${BASE}${relPath.replace(/index\.html$/, '')}`] = createHash('sha256')
+    .update(html.replace(/"interactionStatistic":\{[^}]*\},?/, ''))
+    .digest('hex')
+    .slice(0, 16);
+}
 
 function emit(relPath, content) {
   const target = join(SITE, relPath);
@@ -706,14 +1006,42 @@ for (const [locale, path] of Object.entries(seo.localePaths)) {
   html = replaceRegion(html, 'head', headHtml(locale, meta, version, localeQas, qaLocale));
   html = replaceRegion(html, 'faq', faqHtml(localeQas));
   html = replaceRegion(html, 'answer', seo.answer[locale]);
+  html = replaceRegion(html, 'integrations', integrationsSection(locale));
   html = html
     .replace('<html lang="en">', `<html lang="${locale}">`)
     .replace(/\{\{VERSION\}\}/g, version)
     .replace(/\{\{LOCALE\}\}/g, locale)
     .replace(/\{\{ASSET_PREFIX\}\}/g, depth)
     .replace(/\{\{LOCALE_PATH\}\}/g, path);
+  // The footer is the only link from a landing page into the sub-pages, and it
+  // named the comparison hub alone. A page nothing links to is a page a crawler
+  // reaches only through the sitemap, and a reader never.
+  html = html.replace(
+    /<p class="footer-links">([\s\S]*?)<\/p>/,
+    (_, links) =>
+      `<p class="footer-links">${links} · <a href="integrations/">${escapeHtml(
+        integrations.i18n[locale].title,
+      )}</a></p>`,
+  );
   emit(`${path}index.html`, html);
-  emit(`${path}compare/index.html`, comparePage(locale, version));
+  fingerprint(`${path}index.html`, html.split(version).join(FINGERPRINT_VERSION));
+  // Emitted with the real version, hashed with a sentinel: the second render is
+  // what makes "did this page change" a question about content.
+  for (const [relPath, render] of [
+    [`${path}compare/index.html`, (v) => comparePage(locale, v)],
+    ...RIVALS.map((rival) => [
+      `${path}compare/${rival.slug}/index.html`,
+      (v) => comparePage(locale, v, rival),
+    ]),
+    [`${path}integrations/index.html`, (v) => integrationPage(locale, v)],
+    ...integrations.hosts.map((host) => [
+      `${path}integrations/${host.slug}/index.html`,
+      (v) => integrationPage(locale, v, host),
+    ]),
+  ]) {
+    emit(relPath, render(version));
+    fingerprint(relPath, render(FINGERPRINT_VERSION));
+  }
 }
 
 // IndexNow verification. The key lives at the site's own path rather than the
@@ -733,6 +1061,10 @@ for (const asset of ['og.png', 'favicon.svg', 'favicon.ico', 'apple-touch-icon.p
   written.push(asset);
 }
 
+// Read by the deploy's lastmod stamper. Committed because it is a function of
+// committed content alone, so it moves in a pull request exactly when a page
+// does — which also makes "what did this change touch" visible in the diff.
+emit('.page-hashes.json', `${JSON.stringify(fingerprints, null, 2)}\n`);
 emit('sitemap.xml', sitemapXml());
 emit('robots.txt', robotsTxt());
 emit('llms.txt', llmsTxt(version, qas[seo.defaultLocale]));
@@ -740,6 +1072,28 @@ emit('llms-full.txt', llmsFull(version, qas));
 for (const [locale, path] of Object.entries(seo.localePaths)) {
   if (!path) continue;
   emit(`${path}llms.txt`, llmsTxt(version, qas[locale] ?? qas[seo.defaultLocale]));
+}
+
+// The sitemap is assembled from its own list of paths, so it can agree with
+// itself while disagreeing with the pages that were actually written — a page
+// nobody submits, or a submitted URL that 404s. Neither is visible in the
+// output, so compare the two sets on every build rather than only in --check.
+{
+  const listed = new Set(
+    [...readFileSync(join(SITE, 'sitemap.xml'), 'utf8').matchAll(/<loc>([^<]+)<\/loc>/g)]
+      .map((m) => `${m[1].slice(BASE.length)}index.html`),
+  );
+  const emitted = new Set(written.filter((p) => p.endsWith('index.html')));
+  const missing = [...emitted].filter((p) => !listed.has(p));
+  const phantom = [...listed].filter((p) => !emitted.has(p));
+  if (missing.length || phantom.length) {
+    console.error(
+      `sitemap disagrees with the generated pages:${
+        missing.map((p) => `\n  built but not listed: ${p}`).join('')
+      }${phantom.map((p) => `\n  listed but not built: ${p}`).join('')}`,
+    );
+    process.exit(1);
+  }
 }
 
 if (CHECK && stale.length) {

@@ -6,9 +6,24 @@
     "protocol": "Same checkouts, same machine. All tools capped at a 1 MiB max-file-size threshold where configurable (gitnexus hard-codes 512 KB). ecp medians over 5–7 runs. ecp is a stateless one-shot CLI, so every latency includes full process startup — no daemon, no warm-up."
   },
   "tools": [
-    { "name": "ecp", "url": "https://github.com/coseto6125/egent-code-plexus", "stack": "Rust" },
-    { "name": "codegraph", "url": "https://github.com/colbymchenry/codegraph", "stack": "Node + SQLite" },
-    { "name": "gitnexus", "url": "https://github.com/abhigyanpatwari/GitNexus", "stack": "Node" }
+    {
+      "name": "ecp",
+      "url": "https://github.com/coseto6125/egent-code-plexus",
+      "stack": "Rust",
+      "slug": "ecp"
+    },
+    {
+      "name": "codegraph",
+      "url": "https://github.com/colbymchenry/codegraph",
+      "stack": "Node + SQLite",
+      "slug": "codegraph"
+    },
+    {
+      "name": "gitnexus",
+      "url": "https://github.com/abhigyanpatwari/GitNexus",
+      "stack": "Node",
+      "slug": "gitnexus"
+    }
   ],
   "suites": [
     {
@@ -17,16 +32,96 @@
       "shape": "14,874 files, dense single-language TypeScript",
       "footnote": "gitnexus did not finish — killed after 27 min stuck in its in-memory graph-resolution phase (RSS 4.6 GiB, no output written).",
       "rows": [
-        { "metric": "Cold index", "values": ["4.6 s", "166.9 s", "DNF — killed at 27 min"], "best": 0 },
-        { "metric": "Peak RSS", "values": ["~1.0 GiB", "1.7 GiB", "4.6 GiB (still climbing)"], "best": 0 },
-        { "metric": "Symbol find / query", "values": ["34.6 ms", "169.5 ms", "—"], "best": 0 },
-        { "metric": "Callers / impact", "values": ["27.2 ms", "172.4 ms", "—"], "best": 0 },
-        { "metric": "Inspect / context", "values": ["35.0 ms", "415.9 ms", "—"], "best": 0 },
-        { "metric": "Impact baseline (git diff)", "values": ["725.9 ms", "no such mode", "—"], "best": 0 },
-        { "metric": "Graph nodes", "values": ["507,257", "315,498", "—"], "best": 0 },
-        { "metric": "Graph edges", "values": ["916,380", "986,709", "—"], "best": 1 },
-        { "metric": "Index size on disk", "values": ["87 MiB", "671 MiB", "—"], "best": 0 },
-        { "metric": "Files indexed", "values": ["14,874", "10,814", "—"], "best": 0 }
+        {
+          "metric": "Cold index",
+          "values": [
+            "4.6 s",
+            "166.9 s",
+            "DNF — killed at 27 min"
+          ],
+          "best": 0
+        },
+        {
+          "metric": "Peak RSS",
+          "values": [
+            "~1.0 GiB",
+            "1.7 GiB",
+            "4.6 GiB (still climbing)"
+          ],
+          "best": 0
+        },
+        {
+          "metric": "Symbol find / query",
+          "values": [
+            "34.6 ms",
+            "169.5 ms",
+            "—"
+          ],
+          "best": 0
+        },
+        {
+          "metric": "Callers / impact",
+          "values": [
+            "27.2 ms",
+            "172.4 ms",
+            "—"
+          ],
+          "best": 0
+        },
+        {
+          "metric": "Inspect / context",
+          "values": [
+            "35.0 ms",
+            "415.9 ms",
+            "—"
+          ],
+          "best": 0
+        },
+        {
+          "metric": "Impact baseline (git diff)",
+          "values": [
+            "725.9 ms",
+            "no such mode",
+            "—"
+          ],
+          "best": 0
+        },
+        {
+          "metric": "Graph nodes",
+          "values": [
+            "507,257",
+            "315,498",
+            "—"
+          ],
+          "best": 0
+        },
+        {
+          "metric": "Graph edges",
+          "values": [
+            "916,380",
+            "986,709",
+            "—"
+          ],
+          "best": 1
+        },
+        {
+          "metric": "Index size on disk",
+          "values": [
+            "87 MiB",
+            "671 MiB",
+            "—"
+          ],
+          "best": 0
+        },
+        {
+          "metric": "Files indexed",
+          "values": [
+            "14,874",
+            "10,814",
+            "—"
+          ],
+          "best": 0
+        }
       ]
     },
     {
@@ -35,15 +130,87 @@
       "shape": "3,232 files, polyglot — the corpus all three can finish",
       "footnote": "",
       "rows": [
-        { "metric": "Cold index", "values": ["0.74 s", "11.2 s", "77.6 s"], "best": 0 },
-        { "metric": "Peak RSS", "values": ["264 MiB", "501 MiB", "2.5 GiB"], "best": 0 },
-        { "metric": "Find / query", "values": ["9.4 ms", "103.5 ms", "—"], "best": 0 },
-        { "metric": "Callers / impact", "values": ["9.2 ms", "104.2 ms", "297.6 ms"], "best": 0 },
-        { "metric": "Inspect / context", "values": ["9.4 ms", "—", "295.5 ms"], "best": 0 },
-        { "metric": "Graph nodes", "values": ["49,122", "19,604", "30,223"], "best": 0 },
-        { "metric": "Graph edges", "values": ["48,271", "39,155", "47,218"], "best": 0 },
-        { "metric": "Index size on disk", "values": ["7.7 MiB", "37 MiB", "306 MiB"], "best": 0 },
-        { "metric": "Files indexed", "values": ["3,232", "2,968", "3,232"], "best": 0 }
+        {
+          "metric": "Cold index",
+          "values": [
+            "0.74 s",
+            "11.2 s",
+            "77.6 s"
+          ],
+          "best": 0
+        },
+        {
+          "metric": "Peak RSS",
+          "values": [
+            "264 MiB",
+            "501 MiB",
+            "2.5 GiB"
+          ],
+          "best": 0
+        },
+        {
+          "metric": "Find / query",
+          "values": [
+            "9.4 ms",
+            "103.5 ms",
+            "—"
+          ],
+          "best": 0
+        },
+        {
+          "metric": "Callers / impact",
+          "values": [
+            "9.2 ms",
+            "104.2 ms",
+            "297.6 ms"
+          ],
+          "best": 0
+        },
+        {
+          "metric": "Inspect / context",
+          "values": [
+            "9.4 ms",
+            "—",
+            "295.5 ms"
+          ],
+          "best": 0
+        },
+        {
+          "metric": "Graph nodes",
+          "values": [
+            "49,122",
+            "19,604",
+            "30,223"
+          ],
+          "best": 0
+        },
+        {
+          "metric": "Graph edges",
+          "values": [
+            "48,271",
+            "39,155",
+            "47,218"
+          ],
+          "best": 0
+        },
+        {
+          "metric": "Index size on disk",
+          "values": [
+            "7.7 MiB",
+            "37 MiB",
+            "306 MiB"
+          ],
+          "best": 0
+        },
+        {
+          "metric": "Files indexed",
+          "values": [
+            "3,232",
+            "2,968",
+            "3,232"
+          ],
+          "best": 0
+        }
       ]
     }
   ],
