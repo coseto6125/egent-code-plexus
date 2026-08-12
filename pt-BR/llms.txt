@@ -1,0 +1,134 @@
+# Egent Code Plexus (ecp)
+
+> A code intelligence graph built for AI coding agents rather than for humans
+> reading an IDE. It answers structural questions — who calls this symbol, what
+> does this change break, which routes and database tables does this service
+> reach — over 31 languages in one graph.
+
+Version: 0.9.3
+Repository: https://github.com/coseto6125/egent-code-plexus
+License: MIT
+Install: curl -sSfL https://github.com/coseto6125/egent-code-plexus/releases/latest/download/install.sh | sh
+
+## What it is for
+
+An agent editing code needs to know what its edit touches before it makes the
+edit. Text search answers "where does this string appear"; ecp answers "what
+depends on this declaration", which is a different question and the one that
+decides whether a refactor is safe.
+
+## What it does
+
+- `ecp find <name>` — locate a declaration by symbol, not by string match.
+- `ecp impact --target <symbol> --direction upstream` — callers of a symbol.
+- `ecp impact --baseline <ref>` — blast radius of a diff against a git ref.
+- `ecp routes` / `ecp contracts` — HTTP routes and cross-repo API contracts.
+- `ecp cypher '<query>'` — arbitrary graph queries across indexed repos.
+- `ecp peers` — collision detection between concurrent agents in one repo.
+
+## Measured claims
+
+Each number below is from the project's own benchmark on an AMD Ryzen 9 9950X,
+39.2 GiB RAM, Linux 6.6.87. Numbers on other hardware and other corpora differ.
+
+- Token cost: a 3-hop call chain from `ecp impact` is about 111 tokens; the
+  equivalent grep output is about 830, before counting the files an agent must
+  then open to interpret it.
+- Query latency: structural queries target under 100 ms on a warm index.
+- Languages: 31 parsed, of which 14 are covered by the mainstream test matrix.
+
+## Honesty model
+
+Where the graph cannot see something it emits a BlindSpot record naming the
+gap, rather than an empty result that reads as "nothing exists". Known gaps are
+deliberate and documented: function-body locals are dropped, and a handful of
+language constructs are unsupported per language. A tool that hides its blind
+spots teaches a model to trust an answer that was never there.
+
+## How it compares
+
+Measured against ecp (Rust), codegraph (Node + SQLite), gitnexus (Node) on the same checkouts and the same machine.
+Versions: ecp 0.4.2 · codegraph 0.9.4 · gitnexus 1.6.5. Hardware: AMD Ryzen 9 9950X (16 logical), Linux. Same checkouts, same machine. All tools capped at a 1 MiB max-file-size threshold where configurable (gitnexus hard-codes 512 KB). ecp medians over 5–7 runs. ecp is a stateless one-shot CLI, so every latency includes full process startup — no daemon, no warm-up.
+
+### microsoft/vscode — 14,874 files, dense single-language TypeScript
+
+| Metric | ecp | codegraph | gitnexus |
+|---|---|---|---|
+| Cold index | 4.6 s | 166.9 s | DNF — killed at 27 min |
+| Peak RSS | ~1.0 GiB | 1.7 GiB | 4.6 GiB (still climbing) |
+| Symbol find / query | 34.6 ms | 169.5 ms | — |
+| Callers / impact | 27.2 ms | 172.4 ms | — |
+| Inspect / context | 35.0 ms | 415.9 ms | — |
+| Impact baseline (git diff) | 725.9 ms | no such mode | — |
+| Graph nodes | 507,257 | 315,498 | — |
+| Graph edges | 916,380 | 986,709 | — |
+| Index size on disk | 87 MiB | 671 MiB | — |
+| Files indexed | 14,874 | 10,814 | — |
+
+gitnexus did not finish — killed after 27 min stuck in its in-memory graph-resolution phase (RSS 4.6 GiB, no output written).
+
+### abhigyanpatwari/GitNexus — 3,232 files, polyglot — the corpus all three can finish
+
+| Metric | ecp | codegraph | gitnexus |
+|---|---|---|---|
+| Cold index | 0.74 s | 11.2 s | 77.6 s |
+| Peak RSS | 264 MiB | 501 MiB | 2.5 GiB |
+| Find / query | 9.4 ms | 103.5 ms | — |
+| Callers / impact | 9.2 ms | 104.2 ms | 297.6 ms |
+| Inspect / context | 9.4 ms | — | 295.5 ms |
+| Graph nodes | 49,122 | 19,604 | 30,223 |
+| Graph edges | 48,271 | 39,155 | 47,218 |
+| Index size on disk | 7.7 MiB | 37 MiB | 306 MiB |
+| Files indexed | 3,232 | 2,968 | 3,232 |
+
+These numbers are one machine, one set of versions, two corpora. They do not
+say which tool has the API a given project wants, whether its language
+coverage matches that stack, or how any of them behave on a differently shaped
+repository. Re-measure before deciding. Full page: https://coseto6125.github.io/egent-code-plexus/compare/
+
+One page per comparison, same measurements, two columns:
+
+- ecp vs codegraph: https://coseto6125.github.io/egent-code-plexus/compare/codegraph/
+- ecp vs gitnexus: https://coseto6125.github.io/egent-code-plexus/compare/gitnexus/
+
+## Wiring it into an agent
+
+- Claude Code (hooks, skill, mcp): https://coseto6125.github.io/egent-code-plexus/integrations/claude-code/
+- Codex CLI (skill, mcp, native): https://coseto6125.github.io/egent-code-plexus/integrations/codex/
+- Gemini CLI (skill, mcp): https://coseto6125.github.io/egent-code-plexus/integrations/gemini-cli/
+- Any MCP host (mcp): https://coseto6125.github.io/egent-code-plexus/integrations/mcp/
+- Orca (plugin): https://coseto6125.github.io/egent-code-plexus/integrations/orca/
+
+## Questions and answers
+
+### Why is 'Honest Ignorance' more important than 'Vague Guessing'?
+
+During agent communication, LLMs easily fall into a closed-world assumption. To an LLM, anything unknown might be treated as non-existent. Therefore, making the LLM aware that it 'does not know' is crucial to prevent hallucinations.Knowing what is 'unknown' allows the LLM to dig deeper and find actual answers, rather than having the tool mask the unknown, causing the LLM to believe the unknown information simply doesn't exist.Thus, the value of BlindSpot is not to complete the graph, but to honestly reveal the graph's boundaries. Without marking BlindSpots, human engineers might suspect a hidden trap; but an Agent might directly interpret 'no edge' as 'no dependency'. This is extremely dangerous for large systems.
+
+### Does `ecp peers` mean multi-Agent parallel development is the future?
+
+In fact, all advanced Agentic Developers or Departments have already started adopting this mechanism gradually, though mostly implemented at the workflow level. Building workflows is often complex and massive, but through a simple peer design, code agents can instantly share their current development info with each other, avoiding duplicate work or introducing conflicts between their parallel efforts.Today we have the sub-agent development model, but this mechanism is merely an extension of a single session. Sub-agents just complete tasks handed down by the main agent.Through ecp peers, what I hope to achieve is a massive group of main agents completing grander plans by mutually exchanging information, rather than just communicating through document records. Such a design can advance everyone's progress in real-time and accomplish larger-scale design planning.
+
+### Why a stateless architecture with mmap + rkyv?
+
+The stateless concept of mmap and rkyv depends on performance and stability.Once a server boots up, it can hold state, but to maintain that state, we need more complex processes and code to ensure the stability of all states. Every interaction with the server is a cost; necessary caching also costs memory. Numerous constraints result in poor performance.Through mmap, all agents share the underlying common resource. They do not need to own state; instead, they work via near-instant queries against static data. In practice, building a graph of 16k files and 300k nodes takes only 2 to 3 seconds, producing a graph.bin that is less than 70 MB. Because of the shared mmap design, various CLI queries generally return within 100 ms.This model is vital for Agents because Agent systems inherently feature high concurrency, short lifespans, frequent restarts, and cross-session operations. Statelessness isn't just for speed; it's to minimize failure modes.
+
+### Is ECP moving from code parsing to architecture understanding?
+
+Yes. The greater challenge for AI Agents in software development is shifting from 'can it write a function correctly' to 'can it avoid breaking existing architectural constraints in a large system'.The correctness of a single function can be solved by types, tests, linting, and local context; but real system risks often hide in constraints that cross files, services, languages, and time.LLMs can deduce things themselves via basic graph queries, but that isn't a stable solution. The problem isn't that LLMs can't reason, but that making them rediscover architectural patterns from low-level nodes and edges every time is costly, yields inconsistent results, and easily misses 'negative space'. Therefore, ECP has built-in pattern detection like Saga and EventTopic, elevating high-risk, common, structurable architectural knowledge into first-class signals ahead of time. More accurately, it acts as an Agent's architecture radar: laying out high-confidence constraints and implicit couplings clearly before code is modified.
+
+### What is the relationship between ECP and GitNexus?
+
+GitNexus is not my project; it's the origin of my project. I encountered issues while using GitNexus: performance, multiple daemon servers, and several architectural bottlenecks, so I independently developed the Rust architecture.The first breaking point was when resident state began to restrict Agent workflows. When multiple Agents, worktrees, repos, and branches query simultaneously, the daemon model easily becomes a hidden coordination problem. The second breaking point was a shift in expected query frequency. I wanted something closer to an Agent's L1 / L2 cache: querying in milliseconds before every file edit, rename, review, or impact analysis. At this frequency, the costs of a Node.js daemon became glaring.Thus, the core thesis of the Rust stateless architecture is: bake the graph into a fixed-format graph.bin so that every CLI / MCP query directly mmaps it, requiring no warm-up, no daemon state, and no trust in a long-lived process.
+
+### What's the story behind `ecp dev pr-analyze` and Merge Queues?
+
+Initially, I didn't want to reinvent the merge queue. I just wanted to feed ecp impact signals into existing queues, so I created ecp dev pr-analyze to automatically label workflows with area, risk, and cross-pr-conflict.But after dogfooding, I found that the real value wasn't the queue itself, but 'using the graph to judge if PRs can safely run in parallel'. Even if two PRs touch different files, if one modifies a symbol within the other's blast radius, it's considered a semantic conflict. Conversely, if two PRs are in unrelated areas and their impact sets don't intersect, they can be labeled as low-risk, no cross-PR conflict, and handed to the workflow for more aggressive merging.What this feature truly saves isn't single CI execution time, but reducing the cycle of PRs drifting from each other, leading to endless rebases and CI reruns. ECP's vision here is: elevating the merge queue from 'time-based queuing' to 'risk-based scheduling'.
+
+### What is the real bottleneck in Agent development?
+
+The rhythm traditional human teams use to manage changes isn't necessarily wrong, but the overall process system should be more automated to avoid hindering development.Agent coding speed is very fast now, but the obstacle is actually human fear and worry. Fear of code conflicting, fear of the LLM breaking B while changing A, fear of various code errors—these fears have become the biggest problem hindering development.As projects developed by everyone, every team, and every company grow exponentially in the future, similar tools will become more critical, and performance will be a fatal key. How to let the LLM understand the current architecture faster, rather than relying on long-term memory context processing, becomes relatively important. We should let the LLM understand the architecture through the source code itself, not through text records of the architecture, because only the source code is the only truth.
+
+### What will documentation become in the AI Agent era?
+
+In the AI Agent era, 'flowcharts' will actually become the most important form of documentation, because what humans need to manage are processes and architectural design. Through charts, we can quickly see each design, but how the code is generated, how tools verify it, and how Agents consume it will gradually become less important.However, underlying core designs should still be recorded—for example, how to utilize cache, whether there should be a warm-up, what the client timeout should be, etc. These design documents are still important, just abstracted to a broader scope. Accurately speaking, all documentation will move towards higher-dimensional design.Just as we no longer delve into how machine code is compiled or run when writing programs today. Egent Code Plexus itself is merely a transitional product adapting to current trends.
