@@ -447,3 +447,33 @@ Mientras el LLM no haya interiorizado estos diseños, hacen falta skills que los
 ### ¿Cuál es el primer principio central de la Skill de ECP?
 
 «Toda acción debe partir de hechos estructurales verificables, no de alucinaciones del contexto.»Cualquier cosa dicha antes puede ser una alucinación; solo lo que se comprueba en el momento es verificable. De ahí viene la idea de diseñar los peers: alcanzar una interacción casi en tiempo real mediante hooks y peers para evitar que aparezcan conflictos de desarrollo.
+
+## Questions and answers (pt-BR)
+
+Canonical page: https://coseto6125.github.io/egent-code-plexus/pt-BR/
+
+
+
+## Questions and answers (ru)
+
+Canonical page: https://coseto6125.github.io/egent-code-plexus/ru/
+
+
+
+## Questions and answers (hi)
+
+Canonical page: https://coseto6125.github.io/egent-code-plexus/hi/
+
+
+
+## Questions and answers (fr)
+
+Canonical page: https://coseto6125.github.io/egent-code-plexus/fr/
+
+
+
+## Questions and answers (de)
+
+Canonical page: https://coseto6125.github.io/egent-code-plexus/de/
+
+

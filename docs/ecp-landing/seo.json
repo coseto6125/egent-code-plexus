@@ -8,7 +8,12 @@
     "zh-CN": "zh-CN/",
     "ja": "ja/",
     "ko": "ko/",
-    "es": "es/"
+    "es": "es/",
+    "pt-BR": "pt-BR/",
+    "ru": "ru/",
+    "hi": "hi/",
+    "fr": "fr/",
+    "de": "de/"
   },
   "meta": {
     "en": {
@@ -46,6 +51,36 @@
       "description": "Consultas estructurales para agentes de IA: quién llama a un símbolo, el alcance de un cambio, rutas y contratos entre repositorios. 31 lenguajes, respuestas en menos de 100 ms, 7,5 veces menos tokens que grep, y registros BlindSpot en lugar de conjeturas.",
       "ogTitle": "Egent Code Plexus — hecho para agentes, no para IDEs",
       "ogDescription": "Pregunta quién llama a X, qué rompe un cambio, qué rutas existen. Un grafo sobre 31 lenguajes, respondido en milisegundos."
+    },
+    "pt-BR": {
+      "title": "Egent Code Plexus — grafo de inteligência de código para agentes de codificação de IA",
+      "description": "Consultas estruturais de código para agentes de IA: quem chama um símbolo, raio de impacto de uma mudança, rotas e contratos entre repositórios. 31 linguagens, respostas em menos de 100 ms, 7.5x menos tokens que o grep e registros BlindSpot em vez de palpites.",
+      "ogTitle": "Egent Code Plexus — criado para agentes, não para IDEs",
+      "ogDescription": "Pergunte quem chama X, o que uma mudança quebra, quais rotas existem. Um grafo sobre 31 linguagens, respondido em milissegundos."
+    },
+    "ru": {
+      "title": "Egent Code Plexus — структурный граф кода для ИИ-агентов по написанию кода",
+      "description": "Структурные запросы к коду для ИИ-агентов: кто вызывает символ, радиус взрыва изменения, маршруты и контракты между репозиториями. 31 язык, ответы быстрее 100 ms, в 7.5 раза меньше токенов, чем grep, и записи BlindSpot вместо догадок.",
+      "ogTitle": "Egent Code Plexus — создан для агентов, а не для IDE",
+      "ogDescription": "Спросите, кто вызывает X, что сломает изменение, какие есть маршруты. Один граф на 31 язык, ответы за миллисекунды."
+    },
+    "hi": {
+      "title": "Egent Code Plexus — AI coding agents के लिए code intelligence graph",
+      "description": "AI agents के लिए structural code queries: किसी symbol को कौन call करता है, बदलाव का blast radius, routes और cross-repo contracts। 31 languages, sub-100ms जवाब, grep से 7.5x कम tokens, और अनुमानों की जगह BlindSpot records।",
+      "ogTitle": "Egent Code Plexus — agents के लिए बनाया गया, IDEs के लिए नहीं",
+      "ogDescription": "पूछें X को कौन call करता है, बदलाव से क्या टूटेगा, कौन से routes हैं। 31 languages पर एक graph, जवाब milliseconds में।"
+    },
+    "fr": {
+      "title": "Egent Code Plexus — graphe d'intelligence de code pour agents de codage IA",
+      "description": "Requêtes structurelles sur le code pour agents IA : qui appelle un symbole, rayon d'impact d'un changement, routes et contrats inter-dépôts. 31 langages, réponses sous 100 ms, 7.5x moins de tokens que grep, et des BlindSpots plutôt que des suppositions.",
+      "ogTitle": "Egent Code Plexus — conçu pour les agents, pas pour les IDE",
+      "ogDescription": "Demandez qui appelle X, ce qu'un changement casse, quelles routes existent. Un seul graphe sur 31 langages, des réponses en millisecondes."
+    },
+    "de": {
+      "title": "Egent Code Plexus – Code-Intelligence-Graph für KI-Coding-Agenten",
+      "description": "Strukturelle Code-Abfragen für KI-Agenten: Wer ruft ein Symbol auf, Blast Radius einer Änderung, Routes und repoübergreifende Contracts. 31 Sprachen, Antworten unter 100 ms, 7.5x weniger Tokens als grep, und BlindSpot-Einträge statt Raterei.",
+      "ogTitle": "Egent Code Plexus – für Agenten gebaut, nicht für IDEs",
+      "ogDescription": "Frag, wer X aufruft, was eine Änderung kaputt macht, welche Routes existieren. Ein Graph über 31 Sprachen, beantwortet in Millisekunden."
     }
   },
   "sameAs": [
