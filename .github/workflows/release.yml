@@ -776,9 +776,16 @@ jobs:
           # --delete so a removed page actually disappears; without it a
           # deleted locale stays live for ever while the sitemap stops listing
           # it. .git is excluded for the obvious reason.
-          rsync -a --delete --exclude '.git' \
+          # .lastmod.json is state the deployed tree owns, not a build output;
+          # --delete would wipe it and every page would claim today's date.
+          rsync -a --delete --exclude '.git' --exclude .lastmod.json \
             --exclude template.html --exclude seo.json --exclude compare.json \
+            --exclude integrations.json \
             src/docs/ecp-landing/ site/
+
+          # Before the no-change check below: a deploy that changed nothing must
+          # also leave the sitemap alone, and this is what keeps the dates put.
+          node src/scripts/site/stamp_lastmod.mjs site "$(date -u +%F)"
 
           cd site
           if git diff --quiet && [ -z "$(git status --porcelain)" ]; then

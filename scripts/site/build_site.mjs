@@ -15,6 +15,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createContext, runInContext } from 'node:vm';
+import { createHash } from 'node:crypto';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const SITE = join(ROOT, 'docs/ecp-landing');
@@ -46,6 +47,17 @@ const STARS = Number(process.env.ECP_STARS) || 0;
 const STARS_AT = /^\d{4}-\d{2}-\d{2}$/.test(process.env.ECP_STARS_AT ?? '')
   ? process.env.ECP_STARS_AT
   : BUILD_DATE;
+
+/**
+ * Version used when hashing a page for change detection. Every page carries the
+ * real version, so hashing the shipped bytes says "everything changed" at every
+ * release; the v0.9.3 deploy rewrote 19 files and 25 lines, all of them the
+ * version. Rendering a second time with a sentinel is exact where a search for
+ * the version string is not: `compare.json` records `codegraph 0.9.4`, so once
+ * ecp reaches 0.9.4 a textual normaliser would eat a third party's version and
+ * churn every comparison page.
+ */
+const FINGERPRINT_VERSION = '0.0.0-fingerprint';
 
 const BASE = seo.baseUrl;
 const OG_LOCALE = {
@@ -918,7 +930,21 @@ const version = workspaceVersion();
 const { translations, qas } = loadSiteData();
 const template = readFileSync(join(SITE, 'template.html'), 'utf8');
 const written = [];
+const fingerprints = {};
 let stale = [];
+
+/**
+ * Content identity of a page, ignoring the two inputs that move without the
+ * page saying anything new: the version (rendered with a sentinel by the
+ * caller) and the star count, which is an environment value the deploy
+ * supplies and a reader never asked about.
+ */
+function fingerprint(relPath, html) {
+  fingerprints[`${BASE}${relPath.replace(/index\.html$/, '')}`] = createHash('sha256')
+    .update(html.replace(/"interactionStatistic":\{[^}]*\},?/, ''))
+    .digest('hex')
+    .slice(0, 16);
+}
 
 function emit(relPath, content) {
   const target = join(SITE, relPath);
@@ -970,13 +996,23 @@ for (const [locale, path] of Object.entries(seo.localePaths)) {
       )}</a></p>`,
   );
   emit(`${path}index.html`, html);
-  emit(`${path}compare/index.html`, comparePage(locale, version));
-  for (const rival of RIVALS) {
-    emit(`${path}compare/${rival.slug}/index.html`, comparePage(locale, version, rival));
-  }
-  emit(`${path}integrations/index.html`, integrationPage(locale, version));
-  for (const host of integrations.hosts) {
-    emit(`${path}integrations/${host.slug}/index.html`, integrationPage(locale, version, host));
+  fingerprint(`${path}index.html`, html.split(version).join(FINGERPRINT_VERSION));
+  // Emitted with the real version, hashed with a sentinel: the second render is
+  // what makes "did this page change" a question about content.
+  for (const [relPath, render] of [
+    [`${path}compare/index.html`, (v) => comparePage(locale, v)],
+    ...RIVALS.map((rival) => [
+      `${path}compare/${rival.slug}/index.html`,
+      (v) => comparePage(locale, v, rival),
+    ]),
+    [`${path}integrations/index.html`, (v) => integrationPage(locale, v)],
+    ...integrations.hosts.map((host) => [
+      `${path}integrations/${host.slug}/index.html`,
+      (v) => integrationPage(locale, v, host),
+    ]),
+  ]) {
+    emit(relPath, render(version));
+    fingerprint(relPath, render(FINGERPRINT_VERSION));
   }
 }
 
@@ -997,6 +1033,10 @@ for (const asset of ['og.png', 'favicon.svg', 'favicon.ico', 'apple-touch-icon.p
   written.push(asset);
 }
 
+// Read by the deploy's lastmod stamper. Committed because it is a function of
+// committed content alone, so it moves in a pull request exactly when a page
+// does — which also makes "what did this change touch" visible in the diff.
+emit('.page-hashes.json', `${JSON.stringify(fingerprints, null, 2)}\n`);
 emit('sitemap.xml', sitemapXml());
 emit('robots.txt', robotsTxt());
 emit('llms.txt', llmsTxt(version, qas[seo.defaultLocale]));
