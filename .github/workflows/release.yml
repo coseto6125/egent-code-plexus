@@ -791,3 +791,13 @@ jobs:
           git add -A
           git commit -m "deploy(site): rebuild for ${GITHUB_REF_NAME}"
           git push
+
+      # Verification has been in place since the site started serving a key
+      # file, but nothing ever told an index that a URL changed. Never fails the
+      # release: this is a hint to a crawler, and a refused hint is not a broken
+      # release.
+      - name: Tell IndexNow the pages changed
+        if: env.SKIP_DEPLOY != '1'
+        continue-on-error: true
+        shell: bash
+        run: node src/scripts/site/indexnow.mjs site

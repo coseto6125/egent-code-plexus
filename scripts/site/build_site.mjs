@@ -352,26 +352,44 @@ function templateElement(tag) {
  * on what the measurements do not cover, because a comparison a reader cannot
  * check is worth less than no comparison at all.
  */
-function comparePage(locale, version) {
+/** Every tool in the table except ecp itself, which is column 0 everywhere. */
+const RIVALS = compare.tools.slice(1);
+
+/**
+ * One page per rival on top of the hub page that carries all of them. "ecp vs
+ * <tool>" is the query people actually type and the shape an answer engine
+ * quotes, and a two-column table is the thing it can lift whole; the hub's
+ * four-column table answers a question nobody asked in those words.
+ *
+ * No new prose: the head, the intro and the methodology are the same localized
+ * strings the hub uses, and the numbers are the same measurements with the
+ * other tool's column dropped. A per-rival paragraph would have to be invented
+ * in six languages, and an invented sentence is worth less than a URL.
+ */
+function comparePage(locale, version, rival = null) {
   const t = compare.i18n[locale] ?? compare.i18n[seo.defaultLocale];
-  const path = `${seo.localePaths[locale]}compare/`;
+  const leaf = rival ? `compare/${rival.slug}/` : 'compare/';
+  const path = `${seo.localePaths[locale]}${leaf}`;
   const canonical = BASE + path;
   const up = '../'.repeat(path.split('/').filter(Boolean).length);
+  const columns = rival ? [compare.tools[0], rival] : compare.tools;
+  const keep = rival ? [0, compare.tools.indexOf(rival)] : compare.tools.map((_, i) => i);
+  const title = rival ? `${t.title} · ecp vs ${rival.name}` : t.title;
 
   const head = [
-    `<title>${escapeHtml(t.title)} — ${escapeHtml(t.subtitle)}</title>`,
+    `<title>${escapeHtml(title)} — ${escapeHtml(t.subtitle)}</title>`,
     `<meta name="description" content="${escapeHtml(stripTags(t.intro)).slice(0, 300)}">`,
     `<link rel="canonical" href="${canonical}">`,
     ...Object.entries(seo.localePaths).map(
-      ([c, p2]) => `<link rel="alternate" hreflang="${c}" href="${BASE}${p2}compare/">`,
+      ([c, p2]) => `<link rel="alternate" hreflang="${c}" href="${BASE}${p2}${leaf}">`,
     ),
-    `<link rel="alternate" hreflang="x-default" href="${BASE}compare/">`,
+    `<link rel="alternate" hreflang="x-default" href="${BASE}${leaf}">`,
     '<meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large">',
     `<link rel="icon" href="${BASE}favicon.svg" type="image/svg+xml">`,
     '<meta property="og:type" content="article">',
     `<meta property="og:locale" content="${OG_LOCALE[locale]}">`,
     '<meta property="og:site_name" content="Egent Code Plexus">',
-    `<meta property="og:title" content="${escapeHtml(t.title)}">`,
+    `<meta property="og:title" content="${escapeHtml(title)}">`,
     `<meta property="og:description" content="${escapeHtml(t.subtitle)}">`,
     `<meta property="og:url" content="${canonical}">`,
     `<meta property="og:image" content="${BASE}og.png">`,
@@ -381,12 +399,12 @@ function comparePage(locale, version) {
   const articleLd = {
     '@context': 'https://schema.org',
     '@type': 'TechArticle',
-    headline: t.title,
+    headline: title,
     description: stripTags(t.subtitle),
     inLanguage: locale,
     url: canonical,
     dateModified: BUILD_DATE,
-    about: compare.tools.map((tool) => ({
+    about: columns.map((tool) => ({
       '@type': 'SoftwareApplication',
       name: tool.name,
       applicationCategory: 'DeveloperApplication',
@@ -395,7 +413,7 @@ function comparePage(locale, version) {
     isBasedOn: `${seo.repoUrl}#-performance-receipts`,
   };
 
-  const headers = compare.tools
+  const headers = columns
     .map((tool) => `<th><a href="${tool.url}" rel="noopener">${tool.name}</a><br><span class="mono compare-stack">${tool.stack}</span></th>`)
     .join('');
 
@@ -403,8 +421,11 @@ function comparePage(locale, version) {
     .map((suite) => {
       const rows = suite.rows
         .map((r) => {
-          const cells = r.values
-            .map((v, i) => `<td${i === r.best ? ' class="compare-best"' : ''}>${escapeHtml(v)}</td>`)
+          // `best` indexes the full row, so it has to be remapped once a column
+          // is dropped — and dropped entirely when the winner is the tool this
+          // page does not show, rather than silently crowning the runner-up.
+          const cells = keep
+            .map((column) => `<td${column === r.best ? ' class="compare-best"' : ''}>${escapeHtml(r.values[column])}</td>`)
             .join('');
           return `<tr><td>${escapeHtml(r.metric)}</td>${cells}</tr>`;
         })
@@ -426,6 +447,15 @@ function comparePage(locale, version) {
             ${note}`;
     })
     .join('\n');
+
+  // Tool names, not a sentence: these links carry the one phrase every locale
+  // shares, so the hub reaches its per-rival pages without a translated label.
+  const rivalLinks = rival
+    ? ''
+    : `
+        <ul class="compare-method compare-rivals">
+${RIVALS.map((tool) => `            <li><a href="${tool.slug}/">ecp vs ${escapeHtml(tool.name)}</a></li>`).join('\n')}
+        </ul>`;
 
   // The chrome is the landing page's own markup, fonts included, so the two
   // pages cannot drift apart visually. app.js runs here too: it reads the
@@ -476,14 +506,15 @@ ${chrome.header}
         </ul>
 ${tables}
 
+${rivalLinks}
         <h2 class="section-heading">${escapeHtml(t.limitsHeading)}</h2>
         <p class="hero-answer compare-limits">${t.limits}</p>
         <p class="table-caption">${escapeHtml(t.footer.replace('{version}', version))}</p>
-        <p class="compare-back"><a href="../">&larr; ${escapeHtml(seo.meta[locale].ogTitle)}</a></p>
+        <p class="compare-back"><a href="${rival ? '../../' : '../'}">&larr; ${escapeHtml(seo.meta[locale].ogTitle)}</a></p>
     </main>
 
 ${chrome.footer}
-    <script>window.__ECP_LOCALE__ = "${locale}"; window.__ECP_ROOT__ = "${up}"; window.__ECP_PAGE__ = "compare/";</script>
+    <script>window.__ECP_LOCALE__ = "${locale}"; window.__ECP_ROOT__ = "${up}"; window.__ECP_PAGE__ = "${leaf}";</script>
     <script src="${up}js/qa_data.js"></script>
     <script src="${up}js/app.js"></script>
 </body>
@@ -493,11 +524,19 @@ ${chrome.footer}
 
 // ── crawler files ────────────────────────────────────────────────────────────
 
+/** Home outranks the comparison hub, which outranks one rival's slice of it. */
+function priority(code, suffix) {
+  const depth = suffix.split('/').filter(Boolean).length;
+  const base = [1.0, 0.9, 0.7][depth];
+  return (code === seo.defaultLocale ? base : base - 0.1).toFixed(1);
+}
+
 function sitemapXml() {
   const today = BUILD_DATE;
   const pages = Object.entries(seo.localePaths).flatMap(([code, p]) => [
     { code, p, suffix: '' },
     { code, p, suffix: 'compare/' },
+    ...RIVALS.map((tool) => ({ code, p, suffix: `compare/${tool.slug}/` })),
   ]);
   const urls = pages
     .map(({ code, p, suffix }) => {
@@ -511,7 +550,7 @@ function sitemapXml() {
         <loc>${BASE}${p}${suffix}</loc>
         <lastmod>${today}</lastmod>
         <changefreq>weekly</changefreq>
-        <priority>${code === seo.defaultLocale ? (suffix ? '0.9' : '1.0') : '0.8'}</priority>
+        <priority>${priority(code, suffix)}</priority>
 ${links}
         <xhtml:link rel="alternate" hreflang="x-default" href="${BASE}${suffix}"/>
     </url>`;
@@ -609,6 +648,10 @@ spots teaches a model to trust an answer that was never there.
 ## How it compares
 
 ${compareText()}
+
+One page per comparison, same measurements, two columns:
+
+${RIVALS.map((tool) => `- ecp vs ${tool.name}: ${BASE}compare/${tool.slug}/`).join('\n')}
 
 ## Questions and answers
 
@@ -714,6 +757,9 @@ for (const [locale, path] of Object.entries(seo.localePaths)) {
     .replace(/\{\{LOCALE_PATH\}\}/g, path);
   emit(`${path}index.html`, html);
   emit(`${path}compare/index.html`, comparePage(locale, version));
+  for (const rival of RIVALS) {
+    emit(`${path}compare/${rival.slug}/index.html`, comparePage(locale, version, rival));
+  }
 }
 
 // IndexNow verification. The key lives at the site's own path rather than the
@@ -740,6 +786,28 @@ emit('llms-full.txt', llmsFull(version, qas));
 for (const [locale, path] of Object.entries(seo.localePaths)) {
   if (!path) continue;
   emit(`${path}llms.txt`, llmsTxt(version, qas[locale] ?? qas[seo.defaultLocale]));
+}
+
+// The sitemap is assembled from its own list of paths, so it can agree with
+// itself while disagreeing with the pages that were actually written — a page
+// nobody submits, or a submitted URL that 404s. Neither is visible in the
+// output, so compare the two sets on every build rather than only in --check.
+{
+  const listed = new Set(
+    [...readFileSync(join(SITE, 'sitemap.xml'), 'utf8').matchAll(/<loc>([^<]+)<\/loc>/g)]
+      .map((m) => `${m[1].slice(BASE.length)}index.html`),
+  );
+  const emitted = new Set(written.filter((p) => p.endsWith('index.html')));
+  const missing = [...emitted].filter((p) => !listed.has(p));
+  const phantom = [...listed].filter((p) => !emitted.has(p));
+  if (missing.length || phantom.length) {
+    console.error(
+      `sitemap disagrees with the generated pages:${
+        missing.map((p) => `\n  built but not listed: ${p}`).join('')
+      }${phantom.map((p) => `\n  listed but not built: ${p}`).join('')}`,
+    );
+    process.exit(1);
+  }
 }
 
 if (CHECK && stale.length) {
