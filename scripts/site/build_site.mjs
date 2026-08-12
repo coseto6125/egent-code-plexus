@@ -67,6 +67,11 @@ const OG_LOCALE = {
   ja: 'ja_JP',
   ko: 'ko_KR',
   es: 'es_ES',
+  'pt-BR': 'pt_BR',
+  ru: 'ru_RU',
+  hi: 'hi_IN',
+  fr: 'fr_FR',
+  de: 'de_DE',
 };
 
 // ── source data ──────────────────────────────────────────────────────────────

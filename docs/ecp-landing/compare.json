@@ -268,6 +268,51 @@
       "limitsHeading": "Lo que estas cifras no dicen",
       "limits": "Son una máquina, un conjunto de versiones y dos corpus. No dicen qué herramienta tiene la API que necesitas, si su cobertura de lenguajes encaja con tu stack, ni cómo se comporta en un repositorio con otra forma. Una herramienta que pierde en indexado en frío puede seguir siendo la correcta si responde algo que las otras no. <strong>Vuelve a medirlas en tu propio repositorio antes de decidir</strong>: los comandos están en el README de cada proyecto.",
       "footer": "Cifras correspondientes a ecp {version}. Se agradecen correcciones como issues."
+    },
+    "pt-BR": {
+      "title": "ecp vs codegraph vs GitNexus",
+      "subtitle": "Três ferramentas de code-graph, mesmos checkouts, mesma máquina.",
+      "intro": "As três constroem um grafo do repositório e respondem perguntas estruturais sobre ele. A diferença está no que cada uma otimiza: <strong>codegraph</strong> e <strong>GitNexus</strong> são serviços Node que mantêm o grafo em memória ou em SQLite, enquanto o <strong>ecp</strong> é um binário Rust sem estado que faz mmap de um grafo pré-construído, então uma consulta custa uma inicialização de processo, não um aquecimento. Os números abaixo são medições do próprio projeto, publicadas com as condições que as produziram.",
+      "methodologyHeading": "Como isso foi medido",
+      "limitsHeading": "O que esses números não dizem",
+      "limits": "São uma máquina, um conjunto de versões, dois corpora. Não dizem nada sobre qual ferramenta tem a API que você quer, se a cobertura de linguagens bate com a sua stack, nem como ela se comporta em um repositório com formato diferente desses dois. Uma ferramenta que perde no índice a frio ainda pode ser a escolha certa se responde uma pergunta que as outras não conseguem. <strong>Rode-os de novo no seu próprio repositório antes de decidir</strong> — os comandos estão no README de cada projeto.",
+      "footer": "Números atualizados pela última vez para o ecp {version}. Correções são bem-vindas como issues."
+    },
+    "ru": {
+      "title": "ecp vs codegraph vs GitNexus",
+      "subtitle": "Три инструмента code-graph, одинаковые checkout-ы, одна машина.",
+      "intro": "Все три строят граф репозитория и отвечают на структурные вопросы о нём. Разница в том, подо что они оптимизированы: <strong>codegraph</strong> и <strong>GitNexus</strong> — сервисы на Node, держащие граф в памяти или в SQLite, а <strong>ecp</strong> — Rust-бинарник без состояния, который делает mmap заранее построенного графа, так что запрос стоит один запуск процесса, а не прогрев. Цифры ниже — собственные измерения проекта, опубликованные вместе с условиями, в которых они получены.",
+      "methodologyHeading": "Как это измерялось",
+      "limitsHeading": "Чего эти цифры не говорят",
+      "limits": "Это одна машина, один набор версий, два корпуса. Они ничего не говорят о том, у какого инструмента нужный вам API, покрывает ли он языки вашего стека и как он поведёт себя на репозитории, не похожем на эти два. Инструмент, проигравший в холодной индексации, всё равно может оказаться правильным выбором, если отвечает на вопрос, на который другие не могут. <strong>Прежде чем решать, прогоните измерения на своём репозитории</strong> — команды есть в README каждого проекта.",
+      "footer": "Цифры обновлены для ecp {version}. Поправки принимаются через issues."
+    },
+    "hi": {
+      "title": "ecp vs codegraph vs GitNexus",
+      "subtitle": "तीन code-graph tools, समान checkouts, समान machine।",
+      "intro": "तीनों repository का graph बनाते हैं और उस पर structural सवालों के जवाब देते हैं। फ़र्क़ इसमें है कि हर एक किस चीज़ के लिए optimised है: <strong>codegraph</strong> और <strong>GitNexus</strong> Node services हैं जो graph को memory या SQLite में रखती हैं, जबकि <strong>ecp</strong> एक stateless Rust binary है जो prebuilt graph को memory-map करती है — यानी एक query की लागत warm-up नहीं, सिर्फ़ एक process start है। नीचे के आँकड़े project की अपनी measurements हैं, उन शर्तों के साथ published जिनमें वे निकले।",
+      "methodologyHeading": "ये कैसे मापे गए",
+      "limitsHeading": "ये आँकड़े क्या नहीं बताते",
+      "limits": "ये एक machine, versions का एक set, दो corpora हैं। ये इस बारे में कुछ नहीं कहते कि कौन सा tool आपकी चाहत की API देता है, उसकी language coverage आपके stack से मेल खाती है या नहीं, या इन दोनों से अलग बनावट वाली repository पर वह कैसा बर्ताव करता है। Cold index में हारने वाला tool फिर भी सही चुनाव हो सकता है, अगर वह ऐसा सवाल हल करता है जो बाकी नहीं कर पाते। <strong>फ़ैसला करने से पहले इन्हें अपनी repository पर दोबारा चलाएं</strong> — commands हर project की README में हैं।",
+      "footer": "आँकड़े आख़िरी बार ecp {version} के लिए update हुए। कोई सुधार हो तो issue के रूप में ज़रूर भेजें।"
+    },
+    "fr": {
+      "title": "ecp vs codegraph vs GitNexus",
+      "subtitle": "Trois outils de graphe de code, mêmes checkouts, même machine.",
+      "intro": "Tous trois construisent un graphe du dépôt et répondent à des questions structurelles. Ils diffèrent par ce qu'ils optimisent : <strong>codegraph</strong> et <strong>GitNexus</strong> sont des services Node qui gardent le graphe en mémoire ou dans SQLite, tandis qu'<strong>ecp</strong> est un binaire Rust sans état qui charge un graphe préconstruit via mmap : une requête coûte un démarrage de processus, pas un temps de chauffe. Les chiffres ci-dessous sont les mesures du projet lui-même, publiées avec les conditions qui les ont produites.",
+      "methodologyHeading": "Comment ces chiffres ont été mesurés",
+      "limitsHeading": "Ce que ces chiffres ne disent pas",
+      "limits": "C'est une machine, un jeu de versions, deux corpus. Ces chiffres ne disent rien de l'API qu'il vous faut, de la couverture de langages face à votre stack, ni du comportement sur un dépôt qui ne ressemble pas à ces deux-là. Un outil qui perd sur l'indexation à froid peut rester le bon choix s'il répond à une question que les autres ne savent pas traiter. <strong>Rejouez les mesures sur votre propre dépôt avant de trancher</strong> : les commandes sont dans le README de chaque projet.",
+      "footer": "Chiffres mis à jour pour ecp {version}. Corrections bienvenues via les issues."
+    },
+    "de": {
+      "title": "ecp vs codegraph vs GitNexus",
+      "subtitle": "Drei Code-Graph-Tools, gleiche Checkouts, gleiche Maschine.",
+      "intro": "Alle drei bauen einen Graphen über ein Repository und beantworten strukturelle Fragen dazu. Sie unterscheiden sich darin, worauf sie optimiert sind: <strong>codegraph</strong> und <strong>GitNexus</strong> sind Node-Services, die einen Graphen im Speicher oder in SQLite halten, während <strong>ecp</strong> ein zustandsloses Rust-Binary ist, das einen vorgebauten Graphen per mmap einbindet – eine Abfrage kostet also einen Prozessstart statt einer Aufwärmphase. Die Zahlen unten sind die eigenen Messungen des Projekts, veröffentlicht mit den Bedingungen, unter denen sie entstanden sind.",
+      "methodologyHeading": "So wurde gemessen",
+      "limitsHeading": "Was diese Zahlen nicht verraten",
+      "limits": "Sie stammen von einer Maschine, einem Versionsstand, zwei Korpora. Sie sagen nichts darüber, welches Tool die API hat, die du brauchst, ob die Sprachabdeckung zu deinem Stack passt oder wie es sich auf einem Repository verhält, das anders geschnitten ist als diese beiden. Ein Tool, das beim Cold Index verliert, kann trotzdem die richtige Wahl sein, wenn es eine Frage beantwortet, die die anderen nicht können. <strong>Miss auf deinem eigenen Repository nach, bevor du entscheidest</strong> – die Befehle stehen im README des jeweiligen Projekts.",
+      "footer": "Zahlen zuletzt aktualisiert für ecp {version}. Korrekturen gern als Issues."
     }
   }
 }
