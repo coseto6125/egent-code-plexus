@@ -716,6 +716,33 @@ ${chrome.footer}
 `;
 }
 
+
+/**
+ * The integrations tab on the landing page. Cards carry the host name and the
+ * channels it takes, which are facts rather than sentences, so this section
+ * needs no translation beyond the lead the integrations hub already ships and
+ * the tab label in `app.js`.
+ */
+function integrationsSection(locale) {
+  const t = integrations.i18n[locale] ?? integrations.i18n[seo.defaultLocale];
+  const cards = integrations.hosts
+    .map(
+      (host) => `
+                <div class="bento-card">
+                    <h3 class="mono accent"><a href="integrations/${host.slug}/">${escapeHtml(host.name)}</a></h3>
+                    <p class="mono">${host.channels
+                      .map((channel) => escapeHtml(integrations.channelLabels[channel]))
+                      .join(' · ')}</p>
+                </div>`,
+    )
+    .join('');
+  return `
+            <p class="hero-answer">${t.intro}</p>
+            <div class="bento-grid">${cards}
+            </div>
+            <p class="compare-back"><a href="integrations/">${escapeHtml(t.matrixHeading)} &rarr;</a></p>`;
+}
+
 // ── crawler files ────────────────────────────────────────────────────────────
 
 /** Home outranks the comparison hub, which outranks one rival's slice of it. */
@@ -979,6 +1006,7 @@ for (const [locale, path] of Object.entries(seo.localePaths)) {
   html = replaceRegion(html, 'head', headHtml(locale, meta, version, localeQas, qaLocale));
   html = replaceRegion(html, 'faq', faqHtml(localeQas));
   html = replaceRegion(html, 'answer', seo.answer[locale]);
+  html = replaceRegion(html, 'integrations', integrationsSection(locale));
   html = html
     .replace('<html lang="en">', `<html lang="${locale}">`)
     .replace(/\{\{VERSION\}\}/g, version)

@@ -108,6 +108,7 @@
     <div class="content-nav-wrapper sticky">
         <nav class="content-nav container">
             <button class="section-btn active" data-target="setup" data-i18n="nav.setup">Quick Start</button>
+            <button class="section-btn" data-target="integrations" data-i18n="nav.integrations">Integrations</button>
             <button class="section-btn" data-target="highlights" data-i18n="nav.highlights">Highlights</button>
             <button class="section-btn" data-target="matrix" data-i18n="nav.matrix">Languages</button>
             <button class="section-btn" data-target="benchmarks" data-i18n="nav.benchmarks">Benchmarks</button>
@@ -143,6 +144,36 @@
                     <code class="mono code-block">ecp admin mcp tools</code>
                 </div>
             </div>
+        </section>
+
+        <!-- INTEGRATIONS -->
+        <section id="integrations" class="content-section">
+            <h2 class="section-heading" data-i18n="nav.integrations">Integrations</h2>
+            <!-- integrations:start -->
+            <p class="hero-answer">An agent reaches ecp through one of four channels: settings hooks that keep the index warm, a skill that says when a structural query beats a text search, an MCP server that exposes the queries as tools, or a host plugin. Most hosts take more than one, and each installs on its own.</p>
+            <div class="bento-grid">
+                <div class="bento-card">
+                    <h3 class="mono accent"><a href="integrations/claude-code/">Claude Code</a></h3>
+                    <p class="mono">hooks · skill · MCP</p>
+                </div>
+                <div class="bento-card">
+                    <h3 class="mono accent"><a href="integrations/codex/">Codex CLI</a></h3>
+                    <p class="mono">skill · MCP · native tools</p>
+                </div>
+                <div class="bento-card">
+                    <h3 class="mono accent"><a href="integrations/gemini-cli/">Gemini CLI</a></h3>
+                    <p class="mono">skill · MCP</p>
+                </div>
+                <div class="bento-card">
+                    <h3 class="mono accent"><a href="integrations/mcp/">Any MCP host</a></h3>
+                    <p class="mono">MCP</p>
+                </div>
+                <div class="bento-card">
+                    <h3 class="mono accent"><a href="integrations/orca/">Orca</a></h3>
+                    <p class="mono">plugin</p>
+                </div>
+            </div>
+            <p class="compare-back"><a href="integrations/">What each host takes &rarr;</a></p><!-- integrations:end -->
         </section>
 
         <!-- HIGHLIGHTS -->

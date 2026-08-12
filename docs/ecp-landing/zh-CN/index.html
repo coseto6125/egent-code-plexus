@@ -108,6 +108,7 @@
     <div class="content-nav-wrapper sticky">
         <nav class="content-nav container">
             <button class="section-btn active" data-target="setup" data-i18n="nav.setup">快速开始</button>
+            <button class="section-btn" data-target="integrations" data-i18n="nav.integrations">集成方式</button>
             <button class="section-btn" data-target="highlights" data-i18n="nav.highlights">技术亮点</button>
             <button class="section-btn" data-target="matrix" data-i18n="nav.matrix">支持语言</button>
             <button class="section-btn" data-target="benchmarks" data-i18n="nav.benchmarks">性能实测</button>
@@ -143,6 +144,36 @@
                     <code class="mono code-block">ecp admin mcp tools</code>
                 </div>
             </div>
+        </section>
+
+        <!-- INTEGRATIONS -->
+        <section id="integrations" class="content-section">
+            <h2 class="section-heading" data-i18n="nav.integrations">集成方式</h2>
+            <!-- integrations:start -->
+            <p class="hero-answer">agent 通过四种通道之一接上 ecp：让索引保持热的设置 hook、告诉模型什么时候该用结构查询而不是文本搜索的 skill、把查询包成工具的 MCP server，以及 host 专属的插件。多数 host 可以同时用好几种，每一种都独立安装。</p>
+            <div class="bento-grid">
+                <div class="bento-card">
+                    <h3 class="mono accent"><a href="integrations/claude-code/">Claude Code</a></h3>
+                    <p class="mono">hooks · skill · MCP</p>
+                </div>
+                <div class="bento-card">
+                    <h3 class="mono accent"><a href="integrations/codex/">Codex CLI</a></h3>
+                    <p class="mono">skill · MCP · native tools</p>
+                </div>
+                <div class="bento-card">
+                    <h3 class="mono accent"><a href="integrations/gemini-cli/">Gemini CLI</a></h3>
+                    <p class="mono">skill · MCP</p>
+                </div>
+                <div class="bento-card">
+                    <h3 class="mono accent"><a href="integrations/mcp/">Any MCP host</a></h3>
+                    <p class="mono">MCP</p>
+                </div>
+                <div class="bento-card">
+                    <h3 class="mono accent"><a href="integrations/orca/">Orca</a></h3>
+                    <p class="mono">plugin</p>
+                </div>
+            </div>
+            <p class="compare-back"><a href="integrations/">各 host 支持的通道 &rarr;</a></p><!-- integrations:end -->
         </section>
 
         <!-- HIGHLIGHTS -->
