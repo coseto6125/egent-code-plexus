@@ -91,6 +91,14 @@ One page per comparison, same measurements, two columns:
 - ecp vs codegraph: https://coseto6125.github.io/egent-code-plexus/compare/codegraph/
 - ecp vs gitnexus: https://coseto6125.github.io/egent-code-plexus/compare/gitnexus/
 
+## Wiring it into an agent
+
+- Claude Code (hooks, skill, mcp): https://coseto6125.github.io/egent-code-plexus/integrations/claude-code/
+- Codex CLI (skill, mcp, native): https://coseto6125.github.io/egent-code-plexus/integrations/codex/
+- Gemini CLI (skill, mcp): https://coseto6125.github.io/egent-code-plexus/integrations/gemini-cli/
+- Any MCP host (mcp): https://coseto6125.github.io/egent-code-plexus/integrations/mcp/
+- Orca (plugin): https://coseto6125.github.io/egent-code-plexus/integrations/orca/
+
 ## Questions and answers
 
 ### 為什麼「誠實的不知道」比「模糊的猜測」重要？

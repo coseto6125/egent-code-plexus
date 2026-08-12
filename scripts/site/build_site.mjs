@@ -22,6 +22,7 @@ const CHECK = process.argv.includes('--check');
 
 const seo = JSON.parse(readFileSync(join(SITE, 'seo.json'), 'utf8'));
 const compare = JSON.parse(readFileSync(join(SITE, 'compare.json'), 'utf8'));
+const integrations = JSON.parse(readFileSync(join(SITE, 'integrations.json'), 'utf8'));
 
 // Freshness is a citation signal, and it is committed rather than computed.
 // Deriving it from git put a clock in the build: CI checks out the synthetic
@@ -522,6 +523,187 @@ ${chrome.footer}
 `;
 }
 
+
+/**
+ * One page per agent host, plus a hub carrying the channel matrix.
+ *
+ * "how do I give <agent> codebase awareness" is a question with a host in it,
+ * and the answer is a different set of commands for each one. The hub's matrix
+ * is the part worth quoting; the host pages are the part worth following.
+ *
+ * Every command is copied from the shipped binary's own `--help`, and a host
+ * whose installer still prints a placeholder is described as manual rather
+ * than supported — an install page that lies costs more than the traffic it
+ * earns.
+ */
+function integrationPage(locale, version, host = null) {
+  const t = integrations.i18n[locale] ?? integrations.i18n[seo.defaultLocale];
+  const leaf = host ? `integrations/${host.slug}/` : 'integrations/';
+  const path = `${seo.localePaths[locale]}${leaf}`;
+  const canonical = BASE + path;
+  const up = '../'.repeat(path.split('/').filter(Boolean).length);
+  const copy = host ? t.hosts[host.slug] : null;
+  const title = host ? `${host.name} — ${t.title}` : `${t.title} — ${seo.meta[locale].ogTitle}`;
+  const description = stripTags(host ? copy.intro : t.intro).slice(0, 300);
+
+  const head = [
+    `<title>${escapeHtml(title)}</title>`,
+    `<meta name="description" content="${escapeHtml(description)}">`,
+    `<link rel="canonical" href="${canonical}">`,
+    ...Object.entries(seo.localePaths).map(
+      ([c, p2]) => `<link rel="alternate" hreflang="${c}" href="${BASE}${p2}${leaf}">`,
+    ),
+    `<link rel="alternate" hreflang="x-default" href="${BASE}${leaf}">`,
+    '<meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large">',
+    `<link rel="icon" href="${BASE}favicon.svg" type="image/svg+xml">`,
+    '<meta property="og:type" content="article">',
+    `<meta property="og:locale" content="${OG_LOCALE[locale]}">`,
+    '<meta property="og:site_name" content="Egent Code Plexus">',
+    `<meta property="og:title" content="${escapeHtml(title)}">`,
+    `<meta property="og:description" content="${escapeHtml(stripTags(t.subtitle))}">`,
+    `<meta property="og:url" content="${canonical}">`,
+    `<meta property="og:image" content="${BASE}og.png">`,
+    '<meta name="twitter:card" content="summary_large_image">',
+  ].join('\n    ');
+
+  // HowTo only where there are steps to follow. The hub is a table, and a
+  // HowTo without steps is structured data describing nothing.
+  const howToLd = host?.steps
+    ? {
+        '@context': 'https://schema.org',
+        '@type': 'HowTo',
+        name: title,
+        inLanguage: locale,
+        description,
+        step: host.steps.map((command, i) => ({
+          '@type': 'HowToStep',
+          position: i + 1,
+          name: command,
+          text: command,
+        })),
+      }
+    : null;
+
+  const articleLd = {
+    '@context': 'https://schema.org',
+    '@type': 'TechArticle',
+    headline: title,
+    description,
+    inLanguage: locale,
+    url: canonical,
+    dateModified: BUILD_DATE,
+    about: {
+      '@type': 'SoftwareApplication',
+      name: host ? host.name : 'Egent Code Plexus',
+      applicationCategory: 'DeveloperApplication',
+      url: host ? host.url : seo.repoUrl,
+    },
+    isBasedOn: seo.repoUrl,
+  };
+
+  const matrix = `
+            <div class="table-container">
+                <table class="saas-table">
+                    <thead><tr><th>Host</th>${Object.values(integrations.channelLabels)
+                      .map((label) => `<th>${escapeHtml(label)}</th>`)
+                      .join('')}</tr></thead>
+                    <tbody>
+                    ${integrations.hosts
+                      .map(
+                        (h) =>
+                          `<tr><td><a href="${host ? '../' : ''}${h.slug}/">${escapeHtml(h.name)}</a></td>${Object.keys(
+                            integrations.channelLabels,
+                          )
+                            .map(
+                              (channel) =>
+                                `<td${h.channels.includes(channel) ? ' class="compare-best"' : ''}>${
+                                  h.channels.includes(channel) ? '✓' : '—'
+                                }</td>`,
+                            )
+                            .join('')}</tr>`,
+                      )
+                      .join('\n                    ')}
+                    </tbody>
+                </table>
+            </div>`;
+
+  const block = (heading, body) =>
+    body ? `\n        <h2 class="section-heading">${escapeHtml(heading)}</h2>\n${body}` : '';
+  const commands = (lines) =>
+    `        <ul class="compare-method">${lines
+      .map((line) => `<li><code class="mono">${escapeHtml(line)}</code></li>`)
+      .join('')}</ul>`;
+
+  const body = host
+    ? [
+        block(t.stepsHeading, host.steps ? commands(host.steps) : ''),
+        block(
+          t.configHeading,
+          host.config
+            ? `        <pre class="code-block mono">${escapeHtml(host.config)}</pre>` +
+                (host.configPaths ? commands(host.configPaths) : '')
+            : '',
+        ),
+        block(t.verifyHeading, commands([host.verify])),
+        block(t.caveatHeading, `        <p class="hero-answer compare-limits">${copy.caveat}</p>`),
+      ].join('')
+    : block(t.matrixHeading, matrix) +
+      block(
+        t.hostsHeading,
+        commands(integrations.hosts.map((h) => h.name)).replace(
+          /<li><code class="mono">([^<]+)<\/code><\/li>/g,
+          (_, name) => {
+            const h = integrations.hosts.find((x) => x.name === name);
+            return `<li><a href="${h.slug}/">${escapeHtml(h.name)}</a></li>`;
+          },
+        ),
+      );
+
+  const chrome = {
+    header: applyTranslations(templateElement('header'), {}),
+    footer: templateElement('footer').replace(/\s*<p class="footer-links">[\s\S]*?<\/p>/, ''),
+  };
+
+  return `<!DOCTYPE html>
+<html lang="${locale}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    ${head}
+    <link rel="stylesheet" href="${up}css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;700&family=Inter:wght@400;500;600;800&display=swap" rel="stylesheet">
+    <script type="application/ld+json">${scriptJson(articleLd)}</script>${
+      howToLd ? `\n    <script type="application/ld+json">${scriptJson(howToLd)}</script>` : ''
+    }
+</head>
+<body class="theme-dark">
+${chrome.header}
+
+    <section class="hero compare-hero">
+        <div class="hero-bg-glow"></div>
+        <div class="container hero-content">
+            <h1 class="hero-title">${escapeHtml(host ? host.name : t.title)}</h1>
+            <p class="hero-tagline mono">${escapeHtml(t.subtitle)}</p>
+            <p class="hero-answer">${host ? copy.intro : t.intro}</p>
+        </div>
+    </section>
+
+    <main class="container compare-main">${body}
+        <p class="table-caption">${escapeHtml(t.sourceLabel.replace('{version}', version))}</p>
+        <p class="compare-back"><a href="${host ? '../../' : '../'}">&larr; ${escapeHtml(seo.meta[locale].ogTitle)}</a></p>
+    </main>
+
+${chrome.footer}
+    <script>window.__ECP_LOCALE__ = "${locale}"; window.__ECP_ROOT__ = "${up}"; window.__ECP_PAGE__ = "${leaf}";</script>
+    <script src="${up}js/qa_data.js"></script>
+    <script src="${up}js/app.js"></script>
+</body>
+</html>
+`;
+}
+
 // ── crawler files ────────────────────────────────────────────────────────────
 
 /** Home outranks the comparison hub, which outranks one rival's slice of it. */
@@ -537,6 +719,8 @@ function sitemapXml() {
     { code, p, suffix: '' },
     { code, p, suffix: 'compare/' },
     ...RIVALS.map((tool) => ({ code, p, suffix: `compare/${tool.slug}/` })),
+    { code, p, suffix: 'integrations/' },
+    ...integrations.hosts.map((host) => ({ code, p, suffix: `integrations/${host.slug}/` })),
   ]);
   const urls = pages
     .map(({ code, p, suffix }) => {
@@ -563,6 +747,22 @@ ${urls}
 `;
 }
 
+/**
+ * Written, served, and read by nobody — for now.
+ *
+ * A crawler fetches robots.txt from the host root and nowhere else, and this
+ * site lives on a project path, so the file below sits at
+ * `<host>/egent-code-plexus/robots.txt` while every crawler asks
+ * `<host>/robots.txt`, which is a different repository and currently 404s. A
+ * 404 there means "no rules", so nothing is blocked; what is lost is the
+ * `Sitemap:` line and the AI-crawler allowlist, and those crawlers default to
+ * allowed anyway. Sitemap discovery therefore rests on Search Console and on
+ * the IndexNow submission, not on this file.
+ *
+ * It stays because it costs nothing and becomes load-bearing the moment the
+ * site answers at a host root — a custom domain, or a robots.txt in the user
+ * site repository that points here.
+ */
 function robotsTxt() {
   // Answer engines are the audience this site is written for, so say yes by
   // name rather than relying on the wildcard: Google-Extended and
@@ -652,6 +852,10 @@ ${compareText()}
 One page per comparison, same measurements, two columns:
 
 ${RIVALS.map((tool) => `- ecp vs ${tool.name}: ${BASE}compare/${tool.slug}/`).join('\n')}
+
+## Wiring it into an agent
+
+${integrations.hosts.map((host) => `- ${host.name} (${host.channels.join(', ')}): ${BASE}integrations/${host.slug}/`).join('\n')}
 
 ## Questions and answers
 
@@ -755,10 +959,24 @@ for (const [locale, path] of Object.entries(seo.localePaths)) {
     .replace(/\{\{LOCALE\}\}/g, locale)
     .replace(/\{\{ASSET_PREFIX\}\}/g, depth)
     .replace(/\{\{LOCALE_PATH\}\}/g, path);
+  // The footer is the only link from a landing page into the sub-pages, and it
+  // named the comparison hub alone. A page nothing links to is a page a crawler
+  // reaches only through the sitemap, and a reader never.
+  html = html.replace(
+    /<p class="footer-links">([\s\S]*?)<\/p>/,
+    (_, links) =>
+      `<p class="footer-links">${links} · <a href="integrations/">${escapeHtml(
+        integrations.i18n[locale].title,
+      )}</a></p>`,
+  );
   emit(`${path}index.html`, html);
   emit(`${path}compare/index.html`, comparePage(locale, version));
   for (const rival of RIVALS) {
     emit(`${path}compare/${rival.slug}/index.html`, comparePage(locale, version, rival));
+  }
+  emit(`${path}integrations/index.html`, integrationPage(locale, version));
+  for (const host of integrations.hosts) {
+    emit(`${path}integrations/${host.slug}/index.html`, integrationPage(locale, version, host));
   }
 }
 

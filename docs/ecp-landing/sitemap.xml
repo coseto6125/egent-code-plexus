@@ -53,6 +53,84 @@
         <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/compare/gitnexus/"/>
     </url>
     <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/integrations/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.9</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/integrations/claude-code/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.7</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/claude-code/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/integrations/codex/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.7</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/codex/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/integrations/gemini-cli/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.7</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/gemini-cli/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/integrations/mcp/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.7</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/mcp/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/integrations/orca/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.7</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/orca/"/>
+    </url>
+    <url>
         <loc>https://coseto6125.github.io/egent-code-plexus/zh-TW/</loc>
         <lastmod>2026-08-10</lastmod>
         <changefreq>weekly</changefreq>
@@ -103,6 +181,84 @@
         <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/compare/gitnexus/"/>
         <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/compare/gitnexus/"/>
         <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/compare/gitnexus/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.8</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/claude-code/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/claude-code/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/codex/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/codex/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/gemini-cli/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/gemini-cli/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/mcp/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/mcp/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/orca/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/orca/"/>
     </url>
     <url>
         <loc>https://coseto6125.github.io/egent-code-plexus/zh-CN/</loc>
@@ -157,6 +313,84 @@
         <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/compare/gitnexus/"/>
     </url>
     <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.8</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/claude-code/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/claude-code/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/codex/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/codex/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/gemini-cli/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/gemini-cli/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/mcp/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/mcp/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/orca/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/orca/"/>
+    </url>
+    <url>
         <loc>https://coseto6125.github.io/egent-code-plexus/ja/</loc>
         <lastmod>2026-08-10</lastmod>
         <changefreq>weekly</changefreq>
@@ -207,6 +441,84 @@
         <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/compare/gitnexus/"/>
         <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/compare/gitnexus/"/>
         <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/compare/gitnexus/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/ja/integrations/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.8</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/ja/integrations/claude-code/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/claude-code/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/ja/integrations/codex/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/codex/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/ja/integrations/gemini-cli/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/gemini-cli/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/ja/integrations/mcp/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/mcp/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/ja/integrations/orca/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/orca/"/>
     </url>
     <url>
         <loc>https://coseto6125.github.io/egent-code-plexus/ko/</loc>
@@ -261,6 +573,84 @@
         <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/compare/gitnexus/"/>
     </url>
     <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/ko/integrations/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.8</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/ko/integrations/claude-code/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/claude-code/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/ko/integrations/codex/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/codex/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/ko/integrations/gemini-cli/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/gemini-cli/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/ko/integrations/mcp/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/mcp/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/ko/integrations/orca/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/orca/"/>
+    </url>
+    <url>
         <loc>https://coseto6125.github.io/egent-code-plexus/es/</loc>
         <lastmod>2026-08-10</lastmod>
         <changefreq>weekly</changefreq>
@@ -311,5 +701,83 @@
         <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/compare/gitnexus/"/>
         <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/compare/gitnexus/"/>
         <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/compare/gitnexus/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/es/integrations/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.8</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/es/integrations/claude-code/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/claude-code/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/claude-code/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/es/integrations/codex/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/codex/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/codex/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/es/integrations/gemini-cli/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/gemini-cli/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/gemini-cli/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/es/integrations/mcp/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/mcp/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/mcp/"/>
+    </url>
+    <url>
+        <loc>https://coseto6125.github.io/egent-code-plexus/es/integrations/orca/</loc>
+        <lastmod>2026-08-10</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>0.6</priority>
+        <xhtml:link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/orca/"/>
+        <xhtml:link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/orca/"/>
     </url>
 </urlset>

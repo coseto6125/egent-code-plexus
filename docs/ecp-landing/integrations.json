@@ -1,0 +1,276 @@
+{
+  "note": "Every command here comes from `ecp admin <host> install --help` on the shipped binary. A host whose installer is still a stub is listed under `manual`, not as supported — see hosts[].mcpOnly.",
+  "hosts": [
+    {
+      "slug": "claude-code",
+      "name": "Claude Code",
+      "url": "https://claude.com/claude-code",
+      "channels": ["hooks", "skill", "mcp"],
+      "steps": [
+        "ecp admin claude install hooks",
+        "ecp admin claude install skills",
+        "ecp admin claude install mcp-server"
+      ],
+      "verify": "ecp admin claude status"
+    },
+    {
+      "slug": "codex",
+      "name": "Codex CLI",
+      "url": "https://developers.openai.com/codex/cli",
+      "channels": ["skill", "mcp", "native"],
+      "steps": [
+        "ecp admin codex install skills",
+        "ecp admin codex install native-tools"
+      ],
+      "verify": "ecp admin codex status"
+    },
+    {
+      "slug": "gemini-cli",
+      "name": "Gemini CLI",
+      "url": "https://github.com/google-gemini/gemini-cli",
+      "channels": ["skill", "mcp"],
+      "steps": [
+        "ecp admin gemini install native-skill",
+        "ecp admin gemini install mcp-server"
+      ],
+      "verify": "ecp admin gemini status"
+    },
+    {
+      "slug": "mcp",
+      "name": "Any MCP host",
+      "url": "https://modelcontextprotocol.io",
+      "channels": ["mcp"],
+      "config": "{\n  \"mcpServers\": {\n    \"ecp\": { \"command\": \"ecp\", \"args\": [\"admin\", \"mcp\", \"serve\"] }\n  }\n}",
+      "configPaths": [
+        "Cursor — ~/.cursor/mcp.json",
+        "Windsurf — ~/.codeium/windsurf/mcp_config.json",
+        "Cline / Roo Code — cline_mcp_settings.json",
+        "Copilot — VS Code settings.json"
+      ],
+      "verify": "ecp admin mcp tools"
+    },
+    {
+      "slug": "orca",
+      "name": "Orca",
+      "url": "https://github.com/coseto6125/ecp-orca-plugin",
+      "channels": ["plugin"],
+      "steps": [
+        "https://github.com/coseto6125/ecp-orca-plugin.git"
+      ],
+      "verify": "ecp summary"
+    }
+  ],
+  "channelLabels": {
+    "hooks": "hooks",
+    "skill": "skill",
+    "mcp": "MCP",
+    "native": "native tools",
+    "plugin": "plugin"
+  },
+  "i18n": {
+    "en": {
+      "title": "Integrations",
+      "subtitle": "Four channels, one graph.",
+      "intro": "An agent reaches ecp through one of four channels: settings hooks that keep the index warm, a skill that says when a structural query beats a text search, an MCP server that exposes the queries as tools, or a host plugin. Most hosts take more than one, and each installs on its own.",
+      "matrixHeading": "What each host takes",
+      "stepsHeading": "Install",
+      "configHeading": "Configuration",
+      "verifyHeading": "Check it landed",
+      "caveatHeading": "Worth knowing",
+      "hostsHeading": "Per host",
+      "sourceLabel": "Every command on this page comes from the shipped binary's own help output, on ecp {version}.",
+      "hosts": {
+        "claude-code": {
+          "intro": "Claude Code reads ecp through three independent channels: settings.json hooks that reindex as the repository moves, skill packs that tell the model when a graph query beats a grep, and an MCP server registered through <code class=\"mono\">claude mcp add-json</code>. Install what you want; nothing here depends on the rest.",
+          "caveat": "The skill carries more weight than the tools. A model that can call ecp but has no rule for when to call it still reaches for grep first. A partial install is normal, and <code class=\"mono\">ecp admin claude status</code> prints which components are actually in place."
+        },
+        "codex": {
+          "intro": "Codex CLI takes the skills that teach it when a structural query is the right move, and reaches the queries themselves either over MCP through <code class=\"mono\">~/.codex/config.toml</code> or through a native tool scaffold.",
+          "caveat": "<code class=\"mono\">native-tools</code> writes a scaffold for a fork of openai/codex, not a patch to the released binary. Unless you build Codex yourself, the MCP route is the one that works."
+        },
+        "gemini-cli": {
+          "intro": "Gemini CLI takes two pieces: a native skill, and an stdio MCP registration added through the <code class=\"mono\">gemini mcp add</code> command.",
+          "caveat": "The two install separately and one does not imply the other. <code class=\"mono\">ecp admin gemini status</code> reports each on its own line."
+        },
+        "mcp": {
+          "intro": "<code class=\"mono\">ecp admin mcp serve</code> is a stdio JSON-RPC MCP server exposing 20 tools, so any host that speaks MCP can call the graph. Point the host at the binary and it works without any ecp-side registration.",
+          "caveat": "The automated installers for Cursor, Windsurf, Cline / Roo Code and Copilot are not written yet — they print a placeholder rather than editing a config. Those hosts take the JSON above by hand, which is why it is printed here rather than hidden behind a command."
+        },
+        "orca": {
+          "intro": "Orca installs ecp as a plugin: add the repository as a marketplace source, then install <strong>ECP Code Graph</strong> from the listing. Every worktree Orca creates is indexed in the background, and a panel puts index, impact and summary one click away.",
+          "caveat": "The plugin does not install the ecp binary, and it runs on the Orca client machine even when the worktree lives on another one. Install ecp where the code is."
+        }
+      }
+    },
+    "zh-TW": {
+      "title": "整合方式",
+      "subtitle": "四種通道，同一張圖。",
+      "intro": "agent 透過四種通道之一接上 ecp：讓索引保持熱的設定 hook、告訴模型什麼時候該用結構查詢而不是文字搜尋的 skill、把查詢包成工具的 MCP server，以及 host 專屬的插件。多數 host 可以同時吃好幾種，每一種都獨立安裝。",
+      "matrixHeading": "各 host 支援的通道",
+      "stepsHeading": "安裝",
+      "configHeading": "設定內容",
+      "verifyHeading": "確認裝好了",
+      "caveatHeading": "要知道的事",
+      "hostsHeading": "逐一說明",
+      "sourceLabel": "本頁每一條指令都來自 ecp {version} 執行檔本身的 help 輸出。",
+      "hosts": {
+        "claude-code": {
+          "intro": "Claude Code 透過三個彼此獨立的通道讀 ecp：隨著 repo 變動重建索引的 settings.json hook、告訴模型何時該用圖查詢而不是 grep 的 skill 包，以及透過 <code class=\"mono\">claude mcp add-json</code> 註冊的 MCP server。要哪個裝哪個，彼此沒有相依。",
+          "caveat": "skill 比工具本身更關鍵。模型叫得動 ecp、但沒有規則告訴它什麼時候該叫，第一反應仍然是 grep。只裝一部分是常態，<code class=\"mono\">ecp admin claude status</code> 會逐項列出哪些真的裝上了。"
+        },
+        "codex": {
+          "intro": "Codex CLI 吃的是教它何時該下結構查詢的 skill，查詢本身則有兩條路：透過 <code class=\"mono\">~/.codex/config.toml</code> 走 MCP，或走原生工具骨架。",
+          "caveat": "<code class=\"mono\">native-tools</code> 產生的是給 openai/codex 分支用的骨架，不是給已發佈執行檔的 patch。除非你自己編 Codex，能用的是 MCP 那條路。"
+        },
+        "gemini-cli": {
+          "intro": "Gemini CLI 需要兩塊：原生 skill，以及透過 <code class=\"mono\">gemini mcp add</code> 加入的 stdio MCP 註冊。",
+          "caveat": "兩者分開安裝，裝了一個不代表另一個也在。<code class=\"mono\">ecp admin gemini status</code> 會各自報一行。"
+        },
+        "mcp": {
+          "intro": "<code class=\"mono\">ecp admin mcp serve</code> 是一個 stdio JSON-RPC 的 MCP server，對外開 20 個工具，所以任何講 MCP 的 host 都叫得動這張圖。把 host 指向這個執行檔即可，ecp 這側不需要另外註冊。",
+          "caveat": "Cursor、Windsurf、Cline / Roo Code、Copilot 的自動安裝器還沒寫，執行後只會印一行佔位訊息，不會真的改設定檔。這幾家目前要自己貼上面那段 JSON，所以這裡直接把它印出來，而不是藏在一個指令後面。"
+        },
+        "orca": {
+          "intro": "Orca 用插件的形式安裝 ecp：把這個 repo 加成 marketplace 來源，再從清單安裝 <strong>ECP Code Graph</strong>。之後 Orca 每開一個 worktree 就會在背景索引，面板則把 index、impact、summary 放在一次點擊的距離內。",
+          "caveat": "插件不會幫你安裝 ecp 執行檔，而且它跑在 Orca 客戶端那台機器上，即使 worktree 在另一台也一樣。ecp 要裝在程式碼所在的那一側。"
+        }
+      }
+    },
+    "zh-CN": {
+      "title": "集成方式",
+      "subtitle": "四种通道，同一张图。",
+      "intro": "agent 通过四种通道之一接上 ecp：让索引保持热的设置 hook、告诉模型什么时候该用结构查询而不是文本搜索的 skill、把查询包成工具的 MCP server，以及 host 专属的插件。多数 host 可以同时用好几种，每一种都独立安装。",
+      "matrixHeading": "各 host 支持的通道",
+      "stepsHeading": "安装",
+      "configHeading": "配置内容",
+      "verifyHeading": "确认已装好",
+      "caveatHeading": "需要知道的事",
+      "hostsHeading": "逐个说明",
+      "sourceLabel": "本页每一条命令都来自 ecp {version} 可执行文件自身的 help 输出。",
+      "hosts": {
+        "claude-code": {
+          "intro": "Claude Code 通过三个彼此独立的通道读 ecp：随 repo 变动重建索引的 settings.json hook、告诉模型何时该用图查询而不是 grep 的 skill 包，以及通过 <code class=\"mono\">claude mcp add-json</code> 注册的 MCP server。要哪个装哪个，彼此没有依赖。",
+          "caveat": "skill 比工具本身更关键。模型能调用 ecp、却没有规则告诉它何时该调用，第一反应仍然是 grep。只装一部分是常态，<code class=\"mono\">ecp admin claude status</code> 会逐项列出哪些真的装上了。"
+        },
+        "codex": {
+          "intro": "Codex CLI 需要的是教它何时该下结构查询的 skill，查询本身则有两条路：通过 <code class=\"mono\">~/.codex/config.toml</code> 走 MCP，或走原生工具骨架。",
+          "caveat": "<code class=\"mono\">native-tools</code> 生成的是给 openai/codex 分支用的骨架，不是给已发布可执行文件的 patch。除非你自己编译 Codex，能用的是 MCP 那条路。"
+        },
+        "gemini-cli": {
+          "intro": "Gemini CLI 需要两块：原生 skill，以及通过 <code class=\"mono\">gemini mcp add</code> 加入的 stdio MCP 注册。",
+          "caveat": "两者分开安装，装了一个不代表另一个也在。<code class=\"mono\">ecp admin gemini status</code> 会各报一行。"
+        },
+        "mcp": {
+          "intro": "<code class=\"mono\">ecp admin mcp serve</code> 是一个 stdio JSON-RPC 的 MCP server，对外开放 20 个工具，所以任何讲 MCP 的 host 都能调用这张图。把 host 指向这个可执行文件即可，ecp 这侧不需要另外注册。",
+          "caveat": "Cursor、Windsurf、Cline / Roo Code、Copilot 的自动安装器还没写，执行后只会打印一行占位信息，不会真的改配置文件。这几家目前要手动粘贴上面那段 JSON，所以这里直接把它印出来，而不是藏在一个命令后面。"
+        },
+        "orca": {
+          "intro": "Orca 以插件形式安装 ecp：把这个 repo 加为 marketplace 源，再从列表安装 <strong>ECP Code Graph</strong>。之后 Orca 每开一个 worktree 都会在后台索引，面板则把 index、impact、summary 放在一次点击的距离内。",
+          "caveat": "插件不会帮你安装 ecp 可执行文件，而且它运行在 Orca 客户端那台机器上，即使 worktree 在另一台也一样。ecp 要装在代码所在的那一侧。"
+        }
+      }
+    },
+    "ja": {
+      "title": "連携方法",
+      "subtitle": "4 つの経路、1 つのグラフ。",
+      "intro": "エージェントは 4 つの経路のいずれかで ecp に接続します。インデックスを温かく保つ設定フック、テキスト検索より構造クエリが適する場面をモデルに伝えるスキル、クエリをツールとして公開する MCP サーバー、そしてホスト専用のプラグインです。多くのホストは複数を同時に使え、それぞれ独立してインストールします。",
+      "matrixHeading": "ホストごとの対応経路",
+      "stepsHeading": "インストール",
+      "configHeading": "設定内容",
+      "verifyHeading": "導入を確認する",
+      "caveatHeading": "知っておくこと",
+      "hostsHeading": "ホスト別",
+      "sourceLabel": "このページのコマンドはすべて、ecp {version} のバイナリ自身のヘルプ出力から取っています。",
+      "hosts": {
+        "claude-code": {
+          "intro": "Claude Code は 3 つの独立した経路で ecp を読みます。リポジトリの変化に合わせて再インデックスする settings.json のフック、grep よりグラフクエリが適する場面をモデルに教えるスキルパック、そして <code class=\"mono\">claude mcp add-json</code> で登録する MCP サーバーです。必要なものだけ入れられ、互いに依存しません。",
+          "caveat": "ツールそのものよりスキルの方が効きます。ecp を呼べるモデルでも、いつ呼ぶかの規則がなければ最初に手が伸びるのは grep です。一部だけ導入されている状態は普通で、<code class=\"mono\">ecp admin claude status</code> が実際に入っている構成要素を一覧します。"
+        },
+        "codex": {
+          "intro": "Codex CLI には、構造クエリを使うべき場面を教えるスキルを入れます。クエリ自体への経路は 2 つあり、<code class=\"mono\">~/.codex/config.toml</code> 経由の MCP か、ネイティブツールの雛形です。",
+          "caveat": "<code class=\"mono\">native-tools</code> が書き出すのは openai/codex のフォーク向けの雛形であり、公開バイナリへのパッチではありません。自分で Codex をビルドしないのであれば、動くのは MCP の経路です。"
+        },
+        "gemini-cli": {
+          "intro": "Gemini CLI には 2 つの部品が必要です。ネイティブスキルと、<code class=\"mono\">gemini mcp add</code> で追加する stdio MCP 登録です。",
+          "caveat": "この 2 つは別々にインストールされ、片方があってももう片方があるとは限りません。<code class=\"mono\">ecp admin gemini status</code> がそれぞれ 1 行ずつ報告します。"
+        },
+        "mcp": {
+          "intro": "<code class=\"mono\">ecp admin mcp serve</code> は 20 個のツールを公開する stdio JSON-RPC の MCP サーバーです。MCP を話すホストであればこのグラフを呼べます。ホストからバイナリを指すだけでよく、ecp 側の登録は不要です。",
+          "caveat": "Cursor、Windsurf、Cline / Roo Code、Copilot 向けの自動インストーラーはまだ書かれておらず、実行しても設定を書き換えずプレースホルダーを表示するだけです。これらのホストでは上の JSON を手で貼る必要があるため、コマンドの裏に隠さずここに印刷しています。"
+        },
+        "orca": {
+          "intro": "Orca ではプラグインとして導入します。このリポジトリをマーケットプレイスのソースに追加し、一覧から <strong>ECP Code Graph</strong> をインストールしてください。以降、Orca が作る各ワークツリーはバックグラウンドでインデックスされ、パネルから index、impact、summary をワンクリックで実行できます。",
+          "caveat": "プラグインは ecp バイナリ自体をインストールしません。またワークツリーが別のマシンにあっても、プラグインは Orca クライアント側で動きます。ecp はコードがある側に入れてください。"
+        }
+      }
+    },
+    "ko": {
+      "title": "연동 방법",
+      "subtitle": "네 가지 경로, 하나의 그래프.",
+      "intro": "에이전트는 네 가지 경로 중 하나로 ecp에 연결됩니다. 인덱스를 따뜻하게 유지하는 설정 훅, 텍스트 검색보다 구조 질의가 나은 순간을 모델에게 알려주는 스킬, 질의를 도구로 노출하는 MCP 서버, 그리고 호스트 전용 플러그인입니다. 대부분의 호스트는 여러 개를 함께 쓸 수 있고, 각각 따로 설치합니다.",
+      "matrixHeading": "호스트별 지원 경로",
+      "stepsHeading": "설치",
+      "configHeading": "설정 내용",
+      "verifyHeading": "설치 확인",
+      "caveatHeading": "알아둘 점",
+      "hostsHeading": "호스트별 안내",
+      "sourceLabel": "이 페이지의 모든 명령은 ecp {version} 바이너리의 help 출력에서 그대로 가져왔습니다.",
+      "hosts": {
+        "claude-code": {
+          "intro": "Claude Code는 서로 독립적인 세 경로로 ecp를 읽습니다. 저장소가 바뀔 때 다시 인덱싱하는 settings.json 훅, grep보다 그래프 질의가 나은 순간을 모델에게 가르치는 스킬 팩, 그리고 <code class=\"mono\">claude mcp add-json</code>으로 등록하는 MCP 서버입니다. 필요한 것만 설치하면 되고 서로 의존하지 않습니다.",
+          "caveat": "도구 자체보다 스킬이 더 중요합니다. ecp를 호출할 수 있어도 언제 호출할지에 대한 규칙이 없으면 모델은 여전히 grep부터 씁니다. 일부만 설치된 상태는 흔하며, <code class=\"mono\">ecp admin claude status</code>가 실제로 설치된 구성 요소를 항목별로 출력합니다."
+        },
+        "codex": {
+          "intro": "Codex CLI에는 구조 질의를 써야 할 때를 가르치는 스킬을 설치합니다. 질의 자체에 닿는 경로는 두 가지로, <code class=\"mono\">~/.codex/config.toml</code>을 통한 MCP 또는 네이티브 도구 스캐폴드입니다.",
+          "caveat": "<code class=\"mono\">native-tools</code>가 만들어내는 것은 openai/codex 포크용 스캐폴드이지 배포된 바이너리에 대한 패치가 아닙니다. Codex를 직접 빌드하지 않는다면 실제로 동작하는 쪽은 MCP 경로입니다."
+        },
+        "gemini-cli": {
+          "intro": "Gemini CLI에는 두 가지가 필요합니다. 네이티브 스킬과 <code class=\"mono\">gemini mcp add</code>로 추가하는 stdio MCP 등록입니다.",
+          "caveat": "둘은 따로 설치되며 하나가 있다고 다른 하나가 있는 것은 아닙니다. <code class=\"mono\">ecp admin gemini status</code>가 각각 한 줄씩 보고합니다."
+        },
+        "mcp": {
+          "intro": "<code class=\"mono\">ecp admin mcp serve</code>는 20개 도구를 노출하는 stdio JSON-RPC MCP 서버입니다. MCP를 말하는 호스트라면 이 그래프를 호출할 수 있습니다. 호스트가 바이너리를 가리키게 하면 되고 ecp 쪽 등록은 필요 없습니다.",
+          "caveat": "Cursor, Windsurf, Cline / Roo Code, Copilot용 자동 설치기는 아직 작성되지 않아 실행해도 설정을 바꾸지 않고 자리표시자만 출력합니다. 이 호스트들은 위 JSON을 직접 붙여넣어야 하므로 명령 뒤에 숨기지 않고 여기에 그대로 적어 둡니다."
+        },
+        "orca": {
+          "intro": "Orca에서는 플러그인으로 설치합니다. 이 저장소를 마켓플레이스 소스로 추가한 뒤 목록에서 <strong>ECP Code Graph</strong>를 설치하세요. 이후 Orca가 만드는 모든 워크트리가 백그라운드에서 인덱싱되고, 패널에서 index, impact, summary를 한 번의 클릭으로 실행할 수 있습니다.",
+          "caveat": "플러그인은 ecp 바이너리를 설치하지 않으며, 워크트리가 다른 machine에 있어도 플러그인은 Orca 클라이언트 쪽에서 실행됩니다. ecp는 코드가 있는 쪽에 설치하세요."
+        }
+      }
+    },
+    "es": {
+      "title": "Integraciones",
+      "subtitle": "Cuatro canales, un solo grafo.",
+      "intro": "Un agente llega a ecp por uno de cuatro canales: hooks de configuración que mantienen el índice caliente, una skill que indica cuándo una consulta estructural gana a una búsqueda de texto, un servidor MCP que expone las consultas como herramientas, o un plugin propio del host. La mayoría de los hosts admite varios, y cada uno se instala por separado.",
+      "matrixHeading": "Qué admite cada host",
+      "stepsHeading": "Instalación",
+      "configHeading": "Configuración",
+      "verifyHeading": "Comprobar que quedó instalado",
+      "caveatHeading": "Conviene saber",
+      "hostsHeading": "Host por host",
+      "sourceLabel": "Cada comando de esta página proviene de la ayuda del propio binario, en ecp {version}.",
+      "hosts": {
+        "claude-code": {
+          "intro": "Claude Code lee ecp por tres canales independientes: hooks en settings.json que reindexan según se mueve el repositorio, packs de skills que le dicen al modelo cuándo una consulta al grafo gana a un grep, y un servidor MCP registrado mediante <code class=\"mono\">claude mcp add-json</code>. Instala lo que quieras; ninguno depende de los demás.",
+          "caveat": "La skill pesa más que las herramientas. Un modelo que puede llamar a ecp pero no tiene una regla sobre cuándo llamarlo sigue tirando de grep primero. Una instalación parcial es normal, y <code class=\"mono\">ecp admin claude status</code> imprime qué componentes están realmente puestos."
+        },
+        "codex": {
+          "intro": "Codex CLI toma las skills que le enseñan cuándo una consulta estructural es la jugada correcta, y llega a las consultas por MCP a través de <code class=\"mono\">~/.codex/config.toml</code> o por un andamiaje de herramientas nativas.",
+          "caveat": "<code class=\"mono\">native-tools</code> escribe un andamiaje para un fork de openai/codex, no un parche al binario publicado. Si no compilas Codex tú mismo, la vía que funciona es MCP."
+        },
+        "gemini-cli": {
+          "intro": "Gemini CLI necesita dos piezas: una skill nativa y un registro MCP por stdio añadido con <code class=\"mono\">gemini mcp add</code>.",
+          "caveat": "Se instalan por separado y una no implica la otra. <code class=\"mono\">ecp admin gemini status</code> informa de cada una en su propia línea."
+        },
+        "mcp": {
+          "intro": "<code class=\"mono\">ecp admin mcp serve</code> es un servidor MCP JSON-RPC por stdio que expone 20 herramientas, así que cualquier host que hable MCP puede consultar el grafo. Basta con apuntar el host al binario; del lado de ecp no hace falta registrar nada.",
+          "caveat": "Los instaladores automáticos para Cursor, Windsurf, Cline / Roo Code y Copilot todavía no están escritos: imprimen un marcador de posición en lugar de editar una configuración. Esos hosts requieren pegar el JSON de arriba a mano, y por eso aparece aquí en lugar de esconderse detrás de un comando."
+        },
+        "orca": {
+          "intro": "Orca instala ecp como plugin: añade este repositorio como fuente de marketplace y luego instala <strong>ECP Code Graph</strong> desde el listado. A partir de ahí, cada worktree que crea Orca se indexa en segundo plano, y un panel deja index, impact y summary a un clic.",
+          "caveat": "El plugin no instala el binario de ecp, y se ejecuta en la máquina cliente de Orca aunque el worktree viva en otra. Instala ecp donde está el código."
+        }
+      }
+    }
+  }
+}
