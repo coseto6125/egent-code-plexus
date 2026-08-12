@@ -86,6 +86,19 @@ say which tool has the API a given project wants, whether its language
 coverage matches that stack, or how any of them behave on a differently shaped
 repository. Re-measure before deciding. Full page: https://coseto6125.github.io/egent-code-plexus/compare/
 
+One page per comparison, same measurements, two columns:
+
+- ecp vs codegraph: https://coseto6125.github.io/egent-code-plexus/compare/codegraph/
+- ecp vs gitnexus: https://coseto6125.github.io/egent-code-plexus/compare/gitnexus/
+
+## Wiring it into an agent
+
+- Claude Code (hooks, skill, mcp): https://coseto6125.github.io/egent-code-plexus/integrations/claude-code/
+- Codex CLI (skill, mcp, native): https://coseto6125.github.io/egent-code-plexus/integrations/codex/
+- Gemini CLI (skill, mcp): https://coseto6125.github.io/egent-code-plexus/integrations/gemini-cli/
+- Any MCP host (mcp): https://coseto6125.github.io/egent-code-plexus/integrations/mcp/
+- Orca (plugin): https://coseto6125.github.io/egent-code-plexus/integrations/orca/
+
 ## Questions and answers
 
 ### 为什么「诚实地说不知道」比「模糊的猜测」重要？

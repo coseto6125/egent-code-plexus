@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Any MCP host — Integrations</title>
+    <meta name="description" content="ecp admin mcp serve is a stdio JSON-RPC MCP server exposing 20 tools, so any host that speaks MCP can call the graph. Point the host at the binary and it works without any ecp-side registration.">
+    <link rel="canonical" href="https://coseto6125.github.io/egent-code-plexus/integrations/mcp/">
+    <link rel="alternate" hreflang="en" href="https://coseto6125.github.io/egent-code-plexus/integrations/mcp/">
+    <link rel="alternate" hreflang="zh-TW" href="https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/mcp/">
+    <link rel="alternate" hreflang="zh-CN" href="https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/mcp/">
+    <link rel="alternate" hreflang="ja" href="https://coseto6125.github.io/egent-code-plexus/ja/integrations/mcp/">
+    <link rel="alternate" hreflang="ko" href="https://coseto6125.github.io/egent-code-plexus/ko/integrations/mcp/">
+    <link rel="alternate" hreflang="es" href="https://coseto6125.github.io/egent-code-plexus/es/integrations/mcp/">
+    <link rel="alternate" hreflang="x-default" href="https://coseto6125.github.io/egent-code-plexus/integrations/mcp/">
+    <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large">
+    <link rel="icon" href="https://coseto6125.github.io/egent-code-plexus/favicon.svg" type="image/svg+xml">
+    <meta property="og:type" content="article">
+    <meta property="og:locale" content="en_US">
+    <meta property="og:site_name" content="Egent Code Plexus">
+    <meta property="og:title" content="Any MCP host — Integrations">
+    <meta property="og:description" content="Four channels, one graph.">
+    <meta property="og:url" content="https://coseto6125.github.io/egent-code-plexus/integrations/mcp/">
+    <meta property="og:image" content="https://coseto6125.github.io/egent-code-plexus/og.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <link rel="stylesheet" href="../../css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;700&family=Inter:wght@400;500;600;800&display=swap" rel="stylesheet">
+    <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Any MCP host — Integrations","description":"ecp admin mcp serve is a stdio JSON-RPC MCP server exposing 20 tools, so any host that speaks MCP can call the graph. Point the host at the binary and it works without any ecp-side registration.","inLanguage":"en","url":"https://coseto6125.github.io/egent-code-plexus/integrations/mcp/","dateModified":"2026-08-10","about":{"@type":"SoftwareApplication","name":"Any MCP host","applicationCategory":"DeveloperApplication","url":"https://modelcontextprotocol.io"},"isBasedOn":"https://github.com/coseto6125/egent-code-plexus"}</script>
+</head>
+<body class="theme-dark">
+<header class="navbar">
+        <div class="nav-container">
+            <div class="nav-logo">
+                <span class="logo-icon"></span>
+                <span class="logo-text">Egent Code Plexus</span>
+            </div>
+            <div class="nav-actions">
+                <a href="https://github.com/coseto6125/egent-code-plexus" target="_blank" rel="noopener noreferrer" class="github-link">
+                    <svg height="24" width="24" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+                    GitHub
+                </a>
+                <div id="lang-selector-container"></div>
+            </div>
+        </div>
+    </header>
+
+    <section class="hero compare-hero">
+        <div class="hero-bg-glow"></div>
+        <div class="container hero-content">
+            <h1 class="hero-title">Any MCP host</h1>
+            <p class="hero-tagline mono">Four channels, one graph.</p>
+            <p class="hero-answer"><code class="mono">ecp admin mcp serve</code> is a stdio JSON-RPC MCP server exposing 20 tools, so any host that speaks MCP can call the graph. Point the host at the binary and it works without any ecp-side registration.</p>
+        </div>
+    </section>
+
+    <main class="container compare-main">
+        <h2 class="section-heading">Configuration</h2>
+        <pre class="code-block mono">{
+  &quot;mcpServers&quot;: {
+    &quot;ecp&quot;: { &quot;command&quot;: &quot;ecp&quot;, &quot;args&quot;: [&quot;admin&quot;, &quot;mcp&quot;, &quot;serve&quot;] }
+  }
+}</pre>        <ul class="compare-method"><li><code class="mono">Cursor — ~/.cursor/mcp.json</code></li><li><code class="mono">Windsurf — ~/.codeium/windsurf/mcp_config.json</code></li><li><code class="mono">Cline / Roo Code — cline_mcp_settings.json</code></li><li><code class="mono">Copilot — VS Code settings.json</code></li></ul>
+        <h2 class="section-heading">Check it landed</h2>
+        <ul class="compare-method"><li><code class="mono">ecp admin mcp tools</code></li></ul>
+        <h2 class="section-heading">Worth knowing</h2>
+        <p class="hero-answer compare-limits">The automated installers for Cursor, Windsurf, Cline / Roo Code and Copilot are not written yet — they print a placeholder rather than editing a config. Those hosts take the JSON above by hand, which is why it is printed here rather than hidden behind a command.</p>
+        <p class="table-caption">Every command on this page comes from the shipped binary's own help output, on ecp 0.9.3.</p>
+        <p class="compare-back"><a href="../../">&larr; Egent Code Plexus — built for agents, not IDEs</a></p>
+    </main>
+
+<footer class="site-footer">
+        <div class="container footer-inner">
+            <div class="footer-brand">
+                <span class="logo-icon small"></span>
+                <span>Egent Code Plexus</span>
+            </div>
+            <p class="footer-copy" data-i18n="footer.text">&copy; 2026 Egent Code Plexus Project. Segments extracted from the Native Design Deep Dive.</p>
+        </div>
+    </footer>
+    <script>window.__ECP_LOCALE__ = "en"; window.__ECP_ROOT__ = "../../"; window.__ECP_PAGE__ = "integrations/mcp/";</script>
+    <script src="../../js/qa_data.js"></script>
+    <script src="../../js/app.js"></script>
+</body>
+</html>
