@@ -61,6 +61,7 @@ const TOP_LEVEL_COMMANDS: &[&str] = &[
     "find",
     "impact",
     "rename",
+    "pattern",
     "cypher",
     "summary",
     "routes",

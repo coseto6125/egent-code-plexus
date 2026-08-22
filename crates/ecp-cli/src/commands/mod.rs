@@ -18,6 +18,7 @@ pub mod impact;
 pub mod insight;
 pub mod inspect;
 pub mod mcp;
+pub mod pattern;
 pub mod peers;
 pub mod peers_msg;
 pub mod peers_plan;

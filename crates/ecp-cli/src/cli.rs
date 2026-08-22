@@ -32,6 +32,9 @@ pub enum Commands {
     Impact(commands::impact::ImpactArgs),
     /// AST-aware multi-file rename
     Rename(commands::rename::RenameArgs),
+    /// Syntax-pattern search over source files — the statement shapes the graph
+    /// does not hold. `--callers-of` scopes the scan to one symbol's callers.
+    Pattern(commands::pattern::PatternArgs),
     /// Cypher query escape hatch
     Cypher(commands::cypher::CypherArgs),
     /// Registry + repo health. Default: scoped to the cwd repo when indexed; registry overview otherwise.
@@ -160,6 +163,7 @@ impl Commands {
             | Commands::Find(_)
             | Commands::Impact(_)
             | Commands::Rename(_)
+            | Commands::Pattern(_)
             | Commands::Cypher(_)
             | Commands::Routes(_)
             | Commands::ShapeCheck(_)
@@ -207,6 +211,7 @@ impl Commands {
                 .filter(|r| std::path::Path::new(r).is_dir()),
             Commands::Impact(args) => args.repo.as_deref(),
             Commands::Rename(args) => args.repo.as_deref(),
+            Commands::Pattern(args) => args.repo.as_deref(),
             Commands::Cypher(args) => args.repo.as_deref(),
             Commands::Routes(args) => args.repo.as_deref(),
             Commands::ShapeCheck(args) => args.repo.as_deref(),
