@@ -949,7 +949,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "ecp-analyzer"
-version = "0.9.3"
+version = "0.10.0"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -1007,7 +1007,7 @@ dependencies = [
 
 [[package]]
 name = "ecp-core"
-version = "0.9.3"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "cc",
@@ -1042,7 +1042,7 @@ dependencies = [
 
 [[package]]
 name = "ecp-mcp"
-version = "0.9.3"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1056,7 +1056,7 @@ dependencies = [
 
 [[package]]
 name = "egent-code-plexus"
-version = "0.9.3"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "chrono",

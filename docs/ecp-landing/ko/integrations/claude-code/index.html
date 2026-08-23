@@ -32,7 +32,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;700&family=Inter:wght@400;500;600;800&display=swap" rel="stylesheet">
-    <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Claude Code — 연동 방법","description":"Claude Code는 서로 독립적인 세 경로로 ecp를 읽습니다. 저장소가 바뀔 때 다시 인덱싱하는 settings.json 훅, grep보다 그래프 질의가 나은 순간을 모델에게 가르치는 스킬 팩, 그리고 claude mcp add-json으로 등록하는 MCP 서버입니다. 필요한 것만 설치하면 되고 서로 의존하지 않습니다.","inLanguage":"ko","url":"https://coseto6125.github.io/egent-code-plexus/ko/integrations/claude-code/","dateModified":"2026-08-10","about":{"@type":"SoftwareApplication","name":"Claude Code","applicationCategory":"DeveloperApplication","url":"https://claude.com/claude-code"},"isBasedOn":"https://github.com/coseto6125/egent-code-plexus"}</script>
+    <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"Claude Code — 연동 방법","description":"Claude Code는 서로 독립적인 세 경로로 ecp를 읽습니다. 저장소가 바뀔 때 다시 인덱싱하는 settings.json 훅, grep보다 그래프 질의가 나은 순간을 모델에게 가르치는 스킬 팩, 그리고 claude mcp add-json으로 등록하는 MCP 서버입니다. 필요한 것만 설치하면 되고 서로 의존하지 않습니다.","inLanguage":"ko","url":"https://coseto6125.github.io/egent-code-plexus/ko/integrations/claude-code/","dateModified":"2026-08-23","about":{"@type":"SoftwareApplication","name":"Claude Code","applicationCategory":"DeveloperApplication","url":"https://claude.com/claude-code"},"isBasedOn":"https://github.com/coseto6125/egent-code-plexus"}</script>
     <script type="application/ld+json">{"@context":"https://schema.org","@type":"HowTo","name":"Claude Code — 연동 방법","inLanguage":"ko","description":"Claude Code는 서로 독립적인 세 경로로 ecp를 읽습니다. 저장소가 바뀔 때 다시 인덱싱하는 settings.json 훅, grep보다 그래프 질의가 나은 순간을 모델에게 가르치는 스킬 팩, 그리고 claude mcp add-json으로 등록하는 MCP 서버입니다. 필요한 것만 설치하면 되고 서로 의존하지 않습니다.","step":[{"@type":"HowToStep","position":1,"name":"ecp admin claude install hooks","text":"ecp admin claude install hooks"},{"@type":"HowToStep","position":2,"name":"ecp admin claude install skills","text":"ecp admin claude install skills"},{"@type":"HowToStep","position":3,"name":"ecp admin claude install mcp-server","text":"ecp admin claude install mcp-server"}]}</script>
 </head>
 <body class="theme-dark">
@@ -68,7 +68,7 @@
         <ul class="compare-method"><li><code class="mono">ecp admin claude status</code></li></ul>
         <h2 class="section-heading">알아둘 점</h2>
         <p class="hero-answer compare-limits">도구 자체보다 스킬이 더 중요합니다. ecp를 호출할 수 있어도 언제 호출할지에 대한 규칙이 없으면 모델은 여전히 grep부터 씁니다. 일부만 설치된 상태는 흔하며, <code class="mono">ecp admin claude status</code>가 실제로 설치된 구성 요소를 항목별로 출력합니다.</p>
-        <p class="table-caption">이 페이지의 모든 명령은 ecp 0.9.3 바이너리의 help 출력에서 그대로 가져왔습니다.</p>
+        <p class="table-caption">이 페이지의 모든 명령은 ecp 0.10.0 바이너리의 help 출력에서 그대로 가져왔습니다.</p>
         <p class="compare-back"><a href="../../">&larr; Egent Code Plexus — IDE가 아니라 에이전트를 위해</a></p>
     </main>
 
