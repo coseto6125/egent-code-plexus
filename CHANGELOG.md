@@ -11,6 +11,7 @@
 ### Performance
 
 - parallelize full-repo scans (#713)
+
 ## v0.9.3 - 2026-08-10
 
 ### Bug Fixes
