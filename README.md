@@ -262,6 +262,7 @@ Two tiers: **agent commands** at top level (query / refactor / verify) and **adm
 | `heuristics <kind>` | Heuristic detectors: `saga` (compensate/undo/rollback name-pairs), `schema-bindings` (MirrorsField), `event-mirrors` (EventTopicMirror). Findings are confidence-tagged and never enter the graph |
 | `impact <name> --direction <up\|down>` | Blast-radius BFS with confidence filtering; `--since <ref>` for change-set impact |
 | `rename --symbol <old> --new-name <new>` | AST-aware multi-file rename across 14 languages. Always `--dry-run` first. |
+| `pattern -p '<pattern>' [--callers-of <symbol>]` | Syntax-shape search over indexed source files; optionally scope matches to one symbol's callers |
 | `cypher '<query>'` | openCypher escape hatch; `m.content` returns source body |
 | `summary` | Registry overview, framework coverage, LLM-actionable blind-spot catalog, graph freshness |
 | `routes [<path>]` | HTTP route enumeration (declarative + imperative); with `<path>`: handler + caller chain |
