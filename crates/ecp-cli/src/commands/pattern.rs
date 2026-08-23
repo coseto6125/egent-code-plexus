@@ -33,6 +33,7 @@ use clap::Args;
 use ecp_analyzer::pattern_finder::{
     compile, lang_for_path, match_source, CompiledPattern, PatternError, PatternLang,
 };
+use ecp_core::graph::ArchivedRelType;
 use ecp_core::EcpError;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -133,9 +134,8 @@ pub fn build_payload(args: &PatternArgs, engine: &Engine) -> Result<serde_json::
             files => files,
         },
     };
-    let scanned_files = candidates.len();
-
     let mut matches: Vec<serde_json::Value> = Vec::new();
+    let mut scanned_files = 0usize;
     let mut total = 0usize;
     let mut truncated = false;
 
@@ -159,6 +159,7 @@ pub fn build_payload(args: &PatternArgs, engine: &Engine) -> Result<serde_json::
         let Ok(bytes) = std::fs::read(repo_root.join(rel_path)) else {
             continue;
         };
+        scanned_files += 1;
         for hit in match_source(&bytes, lang, pattern) {
             total += 1;
             if args.limit > 0 && matches.len() >= args.limit {
@@ -236,10 +237,7 @@ fn caller_files<'g>(
         let end = graph.in_offsets[target + 1].to_native() as usize;
         for i in start..end {
             let edge = &graph.edges[graph.in_edge_idx[i].to_native() as usize];
-            // A heuristic edge (field mirror, event-topic mirror, compensation)
-            // is a structural guess, not a call, so its source file holds no
-            // caller. `rename` excludes them for the same reason.
-            if edge.rel_type.is_heuristic() {
+            if !matches!(edge.rel_type, ArchivedRelType::Calls) {
                 continue;
             }
             let src = &graph.nodes[edge.source.to_native() as usize];
@@ -249,6 +247,8 @@ fn caller_files<'g>(
         }
     }
 
+    let mut file_idx: Vec<usize> = file_idx.into_iter().collect();
+    file_idx.sort_unstable();
     file_idx
         .into_iter()
         .map(|i| graph.files[i].path.resolve(&graph.string_pool))

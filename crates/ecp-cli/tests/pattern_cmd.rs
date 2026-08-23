@@ -118,11 +118,57 @@ fn pattern_callers_of_drops_unconnected_files() {
         .iter()
         .map(|m| m["file"].as_str().unwrap())
         .collect();
+    assert_eq!(files, ["pattern_def.py", "pattern_user.py"]);
     assert!(!files.contains(&"pattern_unrelated.py"), "{files:?}");
     assert!(
         scoped["scanned_files"].as_u64() < all["scanned_files"].as_u64(),
         "scoping must narrow the file set: {scoped} vs {all}"
     );
+}
+
+#[test]
+fn pattern_callers_of_excludes_override_edges() {
+    let repo = tempfile::tempdir().expect("tempdir");
+    let root = repo.path();
+    std::fs::write(root.join("Base.java"), "class Base { void foo() {} }\n").unwrap();
+    std::fs::write(
+        root.join("Child.java"),
+        "class Child extends Base { @Override void foo() { int marker = 7; } }\n",
+    )
+    .unwrap();
+    run_git(root, &["init", "-q"]);
+    run_git(root, &["config", "user.email", "t@e"]);
+    run_git(root, &["config", "user.name", "t"]);
+    run_git(root, &["add", "."]);
+    run_git(root, &["commit", "-q", "-m", "init"]);
+    build_index(root);
+
+    let v = payload(&run_pattern(
+        root,
+        &[
+            "-p",
+            "int marker = $X;",
+            "--lang",
+            "java",
+            "--callers-of",
+            "Base.foo",
+        ],
+    ));
+    assert_eq!(v["scanned_files"], 1, "{v}");
+    assert_eq!(v["total"], 0, "{v}");
+}
+
+#[test]
+fn pattern_lang_counts_only_files_actually_scanned() {
+    let repo = setup_repo();
+    let root = repo.path();
+    std::fs::write(root.join("unrelated.rs"), "fn unrelated() {}\n").unwrap();
+    run_git(root, &["add", "unrelated.rs"]);
+    run_git(root, &["commit", "-q", "-m", "add rust file"]);
+    build_index(root);
+
+    let v = payload(&run_pattern(root, &["-p", "pass", "--lang", "py"]));
+    assert_eq!(v["scanned_files"], 3, "{v}");
 }
 
 #[test]
