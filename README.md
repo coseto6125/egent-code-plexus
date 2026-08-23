@@ -259,19 +259,21 @@ Two tiers: **agent commands** at top level (query / refactor / verify) and **adm
 |---|---|
 | `inspect <name>` | Symbol → metadata, decorators, signature, callers, callees, 1-hop impact, contained methods / properties / enum variants |
 | `find <pattern>` | Exact · `--mode fuzzy` · `--mode bm25` (5 buckets: source / tests / reference / document / config) |
-| `find-schema-bindings <field>` | MirrorsField heuristic edges + blind-spot candidates across classes / services |
-| `find-transaction-patterns [--class <Name>]` | Saga compensate/undo/rollback name-pairs; ≥0.75 → POSSIBLY_RELATED, <0.75 → BLIND_SPOT |
+| `heuristics <kind>` | Heuristic detectors: `saga` (compensate/undo/rollback name-pairs), `schema-bindings` (MirrorsField), `event-mirrors` (EventTopicMirror). Findings are confidence-tagged and never enter the graph |
 | `impact <name> --direction <up\|down>` | Blast-radius BFS with confidence filtering; `--since <ref>` for change-set impact |
 | `rename --symbol <old> --new-name <new>` | AST-aware multi-file rename across 14 languages. Always `--dry-run` first. |
 | `cypher '<query>'` | openCypher escape hatch; `m.content` returns source body |
 | `summary` | Registry overview, framework coverage, LLM-actionable blind-spot catalog, graph freshness |
 | `routes [<path>]` | HTTP route enumeration (declarative + imperative); with `<path>`: handler + caller chain |
 | `contracts` | Cross-repo API contract inventory (routes / queue / RPC) |
+| `processes [trace <pattern>]` | Detected execution-flow nodes; with `trace`: the step sequence in real order |
 | `diff` | Resolver-delta: binding tier-degradation + route / contract changes |
 | `tool-map` | External HTTP / DB / Redis / queue call sites via import-binding analysis |
 | `shape-check` | Drift between HTTP consumer access patterns and Route response shapes |
 | `peers` | Multi-session collaboration: `status / diff / say / inbox / log / thread / watch / gc` |
 | `review` | One-shot audit: impact + summary + tool-map + shape-check + diff, high-confidence signals only |
+| `usage` | Telemetry dashboard over CLI + MCP calls: counts, p50/p99 latency, error rate |
+| `uninstall` | Remove ecp host integrations (hooks, MCP registration, skills) for Claude Code / Codex / Gemini. `--dry-run` to preview |
 
 **Admin commands** (`ecp admin <cmd>`):
 
