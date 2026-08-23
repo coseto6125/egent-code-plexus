@@ -1,6 +1,6 @@
 ---
 name: ecp
-description: Tracing who-calls-X or a data flow — mid-debug, not only before a refactor — or exploring code structure: where a symbol is defined, who calls it, blast radius, routes/contracts. Reach here before grep. Command by question: definition→`ecp find`, who-calls/blast-radius→`ecp impact`, full context→`ecp inspect`, filename-read-vs-written→`ecp impact --literal`, routes/contracts→`ecp routes`/`ecp contracts`, trace execution flow→`ecp processes`, graph question with no verb (orphans, all-impls)→`ecp cypher`. Grep only for non-code text: config values, log strings, fs layout.
+description: Tracing who-calls-X or a data flow — mid-debug, not only before a refactor — or exploring code structure: where a symbol is defined, who calls it, blast radius, routes/contracts. Reach here before grep. Command by question: definition→`ecp find`, who-calls/blast-radius→`ecp impact`, full context→`ecp inspect`, filename-read-vs-written→`ecp impact --literal`, routes/contracts→`ecp routes`/`ecp contracts`, trace execution flow→`ecp processes`, statement shape inside code (swallowed exception, missing timeout)→`ecp pattern`, graph question with no verb (orphans, all-impls)→`ecp cypher`. Grep only for non-code text: config values, log strings, fs layout.
 ---
 
 # EgentCodePlexus (ecp) — Structural Analysis Entry
@@ -10,7 +10,7 @@ description: Tracing who-calls-X or a data flow — mid-debug, not only before a
 1. **ecp-first.** The moment you'd fan out to read files or grep a symbol to understand structure, that IS the ecp trigger — any indexed repo, ecp's own included. "Who calls X" → `ecp impact` (returns the caller *list*); `ecp find` only locates the definition.
 2. **Blast radius before refactor — and it's a lower bound.** Before changing a function or class, run `ecp impact <name>`; many callers, or callers in core / widely-imported modules → confirm with the user first. The resolver suppresses ambiguous bare calls to common names, so the caller set is a lower bound: a suspiciously low count for a common name → `grep` the call sites to cross-check.
 3. **Honest miss.** `found:false` carrying a `result` caveat field is provisional — do what the caveat says (rerun, or `ecp admin index --force --repo .`). `found:false` with no caveat is trustworthy: try `ecp find <fragment> --mode fuzzy` for name drift, then report "doesn't exist" — never synthesize a caller list or blast radius for a symbol ecp couldn't find.
-4. **Text → grep.** String literals, log messages, config keys, fs layout, vendored / generated code: grep / Read. ecp parses code, not text. For any other surprising output, find the root cause before calling it a bug: [`guides/troubleshooting.md`](./guides/troubleshooting.md).
+4. **Text → grep.** String literals, log messages, config keys, fs layout, vendored / generated code: grep / Read. ecp parses code, not text. Between the two sits statement *shape* (a `try` that swallows, a call missing an argument): that is `ecp pattern`, not grep. For any other surprising output, find the root cause before calling it a bug: [`guides/troubleshooting.md`](./guides/troubleshooting.md).
 
 ## Quick Reference
 
@@ -51,6 +51,7 @@ description: Tracing who-calls-X or a data flow — mid-debug, not only before a
 | `ecp processes` / `processes trace <pat>` | Execution-flow steps in real order — cleaner than `impact --direction down` |
 | `ecp review` | Full audit (impact + summary + tool-map + shape-check + diff) |
 | `ecp rename <old> <new>` | AST-aware multi-file rename |
+| `ecp pattern -p '<pat>'` | Statement shapes the graph has no node for; `--callers-of` scopes by reachability |
 | `ecp admin doctor [check] [--fix]` | Environment health; `--fix` repairs |
 
 ### Multi-repo / groups
