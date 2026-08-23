@@ -35,9 +35,12 @@ use ecp_analyzer::pattern_finder::{
 };
 use ecp_core::graph::ArchivedRelType;
 use ecp_core::EcpError;
+use rayon::prelude::*;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+
+const MAX_PATTERN_WORKERS: usize = 8;
 
 #[derive(Args, Debug, Clone)]
 pub struct PatternArgs {
@@ -134,45 +137,22 @@ pub fn build_payload(args: &PatternArgs, engine: &Engine) -> Result<serde_json::
             files => files,
         },
     };
-    let mut matches: Vec<serde_json::Value> = Vec::new();
-    let mut scanned_files = 0usize;
-    let mut total = 0usize;
-    let mut truncated = false;
 
-    for rel_path in candidates {
-        let ext = match rel_path.rsplit_once('.') {
-            Some((_, e)) => e.to_lowercase(),
-            None => continue,
+    // Compile once per candidate extension before entering the parallel scan.
+    // The compiled language and pattern are both Sync, so every worker can
+    // share them without rebuilding parser state per file.
+    for rel_path in &candidates {
+        let Some((_, ext)) = rel_path.rsplit_once('.') else {
+            continue;
         };
+        let ext = ext.to_lowercase();
         if wanted_ext.as_ref().is_some_and(|want| &ext != want) {
             continue;
         }
-
-        let entry = compiled.entry(ext).or_insert_with_key(|ext| {
+        compiled.entry(ext).or_insert_with_key(|ext| {
             let lang = lang_for_path(&format!("x.{ext}"))?;
             Some(compile(&args.pattern, &lang).map(|pattern| (lang, pattern)))
         });
-        let Some(Ok((lang, pattern))) = entry.as_ref() else {
-            continue;
-        };
-
-        let Ok(bytes) = std::fs::read(repo_root.join(rel_path)) else {
-            continue;
-        };
-        scanned_files += 1;
-        for hit in match_source(&bytes, lang, pattern) {
-            total += 1;
-            if args.limit > 0 && matches.len() >= args.limit {
-                truncated = true;
-                continue;
-            }
-            matches.push(json!({
-                "file": rel_path,
-                "line": hit.row + 1,
-                "col": hit.col + 1,
-                "text": first_line(&bytes[hit.start_byte..hit.end_byte]),
-            }));
-        }
     }
 
     // Every supported language rejected the pattern: that is a pattern error.
@@ -187,6 +167,83 @@ pub fn build_payload(args: &PatternArgs, engine: &Engine) -> Result<serde_json::
             "pattern does not parse: {detail}"
         )));
     }
+
+    let mut matches: Vec<serde_json::Value> = Vec::new();
+    let mut scanned_files = 0usize;
+    let mut total = 0usize;
+
+    // Start with a small batch so a common pattern can satisfy the report
+    // limit without retaining results from every file. Grow sparse scans
+    // geometrically to avoid paying the Rayon dispatch cost per small batch.
+    // Unlimited output stays bounded because every match must be retained.
+    let worker_count = pattern_worker_count(rayon::current_num_threads());
+    let worker_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(worker_count)
+        .build()
+        .map_err(|error| {
+            std::io::Error::other(format!("failed to build pattern workers: {error}"))
+        })?;
+    let mut batch_size = worker_count.saturating_mul(2).max(1);
+    let mut batch_start = 0usize;
+    while batch_start < candidates.len() {
+        let batch_end = batch_start.saturating_add(batch_size).min(candidates.len());
+        let batch = &candidates[batch_start..batch_end];
+        let report_limit = if args.limit == 0 {
+            usize::MAX
+        } else {
+            args.limit - matches.len()
+        };
+        let scans: Vec<Option<(usize, Vec<serde_json::Value>)>> = worker_pool.install(|| {
+            batch
+                .par_iter()
+                .map(|rel_path| {
+                    let ext = rel_path.rsplit_once('.')?.1.to_lowercase();
+                    if wanted_ext.as_ref().is_some_and(|want| &ext != want) {
+                        return None;
+                    }
+                    let Some(Ok((lang, pattern))) = compiled.get(&ext)?.as_ref() else {
+                        return None;
+                    };
+                    let bytes = std::fs::read(repo_root.join(rel_path)).ok()?;
+                    let hits = match_source(&bytes, lang, pattern);
+                    let total = hits.len();
+                    let reported = hits
+                        .into_iter()
+                        .take(report_limit)
+                        .map(|hit| {
+                            json!({
+                                "file": rel_path,
+                                "line": hit.row + 1,
+                                "col": hit.col + 1,
+                                "text": first_line(&bytes[hit.start_byte..hit.end_byte]),
+                            })
+                        })
+                        .collect();
+                    Some((total, reported))
+                })
+                .collect()
+        });
+
+        for (file_total, file_matches) in scans.into_iter().flatten() {
+            scanned_files += 1;
+            total += file_total;
+            if args.limit == 0 {
+                matches.extend(file_matches);
+            } else {
+                matches.extend(file_matches.into_iter().take(args.limit - matches.len()));
+            }
+        }
+
+        batch_start = batch_end;
+        batch_size = if args.limit == 0 {
+            worker_count.saturating_mul(8).max(1)
+        } else if matches.len() == args.limit {
+            candidates.len() - batch_start
+        } else {
+            batch_size.saturating_mul(2)
+        };
+    }
+    let truncated = args.limit > 0 && total > args.limit;
 
     let languages: Vec<&str> = {
         let mut names: Vec<&str> = compiled
@@ -206,6 +263,10 @@ pub fn build_payload(args: &PatternArgs, engine: &Engine) -> Result<serde_json::
         "truncated": truncated,
         "matches": matches,
     }))
+}
+
+fn pattern_worker_count(available: usize) -> usize {
+    available.clamp(1, MAX_PATTERN_WORKERS)
 }
 
 /// Repo-relative paths of files holding a caller of `symbol`, plus the file
@@ -261,5 +322,15 @@ fn first_line(bytes: &[u8]) -> String {
     match text.split_once('\n') {
         Some((head, _)) => format!("{}…", head.trim_end()),
         None => text.trim_end().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pattern_worker_count_above_limit_returns_eight() {
+        assert_eq!(pattern_worker_count(16), MAX_PATTERN_WORKERS);
     }
 }
