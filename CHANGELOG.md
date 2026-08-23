@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.10.0 - 2026-08-23
+
+### Features
+
+- add `ecp pattern` for statement-shape search (#711)
+- five more locales, pt-BR ru hi fr de (#701)
+- comparison and integration pages, six locales, 12 URLs to 60 (#700)
+
+### Performance
+
+- parallelize full-repo scans (#713)
+
 ## v0.9.3 - 2026-08-10
 
 ### Bug Fixes

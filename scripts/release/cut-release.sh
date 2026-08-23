@@ -143,6 +143,7 @@ prepend_changelog() {
     echo "# Changelog"
     echo
     echo "$section"
+    echo
     if [[ -f "$CHANGELOG" ]]; then
       # drop the existing leading "# Changelog" header, keep the rest
       tail -n +2 "$CHANGELOG" | sed '/./,$!d'
