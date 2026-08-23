@@ -93,6 +93,33 @@ fn pattern_multiline_metavar_matches_every_indexed_file() {
 }
 
 #[test]
+fn test_pattern_limit_keeps_index_order_and_counts_every_match() {
+    let repo = setup_repo();
+    let v = payload(&run_pattern(
+        repo.path(),
+        &["-p", SWALLOWED_EXCEPT, "--lang", "py", "--limit", "1"],
+    ));
+
+    assert_eq!(v["total"], 3, "{v}");
+    assert_eq!(v["truncated"], true, "{v}");
+    assert_eq!(v["matches"].as_array().unwrap().len(), 1, "{v}");
+    assert_eq!(v["matches"][0]["file"], "pattern_def.py", "{v}");
+}
+
+#[test]
+fn test_pattern_limit_zero_reports_every_match_without_truncation() {
+    let repo = setup_repo();
+    let v = payload(&run_pattern(
+        repo.path(),
+        &["-p", SWALLOWED_EXCEPT, "--lang", "py", "--limit", "0"],
+    ));
+
+    assert_eq!(v["total"], 3, "{v}");
+    assert_eq!(v["truncated"], false, "{v}");
+    assert_eq!(v["matches"].as_array().unwrap().len(), 3, "{v}");
+}
+
+#[test]
 fn pattern_callers_of_drops_unconnected_files() {
     let repo = setup_repo();
     let all = payload(&run_pattern(
