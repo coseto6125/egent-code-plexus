@@ -272,7 +272,7 @@ jobs:
 
       - name: Install cargo-nextest
         if: needs.detect-changes.outputs.code == 'true'
-        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
+        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
         with:
           tool: cargo-nextest
 
@@ -391,7 +391,7 @@ jobs:
 
       - name: Install cargo-audit & cargo-deny
         if: needs.detect-changes.outputs.code == 'true'
-        uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2.86.3
+        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
         with:
           tool: cargo-audit,cargo-deny
 
