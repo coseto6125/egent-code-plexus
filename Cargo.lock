@@ -1140,9 +1140,9 @@ dependencies = [
 
 [[package]]
 name = "etoon"
-version = "0.7.1"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad4bb67af1c42f52b1162eaab5bb3a7093d6636211e74750e1c05212d9aacfdb"
+checksum = "8e2bdff0a55ecf32becb984e1c5a6e07c64ec65e0a29f5e3885e125e0c3f6541"
 dependencies = [
  "itoa",
  "memchr",
@@ -4243,9 +4243,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.24.1"
+version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cefc03fd367c0c6d4305de1b312cf00248c4114f4a0418ce6a6af769e3b0bd9"
+checksum = "f053576934f05a761a402421fbbe3d425d9366f75f978806a037b3ca481abecc"
 dependencies = [
  "atomic",
  "getrandom 0.4.3",
