@@ -1,0 +1,34 @@
+# cargo-audit configuration.
+#
+# `cargo deny check` does NOT cover this: RUSTSEC-2026-0253 is an
+# `informational = "unsound"` advisory, which cargo-deny leaves alone by
+# default — with an empty ignore list it still reports `advisories ok`. The
+# warning in CI comes from `cargo audit`, and cargo-audit reads this file, so
+# the suppression has to live here.
+
+[advisories]
+ignore = [
+  # RUSTSEC-2026-0253 — lru: LruCache::pop() is not panic-safe. A panicking
+  # key Drop skips detach(), leaving a node freed from the map but still
+  # linked, which a later eviction dereferences.
+  #
+  # Patched in lru 0.18.2. tantivy 0.26.1 requires lru ^0.16.3 and is the
+  # latest tantivy, so this repo cannot reach the fix from its own manifests.
+  #
+  # Unreachable here because tantivy's only LruCache is
+  # `LruCache<usize, Block>` (tantivy/src/store/reader.rs:74). The advisory
+  # needs a key whose Drop can panic; `usize` is Copy and its Drop is a no-op.
+  # crates/ecp-cli/tests/supply_chain_pins.rs asserts that every LruCache
+  # tantivy declares still keys on usize, so this entry goes red before its
+  # reason does.
+  #
+  # The prebuilt binaries carry a second, weaker guard: [profile.release-dist]
+  # sets panic = "abort", and the advisory needs unwinding. That covers the
+  # GitHub Release / npm / PyPI / Homebrew artifacts only — install.sh's
+  # `cargo install --git` fallback builds under the default release profile
+  # and does unwind, so the usize key above is the reason that holds
+  # everywhere. The test pins the abort setting too, as the weaker leg.
+  #
+  # Remove this entry when tantivy's lru requirement reaches >= 0.18.2.
+  "RUSTSEC-2026-0253",
+]
