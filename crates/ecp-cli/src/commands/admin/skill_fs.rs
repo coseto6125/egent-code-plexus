@@ -164,6 +164,13 @@ fn collect_rel_files(base: &Path, dir: &Path, out: &mut BTreeSet<PathBuf>) -> Re
 }
 
 /// Unified diff `old` → `new`. Falls back to a placeholder for non-UTF-8 bytes.
+//
+// Left on `from_lines`' default algorithm on purpose. similar 3.2.0 changed
+// `Algorithm::Myers` to Git-style bounded, non-minimal splits and moved the
+// old shortest-edit-script behaviour to `Algorithm::RawMyers`. Measured: the
+// two agree byte-for-byte until the input passes ~2000 pathological lines,
+// and the skill files this diffs top out at 89 lines, so the new default
+// costs nothing here and the pin would only freeze a behaviour we never hit.
 fn unified_diff(old: &[u8], new: &[u8], rel_path: &str) -> String {
     match (std::str::from_utf8(old), std::str::from_utf8(new)) {
         (Ok(old), Ok(new)) => similar::TextDiff::from_lines(old, new)
