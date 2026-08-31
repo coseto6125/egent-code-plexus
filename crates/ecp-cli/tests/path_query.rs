@@ -156,6 +156,16 @@ fn indexed_polyglot_repo(repo: &Path) {
          export function makeChild(): TChild { return new TChild(); }\n",
     )
     .unwrap();
+    // Two definitions of one name, plus a bare call to it. At index time the
+    // resolver suppresses the ambiguous call, so the graph is missing an edge
+    // that the source plainly has — the case where a miss is a lower bound.
+    std::fs::write(repo.join("src/amb_a.py"), "def dupe():\n    return 1\n").unwrap();
+    std::fs::write(repo.join("src/amb_b.py"), "def dupe():\n    return 2\n").unwrap();
+    std::fs::write(
+        repo.join("src/amb_caller.py"),
+        "def run_all():\n    return dupe()\n",
+    )
+    .unwrap();
     // A chain long enough that the default depth reaches it but --depth 2 does
     // not: the depth cap has to be observable to be worth having.
     std::fs::write(
@@ -254,6 +264,29 @@ fn path_names_the_intermediate_in_every_mainstream_language() {
         }
         if out["hops"].as_u64() != Some(2) {
             failures.push(format!("{pfx}: hops = {}, want 2", out["hops"]));
+        }
+        // Each hop has to carry its edge, not just its endpoint. Without this
+        // the suite would still pass if the payload degraded to bare names.
+        let steps = out["path"].as_array().unwrap();
+        for step in &steps[1..] {
+            if step["viaRelType"].as_str() != Some("calls") {
+                failures.push(format!(
+                    "{pfx}: hop into {} has viaRelType {}, want calls",
+                    step["name"], step["viaRelType"]
+                ));
+            }
+            if !step["viaConfidence"].is_number() {
+                failures.push(format!(
+                    "{pfx}: hop into {} lost its confidence",
+                    step["name"]
+                ));
+            }
+        }
+        if steps[0]["viaRelType"].as_str() != Some("") {
+            failures.push(format!(
+                "{pfx}: start node claims an incoming edge: {}",
+                steps[0]
+            ));
         }
     }
     assert!(
@@ -379,4 +412,62 @@ fn path_steps_carry_their_relation_type() {
         hops.iter().collect::<std::collections::HashSet<_>>().len() > 1,
         "a mixed-relation path must not render every hop alike: {out}"
     );
+}
+
+/// With two same-named definitions the resolver suppresses the bare call at
+/// index time, so the graph is missing an edge the source plainly has. The
+/// payload otherwise tells the caller that an unreachable pair is a real
+/// answer, which here would be a lie.
+///
+/// Contract: the miss carries a caveat naming the collision. `ecp impact`
+/// keeps the same contract for the same reason.
+#[test]
+fn path_miss_admits_when_a_same_name_collision_suppressed_edges() {
+    let tmp = tempfile::tempdir().unwrap();
+    indexed_polyglot_repo(tmp.path());
+
+    let out = run_path(tmp.path(), &["run_all", "dupe"]);
+    assert_eq!(out["toCandidates"].as_u64(), Some(2), "{out}");
+    let caveat = out["result"].as_str().unwrap_or_default();
+    assert!(
+        caveat.contains("same-named definitions"),
+        "a collision-driven miss must say so: {out}"
+    );
+}
+
+/// `--to-file` narrows an overloaded endpoint to one definition. Contract: the
+/// candidate count drops, so the caller can ask about a specific definition
+/// instead of accepting whichever one the walk happened to reach.
+#[test]
+fn path_endpoint_file_filter_narrows_the_candidate_set() {
+    let tmp = tempfile::tempdir().unwrap();
+    indexed_polyglot_repo(tmp.path());
+
+    let wide = run_path(tmp.path(), &["run_all", "dupe"]);
+    assert_eq!(wide["toCandidates"].as_u64(), Some(2), "{wide}");
+
+    let narrow = run_path(tmp.path(), &["run_all", "dupe", "--to-file", "amb_a"]);
+    assert_eq!(narrow["toCandidates"].as_u64(), Some(1), "{narrow}");
+}
+
+/// A confidence outside 0.0–1.0 filters out every edge, and the resulting
+/// `found: false` is indistinguishable from a real miss. Contract: the flag is
+/// rejected up front rather than producing a plausible wrong answer.
+#[test]
+fn path_rejects_an_out_of_range_confidence() {
+    let tmp = tempfile::tempdir().unwrap();
+    indexed_polyglot_repo(tmp.path());
+
+    for bad in ["2", "-1", "NaN"] {
+        let out = Command::new(ecp_bin())
+            .args(["path", "d0", "d4", "--min-confidence", bad])
+            .current_dir(tmp.path())
+            .env("HOME", tmp.path())
+            .output()
+            .expect("ecp path failed to spawn");
+        assert!(
+            !out.status.success(),
+            "--min-confidence {bad} must be rejected, not silently applied"
+        );
+    }
 }

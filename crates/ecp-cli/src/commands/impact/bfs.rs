@@ -121,28 +121,33 @@ pub(crate) fn admit_edge(
 }
 
 /// The edge that reached a node during the walk.
-struct Hop {
+///
+/// `reason` borrows the graph's string pool rather than owning a copy: the
+/// walk discovers far more nodes than end up on the path — a hub with a
+/// hundred thousand neighbours would otherwise allocate a hundred thousand
+/// strings to render at most `max_depth + 1` of them.
+struct Hop<'g> {
     from: usize,
     rel: &'static str,
-    reason: String,
+    reason: &'g str,
     confidence: f32,
     heuristic: bool,
 }
 
 /// One node on a resolved path, with the edge that reached it. `via` is `None`
 /// on the first step, which is the start node itself.
-pub(crate) struct PathStep {
+pub(crate) struct PathStep<'g> {
     pub(crate) meta: MergedNodeMeta,
-    pub(crate) via: Option<PathEdge>,
+    pub(crate) via: Option<PathEdge<'g>>,
 }
 
-pub(crate) struct PathEdge {
+pub(crate) struct PathEdge<'g> {
     /// Relation type, e.g. `calls` / `extends`. The default walk follows every
     /// non-containment relation, so the reason string alone cannot say which
     /// kind of hop this was — and "A extends B" is a different fact from
     /// "A calls B".
     pub(crate) rel: &'static str,
-    pub(crate) reason: String,
+    pub(crate) reason: &'g str,
     pub(crate) confidence: f32,
     pub(crate) heuristic: bool,
 }
@@ -167,9 +172,9 @@ pub(crate) struct PathEdge {
 ///
 /// Returns `None` when no goal is reachable within `max_depth`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn shortest_path(
-    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
-    view: Option<&OverlayView>,
+pub(crate) fn shortest_path<'g>(
+    graph: &'g ecp_core::graph::ArchivedZeroCopyGraph,
+    view: Option<&'g OverlayView>,
     starts: &[usize],
     goals: &HashSet<usize>,
     direction: &Direction,
@@ -178,10 +183,10 @@ pub(crate) fn shortest_path(
     include_tests: bool,
     rel_filter: &Option<Vec<String>>,
     include_heuristic: bool,
-) -> Option<Vec<PathStep>> {
+) -> Option<Vec<PathStep<'g>>> {
     // node -> the hop that reached it; `None` marks a seed.
     let merged = MergedGraph::new(graph, view);
-    let mut pred: HashMap<usize, Option<Hop>> = HashMap::new();
+    let mut pred: HashMap<usize, Option<Hop<'g>>> = HashMap::new();
     let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
     let mut test_path_cache = HashMap::new();
 
@@ -204,7 +209,7 @@ pub(crate) fn shortest_path(
             continue;
         }
 
-        let mut consider = |edge: &MergedEdge<'_>, next_idx: usize| {
+        let mut consider = |edge: &MergedEdge<'g>, next_idx: usize| {
             let heuristic = match admit_edge(edge, min_conf, rel_filter, include_heuristic) {
                 EdgeVerdict::Follow { heuristic } => heuristic,
                 _ => return,
@@ -213,7 +218,7 @@ pub(crate) fn shortest_path(
                 slot.insert(Some(Hop {
                     from: curr_idx,
                     rel: rel_type_to_str(edge.rel_type()),
-                    reason: edge.reason(graph).to_string(),
+                    reason: edge.reason(graph),
                     confidence: edge.confidence(),
                     heuristic,
                 }));
@@ -238,7 +243,7 @@ pub(crate) fn shortest_path(
     // Walk the hop chain back to its seed, then flip: the path is at most
     // `max_depth + 1` nodes, so materialising the display metadata here costs
     // nothing next to the walk that found them.
-    let mut chain: Vec<PathStep> = Vec::new();
+    let mut chain: Vec<PathStep<'g>> = Vec::new();
     let mut cursor = reached?;
     loop {
         let hop = pred.get(&cursor).expect("reached node carries a hop entry");
@@ -249,7 +254,7 @@ pub(crate) fn shortest_path(
                     meta,
                     via: Some(PathEdge {
                         rel: h.rel,
-                        reason: h.reason.clone(),
+                        reason: h.reason,
                         confidence: h.confidence,
                         heuristic: h.heuristic,
                     }),

@@ -25,7 +25,11 @@ ecp path <FROM> <TO> [--direction down] [--depth 8] [--repo <PATH>]
 - `--include-tests`: allow test files on the route. Off by default, so a
   production path is not routed through a test helper that calls both ends.
 - `--min-confidence 0.8`: drop low-confidence edges. Default 0.0 is
-  recall-first, matching `ecp impact`.
+  recall-first, matching `ecp impact`. Values outside 0.0–1.0 are rejected
+  rather than filtering every edge into a `found: false` you cannot tell from
+  a real miss.
+- `--from-file` / `--to-file`: substring on the file path, to pin an
+  overloaded endpoint to one definition.
 - `--include-heuristic`: allow heuristic edges (MirrorsField, EventTopicMirror)
   as steps.
 
@@ -61,7 +65,13 @@ about the call graph.
 An overloaded name is not an error. Every candidate for both names seeds the
 same walk, so the cost is one traversal rather than one per pair, and
 `fromCandidates` / `toCandidates` report how many definitions each name had.
-The chain's own file:line says which two the answer joined.
+The chain's own file:line says which two the answer joined. To ask about a
+specific one, narrow with `--from-file` / `--to-file`.
+
+Two or more definitions of a name also mean the resolver suppressed every bare
+call to it at index time, so edges are missing from the walk. The payload says
+so in its caveat, and a miss under that condition is a lower bound rather than
+an answer.
 
 ## Misses
 

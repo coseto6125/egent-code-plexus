@@ -24,7 +24,7 @@ use crate::commands::impact::bfs::{shortest_path, PathStep};
 use crate::commands::impact::{direction_str, parse_csv_lower, Direction};
 use crate::commands::symbol_id::resolve_candidates;
 use crate::engine::Engine;
-use crate::output::{emit_with_caveat, OutputFormat};
+use crate::output::{emit_with_caveat, merge_caveats, OutputFormat};
 use clap::Args;
 use ecp_core::EcpError;
 use serde_json::{json, Value};
@@ -65,8 +65,17 @@ pub struct PathArgs {
 
     /// Drop edges below this confidence (0.0–1.0). Default 0.0 is
     /// recall-first, matching `ecp impact`.
-    #[arg(long, default_value = "0.0")]
+    #[arg(long, default_value = "0.0", value_parser = parse_confidence)]
     pub min_confidence: f32,
+
+    /// Disambiguate `<FROM>` when the name has several definitions: substring
+    /// on the file path.
+    #[arg(long)]
+    pub from_file: Option<String>,
+
+    /// Disambiguate `<TO>` the same way.
+    #[arg(long)]
+    pub to_file: Option<String>,
 
     /// Allow heuristic edges (MirrorsField, EventTopicMirror) as steps. Each
     /// one is tagged `requires_verification` in the output.
@@ -82,12 +91,28 @@ pub struct PathArgs {
     pub format: Option<String>,
 }
 
+/// Rejects out-of-range and NaN rather than silently filtering every edge and
+/// reporting `found: false` — a miss caused by a bad flag is indistinguishable
+/// from a real one in the output, which is the worst kind of wrong answer here.
+fn parse_confidence(raw: &str) -> Result<f32, String> {
+    let v: f32 = raw
+        .parse()
+        .map_err(|_| format!("'{raw}' is not a number"))?;
+    if !(0.0..=1.0).contains(&v) {
+        return Err(format!("must be between 0.0 and 1.0, got '{raw}'"));
+    }
+    Ok(v)
+}
+
 pub fn run(args: PathArgs, engine: &Engine) -> Result<(), EcpError> {
     let (payload, caveat) = build_payload(&args, engine)?;
     emit_with_caveat(
         &payload,
         OutputFormat::parse(args.format.as_deref()),
-        caveat,
+        // The engine's staleness caveat comes first: a `found: false` read off
+        // a warm-attached or behind-HEAD graph is provisional, and this payload
+        // otherwise states the opposite in as many words.
+        merge_caveats(engine.caveat(), caveat),
     )
 }
 
@@ -100,8 +125,10 @@ pub fn build_payload(
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let view = engine.overlay_view();
 
-    let (starts, _) = resolve_candidates(graph, view, &args.from, None, None);
-    let (goal_vec, _) = resolve_candidates(graph, view, &args.to, None, None);
+    let (starts, from_defs) =
+        resolve_candidates(graph, view, &args.from, None, args.from_file.as_deref());
+    let (goal_vec, to_defs) =
+        resolve_candidates(graph, view, &args.to, None, args.to_file.as_deref());
     if starts.is_empty() {
         return Err(unresolved(&args.from));
     }
@@ -109,6 +136,10 @@ pub fn build_payload(
         return Err(unresolved(&args.to));
     }
     let goals: HashSet<usize> = goal_vec.iter().copied().collect();
+    let ambiguity = merge_caveats(
+        ambiguity_caveat(&args.from, from_defs),
+        ambiguity_caveat(&args.to, to_defs),
+    );
 
     let rel_filter = parse_csv_lower(args.relation_types.as_deref());
     let found = shortest_path(
@@ -153,7 +184,7 @@ pub fn build_payload(
                  rerun with --direction {flipped}."
             ));
         }
-        return Ok((payload, Some(caveat)));
+        return Ok((payload, merge_caveats(ambiguity, Some(caveat))));
     };
 
     let heuristic_steps = steps
@@ -179,7 +210,23 @@ pub fn build_payload(
             steps.len() - 1
         )
     });
-    Ok((payload, caveat))
+    Ok((payload, merge_caveats(ambiguity, caveat)))
+}
+
+/// With two or more same-named definitions in the graph, the resolver
+/// suppressed every bare call to that name at index time
+/// (`DecisionTier::AmbiguousGlobal`), so edges are missing from the walk. A
+/// miss under that condition is a lower bound, and this payload otherwise
+/// says an unreachable pair is a real answer.
+fn ambiguity_caveat(name: &str, same_name_defs: usize) -> Option<String> {
+    (same_name_defs >= 2).then(|| {
+        format!(
+            "route may be incomplete: {same_name_defs} same-named definitions of '{name}' \
+             exist, so bare calls (no import/qualifier context) were ambiguity-suppressed at \
+             index time. Narrow with --from-file / --to-file, and cross-check missing hops \
+             with grep before trusting a miss."
+        )
+    })
 }
 
 /// Hops the flipped direction would need, when the requested one found none.
@@ -216,7 +263,7 @@ fn step_json(step: &PathStep) -> Value {
     // The start node has no incoming edge; its via fields stay empty rather
     // than borrowing the next hop's, which would misread as a self-edge.
     let (rel, reason, confidence, heuristic) = match &step.via {
-        Some(e) => (e.rel, e.reason.as_str(), e.confidence, e.heuristic),
+        Some(e) => (e.rel, e.reason, e.confidence, e.heuristic),
         None => ("", "", 1.0, false),
     };
     json!({

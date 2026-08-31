@@ -129,9 +129,10 @@ pub(super) fn impact_by_name(
     // Resolve name → matching node indices, with optional --file / --kind
     // disambiguation. FQN `Owner.Method` form is an additional filter on top.
     let file_needle = args.file.as_deref();
-    let kind_needle = args.kind.as_deref().map(|s| s.to_ascii_lowercase());
-    let (matches, same_name_defs) =
-        resolve_candidates(graph, view, name, kind_needle.as_deref(), file_needle);
+    // `resolve_candidates` lowercases for the comparison; this binding exists
+    // only for the disambiguation check further down.
+    let kind_needle = args.kind.as_deref();
+    let (matches, same_name_defs) = resolve_candidates(graph, view, name, kind_needle, file_needle);
 
     if matches.is_empty() {
         return Err(EcpError::InvalidArgument(format!(
