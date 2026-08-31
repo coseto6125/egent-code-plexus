@@ -20,7 +20,7 @@
 //! default answer is the one that is safe to act on, and the opt-in flag tags
 //! every inferred step it lets through.
 
-use crate::commands::impact::bfs::{shortest_path, PathStep};
+use crate::commands::impact::bfs::{shortest_path, PathStep, WalkOpts};
 use crate::commands::impact::{direction_str, parse_csv_lower, Direction};
 use crate::commands::symbol_id::resolve_candidates;
 use crate::engine::Engine;
@@ -78,7 +78,7 @@ pub struct PathArgs {
     pub to_file: Option<String>,
 
     /// Allow heuristic edges (MirrorsField, EventTopicMirror) as steps. Each
-    /// one is tagged `requires_verification` in the output.
+    /// one is tagged `requiresVerification` in the output.
     #[arg(long)]
     pub include_heuristic: bool,
 
@@ -116,22 +116,20 @@ pub fn run(args: PathArgs, engine: &Engine) -> Result<(), EcpError> {
     )
 }
 
-/// Payload plus an optional `result` caveat. Split from `run` so the MCP
-/// surface and tests can assert the structure without capturing stdout.
-pub fn build_payload(
-    args: &PathArgs,
-    engine: &Engine,
-) -> Result<(Value, Option<String>), EcpError> {
+/// Payload plus an optional `result` caveat, kept apart from `run` so the
+/// caveat merging and the emit stay one readable line each. MCP reaches this
+/// command by spawning the binary, so `run` is the only caller.
+fn build_payload(args: &PathArgs, engine: &Engine) -> Result<(Value, Option<String>), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let view = engine.overlay_view();
 
     let (starts, from_defs) =
         resolve_candidates(graph, view, &args.from, None, args.from_file.as_deref());
-    let (goal_vec, to_defs) =
-        resolve_candidates(graph, view, &args.to, None, args.to_file.as_deref());
     if starts.is_empty() {
         return Err(unresolved(&args.from));
     }
+    let (goal_vec, to_defs) =
+        resolve_candidates(graph, view, &args.to, None, args.to_file.as_deref());
     if goal_vec.is_empty() {
         return Err(unresolved(&args.to));
     }
@@ -142,18 +140,15 @@ pub fn build_payload(
     );
 
     let rel_filter = parse_csv_lower(args.relation_types.as_deref());
-    let found = shortest_path(
-        graph,
-        view,
-        &starts,
-        &goals,
-        &args.direction,
-        args.depth,
-        args.min_confidence,
-        args.include_tests,
-        &rel_filter,
-        args.include_heuristic,
-    );
+    let opts = WalkOpts {
+        direction: args.direction.clone(),
+        depth: args.depth,
+        min_conf: args.min_confidence,
+        include_tests: args.include_tests,
+        rel_filter: &rel_filter,
+        include_heuristic: args.include_heuristic,
+    };
+    let found = shortest_path(graph, view, &starts, &goals, &opts);
 
     let direction = direction_str(&args.direction);
     let Some(steps) = found else {
@@ -173,16 +168,24 @@ pub fn build_payload(
              is a real answer, not a missing index.",
             args.from, args.to, args.depth
         );
-        // Swapped arguments are the one mistake this command invites, so spend
-        // a second walk to turn the dead end into the command that works. Only
-        // on a miss, where the first walk already exhausted the reachable set.
-        if let Some((flipped, hops)) =
-            reverse_probe(args, graph, view, &starts, &goals, &rel_filter)
-        {
+        if args.min_confidence > 0.0 {
             caveat.push_str(&format!(
-                " There is a path in the other direction ({flipped}, {hops} hops): \
-                 rerun with --direction {flipped}."
+                " --min-confidence {} is also dropping edges; a miss under a gate is not the \
+                 same claim as a miss without one.",
+                args.min_confidence
             ));
+        }
+        // Swapped arguments are the one mistake this command invites, so spend a
+        // second walk to turn the dead end into the command that works. Only on
+        // a miss, where the first walk already exhausted the reachable set.
+        if let Some(flipped) = opts.flipped() {
+            if let Some(steps) = shortest_path(graph, view, &starts, &goals, &flipped) {
+                let (name, hops) = (direction_str(&flipped.direction), steps.len() - 1);
+                caveat.push_str(&format!(
+                    " There is a path in the other direction ({name}, {hops} hops): \
+                     rerun with --direction {name}."
+                ));
+            }
         }
         return Ok((payload, merge_caveats(ambiguity, Some(caveat))));
     };
@@ -227,36 +230,6 @@ fn ambiguity_caveat(name: &str, same_name_defs: usize) -> Option<String> {
              with grep before trusting a miss."
         )
     })
-}
-
-/// Hops the flipped direction would need, when the requested one found none.
-/// `None` for `--direction both`, where there is no other direction to try.
-fn reverse_probe(
-    args: &PathArgs,
-    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
-    view: Option<&ecp_core::session::OverlayView>,
-    starts: &[usize],
-    goals: &HashSet<usize>,
-    rel_filter: &Option<Vec<String>>,
-) -> Option<(&'static str, usize)> {
-    let flipped = match args.direction {
-        Direction::Up => Direction::Down,
-        Direction::Down => Direction::Up,
-        Direction::Both => return None,
-    };
-    let steps = shortest_path(
-        graph,
-        view,
-        starts,
-        goals,
-        &flipped,
-        args.depth,
-        args.min_confidence,
-        args.include_tests,
-        rel_filter,
-        args.include_heuristic,
-    )?;
-    Some((direction_str(&flipped), steps.len() - 1))
 }
 
 fn step_json(step: &PathStep) -> Value {
