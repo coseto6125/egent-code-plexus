@@ -35,16 +35,24 @@ pub(crate) fn merged_node_meta(
     }
 }
 
-/// Whether BFS may stand on a merged-space node.
+/// Whether a walk may stand on a merged-space node.
 ///
-/// Two exclusions, both of which also decide what `run_bfs` emits: synthetic
+/// Two exclusions, the same two `run_bfs` applies while it emits: synthetic
 /// nodes (`Decorates` can reach an Annotation at SYNTHETIC_FILE_IDX) have no
 /// file:line to report, and test files stay out unless asked for. Virtual
 /// overlay nodes come from freshly parsed source, never from synthetic
 /// emission, so only the test-path check applies to them.
 ///
-/// `test_path_cache` is keyed by base file index; overlay nodes carry their
-/// own path and bypass it.
+/// **This mirrors the guard `run_bfs` keeps inline, deliberately.** Routing
+/// `run_bfs` through this helper cost +2% on a depth-6 both-directions walk
+/// over the vscode corpus (347ms median against 340ms, measured next to a
+/// control binary whose `run_bfs` was byte-identical to the baseline and which
+/// reproduced the baseline exactly). Per-query latency is this project's first
+/// priority, so the copies stand and `path_walks_the_same_graph_as_impact` in
+/// `tests/path_query.rs` guards them against drifting apart.
+///
+/// `test_path_cache` is keyed by base file index; overlay nodes carry their own
+/// path and bypass it.
 fn node_traversable(
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
     view: Option<&OverlayView>,
@@ -74,13 +82,17 @@ fn node_traversable(
 
 /// Whether an edge may be followed, and why not when it may not.
 ///
-/// Shared by [`run_bfs`] and [`shortest_path`] so a path only ever runs along
-/// edges the blast radius would also have walked. Two answers about the same
-/// graph disagreeing on which edges are real would be worse than one answer.
+/// Mirrors the filter chain `run_bfs` keeps inline, for the same measured
+/// reason as [`node_traversable`]. A path must only ever run along edges the
+/// blast radius would also have walked — two answers about the same graph
+/// disagreeing on which edges are real would be worse than one answer — so
+/// `path_walks_the_same_graph_as_impact` in `tests/path_query.rs` asserts the
+/// two copies still agree.
 pub(crate) enum EdgeVerdict {
     /// Follow it. `heuristic` marks a `RelType::is_heuristic` edge, which the
-    /// caller reports in its own bucket.
-    Follow { heuristic: bool },
+    /// caller reports in its own bucket. `confidence` rides along so the caller
+    /// does not read it a second time on the hot path.
+    Follow { heuristic: bool, confidence: f32 },
     /// Confidence below the caller's gate.
     BelowConfidence,
     /// Heuristic edge with `include_heuristic` off.
@@ -91,13 +103,15 @@ pub(crate) enum EdgeVerdict {
     NotTraversable,
 }
 
+#[inline(always)]
 pub(crate) fn admit_edge(
     edge: &MergedEdge<'_>,
     min_conf: f32,
     rel_filter: &Option<Vec<String>>,
     include_heuristic: bool,
 ) -> EdgeVerdict {
-    if edge.confidence() < min_conf {
+    let confidence = edge.confidence();
+    if confidence < min_conf {
         return EdgeVerdict::BelowConfidence;
     }
     let rel = edge.rel_type();
@@ -117,7 +131,10 @@ pub(crate) fn admit_edge(
             return EdgeVerdict::NotTraversable;
         }
     }
-    EdgeVerdict::Follow { heuristic }
+    EdgeVerdict::Follow {
+        heuristic,
+        confidence,
+    }
 }
 
 /// The edge that reached a node during the walk.
@@ -210,16 +227,20 @@ pub(crate) fn shortest_path<'g>(
         }
 
         let mut consider = |edge: &MergedEdge<'g>, next_idx: usize| {
-            let heuristic = match admit_edge(edge, min_conf, rel_filter, include_heuristic) {
-                EdgeVerdict::Follow { heuristic } => heuristic,
-                _ => return,
-            };
+            let (heuristic, confidence) =
+                match admit_edge(edge, min_conf, rel_filter, include_heuristic) {
+                    EdgeVerdict::Follow {
+                        heuristic,
+                        confidence,
+                    } => (heuristic, confidence),
+                    _ => return,
+                };
             if let std::collections::hash_map::Entry::Vacant(slot) = pred.entry(next_idx) {
                 slot.insert(Some(Hop {
                     from: curr_idx,
                     rel: rel_type_to_str(edge.rel_type()),
                     reason: edge.reason(graph),
-                    confidence: edge.confidence(),
+                    confidence,
                     heuristic,
                 }));
                 queue.push_back((next_idx, curr_depth + 1));
@@ -338,12 +359,23 @@ pub(super) fn run_bfs(
             String,
             u32,
         );
-        if !node_traversable(graph, view, curr_idx, include_tests, &mut test_path_cache) {
-            continue;
-        }
         if curr_idx < base_len {
             let curr_node = &graph.nodes[curr_idx];
+            // BFS via `Decorates` edges can reach synthetic Annotation nodes
+            // (SYNTHETIC_FILE_IDX); they have no file:line to report.
+            if !curr_node.has_owning_file() {
+                continue;
+            }
             let file_idx = curr_node.file_idx.to_native() as usize;
+            if !include_tests {
+                let is_test = *test_path_cache.entry(file_idx).or_insert_with(|| {
+                    let file_path = graph.files[file_idx].path.resolve(&graph.string_pool);
+                    is_test_path(file_path)
+                });
+                if is_test {
+                    continue;
+                }
+            }
             uid = curr_node.uid.to_native();
             name = curr_node.name.resolve(&graph.string_pool).to_string();
             owner_class = resolve_owner_class(graph, curr_idx).map(str::to_owned);
@@ -354,9 +386,14 @@ pub(super) fn run_bfs(
                 .to_string();
             line = curr_node.start_line();
         } else {
+            // No has_owning_file guard here: virtual nodes come from freshly
+            // parsed source files, never from synthetic emission.
             let vn = view
                 .and_then(|v| v.node(curr_idx as u32))
                 .expect("virtual index enqueued without a view");
+            if !include_tests && is_test_path(&vn.rel_path) {
+                continue;
+            }
             uid = vn.uid;
             name = vn.name.clone();
             owner_class = vn.owner_class.clone();
@@ -402,23 +439,36 @@ pub(super) fn run_bfs(
         // ── expansion ───────────────────────────────────────────────────
         // Shared filter chain + enqueue for base and overlay edges.
         let mut consider = |edge: &MergedEdge<'_>, next_idx: usize| {
-            let is_heur = match admit_edge(edge, min_conf, rel_filter, include_heuristic) {
-                EdgeVerdict::Follow { heuristic } => heuristic,
-                EdgeVerdict::BelowConfidence => {
-                    hidden_conf_edges += 1;
+            let edge_conf = edge.confidence();
+            if edge_conf < min_conf {
+                hidden_conf_edges += 1;
+                return;
+            }
+            let rel = edge.rel_type();
+            // Structural containment edges (Defines, HasMethod, HasProperty,
+            // Imports) describe where a symbol lives, not who calls it.
+            // Exclude from BFS so File→Function Defines does not register
+            // as a caller.
+            if rel.is_scope_containment() {
+                return;
+            }
+            let is_heur = rel.is_heuristic();
+            if is_heur && !include_heuristic {
+                hidden_heuristic_edges += 1;
+                return;
+            }
+            if let Some(rels) = rel_filter.as_ref() {
+                let rel_str = rel_type_to_str(rel);
+                if !rels.iter().any(|r| r == rel_str) {
                     return;
                 }
-                EdgeVerdict::HeuristicSuppressed => {
-                    hidden_heuristic_edges += 1;
-                    return;
-                }
-                EdgeVerdict::NotTraversable => return,
-            };
-            if visited.insert(next_idx) {
+            }
+            if !visited.contains(&next_idx) {
+                visited.insert(next_idx);
                 queue.push_back((
                     next_idx,
                     curr_depth + 1,
-                    Some((edge.reason(graph).to_string(), edge.confidence())),
+                    Some((edge.reason(graph).to_string(), edge_conf)),
                     is_heur,
                 ));
             }

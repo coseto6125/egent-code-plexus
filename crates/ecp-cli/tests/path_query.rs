@@ -156,6 +156,21 @@ fn indexed_polyglot_repo(repo: &Path) {
          export function makeChild(): TChild { return new TChild(); }\n",
     )
     .unwrap();
+    // A production chain whose only link runs through a test file. Both the
+    // path walk and the impact walk have to exclude it by default and include
+    // it under --include-tests, which is what pins their two copies of the
+    // node guard to the same behaviour.
+    std::fs::create_dir(repo.join("tests")).unwrap();
+    std::fs::write(
+        repo.join("src/bridge.py"),
+        "def prod_start():\n    return t_bridge()\n\ndef prod_end():\n    return 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("tests/test_bridge.py"),
+        "def t_bridge():\n    return prod_end()\n",
+    )
+    .unwrap();
     // Two definitions of one name, plus a bare call to it. At index time the
     // resolver suppresses the ambiguous call, so the graph is missing an edge
     // that the source plainly has — the case where a miss is a lower bound.
@@ -470,4 +485,79 @@ fn path_rejects_an_out_of_range_confidence() {
             "--min-confidence {bad} must be rejected, not silently applied"
         );
     }
+}
+
+/// `ecp path` and `ecp impact` keep separate copies of the node guard and the
+/// edge filter — `run_bfs` inlines them because routing it through the shared
+/// helpers measured +2% on the vscode corpus, and per-query latency outranks
+/// the tidier arrangement. This is what stops the copies drifting.
+///
+/// Contract: the two walks agree about the same graph. `prod_start` reaches
+/// `prod_end` only through a function in a test file, so both must miss it by
+/// default and both must find it under `--include-tests`. A divergence in
+/// either copy of the guard flips exactly one of the four assertions.
+#[test]
+fn path_walks_the_same_graph_as_impact() {
+    let tmp = tempfile::tempdir().unwrap();
+    indexed_polyglot_repo(tmp.path());
+
+    let reaches_via_impact = |extra: &[&str]| -> bool {
+        let mut argv = vec![
+            "impact",
+            "prod_start",
+            "--direction",
+            "down",
+            "--depth",
+            "4",
+            "--format",
+            "json",
+        ];
+        argv.extend_from_slice(extra);
+        let out = Command::new(ecp_bin())
+            .args(&argv)
+            .current_dir(tmp.path())
+            .env("HOME", tmp.path())
+            .output()
+            .expect("ecp impact failed to spawn");
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "impact did not emit JSON ({e}): {}",
+                String::from_utf8_lossy(&out.stdout)
+            )
+        });
+        v["impact"]
+            .as_array()
+            .map(|rows| rows.iter().any(|r| r["name"].as_str() == Some("prod_end")))
+            .unwrap_or(false)
+    };
+
+    let path_default = run_path(tmp.path(), &["prod_start", "prod_end", "--depth", "4"]);
+    assert_eq!(
+        path_default["found"].as_bool(),
+        Some(false),
+        "a route through a test file must not be a production path: {path_default}"
+    );
+    assert!(
+        !reaches_via_impact(&[]),
+        "impact must exclude the same test-file hop"
+    );
+
+    let path_tests = run_path(
+        tmp.path(),
+        &["prod_start", "prod_end", "--depth", "4", "--include-tests"],
+    );
+    assert_eq!(
+        path_tests["found"].as_bool(),
+        Some(true),
+        "--include-tests must open the same hop for path: {path_tests}"
+    );
+    assert_eq!(
+        step_names(&path_tests),
+        vec!["prod_start", "t_bridge", "prod_end"],
+        "{path_tests}"
+    );
+    assert!(
+        reaches_via_impact(&["--include-tests"]),
+        "--include-tests must open the same hop for impact"
+    );
 }
