@@ -9,15 +9,15 @@ use std::collections::{HashMap, HashSet, VecDeque};
 /// Display metadata for a merged-space node index (`>= graph.nodes.len()` =
 /// overlay virtual node). Cold-path companion to `run_bfs`'s inline emission
 /// (which keeps its per-file test-path cache).
-pub(super) struct MergedNodeMeta {
+pub(crate) struct MergedNodeMeta {
     pub(super) uid: u64,
-    pub(super) name: String,
-    pub(super) kind: &'static str,
-    pub(super) file_path: String,
-    pub(super) line: u32,
+    pub(crate) name: String,
+    pub(crate) kind: &'static str,
+    pub(crate) file_path: String,
+    pub(crate) line: u32,
 }
 
-pub(super) fn merged_node_meta(
+pub(crate) fn merged_node_meta(
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
     view: Option<&OverlayView>,
     idx: usize,
@@ -33,6 +33,220 @@ pub(super) fn merged_node_meta(
         file_path: node.file_path(&merged).unwrap_or_default().to_string(),
         line: node.start_line(),
     }
+}
+
+/// Whether BFS may stand on a merged-space node.
+///
+/// Two exclusions, both of which also decide what `run_bfs` emits: synthetic
+/// nodes (`Decorates` can reach an Annotation at SYNTHETIC_FILE_IDX) have no
+/// file:line to report, and test files stay out unless asked for. Virtual
+/// overlay nodes come from freshly parsed source, never from synthetic
+/// emission, so only the test-path check applies to them.
+///
+/// `test_path_cache` is keyed by base file index; overlay nodes carry their
+/// own path and bypass it.
+fn node_traversable(
+    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
+    view: Option<&OverlayView>,
+    idx: usize,
+    include_tests: bool,
+    test_path_cache: &mut HashMap<usize, bool>,
+) -> bool {
+    if idx < graph.nodes.len() {
+        let node = &graph.nodes[idx];
+        if !node.has_owning_file() {
+            return false;
+        }
+        if include_tests {
+            return true;
+        }
+        let file_idx = node.file_idx.to_native() as usize;
+        !*test_path_cache
+            .entry(file_idx)
+            .or_insert_with(|| is_test_path(graph.files[file_idx].path.resolve(&graph.string_pool)))
+    } else {
+        let vn = view
+            .and_then(|v| v.node(idx as u32))
+            .expect("virtual index probed without a view");
+        include_tests || !is_test_path(&vn.rel_path)
+    }
+}
+
+/// Whether an edge may be followed, and why not when it may not.
+///
+/// Shared by [`run_bfs`] and [`shortest_path`] so a path only ever runs along
+/// edges the blast radius would also have walked. Two answers about the same
+/// graph disagreeing on which edges are real would be worse than one answer.
+pub(crate) enum EdgeVerdict {
+    /// Follow it. `heuristic` marks a `RelType::is_heuristic` edge, which the
+    /// caller reports in its own bucket.
+    Follow { heuristic: bool },
+    /// Confidence below the caller's gate.
+    BelowConfidence,
+    /// Heuristic edge with `include_heuristic` off.
+    HeuristicSuppressed,
+    /// Structural containment, or filtered out by `--relation_types`. Neither
+    /// is a hidden edge worth counting: containment is never a caller, and a
+    /// relation filter is the caller asking for exactly this.
+    NotTraversable,
+}
+
+pub(crate) fn admit_edge(
+    edge: &MergedEdge<'_>,
+    min_conf: f32,
+    rel_filter: &Option<Vec<String>>,
+    include_heuristic: bool,
+) -> EdgeVerdict {
+    if edge.confidence() < min_conf {
+        return EdgeVerdict::BelowConfidence;
+    }
+    let rel = edge.rel_type();
+    // Structural containment edges (Defines, HasMethod, HasProperty, Imports)
+    // describe where a symbol lives, not who calls it. Exclude from BFS so
+    // File→Function Defines does not register as a caller.
+    if rel.is_scope_containment() {
+        return EdgeVerdict::NotTraversable;
+    }
+    let heuristic = rel.is_heuristic();
+    if heuristic && !include_heuristic {
+        return EdgeVerdict::HeuristicSuppressed;
+    }
+    if let Some(rels) = rel_filter.as_ref() {
+        let rel_str = rel_type_to_str(rel);
+        if !rels.iter().any(|r| r == rel_str) {
+            return EdgeVerdict::NotTraversable;
+        }
+    }
+    EdgeVerdict::Follow { heuristic }
+}
+
+/// One node on a resolved path.
+pub(crate) struct PathStep {
+    pub(crate) meta: MergedNodeMeta,
+    /// Reason + confidence of the edge that reached this node. `None` on the
+    /// first step, which is the start node itself.
+    pub(crate) via: Option<(String, f32)>,
+    /// Whether that edge was heuristic. `false` on the first step.
+    pub(crate) via_heuristic: bool,
+}
+
+/// Shortest path from any node in `starts` to any node in `goals`, along the
+/// edges [`run_bfs`] would walk under the same filters.
+///
+/// Multi-source and multi-goal on purpose: `ecp path A B` resolves both names
+/// to candidate sets, and seeding the frontier with every A candidate at depth
+/// 0 costs one BFS instead of |A| x |B| of them. The returned chain names the
+/// endpoints it actually used, so an overloaded name stays unambiguous in the
+/// answer rather than in a flag the caller has to guess at.
+///
+/// Memory is bounded by the reached set, one `usize` pair plus the edge reason
+/// per node — the same order as `run_bfs`'s visited set, and far below its
+/// per-node `serde_json::Value`. The walk stops at the first goal popped, so
+/// a near hit never pays for the full radius.
+///
+/// A node that is both a start and a goal yields the zero-hop path: `from` and
+/// `to` resolved to the same symbol. Finding a cycle back to a start is a
+/// different question and this is not it.
+///
+/// Returns `None` when no goal is reachable within `max_depth`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn shortest_path(
+    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
+    view: Option<&OverlayView>,
+    starts: &[usize],
+    goals: &HashSet<usize>,
+    direction: &Direction,
+    max_depth: usize,
+    min_conf: f32,
+    include_tests: bool,
+    rel_filter: &Option<Vec<String>>,
+    include_heuristic: bool,
+) -> Option<Vec<PathStep>> {
+    // node -> the hop that reached it; `None` marks a seed.
+    type Hop = Option<(usize, String, f32, bool)>;
+    let merged = MergedGraph::new(graph, view);
+    let mut pred: HashMap<usize, Hop> = HashMap::new();
+    let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
+    let mut test_path_cache = HashMap::new();
+
+    for &start in starts {
+        if pred.insert(start, None).is_none() {
+            queue.push_back((start, 0));
+        }
+    }
+
+    let mut reached = None;
+    while let Some((curr_idx, curr_depth)) = queue.pop_front() {
+        if !node_traversable(graph, view, curr_idx, include_tests, &mut test_path_cache) {
+            continue;
+        }
+        if goals.contains(&curr_idx) {
+            reached = Some(curr_idx);
+            break;
+        }
+        if curr_depth >= max_depth {
+            continue;
+        }
+
+        let mut consider = |edge: &MergedEdge<'_>, next_idx: usize| {
+            let heuristic = match admit_edge(edge, min_conf, rel_filter, include_heuristic) {
+                EdgeVerdict::Follow { heuristic } => heuristic,
+                _ => return,
+            };
+            if let std::collections::hash_map::Entry::Vacant(slot) = pred.entry(next_idx) {
+                slot.insert(Some((
+                    curr_idx,
+                    edge.reason(graph).to_string(),
+                    edge.confidence(),
+                    heuristic,
+                )));
+                queue.push_back((next_idx, curr_depth + 1));
+            }
+        };
+
+        if matches!(direction, Direction::Up | Direction::Both) {
+            for edge in merged.in_edges(curr_idx as u32) {
+                let source = edge.source as usize;
+                consider(&edge, source);
+            }
+        }
+        if matches!(direction, Direction::Down | Direction::Both) {
+            for edge in merged.out_edges(curr_idx as u32) {
+                let target = edge.target as usize;
+                consider(&edge, target);
+            }
+        }
+    }
+
+    // Walk the hop chain back to its seed, then flip: the path is at most
+    // `max_depth + 1` nodes, so materialising the display metadata here costs
+    // nothing next to the walk that found them.
+    let mut chain: Vec<PathStep> = Vec::new();
+    let mut cursor = reached?;
+    loop {
+        let hop = pred.get(&cursor).expect("reached node carries a hop entry");
+        let meta = merged_node_meta(graph, view, cursor);
+        match hop {
+            Some((prev, reason, conf, heuristic)) => {
+                chain.push(PathStep {
+                    meta,
+                    via: Some((reason.clone(), *conf)),
+                    via_heuristic: *heuristic,
+                });
+                cursor = *prev;
+            }
+            None => {
+                chain.push(PathStep {
+                    meta,
+                    via: None,
+                    via_heuristic: false,
+                });
+                break;
+            }
+        }
+    }
+    chain.reverse();
+    Some(chain)
 }
 
 /// Core BFS over the merged graph (base CSR + optional overlay view) from
@@ -102,23 +316,12 @@ pub(super) fn run_bfs(
             String,
             u32,
         );
+        if !node_traversable(graph, view, curr_idx, include_tests, &mut test_path_cache) {
+            continue;
+        }
         if curr_idx < base_len {
             let curr_node = &graph.nodes[curr_idx];
-            // BFS via `Decorates` edges can reach synthetic Annotation nodes
-            // (SYNTHETIC_FILE_IDX); they have no file:line to report.
-            if !curr_node.has_owning_file() {
-                continue;
-            }
             let file_idx = curr_node.file_idx.to_native() as usize;
-            if !include_tests {
-                let is_test = *test_path_cache.entry(file_idx).or_insert_with(|| {
-                    let file_path = graph.files[file_idx].path.resolve(&graph.string_pool);
-                    is_test_path(file_path)
-                });
-                if is_test {
-                    continue;
-                }
-            }
             uid = curr_node.uid.to_native();
             name = curr_node.name.resolve(&graph.string_pool).to_string();
             owner_class = resolve_owner_class(graph, curr_idx).map(str::to_owned);
@@ -129,14 +332,9 @@ pub(super) fn run_bfs(
                 .to_string();
             line = curr_node.start_line();
         } else {
-            // No has_owning_file guard here: virtual nodes come from freshly
-            // parsed source files, never from synthetic emission.
             let vn = view
                 .and_then(|v| v.node(curr_idx as u32))
                 .expect("virtual index enqueued without a view");
-            if !include_tests && is_test_path(&vn.rel_path) {
-                continue;
-            }
             uid = vn.uid;
             name = vn.name.clone();
             owner_class = vn.owner_class.clone();
@@ -182,36 +380,23 @@ pub(super) fn run_bfs(
         // ── expansion ───────────────────────────────────────────────────
         // Shared filter chain + enqueue for base and overlay edges.
         let mut consider = |edge: &MergedEdge<'_>, next_idx: usize| {
-            let edge_conf = edge.confidence();
-            if edge_conf < min_conf {
-                hidden_conf_edges += 1;
-                return;
-            }
-            let rel = edge.rel_type();
-            // Structural containment edges (Defines, HasMethod, HasProperty,
-            // Imports) describe where a symbol lives, not who calls it.
-            // Exclude from BFS so File→Function Defines does not register
-            // as a caller.
-            if rel.is_scope_containment() {
-                return;
-            }
-            let is_heur = rel.is_heuristic();
-            if is_heur && !include_heuristic {
-                hidden_heuristic_edges += 1;
-                return;
-            }
-            if let Some(rels) = rel_filter.as_ref() {
-                let rel_str = rel_type_to_str(rel);
-                if !rels.iter().any(|r| r == rel_str) {
+            let is_heur = match admit_edge(edge, min_conf, rel_filter, include_heuristic) {
+                EdgeVerdict::Follow { heuristic } => heuristic,
+                EdgeVerdict::BelowConfidence => {
+                    hidden_conf_edges += 1;
                     return;
                 }
-            }
-            if !visited.contains(&next_idx) {
-                visited.insert(next_idx);
+                EdgeVerdict::HeuristicSuppressed => {
+                    hidden_heuristic_edges += 1;
+                    return;
+                }
+                EdgeVerdict::NotTraversable => return,
+            };
+            if visited.insert(next_idx) {
                 queue.push_back((
                     next_idx,
                     curr_depth + 1,
-                    Some((edge.reason(graph).to_string(), edge_conf)),
+                    Some((edge.reason(graph).to_string(), edge.confidence())),
                     is_heur,
                 ));
             }

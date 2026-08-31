@@ -136,6 +136,12 @@ pub enum Commands {
     /// `ecp schema --help` (hidden subcommands still respond to help).
     #[command(hide = true)]
     Schema(commands::schema::SchemaArgs),
+    /// Shortest route between two symbols: the ordered chain plus the edge that makes each hop.
+    ///
+    /// `impact` walks out from one symbol; `path` joins two. Answers "A reaches
+    /// B through what", which cypher's `-[:Calls*1..N]->` cannot: it keeps the
+    /// endpoints and drops the route.
+    Path(commands::path::PathArgs),
     /// List detected Process (execution-flow) nodes, or `processes trace <pattern>` for step sequence.
     ///
     /// Surfaces the Leiden-community + BFS detection emitted at index time
@@ -171,6 +177,7 @@ impl Commands {
             | Commands::Review(_)
             | Commands::Heuristics(_)
             | Commands::FindTransactionPatterns(_)
+            | Commands::Path(_)
             | Commands::Processes(_)
             | Commands::FindSchemaBindings(_)
             | Commands::FindEventMirrors(_) => true,
@@ -223,6 +230,7 @@ impl Commands {
                 commands::heuristics::HeuristicsKind::EventMirrors(a) => a.repo.as_deref(),
             },
             Commands::FindTransactionPatterns(args) => args.repo.as_deref(),
+            Commands::Path(args) => args.repo.as_deref(),
             Commands::Processes(args) => args.repo.as_deref(),
             Commands::FindSchemaBindings(args) => args.repo.as_deref(),
             Commands::FindEventMirrors(args) => args.repo.as_deref(),
