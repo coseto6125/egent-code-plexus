@@ -4,11 +4,10 @@ use super::payload::SymbolImpactPayload;
 use super::{
     parse_csv_lower, resolve_min_conf, ImpactArgs, ImpactHints, DEFAULT_CONFIDENCE_THRESHOLD,
 };
-use crate::commands::format::{kind_to_str, node_kind_to_str};
 use crate::commands::impact::{
     attach_heuristic_fields, attach_hidden_edges, direction_str, Direction,
 };
-use crate::commands::symbol_id::{format_fqn, resolve_owner_class, split_fqn_target};
+use crate::commands::symbol_id::{format_fqn, resolve_candidates, split_fqn_target};
 use crate::engine::Engine;
 use ecp_core::EcpError;
 use serde_json::{json, Value};
@@ -131,85 +130,8 @@ pub(super) fn impact_by_name(
     // disambiguation. FQN `Owner.Method` form is an additional filter on top.
     let file_needle = args.file.as_deref();
     let kind_needle = args.kind.as_deref().map(|s| s.to_ascii_lowercase());
-
-    let mut same_name_defs = 0usize;
-    let mut matches: Vec<usize> = Vec::new();
-    for (idx, node) in graph.nodes.iter().enumerate() {
-        if node.name.resolve(&graph.string_pool) != bare_name {
-            continue;
-        }
-        // Synthetic nodes (e.g. resolver-miss `Annotation` from
-        // `decorates_edges`) carry SYNTHETIC_FILE_IDX — they aren't
-        // real symbols at any file:line. Drop them from impact targets.
-        if !node.has_owning_file() {
-            continue;
-        }
-        // Working-tree truth: a dirty-file symbol deleted/renamed on disk
-        // (suppressed by the overlay view) is not a valid impact target, and
-        // deliberately stops counting toward `same_name_defs` — the ambiguity
-        // caveat describes the on-disk world, not the stale base graph.
-        if view.is_some_and(|v| v.redirect(idx as u32).is_none()) {
-            continue;
-        }
-        // Counted BEFORE --kind/--file/FQN narrowing: the Tier-3 resolver
-        // defence keys on the global name collision, not on whichever
-        // single def the user disambiguated to.
-        same_name_defs += 1;
-        if let Some(ref kn) = kind_needle {
-            let node_kind = kind_to_str(&node.kind).to_ascii_lowercase();
-            if &node_kind != kn {
-                continue;
-            }
-        }
-        if let Some(needle) = file_needle {
-            let file_path = graph.files[node.file_idx.to_native() as usize]
-                .path
-                .resolve(&graph.string_pool);
-            if !file_path.contains(needle) {
-                continue;
-            }
-        }
-        if let Some(owner) = owner_filter {
-            if !resolve_owner_class(graph, idx)
-                .map(|oc| oc == owner)
-                .unwrap_or(false)
-            {
-                continue;
-            }
-        }
-        // A replaced base node enters the merged space as its virtual twin
-        // (on-disk spans; masked stale adjacency handled by run_bfs).
-        matches.push(match view {
-            Some(v) => v.redirect(idx as u32).expect("suppressed filtered above") as usize,
-            None => idx,
-        });
-    }
-    // Symbols that only exist in the working tree (new functions in dirty
-    // files) — base-replacing twins are excluded: they arrived via redirect.
-    if let Some(v) = view {
-        for (i, vn) in v.virtual_nodes().iter().enumerate() {
-            if vn.replaced_base.is_some() || vn.name != bare_name {
-                continue;
-            }
-            same_name_defs += 1;
-            if let Some(ref kn) = kind_needle {
-                if &node_kind_to_str(&vn.kind).to_ascii_lowercase() != kn {
-                    continue;
-                }
-            }
-            if let Some(needle) = file_needle {
-                if !vn.rel_path.contains(needle) {
-                    continue;
-                }
-            }
-            if let Some(owner) = owner_filter {
-                if vn.owner_class.as_deref() != Some(owner) {
-                    continue;
-                }
-            }
-            matches.push(v.base_len() as usize + i);
-        }
-    }
+    let (matches, same_name_defs) =
+        resolve_candidates(graph, view, name, kind_needle.as_deref(), file_needle);
 
     if matches.is_empty() {
         return Err(EcpError::InvalidArgument(format!(
