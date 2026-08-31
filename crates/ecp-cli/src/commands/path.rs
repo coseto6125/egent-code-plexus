@@ -125,11 +125,11 @@ fn build_payload(args: &PathArgs, engine: &Engine) -> Result<(Value, Option<Stri
 
     let (starts, from_defs) =
         resolve_candidates(graph, view, &args.from, None, args.from_file.as_deref());
-    let (goal_vec, to_defs) =
-        resolve_candidates(graph, view, &args.to, None, args.to_file.as_deref());
     if starts.is_empty() {
         return Err(unresolved(&args.from));
     }
+    let (goal_vec, to_defs) =
+        resolve_candidates(graph, view, &args.to, None, args.to_file.as_deref());
     if goal_vec.is_empty() {
         return Err(unresolved(&args.to));
     }
@@ -139,12 +139,13 @@ fn build_payload(args: &PathArgs, engine: &Engine) -> Result<(Value, Option<Stri
         ambiguity_caveat(&args.to, to_defs),
     );
 
+    let rel_filter = parse_csv_lower(args.relation_types.as_deref());
     let opts = WalkOpts {
         direction: args.direction.clone(),
         depth: args.depth,
         min_conf: args.min_confidence,
         include_tests: args.include_tests,
-        rel_filter: parse_csv_lower(args.relation_types.as_deref()),
+        rel_filter: &rel_filter,
         include_heuristic: args.include_heuristic,
     };
     let found = shortest_path(graph, view, &starts, &goals, &opts);

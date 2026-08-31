@@ -43,13 +43,12 @@ pub(super) fn merged_node_meta(
 /// overlay nodes come from freshly parsed source, never from synthetic
 /// emission, so only the test-path check applies to them.
 ///
-/// **This mirrors the guard `run_bfs` keeps inline, deliberately.** Routing
-/// `run_bfs` through this helper cost +2% on a depth-6 both-directions walk
-/// over the vscode corpus (347ms median against 340ms, measured next to a
-/// control binary whose `run_bfs` was byte-identical to the baseline and which
-/// reproduced the baseline exactly). Per-query latency is this project's first
-/// priority, so the copies stand and `path_walks_the_same_graph_as_impact` in
-/// `tests/path_query.rs` guards them against drifting apart.
+/// **This mirrors the guard `run_bfs` keeps inline, deliberately** — routing
+/// `run_bfs` through it measured ~2% slower on the vscode corpus, and
+/// per-query latency is this project's first priority. The method and the
+/// numbers are in the `perf(path): leave run_bfs alone` commit. Change either
+/// copy and run `path_walks_the_same_graph_as_impact` in
+/// `tests/path_query.rs`, which holds the two together.
 ///
 /// `test_path_cache` is keyed by base file index; overlay nodes carry their own
 /// path and bypass it.
@@ -85,15 +84,12 @@ fn node_traversable(
 /// Mirrors the filter chain `run_bfs` keeps inline, for the same measured
 /// reason as [`node_traversable`]. A path must only ever run along edges the
 /// blast radius would also have walked — two answers about the same graph
-/// disagreeing on which edges are real would be worse than one answer — so
-/// `path_walks_the_same_graph_as_impact` in `tests/path_query.rs` exercises
-/// both copies through the node guard and the relation filter.
+/// disagreeing on which edges are real would be worse than one answer.
 ///
 /// The confidence rides along because the caller needs it for the step it is
-/// about to record, and reading it twice is the kind of thing this file has
-/// already been measured on. No reason is returned for a rejection: `run_bfs`
-/// separates them to fill its `hidden_edges` counters, and `shortest_path`
-/// treats all four the same way.
+/// about to record. No reason is returned for a rejection: `run_bfs` separates
+/// them to fill its `hidden_edges` counters, and `shortest_path` treats all
+/// four the same way.
 fn admit_edge(
     edge: &MergedEdge<'_>,
     min_conf: f32,
@@ -124,18 +120,11 @@ fn admit_edge(
     Some((heuristic, confidence))
 }
 
-/// The edge that reached a node during the walk.
-///
-/// `reason` borrows the graph's string pool rather than owning a copy: the
-/// walk discovers far more nodes than end up on the path — a hub with a
-/// hundred thousand neighbours would otherwise allocate a hundred thousand
-/// strings to render at most `max_depth + 1` of them.
+/// The edge that reached a node during the walk: the step's own payload plus
+/// where it came from.
 struct Hop<'g> {
     from: usize,
-    rel: &'static str,
-    reason: &'g str,
-    confidence: f32,
-    heuristic: bool,
+    via: PathEdge<'g>,
 }
 
 /// One node on a resolved path, with the edge that reached it. `via` is `None`
@@ -145,6 +134,11 @@ pub(crate) struct PathStep<'g> {
     pub(crate) via: Option<PathEdge<'g>>,
 }
 
+/// `reason` borrows the graph's string pool rather than owning a copy: the walk
+/// discovers far more nodes than end up on the path, and a hub with a hundred
+/// thousand neighbours would otherwise allocate a hundred thousand strings to
+/// render at most `depth + 1` of them.
+#[derive(Clone, Copy)]
 pub(crate) struct PathEdge<'g> {
     /// Relation type, e.g. `calls` / `extends`. The default walk follows every
     /// non-containment relation, so the reason string alone cannot say which
@@ -161,19 +155,20 @@ pub(crate) struct PathEdge<'g> {
 /// One value instead of six parameters threaded twice: a miss re-runs the walk
 /// in the flipped direction, and passing the same six along by hand was a
 /// function whose whole body was the re-passing.
-pub(crate) struct WalkOpts {
+#[derive(Clone)]
+pub(crate) struct WalkOpts<'a> {
     pub(crate) direction: Direction,
     pub(crate) depth: usize,
     pub(crate) min_conf: f32,
     pub(crate) include_tests: bool,
-    pub(crate) rel_filter: Option<Vec<String>>,
+    pub(crate) rel_filter: &'a Option<Vec<String>>,
     pub(crate) include_heuristic: bool,
 }
 
-impl WalkOpts {
+impl<'a> WalkOpts<'a> {
     /// The same walk in the other direction, or `None` for `Both`, which has no
     /// other direction to try.
-    pub(crate) fn flipped(&self) -> Option<WalkOpts> {
+    pub(crate) fn flipped(&self) -> Option<WalkOpts<'a>> {
         let direction = match self.direction {
             Direction::Up => Direction::Down,
             Direction::Down => Direction::Up,
@@ -181,11 +176,7 @@ impl WalkOpts {
         };
         Some(WalkOpts {
             direction,
-            depth: self.depth,
-            min_conf: self.min_conf,
-            include_tests: self.include_tests,
-            rel_filter: self.rel_filter.clone(),
-            include_heuristic: self.include_heuristic,
+            ..self.clone()
         })
     }
 }
@@ -214,7 +205,7 @@ pub(crate) fn shortest_path<'g>(
     view: Option<&'g OverlayView>,
     starts: &[usize],
     goals: &HashSet<usize>,
-    opts: &WalkOpts,
+    opts: &WalkOpts<'_>,
 ) -> Option<Vec<PathStep<'g>>> {
     // node -> the hop that reached it; `None` marks a seed.
     let merged = MergedGraph::new(graph, view);
@@ -248,21 +239,20 @@ pub(crate) fn shortest_path<'g>(
         }
 
         let mut consider = |edge: &MergedEdge<'g>, next_idx: usize| {
-            let Some((heuristic, confidence)) = admit_edge(
-                edge,
-                opts.min_conf,
-                &opts.rel_filter,
-                opts.include_heuristic,
-            ) else {
+            let Some((heuristic, confidence)) =
+                admit_edge(edge, opts.min_conf, opts.rel_filter, opts.include_heuristic)
+            else {
                 return;
             };
             if let std::collections::hash_map::Entry::Vacant(slot) = pred.entry(next_idx) {
                 slot.insert(Some(Hop {
                     from: curr_idx,
-                    rel: rel_type_to_str(edge.rel_type()),
-                    reason: edge.reason(graph),
-                    confidence,
-                    heuristic,
+                    via: PathEdge {
+                        rel: rel_type_to_str(edge.rel_type()),
+                        reason: edge.reason(graph),
+                        confidence,
+                        heuristic,
+                    },
                 }));
                 queue.push_back((next_idx, curr_depth + 1));
             }
@@ -294,12 +284,7 @@ pub(crate) fn shortest_path<'g>(
             Some(h) => {
                 chain.push(PathStep {
                     meta,
-                    via: Some(PathEdge {
-                        rel: h.rel,
-                        reason: h.reason,
-                        confidence: h.confidence,
-                        heuristic: h.heuristic,
-                    }),
+                    via: Some(h.via),
                 });
                 cursor = h.from;
             }

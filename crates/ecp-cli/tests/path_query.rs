@@ -7,10 +7,18 @@
 //! One repo holds every fixture and is indexed once: 14 separate indexes would
 //! buy nothing and cost 14x the build.
 //!
+//! Each test builds and indexes its own copy so it stays isolated and
+//! parallel. That is ten indexes for a ten-test binary, which sounds wasteful
+//! and is not: the whole suite runs in ~1.0s, and a shared `OnceLock` fixture
+//! would trade that isolation for nothing measurable.
+//!
 //! Known gap: `--include-heuristic` and its `requiresVerification` tagging are
 //! not covered. A heuristic edge needs a MirrorsField or EventTopicMirror
 //! pattern, which is a fixture of its own rather than a line in this one.
 
+mod common;
+
+use common::{ecp_bin, init_and_analyze, write};
 use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
@@ -125,103 +133,59 @@ const FIXTURES: &[(&str, &str, &str)] = &[
     ),
 ];
 
-fn ecp_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ecp")
-}
-
-fn git(repo: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .expect("git failed to spawn");
-    assert!(
-        out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
 /// A repo holding every fixture, committed and indexed once.
 fn indexed_polyglot_repo(repo: &Path) {
-    git(repo, &["init", "-q", "-b", "main"]);
-    std::fs::create_dir(repo.join("src")).unwrap();
     for (file, _, source) in FIXTURES {
-        std::fs::write(repo.join("src").join(file), source).unwrap();
+        write(repo, &format!("src/{file}"), source);
     }
     // A path whose hops are NOT all the same relation: `makeChild` reaches
     // `TBase` only through `TChild`'s inheritance edge. Both hops carry a
     // reason string (`type_annotation`, `heritage`) and neither of those says
     // "this one is inheritance", so the relation type has to be its own field.
-    std::fs::write(
-        repo.join("src/mixed.ts"),
+    write(
+        repo,
+        "src/mixed.ts",
         "export class TBase { work(): number { return 1; } }\n\
          export class TChild extends TBase {}\n\
          export function makeChild(): TChild { return new TChild(); }\n",
-    )
-    .unwrap();
+    );
     // A production chain whose only link runs through a test file. Both the
     // path walk and the impact walk have to exclude it by default and include
     // it under --include-tests, which is what pins their two copies of the
     // node guard to the same behaviour.
-    std::fs::create_dir(repo.join("tests")).unwrap();
-    std::fs::write(
-        repo.join("src/bridge.py"),
+    write(
+        repo,
+        "src/bridge.py",
         "def prod_start():\n    return t_bridge()\n\ndef prod_end():\n    return 1\n",
-    )
-    .unwrap();
-    std::fs::write(
-        repo.join("tests/test_bridge.py"),
+    );
+    write(
+        repo,
+        "tests/test_bridge.py",
         "def t_bridge():\n    return prod_end()\n",
-    )
-    .unwrap();
+    );
     // Two definitions of one name, plus a bare call to it. At index time the
     // resolver suppresses the ambiguous call, so the graph is missing an edge
     // that the source plainly has — the case where a miss is a lower bound.
-    std::fs::write(repo.join("src/amb_a.py"), "def dupe():\n    return 1\n").unwrap();
-    std::fs::write(repo.join("src/amb_b.py"), "def dupe():\n    return 2\n").unwrap();
-    std::fs::write(
-        repo.join("src/amb_caller.py"),
+    write(repo, "src/amb_a.py", "def dupe():\n    return 1\n");
+    write(repo, "src/amb_b.py", "def dupe():\n    return 2\n");
+    write(
+        repo,
+        "src/amb_caller.py",
         "def run_all():\n    return dupe()\n",
-    )
-    .unwrap();
+    );
     // A chain long enough that the default depth reaches it but --depth 2 does
     // not: the depth cap has to be observable to be worth having.
-    std::fs::write(
-        repo.join("src/deep.py"),
+    write(
+        repo,
+        "src/deep.py",
         "def d0():\n    return d1()\n\n\
          def d1():\n    return d2()\n\n\
          def d2():\n    return d3()\n\n\
          def d3():\n    return d4()\n\n\
          def d4():\n    return 1\n\n\
          def island():\n    return 0\n",
-    )
-    .unwrap();
-    git(repo, &["add", "-A"]);
-    git(
-        repo,
-        &[
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "-q",
-            "-m",
-            "init",
-        ],
     );
-    let out = Command::new(ecp_bin())
-        .args(["admin", "index", "--repo", "."])
-        .current_dir(repo)
-        .env("HOME", repo)
-        .output()
-        .expect("admin index failed to spawn");
-    assert!(
-        out.status.success(),
-        "admin index failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    init_and_analyze(repo);
 }
 
 fn run_path(repo: &Path, args: &[&str]) -> Value {
