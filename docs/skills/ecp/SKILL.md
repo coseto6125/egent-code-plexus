@@ -1,6 +1,6 @@
 ---
 name: ecp
-description: Tracing who-calls-X or a data flow — mid-debug, not only before a refactor — or exploring code structure: where a symbol is defined, who calls it, blast radius, routes/contracts. Reach here before grep. Command by question: definition→`ecp find`, who-calls/blast-radius→`ecp impact`, full context→`ecp inspect`, filename-read-vs-written→`ecp impact --literal`, routes/contracts→`ecp routes`/`ecp contracts`, trace execution flow→`ecp processes`, statement shape inside code (swallowed exception, missing timeout)→`ecp pattern`, graph question with no verb (orphans, all-impls)→`ecp cypher`. Grep only for non-code text: config values, log strings, fs layout.
+description: Tracing who-calls-X or a data flow — mid-debug, not only before a refactor — or exploring code structure: where a symbol is defined, who calls it, blast radius, routes/contracts. Reach here before grep. Command by question: definition→`ecp find`, who-calls/blast-radius→`ecp impact`, how-A-reaches-B→`ecp path <from> <to>`, full context→`ecp inspect`, filename-read-vs-written→`ecp impact --literal`, routes/contracts→`ecp routes`/`ecp contracts`, trace execution flow→`ecp processes`, statement shape inside code (swallowed exception, missing timeout)→`ecp pattern`, graph question with no verb (orphans, all-impls)→`ecp cypher`. Grep only for non-code text: config values, log strings, fs layout.
 ---
 
 # EgentCodePlexus (ecp) — Structural Analysis Entry
@@ -35,6 +35,8 @@ description: Tracing who-calls-X or a data flow — mid-debug, not only before a
 |---|---|
 | `ecp impact --baseline origin/main` | All symbols changed baseline → HEAD |
 | `ecp review --baseline origin/main` | Post-edit audit: impact + route drift + egress, one pass |
+
+**Two symbols, not one** — `ecp path <from> <to>` returns the ordered chain plus the edge per hop, which `impact` (one endpoint) and cypher's `-[:Calls*1..N]->` (endpoints only, route dropped) cannot. Default `--direction down` follows callees; a miss names the direction that works. Heuristic edges are off by default here, the reverse of `impact`: a path has no second bucket to put an unverified step in.
 
 **Literal mode**: `ecp impact --literal session_meta.json` → each site classified `sink:read`/`write`/`join`/`free` (grep can't tell read from write); `--literal-coherence` finds split-brain filename pairs.
 

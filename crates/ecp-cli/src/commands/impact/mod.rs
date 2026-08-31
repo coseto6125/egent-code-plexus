@@ -1,5 +1,5 @@
 mod baseline;
-mod bfs;
+pub(crate) mod bfs;
 mod coverage;
 mod literal;
 pub mod payload;
@@ -167,7 +167,7 @@ pub struct ImpactArgs {
 
 /// Split a comma-separated flag value into a normalized lowercase Vec.
 /// Empty / whitespace-only parts are dropped so `--kind ,function,` works.
-fn parse_csv_lower(s: Option<&str>) -> Option<Vec<String>> {
+pub(crate) fn parse_csv_lower(s: Option<&str>) -> Option<Vec<String>> {
     s.map(|raw| {
         raw.split(',')
             .map(|p| p.trim().to_ascii_lowercase())
@@ -434,7 +434,7 @@ fn resolve_min_conf(args: &ImpactArgs) -> f32 {
     })
 }
 
-fn direction_str(dir: &Direction) -> &'static str {
+pub(crate) fn direction_str(dir: &Direction) -> &'static str {
     match dir {
         Direction::Up => "upstream",
         Direction::Down => "downstream",

@@ -110,6 +110,7 @@ fn command_label(cmd: &Commands) -> &'static str {
         Commands::FindTransactionPatterns(_) => "find-transaction-patterns",
         Commands::FindSchemaBindings(_) => "find-schema-bindings",
         Commands::FindEventMirrors(_) => "find-event-mirrors",
+        Commands::Path(_) => "path",
         Commands::Processes(_) => "processes",
         Commands::Summary(_) => "summary",
         Commands::Contracts(_) => "contracts",
@@ -276,6 +277,9 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
         Commands::FindEventMirrors(args) => {
             commands::find_event_mirrors::run(args, engine.expect("needs_graph() gates this arm"))
         }
+        Commands::Path(args) => {
+            commands::path::run(args, engine.expect("needs_graph() gates this arm"))
+        }
         Commands::Processes(args) => {
             commands::processes::run(args, engine.expect("needs_graph() gates this arm"))
         }
@@ -333,6 +337,7 @@ fn check_group_atom(cli: &Cli) {
             (repo, None)
         }
         Commands::FindTransactionPatterns(a) => (a.repo.as_deref(), None),
+        Commands::Path(a) => (a.repo.as_deref(), None),
         Commands::Processes(a) => (a.repo.as_deref(), None),
         Commands::FindSchemaBindings(a) => (a.repo.as_deref(), None),
         Commands::FindEventMirrors(a) => (a.repo.as_deref(), None),
