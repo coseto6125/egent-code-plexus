@@ -33,16 +33,30 @@ ecp path <FROM> <TO> [--direction down] [--depth 8] [--repo <PATH>]
 
 ```
 ecp path handler db_query
-path[4]{filePath,kind,line,name,requiresVerification,viaConfidence,viaReason}:
-  chain.py,Function,1,handler,false,1,""
-  chain.py,Function,4,service,false,1,call
-  chain.py,Function,7,repo_lookup,false,1,call
-  chain.py,Function,10,db_query,false,1,call
+path[4]{filePath,kind,line,name,requiresVerification,viaConfidence,viaReason,viaRelType}:
+  chain.py,Function,1,handler,false,1,"",""
+  chain.py,Function,4,service,false,1,call,calls
+  chain.py,Function,7,repo_lookup,false,1,call,calls
+  chain.py,Function,10,db_query,false,1,call,calls
 ```
 
-`viaReason` and `viaConfidence` describe the edge INTO that step; the first row
-is the start node, so its reason is empty. `hops` is one less than the number
-of rows.
+`viaRelType`, `viaReason` and `viaConfidence` describe the edge INTO that step;
+the first row is the start node, so all three are empty. `hops` is one less
+than the number of rows.
+
+Read `viaRelType` before drawing a conclusion — the default walk follows every
+non-containment relation, so a path is not necessarily a call chain:
+
+```
+ecp path makeChild TBase
+  mixed.ts,Function,3,makeChild,false,1,"",""
+  mixed.ts,Class,2,TChild,false,1,type_annotation,accesses
+  mixed.ts,Class,1,TBase,false,1,heritage,extends
+```
+
+"makeChild reaches TBase" here means one type reference and one inheritance
+edge, not two calls. Pass `--relation_types calls` when the question really is
+about the call graph.
 
 An overloaded name is not an error. Every candidate for both names seeds the
 same walk, so the cost is one traversal rather than one per pair, and

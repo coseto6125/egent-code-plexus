@@ -145,6 +145,17 @@ fn indexed_polyglot_repo(repo: &Path) {
     for (file, _, source) in FIXTURES {
         std::fs::write(repo.join("src").join(file), source).unwrap();
     }
+    // A path whose hops are NOT all the same relation: `makeChild` reaches
+    // `TBase` only through `TChild`'s inheritance edge. Both hops carry a
+    // reason string (`type_annotation`, `heritage`) and neither of those says
+    // "this one is inheritance", so the relation type has to be its own field.
+    std::fs::write(
+        repo.join("src/mixed.ts"),
+        "export class TBase { work(): number { return 1; } }\n\
+         export class TChild extends TBase {}\n\
+         export function makeChild(): TChild { return new TChild(); }\n",
+    )
+    .unwrap();
     // A chain long enough that the default depth reaches it but --depth 2 does
     // not: the depth cap has to be observable to be worth having.
     std::fs::write(
@@ -334,5 +345,38 @@ fn path_rejects_a_symbol_the_graph_does_not_hold() {
     assert!(
         stderr.contains("no_such_symbol_anywhere"),
         "the error must name the symbol it could not find: {stderr}"
+    );
+}
+
+/// Every hop carries its relation type. The default walk follows every
+/// non-containment relation, so without this an inheritance hop and a call hop
+/// are indistinguishable in the output — and they are not the same fact.
+///
+/// Contract: the two hops of `make_child -> PChild -> PBase` report DIFFERENT
+/// `viaRelType` values, and the inheritance one says so. The exact spelling of
+/// the first hop's relation is the resolver's business, not this test's.
+#[test]
+fn path_steps_carry_their_relation_type() {
+    let tmp = tempfile::tempdir().unwrap();
+    indexed_polyglot_repo(tmp.path());
+
+    let out = run_path(tmp.path(), &["makeChild", "TBase"]);
+    assert_eq!(out["found"].as_bool(), Some(true), "{out}");
+
+    let rels: Vec<&str> = out["path"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["viaRelType"].as_str().unwrap())
+        .collect();
+    assert_eq!(rels[0], "", "the start node has no incoming edge: {out}");
+    let hops = &rels[1..];
+    assert!(
+        hops.contains(&"extends"),
+        "the inheritance hop must name itself: {out}"
+    );
+    assert!(
+        hops.iter().collect::<std::collections::HashSet<_>>().len() > 1,
+        "a mixed-relation path must not render every hop alike: {out}"
     );
 }

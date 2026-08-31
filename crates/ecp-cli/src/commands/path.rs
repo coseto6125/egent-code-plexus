@@ -156,7 +156,10 @@ pub fn build_payload(
         return Ok((payload, Some(caveat)));
     };
 
-    let heuristic_steps = steps.iter().filter(|s| s.via_heuristic).count();
+    let heuristic_steps = steps
+        .iter()
+        .filter(|s| s.via.as_ref().is_some_and(|e| e.heuristic))
+        .count();
     let payload = json!({
         "status": "success",
         "from": args.from,
@@ -210,19 +213,21 @@ fn reverse_probe(
 }
 
 fn step_json(step: &PathStep) -> Value {
-    let (via_reason, via_confidence) = step
-        .via
-        .as_ref()
-        .map(|(r, c)| (r.as_str(), *c))
-        .unwrap_or(("", 1.0));
+    // The start node has no incoming edge; its via fields stay empty rather
+    // than borrowing the next hop's, which would misread as a self-edge.
+    let (rel, reason, confidence, heuristic) = match &step.via {
+        Some(e) => (e.rel, e.reason.as_str(), e.confidence, e.heuristic),
+        None => ("", "", 1.0, false),
+    };
     json!({
         "name": step.meta.name,
         "kind": step.meta.kind,
         "filePath": step.meta.file_path,
         "line": step.meta.line,
-        "viaReason": via_reason,
-        "viaConfidence": via_confidence,
-        "requiresVerification": step.via_heuristic,
+        "viaRelType": rel,
+        "viaReason": reason,
+        "viaConfidence": confidence,
+        "requiresVerification": heuristic,
     })
 }
 

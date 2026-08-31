@@ -120,14 +120,31 @@ pub(crate) fn admit_edge(
     EdgeVerdict::Follow { heuristic }
 }
 
-/// One node on a resolved path.
+/// The edge that reached a node during the walk.
+struct Hop {
+    from: usize,
+    rel: &'static str,
+    reason: String,
+    confidence: f32,
+    heuristic: bool,
+}
+
+/// One node on a resolved path, with the edge that reached it. `via` is `None`
+/// on the first step, which is the start node itself.
 pub(crate) struct PathStep {
     pub(crate) meta: MergedNodeMeta,
-    /// Reason + confidence of the edge that reached this node. `None` on the
-    /// first step, which is the start node itself.
-    pub(crate) via: Option<(String, f32)>,
-    /// Whether that edge was heuristic. `false` on the first step.
-    pub(crate) via_heuristic: bool,
+    pub(crate) via: Option<PathEdge>,
+}
+
+pub(crate) struct PathEdge {
+    /// Relation type, e.g. `calls` / `extends`. The default walk follows every
+    /// non-containment relation, so the reason string alone cannot say which
+    /// kind of hop this was — and "A extends B" is a different fact from
+    /// "A calls B".
+    pub(crate) rel: &'static str,
+    pub(crate) reason: String,
+    pub(crate) confidence: f32,
+    pub(crate) heuristic: bool,
 }
 
 /// Shortest path from any node in `starts` to any node in `goals`, along the
@@ -163,9 +180,8 @@ pub(crate) fn shortest_path(
     include_heuristic: bool,
 ) -> Option<Vec<PathStep>> {
     // node -> the hop that reached it; `None` marks a seed.
-    type Hop = Option<(usize, String, f32, bool)>;
     let merged = MergedGraph::new(graph, view);
-    let mut pred: HashMap<usize, Hop> = HashMap::new();
+    let mut pred: HashMap<usize, Option<Hop>> = HashMap::new();
     let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
     let mut test_path_cache = HashMap::new();
 
@@ -194,12 +210,13 @@ pub(crate) fn shortest_path(
                 _ => return,
             };
             if let std::collections::hash_map::Entry::Vacant(slot) = pred.entry(next_idx) {
-                slot.insert(Some((
-                    curr_idx,
-                    edge.reason(graph).to_string(),
-                    edge.confidence(),
+                slot.insert(Some(Hop {
+                    from: curr_idx,
+                    rel: rel_type_to_str(edge.rel_type()),
+                    reason: edge.reason(graph).to_string(),
+                    confidence: edge.confidence(),
                     heuristic,
-                )));
+                }));
                 queue.push_back((next_idx, curr_depth + 1));
             }
         };
@@ -227,20 +244,20 @@ pub(crate) fn shortest_path(
         let hop = pred.get(&cursor).expect("reached node carries a hop entry");
         let meta = merged_node_meta(graph, view, cursor);
         match hop {
-            Some((prev, reason, conf, heuristic)) => {
+            Some(h) => {
                 chain.push(PathStep {
                     meta,
-                    via: Some((reason.clone(), *conf)),
-                    via_heuristic: *heuristic,
+                    via: Some(PathEdge {
+                        rel: h.rel,
+                        reason: h.reason.clone(),
+                        confidence: h.confidence,
+                        heuristic: h.heuristic,
+                    }),
                 });
-                cursor = *prev;
+                cursor = h.from;
             }
             None => {
-                chain.push(PathStep {
-                    meta,
-                    via: None,
-                    via_heuristic: false,
-                });
+                chain.push(PathStep { meta, via: None });
                 break;
             }
         }
