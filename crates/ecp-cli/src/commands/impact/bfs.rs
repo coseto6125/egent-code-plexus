@@ -17,7 +17,7 @@ pub(crate) struct MergedNodeMeta {
     pub(crate) line: u32,
 }
 
-pub(crate) fn merged_node_meta(
+pub(super) fn merged_node_meta(
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
     view: Option<&OverlayView>,
     idx: usize,
@@ -80,61 +80,48 @@ fn node_traversable(
     }
 }
 
-/// Whether an edge may be followed, and why not when it may not.
+/// `Some((heuristic, confidence))` when a walk may follow this edge.
 ///
 /// Mirrors the filter chain `run_bfs` keeps inline, for the same measured
 /// reason as [`node_traversable`]. A path must only ever run along edges the
 /// blast radius would also have walked — two answers about the same graph
 /// disagreeing on which edges are real would be worse than one answer — so
-/// `path_walks_the_same_graph_as_impact` in `tests/path_query.rs` asserts the
-/// two copies still agree.
-pub(crate) enum EdgeVerdict {
-    /// Follow it. `heuristic` marks a `RelType::is_heuristic` edge, which the
-    /// caller reports in its own bucket. `confidence` rides along so the caller
-    /// does not read it a second time on the hot path.
-    Follow { heuristic: bool, confidence: f32 },
-    /// Confidence below the caller's gate.
-    BelowConfidence,
-    /// Heuristic edge with `include_heuristic` off.
-    HeuristicSuppressed,
-    /// Structural containment, or filtered out by `--relation_types`. Neither
-    /// is a hidden edge worth counting: containment is never a caller, and a
-    /// relation filter is the caller asking for exactly this.
-    NotTraversable,
-}
-
-#[inline(always)]
-pub(crate) fn admit_edge(
+/// `path_walks_the_same_graph_as_impact` in `tests/path_query.rs` exercises
+/// both copies through the node guard and the relation filter.
+///
+/// The confidence rides along because the caller needs it for the step it is
+/// about to record, and reading it twice is the kind of thing this file has
+/// already been measured on. No reason is returned for a rejection: `run_bfs`
+/// separates them to fill its `hidden_edges` counters, and `shortest_path`
+/// treats all four the same way.
+fn admit_edge(
     edge: &MergedEdge<'_>,
     min_conf: f32,
     rel_filter: &Option<Vec<String>>,
     include_heuristic: bool,
-) -> EdgeVerdict {
+) -> Option<(bool, f32)> {
     let confidence = edge.confidence();
     if confidence < min_conf {
-        return EdgeVerdict::BelowConfidence;
+        return None;
     }
     let rel = edge.rel_type();
     // Structural containment edges (Defines, HasMethod, HasProperty, Imports)
     // describe where a symbol lives, not who calls it. Exclude from BFS so
     // File→Function Defines does not register as a caller.
     if rel.is_scope_containment() {
-        return EdgeVerdict::NotTraversable;
+        return None;
     }
     let heuristic = rel.is_heuristic();
     if heuristic && !include_heuristic {
-        return EdgeVerdict::HeuristicSuppressed;
+        return None;
     }
     if let Some(rels) = rel_filter.as_ref() {
         let rel_str = rel_type_to_str(rel);
         if !rels.iter().any(|r| r == rel_str) {
-            return EdgeVerdict::NotTraversable;
+            return None;
         }
     }
-    EdgeVerdict::Follow {
-        heuristic,
-        confidence,
-    }
+    Some((heuristic, confidence))
 }
 
 /// The edge that reached a node during the walk.
@@ -169,6 +156,40 @@ pub(crate) struct PathEdge<'g> {
     pub(crate) heuristic: bool,
 }
 
+/// Which edges and nodes a walk may use.
+///
+/// One value instead of six parameters threaded twice: a miss re-runs the walk
+/// in the flipped direction, and passing the same six along by hand was a
+/// function whose whole body was the re-passing.
+pub(crate) struct WalkOpts {
+    pub(crate) direction: Direction,
+    pub(crate) depth: usize,
+    pub(crate) min_conf: f32,
+    pub(crate) include_tests: bool,
+    pub(crate) rel_filter: Option<Vec<String>>,
+    pub(crate) include_heuristic: bool,
+}
+
+impl WalkOpts {
+    /// The same walk in the other direction, or `None` for `Both`, which has no
+    /// other direction to try.
+    pub(crate) fn flipped(&self) -> Option<WalkOpts> {
+        let direction = match self.direction {
+            Direction::Up => Direction::Down,
+            Direction::Down => Direction::Up,
+            Direction::Both => return None,
+        };
+        Some(WalkOpts {
+            direction,
+            depth: self.depth,
+            min_conf: self.min_conf,
+            include_tests: self.include_tests,
+            rel_filter: self.rel_filter.clone(),
+            include_heuristic: self.include_heuristic,
+        })
+    }
+}
+
 /// Shortest path from any node in `starts` to any node in `goals`, along the
 /// edges [`run_bfs`] would walk under the same filters.
 ///
@@ -187,19 +208,13 @@ pub(crate) struct PathEdge<'g> {
 /// `to` resolved to the same symbol. Finding a cycle back to a start is a
 /// different question and this is not it.
 ///
-/// Returns `None` when no goal is reachable within `max_depth`.
-#[allow(clippy::too_many_arguments)]
+/// Returns `None` when no goal is reachable within `opts.depth`.
 pub(crate) fn shortest_path<'g>(
     graph: &'g ecp_core::graph::ArchivedZeroCopyGraph,
     view: Option<&'g OverlayView>,
     starts: &[usize],
     goals: &HashSet<usize>,
-    direction: &Direction,
-    max_depth: usize,
-    min_conf: f32,
-    include_tests: bool,
-    rel_filter: &Option<Vec<String>>,
-    include_heuristic: bool,
+    opts: &WalkOpts,
 ) -> Option<Vec<PathStep<'g>>> {
     // node -> the hop that reached it; `None` marks a seed.
     let merged = MergedGraph::new(graph, view);
@@ -215,26 +230,32 @@ pub(crate) fn shortest_path<'g>(
 
     let mut reached = None;
     while let Some((curr_idx, curr_depth)) = queue.pop_front() {
-        if !node_traversable(graph, view, curr_idx, include_tests, &mut test_path_cache) {
+        if !node_traversable(
+            graph,
+            view,
+            curr_idx,
+            opts.include_tests,
+            &mut test_path_cache,
+        ) {
             continue;
         }
         if goals.contains(&curr_idx) {
             reached = Some(curr_idx);
             break;
         }
-        if curr_depth >= max_depth {
+        if curr_depth >= opts.depth {
             continue;
         }
 
         let mut consider = |edge: &MergedEdge<'g>, next_idx: usize| {
-            let (heuristic, confidence) =
-                match admit_edge(edge, min_conf, rel_filter, include_heuristic) {
-                    EdgeVerdict::Follow {
-                        heuristic,
-                        confidence,
-                    } => (heuristic, confidence),
-                    _ => return,
-                };
+            let Some((heuristic, confidence)) = admit_edge(
+                edge,
+                opts.min_conf,
+                &opts.rel_filter,
+                opts.include_heuristic,
+            ) else {
+                return;
+            };
             if let std::collections::hash_map::Entry::Vacant(slot) = pred.entry(next_idx) {
                 slot.insert(Some(Hop {
                     from: curr_idx,
@@ -247,13 +268,13 @@ pub(crate) fn shortest_path<'g>(
             }
         };
 
-        if matches!(direction, Direction::Up | Direction::Both) {
+        if matches!(opts.direction, Direction::Up | Direction::Both) {
             for edge in merged.in_edges(curr_idx as u32) {
                 let source = edge.source as usize;
                 consider(&edge, source);
             }
         }
-        if matches!(direction, Direction::Down | Direction::Both) {
+        if matches!(opts.direction, Direction::Down | Direction::Both) {
             for edge in merged.out_edges(curr_idx as u32) {
                 let target = edge.target as usize;
                 consider(&edge, target);

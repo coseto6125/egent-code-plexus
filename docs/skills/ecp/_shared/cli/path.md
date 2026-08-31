@@ -44,9 +44,10 @@ path[4]{filePath,kind,line,name,requiresVerification,viaConfidence,viaReason,via
   chain.py,Function,10,db_query,false,1,call,calls
 ```
 
-`viaRelType`, `viaReason` and `viaConfidence` describe the edge INTO that step;
-the first row is the start node, so all three are empty. `hops` is one less
-than the number of rows.
+`viaRelType`, `viaReason` and `viaConfidence` describe the edge INTO that step.
+The first row is the start node, which has no incoming edge: its relation and
+reason are empty and its confidence reads 1. `hops` is one less than the number
+of rows.
 
 Read `viaRelType` before drawing a conclusion — the default walk follows every
 non-containment relation, so a path is not necessarily a call chain:

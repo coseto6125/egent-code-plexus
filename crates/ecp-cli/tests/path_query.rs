@@ -6,6 +6,10 @@
 //! not on Go is exactly the mixed-stack failure this suite exists to catch.
 //! One repo holds every fixture and is indexed once: 14 separate indexes would
 //! buy nothing and cost 14x the build.
+//!
+//! Known gap: `--include-heuristic` and its `requiresVerification` tagging are
+//! not covered. A heuristic edge needs a MirrorsField or EventTopicMirror
+//! pattern, which is a fixture of its own rather than a line in this one.
 
 use serde_json::Value;
 use std::path::Path;
@@ -463,6 +467,28 @@ fn path_endpoint_file_filter_narrows_the_candidate_set() {
 
     let narrow = run_path(tmp.path(), &["run_all", "dupe", "--to-file", "amb_a"]);
     assert_eq!(narrow["toCandidates"].as_u64(), Some(1), "{narrow}");
+
+    // The FROM side takes the same treatment; a flag that only worked on one
+    // endpoint would be worse than no flag.
+    let from_wide = run_path(tmp.path(), &["dupe", "run_all", "--direction", "up"]);
+    assert_eq!(from_wide["fromCandidates"].as_u64(), Some(2), "{from_wide}");
+
+    let from_narrow = run_path(
+        tmp.path(),
+        &[
+            "dupe",
+            "run_all",
+            "--direction",
+            "up",
+            "--from-file",
+            "amb_b",
+        ],
+    );
+    assert_eq!(
+        from_narrow["fromCandidates"].as_u64(),
+        Some(1),
+        "{from_narrow}"
+    );
 }
 
 /// A confidence outside 0.0–1.0 filters out every edge, and the resulting
@@ -560,4 +586,27 @@ fn path_walks_the_same_graph_as_impact() {
         reaches_via_impact(&["--include-tests"]),
         "--include-tests must open the same hop for impact"
     );
+
+    // The second copied rule is the relation filter inside `admit_edge`. The
+    // d0..d4 chain is calls all the way down, so restricting to `extends` has
+    // to empty it for both walks.
+    let no_calls = run_path(
+        tmp.path(),
+        &["d0", "d4", "--depth", "4", "--relation_types", "extends"],
+    );
+    assert_eq!(
+        no_calls["found"].as_bool(),
+        Some(false),
+        "--relation_types extends must not traverse a call chain: {no_calls}"
+    );
+    assert!(
+        !reaches_via_impact(&["--relation_types", "extends"]),
+        "impact must apply the same relation filter"
+    );
+    // And the filter is doing work rather than always emptying the walk.
+    let calls_only = run_path(
+        tmp.path(),
+        &["d0", "d4", "--depth", "4", "--relation_types", "calls"],
+    );
+    assert_eq!(calls_only["found"].as_bool(), Some(true), "{calls_only}");
 }
