@@ -27,14 +27,14 @@ pub struct CommitIndex {
 /// LRU-evicted today because typical MCP / CLI usage tops out at <20 repos.
 static SCAN_CACHE: OnceLock<CommitIndexCache> = OnceLock::new();
 
-/// Sort key for same-SHA tie-breaking. Primary axis is `generation` (a
+/// Same-SHA tie-break candidate. Primary axis is `generation` (a
 /// deterministic 3-tuple the producer encodes into the dir name), with mtime
 /// retained only as a tertiary fallback. The pre-FU-045 behaviour was
 /// mtime-only, which raced against ext4 / APFS mtime resolution + non-sorted
 /// `read_dir` order — equal mtimes silently picked whichever dir the OS
 /// iterated first.
 ///
-/// `Ord` derived on the struct gives lexicographic `(generation, mtime)`:
+/// Ordering is lexicographic `(generation, mtime)`:
 /// - `None < Some(_)`, so a base dir always loses to any generation dir.
 /// - Between two `Some(_)` generations, `(timestamp_ms, pid, counter)` wins
 ///   in lex order.
@@ -42,15 +42,19 @@ static SCAN_CACHE: OnceLock<CommitIndexCache> = OnceLock::new();
 ///   producer guarantees never happens for distinct builds — the `counter`
 ///   field is monotonic per process, and `pid + timestamp_ms` covers
 ///   cross-process collisions).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Freshness {
+///
+/// `mtime` is read lazily, on the first equal-generation collision only:
+/// it costs a `stat` of `meta.json` per dir, and a cache with 130 commit
+/// dirs spent 1.3 ms of every query on stats that decided nothing.
+struct Candidate {
+    name: String,
     generation: Option<Generation>,
-    mtime: SystemTime,
+    mtime: Option<SystemTime>,
 }
 
 impl CommitIndex {
     pub fn scan(commits_dir: &Path) -> io::Result<Self> {
-        let mut candidates: FxHashMap<[u8; 20], (String, Freshness)> = FxHashMap::default();
+        let mut candidates: FxHashMap<[u8; 20], Candidate> = FxHashMap::default();
         let it = match std::fs::read_dir(commits_dir) {
             Ok(d) => d,
             // commits/ dir absent on first build for a new repo — empty index, not error
@@ -72,21 +76,36 @@ impl CommitIndex {
             let Ok(parsed) = CommitDirName::parse(&name) else {
                 continue;
             };
-            let freshness = Freshness {
+            let mut candidate = Candidate {
+                name,
                 generation: parsed.generation,
-                mtime: commit_dir_mtime(&entry.path()),
+                mtime: None,
             };
-            match candidates.get(&parsed.sha) {
-                Some((_existing, existing)) if *existing >= freshness => {}
-                _ => {
-                    candidates.insert(parsed.sha, (name, freshness));
+            let Some(existing) = candidates.get_mut(&parsed.sha) else {
+                candidates.insert(parsed.sha, candidate);
+                continue;
+            };
+            let newer = match candidate.generation.cmp(&existing.generation) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Less => false,
+                std::cmp::Ordering::Equal => {
+                    let existing_path = commits_dir.join(&existing.name);
+                    let existing_mtime = *existing
+                        .mtime
+                        .get_or_insert_with(|| commit_dir_mtime(&existing_path));
+                    let mtime = commit_dir_mtime(&entry.path());
+                    candidate.mtime = Some(mtime);
+                    mtime > existing_mtime
                 }
+            };
+            if newer {
+                *existing = candidate;
             }
         }
         Ok(Self {
             by_sha: candidates
                 .into_iter()
-                .map(|(sha, (name, _freshness))| (sha, name))
+                .map(|(sha, candidate)| (sha, candidate.name))
                 .collect(),
         })
     }
@@ -140,7 +159,7 @@ impl CommitIndex {
 /// Read the freshest mtime available on a commit dir: prefer `meta.json`,
 /// fall back to `graph.bin`, finally the dir itself. Returns
 /// `SystemTime::UNIX_EPOCH` if every stat fails — that loses every
-/// same-SHA tie under the [`Freshness`] order, which is the safe default
+/// same-SHA tie under the [`Candidate`] order, which is the safe default
 /// for a half-broken / not-yet-published dir.
 ///
 /// Only the *secondary* tie-breaker after the parsed [`Generation`] suffix —

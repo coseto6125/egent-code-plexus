@@ -332,14 +332,15 @@ fn overlay_only_matches(
     }
 
     // Dedup against the base graph: a symbol the base already carries (with its
-    // real edges) should not get a lower-fidelity overlay duplicate. Build the
-    // uid set only now that we know there's at least one candidate to check.
-    let base_uids: rustc_hash::FxHashSet<u64> =
-        graph.nodes.iter().map(|n| n.uid.to_native()).collect();
+    // real edges) should not get a lower-fidelity overlay duplicate. The map
+    // holds only the candidate uids, so a dirty-tree query on a 500k-node graph
+    // pays one pass over the uids and not a 500k-entry set.
+    let wanted: rustc_hash::FxHashSet<u64> = matched.iter().map(|h| h.uid).collect();
+    let in_base = index_wanted_uids(graph.nodes.iter().map(|n| n.uid.to_native()), &wanted);
 
     matched
         .into_iter()
-        .filter(|h| !base_uids.contains(&h.uid))
+        .filter(|h| !in_base.contains_key(&h.uid))
         .map(|h| {
             let category = if ecp_core::algorithms::process_trace::is_test_path(&h.rel_path) {
                 "Test"
@@ -942,42 +943,110 @@ fn substring_hits(
     repo_label: &Option<String>,
 ) -> (Vec<Hit>, u64) {
     let pattern_lower = pattern.to_lowercase();
-    let mut hits = Vec::new();
-    for (idx, node) in graph.nodes.iter().enumerate() {
-        let name_lower = node.name.resolve(&graph.string_pool).to_lowercase();
-        let score: f32 = if name_lower == pattern_lower {
-            1.0
-        } else if name_lower.starts_with(&pattern_lower) {
-            0.7
-        } else if name_lower.contains(&pattern_lower) {
-            0.4
+    // A symbol name never contains whitespace, so a multi-word pattern (the
+    // hook's `pub struct HookInput`) is scored one term at a time and a name
+    // takes its best term; the whole string would match nothing.
+    let terms: Vec<&str> = if pattern_lower.trim().is_empty() {
+        vec![""]
+    } else {
+        pattern_lower.split_whitespace().collect()
+    };
+    let mut scored: Vec<(f32, usize)> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| hit_eligible(graph, *idx, kind_set))
+        .filter_map(|(idx, node)| {
+            let name = node.name.resolve(&graph.string_pool);
+            terms
+                .iter()
+                .filter_map(|term| substring_score(name, term))
+                .reduce(f32::max)
+                .map(|score| (score, idx))
+        })
+        .collect();
+    // Best score first, always. Consumers that take the rows as they come
+    // used to get node order, which hid an exact match behind earlier 0.4
+    // substring rows: the PreToolUse hook (leading MAX_HITS rows),
+    // `ecp group find --merge none` (prints per-repo order) and `--merge rrf`
+    // (ranks by position), and the tie order of a multi-repo `find`. Those
+    // change on purpose. `run_single` / `run_batch` re-sort stably in the
+    // bucket partition, so their output is unchanged. Substring fallback
+    // scans every node; a 3-char pattern on a monorepo returns thousands, so
+    // cap to MULTI_CAP before the rows are built: a `Hit` carries its
+    // callers and callees as owned Strings, and building thousands to keep
+    // a hundred was the peak allocation of this path.
+    let total_before_truncate = scored.len() as u64;
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(MULTI_CAP);
+    let hits = scored
+        .into_iter()
+        .filter_map(|(score, idx)| {
+            build_hit(
+                graph,
+                idx,
+                score,
+                ScoreSource::Substring,
+                kind_set,
+                repo_label,
+            )
+        })
+        .collect();
+    (hits, total_before_truncate)
+}
+
+/// Legacy 1.0 / 0.7 / 0.4 substring score. ASCII names compare in place;
+/// the per-node `to_lowercase` allocation this replaces ran once for every
+/// node in the graph, matches or not. `pattern_lower` is already lowercased.
+fn substring_score(name: &str, pattern_lower: &str) -> Option<f32> {
+    // The CLI accepts `ecp find ""`: every name starts with the empty
+    // pattern (0.7, or 1.0 for an empty name), and `windows(0)` below would
+    // panic, so settle it here rather than by branch order.
+    if pattern_lower.is_empty() {
+        return Some(if name.is_empty() { 1.0 } else { 0.7 });
+    }
+    if !name.is_ascii() || !pattern_lower.is_ascii() {
+        let name_lower = name.to_lowercase();
+        return if name_lower == pattern_lower {
+            Some(1.0)
+        } else if name_lower.starts_with(pattern_lower) {
+            Some(0.7)
+        } else if name_lower.contains(pattern_lower) {
+            Some(0.4)
         } else {
-            continue;
+            None
         };
-        if let Some(hit) = build_hit(
-            graph,
-            idx,
-            score,
-            ScoreSource::Substring,
-            kind_set,
-            repo_label,
-        ) {
-            hits.push(hit);
+    }
+    let (name, pattern) = (name.as_bytes(), pattern_lower.as_bytes());
+    if name.eq_ignore_ascii_case(pattern) {
+        Some(1.0)
+    } else if name.len() >= pattern.len() && name[..pattern.len()].eq_ignore_ascii_case(pattern) {
+        Some(0.7)
+    } else if name
+        .windows(pattern.len())
+        .any(|window| window.eq_ignore_ascii_case(pattern))
+    {
+        Some(0.4)
+    } else {
+        None
+    }
+}
+
+/// The `--kind` filter plus the owning-file requirement, split out so a
+/// caller can rank and cap candidates before paying for `build_hit`.
+fn hit_eligible(
+    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
+    idx: usize,
+    kind_set: &Option<Vec<String>>,
+) -> bool {
+    let node = &graph.nodes[idx];
+    if let Some(ks) = kind_set {
+        let node_kind_str = format!("{:?}", node.kind).to_lowercase();
+        if !ks.iter().any(|k| k == &node_kind_str) {
+            return false;
         }
     }
-    // Substring fallback scans every node — on large monorepos a 3-char
-    // pattern can return thousands. Cap to MULTI_CAP so partition's sort
-    // stays bounded on the pre_tool_use::handle hot path.
-    let total_before_truncate = hits.len() as u64;
-    if hits.len() > MULTI_CAP {
-        hits.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        hits.truncate(MULTI_CAP);
-    }
-    (hits, total_before_truncate)
+    node.has_owning_file()
 }
 
 /// Shared per-node Hit constructor. Applies kind filter and reads
@@ -992,16 +1061,10 @@ fn build_hit(
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
 ) -> Option<Hit> {
-    let node = &graph.nodes[idx];
-    if let Some(ks) = kind_set {
-        let node_kind_str = format!("{:?}", node.kind).to_lowercase();
-        if !ks.iter().any(|k| k == &node_kind_str) {
-            return None;
-        }
-    }
-    if !node.has_owning_file() {
+    if !hit_eligible(graph, idx, kind_set) {
         return None;
     }
+    let node = &graph.nodes[idx];
     let name = node.name.resolve(&graph.string_pool);
     let file_entry = &graph.files[node.file_idx.to_native() as usize];
     let file = file_entry.path.resolve(&graph.string_pool).to_string();

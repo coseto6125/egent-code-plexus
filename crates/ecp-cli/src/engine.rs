@@ -2,10 +2,55 @@ use ecp_core::graph::{ArchivedZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
 use ecp_core::session::OverlayView;
 use memmap2::Mmap;
 use rkyv::rancor::Error;
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
+
+pub mod test_counters {
+    use std::sync::atomic::AtomicUsize;
+
+    /// Incremented on every full `rkyv::access` walk over a graph file.
+    /// Integration tests assert that `header_compatible` followed by
+    /// `Engine::load` on the same file walks it once, not twice.
+    pub static DEEP_VALIDATION_COUNT: AtomicUsize = AtomicUsize::new(0);
+}
+
+/// Identity of a graph file whose full structural validation already passed
+/// in this process. `ensure_index` validates through `header_compatible`, and
+/// `Engine::load` validated the same bytes again a few microseconds later:
+/// on an 88 MB graph that second walk cost 2-4 ms of every command.
+type ValidatedKey = (PathBuf, u64, Option<SystemTime>);
+
+static VALIDATED: OnceLock<Mutex<HashSet<ValidatedKey>>> = OnceLock::new();
+
+fn validated_set() -> &'static Mutex<HashSet<ValidatedKey>> {
+    VALIDATED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn validated_key(graph_path: &Path, file: &File) -> Option<ValidatedKey> {
+    let meta = file.metadata().ok()?;
+    Some((graph_path.to_path_buf(), meta.len(), meta.modified().ok()))
+}
+
+/// Full structural validation, skipped when this process already validated
+/// a file of the same path, length and mtime. A rebuilt graph lands under a
+/// new commit dir, so an identical key means identical bytes.
+fn validate_once(graph_path: &Path, file: &File, bytes: &[u8]) -> io::Result<()> {
+    let key = validated_key(graph_path, file);
+    if let Some(key) = &key {
+        if validated_set().lock().is_ok_and(|set| set.contains(key)) {
+            return Ok(());
+        }
+    }
+    validate_header(bytes)?;
+    if let (Some(key), Ok(mut set)) = (key, validated_set().lock()) {
+        set.insert(key);
+    }
+    Ok(())
+}
 
 pub struct Engine {
     mmap: Mmap,
@@ -61,7 +106,7 @@ impl Engine {
         // the kernel read ahead in bulk; best-effort, and a no-op when warm.
         #[cfg(unix)]
         let _ = mmap.advise(memmap2::Advice::WillNeed);
-        validate_header(&mmap)?;
+        validate_once(&graph_path, &file, &mmap)?;
         Ok(Self {
             mmap,
             graph_path,
@@ -218,13 +263,16 @@ impl Engine {
 /// triggers a clean rebuild — without surfacing `InvalidData` on a
 /// CLI upgrade that bumped `GRAPH_FORMAT_VERSION`.
 pub fn header_compatible(graph_path: &Path) -> bool {
-    let Ok(file) = File::open(graph_path) else {
+    // Same canonicalization as `Engine::load`, or the validated-set keys never
+    // match and every command walks the file twice again.
+    let graph_path = fs::canonicalize(graph_path).unwrap_or_else(|_| graph_path.to_path_buf());
+    let Ok(file) = File::open(&graph_path) else {
         return false;
     };
     let Ok(mmap) = (unsafe { Mmap::map(&file) }) else {
         return false;
     };
-    validate_header(&mmap).is_ok()
+    validate_once(&graph_path, &file, &mmap).is_ok()
 }
 
 /// Reject `graph.bin` files that don't carry the ecp magic header or
@@ -233,6 +281,7 @@ pub fn header_compatible(graph_path: &Path) -> bool {
 /// (which only validates structural layout, not field values) and
 /// surface as segfaults or silent misinterpretation downstream.
 fn validate_header(bytes: &[u8]) -> io::Result<()> {
+    test_counters::DEEP_VALIDATION_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let archived = rkyv::access::<ArchivedZeroCopyGraph, Error>(bytes).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,

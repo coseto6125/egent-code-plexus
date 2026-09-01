@@ -54,6 +54,29 @@ fn picks_newest_generation_for_same_sha() {
 }
 
 #[test]
+fn picks_newer_mtime_when_generations_are_equal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let commits = tmp.path().join("commits");
+    std::fs::create_dir(&commits).unwrap();
+    let sha_hex = "abc123def4567890abc123def4567890abc123de";
+    // Two base dirs (no `.gen.`) for one SHA: a tag and a branch pointing at
+    // the same commit. Only mtime can break that tie, so it must be read.
+    let old_dir = format!("tag_v1.0__{sha_hex}");
+    let new_dir = format!("branch_main__{sha_hex}");
+    std::fs::create_dir(commits.join(&old_dir)).unwrap();
+    std::fs::write(commits.join(&old_dir).join("meta.json"), b"old").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::create_dir(commits.join(&new_dir)).unwrap();
+    std::fs::write(commits.join(&new_dir).join("meta.json"), b"new").unwrap();
+
+    let idx = CommitIndex::scan(&commits).unwrap();
+    let mut sha = [0u8; 20];
+    hex::decode_to_slice(sha_hex, &mut sha).unwrap();
+
+    assert_eq!(idx.find(&sha), Some(new_dir.as_str()));
+}
+
+#[test]
 fn recovery_filter_does_not_skip_source_id_text() {
     let tmp = tempfile::tempdir().unwrap();
     let commits = tmp.path().join("commits");
