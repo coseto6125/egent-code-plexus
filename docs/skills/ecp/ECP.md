@@ -16,7 +16,7 @@
 | Who calls / depends on X (before refactor/rename)   | `ecp impact --target <name> --direction upstream` | grep |
 | Blast radius of a diff                               | `ecp impact --baseline <ref>`                    | manual trace |
 | How A reaches B (the route, not just the endpoints)  | `ecp path <from> <to>`                           | `ecp cypher` |
-| Routes / API contracts / event topics                | `ecp routes` / `ecp contracts` / `ecp find-event-mirrors` | grep |
+| Routes / API contracts / event topics                | `ecp routes` / `ecp contracts` / `ecp heuristics event-mirrors` | grep |
 | Understand any indexed repo's internals              | `ecp impact` / `ecp inspect` / `ecp cypher`      | Explore agent |
 | Cross-repo / arbitrary graph query                   | `ecp cypher '<query>'`                           | —    |
 | String literal / config key / fs layout / vendored   | grep / glob                                      | ecp  |

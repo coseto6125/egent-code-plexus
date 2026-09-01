@@ -23,9 +23,13 @@ description: Detailed `ecp` command reference aligned with `ecp --help` and `ecp
 | Route / contract delta — edge view | `ecp diff --section all --baseline <ref> --repo .` |
 | Route response-shape drift detection | `ecp shape-check --route <path>? --repo .` |
 | External HTTP / DB / Redis / queue usage | `ecp tool-map` |
-| Registry health / freshness / blind spots | `ecp summary` (was `ecp coverage`; alias kept one release) |
+| Registry health / freshness / blind spots | `ecp summary` |
 | Multi-session peer collaboration | `ecp peers` |
 | LLM-workflow audit over changed files | `ecp review` |
+| A reaches B — the ordered chain plus the edge per hop | `ecp path <from> <to> --repo .` |
+| Execution-flow steps in real order | `ecp processes` / `ecp processes trace <pattern>` |
+| Statement shapes the graph holds no node for | `ecp pattern -p '<pattern>' --repo .` |
+| Confidence-tagged pairings no edge proves | `ecp heuristics saga` / `schema-bindings` / `event-mirrors` |
 
 ## Admin Subcommands
 
@@ -43,7 +47,6 @@ Use `ecp admin --help` for the full subcommand list. The admin namespace is the 
 | Manage repo group membership | `ecp admin group` |
 | List / inspect L1 sessions | `ecp admin sessions` |
 | Run MCP server or list exposed tools | `ecp admin mcp serve` / `ecp admin mcp tools` |
-| Diff resolver dump against language oracle | `ecp admin verify-resolver` |
 
 ## Help Routing
 
