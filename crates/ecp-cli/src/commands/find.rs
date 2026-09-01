@@ -960,12 +960,15 @@ fn substring_hits(
             hits.push(hit);
         }
     }
-    // Best score first, always: `compute_hits` consumers (the PreToolUse
-    // hook) take the leading MAX_HITS rows as-is, and node order used to hide
-    // an exact match behind earlier 0.4 substring rows. The CLI's bucket
-    // partition re-sorts stably, so its output is unchanged. Substring
-    // fallback scans every node; a 3-char pattern on a monorepo returns
-    // thousands, so cap to MULTI_CAP.
+    // Best score first, always. Consumers that take the rows as they come
+    // used to get node order, which hid an exact match behind earlier 0.4
+    // substring rows: the PreToolUse hook (leading MAX_HITS rows),
+    // `ecp group find --merge none` (prints per-repo order) and `--merge rrf`
+    // (ranks by position), and the tie order of a multi-repo `find`. Those
+    // change on purpose. `run_single` / `run_batch` re-sort stably in the
+    // bucket partition, so their output is unchanged. Substring fallback
+    // scans every node; a 3-char pattern on a monorepo returns thousands, so
+    // cap to MULTI_CAP.
     let total_before_truncate = hits.len() as u64;
     hits.sort_by(|a, b| {
         b.score
@@ -980,6 +983,12 @@ fn substring_hits(
 /// the per-node `to_lowercase` allocation this replaces ran once for every
 /// node in the graph, matches or not. `pattern_lower` is already lowercased.
 fn substring_score(name: &str, pattern_lower: &str) -> Option<f32> {
+    // The CLI accepts `ecp find ""`: every name starts with the empty
+    // pattern (0.7, or 1.0 for an empty name), and `windows(0)` below would
+    // panic, so settle it here rather than by branch order.
+    if pattern_lower.is_empty() {
+        return Some(if name.is_empty() { 1.0 } else { 0.7 });
+    }
     if !name.is_ascii() || !pattern_lower.is_ascii() {
         let name_lower = name.to_lowercase();
         return if name_lower == pattern_lower {

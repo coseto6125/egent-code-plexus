@@ -4,7 +4,7 @@
 //! best score first, and the ASCII fast path must score exactly like the
 //! lowercase comparison it replaces.
 
-use ecp_cli::commands::find::{compute_hits, FindArgs, FindMode, ScoreSource};
+use ecp_cli::commands::find::{compute_hits, run_for_repo, FindArgs, FindMode, ScoreSource};
 use ecp_cli::commands::hook::pre_tool_use::format_hits;
 use ecp_cli::engine::Engine;
 use ecp_core::graph_fixture::GraphFixture;
@@ -63,6 +63,37 @@ fn test_compute_hits_substring_fallback_puts_exact_match_first() {
     let rendered = format_hits(&hits);
     let first_row = rendered.lines().nth(1).unwrap();
     assert!(first_row.contains("handle (src/lib.rs:8)"), "{rendered}");
+}
+
+/// `ecp group find` (both merge modes) consumes `run_for_repo`'s rows in
+/// the order returned, with no re-sort of its own; on the fallback that
+/// order is now best score first rather than node order.
+#[test]
+fn test_run_for_repo_fallback_orders_best_score_first() {
+    let names = ["xhandle1", "xhandle2", "handleClick", "handle"];
+    let (_dir, engine) = load_fixture(&names);
+    let hits = run_for_repo(&engine, "member", "handle", None).unwrap();
+    let ordered: Vec<(&str, f32)> = hits.iter().map(|h| (h.name.as_str(), h.score)).collect();
+    assert_eq!(
+        ordered,
+        vec![
+            ("handle", 1.0),
+            ("handleClick", 0.7),
+            ("xhandle1", 0.4),
+            ("xhandle2", 0.4),
+        ]
+    );
+    assert!(hits.iter().all(|h| h.repo.as_deref() == Some("member")));
+}
+
+/// `ecp find ""` is accepted by clap; the fallback must answer, not panic
+/// on a zero-width window.
+#[test]
+fn test_substring_fallback_empty_pattern_matches_every_name_as_prefix() {
+    let (_dir, engine) = load_fixture(&["alpha", "beta"]);
+    let hits = compute_hits(bm25_args(""), &engine).unwrap();
+    assert_eq!(hits.len(), 2);
+    assert!(hits.iter().all(|h| h.score == 0.7));
 }
 
 #[test]
