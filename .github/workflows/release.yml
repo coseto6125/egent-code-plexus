@@ -156,7 +156,14 @@ jobs:
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
-          name="${BIN_NAME}-${GITHUB_REF_NAME:-dev}-${{ matrix.target }}"
+          # GITHUB_REF_NAME is the tag on a release, but the branch name on a
+          # workflow_dispatch dry run — and every branch here is prefixed
+          # feat/ fix/ chore/ perf/. An unescaped slash turns dist/${name} into
+          # a nested directory, the archive lands one level down, and the
+          # attestation step below globs dist/*.tar.gz and finds nothing. That
+          # made the dry run useless for exactly the branches it exists to test.
+          ref="${GITHUB_REF_NAME:-dev}"
+          name="${BIN_NAME}-${ref//\//-}-${{ matrix.target }}"
           mkdir -p "dist/${name}"
           cp "target/${{ matrix.target }}/release-dist/${BIN_NAME}" "dist/${name}/"
           cp README.md LICENSE LICENSES/NOTICES.md "dist/${name}/" 2>/dev/null || true
@@ -168,8 +175,9 @@ jobs:
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $name = "${env:BIN_NAME}-${env:GITHUB_REF_NAME}-${{ matrix.target }}"
-          if (-not $env:GITHUB_REF_NAME) { $name = "${env:BIN_NAME}-dev-${{ matrix.target }}" }
+          # Slash-sanitized for the same reason as the tar.gz step above.
+          $ref = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME -replace '/', '-' } else { 'dev' }
+          $name = "${env:BIN_NAME}-${ref}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release-dist/${env:BIN_NAME}.exe" "dist/$name/"
           foreach ($f in @('README.md','LICENSE','LICENSES/NOTICES.md')) {
