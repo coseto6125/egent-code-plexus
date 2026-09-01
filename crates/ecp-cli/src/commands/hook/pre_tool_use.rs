@@ -217,7 +217,6 @@ fn shell_words(cmd: &str) -> Vec<String> {
 /// value / too short.
 fn extract_from_shell(cmd: &str) -> Option<String> {
     let flags_with_values = [
-        "-e",
         "-f",
         "-m",
         "-A",
@@ -232,6 +231,9 @@ fn extract_from_shell(cmd: &str) -> Option<String> {
     ];
     let mut found_cmd = false;
     let mut skip_next = false;
+    // `-e PATTERN` names the pattern explicitly for both grep and rg; the
+    // word after it is the answer, not a flag value to step over.
+    let mut next_is_pattern = false;
     for word in shell_words(cmd) {
         if skip_next {
             skip_next = false;
@@ -243,8 +245,10 @@ fn extract_from_shell(cmd: &str) -> Option<String> {
             }
             continue;
         }
-        if word.starts_with('-') {
-            if flags_with_values.contains(&word.as_str()) {
+        if word.starts_with('-') && !next_is_pattern {
+            if word == "-e" || word == "--regexp" {
+                next_is_pattern = true;
+            } else if flags_with_values.contains(&word.as_str()) {
                 skip_next = true;
             }
             continue;
@@ -252,6 +256,7 @@ fn extract_from_shell(cmd: &str) -> Option<String> {
         if word.len() >= 3 {
             return Some(word);
         }
+        next_is_pattern = false;
     }
     None
 }
@@ -271,6 +276,23 @@ mod tests {
         );
         let cmd = "rg -n 'fn compute hits' src/";
         assert_eq!(extract_from_shell(cmd), Some("fn compute hits".to_string()));
+    }
+
+    #[test]
+    fn dash_e_names_the_pattern_instead_of_hiding_it() {
+        assert_eq!(
+            extract_from_shell("rg -e validateUser src/"),
+            Some("validateUser".to_string())
+        );
+        assert_eq!(
+            extract_from_shell("grep -rn --regexp validateUser src/"),
+            Some("validateUser".to_string())
+        );
+        // A pattern that itself starts with a dash is still the pattern.
+        assert_eq!(
+            extract_from_shell("rg -e -foo_bar src/"),
+            Some("-foo_bar".to_string())
+        );
     }
 
     #[test]
