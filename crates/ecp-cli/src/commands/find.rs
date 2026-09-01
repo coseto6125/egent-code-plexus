@@ -332,14 +332,15 @@ fn overlay_only_matches(
     }
 
     // Dedup against the base graph: a symbol the base already carries (with its
-    // real edges) should not get a lower-fidelity overlay duplicate. Build the
-    // uid set only now that we know there's at least one candidate to check.
-    let base_uids: rustc_hash::FxHashSet<u64> =
-        graph.nodes.iter().map(|n| n.uid.to_native()).collect();
+    // real edges) should not get a lower-fidelity overlay duplicate. The map
+    // holds only the candidate uids, so a dirty-tree query on a 500k-node graph
+    // pays one pass over the uids and not a 500k-entry set.
+    let wanted: rustc_hash::FxHashSet<u64> = matched.iter().map(|h| h.uid).collect();
+    let in_base = index_wanted_uids(graph.nodes.iter().map(|n| n.uid.to_native()), &wanted);
 
     matched
         .into_iter()
-        .filter(|h| !base_uids.contains(&h.uid))
+        .filter(|h| !in_base.contains_key(&h.uid))
         .map(|h| {
             let category = if ecp_core::algorithms::process_trace::is_test_path(&h.rel_path) {
                 "Test"
@@ -944,14 +945,8 @@ fn substring_hits(
     let pattern_lower = pattern.to_lowercase();
     let mut hits = Vec::new();
     for (idx, node) in graph.nodes.iter().enumerate() {
-        let name_lower = node.name.resolve(&graph.string_pool).to_lowercase();
-        let score: f32 = if name_lower == pattern_lower {
-            1.0
-        } else if name_lower.starts_with(&pattern_lower) {
-            0.7
-        } else if name_lower.contains(&pattern_lower) {
-            0.4
-        } else {
+        let Some(score) = substring_score(node.name.resolve(&graph.string_pool), &pattern_lower)
+        else {
             continue;
         };
         if let Some(hit) = build_hit(
@@ -965,19 +960,51 @@ fn substring_hits(
             hits.push(hit);
         }
     }
-    // Substring fallback scans every node — on large monorepos a 3-char
-    // pattern can return thousands. Cap to MULTI_CAP so partition's sort
-    // stays bounded on the pre_tool_use::handle hot path.
+    // Best score first, always: `compute_hits` consumers (the PreToolUse
+    // hook) take the leading MAX_HITS rows as-is, and node order used to hide
+    // an exact match behind earlier 0.4 substring rows. The CLI's bucket
+    // partition re-sorts stably, so its output is unchanged. Substring
+    // fallback scans every node; a 3-char pattern on a monorepo returns
+    // thousands, so cap to MULTI_CAP.
     let total_before_truncate = hits.len() as u64;
-    if hits.len() > MULTI_CAP {
-        hits.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        hits.truncate(MULTI_CAP);
-    }
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    hits.truncate(MULTI_CAP);
     (hits, total_before_truncate)
+}
+
+/// Legacy 1.0 / 0.7 / 0.4 substring score. ASCII names compare in place;
+/// the per-node `to_lowercase` allocation this replaces ran once for every
+/// node in the graph, matches or not. `pattern_lower` is already lowercased.
+fn substring_score(name: &str, pattern_lower: &str) -> Option<f32> {
+    if !name.is_ascii() || !pattern_lower.is_ascii() {
+        let name_lower = name.to_lowercase();
+        return if name_lower == pattern_lower {
+            Some(1.0)
+        } else if name_lower.starts_with(pattern_lower) {
+            Some(0.7)
+        } else if name_lower.contains(pattern_lower) {
+            Some(0.4)
+        } else {
+            None
+        };
+    }
+    let (name, pattern) = (name.as_bytes(), pattern_lower.as_bytes());
+    if name.eq_ignore_ascii_case(pattern) {
+        Some(1.0)
+    } else if name.len() >= pattern.len() && name[..pattern.len()].eq_ignore_ascii_case(pattern) {
+        Some(0.7)
+    } else if name
+        .windows(pattern.len())
+        .any(|window| window.eq_ignore_ascii_case(pattern))
+    {
+        Some(0.4)
+    } else {
+        None
+    }
 }
 
 /// Shared per-node Hit constructor. Applies kind filter and reads
