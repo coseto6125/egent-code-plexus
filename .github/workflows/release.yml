@@ -86,16 +86,84 @@ jobs:
           cache-targets: false
           cache-on-failure: true
 
+      - name: Remap the builder's source paths out of the binary
+        shell: bash
+        # The binary embeds a source path for every panic location rustc keeps
+        # and every `assert()` the tree-sitter grammars compile in. `strip =
+        # true` does not touch them — they live in .rodata, not debug info. A
+        # v0.10.2 artifact from this workflow carries
+        # /home/runner/.cargo/registry/src 550 times (498 .rs, 12 .c/.h), which
+        # makes the bytes depend on where the build ran. That is the thing the
+        # provenance attestation below is meant to let someone check.
+        #
+        # install.sh's `cargo install --git` fallback has the sharper version of
+        # the same problem: it bakes the *user's* home directory in, so passing
+        # that binary to someone else hands over your username.
+        #
+        # rustc covers the .rs paths, -ffile-prefix-map the .c/.h ones. MSVC has
+        # no equivalent flag family (cc-rs skips the C half there as well), so
+        # Windows gets the Rust half only.
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            src="${CARGO_HOME:-${USERPROFILE}\\.cargo}\\registry\\src"
+          else
+            src="${CARGO_HOME:-$HOME/.cargo}/registry/src"
+            echo "CFLAGS=-ffile-prefix-map=$src=/cargo" >> "$GITHUB_ENV"
+          fi
+          echo "RUSTFLAGS=--remap-path-prefix=$src=/cargo" >> "$GITHUB_ENV"
+          echo "remapping $src -> /cargo"
+
       - name: Build release binary
         # target/ is intentionally NOT cached so LTO fat link always runs on
         # workspace crates. Only ~/.cargo/registry is cached (deps download).
         run: cargo build --profile release-dist --bin ${{ env.BIN_NAME }} --target ${{ matrix.target }}
 
+      - name: Verify the remap applied
+        shell: bash
+        # A remap whose prefix does not match leaves the artifact untouched and
+        # reports nothing, so assert on the binary rather than trust the flag.
+        #
+        # Both directions matter. An absent build-host path is also what a
+        # mistyped prefix produces, so the second check requires the rewritten
+        # form to actually be there. Windows is where this is most likely to
+        # drift: the prefix is a backslash path derived from USERPROFILE, and
+        # --remap-path-prefix substitutes the prefix only, so the tail keeps its
+        # original separator and the rewritten form reads /cargo\index...
+        run: |
+          bin="target/${{ matrix.target }}/release-dist/${BIN_NAME}"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            bin="$bin.exe"
+            needle="${CARGO_HOME:-${USERPROFILE}\\.cargo}\\registry\\src"
+            rewritten='/cargo\index.crates.io-'
+          else
+            needle="${CARGO_HOME:-$HOME/.cargo}/registry/src"
+            rewritten='/cargo/index.crates.io-'
+          fi
+
+          # `if grep -q` keeps a no-match exit 1 out of `set -e`'s way.
+          if grep -a -q -F -- "$needle" "$bin"; then
+            grep -a -o -F -- "$needle" "$bin" | head -3
+            echo "::error::path remap did not apply: $needle still appears in $bin"
+            exit 1
+          fi
+          if ! grep -a -q -F -- "$rewritten" "$bin"; then
+            echo "::error::no $rewritten paths in $bin — the prefix matched nothing, so the remap was a no-op"
+            exit 1
+          fi
+          echo "$bin: no build-host paths, registry paths rewritten to /cargo"
+
       - name: Package (tar.gz)
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
-          name="${BIN_NAME}-${GITHUB_REF_NAME:-dev}-${{ matrix.target }}"
+          # GITHUB_REF_NAME is the tag on a release, but the branch name on a
+          # workflow_dispatch dry run — and every branch here is prefixed
+          # feat/ fix/ chore/ perf/. An unescaped slash turns dist/${name} into
+          # a nested directory, the archive lands one level down, and the
+          # attestation step below globs dist/*.tar.gz and finds nothing. That
+          # made the dry run useless for exactly the branches it exists to test.
+          ref="${GITHUB_REF_NAME:-dev}"
+          name="${BIN_NAME}-${ref//\//-}-${{ matrix.target }}"
           mkdir -p "dist/${name}"
           cp "target/${{ matrix.target }}/release-dist/${BIN_NAME}" "dist/${name}/"
           cp README.md LICENSE LICENSES/NOTICES.md "dist/${name}/" 2>/dev/null || true
@@ -107,8 +175,9 @@ jobs:
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $name = "${env:BIN_NAME}-${env:GITHUB_REF_NAME}-${{ matrix.target }}"
-          if (-not $env:GITHUB_REF_NAME) { $name = "${env:BIN_NAME}-dev-${{ matrix.target }}" }
+          # Slash-sanitized for the same reason as the tar.gz step above.
+          $ref = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME -replace '/', '-' } else { 'dev' }
+          $name = "${env:BIN_NAME}-${ref}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release-dist/${env:BIN_NAME}.exe" "dist/$name/"
           foreach ($f in @('README.md','LICENSE','LICENSES/NOTICES.md')) {
