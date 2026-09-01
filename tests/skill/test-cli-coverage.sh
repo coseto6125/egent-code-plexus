@@ -103,6 +103,30 @@ cat > "$tmp/GEMINI.md" <<'MD'
 MD
 assert_exit 0 bash -c "cd '$tmp' && bash '$SCRIPT' GEMINI.md"
 
+# --- main.rs cross-check: a verb the enum parse drops must not pass silently ---
+cat > "$tmp/crates/ecp-cli/src/main.rs" <<'RS'
+fn verb(cmd: &Commands) -> &'static str {
+    match cmd {
+        Commands::Find(_) => "find",
+        Commands::Impact(_) => "impact",
+        Commands::ShapeCheck(_) => "shape-check",
+        Commands::Heuristics(_) => "heuristics",
+        Commands::FindEventMirrors(_) => "find-event-mirrors",
+        Commands::Group { .. } => "group",
+        Commands::Usage(_) => "usage",
+    }
+}
+RS
+assert_exit 0 bash -c "cd '$tmp' && bash '$SCRIPT' GEMINI.md"
+
+# main.rs knows a verb the enum parse did not produce.
+echo '        Commands::Path(_) => "path",' >> "$tmp/crates/ecp-cli/src/main.rs"
+assert_exit 1 bash -c "cd '$tmp' && bash '$SCRIPT' GEMINI.md 2>'$out'"
+assert_grep 'disagree on the verb list' "$out"
+assert_grep '^  > path$' "$out"
+sed -i '$d' "$tmp/crates/ecp-cli/src/main.rs"
+assert_exit 0 bash -c "cd '$tmp' && bash '$SCRIPT' GEMINI.md"
+
 # --- Guardrails on the script's own preconditions ---
 assert_exit 1 bash -c "cd '$(dirname "$tmp")' && bash '$SCRIPT' 2>/dev/null"
 assert_exit 1 bash -c "cd '$tmp' && bash '$SCRIPT' no-such-pack 2>/dev/null"

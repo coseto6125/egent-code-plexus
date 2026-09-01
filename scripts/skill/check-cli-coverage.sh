@@ -13,6 +13,11 @@
 set -euo pipefail
 
 CLI_RS="crates/ecp-cli/src/cli.rs"
+# `main.rs` maps every variant to its verb name in a match the compiler keeps
+# exhaustive. Cross-checking the two closes this gate's one silent failure: an
+# enum shape the awk below stops recognising would otherwise drop a verb and
+# leave the gate vacuously green.
+MAIN_RS="crates/ecp-cli/src/main.rs"
 
 # Verbs that answer no structural question, so a routing doc may leave them out.
 # `peers` is session collaboration, `usage` is a telemetry dashboard, and
@@ -63,6 +68,17 @@ in_attr { attr = attr $0; if ($0 ~ /\)\]|^[[:space:]]*\]/) in_attr = 0; next }
 VERBS=$(read_verbs)
 [[ -n "$VERBS" ]] || { echo "coverage: parsed no verbs from $CLI_RS — the enum shape changed" >&2; exit 1; }
 
+if [[ -f "$MAIN_RS" ]]; then
+    declared=$(grep -oE '^[[:space:]]*Commands::[A-Za-z0-9]+[^=]*=> "[a-z-]+"' "$MAIN_RS" |
+               grep -oE '"[a-z-]+"$' | tr -d '"' | sort -u)
+    parsed=$(cut -f1 <<<"$VERBS" | sort -u)
+    if [[ -n "$declared" && "$declared" != "$parsed" ]]; then
+        echo "coverage: $CLI_RS and $MAIN_RS disagree on the verb list — the enum parse is stale" >&2
+        diff <(echo "$parsed") <(echo "$declared") | sed 's/^/  /' >&2
+        exit 1
+    fi
+fi
+
 if [[ "${1:-}" == "--list" ]]; then
     printf '%s\n' "$VERBS"
     exit 0
@@ -101,10 +117,12 @@ check_pack() {
     done
 
     for v in $retired; do
-        local hit
-        # shellcheck disable=SC2086
-        hit=$(grep -lE "ecp $v([^a-z-]|\$)" $docs 2>/dev/null | head -1 || true)
-        [[ -n "$hit" ]] && note "$hit names \`ecp $v\`, which the CLI answers with a Deprecated notice" || true
+        local f
+        for f in $docs; do
+            named "$v" <"$f" || continue
+            note "$f names \`ecp $v\`, which the CLI answers with a Deprecated notice"
+            break
+        done
     done
 
     # Per-command reference cards, where the pack ships them.
