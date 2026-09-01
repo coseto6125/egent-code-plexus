@@ -36,10 +36,7 @@ pub fn handle(input: &HookInput) -> Result<(), EcpError> {
 }
 
 fn compute_search_hits(input: &HookInput) -> Option<String> {
-    let pattern = match extract_pattern(&input.tool_name, &input.tool_input) {
-        Some(p) if p.len() >= 3 => p,
-        _ => return None,
-    };
+    let pattern = search_terms(&extract_pattern(&input.tool_name, &input.tool_input)?)?;
     let index_dir = lookup_index_dir(&input.cwd)?;
     let graph_path = index_dir.join("graph.bin");
     let engine = Engine::load(&graph_path).ok()?;
@@ -124,9 +121,87 @@ fn extract_pattern(tool: &str, tool_input: &serde_json::Value) -> Option<String>
     }
 }
 
-/// Single-pass scan: locate `rg` / `grep`, then walk subsequent tokens
+/// The identifier-shaped words of a grep / rg pattern, space-joined for the
+/// BM25 query. Regex syntax carries no symbol signal: `^\[t\]` used to reach
+/// tantivy as the token `t` and surface five unrelated `t` functions, and
+/// `\bfetch\s*\(` as `bfetch`. Escapes (`\X`) are dropped whole, every other
+/// non-word character splits, and a word survives only with three or more
+/// characters and at least one letter. `None` skips the graph load entirely.
+fn search_terms(pattern: &str) -> Option<String> {
+    let mut terms: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut flush = |current: &mut String| {
+        if current.chars().count() >= 3 && current.chars().any(char::is_alphabetic) {
+            terms.push(std::mem::take(current));
+        } else {
+            current.clear();
+        }
+    };
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            flush(&mut current);
+            chars.next();
+        } else if c.is_alphanumeric() || c == '_' {
+            current.push(c);
+        } else {
+            flush(&mut current);
+        }
+    }
+    flush(&mut current);
+    (!terms.is_empty()).then(|| terms.join(" "))
+}
+
+/// Split a shell command into words the way the shell hands them to the
+/// program: quotes group, and are removed; a backslash outside single quotes
+/// escapes the next character. A quoted pattern such as
+/// `grep "pub struct HookInput"` is one word, not three.
+fn shell_words(cmd: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_word = false;
+    let mut chars = cmd.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                in_word = true;
+                current.extend(chars.by_ref().take_while(|&q| q != '\''));
+            }
+            '"' => {
+                in_word = true;
+                while let Some(q) = chars.next() {
+                    match q {
+                        '"' => break,
+                        '\\' => current.extend(chars.next()),
+                        _ => current.push(q),
+                    }
+                }
+            }
+            '\\' => {
+                in_word = true;
+                current.extend(chars.next());
+            }
+            c if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            _ => {
+                in_word = true;
+                current.push(c);
+            }
+        }
+    }
+    if in_word {
+        words.push(current);
+    }
+    words
+}
+
+/// Single-pass scan: locate `rg` / `grep`, then walk subsequent words
 /// to find the first ≥3-char non-flag positional. Returns `None` if
-/// `rg` / `grep` is absent or every token after it is a flag / flag
+/// `rg` / `grep` is absent or every word after it is a flag / flag
 /// value / too short.
 fn extract_from_shell(cmd: &str) -> Option<String> {
     let flags_with_values = [
@@ -145,26 +220,25 @@ fn extract_from_shell(cmd: &str) -> Option<String> {
     ];
     let mut found_cmd = false;
     let mut skip_next = false;
-    for token in cmd.split_whitespace() {
+    for word in shell_words(cmd) {
         if skip_next {
             skip_next = false;
             continue;
         }
         if !found_cmd {
-            if token == "rg" || token == "grep" {
+            if word == "rg" || word == "grep" {
                 found_cmd = true;
             }
             continue;
         }
-        if token.starts_with('-') {
-            if flags_with_values.contains(&token) {
+        if word.starts_with('-') {
+            if flags_with_values.contains(&word.as_str()) {
                 skip_next = true;
             }
             continue;
         }
-        let cleaned: String = token.chars().filter(|c| *c != '"' && *c != '\'').collect();
-        if cleaned.len() >= 3 {
-            return Some(cleaned);
+        if word.len() >= 3 {
+            return Some(word);
         }
     }
     None
@@ -172,7 +246,48 @@ fn extract_from_shell(cmd: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_from_shell;
+    use super::{extract_from_shell, search_terms};
+
+    #[test]
+    fn grep_quoted_multiword_pattern_kept_whole() {
+        // Whitespace splitting handed the hook `"pub` (cleaned to `pub`) and
+        // the graph answered with every `pub_*` symbol in the repo.
+        let cmd = r#"grep -n "pub struct HookInput" -A12 crates/x.rs | head"#;
+        assert_eq!(
+            extract_from_shell(cmd),
+            Some("pub struct HookInput".to_string())
+        );
+        let cmd = "rg -n 'fn compute hits' src/";
+        assert_eq!(extract_from_shell(cmd), Some("fn compute hits".to_string()));
+    }
+
+    #[test]
+    fn grep_escaped_quote_inside_pattern_survives() {
+        let cmd = r#"grep -rn "say \"hi\" now" ."#;
+        assert_eq!(extract_from_shell(cmd), Some(r#"say "hi" now"#.to_string()));
+    }
+
+    #[test]
+    fn search_terms_splits_regex_into_identifiers() {
+        assert_eq!(
+            search_terms("(compute_single|score|bm25)").as_deref(),
+            Some("compute_single score bm25")
+        );
+        assert_eq!(search_terms("HookInput").as_deref(), Some("HookInput"));
+        assert_eq!(
+            search_terms("pub struct HookInput").as_deref(),
+            Some("pub struct HookInput")
+        );
+    }
+
+    #[test]
+    fn search_terms_drops_escapes_and_short_words() {
+        assert_eq!(search_terms(r"\bfetch\s*\(").as_deref(), Some("fetch"));
+        assert_eq!(search_terms("fn .*uid").as_deref(), Some("uid"));
+        assert_eq!(search_terms(r"^\[t\]"), None);
+        assert_eq!(search_terms("12345"), None);
+        assert_eq!(search_terms("ab"), None);
+    }
 
     #[test]
     fn grep_double_quoted_pattern_extracted() {
