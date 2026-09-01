@@ -3,8 +3,9 @@ use crate::commands::format::{kind_to_str, node_kind_to_str, rel_type_to_str};
 use crate::commands::symbol_id::resolve_owner_class;
 use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::session::{MergedEdge, MergedGraph, OverlayView};
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 
 /// Display metadata for a merged-space node index (`>= graph.nodes.len()` =
 /// overlay virtual node). Cold-path companion to `run_bfs`'s inline emission
@@ -57,7 +58,7 @@ fn node_traversable(
     view: Option<&OverlayView>,
     idx: usize,
     include_tests: bool,
-    test_path_cache: &mut HashMap<usize, bool>,
+    test_path_cache: &mut FxHashMap<usize, bool>,
 ) -> bool {
     if idx < graph.nodes.len() {
         let node = &graph.nodes[idx];
@@ -209,9 +210,9 @@ pub(crate) fn shortest_path<'g>(
 ) -> Option<Vec<PathStep<'g>>> {
     // node -> the hop that reached it; `None` marks a seed.
     let merged = MergedGraph::new(graph, view);
-    let mut pred: HashMap<usize, Option<Hop<'g>>> = HashMap::new();
+    let mut pred: FxHashMap<usize, Option<Hop<'g>>> = FxHashMap::default();
     let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
-    let mut test_path_cache = HashMap::new();
+    let mut test_path_cache = FxHashMap::default();
 
     for &start in starts {
         if pred.insert(start, None).is_none() {
@@ -326,9 +327,9 @@ pub(crate) fn shortest_path<'g>(
 /// Callers relying on this for orphan-detection (see `impact_with_baseline`'s
 /// downstream fallback) MUST be updated if this invariant changes.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn run_bfs(
-    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
-    view: Option<&OverlayView>,
+pub(super) fn run_bfs<'g>(
+    graph: &'g ecp_core::graph::ArchivedZeroCopyGraph,
+    view: Option<&'g OverlayView>,
     start_idx: usize,
     direction: &Direction,
     max_depth: usize,
@@ -338,17 +339,19 @@ pub(super) fn run_bfs(
     include_heuristic: bool,
     max_results: Option<usize>,
 ) -> (Vec<Value>, Vec<Value>, u64, u64) {
-    // (node_idx, depth, via_edge_info, reached_via_heuristic)
-    type ViaEdge = Option<(String, f32)>;
-    type Step = (usize, usize, ViaEdge, bool);
+    // (node_idx, depth, via_edge_info, reached_via_heuristic). The reason is
+    // borrowed from the string pool: a hub enqueues six figures of nodes at
+    // depth 2, and an owned String per node was the largest allocation here.
+    type ViaEdge<'g> = Option<(&'g str, f32)>;
+    type Step<'g> = (usize, usize, ViaEdge<'g>, bool);
 
     let merged = MergedGraph::new(graph, view);
     let base_len = graph.nodes.len();
-    let mut visited = HashSet::new();
-    let mut queue: VecDeque<Step> = VecDeque::new();
+    let mut visited = FxHashSet::default();
+    let mut queue: VecDeque<Step<'g>> = VecDeque::new();
     let mut det_results: Vec<Value> = Vec::new();
     let mut heur_results: Vec<Value> = Vec::new();
-    let mut test_path_cache = HashMap::new();
+    let mut test_path_cache = FxHashMap::default();
     let mut hidden_conf_edges: u64 = 0;
     let mut hidden_heuristic_edges: u64 = 0;
 
@@ -408,10 +411,7 @@ pub(super) fn run_bfs(
             line = vn.start_line;
         }
 
-        let (via_reason, via_confidence) = via
-            .as_ref()
-            .map(|(r, c)| (r.as_str(), *c))
-            .unwrap_or(("", 1.0));
+        let (via_reason, via_confidence) = via.unwrap_or(("", 1.0));
         let entry = json!({
             "uid": uid.to_string(),
             "name": name,
@@ -444,7 +444,7 @@ pub(super) fn run_bfs(
 
         // ── expansion ───────────────────────────────────────────────────
         // Shared filter chain + enqueue for base and overlay edges.
-        let mut consider = |edge: &MergedEdge<'_>, next_idx: usize| {
+        let mut consider = |edge: &MergedEdge<'g>, next_idx: usize| {
             let edge_conf = edge.confidence();
             if edge_conf < min_conf {
                 hidden_conf_edges += 1;
@@ -469,12 +469,11 @@ pub(super) fn run_bfs(
                     return;
                 }
             }
-            if !visited.contains(&next_idx) {
-                visited.insert(next_idx);
+            if visited.insert(next_idx) {
                 queue.push_back((
                     next_idx,
                     curr_depth + 1,
-                    Some((edge.reason(graph).to_string(), edge_conf)),
+                    Some((edge.reason(graph), edge_conf)),
                     is_heur,
                 ));
             }

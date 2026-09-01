@@ -206,19 +206,22 @@ pub(super) fn impact_by_name(
             !args.no_heuristic,
             remaining,
         );
-        all_results.extend(det_results.iter().cloned());
-        per_match_bfs.push((*start_idx, det_results));
+        // `per_match_bfs` feeds `coverage_analyses` only, behind
+        // `--test-coverage`; the default path moves the results once.
+        if args.test_coverage {
+            per_match_bfs.push((*start_idx, det_results.clone()));
+        }
+        all_results.extend(det_results);
         all_heuristic_results.extend(heur_results);
         hidden_edges_total += hidden_conf;
         hidden_heuristic_total += hidden_heur;
     }
 
     // Empty callers hint for upstream direction.
-    let impact_without_start: Vec<&Value> = all_results
+    let reached_beyond_start = all_results
         .iter()
-        .filter(|e| e["depth"].as_u64().unwrap_or(0) > 0)
-        .collect();
-    let emit_empty_hint = impact_without_start.is_empty() && args.direction == Direction::Up;
+        .any(|e| e["depth"].as_u64().unwrap_or(0) > 0);
+    let emit_empty_hint = !reached_beyond_start && args.direction == Direction::Up;
     // A field target with no readers: the hint must flag that some languages
     // don't model field reads yet, so empty != provably unread.
     let empty_hint_is_field = emit_empty_hint
