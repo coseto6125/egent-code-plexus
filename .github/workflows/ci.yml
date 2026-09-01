@@ -449,6 +449,47 @@ jobs:
         with:
           fail_level: error
 
+  skill-docs:
+    name: Skill docs are in sync
+    runs-on: ubuntu-latest
+    if: ${{ !(contains(github.event.pull_request.title, '[skip ci]') || contains(github.event.head_commit.message, '[skip ci]')) }}
+
+    # ONBOARDING.md is generated from SKILL.md + guides/ by
+    # scripts/skill/aggregate.sh, and README links to it as the agent-facing
+    # onboarding guide. Nothing regenerated it after PR #442, so it shipped
+    # 119 lines behind its own sources for three months. tests/skill/*.sh and
+    # scripts/skill/lint-skill.sh existed the whole time and ran nowhere.
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Diagnose checkout failure
+        if: steps.checkout.conclusion == 'failure'
+        uses: ./.github/actions/diagnose-checkout-failure
+
+      - name: Lint skill packs
+        run: |
+          bash scripts/skill/lint-skill.sh docs/skills/ecp
+          bash scripts/skill/lint-skill.sh docs/skills/ecp-onboard
+
+      - name: Run skill tooling tests
+        run: bash tests/skill/run-all.sh
+
+      - name: Verify ONBOARDING.md matches SKILL.md + guides
+        run: bash scripts/skill/aggregate.sh --check docs/skills/ecp-onboard
+
   site:
     name: Landing site is in sync
     runs-on: ubuntu-latest
