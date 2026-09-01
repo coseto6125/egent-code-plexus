@@ -490,6 +490,9 @@ jobs:
       - name: Verify ONBOARDING.md matches SKILL.md + guides
         run: bash scripts/skill/aggregate.sh --check docs/skills/ecp-onboard
 
+      - name: Verify every skill pack matches the CLI verb list
+        run: bash scripts/skill/check-cli-coverage.sh
+
   site:
     name: Landing site is in sync
     runs-on: ubuntu-latest

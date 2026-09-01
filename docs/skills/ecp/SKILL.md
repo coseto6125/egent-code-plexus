@@ -1,6 +1,6 @@
 ---
 name: ecp
-description: Tracing who-calls-X or a data flow — mid-debug, not only before a refactor — or exploring code structure: where a symbol is defined, who calls it, blast radius, routes/contracts. Reach here before grep. Command by question: definition→`ecp find`, who-calls/blast-radius→`ecp impact`, how-A-reaches-B→`ecp path <from> <to>`, full context→`ecp inspect`, filename-read-vs-written→`ecp impact --literal`, routes/contracts→`ecp routes`/`ecp contracts`, trace execution flow→`ecp processes`, statement shape inside code (swallowed exception, missing timeout)→`ecp pattern`, graph question with no verb (orphans, all-impls)→`ecp cypher`. Grep only for non-code text: config values, log strings, fs layout.
+description: Tracing who-calls-X or a data flow — mid-debug, not only before a refactor — or exploring code structure: where a symbol is defined, who calls it, blast radius, routes/contracts. Reach here before grep. Command by question: definition→`ecp find`, who-calls/blast-radius→`ecp impact`, how-A-reaches-B→`ecp path <from> <to>`, full context→`ecp inspect`, filename-read-vs-written→`ecp impact --literal`, routes/contracts→`ecp routes`/`ecp contracts`, trace execution flow→`ecp processes`, statement shape inside code (swallowed exception, missing timeout)→`ecp pattern`, event-topic / saga / schema-field pairings→`ecp heuristics`, graph question with no verb (orphans, all-impls)→`ecp cypher`. Grep only for non-code text: config values, log strings, fs layout.
 ---
 
 # EgentCodePlexus (ecp) — Structural Analysis Entry
@@ -54,6 +54,7 @@ description: Tracing who-calls-X or a data flow — mid-debug, not only before a
 | `ecp review` | Full audit (impact + summary + tool-map + shape-check + diff) |
 | `ecp rename <old> <new>` | AST-aware multi-file rename |
 | `ecp pattern -p '<pat>'` | Statement shapes the graph has no node for; `--callers-of` scopes by reachability |
+| `ecp heuristics <kind>` | Confidence-tagged pairings no edge proves: `saga`, `schema-bindings`, `event-mirrors` |
 | `ecp admin doctor [check] [--fix]` | Environment health; `--fix` repairs |
 
 ### Multi-repo / groups
