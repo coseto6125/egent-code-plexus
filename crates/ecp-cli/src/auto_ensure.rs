@@ -43,6 +43,9 @@ pub mod test_counters {
     /// `tests/ensure_fresh_tantivy_drain.rs`; in normal prod (cache root
     /// sibling to the repo) this counter stays at 0.
     pub static TANTIVY_JOIN_COUNT: AtomicUsize = AtomicUsize::new(0);
+    /// Incremented per parked tantivy writer that `join_pending_tantivy_writers`
+    /// waited for at process exit.
+    pub static TANTIVY_EXIT_JOIN_COUNT: AtomicUsize = AtomicUsize::new(0);
     /// Incremented every time `ensure_fresh` returns `WarmAttach` instead of
     /// blocking on a cold build. Lets integration tests assert the fast path
     /// fires for OOB branch-switch scenarios.
@@ -60,6 +63,7 @@ pub mod test_counters {
         REANALYZE_CALL_COUNT.store(0, Ordering::Relaxed);
         BUILD_L2_CALL_COUNT.store(0, Ordering::Relaxed);
         TANTIVY_JOIN_COUNT.store(0, Ordering::Relaxed);
+        TANTIVY_EXIT_JOIN_COUNT.store(0, Ordering::Relaxed);
         WARM_ATTACH_COUNT.store(0, Ordering::Relaxed);
         BEHIND_HEAD_HEAL_COUNT.store(0, Ordering::Relaxed);
         super::BEHIND_HEAD_SPAWNED.store(false, Ordering::Relaxed);
@@ -517,7 +521,7 @@ pub fn ensure_fresh(
             // the background as its final step; no extra write needed here.
             let mut result = crate::build::orchestrator::build_l2(worktree_root, target_sha)
                 .map_err(|e| format!("build_l2: {e}"))?;
-            drain_tantivy_if_inside_worktree(&mut result, worktree_root);
+            park_tantivy_writer(&mut result, worktree_root);
             eprintln!("l2.built elapsed={:.2}s", start.elapsed().as_secs_f32());
             Ok(EnsureFreshOutcome::Ready)
         }
@@ -539,7 +543,7 @@ pub fn ensure_fresh(
                 let start = std::time::Instant::now();
                 let mut result = crate::build::orchestrator::build_l2(worktree_root, target_sha)
                     .map_err(|e| format!("build_l2 (incompatible schema): {e}"))?;
-                drain_tantivy_if_inside_worktree(&mut result, worktree_root);
+                park_tantivy_writer(&mut result, worktree_root);
                 eprintln!("l2.rebuilt elapsed={:.2}s", start.elapsed().as_secs_f32());
             } else {
                 // Header-compatible + dirty files: incremental refresh path.
@@ -891,11 +895,52 @@ fn spawn_background_rebuild(worktree_root: &Path) {
 fn drain_tantivy_if_inside_worktree(
     result: &mut crate::build::orchestrator::BuildResult,
     worktree_root: &Path,
-) {
+) -> bool {
     let cache_root = ecp_core::registry::resolve_home_ecp();
     if cache_root.starts_with(worktree_root) {
         result.join_background();
         test_counters::TANTIVY_JOIN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return true;
+    }
+    false
+}
+
+/// Writers still running when the query finished. A `JoinHandle` dropped
+/// with the `BuildResult` detached the thread, and a CLI process exits the
+/// moment its answer is printed: the writer died between `create_in_dir`
+/// (which writes `meta.json` with `segments: []`) and `commit()`, leaving an
+/// index that opens cleanly and matches nothing, for every later query on
+/// that commit. `main` joins these after the answer is out.
+static PENDING_TANTIVY_WRITERS: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::new());
+
+/// Keep the query fast (the writer keeps running in the background) but keep
+/// the handle, so the process cannot exit underneath the writer.
+fn park_tantivy_writer(result: &mut crate::build::orchestrator::BuildResult, worktree_root: &Path) {
+    if drain_tantivy_if_inside_worktree(result, worktree_root) {
+        return;
+    }
+    if let Some(handle) = result.tantivy_handle.take() {
+        if let Ok(mut pending) = PENDING_TANTIVY_WRITERS.lock() {
+            // A long-lived MCP process parks one writer per build; drop the
+            // ones already done so the list stays a handful, not a history.
+            pending.retain(|h| !h.is_finished());
+            pending.push(handle);
+        }
+    }
+}
+
+/// Wait for every parked tantivy writer. Called once, after the command has
+/// written its output, so the join costs the user nothing they can see.
+pub fn join_pending_tantivy_writers() {
+    let handles: Vec<_> = PENDING_TANTIVY_WRITERS
+        .lock()
+        .map(|mut pending| std::mem::take(&mut *pending))
+        .unwrap_or_default();
+    for handle in handles {
+        test_counters::TANTIVY_EXIT_JOIN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Err(panic) = handle.join() {
+            tracing::warn!("tantivy background thread panicked: {panic:?}");
+        }
     }
 }
 

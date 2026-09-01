@@ -42,6 +42,9 @@ fn main() {
     let outcome = dispatch(cli);
     let duration_ms = start.elapsed().as_millis() as u64;
     ecp_cli::telemetry_cli::record(label, sub, duration_ms, outcome.as_ref().err());
+    // The answer is already on stdout; a cold-index build may still be
+    // writing its tantivy index, and exiting now would publish an empty one.
+    ecp_cli::auto_ensure::join_pending_tantivy_writers();
     if let Err(e) = outcome {
         eprintln!("Command failed: {e}");
         std::process::exit(1);
