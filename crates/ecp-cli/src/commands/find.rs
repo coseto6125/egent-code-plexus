@@ -943,23 +943,28 @@ fn substring_hits(
     repo_label: &Option<String>,
 ) -> (Vec<Hit>, u64) {
     let pattern_lower = pattern.to_lowercase();
-    let mut hits = Vec::new();
-    for (idx, node) in graph.nodes.iter().enumerate() {
-        let Some(score) = substring_score(node.name.resolve(&graph.string_pool), &pattern_lower)
-        else {
-            continue;
-        };
-        if let Some(hit) = build_hit(
-            graph,
-            idx,
-            score,
-            ScoreSource::Substring,
-            kind_set,
-            repo_label,
-        ) {
-            hits.push(hit);
-        }
-    }
+    // A symbol name never contains whitespace, so a multi-word pattern (the
+    // hook's `pub struct HookInput`) is scored one term at a time and a name
+    // takes its best term; the whole string would match nothing.
+    let terms: Vec<&str> = if pattern_lower.trim().is_empty() {
+        vec![""]
+    } else {
+        pattern_lower.split_whitespace().collect()
+    };
+    let mut scored: Vec<(f32, usize)> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| hit_eligible(graph, *idx, kind_set))
+        .filter_map(|(idx, node)| {
+            let name = node.name.resolve(&graph.string_pool);
+            terms
+                .iter()
+                .filter_map(|term| substring_score(name, term))
+                .reduce(f32::max)
+                .map(|score| (score, idx))
+        })
+        .collect();
     // Best score first, always. Consumers that take the rows as they come
     // used to get node order, which hid an exact match behind earlier 0.4
     // substring rows: the PreToolUse hook (leading MAX_HITS rows),
@@ -968,14 +973,25 @@ fn substring_hits(
     // change on purpose. `run_single` / `run_batch` re-sort stably in the
     // bucket partition, so their output is unchanged. Substring fallback
     // scans every node; a 3-char pattern on a monorepo returns thousands, so
-    // cap to MULTI_CAP.
-    let total_before_truncate = hits.len() as u64;
-    hits.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    hits.truncate(MULTI_CAP);
+    // cap to MULTI_CAP before the rows are built: a `Hit` carries its
+    // callers and callees as owned Strings, and building thousands to keep
+    // a hundred was the peak allocation of this path.
+    let total_before_truncate = scored.len() as u64;
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(MULTI_CAP);
+    let hits = scored
+        .into_iter()
+        .filter_map(|(score, idx)| {
+            build_hit(
+                graph,
+                idx,
+                score,
+                ScoreSource::Substring,
+                kind_set,
+                repo_label,
+            )
+        })
+        .collect();
     (hits, total_before_truncate)
 }
 
@@ -1016,6 +1032,23 @@ fn substring_score(name: &str, pattern_lower: &str) -> Option<f32> {
     }
 }
 
+/// The `--kind` filter plus the owning-file requirement, split out so a
+/// caller can rank and cap candidates before paying for `build_hit`.
+fn hit_eligible(
+    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
+    idx: usize,
+    kind_set: &Option<Vec<String>>,
+) -> bool {
+    let node = &graph.nodes[idx];
+    if let Some(ks) = kind_set {
+        let node_kind_str = format!("{:?}", node.kind).to_lowercase();
+        if !ks.iter().any(|k| k == &node_kind_str) {
+            return false;
+        }
+    }
+    node.has_owning_file()
+}
+
 /// Shared per-node Hit constructor. Applies kind filter and reads
 /// file/line/kind/caller_count from the archived graph. Returns `None`
 /// when the node's kind doesn't match the filter. `score_source`
@@ -1028,16 +1061,10 @@ fn build_hit(
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
 ) -> Option<Hit> {
-    let node = &graph.nodes[idx];
-    if let Some(ks) = kind_set {
-        let node_kind_str = format!("{:?}", node.kind).to_lowercase();
-        if !ks.iter().any(|k| k == &node_kind_str) {
-            return None;
-        }
-    }
-    if !node.has_owning_file() {
+    if !hit_eligible(graph, idx, kind_set) {
         return None;
     }
+    let node = &graph.nodes[idx];
     let name = node.name.resolve(&graph.string_pool);
     let file_entry = &graph.files[node.file_idx.to_native() as usize];
     let file = file_entry.path.resolve(&graph.string_pool).to_string();

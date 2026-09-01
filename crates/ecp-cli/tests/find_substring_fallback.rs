@@ -96,6 +96,29 @@ fn test_substring_fallback_empty_pattern_matches_every_name_as_prefix() {
     assert!(hits.iter().all(|h| h.score == 0.7));
 }
 
+/// The hook hands BM25 a space-joined term list; on the fallback a name
+/// scores against its best single term, since no name contains a space.
+#[test]
+fn test_substring_fallback_scores_multiword_pattern_per_term() {
+    let (_dir, engine) = load_fixture(&["HookInput", "pub_use_re", "unrelated"]);
+    let hits = compute_hits(bm25_args("pub struct HookInput"), &engine).unwrap();
+    let ordered: Vec<(&str, f32)> = hits.iter().map(|h| (h.name.as_str(), h.score)).collect();
+    assert_eq!(ordered, vec![("HookInput", 1.0), ("pub_use_re", 0.7)]);
+}
+
+/// Rows are capped at MULTI_CAP after ranking, so the exact match survives
+/// the cap however late it sits in node order.
+#[test]
+fn test_substring_fallback_caps_after_ranking() {
+    let filler: Vec<String> = (0..150).map(|i| format!("xhandle{i}")).collect();
+    let mut names: Vec<&str> = filler.iter().map(String::as_str).collect();
+    names.push("handle");
+    let (_dir, engine) = load_fixture(&names);
+    let hits = compute_hits(bm25_args("handle"), &engine).unwrap();
+    assert_eq!(hits.len(), 100);
+    assert_eq!(hits[0].name, "handle");
+}
+
 #[test]
 fn test_substring_fallback_scores_ascii_and_unicode_names_alike() {
     let names = [
