@@ -84,8 +84,8 @@ mcp_targets:
 
 ## Step 5: Confirm explicit write consent
 
-Per Directive 5 in SKILL.md, the wizard MUST NOT write to user files
-outside `~/.ecp/onboarding-summary.md` without consent. Native installs
+Per Directive 5 in SKILL.md, the wizard writes only to
+`~/.ecp/onboarding-summary.md` until the user consents. Native installs
 go through `ecp admin <host>` (ecp owns those writes); MCP installs write
 the config files below. Show the user exactly what Phase 05 will do:
 

@@ -78,7 +78,13 @@ settings to emulate them.
 
 ### 4b — MCP targets (`config_inventory.mcp_targets`)
 
-For each MCP target:
+This path is for hosts ecp cannot script (Cursor, Zed, VS Code,
+Continue.dev). A host that appears under `native_targets` has an
+installer — `ecp admin <host> install mcp-server` — so route it through
+4a and leave it out of this step. Step 4a's rule holds here too: never
+hand-edit a config ecp owns.
+
+For each remaining MCP target:
 
 - **Idempotency:** if the config file already exists, **merge** the
   `ecp` entry into the existing `mcpServers` object rather than
@@ -87,8 +93,8 @@ For each MCP target:
   `<path>.bak.<timestamp>`.
 
 ```bash
-# Example: Claude Code
-target=~/.claude/.mcp.json
+# Example: Cursor
+target=~/.cursor/mcp.json
 if [[ -f "$target" ]]; then
     cp "$target" "$target.bak.$(date +%s)"
     jq '.mcpServers.ecp = {"command":"ecp","args":["admin","mcp","serve"]}' \
