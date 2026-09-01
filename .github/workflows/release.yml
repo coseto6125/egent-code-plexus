@@ -120,25 +120,37 @@ jobs:
 
       - name: Verify the remap applied
         shell: bash
-        # A remap that silently does not match its prefix leaves the artifact
-        # exactly as it was and says nothing, so assert on the binary rather
-        # than trust the flag. Windows is where this is most likely to drift:
-        # the prefix there is a backslash path derived from USERPROFILE.
+        # A remap whose prefix does not match leaves the artifact untouched and
+        # reports nothing, so assert on the binary rather than trust the flag.
+        #
+        # Both directions matter. An absent build-host path is also what a
+        # mistyped prefix produces, so the second check requires the rewritten
+        # form to actually be there. Windows is where this is most likely to
+        # drift: the prefix is a backslash path derived from USERPROFILE, and
+        # --remap-path-prefix substitutes the prefix only, so the tail keeps its
+        # original separator and the rewritten form reads /cargo\index...
         run: |
           bin="target/${{ matrix.target }}/release-dist/${BIN_NAME}"
-          [ "$RUNNER_OS" = "Windows" ] && bin="$bin.exe"
           if [ "$RUNNER_OS" = "Windows" ]; then
+            bin="$bin.exe"
             needle="${CARGO_HOME:-${USERPROFILE}\\.cargo}\\registry\\src"
+            rewritten='/cargo\index.crates.io-'
           else
             needle="${CARGO_HOME:-$HOME/.cargo}/registry/src"
+            rewritten='/cargo/index.crates.io-'
           fi
-          n=$(grep -a -o -F -- "$needle" "$bin" | wc -l | tr -d ' ')
-          echo "$bin: $n embedded build-host paths"
-          if [ "$n" != "0" ]; then
-            grep -a -o -F -m 3 -- "$needle" "$bin" || true
-            echo "::error::path remap did not apply: $n occurrences of $needle survived in $bin"
+
+          # `if grep -q` keeps a no-match exit 1 out of `set -e`'s way.
+          if grep -a -q -F -- "$needle" "$bin"; then
+            grep -a -o -F -- "$needle" "$bin" | head -3
+            echo "::error::path remap did not apply: $needle still appears in $bin"
             exit 1
           fi
+          if ! grep -a -q -F -- "$rewritten" "$bin"; then
+            echo "::error::no $rewritten paths in $bin — the prefix matched nothing, so the remap was a no-op"
+            exit 1
+          fi
+          echo "$bin: no build-host paths, registry paths rewritten to /cargo"
 
       - name: Package (tar.gz)
         if: matrix.archive == 'tar.gz'
