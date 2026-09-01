@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.11.0 - 2026-09-01
+
+### Features
+
+- ecp path <FROM> <TO> — the route between two symbols, not just the endpoints (#726)
+
+### Bug Fixes
+
+- Phase 05 4b routed scriptable hosts to jq; ONBOARDING.md 119 lines behind its sources (#728)
+
+### Refactor
+
+- two /simplify passes over the ecp path diff (#727)
+
 ## v0.10.2 - 2026-08-26
 
 - (no user-facing changes)
