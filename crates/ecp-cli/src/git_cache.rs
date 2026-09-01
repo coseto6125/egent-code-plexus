@@ -96,6 +96,9 @@ pub fn head_sha_bytes(cwd: &Path) -> Option<[u8; 20]> {
 }
 
 fn read_head_sha(cwd: &Path) -> Option<String> {
+    if let Some(sha) = head_sha_from_files(cwd) {
+        return Some(sha);
+    }
     let out = safe_exec::git()
         .args(["rev-parse", "HEAD"])
         .current_dir(cwd)
@@ -159,6 +162,9 @@ pub fn worktree_root_from_common_dir(common_dir: &Path) -> &Path {
 }
 
 fn read_common_dir(cwd: &Path) -> io::Result<PathBuf> {
+    if let Some(dir) = common_dir_from_files(cwd) {
+        return Ok(dir);
+    }
     let out = safe_exec::git()
         .args(["rev-parse", "--git-common-dir"])
         .current_dir(cwd)
@@ -175,6 +181,123 @@ fn read_common_dir(cwd: &Path) -> io::Result<PathBuf> {
     } else {
         Ok(cwd.join(p))
     }
+}
+
+// ── File-based readers ───────────────────────────────────────────────────────
+//
+// `git rev-parse HEAD` and `git rev-parse --git-common-dir` cost ~1 ms each as
+// a child process, and every graph-backed command plus every hook paid both.
+// The answers live in a handful of small files, so read those and keep the
+// spawn as the fallback for every layout not modelled here (bare repos,
+// symbolic-ref chains, the reftable backend, `GIT_DIR`-style overrides).
+
+/// Environment overrides redirect git away from the on-disk layout under
+/// `cwd`; the file readers cannot see them, so they hand back to the spawn.
+fn git_env_overrides_present() -> bool {
+    [
+        "GIT_DIR",
+        "GIT_COMMON_DIR",
+        "GIT_WORK_TREE",
+        "GIT_CEILING_DIRECTORIES",
+    ]
+    .iter()
+    .any(|k| std::env::var_os(k).is_some())
+}
+
+/// The worktree's own gitdir: `<root>/.git` when that is a directory, or the
+/// `gitdir:` target when it is a file (linked worktrees, submodules).
+fn discover_gitdir(cwd: &Path) -> Option<PathBuf> {
+    let start = fs::canonicalize(cwd).ok()?;
+    for dir in start.ancestors() {
+        let dot_git = dir.join(".git");
+        let Ok(meta) = fs::metadata(&dot_git) else {
+            continue;
+        };
+        if meta.is_dir() {
+            return Some(dot_git);
+        }
+        let content = fs::read_to_string(&dot_git).ok()?;
+        let target = Path::new(content.strip_prefix("gitdir:")?.trim());
+        let abs = if target.is_absolute() {
+            target.to_path_buf()
+        } else {
+            dir.join(target)
+        };
+        return fs::canonicalize(abs).ok();
+    }
+    None
+}
+
+fn common_dir_of_gitdir(gitdir: &Path) -> Option<PathBuf> {
+    match fs::read_to_string(gitdir.join("commondir")) {
+        Ok(rel) => {
+            let target = Path::new(rel.trim());
+            let abs = if target.is_absolute() {
+                target.to_path_buf()
+            } else {
+                gitdir.join(target)
+            };
+            fs::canonicalize(abs).ok()
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Some(gitdir.to_path_buf()),
+        Err(_) => None,
+    }
+}
+
+/// `git rev-parse --git-common-dir`, read from `.git` / `commondir` files.
+/// `None` means "not modelled here", not "not a repo": the caller spawns git.
+pub fn common_dir_from_files(cwd: &Path) -> Option<PathBuf> {
+    if git_env_overrides_present() {
+        return None;
+    }
+    common_dir_of_gitdir(&discover_gitdir(cwd)?)
+}
+
+/// `git rev-parse HEAD`, read from `HEAD`, the loose ref and `packed-refs`.
+/// `None` on an unborn branch, a symbolic-ref chain, or any layout not
+/// modelled here: the caller spawns git and keeps its own fallbacks.
+pub fn head_sha_from_files(cwd: &Path) -> Option<String> {
+    if git_env_overrides_present() {
+        return None;
+    }
+    let gitdir = discover_gitdir(cwd)?;
+    let head = fs::read_to_string(gitdir.join("HEAD")).ok()?;
+    let head = head.trim();
+    let Some(refname) = head.strip_prefix("ref:") else {
+        return hex_object_id(head);
+    };
+    let refname = refname.trim();
+    let common = common_dir_of_gitdir(&gitdir)?;
+    // A loose ref overrides a packed one, exactly as git resolves it. Branch
+    // refs are shared and live under the common dir; per-worktree refs
+    // (`refs/bisect`, `refs/worktree`) live under the worktree's own gitdir.
+    let loose = fs::read_to_string(common.join(refname))
+        .or_else(|_| fs::read_to_string(gitdir.join(refname)))
+        .ok();
+    if let Some(content) = loose {
+        return hex_object_id(content.trim());
+    }
+    packed_ref_object_id(&common.join("packed-refs"), refname)
+}
+
+/// A full SHA-1 (40) or SHA-256 (64) hex object id, lowercased the way
+/// `git rev-parse` prints it.
+fn hex_object_id(s: &str) -> Option<String> {
+    let full_length = s.len() == 40 || s.len() == 64;
+    (full_length && s.bytes().all(|b| b.is_ascii_hexdigit())).then(|| s.to_ascii_lowercase())
+}
+
+fn packed_ref_object_id(packed_refs: &Path, refname: &str) -> Option<String> {
+    let text = fs::read_to_string(packed_refs).ok()?;
+    text.lines()
+        // `#` is the header; `^` lines carry the peeled target of the tag above.
+        .filter(|line| !line.starts_with('#') && !line.starts_with('^'))
+        .find_map(|line| {
+            let (oid, name) = line.split_once(' ')?;
+            (name.trim() == refname)
+                .then(|| hex_object_id(oid))
+                .flatten()
+        })
 }
 
 #[cfg(test)]
