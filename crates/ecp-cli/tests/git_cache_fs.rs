@@ -168,6 +168,17 @@ fn test_common_dir_from_files_linked_worktree_matches_git() {
 }
 
 #[test]
+fn test_readers_decline_a_stub_dot_git_directory() {
+    // A bare `.git` directory with no HEAD / objects / refs is not a
+    // repository to git; the readers must not turn the tree into one.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join(".git")).unwrap();
+    assert_eq!(git_cache::common_dir_from_files(tmp.path()), None);
+    assert_eq!(git_cache::head_sha_from_files(tmp.path()), None);
+    assert!(git_cache::common_dir(tmp.path()).is_err());
+}
+
+#[test]
 fn test_common_dir_from_files_outside_git_is_none() {
     let tmp = tempfile::tempdir().unwrap();
     assert_eq!(git_cache::common_dir_from_files(tmp.path()), None);

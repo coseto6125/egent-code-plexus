@@ -263,6 +263,8 @@ impl Engine {
 /// triggers a clean rebuild — without surfacing `InvalidData` on a
 /// CLI upgrade that bumped `GRAPH_FORMAT_VERSION`.
 pub fn header_compatible(graph_path: &Path) -> bool {
+    // Same canonicalization as `Engine::load`, or the validated-set keys never
+    // match and every command walks the file twice again.
     let graph_path = fs::canonicalize(graph_path).unwrap_or_else(|_| graph_path.to_path_buf());
     let Ok(file) = File::open(&graph_path) else {
         return false;

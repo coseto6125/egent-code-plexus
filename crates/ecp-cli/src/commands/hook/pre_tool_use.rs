@@ -172,7 +172,19 @@ fn shell_words(cmd: &str) -> Vec<String> {
                 while let Some(q) = chars.next() {
                     match q {
                         '"' => break,
-                        '\\' => current.extend(chars.next()),
+                        // Inside double quotes a backslash escapes only `$`,
+                        // `` ` ``, `"`, `\\` and newline; before anything else
+                        // it stays literal, which is what keeps a regex like
+                        // `"\bfetch\s*\("` intact.
+                        '\\' => match chars.next() {
+                            Some('\n') => {}
+                            Some(escaped @ ('$' | '`' | '"' | '\\')) => current.push(escaped),
+                            Some(other) => {
+                                current.push('\\');
+                                current.push(other);
+                            }
+                            None => current.push('\\'),
+                        },
                         _ => current.push(q),
                     }
                 }
@@ -259,6 +271,22 @@ mod tests {
         );
         let cmd = "rg -n 'fn compute hits' src/";
         assert_eq!(extract_from_shell(cmd), Some("fn compute hits".to_string()));
+    }
+
+    #[test]
+    fn grep_double_quoted_regex_keeps_its_backslashes() {
+        // POSIX: inside "..." a backslash before anything other than
+        // $ ` " \\ or newline is literal, so the regex reaches search_terms
+        // unchanged and reduces to `fetch`, not `bfetchs`.
+        let cmd = r#"grep -rn "\bfetch\s*\(" src/"#;
+        let raw = extract_from_shell(cmd);
+        assert_eq!(raw.as_deref(), Some(r"\bfetch\s*\("));
+        assert_eq!(
+            search_terms(raw.as_deref().unwrap()).as_deref(),
+            Some("fetch")
+        );
+        let cmd = r#"grep "a\$b\\c" f"#;
+        assert_eq!(extract_from_shell(cmd), Some(r"a$b\c".to_string()));
     }
 
     #[test]

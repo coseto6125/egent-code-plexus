@@ -159,7 +159,7 @@ impl CommitIndex {
 /// Read the freshest mtime available on a commit dir: prefer `meta.json`,
 /// fall back to `graph.bin`, finally the dir itself. Returns
 /// `SystemTime::UNIX_EPOCH` if every stat fails — that loses every
-/// same-SHA tie under the [`Freshness`] order, which is the safe default
+/// same-SHA tie under the [`Candidate`] order, which is the safe default
 /// for a half-broken / not-yet-published dir.
 ///
 /// Only the *secondary* tie-breaker after the parsed [`Generation`] suffix —

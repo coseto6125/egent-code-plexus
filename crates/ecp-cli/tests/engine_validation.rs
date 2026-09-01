@@ -9,7 +9,12 @@ use ecp_core::graph::{GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
 use ecp_core::graph_fixture::GraphFixture;
 use rkyv::rancor::Error;
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 use tempfile::tempdir;
+
+/// The walk counter is process-global and the test harness runs these tests
+/// on one thread pool; each test holds this while it reads the counter.
+static COUNTER_LOCK: Mutex<()> = Mutex::new(());
 
 fn make_graph() -> Vec<u8> {
     let mut fx = GraphFixture::new();
@@ -27,6 +32,7 @@ fn deep_validations() -> usize {
 
 #[test]
 fn test_engine_load_after_header_compatible_validates_once() {
+    let _serial = COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempdir().unwrap();
     let path = dir.path().join("graph.bin");
     std::fs::write(&path, make_graph()).unwrap();
@@ -45,6 +51,7 @@ fn test_engine_load_after_header_compatible_validates_once() {
 
 #[test]
 fn test_engine_load_revalidates_when_file_changed_underneath() {
+    let _serial = COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempdir().unwrap();
     let path = dir.path().join("graph.bin");
     let bytes = make_graph();
@@ -62,6 +69,7 @@ fn test_engine_load_revalidates_when_file_changed_underneath() {
 
 #[test]
 fn test_header_compatible_rejects_wrong_magic_without_caching_it() {
+    let _serial = COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempdir().unwrap();
     let path = dir.path().join("graph.bin");
     let mut bytes = make_graph();
