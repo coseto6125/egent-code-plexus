@@ -86,10 +86,59 @@ jobs:
           cache-targets: false
           cache-on-failure: true
 
+      - name: Remap the builder's source paths out of the binary
+        shell: bash
+        # The binary embeds a source path for every panic location rustc keeps
+        # and every `assert()` the tree-sitter grammars compile in. `strip =
+        # true` does not touch them — they live in .rodata, not debug info. A
+        # v0.10.2 artifact from this workflow carries
+        # /home/runner/.cargo/registry/src 550 times (498 .rs, 12 .c/.h), which
+        # makes the bytes depend on where the build ran. That is the thing the
+        # provenance attestation below is meant to let someone check.
+        #
+        # install.sh's `cargo install --git` fallback has the sharper version of
+        # the same problem: it bakes the *user's* home directory in, so passing
+        # that binary to someone else hands over your username.
+        #
+        # rustc covers the .rs paths, -ffile-prefix-map the .c/.h ones. MSVC has
+        # no equivalent flag family (cc-rs skips the C half there as well), so
+        # Windows gets the Rust half only.
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            src="${CARGO_HOME:-${USERPROFILE}\\.cargo}\\registry\\src"
+          else
+            src="${CARGO_HOME:-$HOME/.cargo}/registry/src"
+            echo "CFLAGS=-ffile-prefix-map=$src=/cargo" >> "$GITHUB_ENV"
+          fi
+          echo "RUSTFLAGS=--remap-path-prefix=$src=/cargo" >> "$GITHUB_ENV"
+          echo "remapping $src -> /cargo"
+
       - name: Build release binary
         # target/ is intentionally NOT cached so LTO fat link always runs on
         # workspace crates. Only ~/.cargo/registry is cached (deps download).
         run: cargo build --profile release-dist --bin ${{ env.BIN_NAME }} --target ${{ matrix.target }}
+
+      - name: Verify the remap applied
+        shell: bash
+        # A remap that silently does not match its prefix leaves the artifact
+        # exactly as it was and says nothing, so assert on the binary rather
+        # than trust the flag. Windows is where this is most likely to drift:
+        # the prefix there is a backslash path derived from USERPROFILE.
+        run: |
+          bin="target/${{ matrix.target }}/release-dist/${BIN_NAME}"
+          [ "$RUNNER_OS" = "Windows" ] && bin="$bin.exe"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            needle="${CARGO_HOME:-${USERPROFILE}\\.cargo}\\registry\\src"
+          else
+            needle="${CARGO_HOME:-$HOME/.cargo}/registry/src"
+          fi
+          n=$(grep -a -o -F -- "$needle" "$bin" | wc -l | tr -d ' ')
+          echo "$bin: $n embedded build-host paths"
+          if [ "$n" != "0" ]; then
+            grep -a -o -F -m 3 -- "$needle" "$bin" || true
+            echo "::error::path remap did not apply: $n occurrences of $needle survived in $bin"
+            exit 1
+          fi
 
       - name: Package (tar.gz)
         if: matrix.archive == 'tar.gz'
