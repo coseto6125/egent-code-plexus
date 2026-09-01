@@ -142,6 +142,16 @@ const TOOL_LIST_TTL_MS: u64 = 60_000;
 ///
 /// Older peers predate both fields and keep the legacy wire shape, matching
 /// how rmcp's own `#[tool_handler]` gates them.
+///
+/// Since rmcp 3.2.0 the hints branch is unreachable over stdio, and that is the
+/// spec's intent rather than a bug to route around. `negotiate_protocol_version`
+/// (rust-sdk#1228) now returns a legacy version on every path, because an
+/// `initialize` handshake selects legacy semantics whatever version the client
+/// names; `2026-07-28` arrives only through the discover lifecycle, which rmcp
+/// wires in the streamable-HTTP tower service alone. `serve_stdio` goes through
+/// `serve_server`, so `protocol` is always below the gate today. Keep the branch:
+/// it is what a discover-lifecycle peer must receive, and it goes live the day
+/// `ecp` gains an HTTP transport or rmcp gives stdio that lifecycle.
 fn list_tools_result(
     tools: Vec<rmcp::model::Tool>,
     protocol: Option<rmcp::model::ProtocolVersion>,
