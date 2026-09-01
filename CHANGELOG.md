@@ -2,7 +2,35 @@
 
 ## v0.12.0 - 2026-09-01
 
-- (no user-facing changes)
+### Skills
+
+The three bundled skill packs — `docs/skills/ecp` for Claude Code, plus the Codex
+and Gemini samples — each carried a hand-maintained copy of the CLI verb list, and
+all three had fallen behind. This release brings them level and gates them so they
+cannot drift again. A package-manager install reads the copy embedded in the
+binary, so this is the release that delivers the fixes.
+
+- **`ecp heuristics` is documented for the first time.** Its three kinds (`saga`,
+  `schema-bindings`, `event-mirrors`) reach the skill in the SKILL.md description
+  and a new `_shared/cli/heuristics.md` reference card.
+- **No skill file names a retired verb any more.** `ecp find-schema-bindings`,
+  `ecp find-transaction-patterns` and `ecp find-event-mirrors` still run and still
+  print their Deprecated notice, but an agent reading the pack no longer learns a
+  retired entry point from it.
+- **The Codex and Gemini packs gain `ecp path`, `ecp pattern`, `ecp processes` and
+  `ecp heuristics`**; the Gemini pack also gains `ecp diff`. Both lose two entries
+  the CLI stopped answering: an `ecp coverage` alias note and
+  `ecp admin verify-resolver`.
+- **`heuristics.md` drops the "Outbox deferred pending T5-33" claim.** Outbox
+  detection shipped; `--saga-only` and `--outbox-only` split the two halves.
+- **New `scripts/skill/check-cli-coverage.sh`, wired into CI.** It reads the clap
+  command enum rather than a built binary, so it runs on a docs-only PR and knows
+  about a verb that PR itself adds. It fails when a pack omits a live verb, names a
+  deprecated one, or ships a reference card for a command that no longer exists.
+  Replayed against the commits that introduced the drift, it flags each one on the
+  very verb that commit added.
+
+No behaviour change in the `ecp` binary.
 
 ## v0.11.0 - 2026-09-01
 
