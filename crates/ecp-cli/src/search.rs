@@ -13,6 +13,23 @@ pub struct TantivyEngine;
 
 static STALE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+const BUILDING_PREFIX: &str = "tantivy.building.";
+
+fn sweep_building_dirs(index_dir: &Path) {
+    let Ok(entries) = fs::read_dir(index_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(BUILDING_PREFIX))
+        {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 fn stale_tantivy_path(tantivy_dir: &Path) -> std::path::PathBuf {
     let parent = tantivy_dir.parent().unwrap_or_else(|| Path::new(""));
     let stale_name = format!(
@@ -111,20 +128,13 @@ impl TantivyEngine {
     /// by zombie, prior commit corrupt, FS full). The next `ecp analyze`
     /// rebuilds from scratch via the `remove_dir_all` step below.
     pub fn build_index(index_dir: &Path, graph: &ZeroCopyGraph) -> Result<(), String> {
-        let index_dir = index_dir.join("tantivy");
-        if index_dir.exists() {
-            // Move stale Tantivy state outside the build dir before async
-            // cleanup. On Windows, a background delete under `<sha>.building/`
-            // can keep a handle open and make the later `.building -> <sha>`
-            // publish fail with os error 5.
-            let dead_path = stale_tantivy_path(&index_dir);
-            fs::rename(&index_dir, &dead_path)
-                .map_err(|e| format!("move stale tantivy dir aside: {e}"))?;
-            // Non-blocking cleanup
-            std::thread::spawn(move || {
-                let _ = fs::remove_dir_all(dead_path);
-            });
-        }
+        let final_dir = index_dir.join("tantivy");
+        // Build beside the final dir and rename in after `commit()`: a reader
+        // sees either the previous complete index or the new one, never an
+        // index whose `meta.json` has no segments yet. Leftovers of a killed
+        // build are swept first.
+        sweep_building_dirs(index_dir);
+        let index_dir = index_dir.join(format!("{BUILDING_PREFIX}{}", std::process::id()));
         fs::create_dir_all(&index_dir).map_err(|e| format!("create tantivy dir: {e}"))?;
 
         let mut schema_builder = Schema::builder();
@@ -169,6 +179,20 @@ impl TantivyEngine {
         index_writer
             .commit()
             .map_err(|e| format!("tantivy commit: {e}"))?;
+        drop(index_writer);
+        if final_dir.exists() {
+            // Move stale Tantivy state outside the build dir before async
+            // cleanup. On Windows, a background delete under `<sha>.building/`
+            // can keep a handle open and make the later `.building -> <sha>`
+            // publish fail with os error 5.
+            let dead_path = stale_tantivy_path(&final_dir);
+            fs::rename(&final_dir, &dead_path)
+                .map_err(|e| format!("move stale tantivy dir aside: {e}"))?;
+            std::thread::spawn(move || {
+                let _ = fs::remove_dir_all(dead_path);
+            });
+        }
+        fs::rename(&index_dir, &final_dir).map_err(|e| format!("publish tantivy dir: {e}"))?;
         Ok(())
     }
 
@@ -207,6 +231,13 @@ impl TantivyEngine {
             .try_into()
             .ok()?;
         let searcher: tantivy::Searcher = reader.searcher();
+        // `create_in_dir` writes `meta.json` with no segments before a single
+        // document is added; an index still in that state was never
+        // committed (the writer died), and it must not be read as "BM25
+        // ruled out every symbol". Absent lets the substring scan answer.
+        if searcher.segment_readers().is_empty() {
+            return None;
+        }
         let schema = index.schema();
         let name_field = schema.get_field("name").unwrap();
         let uid_field = schema.get_field("uid").unwrap();

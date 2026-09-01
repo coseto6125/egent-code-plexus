@@ -136,3 +136,57 @@ fn ensure_fresh_skips_tantivy_drain_when_cache_outside_worktree() {
          point of CI-B's background spawn",
     );
 }
+
+/// A cold build inside a query parks its tantivy writer instead of
+/// detaching it; `join_pending_tantivy_writers` (what `main` calls after the
+/// answer is printed) waits for it, and the published index has segments.
+#[test]
+fn ensure_fresh_parks_the_writer_and_exit_join_completes_the_index() {
+    let _env_guard = lock_env();
+    let _snapshot = EnvSnapshot::take();
+
+    let worktree_tmp = TempDir::new().expect("worktree tempdir");
+    let cache_tmp = TempDir::new().expect("cache tempdir");
+    let worktree = worktree_tmp.path();
+    git_init_with_commit(worktree);
+
+    std::env::set_var("HOME", cache_tmp.path());
+    std::env::remove_var("ECP_HOME");
+
+    test_counters::reset();
+
+    let graph_path = worktree.join(".ecp").join("graph.bin");
+    auto_ensure::ensure_fresh(auto_ensure::IndexNeed::NearCurrent, &graph_path, worktree)
+        .expect("cold build");
+    assert_eq!(
+        test_counters::tantivy_join_calls(),
+        0,
+        "the query path must not block"
+    );
+
+    auto_ensure::join_pending_tantivy_writers();
+    assert_eq!(
+        test_counters::TANTIVY_EXIT_JOIN_COUNT.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the writer spawned by the cold build must be parked and joined at exit"
+    );
+
+    let commits = cache_tmp
+        .path()
+        .join(".ecp")
+        .join(ecp_cli::repo_identity::repo_dir_name_for_cwd(worktree).unwrap())
+        .join("commits");
+    let commit_dir = fs::read_dir(&commits)
+        .expect("commits dir")
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.join("tantivy").join("meta.json").exists())
+        .expect("a published commit dir with a tantivy index");
+    let meta: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(commit_dir.join("tantivy/meta.json")).unwrap())
+            .unwrap();
+    assert!(
+        meta["segments"].as_array().is_some_and(|s| !s.is_empty()),
+        "published index must be committed: {meta}"
+    );
+}
