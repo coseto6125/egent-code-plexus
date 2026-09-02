@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.13.0 - 2026-09-02
+
+### Features
+
+- expand the Rails routing DSL so `resources` reaches the graph (#741)
+
+### Bug Fixes
+
+- count callers and callees over Calls edges only (#740)
+- scope a --graph query to the graph it names, and key the HEAD cache on the right worktree (#738)
+
 ## v0.12.1 - 2026-09-02
 
 ### Bug Fixes
