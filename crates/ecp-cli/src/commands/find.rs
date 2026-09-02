@@ -29,11 +29,12 @@
 //! carries a `language` field derived from file extension.
 
 use crate::commands::format::kind_to_str;
+use crate::commands::graph_csr::iter_incoming_edges_filtered;
 use crate::engine::Engine;
 use crate::output::{emit_with_caveat, OutputFormat};
 use clap::{Args, ValueEnum};
 use ecp_analyzer::resolution::index::Language;
-use ecp_core::graph::{ArchivedFileCategory, ArchivedZeroCopyGraph, FileCategory};
+use ecp_core::graph::{ArchivedFileCategory, ArchivedRelType, ArchivedZeroCopyGraph, FileCategory};
 use ecp_core::registry::{resolve_home_ecp, CommitDirName, Registry};
 use ecp_core::EcpError;
 use rayon::prelude::*;
@@ -262,10 +263,18 @@ fn category_to_str(cat: &ArchivedFileCategory) -> &'static str {
     }
 }
 
+/// Number of `Calls` edges into `node_idx`.
+///
+/// The raw in-degree is not that number: it also counts the `Defines` edge
+/// from the declaring file and one `Imports` edge per file that pulls that
+/// module in. Reported under the name `caller_count`, it told an agent that
+/// `compute_hits` in this repo had 17 callers when the graph held 11 `Calls`
+/// edges: the other 6 were the declaring file and 5 importing files.
 fn count_incoming(graph: &ArchivedZeroCopyGraph, node_idx: usize) -> u32 {
-    let in_start = graph.in_offsets[node_idx].to_native() as usize;
-    let in_end = graph.in_offsets[node_idx + 1].to_native() as usize;
-    (in_end - in_start) as u32
+    iter_incoming_edges_filtered(graph, node_idx as u32, |rel| {
+        matches!(rel, ArchivedRelType::Calls)
+    })
+    .count() as u32
 }
 
 /// Sort priority for an overlay-only hit, derived from its path alone (no base
@@ -1074,34 +1083,47 @@ fn build_hit(
     let kind_str = kind_to_str(&node.kind).to_string();
     let signature = format!("{kind_str} {name}");
 
-    let in_start = graph.in_offsets[idx].to_native() as usize;
-    let in_end = graph.in_offsets[idx + 1].to_native() as usize;
-    let caller_count = in_end.saturating_sub(in_start);
-    let callers: Vec<String> = graph.in_edge_idx[in_start..in_end]
-        .iter()
-        .take(HOP_EXPANSION_LIMIT)
-        .map(|eidx| {
-            let e = &graph.edges[eidx.to_native() as usize];
-            graph.nodes[e.source.to_native() as usize]
-                .name
-                .resolve(&graph.string_pool)
-                .to_string()
-        })
-        .collect();
+    // `Calls` only, on both sides. Walking the raw CSR slice put the declaring
+    // file and every importing file into `callers`, and every `ReadsField`
+    // target into `callees` — the hook renders those two lists verbatim as
+    // `Called by:` and `Calls:`, so a File node arrived at the model labelled
+    // as a caller.
+    let caller_names = iter_incoming_edges_filtered(graph, idx as u32, |rel| {
+        matches!(rel, ArchivedRelType::Calls)
+    })
+    .map(|(src, _)| {
+        graph.nodes[src as usize]
+            .name
+            .resolve(&graph.string_pool)
+            .to_string()
+    });
+    let mut caller_count = 0usize;
+    let mut callers: Vec<String> = Vec::new();
+    for name in caller_names {
+        caller_count += 1;
+        if callers.len() < HOP_EXPANSION_LIMIT {
+            callers.push(name);
+        }
+    }
 
     let out_start = graph.out_offsets[idx].to_native() as usize;
     let out_end = graph.out_offsets[idx + 1].to_native() as usize;
-    let callee_count = out_end.saturating_sub(out_start);
-    let callees: Vec<String> = graph.edges[out_start..out_end]
+    let mut callee_count = 0usize;
+    let mut callees: Vec<String> = Vec::new();
+    for e in graph.edges[out_start..out_end]
         .iter()
-        .take(HOP_EXPANSION_LIMIT)
-        .map(|e| {
-            graph.nodes[e.target.to_native() as usize]
-                .name
-                .resolve(&graph.string_pool)
-                .to_string()
-        })
-        .collect();
+        .filter(|e| matches!(e.rel_type, ArchivedRelType::Calls))
+    {
+        callee_count += 1;
+        if callees.len() < HOP_EXPANSION_LIMIT {
+            callees.push(
+                graph.nodes[e.target.to_native() as usize]
+                    .name
+                    .resolve(&graph.string_pool)
+                    .to_string(),
+            );
+        }
+    }
 
     Some(Hit {
         repo: repo_label.clone(),
