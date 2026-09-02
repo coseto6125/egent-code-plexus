@@ -64,7 +64,10 @@ Review the same changes for hacky patterns:
 5. **Stringly-typed code** — raw strings where constants, enums, or branded types already exist
 6. **Unnecessary JSX nesting** — wrapper Boxes/elements that add no layout value
 7. **Nested conditionals 3+ levels deep** — flatten with early returns, guard clauses, lookup tables, or if/else-if cascades
-8. **Unnecessary comments** — comments explaining WHAT (delete; well-named identifiers do that), narrating the change, or referencing the task/caller — keep only non-obvious WHY
+8. **Nested ternaries** — replace a ternary nested inside another with a `match`/switch or if/else-if cascade
+9. **Unnecessary comments** — comments explaining WHAT (delete; well-named identifiers do that), narrating the change, or referencing the task/caller — keep only non-obvious WHY
+
+**Readability guardrail** — every fix must make the code easier to read, not merely shorter. Reject any change that trades clarity for line count: dense one-liners, over-clever collapses, merging distinct concerns into one unit, or dropping an abstraction that was carrying its weight.
 
 ### Agent 3: Efficiency Review
 
