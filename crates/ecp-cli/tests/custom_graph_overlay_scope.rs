@@ -6,31 +6,16 @@
 //! the surrounding agent session's id, so a fixture-graph query answered with
 //! paths from the real repository the test happened to run inside.
 
+mod common;
+
+use common::{ecp_bin, run_git};
 use ecp_core::graph_fixture::GraphFixture;
 use rkyv::rancor::Error;
 use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
 
-fn ecp_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ecp")
-}
-
 const SESSION_ID: &str = "custom-graph-overlay-scope";
-
-fn run_git(repo: &Path, args: &[&str]) {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .expect("git spawn");
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
 
 /// `ecp` run from inside `repo`, with the cache root and the session id both
 /// pinned to the fixture — the same shape an agent host produces.

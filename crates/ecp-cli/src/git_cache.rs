@@ -28,6 +28,7 @@ struct Cache {
     /// On hit, restat and invalidate on mismatch.
     head_sha: HashMap<PathBuf, (Option<String>, Option<SystemTime>)>,
     common_dir: HashMap<PathBuf, io::Result<PathBuf>>,
+    git_dir: HashMap<PathBuf, io::Result<PathBuf>>,
     /// `(gitdir, common_dir)` from the file readers, `None` when they
     /// declined and the spawn answered instead.
     git_dirs: HashMap<PathBuf, Option<(PathBuf, PathBuf)>>,
@@ -79,12 +80,11 @@ pub fn head_sha(cwd: &Path) -> Option<String> {
 fn head_file_mtime(cwd: &Path) -> Option<SystemTime> {
     let (gitdir, common) = match git_dirs(cwd) {
         Some(dirs) => dirs,
-        // Not a layout the file readers model: `common_dir` spawns git, and
-        // for those layouts the gitdir is the common dir.
-        None => {
-            let common = common_dir(cwd).ok()?;
-            (common.clone(), common)
-        }
+        // The file readers declined (an env override, or a layout they do not
+        // model), so ask git for each path separately. Reusing the common dir
+        // as the gitdir puts a linked worktree straight back on the main
+        // worktree's HEAD, which is the bug this function exists to avoid.
+        None => (git_dir(cwd).ok()?, common_dir(cwd).ok()?),
     };
     let head = gitdir.join("HEAD");
     let head_content = fs::read_to_string(&head).ok()?;
@@ -139,25 +139,42 @@ fn read_head_sha(cwd: &Path) -> Option<String> {
 /// (relative output is joined onto `cwd` to preserve the prior
 /// `repo_identity::git_common_dir` contract).
 pub fn common_dir(cwd: &Path) -> io::Result<PathBuf> {
+    cached_git_path(cwd, |c| &mut c.common_dir, read_common_dir)
+}
+
+/// Cached `git rev-parse --git-dir` — the worktree's OWN gitdir, where `HEAD`
+/// lives. A linked worktree's differs from the common dir, so the two must
+/// never be collapsed: doing so is what put `head_file_mtime` on the main
+/// worktree's HEAD.
+pub fn git_dir(cwd: &Path) -> io::Result<PathBuf> {
+    cached_git_path(cwd, |c| &mut c.git_dir, read_git_dir)
+}
+
+/// One cached `git rev-parse <flag>` answer per canonical cwd. `pick` names
+/// the map, so the two flags never share an entry.
+fn cached_git_path(
+    cwd: &Path,
+    pick: fn(&mut Cache) -> &mut HashMap<PathBuf, io::Result<PathBuf>>,
+    read: fn(&Path) -> io::Result<PathBuf>,
+) -> io::Result<PathBuf> {
+    fn clone_of(r: &io::Result<PathBuf>) -> io::Result<PathBuf> {
+        r.as_ref()
+            .cloned()
+            .map_err(|e| io::Error::new(e.kind(), e.to_string()))
+    }
     let key = canon_key(cwd);
     {
-        let guard = cache()
+        let mut guard = cache()
             .lock()
             .map_err(|_| io::Error::other("git_cache mutex poisoned"))?;
-        if let Some(cached) = guard.common_dir.get(&key) {
-            return cached
-                .as_ref()
-                .cloned()
-                .map_err(|e| io::Error::new(e.kind(), e.to_string()));
+        if let Some(cached) = pick(&mut guard).get(&key) {
+            return clone_of(cached);
         }
     }
-    let computed = read_common_dir(cwd);
-    let to_return = computed
-        .as_ref()
-        .cloned()
-        .map_err(|e| io::Error::new(e.kind(), e.to_string()));
+    let computed = read(cwd);
+    let to_return = clone_of(&computed);
     if let Ok(mut guard) = cache().lock() {
-        guard.common_dir.insert(key, computed);
+        pick(&mut guard).insert(key, computed);
     }
     to_return
 }
@@ -178,12 +195,22 @@ pub fn worktree_root_from_common_dir(common_dir: &Path) -> &Path {
     dunce::simplified(common_dir.parent().unwrap_or(common_dir))
 }
 
+fn read_git_dir(cwd: &Path) -> io::Result<PathBuf> {
+    rev_parse_path(cwd, "--git-dir")
+}
+
 fn read_common_dir(cwd: &Path) -> io::Result<PathBuf> {
     if let Some(dir) = common_dir_from_files(cwd) {
         return Ok(dir);
     }
+    rev_parse_path(cwd, "--git-common-dir")
+}
+
+/// `git rev-parse <flag>` as an absolute path. Relative output is joined onto
+/// `cwd`, preserving the prior `repo_identity::git_common_dir` contract.
+fn rev_parse_path(cwd: &Path, flag: &str) -> io::Result<PathBuf> {
     let out = safe_exec::git()
-        .args(["rev-parse", "--git-common-dir"])
+        .args(["rev-parse", flag])
         .current_dir(cwd)
         .output()?;
     if !out.status.success() {
