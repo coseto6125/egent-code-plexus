@@ -70,9 +70,23 @@ pub fn head_sha(cwd: &Path) -> Option<String> {
 /// usually stays unchanged across commits. Detached HEAD uses `.git/HEAD`.
 /// Returns `None` when no git sentinel is statable; the caller treats
 /// `None == None` as a valid cache hit for non-git synthetic SHAs.
+///
+/// HEAD is per-worktree and lives in the worktree's own gitdir; only the ref
+/// it names is shared. Reading the common dir's HEAD made a linked worktree
+/// watch the MAIN worktree's branch, so a checkout or commit here never
+/// invalidated the entry and a long-lived process (the MCP server, the peers
+/// watcher) kept answering with the SHA from before.
 fn head_file_mtime(cwd: &Path) -> Option<SystemTime> {
-    let common = common_dir(cwd).ok()?;
-    let head = common.join("HEAD");
+    let (gitdir, common) = match git_dirs(cwd) {
+        Some(dirs) => dirs,
+        // Not a layout the file readers model: `common_dir` spawns git, and
+        // for those layouts the gitdir is the common dir.
+        None => {
+            let common = common_dir(cwd).ok()?;
+            (common.clone(), common)
+        }
+    };
+    let head = gitdir.join("HEAD");
     let head_content = fs::read_to_string(&head).ok()?;
     let path = head_content
         .strip_prefix("ref:")

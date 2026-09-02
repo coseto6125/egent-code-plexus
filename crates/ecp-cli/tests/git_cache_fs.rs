@@ -192,3 +192,74 @@ fn test_public_entry_points_agree_with_git() {
     let common = std::fs::canonicalize(git_cache::common_dir(tmp.path()).unwrap()).unwrap();
     assert_eq!(common, git_common_dir(tmp.path()));
 }
+
+// ── HEAD-cache invalidation ──────────────────────────────────────────────────
+//
+// `head_sha` caches per canonical cwd and restats a sentinel to decide whether
+// the entry still holds. HEAD is per-worktree, so a linked worktree that
+// watched the common dir's HEAD watched the MAIN worktree's branch: nothing
+// done in the linked worktree ever invalidated the entry. One-shot CLI runs
+// never noticed; a long-lived process (the MCP server, the peers watcher) kept
+// answering with the SHA from before.
+
+/// mtime is the sentinel, and a filesystem may hold it at one-second
+/// granularity, so a change made inside the same second is indistinguishable
+/// from no change. Wait past that before mutating the fixture.
+fn wait_past_mtime_granularity() {
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+}
+
+#[test]
+fn test_head_sha_follows_a_checkout_in_a_detached_linked_worktree() {
+    let tmp = init_repo_with_commit();
+    let first = git_stdout(tmp.path(), &["rev-parse", "HEAD"]);
+    std::fs::write(tmp.path().join("b.txt"), "y").unwrap();
+    commit_all(tmp.path(), "second");
+    let second = git_stdout(tmp.path(), &["rev-parse", "HEAD"]);
+
+    let wt = tmp.path().join("wt");
+    run_git(
+        tmp.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            wt.to_str().unwrap(),
+            &first,
+        ],
+    );
+    assert_eq!(git_cache::head_sha(&wt), Some(first.clone()));
+
+    wait_past_mtime_granularity();
+    run_git(&wt, &["checkout", "-q", "--detach", &second]);
+    assert_eq!(
+        git_cache::head_sha(&wt),
+        Some(second),
+        "a checkout in the linked worktree must invalidate its cached HEAD"
+    );
+}
+
+#[test]
+fn test_head_sha_follows_a_commit_on_a_linked_worktree_branch() {
+    let tmp = init_repo_with_commit();
+    let wt = tmp.path().join("wt");
+    run_git(
+        tmp.path(),
+        &["worktree", "add", "-q", "-b", "topic", wt.to_str().unwrap()],
+    );
+    let before = git_stdout(&wt, &["rev-parse", "HEAD"]);
+    assert_eq!(git_cache::head_sha(&wt), Some(before.clone()));
+
+    wait_past_mtime_granularity();
+    std::fs::write(wt.join("c.txt"), "z").unwrap();
+    commit_all(&wt, "on topic");
+    let after = git_stdout(&wt, &["rev-parse", "HEAD"]);
+    assert_ne!(before, after, "fixture: the commit must move topic");
+    assert_eq!(
+        git_cache::head_sha(&wt),
+        Some(after),
+        "a commit on the linked worktree's own branch must invalidate its \
+         cached HEAD; the main worktree's branch is not the sentinel"
+    );
+}
