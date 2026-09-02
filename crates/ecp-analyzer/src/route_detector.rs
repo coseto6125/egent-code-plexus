@@ -78,6 +78,20 @@ pub fn detect_from_call(raw: &RawRoute) -> Option<DetectedRoute> {
         });
     }
 
+    // Mount fast path, same shape as gRPC above: the Rails routes walker
+    // emits `mount Engine, at: "/jobs"` as a normalized record (method
+    // `MOUNT`, leading-slash path). A mount point is where an engine attaches
+    // its own route set, so it belongs in a route inventory, and `mount`
+    // matches no entry in the HTTP-method allowlist below. No other provider
+    // emits this method — JS `app.mount(…)` never reaches here, because the
+    // JS matcher captures only the verbs in its own allowlist.
+    if lower == "mount" && raw.path.starts_with('/') {
+        return Some(DetectedRoute {
+            method: "MOUNT".to_string(),
+            path: raw.path.clone(),
+        });
+    }
+
     let method = HTTP_METHODS.iter().find(|&&m| lower.contains(m))?;
 
     // Raw path may arrive wrapped in `"…"` / `'…'` because Python / TS
@@ -215,6 +229,21 @@ mod tests {
         let r = detect_from_call(&raw("GRPC", "/helloworld.Greeter/SayHello")).unwrap();
         assert_eq!(r.method, "GRPC");
         assert_eq!(r.path, "/helloworld.Greeter/SayHello");
+    }
+
+    #[test]
+    fn detect_from_call_accepts_rails_engine_mount() {
+        // The Rails routes walker emits mount points as method `MOUNT`;
+        // `mount` matches no HTTP-method allowlist entry, so without the
+        // fast path the engine's attachment point leaves the inventory.
+        let r = detect_from_call(&raw("MOUNT", "/jobs")).unwrap();
+        assert_eq!(r.method, "MOUNT");
+        assert_eq!(r.path, "/jobs");
+    }
+
+    #[test]
+    fn detect_from_call_mount_requires_leading_slash() {
+        assert!(detect_from_call(&raw("MOUNT", "jobs")).is_none());
     }
 
     #[test]

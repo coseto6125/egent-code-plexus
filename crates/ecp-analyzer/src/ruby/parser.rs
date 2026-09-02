@@ -34,6 +34,12 @@ const BLIND_SPEC: &[(&str, &str)] = &[
     ),
 ];
 
+/// BlindSpot spec for a routing block nested past the Rails walker's cap.
+const BLIND_RAILS_ROUTES_DEPTH: (&str, &str) = (
+    "rb-rails-routes-depth",
+    "routes.draw block nested past the walker's cap \u{2014} routes inside it carry no namespace/scope prefix; read the block directly",
+);
+
 /// BlindSpot spec for the module-as-enum pattern.
 const BLIND_MODULE_AS_ENUM: (&str, &str) = (
     "ruby-module-as-enum",
@@ -55,6 +61,12 @@ fn ruby_first_arg_is_literal_callable(call_node: &Node) -> bool {
         "simple_symbol" | "symbol_array" | "string" | "bare_symbol" | "delimited_symbol"
     )
 }
+
+/// Receivers a Ruby route DSL sends its verb to. Hanami builds routes on a
+/// `router` object and Roda on the request object `r`; `map` and `app` cover
+/// Rack::Builder and modular Sinatra. Anything else holding a `get` with a
+/// path is an HTTP client.
+const ROUTER_RECEIVERS: &[&str] = &["r", "router", "map", "app"];
 
 /// Per upstream `ruby.ts:156-178` `astFrameworkPatterns`.
 const RUBY_FRAMEWORKS: &[FrameworkPatternSpec] = &[
@@ -619,8 +631,23 @@ impl LanguageProvider for RubyProvider {
                 }
             }
 
-            if let (Some(r_method), Some(r_path), Some(r_root)) =
-                (route_method, route_path, route_root)
+            // A route DSL sends its verb to the mapper: Rails `get "/x"` and
+            // Sinatra `get "/x" do` have no receiver; Hanami `router.get` and
+            // Roda `r.get` send it to a router object. Any other receiver
+            // means an HTTP client — `connection.get "/openapi/v1/tag"` names
+            // an endpoint this application calls, not one it serves. Measured
+            // 2026-09-02 on a Rails 8.1 app: ten such calls under
+            // `app/services/client/**` reached `ecp routes` before this check.
+            let declares_route =
+                route_root.is_some_and(|n| match n.child_by_field_name("receiver") {
+                    None => true,
+                    Some(r) => r
+                        .utf8_text(source)
+                        .is_ok_and(|t| ROUTER_RECEIVERS.contains(&t)),
+                });
+
+            if let (true, Some(r_method), Some(r_path), Some(r_root)) =
+                (declares_route, route_method, route_path, route_root)
             {
                 if let (Ok(method_str), Ok(path_str)) = (
                     std::str::from_utf8(&source[r_method.start_byte()..r_method.end_byte()]),
@@ -927,6 +954,29 @@ impl LanguageProvider for RubyProvider {
             }
             None => false,
         });
+
+        // Rails states most of its routing surface through `resources`, which
+        // the generic matcher above cannot see because it names a symbol
+        // rather than a path. Expand the `routes.draw` DSL, and drop the
+        // generic captures inside those blocks — the expansion reports the
+        // same lines with the enclosing `namespace` / `scope` prefix applied.
+        let rails = crate::ruby::rails_routes::extract(tree.root_node(), source);
+        if !rails.draw_rows.is_empty() {
+            routes.retain(|r| !rails.covers(r.span.0));
+            routes.extend(rails.routes);
+            // A block past the walker's nesting cap keeps its generic captures
+            // (`covers` excludes it) and is reported as a place the graph
+            // stopped looking, the same way `send` and `eval` are.
+            for span in rails.truncated {
+                blind_spots.push(BlindSpot {
+                    kind: BLIND_RAILS_ROUTES_DEPTH.0.to_string(),
+                    file_path: path.to_path_buf(),
+                    span,
+                    hint: BLIND_RAILS_ROUTES_DEPTH.1.to_string(),
+                    is_test: is_test_file,
+                });
+            }
+        }
 
         // Ruby test files: spec/*_spec.rb (RSpec) or test/*_test.rb (Minitest).
         let file_category = {
