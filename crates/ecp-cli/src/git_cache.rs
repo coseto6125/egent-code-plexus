@@ -155,6 +155,10 @@ pub fn common_dir(cwd: &Path) -> io::Result<PathBuf> {
 /// lives. A linked worktree's differs from the common dir, so the two must
 /// never be collapsed: doing so is what put `head_file_mtime` on the main
 /// worktree's HEAD.
+///
+/// Spawns git on a cache miss, with no file-reader fast path: `git_dirs`
+/// already answers the layouts the readers model, so this runs only where
+/// they declined. Keep it off the per-query hot path.
 pub fn git_dir(cwd: &Path) -> io::Result<PathBuf> {
     cached_git_path(cwd, |c| &mut c.git_dir, read_git_dir)
 }
