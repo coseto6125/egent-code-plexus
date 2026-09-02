@@ -79,7 +79,10 @@ Reviewers (or the orchestrator at Tier 1) get the diff plus the Phase-2 artefact
 5. **Stringly-typed code** — raw strings where constants / enums / branded types exist
 6. **Unnecessary JSX nesting** — wrapper elements adding no layout value
 7. **Nested conditionals 3+ deep** — flatten with early returns, guard clauses, lookup tables
-8. **WHAT-comments** — delete (identifiers say it); keep only non-obvious WHY
+8. **Nested ternaries** — replace with `match`/switch or if-else chains
+9. **WHAT-comments** — delete (identifiers say it); keep only non-obvious WHY
+
+**Readability guardrail** — a fix must make code *easier* to read, not just shorter. Reject clarity-for-line-count trades: dense one-liners, over-clever collapses, merging distinct concerns, dropping an abstraction that earned its place.
 
 ### Checklist — Efficiency
 
