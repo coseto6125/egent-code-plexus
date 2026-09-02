@@ -5,7 +5,7 @@
 > does this change break, which routes and database tables does this service
 > reach — over 31 languages in one graph.
 
-Version: 0.12.0
+Version: 0.12.1
 Repository: https://github.com/coseto6125/egent-code-plexus
 License: MIT
 Install: curl -sSfL https://github.com/coseto6125/egent-code-plexus/releases/latest/download/install.sh | sh

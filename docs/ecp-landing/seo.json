@@ -97,5 +97,5 @@
     "es": "Egent Code Plexus (<strong>ecp</strong>) es un grafo de inteligencia de código de línea de comandos para agentes de IA. Indexa un repositorio como grafo de símbolos y responde preguntas estructurales directamente: <em>qué funciones llaman a esta</em>, <em>qué rompe este cambio</em>, <em>a qué rutas HTTP y tablas de base de datos llega este servicio</em>, en 31 lenguajes, en milisegundos y sin demonio. Donde el grafo no ve algo lo dice con un registro BlindSpot en lugar de devolver un resultado vacío que parece prueba de ausencia."
   },
   "indexNowKey": "fca60b3c39ca4cdc97727c91f4253c95",
-  "contentDate": "2026-09-01"
+  "contentDate": "2026-09-02"
 }

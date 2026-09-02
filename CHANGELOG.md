@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.12.1 - 2026-09-02
+
+### Bug Fixes
+
+- never publish or trust a tantivy index the writer did not commit (#736)
+
+### Performance
+
+- cut the fixed overhead every query pays, and the per-node waste in impact and find (#735)
+
 ## v0.12.0 - 2026-09-01
 
 ### Skills
