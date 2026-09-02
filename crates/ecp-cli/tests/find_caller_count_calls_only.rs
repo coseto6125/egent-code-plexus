@@ -120,11 +120,7 @@ fn find_callers_and_callees_lists_hold_calls_edges_only() {
     // What the model reads: the file names never appear as callers.
     let rendered = format_hits(std::slice::from_ref(hit));
     assert!(
-        rendered.contains("Called by: caller_a"),
-        "rendered: {rendered}"
-    );
-    assert!(
-        !rendered.contains("lib.rs,") && !rendered.contains("consumer.rs"),
+        rendered.contains("Called by: caller_a\n"),
         "rendered: {rendered}"
     );
     assert!(!rendered.contains("Calls:"), "rendered: {rendered}");
