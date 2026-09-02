@@ -224,13 +224,14 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
         // per-process id, so the fragments `ensure_fresh` just wrote above are
         // still read back by this same process. Empty/absent overlay = zero
         // query-path cost.
-        // An explicit `--graph` names a foreign graph; the overlay's symbols
-        // and edges belong to cwd's own graph, so merging the two answers a
-        // directed query with rows the named graph does not contain.
+        // The overlay's symbols and edges belong to cwd's own graph, so
+        // merging them into a foreign graph answers a directed query with
+        // rows that graph does not contain. `--graph` pointing at the very
+        // file cwd would have resolved is not foreign, and keeps it.
+        let foreign_graph =
+            graph_path::is_custom(&cli.graph) && !graph_path::is_cwd_graph(&graph_path, &cwd);
         let engine = match auto_ensure::resolve_session_overlay_dir(&cwd) {
-            Some(dir) if dir.is_dir() && !graph_path::is_custom(&cli.graph) => {
-                engine.with_overlay(dir, cwd.clone())
-            }
+            Some(dir) if dir.is_dir() && !foreign_graph => engine.with_overlay(dir, cwd.clone()),
             _ => engine,
         };
 

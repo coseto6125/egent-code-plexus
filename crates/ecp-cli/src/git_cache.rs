@@ -88,12 +88,21 @@ fn head_file_mtime(cwd: &Path) -> Option<SystemTime> {
     };
     let head = gitdir.join("HEAD");
     let head_content = fs::read_to_string(&head).ok()?;
-    let path = head_content
+    let Some(refname) = head_content
         .strip_prefix("ref:")
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map_or(head, |r| common.join(r));
-    fs::metadata(&path)
+    else {
+        // Detached: HEAD itself carries the sha and is rewritten on checkout.
+        return fs::metadata(&head).ok().and_then(|m| m.modified().ok());
+    };
+    // Same order `head_sha_from_files` reads the value in: shared branch refs
+    // under the common dir, per-worktree refs (`refs/bisect`, `refs/worktree`)
+    // under the worktree's own gitdir, packed last. Watching a path the reader
+    // would not have read leaves the sentinel `None`, and `head_sha` treats
+    // `None == None` as a hit — the entry would then never expire.
+    fs::metadata(common.join(refname))
+        .or_else(|_| fs::metadata(gitdir.join(refname)))
         .or_else(|_| fs::metadata(common.join("packed-refs")))
         .ok()
         .and_then(|m| m.modified().ok())

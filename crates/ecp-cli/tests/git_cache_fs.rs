@@ -263,3 +263,44 @@ fn test_head_sha_follows_a_commit_on_a_linked_worktree_branch() {
          cached HEAD; the main worktree's branch is not the sentinel"
     );
 }
+
+#[test]
+fn test_head_sha_follows_a_per_worktree_ref() {
+    // `refs/worktree/*` and `refs/bisect/*` are per-worktree: the loose ref
+    // lives in the worktree's own gitdir, not the shared dir. A sentinel that
+    // only looks in the common dir finds nothing, and `head_sha` reads the
+    // resulting `None` as a cache hit, so the entry never expires.
+    let tmp = init_repo_with_commit();
+    let first = git_stdout(tmp.path(), &["rev-parse", "HEAD"]);
+    std::fs::write(tmp.path().join("b.txt"), "y").unwrap();
+    commit_all(tmp.path(), "second");
+    let second = git_stdout(tmp.path(), &["rev-parse", "HEAD"]);
+
+    let wt = tmp.path().join("wt");
+    run_git(
+        tmp.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            wt.to_str().unwrap(),
+            &first,
+        ],
+    );
+    run_git(&wt, &["update-ref", "refs/worktree/wip", &first]);
+    run_git(&wt, &["symbolic-ref", "HEAD", "refs/worktree/wip"]);
+    assert!(
+        !tmp.path().join(".git/refs/worktree/wip").exists(),
+        "fixture: the ref must be per-worktree, not shared"
+    );
+    assert_eq!(git_cache::head_sha(&wt), Some(first));
+
+    wait_past_mtime_granularity();
+    run_git(&wt, &["update-ref", "refs/worktree/wip", &second]);
+    assert_eq!(
+        git_cache::head_sha(&wt),
+        Some(second),
+        "moving a per-worktree ref must invalidate the cached HEAD"
+    );
+}

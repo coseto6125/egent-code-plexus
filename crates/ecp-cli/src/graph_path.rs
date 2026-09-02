@@ -27,6 +27,20 @@ pub fn is_custom(graph: &Path) -> bool {
     graph.as_os_str() != LEGACY_DEFAULT
 }
 
+/// True when `path` is the graph `resolve` picks for `cwd` anyway. An agent
+/// that reads the path out of `ecp summary` and then passes it back as
+/// `--graph` is naming its own graph, not a foreign one, and must not get a
+/// different answer for it.
+pub fn is_cwd_graph(path: &Path, cwd: &Path) -> bool {
+    let Some(own) = resolve_v2(cwd) else {
+        return false;
+    };
+    match (std::fs::canonicalize(&own), std::fs::canonicalize(path)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => own == path,
+    }
+}
+
 fn resolve_v2(cwd: &Path) -> Option<PathBuf> {
     let home_ecp = resolve_home_ecp();
     let repo_dir_name = repo_identity::repo_dir_name_for_cwd(cwd).ok()?;
