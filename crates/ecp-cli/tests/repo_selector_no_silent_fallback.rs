@@ -217,3 +217,53 @@ fn a_registered_repo_with_no_index_left_is_not_answered_from_the_cwd() {
     );
     let _ = repo;
 }
+
+/// A selector typed at a command that needs a path is a different mistake from
+/// a mistyped path, and the two must not read the same. The reader who wrote
+/// `--repo @all` wants to know which commands take one, and being told "not a
+/// directory" and nothing else sends them looking for a directory.
+#[test]
+fn a_selector_on_a_path_only_command_says_where_selectors_work() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, home) = indexed_repo(tmp.path());
+
+    let selector = run(
+        &repo,
+        &home,
+        &[
+            "impact",
+            "--target",
+            "only_here",
+            "--direction",
+            "upstream",
+            "--repo",
+            "@all",
+        ],
+    );
+    let selector_text = combined(&selector);
+    assert!(!selector.status.success());
+    assert!(
+        selector_text.contains("bm25"),
+        "a selector must be pointed at the commands that accept one: {selector_text}"
+    );
+
+    let typo = run(
+        &repo,
+        &home,
+        &[
+            "impact",
+            "--target",
+            "only_here",
+            "--direction",
+            "upstream",
+            "--repo",
+            "no-such-directory-here",
+        ],
+    );
+    let typo_text = combined(&typo);
+    assert!(!typo.status.success());
+    assert!(
+        !typo_text.contains("bm25"),
+        "a mistyped path must not carry the selector advice: {typo_text}"
+    );
+}
