@@ -267,3 +267,58 @@ fn a_selector_on_a_path_only_command_says_where_selectors_work() {
         "a mistyped path must not carry the selector advice: {typo_text}"
     );
 }
+
+/// `cypher` accepted a registry name and then ignored it: it resolved the
+/// selector, checked that it named exactly one repo, and answered from the
+/// current directory's graph regardless of which repo that was. Standing in A
+/// and asking for B returned A's symbols under B's name.
+///
+/// A review read the refusal that replaced it as a lost feature. It was not a
+/// feature — the selector was accepted, never honoured. This pins the
+/// distinction: the wrong repo's symbols must not come back, whether the
+/// command refuses or grows real cross-repo support later.
+#[test]
+fn cypher_does_not_answer_about_the_current_repo_when_asked_for_another() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let mut names = Vec::new();
+    for (dir, sym) in [("a", "sym_in_a"), ("b", "sym_in_b")] {
+        let repo = tmp.path().join(dir);
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "t@example.invalid"]);
+        git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("lib.py"), format!("def {sym}():\n    return 1\n")).unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "init"]);
+        assert!(run(&repo, &home, &["admin", "index", "--repo", "."])
+            .status
+            .success());
+        names.push(repo);
+    }
+
+    let registry = std::fs::read_to_string(home.join(".ecp/registry.json")).unwrap();
+    let b_name = registry
+        .split('"')
+        .find(|k| k.starts_with("b__"))
+        .expect("b must be registered")
+        .to_string();
+
+    let out = run(
+        &names[0],
+        &home,
+        &[
+            "cypher",
+            "MATCH (n:Function) RETURN n.name",
+            "--repo",
+            &b_name,
+        ],
+    );
+    let text = combined(&out);
+    assert!(
+        !text.contains("sym_in_a"),
+        "asked about b, answered about a: {text}"
+    );
+}
