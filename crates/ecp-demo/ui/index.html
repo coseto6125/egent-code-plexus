@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ecp live demo</title>
+  <meta name="description" content="Paste a public GitHub repository, let ecp index it, then run the same code-graph queries an AI agent gets over MCP.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%2300F2FF'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="logo"></span>
+      <span>ecp</span>
+      <span class="muted">live demo</span>
+      <span class="pill" id="version"></span>
+    </div>
+    <nav>
+      <a href="https://coseto6125.github.io/egent-code-plexus/" rel="noopener">site</a>
+      <a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">github</a>
+    </nav>
+  </header>
+
+  <section class="hero">
+    <h1>Point ecp at any public GitHub repository.</h1>
+    <p class="muted">It gets cloned and indexed here, then every read-only query below runs against its code graph, with the exact command an agent would type.</p>
+    <form id="add-form" class="add" autocomplete="off">
+      <input id="add-url" type="text" placeholder="https://github.com/owner/repo" spellcheck="false" required>
+      <button type="submit" id="add-btn">Index</button>
+    </form>
+    <p id="add-status" class="status"></p>
+    <p id="limits" class="hint"></p>
+  </section>
+
+  <main class="layout">
+    <aside class="side">
+      <section>
+        <h2>Repositories</h2>
+        <div id="repos" class="list"></div>
+        <p id="repos-empty" class="hint">Nothing indexed yet.</p>
+      </section>
+      <section>
+        <h2>Tool</h2>
+        <p class="hint">Same list an agent gets over MCP. Read-only subset.</p>
+        <div id="tools" class="list"></div>
+      </section>
+    </aside>
+
+    <section class="work">
+      <div class="tool-head">
+        <h1 id="tool-name">…</h1>
+        <p id="tool-desc" class="muted"></p>
+      </div>
+      <form id="form" autocomplete="off">
+        <div id="fields" class="fields"></div>
+        <div class="actions">
+          <button type="submit" id="run">Run</button>
+          <span id="status" class="status"></span>
+        </div>
+      </form>
+
+      <div class="cmd-row">
+        <code id="cmd" class="cmd"></code>
+        <button type="button" id="copy" class="ghost small" hidden>copy</button>
+      </div>
+
+      <div id="out-wrap" hidden>
+        <div class="out-bar">
+          <span id="out-meta" class="muted"></span>
+          <label class="toggle"><input type="checkbox" id="raw"> raw</label>
+        </div>
+        <pre id="out" class="out"></pre>
+        <details id="err-wrap" hidden>
+          <summary>stderr</summary>
+          <pre id="err" class="out err"></pre>
+        </details>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot muted">
+    Shared free instance: one index at a time, timeouts and output caps apply, least-used repositories are evicted. Nothing here can write to the repositories.
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

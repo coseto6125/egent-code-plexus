@@ -1,0 +1,90 @@
+name: Demo image
+
+# Builds the public demo image (ecp + ecp-demo + indexed corpora) and pushes
+# it to GHCR; the deploy hook then tells Render to pull it. A separate cron
+# job pings the live service so the free instance never spins down.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.dockerignore'
+      - '.github/workflows/demo.yml'
+  workflow_dispatch:
+  schedule:
+    - cron: '*/10 * * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: Build and push
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/ecp-demo
+          tags: |
+            type=raw,value=latest
+            type=sha,format=long
+
+      - name: Build and push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: crates/ecp-demo/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Optional: set RENDER_DEPLOY_HOOK_URL (Render → service → Settings →
+      # Deploy Hook) and every image push redeploys. Without it, deploy by hand.
+      - name: Tell Render to redeploy
+        if: env.HOOK != ''
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: curl -fsS -o /dev/null "$HOOK"
+
+  keepalive:
+    name: Keep the free instance awake
+    if: github.event_name == 'schedule' && vars.ECP_DEMO_URL != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /healthz
+        env:
+          URL: ${{ vars.ECP_DEMO_URL }}
+        # A sleeping instance answers in about a minute; anything slower is
+        # worth a red run.
+        run: curl -fsS --max-time 120 -o /dev/null "${URL%/}/healthz"

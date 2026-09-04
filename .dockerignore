@@ -1,0 +1,22 @@
+# Build context for crates/ecp-demo/Dockerfile. Everything a `cargo build`
+# of the workspace does not read stays out: the sample corpora alone are
+# several GB and would be shipped to the builder on every image build.
+# `docs/skills` and `skill_sample` stay: ecp-cli embeds them with `include_dir!`.
+.sample_repo
+.vscode_source
+.source_code
+.claude
+.codegraph
+.ecp
+.gemini
+.gitnexus
+.gnx
+.ruff_cache
+target
+docs
+!docs/skills
+interviews
+packaging
+scripts
+tests
+.github
