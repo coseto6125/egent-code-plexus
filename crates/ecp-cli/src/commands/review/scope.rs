@@ -6,7 +6,10 @@ pub fn resolve(args: &super::ReviewArgs, repo_dir: &Path) -> Result<Vec<PathBuf>
         return Ok(files.iter().map(PathBuf::from).collect());
     }
     match &args.since {
-        Some(r) => diff_name_only(repo_dir, &format!("{r}...HEAD")),
+        Some(r) => {
+            crate::git::safe_exec::reject_option_like_rev(r)?;
+            diff_name_only(repo_dir, &format!("{r}...HEAD"))
+        }
         None => {
             let mut tracked = diff_name_only(repo_dir, "HEAD")?;
             tracked.extend(untracked_files(repo_dir)?);
@@ -18,7 +21,9 @@ pub fn resolve(args: &super::ReviewArgs, repo_dir: &Path) -> Result<Vec<PathBuf>
 /// Run `git diff <spec> --name-only` and parse the newline-separated output.
 fn diff_name_only(repo_dir: &Path, spec: &str) -> Result<Vec<PathBuf>, EcpError> {
     let out = crate::git::safe_exec::git()
-        .args(["diff", spec, "--name-only"])
+        .args(["diff"])
+        .args(crate::git::safe_exec::DIFF_HARDENING)
+        .args([spec, "--name-only"])
         .current_dir(repo_dir)
         .output()
         .map_err(|e| EcpError::GitDiff {

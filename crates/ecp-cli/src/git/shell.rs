@@ -11,12 +11,14 @@ impl GitDiffProvider for ShellGitProvider {
     fn diff(&self, repo: &Path, scope: &DiffScope) -> Result<Vec<FileDiff>, EcpError> {
         const ZERO_CONTEXT: &str = "-U0";
         let mut args: Vec<&str> = vec!["diff"];
+        args.extend(super::safe_exec::DIFF_HARDENING);
         let base_owned: String;
         match scope {
             DiffScope::Unstaged => {}
             DiffScope::Staged => args.push("--staged"),
             DiffScope::All => args.push("HEAD"),
             DiffScope::Compare(base) => {
+                super::safe_exec::reject_option_like_rev(base)?;
                 base_owned = base.clone();
                 args.push(&base_owned);
             }

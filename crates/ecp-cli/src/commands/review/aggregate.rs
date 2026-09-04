@@ -262,8 +262,11 @@ fn run_tool_map(
 /// Run `git diff -U0 <since>...HEAD` and build a per-file set of added lines.
 /// Returns `None` when git fails (caller degrades gracefully).
 fn diff_added_lines(repo_dir: &Path, since: &str) -> Option<HashMap<String, HashSet<u32>>> {
+    safe_exec::reject_option_like_rev(since).ok()?;
     let out = safe_exec::git()
-        .args(["diff", "-U0", &format!("{since}...HEAD")])
+        .args(["diff", "-U0"])
+        .args(safe_exec::DIFF_HARDENING)
+        .arg(format!("{since}...HEAD"))
         .current_dir(repo_dir)
         .output()
         .ok()?;

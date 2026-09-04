@@ -2,6 +2,7 @@
 //! go through `safe_exec::git()` to ensure hostile repo configs cannot
 //! escalate to code execution. See spec §8 H4.
 
+use ecp_core::EcpError;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -14,6 +15,13 @@ use std::time::{Duration, Instant};
 /// - `core.fsmonitor=` — empties any user-defined fsmonitor exec
 /// - `core.editor=false` — neutralizes editor invocations
 /// - `credential.helper=` — empties helper to avoid running arbitrary bins
+/// - `diff.external=` — empties the external diff driver, which a scanned
+///   repo's own `.git/config` can otherwise point at any executable
+///
+/// A textconv driver is named per-attribute (`.gitattributes` says
+/// `f.c diff=foo`, config says `diff.foo.textconv=…`), so no single `-c`
+/// disables it. Diff-family callers pass `--no-textconv` themselves; see
+/// [`DIFF_HARDENING`].
 pub fn git() -> Command {
     let mut cmd = Command::new("git");
     cmd.args([
@@ -25,8 +33,40 @@ pub fn git() -> Command {
         "core.editor=false",
         "-c",
         "credential.helper=",
+        "-c",
+        "diff.external=",
     ]);
     cmd
+}
+
+/// Per-invocation flags for every diff-family command (`diff`, `log -p`,
+/// `show`, `blame`, `grep`). They close the two ways a scanned repository
+/// turns rendering a diff into running its own code:
+/// - `--no-ext-diff` — ignores `diff.external` even if a config layer sets it
+///   after ours (belt to [`git()`]'s braces).
+/// - `--no-textconv` — ignores per-attribute textconv drivers, which `-c`
+///   cannot pre-empt because the driver name comes from `.gitattributes`.
+pub const DIFF_HARDENING: [&str; 2] = ["--no-ext-diff", "--no-textconv"];
+
+/// Reject a user-supplied revision that git would read as an option.
+///
+/// Revisions reach git as bare argv elements, so a value like
+/// `--output=/etc/passwd` is an *option*, not a revision: `git diff` then
+/// writes its patch over that path and reports no changes, because stdout
+/// came back empty. A git refname can never begin with `-`
+/// (`git check-ref-format` forbids it), so refusing the whole class costs no
+/// legitimate input.
+///
+/// `--` cannot substitute for this check: before a revision it tells git the
+/// remaining arguments are paths, which silently turns the revision into a
+/// pathspec and changes what the diff means.
+pub fn reject_option_like_rev(rev: &str) -> Result<(), EcpError> {
+    if rev.starts_with('-') {
+        return Err(EcpError::InvalidArgument(format!(
+            "revision `{rev}` starts with `-`, which git reads as an option, not a revision"
+        )));
+    }
+    Ok(())
 }
 
 /// True when running inside an agent sandbox that restricts (or fully blocks)
