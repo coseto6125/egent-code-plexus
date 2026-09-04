@@ -101,18 +101,33 @@ fn resolve_home_ecp_from_env(
     ecp_home: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
 ) -> PathBuf {
-    if let Some(path) = ecp_home {
-        let candidate = PathBuf::from(path);
-        if probe_writable(&candidate) {
-            return candidate;
-        }
+    let candidates: Vec<PathBuf> = [
+        ecp_home.map(PathBuf::from),
+        home.map(|h| PathBuf::from(h).join(".ecp")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    // A writable root serves reads and writes both, so it wins outright.
+    if let Some(writable) = candidates.iter().find(|c| probe_writable(c)) {
+        return writable.clone();
     }
-    if let Some(h) = home {
-        let candidate = PathBuf::from(h).join(".ecp");
-        if probe_writable(&candidate) {
-            return candidate;
-        }
+
+    // Nothing is writable, which is what an agent under a read-only sandbox
+    // sees — and the root it cannot write is usually the one holding the
+    // index it wants to read. Sending it to an empty temp directory threw
+    // that index away: with a writable temp dir the query rebuilt the whole
+    // graph somewhere else, and with a read-only one it died as `Permission
+    // denied (os error 13)` while the answer sat on disk. Prefer a root that
+    // already holds a registry, and let a write fail where the data lives.
+    if let Some(readable) = candidates
+        .iter()
+        .find(|c| c.join("registry.json").is_file())
+    {
+        return readable.clone();
     }
+
     fallback_home()
 }
 
@@ -172,6 +187,62 @@ mod tests {
         assert!(probe_writable(tmp.path()));
         // probe file should be cleaned up
         assert!(!tmp.path().join(".ecp-write-probe").exists());
+    }
+
+    /// A sandboxed agent gets a read-only filesystem and an index it can
+    /// still read. Sending it to an empty temp directory discards that index:
+    /// with a writable temp dir the query silently rebuilds the whole graph
+    /// elsewhere, and with a read-only one it dies as `Permission denied`
+    /// while the answer sits on disk.
+    #[cfg(unix)]
+    #[test]
+    fn an_unwritable_root_holding_a_registry_beats_the_temp_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let cache = home.join(".ecp");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("registry.json"), b"{}").unwrap();
+
+        let mut perms = std::fs::metadata(&cache).unwrap().permissions();
+        perms.set_mode(0o500);
+        std::fs::set_permissions(&cache, perms).unwrap();
+
+        let resolved = resolve_home_ecp_from_env(None, Some(home.into_os_string()));
+
+        let mut restore = std::fs::metadata(&cache).unwrap().permissions();
+        restore.set_mode(0o700);
+        std::fs::set_permissions(&cache, restore).unwrap();
+
+        assert_eq!(
+            resolved, cache,
+            "an unwritable root holding an index must still be read from"
+        );
+    }
+
+    /// The companion. An unwritable root with nothing in it answers no query,
+    /// so the temp fallback is still right — otherwise the rule above would
+    /// strand every fresh sandbox on a root it cannot use.
+    #[cfg(unix)]
+    #[test]
+    fn an_unwritable_empty_root_still_falls_back_to_temp() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let cache = home.join(".ecp");
+        std::fs::create_dir_all(&cache).unwrap();
+
+        let mut perms = std::fs::metadata(&cache).unwrap().permissions();
+        perms.set_mode(0o500);
+        std::fs::set_permissions(&cache, perms).unwrap();
+
+        let resolved = resolve_home_ecp_from_env(None, Some(home.into_os_string()));
+
+        let mut restore = std::fs::metadata(&cache).unwrap().permissions();
+        restore.set_mode(0o700);
+        std::fs::set_permissions(&cache, restore).unwrap();
+
+        assert_eq!(resolved, fallback_home());
     }
 
     #[cfg(unix)]
