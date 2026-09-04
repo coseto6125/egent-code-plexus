@@ -254,7 +254,100 @@ fn review_rejects_an_option_shaped_since_even_when_files_are_given() {
         "git ran with the injected --output and created the file: {text}"
     );
     assert!(
+        !out.status.success(),
+        "the rejection has to reach the exit status too, or a script reads \
+         this run as a clean review: {text}"
+    );
+    assert!(
         text.contains("not a revision") || text.contains("starts with `-`"),
         "the rejection must name the option-shaped revision: {text}"
+    );
+}
+
+/// A filter driver is the third way a scanned repository names a program for
+/// git to run, and the only one that fires on the commands `ecp diff` uses to
+/// move the worktree. `core.hooksPath=/dev/null` does not touch it, and neither
+/// `checkout` nor `stash` has a `--no-filters`.
+///
+/// Both keys are set on purpose: `process` takes precedence over `smudge`, so a
+/// fix that covers only `smudge` and `clean` leaves this test red.
+///
+/// The tree is left dirty so the guard takes its `stash push -u` path as well,
+/// and the assertions cover the guard's contract in both directions — the
+/// payload never runs, and the working tree comes back as it was.
+#[cfg(unix)]
+#[test]
+fn repo_defined_filter_drivers_do_not_run_during_checkout_or_stash() {
+    use ecp_cli::commands::diff::git_guard::GitGuard;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    repo_with_two_commits(&repo);
+
+    let marker = tmp.path().join("filter-ran");
+    let script = tmp.path().join("filter.sh");
+    // A filter reads the blob on stdin and writes the converted bytes to
+    // stdout, so the passthrough here is a bare `cat`, not `cat "$1"`.
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf 'executed' > '{}'\ncat\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fs::write(repo.join(".gitattributes"), "f.txt filter=evil\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "attrs"]);
+    git(
+        &repo,
+        &["config", "filter.evil.smudge", script.to_str().unwrap()],
+    );
+    git(
+        &repo,
+        &["config", "filter.evil.clean", script.to_str().unwrap()],
+    );
+    git(
+        &repo,
+        &["config", "filter.evil.process", script.to_str().unwrap()],
+    );
+
+    let base = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD~1"])
+            .current_dir(&repo)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+
+    fs::write(repo.join("f.txt"), "dirty\n").unwrap();
+
+    {
+        let _guard = GitGuard::enter(&repo, &base).expect("the guard must still enter");
+        assert!(
+            !marker.exists(),
+            "a filter driver from the scanned repo ran during stash/checkout: {}",
+            fs::read_to_string(&marker).unwrap_or_default()
+        );
+    }
+
+    assert!(
+        !marker.exists(),
+        "a filter driver ran while the guard was restoring the worktree: {}",
+        fs::read_to_string(&marker).unwrap_or_default()
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("f.txt")).unwrap(),
+        "dirty\n",
+        "the guard must hand the dirty worktree back unchanged"
     );
 }

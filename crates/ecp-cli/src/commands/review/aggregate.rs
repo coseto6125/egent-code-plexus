@@ -262,6 +262,10 @@ fn run_tool_map(
 /// Run `git diff -U0 <since>...HEAD` and build a per-file set of added lines.
 /// Returns `None` when git fails (caller degrades gracefully).
 fn diff_added_lines(repo_dir: &Path, since: &str) -> Option<HashMap<String, HashSet<u32>>> {
+    // `scope::resolve` is the authority and runs first on the one path into
+    // this module (`review::run`), so an invalid value never arrives here.
+    // The check is kept as the second layer, and stays `.ok()?` because the
+    // caller reads `None` as "no filter available" for every git failure.
     safe_exec::reject_option_like_rev(since).ok()?;
     let out = safe_exec::git()
         .args(["diff", "-U0"])
