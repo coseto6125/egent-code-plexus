@@ -1445,7 +1445,7 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<RepoTarget>, EcpError> 
             return Err(EcpError::InvalidArgument(format!(
                 "--repo: not in the registry: {}.{} {} registered in total.",
                 unmatched.join(", "),
-                did_you_mean(&unmatched, &snapshot),
+                did_you_mean(&unmatched, snapshot),
                 snapshot.repos.len()
             )));
         }

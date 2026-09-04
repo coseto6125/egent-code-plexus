@@ -36,9 +36,11 @@ fn fingerprint_dir_name() -> &'static str {
     CACHE.get_or_init(|| short_hash_hex8(BUILDER_FINGERPRINT.as_bytes()))
 }
 
-/// Stable digest of a repo-relative path. Separators are normalised to `/`
-/// only when the platform uses something else, so the common case hashes the
-/// borrowed bytes with no allocation.
+/// Stable digest of a repo-relative path, so the same file hashes the same on
+/// every platform. The `\` scan is over the string's own bytes, not a platform
+/// check: a path holding none — every ordinary Unix path, and a Windows one
+/// already carrying forward slashes — hashes the borrowed bytes with no
+/// allocation, and only a path that really contains `\` pays for the rewrite.
 fn path_key(rel_path: &Path) -> u64 {
     let raw = rel_path.to_string_lossy();
     match raw.contains('\\') {

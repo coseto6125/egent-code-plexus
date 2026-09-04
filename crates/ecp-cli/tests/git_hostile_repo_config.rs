@@ -152,3 +152,61 @@ fn ordinary_revisions_still_diff() {
         "the hardening must not change what a normal diff reports"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn repo_supplied_hooks_do_not_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    repo_with_two_commits(&repo);
+
+    // No config needed for this one: an executable in `.git/hooks/` is the
+    // whole attack, and ecp checks out and stashes on the user's behalf.
+    let marker = tmp.path().join("hook-ran");
+    let hook = repo.join(".git/hooks/post-checkout");
+    payload_script(&hook, &marker);
+
+    let out = ecp_cli::git::safe_exec::git()
+        .args(["checkout", "--detach", "HEAD~1"])
+        .current_dir(&repo)
+        .output()
+        .expect("git checkout");
+    assert!(
+        out.status.success(),
+        "checkout itself must still work: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !marker.exists(),
+        "the scanned repo's post-checkout hook ran: {}",
+        fs::read_to_string(&marker).unwrap_or_default()
+    );
+}
+
+/// The hardening lives in per-invocation flags, not in a `-c` that empties
+/// `diff.external`: git reads an empty external driver as a command to run and
+/// dies with `cannot run :` on every ordinary diff. This asserts the plain
+/// path still works, so nobody reintroduces that `-c` and breaks every caller
+/// who renders a diff without [`DIFF_HARDENING`].
+#[test]
+fn a_bare_hardened_git_still_renders_an_ordinary_diff() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    repo_with_two_commits(&repo);
+
+    let out = ecp_cli::git::safe_exec::git()
+        .args(["diff", "HEAD~1", "HEAD"])
+        .current_dir(&repo)
+        .output()
+        .expect("git diff");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "a plain diff through safe_exec must succeed, got: {stderr}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("+b"),
+        "expected the diff body, got stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}

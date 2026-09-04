@@ -15,13 +15,20 @@ use std::time::{Duration, Instant};
 /// - `core.fsmonitor=` — empties any user-defined fsmonitor exec
 /// - `core.editor=false` — neutralizes editor invocations
 /// - `credential.helper=` — empties helper to avoid running arbitrary bins
-/// - `diff.external=` — empties the external diff driver, which a scanned
-///   repo's own `.git/config` can otherwise point at any executable
+/// - `core.hooksPath=/dev/null` — points the hook directory at nothing, so a
+///   scanned repository's `.git/hooks/post-checkout` (and the rest) cannot run
+///   during ecp's own bookkeeping. This one needs no config at all from the
+///   attacker: an executable dropped in `.git/hooks/` is enough, and
+///   `ecp diff --baseline` checks out and stashes on the user's behalf.
 ///
-/// A textconv driver is named per-attribute (`.gitattributes` says
-/// `f.c diff=foo`, config says `diff.foo.textconv=…`), so no single `-c`
-/// disables it. Diff-family callers pass `--no-textconv` themselves; see
-/// [`DIFF_HARDENING`].
+/// Two execution vectors have no `-c` that turns them off, because the
+/// program's name comes from `.gitattributes` rather than from config: an
+/// external diff driver and a textconv driver. Diff-family callers pass
+/// [`DIFF_HARDENING`] for those. `-c diff.external=` is deliberately NOT set
+/// here — git treats the empty value as a command to run and dies with
+/// `cannot run : No such file or directory` on every ordinary diff, so it
+/// breaks benign repositories while adding nothing `--no-ext-diff` does not
+/// already do.
 pub fn git() -> Command {
     let mut cmd = Command::new("git");
     cmd.args([
@@ -34,18 +41,18 @@ pub fn git() -> Command {
         "-c",
         "credential.helper=",
         "-c",
-        "diff.external=",
+        "core.hooksPath=/dev/null",
     ]);
     cmd
 }
 
 /// Per-invocation flags for every diff-family command (`diff`, `log -p`,
-/// `show`, `blame`, `grep`). They close the two ways a scanned repository
-/// turns rendering a diff into running its own code:
-/// - `--no-ext-diff` — ignores `diff.external` even if a config layer sets it
-///   after ours (belt to [`git()`]'s braces).
-/// - `--no-textconv` — ignores per-attribute textconv drivers, which `-c`
-///   cannot pre-empt because the driver name comes from `.gitattributes`.
+/// `show <commit>`, `blame`, `grep`). They close the two ways a scanned
+/// repository turns rendering a diff into running its own code:
+/// - `--no-ext-diff` — ignores `diff.external`, which the repo's own
+///   `.git/config` can point at any executable.
+/// - `--no-textconv` — ignores per-attribute textconv drivers, which no `-c`
+///   can pre-empt because the driver name comes from `.gitattributes`.
 pub const DIFF_HARDENING: [&str; 2] = ["--no-ext-diff", "--no-textconv"];
 
 /// Reject a user-supplied revision that git would read as an option.

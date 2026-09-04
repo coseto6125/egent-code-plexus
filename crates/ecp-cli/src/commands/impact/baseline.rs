@@ -428,8 +428,15 @@ fn hash_node_lines(lines: &[&[u8]], start_row: u32, end_row: u32) -> u64 {
 
 /// Fetch the content of a repo-relative path at a specific git ref via
 /// `git show <ref>:<path>`. Returns `None` for paths not present at that ref.
+///
+/// `git_ref` comes from `--baseline`, so it is checked here rather than relying
+/// on the caller having run the diff first. That ordering does hold today, but
+/// it is an accident of one function's body: nothing in this signature says the
+/// ref arrives validated, so a reordering or a second caller would reopen the
+/// option injection without touching this file.
 fn head_blob_at(repo: &std::path::Path, rel_path: &str, git_ref: &str) -> Option<Vec<u8>> {
     use crate::git::safe_exec;
+    safe_exec::reject_option_like_rev(git_ref).ok()?;
     let out = safe_exec::git()
         .args(["show", &format!("{git_ref}:{rel_path}")])
         .current_dir(repo)
