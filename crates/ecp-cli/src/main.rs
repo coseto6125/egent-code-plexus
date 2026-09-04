@@ -158,6 +158,22 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
     // for it, so the whole load is skipped rather than run and discarded —
     // down to the `current_dir()` syscall.
     let (engine, graph_path) = if cli.command.needs_graph() {
+        // `--repo` names the directory this invocation answers about. When it
+        // is not one, the value used to flow on as a relative path, resolve to
+        // nothing, and leave the cwd's own graph attached — so `ecp impact
+        // --repo typo-in-the-name` answered confidently about the wrong
+        // repository. Same reasoning as the `--graph` gate below, and the same
+        // remedy: an honest failure. `find` is unaffected; its `repo()` already
+        // returns `None` for the registry selectors (`@all`, comma lists) that
+        // are legitimately not paths, and resolves them itself.
+        if let Some(repo) = cli.command.repo() {
+            if !std::path::Path::new(repo).is_dir() {
+                return Err(ecp_core::EcpError::InvalidArgument(format!(
+                    "--repo {repo}: not a directory. Pass a path to the repository, \
+                     or run from inside it and omit --repo."
+                )));
+            }
+        }
         let cwd = cli
             .command
             .repo()
