@@ -121,9 +121,13 @@ fn resolve_home_ecp_from_env(
     // graph somewhere else, and with a read-only one it died as `Permission
     // denied (os error 13)` while the answer sat on disk. Prefer a root that
     // already holds a registry, and let a write fail where the data lives.
+    // Opened, not stat'd: a `registry.json` this process cannot read is no more
+    // use than a missing one, and `read_or_empty` turns it into a hard error
+    // rather than an empty registry — so picking that root strands the command
+    // where the temp fallback would still have worked.
     if let Some(readable) = candidates
         .iter()
-        .find(|c| c.join("registry.json").is_file())
+        .find(|c| std::fs::File::open(c.join("registry.json")).is_ok())
     {
         return readable.clone();
     }
@@ -218,6 +222,40 @@ mod tests {
             resolved, cache,
             "an unwritable root holding an index must still be read from"
         );
+    }
+
+    /// A `registry.json` the process cannot open is no better than a missing
+    /// one: `read_or_empty` propagates the permission error instead of
+    /// returning an empty registry, so choosing that root fails the command
+    /// where the temp fallback would still have answered.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_registry_does_not_win_the_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let cache = home.join(".ecp");
+        std::fs::create_dir_all(&cache).unwrap();
+        let registry = cache.join("registry.json");
+        std::fs::write(&registry, b"{}").unwrap();
+
+        let mut file_perms = std::fs::metadata(&registry).unwrap().permissions();
+        file_perms.set_mode(0o000);
+        std::fs::set_permissions(&registry, file_perms).unwrap();
+        let mut dir_perms = std::fs::metadata(&cache).unwrap().permissions();
+        dir_perms.set_mode(0o500);
+        std::fs::set_permissions(&cache, dir_perms).unwrap();
+
+        let resolved = resolve_home_ecp_from_env(None, Some(home.into_os_string()));
+
+        let mut restore_dir = std::fs::metadata(&cache).unwrap().permissions();
+        restore_dir.set_mode(0o700);
+        std::fs::set_permissions(&cache, restore_dir).unwrap();
+        let mut restore_file = std::fs::metadata(&registry).unwrap().permissions();
+        restore_file.set_mode(0o600);
+        std::fs::set_permissions(&registry, restore_file).unwrap();
+
+        assert_eq!(resolved, fallback_home());
     }
 
     /// The companion. An unwritable root with nothing in it answers no query,
