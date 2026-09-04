@@ -13,6 +13,13 @@ on:
       - 'Cargo.lock'
       - '.dockerignore'
       - '.github/workflows/demo.yml'
+  # A pull request builds the image without pushing it, so a broken
+  # Dockerfile is caught before it reaches main.
+  pull_request:
+    paths:
+      - 'crates/ecp-demo/**'
+      - '.dockerignore'
+      - '.github/workflows/demo.yml'
   workflow_dispatch:
   schedule:
     - cron: '*/10 * * * *'
@@ -28,6 +35,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      PUSH: ${{ github.event_name != 'pull_request' }}
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
@@ -43,6 +52,7 @@ jobs:
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Log in to GHCR
+        if: env.PUSH == 'true'
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -63,7 +73,7 @@ jobs:
         with:
           context: .
           file: crates/ecp-demo/Dockerfile
-          push: true
+          push: ${{ env.PUSH == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -72,7 +82,7 @@ jobs:
       # Optional: set RENDER_DEPLOY_HOOK_URL (Render → service → Settings →
       # Deploy Hook) and every image push redeploys. Without it, deploy by hand.
       - name: Tell Render to redeploy
-        if: env.HOOK != ''
+        if: env.PUSH == 'true' && env.HOOK != ''
         env:
           HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
         run: curl -fsS -o /dev/null "$HOOK"
