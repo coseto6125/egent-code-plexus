@@ -15,6 +15,13 @@ ecp <cmd> --graph .ecp/graph.bin
 ```
 
 ## Multi-repo Selectors
+`--repo` takes a registry selector instead of a path on three commands only:
+`find --mode bm25`, `summary`, and `contracts`. Everywhere else `--repo` must be
+a directory, and a selector is refused rather than silently answered from the
+current directory.
+
 - `@all`: Every registered repository.
-- `@<group>`: All members of a named group.
-- `name1,name2`: Explicit list.
+- `@<group>`: All members of a named group. Top-level commands refuse this one
+  and point at `ecp group <verb>`.
+- `name1,name2`: Explicit list. A name the registry does not hold is an error,
+  not a silently narrower search.

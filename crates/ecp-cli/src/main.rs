@@ -168,9 +168,19 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
         // are legitimately not paths, and resolves them itself.
         if let Some(repo) = cli.command.repo() {
             if !std::path::Path::new(repo).is_dir() {
+                // A selector-shaped value is a different mistake from a typo,
+                // and gets a different sentence: the reader wants to know which
+                // commands take one, not that this string is not a directory.
+                let hint = match repo.starts_with('@') || repo.contains(',') {
+                    true => {
+                        " Registry selectors (`@all`, a comma list) work with \
+                             `find --mode bm25`, `summary` and `contracts`."
+                    }
+                    false => "",
+                };
                 return Err(ecp_core::EcpError::InvalidArgument(format!(
                     "--repo {repo}: not a directory. Pass a path to the repository, \
-                     or run from inside it and omit --repo."
+                     or run from inside it and omit --repo.{hint}"
                 )));
             }
         }

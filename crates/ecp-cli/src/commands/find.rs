@@ -1459,20 +1459,30 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<RepoTarget>, EcpError> 
     }
 
     let mut targets: Vec<RepoTarget> = Vec::with_capacity(dir_names.len());
+    // Why a repo the selector named produced no target. Only consulted when
+    // NOTHING resolved: a partial result is self-describing, because every row
+    // carries the repo it came from, while an empty one reaches the caller as
+    // "no selector was given" and gets answered from the current directory.
+    let mut skipped: Vec<String> = Vec::new();
     for dir_name in &dir_names {
         let alias = match snapshot.repos.get(dir_name) {
             Some(a) => a,
-            None => continue,
+            None => {
+                skipped.push(format!("{dir_name} (vanished from the registry mid-read)"));
+                continue;
+            }
         };
         let commits_dir = home_ecp.join(dir_name).join("commits");
         let idx = CommitIndex::scan(&commits_dir)
             .map_err(|e| EcpError::InvalidArgument(format!("{dir_name}: scan commits: {e}")))?;
         if idx.is_empty() {
-            continue; // repo registered but not yet built
+            skipped.push(format!("{dir_name} (registered, never indexed)"));
+            continue;
         }
         let Some(graph_path) =
             crate::commit_lookup::find_latest_by_mtime(&commits_dir).map(|d| d.join("graph.bin"))
         else {
+            skipped.push(format!("{dir_name} (indexed, but no graph.bin on disk)"));
             continue;
         };
         let display_name = alias
@@ -1509,6 +1519,12 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<RepoTarget>, EcpError> 
         });
     }
 
+    if targets.is_empty() {
+        return Err(EcpError::InvalidArgument(format!(
+            "--repo {sel}: nothing to search — {}",
+            skipped.join("; ")
+        )));
+    }
     Ok(targets)
 }
 

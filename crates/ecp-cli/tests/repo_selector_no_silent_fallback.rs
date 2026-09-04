@@ -31,8 +31,9 @@ fn git(repo: &Path, args: &[&str]) {
     assert!(ok, "git {args:?} failed");
 }
 
-/// An indexed one-file repo, plus its own `HOME` so the real `~/.ecp` is never
-/// touched and the registry starts empty.
+/// An indexed one-file repo, plus its own cache root so the real `~/.ecp` is
+/// never touched and the registry starts empty. See `run` for why HOME alone
+/// does not achieve that.
 fn indexed_repo(tmp: &Path) -> (PathBuf, PathBuf) {
     let repo = tmp.join("repo");
     let home = tmp.join("home");
@@ -58,7 +59,12 @@ fn run(cwd: &Path, home: &Path, args: &[&str]) -> Output {
     Command::new(ecp_bin())
         .args(args)
         .current_dir(cwd)
+        // `resolve_home_ecp` reads ECP_HOME first and only falls back to HOME,
+        // so overriding HOME alone leaves a developer who sets ECP_HOME
+        // writing fixtures into the real cache — and asserting against their
+        // real registry instead of an empty one.
         .env("HOME", home)
+        .env_remove("ECP_HOME")
         .output()
         .expect("run ecp")
 }
@@ -167,4 +173,47 @@ fn a_repo_path_still_answers_about_that_path() {
         text.contains("only_here"),
         "expected the symbol from the named repo: {text}"
     );
+}
+
+/// The registry outlives the graphs it points at: `admin gc` prunes commit
+/// directories under a retention policy and leaves `registry.json` alone. A
+/// name in that state passes the registry check and then produces no target,
+/// which the callers read as "no selector given" — the same wrong answer by a
+/// different door.
+#[test]
+fn a_registered_repo_with_no_index_left_is_not_answered_from_the_cwd() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, home) = indexed_repo(tmp.path());
+
+    // Find the cache directory the fixture registered, then empty its commits
+    // the way retention does.
+    let ecp = home.join(".ecp");
+    let dir_name = std::fs::read_dir(&ecp)
+        .expect("cache root")
+        .filter_map(|e| e.ok())
+        .find(|e| e.path().join("commits").is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .expect("the fixture must have registered one repo");
+    std::fs::remove_dir_all(ecp.join(&dir_name).join("commits")).unwrap();
+    std::fs::create_dir_all(ecp.join(&dir_name).join("commits")).unwrap();
+
+    let elsewhere = tmp.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("other.rs"), "fn only_here() {}\n").unwrap();
+
+    let out = run(
+        &elsewhere,
+        &home,
+        &["find", "only_here", "--mode", "bm25", "--repo", &dir_name],
+    );
+    let text = combined(&out);
+    assert!(
+        !out.status.success(),
+        "answered from the current directory for a repo with no index: {text}"
+    );
+    assert!(
+        text.contains(&dir_name),
+        "the error must name the repo it could not search: {text}"
+    );
+    let _ = repo;
 }
