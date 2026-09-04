@@ -179,8 +179,8 @@ pub fn run_analyzer_for_paths(
     };
     let cache_ref: Option<&crate::parse_cache::ParseCache> = parse_cache.as_ref();
     let t_parse = std::time::Instant::now();
-    let local_graphs = pipeline.analyze_with_cache(files_to_analyze, |_rel_path, hash| {
-        cache_ref.and_then(|c| c.get(hash))
+    let local_graphs = pipeline.analyze_with_cache(files_to_analyze, |rel_path, hash| {
+        cache_ref.and_then(|c| c.get(rel_path, hash))
     });
     if prof {
         eprintln!(
@@ -206,9 +206,12 @@ pub fn run_analyzer_for_paths(
         use rayon::prelude::*;
         let to_write: Vec<(std::path::PathBuf, Vec<u8>)> = local_graphs
             .par_iter()
-            .filter(|g| !cache.path_for(&g.content_hash).exists())
+            .filter(|g| !cache.path_for(&g.file_path, &g.content_hash).exists())
             .filter_map(|g| match rkyv::to_bytes::<rkyv::rancor::Error>(g) {
-                Ok(bytes) => Some((cache.path_for(&g.content_hash), bytes.into_vec())),
+                Ok(bytes) => Some((
+                    cache.path_for(&g.file_path, &g.content_hash),
+                    bytes.into_vec(),
+                )),
                 Err(e) => {
                     tracing::warn!("parse_cache: serialize failed for {:?}: {}", g.file_path, e);
                     None

@@ -1,6 +1,6 @@
 //! Phase 3 — persistent per-file parse cache tests.
 //!
-//! Caches tree-sitter `LocalGraph` blobs keyed by content_hash. On hit,
+//! Caches tree-sitter `LocalGraph` blobs keyed by (path, content_hash). On hit,
 //! the analyzer pipeline skips the parse step entirely and feeds the
 //! cached graph straight into the global builder. Binary upgrade → new
 //! `BUILDER_FINGERPRINT` → new cache subdir → old entries stay on disk
@@ -8,6 +8,7 @@
 
 use ecp_cli::parse_cache::ParseCache;
 use ecp_core::analyzer::types::LocalGraph;
+use std::path::Path;
 
 fn graph(file: &str, hash: [u8; 8]) -> LocalGraph {
     LocalGraph {
@@ -34,7 +35,7 @@ fn graph(file: &str, hash: [u8; 8]) -> LocalGraph {
 fn empty_cache_returns_none_on_lookup() {
     let tmp = tempfile::tempdir().unwrap();
     let cache = ParseCache::open(tmp.path()).unwrap();
-    assert!(cache.get(&[0u8; 8]).is_none());
+    assert!(cache.get(Path::new("src/a.rs"), &[0u8; 8]).is_none());
 }
 
 #[test]
@@ -47,7 +48,9 @@ fn put_then_get_round_trips_local_graph() {
     let g = graph("src/a.rs", hash);
     cache.put(&g).unwrap();
 
-    let got = cache.get(&hash).expect("cached entry should hit");
+    let got = cache
+        .get(Path::new("src/a.rs"), &hash)
+        .expect("cached entry should hit");
     assert_eq!(got.content_hash, hash);
     assert_eq!(got.file_path.to_str(), Some("src/a.rs"));
 }
@@ -65,8 +68,10 @@ fn distinct_hashes_dont_collide() {
     cache.put(&graph("a.rs", h1)).unwrap();
     cache.put(&graph("b.rs", h2)).unwrap();
 
-    assert_eq!(cache.get(&h1).unwrap().file_path.to_str(), Some("a.rs"));
-    assert_eq!(cache.get(&h2).unwrap().file_path.to_str(), Some("b.rs"));
+    let a = cache.get(Path::new("a.rs"), &h1).unwrap();
+    let b = cache.get(Path::new("b.rs"), &h2).unwrap();
+    assert_eq!(a.file_path.to_str(), Some("a.rs"));
+    assert_eq!(b.file_path.to_str(), Some("b.rs"));
 }
 
 #[test]
@@ -80,11 +85,11 @@ fn corrupted_entry_yields_miss_and_is_purged() {
 
     let mut hash = [0u8; 8];
     hash[0] = 7;
-    let path = cache.path_for(&hash);
+    let path = cache.path_for(Path::new("x.rs"), &hash);
     std::fs::write(&path, b"not-a-valid-rkyv-blob").unwrap();
     assert!(path.exists());
 
-    assert!(cache.get(&hash).is_none());
+    assert!(cache.get(Path::new("x.rs"), &hash).is_none());
     assert!(!path.exists(), "corrupted blob must be removed on miss");
 }
 
@@ -101,22 +106,77 @@ fn fingerprint_scopes_cache_entries_by_subdirectory() {
     hash[0] = 3;
     cache.put(&graph("c.rs", hash)).unwrap();
 
-    let blob = cache.path_for(&hash);
+    let blob = cache.path_for(Path::new("c.rs"), &hash);
     let parse_cache_dir = blob.parent().unwrap().parent().unwrap();
     assert_eq!(parse_cache_dir.file_name().unwrap(), "parse_cache");
 
     // Drop a blob into a sibling fingerprint dir — must not be visible.
     let stale_fp_dir = parse_cache_dir.join("deadbeef");
     std::fs::create_dir_all(&stale_fp_dir).unwrap();
-    std::fs::write(
-        stale_fp_dir.join(format!("{:016x}.rkyv", u64::from_le_bytes(hash))),
-        b"x",
-    )
-    .unwrap();
+    std::fs::write(stale_fp_dir.join(blob.file_name().unwrap()), b"x").unwrap();
 
     assert_eq!(
-        cache.get(&hash).unwrap().file_path.to_str(),
+        cache
+            .get(Path::new("c.rs"), &hash)
+            .unwrap()
+            .file_path
+            .to_str(),
         Some("c.rs"),
         "current-fingerprint entry must win over stale sibling fingerprint dir"
+    );
+}
+
+/// Two files can hold the same bytes — an empty `__init__.py`, a generated
+/// stub, a duplicated config. Before the path joined the key, the second file
+/// read back the first one's `LocalGraph`, so its symbols arrived carrying the
+/// wrong `file_path`, collided on uid with the originals, and were tombstoned
+/// to empty names. The file then had no presence in the graph at all while
+/// `ecp find` still reported success.
+///
+/// The assertion is on what the caller receives — the path it asked about —
+/// rather than on the key's spelling, so any future keying scheme that keeps
+/// the two files apart passes.
+#[test]
+fn byte_identical_files_at_different_paths_keep_their_own_graphs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = ParseCache::open(tmp.path()).unwrap();
+
+    let same_bytes = [9u8; 8];
+    cache.put(&graph("src/a.py", same_bytes)).unwrap();
+    cache.put(&graph("src/dup.py", same_bytes)).unwrap();
+
+    assert_eq!(
+        cache
+            .get(Path::new("src/dup.py"), &same_bytes)
+            .expect("the duplicate's own entry must exist")
+            .file_path
+            .to_str(),
+        Some("src/dup.py"),
+        "the duplicate read back the original's graph"
+    );
+    assert_eq!(
+        cache
+            .get(Path::new("src/a.py"), &same_bytes)
+            .expect("the original's entry must survive the duplicate's put")
+            .file_path
+            .to_str(),
+        Some("src/a.py"),
+        "the duplicate's put overwrote the original's entry"
+    );
+}
+
+/// A file that moves keeps its bytes, so a content-only key would hand the new
+/// path the old path's graph. It must miss instead and be reparsed.
+#[test]
+fn a_renamed_file_does_not_read_back_its_old_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = ParseCache::open(tmp.path()).unwrap();
+
+    let unchanged = [4u8; 8];
+    cache.put(&graph("src/before.rs", unchanged)).unwrap();
+
+    assert!(
+        cache.get(Path::new("src/after.rs"), &unchanged).is_none(),
+        "the new path must miss, not inherit the old path's graph"
     );
 }
