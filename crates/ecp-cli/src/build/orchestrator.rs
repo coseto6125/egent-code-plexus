@@ -395,10 +395,17 @@ pub(crate) fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io:
     Ok(out.status.success())
 }
 
+/// Extract `sha`'s tree into `dest`.
+///
+/// `archive` converts content on the way out, so it runs any filter driver the
+/// repository names for a path. This is the widest reach of the three such
+/// commands: `build_l2` comes through here whenever the worktree is dirty or
+/// HEAD is not the target SHA, which nearly every command can trigger. The
+/// overrides are what stop the scanned repository executing its own program.
 pub(crate) fn git_archive_to(worktree: &Path, sha: &str, dest: &Path) -> io::Result<()> {
-    let archive = safe_exec::git()
+    let overrides = safe_exec::repo_local_filter_overrides(worktree);
+    let archive = safe_exec::git_with_overrides(worktree, &overrides)
         .args(["archive", "--format=tar", sha])
-        .current_dir(worktree)
         .output()?;
     if !archive.status.success() {
         return Err(io::Error::other("git archive failed"));
@@ -781,6 +788,91 @@ mod tests {
             result.commit_dir, gen_dir,
             "generation tuple must dominate mtime; base.mtime > gen_dir.mtime here \
              but gen_dir must still win"
+        );
+    }
+}
+
+/// `git_archive_to` is the widest path a scanned repository's filter driver
+/// can reach, so it gets its own guard rather than relying on the one over
+/// `GitGuard`. `process` is set alongside `smudge` on purpose: it takes
+/// precedence, so a fix covering only `smudge` and `clean` leaves this red.
+#[cfg(all(test, unix))]
+mod archive_filter_tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn git(repo: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git available");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn git_archive_does_not_run_a_repo_defined_filter_driver() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let dest = tmp.path().join("dest");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+
+        let marker = tmp.path().join("archive-filter-ran");
+        let script = tmp.path().join("filter.sh");
+        // A filter reads the blob on stdin and writes the converted bytes to
+        // stdout, so the passthrough is a bare `cat`.
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf 'executed' > '{}'\ncat\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        git(&repo, &["init", "-q", "."]);
+        git(&repo, &["config", "user.email", "t@example.invalid"]);
+        git(&repo, &["config", "user.name", "t"]);
+        fs::write(repo.join(".gitattributes"), "payload.txt filter=evil\n").unwrap();
+        fs::write(repo.join("payload.txt"), "content\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "one"]);
+        let driver = script.to_str().unwrap();
+        git(&repo, &["config", "filter.evil.smudge", driver]);
+        git(&repo, &["config", "filter.evil.clean", driver]);
+        git(&repo, &["config", "filter.evil.process", driver]);
+
+        let sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        super::git_archive_to(&repo, &sha, &dest).expect("archive must still extract");
+
+        assert!(
+            !marker.exists(),
+            "a filter driver from the scanned repo ran during git archive: {}",
+            fs::read_to_string(&marker).unwrap_or_default()
+        );
+        assert_eq!(
+            fs::read_to_string(dest.join("payload.txt")).unwrap(),
+            "content\n",
+            "the extracted tree must carry the content as stored"
         );
     }
 }

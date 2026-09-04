@@ -21,14 +21,17 @@ use std::time::{Duration, Instant};
 ///   attacker: an executable dropped in `.git/hooks/` is enough, and
 ///   `ecp diff --baseline` checks out and stashes on the user's behalf.
 ///
-/// Two execution vectors have no `-c` that turns them off, because the
+/// Three execution vectors are not covered by these flags, because the
 /// program's name comes from `.gitattributes` rather than from config: an
-/// external diff driver and a textconv driver. Diff-family callers pass
-/// [`DIFF_HARDENING`] for those. `-c diff.external=` is deliberately NOT set
-/// here — git treats the empty value as a command to run and dies with
-/// `cannot run : No such file or directory` on every ordinary diff, so it
-/// breaks benign repositories while adding nothing `--no-ext-diff` does not
-/// already do.
+/// external diff driver, a textconv driver, and a filter driver. Diff-family
+/// callers pass [`DIFF_HARDENING`] for the first two. Commands that convert
+/// worktree content — `checkout`, `stash`, `archive` — pass the overrides from
+/// [`repo_local_filter_overrides`] for the third.
+///
+/// `-c diff.external=` is deliberately NOT set here — git treats the empty
+/// value as a command to run and dies with `cannot run : No such file or
+/// directory` on every ordinary diff, so it breaks benign repositories while
+/// adding nothing `--no-ext-diff` does not already do.
 pub fn git() -> Command {
     let mut cmd = Command::new("git");
     cmd.args([
@@ -54,6 +57,77 @@ pub fn git() -> Command {
 /// - `--no-textconv` — ignores per-attribute textconv drivers, which no `-c`
 ///   can pre-empt because the driver name comes from `.gitattributes`.
 pub const DIFF_HARDENING: [&str; 2] = ["--no-ext-diff", "--no-textconv"];
+
+/// `-c` settings that neutralise every filter driver the scanned repository
+/// defines in its own `.git/config`. Pair with [`git_with_overrides`].
+///
+/// `checkout`, `stash` and `archive` all convert content, so a `.gitattributes`
+/// line naming `filter=<driver>` runs that driver's program. `core.hooksPath`
+/// does not touch it, none of the three commands has a `--no-filters`, and the
+/// driver name lives in the repository's own attributes file — so the names
+/// have to be read out of the config before they can be overridden.
+///
+/// All three keys need it. `process` takes precedence over `smudge` and
+/// `clean`, so a repository that sets it keeps executing when only those two
+/// are covered. `cat` is the passthrough: it returns the content unchanged,
+/// which is what an absent filter does. It is not a valid long-running filter,
+/// so the `process` override makes git log an initialisation failure and fall
+/// back to the content as stored, and `required=false` is what keeps that a
+/// fallback rather than a hard error. Those lines land in captured stderr,
+/// which the success path discards.
+///
+/// Scope is deliberately repo-local. A driver in the user's global config is
+/// the user's own — git-lfs, usually — and stays live. A driver in the scanned
+/// repository's config was shipped by whoever wrote that repository.
+pub fn repo_local_filter_overrides(repo_dir: &Path) -> Vec<String> {
+    let Ok(out) = git()
+        .args([
+            "config",
+            "--local",
+            "--name-only",
+            "--get-regexp",
+            "^filter\\.",
+        ])
+        .current_dir(repo_dir)
+        .output()
+    else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut names: Vec<&str> = text
+        .lines()
+        .filter_map(|key| key.strip_prefix("filter."))
+        // Driver names may themselves contain dots, so split off the leaf.
+        .filter_map(|rest| rest.rsplit_once('.'))
+        .filter(|(_, leaf)| matches!(*leaf, "smudge" | "clean" | "process"))
+        .map(|(name, _)| name)
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+        .into_iter()
+        .flat_map(|n| {
+            [
+                format!("filter.{n}.smudge=cat"),
+                format!("filter.{n}.clean=cat"),
+                format!("filter.{n}.process=cat"),
+                format!("filter.{n}.required=false"),
+            ]
+        })
+        .collect()
+}
+
+/// [`git`] plus `-c` overrides, rooted at `repo_dir`. Kept separate from
+/// [`repo_local_filter_overrides`] so a caller that runs several commands over
+/// one repository enumerates the drivers once.
+pub fn git_with_overrides(repo_dir: &Path, overrides: &[String]) -> Command {
+    let mut cmd = git();
+    for kv in overrides {
+        cmd.arg("-c").arg(kv);
+    }
+    cmd.current_dir(repo_dir);
+    cmd
+}
 
 /// Reject a user-supplied revision that git would read as an option.
 ///
