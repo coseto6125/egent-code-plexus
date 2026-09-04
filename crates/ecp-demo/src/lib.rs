@@ -6,13 +6,14 @@
 //! build. The tool list, its JSON schemas and the JSON→argv translation come
 //! from `ecp-mcp`, so the page shows exactly the surface an agent gets.
 //! The service adds only what a public endpoint needs: a subcommand
-//! allowlist, server-owned args, per-run timeouts, an output cap, one build
-//! at a time, size and count ceilings on the corpora, and per-IP rate limits.
+//! allowlist, server-owned flags, per-run timeouts, an output cap, one build
+//! at a time, size and count ceilings on the checkouts, and per-IP rate limits.
 
 pub mod app;
 pub mod ratelimit;
 pub mod repos;
 pub mod runner;
+pub mod spawn;
 pub mod tools;
 
 use anyhow::{Context, Result};
@@ -28,10 +29,14 @@ pub struct Config {
     pub curl: PathBuf,
     pub repos_dir: PathBuf,
     pub timeout: Duration,
+    pub queue_wait: Duration,
     pub max_output_bytes: usize,
     pub rate_per_min: u32,
     pub add_rate_per_hour: u32,
     pub concurrency: usize,
+    /// How many `x-forwarded-for` hops were appended by proxies this
+    /// deployment trusts; 0 ignores the header and uses the socket peer.
+    pub trusted_hops: usize,
     pub max_repo_kb: u64,
     pub max_repos: usize,
     pub queue_limit: usize,
@@ -49,10 +54,12 @@ impl Config {
             curl: env_path("ECP_DEMO_CURL", "curl"),
             repos_dir: env_path("ECP_DEMO_REPOS", "/data/repos"),
             timeout: Duration::from_secs(env_or("ECP_DEMO_TIMEOUT_SECS", 15)?),
+            queue_wait: Duration::from_secs(env_or("ECP_DEMO_QUEUE_WAIT_SECS", 5)?),
             max_output_bytes: env_or("ECP_DEMO_MAX_OUTPUT_BYTES", 256 * 1024)?,
             rate_per_min: env_or("ECP_DEMO_RATE_PER_MIN", 60)?,
             add_rate_per_hour: env_or("ECP_DEMO_ADD_RATE_PER_HOUR", 10)?,
             concurrency: env_or("ECP_DEMO_CONCURRENCY", 2)?,
+            trusted_hops: env_or("ECP_DEMO_TRUSTED_HOPS", 1)?,
             max_repo_kb: env_or("ECP_DEMO_MAX_REPO_KB", 50 * 1024)?,
             max_repos: env_or("ECP_DEMO_MAX_REPOS", 6)?,
             queue_limit: env_or("ECP_DEMO_QUEUE_LIMIT", 3)?,

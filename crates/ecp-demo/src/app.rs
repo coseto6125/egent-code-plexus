@@ -3,7 +3,7 @@
 //! UI for everything else.
 
 use crate::ratelimit::RateLimiter;
-use crate::repos::{parse_github_repo, AddError, Programs, RepoStore, Status, StoreConfig};
+use crate::repos::{parse_github_repo, Programs, RepoStore, Status, StoreConfig};
 use crate::runner::{RunError, Runner};
 use crate::tools::{demo_tools, DemoTool};
 use crate::Config;
@@ -36,6 +36,7 @@ pub struct AppState {
     runner: Runner,
     run_limiter: RateLimiter,
     add_limiter: RateLimiter,
+    trusted_hops: usize,
 }
 
 impl AppState {
@@ -59,6 +60,7 @@ impl AppState {
         let runner = Runner::new(
             config.bin.clone(),
             config.timeout,
+            config.queue_wait,
             config.max_output_bytes,
             config.concurrency,
         );
@@ -68,6 +70,7 @@ impl AppState {
             runner,
             RateLimiter::per_minute(config.rate_per_min),
             RateLimiter::new(config.add_rate_per_hour, Duration::from_secs(3600)),
+            config.trusted_hops,
         ))
     }
 
@@ -77,6 +80,7 @@ impl AppState {
         runner: Runner,
         run_limiter: RateLimiter,
         add_limiter: RateLimiter,
+        trusted_hops: usize,
     ) -> Self {
         let tool_index = tools
             .iter()
@@ -90,6 +94,7 @@ impl AppState {
             runner,
             run_limiter,
             add_limiter,
+            trusted_hops,
         }
     }
 }
@@ -166,19 +171,30 @@ async fn meta(State(state): State<Arc<AppState>>) -> Json<Value> {
     }))
 }
 
-async fn list_repos(State(state): State<Arc<AppState>>) -> Json<Value> {
-    Json(json!({ "repos": state.repos.list() }))
+type ApiError = (StatusCode, Json<Value>);
+
+fn api_error(status: StatusCode, msg: impl Into<String>) -> ApiError {
+    (status, Json(json!({ "error": msg.into() })))
+}
+
+fn rate_limited() -> ApiError {
+    api_error(StatusCode::TOO_MANY_REQUESTS, "rate limit: wait a minute")
+}
+
+/// The page polls this while a build runs, so it shares the run budget.
+async fn list_repos(
+    State(state): State<Arc<AppState>>,
+    ClientIp(ip): ClientIp,
+) -> Result<Json<Value>, ApiError> {
+    if !state.run_limiter.allow(ip) {
+        return Err(rate_limited());
+    }
+    Ok(Json(json!({ "repos": state.repos.list() })))
 }
 
 #[derive(Deserialize)]
 struct AddRequest {
     url: String,
-}
-
-type ApiError = (StatusCode, Json<Value>);
-
-fn api_error(status: StatusCode, msg: impl Into<String>) -> ApiError {
-    (status, Json(json!({ "error": msg.into() })))
 }
 
 async fn add_repo(
@@ -194,20 +210,16 @@ async fn add_repo(
             "rate limit: this address added too many repositories this hour",
         ));
     }
-    match state.repos.add(&owner, &repo) {
-        Ok(entry) => {
-            let status = if entry.status == Status::Ready {
-                StatusCode::OK
-            } else {
-                StatusCode::ACCEPTED
-            };
-            Ok((status, Json(json!({ "repo": entry }))).into_response())
-        }
-        Err(e @ AddError::QueueFull) => {
-            Err(api_error(StatusCode::SERVICE_UNAVAILABLE, e.to_string()))
-        }
-        Err(e @ AddError::BadUrl(_)) => Err(api_error(StatusCode::BAD_REQUEST, e.to_string())),
-    }
+    let entry = state
+        .repos
+        .add(&owner, &repo)
+        .map_err(|e| api_error(StatusCode::SERVICE_UNAVAILABLE, e.to_string()))?;
+    let status = if entry.status == Status::Ready {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED
+    };
+    Ok((status, Json(json!({ "repo": entry }))).into_response())
 }
 
 #[derive(Deserialize)]
@@ -228,10 +240,7 @@ async fn run(
     Json(req): Json<RunRequest>,
 ) -> Result<Response<Body>, ApiError> {
     if !state.run_limiter.allow(ip) {
-        return Err(api_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "rate limit: wait a minute",
-        ));
+        return Err(rate_limited());
     }
     let tool = state
         .tool_index
@@ -243,7 +252,7 @@ async fn run(
                 format!("unknown tool {:?}", req.tool),
             )
         })?;
-    let corpus = state
+    let (corpus, _lease) = state
         .repos
         .ready_path(&req.repo)
         .map_err(|status| match status {
@@ -260,47 +269,90 @@ async fn run(
                 format!("{} is still being indexed", req.repo),
             ),
         })?;
-    if let Some(key) = tool.reserved_arg_used(&req.args) {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            format!("`{key}` is set by the server"),
-        ));
-    }
     match state.runner.run(tool, &corpus, &req.args).await {
         Ok(outcome) if outcome.timed_out => {
             Ok((StatusCode::GATEWAY_TIMEOUT, Json(outcome)).into_response())
         }
         Ok(outcome) => Ok(Json(outcome).into_response()),
-        Err(RunError::BadArgs(msg)) => Err(api_error(StatusCode::BAD_REQUEST, msg)),
+        Err(e @ (RunError::BadArgs(_) | RunError::Reserved(_))) => {
+            Err(api_error(StatusCode::BAD_REQUEST, e.to_string()))
+        }
+        Err(e @ RunError::Busy) => Err(api_error(StatusCode::SERVICE_UNAVAILABLE, e.to_string())),
         Err(e @ RunError::Spawn(_)) => {
             Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
         }
     }
 }
 
-/// Client address for rate limiting: the first `x-forwarded-for` hop when a
-/// proxy (Render, a tunnel) sits in front, else the socket peer.
+/// Client address for rate limiting. A proxy appends the address it saw to
+/// the right of `x-forwarded-for`, so the trusted value is counted from the
+/// end; the leftmost entries are whatever the client chose to send.
 pub struct ClientIp(pub IpAddr);
 
-impl<S: Send + Sync> FromRequestParts<S> for ClientIp {
+impl FromRequestParts<Arc<AppState>> for ClientIp {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
         Ok(ClientIp(client_ip(
             &parts.headers,
             parts
                 .extensions
-                .get::<axum::extract::ConnectInfo<SocketAddr>>(),
+                .get::<axum::extract::ConnectInfo<SocketAddr>>()
+                .map(|c| c.0.ip()),
+            state.trusted_hops,
         )))
     }
 }
 
-fn client_ip(headers: &HeaderMap, peer: Option<&axum::extract::ConnectInfo<SocketAddr>>) -> IpAddr {
-    headers
+fn client_ip(headers: &HeaderMap, peer: Option<IpAddr>, trusted_hops: usize) -> IpAddr {
+    let forwarded = headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .and_then(|first| first.trim().parse().ok())
-        .or_else(|| peer.map(|p| p.0.ip()))
+        .filter(|_| trusted_hops > 0)
+        .and_then(|v| {
+            let hops: Vec<&str> = v.split(',').map(str::trim).collect();
+            hops.len()
+                .checked_sub(trusted_hops)
+                .and_then(|i| hops[i].parse().ok())
+        });
+    forwarded
+        .or(peer)
         .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn xff(value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", HeaderValue::from_str(value).unwrap());
+        h
+    }
+
+    const PEER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 9));
+
+    #[test]
+    fn client_ip_takes_the_hop_the_trusted_proxy_appended() {
+        assert_eq!(
+            client_ip(&xff("6.6.6.6, 203.0.113.5"), Some(PEER), 1),
+            "203.0.113.5".parse::<IpAddr>().unwrap(),
+            "the leftmost hop is client-supplied and must not win"
+        );
+        assert_eq!(
+            client_ip(&xff("6.6.6.6, 203.0.113.5, 198.51.100.1"), Some(PEER), 2),
+            "203.0.113.5".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn client_ip_falls_back_to_the_peer_when_the_header_is_short_or_untrusted() {
+        assert_eq!(client_ip(&xff("6.6.6.6"), Some(PEER), 2), PEER);
+        assert_eq!(client_ip(&xff("6.6.6.6"), Some(PEER), 0), PEER);
+        assert_eq!(client_ip(&xff("not-an-ip"), Some(PEER), 1), PEER);
+        assert_eq!(client_ip(&HeaderMap::new(), Some(PEER), 1), PEER);
+    }
 }

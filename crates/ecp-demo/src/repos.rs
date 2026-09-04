@@ -1,13 +1,14 @@
-//! On-demand corpora. A public GitHub repository is cloned at the tip of its
-//! default branch, indexed once by `ecp admin index`, then served until the
-//! store evicts it. Every step that touches the network or the CPU runs under
-//! a timeout, one build at a time, and a size ceiling is enforced twice: from
-//! the GitHub API before the clone, and from the checkout after it.
+//! On-demand checkouts. A public GitHub repository is cloned at the tip of
+//! its default branch, indexed once by `ecp admin index`, then served until
+//! the store evicts it. Every step that touches the network or the CPU runs
+//! under a timeout, one build at a time, and a size ceiling is enforced
+//! twice: from the GitHub API before the clone, and from the checkout after it.
 
+use crate::spawn::run_with_timeout;
 use serde::Serialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
@@ -21,6 +22,12 @@ pub enum Status {
     Indexing,
     Ready,
     Failed,
+}
+
+impl Status {
+    fn is_pending(self) -> bool {
+        matches!(self, Status::Queued | Status::Cloning | Status::Indexing)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -38,6 +45,18 @@ pub struct RepoEntry {
     pub added_at: u64,
     #[serde(skip)]
     pub last_used: Instant,
+    /// Runs currently reading the checkout; eviction skips a non-zero count.
+    #[serde(skip)]
+    in_flight: Arc<AtomicUsize>,
+}
+
+/// Held for the duration of one run; keeps the checkout out of eviction.
+pub struct Lease(Arc<AtomicUsize>);
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// External programs the store spawns. Injected so tests can stand in for all three.
@@ -54,6 +73,7 @@ pub struct StoreConfig {
     pub programs: Programs,
     pub max_repo_kb: u64,
     pub max_repos: usize,
+    /// Builds in progress (and failed entries kept for display) at most.
     pub queue_limit: usize,
     pub clone_timeout: Duration,
     pub index_timeout: Duration,
@@ -67,20 +87,14 @@ pub struct RepoStore {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum AddError {
-    BadUrl(String),
-    QueueFull,
-}
+pub struct QueueFull;
 
-impl std::fmt::Display for AddError {
+impl std::fmt::Display for QueueFull {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AddError::BadUrl(msg) => write!(f, "{msg}"),
-            AddError::QueueFull => write!(
-                f,
-                "too many repositories are being indexed right now; retry in a minute"
-            ),
-        }
+        write!(
+            f,
+            "too many repositories are being indexed right now; retry in a minute"
+        )
     }
 }
 
@@ -133,21 +147,23 @@ impl RepoStore {
         self.lock().clone()
     }
 
-    /// The checkout path of a `Ready` repo; marks it as just used.
-    pub fn ready_path(&self, name: &str) -> Result<PathBuf, Option<Status>> {
+    /// The checkout path of a `Ready` repo plus a lease that keeps it from
+    /// being evicted while the caller reads it; marks it as just used.
+    pub fn ready_path(&self, name: &str) -> Result<(PathBuf, Lease), Option<Status>> {
         let mut entries = self.lock();
         let entry = entries.iter_mut().find(|e| e.name == name).ok_or(None)?;
         if entry.status != Status::Ready {
             return Err(Some(entry.status));
         }
         entry.last_used = Instant::now();
-        Ok(entry.path.clone())
+        entry.in_flight.fetch_add(1, Ordering::SeqCst);
+        Ok((entry.path.clone(), Lease(Arc::clone(&entry.in_flight))))
     }
 
     /// Register `owner/repo` and start its build in the background. An entry
     /// that already exists is returned as is (re-adding is a no-op, a failed
     /// one is retried).
-    pub fn add(self: &Arc<Self>, owner: &str, repo: &str) -> Result<RepoEntry, AddError> {
+    pub fn add(self: &Arc<Self>, owner: &str, repo: &str) -> Result<RepoEntry, QueueFull> {
         let name = format!("{owner}/{repo}");
         let path = self.cfg.dir.join(format!("{owner}__{repo}"));
         let entry = {
@@ -160,10 +176,14 @@ impl RepoStore {
                 existing.error = None;
                 existing.clone()
             } else {
-                let pending = entries.iter().filter(|e| e.status != Status::Ready).count();
+                let pending = entries.iter().filter(|e| e.status.is_pending()).count();
                 if pending >= self.cfg.queue_limit {
-                    return Err(AddError::QueueFull);
+                    return Err(QueueFull);
                 }
+                // Failed entries stay visible so the visitor reads the reason,
+                // but only the newest few: they never count as pending and
+                // must not grow without bound.
+                prune_failed(&mut entries, self.cfg.queue_limit.saturating_sub(1));
                 let entry = RepoEntry {
                     name: name.clone(),
                     path,
@@ -177,6 +197,7 @@ impl RepoStore {
                         .map(|d| d.as_secs())
                         .unwrap_or(0),
                     last_used: Instant::now(),
+                    in_flight: Arc::new(AtomicUsize::new(0)),
                 };
                 entries.push(entry.clone());
                 entry
@@ -198,7 +219,6 @@ impl RepoStore {
             Some(e) => e.path.clone(),
             None => return,
         };
-        self.evict_for(&name).await;
         match self.clone_and_index(&name, &path).await {
             Ok((bytes, commit, summary)) => self.update(&name, |e| {
                 e.status = Status::Ready;
@@ -237,7 +257,10 @@ impl RepoStore {
             .await
             .map_err(|e| format!("clone: {e}"))?;
 
-        let bytes = dir_bytes(path);
+        let walked = path.to_path_buf();
+        let bytes = tokio::task::spawn_blocking(move || dir_bytes(&walked))
+            .await
+            .unwrap_or(0);
         let cap = self.cfg.max_repo_kb * 1024;
         if bytes > cap {
             return Err(format!(
@@ -254,6 +277,10 @@ impl RepoStore {
             .ok()
             .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
             .filter(|s| !s.is_empty());
+
+        // Only now is a working repo worth giving up: every refusal above
+        // leaves the existing set untouched.
+        self.evict_for(name).await;
 
         self.update(name, |e| e.status = Status::Indexing);
         let mut index = Command::new(&self.cfg.programs.ecp);
@@ -322,7 +349,9 @@ impl RepoStore {
         Ok(())
     }
 
-    /// Drop the least recently used `Ready` repos until one more fits.
+    /// Drop the least recently used `Ready` repos until one more fits. A
+    /// repo with a run in flight is never a victim; when only those remain,
+    /// the set overflows the ceiling until the next add.
     async fn evict_for(&self, incoming: &str) {
         loop {
             let victim = {
@@ -333,7 +362,11 @@ impl RepoStore {
                 }
                 entries
                     .iter()
-                    .filter(|e| e.status == Status::Ready && e.name != incoming)
+                    .filter(|e| {
+                        e.status == Status::Ready
+                            && e.name != incoming
+                            && e.in_flight.load(Ordering::SeqCst) == 0
+                    })
                     .min_by_key(|e| e.last_used)
                     .map(|e| (e.name.clone(), e.path.clone()))
             };
@@ -345,7 +378,7 @@ impl RepoStore {
 
     /// Remove a checkout and its index. Both steps tolerate absence.
     async fn discard(&self, path: &Path) {
-        if !path.exists() {
+        if tokio::fs::metadata(path).await.is_err() {
             return;
         }
         let mut drop = Command::new(&self.cfg.programs.ecp);
@@ -367,21 +400,38 @@ impl RepoStore {
     }
 }
 
+/// Keep the newest `keep` failed entries; drop the rest.
+fn prune_failed(entries: &mut Vec<RepoEntry>, keep: usize) {
+    let mut failed: Vec<(u64, String)> = entries
+        .iter()
+        .filter(|e| e.status == Status::Failed)
+        .map(|e| (e.added_at, e.name.clone()))
+        .collect();
+    if failed.len() <= keep {
+        return;
+    }
+    failed.sort();
+    let drop_count = failed.len() - keep;
+    let doomed: Vec<String> = failed
+        .into_iter()
+        .take(drop_count)
+        .map(|(_, n)| n)
+        .collect();
+    entries.retain(|e| !doomed.contains(&e.name));
+}
+
 /// Run to completion under `timeout`; a non-zero exit carries stderr.
-async fn run(mut cmd: Command, timeout: Duration) -> Result<std::process::Output, String> {
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(out)) if out.status.success() => Ok(out),
-        Ok(Ok(out)) => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
-        Ok(Err(e)) => Err(e.to_string()),
-        Err(_) => Err(format!("gave up after {}s", timeout.as_secs())),
+async fn run(cmd: Command, timeout: Duration) -> Result<std::process::Output, String> {
+    match run_with_timeout(cmd, timeout).await {
+        Ok(Some(out)) if out.status.success() => Ok(out),
+        Ok(Some(out)) => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+        Ok(None) => Err(format!("killed after {}s", timeout.as_secs())),
+        Err(e) => Err(format!("spawn: {e}")),
     }
 }
 
+/// Bytes under `path`. `DirEntry::metadata` does not follow symlinks, so
+/// the walk never leaves the checkout.
 fn dir_bytes(path: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(path) else {
         return 0;
@@ -434,5 +484,30 @@ mod tests {
                 "{input:?} must be rejected"
             );
         }
+    }
+
+    fn failed(name: &str, added_at: u64) -> RepoEntry {
+        RepoEntry {
+            name: name.into(),
+            path: PathBuf::new(),
+            status: Status::Failed,
+            error: None,
+            summary: Value::Null,
+            bytes: 0,
+            commit: None,
+            added_at,
+            last_used: Instant::now(),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    #[test]
+    fn prune_failed_keeps_the_newest_entries_only() {
+        let mut entries = vec![failed("a", 1), failed("b", 3), failed("c", 2)];
+        prune_failed(&mut entries, 2);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["b", "c"]);
+        prune_failed(&mut entries, 0);
+        assert!(entries.is_empty());
     }
 }

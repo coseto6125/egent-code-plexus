@@ -9,7 +9,7 @@ use serde_json::Value;
 /// Read-only subcommands. Left out on purpose: `rename` edits files;
 /// `uninstall` and `admin` mutate the host; `peers`, `group`, `usage`,
 /// `review` and `diff` read session, group, telemetry or working-tree state
-/// the fixed corpora never carry.
+/// a fresh checkout never carries.
 pub const ALLOWED: &[&str] = &[
     "find",
     "inspect",
@@ -27,9 +27,10 @@ pub const ALLOWED: &[&str] = &[
     "schema",
 ];
 
-/// Args the server owns. `repo` is set from the selected corpus, `graph`
-/// would let a caller point `ecp` at any file in the container, `batch`
-/// reads stdin the demo never provides.
+/// Flags the server owns. `repo` is set from the selected checkout, `graph`
+/// would let a caller point `ecp` at any file in the container (it is a
+/// clap global, so every subcommand accepts it), `batch` reads stdin the
+/// demo never provides.
 pub const RESERVED_ARGS: &[&str] = &["repo", "graph", "batch"];
 
 pub struct DemoTool {
@@ -86,14 +87,17 @@ impl DemoTool {
             positional_args: &self.inner.positional_args,
         }
     }
+}
 
-    /// The first reserved arg a caller tried to set, if any.
-    pub fn reserved_arg_used<'a>(&self, args: &'a Value) -> Option<&'a str> {
-        args.as_object()?
-            .keys()
-            .map(String::as_str)
-            .find(|k| RESERVED_ARGS.contains(k))
-    }
+/// The first reserved flag among argv tokens, matched the way clap parses
+/// them: `--graph`, `--graph=…`. Checked on the translated argv rather than
+/// on JSON keys, so key spelling (`Graph` → `--graph`) and a positional
+/// value that starts with `--` are both caught.
+pub fn reserved_token(argv: &[String]) -> Option<&'static str> {
+    argv.iter().find_map(|token| {
+        let name = token.strip_prefix("--")?.split('=').next()?;
+        RESERVED_ARGS.iter().copied().find(|r| *r == name)
+    })
 }
 
 /// The allowlisted tools, in `ecp --help` order.
@@ -110,10 +114,18 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
     use ecp_cli::cli::Cli;
+    use ecp_mcp::spawn::build_argv;
     use serde_json::json;
 
     fn tools() -> Vec<DemoTool> {
         demo_tools(&Cli::command())
+    }
+
+    fn find_tool() -> DemoTool {
+        tools()
+            .into_iter()
+            .find(|t| t.inner.subcommand == "find")
+            .expect("find is allowlisted")
     }
 
     #[test]
@@ -140,10 +152,7 @@ mod tests {
 
     #[test]
     fn public_schema_drops_reserved_args_but_keeps_the_rest() {
-        let find = tools()
-            .into_iter()
-            .find(|t| t.inner.subcommand == "find")
-            .expect("find is allowlisted");
+        let find = find_tool();
         assert!(find.takes_repo);
         let props = find.public_schema["properties"].as_object().unwrap();
         for reserved in RESERVED_ARGS {
@@ -160,15 +169,35 @@ mod tests {
     }
 
     #[test]
-    fn reserved_arg_used_names_the_offending_key() {
-        let find = tools()
-            .into_iter()
-            .find(|t| t.inner.subcommand == "find")
-            .unwrap();
+    fn reserved_token_catches_key_spelling_and_positional_smuggling() {
+        let find = find_tool();
+        let argv = |args: Value| build_argv(&find.inner, &args).unwrap();
         assert_eq!(
-            find.reserved_arg_used(&json!({"pattern": "x", "graph": "/etc/passwd"})),
+            reserved_token(&argv(json!({"pattern": "x", "graph": "/etc/passwd"}))),
             Some("graph")
         );
-        assert_eq!(find.reserved_arg_used(&json!({"pattern": "x"})), None);
+        assert_eq!(
+            reserved_token(&argv(json!({"pattern": "x", "Graph": "/etc/passwd"}))),
+            Some("graph"),
+            "`Graph` kebab-cases to --graph"
+        );
+        assert_eq!(
+            reserved_token(&argv(json!({"pattern": "--graph=/etc/shadow"}))),
+            Some("graph"),
+            "a positional value is passed verbatim and clap reads it as the flag"
+        );
+        assert_eq!(
+            reserved_token(&argv(json!({"pattern": "x", "repo": "/"}))),
+            Some("repo")
+        );
+        assert_eq!(
+            reserved_token(&argv(json!({"pattern": "x", "mode": "fuzzy", "all": true}))),
+            None
+        );
+        assert_eq!(
+            reserved_token(&argv(json!({"pattern": "graph"}))),
+            None,
+            "a bare word is not a flag"
+        );
     }
 }

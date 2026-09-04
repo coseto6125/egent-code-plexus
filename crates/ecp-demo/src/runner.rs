@@ -1,13 +1,14 @@
 //! Spawn one `ecp` invocation per request with the guards a public endpoint
-//! needs: a wall-clock timeout that kills the child, an output cap, and a
-//! concurrency cap sized for the instance's CPU share.
+//! needs: the server-owned flags rejected on the final argv, a bounded wait
+//! for a concurrency permit, a wall-clock timeout that kills the child, and
+//! an output cap.
 
-use crate::tools::DemoTool;
+use crate::spawn::run_with_timeout;
+use crate::tools::{reserved_token, DemoTool};
 use ecp_mcp::spawn::build_argv;
 use serde::Serialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
@@ -15,6 +16,7 @@ use tokio::sync::Semaphore;
 pub struct Runner {
     bin: PathBuf,
     timeout: Duration,
+    queue_wait: Duration,
     max_output_bytes: usize,
     permits: Arc<Semaphore>,
 }
@@ -35,6 +37,10 @@ pub struct Outcome {
 pub enum RunError {
     /// The JSON args do not translate to argv (unknown shape, bad `subcmd`).
     BadArgs(String),
+    /// The argv carries a flag the server owns (`--graph`, `--repo`, `--batch`).
+    Reserved(&'static str),
+    /// No permit came free within the queue wait.
+    Busy,
     Spawn(std::io::Error),
 }
 
@@ -42,6 +48,8 @@ impl std::fmt::Display for RunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RunError::BadArgs(msg) => write!(f, "invalid args: {msg}"),
+            RunError::Reserved(flag) => write!(f, "`{flag}` is set by the server"),
+            RunError::Busy => write!(f, "busy: every query slot is taken, retry in a few seconds"),
             RunError::Spawn(e) => write!(f, "spawning ecp: {e}"),
         }
     }
@@ -51,12 +59,14 @@ impl Runner {
     pub fn new(
         bin: PathBuf,
         timeout: Duration,
+        queue_wait: Duration,
         max_output_bytes: usize,
         concurrency: usize,
     ) -> Self {
         Self {
             bin,
             timeout,
+            queue_wait,
             max_output_bytes,
             permits: Arc::new(Semaphore::new(concurrency.max(1))),
         }
@@ -77,38 +87,36 @@ impl Runner {
         corpus: &Path,
         args: &Value,
     ) -> Result<Outcome, RunError> {
+        // The caller's tokens are checked as clap will see them: a key such
+        // as `Graph` kebab-cases to `--graph`, and a positional value may
+        // itself be `--graph=/etc/shadow`; both reach the global flag.
+        let caller_argv =
+            build_argv(&tool.inner, args).map_err(|e| RunError::BadArgs(e.to_string()))?;
+        if let Some(flag) = reserved_token(&caller_argv) {
+            return Err(RunError::Reserved(flag));
+        }
         let mut argv = vec![tool.inner.subcommand.clone()];
         if tool.takes_repo {
             argv.push("--repo".into());
             argv.push(corpus.display().to_string());
         }
-        argv.extend(build_argv(&tool.inner, args).map_err(|e| RunError::BadArgs(e.to_string()))?);
+        argv.extend(caller_argv);
 
         // A closed semaphore is impossible here: the runner owns it for its whole life.
-        let _permit = self
-            .permits
-            .acquire()
+        let _permit = tokio::time::timeout(self.queue_wait, self.permits.acquire())
             .await
+            .map_err(|_| RunError::Busy)?
             .expect("runner semaphore stays open");
         let started = Instant::now();
-        let child = tokio::process::Command::new(&self.bin)
-            .args(&argv)
-            .current_dir(corpus)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(RunError::Spawn)?;
+        let mut cmd = tokio::process::Command::new(&self.bin);
+        cmd.args(&argv).current_dir(corpus);
 
         let mut display_argv = Vec::with_capacity(argv.len() + 1);
         display_argv.push("ecp".to_string());
         display_argv.extend(argv);
 
-        // Dropping the timed-out future drops the child, and `kill_on_drop`
-        // turns that into SIGKILL. Nothing else stops a runaway cypher query.
-        match tokio::time::timeout(self.timeout, child.wait_with_output()).await {
-            Ok(Ok(output)) => {
+        match run_with_timeout(cmd, self.timeout).await {
+            Ok(Some(output)) => {
                 let (stdout, truncated) = self.capped(&output.stdout);
                 let (stderr, _) = self.capped(&output.stderr);
                 Ok(Outcome {
@@ -121,8 +129,7 @@ impl Runner {
                     elapsed_ms: started.elapsed().as_millis() as u64,
                 })
             }
-            Ok(Err(e)) => Err(RunError::Spawn(e)),
-            Err(_) => Ok(Outcome {
+            Ok(None) => Ok(Outcome {
                 argv: display_argv,
                 exit_code: None,
                 stdout: String::new(),
@@ -131,6 +138,7 @@ impl Runner {
                 timed_out: true,
                 elapsed_ms: started.elapsed().as_millis() as u64,
             }),
+            Err(e) => Err(RunError::Spawn(e)),
         }
     }
 

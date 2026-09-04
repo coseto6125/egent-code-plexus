@@ -2,7 +2,8 @@
 // the visitor indexed. `API` lets the same page run from a static host
 // against a remote backend.
 const API = window.ECP_DEMO_API || '';
-const POLL_MS = 2000;
+// The list endpoint shares the per-minute run budget; 3 s keeps polling well under it.
+const POLL_MS = 3000;
 
 const $ = (id) => document.getElementById(id);
 const state = { meta: null, repos: [], repo: null, tool: null, poll: null };
@@ -259,11 +260,13 @@ function setStatus(id, text, bad = false) {
   $(id).classList.toggle('bad', bad);
 }
 
+// Tokenizes the escaped text, so a string is delimited by `&quot;` and a
+// backslash pair (`\&quot;` included) is skipped as one unit.
 function highlight(json) {
   return esc(json).replace(
-    /("(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(?:\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g,
+    /(&quot;(?:\\.|(?!&quot;)[^\\])*&quot;(?:\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g,
     (m) => {
-      if (m.startsWith('"')) return m.endsWith(':') ? `<span class="k">${m}</span>` : `<span class="s">${m}</span>`;
+      if (m.startsWith('&quot;')) return m.endsWith(':') ? `<span class="k">${m}</span>` : `<span class="s">${m}</span>`;
       if (m === 'true' || m === 'false' || m === 'null') return `<span class="b">${m}</span>`;
       return `<span class="n">${m}</span>`;
     },
@@ -285,6 +288,8 @@ function esc(s) {
 
 $('add-form').addEventListener('submit', (ev) => {
   ev.preventDefault();
+  // Enter in the text field submits even while the button is disabled.
+  if ($('add-btn').disabled) return;
   addRepo($('add-url').value);
 });
 $('form').addEventListener('submit', run);
