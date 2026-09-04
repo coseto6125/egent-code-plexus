@@ -30,7 +30,10 @@ const INT_TIDS: [TypeId; 6] = [
 ];
 const FLOAT_TIDS: [TypeId; 2] = [TypeId::of::<f64>(), TypeId::of::<f32>()];
 
-#[derive(Debug, Clone)]
+/// Serialized by `ecp admin mcp tools --format json`, so a host that spawns
+/// `ecp` itself (a web front, a non-Rust adapter) reads the same tool
+/// surface and argv rules the MCP server applies, without linking this crate.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct DerivedTool {
     /// MCP tool name (`ecp_<subcommand>`).
     pub name: String,
@@ -45,6 +48,7 @@ pub struct DerivedTool {
     pub schema: Arc<Value>,
     /// Arg IDs whose CLI action is `SetTrue`/`SetFalse` — emitted as a bare
     /// flag (`--foo`) with no following value.
+    #[serde(serialize_with = "sorted")]
     pub flag_args: HashSet<String>,
     /// Arg IDs that are positional, in declared order.
     pub positional_args: Vec<String>,
@@ -55,6 +59,13 @@ pub struct DerivedTool {
     /// and prepended as the first prefix arg at dispatch time. Lets one
     /// MCP tool front many sub-subcommands via a `subcmd` discriminator.
     pub subcmd_arg: Option<String>,
+}
+
+/// A `HashSet` iterates in hash order; the JSON must not change between runs.
+fn sorted<S: serde::Serializer>(set: &HashSet<String>, s: S) -> Result<S::Ok, S::Error> {
+    let mut items: Vec<&String> = set.iter().collect();
+    items.sort();
+    s.collect_seq(items)
 }
 
 /// Enumerate every visible subcommand of `root` as an MCP tool.
