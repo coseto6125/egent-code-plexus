@@ -85,9 +85,9 @@ fn harness(stubs: Stubs, limits: Limits) -> Harness {
         &bin,
         "ecp",
         &format!(
-            r#"echo "cwd=$PWD argv=$*" >> "{log_s}"
+            r#"echo "cwd=$PWD argv=$* token=${{GITHUB_TOKEN:-none}}" >> "{log_s}"
 case "$1" in
-  admin) [ "$2" = index ] && sleep {delay}; exit 0 ;;
+  admin) [ "$2" = index ] && sleep {delay}; [ -e .ecp ] && echo "index saw .ecp" >> "{log_s}"; exit 0 ;;
   summary) echo '{{"summary":{{"per_repo":[{{"metrics":{{"nodes":3}}}}]}}}}' ;;
   find)
     case "$*" in *--slow*) sleep 5 ;; esac
@@ -104,7 +104,7 @@ esac"#,
         &format!(
             r#"echo "cwd=$PWD argv=git $*" >> "{log_s}"
 case "$1" in
-  clone) for last; do :; done; mkdir -p "$last"; head -c {bytes} /dev/zero > "$last/blob"; exit 0 ;;
+  clone) for last; do :; done; mkdir -p "$last/.ecp"; echo '[index]' > "$last/.ecp/config.toml"; head -c {bytes} /dev/zero > "$last/blob"; exit 0 ;;
   rev-parse) echo abc1234 ;;
 esac"#,
             bytes = stubs.checkout_bytes
@@ -733,6 +733,25 @@ async fn the_repo_list_shares_the_run_rate_limit() {
         h.call("GET", "/api/repos", None).await.0,
         StatusCode::TOO_MANY_REQUESTS
     );
+}
+
+#[tokio::test]
+async fn ecp_runs_with_a_scrubbed_environment_and_without_the_repos_own_config() {
+    std::env::set_var("GITHUB_TOKEN", "ghp_secret");
+    let h = harness(ok_stubs(), Limits::default());
+    h.add("octo/cat").await;
+    h.settled("octo/cat").await;
+    h.run("find", "octo/cat", json!({ "pattern": "x" })).await;
+    let log = h.log();
+    assert!(
+        !log.contains("token=ghp_secret"),
+        "the host token leaked into an ecp child: {log}"
+    );
+    assert!(
+        !log.contains("index saw .ecp"),
+        "the checkout's own .ecp/ must be gone before indexing: {log}"
+    );
+    assert!(!h.checkout("octo", "cat").join(".ecp").exists());
 }
 
 #[tokio::test]

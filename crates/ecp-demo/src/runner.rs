@@ -3,7 +3,7 @@
 //! for a concurrency permit, a wall-clock timeout that kills the child, and
 //! an output cap.
 
-use crate::spawn::run_with_timeout;
+use crate::spawn::{ecp_command, run_with_timeout};
 use crate::tools::{reserved_token, DemoTool};
 use ecp_mcp::spawn::build_argv;
 use serde::Serialize;
@@ -108,7 +108,7 @@ impl Runner {
             .map_err(|_| RunError::Busy)?
             .expect("runner semaphore stays open");
         let started = Instant::now();
-        let mut cmd = tokio::process::Command::new(&self.bin);
+        let mut cmd = ecp_command(&self.bin);
         cmd.args(&argv).current_dir(corpus);
 
         let mut display_argv = Vec::with_capacity(argv.len() + 1);

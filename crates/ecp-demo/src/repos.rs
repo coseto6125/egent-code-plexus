@@ -4,7 +4,7 @@
 //! under a timeout, one build at a time, and a size ceiling is enforced
 //! twice: from the GitHub API before the clone, and from the checkout after it.
 
-use crate::spawn::run_with_timeout;
+use crate::spawn::{ecp_command, run_with_timeout};
 use serde::Serialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -256,6 +256,10 @@ impl RepoStore {
         run(clone, self.cfg.clone_timeout)
             .await
             .map_err(|e| format!("clone: {e}"))?;
+        // `ecp admin index` honours `<repo>/.ecp/config.toml` (the per-file
+        // size cap among others), and that file comes from whoever pushed
+        // the repo. The demo's limits, not the repo's, apply.
+        let _ = tokio::fs::remove_dir_all(path.join(".ecp")).await;
 
         let walked = path.to_path_buf();
         let bytes = tokio::task::spawn_blocking(move || dir_bytes(&walked))
@@ -283,7 +287,7 @@ impl RepoStore {
         self.evict_for(name).await;
 
         self.update(name, |e| e.status = Status::Indexing);
-        let mut index = Command::new(&self.cfg.programs.ecp);
+        let mut index = ecp_command(&self.cfg.programs.ecp);
         index
             .args(["admin", "index", "--repo"])
             .arg(path)
@@ -292,7 +296,7 @@ impl RepoStore {
             .await
             .map_err(|e| format!("index: {e}"))?;
 
-        let mut summary = Command::new(&self.cfg.programs.ecp);
+        let mut summary = ecp_command(&self.cfg.programs.ecp);
         summary
             .args(["summary", "--format", "json", "--repo"])
             .arg(path)
@@ -381,7 +385,7 @@ impl RepoStore {
         if tokio::fs::metadata(path).await.is_err() {
             return;
         }
-        let mut drop = Command::new(&self.cfg.programs.ecp);
+        let mut drop = ecp_command(&self.cfg.programs.ecp);
         drop.args(["admin", "drop", "--repo"])
             .arg(path)
             .current_dir(&self.cfg.dir);
