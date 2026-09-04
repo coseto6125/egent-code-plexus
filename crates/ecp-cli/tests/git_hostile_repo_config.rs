@@ -210,3 +210,51 @@ fn a_bare_hardened_git_still_renders_an_ordinary_diff() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+/// `review --since` reaches git through two paths: the file list, and the
+/// per-file added-line filter. `--files` short-circuits the first, so
+/// validating only there left the second reachable — and it is a write, not
+/// just a dropped filter. Against the unfixed binary this exact invocation
+/// created the victim file and reported `status: clean`.
+///
+/// The value uses the `--since=<v>` form on purpose: with a space, clap takes
+/// `--output=...` for an unknown flag of its own and rejects it before any of
+/// this code runs, so the spaced form would pass without proving anything.
+#[test]
+fn review_rejects_an_option_shaped_since_even_when_files_are_given() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    repo_with_two_commits(&repo);
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let victim = tmp.path().join("victim");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_ecp"))
+        .args([
+            "review",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--files",
+            "f.txt",
+            &format!("--since=--output={}", victim.display()),
+        ])
+        .current_dir(&repo)
+        .env("HOME", &home)
+        .env_remove("ECP_HOME")
+        .output()
+        .expect("run ecp review");
+
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !victim.exists(),
+        "git ran with the injected --output and created the file: {text}"
+    );
+    assert!(
+        text.contains("not a revision") || text.contains("starts with `-`"),
+        "the rejection must name the option-shaped revision: {text}"
+    );
+}

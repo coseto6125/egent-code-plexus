@@ -36,17 +36,17 @@ fn fingerprint_dir_name() -> &'static str {
     CACHE.get_or_init(|| short_hash_hex8(BUILDER_FINGERPRINT.as_bytes()))
 }
 
-/// Stable digest of a repo-relative path, so the same file hashes the same on
-/// every platform. The `\` scan is over the string's own bytes, not a platform
-/// check: a path holding none — every ordinary Unix path, and a Windows one
-/// already carrying forward slashes — hashes the borrowed bytes with no
-/// allocation, and only a path that really contains `\` pays for the rewrite.
+/// Digest of a repo-relative path, over the path's own bytes.
+///
+/// No separator normalisation, and no lossy UTF-8 conversion: both would map
+/// two different paths onto one key, which is the collision this key exists to
+/// prevent. On Unix `\` is an ordinary filename byte, so folding it to `/`
+/// would let `src\dup.rs` read back `src/dup.rs`'s graph whenever their
+/// contents match. Normalising buys nothing anyway — the cache lives under
+/// `~/.ecp` on one machine, and `put` and `get` are handed the very same
+/// `rel_path` by the pipeline, so they agree without help.
 fn path_key(rel_path: &Path) -> u64 {
-    let raw = rel_path.to_string_lossy();
-    match raw.contains('\\') {
-        true => xxhash_rust::xxh3::xxh3_64(raw.replace('\\', "/").as_bytes()),
-        false => xxhash_rust::xxh3::xxh3_64(raw.as_bytes()),
-    }
+    xxhash_rust::xxh3::xxh3_64(rel_path.as_os_str().as_encoded_bytes())
 }
 
 pub struct ParseCache {

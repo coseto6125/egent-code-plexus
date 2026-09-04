@@ -180,3 +180,35 @@ fn a_renamed_file_does_not_read_back_its_old_path() {
         "the new path must miss, not inherit the old path's graph"
     );
 }
+
+/// On Unix a backslash is an ordinary filename byte, so `src\dup.rs` and
+/// `src/dup.rs` are two different files. An earlier version of the key folded
+/// `\` to `/` for cross-platform tidiness and reintroduced, for that pair, the
+/// exact collision the path was added to prevent.
+#[cfg(unix)]
+#[test]
+fn a_backslash_in_a_unix_path_is_not_a_separator() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = ParseCache::open(tmp.path()).unwrap();
+
+    let same_bytes = [5u8; 8];
+    cache.put(&graph(r"src\dup.rs", same_bytes)).unwrap();
+    cache.put(&graph("src/dup.rs", same_bytes)).unwrap();
+
+    assert_eq!(
+        cache
+            .get(Path::new(r"src\dup.rs"), &same_bytes)
+            .expect("the backslash path keeps its own entry")
+            .file_path
+            .to_str(),
+        Some(r"src\dup.rs")
+    );
+    assert_eq!(
+        cache
+            .get(Path::new("src/dup.rs"), &same_bytes)
+            .expect("the slash path keeps its own entry")
+            .file_path
+            .to_str(),
+        Some("src/dup.rs")
+    );
+}

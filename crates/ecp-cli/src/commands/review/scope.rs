@@ -2,14 +2,20 @@ use ecp_core::EcpError;
 use std::path::{Path, PathBuf};
 
 pub fn resolve(args: &super::ReviewArgs, repo_dir: &Path) -> Result<Vec<PathBuf>, EcpError> {
+    // Ahead of the `--files` early return, because `--since` survives it:
+    // `aggregate` still uses the value to build a per-file added-line filter.
+    // Validating only on the path that reads it here left
+    // `review --files x.rs --since <option-shaped>` collapsing the rejection
+    // into "the diff was deferred", so the caller got an analysis missing the
+    // filter it asked for and a footnote instead of an error.
+    if let Some(r) = &args.since {
+        crate::git::safe_exec::reject_option_like_rev(r)?;
+    }
     if let Some(files) = &args.files {
         return Ok(files.iter().map(PathBuf::from).collect());
     }
     match &args.since {
-        Some(r) => {
-            crate::git::safe_exec::reject_option_like_rev(r)?;
-            diff_name_only(repo_dir, &format!("{r}...HEAD"))
-        }
+        Some(r) => diff_name_only(repo_dir, &format!("{r}...HEAD")),
         None => {
             let mut tracked = diff_name_only(repo_dir, "HEAD")?;
             tracked.extend(untracked_files(repo_dir)?);
