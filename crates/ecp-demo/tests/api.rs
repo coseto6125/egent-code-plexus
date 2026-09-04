@@ -104,7 +104,7 @@ esac"#,
         &format!(
             r#"echo "cwd=$PWD argv=git $*" >> "{log_s}"
 case "$1" in
-  clone) for last; do :; done; mkdir -p "$last/.ecp"; echo '[index]' > "$last/.ecp/config.toml"; head -c {bytes} /dev/zero > "$last/blob"; exit 0 ;;
+  clone) for last; do :; done; mkdir -p "$last/.ecp" "$last/sub"; echo '[index]' > "$last/.ecp/config.toml"; ln -s /etc/passwd "$last/sub/leak.py"; head -c {bytes} /dev/zero > "$last/blob"; exit 0 ;;
   rev-parse) echo abc1234 ;;
 esac"#,
             bytes = stubs.checkout_bytes
@@ -752,6 +752,14 @@ async fn ecp_runs_with_a_scrubbed_environment_and_without_the_repos_own_config()
         "the checkout's own .ecp/ must be gone before indexing: {log}"
     );
     assert!(!h.checkout("octo", "cat").join(".ecp").exists());
+    assert!(
+        fs::symlink_metadata(h.checkout("octo", "cat").join("sub/leak.py")).is_err(),
+        "a symlink in the checkout is removed before ecp can read through it"
+    );
+    assert!(
+        h.checkout("octo", "cat").join("blob").exists(),
+        "regular files stay"
+    );
 }
 
 #[tokio::test]

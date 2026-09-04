@@ -262,7 +262,7 @@ impl RepoStore {
         let _ = tokio::fs::remove_dir_all(path.join(".ecp")).await;
 
         let walked = path.to_path_buf();
-        let bytes = tokio::task::spawn_blocking(move || dir_bytes(&walked))
+        let bytes = tokio::task::spawn_blocking(move || scrub_symlinks_and_measure(&walked))
             .await
             .unwrap_or(0);
         let cap = self.cfg.max_repo_kb * 1024;
@@ -436,14 +436,22 @@ async fn run(cmd: Command, timeout: Duration) -> Result<std::process::Output, St
 
 /// Bytes under `path`. `DirEntry::metadata` does not follow symlinks, so
 /// the walk never leaves the checkout.
-fn dir_bytes(path: &Path) -> u64 {
+/// Bytes under `path`, with every symlink removed on the way: `ecp` reads
+/// files through symlinks, so a committed `secrets.py -> /etc/passwd` would
+/// index whatever the link points at. `DirEntry::metadata` does not follow
+/// links, so the walk itself never leaves the checkout.
+fn scrub_symlinks_and_measure(path: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(path) else {
         return 0;
     };
     entries
         .filter_map(Result::ok)
         .map(|entry| match entry.metadata() {
-            Ok(meta) if meta.is_dir() => dir_bytes(&entry.path()),
+            Ok(meta) if meta.is_symlink() => {
+                let _ = std::fs::remove_file(entry.path());
+                0
+            }
+            Ok(meta) if meta.is_dir() => scrub_symlinks_and_measure(&entry.path()),
             Ok(meta) => meta.len(),
             Err(_) => 0,
         })
