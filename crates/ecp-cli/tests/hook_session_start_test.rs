@@ -102,3 +102,125 @@ fn template_placeholders_get_rendered_when_meta_present() {
     );
     assert!(body.contains("SessionStart"));
 }
+
+/// A scanned repository's `.claude/ecp-rules.md` becomes the entire SessionStart
+/// `additionalContext`, so a symlink there reads any file the user can read
+/// straight into the model's context. Measured on 0.13.0: the secret came back
+/// verbatim in the JSON payload.
+///
+/// The second case is the one that keeps the guard honest. A symlink that stays
+/// inside the repository is ordinary — a repo pointing `.claude/ecp-rules.md` at
+/// its own `docs/` copy — and its target is repo content either way, so
+/// refusing it would cost a real setup and buy nothing.
+#[cfg(unix)]
+#[test]
+fn session_start_reads_a_rules_symlink_only_when_it_stays_in_the_repo() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(repo.join(".claude")).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+
+    // SessionStart emits nothing at all without an index, so an unindexed repo
+    // would make both halves of this test pass for the wrong reason.
+    std::fs::write(repo.join("a.py"), "def a():\n    return 1\n").unwrap();
+    for args in [
+        vec!["init", "-q", "."],
+        vec!["config", "user.email", "t@example.invalid"],
+        vec!["config", "user.name", "t"],
+        vec!["add", "-A"],
+        vec!["commit", "-qm", "one"],
+    ] {
+        assert!(Command::new("git")
+            .args(&args)
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+    }
+    assert!(Command::new(ecp_bin())
+        .args(["admin", "index", "--repo", "."])
+        .current_dir(&repo)
+        .env("HOME", &home)
+        .env_remove("ECP_HOME")
+        .output()
+        .unwrap()
+        .status
+        .success());
+
+    let secret = tmp.path().join("secret.txt");
+    std::fs::write(&secret, "SECRET-TOKEN-ABC123\n").unwrap();
+    let rules = repo.join(".claude").join("ecp-rules.md");
+
+    let envelope = format!(
+        r#"{{"session_id":"sym-probe","cwd":"{}","hook_event_name":"SessionStart"}}"#,
+        repo.display()
+    );
+
+    std::os::unix::fs::symlink(&secret, &rules).unwrap();
+    let out = run_session_start(&envelope, Some(&home));
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        !text.contains("SECRET-TOKEN-ABC123"),
+        "a file outside the repository reached additionalContext: {text}"
+    );
+
+    std::fs::remove_file(&rules).unwrap();
+    std::fs::write(repo.join("docs-rules.md"), "IN-REPO RULES OK\n").unwrap();
+    std::os::unix::fs::symlink("../docs-rules.md", &rules).unwrap();
+    let out = run_session_start(&envelope, Some(&home));
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        text.contains("IN-REPO RULES OK"),
+        "a symlink inside the repository must still be read: {text}"
+    );
+}
+
+/// The second repo-supplied read: the tail of `.ecp/last-rebuild.log` is quoted
+/// into the UserPromptSubmit notice, so a symlink there reads a file outside the
+/// checkout into the same place. It goes through the resolver rather than the
+/// whole-file read, because the tail is bounded and validating by reading
+/// everything would let a repository choose how much this process allocates.
+#[cfg(unix)]
+#[test]
+fn user_prompt_submit_does_not_quote_a_log_symlinked_outside_the_repo() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().join("repo");
+    let state = repo.join(".ecp");
+    std::fs::create_dir_all(&state).unwrap();
+
+    let secret = tmp.path().join("secret.txt");
+    std::fs::write(&secret, "SECRET-LOG-LINE-XYZ\n").unwrap();
+    std::os::unix::fs::symlink(&secret, state.join("last-rebuild.log")).unwrap();
+    // The notice only renders on the failure path.
+    std::fs::write(state.join(".rebuild-failed"), "").unwrap();
+
+    let envelope = format!(
+        r#"{{"session_id":"log-probe","cwd":"{}","hook_event_name":"UserPromptSubmit","prompt":"hi"}}"#,
+        repo.display()
+    );
+    let mut child = Command::new(ecp_bin())
+        .args(["hook", "user-prompt-submit", "--claude-code"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(envelope.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+
+    assert!(
+        text.contains("reindex FAILED"),
+        "the failure notice must still render, or this test proves nothing: {text}"
+    );
+    assert!(
+        !text.contains("SECRET-LOG-LINE-XYZ"),
+        "a file outside the repository was quoted into the notice: {text}"
+    );
+}

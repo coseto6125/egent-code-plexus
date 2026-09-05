@@ -221,3 +221,44 @@ pub fn drain_and_render_peer_payload() -> Option<String> {
     .flatten()
     .filter(|p: &String| !p.is_empty())
 }
+
+/// Read a file whose path a scanned repository controls, refusing one that
+/// resolves outside `repo_root`.
+///
+/// Both hook reads of repo-supplied files put what they read in front of the
+/// model: `.claude/ecp-rules.md` becomes the whole SessionStart
+/// `additionalContext`, and the tail of `.ecp/last-rebuild.log` is quoted into
+/// the UserPromptSubmit notice. Measured on 0.13.0, pointing either at a file
+/// outside the repository read that file out — a checkout is untrusted input,
+/// and a symlink in one is not exotic.
+///
+/// The check is on the resolved path rather than on the last component, so a
+/// symlinked `.claude` directory is caught as well as a symlinked file, and a
+/// symlink that stays inside the repository still works — its target is
+/// repo content either way, so refusing it would buy nothing.
+///
+/// Resolve-then-read leaves a window in which the path could change. That
+/// window is not the threat here: the attacker is a repository sitting on disk,
+/// not a process racing this one. Closing it needs `openat2(RESOLVE_BENEATH)`,
+/// which is Linux-only, and ecp ships on five platforms.
+pub fn resolve_within_repo(path: &Path, repo_root: &Path) -> Option<PathBuf> {
+    let resolved = std::fs::canonicalize(path).ok()?;
+    let root = std::fs::canonicalize(repo_root).ok()?;
+    if !resolved.starts_with(&root) {
+        tracing::warn!(
+            "hook: refusing {} — it resolves to {}, outside the repository",
+            path.display(),
+            resolved.display()
+        );
+        return None;
+    }
+    Some(resolved)
+}
+
+/// [`resolve_within_repo`] followed by a whole-file read. Only for the rules
+/// template, which is used in full. A caller that reads part of a file takes
+/// the resolved path instead: reading it all to validate it would let a
+/// repository decide how much this process allocates, on the hook path.
+pub fn read_within_repo(path: &Path, repo_root: &Path) -> Option<String> {
+    std::fs::read_to_string(resolve_within_repo(path, repo_root)?).ok()
+}

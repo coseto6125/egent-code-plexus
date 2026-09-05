@@ -95,20 +95,22 @@ fn render_rules(repo_root: &Path, index_dir: &Path) -> String {
 }
 
 fn load_template(repo_root: &Path) -> Option<String> {
-    let candidates = [
-        repo_root.join(".claude").join("ecp-rules.md"),
+    // The repo-supplied template goes through the confined read; the one under
+    // the user's own `~/.claude` does not, because that is the user's file and
+    // a symlink there is their own decision.
+    if let Some(s) =
+        super::common::read_within_repo(&repo_root.join(".claude").join("ecp-rules.md"), repo_root)
+    {
+        return Some(s);
+    }
+    fs::read_to_string(
         home_dir()
             .join(".claude")
             .join("hooks")
             .join("ecp")
             .join("rules.md"),
-    ];
-    for c in candidates {
-        if let Ok(s) = fs::read_to_string(&c) {
-            return Some(s);
-        }
-    }
-    None
+    )
+    .ok()
 }
 
 fn home_dir() -> PathBuf {
