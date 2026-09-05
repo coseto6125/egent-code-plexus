@@ -29,8 +29,9 @@ pub struct RepoSnapshot {
     pub last_commit: String,
 }
 
-pub fn group_dir(home_ecp: &Path, group_name: &str) -> PathBuf {
-    home_ecp.join("groups").join(group_name)
+pub fn group_dir(home_ecp: &Path, group_name: &str) -> io::Result<PathBuf> {
+    ecp_core::registry::validate_cache_component(group_name)?;
+    Ok(home_ecp.join("groups").join(group_name))
 }
 
 pub fn write_contracts(group_dir: &Path, reg: &ContractRegistry) -> io::Result<()> {

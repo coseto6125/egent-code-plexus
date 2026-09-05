@@ -255,3 +255,118 @@ fn inbox_subcommand_reads_without_draining() {
         "inbox subcommand drained the file (should be non-destructive): {after}"
     );
 }
+
+fn assert_say_rejects_target(root: &std::path::Path, target: &str) {
+    let repo = root.join("cache");
+    let sessions = repo.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let destination = sessions.join(target);
+    std::fs::create_dir_all(&destination).unwrap();
+    let before = std::fs::read_dir(&destination).unwrap().count();
+    let out = Command::new(bin())
+        .args(["peers", "say", "must not arrive", "--to", target, "--repo"])
+        .arg(&repo)
+        .env("ECP_HOME", root.join("home"))
+        .env("ECP_SESSION_ID", "sender")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "invalid target accepted: {target:?}");
+    assert!(stderr.contains(&format!("{target:?}")), "stderr: {stderr}");
+    assert!(
+        stderr.contains("single normal path component"),
+        "stderr: {stderr}"
+    );
+    assert!(!destination.join("inbox.jsonl").exists());
+    assert!(!destination.join("inbox.jsonl.lock").exists());
+    assert_eq!(std::fs::read_dir(&destination).unwrap().count(), before);
+    assert!(!sessions.join("sender").exists());
+}
+
+#[test]
+fn say_absolute_target_errors_without_writing_outside_cache() {
+    let dir = tempdir().unwrap();
+    let target = dir.path().join("escaped");
+    assert_say_rejects_target(dir.path(), target.to_str().unwrap());
+}
+
+#[test]
+fn say_parent_traversal_errors_without_writing_outside_cache() {
+    for target in ["..", "../../escaped"] {
+        let dir = tempdir().unwrap();
+        assert_say_rejects_target(dir.path(), target);
+    }
+}
+
+#[test]
+fn say_separator_in_target_errors_without_writing_inbox() {
+    for target in ["nested/child", ".", ""] {
+        let dir = tempdir().unwrap();
+        assert_say_rejects_target(dir.path(), target);
+    }
+}
+
+#[test]
+fn say_windows_target_errors_without_creating_directory() {
+    for target in [
+        r"nested\child",
+        "C:child",
+        "C:",
+        r"C:\child",
+        r"\\server\share",
+    ] {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("cache");
+        std::fs::create_dir(&repo).unwrap();
+        let out = Command::new(bin())
+            .args(["peers", "say", "must not arrive", "--to", target, "--repo"])
+            .arg(&repo)
+            .env("ECP_HOME", dir.path().join("home"))
+            .env("ECP_SESSION_ID", "sender")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success());
+        assert!(stderr.contains(&format!("{target:?}")), "stderr: {stderr}");
+        assert!(
+            stderr.contains("single normal path component"),
+            "stderr: {stderr}"
+        );
+        assert_eq!(std::fs::read_dir(&repo).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn session_commands_invalid_session_id_error_without_creating_directory() {
+    let commands: &[&[&str]] = &[
+        &["peers", "say", "must not arrive"],
+        &["peers", "inbox", "--clear"],
+        &["peers", "thread", "m_test"],
+        &["peers", "name", "worker"],
+        &["peers", "log"],
+        &["peers", "gc"],
+        &["watch", "--status"],
+    ];
+    for args in commands {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("cache");
+        std::fs::create_dir(&repo).unwrap();
+        let out = Command::new(bin())
+            .args(*args)
+            .arg("--repo")
+            .arg(&repo)
+            .env("ECP_HOME", dir.path().join("home"))
+            .env("ECP_SESSION_ID", "../../escaped")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "args: {args:?}");
+        assert!(stderr.contains("../../escaped"), "stderr: {stderr}");
+        assert!(
+            stderr.contains("single normal path component"),
+            "stderr: {stderr}"
+        );
+        assert!(!dir.path().join("escaped").exists());
+        assert_eq!(std::fs::read_dir(&repo).unwrap().count(), 0);
+    }
+}

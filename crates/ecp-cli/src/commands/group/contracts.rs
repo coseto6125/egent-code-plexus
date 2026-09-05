@@ -54,7 +54,7 @@ struct ContractRecord {
 
 pub fn run(args: ContractsArgs) -> Result<(), EcpError> {
     let home_ecp = resolve_home_ecp();
-    let group_dir = storage::group_dir(&home_ecp, &args.name);
+    let group_dir = storage::group_dir(&home_ecp, &args.name)?;
 
     let reg = storage::read_contracts(&group_dir)?;
 

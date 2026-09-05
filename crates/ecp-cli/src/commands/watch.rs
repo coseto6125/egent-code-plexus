@@ -34,6 +34,7 @@ pub fn run(args: WatchArgs) -> Result<(), EcpError> {
         None => default_repo_root()?,
     };
     let session_id = resolve_session_id(None);
+    ecp_core::registry::validate_cache_component(&session_id)?;
     let session_dir = repo_root.join("sessions").join(&session_id);
     std::fs::create_dir_all(&session_dir)?;
 

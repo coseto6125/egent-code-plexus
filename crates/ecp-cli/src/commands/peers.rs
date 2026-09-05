@@ -312,6 +312,7 @@ fn cmd_status_pairs(repo_root: &std::path::Path, format: StatusFormat) -> std::i
 
 fn cmd_name(repo_root: &std::path::Path, name: &str) -> std::io::Result<()> {
     let me = resolve_session_id(None);
+    ecp_core::registry::validate_cache_component(&me)?;
     let meta_path = repo_root
         .join("sessions")
         .join(&me)
@@ -362,6 +363,7 @@ fn cmd_log(
     limit: usize,
 ) -> std::io::Result<()> {
     let me = resolve_session_id(None);
+    ecp_core::registry::validate_cache_component(&me)?;
     let msg_log = repo_root.join("sessions").join(&me).join("msg.log");
     let Ok(content) = std::fs::read_to_string(&msg_log) else {
         println!("no messages");
@@ -399,6 +401,7 @@ fn cmd_log(
 fn cmd_gc(repo_root: &std::path::Path) -> std::io::Result<()> {
     use ecp_core::peer::retention::*;
     let me = resolve_session_id(None);
+    ecp_core::registry::validate_cache_component(&me)?;
     let session_dir = repo_root.join("sessions").join(&me);
     let _ = rotate_if_needed(
         &session_dir.join("msg.log"),

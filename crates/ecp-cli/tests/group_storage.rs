@@ -128,3 +128,92 @@ fn contracts_rkyv_archived_zero_copy_read() {
         "http:POST:/api/users"
     );
 }
+
+fn sync_group(home_ecp: &std::path::Path, name: &str) -> std::process::Output {
+    let registry = ecp_core::registry::RegistryFile {
+        version: 2,
+        repos: BTreeMap::new(),
+        groups: vec![ecp_core::registry::GroupEntry {
+            name: name.to_string(),
+            members: vec![],
+        }],
+    };
+    std::fs::create_dir_all(home_ecp).unwrap();
+    ecp_core::registry::RegistryFile::write_atomic(&home_ecp.join("registry.json"), &registry)
+        .unwrap();
+    std::process::Command::new(env!("CARGO_BIN_EXE_ecp"))
+        .args(["group", "sync", name, "--exact-only"])
+        .env("ECP_HOME", home_ecp)
+        .output()
+        .unwrap()
+}
+
+fn assert_group_sync_rejects_name(root: &std::path::Path, name: &str) {
+    let home_ecp = root.join("cache");
+    let out = sync_group(&home_ecp, name);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "invalid group name accepted: {name:?}"
+    );
+    assert!(stderr.contains(&format!("{name:?}")), "stderr: {stderr}");
+    assert!(
+        stderr.contains("single normal path component"),
+        "stderr: {stderr}"
+    );
+    assert!(!home_ecp.join("groups").exists());
+    assert!(!root.join("escaped").exists());
+    assert!(!home_ecp.join("contracts.rkyv").exists());
+    assert!(!home_ecp.join("meta.json").exists());
+}
+
+#[test]
+fn group_sync_absolute_name_errors_without_creating_directory() {
+    let dir = TempDir::new().unwrap();
+    let name = dir.path().join("escaped");
+    assert_group_sync_rejects_name(dir.path(), name.to_str().unwrap());
+}
+
+#[test]
+fn group_sync_parent_traversal_errors_without_creating_directory() {
+    for name in ["..", "../../escaped"] {
+        let dir = TempDir::new().unwrap();
+        assert_group_sync_rejects_name(dir.path(), name);
+    }
+}
+
+#[test]
+fn group_sync_separators_and_prefixes_error_without_creating_directory() {
+    for name in [
+        "",
+        ".",
+        "nested/child",
+        r"nested\child",
+        "C:child",
+        "C:",
+        r"C:\child",
+        r"\\server\share",
+    ] {
+        let dir = TempDir::new().unwrap();
+        assert_group_sync_rejects_name(dir.path(), name);
+    }
+}
+
+#[test]
+fn group_sync_ordinary_name_writes_inside_cache() {
+    let dir = TempDir::new().unwrap();
+    let home_ecp = dir.path().join("cache");
+    let out = sync_group(&home_ecp, "team-alpha_1.2");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let group = home_ecp.join("groups/team-alpha_1.2");
+    assert!(group.join("contracts.rkyv").is_file());
+    assert!(group.join("meta.json").is_file());
+    assert_eq!(
+        std::fs::read_dir(home_ecp.join("groups")).unwrap().count(),
+        1
+    );
+}

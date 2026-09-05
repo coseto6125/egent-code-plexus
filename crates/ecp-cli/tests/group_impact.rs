@@ -99,7 +99,7 @@ fn cross_links_filter_from_uid_in_local_set() {
         unmatched: vec![],
     };
 
-    let gdir = group_dir(&ecp_home, "demo");
+    let gdir = group_dir(&ecp_home, "demo").unwrap();
     std::fs::create_dir_all(&gdir).unwrap();
     write_contracts(&gdir, &registry).unwrap();
 
@@ -148,7 +148,7 @@ fn cross_links_filter_to_uid_in_local_set() {
         unmatched: vec![],
     };
 
-    let gdir = group_dir(&ecp_home, "demo");
+    let gdir = group_dir(&ecp_home, "demo").unwrap();
     std::fs::create_dir_all(&gdir).unwrap();
     write_contracts(&gdir, &registry).unwrap();
 
@@ -188,7 +188,7 @@ fn cross_links_filter_respects_min_confidence() {
         unmatched: vec![],
     };
 
-    let gdir = group_dir(&ecp_home, "demo");
+    let gdir = group_dir(&ecp_home, "demo").unwrap();
     std::fs::create_dir_all(&gdir).unwrap();
     write_contracts(&gdir, &registry).unwrap();
 
@@ -224,7 +224,7 @@ fn cross_links_no_hits_when_local_uids_empty() {
         unmatched: vec![],
     };
 
-    let gdir = group_dir(&ecp_home, "demo");
+    let gdir = group_dir(&ecp_home, "demo").unwrap();
     std::fs::create_dir_all(&gdir).unwrap();
     write_contracts(&gdir, &registry).unwrap();
 
