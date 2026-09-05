@@ -403,41 +403,90 @@ pub(crate) fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io:
 /// HEAD is not the target SHA, which nearly every command can trigger. The
 /// overrides are what stop the scanned repository executing its own program.
 pub(crate) fn git_archive_to(worktree: &Path, sha: &str, dest: &Path) -> io::Result<()> {
+    use std::io::Read;
+
     let overrides = safe_exec::filter_overrides(worktree);
     // git's stdout is tar's stdin, so the kernel pipe holds the archive rather
     // than this process. `.output()` used to buffer the whole tar first, which
     // made peak memory a function of what the repository tracks: a 200 MB blob
     // took the index from 71 MB to 502 MB, and none of it is content the
-    // analyzer would read — its per-file cap rejects that file after it has
-    // already been held in full.
+    // analyzer would read — its per-file cap rejects that file afterwards.
     let mut git = safe_exec::git_with_overrides(worktree, &overrides)
         .args(["archive", "--format=tar", sha])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
-    let git_stdout = git
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("git archive: no stdout"))?;
 
-    let tar = std::process::Command::new("tar")
+    // Every path out of here from now on reaps git. Dropping a `Child` neither
+    // kills nor waits for the process, so an early `?` would leave `git
+    // archive` running against the repository with nobody collecting it.
+    let finish_git = |git: &mut std::process::Child| {
+        let _ = git.kill();
+        let _ = git.wait();
+    };
+
+    let Some(git_stdout) = git.stdout.take() else {
+        finish_git(&mut git);
+        return Err(io::Error::other("git archive: no stdout"));
+    };
+    let Some(mut git_stderr) = git.stderr.take() else {
+        finish_git(&mut git);
+        return Err(io::Error::other("git archive: no stderr"));
+    };
+
+    let mut tar = match std::process::Command::new("tar")
         .args(["-x", "-f", "-", "-C", dest.to_string_lossy().as_ref()])
         .stdin(std::process::Stdio::from(git_stdout))
-        .spawn()?;
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            finish_git(&mut git);
+            return Err(e);
+        }
+    };
 
-    // tar is waited on first: it drains the pipe, and waiting on git while the
-    // pipe is full would deadlock.
-    let tar_out = tar.wait_with_output()?;
-    let git_out = git.wait_with_output()?;
+    // stderr is drained on its own thread. Waiting for tar first is required —
+    // it is what empties the stdout pipe — but git can fill the stderr pipe
+    // meanwhile, and a git blocked on stderr never closes stdout, so tar waits
+    // for an EOF that never comes and the build hangs.
+    let (tar_status, git_status, stderr) = std::thread::scope(|scope| {
+        let drain = scope.spawn(move || {
+            let mut buf = Vec::new();
+            let _ = git_stderr.read_to_end(&mut buf);
+            buf
+        });
+        let tar_status = tar.wait();
+        let git_status = git.wait();
+        let stderr = drain.join().unwrap_or_default();
+        (tar_status, git_status, stderr)
+    });
 
-    if !git_out.status.success() {
+    // Both are inspected, and which one is reported follows the causality
+    // rather than the order. git is upstream and its stderr is the only thing
+    // that says why — except when git died of SIGPIPE, which means tar went
+    // first and git's failure is the consequence.
+    let tar_status = tar_status?;
+    let git_status = git_status?;
+    // Windows has no SIGPIPE: a writer whose reader is gone gets a failed
+    // write, not a signal, so there is nothing to special-case there.
+    #[cfg(unix)]
+    let git_died_downstream = {
+        use std::os::unix::process::ExitStatusExt;
+        git_status.signal() == Some(13)
+    };
+    #[cfg(not(unix))]
+    let git_died_downstream = false;
+    if !git_status.success() && !git_died_downstream {
         return Err(io::Error::other(format!(
             "git archive failed: {}",
-            String::from_utf8_lossy(&git_out.stderr).trim()
+            String::from_utf8_lossy(&stderr).trim()
         )));
     }
-    if !tar_out.status.success() {
-        return Err(io::Error::other("tar extract failed"));
+    if !tar_status.success() {
+        return Err(io::Error::other(format!(
+            "tar extract failed: {tar_status}"
+        )));
     }
     Ok(())
 }
@@ -935,5 +984,95 @@ mod meta_lock_tests {
              wait is unbounded again: {waited:?}"
         );
         drop(held);
+    }
+}
+
+/// The streaming rewrite put two processes and three pipes where there had been
+/// one buffered call, and the failure paths are where that shows.
+#[cfg(all(test, unix))]
+mod archive_process_tests {
+    use super::*;
+
+    fn one_commit_repo(dir: &std::path::Path) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        for args in [
+            vec!["init", "-q", "."],
+            vec!["config", "user.email", "t@example.invalid"],
+            vec!["config", "user.name", "t"],
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(&args)
+                .current_dir(dir)
+                .status()
+                .unwrap()
+                .success());
+        }
+        std::fs::write(dir.join("a.py"), "def a():\n    return 1\n").unwrap();
+        for args in [vec!["add", "-A"], vec!["commit", "-qm", "one"]] {
+            assert!(std::process::Command::new("git")
+                .args(&args)
+                .current_dir(dir)
+                .status()
+                .unwrap()
+                .success());
+        }
+        String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(dir)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string()
+    }
+
+    /// tar refuses a destination that does not exist. The call has to come back
+    /// with tar's failure — not git's SIGPIPE, which is the consequence — and it
+    /// has to come back at all: an early return that dropped the `Child` would
+    /// leave `git archive` running with nobody to reap it.
+    #[test]
+    fn a_failing_tar_returns_its_own_error_and_does_not_hang() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let sha = one_commit_repo(&repo);
+
+        let start = std::time::Instant::now();
+        let err = git_archive_to(&repo, &sha, &tmp.path().join("no-such-dir"))
+            .expect_err("tar cannot extract into a directory that is not there");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(30),
+            "the call must return, not wait on a child nobody reaps: {:?}",
+            start.elapsed()
+        );
+        assert!(
+            err.to_string().contains("tar extract failed"),
+            "tar's failure is the cause; git's is the SIGPIPE that followed: {err}"
+        );
+    }
+
+    /// A revision that is not a tree makes git fail while tar succeeds on an
+    /// empty stream, so this is the case where git's stderr is the only thing
+    /// that says what went wrong.
+    #[test]
+    fn a_failing_git_reports_what_git_said() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        one_commit_repo(&repo);
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let err = git_archive_to(&repo, &"0".repeat(40), &dest)
+            .expect_err("an all-zero sha is not a tree");
+        assert!(
+            err.to_string().contains("git archive failed"),
+            "expected git's failure: {err}"
+        );
+        assert!(
+            err.to_string().len() > "git archive failed: ".len(),
+            "git's stderr has to survive, or the error names nothing: {err}"
+        );
     }
 }
