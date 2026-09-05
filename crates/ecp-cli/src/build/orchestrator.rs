@@ -437,6 +437,7 @@ pub(crate) fn git_archive_to(worktree: &Path, sha: &str, dest: &Path) -> io::Res
     let mut tar = match std::process::Command::new("tar")
         .args(["-x", "-f", "-", "-C", dest.to_string_lossy().as_ref()])
         .stdin(std::process::Stdio::from(git_stdout))
+        .stderr(std::process::Stdio::piped())
         .spawn()
     {
         Ok(child) => child,
@@ -450,49 +451,61 @@ pub(crate) fn git_archive_to(worktree: &Path, sha: &str, dest: &Path) -> io::Res
     // it is what empties the stdout pipe — but git can fill the stderr pipe
     // meanwhile, and a git blocked on stderr never closes stdout, so tar waits
     // for an EOF that never comes and the build hangs.
-    let (tar_status, git_status, stderr) = std::thread::scope(|scope| {
-        let drain = scope.spawn(move || {
+    let Some(mut tar_stderr) = tar.stderr.take() else {
+        finish_git(&mut git);
+        let _ = tar.kill();
+        let _ = tar.wait();
+        return Err(io::Error::other("tar: no stderr"));
+    };
+    let (tar_status, git_status, git_err, tar_err) = std::thread::scope(|scope| {
+        let drain_git = scope.spawn(move || {
             let mut buf = Vec::new();
             let _ = git_stderr.read_to_end(&mut buf);
             buf
         });
+        let drain_tar = scope.spawn(move || {
+            let mut buf = Vec::new();
+            let _ = tar_stderr.read_to_end(&mut buf);
+            buf
+        });
         let tar_status = tar.wait();
         let git_status = git.wait();
-        let stderr = drain.join().unwrap_or_default();
-        (tar_status, git_status, stderr)
+        (
+            tar_status,
+            git_status,
+            drain_git.join().unwrap_or_default(),
+            drain_tar.join().unwrap_or_default(),
+        )
     });
 
-    // Both are inspected, and which one is reported turns on whether git had
-    // anything to say. git failing with a message on stderr is a real failure —
-    // a bad revision, an unreadable object — and that message is the only thing
-    // that explains it. git failing silently is git dying on a pipe whose
-    // reader went away, which makes tar's failure the cause and git's the
-    // consequence.
-    //
-    // Deliberately not a SIGPIPE check: that is Unix-only, and on Windows a
-    // writer whose reader is gone gets a failed write rather than a signal, so
-    // the signal test silently stops discriminating on one of the five
-    // platforms this ships to.
+    // Both messages, rather than a rule for picking one. Every rule tried here
+    // was wrong for some case: tar-first lost git's stderr when a bad revision
+    // made tar fail on the empty stream it received; a SIGPIPE test is
+    // Unix-only; "git said something" misfires because `GIT_TRACE` in the
+    // caller's environment makes git write to stderr without failing. The
+    // reader wants to know what happened, and when two processes fail together
+    // the honest answer names both.
     let tar_status = tar_status?;
     let git_status = git_status?;
-    let git_said_something = !String::from_utf8_lossy(&stderr).trim().is_empty();
-    if !git_status.success() && git_said_something {
-        return Err(io::Error::other(format!(
-            "git archive failed: {}",
-            String::from_utf8_lossy(&stderr).trim()
-        )));
+    if git_status.success() && tar_status.success() {
+        return Ok(());
+    }
+    let mut parts = Vec::new();
+    if !git_status.success() {
+        parts.push(format!(
+            "git archive: {} {}",
+            git_status,
+            String::from_utf8_lossy(&git_err).trim()
+        ));
     }
     if !tar_status.success() {
-        return Err(io::Error::other(format!(
-            "tar extract failed: {tar_status}"
-        )));
+        parts.push(format!(
+            "tar extract: {} {}",
+            tar_status,
+            String::from_utf8_lossy(&tar_err).trim()
+        ));
     }
-    if !git_status.success() {
-        return Err(io::Error::other(format!(
-            "git archive failed with no message: {git_status}"
-        )));
-    }
-    Ok(())
+    Err(io::Error::other(parts.join("; ")))
 }
 
 pub(crate) fn collect_refs(worktree: &Path, sha: &str) -> io::Result<Vec<RefRecord>> {
@@ -997,6 +1010,30 @@ mod meta_lock_tests {
 mod archive_process_tests {
     use super::*;
 
+    /// `GIT_TRACE` is process-global, so the two tests that set it take turns.
+    /// Without this one test's trace setting leaks into whatever else the
+    /// harness happens to be running on another thread.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Sets `GIT_TRACE` for as long as it is held, and clears it on the way
+    /// out — including on a panic, which a bare `remove_var` after the
+    /// assertions would skip.
+    struct GitTrace(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl GitTrace {
+        fn on() -> Self {
+            let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            std::env::set_var("GIT_TRACE", "1");
+            Self(guard)
+        }
+    }
+
+    impl Drop for GitTrace {
+        fn drop(&mut self) {
+            std::env::remove_var("GIT_TRACE");
+        }
+    }
+
     fn one_commit_repo(dir: &std::path::Path) -> String {
         std::fs::create_dir_all(dir).unwrap();
         for args in [
@@ -1047,6 +1084,9 @@ mod archive_process_tests {
         let repo = tmp.path().join("repo");
         let sha = one_commit_repo(&repo);
 
+        // Trace output on a run where tar is the one that fails: the error has
+        // to name tar, not the process that merely printed the most.
+        let _trace = GitTrace::on();
         let start = std::time::Instant::now();
         let err = git_archive_to(&repo, &sha, &tmp.path().join("no-such-dir"))
             .expect_err("tar cannot extract into a directory that is not there");
@@ -1056,14 +1096,20 @@ mod archive_process_tests {
             start.elapsed()
         );
         assert!(
-            err.to_string().contains("tar extract failed"),
-            "tar's failure is the cause; git's is the SIGPIPE that followed: {err}"
+            err.to_string().contains("tar extract"),
+            "tar's failure has to be named: {err}"
         );
     }
 
     /// A revision that is not a tree makes git fail while tar succeeds on an
     /// empty stream, so this is the case where git's stderr is the only thing
     /// that says what went wrong.
+    ///
+    /// `GIT_TRACE` is set on purpose. git then writes to stderr without
+    /// failing, which is what broke an earlier attempt to pick the causal
+    /// process by "did git say anything" — the caller's environment reaches
+    /// this subprocess, and a rule that reads trace output as an error would
+    /// report git for a failure tar caused.
     #[test]
     fn a_failing_git_reports_what_git_said() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1072,14 +1118,15 @@ mod archive_process_tests {
         let dest = tmp.path().join("dest");
         std::fs::create_dir_all(&dest).unwrap();
 
+        let _trace = GitTrace::on();
         let err = git_archive_to(&repo, &"0".repeat(40), &dest)
             .expect_err("an all-zero sha is not a tree");
         assert!(
-            err.to_string().contains("git archive failed"),
+            err.to_string().contains("git archive"),
             "expected git's failure: {err}"
         );
         assert!(
-            err.to_string().len() > "git archive failed: ".len(),
+            err.to_string().contains("not a tree object"),
             "git's stderr has to survive, or the error names nothing: {err}"
         );
     }
