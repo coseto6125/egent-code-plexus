@@ -119,3 +119,82 @@ fn hook_serial_spawn_runs_each_time() {
         "serial calls should each run; got {lines:?}"
     );
 }
+
+/// The no-flock branch used to run whatever a repository path spelled.
+///
+/// `trap "rmdir '<path>'" EXIT INT TERM` reads as quoted and is not: the body's
+/// own double quotes are the outer pair, so the single quotes inside are
+/// ordinary characters and the shell expands `$(...)` in the path as it parses
+/// the trap. `shell_quote` was doing its job; the double quotes around its
+/// output undid it.
+///
+/// This drives the real preamble with a PATH that has no `flock`, which is the
+/// only way to reach that branch on a machine that has one.
+#[cfg(unix)]
+#[test]
+fn no_flock_fallback_does_not_execute_a_path_that_spells_a_command() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let marker = tmp.path().join("substituted");
+
+    // A PATH holding what the fallback needs and nothing more — `flock` absent
+    // is the point, so linking the tools individually beats trimming a copy of
+    // the system PATH.
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for tool in ["mkdir", "rmdir", "touch", "sh"] {
+        let src = ["/bin", "/usr/bin"]
+            .iter()
+            .map(|d| Path::new(d).join(tool))
+            .find(|p| p.exists())
+            .unwrap_or_else(|| panic!("{tool} must exist for this test"));
+        std::os::unix::fs::symlink(&src, bin.join(tool)).unwrap();
+    }
+    assert!(
+        !bin.join("flock").exists(),
+        "the fallback branch is only reached when flock is missing"
+    );
+
+    // The lock lives in a directory whose name spells a command. Nothing here
+    // is exotic: `$(...)` is a legal directory name on every Unix filesystem.
+    let hostile = tmp.path().join(format!("$(touch {})", marker.display()));
+    std::fs::create_dir_all(&hostile).unwrap();
+    let lock = hostile.join("reindex.lock");
+
+    // The inner command leaves its own mark. Without it the test also passes
+    // when the preamble exits early — `mkdir ... || exit 0` returns 0 and
+    // installs no trap — and an absent substitution marker would then prove
+    // nothing about the branch this test exists to cover.
+    // Through the environment, not interpolated: a temp dir carrying a single
+    // quote would otherwise break the inner command and fail the test before it
+    // reaches what it is here to check. A test about shell quoting is a poor
+    // place to hand-roll shell quoting.
+    let reached = tmp.path().join("reached");
+    let inner = "touch \"$ECP_REACHED\"";
+
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(flock_shell(&lock, inner))
+        .env("PATH", &bin)
+        .env("ECP_REACHED", &reached)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run the preamble");
+
+    assert!(
+        out.status.success(),
+        "the fallback preamble exited non-zero: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        reached.exists(),
+        "the preamble never reached its inner command, so nothing here \
+         exercises the trap; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !marker.exists(),
+        "the shell ran the command spelled in the lock path; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
