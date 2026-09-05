@@ -83,8 +83,17 @@ fn invalidate_keeps_pure_reference() {
     assert!(tmp.path().join("sessions/sid_clean").exists());
 }
 
+/// The contract is that the augmented session leaves its own path, not that the
+/// retired name has any particular spelling. The spelling used to be
+/// `.stale-<sha8>` and was asserted here; that name is the same on every run,
+/// which is the collision this changed to fix, so pinning it again would pin
+/// the defect. Nothing here counts the retired directories either: the removal
+/// runs on a background thread that a test process, unlike a CLI process, does
+/// outlive — so a count would race the cleaner. That the retired name is one
+/// `admin gc` sweeps is pinned in `gc::tests` instead, where it is
+/// deterministic.
 #[test]
-fn invalidate_renames_augmented_to_stale() {
+fn invalidate_retires_an_augmented_session() {
     let tmp = tempfile::tempdir().unwrap();
     setup_repo_with_l2(tmp.path());
     add_session(tmp.path(), "sid_dirty", SHA, true);
@@ -92,9 +101,28 @@ fn invalidate_renames_augmented_to_stale() {
     assert_eq!(report.kept, 0);
     assert_eq!(report.invalidated, 1);
     assert!(!tmp.path().join("sessions/sid_dirty").exists());
-    let sha8 = &SHA[..8];
-    let stale = tmp.path().join(format!("sessions/sid_dirty.stale-{sha8}"));
-    assert!(stale.exists());
+}
+
+/// Two `--force` runs at one SHA used to collide: the retired name carried
+/// only the SHA, so the second rename landed on the non-empty directory the
+/// first had left behind and the whole rebuild died with `Directory not empty
+/// (os error 39)`. The cleanup that was meant to prevent that ran on a
+/// detached thread sleeping two seconds, which a CLI process does not outlive.
+#[test]
+fn invalidate_twice_at_one_sha_does_not_collide() {
+    let tmp = tempfile::tempdir().unwrap();
+    setup_repo_with_l2(tmp.path());
+
+    add_session(tmp.path(), "sid_dirty", SHA, true);
+    let first = invalidate_matching_l1(tmp.path(), SHA).unwrap();
+    assert_eq!(first.invalidated, 1);
+
+    // The session comes back the moment anything queries again.
+    add_session(tmp.path(), "sid_dirty", SHA, true);
+    let second = invalidate_matching_l1(tmp.path(), SHA)
+        .expect("a second invalidation at the same SHA must not fail");
+    assert_eq!(second.invalidated, 1);
+    assert!(!tmp.path().join("sessions/sid_dirty").exists());
 }
 
 #[test]
@@ -112,9 +140,17 @@ fn invalidate_ignores_sessions_for_other_sha() {
 fn invalidate_skips_already_stale_dirs() {
     let tmp = tempfile::tempdir().unwrap();
     setup_repo_with_l2(tmp.path());
+    // Both spellings: `.stale-<sha8>` is what binaries before this change
+    // wrote and is still on disk in `~/.ecp`, `.dead.<pid>.<n>.<ts>` is what
+    // they write now. Neither may be walked back into.
     fs::create_dir_all(
         tmp.path()
             .join(format!("sessions/sid_zombie.stale-{}", &SHA[..8])),
+    )
+    .unwrap();
+    fs::create_dir_all(
+        tmp.path()
+            .join("sessions/sid_ghost.dead.4242.0.1730000000000"),
     )
     .unwrap();
     let report = invalidate_matching_l1(tmp.path(), SHA).unwrap();

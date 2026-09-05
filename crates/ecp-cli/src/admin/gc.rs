@@ -39,21 +39,16 @@ pub struct SweepStats {
 }
 
 /// SHAs that must be retained: branch/tag/ref objects from the worktree
-/// A session dir marked dead: `<sid>.dead` or `<sid>.dead.<unix_ts>` (single
-/// trailing epoch segment — the shape `sweep_sessions` writes via
-/// `path.with_extension(format!("dead.{ts}"))`).
-fn is_session_dead(name: &str) -> bool {
-    name.ends_with(".dead")
-        || name
-            .rsplit_once(".dead.")
-            .map(|(_, ts)| ts.chars().all(|c| c.is_ascii_digit()))
-            .unwrap_or(false)
-}
-
-/// A retired repo dir: `<repo>__<hash>.dead.<pid>.<n>.<ts>` — three numeric
-/// segments, the shape `fs_safe::retire_dir_async` emits (distinct from the
-/// single-epoch session form, hence a separate predicate).
-pub(crate) fn is_repo_retired(name: &str) -> bool {
+/// A directory marked dead: `<name>.dead`, or `.dead.` followed by any number
+/// of numeric segments.
+///
+/// One predicate for both shapes on purpose. `sweep_sessions` writes
+/// `.dead.<unix_ts>` and `fs_safe::retire_dir_async` writes
+/// `.dead.<pid>.<n>.<ts>`; a session retired through the second form went
+/// unrecognised while these were two predicates, so it was never swept. The
+/// single-segment shape satisfies "every segment is numeric" already, which is
+/// why the stricter one could be dropped rather than kept alongside.
+pub fn is_retired_dir(name: &str) -> bool {
     name.ends_with(".dead")
         || name
             .rsplit_once(".dead.")
@@ -90,7 +85,7 @@ pub fn reachability(repo_root: &Path, worktree: &Path) -> io::Result<FxHashSet<S
         for entry in it.flatten() {
             let name = entry.file_name();
             let s = name.to_string_lossy();
-            if is_session_dead(&s) || s.contains(".stale-") {
+            if is_retired_dir(&s) || s.contains(".stale-") {
                 continue;
             }
             let sm_path = entry.path().join("session_meta.json");
@@ -191,7 +186,7 @@ pub fn sweep_sessions(repo_root: &Path) -> io::Result<SweepStats> {
     for entry in it.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
-        if is_session_dead(&name) || name.contains(".stale-") {
+        if is_retired_dir(&name) || name.contains(".stale-") {
             fs::remove_dir_all(&path)?;
             removed += 1;
             continue;
@@ -314,7 +309,7 @@ pub fn sweep_retired_repos(home_ecp: &Path) -> io::Result<SweepStats> {
     };
     for entry in it.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if !is_repo_retired(&name) {
+        if !is_retired_dir(&name) {
             continue;
         }
         let path = entry.path();
@@ -421,5 +416,31 @@ mod tests {
         let stats = sweep_orphan_tmp(home).expect("sweep");
         assert_eq!(stats.removed, 0, "dirs named *.tmp are not files; skipped");
         assert!(tmp_dir.exists());
+    }
+
+    /// The two shapes had a predicate each, and a session retired through
+    /// `retire_dir_async` matched neither the session one nor the sweep, so it
+    /// stayed on disk for ever. Names are built here rather than copied as
+    /// literals, so a change to `retire_dir` reaches this test.
+    #[test]
+    fn is_retired_dir_accepts_both_retired_shapes_and_no_live_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live = tmp.path().join("sid_live");
+        std::fs::create_dir_all(live.join("inner")).unwrap();
+        let retired = ecp_core::registry::retire_dir(&live)
+            .unwrap()
+            .expect("retire_dir must move a directory that exists");
+        let retired_name = retired.file_name().unwrap().to_str().unwrap();
+        assert!(
+            is_retired_dir(retired_name),
+            "gc must sweep what retire_dir writes: {retired_name}"
+        );
+
+        // The shape `sweep_sessions` writes itself.
+        assert!(is_retired_dir("sid.dead.1730000000"));
+        assert!(is_retired_dir("sid.dead"));
+
+        assert!(!is_retired_dir("sid_live"));
+        assert!(!is_retired_dir("sid.dead.notanumber"));
     }
 }

@@ -39,7 +39,7 @@ pub fn run(args: GcArgs) -> Result<(), ecp_core::EcpError> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') || crate::admin::gc::is_repo_retired(&name) {
+            if name.starts_with('.') || crate::admin::gc::is_retired_dir(&name) {
                 continue;
             }
             if name == "telemetry" {
