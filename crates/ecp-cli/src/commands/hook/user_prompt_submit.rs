@@ -79,11 +79,14 @@ fn drain_update_notice() -> Option<String> {
 /// must never block on log access.
 fn read_log_tail(log: &Path, lines: usize, repo_root: &Path) -> String {
     // The tail is quoted into the notice the model reads, and the log lives at
-    // a repo-controlled path, so it goes through the confined read first.
-    if super::common::read_within_repo(log, repo_root).is_none() {
-        return String::new();
-    }
-    let mut f = match fs::File::open(log) {
+    // a repo-controlled path, so the path is confined first. Resolved, not
+    // read: this function reads at most `LOG_TAIL_WINDOW` bytes, and validating
+    // by reading the whole file would hand a repository the allocation size.
+    let log = match super::common::resolve_within_repo(log, repo_root) {
+        Some(p) => p,
+        None => return String::new(),
+    };
+    let mut f = match fs::File::open(&log) {
         Ok(f) => f,
         Err(_) => return String::new(),
     };

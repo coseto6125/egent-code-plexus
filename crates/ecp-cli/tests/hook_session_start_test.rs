@@ -175,3 +175,52 @@ fn session_start_reads_a_rules_symlink_only_when_it_stays_in_the_repo() {
         "a symlink inside the repository must still be read: {text}"
     );
 }
+
+/// The second repo-supplied read: the tail of `.ecp/last-rebuild.log` is quoted
+/// into the UserPromptSubmit notice, so a symlink there reads a file outside the
+/// checkout into the same place. It goes through the resolver rather than the
+/// whole-file read, because the tail is bounded and validating by reading
+/// everything would let a repository choose how much this process allocates.
+#[cfg(unix)]
+#[test]
+fn user_prompt_submit_does_not_quote_a_log_symlinked_outside_the_repo() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().join("repo");
+    let state = repo.join(".ecp");
+    std::fs::create_dir_all(&state).unwrap();
+
+    let secret = tmp.path().join("secret.txt");
+    std::fs::write(&secret, "SECRET-LOG-LINE-XYZ\n").unwrap();
+    std::os::unix::fs::symlink(&secret, state.join("last-rebuild.log")).unwrap();
+    // The notice only renders on the failure path.
+    std::fs::write(state.join(".rebuild-failed"), "").unwrap();
+
+    let envelope = format!(
+        r#"{{"session_id":"log-probe","cwd":"{}","hook_event_name":"UserPromptSubmit","prompt":"hi"}}"#,
+        repo.display()
+    );
+    let mut child = Command::new(ecp_bin())
+        .args(["hook", "user-prompt-submit", "--claude-code"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(envelope.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+
+    assert!(
+        text.contains("reindex FAILED"),
+        "the failure notice must still render, or this test proves nothing: {text}"
+    );
+    assert!(
+        !text.contains("SECRET-LOG-LINE-XYZ"),
+        "a file outside the repository was quoted into the notice: {text}"
+    );
+}

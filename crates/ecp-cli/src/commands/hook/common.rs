@@ -241,7 +241,7 @@ pub fn drain_and_render_peer_payload() -> Option<String> {
 /// window is not the threat here: the attacker is a repository sitting on disk,
 /// not a process racing this one. Closing it needs `openat2(RESOLVE_BENEATH)`,
 /// which is Linux-only, and ecp ships on five platforms.
-pub fn read_within_repo(path: &Path, repo_root: &Path) -> Option<String> {
+pub fn resolve_within_repo(path: &Path, repo_root: &Path) -> Option<PathBuf> {
     let resolved = std::fs::canonicalize(path).ok()?;
     let root = std::fs::canonicalize(repo_root).ok()?;
     if !resolved.starts_with(&root) {
@@ -252,5 +252,13 @@ pub fn read_within_repo(path: &Path, repo_root: &Path) -> Option<String> {
         );
         return None;
     }
-    std::fs::read_to_string(&resolved).ok()
+    Some(resolved)
+}
+
+/// [`resolve_within_repo`] followed by a whole-file read. Only for the rules
+/// template, which is used in full. A caller that reads part of a file takes
+/// the resolved path instead: reading it all to validate it would let a
+/// repository decide how much this process allocates, on the hook path.
+pub fn read_within_repo(path: &Path, repo_root: &Path) -> Option<String> {
+    std::fs::read_to_string(resolve_within_repo(path, repo_root)?).ok()
 }
