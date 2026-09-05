@@ -602,20 +602,24 @@ fn an_untracked_file_stays_out_of_the_commit_keyed_graph() {
         "ecp admin index",
     );
 
-    let summary = Command::new(ecp_bin())
-        .args([
-            "summary",
-            "--repo",
-            repo.to_str().unwrap(),
-            "--format",
-            "json",
-        ])
-        .env("HOME", &home)
-        .output()
-        .expect("summary");
-    let summary = String::from_utf8_lossy(&summary.stdout).to_string();
-    assert!(
-        !summary.contains("\"files\":2") && !summary.contains("\"files\": 2"),
+    let summary = run(
+        Command::new(ecp_bin())
+            .args([
+                "summary",
+                "--repo",
+                repo.to_str().unwrap(),
+                "--format",
+                "json",
+            ])
+            .env("HOME", &home),
+        "ecp summary",
+    );
+    let summary: serde_json::Value =
+        serde_json::from_slice(&summary.stdout).expect("summary emits json");
+    // committed.rs and nothing else: `untracked.rs` never reached the commit graph.
+    assert_eq!(
+        summary["summary"]["per_repo"][0]["metrics"]["files"],
+        serde_json::json!(1),
         "the commit-keyed graph took in an untracked file: {summary}"
     );
 
