@@ -164,13 +164,18 @@ fn no_flock_fallback_does_not_execute_a_path_that_spells_a_command() {
     // when the preamble exits early — `mkdir ... || exit 0` returns 0 and
     // installs no trap — and an absent substitution marker would then prove
     // nothing about the branch this test exists to cover.
+    // Through the environment, not interpolated: a temp dir carrying a single
+    // quote would otherwise break the inner command and fail the test before it
+    // reaches what it is here to check. A test about shell quoting is a poor
+    // place to hand-roll shell quoting.
     let reached = tmp.path().join("reached");
-    let inner = format!("touch '{}'", reached.display());
+    let inner = "touch \"$ECP_REACHED\"";
 
     let out = Command::new("sh")
         .arg("-c")
-        .arg(flock_shell(&lock, &inner))
+        .arg(flock_shell(&lock, inner))
         .env("PATH", &bin)
+        .env("ECP_REACHED", &reached)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
