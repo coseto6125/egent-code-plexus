@@ -507,7 +507,10 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
             // The JSON/toon paths carry the staleness caveat in the `result`
             // field; text (the default format) must say it too, or a stale
             // "no match" reads as a definitive "does not exist".
-            if let Some(c) = engine.caveat() {
+            if let Some(c) = merge_caveats(
+                engine.caveat(),
+                (!found).then(|| omitted_files_caveat(engine)),
+            ) {
                 eprintln!("note: {c}");
             }
             if !found {
@@ -545,7 +548,10 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
             emit_with_caveat(
                 &serde_json::to_value(&result).map_err(|e| EcpError::Output(e.to_string()))?,
                 format,
-                engine.caveat(),
+                merge_caveats(
+                    engine.caveat(),
+                    (!found).then(|| omitted_files_caveat(engine)),
+                ),
             )
         }
     }
@@ -756,6 +762,17 @@ struct BucketedResults {
 }
 
 impl BucketedResults {
+    /// True when any bucket holds a row. `found` in the payload is derived the
+    /// same way, so the caveat and the flag cannot disagree.
+    fn is_any_hit(&self) -> bool {
+        !(self.source.is_empty()
+            && self.examples.is_empty()
+            && self.tests.is_empty()
+            && self.reference.is_empty()
+            && self.document.is_empty()
+            && self.config.is_empty())
+    }
+
     fn partition(mut hits: Vec<Hit>) -> Self {
         // Sort overall by descending score before partitioning so each bucket
         // gets the best representatives across repos.
@@ -811,6 +828,14 @@ fn run_single(
     let (hits, truncated_total) =
         compute_single(&pattern, &mode, kind_filter.as_deref(), engine, repo_label)?;
     let buckets = BucketedResults::partition(hits);
+    // A miss against a graph that skipped files is not the same answer as a
+    // miss against a complete one, and ECP.md tells the reading model to treat
+    // an uncaveated `found:false` as "this symbol does not exist". Counted only
+    // on the miss path, so a hit pays nothing.
+    let caveat = merge_caveats(
+        caveat,
+        (!buckets.is_any_hit()).then(|| omitted_files_caveat(engine)),
+    );
     let summary = if truncated_total > (MULTI_CAP as u64) {
         eprintln!("note: search truncated — {truncated_total} matches found, {MULTI_CAP} kept");
         Some(format!(
@@ -820,6 +845,42 @@ fn run_single(
         None
     };
     emit_bucketed_with_metadata(&buckets, format, summary, truncated_total, caveat)
+}
+
+/// Join a staleness caveat with an omission caveat, keeping whichever exist.
+/// The inner `Option` lets a caller say "not applicable here" without
+/// evaluating the second one.
+fn merge_caveats(base: Option<String>, extra: Option<Option<String>>) -> Option<String> {
+    match (base, extra.flatten()) {
+        (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+        (Some(a), None) => Some(a),
+        (None, b) => b,
+    }
+}
+
+/// How many files the index left out, phrased for a model that just got a
+/// `found:false` and has to decide whether the symbol exists.
+///
+/// Reads the count already in the graph rather than re-deriving it, and only
+/// on the miss path — `find`'s budget is 30ms and a hit must not pay for this.
+fn omitted_files_caveat(engine: &Engine) -> Option<String> {
+    let graph = engine.graph().ok()?;
+    let omitted = graph
+        .blind_spots
+        .iter()
+        .filter(|b| {
+            matches!(
+                b.kind.resolve(&graph.string_pool),
+                "file-too-large" | "file-unreadable" | "parse-failed"
+            )
+        })
+        .count();
+    (omitted > 0).then(|| {
+        format!(
+            "this index left out {omitted} file(s) it could not analyse, so a miss here is not \
+             proof the symbol is absent — `ecp summary` names them under blind_spots"
+        )
+    })
 }
 
 /// Pure compute path for single-repo search: returns owned Hit rows, all
