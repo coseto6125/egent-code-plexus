@@ -25,7 +25,7 @@ pub fn handle(input: &HookInput) -> Result<(), EcpError> {
         let log = state_dir.join("last-rebuild.log");
 
         if failed.exists() {
-            let tail = read_log_tail(&log, 3);
+            let tail = read_log_tail(&log, 3, Path::new(&input.cwd));
             let _ = fs::remove_file(&failed);
             let msg = format!(
                 "ecp background reindex FAILED. {} Run `ecp admin index` manually to retry.",
@@ -77,7 +77,12 @@ fn drain_update_notice() -> Option<String> {
 /// reading from offset 0 for files smaller than the window. Returns
 /// `String::new()` if the file is missing / unreadable — UserPromptSubmit
 /// must never block on log access.
-fn read_log_tail(log: &Path, lines: usize) -> String {
+fn read_log_tail(log: &Path, lines: usize, repo_root: &Path) -> String {
+    // The tail is quoted into the notice the model reads, and the log lives at
+    // a repo-controlled path, so it goes through the confined read first.
+    if super::common::read_within_repo(log, repo_root).is_none() {
+        return String::new();
+    }
     let mut f = match fs::File::open(log) {
         Ok(f) => f,
         Err(_) => return String::new(),
