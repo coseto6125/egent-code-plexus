@@ -525,13 +525,10 @@ fn sync_file(path: &Path) -> io::Result<()> {
 
 pub(crate) fn update_repo_meta(repo_root: &Path, worktree: &Path, sha: &str) -> io::Result<()> {
     let meta_path = repo_root.join("meta.json");
-    let lock_path = repo_root.join(".meta.lock");
-    let lock = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)?;
-    lock.lock_exclusive()?;
+    // `FileLock` rather than a bare `lock_exclusive()`: an unbounded wait here
+    // hangs indexing behind a holder that will never release, which is the
+    // freeze PR #475 removed from the registry and left in place here.
+    let _lock = ecp_core::registry::FileLock::acquire_exclusive(&repo_root.join(".meta.lock"))?;
 
     let mut rm = if meta_path.exists() {
         RepoMeta::read(&meta_path)?
@@ -874,5 +871,43 @@ mod archive_filter_tests {
             "content\n",
             "the extracted tree must carry the content as stored"
         );
+    }
+}
+
+/// `update_repo_meta` used to wait for `.meta.lock` with no deadline, so a
+/// holder that never released stopped indexing for good rather than reporting
+/// anything. Held here from a second descriptor in this process: `flock` is
+/// scoped to the open file description, so two `open` calls conflict even
+/// inside one process.
+///
+/// The elapsed bound is the assertion that matters. Against the previous code
+/// this test does not fail, it hangs — which the harness reports as a timeout
+/// rather than as this message, so the message says what to look for.
+#[cfg(test)]
+mod meta_lock_tests {
+    use super::*;
+
+    #[test]
+    fn update_repo_meta_reports_a_busy_lock_instead_of_waiting_for_ever() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_root = tmp.path().join("repo__deadbeef");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        let held =
+            ecp_core::registry::FileLock::acquire_exclusive(&repo_root.join(".meta.lock")).unwrap();
+
+        let start = std::time::Instant::now();
+        let result = update_repo_meta(&repo_root, tmp.path(), &"a".repeat(40));
+        let waited = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "a lock nobody releases has to end as an error"
+        );
+        assert!(
+            waited < std::time::Duration::from_secs(60),
+            "if this reads as a harness timeout rather than this assertion, the \
+             wait is unbounded again: {waited:?}"
+        );
+        drop(held);
     }
 }
