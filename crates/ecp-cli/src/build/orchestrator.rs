@@ -404,20 +404,39 @@ pub(crate) fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io:
 /// overrides are what stop the scanned repository executing its own program.
 pub(crate) fn git_archive_to(worktree: &Path, sha: &str, dest: &Path) -> io::Result<()> {
     let overrides = safe_exec::filter_overrides(worktree);
-    let archive = safe_exec::git_with_overrides(worktree, &overrides)
+    // git's stdout is tar's stdin, so the kernel pipe holds the archive rather
+    // than this process. `.output()` used to buffer the whole tar first, which
+    // made peak memory a function of what the repository tracks: a 200 MB blob
+    // took the index from 71 MB to 502 MB, and none of it is content the
+    // analyzer would read — its per-file cap rejects that file after it has
+    // already been held in full.
+    let mut git = safe_exec::git_with_overrides(worktree, &overrides)
         .args(["archive", "--format=tar", sha])
-        .output()?;
-    if !archive.status.success() {
-        return Err(io::Error::other("git archive failed"));
-    }
-    let mut child = std::process::Command::new("tar")
-        .args(["-x", "-f", "-", "-C", dest.to_string_lossy().as_ref()])
-        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()?;
-    use std::io::Write;
-    child.stdin.as_mut().unwrap().write_all(&archive.stdout)?;
-    let s = child.wait()?;
-    if !s.success() {
+    let git_stdout = git
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("git archive: no stdout"))?;
+
+    let tar = std::process::Command::new("tar")
+        .args(["-x", "-f", "-", "-C", dest.to_string_lossy().as_ref()])
+        .stdin(std::process::Stdio::from(git_stdout))
+        .spawn()?;
+
+    // tar is waited on first: it drains the pipe, and waiting on git while the
+    // pipe is full would deadlock.
+    let tar_out = tar.wait_with_output()?;
+    let git_out = git.wait_with_output()?;
+
+    if !git_out.status.success() {
+        return Err(io::Error::other(format!(
+            "git archive failed: {}",
+            String::from_utf8_lossy(&git_out.stderr).trim()
+        )));
+    }
+    if !tar_out.status.success() {
         return Err(io::Error::other("tar extract failed"));
     }
     Ok(())
