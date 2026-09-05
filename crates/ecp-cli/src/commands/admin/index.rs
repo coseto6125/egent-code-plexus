@@ -68,7 +68,12 @@ pub fn run_analyzer_for_paths(
     // in `.ecp/config.toml` > 1 MiB default. See `ecp_core::config`.
     let max_file_size = ecp_core::config::resolve_max_file_bytes(src_root);
     let (file_tx, file_rx) = std::sync::mpsc::channel::<(std::path::PathBuf, std::path::PathBuf)>();
-    let skipped_large = std::sync::atomic::AtomicU64::new(0);
+    // Paths, not just a count. The count only ever reached a `tracing::warn!`
+    // on stderr; the graph said nothing, so `ecp find` answered `found: false`
+    // for symbols that are in the tree and the reading model was told they do
+    // not exist. These become BlindSpots below.
+    let skipped_large: std::sync::Mutex<Vec<(std::path::PathBuf, u64)>> =
+        std::sync::Mutex::new(Vec::new());
     let skipped_large_ref = &skipped_large;
     let max_file_size_ref = &max_file_size;
     let src_root_ref = src_root;
@@ -91,7 +96,11 @@ pub fn run_analyzer_for_paths(
                 if path.is_file() && should_analyze_path(path) {
                     if let Ok(metadata) = entry.metadata() {
                         if metadata.len() > *max_file_size_ref {
-                            skipped_large_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let rel_path = path.strip_prefix(src_root_ref).unwrap_or(path);
+                            skipped_large_ref
+                                .lock()
+                                .expect("skipped-large list is never held across a panic")
+                                .push((rel_path.to_path_buf(), metadata.len()));
                             return ignore::WalkState::Continue;
                         }
                     }
@@ -105,12 +114,14 @@ pub fn run_analyzer_for_paths(
     drop(file_tx);
     let files_to_analyze: Vec<(std::path::PathBuf, std::path::PathBuf)> =
         file_rx.into_iter().collect();
-    let skipped_large_files = skipped_large.load(std::sync::atomic::Ordering::Relaxed);
+    let skipped_large_files = skipped_large
+        .into_inner()
+        .expect("skipped-large list is never held across a panic");
 
-    if skipped_large_files > 0 {
+    if !skipped_large_files.is_empty() {
         tracing::warn!(
             "Skipped {} files > {} KB during analysis of {:?}",
-            skipped_large_files,
+            skipped_large_files.len(),
             max_file_size / 1024,
             src_root
         );
@@ -179,7 +190,7 @@ pub fn run_analyzer_for_paths(
     };
     let cache_ref: Option<&crate::parse_cache::ParseCache> = parse_cache.as_ref();
     let t_parse = std::time::Instant::now();
-    let local_graphs = pipeline.analyze_with_cache(files_to_analyze, |rel_path, hash| {
+    let mut local_graphs = pipeline.analyze_with_cache(files_to_analyze, |rel_path, hash| {
         cache_ref.and_then(|c| c.get(rel_path, hash))
     });
     if prof {
@@ -206,6 +217,11 @@ pub fn run_analyzer_for_paths(
         use rayon::prelude::*;
         let to_write: Vec<(std::path::PathBuf, Vec<u8>)> = local_graphs
             .par_iter()
+            // An omitted graph carries a zero hash because its content was
+            // never read. Caching it would key an empty graph on a hash no
+            // real file produces — dead weight at best, and at worst an empty
+            // answer served for a file whose content happens to hash to zero.
+            .filter(|g| g.content_hash != [0u8; 8])
             .filter(|g| !cache.path_for(&g.file_path, &g.content_hash).exists())
             .filter_map(|g| match rkyv::to_bytes::<rkyv::rancor::Error>(g) {
                 Ok(bytes) => Some((
@@ -253,6 +269,21 @@ pub fn run_analyzer_for_paths(
             t_step3.elapsed().as_secs_f32()
         );
     }
+    // Appended after the cache write on purpose: an omitted graph carries a
+    // zero content hash, and caching it would let the next run serve the
+    // omission as if it were a parse.
+    for (rel_path, len) in skipped_large_files {
+        local_graphs.push(ecp_core::analyzer::types::LocalGraph::omitted(
+            &rel_path,
+            "file-too-large",
+            format!(
+                "{len} bytes exceeds the {max_file_size}-byte per-file cap, so nothing in this \
+                 file is in the graph. Raise `[index] max_file_bytes` in `.ecp/config.toml`, or \
+                 set `ECP_MAX_FILE_BYTES`, to include it."
+            ),
+        ));
+    }
+
     let t_step4 = std::time::Instant::now();
     // ── Step 4: Build global graph ────────────────────────────────────────
     let t_cfg = std::time::Instant::now();

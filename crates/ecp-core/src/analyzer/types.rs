@@ -631,6 +631,48 @@ pub struct LocalGraph {
     pub raw_function_metas: Vec<RawFunctionMeta>,
 }
 
+impl LocalGraph {
+    /// A graph for a file the pipeline could not analyse, carrying nothing but
+    /// the reason.
+    ///
+    /// Every path that gives up on a file used to `return` from the worker, so
+    /// the file contributed no graph and no record, and the index published as
+    /// complete. `ecp find` then answered `found: false` for a symbol that is
+    /// in the tree — and `found:false` with no caveat is the tool telling the
+    /// reading model the symbol does not exist. The project's own rule is that
+    /// honest no-data beats a guess; this is what makes the no-data honest.
+    ///
+    /// `content_hash` stays zero on purpose. It is the parse cache's key, and a
+    /// hash of content that was never read would be a lie the next run trusts.
+    pub fn omitted(rel_path: &std::path::Path, kind: &str, hint: String) -> Self {
+        let is_test = crate::algorithms::process_trace::is_test_path(&rel_path.to_string_lossy());
+        Self {
+            file_path: rel_path.to_path_buf(),
+            content_hash: [0u8; 8],
+            nodes: Vec::new(),
+            documents: Vec::new(),
+            imports: Vec::new(),
+            routes: Vec::new(),
+            framework_refs: Vec::new(),
+            fanout_refs: Vec::new(),
+            blind_spots: vec![BlindSpot {
+                kind: kind.to_string(),
+                file_path: rel_path.to_path_buf(),
+                span: (0, 0, 0, 0),
+                hint,
+                is_test,
+            }],
+            schema_fields: None,
+            event_topics: None,
+            tx_scopes: None,
+            path_literals: None,
+            sql_refs: None,
+            call_metas: Vec::new(),
+            raw_function_metas: Vec::new(),
+        }
+    }
+}
+
 impl Default for LocalGraph {
     fn default() -> Self {
         Self {

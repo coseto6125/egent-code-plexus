@@ -246,14 +246,35 @@ impl AnalyzerPipeline {
                         // Skip oversized files before reading to keep the
                         // worker thread from materialising a multi-GiB blob
                         // into memory. metadata() is one fstat — cheap.
+                        // Every give-up below reports itself. A silent `return`
+                        // left the file with no graph and no record, the index
+                        // published as complete, and `ecp find` answered
+                        // `found: false` for a symbol that is in the tree.
                         let file_len = match std::fs::metadata(&abs_path) {
                             Ok(meta) => {
                                 if meta.len() > max_file_bytes {
+                                    let _ = sender.send(LocalGraph::omitted(
+                                        &rel_path,
+                                        "file-too-large",
+                                        format!(
+                                            "{} bytes exceeds the {max_file_bytes}-byte per-file cap, \
+                                             so nothing in this file is in the graph. Raise \
+                                             `[index] max_file_bytes` or `ECP_MAX_FILE_BYTES` to include it.",
+                                            meta.len()
+                                        ),
+                                    ));
                                     return;
                                 }
                                 meta.len()
                             }
-                            Err(_) => return,
+                            Err(e) => {
+                                let _ = sender.send(LocalGraph::omitted(
+                                    &rel_path,
+                                    "file-unreadable",
+                                    format!("could not stat the file: {e}"),
+                                ));
+                                return;
+                            }
                         };
 
                         // CI-E: mmap source bytes instead of `fs::read`. The
@@ -275,13 +296,27 @@ impl AnalyzerPipeline {
                                 Ok(m) => SourceBuf::Mmap(m),
                                 Err(_) => match std::fs::read(&abs_path) {
                                     Ok(v) => SourceBuf::Owned(v),
-                                    Err(_) => return,
+                                    Err(e) => {
+                                        let _ = sender.send(LocalGraph::omitted(
+                                            &rel_path,
+                                            "file-unreadable",
+                                            format!("could not read the file: {e}"),
+                                        ));
+                                        return;
+                                    }
                                 },
                             }
                         } else {
                             match std::fs::read(&abs_path) {
                                 Ok(v) => SourceBuf::Owned(v),
-                                Err(_) => return,
+                                Err(e) => {
+                                    let _ = sender.send(LocalGraph::omitted(
+                                        &rel_path,
+                                        "file-unreadable",
+                                        format!("could not read the file: {e}"),
+                                    ));
+                                    return;
+                                }
                             }
                         };
                         let source: &[u8] = source_buf.as_slice();
@@ -307,9 +342,18 @@ impl AnalyzerPipeline {
                             entry.0 += 1;
                             entry.1 += parse_ns;
                         }
-                        if let Ok(mut local_graph) = result {
-                            local_graph.content_hash = content_hash;
-                            let _ = sender.send(local_graph);
+                        match result {
+                            Ok(mut local_graph) => {
+                                local_graph.content_hash = content_hash;
+                                let _ = sender.send(local_graph);
+                            }
+                            Err(e) => {
+                                let _ = sender.send(LocalGraph::omitted(
+                                    &rel_path,
+                                    "parse-failed",
+                                    format!("the {} parser returned an error: {e}", provider.name()),
+                                ));
+                            }
                         }
                     });
             });
@@ -407,20 +451,37 @@ mod tests {
         ];
         let results = pipeline.analyze(files);
 
-        let paths: Vec<_> = results
+        // The contract changed from "the oversized file is absent" to "it is
+        // present carrying only the reason it was not parsed". Absence was the
+        // defect: it left the caller unable to tell a file that has no symbols
+        // from one nobody looked at.
+        let big = results
             .iter()
-            .map(|g| g.file_path.to_str().unwrap().to_string())
-            .collect();
+            .find(|g| g.file_path.to_str() == Some("big.ts"))
+            .expect("the skipped file must still be reported");
         assert!(
-            !paths.iter().any(|p| p == "big.ts"),
-            "17-byte file must be skipped under 10-byte cap; got {:?}",
-            paths
+            big.nodes.is_empty(),
+            "a file over the cap must not be parsed; got {} nodes",
+            big.nodes.len()
+        );
+        assert_eq!(
+            big.blind_spots
+                .iter()
+                .map(|b| b.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["file-too-large"],
+            "the reason has to travel with it"
         );
         assert!(
-            paths.iter().any(|p| p == "small.ts"),
-            "1-byte file must still pass through; got {:?}",
-            paths
+            big.content_hash == [0u8; 8],
+            "content that was never read must not get a hash the parse cache trusts"
         );
+
+        let small = results
+            .iter()
+            .find(|g| g.file_path.to_str() == Some("small.ts"))
+            .expect("1-byte file must still pass through");
+        assert!(small.blind_spots.is_empty());
 
         unsafe { std::env::remove_var("ECP_MAX_FILE_BYTES") };
     }
