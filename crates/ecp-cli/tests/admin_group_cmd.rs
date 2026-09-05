@@ -277,3 +277,36 @@ fn group_remove_noop_when_not_a_member() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn group_add_invalid_name_errors_without_changing_registry() {
+    let home = tempfile::tempdir().unwrap();
+    seed_registry(home.path(), vec![make_repo("alpha", vec![])], vec![]);
+    let registry_path = home.path().join(".ecp/registry.json");
+    let before = std::fs::read(&registry_path).unwrap();
+    let absolute = home.path().join("escaped");
+    for name in [
+        absolute.to_str().unwrap(),
+        "..",
+        "../../escaped",
+        "nested/child",
+        r"nested\child",
+        "C:child",
+    ] {
+        let out = Command::new(ecp_bin())
+            .args(["admin", "group", "add", "alpha", name])
+            .env("ECP_HOME", home.path().join(".ecp"))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success());
+        assert!(stderr.contains(&format!("{name:?}")), "stderr: {stderr}");
+        assert!(
+            stderr.contains("single normal path component"),
+            "stderr: {stderr}"
+        );
+        assert_eq!(std::fs::read(&registry_path).unwrap(), before);
+        assert!(!absolute.exists());
+        assert!(!home.path().join(".ecp/groups").exists());
+    }
+}

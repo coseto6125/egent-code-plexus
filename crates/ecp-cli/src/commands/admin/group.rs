@@ -40,6 +40,7 @@ where
 }
 
 fn add(repo: &str, group: &str) -> Result<(), EcpError> {
+    ecp_core::registry::validate_cache_component(group)?;
     mutate_registry(|reg| {
         let mut changed = false;
 

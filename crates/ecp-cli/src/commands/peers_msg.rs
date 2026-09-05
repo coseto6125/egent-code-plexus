@@ -14,6 +14,7 @@ pub(crate) fn resolve_target_session(
     me: &str,
     target: &str,
 ) -> std::io::Result<String> {
+    ecp_core::registry::validate_cache_component(target)?;
     if repo_root.join("sessions").join(target).is_dir() {
         return Ok(target.to_string());
     }
@@ -45,6 +46,7 @@ pub fn cmd_say(
     reply: Option<&str>,
 ) -> std::io::Result<()> {
     let me = crate::session::resolver::resolve_session_id(None);
+    ecp_core::registry::validate_cache_component(&me)?;
     let to_sid = to
         .map(|t| resolve_target_session(repo_root, &me, t))
         .transpose()?;
@@ -123,10 +125,9 @@ pub fn cmd_say(
 /// The file is never rotated or truncated — see `peer::inbox` — so everything
 /// ever delivered to this session is here.
 pub fn cmd_inbox(repo_root: &Path, limit: usize, clear: bool) -> std::io::Result<()> {
-    let inbox = repo_root
-        .join("sessions")
-        .join(crate::session::resolver::resolve_session_id(None))
-        .join("inbox.jsonl");
+    let me = crate::session::resolver::resolve_session_id(None);
+    ecp_core::registry::validate_cache_component(&me)?;
+    let inbox = repo_root.join("sessions").join(&me).join("inbox.jsonl");
     if clear {
         ecp_core::peer::inbox::truncate_inbox(&inbox)?;
         println!("inbox cleared");
@@ -160,6 +161,7 @@ pub fn cmd_inbox(repo_root: &Path, limit: usize, clear: bool) -> std::io::Result
 
 pub fn cmd_thread(repo_root: &Path, msg_id: &str) -> std::io::Result<()> {
     let me = crate::session::resolver::resolve_session_id(None);
+    ecp_core::registry::validate_cache_component(&me)?;
     let msg_log = repo_root.join("sessions").join(&me).join("msg.log");
     let Ok(content) = std::fs::read_to_string(&msg_log) else {
         println!("no messages");

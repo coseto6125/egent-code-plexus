@@ -137,7 +137,7 @@ fn status_reports_stale_when_meta_commit_differs_from_head() {
     );
 
     // Write a meta.json with a deliberately-wrong stored commit.
-    let gdir = group_dir(&home_ecp, "demo");
+    let gdir = group_dir(&home_ecp, "demo").unwrap();
     let mut snapshots = BTreeMap::new();
     snapshots.insert(
         dir_name.clone(),

@@ -46,6 +46,7 @@ pub struct ImpactArgs {
 }
 
 pub fn run(args: ImpactArgs) -> Result<(), EcpError> {
+    ecp_core::registry::validate_cache_component(&args.name)?;
     let home_ecp = resolve_home_ecp();
     let registry_path = home_ecp.join("registry.json");
     let reg = ecp_core::registry::RegistryFile::read_or_empty(&registry_path)?;
@@ -109,7 +110,7 @@ pub fn run(args: ImpactArgs) -> Result<(), EcpError> {
     )?;
 
     // 5. Read contracts.rkyv via zero-copy mmap.
-    let group_dir = storage::group_dir(&home_ecp, &args.name);
+    let group_dir = storage::group_dir(&home_ecp, &args.name)?;
     let contracts_path = group_dir.join(storage::CONTRACTS_FILE);
 
     // 6. Build local_uids set.

@@ -111,3 +111,45 @@ fn uid_errors_if_not_under_repo() {
     let repo = Path::new("/repo");
     assert!(uid_path(abs, repo).is_err());
 }
+
+#[test]
+fn cache_component_rejects_paths_with_actionable_error() {
+    for name in [
+        "",
+        ".",
+        "..",
+        "/absolute",
+        "a/b",
+        r"a\b",
+        "C:",
+        "c:relative",
+        r"C:\absolute",
+        r"\\server\share",
+        "./a",
+        "a/",
+        "a/.",
+    ] {
+        let error = ecp_core::registry::validate_cache_component(name).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        let message = error.to_string();
+        assert!(message.contains(&format!("{name:?}")), "{message}");
+        assert!(
+            message.contains("single normal path component"),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn cache_component_accepts_ordinary_names_without_whitelisting_characters() {
+    for name in [
+        "team-alpha_1.2",
+        "agent name",
+        ".hidden",
+        "foo..bar",
+        "組別",
+        "-worker",
+    ] {
+        ecp_core::registry::validate_cache_component(name).unwrap();
+    }
+}

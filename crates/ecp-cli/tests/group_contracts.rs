@@ -5,7 +5,7 @@ use tempfile::TempDir;
 
 fn seed(home: &Path) {
     let home_ecp = home.join(".ecp");
-    let gdir = group_dir(&home_ecp, "demo");
+    let gdir = group_dir(&home_ecp, "demo").unwrap();
     std::fs::create_dir_all(&gdir).unwrap();
 
     let p_http = StoredContract {

@@ -158,7 +158,7 @@ def create_user():
 
     // ── 7. Verify contracts.rkyv and meta.json exist ──────────────────────
     let ecp_home = home.join(".ecp");
-    let gdir = group_dir(&ecp_home, "demo");
+    let gdir = group_dir(&ecp_home, "demo").unwrap();
     assert!(
         gdir.join("contracts.rkyv").exists(),
         "contracts.rkyv missing at {:?}",

@@ -39,6 +39,12 @@ pub struct SyncArgs {
 }
 
 pub fn run(args: SyncArgs) -> Result<(), EcpError> {
+    // Ahead of the registry lookup: a name that cannot be a directory
+    // cannot be in the registry either, and "not found in registry"
+    // sends the reader to `admin group add`, which refuses the same
+    // value. Naming the real reason is the difference between one
+    // error and a loop.
+    ecp_core::registry::validate_cache_component(&args.name)?;
     let start = Instant::now();
 
     // 1. Resolve home, open registry.
@@ -93,7 +99,7 @@ pub fn run(args: SyncArgs) -> Result<(), EcpError> {
     }
 
     // 5. Match contracts.
-    let group_dir = storage::group_dir(&home_ecp, &args.name);
+    let group_dir = storage::group_dir(&home_ecp, &args.name)?;
     let (cross_links, unmatched) =
         match_contracts(&all_contracts, &group_dir, &cfg, args.exact_only)?;
 

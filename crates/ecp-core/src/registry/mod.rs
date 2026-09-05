@@ -21,7 +21,8 @@ pub use io::{atomic_write_bytes, atomic_write_bytes_no_fsync, atomic_write_json}
 #[doc(hidden)]
 pub use lock::{lock_exclusive_within, FileLock};
 pub use path::{
-    derive_repo_name, home_dir, resolve_home_ecp, sanitize_segment, uid_path, PathError,
+    derive_repo_name, home_dir, resolve_home_ecp, sanitize_segment, uid_path,
+    validate_cache_component, PathError,
 };
 pub use repo_meta::RepoMeta;
 pub use store::{strip_credentials, GroupEntry, RegistryFile, RepoAlias, CURRENT_VERSION};

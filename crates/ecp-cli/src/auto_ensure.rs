@@ -950,6 +950,7 @@ pub fn join_pending_tantivy_writers() {
 /// dir may not exist yet (no overlay written this session) — the caller checks.
 pub fn resolve_session_overlay_dir(worktree_root: &Path) -> Option<PathBuf> {
     let session_id = crate::session::resolver::resolve_session_id(None);
+    ecp_core::registry::validate_cache_component(&session_id).ok()?;
     let home_ecp = ecp_core::registry::resolve_home_ecp();
     let repo_dir = crate::repo_identity::repo_dir_name_for_cwd(worktree_root).ok()?;
     Some(home_ecp.join(&repo_dir).join("sessions").join(&session_id))

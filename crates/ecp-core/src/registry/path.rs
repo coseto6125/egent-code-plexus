@@ -36,6 +36,40 @@ pub fn sanitize_segment(s: &str) -> Result<String, PathError> {
     Ok(s.to_string())
 }
 
+/// Require `name` to be one ordinary path component before it is joined onto
+/// a cache root.
+///
+/// Group names and peer session ids are caller-supplied and end up as
+/// directories under `~/.ecp`. Without this, `ecp group sync ../../../X` wrote
+/// `contracts.rkyv` and `meta.json` into `X` three levels above the cache root,
+/// and an absolute name replaced the prefix outright — measured on 0.13.0,
+/// with `groups/` left empty in both cases.
+///
+/// Both separators are rejected on every platform, not only on Windows: a name
+/// carrying `\\` is meaningless as a single component anywhere, and accepting it
+/// on Unix would let the same value mean two different directories depending on
+/// which machine read it.
+pub fn validate_cache_component(name: &str) -> std::io::Result<()> {
+    let mut components = Path::new(name).components();
+    // Unix components do not recognize Windows separators or drive prefixes.
+    let windows_drive =
+        name.as_bytes().get(1) == Some(&b':') && name.as_bytes()[0].is_ascii_alphabetic();
+    if name.contains(['/', '\\'])
+        || windows_drive
+        || !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "invalid cache name {name:?}: use a single normal path component; \
+                 empty names, '.', '..', '/' or '\\' separators, and Windows drive/UNC prefixes are not allowed"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Extract `<repo>` segment from a git remote URL. Handles SSH
 /// (`git@host:user/repo.git`) and HTTPS (`https://host/user/repo.git`).
 /// `None` returns Err (caller falls back to working-tree basename).

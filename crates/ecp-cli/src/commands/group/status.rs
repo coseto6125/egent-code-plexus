@@ -34,6 +34,7 @@ struct MemberReport {
 }
 
 pub fn run(args: StatusArgs) -> Result<(), EcpError> {
+    ecp_core::registry::validate_cache_component(&args.name)?;
     let home_ecp = resolve_home_ecp();
     let registry_path = home_ecp.join("registry.json");
     let reg = RegistryFile::read_or_empty(&registry_path)?;
@@ -51,7 +52,7 @@ pub fn run(args: StatusArgs) -> Result<(), EcpError> {
         })?
         .clone();
 
-    let group_dir = storage::group_dir(&home_ecp, &args.name);
+    let group_dir = storage::group_dir(&home_ecp, &args.name)?;
     let meta_path = group_dir.join(storage::META_FILE);
 
     // No meta.json → never synced; all members are NO_META.

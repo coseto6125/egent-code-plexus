@@ -255,3 +255,149 @@ fn inbox_subcommand_reads_without_draining() {
         "inbox subcommand drained the file (should be non-destructive): {after}"
     );
 }
+
+/// Nothing is pre-created here. Creating `sessions.join(target)` first would
+/// put the escaped directory on disk before the command runs, leaving the test
+/// unable to say who made it — and for `..` or `.` it would resolve onto a
+/// directory the setup itself owns, so "must not exist" could not be asserted
+/// uniformly either.
+///
+/// Instead the whole temp tree is swept for an inbox afterwards. That holds for
+/// every target shape, and it is the outcome that matters: the message must not
+/// land anywhere, not merely outside one directory the test happened to name.
+fn assert_say_rejects_target(root: &std::path::Path, target: &str) {
+    let repo = root.join("cache");
+    let sessions = repo.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+
+    let out = Command::new(bin())
+        .args(["peers", "say", "must not arrive", "--to", target, "--repo"])
+        .arg(&repo)
+        .env("ECP_HOME", root.join("home"))
+        .env("ECP_SESSION_ID", "sender")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "invalid target accepted: {target:?}");
+    assert!(stderr.contains(&format!("{target:?}")), "stderr: {stderr}");
+    assert!(
+        stderr.contains("single normal path component"),
+        "stderr: {stderr}"
+    );
+
+    let stray = find_inbox_files(root);
+    assert!(
+        stray.is_empty(),
+        "target {target:?} produced an inbox: {stray:?}"
+    );
+    assert!(!sessions.join("sender").exists());
+}
+
+/// Every `inbox.jsonl` or its lock anywhere under `dir`.
+fn find_inbox_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(find_inbox_files(&path));
+        } else if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("inbox.jsonl"))
+        {
+            found.push(path);
+        }
+    }
+    found
+}
+
+#[test]
+fn say_absolute_target_errors_without_writing_outside_cache() {
+    let dir = tempdir().unwrap();
+    let target = dir.path().join("escaped");
+    assert_say_rejects_target(dir.path(), target.to_str().unwrap());
+}
+
+#[test]
+fn say_parent_traversal_errors_without_writing_outside_cache() {
+    for target in ["..", "../../escaped"] {
+        let dir = tempdir().unwrap();
+        assert_say_rejects_target(dir.path(), target);
+    }
+}
+
+#[test]
+fn say_separator_in_target_errors_without_writing_inbox() {
+    for target in ["nested/child", ".", ""] {
+        let dir = tempdir().unwrap();
+        assert_say_rejects_target(dir.path(), target);
+    }
+}
+
+#[test]
+fn say_windows_target_errors_without_creating_directory() {
+    for target in [
+        r"nested\child",
+        "C:child",
+        "C:",
+        r"C:\child",
+        r"\\server\share",
+    ] {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("cache");
+        std::fs::create_dir(&repo).unwrap();
+        let out = Command::new(bin())
+            .args(["peers", "say", "must not arrive", "--to", target, "--repo"])
+            .arg(&repo)
+            .env("ECP_HOME", dir.path().join("home"))
+            .env("ECP_SESSION_ID", "sender")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success());
+        assert!(stderr.contains(&format!("{target:?}")), "stderr: {stderr}");
+        assert!(
+            stderr.contains("single normal path component"),
+            "stderr: {stderr}"
+        );
+        assert_eq!(std::fs::read_dir(&repo).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn session_commands_invalid_session_id_error_without_creating_directory() {
+    let commands: &[&[&str]] = &[
+        &["peers", "say", "must not arrive"],
+        &["peers", "inbox", "--clear"],
+        &["peers", "thread", "m_test"],
+        &["peers", "name", "worker"],
+        &["peers", "log"],
+        &["peers", "gc"],
+        &["watch", "--status"],
+    ];
+    for args in commands {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("cache");
+        std::fs::create_dir(&repo).unwrap();
+        let out = Command::new(bin())
+            .args(*args)
+            .arg("--repo")
+            .arg(&repo)
+            .env("ECP_HOME", dir.path().join("home"))
+            .env("ECP_SESSION_ID", "../../escaped")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "args: {args:?}");
+        assert!(stderr.contains("../../escaped"), "stderr: {stderr}");
+        assert!(
+            stderr.contains("single normal path component"),
+            "stderr: {stderr}"
+        );
+        assert!(!dir.path().join("escaped").exists());
+        assert_eq!(std::fs::read_dir(&repo).unwrap().count(), 0);
+    }
+}
