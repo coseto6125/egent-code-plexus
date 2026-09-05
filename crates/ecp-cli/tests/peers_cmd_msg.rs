@@ -256,13 +256,20 @@ fn inbox_subcommand_reads_without_draining() {
     );
 }
 
+/// Nothing is pre-created here. Creating `sessions.join(target)` first would
+/// put the escaped directory on disk before the command runs, leaving the test
+/// unable to say who made it — and for `..` or `.` it would resolve onto a
+/// directory the setup itself owns, so "must not exist" could not be asserted
+/// uniformly either.
+///
+/// Instead the whole temp tree is swept for an inbox afterwards. That holds for
+/// every target shape, and it is the outcome that matters: the message must not
+/// land anywhere, not merely outside one directory the test happened to name.
 fn assert_say_rejects_target(root: &std::path::Path, target: &str) {
     let repo = root.join("cache");
     let sessions = repo.join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
-    let destination = sessions.join(target);
-    std::fs::create_dir_all(&destination).unwrap();
-    let before = std::fs::read_dir(&destination).unwrap().count();
+
     let out = Command::new(bin())
         .args(["peers", "say", "must not arrive", "--to", target, "--repo"])
         .arg(&repo)
@@ -277,10 +284,34 @@ fn assert_say_rejects_target(root: &std::path::Path, target: &str) {
         stderr.contains("single normal path component"),
         "stderr: {stderr}"
     );
-    assert!(!destination.join("inbox.jsonl").exists());
-    assert!(!destination.join("inbox.jsonl.lock").exists());
-    assert_eq!(std::fs::read_dir(&destination).unwrap().count(), before);
+
+    let stray = find_inbox_files(root);
+    assert!(
+        stray.is_empty(),
+        "target {target:?} produced an inbox: {stray:?}"
+    );
     assert!(!sessions.join("sender").exists());
+}
+
+/// Every `inbox.jsonl` or its lock anywhere under `dir`.
+fn find_inbox_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(find_inbox_files(&path));
+        } else if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("inbox.jsonl"))
+        {
+            found.push(path);
+        }
+    }
+    found
 }
 
 #[test]
