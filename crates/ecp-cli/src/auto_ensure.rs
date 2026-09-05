@@ -425,7 +425,7 @@ fn git_fingerprint_shortcut(
 /// `graph.bin.*` sidecars when the graph lives in-tree (legacy layout, test
 /// fixtures). Canonicalize failure (e.g. a deleted tracked file) ⇒ treat as
 /// a real source change — the conservative direction.
-fn is_ecp_artifact(
+pub(crate) fn is_ecp_artifact(
     path: &Path,
     graph_canonical: Option<&Path>,
     home_ecp_canonical: Option<&Path>,
@@ -459,7 +459,7 @@ fn is_ecp_artifact(
 /// for renames — the one that now exists on disk) and skip prefix-less old-path
 /// segments. Any spurious path still degrades to "not reanalyzed" because
 /// `reanalyze_files` skips paths that don't exist on disk.
-fn parse_porcelain_paths(stdout: &[u8], root: &Path) -> Vec<PathBuf> {
+pub(crate) fn parse_porcelain_paths(stdout: &[u8], root: &Path) -> Vec<PathBuf> {
     stdout
         .split(|&b| b == 0)
         // Keep only segments shaped like `XY <path>`: ≥4 bytes with a space in

@@ -550,3 +550,103 @@ fn find_reports_the_worktree_line_for_a_symbol_that_moved() {
         "added_fn must keep reporting its overlay line; got:\n{added}"
     );
 }
+
+/// `commits/<branch>__<sha>/` is keyed on HEAD's SHA and shared by every
+/// worktree of the repo, so what lands there has to be HEAD's content.
+///
+/// `git diff-index --quiet HEAD` does not see untracked files, so a tree whose
+/// only change was a new file read as clean and got indexed from the worktree —
+/// putting an uncommitted symbol into HEAD's slot, where the next worktree at
+/// that SHA finds a symbol that is not in HEAD.
+///
+/// Both halves are asserted. Keeping the symbol out of L2 is only right if it
+/// is still findable, and it is: uncommitted work is the overlay's job.
+#[test]
+fn an_untracked_file_stays_out_of_the_commit_keyed_graph() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let sid = "test-untracked-clean";
+
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "t@t"],
+        vec!["config", "user.name", "t"],
+    ] {
+        run(
+            Command::new("git").arg("-C").arg(&repo).args(&args),
+            "git setup",
+        );
+    }
+    std::fs::write(repo.join("committed.rs"), "fn committed_fn() {}\n").unwrap();
+    run(
+        Command::new("git").arg("-C").arg(&repo).args(["add", "."]),
+        "git add",
+    );
+    run(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["commit", "-qm", "init"]),
+        "git commit",
+    );
+    // Never added, so `git diff-index --quiet HEAD` says clean.
+    std::fs::write(repo.join("untracked.rs"), "fn untracked_fn() {}\n").unwrap();
+
+    run(
+        Command::new(ecp_bin())
+            .args(["admin", "index", "--repo", repo.to_str().unwrap()])
+            .env("HOME", &home),
+        "ecp admin index",
+    );
+
+    let summary = run(
+        Command::new(ecp_bin())
+            .args([
+                "summary",
+                "--repo",
+                repo.to_str().unwrap(),
+                "--format",
+                "json",
+            ])
+            .env("HOME", &home),
+        "ecp summary",
+    );
+    let summary: serde_json::Value =
+        serde_json::from_slice(&summary.stdout).expect("summary emits json");
+    // committed.rs and nothing else: `untracked.rs` never reached the commit graph.
+    assert_eq!(
+        summary["summary"]["per_repo"][0]["metrics"]["files"],
+        serde_json::json!(1),
+        "the commit-keyed graph took in an untracked file: {summary}"
+    );
+
+    // First query writes the overlay fragment for this session.
+    let _ = Command::new(ecp_bin())
+        .args(["find", "committed_fn", "--repo", repo.to_str().unwrap()])
+        .env("HOME", &home)
+        .env("CLAUDE_CODE_SESSION_ID", sid)
+        .output()
+        .expect("warm query");
+
+    let out = Command::new(ecp_bin())
+        .args([
+            "find",
+            "untracked_fn",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .env("HOME", &home)
+        .env("CLAUDE_CODE_SESSION_ID", sid)
+        .output()
+        .expect("find");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"found\":true") || stdout.contains("\"found\": true"),
+        "keeping it out of L2 is only right if the overlay still serves it: {stdout}"
+    );
+}

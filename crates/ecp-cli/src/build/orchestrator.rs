@@ -388,11 +388,28 @@ pub(crate) fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io:
     if crate::git_cache::common_dir(worktree).is_err() {
         return Ok(true);
     }
+    // `git status`, not `git diff-index --quiet HEAD`. diff-index does not see
+    // untracked files, so a tree whose only change was a new file read as clean
+    // and got indexed from the worktree — under HEAD's SHA, into a
+    // `commits/<branch>__<sha>/` slot every worktree of this repo shares. The
+    // next worktree at that SHA then found a symbol that is not in HEAD.
+    //
+    // This is the same question `auto_ensure`'s freshness gate asks, and it now
+    // gets the same answer from the same code: same flags, same artifact
+    // filter. Two definitions of "clean" that disagree is what let this
+    // through.
     let out = safe_exec::git()
-        .args(["diff-index", "--quiet", "HEAD"])
+        .args(["status", "--porcelain", "-z", "--untracked-files=all"])
         .current_dir(worktree)
         .output()?;
-    Ok(out.status.success())
+    if !out.status.success() {
+        return Ok(false);
+    }
+    let home_ecp_canonical = fs::canonicalize(resolve_home_ecp()).ok();
+    let dirty = crate::auto_ensure::parse_porcelain_paths(&out.stdout, worktree)
+        .into_iter()
+        .any(|p| !crate::auto_ensure::is_ecp_artifact(&p, None, home_ecp_canonical.as_deref()));
+    Ok(!dirty)
 }
 
 /// Extract `sha`'s tree into `dest`.
