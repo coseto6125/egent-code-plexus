@@ -39,38 +39,8 @@ impl FileLock {
             .write(true)
             .truncate(false)
             .open(path)?;
-
-        let start = Instant::now();
-        let mut checked_dead_holder = false;
-        loop {
-            if file.try_lock_exclusive().is_ok() {
-                record_owner_pid(path);
-                return Ok(Self { _file: file });
-            }
-            // One-shot dead-holder probe: if the recorded owner PID is gone,
-            // the kernel should already have dropped its flock, so the next
-            // try wins. We still loop (don't assume) and never delete the
-            // lockfile — flock is fd-scoped, not content-scoped, so there is
-            // no stale state to clear.
-            if !checked_dead_holder {
-                checked_dead_holder = true;
-                if owner_pid_is_dead(path) {
-                    continue;
-                }
-            }
-            if start.elapsed() >= LOCK_TIMEOUT {
-                return Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    format!(
-                        "registry lock {} busy for >{}s (holder pid {})",
-                        path.display(),
-                        LOCK_TIMEOUT.as_secs(),
-                        read_owner_pid(path).map_or_else(|| "?".to_string(), |p| p.to_string()),
-                    ),
-                ));
-            }
-            std::thread::sleep(LOCK_RETRY_INTERVAL);
-        }
+        lock_exclusive_within(&file, path, LOCK_TIMEOUT)?;
+        Ok(Self { _file: file })
     }
 
     /// Try to acquire exclusive lock without blocking.
@@ -84,6 +54,57 @@ impl FileLock {
         file.try_lock_exclusive()?;
         record_owner_pid(path);
         Ok(Self { _file: file })
+    }
+}
+
+/// Bounded exclusive lock on an already-open `file`, with the dead-holder
+/// probe and the diagnostic error that [`FileLock::acquire_exclusive`] uses.
+///
+/// Separate from `FileLock` so a caller that must keep its own `File` — the
+/// build lock is handed down the call chain and dropped at an exact point, just
+/// before the publish rename — gets the same bounded wait rather than its own
+/// copy of the loop. `timeout` is a parameter because the two callers wait for
+/// different things: a registry write is millisecond-scale, a build lock is
+/// waiting out somebody else's whole index.
+pub fn lock_exclusive_within(file: &File, path: &Path, timeout: Duration) -> io::Result<()> {
+    let contended = fs2::lock_contended_error().raw_os_error();
+    let start = Instant::now();
+    let mut checked_dead_holder = false;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => {
+                record_owner_pid(path);
+                return Ok(());
+            }
+            // Only contention is worth retrying. Anything else — a bad
+            // descriptor, a filesystem that will not lock — does not become
+            // true by waiting, and retrying it would replace the real error
+            // with a timeout that names the wrong cause.
+            Err(e) if e.raw_os_error() != contended => return Err(e),
+            Err(_) => {}
+        }
+        // One-shot dead-holder probe: if the recorded owner PID is gone, the
+        // kernel should already have dropped its flock, so the next try wins.
+        // We still loop (don't assume) and never delete the lockfile — flock is
+        // fd-scoped, not content-scoped, so there is no stale state to clear.
+        if !checked_dead_holder {
+            checked_dead_holder = true;
+            if owner_pid_is_dead(path) {
+                continue;
+            }
+        }
+        if start.elapsed() >= timeout {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!(
+                    "lock {} busy for >{}s (holder pid {})",
+                    path.display(),
+                    timeout.as_secs(),
+                    read_owner_pid(path).map_or_else(|| "?".to_string(), |p| p.to_string()),
+                ),
+            ));
+        }
+        std::thread::sleep(LOCK_RETRY_INTERVAL);
     }
 }
 
@@ -124,5 +145,102 @@ fn owner_pid_is_dead(path: &Path) -> bool {
     match read_owner_pid(path) {
         Some(pid) => !crate::peer::registry::pid_alive(pid),
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The point of the bound is that a wedged holder ends the wait with an
+    /// error instead of never ending it. Asserting only `is_err()` would also
+    /// pass for a hang that the test harness eventually killed, so the elapsed
+    /// time is part of the assertion.
+    #[test]
+    fn lock_exclusive_within_gives_up_and_names_the_holder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("busy.lock");
+        let held = FileLock::acquire_exclusive(&path).expect("first acquisition wins");
+
+        let waiter = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .unwrap();
+        let start = Instant::now();
+        let err = lock_exclusive_within(&waiter, &path, Duration::from_millis(200))
+            .expect_err("a held lock must not be handed out twice");
+        let waited = start.elapsed();
+
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        // Both bounds, because either alone passes for the wrong timeout: an
+        // upper bound of seconds accepts a caller that waits far longer than it
+        // asked to, and no lower bound accepts one that never waited at all.
+        assert!(
+            waited >= Duration::from_millis(200),
+            "the wait ended before the timeout it was given: {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_millis(900),
+            "the wait must end near the timeout, not run on: {waited:?}"
+        );
+        assert!(
+            err.to_string().contains(&std::process::id().to_string()),
+            "the error has to name the holder or it cannot be diagnosed: {err}"
+        );
+        drop(held);
+    }
+
+    /// The other half: once the holder lets go, the same call succeeds. Without
+    /// this the test above would also pass for a function that never acquires
+    /// anything.
+    #[test]
+    fn lock_exclusive_within_acquires_a_free_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("free.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .unwrap();
+        lock_exclusive_within(&file, &path, Duration::from_millis(200))
+            .expect("an unheld lock must be granted");
+    }
+
+    /// A lock that cannot be taken for a reason other than contention must
+    /// surface that reason at once, not wait out the timeout and report
+    /// contention that never happened.
+    #[cfg(unix)]
+    #[test]
+    fn lock_exclusive_within_returns_a_non_contention_error_at_once() {
+        use std::os::fd::FromRawFd;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("never.lock");
+        // `i32::MAX` is above any reachable `RLIMIT_NOFILE`, so it is never an
+        // open descriptor and `try_lock_exclusive` fails with EBADF — an error
+        // no amount of waiting turns into a lock. Picking a number rather than
+        // closing a real descriptor keeps this deterministic: cargo runs tests
+        // in parallel threads, and a closed number can be reused by one of
+        // them. `ManuallyDrop` keeps the `File` from closing it on the way out.
+        let file = std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(i32::MAX) });
+
+        let start = Instant::now();
+        let err = lock_exclusive_within(&file, &path, Duration::from_secs(30))
+            .expect_err("an invalid descriptor cannot be locked");
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "a non-contention error must return at once, not after the timeout: {:?}",
+            start.elapsed()
+        );
+        assert_ne!(
+            err.kind(),
+            io::ErrorKind::WouldBlock,
+            "the real cause must survive rather than becoming a timeout: {err}"
+        );
     }
 }

@@ -15,6 +15,10 @@ use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Ceiling on the wait for another `--force` at the same SHA. See the call
+/// site for how the number was chosen.
+const BUILD_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 #[derive(Debug, Default, Clone)]
 pub struct InvalidateReport {
     pub kept: usize,
@@ -204,8 +208,13 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
             .write(true)
             .truncate(false)
             .open(&lock_path)?;
-        lock2
-            .lock_exclusive()
+        // Bounded, but far above the registry's five seconds: this wait is for
+        // another `--force` to finish a whole index, not for a JSON rewrite.
+        // The largest corpus measured here (14882 files) cold-indexes in 5.3s
+        // median and 7.5s worst, so the ceiling is roughly forty times the
+        // worst run — long enough never to fire on a real build, short enough
+        // that a wedged holder surfaces as an error instead of a hang.
+        ecp_core::registry::lock_exclusive_within(&lock2, &lock_path, BUILD_LOCK_TIMEOUT)
             .map_err(|e| io::Error::other(format!("blocking re-lock failed: {e}")))?;
         lock2
     } else {

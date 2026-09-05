@@ -19,7 +19,7 @@ pub use io::{atomic_write_bytes, atomic_write_bytes_no_fsync, atomic_write_json}
 /// Internal implementation detail. Not part of public API.
 /// Use only within ecp-core or in tests.
 #[doc(hidden)]
-pub use lock::FileLock;
+pub use lock::{lock_exclusive_within, FileLock};
 pub use path::{
     derive_repo_name, home_dir, resolve_home_ecp, sanitize_segment, uid_path, PathError,
 };
