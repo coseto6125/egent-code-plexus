@@ -449,3 +449,104 @@ fn find_honours_dirty_file_suppression_across_languages() {
         assert_eq!(result["returned"], 2, "{file}: {result}");
     }
 }
+
+/// A symbol that already existed at HEAD but moved in the working tree must
+/// report where it is now, not where it was.
+///
+/// The overlay carries this file's parse as it is on disk, and `find` was
+/// discarding every overlay hit whose uid the base graph already had — then
+/// reporting the base node's line. So one file answered from two vintages at
+/// once: a symbol added since HEAD got its real line from the overlay, and a
+/// symbol that merely moved got HEAD's, with `found: true` on both and nothing
+/// to tell them apart. A model following the second one reads the wrong lines.
+/// PR #762 fixed this by routing the base scan through `MergedGraph`; this
+/// test holds the contract with no `--file` filter, which that PR's matrix
+/// never queries without.
+///
+/// Both symbols are asserted in the same run for exactly that reason — checking
+/// only the moved one would pass for a build that dropped the overlay entirely.
+#[test]
+fn find_reports_the_worktree_line_for_a_symbol_that_moved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let sid = "test-moved-symbol";
+
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "t@t"],
+        vec!["config", "user.name", "t"],
+    ] {
+        run(
+            Command::new("git").arg("-C").arg(&repo).args(&args),
+            "git setup",
+        );
+    }
+    std::fs::write(repo.join("tools.rs"), "fn moved_fn() {}\n").unwrap();
+    run(
+        Command::new("git").arg("-C").arg(&repo).args(["add", "."]),
+        "git add",
+    );
+    run(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["commit", "-qm", "init"]),
+        "git commit",
+    );
+    run(
+        Command::new(ecp_bin())
+            .args(["admin", "index", "--repo", repo.to_str().unwrap()])
+            .env("HOME", &home),
+        "ecp admin index",
+    );
+
+    // Push `moved_fn` down by 24 uncommitted lines and add a second symbol
+    // below it. Neither is committed, so the L2 graph still describes HEAD.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let padding = "// pad\n".repeat(24);
+    std::fs::write(
+        repo.join("tools.rs"),
+        format!("{padding}fn moved_fn() {{}}\nfn added_fn() {{}}\n"),
+    )
+    .unwrap();
+
+    // First query writes the overlay fragment for the stable session.
+    let _ = Command::new(ecp_bin())
+        .args(["find", "moved_fn", "--repo", repo.to_str().unwrap()])
+        .env("HOME", &home)
+        .env("CLAUDE_CODE_SESSION_ID", sid)
+        .output()
+        .expect("warm query");
+
+    let find = |name: &str| -> String {
+        let out = Command::new(ecp_bin())
+            .args([
+                "find",
+                name,
+                "--repo",
+                repo.to_str().unwrap(),
+                "--format",
+                "json",
+            ])
+            .env("HOME", &home)
+            .env("CLAUDE_CODE_SESSION_ID", sid)
+            .output()
+            .expect("find");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    let moved = find("moved_fn");
+    assert!(
+        moved.contains("\"line\":25") || moved.contains("\"line\": 25"),
+        "moved_fn is on line 25 of the working tree, not line 1 of HEAD; got:\n{moved}"
+    );
+
+    let added = find("added_fn");
+    assert!(
+        added.contains("\"line\":26") || added.contains("\"line\": 26"),
+        "added_fn must keep reporting its overlay line; got:\n{added}"
+    );
+}
