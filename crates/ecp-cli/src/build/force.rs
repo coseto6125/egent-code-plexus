@@ -14,8 +14,6 @@ use fs2::FileExt;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::Duration;
 
 #[derive(Debug, Default, Clone)]
 pub struct InvalidateReport {
@@ -30,16 +28,14 @@ pub struct InvalidateReport {
     pub meta_reaped: usize,
 }
 
-/// Rename each `sessions/<sid>/` whose `SessionState` is `AugmentedReference`
-/// with `base_sha == target_sha` to `sessions/<sid>.stale-<sha8>/`, spawn a
-/// 2s delayed `rm -rf`, and return counts. PureReference sessions for the
+/// Retire each `sessions/<sid>/` whose `SessionState` is `AugmentedReference`
+/// with `base_sha == target_sha`, and return counts. PureReference sessions for the
 /// same SHA are kept. Stale sessions are left for the GC sweep.
 pub fn invalidate_matching_l1(repo_root: &Path, target_sha: &str) -> io::Result<InvalidateReport> {
     let sessions_dir = repo_root.join("sessions");
     if !sessions_dir.exists() {
         return Ok(InvalidateReport::default());
     }
-    let sha8 = target_sha.get(..8).unwrap_or(target_sha);
     let mut report = InvalidateReport::default();
     // Hoist CommitIndex::scan once — classify_with_index reuses it across all
     // sessions instead of re-walking commits/ per session. scan_cached lets
@@ -66,9 +62,13 @@ pub fn invalidate_matching_l1(repo_root: &Path, target_sha: &str) -> io::Result<
                 report.kept += 1;
             }
             SessionState::AugmentedReference { base_sha, .. } if base_sha == target_sha => {
-                let stale_path = sessions_dir.join(format!("{name}.stale-{sha8}"));
-                ecp_core::registry::rename_with_retry(&path, &stale_path)?;
-                spawn_delayed_rm_rf(stale_path, Duration::from_secs(2));
+                // `retire_dir_async` rather than a `.stale-<sha8>` of our own:
+                // that name is the same on every run, so a second `--force` at
+                // one SHA renamed onto the directory the first left behind and
+                // died with ENOTEMPTY. The retired name carries pid, counter
+                // and timestamp, so it cannot collide, and `admin gc` already
+                // sweeps that shape.
+                retire_dir_async(&path)?;
                 report.invalidated += 1;
             }
             // MetaUnreadable is unrecoverable: no session_meta.json ⇒ no
@@ -78,9 +78,7 @@ pub fn invalidate_matching_l1(repo_root: &Path, target_sha: &str) -> io::Result<
             SessionState::Stale {
                 reason: StaleReason::MetaUnreadable,
             } => {
-                let dead_path = sessions_dir.join(format!("{name}.dead"));
-                ecp_core::registry::rename_with_retry(&path, &dead_path)?;
-                spawn_delayed_rm_rf(dead_path, Duration::from_secs(2));
+                retire_dir_async(&path)?;
                 report.meta_reaped += 1;
             }
             SessionState::Stale { reason } if matches_sha_hint(repo_root, name, target_sha) => {
@@ -109,19 +107,6 @@ fn matches_sha_hint(repo_root: &Path, sid: &str, target_sha: &str) -> bool {
         Ok(sm) => sm.base_sha == target_sha,
         Err(_) => true,
     }
-}
-
-fn spawn_delayed_rm_rf(path: PathBuf, delay: Duration) {
-    thread::spawn(move || {
-        thread::sleep(delay);
-        if let Err(e) = fs::remove_dir_all(&path) {
-            tracing::warn!(
-                "delayed rm of stale session dir failed: {} (path={}); falls to GC sweep",
-                e,
-                path.display()
-            );
-        }
-    });
 }
 
 pub struct ForceRebuildResult {
