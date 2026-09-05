@@ -12,7 +12,7 @@
 //!
 //! All git invocations go through `safe_exec::git()` per security spec §8 H4.
 //! The three that write the worktree — `stash push`, `checkout`, `stash pop` —
-//! additionally carry `safe_exec::repo_local_filter_overrides`, because content
+//! additionally carry `safe_exec::filter_overrides`, because content
 //! conversion is what runs a repository's own filter driver.
 
 use crate::git::safe_exec;
@@ -28,7 +28,7 @@ pub struct GitGuard {
 
 impl GitGuard {
     pub fn enter(repo_dir: &Path, target_sha: &str) -> Result<Self, EcpError> {
-        let filter_overrides = safe_exec::repo_local_filter_overrides(repo_dir);
+        let filter_overrides = safe_exec::filter_overrides(repo_dir);
         let original_ref = current_head_ref(repo_dir)?;
         let stash_created = stash_if_dirty(repo_dir, &filter_overrides)?;
 

@@ -269,15 +269,30 @@ fn review_rejects_an_option_shaped_since_even_when_files_are_given() {
 /// move the worktree. `core.hooksPath=/dev/null` does not touch it, and neither
 /// `checkout` nor `stash` has a `--no-filters`.
 ///
-/// Both keys are set on purpose: `process` takes precedence over `smudge`, so a
-/// fix that covers only `smudge` and `clean` leaves this test red.
+/// Run once per way a repository can place the driver, because the first fix
+/// enumerated `--config --local` and two of these three are invisible there:
+/// `.git/config.worktree` needs `extensions.worktreeConfig`, and `include.path`
+/// needs nothing at all. Both executed on checkout when measured.
 ///
-/// The tree is left dirty so the guard takes its `stash push -u` path as well,
-/// and the assertions cover the guard's contract in both directions — the
-/// payload never runs, and the working tree comes back as it was.
+/// `process` is set alongside `smudge` and `clean` on purpose: it takes
+/// precedence, so a fix covering only the other two leaves every case red.
+///
+/// What this cannot show: a driver in the user's *global* config is overridden
+/// too, and that is deliberate — a repository shadows a global name with its
+/// own value, so an allowlist keyed on the name waves the attack through.
+/// Asserting it would mean setting global git config from inside a test binary
+/// whose other tests run in the same process, so the guarantee rests on
+/// `filter_overrides` passing no scope flag rather than on a case here.
 #[cfg(unix)]
 #[test]
 fn repo_defined_filter_drivers_do_not_run_during_checkout_or_stash() {
+    for placement in ["local", "worktree-config", "include-path"] {
+        assert_filter_placement_is_neutralised(placement);
+    }
+}
+
+#[cfg(unix)]
+fn assert_filter_placement_is_neutralised(placement: &str) {
     use ecp_cli::commands::diff::git_guard::GitGuard;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -304,18 +319,38 @@ fn repo_defined_filter_drivers_do_not_run_during_checkout_or_stash() {
     fs::write(repo.join(".gitattributes"), "f.txt filter=evil\n").unwrap();
     git(&repo, &["add", "-A"]);
     git(&repo, &["commit", "-qm", "attrs"]);
-    git(
-        &repo,
-        &["config", "filter.evil.smudge", script.to_str().unwrap()],
-    );
-    git(
-        &repo,
-        &["config", "filter.evil.clean", script.to_str().unwrap()],
-    );
-    git(
-        &repo,
-        &["config", "filter.evil.process", script.to_str().unwrap()],
-    );
+
+    let driver = script.to_str().unwrap();
+    let keys = [
+        "filter.evil.smudge",
+        "filter.evil.clean",
+        "filter.evil.process",
+    ];
+    match placement {
+        "local" => {
+            for k in keys {
+                git(&repo, &["config", k, driver]);
+            }
+        }
+        "worktree-config" => {
+            git(&repo, &["config", "extensions.worktreeConfig", "true"]);
+            for k in keys {
+                git(&repo, &["config", "--worktree", k, driver]);
+            }
+        }
+        "include-path" => {
+            let extra = repo.join(".git/extra.cfg");
+            fs::write(
+                &extra,
+                format!(
+                    "[filter \"evil\"]\n\tsmudge = {driver}\n\tclean = {driver}\n\tprocess = {driver}\n"
+                ),
+            )
+            .unwrap();
+            git(&repo, &["config", "include.path", "./extra.cfg"]);
+        }
+        other => panic!("unknown placement {other}"),
+    }
 
     let base = String::from_utf8(
         Command::new("git")
@@ -329,25 +364,33 @@ fn repo_defined_filter_drivers_do_not_run_during_checkout_or_stash() {
     .trim()
     .to_string();
 
+    // Left dirty so the guard takes its `stash push -u` path as well.
     fs::write(repo.join("f.txt"), "dirty\n").unwrap();
 
     {
         let _guard = GitGuard::enter(&repo, &base).expect("the guard must still enter");
+        // Without this the test would also pass for a guard that checked
+        // nothing out, which never reaches a filter at all.
+        assert_eq!(
+            fs::read_to_string(repo.join("f.txt")).unwrap(),
+            "b\n",
+            "[{placement}] the guard must check out the requested base"
+        );
         assert!(
             !marker.exists(),
-            "a filter driver from the scanned repo ran during stash/checkout: {}",
+            "[{placement}] a filter driver ran during stash/checkout: {}",
             fs::read_to_string(&marker).unwrap_or_default()
         );
     }
 
     assert!(
         !marker.exists(),
-        "a filter driver ran while the guard was restoring the worktree: {}",
+        "[{placement}] a filter driver ran while the guard restored the worktree: {}",
         fs::read_to_string(&marker).unwrap_or_default()
     );
     assert_eq!(
         fs::read_to_string(repo.join("f.txt")).unwrap(),
         "dirty\n",
-        "the guard must hand the dirty worktree back unchanged"
+        "[{placement}] the guard must hand the dirty worktree back unchanged"
     );
 }
