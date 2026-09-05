@@ -29,6 +29,15 @@ fn init_and_index(repo: &Path) {
         .unwrap();
     std::fs::create_dir_all(repo.join("src")).unwrap();
     std::fs::write(repo.join("src/lib.rs"), SRC).unwrap();
+    // `add` before `commit`: without it the source stayed untracked, and the
+    // index only saw it because `worktree_clean_and_head_matches` read an
+    // untracked-only tree as clean and indexed the worktree under HEAD's SHA.
+    // That is the defect, so a fixture that leans on it tests nothing.
+    Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
     Command::new("git")
         .args([
             "-c",
@@ -36,7 +45,6 @@ fn init_and_index(repo: &Path) {
             "-c",
             "user.name=t",
             "commit",
-            "--allow-empty",
             "-q",
             "-m",
             "init",
@@ -81,6 +89,15 @@ pub fn read_timeout(c: &Config) -> u32 {
         .output()
         .unwrap();
     std::fs::write(repo.join("src/lib.rs"), src).unwrap();
+    // `add` before `commit`: without it the source stayed untracked, and the
+    // index only saw it because `worktree_clean_and_head_matches` read an
+    // untracked-only tree as clean and indexed the worktree under HEAD's SHA.
+    // That is the defect, so a fixture that leans on it tests nothing.
+    Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
     Command::new("git")
         .args([
             "-c",
@@ -88,7 +105,6 @@ pub fn read_timeout(c: &Config) -> u32 {
             "-c",
             "user.name=t",
             "commit",
-            "--allow-empty",
             "-q",
             "-m",
             "init",
