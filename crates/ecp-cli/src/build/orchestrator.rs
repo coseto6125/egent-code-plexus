@@ -403,7 +403,7 @@ pub(crate) fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io:
 /// HEAD is not the target SHA, which nearly every command can trigger. The
 /// overrides are what stop the scanned repository executing its own program.
 pub(crate) fn git_archive_to(worktree: &Path, sha: &str, dest: &Path) -> io::Result<()> {
-    let overrides = safe_exec::repo_local_filter_overrides(worktree);
+    let overrides = safe_exec::filter_overrides(worktree);
     let archive = safe_exec::git_with_overrides(worktree, &overrides)
         .args(["archive", "--format=tar", sha])
         .output()?;
