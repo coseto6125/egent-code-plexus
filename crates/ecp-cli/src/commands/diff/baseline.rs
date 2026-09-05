@@ -14,6 +14,7 @@ use std::process::Command;
 
 /// Resolve `ref_str` to a 40-char commit SHA inside the given repo dir.
 pub fn resolve(ref_str: &str, repo_dir: &Path) -> Result<String, EcpError> {
+    safe_exec::reject_option_like_rev(ref_str)?;
     if let Some(pr_num) = ref_str.strip_prefix("PR/") {
         return resolve_pr(pr_num, repo_dir);
     }

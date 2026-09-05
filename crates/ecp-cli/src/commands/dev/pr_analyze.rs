@@ -335,6 +335,7 @@ pub fn run(args: PrAnalyzeArgs, _cli_graph: &std::path::Path) -> Result<(), EcpE
 }
 
 fn git_rev_parse(reference: &str) -> Result<String, EcpError> {
+    safe_exec::reject_option_like_rev(reference)?;
     let out = safe_exec::git()
         .args(["rev-parse", reference])
         .output()

@@ -158,6 +158,32 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
     // for it, so the whole load is skipped rather than run and discarded —
     // down to the `current_dir()` syscall.
     let (engine, graph_path) = if cli.command.needs_graph() {
+        // `--repo` names the directory this invocation answers about. When it
+        // is not one, the value used to flow on as a relative path, resolve to
+        // nothing, and leave the cwd's own graph attached — so `ecp impact
+        // --repo typo-in-the-name` answered confidently about the wrong
+        // repository. Same reasoning as the `--graph` gate below, and the same
+        // remedy: an honest failure. `find` is unaffected; its `repo()` already
+        // returns `None` for the registry selectors (`@all`, comma lists) that
+        // are legitimately not paths, and resolves them itself.
+        if let Some(repo) = cli.command.repo() {
+            if !std::path::Path::new(repo).is_dir() {
+                // A selector-shaped value is a different mistake from a typo,
+                // and gets a different sentence: the reader wants to know which
+                // commands take one, not that this string is not a directory.
+                let hint = match repo.starts_with('@') || repo.contains(',') {
+                    true => {
+                        " Registry selectors (`@all`, a comma list) work with \
+                             `find --mode bm25`, `summary` and `contracts`."
+                    }
+                    false => "",
+                };
+                return Err(ecp_core::EcpError::InvalidArgument(format!(
+                    "--repo {repo}: not a directory. Pass a path to the repository, \
+                     or run from inside it and omit --repo.{hint}"
+                )));
+            }
+        }
         let cwd = cli
             .command
             .repo()

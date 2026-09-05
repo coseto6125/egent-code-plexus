@@ -1367,6 +1367,32 @@ pub(crate) struct RepoTarget {
     stale_for_head: bool,
 }
 
+/// Registry entries whose `dir_name` shares a substring with something the
+/// user asked for, at most five, rendered as a ` Did you mean: a, b?` clause.
+/// Empty when nothing is close.
+///
+/// A registry can hold a hundred repos. Listing them all to explain one typo
+/// spends more of the reading model's context than the answer would have, so
+/// the error carries the near misses and a count instead of the roster.
+fn did_you_mean(unmatched: &[String], snapshot: &ecp_core::registry::RegistryFile) -> String {
+    let mut near: Vec<&str> = snapshot
+        .repos
+        .values()
+        .map(|v| v.dir_name.as_str())
+        .filter(|known| {
+            unmatched
+                .iter()
+                .any(|want| known.contains(want.as_str()) || want.contains(known))
+        })
+        .collect();
+    if near.is_empty() {
+        return String::new();
+    }
+    near.sort_unstable();
+    near.truncate(5);
+    format!(" Did you mean: {}?", near.join(", "))
+}
+
 /// Resolve `--repo` to `Vec<RepoTarget>`.
 /// Returns empty Vec when the selector is absent (caller uses pre-loaded engine).
 fn resolve_targets(selector: Option<&str>) -> Result<Vec<RepoTarget>, EcpError> {
@@ -1374,6 +1400,12 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<RepoTarget>, EcpError> 
 
     let sel = match selector {
         None | Some(".") | Some("") => return Ok(vec![]),
+        // A real directory is not a registry selector. `Commands::repo()` has
+        // already handed it to the engine as this invocation's repo, so the
+        // empty target list correctly means "search the graph already loaded".
+        // Path semantics win over an identically-named registry entry, which is
+        // the trade-off `Commands::repo()` documents.
+        Some(s) if std::path::Path::new(s).is_dir() => return Ok(vec![]),
         Some(s) => s,
     };
 
@@ -1391,39 +1423,66 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<RepoTarget>, EcpError> 
         )));
     } else {
         // Comma-separated list of names or dir_names.
-        sel.split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .flat_map(|name| {
-                // Match by alias or dir_name; return the dir_name (map key).
-                snapshot
-                    .repos
-                    .iter()
-                    .find(|(_k, v)| v.dir_name == name || v.aliases.iter().any(|a| a == &name))
-                    .map(|(k, _v)| k.clone())
-            })
-            .collect()
+        let mut matched = Vec::new();
+        let mut unmatched = Vec::new();
+        for name in sel.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            // Match by alias or dir_name; keep the dir_name (map key).
+            match snapshot
+                .repos
+                .iter()
+                .find(|(_k, v)| v.dir_name == name || v.aliases.iter().any(|a| a == name))
+            {
+                Some((k, _v)) => matched.push(k.clone()),
+                None => unmatched.push(name.to_string()),
+            }
+        }
+        // A name the registry does not hold used to be dropped here, leaving
+        // an empty target list that the caller reads as "no selector given" —
+        // so the search silently ran against the current directory's graph and
+        // answered about the wrong repository. In a mixed list the same drop
+        // narrowed the search without saying so.
+        if !unmatched.is_empty() {
+            return Err(EcpError::InvalidArgument(format!(
+                "--repo: not in the registry: {}.{} {} registered in total.",
+                unmatched.join(", "),
+                did_you_mean(&unmatched, snapshot),
+                snapshot.repos.len()
+            )));
+        }
+        matched
     };
 
     if dir_names.is_empty() {
-        return Ok(vec![]);
+        return Err(EcpError::InvalidArgument(format!(
+            "--repo {sel}: the registry holds no repositories to search"
+        )));
     }
 
     let mut targets: Vec<RepoTarget> = Vec::with_capacity(dir_names.len());
+    // Why a repo the selector named produced no target. Only consulted when
+    // NOTHING resolved: a partial result is self-describing, because every row
+    // carries the repo it came from, while an empty one reaches the caller as
+    // "no selector was given" and gets answered from the current directory.
+    let mut skipped: Vec<String> = Vec::new();
     for dir_name in &dir_names {
         let alias = match snapshot.repos.get(dir_name) {
             Some(a) => a,
-            None => continue,
+            None => {
+                skipped.push(format!("{dir_name} (vanished from the registry mid-read)"));
+                continue;
+            }
         };
         let commits_dir = home_ecp.join(dir_name).join("commits");
         let idx = CommitIndex::scan(&commits_dir)
             .map_err(|e| EcpError::InvalidArgument(format!("{dir_name}: scan commits: {e}")))?;
         if idx.is_empty() {
-            continue; // repo registered but not yet built
+            skipped.push(format!("{dir_name} (registered, never indexed)"));
+            continue;
         }
         let Some(graph_path) =
             crate::commit_lookup::find_latest_by_mtime(&commits_dir).map(|d| d.join("graph.bin"))
         else {
+            skipped.push(format!("{dir_name} (indexed, but no graph.bin on disk)"));
             continue;
         };
         let display_name = alias
@@ -1460,6 +1519,12 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<RepoTarget>, EcpError> 
         });
     }
 
+    if targets.is_empty() {
+        return Err(EcpError::InvalidArgument(format!(
+            "--repo {sel}: nothing to search — {}",
+            skipped.join("; ")
+        )));
+    }
     Ok(targets)
 }
 

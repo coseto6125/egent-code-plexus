@@ -2,6 +2,15 @@ use ecp_core::EcpError;
 use std::path::{Path, PathBuf};
 
 pub fn resolve(args: &super::ReviewArgs, repo_dir: &Path) -> Result<Vec<PathBuf>, EcpError> {
+    // Ahead of the `--files` early return, because `--since` survives it:
+    // `aggregate` still uses the value to build a per-file added-line filter.
+    // Validating only on the path that reads it here left
+    // `review --files x.rs --since <option-shaped>` collapsing the rejection
+    // into "the diff was deferred", so the caller got an analysis missing the
+    // filter it asked for and a footnote instead of an error.
+    if let Some(r) = &args.since {
+        crate::git::safe_exec::reject_option_like_rev(r)?;
+    }
     if let Some(files) = &args.files {
         return Ok(files.iter().map(PathBuf::from).collect());
     }
@@ -18,7 +27,9 @@ pub fn resolve(args: &super::ReviewArgs, repo_dir: &Path) -> Result<Vec<PathBuf>
 /// Run `git diff <spec> --name-only` and parse the newline-separated output.
 fn diff_name_only(repo_dir: &Path, spec: &str) -> Result<Vec<PathBuf>, EcpError> {
     let out = crate::git::safe_exec::git()
-        .args(["diff", spec, "--name-only"])
+        .args(["diff"])
+        .args(crate::git::safe_exec::DIFF_HARDENING)
+        .args([spec, "--name-only"])
         .current_dir(repo_dir)
         .output()
         .map_err(|e| EcpError::GitDiff {

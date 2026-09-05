@@ -1,19 +1,26 @@
 //! Per-file persistent parse cache.
 //!
 //! Stores tree-sitter `LocalGraph` blobs at
-//! `<home_ecp>/<repo>/parse_cache/<fp>/<content_hash>.rkyv`, where `<fp>` is
-//! an 8-hex-char digest of [`BUILDER_FINGERPRINT`] — scoping each entry
-//! to one binary build so an upgrade can't replay stale parser output
+//! `<home_ecp>/<repo>/parse_cache/<fp>/<path_hash><content_hash>.rkyv`, where
+//! `<fp>` is an 8-hex-char digest of [`BUILDER_FINGERPRINT`] — scoping each
+//! entry to one binary build so an upgrade can't replay stale parser output
 //! against a fresh reader. The pipeline's per-file `cache_lookup` hook
-//! short-circuits to a cached graph when the file's `xxh3_64(content)`
-//! matches an existing entry; misses fall through to the regular
-//! tree-sitter parse and are written back here for next time.
+//! short-circuits to a cached graph when both the file's path and its
+//! `xxh3_64(content)` match an existing entry; misses fall through to the
+//! regular tree-sitter parse and are written back here for next time.
 //!
-//! Cache scope is per-repo (caller picks the root), per-fingerprint.
-//! Cross-repo content collisions are impossible because the hash is over
-//! file bytes — same bytes yield the same graph regardless of where they
-//! live. The fingerprint subdir is the only invalidation lever; LRU /
-//! quota / orphan sweep belong to a separate GC pass.
+//! **The path is half the key, and it has to be.** A `LocalGraph` carries the
+//! `file_path` it was parsed from, and the builder reads that field back to
+//! decide which File node the symbols belong to. Keying on content alone let
+//! two byte-identical files share one entry: the second file's symbols came
+//! back wearing the first file's path, collided on uid, and were tombstoned
+//! to empty names — so the file vanished from the graph while `ecp find`
+//! reported success. Byte-identical files are ordinary (empty `__init__.py`,
+//! generated stubs, duplicated configs), so this was not a corner case.
+//!
+//! Cache scope is per-repo (caller picks the root), per-fingerprint, per-path.
+//! The fingerprint subdir is the only invalidation lever; LRU / quota /
+//! orphan sweep belong to a separate GC pass.
 
 use crate::repo_identity::short_hash_hex8;
 use ecp_core::analyzer::types::LocalGraph;
@@ -27,6 +34,19 @@ use std::sync::OnceLock;
 fn fingerprint_dir_name() -> &'static str {
     static CACHE: OnceLock<String> = OnceLock::new();
     CACHE.get_or_init(|| short_hash_hex8(BUILDER_FINGERPRINT.as_bytes()))
+}
+
+/// Digest of a repo-relative path, over the path's own bytes.
+///
+/// No separator normalisation, and no lossy UTF-8 conversion: both would map
+/// two different paths onto one key, which is the collision this key exists to
+/// prevent. On Unix `\` is an ordinary filename byte, so folding it to `/`
+/// would let `src\dup.rs` read back `src/dup.rs`'s graph whenever their
+/// contents match. Normalising buys nothing anyway — the cache lives under
+/// `~/.ecp` on one machine, and `put` and `get` are handed the very same
+/// `rel_path` by the pipeline, so they agree without help.
+fn path_key(rel_path: &Path) -> u64 {
+    xxhash_rust::xxh3::xxh3_64(rel_path.as_os_str().as_encoded_bytes())
 }
 
 pub struct ParseCache {
@@ -43,20 +63,27 @@ impl ParseCache {
         Ok(Self { root })
     }
 
-    /// Filesystem location for a given content hash. Exposed for tests
-    /// that need to seed corrupted blobs or inspect on-disk layout.
-    pub fn path_for(&self, content_hash: &[u8; 8]) -> PathBuf {
-        self.root
-            .join(format!("{:016x}.rkyv", u64::from_le_bytes(*content_hash)))
+    /// Filesystem location for one `(rel_path, content_hash)` pair. Exposed
+    /// for tests that need to seed corrupted blobs or inspect on-disk layout.
+    ///
+    /// The two halves stay separate in the name rather than being hashed
+    /// together, so an entry on disk can be traced back to its file by
+    /// hashing a candidate path.
+    pub fn path_for(&self, rel_path: &Path, content_hash: &[u8; 8]) -> PathBuf {
+        self.root.join(format!(
+            "{:016x}{:016x}.rkyv",
+            path_key(rel_path),
+            u64::from_le_bytes(*content_hash)
+        ))
     }
 
-    /// Read a cached `LocalGraph` keyed by its content hash. Returns
+    /// Read a cached `LocalGraph` for one `(rel_path, content_hash)`. Returns
     /// `None` on miss, corruption, or read error — callers always have
     /// a safe fall-through to the regular parse path. Corrupt entries
     /// are deleted so the next `put` for the same key writes clean
     /// (without this, a single bad blob poisons that key forever).
-    pub fn get(&self, content_hash: &[u8; 8]) -> Option<LocalGraph> {
-        let path = self.path_for(content_hash);
+    pub fn get(&self, rel_path: &Path, content_hash: &[u8; 8]) -> Option<LocalGraph> {
+        let path = self.path_for(rel_path, content_hash);
         let bytes = std::fs::read(&path).ok()?;
         match rkyv::from_bytes::<LocalGraph, rkyv::rancor::Error>(&bytes) {
             Ok(g) => Some(g),
@@ -89,6 +116,9 @@ impl ParseCache {
     #[allow(dead_code)]
     pub fn put(&self, graph: &LocalGraph) -> std::io::Result<()> {
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(graph).map_err(std::io::Error::other)?;
-        atomic_write_bytes_no_fsync(&self.path_for(&graph.content_hash), &bytes)
+        atomic_write_bytes_no_fsync(
+            &self.path_for(&graph.file_path, &graph.content_hash),
+            &bytes,
+        )
     }
 }

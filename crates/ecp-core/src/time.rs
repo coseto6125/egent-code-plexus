@@ -41,17 +41,36 @@ pub fn unix_secs_to_rfc3339(secs: u64) -> String {
 /// shape mismatch (length, digit positions, value range). Designed for
 /// jsonl read paths that tolerate occasional malformed lines.
 pub fn parse_rfc3339_secs(s: &str) -> Option<u64> {
-    if s.len() < 20 || s.as_bytes()[10] != b'T' || s.as_bytes()[19] != b'Z' {
+    let b = s.as_bytes();
+    if b.len() < 20 || b[10] != b'T' || b[19] != b'Z' {
         return None;
     }
-    let year: u64 = s[0..4].parse().ok()?;
-    let month: u64 = s[5..7].parse().ok()?;
-    let day: u64 = s[8..10].parse().ok()?;
-    let hh: u64 = s[11..13].parse().ok()?;
-    let mm: u64 = s[14..16].parse().ok()?;
-    let ss: u64 = s[17..19].parse().ok()?;
+    let year = ascii_digits(b, 0, 4)?;
+    let month = ascii_digits(b, 5, 7)?;
+    let day = ascii_digits(b, 8, 10)?;
+    let hh = ascii_digits(b, 11, 13)?;
+    let mm = ascii_digits(b, 14, 16)?;
+    let ss = ascii_digits(b, 17, 19)?;
     let days = ymd_to_days(year, month, day)?;
     Some(days * 86400 + hh * 3600 + mm * 60 + ss)
+}
+
+/// `b[start..end]` read as ASCII digits. `None` when any byte is not one.
+///
+/// Reading bytes rather than `&s[start..end]` is what keeps the shape gate
+/// honest: a `str` slice panics when its bound lands inside a multi-byte
+/// char, so a timestamp like `202é01-01T00:00:00Z` — 20 bytes, `T` at 10,
+/// `Z` at 19, so it passes the gate — used to abort the whole read instead
+/// of being rejected as malformed.
+fn ascii_digits(b: &[u8], start: usize, end: usize) -> Option<u64> {
+    let mut n = 0u64;
+    for &c in &b[start..end] {
+        if !c.is_ascii_digit() {
+            return None;
+        }
+        n = n * 10 + u64::from(c - b'0');
+    }
+    Some(n)
 }
 
 /// Days since 1970-01-01 → (year, month, day). Hand-rolled Gregorian.
@@ -109,5 +128,27 @@ mod tests {
         assert!(parse_rfc3339_secs("2026-05-23T07:30:45").is_none()); // missing Z
         assert!(parse_rfc3339_secs("2026-13-01T00:00:00Z").is_none()); // bad month
         assert!(parse_rfc3339_secs("2026-05-32T00:00:00Z").is_none()); // bad day
+    }
+
+    /// A jsonl line can hold any UTF-8. These pass the length / `T` / `Z`
+    /// gate but put a multi-byte char across a field boundary, which the
+    /// old `&s[0..4]` slicing turned into a panic — in a reader whose
+    /// contract is to return `None` for anything malformed.
+    #[test]
+    fn parse_rejects_multibyte_chars_without_panicking() {
+        // 'é' is 2 bytes, occupying byte 3 and 4 — straddling the year field's
+        // end. 20 bytes total, 'T' at 10, 'Z' at 19.
+        let straddles_year = "202é01-01T00:00:00Z";
+        assert_eq!(straddles_year.len(), 20);
+        assert_eq!(straddles_year.as_bytes()[10], b'T');
+        assert_eq!(straddles_year.as_bytes()[19], b'Z');
+        assert!(parse_rfc3339_secs(straddles_year).is_none());
+
+        // 'ü' straddles the hour field's start (bytes 11-12). 21 bytes, so
+        // it clears the length gate too.
+        let straddles_hour = "2026-05-23Tü:30:45Z0";
+        assert_eq!(straddles_hour.as_bytes()[10], b'T');
+        assert_eq!(straddles_hour.as_bytes()[19], b'Z');
+        assert!(parse_rfc3339_secs(straddles_hour).is_none());
     }
 }

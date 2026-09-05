@@ -22,9 +22,21 @@ fn ecp_bin() -> &'static str {
 
 // ── Fixture helpers ─────────────────────────────────────────────────────────
 
-/// Seed a graph under the v2 layout: `<home_ecp>/<dir_name>/commits/<sha>/graph.bin`.
+const ALPHA_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const BETA_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+/// Seed a graph under the v2 layout:
+/// `<home_ecp>/<dir_name>/commits/commit__<40-hex>/graph.bin`.
+///
+/// The commit dir name has to be one `CommitDirName::parse` accepts, or
+/// `CommitIndex::scan` skips it and the repo reads as registered-but-never-
+/// indexed. These fixtures used names like `sha_alpha0001` for a long time,
+/// which parse as `NoSha`; the multi-repo tests below then resolved zero
+/// targets and quietly answered from the `--graph` engine instead of fanning
+/// out, so they passed without ever exercising the fan-out they are named for.
 /// Returns the path to the graph.bin.
-fn seed_repo(home_ecp: &Path, dir_name: &str, sha_dir: &str, node_names: &[&str]) -> PathBuf {
+fn seed_repo(home_ecp: &Path, dir_name: &str, sha_hex: &str, node_names: &[&str]) -> PathBuf {
+    assert_eq!(sha_hex.len(), 40, "commit dir needs a 40-hex sha");
     let mut fx = GraphFixture::new();
     let file_path = format!("{dir_name}.rs");
     for name in node_names {
@@ -32,7 +44,10 @@ fn seed_repo(home_ecp: &Path, dir_name: &str, sha_dir: &str, node_names: &[&str]
         fx.span(id, (0, 0, 0, 10));
     }
     let bytes = fx.into_bytes();
-    let commit_dir = home_ecp.join(dir_name).join("commits").join(sha_dir);
+    let commit_dir = home_ecp
+        .join(dir_name)
+        .join("commits")
+        .join(format!("commit__{sha_hex}"));
     std::fs::create_dir_all(&commit_dir).unwrap();
     let graph_path = commit_dir.join("graph.bin");
     std::fs::write(&graph_path, &bytes).unwrap();
@@ -59,13 +74,13 @@ fn two_repo_fixture() -> Fixture {
     let alpha_graph = seed_repo(
         &home_ecp,
         "alpha__aabbccdd",
-        "sha_alpha0001",
+        ALPHA_SHA,
         &["fetch_user", "save_user"],
     );
     let _beta_graph = seed_repo(
         &home_ecp,
         "beta__aabbccdd",
-        "sha_beta00001",
+        BETA_SHA,
         &["fetch_account", "delete_session"],
     );
 
@@ -126,7 +141,9 @@ fn run_search(home: &Path, graph: &Path, args: &[&str]) -> std::process::Output 
 }
 
 fn run_search_multi(home: &Path, args: &[&str]) -> std::process::Output {
-    let alpha_graph = home.join(".ecp/alpha__aabbccdd/commits/sha_alpha0001/graph.bin");
+    let alpha_graph = home.join(format!(
+        ".ecp/alpha__aabbccdd/commits/commit__{ALPHA_SHA}/graph.bin"
+    ));
     Command::new(ecp_bin())
         .arg("find")
         .arg("--mode")
@@ -281,9 +298,17 @@ fn search_multi_repo_at_all() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
+    // Both repos, not just whichever graph the process happened to load.
+    // `fetch` alone would pass on alpha's `fetch_user` while beta was never
+    // opened, which is exactly how this test used to pass with a fixture the
+    // commit-dir parser skipped.
     assert!(
-        stdout.contains("fetch"),
-        "expected 'fetch' in results: {stdout}"
+        stdout.contains("fetch_user"),
+        "expected alpha's symbol in results: {stdout}"
+    );
+    assert!(
+        stdout.contains("fetch_account"),
+        "expected beta's symbol too — @all must reach every registered repo: {stdout}"
     );
 }
 
@@ -293,9 +318,9 @@ fn search_multi_repo_missing_graph_degrades_gracefully() {
     // Alpha's graph is used by --graph (for main.rs engine load) and for
     // @all fan-out. Beta will fail silently; alpha still produces results.
     let f = two_repo_fixture();
-    let beta_graph = f
-        .home_path
-        .join(".ecp/beta__aabbccdd/commits/sha_beta00001/graph.bin");
+    let beta_graph = f.home_path.join(format!(
+        ".ecp/beta__aabbccdd/commits/commit__{BETA_SHA}/graph.bin"
+    ));
     std::fs::remove_file(&beta_graph).unwrap();
 
     let out = run_search_multi(

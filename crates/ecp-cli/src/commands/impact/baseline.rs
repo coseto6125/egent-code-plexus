@@ -428,8 +428,15 @@ fn hash_node_lines(lines: &[&[u8]], start_row: u32, end_row: u32) -> u64 {
 
 /// Fetch the content of a repo-relative path at a specific git ref via
 /// `git show <ref>:<path>`. Returns `None` for paths not present at that ref.
+///
+/// `git_ref` comes from `--baseline`, so it is checked here rather than relying
+/// on the caller having run the diff first. That ordering does hold today, but
+/// it is an accident of one function's body: nothing in this signature says the
+/// ref arrives validated, so a reordering or a second caller would reopen the
+/// option injection without touching this file.
 fn head_blob_at(repo: &std::path::Path, rel_path: &str, git_ref: &str) -> Option<Vec<u8>> {
     use crate::git::safe_exec;
+    safe_exec::reject_option_like_rev(git_ref).ok()?;
     let out = safe_exec::git()
         .args(["show", &format!("{git_ref}:{rel_path}")])
         .current_dir(repo)
@@ -439,5 +446,78 @@ fn head_blob_at(repo: &std::path::Path, rel_path: &str, git_ref: &str) -> Option
         Some(out.stdout)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .expect("git available")
+            .success());
+    }
+
+    fn one_commit_repo(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "user.email", "t@example.invalid"]);
+        git(dir, &["config", "user.name", "t"]);
+        std::fs::write(dir.join("lib.rs"), "fn a() {}\n").unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-qm", "one"]);
+    }
+
+    /// `head_blob_at` builds `git show <ref>:<path>` from `--baseline`. Its
+    /// caller validates the ref earlier, but that is one function's call
+    /// order, not this function's contract, so the guard is pinned here where
+    /// a reordering or a second caller cannot quietly remove it.
+    ///
+    /// The fixture is a real repository and `rel_path` carries no slash, both
+    /// on purpose. Without the guard, git runs
+    /// `git show --output=<out>/o:lib.rs`, succeeds, and writes that file, so
+    /// the empty directory is what fails when the guard goes away. The first
+    /// version of this test used a non-repository and a path with a slash;
+    /// git then failed for its own reasons and the test passed with the guard
+    /// reverted, proving nothing.
+    #[test]
+    fn head_blob_at_refuses_an_option_shaped_ref_without_running_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let out_dir = tmp.path().join("out");
+        one_commit_repo(&repo);
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let injected = format!("--output={}/o", out_dir.display());
+        let got = head_blob_at(&repo, "lib.rs", &injected);
+
+        assert!(got.is_none(), "an option-shaped ref must not reach git");
+        let written: Vec<String> = std::fs::read_dir(&out_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            written.is_empty(),
+            "git ran with the injected --output and wrote {written:?}"
+        );
+    }
+
+    /// The companion. A guard that rejected every ref would pass the test
+    /// above on its own; this one fails if the guard grows too wide.
+    #[test]
+    fn head_blob_at_still_reads_a_blob_at_an_ordinary_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        one_commit_repo(&repo);
+
+        let blob = head_blob_at(&repo, "lib.rs", "HEAD").expect("HEAD:lib.rs must resolve");
+        assert_eq!(String::from_utf8(blob).unwrap(), "fn a() {}\n");
     }
 }
