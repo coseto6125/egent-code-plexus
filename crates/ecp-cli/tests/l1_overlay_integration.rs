@@ -6,6 +6,7 @@
 //!   materialise under <home>/.ecp/<repo>__<hash>/sessions/<sid>/.
 
 use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::WalkDir;
 
@@ -295,4 +296,156 @@ fn find_surfaces_overlay_only_symbol() {
         stdout.contains("main.rs"),
         "find result must carry the overlay symbol's file path; got:\n{stdout}"
     );
+}
+
+fn init_find_overlay_repo(file: &str, source: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "t@t"],
+        vec!["config", "user.name", "t"],
+    ] {
+        run(
+            Command::new("git").arg("-C").arg(&repo).args(args),
+            "git setup",
+        );
+    }
+    std::fs::write(repo.join(file), source).unwrap();
+    run(
+        Command::new("git").arg("-C").arg(&repo).args(["add", "."]),
+        "git add",
+    );
+    run(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["commit", "-qm", "init"]),
+        "git commit",
+    );
+    run(
+        Command::new(ecp_bin())
+            .args(["admin", "index", "--repo"])
+            .arg(&repo)
+            .env("HOME", &home)
+            .env("ECP_HOME", &home)
+            .env("CLAUDE_CODE_SESSION_ID", "test-find-suppression"),
+        "ecp admin index",
+    );
+    (tmp, repo, home)
+}
+
+fn find_overlay_json(repo: &Path, home: &Path, name: &str, mode: &str) -> serde_json::Value {
+    let out = run(
+        Command::new(ecp_bin())
+            .args([
+                "find", name, "--mode", mode, "--all", "--file", "src", "--format", "json",
+                "--repo",
+            ])
+            .arg(repo)
+            .env("HOME", home)
+            .env("ECP_HOME", home)
+            .env("CLAUDE_CODE_SESSION_ID", "test-find-suppression"),
+        "ecp find",
+    );
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "invalid find JSON ({e}): {}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    })
+}
+
+#[test]
+fn find_suppresses_symbols_in_an_emptied_dirty_file() {
+    let (_tmp, repo, home) = init_find_overlay_repo("src/a.rs", "fn wanderer() {}\n");
+    let clean = find_overlay_json(&repo, &home, "wanderer", "exact");
+    assert_eq!(clean["found"], true, "{clean}");
+    assert_eq!(clean["matches"][0]["file"], "src/a.rs", "{clean}");
+    assert_eq!(clean["matches"][0]["line"], 1, "{clean}");
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    std::fs::write(repo.join("src/a.rs"), "\n").unwrap();
+    // Empty fragments must suppress too, including when a later process reads them.
+    for mode in ["exact", "exact", "fuzzy"] {
+        let result = find_overlay_json(&repo, &home, "wanderer", mode);
+        assert_eq!(result["found"], false, "{result}");
+        assert_eq!(result["matches"], serde_json::json!([]), "{result}");
+        assert_eq!(result["total_candidates"], 0, "{result}");
+        assert_eq!(result["returned"], 0, "{result}");
+    }
+}
+
+#[test]
+fn find_honours_dirty_file_suppression_across_languages() {
+    for (file, prefix, declaration, suffix) in [
+        ("src/a.ts", "", "function NAME() {}\n", ""),
+        ("src/a.js", "", "function NAME() {}\n", ""),
+        ("src/a.py", "", "def NAME(): pass\n", ""),
+        ("src/A.java", "class A {\n", "void NAME() {}\n", "}\n"),
+        ("src/a.kt", "", "fun NAME() {}\n", ""),
+        ("src/A.cs", "class A {\n", "void NAME() {}\n", "}\n"),
+        ("src/a.go", "package a\n", "func NAME() {}\n", ""),
+        ("src/a.rs", "", "fn NAME() {}\n", ""),
+        ("src/a.php", "<?php\n", "function NAME() {}\n", ""),
+        ("src/a.rb", "", "def NAME; end\n", ""),
+        ("src/a.swift", "", "func NAME() {}\n", ""),
+        ("src/a.c", "", "void NAME() {}\n", ""),
+        ("src/a.cpp", "", "void NAME() {}\n", ""),
+        ("src/a.dart", "", "void NAME() {}\n", ""),
+    ] {
+        let deleted = declaration.replace("NAME", "overlay_deleted");
+        let kept = declaration.replace("NAME", "overlay_kept");
+        let added = declaration.replace("NAME", "overlay_added");
+        let (_tmp, repo, home) =
+            init_find_overlay_repo(file, &format!("{prefix}{deleted}{kept}{suffix}"));
+        let first_line = prefix.lines().count() as u64 + 1;
+
+        for (name, line) in [
+            ("overlay_deleted", first_line),
+            ("overlay_kept", first_line + 1),
+        ] {
+            let clean = find_overlay_json(&repo, &home, name, "exact");
+            assert_eq!(clean["found"], true, "{file}: {clean}");
+            assert_eq!(clean["total_candidates"], 1, "{file}: {clean}");
+            assert_eq!(clean["matches"][0]["file"], file, "{file}: {clean}");
+            assert_eq!(clean["matches"][0]["line"], line, "{file}: {clean}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(
+            repo.join(file),
+            format!("{prefix}\n\n{kept}{added}{suffix}"),
+        )
+        .unwrap();
+
+        for (name, line) in [
+            ("overlay_kept", first_line + 2),
+            ("overlay_added", first_line + 3),
+        ] {
+            let result = find_overlay_json(&repo, &home, name, "exact");
+            assert_eq!(result["found"], true, "{file}: {result}");
+            assert_eq!(result["total_candidates"], 1, "{file}: {result}");
+            assert_eq!(result["matches"][0]["file"], file, "{file}: {result}");
+            assert_eq!(result["matches"][0]["line"], line, "{file}: {result}");
+        }
+        let result = find_overlay_json(&repo, &home, "overlay_deleted", "exact");
+        assert_eq!(result["found"], false, "{file}: {result}");
+        assert_eq!(result["matches"], serde_json::json!([]), "{file}: {result}");
+        assert_eq!(result["total_candidates"], 0, "{file}: {result}");
+
+        let result = find_overlay_json(&repo, &home, "overlay_", "fuzzy");
+        let mut names: Vec<_> = result["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["name"].as_str().unwrap())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["overlay_added", "overlay_kept"], "{file}: {result}");
+        assert_eq!(result["total_candidates"], 2, "{file}: {result}");
+        assert_eq!(result["returned"], 2, "{file}: {result}");
+    }
 }
