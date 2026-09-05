@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.13.1 - 2026-09-05
+
+### Bug Fixes
+
+- an untracked file makes the tree dirty (#761)
+- honour overlay suppression in exact and fuzzy lookup (#762)
+- report the files the indexer left out instead of dropping them (#758)
+- reset the parser after a cancelled parse (#759)
+- require a single path component before joining onto a cache root (#755)
+- bound the two lock waits that could still hang indexing (#754)
+- confine repo-supplied hook reads to the repository (#756)
+- stop the no-flock fallback running what a repo path spells (#753)
+- retire sessions to a unique dir so a second --force is not fatal (#752)
+- enumerate the effective config, not the --local scope (#751)
+- seven defects from a read-only audit — repo config running code, and four silent wrong answers (#750)
+
+### Performance
+
+- stream git archive into tar instead of buffering it (#757)
+
 ## v0.13.0 - 2026-09-02
 
 ### Features
