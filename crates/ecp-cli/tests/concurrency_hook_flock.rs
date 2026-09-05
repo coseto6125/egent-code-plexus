@@ -160,15 +160,33 @@ fn no_flock_fallback_does_not_execute_a_path_that_spells_a_command() {
     std::fs::create_dir_all(&hostile).unwrap();
     let lock = hostile.join("reindex.lock");
 
+    // The inner command leaves its own mark. Without it the test also passes
+    // when the preamble exits early — `mkdir ... || exit 0` returns 0 and
+    // installs no trap — and an absent substitution marker would then prove
+    // nothing about the branch this test exists to cover.
+    let reached = tmp.path().join("reached");
+    let inner = format!("touch '{}'", reached.display());
+
     let out = Command::new("sh")
         .arg("-c")
-        .arg(flock_shell(&lock, "true"))
+        .arg(flock_shell(&lock, &inner))
         .env("PATH", &bin)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
         .expect("run the preamble");
 
+    assert!(
+        out.status.success(),
+        "the fallback preamble exited non-zero: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        reached.exists(),
+        "the preamble never reached its inner command, so nothing here \
+         exercises the trap; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         !marker.exists(),
         "the shell ran the command spelled in the lock path; stderr: {}",
