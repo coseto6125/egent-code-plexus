@@ -403,24 +403,109 @@ pub(crate) fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io:
 /// HEAD is not the target SHA, which nearly every command can trigger. The
 /// overrides are what stop the scanned repository executing its own program.
 pub(crate) fn git_archive_to(worktree: &Path, sha: &str, dest: &Path) -> io::Result<()> {
+    use std::io::Read;
+
     let overrides = safe_exec::filter_overrides(worktree);
-    let archive = safe_exec::git_with_overrides(worktree, &overrides)
+    // git's stdout is tar's stdin, so the kernel pipe holds the archive rather
+    // than this process. `.output()` used to buffer the whole tar first, which
+    // made peak memory a function of what the repository tracks: a 200 MB blob
+    // took the index from 71 MB to 502 MB, and none of it is content the
+    // analyzer would read — its per-file cap rejects that file afterwards.
+    let mut git = safe_exec::git_with_overrides(worktree, &overrides)
         .args(["archive", "--format=tar", sha])
-        .output()?;
-    if !archive.status.success() {
-        return Err(io::Error::other("git archive failed"));
-    }
-    let mut child = std::process::Command::new("tar")
-        .args(["-x", "-f", "-", "-C", dest.to_string_lossy().as_ref()])
-        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()?;
-    use std::io::Write;
-    child.stdin.as_mut().unwrap().write_all(&archive.stdout)?;
-    let s = child.wait()?;
-    if !s.success() {
-        return Err(io::Error::other("tar extract failed"));
+
+    // Every path out of here from now on reaps git. Dropping a `Child` neither
+    // kills nor waits for the process, so an early `?` would leave `git
+    // archive` running against the repository with nobody collecting it.
+    let finish_git = |git: &mut std::process::Child| {
+        let _ = git.kill();
+        let _ = git.wait();
+    };
+
+    let Some(git_stdout) = git.stdout.take() else {
+        finish_git(&mut git);
+        return Err(io::Error::other("git archive: no stdout"));
+    };
+    let Some(mut git_stderr) = git.stderr.take() else {
+        finish_git(&mut git);
+        return Err(io::Error::other("git archive: no stderr"));
+    };
+
+    let mut tar = match std::process::Command::new("tar")
+        .args(["-x", "-f", "-", "-C", dest.to_string_lossy().as_ref()])
+        .stdin(std::process::Stdio::from(git_stdout))
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            finish_git(&mut git);
+            return Err(e);
+        }
+    };
+
+    // stderr is drained on its own thread. Waiting for tar first is required —
+    // it is what empties the stdout pipe — but git can fill the stderr pipe
+    // meanwhile, and a git blocked on stderr never closes stdout, so tar waits
+    // for an EOF that never comes and the build hangs.
+    let Some(mut tar_stderr) = tar.stderr.take() else {
+        finish_git(&mut git);
+        let _ = tar.kill();
+        let _ = tar.wait();
+        return Err(io::Error::other("tar: no stderr"));
+    };
+    let (tar_status, git_status, git_err, tar_err) = std::thread::scope(|scope| {
+        let drain_git = scope.spawn(move || {
+            let mut buf = Vec::new();
+            let _ = git_stderr.read_to_end(&mut buf);
+            buf
+        });
+        let drain_tar = scope.spawn(move || {
+            let mut buf = Vec::new();
+            let _ = tar_stderr.read_to_end(&mut buf);
+            buf
+        });
+        let tar_status = tar.wait();
+        let git_status = git.wait();
+        (
+            tar_status,
+            git_status,
+            drain_git.join().unwrap_or_default(),
+            drain_tar.join().unwrap_or_default(),
+        )
+    });
+
+    // Both messages, rather than a rule for picking one. Every rule tried here
+    // was wrong for some case: tar-first lost git's stderr when a bad revision
+    // made tar fail on the empty stream it received; a SIGPIPE test is
+    // Unix-only; "git said something" misfires because `GIT_TRACE` in the
+    // caller's environment makes git write to stderr without failing. The
+    // reader wants to know what happened, and when two processes fail together
+    // the honest answer names both.
+    let tar_status = tar_status?;
+    let git_status = git_status?;
+    if git_status.success() && tar_status.success() {
+        return Ok(());
     }
-    Ok(())
+    let mut parts = Vec::new();
+    if !git_status.success() {
+        parts.push(format!(
+            "git archive: {} {}",
+            git_status,
+            String::from_utf8_lossy(&git_err).trim()
+        ));
+    }
+    if !tar_status.success() {
+        parts.push(format!(
+            "tar extract: {} {}",
+            tar_status,
+            String::from_utf8_lossy(&tar_err).trim()
+        ));
+    }
+    Err(io::Error::other(parts.join("; ")))
 }
 
 pub(crate) fn collect_refs(worktree: &Path, sha: &str) -> io::Result<Vec<RefRecord>> {
@@ -916,5 +1001,133 @@ mod meta_lock_tests {
              wait is unbounded again: {waited:?}"
         );
         drop(held);
+    }
+}
+
+/// The streaming rewrite put two processes and three pipes where there had been
+/// one buffered call, and the failure paths are where that shows.
+#[cfg(all(test, unix))]
+mod archive_process_tests {
+    use super::*;
+
+    /// `GIT_TRACE` is process-global, so the two tests that set it take turns.
+    /// Without this one test's trace setting leaks into whatever else the
+    /// harness happens to be running on another thread.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Sets `GIT_TRACE` for as long as it is held, and clears it on the way
+    /// out — including on a panic, which a bare `remove_var` after the
+    /// assertions would skip.
+    struct GitTrace(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl GitTrace {
+        fn on() -> Self {
+            let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            std::env::set_var("GIT_TRACE", "1");
+            Self(guard)
+        }
+    }
+
+    impl Drop for GitTrace {
+        fn drop(&mut self) {
+            std::env::remove_var("GIT_TRACE");
+        }
+    }
+
+    fn one_commit_repo(dir: &std::path::Path) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        for args in [
+            vec!["init", "-q", "."],
+            vec!["config", "user.email", "t@example.invalid"],
+            vec!["config", "user.name", "t"],
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(&args)
+                .current_dir(dir)
+                .status()
+                .unwrap()
+                .success());
+        }
+        std::fs::write(dir.join("a.py"), "def a():\n    return 1\n").unwrap();
+        // Larger than a pipe buffer, so git actually blocks on the pipe rather
+        // than finishing before tar is even scheduled — which is the only state
+        // in which the ordering these tests check is observable.
+        std::fs::write(dir.join("bulk.txt"), "x".repeat(1_000_000)).unwrap();
+        for args in [vec!["add", "-A"], vec!["commit", "-qm", "one"]] {
+            assert!(std::process::Command::new("git")
+                .args(&args)
+                .current_dir(dir)
+                .status()
+                .unwrap()
+                .success());
+        }
+        String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(dir)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string()
+    }
+
+    /// tar refuses a destination that does not exist. The call has to come back
+    /// with tar's failure — not git's SIGPIPE, which is the consequence — and it
+    /// has to come back at all: an early return that dropped the `Child` would
+    /// leave `git archive` running with nobody to reap it.
+    #[test]
+    fn a_failing_tar_returns_its_own_error_and_does_not_hang() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let sha = one_commit_repo(&repo);
+
+        // Trace output on a run where tar is the one that fails: the error has
+        // to name tar, not the process that merely printed the most.
+        let _trace = GitTrace::on();
+        let start = std::time::Instant::now();
+        let err = git_archive_to(&repo, &sha, &tmp.path().join("no-such-dir"))
+            .expect_err("tar cannot extract into a directory that is not there");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(30),
+            "the call must return, not wait on a child nobody reaps: {:?}",
+            start.elapsed()
+        );
+        assert!(
+            err.to_string().contains("tar extract"),
+            "tar's failure has to be named: {err}"
+        );
+    }
+
+    /// A revision that is not a tree makes git fail while tar succeeds on an
+    /// empty stream, so this is the case where git's stderr is the only thing
+    /// that says what went wrong.
+    ///
+    /// `GIT_TRACE` is set on purpose. git then writes to stderr without
+    /// failing, which is what broke an earlier attempt to pick the causal
+    /// process by "did git say anything" — the caller's environment reaches
+    /// this subprocess, and a rule that reads trace output as an error would
+    /// report git for a failure tar caused.
+    #[test]
+    fn a_failing_git_reports_what_git_said() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        one_commit_repo(&repo);
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let _trace = GitTrace::on();
+        let err = git_archive_to(&repo, &"0".repeat(40), &dest)
+            .expect_err("an all-zero sha is not a tree");
+        assert!(
+            err.to_string().contains("git archive"),
+            "expected git's failure: {err}"
+        );
+        assert!(
+            err.to_string().contains("not a tree object"),
+            "git's stderr has to survive, or the error names nothing: {err}"
+        );
     }
 }
