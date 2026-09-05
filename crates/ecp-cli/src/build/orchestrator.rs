@@ -462,22 +462,21 @@ pub(crate) fn git_archive_to(worktree: &Path, sha: &str, dest: &Path) -> io::Res
         (tar_status, git_status, stderr)
     });
 
-    // Both are inspected, and which one is reported follows the causality
-    // rather than the order. git is upstream and its stderr is the only thing
-    // that says why — except when git died of SIGPIPE, which means tar went
-    // first and git's failure is the consequence.
+    // Both are inspected, and which one is reported turns on whether git had
+    // anything to say. git failing with a message on stderr is a real failure —
+    // a bad revision, an unreadable object — and that message is the only thing
+    // that explains it. git failing silently is git dying on a pipe whose
+    // reader went away, which makes tar's failure the cause and git's the
+    // consequence.
+    //
+    // Deliberately not a SIGPIPE check: that is Unix-only, and on Windows a
+    // writer whose reader is gone gets a failed write rather than a signal, so
+    // the signal test silently stops discriminating on one of the five
+    // platforms this ships to.
     let tar_status = tar_status?;
     let git_status = git_status?;
-    // Windows has no SIGPIPE: a writer whose reader is gone gets a failed
-    // write, not a signal, so there is nothing to special-case there.
-    #[cfg(unix)]
-    let git_died_downstream = {
-        use std::os::unix::process::ExitStatusExt;
-        git_status.signal() == Some(13)
-    };
-    #[cfg(not(unix))]
-    let git_died_downstream = false;
-    if !git_status.success() && !git_died_downstream {
+    let git_said_something = !String::from_utf8_lossy(&stderr).trim().is_empty();
+    if !git_status.success() && git_said_something {
         return Err(io::Error::other(format!(
             "git archive failed: {}",
             String::from_utf8_lossy(&stderr).trim()
@@ -486,6 +485,11 @@ pub(crate) fn git_archive_to(worktree: &Path, sha: &str, dest: &Path) -> io::Res
     if !tar_status.success() {
         return Err(io::Error::other(format!(
             "tar extract failed: {tar_status}"
+        )));
+    }
+    if !git_status.success() {
+        return Err(io::Error::other(format!(
+            "git archive failed with no message: {git_status}"
         )));
     }
     Ok(())
@@ -1008,6 +1012,10 @@ mod archive_process_tests {
                 .success());
         }
         std::fs::write(dir.join("a.py"), "def a():\n    return 1\n").unwrap();
+        // Larger than a pipe buffer, so git actually blocks on the pipe rather
+        // than finishing before tar is even scheduled — which is the only state
+        // in which the ordering these tests check is observable.
+        std::fs::write(dir.join("bulk.txt"), "x".repeat(1_000_000)).unwrap();
         for args in [vec!["add", "-A"], vec!["commit", "-qm", "one"]] {
             assert!(std::process::Command::new("git")
                 .args(&args)
