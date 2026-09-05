@@ -46,8 +46,15 @@ pub fn flock_preamble(lock: &Path) -> String {
             .and_then(|name| name.to_str())
             .unwrap_or("ecp.lock")
     ));
+    // The lock dir reaches the trap through a variable, not by interpolation.
+    // `trap "rmdir '<path>'"` looks quoted and is not: the body's own double
+    // quotes are the outer pair, so the single quotes inside are ordinary
+    // characters and the shell expands `$(...)` in the path while it parses the
+    // trap. A repository directory carrying `$(...)` in its name therefore ran
+    // it. Assigning first and single-quoting the body defers the expansion to
+    // the variable, which `shell_quote` has already made literal.
     format!(
-        "if command -v flock >/dev/null 2>&1; then\n  exec 9>{lock} || exit 0\n  flock -n 9 || exit 0\nelse\n  mkdir {lock_dir} 2>/dev/null || exit 0\n  trap \"rmdir {lock_dir}\" EXIT INT TERM\n  : > {lock}\nfi\n",
+        "if command -v flock >/dev/null 2>&1; then\n  exec 9>{lock} || exit 0\n  flock -n 9 || exit 0\nelse\n  ECP_LOCK_DIR={lock_dir}\n  mkdir \"$ECP_LOCK_DIR\" 2>/dev/null || exit 0\n  trap 'rmdir \"$ECP_LOCK_DIR\"' EXIT INT TERM\n  : > {lock}\nfi\n",
         lock = shell_quote(lock),
         lock_dir = shell_quote(lock_dir),
     )
