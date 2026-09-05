@@ -68,6 +68,10 @@ fn an_oversized_file_becomes_a_blind_spot_rather_than_silence() {
     );
 }
 
+/// Every query names its format. The default is structured today and these
+/// assertions hold against it, but a test that leans on a default is a test
+/// that breaks for a reason unrelated to what it checks.
+///
 /// The caveat rides the `result` field, which is what ECP.md already documents
 /// as the marker for a provisional answer — so this needs no new convention for
 /// the reading model to learn.
@@ -79,9 +83,12 @@ fn a_miss_names_the_omissions_only_when_the_index_has_some() {
     let incomplete = tempfile::tempdir().unwrap();
     fixture(incomplete.path(), true);
     run(incomplete.path(), &["admin", "index", "--repo", "."]);
-    let miss = run(incomplete.path(), &["find", "big_fn", "--repo", "."]);
+    let miss = run(
+        incomplete.path(),
+        &["find", "big_fn", "--repo", ".", "--format", "json"],
+    );
     assert!(
-        miss.contains("found: false"),
+        miss.contains("\"found\":false"),
         "the symbol is genuinely out of the graph: {miss}"
     );
     assert!(
@@ -92,9 +99,12 @@ fn a_miss_names_the_omissions_only_when_the_index_has_some() {
     let complete = tempfile::tempdir().unwrap();
     fixture(complete.path(), false);
     run(complete.path(), &["admin", "index", "--repo", "."]);
-    let clean_miss = run(complete.path(), &["find", "nonexistent", "--repo", "."]);
+    let clean_miss = run(
+        complete.path(),
+        &["find", "nonexistent", "--repo", ".", "--format", "json"],
+    );
     assert!(
-        clean_miss.contains("found: false"),
+        clean_miss.contains("\"found\":false"),
         "expected a miss: {clean_miss}"
     );
     assert!(
@@ -102,9 +112,12 @@ fn a_miss_names_the_omissions_only_when_the_index_has_some() {
         "a complete index must not caveat its misses: {clean_miss}"
     );
 
-    let hit = run(complete.path(), &["find", "visible", "--repo", "."]);
+    let hit = run(
+        complete.path(),
+        &["find", "visible", "--repo", ".", "--format", "json"],
+    );
     assert!(
-        hit.contains("found: true") && !hit.contains("left out"),
+        hit.contains("\"found\":true") && !hit.contains("left out"),
         "a hit carries no omission caveat: {hit}"
     );
 }

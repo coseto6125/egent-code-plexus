@@ -217,6 +217,11 @@ pub fn run_analyzer_for_paths(
         use rayon::prelude::*;
         let to_write: Vec<(std::path::PathBuf, Vec<u8>)> = local_graphs
             .par_iter()
+            // An omitted graph carries a zero hash because its content was
+            // never read. Caching it would key an empty graph on a hash no
+            // real file produces — dead weight at best, and at worst an empty
+            // answer served for a file whose content happens to hash to zero.
+            .filter(|g| g.content_hash != [0u8; 8])
             .filter(|g| !cache.path_for(&g.file_path, &g.content_hash).exists())
             .filter_map(|g| match rkyv::to_bytes::<rkyv::rancor::Error>(g) {
                 Ok(bytes) => Some((
