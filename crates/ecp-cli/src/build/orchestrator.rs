@@ -903,8 +903,15 @@ mod meta_lock_tests {
             result.is_err(),
             "a lock nobody releases has to end as an error"
         );
+        // Bounded on both sides. An upper bound of a minute also passes for a
+        // caller that waits fifty-nine seconds, which is not the five this site
+        // asks for; a lower bound alone passes for one that never waited.
         assert!(
-            waited < std::time::Duration::from_secs(60),
+            waited >= std::time::Duration::from_secs(4),
+            "the wait ended before the five seconds this site asks for: {waited:?}"
+        );
+        assert!(
+            waited < std::time::Duration::from_secs(15),
             "if this reads as a harness timeout rather than this assertion, the \
              wait is unbounded again: {waited:?}"
         );

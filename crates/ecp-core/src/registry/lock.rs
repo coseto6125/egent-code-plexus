@@ -67,12 +67,21 @@ impl FileLock {
 /// different things: a registry write is millisecond-scale, a build lock is
 /// waiting out somebody else's whole index.
 pub fn lock_exclusive_within(file: &File, path: &Path, timeout: Duration) -> io::Result<()> {
+    let contended = fs2::lock_contended_error().raw_os_error();
     let start = Instant::now();
     let mut checked_dead_holder = false;
     loop {
-        if file.try_lock_exclusive().is_ok() {
-            record_owner_pid(path);
-            return Ok(());
+        match file.try_lock_exclusive() {
+            Ok(()) => {
+                record_owner_pid(path);
+                return Ok(());
+            }
+            // Only contention is worth retrying. Anything else — a bad
+            // descriptor, a filesystem that will not lock — does not become
+            // true by waiting, and retrying it would replace the real error
+            // with a timeout that names the wrong cause.
+            Err(e) if e.raw_os_error() != contended => return Err(e),
+            Err(_) => {}
         }
         // One-shot dead-holder probe: if the recorded owner PID is gone, the
         // kernel should already have dropped its flock, so the next try wins.
@@ -166,8 +175,15 @@ mod tests {
         let waited = start.elapsed();
 
         assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        // Both bounds, because either alone passes for the wrong timeout: an
+        // upper bound of seconds accepts a caller that waits far longer than it
+        // asked to, and no lower bound accepts one that never waited at all.
         assert!(
-            waited < Duration::from_secs(5),
+            waited >= Duration::from_millis(200),
+            "the wait ended before the timeout it was given: {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_millis(900),
             "the wait must end near the timeout, not run on: {waited:?}"
         );
         assert!(
@@ -193,5 +209,38 @@ mod tests {
             .unwrap();
         lock_exclusive_within(&file, &path, Duration::from_millis(200))
             .expect("an unheld lock must be granted");
+    }
+
+    /// A lock that cannot be taken for a reason other than contention must
+    /// surface that reason at once, not wait out the timeout and report
+    /// contention that never happened.
+    #[cfg(unix)]
+    #[test]
+    fn lock_exclusive_within_returns_a_non_contention_error_at_once() {
+        use std::os::fd::FromRawFd;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("never.lock");
+        // `i32::MAX` is above any reachable `RLIMIT_NOFILE`, so it is never an
+        // open descriptor and `try_lock_exclusive` fails with EBADF — an error
+        // no amount of waiting turns into a lock. Picking a number rather than
+        // closing a real descriptor keeps this deterministic: cargo runs tests
+        // in parallel threads, and a closed number can be reused by one of
+        // them. `ManuallyDrop` keeps the `File` from closing it on the way out.
+        let file = std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(i32::MAX) });
+
+        let start = Instant::now();
+        let err = lock_exclusive_within(&file, &path, Duration::from_secs(30))
+            .expect_err("an invalid descriptor cannot be locked");
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "a non-contention error must return at once, not after the timeout: {:?}",
+            start.elapsed()
+        );
+        assert_ne!(
+            err.kind(),
+            io::ErrorKind::WouldBlock,
+            "the real cause must survive rather than becoming a timeout: {err}"
+        );
     }
 }
