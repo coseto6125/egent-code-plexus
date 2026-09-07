@@ -26,7 +26,11 @@ permissions:
 
 jobs:
   analyze:
-    name: Analyze
+    # Pinned to the language alone. A matrix job left with the default name
+    # carries every matrix key, so adding `build-mode` renamed the jobs to
+    # `Analyze (python, none)`. Branch protection matches required status
+    # checks by name, so those checks then never report.
+    name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -43,11 +47,13 @@ jobs:
           # and cargo the ubuntu-latest image already carries.
           - language: rust
             build-mode: none
-          - language: javascript
+          # `javascript`, `typescript` and `javascript-typescript` are the
+          # same CodeQL language (src/languages/builtin.json aliases the
+          # first two to the third), so the split entries built and
+          # analyzed one database twice.
+          - language: javascript-typescript
             build-mode: none
           - language: python
-            build-mode: none
-          - language: typescript
             build-mode: none
         # CodeQL supports [ $supported-codeql-languages ]
         # Learn more about CodeQL language support at https://aka.ms/codeql-docs/language-support
