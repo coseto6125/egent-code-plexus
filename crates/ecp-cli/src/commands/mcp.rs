@@ -7,13 +7,6 @@
 use clap::{Args, Command, Subcommand};
 use ecp_core::EcpError;
 use ecp_mcp::server::{serve_stdio, EcpMcpServer};
-use serde::Serialize;
-
-#[derive(Serialize, Debug)]
-struct ToolInfo {
-    name: String,
-    description: String,
-}
 
 #[derive(Args, Debug, Clone)]
 pub struct McpArgs {
@@ -61,14 +54,11 @@ pub fn run(args: McpArgs, root_cmd: Command) -> Result<(), EcpError> {
                             "warning: toon renderer not yet integrated, falling back to json"
                         );
                     }
-                    let tool_infos: Vec<ToolInfo> = tools
-                        .iter()
-                        .map(|t| ToolInfo {
-                            name: t.name.clone(),
-                            description: t.description.clone(),
-                        })
-                        .collect();
-                    let json = serde_json::to_string_pretty(&tool_infos)
+                    // The whole `DerivedTool`, not just name + description:
+                    // `schema`, `positional_args`, `flag_args`, `prefix_args`
+                    // and `subcmd_arg` are what a host needs to build the
+                    // same argv the MCP server would.
+                    let json = serde_json::to_string_pretty(tools)
                         .map_err(|e| EcpError::Output(format!("json: {e}")))?;
                     println!("{json}");
                 }

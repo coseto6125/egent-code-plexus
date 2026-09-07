@@ -10,14 +10,7 @@ use std::path::Path;
 /// is peeled out and prepended as the first arg (sub-subcommand router).
 /// Non-zero exit → `Err` carrying stderr.
 pub fn run_spawn(binary: &Path, tool: &DerivedTool, args: &Value) -> Result<String> {
-    let (peeled_subcmd, json_args) = peel_subcmd(tool, args)?;
-    let json_argv = crate::argv::json_to_argv(&json_args, &tool.flag_args, &tool.positional_args)?;
-    let argv: Vec<&str> = peeled_subcmd
-        .as_deref()
-        .into_iter()
-        .chain(tool.prefix_args.iter().map(String::as_str))
-        .chain(json_argv.iter().map(String::as_str))
-        .collect();
+    let argv = build_argv(tool, args)?;
     let output = std::process::Command::new(binary)
         .arg(&tool.subcommand)
         .args(&argv)
@@ -32,6 +25,20 @@ pub fn run_spawn(binary: &Path, tool: &DerivedTool, args: &Value) -> Result<Stri
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Every argv token after `<subcommand>`: the peeled sub-subcommand (if the
+/// tool routes one), the tool's fixed prefix, then the JSON-derived args.
+/// Shared with hosts that spawn `ecp` themselves but need the same argv
+/// translation the MCP server applies.
+pub fn build_argv(tool: &DerivedTool, args: &Value) -> Result<Vec<String>> {
+    let (peeled_subcmd, json_args) = peel_subcmd(tool, args)?;
+    let json_argv = crate::argv::json_to_argv(&json_args, &tool.flag_args, &tool.positional_args)?;
+    Ok(peeled_subcmd
+        .into_iter()
+        .chain(tool.prefix_args.iter().cloned())
+        .chain(json_argv)
+        .collect())
 }
 
 /// If `tool.subcmd_arg = Some(key)`, lift the matching JSON string out and

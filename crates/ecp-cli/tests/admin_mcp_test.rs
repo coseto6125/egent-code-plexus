@@ -62,8 +62,51 @@ fn admin_mcp_tools_json_format() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("output must be valid JSON");
+    let tools = parsed.as_array().expect("a JSON array of tools");
+    // A host that spawns `ecp` itself rebuilds argv from these fields, so
+    // each one is part of the contract, not a debugging extra.
+    let find = tools
+        .iter()
+        .find(|t| t["name"] == "ecp_find")
+        .expect("ecp_find is listed");
+    assert_eq!(find["subcommand"], "find");
+    assert!(find["description"].as_str().is_some_and(|d| !d.is_empty()));
     assert!(
-        parsed.is_array() || parsed.get("tools").is_some(),
-        "expected JSON array or {{tools: [...]}} object, got: {parsed}"
+        find["schema"]["properties"]["pattern"].is_object(),
+        "{find}"
     );
+    assert_eq!(find["positional_args"], serde_json::json!(["pattern"]));
+    // The whole set, in order: `flag_args` is a HashSet on the Rust side, so
+    // only the `sorted` serializer makes this array reproducible. A membership
+    // check would still pass if that serializer were dropped.
+    assert_eq!(
+        find["flag_args"],
+        serde_json::json!(["all", "batch", "fuzzy", "include_tests"]),
+        "{find}"
+    );
+    assert_eq!(find["prefix_args"], serde_json::json!([]));
+    assert!(find["subcmd_arg"].is_null());
+    let schema = tools
+        .iter()
+        .find(|t| t["name"] == "ecp_schema")
+        .expect("ecp_schema is listed");
+    assert_eq!(
+        schema["subcmd_arg"], "subcmd",
+        "router tools name their discriminator"
+    );
+    // Every tool, not just the one fixture: with a dozen tools carrying two
+    // or more flags, HashSet iteration order fails this on the first run.
+    for tool in tools {
+        let flags: Vec<&str> = tool["flag_args"]
+            .as_array()
+            .expect("flag_args is an array")
+            .iter()
+            .map(|v| v.as_str().expect("flag ids are strings"))
+            .collect();
+        assert!(
+            flags.windows(2).all(|w| w[0] < w[1]),
+            "{} serializes flag_args out of order: {flags:?}",
+            tool["name"]
+        );
+    }
 }
