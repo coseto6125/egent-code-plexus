@@ -36,7 +36,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: ["javascript", "python", "typescript"]
+        include:
+          # Rust is ~93% of this repo by bytes and was never analyzed.
+          # `none` skips the full build; CodeQL still runs build.rs and
+          # expands macros through rust-analyzer, which needs the rustup
+          # and cargo the ubuntu-latest image already carries.
+          - language: rust
+            build-mode: none
+          - language: javascript
+            build-mode: none
+          - language: python
+            build-mode: none
+          - language: typescript
+            build-mode: none
         # CodeQL supports [ $supported-codeql-languages ]
         # Learn more about CodeQL language support at https://aka.ms/codeql-docs/language-support
 
@@ -56,6 +68,7 @@ jobs:
         uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
           # Vendored upstream tree-sitter grammars are generated parser code we
           # don't author; any findings there (e.g. js/redos in
           # tree-sitter-swift/grammar.js) belong to those upstream projects.
@@ -68,7 +81,8 @@ jobs:
 
       # Autobuild attempts to build any compiled languages  (C/C++, C#, or Java).
       # If this step fails, then you should remove it and run the build manually (see below)
-      - name: Autobuild
+      - if: ${{ matrix.build-mode != 'none' }}
+        name: Autobuild
         uses: github/codeql-action/autobuild@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
 
       # ℹ️ Command-line programs to run using the OS shell.
