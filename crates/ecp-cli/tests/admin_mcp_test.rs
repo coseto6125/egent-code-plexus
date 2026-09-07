@@ -76,11 +76,13 @@ fn admin_mcp_tools_json_format() {
         "{find}"
     );
     assert_eq!(find["positional_args"], serde_json::json!(["pattern"]));
-    assert!(
-        find["flag_args"]
-            .as_array()
-            .is_some_and(|f| f.iter().any(|v| v == "all")),
-        "`--all` is a bare flag: {find}"
+    // The whole set, in order: `flag_args` is a HashSet on the Rust side, so
+    // only the `sorted` serializer makes this array reproducible. A membership
+    // check would still pass if that serializer were dropped.
+    assert_eq!(
+        find["flag_args"],
+        serde_json::json!(["all", "batch", "fuzzy", "include_tests"]),
+        "{find}"
     );
     assert_eq!(find["prefix_args"], serde_json::json!([]));
     assert!(find["subcmd_arg"].is_null());
@@ -92,4 +94,19 @@ fn admin_mcp_tools_json_format() {
         schema["subcmd_arg"], "subcmd",
         "router tools name their discriminator"
     );
+    // Every tool, not just the one fixture: with a dozen tools carrying two
+    // or more flags, HashSet iteration order fails this on the first run.
+    for tool in tools {
+        let flags: Vec<&str> = tool["flag_args"]
+            .as_array()
+            .expect("flag_args is an array")
+            .iter()
+            .map(|v| v.as_str().expect("flag ids are strings"))
+            .collect();
+        assert!(
+            flags.windows(2).all(|w| w[0] < w[1]),
+            "{} serializes flag_args out of order: {flags:?}",
+            tool["name"]
+        );
+    }
 }
