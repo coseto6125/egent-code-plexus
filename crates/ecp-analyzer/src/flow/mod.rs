@@ -539,6 +539,27 @@ fn lower(
             continue;
         }
         let id = ast.len();
+        let semantic_text = matches!(
+            n.kind(),
+            "identifier"
+                | "name"
+                | "variable_name"
+                | "property_identifier"
+                | "dotted_name"
+                | "relative_import"
+        ) || (matches!(n.kind(), "string" | "integer" | "number")
+            && (matches!(field.as_deref(), Some("source" | "module_name" | "key"))
+                || parent.is_some_and(|parent: usize| {
+                    matches!(
+                        ast[parent].kind.as_str(),
+                        "subscript_expression" | "member_expression" | "attribute"
+                    )
+                })));
+        let text = if semantic_text {
+            source[n.byte_range()].to_string()
+        } else {
+            source[n.byte_range()].chars().take(256).collect()
+        };
         ast.push(Ast {
             parent,
             size: n.end_byte() - n.start_byte(),
@@ -546,7 +567,7 @@ fn lower(
                 .child_by_field_name("operator")
                 .map(|op| source[op.byte_range()].to_string()),
             kind: n.kind().into(),
-            text: source[n.byte_range()].chars().take(256).collect(),
+            text,
             file,
             line: n.start_position().row + 1,
             column: n.start_position().column + 1,
@@ -1083,8 +1104,16 @@ impl Engine<'_> {
                     v.merge(&self.eval(c, scopes));
                 }
                 let result = self.node(n, "return", &v);
-                if let Some(exits) = self.exit_states.last_mut() {
-                    exits.push((self.scopes.clone(), self.objects.clone()));
+                // A direct body return leaves the current state intact until invoke merges exits.
+                // Only nested returns need snapshots before their enclosing branch restores state.
+                let direct_exit = self
+                    .active
+                    .last()
+                    .is_some_and(|function| self.field(*function, "body") == a.parent);
+                if !direct_exit {
+                    if let Some(exits) = self.exit_states.last_mut() {
+                        exits.push((self.scopes.clone(), self.objects.clone()));
+                    }
                 }
                 result
             }

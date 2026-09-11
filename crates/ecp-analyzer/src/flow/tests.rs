@@ -387,3 +387,62 @@ fn test_analyze_default_parameters_use_argument_when_supplied() {
         .iter()
         .any(|n| n.kind == "argument" && n.label == "identity(202)"));
 }
+
+#[test]
+fn test_analyze_long_identifiers_preserve_binding_identity() {
+    let prefix = "a".repeat(256);
+    let source = format!("const {prefix}x = 101;\nconst {prefix}y = 202;\nconsume({prefix}x);");
+    let report = query(&source, 1, source.find("101").unwrap() + 1);
+    assert!(report
+        .nodes
+        .iter()
+        .any(|node| node.kind == "argument" && node.line == 3));
+    assert!(report
+        .nodes
+        .iter()
+        .all(|node| node.label.chars().count() <= 160));
+}
+
+#[test]
+fn test_analyze_long_import_path_resolves_complete_source() {
+    let path = format!("{}lib.js", "segment/".repeat(40));
+    let sources = [
+        SourceFile {
+            path: "main.js".into(),
+            source: format!("import {{ identity }} from './{path}';\nconsume(identity(101));"),
+        },
+        SourceFile {
+            path,
+            source: "export function identity(value) { return value; }".into(),
+        },
+    ];
+    let report = analyze(
+        &sources,
+        &FlowRequest {
+            file: "main.js".into(),
+            line: 2,
+            column: 18,
+            subject: Subject::Value,
+            direction: Direction::Forward,
+            budgets: Budgets::default(),
+        },
+    )
+    .unwrap();
+    assert!(report
+        .nodes
+        .iter()
+        .any(|node| node.kind == "argument" && node.label == "identity(101)"));
+}
+
+#[test]
+fn test_analyze_long_property_keys_preserve_field_identity() {
+    let prefix = "k".repeat(256);
+    let source = format!(
+        "const object = {{ \"{prefix}x\": 101, \"{prefix}y\": 202 }};\nconsume(object[\"{prefix}x\"]);"
+    );
+    let report = query(&source, 1, source.find("101").unwrap() + 1);
+    assert!(report
+        .nodes
+        .iter()
+        .any(|node| node.kind == "argument" && node.line == 2));
+}
