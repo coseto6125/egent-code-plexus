@@ -61,21 +61,20 @@ def measure(
 ) -> dict:
     command = [str(binary), *args]
     started = time.perf_counter()
-    with (
-        stem.with_suffix(".stdout").open("w") as stdout,
-        stem.with_suffix(".stderr").open("w") as stderr,
-    ):
-        result = subprocess.run(
-            ["/usr/bin/time", "-f", "%M", "-o", str(stem.with_suffix(".rss")), *command],
-            cwd=repo,
-            env={**os.environ, "ECP_HOME": str(home)},
-            input=stdin,
-            text=True,
-            stdout=stdout,
-            stderr=stderr,
-            timeout=120,
-        )
+    # Pipes use selector-based communication. wait(timeout) on redirected files
+    # polls with sleeps up to 50 ms and distorts short command measurements.
+    result = subprocess.run(
+        ["/usr/bin/time", "-f", "%M", "-o", str(stem.with_suffix(".rss")), *command],
+        cwd=repo,
+        env={**os.environ, "ECP_HOME": str(home)},
+        input=stdin,
+        text=True,
+        capture_output=True,
+        timeout=120,
+    )
     elapsed = time.perf_counter() - started
+    stem.with_suffix(".stdout").write_text(result.stdout)
+    stem.with_suffix(".stderr").write_text(result.stderr)
     if result.returncode:
         raise RuntimeError(f"Command failed: {command}; inspect {stem}.stderr")
     return {
@@ -210,9 +209,21 @@ def main() -> None:
                 )
                 evidence = json.loads(stem.with_suffix(".stdout").read_text())
                 context = evidence["hookSpecificOutput"]["additionalContext"]
-                if "ecp flow" not in context:
+                expected_phase = "before" if phase == "pre" else "after"
+                consumer_lines = [
+                    line
+                    for line in context.splitlines()
+                    if line.startswith("  main.js:") and " argument " in line
+                ]
+                if not (
+                    context.startswith(f"ecp flow {expected_phase} edit:")
+                    and "source_hashes=" in context
+                    and consumer_lines
+                ):
                     raise RuntimeError(f"Edit evidence missing: {stem}")
                 row["context_bytes"] = len(context.encode())
+                row["displayed_argument_consumers"] = len(consumer_lines)
+                row["context_truncated"] = "truncated=true" in context
                 record(f"hook-edit-{size}-{phase}", "after", row)
     summary = {}
     for case, variants in report["cases"].items():
@@ -224,6 +235,8 @@ def main() -> None:
                 if case.endswith("-cached")
                 else rows
             )
+            if not samples:
+                raise RuntimeError(f"No verified samples for {case}/{variant}")
             summary[case][variant] = {
                 "median_ms": statistics.median(row["seconds"] for row in samples) * 1000,
                 "min_ms": min(row["seconds"] for row in samples) * 1000,
