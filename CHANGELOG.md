@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.13.2 - 2026-09-11
+
+### Features
+
+- Print the full tool contract from `ecp admin mcp tools --format json` (#749).
+
+### Dependencies
+
+- Pin Tantivy to upstream commit `5ca39332002c2c87fb5d2abc707cf527b3319d42` (0.27 development) to use patched lru 0.18.3 and remove RUSTSEC-2026-0253. This is an unreleased upstream snapshot: https://github.com/quickwit-oss/tantivy/pull/3034.
+- Update crossbeam-channel, toml, and CI actions since v0.13.1.
+
 ## v0.13.1 - 2026-09-05
 
 ### Bug Fixes
