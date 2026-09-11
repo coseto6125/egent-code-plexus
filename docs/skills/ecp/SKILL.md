@@ -14,6 +14,19 @@ description: Tracing who-calls-X or a data flow — mid-debug, not only before a
 
 ## Quick Reference
 
+### Value dependencies
+
+When changing a computed value, trace its consumers before declaring the change compatible.
+Use `ecp flow --file <path> --line <n> --column <n> --subject value`.
+Use `--subject return` for a function's return value, or `binding` for a variable binding.
+Use `--direction backward` to find value origins.
+The source query works without an index. Read [flow](./_shared/cli/flow.md) for coverage and overlays.
+
+Calls and value dependencies are different: a caller can discard a return value.
+Check each reported consumer against the change. Inspect unresolved boundaries rather than treating them as unaffected.
+After edits, `ecp review --baseline <ref> --include flow` adds before/current consumer evidence to the existing review.
+Refresh evidence when source hashes change. A truncated result is not a complete consumer list.
+
 ### Symbol lookup
 | Command | Use for |
 |---|---|

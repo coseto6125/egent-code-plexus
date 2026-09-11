@@ -1737,6 +1737,69 @@ fn pass1_8_function_metas(
     function_metas
 }
 
+/// Resolve bare JS/TS calls against their enclosing lexical function scopes.
+/// `Some(empty)` prevents same-file fallback to an inaccessible closure.
+fn lexical_function_targets(
+    graph: &LocalGraph,
+    caller: &RawNode,
+    caller_index: u32,
+    callee: &str,
+) -> Option<Vec<(u32, f32)>> {
+    if !matches!(
+        graph.file_path.extension().and_then(|ext| ext.to_str()),
+        Some("js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts")
+    ) || callee.contains(['.', ':'])
+    {
+        return None;
+    }
+    let contains = |outer: Span, inner: Span| {
+        (outer.0, outer.1) <= (inner.0, inner.1) && (outer.2, outer.3) >= (inner.2, inner.3)
+    };
+    let scope_size = |span: Span| (span.2 - span.0, span.3 as i64 - span.1 as i64);
+    let mut saw_binding = false;
+    let mut candidates = Vec::new();
+    for (index, node) in graph.nodes.iter().enumerate() {
+        if node.name != callee || node.kind != NodeKind::Function {
+            continue;
+        }
+        saw_binding = true;
+        let parent = graph
+            .nodes
+            .iter()
+            .filter(|parent| {
+                matches!(parent.kind, NodeKind::Function | NodeKind::Method)
+                    && parent.span != node.span
+                    && contains(parent.span, node.span)
+            })
+            .min_by_key(|parent| scope_size(parent.span));
+        if let Some(parent) = parent {
+            if contains(parent.span, caller.span) {
+                candidates.push((scope_size(parent.span), index));
+            }
+        } else if node.owner_class.is_none() {
+            candidates.push(((u32::MAX, i64::MAX), index));
+        }
+    }
+    if !saw_binding {
+        return None;
+    }
+    candidates.sort_unstable();
+    let Some(&(scope, target)) = candidates.first() else {
+        return Some(Vec::new());
+    };
+    if candidates.get(1).is_some_and(|next| next.0 == scope) {
+        return Some(Vec::new());
+    }
+    let caller_local_index = graph
+        .nodes
+        .iter()
+        .position(|node| std::ptr::eq(node, caller))?;
+    Some(vec![(
+        caller_index - caller_local_index as u32 + target as u32,
+        1.0,
+    )])
+}
+
 /// Emit Pass-2 edges for a single `raw_node`'s heritage / calls / type
 /// annotation. Factored out so the serial dump path and the parallel
 /// hot path can share the same per-node logic.
@@ -1794,13 +1857,23 @@ fn pass2_emit_node_edges(
     for (call_idx, callee) in raw_node.calls.iter().enumerate() {
         let lookup_key = CallMetaKey::new(raw_node.span, call_idx as u32);
         let meta = indirect_lookup.get(&lookup_key);
-        let targets = resolver.resolve_symbol_with_heritage(
-            &local_graph.file_path,
-            callee,
-            &local_graph.imports,
-            ResolveTarget::Callable,
-            call_heritage,
-        );
+        let targets =
+            match lexical_function_targets(local_graph, raw_node, current_node_idx, callee) {
+                Some(targets) if targets.is_empty() => resolver.resolve_imported_symbol(
+                    &local_graph.file_path,
+                    callee,
+                    &local_graph.imports,
+                    ResolveTarget::Callable,
+                ),
+                Some(targets) => targets,
+                None => resolver.resolve_symbol_with_heritage(
+                    &local_graph.file_path,
+                    callee,
+                    &local_graph.imports,
+                    ResolveTarget::Callable,
+                    call_heritage,
+                ),
+            };
         for (target_id, confidence) in targets {
             if target_id == current_node_idx {
                 continue; // self-recursion edges are Louvain / process noise

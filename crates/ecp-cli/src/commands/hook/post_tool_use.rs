@@ -40,6 +40,9 @@ fn git_mutation_re() -> &'static regex::Regex {
 }
 
 pub fn handle(input: &HookInput) -> Result<(), EcpError> {
+    if let Some(flow) = super::edit_flow::context(input, true) {
+        emit_additional_context("PostToolUse", &flow);
+    }
     if input.tool_name != "Bash" {
         return Ok(());
     }

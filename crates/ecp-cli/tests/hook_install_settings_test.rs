@@ -98,6 +98,9 @@ fn reinstalling_same_event_is_idempotent() {
         })
         .count();
     assert_eq!(count, 1, "duplicate entries should not accumulate");
+    assert!(pre
+        .iter()
+        .any(|entry| entry["matcher"] == "Grep|Glob|Bash|Edit|Write"));
 }
 
 #[test]

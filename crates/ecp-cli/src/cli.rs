@@ -35,6 +35,9 @@ pub enum Commands {
     /// Syntax-pattern search over source files — the statement shapes the graph
     /// does not hold. `--callers-of` scopes the scan to one symbol's callers.
     Pattern(commands::pattern::PatternArgs),
+    /// Trace value dependencies from a source position, including resolved calls and returns.
+    /// Reads current JS/TS, Python, and PHP sources without requiring an index.
+    Flow(commands::flow::FlowArgs),
     /// Cypher query escape hatch
     Cypher(commands::cypher::CypherArgs),
     /// Registry + repo health. Default: scoped to the cwd repo when indexed; registry overview otherwise.
@@ -181,7 +184,8 @@ impl Commands {
             | Commands::Processes(_)
             | Commands::FindSchemaBindings(_)
             | Commands::FindEventMirrors(_) => true,
-            Commands::Summary(_)
+            Commands::Flow(_)
+            | Commands::Summary(_)
             | Commands::Contracts(_)
             | Commands::Diff(_)
             | Commands::Admin { .. }
@@ -199,9 +203,8 @@ impl Commands {
         }
     }
 
-    /// This variant's `--repo` value, or `None` for variants without one
-    /// (including every `needs_graph() == false` variant). Exhaustive for the
-    /// same reason as `needs_graph`.
+    /// This variant's `--repo` value, or `None` for variants without one.
+    /// Exhaustive for the same reason as `needs_graph`.
     pub fn repo(&self) -> Option<&str> {
         match self {
             Commands::Inspect(args) => args.repo.as_deref(),
@@ -219,6 +222,7 @@ impl Commands {
             Commands::Impact(args) => args.repo.as_deref(),
             Commands::Rename(args) => args.repo.as_deref(),
             Commands::Pattern(args) => args.repo.as_deref(),
+            Commands::Flow(args) => args.repo.as_deref(),
             Commands::Cypher(args) => args.repo.as_deref(),
             Commands::Routes(args) => args.repo.as_deref(),
             Commands::ShapeCheck(args) => args.repo.as_deref(),

@@ -104,6 +104,7 @@ fn command_label(cmd: &Commands) -> &'static str {
         Commands::Impact(_) => "impact",
         Commands::Rename(_) => "rename",
         Commands::Pattern(_) => "pattern",
+        Commands::Flow(_) => "flow",
         Commands::Cypher(_) => "cypher",
         Commands::Routes(_) => "routes",
         Commands::ShapeCheck(_) => "shape-check",
@@ -285,6 +286,7 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
         Commands::Pattern(args) => {
             commands::pattern::run(args, engine.expect("needs_graph() gates this arm"))
         }
+        Commands::Flow(args) => commands::flow::run(args),
         Commands::Cypher(args) => {
             commands::cypher::run(args, engine.expect("needs_graph() gates this arm"))
         }
@@ -357,6 +359,7 @@ fn check_group_atom(cli: &Cli) {
         Commands::Inspect(a) => (a.repo.as_deref(), None),
         Commands::Rename(a) => (a.repo.as_deref(), None),
         Commands::Pattern(a) => (a.repo.as_deref(), None),
+        Commands::Flow(a) => (a.repo.as_deref(), None),
         Commands::Cypher(a) => (a.repo.as_deref(), None),
         Commands::Routes(a) => (a.repo.as_deref(), None),
         Commands::ShapeCheck(a) => (a.repo.as_deref(), None),

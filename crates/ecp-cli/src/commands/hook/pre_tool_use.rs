@@ -23,6 +23,9 @@ pub fn handle(input: &HookInput) -> Result<(), EcpError> {
     // additionalContext payload — Claude Code parses one JSON object on
     // stdout, so two separate println!s would drop the second silently.
     let mut sections: Vec<String> = Vec::new();
+    if let Some(flow) = super::edit_flow::context(input, false) {
+        sections.push(flow);
+    }
     if let Some(hits) = compute_search_hits(input) {
         sections.push(hits);
     }

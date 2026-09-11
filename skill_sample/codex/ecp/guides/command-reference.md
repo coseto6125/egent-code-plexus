@@ -29,6 +29,8 @@ description: Detailed `ecp` command reference aligned with `ecp --help` and `ecp
 | A reaches B — the ordered chain plus the edge per hop | `ecp path <from> <to> --repo .` |
 | Execution-flow steps in real order | `ecp processes` / `ecp processes trace <pattern>` |
 | Statement shapes the graph holds no node for | `ecp pattern -p '<pattern>' --repo .` |
+| Value origins or consumers, without an index | `ecp flow --file <path> --line <n> --column <n> --subject value --repo .` |
+| Changed-value consumers before and after edits | `ecp review --baseline <ref> --include flow --repo .` |
 | Confidence-tagged pairings no edge proves | `ecp heuristics saga` / `schema-bindings` / `event-mirrors` |
 
 ## Admin Subcommands

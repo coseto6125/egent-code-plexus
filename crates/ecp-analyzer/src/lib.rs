@@ -22,6 +22,7 @@ pub mod dockerfile;
 pub mod entry_points;
 pub mod event_topic;
 pub mod fetch_shape;
+pub mod flow;
 pub mod framework_confidence;
 pub mod framework_helpers;
 pub mod function_meta;

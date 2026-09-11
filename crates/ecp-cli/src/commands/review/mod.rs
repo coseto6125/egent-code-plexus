@@ -15,14 +15,24 @@ use ecp_core::EcpError;
 
 pub mod aggregate;
 pub mod findings;
+pub mod flow;
 pub mod scope;
 pub mod verdicts;
+
+#[derive(clap::ValueEnum, Debug, Clone, PartialEq, Eq)]
+pub enum ReviewInclude {
+    Flow,
+}
 
 #[derive(Args, Debug, Clone)]
 pub struct ReviewArgs {
     /// Git ref to diff against. Defaults to working-tree changes (HEAD).
-    #[arg(long)]
+    #[arg(long, alias = "baseline")]
     pub since: Option<String>,
+
+    /// Include source-based analysis alongside existing findings.
+    #[arg(long, value_enum, value_delimiter = ',')]
+    pub include: Vec<ReviewInclude>,
 
     /// Explicit file list (comma-separated). Overrides --since.
     #[arg(long, value_delimiter = ',')]
@@ -44,6 +54,11 @@ pub struct ReviewArgs {
 }
 
 pub fn run(args: ReviewArgs, engine: &Engine) -> Result<(), EcpError> {
+    if args.verdicts && !args.include.is_empty() {
+        return Err(EcpError::InvalidArgument(
+            "--include flow cannot be combined with --verdicts".into(),
+        ));
+    }
     if args.verdicts {
         return run_verdicts(&args);
     }
@@ -56,7 +71,23 @@ pub fn run(args: ReviewArgs, engine: &Engine) -> Result<(), EcpError> {
     };
     let files = scope::resolve(&args, &repo_dir)?;
     let report = aggregate::run(&files, &repo_dir, engine, args.since.as_deref())?;
-    let payload = report.emit(start.elapsed());
+    let mut payload = report.emit(start.elapsed());
+    if args.include.contains(&ReviewInclude::Flow) {
+        payload["flow"] = flow::build(
+            &repo_dir,
+            args.since.as_deref().unwrap_or("HEAD"),
+            args.files.as_deref(),
+        )?;
+        if payload["flow"]["analysis"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty())
+            || payload["flow"]["truncated"].as_bool() == Some(true)
+        {
+            payload["legacy_status"] = payload["status"].clone();
+            payload["status"] = serde_json::json!("review_required");
+        }
+        payload["elapsed_ms"] = serde_json::json!(start.elapsed().as_millis() as u64);
+    }
     let format = OutputFormat::parse(args.format.as_deref());
     emit(&payload, format)
 }

@@ -170,3 +170,70 @@ fn with_index_emits_legacy_block_via_subprocess() {
         "stdout should expose 1-hop callees; got:\n{stdout}"
     );
 }
+
+fn run_edit_event(
+    event: &str,
+    envelope: &serde_json::Value,
+    home: &std::path::Path,
+) -> std::process::Output {
+    let mut child = Command::new(ecp_bin())
+        .args(["hook", event, "--claude-code"])
+        .env("HOME", home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(envelope.to_string().as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn test_edit_hook_actual_envelope_reports_before_and_after_consumers() {
+    let repo = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    let path = repo.path().join("x.js");
+    fs::write(&path, "let x = 1 + 2;\nconsume(x);\n").unwrap();
+    let mut input = serde_json::json!({"session_id":"session-1","tool_use_id":"edit-1","cwd":repo.path(),"tool_name":"Edit","tool_input":{"file_path":path,"old_string":"1 + 2","new_string":"1 * 2"}});
+    let before = run_edit_event("pre-tool-use", &input, home.path());
+    assert!(
+        before.status.success(),
+        "{}",
+        String::from_utf8_lossy(&before.stderr)
+    );
+    let before: serde_json::Value = serde_json::from_slice(&before.stdout).unwrap();
+    let context = before["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.contains("before edit"), "{context}");
+    assert!(context.contains("x.js:2"), "{context}");
+    fs::write(&path, "let x = 1 * 2;\nconsume(x);\n").unwrap();
+    input["tool_response"] = serde_json::json!({"success":true});
+    let after = run_edit_event("post-tool-use", &input, home.path());
+    assert!(after.status.success());
+    let after: serde_json::Value = serde_json::from_slice(&after.stdout).unwrap();
+    let context = after["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.contains("after edit"), "{context}");
+    assert!(context.contains("x.js:2"), "{context}");
+}
+
+#[test]
+fn test_edit_hook_failed_tool_response_emits_no_current_claim() {
+    let repo = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    let input = serde_json::json!({"cwd":repo.path(),"tool_name":"Write","tool_input":{"file_path":repo.path().join("x.js"),"content":"let x = 1;"},"tool_response":{"is_error":true}});
+    let output = run_edit_event("post-tool-use", &input, home.path());
+    assert!(output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}

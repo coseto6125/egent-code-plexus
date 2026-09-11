@@ -211,43 +211,16 @@ impl<'a> Resolver<'a> {
         self.resolve_symbol_with_heritage(source_file, symbol_name, raw_imports, target, &[])
     }
 
-    /// Variant that exposes the caller's enclosing-class heritage to enable
-    /// Tier 2.75 (`HeritageScoped`). Production call edges should prefer this
-    /// so cross-file mixin / inherited-method references resolve through
-    /// `Bar extends Foo` / `class Bar; include Foo; end` without falling
-    /// through to the strict Global tier.
-    pub fn resolve_symbol_with_heritage(
+    /// Resolve an explicit import without selecting an inaccessible local binding.
+    pub fn resolve_imported_symbol(
         &self,
         source_file: &Path,
         symbol_name: &str,
         raw_imports: &[RawImport],
         target: ResolveTarget,
-        caller_heritage: &[String],
     ) -> Vec<(NodeId, f32)> {
-        let mut results = Vec::new();
-        // Normalize path to use forward slashes to match indexed paths.
         let source_file_str = normalize_source_path(source_file);
-
-        // Tier 1: Try SameFile (kind-aware so a property named `Foo` doesn't
-        // win the lookup for a constructor call `Foo()` in the same file —
-        // see `SymbolTable::file_scoped` doc).
-        if let Some(node_id) =
-            self.symbol_table
-                .lookup_in_file_with_kind(&source_file_str, symbol_name, target)
-        {
-            results.push((node_id, ResolutionTier::SameFile.base_confidence()));
-            self.record(
-                &source_file_str,
-                symbol_name,
-                None,
-                DecisionTier::SameFile,
-                Some(node_id),
-                0,
-                Some(ResolutionTier::SameFile.base_confidence()),
-            );
-            return results; // Highest precedence, return early
-        }
-
+        let mut results = Vec::new();
         // Tier 2: Try ImportScoped (with L0 path normalization).
         //
         // The literal `import.source` is rarely a SymbolTable key on its own
@@ -295,6 +268,51 @@ impl<'a> Resolver<'a> {
                     return results;
                 }
             }
+        }
+
+        results
+    }
+
+    /// Variant that exposes the caller's enclosing-class heritage to enable
+    /// Tier 2.75 (`HeritageScoped`). Production call edges should prefer this
+    /// so cross-file mixin / inherited-method references resolve through
+    /// `Bar extends Foo` / `class Bar; include Foo; end` without falling
+    /// through to the strict Global tier.
+    pub fn resolve_symbol_with_heritage(
+        &self,
+        source_file: &Path,
+        symbol_name: &str,
+        raw_imports: &[RawImport],
+        target: ResolveTarget,
+        caller_heritage: &[String],
+    ) -> Vec<(NodeId, f32)> {
+        let mut results = Vec::new();
+        // Normalize path to use forward slashes to match indexed paths.
+        let source_file_str = normalize_source_path(source_file);
+
+        // Tier 1: Try SameFile (kind-aware so a property named `Foo` doesn't
+        // win the lookup for a constructor call `Foo()` in the same file —
+        // see `SymbolTable::file_scoped` doc).
+        if let Some(node_id) =
+            self.symbol_table
+                .lookup_in_file_with_kind(&source_file_str, symbol_name, target)
+        {
+            results.push((node_id, ResolutionTier::SameFile.base_confidence()));
+            self.record(
+                &source_file_str,
+                symbol_name,
+                None,
+                DecisionTier::SameFile,
+                Some(node_id),
+                0,
+                Some(ResolutionTier::SameFile.base_confidence()),
+            );
+            return results; // Highest precedence, return early
+        }
+
+        let imported = self.resolve_imported_symbol(source_file, symbol_name, raw_imports, target);
+        if !imported.is_empty() {
+            return imported;
         }
 
         // Tier 2.5: Qualifier-scoped lookup. Callees that carry a qualifier

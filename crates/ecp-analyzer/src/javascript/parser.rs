@@ -477,7 +477,7 @@ impl LanguageProvider for JavaScriptProvider {
 
             // Variable / Const emission — module-level only via queries.scm's
             // `(program …)` anchor on the bare `lexical_declaration` /
-            // `variable_declaration` patterns. Arrow-function-assigned
+            // `variable_declaration` patterns. Function-valued
             // declarators are already captured as `name.function` above and
             // produce a Function node; skip them here so we don't shadow it
             // with a duplicate Variable.
@@ -491,27 +491,15 @@ impl LanguageProvider for JavaScriptProvider {
                 } else {
                     vr
                 };
-                // Find the declarator to check its value kind (skip arrow functions).
-                let mut is_arrow = false;
-                let mut cur = decl_node.child(0);
-                while let Some(child) = cur {
-                    if child.kind() == "variable_declarator" {
-                        // Check if value is an arrow_function — those are already
-                        // emitted as Function nodes by the @name.function capture.
-                        for i in 0..child.child_count() {
-                            if let Some(gc) = child.child(i as u32) {
-                                if gc.kind() == "arrow_function" {
-                                    is_arrow = true;
-                                    break;
-                                }
-                            }
-                        }
-                        break;
-                    }
-                    cur = child.next_sibling();
-                }
+                // Inspect this binding, including later declarators in a declaration.
+                let is_function = vn
+                    .parent()
+                    .and_then(|declarator| declarator.child_by_field_name("value"))
+                    .is_some_and(|value| {
+                        matches!(value.kind(), "arrow_function" | "function_expression")
+                    });
 
-                if !is_arrow {
+                if !is_function {
                     {
                         if let Ok(name_str) =
                             std::str::from_utf8(&source[vn.start_byte()..vn.end_byte()])
@@ -719,7 +707,7 @@ impl LanguageProvider for JavaScriptProvider {
         );
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
-        crate::framework_helpers::stamp_owner_fn_by_span(&mut nodes);
+        crate::framework_helpers::stamp_js_function_owners(&mut nodes);
 
         let event_topics = {
             let topics = crate::event_topic::extract_event_topics(
