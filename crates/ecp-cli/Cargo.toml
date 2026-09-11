@@ -46,7 +46,8 @@ ignore = "0.4.26"
 libc = "0.2"
 mimalloc = { version = "0.1", default-features = false }
 rayon = "1.10"
-tantivy = "0.26.1"
+# Upstream LRU panic-safety fix: https://github.com/quickwit-oss/tantivy/pull/3034
+tantivy = { git = "https://github.com/quickwit-oss/tantivy", rev = "5ca39332002c2c87fb5d2abc707cf527b3319d42" }
 tempfile = "3.27"
 thiserror = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
