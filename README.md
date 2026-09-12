@@ -188,6 +188,15 @@ uv tool install egent-code-plexus     # or: pipx install egent-code-plexus
 cargo binstall egent-code-plexus
 ```
 
+### Update
+
+```bash
+ecp update           # replace the installed binary with the latest release
+ecp update --check   # only report whether a newer release exists
+```
+
+`ecp update` works for every install channel above. Upgrading through npm, uv, pip, brew or cargo still works until 0.15, when `ecp update` becomes the only upgrade path.
+
 CPU-tuned source build:
 
 ```bash

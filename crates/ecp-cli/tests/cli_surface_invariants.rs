@@ -78,6 +78,7 @@ const TOP_LEVEL_COMMANDS: &[&str] = &[
     "processes",
     "usage",
     "uninstall",
+    "update",
     // Hidden (deprecated paths kept functional; internal/lifecycle)
     "find-transaction-patterns",
     "find-schema-bindings",

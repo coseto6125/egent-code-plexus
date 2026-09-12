@@ -21,8 +21,9 @@ MAIN_RS="crates/ecp-cli/src/main.rs"
 
 # Verbs that answer no structural question, so a routing doc may leave them out.
 # `peers` is session collaboration, `usage` is a telemetry dashboard, and
-# `uninstall` removes host integrations. None of them query the graph.
-EXEMPT="uninstall peers usage"
+# `uninstall` removes host integrations, `update` replaces the binary. None of
+# them query the graph.
+EXEMPT="uninstall peers usage update"
 
 DEFAULT_PACKS=(
     docs/skills/ecp

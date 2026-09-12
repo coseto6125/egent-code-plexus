@@ -57,9 +57,18 @@ impl InstallSource {
         }
     }
 
-    /// Upgrade command to surface in the version warning. `Unknown` lists every
+    /// Upgrade command to surface in the version warning: `ecp update`, then the
+    /// channel command that still works until 0.15 removes it.
+    pub(crate) fn upgrade_hint(self) -> String {
+        format!(
+            "ecp update  (until 0.15 also via your install channel: {})",
+            self.channel_command()
+        )
+    }
+
+    /// The package-manager upgrade for this channel. `Unknown` lists every
     /// channel so the user can pick the one matching their install.
-    pub(crate) fn upgrade_hint(self) -> &'static str {
+    fn channel_command(self) -> &'static str {
         match self {
             Self::Npm => "npm install -g egent-code-plexus@latest  (or: npx egent-code-plexus@latest)",
             Self::UvTool => "uv tool upgrade egent-code-plexus  (or: uvx egent-code-plexus@latest)",
@@ -140,6 +149,22 @@ mod tests {
             InstallSource::from_exe_path("/usr/local/Cellar/egent-code-plexus/0.5.1/bin/ecp"),
             InstallSource::Homebrew
         );
+    }
+
+    #[test]
+    fn test_upgrade_hint_leads_with_ecp_update_then_channel_and_names_015() {
+        // Contract: the first token is the command that survives 0.15, the
+        // channel command is still present, and the cutoff version is named.
+        let hint = InstallSource::Npm.upgrade_hint();
+        assert!(hint.starts_with("ecp update"), "{hint}");
+        assert!(
+            hint.contains("npm install -g egent-code-plexus@latest"),
+            "{hint}"
+        );
+        assert!(hint.contains("0.15"), "{hint}");
+        assert!(InstallSource::Unknown
+            .upgrade_hint()
+            .contains("brew upgrade"));
     }
 
     #[test]

@@ -15,6 +15,12 @@
 //! `<home_ecp>/.update-available` (consumed once by UserPromptSubmit). Network
 //! failure is silent: it only stamps `last_attempt_epoch` so the 8h backoff
 //! applies, and never writes a notification or surfaces an error.
+//!
+//! Independently of the throttle, every run compares the running version with
+//! the one recorded on the last run. A change that `ecp update` did not make
+//! is a channel upgrade (npm / uv / pip / brew / cargo), and the notice tells
+//! the user that path is removed in 0.15. This is the one place a channel
+//! upgrade can be seen: the package managers never call back into ecp.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -35,6 +41,15 @@ const FAIL_BACKOFF_SECS: u64 = 8 * 3_600;
 /// from one ambiguous timestamp.
 #[derive(Default, Serialize, Deserialize)]
 struct CheckState {
+    /// Version of the binary that last ran the probe. Absent in files written
+    /// before `ecp update` existed, which reads as "nothing to compare yet".
+    #[serde(default)]
+    seen_version: String,
+    /// Version `ecp update` last installed, recorded by the outgoing binary so
+    /// the incoming one's first probe does not read its own arrival as a
+    /// channel upgrade.
+    #[serde(default)]
+    self_updated_to: String,
     /// Day bucket (`epoch / 86400`) of the last *successful* network query.
     last_success_day: u64,
     /// Unix epoch (secs) of the last *failed* attempt. `0` = no pending
@@ -48,40 +63,75 @@ pub fn run() -> Result<(), EcpError> {
     let home_ecp = resolve_home_ecp();
     let state_path = home_ecp.join(".update-check.json");
     let now = now_epoch();
-    let state = read_state(&state_path);
+    let mut state = read_state(&state_path);
+    let local = env!("CARGO_PKG_VERSION");
+    let mut notices = Vec::new();
 
-    if !should_query(&state, now) {
-        return Ok(());
+    if let Some(notice) = channel_update_notice(&state, local) {
+        notices.push(notice);
     }
+    state.seen_version = local.to_string();
 
-    // A restricted-network sandbox would block until the timeout backstop; treat
-    // it as a failure so the 8h backoff applies, then return silently.
-    if safe_exec::sandbox_network_restricted() {
-        write_state(&state_path, &on_failure(&state, now));
-        return Ok(());
-    }
-
-    match latest_published_version() {
-        Some(latest) => {
-            let local = parse_semver(env!("CARGO_PKG_VERSION"));
-            let latest_str = format!("{}.{}.{}", latest.0, latest.1, latest.2);
-            // Success clears any pending failure backoff.
-            write_state(
-                &state_path,
-                &CheckState {
-                    last_success_day: now / DAY_SECS,
-                    last_failure_epoch: 0,
-                    latest_version: latest_str.clone(),
-                },
-            );
-            if local.map(|l| latest > l).unwrap_or(false) {
-                write_notification(&home_ecp, &latest_str);
+    if should_query(&state, now) {
+        // A restricted-network sandbox would block until the timeout backstop;
+        // treat it as a failure so the 8h backoff applies. Network failure is
+        // silent too: it only moves the backoff clock.
+        let latest = (!safe_exec::sandbox_network_restricted())
+            .then(latest_published_version)
+            .flatten();
+        match latest {
+            Some(latest) => {
+                let latest_str = format!("{}.{}.{}", latest.0, latest.1, latest.2);
+                if parse_semver(local).is_some_and(|l| latest > l) {
+                    notices.push(available_notice(&latest_str, local));
+                }
+                // Success clears any pending failure backoff.
+                state.last_success_day = now / DAY_SECS;
+                state.last_failure_epoch = 0;
+                state.latest_version = latest_str;
             }
+            None => state.last_failure_epoch = now,
         }
-        // Silent failure: stamp the backoff clock, write no notification.
-        None => write_state(&state_path, &on_failure(&state, now)),
     }
+    write_state(&state_path, &state);
+    write_notification(&home_ecp, &notices);
     Ok(())
+}
+
+/// Called by `ecp update` from the outgoing binary, so the incoming binary's
+/// first probe sees its own version as expected.
+pub(crate) fn record_self_update(version: &str) {
+    let state_path = resolve_home_ecp().join(".update-check.json");
+    let mut state = read_state(&state_path);
+    state.seen_version = version.to_string();
+    state.self_updated_to = version.to_string();
+    write_state(&state_path, &state);
+}
+
+/// Drop a pending "newer version available" notice once it no longer applies.
+pub(crate) fn clear_notification() {
+    let _ = std::fs::remove_file(resolve_home_ecp().join(".update-available"));
+}
+
+/// The running version differs from the last recorded one, and `ecp update`
+/// did not install it. First run (nothing recorded) is silent.
+fn channel_update_notice(state: &CheckState, local: &str) -> Option<String> {
+    if state.seen_version.is_empty()
+        || state.seen_version == local
+        || state.self_updated_to == local
+    {
+        return None;
+    }
+    Some(format!(
+        "ecp changed from v{} to v{local} outside `ecp update`. Upgrading through npm / uv / pip / brew / cargo is removed in 0.15; run `ecp update` from now on.",
+        state.seen_version
+    ))
+}
+
+fn available_notice(latest: &str, local: &str) -> String {
+    format!(
+        "ecp v{latest} is available (you have v{local}). Run `ecp update`. Upgrading through npm / uv / pip / brew / cargo still works until 0.15, when `ecp update` becomes the only path."
+    )
 }
 
 /// Query when we haven't succeeded today AND we're past the 8h failure backoff.
@@ -94,22 +144,29 @@ fn should_query(state: &CheckState, now: u64) -> bool {
     !succeeded_today && !in_backoff
 }
 
-/// Next state after a failed attempt: keep the prior success day / version
-/// (a stale "available" notice is better than none), only move the backoff clock.
-fn on_failure(prev: &CheckState, now: u64) -> CheckState {
-    CheckState {
-        last_success_day: prev.last_success_day,
-        last_failure_epoch: now,
-        latest_version: prev.latest_version.clone(),
+/// Append each notice the marker does not already hold. The marker is drained
+/// on the next prompt; a session that never submits one must not pile up the
+/// same daily line.
+fn write_notification(home_ecp: &Path, notices: &[String]) {
+    if notices.is_empty() {
+        return;
     }
-}
-
-fn write_notification(home_ecp: &Path, latest: &str) {
-    let local = env!("CARGO_PKG_VERSION");
-    let body = format!(
-        "ecp v{latest} is available (you have v{local}). Upgrade: `ecp admin doctor version` shows the command for your install channel."
-    );
-    let _ = std::fs::write(home_ecp.join(".update-available"), body);
+    let marker = home_ecp.join(".update-available");
+    let existing = std::fs::read_to_string(&marker).unwrap_or_default();
+    let fresh: Vec<&str> = notices
+        .iter()
+        .map(String::as_str)
+        .filter(|n| !existing.contains(n))
+        .collect();
+    if fresh.is_empty() {
+        return;
+    }
+    let mut body = existing;
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str(&fresh.join("\n"));
+    let _ = std::fs::write(marker, body);
 }
 
 fn read_state(path: &Path) -> CheckState {
@@ -138,8 +195,81 @@ mod tests {
         CheckState {
             last_success_day: success_day,
             last_failure_epoch: failure_epoch,
-            latest_version: String::new(),
+            ..Default::default()
         }
+    }
+
+    fn versions(seen: &str, self_updated_to: &str) -> CheckState {
+        CheckState {
+            seen_version: seen.into(),
+            self_updated_to: self_updated_to.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_channel_update_notice_first_run_is_silent() {
+        assert_eq!(channel_update_notice(&versions("", ""), "0.13.3"), None);
+    }
+
+    #[test]
+    fn test_channel_update_notice_same_version_is_silent() {
+        assert_eq!(
+            channel_update_notice(&versions("0.13.3", ""), "0.13.3"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_channel_update_notice_after_ecp_update_is_silent() {
+        // The outgoing binary recorded the version it installed.
+        assert_eq!(
+            channel_update_notice(&versions("0.13.3", "0.13.3"), "0.13.3"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_channel_update_notice_foreign_change_names_both_versions_and_015() {
+        let notice = channel_update_notice(&versions("0.13.2", "0.13.2"), "0.13.4").unwrap();
+        // Contract: the reader learns the old version, the new one, that
+        // channel upgrades end in 0.15, and the command to use instead.
+        assert!(notice.contains("v0.13.2"), "{notice}");
+        assert!(notice.contains("v0.13.4"), "{notice}");
+        assert!(notice.contains("0.15"), "{notice}");
+        assert!(notice.contains("`ecp update`"), "{notice}");
+    }
+
+    #[test]
+    fn test_read_state_from_pre_update_file_keeps_throttle_and_reads_empty_versions() {
+        // Literal shape `ecp admin check-update` wrote before the two version
+        // fields existed (0.6.x through 0.13.2).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".update-check.json");
+        std::fs::write(
+            &path,
+            r#"{"last_success_day":20705,"last_failure_epoch":0,"latest_version":"0.13.2"}"#,
+        )
+        .unwrap();
+
+        let state = read_state(&path);
+
+        assert_eq!(state.last_success_day, 20705);
+        assert_eq!(state.latest_version, "0.13.2");
+        assert_eq!(state.seen_version, "");
+        assert_eq!(channel_update_notice(&state, "0.13.3"), None);
+    }
+
+    #[test]
+    fn test_write_notification_appends_only_lines_not_already_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(".update-available");
+        write_notification(dir.path(), &["first".into()]);
+        write_notification(dir.path(), &["first".into(), "second".into()]);
+        write_notification(dir.path(), &[]);
+
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "first\nsecond");
+        assert!(!dir.path().join("missing").exists());
     }
 
     #[test]
