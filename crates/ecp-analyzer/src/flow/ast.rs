@@ -16,11 +16,15 @@ pub(super) struct Ast {
     pub(super) children: Vec<usize>,
     pub(super) fields: BTreeMap<String, usize>,
 }
+/// `fields_of[id]` records the field name each node was pushed under, so a
+/// caller that cuts the vector at a budget can rebuild parents' field maps
+/// exactly as a lowering that stopped at that node would have left them.
 pub(super) fn lower(
     n: Node<'_>,
     file: usize,
     source: &str,
     ast: &mut Vec<Ast>,
+    fields_of: &mut Vec<Option<&'static str>>,
     limit: usize,
 ) -> (usize, bool) {
     let root = ast.len();
@@ -41,7 +45,7 @@ pub(super) fn lower(
                 | "dotted_name"
                 | "relative_import"
         ) || (matches!(n.kind(), "string" | "integer" | "number")
-            && (matches!(field.as_deref(), Some("source" | "module_name" | "key"))
+            && (matches!(field, Some("source" | "module_name" | "key"))
                 || parent.is_some_and(|parent: usize| {
                     matches!(
                         ast[parent].kind.as_str(),
@@ -69,21 +73,17 @@ pub(super) fn lower(
             children: vec![],
             fields: BTreeMap::new(),
         });
+        fields_of.push(field);
         if let Some(parent) = parent {
             ast[parent].children.push(id);
             if let Some(field) = field {
-                ast[parent].fields.insert(field, id);
+                ast[parent].fields.insert(field.into(), id);
             }
         }
         for i in (0..n.child_count()).rev() {
             let child = n.child(i as u32).unwrap();
             if child.is_named() {
-                pending.push((
-                    child,
-                    Some(id),
-                    n.field_name_for_child(i as u32).map(String::from),
-                    depth + 1,
-                ));
+                pending.push((child, Some(id), n.field_name_for_child(i as u32), depth + 1));
             }
         }
     }

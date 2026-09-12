@@ -311,12 +311,16 @@ pub(crate) fn attach_latest_if_fingerprint_matches(
 /// of the repository. `build_l2` now resolves the root before it keys the
 /// slot; slots written earlier are healed by rejecting them wherever a slot is
 /// chosen. The recorded worktree is absolute, is not the root in use, and has
-/// no `.git` entry, so it was never a worktree root. A recorded root that no
+/// no `.git` entry, so it was never a git worktree root. A non-git source tree
+/// has no `.git` either, but its slot is keyed by the path-bound sha that
+/// `head_sha_hex` synthesises, which exempts it. A recorded git root that no
 /// longer exists is rejected on the same rule; one rebuild republishes the
 /// slot from the current root.
-pub(crate) fn built_below_worktree_root(meta: &CommitBuildMeta, worktree: &Path) -> bool {
-    let built = Path::new(&meta.built_from_worktree);
-    built.is_absolute() && built != worktree && !built.join(".git").exists()
+pub(crate) fn built_below_worktree_root(built: &Path, sha: &str, worktree: &Path) -> bool {
+    built.is_absolute()
+        && built != worktree
+        && !built.join(".git").exists()
+        && !path_bound_sha(built).is_ok_and(|own| own.eq_ignore_ascii_case(sha))
 }
 
 /// Cheap pre-build check: if `commit_dir/meta.json` exists and its
@@ -334,7 +338,7 @@ pub(crate) fn attach_if_fingerprint_matches(
     }
     let meta = CommitBuildMeta::read(&commit_dir.join("meta.json")).ok()?;
     if meta.builder_fingerprint.as_deref() != Some(BUILDER_FINGERPRINT)
-        || built_below_worktree_root(&meta, worktree)
+        || built_below_worktree_root(Path::new(&meta.built_from_worktree), &meta.sha, worktree)
     {
         return None;
     }
@@ -415,6 +419,11 @@ pub(crate) fn head_sha_hex(worktree: &Path) -> io::Result<String> {
     // detection still flows through the mtime walk in `auto_ensure`.
     // Identity is path-bound — moving the dir invalidates this digest, treated
     // as a new repo (acceptable for ad-hoc indexing of non-VCS source trees).
+    path_bound_sha(worktree)
+}
+
+/// The sha a non-git source tree is keyed by: a digest of its canonical path.
+pub(crate) fn path_bound_sha(worktree: &Path) -> io::Result<String> {
     let canonical = std::fs::canonicalize(worktree)?;
     let h = xxhash_rust::xxh3::xxh3_128(canonical.to_string_lossy().as_bytes());
     Ok(format!("{h:040x}"))
@@ -1224,26 +1233,28 @@ mod worktree_root_tests {
         let other_root = tmp.path().join("other");
         fs::create_dir_all(other_root.join(".git")).unwrap();
 
-        let sub = subtree.to_string_lossy().into_owned();
-        assert!(built_below_worktree_root(&meta(&sub), &root));
-        assert!(!built_below_worktree_root(&meta(&sub), &subtree));
-        assert!(!built_below_worktree_root(
-            &meta(&root.to_string_lossy()),
-            &root
-        ));
-        assert!(!built_below_worktree_root(
-            &meta(&other_root.to_string_lossy()),
-            &root
-        ));
+        let git_sha = "0".repeat(40);
+        assert!(built_below_worktree_root(&subtree, &git_sha, &root));
+        assert!(!built_below_worktree_root(&subtree, &git_sha, &subtree));
+        assert!(!built_below_worktree_root(&root, &git_sha, &root));
+        assert!(!built_below_worktree_root(&other_root, &git_sha, &root));
         assert!(built_below_worktree_root(
-            &meta(&tmp.path().join("gone").to_string_lossy()),
+            &tmp.path().join("gone"),
+            &git_sha,
             &root
         ));
         assert!(
-            !built_below_worktree_root(&meta("repo"), &root),
+            !built_below_worktree_root(Path::new("repo"), &git_sha, &root),
             "relative fixtures are unknown"
         );
-        assert!(!built_below_worktree_root(&meta(""), &root));
+        assert!(!built_below_worktree_root(Path::new(""), &git_sha, &root));
+        let plain = tmp.path().join("plain-source");
+        fs::create_dir_all(&plain).unwrap();
+        assert!(
+            !built_below_worktree_root(&plain, &path_bound_sha(&plain).unwrap(), &root),
+            "a non-git source tree is keyed by its own path"
+        );
+        assert!(built_below_worktree_root(&plain, &git_sha, &root));
     }
 
     #[test]

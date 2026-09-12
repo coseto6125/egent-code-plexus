@@ -355,10 +355,35 @@ fn fingerprint_drifted(graph_path: &Path) -> bool {
     }
 }
 
+pub fn worktree_sidecar_path(graph_path: &Path) -> PathBuf {
+    let mut p = graph_path.as_os_str().to_owned();
+    p.push(".worktree");
+    PathBuf::from(p)
+}
+
+/// The slot's sha and recorded worktree root, read like the other sidecars:
+/// one line (`<sha> <path>`) next to `graph.bin`. A slot written before the
+/// sidecar existed is read from `meta.json` once and the sidecar back-filled,
+/// so later queries pay one page of IO rather than a JSON parse.
 fn slot_built_below_root(graph_path: &Path, worktree_root: &Path) -> bool {
-    ecp_core::registry::CommitBuildMeta::read(&graph_path.with_file_name("meta.json")).is_ok_and(
-        |meta| crate::build::orchestrator::built_below_worktree_root(&meta, worktree_root),
-    )
+    let sidecar = worktree_sidecar_path(graph_path);
+    let line = match fs::read_to_string(&sidecar) {
+        Ok(raw) => raw,
+        Err(_) => {
+            let Ok(meta) =
+                ecp_core::registry::CommitBuildMeta::read(&graph_path.with_file_name("meta.json"))
+            else {
+                return false;
+            };
+            let line = format!("{} {}\n", meta.sha, meta.built_from_worktree);
+            let _ = fs::write(&sidecar, &line);
+            line
+        }
+    };
+    let Some((sha, built)) = line.trim_end_matches(['\n', '\r']).split_once(' ') else {
+        return false;
+    };
+    crate::build::orchestrator::built_below_worktree_root(Path::new(built), sha, worktree_root)
 }
 
 /// Try to decide Ready vs Stale via the cheap git fingerprint.
@@ -1455,6 +1480,8 @@ mod fingerprint_drift_tests {
 
     /// A slot whose meta records a subdirectory of the worktree was published
     /// before `build_l2` resolved the root: it holds the subtree's graph only.
+    /// Slots are immutable once published, so the verdict may be cached in a
+    /// sidecar; each case therefore gets its own slot.
     #[test]
     fn ensure_index_rejects_slot_built_below_worktree_root() {
         let dir = tempdir().unwrap();
@@ -1462,30 +1489,38 @@ mod fingerprint_drift_tests {
         let subtree = worktree.join("crates").join("cli");
         fs::create_dir_all(&subtree).unwrap();
         fs::write(worktree.join(".git"), "gitdir: elsewhere\n").unwrap();
-        let slot = dir.path().join("slot");
-        fs::create_dir_all(&slot).unwrap();
-        let graph = slot.join("graph.bin");
-        ecp_core::registry::CommitBuildMeta::write_atomic(
-            &slot.join("meta.json"),
-            &slot_meta(&subtree.to_string_lossy()),
-        )
-        .unwrap();
-        assert!(slot_built_below_root(&graph, &worktree));
+        let other = dir.path().join("other");
+        fs::create_dir_all(&other).unwrap();
+        let slot = |name: &str, built: &Path| {
+            let slot = dir.path().join(name);
+            fs::create_dir_all(&slot).unwrap();
+            ecp_core::registry::CommitBuildMeta::write_atomic(
+                &slot.join("meta.json"),
+                &slot_meta(&built.to_string_lossy()),
+            )
+            .unwrap();
+            slot.join("graph.bin")
+        };
+
+        let from_subtree = slot("from-subtree", &subtree);
+        assert!(slot_built_below_root(&from_subtree, &worktree));
         assert!(
-            !slot_built_below_root(&graph, &subtree),
+            worktree_sidecar_path(&from_subtree).is_file(),
+            "the verdict source is back-filled as a sidecar"
+        );
+        assert!(
+            slot_built_below_root(&from_subtree, &worktree),
+            "the sidecar read gives the same verdict"
+        );
+        assert!(
+            !slot_built_below_root(&from_subtree, &subtree),
             "the subtree itself is the root in use"
         );
 
-        ecp_core::registry::CommitBuildMeta::write_atomic(
-            &slot.join("meta.json"),
-            &slot_meta(&worktree.to_string_lossy()),
-        )
-        .unwrap();
-        assert!(!slot_built_below_root(&graph, &worktree));
-        let other = dir.path().join("other");
-        fs::create_dir_all(&other).unwrap();
+        let from_root = slot("from-root", &worktree);
+        assert!(!slot_built_below_root(&from_root, &worktree));
         assert!(
-            !slot_built_below_root(&graph, &other),
+            !slot_built_below_root(&from_root, &other),
             "a slot from another worktree root of the same repo stays usable"
         );
     }

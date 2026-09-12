@@ -452,7 +452,10 @@ pub fn stamp_owner_fn_by_span(nodes: &mut [RawNode]) {
 /// order with a stack of open spans replaces the pairwise scan: the stack top
 /// is the innermost open container. Identical spans do not enclose each other,
 /// and the lower index wins between identical containers, matching the
-/// pairwise scan's first-minimum rule.
+/// pairwise scan's first-minimum rule. The sweep decides by containment; the
+/// `span_area` proxy the pairwise scan ranked by differs only past its 10 000
+/// column saturation (one line of 10 000+ characters), where it could pick an
+/// outer function and this picks the true innermost one.
 pub fn innermost_enclosing(spans: &[Span]) -> Vec<Option<usize>> {
     let mut order: Vec<usize> = (0..spans.len()).collect();
     order.sort_by_key(|&i| {

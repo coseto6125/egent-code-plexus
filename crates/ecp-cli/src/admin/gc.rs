@@ -226,9 +226,10 @@ pub fn sweep_sessions(repo_root: &Path) -> io::Result<SweepStats> {
 /// `.building` marker (another session may be mid-ingest). Reuses
 /// `CommitDirName::parse` rather than hand-rolling the name grammar.
 /// Retire commit dirs whose recorded worktree still exists but is not a
-/// worktree root (no `.git` entry): they were published from a subdirectory
-/// and hold that subtree's graph only. A recorded worktree that is gone is
-/// left alone; the query path rebuilds such a slot on first use.
+/// worktree root (`orchestrator::built_below_worktree_root`): they were
+/// published from a subdirectory and hold that subtree's graph only. A
+/// recorded worktree that is gone is left alone; the query path rebuilds such
+/// a slot on first use.
 pub fn sweep_subtree_builds(repo_root: &Path) -> io::Result<SweepStats> {
     let mut stats = SweepStats {
         marked: 0,
@@ -240,14 +241,25 @@ pub fn sweep_subtree_builds(repo_root: &Path) -> io::Result<SweepStats> {
     for entry in it.flatten() {
         let dir = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        if !dir.is_dir() || name.starts_with('.') || name.contains(".building") {
+        if !dir.is_dir()
+            || name.starts_with('.')
+            || name.contains(".building")
+            || is_retired_dir(&name)
+        {
             continue;
         }
         let Ok(meta) = ecp_core::registry::CommitBuildMeta::read(&dir.join("meta.json")) else {
             continue;
         };
         let built = Path::new(&meta.built_from_worktree);
-        if built.is_absolute() && built.is_dir() && !built.join(".git").exists() {
+        // `Path::new("")` as the root in use: no live root is exempt here.
+        if built.is_dir()
+            && crate::build::orchestrator::built_below_worktree_root(
+                built,
+                &meta.sha,
+                Path::new(""),
+            )
+        {
             stats.marked += 1;
             if ecp_core::registry::retire_dir_async(&dir)?.is_some() {
                 stats.removed += 1;
@@ -483,11 +495,20 @@ mod subtree_build_tests {
     use ecp_core::registry::{EmbeddingStatus, SourceType};
 
     fn publish(commits: &Path, name: &str, built_from_worktree: &Path) -> std::path::PathBuf {
+        publish_sha(commits, name, built_from_worktree, &"0".repeat(40))
+    }
+
+    fn publish_sha(
+        commits: &Path,
+        name: &str,
+        built_from_worktree: &Path,
+        sha: &str,
+    ) -> std::path::PathBuf {
         let dir = commits.join(name);
         fs::create_dir_all(&dir).unwrap();
         let meta = CommitBuildMeta {
             version: 1,
-            sha: "0".repeat(40),
+            sha: sha.into(),
             source_type: SourceType::Branch,
             source_id: None,
             built_from_worktree: built_from_worktree.to_string_lossy().into(),
@@ -516,12 +537,30 @@ mod subtree_build_tests {
         let from_subtree = publish(&commits, "branch_a__1111", &subtree);
         let from_root = publish(&commits, "branch_b__2222", &worktree);
         let from_gone = publish(&commits, "branch_c__3333", &tmp.path().join("gone"));
+        let plain = tmp.path().join("plain-source");
+        fs::create_dir_all(&plain).unwrap();
+        let from_non_git = publish_sha(
+            &commits,
+            "branch_d__4444",
+            &plain,
+            &crate::build::orchestrator::path_bound_sha(&plain).unwrap(),
+        );
+
+        let retired = publish(&commits, "branch_e__5555.dead.1", &subtree);
 
         let stats = sweep_subtree_builds(&repo_root).unwrap();
 
         assert_eq!((stats.marked, stats.removed), (1, 1));
+        assert!(
+            retired.exists(),
+            "an already retired dir is left to its sweeper"
+        );
         assert!(!from_subtree.exists(), "subtree slot must be retired");
         assert!(from_root.exists(), "root slot stays");
         assert!(from_gone.exists(), "a slot whose worktree is gone stays");
+        assert!(
+            from_non_git.exists(),
+            "a non-git source tree keyed by its path stays"
+        );
     }
 }

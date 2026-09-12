@@ -108,6 +108,7 @@ fn language(path: &str) -> Option<tree_sitter::Language> {
 
 struct Lowered {
     ast: Vec<Ast>,
+    fields_of: Vec<Option<&'static str>>,
     truncated: bool,
     parse_error: bool,
 }
@@ -136,9 +137,18 @@ fn parse_and_lower(index: usize, f: &SourceFile, limit: usize) -> Result<Option<
         return Ok(None);
     };
     let mut ast = Vec::new();
-    let (_, truncated) = lower(tree.root_node(), index, &f.source, &mut ast, limit);
+    let mut fields_of = Vec::new();
+    let (_, truncated) = lower(
+        tree.root_node(),
+        index,
+        &f.source,
+        &mut ast,
+        &mut fields_of,
+        limit,
+    );
     Ok(Some(Lowered {
         ast,
+        fields_of,
         truncated,
         parse_error: tree.root_node().has_error(),
     }))
@@ -186,67 +196,83 @@ fn build<'a>(files: &'a [SourceFile], budgets: &Budgets) -> Result<Engine<'a>, S
             return Err(format!("Unsupported source language: {}", f.path));
         }
     }
-    // Parse and lower per file in parallel; the merge below is serial so node
-    // ids and the shared node budget behave exactly as a single sequential pass.
-    let lowered: Vec<Result<Option<Lowered>, String>> = files
-        .par_iter()
-        .enumerate()
-        .map(|(i, f)| parse_and_lower(i, f, budgets.max_steps))
-        .collect();
-    for (f, lowered) in files.iter().zip(lowered) {
-        let Some(mut lowered) = lowered? else {
-            // One pathological file must not take the whole corpus down with it.
-            engine.roots.push(None);
-            engine.boundaries.insert(Boundary {
-                file: f.path.clone(),
-                line: 1,
-                column: 1,
-                kind: "parse_timeout".into(),
-                message: "Parsing exceeded its time budget; the file is excluded from analysis."
-                    .into(),
-            });
-            continue;
-        };
-        let offset = engine.ast.len();
-        // The root is always kept; everything past the shared budget is cut,
-        // which is what the sequential lowering would have skipped.
-        let keep = budgets.max_steps.saturating_sub(offset).max(1);
-        if lowered.ast.len() > keep {
-            lowered.ast.truncate(keep);
-            lowered.truncated = true;
+    // Parse and lower in parallel, one chunk of files at a time. The merge is
+    // serial: node ids are rebased per file and the shared node budget is cut
+    // at the node the sequential pass stopped at, so reports are byte-identical
+    // and deterministic. Each file lowers at most the budget left when its
+    // chunk started, so transient memory stays within chunk × remaining budget
+    // instead of every file lowering to the full cap before the cut.
+    let chunk_size = rayon::current_num_threads().max(1) * 2;
+    for (chunk_index, chunk) in files.chunks(chunk_size).enumerate() {
+        let remaining = budgets.max_steps.saturating_sub(engine.ast.len());
+        let lowered: Vec<Result<Option<Lowered>, String>> = chunk
+            .par_iter()
+            .enumerate()
+            .map(|(i, f)| parse_and_lower(chunk_index * chunk_size + i, f, remaining))
+            .collect();
+        for (f, lowered) in chunk.iter().zip(lowered) {
+            let Some(mut lowered) = lowered? else {
+                // One pathological file must not take the whole corpus down with it.
+                engine.roots.push(None);
+                engine.boundaries.insert(Boundary {
+                    file: f.path.clone(),
+                    line: 1,
+                    column: 1,
+                    kind: "parse_timeout".into(),
+                    message:
+                        "Parsing exceeded its time budget; the file is excluded from analysis."
+                            .into(),
+                });
+                continue;
+            };
+            let offset = engine.ast.len();
+            // The root is always kept; everything past the shared budget is cut,
+            // which is what the sequential lowering would have skipped.
+            let keep = budgets.max_steps.saturating_sub(offset).max(1);
+            if lowered.ast.len() > keep {
+                lowered.ast.truncate(keep);
+                lowered.truncated = true;
+                for a in &mut lowered.ast {
+                    a.children.retain(|c| *c < keep);
+                    a.fields.clear();
+                }
+                // Field maps are rebuilt in push order: a later child under the
+                // same field name must not leave the name unset once it is cut.
+                for (id, field) in lowered.fields_of.iter().enumerate().take(keep) {
+                    if let (Some(field), Some(parent)) = (field, lowered.ast[id].parent) {
+                        lowered.ast[parent].fields.insert((*field).into(), id);
+                    }
+                }
+            }
             for a in &mut lowered.ast {
-                a.children.retain(|c| *c < keep);
-                a.fields.retain(|_, c| *c < keep);
+                if let Some(p) = a.parent.as_mut() {
+                    *p += offset;
+                }
+                for c in &mut a.children {
+                    *c += offset;
+                }
+                for c in a.fields.values_mut() {
+                    *c += offset;
+                }
             }
-        }
-        for a in &mut lowered.ast {
-            if let Some(p) = a.parent.as_mut() {
-                *p += offset;
+            engine.ast.append(&mut lowered.ast);
+            let root = offset;
+            engine.roots.push(Some(root));
+            if lowered.truncated {
+                engine.truncated = true;
+                engine.boundary(
+                    root,
+                    "ast_budget",
+                    "AST lowering reached the node or nesting budget.",
+                );
             }
-            for c in &mut a.children {
-                *c += offset;
+            if lowered.parse_error {
+                engine.boundary(
+                    root,
+                    "parse_error",
+                    "Syntax errors limit analysis coverage.",
+                );
             }
-            for c in a.fields.values_mut() {
-                *c += offset;
-            }
-        }
-        engine.ast.append(&mut lowered.ast);
-        let root = offset;
-        engine.roots.push(Some(root));
-        if lowered.truncated {
-            engine.truncated = true;
-            engine.boundary(
-                root,
-                "ast_budget",
-                "AST lowering reached the node or nesting budget.",
-            );
-        }
-        if lowered.parse_error {
-            engine.boundary(
-                root,
-                "parse_error",
-                "Syntax errors limit analysis coverage.",
-            );
         }
     }
     for i in 0..files.len() {

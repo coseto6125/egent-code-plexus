@@ -68,10 +68,14 @@ pub fn context_in(input: &HookInput, after: bool, state: &Path) -> Option<String
         return None;
     }
     let cwd = Path::new(&input.cwd);
+    // Paths are keyed at the worktree root when one is found, so they match
+    // the graph and the import specifiers of other files; otherwise at cwd.
     // Hook paths share the host's spelling of cwd, including symlink aliases
     // and Windows verbatim prefixes. New Write targets need not exist yet.
-    let relative = relative_path(cwd, Path::new(file)).ok().or_else(|| {
-        let repo = dunce::canonicalize(cwd).ok()?;
+    let root = git_root(cwd);
+    let base = root.as_deref().unwrap_or(cwd);
+    let relative = relative_path(base, Path::new(file)).ok().or_else(|| {
+        let repo = dunce::canonicalize(base).ok()?;
         relative_path(&repo, Path::new(file)).ok()
     })?;
     if !supported_path(&relative) {
@@ -80,7 +84,7 @@ pub fn context_in(input: &HookInput, after: bool, state: &Path) -> Option<String
     let absolute = if Path::new(file).is_absolute() {
         PathBuf::from(file)
     } else {
-        cwd.join(file)
+        base.join(file)
     };
     let current = match read_source(&absolute) {
         Ok(source) => source,
@@ -129,7 +133,10 @@ pub fn context_in(input: &HookInput, after: bool, state: &Path) -> Option<String
         .ok()?;
         (current, proposed)
     };
-    let importers = importers(&input.cwd, cwd, &relative);
+    let importers = match &root {
+        Some(root) => importers(root, &relative),
+        None => Importers::single(),
+    };
     let mut before = vec![SourceFile {
         path: relative.clone(),
         source: original,
@@ -139,15 +146,28 @@ pub fn context_in(input: &HookInput, after: bool, state: &Path) -> Option<String
         path: relative.clone(),
         source: proposed,
     }];
-    after_edit.extend(importers.files);
+    after_edit.extend(importers.files.iter().cloned());
     let phase = if after { "after" } else { "before" };
-    let report = compare_phase(
+    let mut report = compare_phase(
         &before,
         &after_edit,
         Some(std::slice::from_ref(&relative)),
         Some(phase),
     );
-    let scope = importers.scope;
+    let mut scope = importers.scope;
+    // A truncated corpus stops the engine before the edited file's own
+    // uncalled functions are analysed, so the single-file result is the floor.
+    if !importers.files.is_empty() && report["truncated"].as_bool().unwrap_or(false) {
+        before.truncate(1);
+        after_edit.truncate(1);
+        report = compare_phase(
+            &before,
+            &after_edit,
+            Some(std::slice::from_ref(&relative)),
+            Some(phase),
+        );
+        scope = "edited file only (its direct importers exceeded the analysis budget); cross-file consumers: ecp review --include flow --baseline <ref>".into();
+    }
     if input.session_id.is_empty() || input.tool_use_id.is_empty() {
         let warning = "Hook identity unavailable: edit pairing uses input identity; context deduplication is disabled.\n";
         let mut rendered = render(&report, phase, &scope, MAX_CONTEXT - warning.len());
@@ -174,17 +194,32 @@ struct Importers {
     scope: String,
 }
 
-/// Direct importers of `relative` from the published graph: every file with
-/// an `Imports` edge into a node of the edited file. The graph keys paths at
-/// the worktree root, so an exact path match also proves `cwd` is that root;
-/// otherwise, and without a graph, the scope is the edited file alone.
-fn importers(cwd_text: &str, cwd: &Path, relative: &str) -> Importers {
-    let single = Importers {
-        files: Vec::new(),
-        scope: "edited file only; cross-file consumers: ecp review --include flow --baseline <ref>"
-            .into(),
-    };
-    let Some(index_dir) = lookup_index_dir(cwd_text) else {
+impl Importers {
+    fn single() -> Self {
+        Self {
+            files: Vec::new(),
+            scope:
+                "edited file only; cross-file consumers: ecp review --include flow --baseline <ref>"
+                    .into(),
+        }
+    }
+}
+
+/// Nearest ancestor of `cwd` holding a `.git` entry; a linked worktree's is a
+/// file. One stat per level, so the hook never runs git.
+fn git_root(cwd: &Path) -> Option<PathBuf> {
+    cwd.ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
+/// Direct importers of `relative` (root-relative) from the published graph:
+/// every file with an `Imports` edge into a node of the edited file. Without
+/// a graph, or when the graph does not hold the file, the scope is the edited
+/// file alone.
+fn importers(root: &Path, relative: &str) -> Importers {
+    let single = Importers::single();
+    let Some(index_dir) = lookup_index_dir(&root.to_string_lossy()) else {
         return single;
     };
     let Ok(engine) = Engine::load(index_dir.join("graph.bin")) else {
@@ -222,11 +257,12 @@ fn importers(cwd_text: &str, cwd: &Path, relative: &str) -> Importers {
             .path
             .resolve(&graph.string_pool)
             .to_owned();
-        if !supported_path(&path) {
+        let absolute = root.join(&path);
+        if !supported_path(&path) || !absolute.is_file() {
             omitted += 1;
             continue;
         }
-        match read_source(&cwd.join(&path)) {
+        match read_source(&absolute) {
             Ok(source)
                 if files.len() < MAX_IMPORTERS && bytes + source.len() <= MAX_IMPORTER_BYTES =>
             {
