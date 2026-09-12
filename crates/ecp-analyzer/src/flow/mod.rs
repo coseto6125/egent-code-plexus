@@ -258,12 +258,14 @@ impl Engine<'_> {
             .into_iter()
             .filter(|n| selected.contains(&n.id))
             .collect();
-        let reached: BTreeSet<&str> = nodes.iter().map(|n| n.file.as_str()).collect();
+        // An empty slice keeps every boundary: nothing else explains why it is empty.
+        let reached: Option<BTreeSet<&str>> =
+            (!nodes.is_empty()).then(|| nodes.iter().map(|n| n.file.as_str()).collect());
         let total = self.boundaries.len();
         let boundaries: Vec<Boundary> = self
             .boundaries
             .into_iter()
-            .filter(|b| reached.contains(b.file.as_str()))
+            .filter(|b| reached.as_ref().is_none_or(|r| r.contains(b.file.as_str())))
             .collect();
         let boundaries_omitted = total - boundaries.len();
         let consumers = nodes
