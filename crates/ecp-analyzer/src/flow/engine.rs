@@ -1,5 +1,5 @@
 use super::ast::Ast;
-use super::{Boundary, Budgets, FlowNode, SourceFile};
+use super::{Boundary, Budgets, FlowEdge, FlowNode, SourceFile};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Default, PartialEq, Eq)]

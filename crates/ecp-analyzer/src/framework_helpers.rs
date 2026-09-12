@@ -1303,15 +1303,14 @@ mod innermost_enclosing_tests {
         while spans.len() < count {
             let roll = next() % 4;
             if roll == 0 && !open.is_empty() {
-                open.pop();
-                line += 1;
+                // Leaving a span: the next one starts after it closed.
+                line = open.pop().unwrap().2 + 1;
                 continue;
             }
             let outer_end = open.last().map(|s| s.2).unwrap_or(u32::MAX / 2);
             let start = line + next() % 3;
             if start + 2 >= outer_end {
-                open.pop();
-                line += 1;
+                line = open.pop().unwrap().2 + 1;
                 continue;
             }
             let end = (start + 1 + next() % 40).min(outer_end - 1);

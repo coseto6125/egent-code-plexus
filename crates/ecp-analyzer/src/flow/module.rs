@@ -1,5 +1,5 @@
 use super::engine::Engine;
-use super::{Boundary, Direction, FlowEdge, FlowNode, FlowReport};
+use super::{Boundary, Direction, FlowNode, FlowReport};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn normalize(path: &str) -> String {
