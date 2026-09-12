@@ -357,6 +357,8 @@ fn build<'a>(files: &'a [SourceFile], budgets: &Budgets) -> Result<Engine<'a>, S
         loop_nodes: None,
         loop_objects: None,
         loop_functions: None,
+        loop_call: 0,
+        loop_ctx: vec![],
         links: BTreeSet::new(),
     };
     let mut paths = BTreeSet::new();
@@ -713,9 +715,15 @@ struct Engine<'a> {
     exit_states: Vec<Vec<(Vec<Scope>, Vec<Scope>)>>,
     called: BTreeSet<usize>,
     controls: Vec<Value>,
-    loop_nodes: Option<BTreeMap<(usize, String), usize>>,
-    loop_objects: Option<BTreeMap<usize, usize>>,
-    loop_functions: Option<BTreeMap<usize, usize>>,
+    /// Identity caches for the innermost loop, keyed by call context and AST
+    /// node: iteration k reuses what iteration k-1 created at the same point.
+    loop_nodes: Option<BTreeMap<(usize, usize, String), usize>>,
+    loop_objects: Option<BTreeMap<(usize, usize), usize>>,
+    loop_functions: Option<BTreeMap<(usize, usize), usize>>,
+    /// Calls made so far in the current iteration; each call's ordinal is its
+    /// context, so two call sites stay distinct and one site converges.
+    loop_call: usize,
+    loop_ctx: Vec<usize>,
     /// (importer, dependency) file pairs resolved during module initialisation.
     links: BTreeSet<(usize, usize)>,
 }
@@ -734,10 +742,11 @@ impl Engine<'_> {
         });
     }
     fn node(&mut self, n: usize, kind: &str, inputs: &Value) -> Value {
+        let ctx = self.loop_ctx();
         if let Some(id) = self
             .loop_nodes
             .as_ref()
-            .and_then(|cache| cache.get(&(n, kind.into())))
+            .and_then(|cache| cache.get(&(ctx, n, kind.into())))
             .copied()
         {
             for from in &inputs.ids {
@@ -780,7 +789,7 @@ impl Engine<'_> {
         });
         self.origins.push(n);
         if let Some(cache) = self.loop_nodes.as_mut() {
-            cache.insert((n, kind.into()), id);
+            cache.insert((ctx, n, kind.into()), id);
         }
         for from in &inputs.ids {
             self.edges.insert(FlowEdge {
@@ -914,7 +923,12 @@ impl Engine<'_> {
     fn function(&mut self, n: usize, scopes: &[usize]) -> Value {
         // Loop iterations reuse the callable identity, like they reuse nodes, so a
         // closure created in a loop body does not defeat the fixed point.
-        if let Some(id) = self.loop_functions.as_ref().and_then(|cache| cache.get(&n)) {
+        let ctx = self.loop_ctx();
+        if let Some(id) = self
+            .loop_functions
+            .as_ref()
+            .and_then(|cache| cache.get(&(ctx, n)))
+        {
             let id = *id;
             let mut v = self.node(n, "function", &Value::default());
             v.functions.insert(id);
@@ -1013,7 +1027,7 @@ impl Engine<'_> {
             defaults,
         });
         if let Some(cache) = self.loop_functions.as_mut() {
-            cache.insert(n, id);
+            cache.insert((ctx, n), id);
         }
         let mut v = self.node(n, "function", &Value::default());
         v.functions.insert(id);
@@ -1164,10 +1178,11 @@ impl Engine<'_> {
             }
             "object" | "dictionary" | "array_creation_expression" => {
                 // Loop iterations reuse the allocation, like they reuse nodes, so the heap converges.
+                let ctx = self.loop_ctx();
                 let reused = self
                     .loop_objects
                     .as_ref()
-                    .and_then(|cache| cache.get(&n))
+                    .and_then(|cache| cache.get(&(ctx, n)))
                     .copied();
                 let obj = match reused {
                     Some(obj) => obj,
@@ -1175,7 +1190,7 @@ impl Engine<'_> {
                         let obj = self.objects.len();
                         self.objects.push(Scope::new());
                         if let Some(cache) = self.loop_objects.as_mut() {
-                            cache.insert(n, obj);
+                            cache.insert((ctx, n), obj);
                         }
                         obj
                     }
@@ -1365,6 +1380,9 @@ impl Engine<'_> {
             }
         }
     }
+    fn loop_ctx(&self) -> usize {
+        self.loop_ctx.last().copied().unwrap_or(0)
+    }
     fn is_loop_summary(&self, obj: usize) -> bool {
         self.loop_objects
             .as_ref()
@@ -1535,6 +1553,8 @@ impl Engine<'_> {
             self.loop_nodes.take(),
             self.loop_objects.take(),
             self.loop_functions.take(),
+            self.loop_call,
+            std::mem::take(&mut self.loop_ctx),
         );
         self.loop_nodes = Some(BTreeMap::new());
         self.loop_objects = Some(BTreeMap::new());
@@ -1550,6 +1570,7 @@ impl Engine<'_> {
         let increment = self.field(n, "increment");
         let mut converged = false;
         for _ in 0..32 {
+            self.loop_call = 0;
             let before = self.scopes.clone();
             let objects_before = self.objects.clone();
             let control = condition.map(|c| self.eval(c, scopes)).unwrap_or_default();
@@ -1599,7 +1620,13 @@ impl Engine<'_> {
                 "Iterator element binding and protocol effects are unresolved.",
             );
         }
-        (self.loop_nodes, self.loop_objects, self.loop_functions) = outer_cache;
+        (
+            self.loop_nodes,
+            self.loop_objects,
+            self.loop_functions,
+            self.loop_call,
+            self.loop_ctx,
+        ) = outer_cache;
         result
     }
     fn call(&mut self, n: usize, scopes: &[usize]) -> Value {
@@ -1790,12 +1817,10 @@ impl Engine<'_> {
             return Value::default();
         }
         self.active.push(fun.ast);
-        // Loop iterations reuse local expression nodes, but separate calls retain distinct contexts.
-        let loop_cache = (
-            self.loop_nodes.take(),
-            self.loop_objects.take(),
-            self.loop_functions.take(),
-        );
+        // Inside a loop, the k-th call of an iteration is the same context as the
+        // k-th call of the previous one, so what the callee creates converges too.
+        self.loop_call += 1;
+        self.loop_ctx.push(self.loop_call);
         let summary = self.node(fun.ast, "return_summary", &Value::default());
         self.active_returns.push(summary.clone());
         self.active_parameters.push(vec![]);
@@ -1876,7 +1901,7 @@ impl Engine<'_> {
                 });
             }
         }
-        (self.loop_nodes, self.loop_objects, self.loop_functions) = loop_cache;
+        self.loop_ctx.pop();
         Value {
             ids: summary.ids,
             functions: result.functions,

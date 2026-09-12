@@ -51,3 +51,29 @@ fn test_build_l2_from_subdirectory_indexes_the_whole_worktree() {
     let recorded = dunce::canonicalize(&subdir_meta.built_from_worktree).unwrap();
     assert_eq!(recorded, dunce::canonicalize(&worktree).unwrap());
 }
+
+#[test]
+fn test_force_rebuild_from_subdirectory_indexes_the_whole_worktree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let worktree = tmp.path().join("wt");
+    std::fs::create_dir(&worktree).unwrap();
+    init_two_dir_repo(&worktree);
+    let sha = String::from_utf8(
+        Command::new("git")
+            .current_dir(&worktree)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    std::env::set_var("HOME", tmp.path().join("home-force"));
+    let forced = ecp_cli::build::force::force_rebuild_l2(&worktree.join("b"), &sha).unwrap();
+    let forced_meta = CommitBuildMeta::read(&forced.commit_dir.join("meta.json")).unwrap();
+    std::env::set_var("HOME", tmp.path().join("home-root2"));
+    let from_root = orchestrator::build_l2(&worktree, None).unwrap();
+    let root_meta = CommitBuildMeta::read(&from_root.commit_dir.join("meta.json")).unwrap();
+    assert_eq!(forced_meta.node_count, root_meta.node_count);
+}

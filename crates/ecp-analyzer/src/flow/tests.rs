@@ -651,3 +651,27 @@ fn test_analyze_boundaries_keep_direct_module_neighbours() {
         "{report:#?}"
     );
 }
+#[test]
+fn test_analyze_loop_calling_helper_that_allocates_converges() {
+    let report = query(
+        "const xs = [1];\nlet acc = 0;\nfunction helper(i) { return { v: i }; }\nfor (const i of xs) { acc = helper(i); }\nconsume(acc);\n",
+        1,
+        13,
+    );
+    assert!(!report.truncated, "{report:#?}");
+    assert!(
+        !report.boundaries.iter().any(|b| b.kind == "loop_budget"),
+        "{report:#?}"
+    );
+    assert!(consumes(&report, "acc"), "{report:#?}");
+}
+#[test]
+fn test_analyze_two_call_sites_in_loop_stay_distinct() {
+    let report = query(
+        "const xs = [1];\nfunction id(v) { return v; }\nlet a = 0;\nlet b = 0;\nfor (const i of xs) { a = id(101); b = id(202); }\nconsume(a);\n",
+        5,
+        30,
+    );
+    assert!(consumes(&report, "a"), "{report:#?}");
+    assert!(!consumes(&report, "b"), "{report:#?}");
+}

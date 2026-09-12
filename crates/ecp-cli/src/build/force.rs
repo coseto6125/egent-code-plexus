@@ -149,6 +149,10 @@ impl ForceRebuildResult {
 /// L1 sessions → drop existing L2 → re-run build pipeline → atomic publish.
 /// L1-before-L2 keeps crash recovery self-consistent.
 pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRebuildResult> {
+    // Same rule as build_l2: the slot is keyed by sha, so a subdirectory must
+    // not publish its subtree as the commit's graph.
+    let toplevel = super::orchestrator::worktree_toplevel(worktree);
+    let worktree = toplevel.as_deref().unwrap_or(worktree);
     let sha_hex = target_sha.to_string();
     if sha_hex.len() != 40 || !sha_hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(io::Error::other(format!("invalid sha: {sha_hex}")));
