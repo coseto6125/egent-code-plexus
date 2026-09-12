@@ -72,12 +72,25 @@ pub(crate) fn latest_published_version() -> Option<(u32, u32, u32)> {
     latest_tag_via_git()
 }
 
+/// The newest published Release only, no tag fallback: `ecp update` downloads
+/// this version's assets, and a tag whose build is still running has none.
+pub(crate) fn latest_release_version() -> Option<(u32, u32, u32)> {
+    latest_release_via_curl()
+}
+
 /// `releases/latest` returns only a non-draft, non-prerelease release, so its
 /// `tag_name` won't appear until the pipeline has built and published assets.
 fn latest_release_via_curl() -> Option<(u32, u32, u32)> {
     let mut cmd = std::process::Command::new("curl");
+    // `-q` first: a `.curlrc` left over from debugging (`insecure`, a proxy)
+    // must not shape what `ecp update` installs. HTTPS only, redirects too.
     cmd.args([
+        "-q",
         "-sS",
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
         "--max-time",
         "5",
         "-H",

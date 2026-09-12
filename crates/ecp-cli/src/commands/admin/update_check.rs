@@ -168,7 +168,7 @@ fn should_query(state: &CheckState, now: u64) -> bool {
 
 /// Append each notice the marker does not already hold. The marker is drained
 /// on the next prompt; a session that never submits one must not pile up the
-/// same daily line.
+/// same daily line, and a newer "available" line replaces an older one.
 fn write_notification(home_ecp: &Path, notices: &[String]) {
     if notices.is_empty() {
         return;
@@ -183,12 +183,13 @@ fn write_notification(home_ecp: &Path, notices: &[String]) {
     if fresh.is_empty() {
         return;
     }
-    let mut body = existing;
-    if !body.is_empty() && !body.ends_with('\n') {
-        body.push('\n');
-    }
-    body.push_str(&fresh.join("\n"));
-    let _ = std::fs::write(marker, body);
+    let supersedes_available = fresh.iter().any(|n| n.contains(AVAILABLE_MARK));
+    let body: Vec<&str> = existing
+        .lines()
+        .filter(|line| !line.is_empty() && !(supersedes_available && line.contains(AVAILABLE_MARK)))
+        .chain(fresh)
+        .collect();
+    let _ = std::fs::write(marker, body.join("\n"));
 }
 
 fn read_state(path: &Path) -> CheckState {
@@ -329,6 +330,24 @@ mod tests {
 
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "first\nsecond");
         assert!(!dir.path().join("missing").exists());
+    }
+
+    #[test]
+    fn test_write_notification_newer_available_line_replaces_the_older_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(".update-available");
+        let channel = channel_update_notice(&seen("0.13.2"), "0.13.3").unwrap();
+        write_notification(
+            dir.path(),
+            &[channel.clone(), available_notice("0.13.4", "0.13.3")],
+        );
+        write_notification(dir.path(), &[available_notice("0.13.5", "0.13.3")]);
+
+        let body = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(
+            body,
+            format!("{channel}\n{}", available_notice("0.13.5", "0.13.3"))
+        );
     }
 
     #[test]

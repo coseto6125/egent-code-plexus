@@ -84,6 +84,9 @@ pub fn enumerate_tools(root: &Command) -> Vec<DerivedTool> {
 pub fn ecp_tools(root: &Command) -> Vec<DerivedTool> {
     let mut tools = enumerate_tools(root);
     tools.retain(|t| t.name != "ecp_peers");
+    // A model must not swap the binary every later call runs on; `ecp update`
+    // stays a command the user types.
+    tools.retain(|t| t.name != "ecp_update");
     tools.extend(crate::peers::peer_tools());
     tools.extend(crate::group::group_tools());
     tools.retain(|t| t.name != "ecp_schema");

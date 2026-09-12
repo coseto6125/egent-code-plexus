@@ -5,10 +5,17 @@
 //! the binary gains no HTTP or archive dependency. The release's `.sha256`
 //! sidecar is verified before anything is swapped.
 //!
-//! Replacement is two renames inside the binary's own directory: the running
-//! file moves aside to `<exe>.old`, the new file moves into place. Unix keeps
-//! the old inode alive for this process; Windows lets a running executable be
-//! renamed but not unlinked, so the `.old` file is swept on the next update.
+//! The staged binary is run with `--version` before anything is swapped, so a
+//! release that cannot start on this host never replaces one that can. On
+//! Unix the swap is one atomic rename over the running file, whose inode
+//! stays alive for this process. Windows refuses that, but lets a running
+//! executable be renamed: it moves aside to `<exe>.old`, the new file moves
+//! in, and the `.old` file (still mapped, so not unlinkable) is swept on the
+//! next update.
+//!
+//! The `.sha256` sidecar comes from the same origin as the archive, so it
+//! catches a truncated or corrupted download, not a compromised release; the
+//! SLSA attestations the release publishes are not checked here.
 //!
 //! Channel installs (npm / uv / pip / brew / cargo) are replaced the same way;
 //! the package manager's own record keeps the previous version until 0.15
@@ -26,9 +33,10 @@ use sha2::{Digest, Sha256};
 use crate::commands::admin::doctor::checks::install_source::{
     InstallSource, CHANNELS, CHANNEL_SUNSET,
 };
-use crate::commands::admin::doctor::checks::version::{latest_published_version, parse_semver};
+use crate::commands::admin::doctor::checks::version::{latest_release_version, parse_semver};
 use crate::commands::admin::update_check;
 use crate::git::safe_exec;
+use ecp_core::registry::{resolve_home_ecp, FileLock};
 
 const REPO: &str = "coseto6125/egent-code-plexus";
 const BIN: &str = "ecp";
@@ -46,8 +54,8 @@ pub fn run(args: UpdateArgs) -> Result<(), EcpError> {
     let local = env!("CARGO_PKG_VERSION");
     let local_parsed = parse_semver(local)
         .ok_or_else(|| EcpError::Output(format!("local version {local} is not semver")))?;
-    let latest = latest_published_version().ok_or_else(|| {
-        EcpError::Output("could not read the latest GitHub Release (network, curl, or git)".into())
+    let latest = latest_release_version().ok_or_else(|| {
+        EcpError::Output("could not read the latest GitHub Release (network or curl)".into())
     })?;
     let latest_str = format!("{}.{}.{}", latest.0, latest.1, latest.2);
 
@@ -65,22 +73,36 @@ pub fn run(args: UpdateArgs) -> Result<(), EcpError> {
         return Ok(());
     }
 
-    let target = target_triple(std::env::consts::OS, std::env::consts::ARCH).ok_or_else(|| {
-        EcpError::Output(format!(
-            "no prebuilt release for {}/{}; build from source: cargo install --git https://github.com/{REPO} egent-code-plexus --bin ecp --locked",
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        ))
-    })?;
+    let target = target_triple(std::env::consts::OS, std::env::consts::ARCH)
+        .filter(|_| !cfg!(target_env = "musl"))
+        .ok_or_else(|| {
+            EcpError::Output(format!(
+                "no prebuilt release for this build ({}/{}{}); build from source: cargo install --git https://github.com/{REPO} egent-code-plexus --bin ecp --locked",
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                if cfg!(target_env = "musl") { ", musl" } else { "" }
+            ))
+        })?;
+    let home_ecp = resolve_home_ecp();
+    let _ = std::fs::create_dir_all(&home_ecp);
+    let _one_at_a_time = FileLock::try_exclusive(&home_ecp.join(".update.lock"))
+        .map_err(|_| EcpError::Output("another ecp update is running".into()))?;
     let exe = current_exe()?;
     let dir = exe
         .parent()
         .ok_or_else(|| EcpError::Output(format!("{} has no parent directory", exe.display())))?;
     println!("==> ecp v{local} -> v{latest_str} ({target})");
 
-    // Staged next to the binary so the final rename stays on one filesystem.
-    let staging = tempfile::Builder::new()
-        .prefix(".ecp-update-")
+    // Staged next to the binary so the final rename stays on one filesystem,
+    // and private: what passes the digest check must be what gets installed.
+    let mut staging = tempfile::Builder::new();
+    staging.prefix(".ecp-update-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        staging.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let staging = staging
         .tempdir_in(dir)
         .map_err(|e| EcpError::Output(format!("create staging dir in {}: {e}", dir.display())))?;
     let asset = asset_name(&latest_str, target);
@@ -98,14 +120,18 @@ pub fn run(args: UpdateArgs) -> Result<(), EcpError> {
     println!("==> sha256 ok");
 
     let new_bin = extract(&archive, staging.path(), &latest_str, target)?;
-    replace_binary(&exe, &new_bin)?;
-    let installed = version_of(&exe)?;
-    if !installed.contains(&latest_str) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&new_bin, std::fs::Permissions::from_mode(0o755));
+    }
+    let reported = version_of(&new_bin)?;
+    if !version_matches(&reported, &latest_str) {
         return Err(EcpError::Output(format!(
-            "installed binary reports `{installed}`, expected v{latest_str}; the previous binary is next to it as {}.old*",
-            exe.display()
+            "downloaded binary reports `{reported}`, expected v{latest_str}; nothing was replaced"
         )));
     }
+    replace_binary(&exe, &new_bin)?;
     update_check::record_self_update(&latest_str);
     update_check::clear_available_notice();
     println!("✓ ecp v{latest_str} installed -> {}", exe.display());
@@ -119,7 +145,7 @@ pub fn run(args: UpdateArgs) -> Result<(), EcpError> {
     }
     for other in other_copies_on_path(std::env::var_os("PATH"), &exe) {
         println!(
-            "warning: another ecp on PATH was not updated: {}",
+            "note: another `ecp` on PATH resolves elsewhere: {} (a package-manager launcher is fine; a second copy stays at its old version)",
             other.display()
         );
     }
@@ -169,8 +195,15 @@ fn current_exe() -> Result<PathBuf, EcpError> {
 /// transfer (under 1 KiB/s for 30 s) fails fast instead.
 fn download(url: &str, dest: &Path) -> Result<(), EcpError> {
     let mut cmd = Command::new("curl");
+    // `-q` first: a `.curlrc` left over from debugging (`insecure`, a proxy)
+    // must not shape what gets installed. HTTPS only, redirects too.
     cmd.args([
+        "-q",
         "-sSfL",
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
         "--max-time",
         "170",
         "--speed-limit",
@@ -266,6 +299,7 @@ pub(crate) fn extract(
 /// Where the outgoing binary is parked: `<exe>.old`, or `<exe>.old.<pid>` when
 /// a still-running process holds that name (Windows keeps a mapped executable
 /// locked against unlink, not against rename).
+#[cfg(any(windows, test))]
 fn park_path(exe: &Path) -> PathBuf {
     let mut s: OsString = exe.as_os_str().to_owned();
     s.push(".old");
@@ -292,27 +326,32 @@ fn sweep_parked(exe: &Path) {
     }
 }
 
-/// Swap `new_bin` into `exe`'s place. The previous file is moved aside first
-/// and restored if the second rename fails; when even that fails, the error
-/// names the parked file so the user can move it back by hand.
+/// Swap `new_bin` into `exe`'s place. Unix renames over the running file in
+/// one step. Windows parks the running file first and restores it if the
+/// second rename fails; when even that fails, the error names the parked file
+/// so the user can move it back by hand.
 pub(crate) fn replace_binary(exe: &Path, new_bin: &Path) -> Result<(), EcpError> {
-    let old = park_path(exe);
-    std::fs::rename(exe, &old)
-        .map_err(|e| EcpError::Output(format!("move aside {}: {e}", exe.display())))?;
-    if let Err(e) = std::fs::rename(new_bin, exe) {
-        return Err(EcpError::Output(match std::fs::rename(&old, exe) {
-            Ok(()) => format!("install {}: {e}; the previous binary is back in place", exe.display()),
-            Err(back) => format!(
-                "install {}: {e}; restoring the previous binary failed too ({back}): move {} back by hand",
-                exe.display(),
-                old.display()
-            ),
-        }));
-    }
-    #[cfg(unix)]
+    #[cfg(not(windows))]
+    std::fs::rename(new_bin, exe)
+        .map_err(|e| EcpError::Output(format!("install {}: {e}", exe.display())))?;
+    #[cfg(windows)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(exe, std::fs::Permissions::from_mode(0o755));
+        let old = park_path(exe);
+        std::fs::rename(exe, &old)
+            .map_err(|e| EcpError::Output(format!("move aside {}: {e}", exe.display())))?;
+        if let Err(e) = std::fs::rename(new_bin, exe) {
+            return Err(EcpError::Output(match std::fs::rename(&old, exe) {
+                Ok(()) => format!(
+                    "install {}: {e}; the previous binary is back in place",
+                    exe.display()
+                ),
+                Err(back) => format!(
+                    "install {}: {e}; restoring the previous binary failed too ({back}): move {} back by hand",
+                    exe.display(),
+                    old.display()
+                ),
+            }));
+        }
     }
     sweep_parked(exe);
     Ok(())
@@ -323,7 +362,23 @@ fn version_of(exe: &Path) -> Result<String, EcpError> {
     cmd.arg("--version");
     let out = safe_exec::output_with_timeout(cmd, TOOL_TIMEOUT)
         .ok_or_else(|| EcpError::Output(format!("{} --version did not complete", exe.display())))?;
+    if !out.status.success() {
+        return Err(EcpError::Output(format!(
+            "{} --version failed: {}",
+            exe.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// `ecp 0.13.3+abc1234` reports version 0.13.3; `0.13.30` does not.
+pub(crate) fn version_matches(reported: &str, expected: &str) -> bool {
+    reported
+        .split_whitespace()
+        .nth(1)
+        .and_then(|v| v.strip_prefix(expected))
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('+') || rest.starts_with('-'))
 }
 
 /// Other `ecp` binaries on `PATH` that this update did not touch, so a shell
@@ -453,6 +508,11 @@ mod tests {
         let new_bin = dir.path().join("staged");
         std::fs::write(&exe, b"old").unwrap();
         std::fs::write(&new_bin, b"new").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&new_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         // Leftovers from earlier updates (plain and pid-suffixed) must neither
         // block the swap nor survive it.
         let stale_plain = dir.path().join(format!("{}.old", bin_file_name()));
@@ -486,9 +546,20 @@ mod tests {
             .unwrap_err()
             .to_string();
 
-        assert!(err.contains("back in place"), "{err}");
+        assert!(err.contains("install "), "{err}");
         assert_eq!(std::fs::read(&exe).unwrap(), b"old");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn test_version_matches_accepts_build_suffix_and_rejects_longer_version() {
+        assert!(version_matches("ecp 0.13.3", "0.13.3"));
+        assert!(version_matches("ecp 0.13.3+2d65ddf", "0.13.3"));
+        assert!(version_matches("ecp 0.13.3-rc1\n", "0.13.3"));
+        assert!(!version_matches("ecp 0.13.30", "0.13.3"));
+        assert!(!version_matches("ecp 0.13.2+abc", "0.13.3"));
+        assert!(!version_matches("", "0.13.3"));
+        assert!(!version_matches("0.13.3", "0.13.3"));
     }
 
     #[test]
