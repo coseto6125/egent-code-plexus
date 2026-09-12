@@ -2,6 +2,7 @@ use clap::Parser;
 use ecp_cli::cli::Cli;
 use ecp_cli::commands::flow::{load_sources, load_sources_at_ref};
 use serde_json::{json, Value};
+use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -328,4 +329,90 @@ fn test_load_sources_non_utf8_file_is_skipped_with_boundary() {
     assert_eq!(loaded.skipped.len(), 1);
     assert_eq!(loaded.skipped[0].file, "latin1.js");
     assert_eq!(loaded.skipped[0].kind, "unreadable_source");
+}
+
+#[test]
+fn test_load_sources_tracked_non_utf8_reports_one_boundary() {
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("latin1.js"), b"\xff").unwrap();
+    for args in [vec!["init", "-q"], vec!["add", "latin1.js"]] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+    }
+    let loaded = load_sources(repo.path(), None).unwrap();
+    assert!(loaded.files.is_empty());
+    assert_eq!(loaded.skipped.len(), 1);
+    assert_eq!(loaded.skipped[0].file, "latin1.js");
+}
+
+#[test]
+fn test_load_sources_overlay_repairs_non_utf8_removes_only_replaced_boundary() {
+    let repo = tempfile::tempdir().unwrap();
+    for path in ["repaired.js", "unreadable.js"] {
+        std::fs::write(repo.path().join(path), b"\xff").unwrap();
+    }
+    let overlay = repo.path().join("overlay.json");
+    std::fs::write(
+        &overlay,
+        json!({"./repaired.js": "const x = 1;"}).to_string(),
+    )
+    .unwrap();
+    let loaded = load_sources(repo.path(), Some(&overlay)).unwrap();
+    assert_eq!(loaded.files.len(), 1);
+    assert_eq!(loaded.files[0].path, "repaired.js");
+    assert_eq!(loaded.files[0].source, "const x = 1;");
+    assert_eq!(loaded.skipped.len(), 1);
+    assert_eq!(loaded.skipped[0].file, "unreadable.js");
+    assert_eq!(
+        std::fs::read(repo.path().join("repaired.js")).unwrap(),
+        b"\xff"
+    );
+}
+
+#[test]
+fn test_load_sources_overlay_replaces_non_utf8_byte_budget() {
+    let repo = tempfile::tempdir().unwrap();
+    let mut source = std::fs::File::create(repo.path().join("main.js")).unwrap();
+    source.write_all(b"\xff").unwrap();
+    source.set_len(32 * 1024 * 1024).unwrap();
+    drop(source);
+    let overlay = repo.path().join("overlay.json");
+    std::fs::write(&overlay, json!({"main.js": "const x = 1;"}).to_string()).unwrap();
+    let loaded = load_sources(repo.path(), Some(&overlay)).unwrap();
+    assert_eq!(loaded.files.len(), 1);
+    assert_eq!(loaded.files[0].source, "const x = 1;");
+    assert!(loaded.skipped.is_empty());
+}
+
+#[test]
+fn test_load_sources_tracked_readable_after_skipped_rejects_file_budget_overflow() {
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join(".gitignore"), "tracked.js\n").unwrap();
+    std::fs::write(repo.path().join("tracked.js"), "const x = 1;").unwrap();
+    for args in [vec!["init", "-q"], vec!["add", "-f", "tracked.js"]] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+    }
+    for index in 0..2047 {
+        std::fs::write(repo.path().join(format!("unreadable_{index}.js")), b"\xff").unwrap();
+    }
+    let loaded = load_sources(repo.path(), None).unwrap();
+    assert_eq!(loaded.files.len(), 1);
+    assert_eq!(loaded.skipped.len(), 2047);
+    std::fs::write(repo.path().join("one_more.js"), b"\xff").unwrap();
+    let error = load_sources(repo.path(), None).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("flow source scope exceeds 2048 files"),
+        "{error}"
+    );
 }
