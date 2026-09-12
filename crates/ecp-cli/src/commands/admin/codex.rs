@@ -6,6 +6,7 @@ use crate::commands::admin::skill_source::{resolve, EmbeddedTree};
 use clap::{Args, Subcommand};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Subcommand, Debug)]
 pub enum CodexCommands {

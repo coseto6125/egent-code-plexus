@@ -29,10 +29,10 @@ pub struct FlowArgs {
     #[arg(long)]
     pub file: String,
     /// One-based source line.
-    #[arg(long, value_parser = clap::value_parser!(usize).range(1..))]
+    #[arg(long, value_parser = bounded(u64::MAX))]
     pub line: usize,
     /// One-based UTF-8 byte column. Use the exact expression or binding position.
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(usize).range(1..))]
+    #[arg(long, default_value_t = 1, value_parser = bounded(u64::MAX))]
     pub column: usize,
     /// Select a variable binding, expression value, or enclosing function return.
     #[arg(long, value_enum, default_value = "value")]
@@ -47,20 +47,24 @@ pub struct FlowArgs {
     #[arg(long)]
     pub overlay: Option<PathBuf>,
     /// Maximum dependency nodes. Exhaustion is reported as truncated.
-    #[arg(long, default_value_t = 50_000, value_parser = clap::value_parser!(usize).range(1..=5_000_000))]
+    #[arg(long, default_value_t = 50_000, value_parser = bounded(5_000_000))]
     pub max_nodes: usize,
     /// Maximum call expansion depth. Remaining calls become explicit boundaries.
     /// The cap keeps call expansion, which recurses on the native stack, inside it.
-    #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(usize).range(1..=256))]
+    #[arg(long, default_value_t = 16, value_parser = bounded(256))]
     pub max_call_depth: usize,
     /// Maximum analysis steps. Exhaustion is reported as truncated.
-    #[arg(long, default_value_t = 200_000, value_parser = clap::value_parser!(usize).range(1..=50_000_000))]
+    #[arg(long, default_value_t = 200_000, value_parser = bounded(50_000_000))]
     pub max_steps: usize,
     /// Bypass the latest-result cache. Source hashes always invalidate changed results.
     #[arg(long)]
     pub no_cache: bool,
     #[arg(long)]
     pub format: Option<String>,
+}
+
+fn bounded(max: u64) -> clap::builder::RangedU64ValueParser<usize> {
+    clap::builder::RangedU64ValueParser::new().range(1..=max)
 }
 
 pub fn run(args: FlowArgs) -> Result<(), EcpError> {
