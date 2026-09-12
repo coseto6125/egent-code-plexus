@@ -166,6 +166,10 @@ fn should_query(state: &CheckState, now: u64) -> bool {
     !succeeded_today && !in_backoff
 }
 
+/// A host without the UserPromptSubmit hook (Cursor, Codex over MCP) never
+/// drains the marker; the newest lines are enough for the day it is read.
+const MAX_NOTICE_LINES: usize = 6;
+
 /// Append each notice the marker does not already hold. The marker is drained
 /// on the next prompt; a session that never submits one must not pile up the
 /// same daily line, and a newer "available" line replaces an older one.
@@ -189,7 +193,8 @@ fn write_notification(home_ecp: &Path, notices: &[String]) {
         .filter(|line| !line.is_empty() && !(supersedes_available && line.contains(AVAILABLE_MARK)))
         .chain(fresh)
         .collect();
-    let _ = std::fs::write(marker, body.join("\n"));
+    let start = body.len().saturating_sub(MAX_NOTICE_LINES);
+    let _ = std::fs::write(marker, body[start..].join("\n"));
 }
 
 fn read_state(path: &Path) -> CheckState {
@@ -330,6 +335,22 @@ mod tests {
 
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "first\nsecond");
         assert!(!dir.path().join("missing").exists());
+    }
+
+    #[test]
+    fn test_write_notification_keeps_only_the_newest_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(".update-available");
+        for i in 0..(MAX_NOTICE_LINES + 3) {
+            write_notification(dir.path(), &[format!("line {i}")]);
+        }
+        let body = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(body.lines().count(), MAX_NOTICE_LINES);
+        assert!(body.starts_with("line 3\n"), "{body}");
+        assert!(
+            body.ends_with(&format!("line {}", MAX_NOTICE_LINES + 2)),
+            "{body}"
+        );
     }
 
     #[test]

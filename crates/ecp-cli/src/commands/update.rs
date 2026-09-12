@@ -14,8 +14,10 @@
 //! next update.
 //!
 //! The `.sha256` sidecar comes from the same origin as the archive, so it
-//! catches a truncated or corrupted download, not a compromised release; the
-//! SLSA attestations the release publishes are not checked here.
+//! catches a truncated or corrupted download, not a compromised release. The
+//! SLSA attestation the release publishes is checked through `gh attestation
+//! verify` when `gh` is installed and signed in; otherwise the update says
+//! that provenance went unchecked and continues.
 //!
 //! Channel installs (npm / uv / pip / brew / cargo) are replaced the same way;
 //! the package manager's own record keeps the previous version until 0.15
@@ -102,9 +104,17 @@ pub fn run(args: UpdateArgs) -> Result<(), EcpError> {
         use std::os::unix::fs::PermissionsExt;
         staging.permissions(std::fs::Permissions::from_mode(0o700));
     }
-    let staging = staging
-        .tempdir_in(dir)
-        .map_err(|e| EcpError::Output(format!("create staging dir in {}: {e}", dir.display())))?;
+    let staging = staging.tempdir_in(dir).map_err(|e| {
+        let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
+            "; the install directory is not writable by you (try `sudo ecp update`)"
+        } else {
+            ""
+        };
+        EcpError::Output(format!(
+            "create staging dir in {}: {e}{hint}",
+            dir.display()
+        ))
+    })?;
     let asset = asset_name(&latest_str, target);
     let url = format!("https://github.com/{REPO}/releases/download/v{latest_str}/{asset}");
     let archive = staging.path().join(&asset);
@@ -118,6 +128,10 @@ pub fn run(args: UpdateArgs) -> Result<(), EcpError> {
         .ok_or_else(|| EcpError::Output(format!("{asset}.sha256 does not hold a sha256 digest")))?;
     verify_sha256(&archive, &expected)?;
     println!("==> sha256 ok");
+    match verify_provenance(&archive)? {
+        Provenance::Verified => println!("==> provenance ok (gh attestation verify)"),
+        Provenance::Unchecked(why) => println!("==> provenance unchecked: {why}"),
+    }
 
     let new_bin = extract(&archive, staging.path(), &latest_str, target)?;
     #[cfg(unix)]
@@ -204,6 +218,8 @@ fn download(url: &str, dest: &Path) -> Result<(), EcpError> {
         "=https",
         "--proto-redir",
         "=https",
+        "--max-filesize",
+        "200M",
         "--max-time",
         "170",
         "--speed-limit",
@@ -242,6 +258,42 @@ fn run_tool(cmd: Command, tool: &str, timeout: Duration) -> Result<std::process:
             format!("{tool} did not finish within {}s", timeout.as_secs())
         })
     })
+}
+
+pub(crate) enum Provenance {
+    Verified,
+    Unchecked(String),
+}
+
+/// `gh attestation verify` binds the archive to the release workflow's
+/// identity, which a swapped asset and sidecar cannot forge. A verifier that
+/// runs and rejects stops the update; one that cannot run (no `gh`, or `gh`
+/// not signed in, exit 4) is reported and skipped.
+fn verify_provenance(archive: &Path) -> Result<Provenance, EcpError> {
+    let mut cmd = Command::new("gh");
+    cmd.args(["attestation", "verify"])
+        .arg(archive)
+        .args(["--owner", REPO.split('/').next().unwrap_or(REPO)]);
+    let Some(out) = safe_exec::output_with_timeout(cmd, TOOL_TIMEOUT) else {
+        return Ok(Provenance::Unchecked(
+            "`gh` is not installed or did not finish; see the release notes for `gh attestation verify`".into(),
+        ));
+    };
+    provenance_outcome(out.status.code(), &String::from_utf8_lossy(&out.stderr))
+}
+
+/// gh exits 4 when it needs `gh auth login`; every other failure is a verdict.
+pub(crate) fn provenance_outcome(code: Option<i32>, stderr: &str) -> Result<Provenance, EcpError> {
+    match code {
+        Some(0) => Ok(Provenance::Verified),
+        Some(4) => Ok(Provenance::Unchecked(
+            "`gh` is not signed in (`gh auth login` enables provenance checks)".into(),
+        )),
+        _ => Err(EcpError::Output(format!(
+            "provenance check failed, nothing was replaced: {}",
+            stderr.trim()
+        ))),
+    }
 }
 
 /// First token of a `<hex>  <file>` sidecar, lowercased. `None` unless it is a
@@ -549,6 +601,26 @@ mod tests {
         assert!(err.contains("install "), "{err}");
         assert_eq!(std::fs::read(&exe).unwrap(), b"old");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn test_provenance_outcome_maps_exit_codes() {
+        assert!(matches!(
+            provenance_outcome(Some(0), ""),
+            Ok(Provenance::Verified)
+        ));
+        assert!(matches!(
+            provenance_outcome(
+                Some(4),
+                "To get started with GitHub CLI, please run: gh auth login"
+            ),
+            Ok(Provenance::Unchecked(_))
+        ));
+        let err = provenance_outcome(Some(1), "no attestations found")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nothing was replaced"), "{err}");
+        assert!(provenance_outcome(None, "killed").is_err());
     }
 
     #[test]
