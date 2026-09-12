@@ -80,6 +80,10 @@ pub struct FlowReport {
     pub edges: Vec<FlowEdge>,
     pub consumers: Vec<usize>,
     pub boundaries: Vec<Boundary>,
+    /// Boundaries recorded in files the selected slice never reaches. They are
+    /// dropped from `boundaries` so a one-file query is not buried under the
+    /// rest of the corpus; the count keeps the omission visible.
+    pub boundaries_omitted: usize,
     pub truncated: bool,
     pub coverage: String,
 }
@@ -141,9 +145,13 @@ impl Engine<'_> {
         if done.contains(&file) {
             return;
         }
+        let Some(root) = self.roots[file] else {
+            done.insert(file);
+            return;
+        };
         if !visiting.insert(file) {
             self.boundary(
-                self.roots[file],
+                root,
                 "import_cycle",
                 "Cyclic module initialization has unresolved execution order.",
             );
@@ -166,7 +174,7 @@ impl Engine<'_> {
             self.module(dependency, visiting, done);
         }
         self.imports(file);
-        self.eval(self.roots[file], &[file]);
+        self.eval(root, &[file]);
         visiting.remove(&file);
         done.insert(file);
     }
@@ -250,6 +258,14 @@ impl Engine<'_> {
             .into_iter()
             .filter(|n| selected.contains(&n.id))
             .collect();
+        let reached: BTreeSet<&str> = nodes.iter().map(|n| n.file.as_str()).collect();
+        let total = self.boundaries.len();
+        let boundaries: Vec<Boundary> = self
+            .boundaries
+            .into_iter()
+            .filter(|b| reached.contains(b.file.as_str()))
+            .collect();
+        let boundaries_omitted = total - boundaries.len();
         let consumers = nodes
             .iter()
             .filter(|n| {
@@ -271,9 +287,10 @@ impl Engine<'_> {
                 selected.contains(&edge.from) && selected.contains(&edge.to)
             }).collect(),
             consumers,
-            boundaries: self.boundaries.into_iter().collect(),
+            boundaries,
+            boundaries_omitted,
             truncated: self.truncated,
-            coverage: "Bounded, path-insensitive source analysis with call-site expansion. Boundaries cover all supplied snapshots; empty slices do not prove absence beyond supported semantics.".into(),
+            coverage: "Bounded, path-insensitive source analysis with call-site expansion. Boundaries cover the files the selected slice reaches; boundaries_omitted counts the rest. Empty slices do not prove absence beyond supported semantics.".into(),
         }
     }
 }
@@ -304,6 +321,7 @@ fn build<'a>(files: &'a [SourceFile], budgets: &Budgets) -> Result<Engine<'a>, S
         called: BTreeSet::new(),
         controls: vec![],
         loop_nodes: None,
+        loop_objects: None,
     };
     let mut paths = BTreeSet::new();
     for (i, f) in files.iter().enumerate() {
@@ -323,13 +341,24 @@ fn build<'a>(files: &'a [SourceFile], budgets: &Budgets) -> Result<Engine<'a>, S
             }
         };
         let bytes = f.source.as_bytes();
-        let tree = parser
-            .parse_with_options(
-                &mut |offset, _| &bytes[offset..],
-                None,
-                Some(tree_sitter::ParseOptions::new().progress_callback(&mut progress)),
-            )
-            .ok_or_else(|| format!("Parser exceeded its time budget: {}", f.path))?;
+        let Some(tree) = parser.parse_with_options(
+            &mut |offset, _| &bytes[offset..],
+            None,
+            Some(tree_sitter::ParseOptions::new().progress_callback(&mut progress)),
+        ) else {
+            // One pathological file must not take the whole corpus down with it.
+            engine.roots.push(None);
+            engine.truncated = true;
+            engine.boundaries.insert(Boundary {
+                file: f.path.clone(),
+                line: 1,
+                column: 1,
+                kind: "parse_timeout".into(),
+                message: "Parsing exceeded its time budget; the file is excluded from analysis."
+                    .into(),
+            });
+            continue;
+        };
         let (root, truncated) = lower(
             tree.root_node(),
             i,
@@ -337,7 +366,7 @@ fn build<'a>(files: &'a [SourceFile], budgets: &Budgets) -> Result<Engine<'a>, S
             &mut engine.ast,
             budgets.max_steps,
         );
-        engine.roots.push(root);
+        engine.roots.push(Some(root));
         if truncated {
             engine.truncated = true;
             engine.boundary(
@@ -355,7 +384,9 @@ fn build<'a>(files: &'a [SourceFile], budgets: &Budgets) -> Result<Engine<'a>, S
         }
     }
     for i in 0..files.len() {
-        engine.predeclare(engine.roots[i], &[i]);
+        if let Some(root) = engine.roots[i] {
+            engine.predeclare(root, &[i]);
+        }
     }
     let mut visiting = BTreeSet::new();
     let mut done = BTreeSet::new();
@@ -363,9 +394,13 @@ fn build<'a>(files: &'a [SourceFile], budgets: &Budgets) -> Result<Engine<'a>, S
         engine.module(i, &mut visiting, &mut done);
     }
     // Inspect uncalled functions independently, so source queries do not require a runtime entry point.
+    // Each entry point starts from the module-exit state; otherwise the strong
+    // writes of one uncalled function would kill values a sibling still reads.
+    let module_exit = engine.snapshot();
     let mut f = 0;
     while f < engine.functions.len() && !engine.truncated {
         if !engine.called.contains(&f) {
+            engine.restore(&module_exit);
             engine.invoke(f, &[]);
         }
         f += 1;
@@ -616,10 +651,11 @@ struct Function {
     defaults: BTreeMap<String, Value>,
 }
 type Scope = BTreeMap<String, Value>;
+type State = (Vec<Scope>, Vec<Scope>);
 struct Engine<'a> {
     files: &'a [SourceFile],
     ast: Vec<Ast>,
-    roots: Vec<usize>,
+    roots: Vec<Option<usize>>,
     scopes: Vec<Scope>,
     function_scopes: BTreeSet<usize>,
     references: BTreeMap<(usize, String), (usize, String)>,
@@ -639,6 +675,7 @@ struct Engine<'a> {
     called: BTreeSet<usize>,
     controls: Vec<Value>,
     loop_nodes: Option<BTreeMap<(usize, String), usize>>,
+    loop_objects: Option<BTreeMap<usize, usize>>,
 }
 impl Engine<'_> {
     fn field(&self, n: usize, key: &str) -> Option<usize> {
@@ -832,6 +869,15 @@ impl Engine<'_> {
         (value, key)
     }
     fn function(&mut self, n: usize, scopes: &[usize]) -> Value {
+        // Loop iterations reuse the callable identity, like they reuse nodes, so a
+        // closure created in a loop body does not defeat the fixed point.
+        if self.loop_nodes.is_some() {
+            if let Some(id) = self.functions.iter().rposition(|f| f.ast == n) {
+                let mut v = self.node(n, "function", &Value::default());
+                v.functions.insert(id);
+                return v;
+            }
+        }
         if self.ast[n].text.starts_with("async ") {
             self.boundary(
                 n,
@@ -993,11 +1039,14 @@ impl Engine<'_> {
                     .unwrap_or_default();
                 let condition = self.node(self.field(n, "left").unwrap_or(n), "condition", &left);
                 self.controls.push(condition);
+                // The right operand may be skipped, so its writes are one path of two.
+                let skipped = self.snapshot();
                 let right = self
                     .field(n, "right")
                     .map(|r| self.eval(r, scopes))
                     .unwrap_or_default();
                 self.controls.pop();
+                self.join(&skipped);
                 let mut value = left;
                 value.merge(&right);
                 self.node(n, "value", &value)
@@ -1069,8 +1118,18 @@ impl Engine<'_> {
                 self.node(n, "field_read", &value)
             }
             "object" | "dictionary" | "array_creation_expression" => {
-                let obj = self.objects.len();
-                self.objects.push(Scope::new());
+                // Loop iterations reuse the allocation, like they reuse nodes, so the heap converges.
+                let obj = match self.loop_objects.as_ref().and_then(|cache| cache.get(&n)) {
+                    Some(obj) => *obj,
+                    None => {
+                        let obj = self.objects.len();
+                        self.objects.push(Scope::new());
+                        if let Some(cache) = self.loop_objects.as_mut() {
+                            cache.insert(n, obj);
+                        }
+                        obj
+                    }
+                };
                 let mut inputs = Value::default();
                 for c in &a.children {
                     let key = self.field(*c, "key");
@@ -1247,59 +1306,120 @@ impl Engine<'_> {
             }
         }
     }
-    fn branch(&mut self, n: usize, scopes: &[usize]) -> Value {
-        let condition = self.field(n, "condition");
-        let cond = condition.map(|c| self.eval(c, scopes)).unwrap_or_default();
-        let cond = self.node(condition.unwrap_or(n), "condition", &cond);
-        let before = self.scopes.clone();
-        let objects_before = self.objects.clone();
-        self.controls.push(cond);
-        let yes = self
-            .field(n, "consequence")
-            .or_else(|| self.field(n, "body"));
-        let no = self.field(n, "alternative");
-        let mut result = yes.map(|c| self.eval(c, scopes)).unwrap_or_default();
-        let after = self.scopes.clone();
-        let objects_after = self.objects.clone();
-        for (dst, src) in self.scopes.iter_mut().zip(&before) {
-            *dst = src.clone();
-        }
-        for (dst, src) in self.objects.iter_mut().zip(&objects_before) {
-            *dst = src.clone();
-        }
-        if let Some(no) = no {
-            result.merge(&self.eval(no, scopes));
-        }
-        let yes_returns = yes.is_some_and(|n| self.always_returns(n));
-        let no_returns = no.is_some_and(|n| self.always_returns(n));
-        if no_returns && !yes_returns {
-            for (scope, old) in self.scopes.iter_mut().zip(&after) {
-                *scope = old.clone();
+    fn snapshot(&self) -> State {
+        (self.scopes.clone(), self.objects.clone())
+    }
+    /// Frames and allocations created after the snapshot stay: they belong to
+    /// callables that may still be invoked from another path.
+    fn restore(&mut self, state: &State) {
+        for (dst, src) in self.scopes.iter_mut().zip(&state.0) {
+            if *dst != *src {
+                *dst = src.clone();
             }
-            for (object, old) in self.objects.iter_mut().zip(&objects_after) {
-                *object = old.clone();
+        }
+        for (dst, src) in self.objects.iter_mut().zip(&state.1) {
+            if *dst != *src {
+                *dst = src.clone();
             }
-        } else if !yes_returns {
-            self.merge_scopes(&after);
-            for (object, old) in self.objects.iter_mut().zip(objects_after) {
-                for (key, value) in old {
-                    object.entry(key).or_default().merge(&value);
+        }
+    }
+    /// Union another path's exit state into the current one.
+    fn join(&mut self, state: &State) {
+        self.merge_scopes(&state.0);
+        for (object, old) in self.objects.iter_mut().zip(&state.1) {
+            for (key, value) in old {
+                object.entry(key.clone()).or_default().merge(value);
+            }
+        }
+    }
+    /// Continue from the union of every path that falls through. With no such
+    /// path the code after the fork is unreachable and the state is left as is.
+    fn join_all(&mut self, exits: &[State]) {
+        if let Some((first, rest)) = exits.split_first() {
+            self.restore(first);
+            for state in rest {
+                self.join(state);
+            }
+        }
+    }
+    /// `(condition, body)` arms in source order plus the else body. Python
+    /// `if_statement` repeats the `alternative` field once per `elif` and
+    /// Python `conditional_expression` has no fields at all, so both are read
+    /// positionally instead of through the single-valued field map.
+    fn arms(&self, n: usize) -> (Vec<(Option<usize>, Option<usize>)>, Option<usize>) {
+        let a = &self.ast[n];
+        let python =
+            self.files[a.file].path.ends_with(".py") || self.files[a.file].path.ends_with(".pyi");
+        if python && a.kind == "conditional_expression" {
+            let c = &a.children;
+            return (
+                vec![(c.get(1).copied(), c.first().copied())],
+                c.get(2).copied(),
+            );
+        }
+        let mut arms = vec![(
+            self.field(n, "condition"),
+            self.field(n, "consequence")
+                .or_else(|| self.field(n, "body")),
+        )];
+        if python && a.kind == "if_statement" {
+            let mut otherwise = None;
+            for &c in &a.children {
+                match self.ast[c].kind.as_str() {
+                    "elif_clause" => {
+                        arms.push((self.field(c, "condition"), self.field(c, "consequence")))
+                    }
+                    "else_clause" => otherwise = self.field(c, "body").or(Some(c)),
+                    _ => {}
                 }
             }
+            return (arms, otherwise);
         }
-        self.controls.pop();
+        (arms, self.field(n, "alternative"))
+    }
+    fn branch(&mut self, n: usize, scopes: &[usize]) -> Value {
+        let (arms, otherwise) = self.arms(n);
+        let incoming = self.snapshot();
+        let control_depth = self.controls.len();
+        let mut result = Value::default();
+        let mut exits: Vec<State> = Vec::new();
+        for (index, (condition, body)) in arms.iter().enumerate() {
+            if index > 0 {
+                self.restore(&incoming);
+            }
+            let cond = condition.map(|c| self.eval(c, scopes)).unwrap_or_default();
+            let cond = self.node(condition.unwrap_or(n), "condition", &cond);
+            // Each later arm is also control-dependent on every earlier condition.
+            self.controls.push(cond);
+            if let Some(body) = body {
+                result.merge(&self.eval(body, scopes));
+            }
+            if !body.is_some_and(|b| self.always_returns(b)) {
+                exits.push(self.snapshot());
+            }
+        }
+        self.restore(&incoming);
+        match otherwise {
+            Some(otherwise) => {
+                result.merge(&self.eval(otherwise, scopes));
+                if !self.always_returns(otherwise) {
+                    exits.push(self.snapshot());
+                }
+            }
+            None => exits.push(incoming),
+        }
+        self.controls.truncate(control_depth);
+        self.join_all(&exits);
         result
     }
     fn always_returns(&self, n: usize) -> bool {
         match self.ast[n].kind.as_str() {
             "return_statement" | "throw_statement" | "raise_statement" => true,
             "if_statement" => {
-                self.field(n, "consequence")
-                    .or_else(|| self.field(n, "body"))
-                    .is_some_and(|c| self.always_returns(c))
-                    && self
-                        .field(n, "alternative")
-                        .is_some_and(|c| self.always_returns(c))
+                let (arms, otherwise) = self.arms(n);
+                arms.iter()
+                    .all(|(_, body)| body.is_some_and(|b| self.always_returns(b)))
+                    && otherwise.is_some_and(|c| self.always_returns(c))
             }
             "statement_block" | "block" | "compound_statement" | "else_clause" => {
                 self.ast[n].children.iter().any(|c| self.always_returns(*c))
@@ -1308,12 +1428,14 @@ impl Engine<'_> {
         }
     }
     fn partial_return(&self, n: usize) -> bool {
-        self.field(n, "consequence")
-            .or_else(|| self.field(n, "body"))
-            .is_some_and(|c| self.always_returns(c))
-            ^ self
-                .field(n, "alternative")
-                .is_some_and(|c| self.always_returns(c))
+        let (arms, otherwise) = self.arms(n);
+        let paths = arms.len() + 1;
+        let returning = arms
+            .iter()
+            .filter(|(_, body)| body.is_some_and(|b| self.always_returns(b)))
+            .count()
+            + usize::from(otherwise.is_some_and(|c| self.always_returns(c)));
+        returning > 0 && returning < paths
     }
     fn hoist_locals(&mut self, n: usize, scope: usize, python: bool) {
         let mut pending = vec![n];
@@ -1340,8 +1462,9 @@ impl Engine<'_> {
         }
     }
     fn loop_flow(&mut self, n: usize, scopes: &[usize]) -> Value {
-        let outer_cache = self.loop_nodes.take();
+        let outer_cache = (self.loop_nodes.take(), self.loop_objects.take());
         self.loop_nodes = Some(BTreeMap::new());
+        self.loop_objects = Some(BTreeMap::new());
         let mut result = Value::default();
         if let Some(initializer) = self.field(n, "initializer") {
             self.eval(initializer, scopes);
@@ -1371,8 +1494,11 @@ impl Engine<'_> {
                     object.entry(key.clone()).or_default().merge(value);
                 }
             }
-            // Block-local frames do not escape unless captured; compare the incoming state and the heap.
-            if self.scopes[..before.len()] == before && self.objects == objects_before {
+            // Block-local frames and allocations that first appear inside the body do not
+            // escape unless captured; compare the incoming state and the incoming heap.
+            if self.scopes[..before.len()] == before
+                && self.objects[..objects_before.len()] == objects_before
+            {
                 converged = true;
                 break;
             }
@@ -1399,7 +1525,7 @@ impl Engine<'_> {
                 "Iterator element binding and protocol effects are unresolved.",
             );
         }
-        self.loop_nodes = outer_cache;
+        (self.loop_nodes, self.loop_objects) = outer_cache;
         result
     }
     fn call(&mut self, n: usize, scopes: &[usize]) -> Value {
@@ -1461,7 +1587,16 @@ impl Engine<'_> {
                 }
             }
         } else {
+            // Every possible callee runs from the same call-site state; running them
+            // back to back would let the last one overwrite the others' effects.
+            let fork = (fun.functions.len() > 1).then(|| self.snapshot());
+            let mut exits: Vec<State> = Vec::new();
             for f in fun.functions {
+                if let Some(incoming) = &fork {
+                    if !exits.is_empty() {
+                        self.restore(incoming);
+                    }
+                }
                 if names.iter().any(Option::is_some) {
                     let parameters = self.parameters(self.functions[f].ast);
                     let mut ordered = vec![Value::default(); parameters.len()];
@@ -1488,7 +1623,11 @@ impl Engine<'_> {
                 } else {
                     result.merge(&self.invoke(f, &values));
                 }
+                if fork.is_some() {
+                    exits.push(self.snapshot());
+                }
             }
+            self.join_all(&exits);
         }
         self.node(n, "value", &result)
     }
@@ -1578,7 +1717,7 @@ impl Engine<'_> {
         }
         self.active.push(fun.ast);
         // Loop iterations reuse local expression nodes, but separate calls retain distinct contexts.
-        let loop_cache = self.loop_nodes.take();
+        let loop_cache = (self.loop_nodes.take(), self.loop_objects.take());
         let summary = self.node(fun.ast, "return_summary", &Value::default());
         self.active_returns.push(summary.clone());
         self.active_parameters.push(vec![]);
@@ -1659,7 +1798,7 @@ impl Engine<'_> {
                 });
             }
         }
-        self.loop_nodes = loop_cache;
+        (self.loop_nodes, self.loop_objects) = loop_cache;
         Value {
             ids: summary.ids,
             functions: result.functions,

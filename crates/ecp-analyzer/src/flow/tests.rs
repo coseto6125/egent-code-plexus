@@ -446,3 +446,119 @@ fn test_analyze_long_property_keys_preserve_field_identity() {
         .iter()
         .any(|node| node.kind == "argument" && node.line == 2));
 }
+fn query_in(path: &str, source: &str, line: usize, column: usize) -> FlowReport {
+    analyze(
+        &[SourceFile {
+            path: path.into(),
+            source: source.into(),
+        }],
+        &FlowRequest {
+            file: path.into(),
+            line,
+            column,
+            subject: Subject::Value,
+            direction: Direction::Forward,
+            budgets: Budgets::default(),
+        },
+    )
+    .unwrap()
+}
+fn consumes(report: &FlowReport, label: &str) -> bool {
+    report
+        .consumers
+        .iter()
+        .any(|id| report.nodes.iter().any(|n| n.id == *id && n.label == label))
+}
+// Contract for the five tests below: a value that is consumed on at least one
+// execution path stays a consumer in the path-insensitive report. An empty
+// consumer list must not be produced by a path the analysis silently dropped.
+#[test]
+fn test_analyze_short_circuit_keeps_skipped_assignment_path() {
+    let report = query(
+        "let value = 101;\nlet flag = false;\nflag && (value = 202);\nconsume(value);\n",
+        1,
+        13,
+    );
+    assert!(consumes(&report, "value"), "{report:#?}");
+}
+#[test]
+fn test_analyze_python_conditional_expression_reaches_consumer() {
+    let report = query_in(
+        "test.py",
+        "value = 101\nresult = value if flag else 0\nconsume(result)\n",
+        1,
+        9,
+    );
+    assert!(consumes(&report, "result"), "{report:#?}");
+}
+#[test]
+fn test_analyze_python_elif_branch_reaches_consumer() {
+    let report = query_in(
+        "test.py",
+        "value = 101\nresult = 0\nif a:\n    result = 0\nelif b:\n    result = value\nelse:\n    result = 0\nconsume(result)\n",
+        1,
+        9,
+    );
+    assert!(consumes(&report, "result"), "{report:#?}");
+}
+#[test]
+fn test_analyze_multiple_callees_keep_each_side_effect() {
+    let report = query(
+        "let result = 0;\nfunction a() { result = 101; }\nfunction b() { result = 202; }\nlet selected = flag ? a : b;\nselected();\nconsume(result);\n",
+        2,
+        25,
+    );
+    assert!(consumes(&report, "result"), "{report:#?}");
+}
+#[test]
+fn test_analyze_uncalled_function_does_not_kill_sibling_read() {
+    let report = query(
+        "let value = 101;\nfunction reset() { value = 202; }\nfunction read() { consume(value); }\n",
+        1,
+        13,
+    );
+    assert!(consumes(&report, "value"), "{report:#?}");
+}
+#[test]
+fn test_analyze_loop_with_object_literal_converges() {
+    let report = query(
+        "const items = [1];\nconst out = [];\nfor (const item of items) { out.push({ id: item.id }); }\nlet f = 0;\nwhile (f < 2) { const g = () => f; f = f + 1; }\nconsume(out);\n",
+        2,
+        13,
+    );
+    assert!(!report.truncated, "{report:#?}");
+    assert!(
+        !report.boundaries.iter().any(|b| b.kind == "loop_budget"),
+        "{report:#?}"
+    );
+}
+#[test]
+fn test_analyze_boundaries_scoped_to_reached_files() {
+    let files = [
+        SourceFile {
+            path: "a.js".into(),
+            source: "let x = 1;\nconsume(x);\n".into(),
+        },
+        SourceFile {
+            path: "b.js".into(),
+            source: "other();\n".into(),
+        },
+    ];
+    let report = analyze(
+        &files,
+        &FlowRequest {
+            file: "a.js".into(),
+            line: 1,
+            column: 9,
+            subject: Subject::Value,
+            direction: Direction::Forward,
+            budgets: Budgets::default(),
+        },
+    )
+    .unwrap();
+    assert!(
+        report.boundaries.iter().all(|b| b.file == "a.js"),
+        "{report:#?}"
+    );
+    assert_eq!(report.boundaries_omitted, 1, "{report:#?}");
+}
