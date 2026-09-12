@@ -52,6 +52,12 @@ impl BuildResult {
 }
 
 pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildResult> {
+    // The commit slot is keyed by sha alone. A build started from a
+    // subdirectory would publish that subtree as the commit's graph, and every
+    // later query for the sha, from any directory, would attach to it and see
+    // nothing else. Resolve to the worktree root before anything is keyed.
+    let toplevel = worktree_toplevel(worktree);
+    let worktree = toplevel.as_deref().unwrap_or(worktree);
     let sha_hex = match target_sha {
         Some(s) => s.to_string(),
         None => head_sha_hex(worktree)?,
@@ -354,6 +360,21 @@ fn sha_bytes(sha_hex: &str) -> Option<[u8; 20]> {
     let mut sha = [0u8; 20];
     hex::decode_to_slice(sha_hex, &mut sha).ok()?;
     Some(sha)
+}
+
+/// `None` outside a git worktree; callers then keep the directory they were given.
+pub(crate) fn worktree_toplevel(dir: &Path) -> Option<PathBuf> {
+    let out = safe_exec::git()
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(out.stdout).ok()?;
+    let path = path.trim();
+    (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
 pub(crate) fn head_sha_hex(worktree: &Path) -> io::Result<String> {
