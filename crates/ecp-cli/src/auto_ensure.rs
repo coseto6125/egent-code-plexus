@@ -367,23 +367,29 @@ pub fn worktree_sidecar_path(graph_path: &Path) -> PathBuf {
 /// so later queries pay one page of IO rather than a JSON parse.
 fn slot_built_below_root(graph_path: &Path, worktree_root: &Path) -> bool {
     let sidecar = worktree_sidecar_path(graph_path);
-    let line = match fs::read_to_string(&sidecar) {
-        Ok(raw) => raw,
-        Err(_) => {
+    // Only the terminator the writer appends is removed; a path may end in
+    // any byte. An unreadable or half-written sidecar falls through to
+    // meta.json and is rewritten.
+    let cached = fs::read_to_string(&sidecar).ok().and_then(|raw| {
+        let (sha, built) = raw.strip_suffix('\n')?.split_once(' ')?;
+        (sha.len() == 40).then(|| (sha.to_owned(), built.to_owned()))
+    });
+    let (sha, built) = match cached {
+        Some(cached) => cached,
+        None => {
             let Ok(meta) =
                 ecp_core::registry::CommitBuildMeta::read(&graph_path.with_file_name("meta.json"))
             else {
                 return false;
             };
-            let line = format!("{} {}\n", meta.sha, meta.built_from_worktree);
-            let _ = fs::write(&sidecar, &line);
-            line
+            let _ = fs::write(
+                &sidecar,
+                format!("{} {}\n", meta.sha, meta.built_from_worktree),
+            );
+            (meta.sha, meta.built_from_worktree)
         }
     };
-    let Some((sha, built)) = line.trim_end_matches(['\n', '\r']).split_once(' ') else {
-        return false;
-    };
-    crate::build::orchestrator::built_below_worktree_root(Path::new(built), sha, worktree_root)
+    crate::build::orchestrator::built_below_worktree_root(Path::new(&built), &sha, worktree_root)
 }
 
 /// Try to decide Ready vs Stale via the cheap git fingerprint.
@@ -1519,6 +1525,11 @@ mod fingerprint_drift_tests {
 
         let from_root = slot("from-root", &worktree);
         assert!(!slot_built_below_root(&from_root, &worktree));
+        fs::write(worktree_sidecar_path(&from_subtree), "").unwrap();
+        assert!(
+            slot_built_below_root(&from_subtree, &worktree),
+            "a half-written sidecar falls back to meta.json"
+        );
         assert!(
             !slot_built_below_root(&from_root, &other),
             "a slot from another worktree root of the same repo stays usable"

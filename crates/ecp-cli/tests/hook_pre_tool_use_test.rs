@@ -443,3 +443,26 @@ fn test_edit_hook_from_a_subdirectory_keys_paths_at_the_worktree_root() {
     assert!(!context.contains("use.js"), "{context}");
     assert!(context.contains("1 direct importers"), "{context}");
 }
+
+/// Contract: a cwd that is a symlink to a subdirectory still resolves the
+/// worktree root through the physical path, so importers are found.
+#[cfg(unix)]
+#[test]
+fn test_edit_hook_symlinked_subdirectory_cwd_finds_importers() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = indexed_repo(
+        tmp.path(),
+        &[
+            ("sub/lib.js", "export function x() { return 1; }\n".into()),
+            (
+                "sub/real.js",
+                "import { x } from './lib.js';\nconsume(x());\n".into(),
+            ),
+        ],
+    );
+    let alias = tmp.path().join("alias");
+    std::os::unix::fs::symlink(repo.join("sub"), &alias).unwrap();
+    let context = edit_context(&home, &alias, &alias.join("lib.js"), "return 1", "return 2");
+    assert!(context.contains("sub/real.js:2"), "{context}");
+    assert!(context.contains("1 direct importers"), "{context}");
+}

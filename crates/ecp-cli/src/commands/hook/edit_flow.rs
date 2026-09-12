@@ -72,20 +72,19 @@ pub fn context_in(input: &HookInput, after: bool, state: &Path) -> Option<String
     // the graph and the import specifiers of other files; otherwise at cwd.
     // Hook paths share the host's spelling of cwd, including symlink aliases
     // and Windows verbatim prefixes. New Write targets need not exist yet.
-    let root = git_root(cwd);
+    let root = git_root(cwd).or_else(|| git_root(&dunce::canonicalize(cwd).ok()?));
     let base = root.as_deref().unwrap_or(cwd);
-    let relative = relative_path(base, Path::new(file)).ok().or_else(|| {
-        let repo = dunce::canonicalize(base).ok()?;
-        relative_path(&repo, Path::new(file)).ok()
-    })?;
+    let relative = relative_path(base, Path::new(file))
+        .ok()
+        .or_else(|| relative_path(base, &physical(cwd, Path::new(file))?).ok())
+        .or_else(|| {
+            let repo = dunce::canonicalize(base).ok()?;
+            relative_path(&repo, Path::new(file)).ok()
+        })?;
     if !supported_path(&relative) {
         return None;
     }
-    let absolute = if Path::new(file).is_absolute() {
-        PathBuf::from(file)
-    } else {
-        base.join(file)
-    };
+    let absolute = base.join(&relative);
     let current = match read_source(&absolute) {
         Ok(source) => source,
         Err(reason) => {
@@ -208,6 +207,19 @@ impl Importers {
                     .into(),
         }
     }
+}
+
+/// The physical spelling of `file`: its parent canonicalized, so a path under
+/// a symlinked cwd lands under the same root `git_root` found through the
+/// canonical cwd. A new Write target need not exist, only its directory.
+fn physical(cwd: &Path, file: &Path) -> Option<PathBuf> {
+    let file = if file.is_absolute() {
+        file.to_path_buf()
+    } else {
+        cwd.join(file)
+    };
+    let parent = dunce::canonicalize(file.parent()?).ok()?;
+    Some(parent.join(file.file_name()?))
 }
 
 /// Nearest ancestor of `cwd` holding a `.git` entry; a linked worktree's is a
