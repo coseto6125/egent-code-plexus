@@ -260,6 +260,7 @@ fn run_tool(cmd: Command, tool: &str, timeout: Duration) -> Result<std::process:
     })
 }
 
+#[derive(Debug)]
 pub(crate) enum Provenance {
     Verified,
     Unchecked(String),
