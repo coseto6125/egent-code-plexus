@@ -38,7 +38,11 @@ pub fn context(input: &HookInput, after: bool) -> Option<String> {
         return None;
     }
     let repo = dunce::canonicalize(&input.cwd).ok()?;
-    let relative = crate::commands::flow::relative_path(&repo, Path::new(file)).ok()?;
+    // Hook paths share the host's spelling of cwd, including symlink aliases
+    // and Windows verbatim prefixes. New Write targets need not exist yet.
+    let relative = crate::commands::flow::relative_path(Path::new(&input.cwd), Path::new(file))
+        .or_else(|_| crate::commands::flow::relative_path(&repo, Path::new(file)))
+        .ok()?;
     if !crate::commands::flow::supported_path(&relative) {
         return None;
     }
@@ -198,6 +202,32 @@ fn render(report: &Value, phase: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn test_context_symlink_cwd_preserves_edit_consumers() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&repo).unwrap();
+        std::os::unix::fs::symlink(&repo, &alias).unwrap();
+        std::fs::write(repo.join("x.js"), "let x = 1;\nconsume(x);\n").unwrap();
+        let input: HookInput = serde_json::from_value(json!({"session_id":"alias","tool_use_id":"edit","cwd":alias,"tool_name":"Edit","tool_input":{"file_path":alias.join("x.js"),"old_string":"1","new_string":"2"}})).unwrap();
+        assert!(context(&input, false).unwrap().contains("x.js:2"));
+        std::fs::write(repo.join("x.js"), "let x = 2;\nconsume(x);\n").unwrap();
+        assert!(context(&input, true).unwrap().contains("x.js:2"));
+    }
+
+    #[test]
+    fn test_context_write_new_file_preserves_before_and_after_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("new.js");
+        let source = "let x = 1;\nconsume(x);\n";
+        let input: HookInput = serde_json::from_value(json!({"session_id":"write","tool_use_id":"new","cwd":temp.path(),"tool_name":"Write","tool_input":{"file_path":file,"content":source}})).unwrap();
+        assert!(context(&input, false).unwrap().contains("before edit"));
+        std::fs::write(&file, source).unwrap();
+        assert!(context(&input, true).unwrap().contains("new.js:2"));
+    }
+
     #[test]
     fn test_context_edit_captures_before_and_after_consumers() {
         let dir = tempfile::tempdir().unwrap();
