@@ -135,7 +135,7 @@ fn test_load_sources_python_stub_uses_engine_language_support() {
     )
     .unwrap();
     assert_eq!(
-        load_sources(repo.path(), None).unwrap()[0].path,
+        load_sources(repo.path(), None).unwrap().files[0].path,
         "model.pyi"
     );
 }
@@ -228,10 +228,13 @@ fn test_load_sources_at_ref_preserves_baseline_and_unusual_paths() {
         .success());
     std::fs::write(root.join(file), "const x = 2;").unwrap();
     let baseline = load_sources_at_ref(root, "HEAD").unwrap();
-    assert_eq!(baseline.len(), 1);
-    assert_eq!(baseline[0].path, file);
-    assert_eq!(baseline[0].source, "const x = 1;");
-    assert_eq!(load_sources(root, None).unwrap()[0].source, "const x = 2;");
+    assert_eq!(baseline.files.len(), 1);
+    assert_eq!(baseline.files[0].path, file);
+    assert_eq!(baseline.files[0].source, "const x = 1;");
+    assert_eq!(
+        load_sources(root, None).unwrap().files[0].source,
+        "const x = 2;"
+    );
     assert!(load_sources_at_ref(root, "--all").is_err());
 }
 
@@ -268,18 +271,19 @@ fn test_load_sources_tracked_ignored_matches_baseline_without_fake_deletion() {
     let after = load_sources(root, None).unwrap();
     assert_eq!(
         after
+            .files
             .iter()
             .map(|source| source.path.as_str())
             .collect::<Vec<_>>(),
         ["tracked.js"]
     );
-    let review = ecp_cli::commands::review::flow::compare(&before, &after, None);
+    let review = ecp_cli::commands::review::flow::compare(&before.files, &after.files, None);
     assert!(
         review["analysis"].as_array().unwrap().is_empty(),
         "{review}"
     );
     std::fs::remove_file(root.join("tracked.js")).unwrap();
-    assert!(load_sources(root, None).unwrap().is_empty());
+    assert!(load_sources(root, None).unwrap().files.is_empty());
 }
 
 #[cfg(unix)]
@@ -303,4 +307,25 @@ fn test_load_sources_tracked_symlink_ancestor_rejects_outside_scope() {
     std::os::unix::fs::symlink(outside.path(), root.join("src")).unwrap();
     let error = load_sources(root, None).unwrap_err();
     assert!(error.to_string().contains("outside --repo"), "{error}");
+}
+
+/// Contract: an unreadable source is excluded and reported, never fatal.
+/// Before this fix one latin-1 file failed every flow query in the repo.
+#[test]
+fn test_load_sources_non_utf8_file_is_skipped_with_boundary() {
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("ok.js"), "const x = 1;\n").unwrap();
+    std::fs::write(repo.path().join("latin1.js"), b"let z = \"\xe9\";\n").unwrap();
+    let loaded = load_sources(repo.path(), None).unwrap();
+    assert_eq!(
+        loaded
+            .files
+            .iter()
+            .map(|source| source.path.as_str())
+            .collect::<Vec<_>>(),
+        ["ok.js"]
+    );
+    assert_eq!(loaded.skipped.len(), 1);
+    assert_eq!(loaded.skipped[0].file, "latin1.js");
+    assert_eq!(loaded.skipped[0].kind, "unreadable_source");
 }
