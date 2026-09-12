@@ -511,6 +511,9 @@ fn admin_mcp_tools_list_includes_manual_tools_once_each() {
     // Hidden subcommands must not produce derived tools.
     for forbidden in [
         "ecp_admin",
+        // visible in the CLI, filtered from the model's surface: a model must
+        // not swap the binary its later calls run on
+        "ecp_update",
         "ecp_hook_handle",
         "ecp_hook_watcher",
         "ecp_hook",
