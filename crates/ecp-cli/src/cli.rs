@@ -159,6 +159,11 @@ pub enum Commands {
     /// a terminal ASCII dashboard; `--format json` emits machine-readable stats.
     /// `--source cli|mcp|all` (default `all`) filters which telemetry files feed the dashboard.
     Usage(commands::usage::UsageArgs),
+    /// Replace this binary with the latest GitHub Release; `--check` only reports.
+    ///
+    /// Works for every install channel. Upgrading through npm / uv / pip / brew /
+    /// cargo is removed in 0.15; this is the upgrade path from then on.
+    Update(commands::update::UpdateArgs),
 }
 
 impl Commands {
@@ -199,7 +204,8 @@ impl Commands {
             | Commands::Schema(_)
             | Commands::Insight(_)
             | Commands::Usage(_)
-            | Commands::Uninstall(_) => false,
+            | Commands::Uninstall(_)
+            | Commands::Update(_) => false,
         }
     }
 
@@ -252,7 +258,8 @@ impl Commands {
             | Commands::Schema(_)
             | Commands::Insight(_)
             | Commands::Usage(_)
-            | Commands::Uninstall(_) => None,
+            | Commands::Uninstall(_)
+            | Commands::Update(_) => None,
         }
     }
 }

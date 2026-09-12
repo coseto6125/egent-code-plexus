@@ -131,6 +131,7 @@ fn command_label(cmd: &Commands) -> &'static str {
         Commands::Insight(_) => "insight",
         Commands::Usage(_) => "usage",
         Commands::Uninstall(_) => "uninstall",
+        Commands::Update(_) => "update",
     }
 }
 
@@ -334,6 +335,7 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
         Commands::Insight(args) => commands::insight::run(args),
         Commands::Usage(args) => commands::usage::run(args),
         Commands::Uninstall(args) => commands::uninstall::run(args),
+        Commands::Update(args) => commands::update::run(args),
         Commands::Admin { .. } => unreachable!("handled before graph load"),
     };
     result
