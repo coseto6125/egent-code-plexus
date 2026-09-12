@@ -654,6 +654,8 @@ struct Function {
 }
 type Scope = BTreeMap<String, Value>;
 type State = (Vec<Scope>, Vec<Scope>);
+/// One `(condition, body)` arm of an if / elif / ternary.
+type Arm = (Option<usize>, Option<usize>);
 struct Engine<'a> {
     files: &'a [SourceFile],
     ast: Vec<Ast>,
@@ -1348,7 +1350,7 @@ impl Engine<'_> {
     /// `if_statement` repeats the `alternative` field once per `elif` and
     /// Python `conditional_expression` has no fields at all, so both are read
     /// positionally instead of through the single-valued field map.
-    fn arms(&self, n: usize) -> (Vec<(Option<usize>, Option<usize>)>, Option<usize>) {
+    fn arms(&self, n: usize) -> (Vec<Arm>, Option<usize>) {
         let a = &self.ast[n];
         let python =
             self.files[a.file].path.ends_with(".py") || self.files[a.file].path.ends_with(".pyi");
