@@ -479,3 +479,38 @@ fn test_fresh_gate_disengages_on_head_drift() {
          re-parse the remaining dirty file; stderr={s3}"
     );
 }
+
+// ── hot-path guard ───────────────────────────────────────────────────────────
+
+/// `pre_tool_use::handle` is a hot path: it runs on every matched tool call
+/// and blocks it. It stays a thin dispatcher (three `sections.push` calls:
+/// edit-flow evidence, search hits, peer drain) and never reaches for the
+/// index-maintenance modules. The edit-flow section in turn reads only the
+/// edited file: none of the repository-walk primitives may appear in it.
+#[test]
+fn test_pre_tool_use_hook_unchanged_path() {
+    const HANDLE: &str = include_str!("../src/commands/hook/pre_tool_use.rs");
+    const EDIT_FLOW: &str = include_str!("../src/commands/hook/edit_flow.rs");
+
+    assert!(
+        HANDLE.contains("pub fn handle(input: &HookInput) -> Result<(), EcpError> {"),
+        "pre_tool_use::handle signature changed"
+    );
+    for forbidden in ["reanalyze", "auto_ensure", "ensure_fresh"] {
+        assert!(
+            !HANDLE.contains(forbidden),
+            "pre_tool_use must not reference `{forbidden}` — hot-path rule violated"
+        );
+    }
+    let push_count = HANDLE.matches("sections.push").count();
+    assert_eq!(
+        push_count, 3,
+        "pre_tool_use::handle should contain exactly 3 `sections.push` calls, found {push_count}"
+    );
+    for forbidden in ["load_sources", "WalkBuilder", "ls-files", "read_dir(repo"] {
+        assert!(
+            !EDIT_FLOW.contains(forbidden),
+            "edit_flow must not walk the repository (`{forbidden}`) — hot-path rule violated"
+        );
+    }
+}

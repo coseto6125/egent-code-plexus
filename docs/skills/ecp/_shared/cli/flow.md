@@ -70,6 +70,6 @@ MCP exposes `ecp_flow` from the same CLI schema and executes the same command.
 Use the normal ecp skill for routing. Check each consumer and boundary before declaring compatibility.
 Refresh analysis after source changes rather than carrying forward old conclusions.
 
-Claude Code Edit/Write hooks provide bounded before/after evidence when installed.
+Claude Code Edit/Write hooks provide bounded before/after evidence for the edited file only, when installed. Consumers in other files are not in hook evidence; run `ecp review --include flow --baseline <ref>` for them.
 Other hosts must use the explicit flow/review commands unless their adapter supports the actual edit event.
 Hook evidence is a summary. Read the complete result when it is truncated or unresolved.

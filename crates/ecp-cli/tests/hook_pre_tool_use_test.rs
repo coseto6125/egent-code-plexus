@@ -237,3 +237,37 @@ fn test_edit_hook_failed_tool_response_emits_no_current_claim() {
         String::from_utf8_lossy(&output.stdout)
     );
 }
+
+/// Contract: the Edit hook reads the edited file only. A sibling source the
+/// process cannot read neither slows the hook down nor turns its evidence into
+/// "unresolved"; cross-file consumers are left to `ecp review --include flow`.
+#[cfg(unix)]
+#[test]
+fn test_edit_hook_ignores_unreadable_sibling_sources() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    let path = repo.path().join("x.js");
+    fs::write(&path, "let x = 1;\nconsume(x);\n").unwrap();
+    let sibling = repo.path().join("y.js");
+    fs::write(&sibling, "import { x } from './x.js';\nconsume(x);\n").unwrap();
+    fs::set_permissions(&sibling, fs::Permissions::from_mode(0o000)).unwrap();
+    let input = serde_json::json!({"session_id":"session-2","tool_use_id":"edit-2","cwd":repo.path(),"tool_name":"Edit","tool_input":{"file_path":path,"old_string":"1","new_string":"2"}});
+    let output = run_edit_event("pre-tool-use", &input, home.path());
+    fs::set_permissions(&sibling, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let context = payload["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.contains("x.js:2"), "{context}");
+    assert!(!context.contains("unresolved"), "{context}");
+    assert!(
+        !repo.path().join(".ecp").exists(),
+        "edit snapshots must not be written into the repository"
+    );
+}
