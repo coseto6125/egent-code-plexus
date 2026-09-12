@@ -1383,7 +1383,7 @@ impl Engine<'_> {
         let control_depth = self.controls.len();
         let mut result = Value::default();
         let mut exits: Vec<State> = Vec::new();
-        for (index, (condition, body)) in arms.iter().enumerate() {
+        for (index, &(condition, body)) in arms.iter().enumerate() {
             if index > 0 {
                 self.restore(&incoming);
             }
