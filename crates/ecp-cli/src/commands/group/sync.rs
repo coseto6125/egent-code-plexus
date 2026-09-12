@@ -243,7 +243,7 @@ fn walk_and_extract(
 }
 
 fn git_head(repo_root: &Path) -> std::io::Result<String> {
-    let out = std::process::Command::new("git")
+    let out = crate::git::safe_exec::git()
         .args(["rev-parse", "HEAD"])
         .current_dir(repo_root)
         .output()?;

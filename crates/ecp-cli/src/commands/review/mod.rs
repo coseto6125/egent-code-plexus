@@ -73,11 +73,19 @@ pub fn run(args: ReviewArgs, engine: &Engine) -> Result<(), EcpError> {
     let report = aggregate::run(&files, &repo_dir, engine, args.since.as_deref())?;
     let mut payload = report.emit(start.elapsed());
     if args.include.contains(&ReviewInclude::Flow) {
-        payload["flow"] = flow::build(
+        payload["flow"] = match flow::build(
             &repo_dir,
             args.since.as_deref().unwrap_or("HEAD"),
             args.files.as_deref(),
-        )?;
+        ) {
+            Ok(flow) => flow,
+            // The graph review stays usable; the flow slice reports its own gap.
+            Err(error) => serde_json::json!({
+                "analysis": [],
+                "truncated": true,
+                "unresolved": error.to_string(),
+            }),
+        };
         if payload["flow"]["analysis"]
             .as_array()
             .is_some_and(|rows| !rows.is_empty())

@@ -132,7 +132,7 @@ fn latest_published_graph(cwd: &Path) -> Option<PathBuf> {
 /// consistent with the repo-relative paths the graph stores). `None` when not
 /// a git repo.
 fn git_tracked_files(cwd: &Path) -> Option<Vec<String>> {
-    let out = std::process::Command::new("git")
+    let out = crate::git::safe_exec::git()
         .current_dir(cwd)
         .args(["ls-files", "--full-name", "-z"])
         .output()

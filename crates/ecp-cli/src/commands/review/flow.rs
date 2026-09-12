@@ -19,7 +19,12 @@ pub fn build(repo: &Path, baseline: &str, files: Option<&[String]>) -> Result<Va
         .transpose()?;
     let before = crate::commands::flow::load_sources_at_ref(&repo, baseline)?;
     let after = crate::commands::flow::load_sources(&repo, None)?;
-    Ok(compare(&before, &after, files.as_deref()))
+    let mut report = compare(&before.files, &after.files, files.as_deref());
+    let skipped: Vec<_> = before.skipped.iter().chain(&after.skipped).collect();
+    if !skipped.is_empty() {
+        report["skipped_sources"] = json!(skipped);
+    }
+    Ok(report)
 }
 
 pub fn compare(before: &[SourceFile], after: &[SourceFile], files: Option<&[String]>) -> Value {

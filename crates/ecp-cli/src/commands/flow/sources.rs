@@ -1,9 +1,10 @@
-use ecp_analyzer::flow::SourceFile;
+use crate::git::safe_exec;
+use ecp_analyzer::flow::{Boundary, SourceFile};
 use ecp_core::EcpError;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 const MAX_FILES: usize = 2048;
 const MAX_BYTES: usize = 32 * 1024 * 1024;
@@ -52,7 +53,31 @@ fn budget(files: usize, bytes: usize) -> Result<(), EcpError> {
     Ok(())
 }
 
-pub fn load_sources(repo: &Path, overlay: Option<&Path>) -> Result<Vec<SourceFile>, EcpError> {
+/// Sources admitted to analysis plus the ones the loader could not read.
+/// A skipped file is reported as a boundary, never silently dropped: an
+/// unreadable consumer must not read as an absent one.
+#[derive(Debug, Default)]
+pub struct Loaded {
+    pub files: Vec<SourceFile>,
+    pub skipped: Vec<Boundary>,
+}
+
+fn skipped(path: &str, message: String) -> Boundary {
+    Boundary {
+        file: path.to_owned(),
+        line: 1,
+        column: 1,
+        kind: "unreadable_source".into(),
+        message,
+    }
+}
+
+fn read_source(path: &Path) -> Result<Result<String, String>, EcpError> {
+    let bytes = std::fs::read(path)?;
+    Ok(String::from_utf8(bytes).map_err(|e| format!("not valid UTF-8: {e}")))
+}
+
+pub fn load_sources(repo: &Path, overlay: Option<&Path>) -> Result<Loaded, EcpError> {
     let canonical_repo = dunce::canonicalize(repo)?;
     let overlay: BTreeMap<String, String> = match overlay {
         Some(path) => {
@@ -71,6 +96,7 @@ pub fn load_sources(repo: &Path, overlay: Option<&Path>) -> Result<Vec<SourceFil
         None => BTreeMap::new(),
     };
     let mut sources = BTreeMap::new();
+    let mut skipped_files = Vec::new();
     let mut bytes = 0;
     let scope = repo.to_path_buf();
     let walker = ignore::WalkBuilder::new(repo)
@@ -99,7 +125,13 @@ pub fn load_sources(repo: &Path, overlay: Option<&Path>) -> Result<Vec<SourceFil
                 "source file exceeds flow byte budget: {path}"
             )));
         }
-        let source = std::fs::read_to_string(entry.path())?;
+        let source = match read_source(entry.path())? {
+            Ok(source) => source,
+            Err(message) => {
+                skipped_files.push(skipped(&path, message));
+                continue;
+            }
+        };
         bytes += source.len();
         sources.insert(path, source);
         budget(sources.len(), bytes)?;
@@ -129,7 +161,13 @@ pub fn load_sources(repo: &Path, overlay: Option<&Path>) -> Result<Vec<SourceFil
                 "source file exceeds flow byte budget: {path}"
             )));
         }
-        let source = std::fs::read_to_string(absolute)?;
+        let source = match read_source(&absolute)? {
+            Ok(source) => source,
+            Err(message) => {
+                skipped_files.push(skipped(&path, message));
+                continue;
+            }
+        };
         bytes += source.len();
         sources.insert(path, source);
         budget(sources.len(), bytes)?;
@@ -147,14 +185,17 @@ pub fn load_sources(repo: &Path, overlay: Option<&Path>) -> Result<Vec<SourceFil
         }
         budget(sources.len(), bytes)?;
     }
-    Ok(sources
-        .into_iter()
-        .map(|(path, source)| SourceFile { path, source })
-        .collect())
+    Ok(Loaded {
+        files: sources
+            .into_iter()
+            .map(|(path, source)| SourceFile { path, source })
+            .collect(),
+        skipped: skipped_files,
+    })
 }
 
 fn tracked_paths(repo: &Path) -> Result<Vec<String>, EcpError> {
-    let probe = match Command::new("git")
+    let probe = match safe_exec::git()
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(repo)
         .output()
@@ -166,7 +207,7 @@ fn tracked_paths(repo: &Path) -> Result<Vec<String>, EcpError> {
     if !probe.status.success() || probe.stdout != b"true\n" {
         return Ok(Vec::new());
     }
-    let tracked = Command::new("git")
+    let tracked = safe_exec::git()
         .args(["ls-files", "--cached", "-z", "--"])
         .current_dir(repo)
         .output()?;
@@ -190,8 +231,8 @@ fn tracked_paths(repo: &Path) -> Result<Vec<String>, EcpError> {
 
 /// Read a complete baseline snapshot. Object IDs avoid quoting ambiguities for
 /// paths containing whitespace, colons, or newlines in the batch protocol.
-pub fn load_sources_at_ref(repo: &Path, reference: &str) -> Result<Vec<SourceFile>, EcpError> {
-    let revision = Command::new("git")
+pub fn load_sources_at_ref(repo: &Path, reference: &str) -> Result<Loaded, EcpError> {
+    let revision = safe_exec::git()
         .args([
             "rev-parse",
             "--verify",
@@ -206,7 +247,7 @@ pub fn load_sources_at_ref(repo: &Path, reference: &str) -> Result<Vec<SourceFil
         )));
     }
     let tree = String::from_utf8_lossy(&revision.stdout);
-    let listing = Command::new("git")
+    let listing = safe_exec::git()
         .args(["ls-tree", "-rz", tree.trim()])
         .current_dir(repo)
         .output()?;
@@ -241,9 +282,9 @@ pub fn load_sources_at_ref(repo: &Path, reference: &str) -> Result<Vec<SourceFil
     entries.sort();
     budget(entries.len(), 0)?;
     if entries.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Loaded::default());
     }
-    let mut child = Command::new("git")
+    let mut child = safe_exec::git()
         .args(["cat-file", "--batch"])
         .current_dir(repo)
         .stdin(Stdio::piped())
@@ -259,8 +300,8 @@ pub fn load_sources_at_ref(repo: &Path, reference: &str) -> Result<Vec<SourceFil
         Ok(())
     });
     let mut reader = BufReader::new(child.stdout.take().expect("piped stdout"));
-    let result = (|| -> Result<Vec<SourceFile>, EcpError> {
-        let mut sources = Vec::new();
+    let result = (|| -> Result<Loaded, EcpError> {
+        let mut sources = Loaded::default();
         let mut total = 0usize;
         for (path, id) in entries {
             let mut header = String::new();
@@ -275,7 +316,7 @@ pub fn load_sources_at_ref(repo: &Path, reference: &str) -> Result<Vec<SourceFil
             total = total
                 .checked_add(size)
                 .ok_or_else(|| EcpError::InvalidArgument("baseline source size overflow".into()))?;
-            budget(sources.len() + 1, total)?;
+            budget(sources.files.len() + 1, total)?;
             let mut bytes = vec![0; size];
             reader.read_exact(&mut bytes)?;
             let mut newline = [0];
@@ -285,9 +326,12 @@ pub fn load_sources_at_ref(repo: &Path, reference: &str) -> Result<Vec<SourceFil
                     "invalid git batch terminator".into(),
                 ));
             }
-            let source =
-                String::from_utf8(bytes).map_err(|e| EcpError::InvalidArgument(e.to_string()))?;
-            sources.push(SourceFile { path, source });
+            match String::from_utf8(bytes) {
+                Ok(source) => sources.files.push(SourceFile { path, source }),
+                Err(e) => sources
+                    .skipped
+                    .push(skipped(&path, format!("not valid UTF-8: {e}"))),
+            }
         }
         Ok(sources)
     })();

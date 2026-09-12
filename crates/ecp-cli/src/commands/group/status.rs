@@ -114,7 +114,7 @@ fn resolve_member_status(member: &str, reg: &RegistryFile, meta: &GroupMeta) -> 
 }
 
 fn git_head(repo_root: &Path) -> Option<String> {
-    let out = std::process::Command::new("git")
+    let out = crate::git::safe_exec::git()
         .arg("-C")
         .arg(repo_root)
         .args(["rev-parse", "HEAD"])
@@ -133,7 +133,7 @@ fn git_head(repo_root: &Path) -> Option<String> {
 
 fn git_commits_behind(repo_root: &Path, stored_commit: &str) -> Option<u64> {
     let range = format!("{stored_commit}..HEAD");
-    let out = std::process::Command::new("git")
+    let out = crate::git::safe_exec::git()
         .arg("-C")
         .arg(repo_root)
         .args(["rev-list", "--count", &range])

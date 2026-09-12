@@ -47,7 +47,7 @@ pub fn context(input: &HookInput, after: bool) -> Option<String> {
         return None;
     }
     let mut current = match load_sources(&repo, None) {
-        Ok(sources) => sources,
+        Ok(sources) => sources.files,
         Err(error) => return Some(format!("ecp flow: source snapshot unresolved: {error}")),
     };
     let state = ecp_state_dir_ensure(&input.cwd)?;
