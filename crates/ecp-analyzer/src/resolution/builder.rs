@@ -1759,7 +1759,12 @@ impl LexicalFunctionIndex {
             .nodes
             .iter()
             .enumerate()
-            .filter(|(_, node)| matches!(node.kind, NodeKind::Function | NodeKind::Method))
+            .filter(|(_, node)| {
+                matches!(
+                    node.kind,
+                    NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+                )
+            })
             .collect();
         for &(offset, node) in &functions {
             if node.kind != NodeKind::Function {

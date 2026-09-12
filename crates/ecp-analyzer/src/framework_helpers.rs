@@ -452,7 +452,12 @@ pub fn stamp_js_function_owners(nodes: &mut [RawNode]) {
     let mut functions: Vec<usize> = nodes
         .iter()
         .enumerate()
-        .filter(|(_, node)| matches!(node.kind, NodeKind::Function | NodeKind::Method))
+        .filter(|(_, node)| {
+            matches!(
+                node.kind,
+                NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+            )
+        })
         .map(|(index, _)| index)
         .collect();
     functions.sort_by_key(|&index| std::cmp::Reverse(span_area(nodes[index].span)));
