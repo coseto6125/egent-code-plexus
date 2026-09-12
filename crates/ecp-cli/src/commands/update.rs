@@ -508,7 +508,8 @@ mod tests {
     #[test]
     fn test_park_path_falls_back_to_pid_suffix_when_old_cannot_be_removed() {
         use std::os::unix::fs::PermissionsExt;
-        if nix::unistd::geteuid().is_root() {
+        // root ignores directory modes, so the fallback cannot be provoked.
+        if unsafe { libc::geteuid() } == 0 {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
