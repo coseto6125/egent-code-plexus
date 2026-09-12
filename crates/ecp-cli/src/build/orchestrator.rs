@@ -373,7 +373,9 @@ pub(crate) fn worktree_toplevel(dir: &Path) -> Option<PathBuf> {
         return None;
     }
     let path = String::from_utf8(out.stdout).ok()?;
-    let path = path.trim();
+    // Only git's terminator goes; a root ending in whitespace is still that root.
+    let path = path.strip_suffix('\n').unwrap_or(&path);
+    let path = path.strip_suffix('\r').unwrap_or(path);
     (!path.is_empty()).then(|| PathBuf::from(path))
 }
 

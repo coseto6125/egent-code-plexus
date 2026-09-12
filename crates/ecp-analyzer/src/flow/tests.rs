@@ -562,3 +562,108 @@ fn test_analyze_boundaries_scoped_to_reached_files() {
     );
     assert_eq!(report.boundaries_omitted, 1, "{report:#?}");
 }
+// Second round (codex cross-family review of the fix series).
+#[test]
+fn test_analyze_condition_side_effect_survives_into_fallthrough() {
+    let report = query(
+        "let value = 0;\nfunction check() { value = 101; return flag; }\nfunction run() {\n  if (check()) return;\n  consume(value);\n}\nrun();\n",
+        2,
+        29,
+    );
+    assert!(consumes(&report, "value"), "{report:#?}");
+}
+#[test]
+fn test_analyze_loop_closure_identity_stays_per_call() {
+    let report = query(
+        "function make(v) {\n  let f;\n  while (flag) { f = () => v; }\n  return f;\n}\nconst first = make(101);\nconst second = make(202);\nconsume(second());\n",
+        7,
+        21,
+    );
+    assert!(consumes(&report, "second()"), "{report:#?}");
+}
+#[test]
+fn test_analyze_loop_allocation_reuse_keeps_previous_iteration_field() {
+    let report = query(
+        "let prev;\nlet flag = true;\nwhile (flag) {\n  let next = { x: 0 };\n  if (prev) consume(prev.x);\n  next.x = 101;\n  prev = next;\n}\n",
+        6,
+        12,
+    );
+    assert!(consumes(&report, "prev.x"), "{report:#?}");
+}
+#[test]
+fn test_analyze_uncalled_nested_sibling_keeps_enclosing_value() {
+    let report = query(
+        "function outer() {\n  let value = 101;\n  function reset() { value = 202; }\n  function read() { consume(value); }\n}\n",
+        2,
+        15,
+    );
+    assert!(consumes(&report, "value"), "{report:#?}");
+}
+#[test]
+fn test_analyze_python_elif_return_controls_following_statement() {
+    let report = query_in(
+        "test.py",
+        "def f(a, b):\n    if a:\n        x = 0\n    elif b:\n        return 0\n    consume(7)\n",
+        6,
+        13,
+    );
+    let argument = report
+        .nodes
+        .iter()
+        .find(|n| n.kind == "argument" && n.label == "7")
+        .map(|n| n.id)
+        .expect("consume(7) argument node");
+    let b_conditions: Vec<usize> = report
+        .nodes
+        .iter()
+        .filter(|n| n.kind == "condition" && n.label == "b")
+        .map(|n| n.id)
+        .collect();
+    assert!(
+        report
+            .edges
+            .iter()
+            .any(|e| e.kind == "control" && e.to == argument && b_conditions.contains(&e.from)),
+        "{report:#?}"
+    );
+}
+#[test]
+fn test_analyze_boundaries_keep_direct_module_neighbours() {
+    let files = [
+        SourceFile {
+            path: "a.js".into(),
+            source: "export const x = { secret: 101 };\n".into(),
+        },
+        SourceFile {
+            path: "b.js".into(),
+            source: "import { x } from './a.js';\nconst y = { ...x };\nconsume(y);\n".into(),
+        },
+        SourceFile {
+            path: "c.js".into(),
+            source: "other();\n".into(),
+        },
+    ];
+    let report = analyze(
+        &files,
+        &FlowRequest {
+            file: "a.js".into(),
+            line: 1,
+            column: 28,
+            subject: Subject::Value,
+            direction: Direction::Forward,
+            budgets: Budgets::default(),
+        },
+    )
+    .unwrap();
+    assert!(
+        report
+            .boundaries
+            .iter()
+            .any(|b| b.file == "b.js" && b.kind == "object_member"),
+        "{report:#?}"
+    );
+    assert!(
+        report.boundaries.iter().all(|b| b.file != "c.js"),
+        "{report:#?}"
+    );
+}

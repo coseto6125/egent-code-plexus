@@ -128,7 +128,10 @@ pub fn load_sources(repo: &Path, overlay: Option<&Path>) -> Result<Loaded, EcpEr
         let source = match read_source(entry.path())? {
             Ok(source) => source,
             Err(message) => {
+                // A skipped file still spent the read; it counts against the budget.
+                bytes += size as usize;
                 skipped_files.push(skipped(&path, message));
+                budget(sources.len() + skipped_files.len(), bytes)?;
                 continue;
             }
         };
@@ -164,7 +167,9 @@ pub fn load_sources(repo: &Path, overlay: Option<&Path>) -> Result<Loaded, EcpEr
         let source = match read_source(&absolute)? {
             Ok(source) => source,
             Err(message) => {
+                bytes += metadata.len() as usize;
                 skipped_files.push(skipped(&path, message));
+                budget(sources.len() + skipped_files.len(), bytes)?;
                 continue;
             }
         };
@@ -316,7 +321,7 @@ pub fn load_sources_at_ref(repo: &Path, reference: &str) -> Result<Loaded, EcpEr
             total = total
                 .checked_add(size)
                 .ok_or_else(|| EcpError::InvalidArgument("baseline source size overflow".into()))?;
-            budget(sources.files.len() + 1, total)?;
+            budget(sources.files.len() + sources.skipped.len() + 1, total)?;
             let mut bytes = vec![0; size];
             reader.read_exact(&mut bytes)?;
             let mut newline = [0];

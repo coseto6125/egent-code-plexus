@@ -171,6 +171,7 @@ impl Engine<'_> {
             .filter_map(|(n, _)| self.import_target(n).map(|(_, f)| f))
             .collect();
         for dependency in dependencies {
+            self.links.insert((file, dependency));
             self.module(dependency, visiting, done);
         }
         self.imports(file);
@@ -259,13 +260,44 @@ impl Engine<'_> {
             .filter(|n| selected.contains(&n.id))
             .collect();
         // An empty slice keeps every boundary: nothing else explains why it is empty.
-        let reached: Option<BTreeSet<&str>> =
-            (!nodes.is_empty()).then(|| nodes.iter().map(|n| n.file.as_str()).collect());
+        let index: BTreeMap<&str, usize> = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.path.as_str(), i))
+            .collect();
+        let reached: Option<BTreeSet<usize>> = (!nodes.is_empty()).then(|| {
+            let mut files: BTreeSet<usize> = nodes
+                .iter()
+                .filter_map(|n| index.get(n.file.as_str()).copied())
+                .collect();
+            // Direct module neighbours too: the unresolved import or spread that
+            // stops a slice at a file edge lives on the other side of that edge.
+            let neighbours: Vec<usize> = self
+                .links
+                .iter()
+                .filter_map(|(importer, dependency)| {
+                    if files.contains(importer) {
+                        Some(*dependency)
+                    } else if files.contains(dependency) {
+                        Some(*importer)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            files.extend(neighbours);
+            files
+        });
         let total = self.boundaries.len();
         let boundaries: Vec<Boundary> = self
             .boundaries
             .into_iter()
-            .filter(|b| reached.as_ref().is_none_or(|r| r.contains(b.file.as_str())))
+            .filter(|b| {
+                reached
+                    .as_ref()
+                    .is_none_or(|r| index.get(b.file.as_str()).is_some_and(|i| r.contains(i)))
+            })
             .collect();
         let boundaries_omitted = total - boundaries.len();
         let consumers = nodes
@@ -324,6 +356,8 @@ fn build<'a>(files: &'a [SourceFile], budgets: &Budgets) -> Result<Engine<'a>, S
         controls: vec![],
         loop_nodes: None,
         loop_objects: None,
+        loop_functions: None,
+        links: BTreeSet::new(),
     };
     let mut paths = BTreeSet::new();
     for (i, f) in files.iter().enumerate() {
@@ -350,7 +384,6 @@ fn build<'a>(files: &'a [SourceFile], budgets: &Budgets) -> Result<Engine<'a>, S
         ) else {
             // One pathological file must not take the whole corpus down with it.
             engine.roots.push(None);
-            engine.truncated = true;
             engine.boundaries.insert(Boundary {
                 file: f.path.clone(),
                 line: 1,
@@ -398,12 +431,14 @@ fn build<'a>(files: &'a [SourceFile], budgets: &Budgets) -> Result<Engine<'a>, S
     // Inspect uncalled functions independently, so source queries do not require a runtime entry point.
     // Each entry point starts from the module-exit state; otherwise the strong
     // writes of one uncalled function would kill values a sibling still reads.
-    let module_exit = engine.snapshot();
     let mut f = 0;
     while f < engine.functions.len() && !engine.truncated {
         if !engine.called.contains(&f) {
-            engine.restore(&module_exit);
+            // Each entry point runs from the state it was discovered in (its
+            // enclosing function's frame included) and leaves no effects behind.
+            let base = engine.snapshot();
             engine.invoke(f, &[]);
+            engine.restore(&base);
         }
         f += 1;
     }
@@ -680,6 +715,9 @@ struct Engine<'a> {
     controls: Vec<Value>,
     loop_nodes: Option<BTreeMap<(usize, String), usize>>,
     loop_objects: Option<BTreeMap<usize, usize>>,
+    loop_functions: Option<BTreeMap<usize, usize>>,
+    /// (importer, dependency) file pairs resolved during module initialisation.
+    links: BTreeSet<(usize, usize)>,
 }
 impl Engine<'_> {
     fn field(&self, n: usize, key: &str) -> Option<usize> {
@@ -816,7 +854,8 @@ impl Engine<'_> {
                         "The receiver has no resolved allocation.",
                     );
                 }
-                let weak = base.objects.len() > 1;
+                let weak = base.objects.len() > 1
+                    || base.objects.iter().any(|obj| self.is_loop_summary(*obj));
                 for obj in base.objects {
                     if weak {
                         self.objects[obj]
@@ -875,12 +914,11 @@ impl Engine<'_> {
     fn function(&mut self, n: usize, scopes: &[usize]) -> Value {
         // Loop iterations reuse the callable identity, like they reuse nodes, so a
         // closure created in a loop body does not defeat the fixed point.
-        if self.loop_nodes.is_some() {
-            if let Some(id) = self.functions.iter().rposition(|f| f.ast == n) {
-                let mut v = self.node(n, "function", &Value::default());
-                v.functions.insert(id);
-                return v;
-            }
+        if let Some(id) = self.loop_functions.as_ref().and_then(|cache| cache.get(&n)) {
+            let id = *id;
+            let mut v = self.node(n, "function", &Value::default());
+            v.functions.insert(id);
+            return v;
         }
         if self.ast[n].text.starts_with("async ") {
             self.boundary(
@@ -974,6 +1012,9 @@ impl Engine<'_> {
             scopes: capture_scopes,
             defaults,
         });
+        if let Some(cache) = self.loop_functions.as_mut() {
+            cache.insert(n, id);
+        }
         let mut v = self.node(n, "function", &Value::default());
         v.functions.insert(id);
         v
@@ -1123,8 +1164,13 @@ impl Engine<'_> {
             }
             "object" | "dictionary" | "array_creation_expression" => {
                 // Loop iterations reuse the allocation, like they reuse nodes, so the heap converges.
-                let obj = match self.loop_objects.as_ref().and_then(|cache| cache.get(&n)) {
-                    Some(obj) => *obj,
+                let reused = self
+                    .loop_objects
+                    .as_ref()
+                    .and_then(|cache| cache.get(&n))
+                    .copied();
+                let obj = match reused {
+                    Some(obj) => obj,
                     None => {
                         let obj = self.objects.len();
                         self.objects.push(Scope::new());
@@ -1141,8 +1187,14 @@ impl Engine<'_> {
                     if let (Some(k), Some(v)) = (key, val) {
                         let v = self.eval(v, scopes);
                         inputs.merge(&v);
-                        self.objects[obj]
-                            .insert(self.ast[k].text.trim_matches(['\'', '"']).into(), v);
+                        let key: String = self.ast[k].text.trim_matches(['\'', '"']).into();
+                        // A reused allocation summarises every iteration: its fields
+                        // accumulate instead of restarting from the literal.
+                        if reused.is_some() {
+                            self.objects[obj].entry(key).or_default().merge(&v);
+                        } else {
+                            self.objects[obj].insert(key, v);
+                        }
                     } else {
                         self.boundary(
                             *c,
@@ -1220,7 +1272,10 @@ impl Engine<'_> {
                         v.merge(&current);
                     }
                     if self.ast[c].kind == "if_statement" && self.partial_return(c) {
-                        if let Some(condition) = self.field(c, "condition") {
+                        // Every arm's condition decides whether the statements after
+                        // the branch run at all.
+                        let (arms, _) = self.arms(c);
+                        for condition in arms.iter().filter_map(|(condition, _)| *condition) {
                             if let Some(id) =
                                 self.origins
                                     .iter()
@@ -1310,6 +1365,11 @@ impl Engine<'_> {
             }
         }
     }
+    fn is_loop_summary(&self, obj: usize) -> bool {
+        self.loop_objects
+            .as_ref()
+            .is_some_and(|cache| cache.values().any(|o| *o == obj))
+    }
     fn snapshot(&self) -> State {
         (self.scopes.clone(), self.objects.clone())
     }
@@ -1383,16 +1443,20 @@ impl Engine<'_> {
     }
     fn branch(&mut self, n: usize, scopes: &[usize]) -> Value {
         let (arms, otherwise) = self.arms(n);
-        let incoming = self.snapshot();
         let control_depth = self.controls.len();
         let mut result = Value::default();
         let mut exits: Vec<State> = Vec::new();
-        for (index, &(condition, body)) in arms.iter().enumerate() {
-            if index > 0 {
-                self.restore(&incoming);
+        // State after the latest condition ran and was false. The next arm's
+        // condition and the else body start from it, so a condition's own side
+        // effects (a call that writes) survive into the arms that follow.
+        let mut fallthrough: Option<State> = None;
+        for &(condition, body) in &arms {
+            if let Some(state) = &fallthrough {
+                self.restore(state);
             }
             let cond = condition.map(|c| self.eval(c, scopes)).unwrap_or_default();
             let cond = self.node(condition.unwrap_or(n), "condition", &cond);
+            fallthrough = Some(self.snapshot());
             // Each later arm is also control-dependent on every earlier condition.
             self.controls.push(cond);
             if let Some(body) = body {
@@ -1402,7 +1466,8 @@ impl Engine<'_> {
                 exits.push(self.snapshot());
             }
         }
-        self.restore(&incoming);
+        let fallthrough = fallthrough.unwrap_or_else(|| self.snapshot());
+        self.restore(&fallthrough);
         match otherwise {
             Some(otherwise) => {
                 result.merge(&self.eval(otherwise, scopes));
@@ -1410,7 +1475,7 @@ impl Engine<'_> {
                     exits.push(self.snapshot());
                 }
             }
-            None => exits.push(incoming),
+            None => exits.push(fallthrough),
         }
         self.controls.truncate(control_depth);
         self.join_all(&exits);
@@ -1466,9 +1531,14 @@ impl Engine<'_> {
         }
     }
     fn loop_flow(&mut self, n: usize, scopes: &[usize]) -> Value {
-        let outer_cache = (self.loop_nodes.take(), self.loop_objects.take());
+        let outer_cache = (
+            self.loop_nodes.take(),
+            self.loop_objects.take(),
+            self.loop_functions.take(),
+        );
         self.loop_nodes = Some(BTreeMap::new());
         self.loop_objects = Some(BTreeMap::new());
+        self.loop_functions = Some(BTreeMap::new());
         let mut result = Value::default();
         if let Some(initializer) = self.field(n, "initializer") {
             self.eval(initializer, scopes);
@@ -1529,7 +1599,7 @@ impl Engine<'_> {
                 "Iterator element binding and protocol effects are unresolved.",
             );
         }
-        (self.loop_nodes, self.loop_objects) = outer_cache;
+        (self.loop_nodes, self.loop_objects, self.loop_functions) = outer_cache;
         result
     }
     fn call(&mut self, n: usize, scopes: &[usize]) -> Value {
@@ -1721,7 +1791,11 @@ impl Engine<'_> {
         }
         self.active.push(fun.ast);
         // Loop iterations reuse local expression nodes, but separate calls retain distinct contexts.
-        let loop_cache = (self.loop_nodes.take(), self.loop_objects.take());
+        let loop_cache = (
+            self.loop_nodes.take(),
+            self.loop_objects.take(),
+            self.loop_functions.take(),
+        );
         let summary = self.node(fun.ast, "return_summary", &Value::default());
         self.active_returns.push(summary.clone());
         self.active_parameters.push(vec![]);
@@ -1802,7 +1876,7 @@ impl Engine<'_> {
                 });
             }
         }
-        (self.loop_nodes, self.loop_objects) = loop_cache;
+        (self.loop_nodes, self.loop_objects, self.loop_functions) = loop_cache;
         Value {
             ids: summary.ids,
             functions: result.functions,
