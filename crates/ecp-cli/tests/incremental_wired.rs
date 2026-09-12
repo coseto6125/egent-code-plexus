@@ -507,9 +507,18 @@ fn test_pre_tool_use_hook_unchanged_path() {
         push_count, 3,
         "pre_tool_use::handle should contain exactly 3 `sections.push` calls, found {push_count}"
     );
+    // Comments may name the primitives they rule out; code may not use them.
+    let edit_flow_code: String = EDIT_FLOW
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        );
     for forbidden in ["load_sources", "WalkBuilder", "ls-files", "read_dir(repo"] {
         assert!(
-            !EDIT_FLOW.contains(forbidden),
+            !edit_flow_code.contains(forbidden),
             "edit_flow must not walk the repository (`{forbidden}`) — hot-path rule violated"
         );
     }

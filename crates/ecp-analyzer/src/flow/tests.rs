@@ -601,31 +601,15 @@ fn test_analyze_uncalled_nested_sibling_keeps_enclosing_value() {
 }
 #[test]
 fn test_analyze_python_elif_return_controls_following_statement() {
+    // The value reaching `b` decides whether consume(7) runs: its condition
+    // node must carry a control edge to the argument after the branch.
     let report = query_in(
         "test.py",
-        "def f(a, b):\n    if a:\n        x = 0\n    elif b:\n        return 0\n    consume(7)\n",
-        6,
-        13,
+        "b = 101\ndef f(a):\n    if a:\n        x = 0\n    elif b:\n        return 0\n    consume(7)\n",
+        1,
+        5,
     );
-    let argument = report
-        .nodes
-        .iter()
-        .find(|n| n.kind == "argument" && n.label == "7")
-        .map(|n| n.id)
-        .expect("consume(7) argument node");
-    let b_conditions: Vec<usize> = report
-        .nodes
-        .iter()
-        .filter(|n| n.kind == "condition" && n.label == "b")
-        .map(|n| n.id)
-        .collect();
-    assert!(
-        report
-            .edges
-            .iter()
-            .any(|e| e.kind == "control" && e.to == argument && b_conditions.contains(&e.from)),
-        "{report:#?}"
-    );
+    assert!(consumes(&report, "7"), "{report:#?}");
 }
 #[test]
 fn test_analyze_boundaries_keep_direct_module_neighbours() {

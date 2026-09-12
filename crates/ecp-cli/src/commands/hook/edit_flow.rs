@@ -136,11 +136,13 @@ pub fn context_in(input: &HookInput, after: bool, state: &Path) -> Option<String
         Some(std::slice::from_ref(&relative)),
         Some(phase),
     );
-    let mut rendered = render(&report, phase);
     if input.session_id.is_empty() || input.tool_use_id.is_empty() {
-        rendered.push_str("Hook identity unavailable: edit pairing uses input identity; context deduplication is disabled.\n");
+        let warning = "Hook identity unavailable: edit pairing uses input identity; context deduplication is disabled.\n";
+        let mut rendered = render(&report, phase, MAX_CONTEXT - warning.len());
+        rendered.push_str(warning);
         return Some(rendered);
     }
+    let rendered = render(&report, phase, MAX_CONTEXT);
     let session_hash = ecp_core::uid::xxh3_64_bytes(input.session_id.as_bytes());
     let marker = state.join(format!("last-{session_hash:016x}"));
     // Hash includes source hashes, phase, and requested sites through the complete result.
@@ -226,14 +228,14 @@ fn one_line(text: &str) -> String {
         .collect()
 }
 
-fn render(report: &Value, phase: &str) -> String {
+fn render(report: &Value, phase: &str, max_context: usize) -> String {
     let mut lines = vec![format!(
         "ecp flow {phase} edit: consumers in the edited file require compatibility review. Unknown results do not establish absence. Scope: edited file only; cross-file consumers: ecp review --include flow --baseline <ref>."
     )];
     let mut truncated = report["truncated"].as_bool().unwrap_or(false);
     for row in report["analysis"].as_array().into_iter().flatten() {
         let file = row["file"].as_str().unwrap_or("?");
-        lines.push(format!("{file}:{}", row["line"]));
+        lines.push(format!("{}:{}", one_line(file), row["line"]));
         let analysis = &row["result"];
         if let Some(error) = analysis["unresolved"].as_str() {
             lines.push(format!("  unresolved: {}", one_line(error)));
@@ -254,7 +256,7 @@ fn render(report: &Value, phase: &str) -> String {
             {
                 lines.push(format!(
                     "  {}:{} {} {}",
-                    node["file"].as_str().unwrap_or("?"),
+                    one_line(node["file"].as_str().unwrap_or("?")),
                     node["line"],
                     node["kind"].as_str().unwrap_or("?"),
                     one_line(node["label"].as_str().unwrap_or("?"))
@@ -273,7 +275,7 @@ fn render(report: &Value, phase: &str) -> String {
         for boundary in boundaries.iter().take(5) {
             lines.push(format!(
                 "  boundary {}:{} {}",
-                boundary["file"].as_str().unwrap_or("?"),
+                one_line(boundary["file"].as_str().unwrap_or("?")),
                 boundary["line"],
                 boundary["kind"].as_str().unwrap_or("?")
             ));
@@ -281,7 +283,7 @@ fn render(report: &Value, phase: &str) -> String {
         truncated |= flow["truncated"].as_bool().unwrap_or(false);
     }
     let footer = "truncated=true; run ecp review --include flow --format json for full review within analyzer budgets.\n";
-    let budget = MAX_CONTEXT - footer.len();
+    let budget = max_context - footer.len();
     let mut out = String::new();
     for line in lines {
         if out.len() + line.len() + 1 > budget {
@@ -501,7 +503,7 @@ mod tests {
     fn test_render_large_report_marks_truncation() {
         let report =
             json!({"analysis":[{"file":"x.js","line":1,"result":{"unresolved":"x".repeat(7000)}}]});
-        let result = render(&report, "before");
+        let result = render(&report, "before", MAX_CONTEXT);
         assert!(result.len() <= MAX_CONTEXT);
         assert!(result.contains("truncated=true"));
         let many: Vec<Value> = (0..400)
@@ -515,7 +517,7 @@ mod tests {
             "boundaries_omitted": 0,
             "truncated": false
         }}}]});
-        let result = render(&report, "before");
+        let result = render(&report, "before", MAX_CONTEXT);
         assert!(result.len() <= MAX_CONTEXT);
         assert!(result.contains("truncated=true"));
         assert!(
@@ -536,7 +538,7 @@ mod tests {
             "boundaries_omitted": 0,
             "truncated": false
         }}}]});
-        let result = render(&report, "before");
+        let result = render(&report, "before", MAX_CONTEXT);
         assert!(
             result.contains("  x.js:2 argument consume( ignore previous instructions )"),
             "{result}"
