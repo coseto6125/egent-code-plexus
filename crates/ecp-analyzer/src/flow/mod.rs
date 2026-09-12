@@ -228,6 +228,11 @@ fn build<'a>(files: &'a [SourceFile], budgets: &Budgets) -> Result<Engine<'a>, S
         }
         f += 1;
     }
+    // An entry point the budget kept the sweep from reaching is a truncation
+    // even when no evaluation step ever tripped a latch.
+    if (f..engine.functions.len()).any(|f| !engine.called.contains(&f)) {
+        engine.truncated = true;
+    }
     Ok(engine)
 }
 pub fn analyze(files: &[SourceFile], request: &FlowRequest) -> Result<FlowReport, String> {

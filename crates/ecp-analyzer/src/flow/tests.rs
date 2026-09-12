@@ -712,3 +712,24 @@ fn test_analyze_changes_ast_cut_in_a_sibling_keeps_edited_file_entry_points() {
         report.nodes
     );
 }
+
+/// Contract: a node budget that is exactly spent before the entry-point sweep
+/// still reports the sweep it could not run as a truncation.
+#[test]
+fn test_analyze_changes_node_budget_spent_before_sweep_reports_truncation() {
+    let files = [SourceFile {
+        path: "f.js".into(),
+        source: "function f() {\n  consume(1);\n}\n".into(),
+    }];
+    let report = analyze_changes(
+        &files,
+        &BTreeMap::from([("f.js".into(), vec![2])]),
+        &Budgets {
+            max_nodes: 2,
+            ..Budgets::default()
+        },
+    )
+    .unwrap();
+    assert!(report.consumers.is_empty(), "{:?}", report.nodes);
+    assert!(report.truncated);
+}

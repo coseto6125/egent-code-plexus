@@ -74,12 +74,18 @@ pub fn context_in(input: &HookInput, after: bool, state: &Path) -> Option<String
     // and Windows verbatim prefixes. New Write targets need not exist yet.
     let root = git_root(cwd).or_else(|| git_root(&dunce::canonicalize(cwd).ok()?));
     let base = root.as_deref().unwrap_or(cwd);
-    let relative = relative_path(base, Path::new(file))
+    // A relative hook path is relative to cwd, never to the root.
+    let file = if Path::new(file).is_absolute() {
+        PathBuf::from(file)
+    } else {
+        cwd.join(file)
+    };
+    let relative = relative_path(base, &file)
         .ok()
-        .or_else(|| relative_path(base, &physical(cwd, Path::new(file))?).ok())
+        .or_else(|| relative_path(base, &physical(&file)?).ok())
         .or_else(|| {
             let repo = dunce::canonicalize(base).ok()?;
-            relative_path(&repo, Path::new(file)).ok()
+            relative_path(&repo, &file).ok()
         })?;
     if !supported_path(&relative) {
         return None;
@@ -209,17 +215,14 @@ impl Importers {
     }
 }
 
-/// The physical spelling of `file`: its parent canonicalized, so a path under
-/// a symlinked cwd lands under the same root `git_root` found through the
-/// canonical cwd. A new Write target need not exist, only its directory.
-fn physical(cwd: &Path, file: &Path) -> Option<PathBuf> {
-    let file = if file.is_absolute() {
-        file.to_path_buf()
-    } else {
-        cwd.join(file)
-    };
-    let parent = dunce::canonicalize(file.parent()?).ok()?;
-    Some(parent.join(file.file_name()?))
+/// The physical spelling of `file`: its nearest existing ancestor
+/// canonicalized with the rest re-appended, so a path under a symlinked cwd
+/// lands under the same root `git_root` found through the canonical cwd. A
+/// Write target, and the directories it creates, need not exist yet.
+fn physical(file: &Path) -> Option<PathBuf> {
+    let existing = file.ancestors().find(|dir| dir.exists())?;
+    let canonical = dunce::canonicalize(existing).ok()?;
+    Some(canonical.join(file.strip_prefix(existing).ok()?))
 }
 
 /// Nearest ancestor of `cwd` holding a `.git` entry; a linked worktree's is a
@@ -482,6 +485,46 @@ mod tests {
         assert!(context_in(&input, true, state.path())
             .unwrap()
             .contains("x.js:2"));
+    }
+
+    /// Contract: a relative hook path is relative to cwd, so a subdirectory
+    /// edit never resolves to a same-named file at the worktree root.
+    #[test]
+    fn test_context_relative_path_is_cwd_relative_not_root_relative() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        std::fs::write(repo.join(".git"), "gitdir: elsewhere\n").unwrap();
+        std::fs::write(repo.join("lib.js"), "let y = 9;\n").unwrap();
+        std::fs::write(repo.join("sub/lib.js"), "let x = 1;\nconsume(x);\n").unwrap();
+        let input = edit_input(&repo.join("sub"), Path::new("lib.js"), "1", "2");
+        let rendered = context_in(&input, false, state.path()).unwrap();
+        assert!(rendered.contains("sub/lib.js:2"), "{rendered}");
+    }
+
+    /// Contract: a Write through a symlinked cwd into a directory that does
+    /// not exist yet still gets a before-edit snapshot.
+    #[cfg(unix)]
+    #[test]
+    fn test_context_symlinked_cwd_write_into_new_directory_keeps_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        std::fs::write(repo.join(".git"), "gitdir: elsewhere\n").unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(repo.join("sub"), &alias).unwrap();
+        let file = alias.join("new").join("file.js");
+        let mut input: HookInput = serde_json::from_value(json!({"session_id":"write","tool_use_id":"new","cwd":alias,"tool_name":"Write","tool_input":{"file_path":file,"content":"let x = 1;\nconsume(x);\n"}})).unwrap();
+        assert!(context_in(&input, false, state.path())
+            .unwrap()
+            .contains("before edit"));
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "let x = 1;\nconsume(x);\n").unwrap();
+        input.tool_output = json!({"success":true});
+        let after = context_in(&input, true, state.path()).unwrap();
+        assert!(after.contains("sub/new/file.js:2"), "{after}");
     }
 
     /// Contract: the hook reads the edited file and nothing else. A sibling the
