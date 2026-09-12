@@ -1737,6 +1737,90 @@ fn pass1_8_function_metas(
     function_metas
 }
 
+/// Per-file lexical candidates. Parent discovery runs once, not once per call.
+#[derive(Default)]
+struct LexicalFunctionIndex {
+    by_name: FxHashMap<String, Vec<(Option<Span>, u32)>>,
+}
+
+impl LexicalFunctionIndex {
+    fn new(graph: &LocalGraph, start_index: u32) -> Self {
+        let mut index = Self::default();
+        if !matches!(
+            graph.file_path.extension().and_then(|ext| ext.to_str()),
+            Some("js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts")
+        ) {
+            return index;
+        }
+        if graph.nodes.iter().all(|node| node.calls.is_empty()) {
+            return index;
+        }
+        let functions: Vec<_> = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| {
+                matches!(
+                    node.kind,
+                    NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+                )
+            })
+            .collect();
+        for &(offset, node) in &functions {
+            if node.kind != NodeKind::Function {
+                continue;
+            }
+            let candidates = index.by_name.entry(node.name.clone()).or_default();
+            let parent = functions
+                .iter()
+                .filter(|(_, parent)| {
+                    parent.span != node.span
+                        && crate::framework_helpers::span_contains(parent.span, node.span)
+                })
+                .min_by_key(|(_, parent)| Self::scope_size(Some(parent.span)))
+                .map(|(_, parent)| parent.span);
+            if parent.is_some() || node.owner_class.is_none() {
+                candidates.push((parent, start_index + offset as u32));
+            }
+        }
+        index
+    }
+
+    fn scope_size(scope: Option<Span>) -> (u32, i64) {
+        scope
+            .map(|span| (span.2 - span.0, span.3 as i64 - span.1 as i64))
+            .unwrap_or((u32::MAX, i64::MAX))
+    }
+
+    /// An empty result prevents fallback to an inaccessible or ambiguous closure.
+    fn targets(&self, caller: Span, callee: &str) -> Option<Vec<(u32, f32)>> {
+        if callee.contains(['.', ':']) {
+            return None;
+        }
+        let candidates = self.by_name.get(callee)?;
+        let mut best = None;
+        let mut ambiguous = false;
+        for &(scope, target) in candidates {
+            if scope.is_some_and(|span| !crate::framework_helpers::span_contains(span, caller)) {
+                continue;
+            }
+            let size = Self::scope_size(scope);
+            match best {
+                Some((best_size, _)) if size > best_size => {}
+                Some((best_size, _)) if size == best_size => ambiguous = true,
+                _ => {
+                    best = Some((size, target));
+                    ambiguous = false;
+                }
+            }
+        }
+        Some(match best {
+            Some((_, target)) if !ambiguous => vec![(target, 1.0)],
+            _ => Vec::new(),
+        })
+    }
+}
+
 /// Emit Pass-2 edges for a single `raw_node`'s heritage / calls / type
 /// annotation. Factored out so the serial dump path and the parallel
 /// hot path can share the same per-node logic.
@@ -1761,6 +1845,7 @@ fn pass2_emit_node_edges(
     symbol_table: &SymbolTable,
     edges: &mut Vec<Edge>,
     indirect_lookup: &FxHashMap<CallMetaKey, (u8, String)>,
+    lexical_lookup: &LexicalFunctionIndex,
     pending_call_metas: &mut Vec<(usize, u8, String)>,
 ) {
     for base in &raw_node.heritage {
@@ -1794,13 +1879,22 @@ fn pass2_emit_node_edges(
     for (call_idx, callee) in raw_node.calls.iter().enumerate() {
         let lookup_key = CallMetaKey::new(raw_node.span, call_idx as u32);
         let meta = indirect_lookup.get(&lookup_key);
-        let targets = resolver.resolve_symbol_with_heritage(
-            &local_graph.file_path,
-            callee,
-            &local_graph.imports,
-            ResolveTarget::Callable,
-            call_heritage,
-        );
+        let targets = match lexical_lookup.targets(raw_node.span, callee) {
+            Some(targets) if targets.is_empty() => resolver.resolve_imported_symbol(
+                &local_graph.file_path,
+                callee,
+                &local_graph.imports,
+                ResolveTarget::Callable,
+            ),
+            Some(targets) => targets,
+            None => resolver.resolve_symbol_with_heritage(
+                &local_graph.file_path,
+                callee,
+                &local_graph.imports,
+                ResolveTarget::Callable,
+                call_heritage,
+            ),
+        };
         for (target_id, confidence) in targets {
             if target_id == current_node_idx {
                 continue; // self-recursion edges are Louvain / process noise
@@ -2063,6 +2157,7 @@ fn pass2_resolve_edges(
         let mut current_node_idx = 0u32;
         for (graph_idx, local_graph) in local_graphs.iter().enumerate() {
             let lookup = &indirect_lookups[graph_idx];
+            let lexical_lookup = LexicalFunctionIndex::new(local_graph, start_indices[graph_idx]);
             // T7-6: per-file skip set. `None` = no diff data → resolve all.
             let file_skip = symbol_skip_ref.and_then(|m| {
                 let raw = local_graph.file_path.to_string_lossy();
@@ -2104,6 +2199,7 @@ fn pass2_resolve_edges(
                     symbol_table,
                     &mut edges,
                     lookup,
+                    &lexical_lookup,
                     &mut pending_call_metas_global,
                 );
                 current_node_idx += 1;
@@ -2156,6 +2252,7 @@ fn pass2_resolve_edges(
                 }
                 let start_idx = start_indices[graph_idx];
                 let lookup = &indirect_lookups[graph_idx];
+                let lexical_lookup = LexicalFunctionIndex::new(local_graph, start_idx);
                 let mut local_edges: Vec<Edge> = Vec::new();
                 let mut local_pending: Vec<(usize, u8, String)> = Vec::new();
                 // T7-6: per-file skip set lookup (parallel path).
@@ -2197,6 +2294,7 @@ fn pass2_resolve_edges(
                         symbol_table_ref,
                         &mut local_edges,
                         lookup,
+                        &lexical_lookup,
                         &mut local_pending,
                     );
                 }

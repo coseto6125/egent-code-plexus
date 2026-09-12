@@ -95,6 +95,7 @@ fn class_method_owner_is_class_not_outer_function() {
 class Service {
     handle() {}
 }
+
 ";
     let g = parse(src);
     let methods: Vec<_> = g.nodes.iter().filter(|n| n.name == "handle").collect();
@@ -106,5 +107,180 @@ class Service {
             "handle must have owner Service; got {:?}",
             m.owner_class
         );
+    }
+}
+
+fn parse_bindings(source: &str) -> Vec<LocalGraph> {
+    use ecp_analyzer::typescript::parser::TypeScriptProvider;
+    vec![
+        parse(source),
+        TypeScriptProvider::new()
+            .unwrap()
+            .parse_file(Path::new("test.ts"), source.as_bytes())
+            .unwrap(),
+    ]
+}
+
+#[test]
+fn test_parse_function_expression_bindings_emits_one_function_each() {
+    use ecp_core::graph::NodeKind;
+    for graph in parse_bindings(
+        "const one = function() {};\nlet two = function named() {};\nvar three = () => {};\nexport const four = function() {};\nconst scalar = 1, five = function() {};\n",
+    ) {
+        for name in ["one", "two", "three", "four", "five"] {
+            let nodes: Vec<_> = graph
+                .nodes
+                .iter()
+                .filter(|node| node.name == name)
+                .collect();
+            assert_eq!(nodes.len(), 1, "{name}: {nodes:?}");
+            assert_eq!(nodes[0].kind, NodeKind::Function);
+        }
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|node| node.name == "four" && node.is_exported)
+        );
+        assert!(graph.nodes.iter().any(|node| node.name == "scalar"));
+    }
+}
+
+#[test]
+fn test_build_nested_closure_calls_resolve_lexical_binding() {
+    use ecp_analyzer::resolution::builder::GraphBuilder;
+    use ecp_core::graph::RelType;
+    let source = "
+function first() {
+  function shared() {
+    var step = function() { return 1; };
+    var perView = function() { return step(); };
+    return perView();
+  }
+  return shared();
+}
+function second() {
+  function shared() {
+    var step = function() { return 2; };
+    var perView = function() { return step(); };
+    return perView();
+  }
+  return shared();
+}
+function outside() { return step(); }
+";
+    for local in parse_bindings(source) {
+        let steps: Vec<_> = local
+            .nodes
+            .iter()
+            .filter(|node| node.name == "step")
+            .collect();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].owner_class.as_deref(), Some("first::shared"));
+        assert_eq!(steps[1].owner_class.as_deref(), Some("second::shared"));
+        let mut builder = GraphBuilder::new();
+        builder.add_graph(local);
+        let graph = builder.build();
+        let pool = &graph.string_pool;
+        let mut step_calls = 0;
+        for edge in graph
+            .edges
+            .iter()
+            .filter(|edge| edge.rel_type == RelType::Calls)
+        {
+            let source = &graph.nodes[edge.source as usize];
+            let target = &graph.nodes[edge.target as usize];
+            if target.name.resolve(pool) == "step" {
+                step_calls += 1;
+                assert_eq!(source.name.resolve(pool), "perView");
+                assert_eq!(
+                    source.owner_class.resolve(pool),
+                    target.owner_class.resolve(pool)
+                );
+            }
+            assert_ne!(source.name.resolve(pool), "outside");
+        }
+        assert_eq!(step_calls, 2);
+    }
+}
+
+#[test]
+fn test_build_hidden_closure_preserves_imported_call() {
+    use ecp_analyzer::resolution::builder::GraphBuilder;
+    use ecp_core::graph::RelType;
+    for local in parse_bindings(
+        r#"import { step } from "./dep"; function outer() { const step = function() {}; step(); } function outside() { step(); }"#,
+    ) {
+        let extension = local
+            .file_path
+            .extension()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let mut dependency = parse("export function step() {}");
+        dependency.file_path = format!("dep.{extension}").into();
+        let mut builder = GraphBuilder::new();
+        builder.add_graph(local);
+        builder.add_graph(dependency);
+        let graph = builder.build();
+        let pool = &graph.string_pool;
+        let edge = graph
+            .edges
+            .iter()
+            .find(|edge| {
+                edge.rel_type == RelType::Calls
+                    && graph.nodes[edge.source as usize].name.resolve(pool) == "outside"
+            })
+            .expect("outside calls the imported step");
+        let target = &graph.nodes[edge.target as usize];
+        assert_eq!(target.name.resolve(pool), "step");
+        assert_eq!(
+            graph.files[target.file_idx as usize].path.resolve(pool),
+            format!("dep.{extension}")
+        );
+    }
+}
+
+#[test]
+fn test_build_sibling_foreach_callbacks_keep_closure_calls_separate() {
+    use ecp_analyzer::resolution::builder::GraphBuilder;
+    use ecp_core::graph::RelType;
+    let source = "items.forEach(function(item) {\nvar step = function() { return 1; };\nvar perView = function() { return step(); };\nconsume(perView());\n});\nitems.forEach(function(item) {\nvar step = function() { return 2; };\nvar perView = function() { return step(); };\nconsume(perView());\n});\nfunction outside() { return step(); }";
+    for local in parse_bindings(source) {
+        let owners = owners_of(&local, "step");
+        assert_eq!(owners.len(), 2);
+        assert!(owners.iter().all(Option::is_some), "{owners:?}");
+        assert_ne!(owners[0], owners[1]);
+        let mut builder = GraphBuilder::new();
+        builder.add_graph(local);
+        let graph = builder.build();
+        let pool = &graph.string_pool;
+        let steps: Vec<_> = graph
+            .nodes
+            .iter()
+            .filter(|node| node.name.resolve(pool) == "step")
+            .collect();
+        assert_eq!(steps.len(), 2);
+        assert_ne!(steps[0].uid, steps[1].uid);
+        let mut calls = 0;
+        for edge in graph
+            .edges
+            .iter()
+            .filter(|edge| edge.rel_type == RelType::Calls)
+        {
+            let caller = &graph.nodes[edge.source as usize];
+            let callee = &graph.nodes[edge.target as usize];
+            if callee.name.resolve(pool) == "step" {
+                calls += 1;
+                assert_eq!(caller.name.resolve(pool), "perView");
+                assert_eq!(
+                    caller.owner_class.resolve(pool),
+                    callee.owner_class.resolve(pool)
+                );
+            }
+            assert_ne!(caller.name.resolve(pool), "outside");
+        }
+        assert_eq!(calls, 2);
     }
 }

@@ -1,5 +1,9 @@
 # ECP — Egent Code Plexus (structural code intelligence)
 
+For computed-value changes, use `ecp flow --file <path> --line <n> --column <n>` to check consumers.
+Use `--subject return` for function results and `--direction backward` for origins.
+Calls alone do not prove value dependency. Check unresolved boundaries and refresh results after source changes.
+
 **Usage**: symbol-level code graph for AI agents. Sub-30ms queries; answers "who/what/impact", not "where's this string".
 
 ## The reflex

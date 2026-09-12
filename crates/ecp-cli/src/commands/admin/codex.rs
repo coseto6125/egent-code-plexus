@@ -169,7 +169,7 @@ fn auto_fork_and_apply(patch: &Path, fork_dir: &Path) -> Result<(), ecp_core::Ec
         println!("Forked openai/codex → {}", fork_dir.display());
     }
 
-    let apply = Command::new("git")
+    let apply = crate::git::safe_exec::git()
         .args(["-C", &fork_dir.to_string_lossy()])
         .args(["apply", &patch.to_string_lossy()])
         .output()

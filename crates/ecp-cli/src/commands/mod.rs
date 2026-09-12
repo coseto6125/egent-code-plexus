@@ -7,6 +7,7 @@ pub mod find;
 pub mod find_event_mirrors;
 pub mod find_schema_bindings;
 pub mod find_tx_patterns;
+pub mod flow;
 pub mod format;
 pub mod graph_csr;
 pub mod group;

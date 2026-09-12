@@ -107,6 +107,26 @@ pub fn callee_name_from(call_node: Node<'_>, source: &[u8]) -> Option<String> {
     }
 }
 
+/// Attach a call using columns as well as rows, including one-line closures.
+pub fn attach_to_enclosing_span(
+    span: crate::framework_helpers::Span,
+    callee: String,
+    nodes: &mut [RawNode],
+) {
+    let target = nodes
+        .iter_mut()
+        .filter(|node| {
+            matches!(
+                node.kind,
+                NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+            ) && crate::framework_helpers::span_contains(node.span, span)
+        })
+        .min_by_key(|node| crate::framework_helpers::span_area(node.span));
+    if let Some(target) = target {
+        target.calls.push(callee);
+    }
+}
+
 pub fn attach_to_enclosing(line: u32, callee: String, nodes: &mut [RawNode]) {
     let mut best: Option<usize> = None;
     let mut best_span: u32 = u32::MAX;

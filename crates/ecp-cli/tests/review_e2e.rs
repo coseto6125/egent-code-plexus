@@ -122,3 +122,61 @@ fn review_first_run_builds_v2_index_then_loads_it() {
         "unexpected review payload: {v}"
     );
 }
+
+#[test]
+fn test_review_flow_baseline_operation_change_reports_both_snapshot_consumers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::write(repo.join("x.js"), "let x = 1 + 2;\nconsume(x);\n").unwrap();
+    run_git(&repo, &["init", "-q"]);
+    run_git(&repo, &["config", "user.email", "t@t"]);
+    run_git(&repo, &["config", "user.name", "t"]);
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-qm", "init"]);
+    std::fs::write(repo.join("x.js"), "let x = 1 * 2;\nconsume(x);\n").unwrap();
+    let out = Command::new(ecp_bin())
+        .args([
+            "review",
+            "--include",
+            "flow",
+            "--baseline",
+            "HEAD",
+            "--format",
+            "json",
+        ])
+        .env("HOME", home)
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let start = stdout.find('{').unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout[start..]).unwrap();
+    assert_eq!(report["status"], "review_required");
+    assert_eq!(report["legacy_status"], "clean");
+    let analyses = report["flow"]["analysis"].as_array().unwrap();
+    for phase in ["before", "after"] {
+        let row = analyses
+            .iter()
+            .find(|row| row["snapshot"] == phase)
+            .unwrap();
+        assert!(
+            !row["result"]["report"]["consumers"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "{row}"
+        );
+    }
+    assert!(
+        report.get("status").is_some() && report.get("files_reviewed").is_some(),
+        "legacy findings remain included: {report}"
+    );
+}

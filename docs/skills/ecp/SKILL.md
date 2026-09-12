@@ -1,6 +1,6 @@
 ---
 name: ecp
-description: Tracing who-calls-X or a data flow — mid-debug, not only before a refactor — or exploring code structure: where a symbol is defined, who calls it, blast radius, routes/contracts. Reach here before grep. Command by question: definition→`ecp find`, who-calls/blast-radius→`ecp impact`, how-A-reaches-B→`ecp path <from> <to>`, full context→`ecp inspect`, filename-read-vs-written→`ecp impact --literal`, routes/contracts→`ecp routes`/`ecp contracts`, trace execution flow→`ecp processes`, statement shape inside code (swallowed exception, missing timeout)→`ecp pattern`, event-topic / saga / schema-field pairings→`ecp heuristics`, graph question with no verb (orphans, all-impls)→`ecp cypher`. Grep only for non-code text: config values, log strings, fs layout.
+description: Tracing who-calls-X or a data flow — mid-debug, not only before a refactor — or exploring code structure: where a symbol is defined, who calls it, blast radius, routes/contracts. Reach here before grep. Command by question: value dependencies→`ecp flow`, definition→`ecp find`, who-calls/blast-radius→`ecp impact`, how-A-reaches-B→`ecp path <from> <to>`, full context→`ecp inspect`, filename-read-vs-written→`ecp impact --literal`, routes/contracts→`ecp routes`/`ecp contracts`, trace execution flow→`ecp processes`, statement shape inside code (swallowed exception, missing timeout)→`ecp pattern`, event-topic / saga / schema-field pairings→`ecp heuristics`, graph question with no verb (orphans, all-impls)→`ecp cypher`. Grep only for non-code text: config values, log strings, fs layout.
 ---
 
 # EgentCodePlexus (ecp) — Structural Analysis Entry
@@ -13,6 +13,19 @@ description: Tracing who-calls-X or a data flow — mid-debug, not only before a
 4. **Text → grep.** String literals, log messages, config keys, fs layout, vendored / generated code: grep / Read. ecp parses code, not text. Between the two sits statement *shape* (a `try` that swallows, a call missing an argument): that is `ecp pattern`, not grep. For any other surprising output, find the root cause before calling it a bug: [`guides/troubleshooting.md`](./guides/troubleshooting.md).
 
 ## Quick Reference
+
+### Value dependencies
+
+When changing a computed value, trace its consumers before declaring the change compatible.
+Use `ecp flow --file <path> --line <n> --column <n> --subject value`.
+Use `--subject return` for a function's return value, or `binding` for a variable binding.
+Use `--direction backward` to find value origins.
+The source query works without an index. Read [flow](./_shared/cli/flow.md) for coverage and overlays.
+
+Calls and value dependencies are different: a caller can discard a return value.
+Check each reported consumer against the change. Inspect unresolved boundaries rather than treating them as unaffected.
+After edits, `ecp review --baseline <ref> --include flow` adds before/current consumer evidence to the existing review.
+Refresh evidence when source hashes change. A truncated result is not a complete consumer list.
 
 ### Symbol lookup
 | Command | Use for |

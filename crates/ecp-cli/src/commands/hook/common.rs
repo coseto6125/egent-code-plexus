@@ -18,12 +18,16 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Deserialize)]
 pub struct HookInput {
     #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub tool_use_id: String,
+    #[serde(default)]
     pub cwd: String,
     #[serde(default)]
     pub tool_name: String,
     #[serde(default)]
     pub tool_input: Value,
-    #[serde(default)]
+    #[serde(default, alias = "tool_response")]
     pub tool_output: Value,
 }
 
@@ -38,6 +42,8 @@ pub fn read_stdin_envelope() -> Result<HookInput, EcpError> {
         .map_err(EcpError::Io)?;
     if buf.trim().is_empty() {
         return Ok(HookInput {
+            session_id: String::new(),
+            tool_use_id: String::new(),
             cwd: String::new(),
             tool_name: String::new(),
             tool_input: Value::Null,

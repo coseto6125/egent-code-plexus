@@ -532,6 +532,15 @@ impl LanguageProvider for TypeScriptProvider {
 
             // Process definitions
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
+                if matches!(k, NodeKind::Const | NodeKind::Variable)
+                    && n.parent()
+                        .and_then(|declarator| declarator.child_by_field_name("value"))
+                        .is_some_and(|value| {
+                            matches!(value.kind(), "arrow_function" | "function_expression")
+                        })
+                {
+                    continue;
+                }
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
                     let span = node_span(&root);
 
@@ -807,7 +816,7 @@ impl LanguageProvider for TypeScriptProvider {
         );
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
-        crate::framework_helpers::stamp_owner_fn_by_span(&mut nodes);
+        crate::framework_helpers::stamp_js_function_owners(&mut nodes);
 
         let tx_scopes =
             collect_typeorm_transactional_scopes(&nodes, &[NodeKind::Method, NodeKind::Function]);

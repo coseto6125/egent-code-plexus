@@ -21,37 +21,25 @@
   ) @function
 ) @export
 
-;; Arrow Functions assigned to variables
-(lexical_declaration
-  (variable_declarator
-    name: (identifier) @function.name
-    value: (arrow_function)
-  )
+;; Function expressions and arrow functions assigned to variables
+(variable_declarator
+  name: (identifier) @function.name
+  value: [(arrow_function) (function_expression)]
 ) @function
 
 (export_statement
-  declaration: (lexical_declaration
-    (variable_declarator
-      name: (identifier) @function.name
-      value: (arrow_function)
-    ) @function
-  )
-) @export
-
-(variable_declaration
-  (variable_declarator
-    name: (identifier) @function.name
-    value: (arrow_function)
-  )
-) @function
-
-(export_statement
-  declaration: (variable_declaration
-    (variable_declarator
-      name: (identifier) @function.name
-      value: (arrow_function)
-    ) @function
-  )
+  declaration: [
+    (lexical_declaration
+      (variable_declarator
+        name: (identifier) @function.name
+        value: [(arrow_function) (function_expression)]
+      ) @function)
+    (variable_declaration
+      (variable_declarator
+        name: (identifier) @function.name
+        value: [(arrow_function) (function_expression)]
+      ) @function)
+  ]
 ) @export
 
 ;; Constants — module-level only. Anchored to direct children of `program`;

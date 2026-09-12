@@ -20,7 +20,7 @@ use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_ts_string_value,
     strip_ts_template_value,
 };
-use crate::calls::attach_to_enclosing;
+use crate::calls::attach_to_enclosing_span;
 use crate::framework_helpers::{enclosing_class, node_span};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
@@ -190,8 +190,7 @@ pub fn extract_ts_calls_and_path_literals(
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = ts_callee_name(n, source, locals, nodes) {
-                    let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                    attach_to_enclosing_span(node_span(&n), callee, nodes);
                 }
             }
             "string" | "template_string" => {

@@ -446,6 +446,43 @@ pub fn stamp_owner_fn_by_span(nodes: &mut [RawNode]) {
     }
 }
 
+/// Preserve the full lexical function path for JS/TS closure identities.
+pub fn stamp_js_function_owners(nodes: &mut [RawNode]) {
+    stamp_owner_fn_by_span(nodes);
+    let mut functions: Vec<usize> = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| {
+            matches!(
+                node.kind,
+                NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+            )
+        })
+        .map(|(index, _)| index)
+        .collect();
+    functions.sort_by_key(|&index| std::cmp::Reverse(span_area(nodes[index].span)));
+    for &index in &functions {
+        if nodes[index].kind != NodeKind::Function {
+            continue;
+        }
+        let span = nodes[index].span;
+        let parent = functions
+            .iter()
+            .copied()
+            .filter(|&candidate| {
+                nodes[candidate].span != span && span_contains(nodes[candidate].span, span)
+            })
+            .min_by_key(|&candidate| span_area(nodes[candidate].span));
+        if let Some(parent) = parent {
+            let parent = &nodes[parent];
+            nodes[index].owner_class = Some(match &parent.owner_class {
+                Some(owner) => format!("{owner}::{}", parent.name),
+                None => parent.name.clone(),
+            });
+        }
+    }
+}
+
 /// Enumerate `Function`/`Method` `RawNode` whose span lies inside `class_span`,
 /// skipping dunder methods (`__init__`, `__repr__`, ...) and `exclude_name`
 /// (the caller — prevents self-fan-out).

@@ -85,6 +85,7 @@ mod tests {
             repo: None,
             format: None,
             verdicts: false,
+            include: vec![],
         };
         // resolve returns the explicit list without touching git.
         let v = resolve(&args, &PathBuf::from(".")).unwrap();

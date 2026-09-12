@@ -195,8 +195,8 @@ fn event_kebab_to_camel(ev: &str) -> &'static str {
 
 fn matcher_for(ev: &str) -> &'static str {
     match ev {
-        "pre-tool-use" => "Grep|Glob|Bash",
-        "post-tool-use" => "Bash",
+        "pre-tool-use" => "Grep|Glob|Bash|Edit|Write",
+        "post-tool-use" => "Bash|Edit|Write",
         // `Task` is the pre-rename name of the Agent tool — match both so
         // the tripwire works across Claude Code versions.
         "agent-dispatch" => "Agent|Task",

@@ -13,16 +13,22 @@
   declaration: (generator_function_declaration
     name: (identifier) @name.function) @function) @export
 
-;; Arrow Functions assigned to variables
+;; Function expressions and arrow functions assigned to variables
 (variable_declarator
   name: (identifier) @name.function
-  value: (arrow_function)) @function
+  value: [(arrow_function) (function_expression)]) @function
 
 (export_statement
   declaration: (variable_declaration
     (variable_declarator
       name: (identifier) @name.function
-      value: (arrow_function)) @function)) @export
+      value: [(arrow_function) (function_expression)]) @function)) @export
+
+(export_statement
+  declaration: (lexical_declaration
+    (variable_declarator
+      name: (identifier) @name.function
+      value: [(arrow_function) (function_expression)]) @function)) @export
 
 ;; Classes — decorators captured from both class_declaration and the wrapping
 ;; export_statement, mirroring the TypeScript queries.scm decorator-position
@@ -39,7 +45,7 @@
     name: (identifier) @name.class
     (class_heritage (expression) @heritage)?) @class) @export
 
-;; Variables — module-level only (var / let / const not assigned to an arrow function).
+;; Variables — module-level only (var / let / const not assigned to a function).
 ;; Anchored to direct children of `program`; function-body / block-scope locals
 ;; are intentionally dropped (they bloat symbol counts without LLM-disambiguation
 ;; value). The export_statement patterns below already imply module scope.

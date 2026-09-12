@@ -1,6 +1,6 @@
 //! T7-4 wiring tests: `reanalyze_files` is called from `ensure_fresh` on the
 //! incremental (header-compatible + dirty) path; `build_l2` is NOT called on
-//! that path; `pre_tool_use::handle` is unchanged.
+//! that path; edit hooks do not rebuild the index.
 //!
 //! Tests are placed in a dedicated file so their `test_counters::reset()` calls
 //! cannot interfere with counters in other test binaries running in parallel.
@@ -219,53 +219,29 @@ fn test_auto_ensure_dispatches_incremental_for_overlay_dirty() {
 
 // ── T7-4 test 3 ──────────────────────────────────────────────────────────────
 
-/// Compile-time guard: `pre_tool_use::handle` must not gain new lines in this PR.
-///
-/// We embed the source of `pre_tool_use.rs` at compile time and assert that the
-/// `pub fn handle` function starts with the expected signature. Any addition of
-/// code inside `handle` would change the function body text and fail this test,
-/// surfacing the violation at `cargo test` time.
-///
-/// This test intentionally does NOT check the full file byte-for-byte — doing
-/// so would break on every unrelated refactor in the same file. It only guards
-/// the `handle` entry-point signature and the absence of new imports specific
-/// to auto_ensure / reanalyze, which are the two mutation vectors forbidden by
-/// the T7-4 spec.
+/// Edit evidence stays outside graph rebuild and incremental indexing.
 #[test]
-fn test_pre_tool_use_hook_unchanged_path() {
-    const SRC: &str = include_str!("../src/commands/hook/pre_tool_use.rs");
-
-    // The handle function must remain a thin dispatcher that delegates to
-    // `compute_search_hits` and `drain_and_render_peer_payload` — nothing more.
-    // Assert the exact opening line of `pub fn handle` is present.
-    assert!(
-        SRC.contains("pub fn handle(input: &HookInput) -> Result<(), EcpError> {"),
-        "pre_tool_use::handle signature changed — was it accidentally modified by T7-4?"
-    );
-
-    // Assert that neither `reanalyze` nor `auto_ensure` references were added,
-    // which would indicate the hot-path rule was violated.
-    assert!(
-        !SRC.contains("reanalyze"),
-        "pre_tool_use must not reference `reanalyze` — hot-path rule violated"
-    );
-    assert!(
-        !SRC.contains("auto_ensure"),
-        "pre_tool_use must not reference `auto_ensure` — hot-path rule violated"
-    );
-    assert!(
-        !SRC.contains("ensure_fresh"),
-        "pre_tool_use must not reference `ensure_fresh` — hot-path rule violated"
-    );
-
-    // Verify the function body is still the minimal two-call dispatch.
-    // Rather than byte-matching, count the `sections.push` calls — there must
-    // be exactly two (search hits + peer drain), no more.
-    let push_count = SRC.matches("sections.push").count();
-    assert_eq!(
-        push_count, 2,
-        "pre_tool_use::handle should contain exactly 2 `sections.push` calls, found {push_count}"
-    );
+fn test_pre_tool_use_edit_keeps_index_rebuild_outside_hook() {
+    let _guard = lock_counters();
+    test_counters::reset();
+    let repo = TempDir::new().unwrap();
+    let path = repo.path().join("x.js");
+    fs::write(&path, "let x = 1;\nconsume(x);\n").unwrap();
+    let input = ecp_cli::commands::hook::common::HookInput {
+        session_id: "test-session".into(),
+        tool_use_id: "test-edit".into(),
+        cwd: repo.path().to_string_lossy().into_owned(),
+        tool_name: "Edit".into(),
+        tool_input: serde_json::json!({
+            "file_path": path,
+            "old_string": "1",
+            "new_string": "2",
+        }),
+        tool_output: serde_json::Value::Null,
+    };
+    ecp_cli::commands::hook::pre_tool_use::handle(&input).unwrap();
+    assert_eq!(test_counters::reanalyze_calls(), 0);
+    assert_eq!(test_counters::build_l2_calls(), 0);
 }
 
 // ── T7-4 test 4 (negative) ───────────────────────────────────────────────────
@@ -502,4 +478,48 @@ fn test_fresh_gate_disengages_on_head_drift() {
         "after HEAD drift the gate must disengage and the full path must \
          re-parse the remaining dirty file; stderr={s3}"
     );
+}
+
+// ── hot-path guard ───────────────────────────────────────────────────────────
+
+/// `pre_tool_use::handle` is a hot path: it runs on every matched tool call
+/// and blocks it. It stays a thin dispatcher (three `sections.push` calls:
+/// edit-flow evidence, search hits, peer drain) and never reaches for the
+/// index-maintenance modules. The edit-flow section in turn reads only the
+/// edited file: none of the repository-walk primitives may appear in it.
+#[test]
+fn test_pre_tool_use_hook_unchanged_path() {
+    const HANDLE: &str = include_str!("../src/commands/hook/pre_tool_use.rs");
+    const EDIT_FLOW: &str = include_str!("../src/commands/hook/edit_flow.rs");
+
+    assert!(
+        HANDLE.contains("pub fn handle(input: &HookInput) -> Result<(), EcpError> {"),
+        "pre_tool_use::handle signature changed"
+    );
+    for forbidden in ["reanalyze", "auto_ensure", "ensure_fresh"] {
+        assert!(
+            !HANDLE.contains(forbidden),
+            "pre_tool_use must not reference `{forbidden}` — hot-path rule violated"
+        );
+    }
+    let push_count = HANDLE.matches("sections.push").count();
+    assert_eq!(
+        push_count, 3,
+        "pre_tool_use::handle should contain exactly 3 `sections.push` calls, found {push_count}"
+    );
+    // Comments may name the primitives they rule out; code may not use them.
+    let edit_flow_code: String = EDIT_FLOW
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join(
+            "
+",
+        );
+    for forbidden in ["load_sources", "WalkBuilder", "ls-files", "read_dir(repo"] {
+        assert!(
+            !edit_flow_code.contains(forbidden),
+            "edit_flow must not walk the repository (`{forbidden}`) — hot-path rule violated"
+        );
+    }
 }
