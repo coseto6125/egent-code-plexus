@@ -62,6 +62,9 @@ pub fn run(args: GcArgs) -> Result<(), ecp_core::EcpError> {
             if let Ok(s) = crate::admin::gc::sweep_stale_generations(&repo_root) {
                 total_removed += s.removed;
             }
+            if let Ok(s) = crate::admin::gc::sweep_subtree_builds(&repo_root) {
+                total_removed += s.removed;
+            }
             if let Ok(s) = crate::admin::gc::sweep_sessions(&repo_root) {
                 total_removed += s.removed;
             }

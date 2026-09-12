@@ -80,7 +80,7 @@ pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildRe
     // fingerprint → reuse without touching the analyzer pipeline.
     // L2 is SHA-pure (v2 layout, PR #55); working-tree drift goes through
     // the L1 session overlay, not here.
-    if let Some(attached) = attach_latest_if_fingerprint_matches(&commits_dir, &sha_hex) {
+    if let Some(attached) = attach_latest_if_fingerprint_matches(&commits_dir, &sha_hex, worktree) {
         return Ok(attached);
     }
 
@@ -298,11 +298,29 @@ pub(crate) fn build_inside_locked(
 pub(crate) fn attach_latest_if_fingerprint_matches(
     commits_dir: &Path,
     sha_hex: &str,
+    worktree: &Path,
 ) -> Option<BuildResult> {
     let sha = sha_bytes(sha_hex)?;
     let idx = CommitIndex::scan(commits_dir).ok()?;
     let dir = idx.find(&sha)?;
-    attach_if_fingerprint_matches(&commits_dir.join(dir))
+    attach_if_fingerprint_matches(&commits_dir.join(dir), worktree)
+}
+
+/// A slot published from below the worktree root holds only that subtree's
+/// graph under the commit's sha, so `find` answers `found:false` for the rest
+/// of the repository. `build_l2` now resolves the root before it keys the
+/// slot; slots written earlier are healed by rejecting them wherever a slot is
+/// chosen. The recorded worktree is absolute, is not the root in use, and has
+/// no `.git` entry, so it was never a git worktree root. A non-git source tree
+/// has no `.git` either, but its slot is keyed by the path-bound sha that
+/// `head_sha_hex` synthesises, which exempts it. A recorded git root that no
+/// longer exists is rejected on the same rule; one rebuild republishes the
+/// slot from the current root.
+pub(crate) fn built_below_worktree_root(built: &Path, sha: &str, worktree: &Path) -> bool {
+    built.is_absolute()
+        && built != worktree
+        && !built.join(".git").exists()
+        && !path_bound_sha(built).is_ok_and(|own| own.eq_ignore_ascii_case(sha))
 }
 
 /// Cheap pre-build check: if `commit_dir/meta.json` exists and its
@@ -311,12 +329,17 @@ pub(crate) fn attach_latest_if_fingerprint_matches(
 /// rebuilding. Shared between `build_l2` (skip-if-exists fast path) and
 /// `force_rebuild_l2` (after `wait_for_completion`, lets N concurrent
 /// `--force` callers attach to one winner instead of each rebuilding).
-pub(crate) fn attach_if_fingerprint_matches(commit_dir: &Path) -> Option<BuildResult> {
+pub(crate) fn attach_if_fingerprint_matches(
+    commit_dir: &Path,
+    worktree: &Path,
+) -> Option<BuildResult> {
     if !commit_dir.join("meta.json").is_file() {
         return None;
     }
     let meta = CommitBuildMeta::read(&commit_dir.join("meta.json")).ok()?;
-    if meta.builder_fingerprint.as_deref() != Some(BUILDER_FINGERPRINT) {
+    if meta.builder_fingerprint.as_deref() != Some(BUILDER_FINGERPRINT)
+        || built_below_worktree_root(Path::new(&meta.built_from_worktree), &meta.sha, worktree)
+    {
         return None;
     }
     // Back-fill the HEAD-SHA sidecar for graphs published by binaries that
@@ -396,6 +419,11 @@ pub(crate) fn head_sha_hex(worktree: &Path) -> io::Result<String> {
     // detection still flows through the mtime walk in `auto_ensure`.
     // Identity is path-bound — moving the dir invalidates this digest, treated
     // as a new repo (acceptable for ad-hoc indexing of non-VCS source trees).
+    path_bound_sha(worktree)
+}
+
+/// The sha a non-git source tree is keyed by: a digest of its canonical path.
+pub(crate) fn path_bound_sha(worktree: &Path) -> io::Result<String> {
     let canonical = std::fs::canonicalize(worktree)?;
     let h = xxhash_rust::xxh3::xxh3_128(canonical.to_string_lossy().as_bytes());
     Ok(format!("{h:040x}"))
@@ -1169,5 +1197,80 @@ mod archive_process_tests {
             err.to_string().contains("not a tree object"),
             "git's stderr has to survive, or the error names nothing: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod worktree_root_tests {
+    use super::*;
+    use ecp_core::registry::{EmbeddingStatus, SourceType};
+
+    fn meta(built_from_worktree: &str) -> CommitBuildMeta {
+        CommitBuildMeta {
+            version: 1,
+            sha: "0".repeat(40),
+            source_type: SourceType::Branch,
+            source_id: None,
+            built_from_worktree: built_from_worktree.into(),
+            built_at: String::new(),
+            parent_sha: None,
+            node_count: 0,
+            embedding_status: EmbeddingStatus::None,
+            refs_at_build: vec![],
+            refs_seen_since: vec![],
+            builder_fingerprint: Some(BUILDER_FINGERPRINT.to_string()),
+            binary_commit_sha: None,
+        }
+    }
+
+    #[test]
+    fn test_built_below_worktree_root_flags_subdirectory_and_missing_roots_only() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("repo");
+        let subtree = root.join("crates").join("cli");
+        fs::create_dir_all(&subtree).unwrap();
+        fs::write(root.join(".git"), "gitdir: elsewhere\n").unwrap();
+        let other_root = tmp.path().join("other");
+        fs::create_dir_all(other_root.join(".git")).unwrap();
+
+        let git_sha = "0".repeat(40);
+        assert!(built_below_worktree_root(&subtree, &git_sha, &root));
+        assert!(!built_below_worktree_root(&subtree, &git_sha, &subtree));
+        assert!(!built_below_worktree_root(&root, &git_sha, &root));
+        assert!(!built_below_worktree_root(&other_root, &git_sha, &root));
+        assert!(built_below_worktree_root(
+            &tmp.path().join("gone"),
+            &git_sha,
+            &root
+        ));
+        assert!(
+            !built_below_worktree_root(Path::new("repo"), &git_sha, &root),
+            "relative fixtures are unknown"
+        );
+        assert!(!built_below_worktree_root(Path::new(""), &git_sha, &root));
+        let plain = tmp.path().join("plain-source");
+        fs::create_dir_all(&plain).unwrap();
+        assert!(
+            !built_below_worktree_root(&plain, &path_bound_sha(&plain).unwrap(), &root),
+            "a non-git source tree is keyed by its own path"
+        );
+        assert!(built_below_worktree_root(&plain, &git_sha, &root));
+    }
+
+    #[test]
+    fn test_attach_if_fingerprint_matches_rejects_subtree_slot() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("repo");
+        let subtree = root.join("sub");
+        fs::create_dir_all(&subtree).unwrap();
+        fs::write(root.join(".git"), "gitdir: elsewhere\n").unwrap();
+        let slot = tmp.path().join("slot");
+        fs::create_dir_all(&slot).unwrap();
+        CommitBuildMeta::write_atomic(&slot.join("meta.json"), &meta(&subtree.to_string_lossy()))
+            .unwrap();
+        assert!(attach_if_fingerprint_matches(&slot, &root).is_none());
+        CommitBuildMeta::write_atomic(&slot.join("meta.json"), &meta(&root.to_string_lossy()))
+            .unwrap();
+        assert!(attach_if_fingerprint_matches(&slot, &root).is_some());
     }
 }

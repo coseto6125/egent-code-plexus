@@ -1766,19 +1766,14 @@ impl LexicalFunctionIndex {
                 )
             })
             .collect();
-        for &(offset, node) in &functions {
+        let spans: Vec<Span> = functions.iter().map(|(_, node)| node.span).collect();
+        let parents = crate::framework_helpers::innermost_enclosing(&spans);
+        for (k, &(offset, node)) in functions.iter().enumerate() {
             if node.kind != NodeKind::Function {
                 continue;
             }
             let candidates = index.by_name.entry(node.name.clone()).or_default();
-            let parent = functions
-                .iter()
-                .filter(|(_, parent)| {
-                    parent.span != node.span
-                        && crate::framework_helpers::span_contains(parent.span, node.span)
-                })
-                .min_by_key(|(_, parent)| Self::scope_size(Some(parent.span)))
-                .map(|(_, parent)| parent.span);
+            let parent = parents[k].map(|parent| spans[parent]);
             if parent.is_some() || node.owner_class.is_none() {
                 candidates.push((parent, start_index + offset as u32));
             }

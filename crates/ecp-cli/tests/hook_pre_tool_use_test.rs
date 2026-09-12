@@ -271,3 +271,198 @@ fn test_edit_hook_ignores_unreadable_sibling_sources() {
         "edit snapshots must not be written into the repository"
     );
 }
+
+fn git_in(repo: &std::path::Path, args: &[&str]) {
+    let status = Command::new("git")
+        .current_dir(repo)
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(args)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?}");
+}
+
+/// Contract: with a published graph, the edit hook's evidence covers the
+/// edited file plus its direct importers, and the header names that scope.
+/// Without one it stays single-file (`test_edit_hook_ignores_unreadable_sibling_sources`).
+#[test]
+fn test_edit_hook_reports_consumers_in_direct_importers_from_the_graph() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("x.js"), "export function x() { return 1; }\n").unwrap();
+    fs::write(
+        repo.join("y.js"),
+        "import { x } from './x.js';\nconsume(x());\n",
+    )
+    .unwrap();
+    fs::write(repo.join("z.js"), "consume(2);\n").unwrap();
+    git_in(&repo, &["init", "-q"]);
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-qm", "init"]);
+    let indexed = Command::new(ecp_bin())
+        .args(["admin", "index", "--repo"])
+        .arg(&repo)
+        .env("HOME", &home)
+        .env("ECP_SKIP_BG_REBUILD", "1")
+        .output()
+        .unwrap();
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+    let input = serde_json::json!({"session_id":"session-3","tool_use_id":"edit-3","cwd":repo,"tool_name":"Edit","tool_input":{"file_path":repo.join("x.js"),"old_string":"return 1","new_string":"return 2"}});
+    let output = run_edit_event("pre-tool-use", &input, &home);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let context = payload["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        context.contains("Scope: edited file and 1 direct importers from the graph (0 omitted)"),
+        "{context}"
+    );
+    assert!(context.contains("y.js:2"), "{context}");
+    assert!(!context.contains("z.js"), "{context}");
+}
+
+fn indexed_repo(
+    tmp: &std::path::Path,
+    files: &[(&str, String)],
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let home = tmp.join("home");
+    let repo = tmp.join("repo");
+    for (name, source) in files {
+        let path = repo.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, source).unwrap();
+    }
+    git_in(&repo, &["init", "-q"]);
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-qm", "init"]);
+    let indexed = Command::new(ecp_bin())
+        .args(["admin", "index", "--repo"])
+        .arg(&repo)
+        .env("HOME", &home)
+        .env("ECP_SKIP_BG_REBUILD", "1")
+        .output()
+        .unwrap();
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+    (home, repo)
+}
+
+fn edit_context(
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+    file: &std::path::Path,
+    old: &str,
+    new: &str,
+) -> String {
+    let input = serde_json::json!({"session_id":"session-4","tool_use_id":"edit-4","cwd":cwd,"tool_name":"Edit","tool_input":{"file_path":file,"old_string":old,"new_string":new}});
+    let output = run_edit_event("pre-tool-use", &input, home);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    payload["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Contract: importers never cost the edited file its own evidence. When the
+/// cross-file corpus exhausts the analysis budget, the hook reports the
+/// single-file result and says why the scope shrank.
+#[test]
+fn test_edit_hook_falls_back_to_the_edited_file_when_importers_exhaust_the_budget() {
+    let tmp = tempdir().unwrap();
+    let filler = "0;\n".repeat(40_000);
+    let (home, repo) = indexed_repo(
+        tmp.path(),
+        &[
+            (
+                "x.js",
+                "export function f() {\n  let x = 1;\n  consume(x);\n}\n".into(),
+            ),
+            ("y1.js", format!("import {{ f }} from './x.js';\n{filler}")),
+            ("y2.js", format!("import {{ f }} from './x.js';\n{filler}")),
+            ("y3.js", format!("import {{ f }} from './x.js';\n{filler}")),
+        ],
+    );
+    let context = edit_context(&home, &repo, &repo.join("x.js"), "let x = 1", "let x = 2");
+    assert!(
+        context.contains(
+            "Scope: edited file only (its direct importers exceeded the analysis budget)"
+        ),
+        "{context}"
+    );
+    assert!(context.contains("x.js:3"), "{context}");
+    assert!(!context.contains("truncated=true"), "{context}");
+}
+
+/// Contract: a hook fired from a subdirectory keys paths at the worktree
+/// root, so the graph lookup and the importers' import specifiers agree.
+#[test]
+fn test_edit_hook_from_a_subdirectory_keys_paths_at_the_worktree_root() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = indexed_repo(
+        tmp.path(),
+        &[
+            ("lib.js", "export function x() { return 1; }\n".into()),
+            (
+                "use.js",
+                "import { x } from './lib.js';\nconsume(x());\n".into(),
+            ),
+            ("sub/lib.js", "export function x() { return 1; }\n".into()),
+            (
+                "sub/real.js",
+                "import { x } from './lib.js';\nconsume(x());\n".into(),
+            ),
+        ],
+    );
+    let context = edit_context(
+        &home,
+        &repo.join("sub"),
+        &repo.join("sub").join("lib.js"),
+        "return 1",
+        "return 2",
+    );
+    assert!(context.contains("sub/real.js:2"), "{context}");
+    assert!(!context.contains("use.js"), "{context}");
+    assert!(context.contains("1 direct importers"), "{context}");
+}
+
+/// Contract: a cwd that is a symlink to a subdirectory still resolves the
+/// worktree root through the physical path, so importers are found.
+#[cfg(unix)]
+#[test]
+fn test_edit_hook_symlinked_subdirectory_cwd_finds_importers() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = indexed_repo(
+        tmp.path(),
+        &[
+            ("sub/lib.js", "export function x() { return 1; }\n".into()),
+            (
+                "sub/real.js",
+                "import { x } from './lib.js';\nconsume(x());\n".into(),
+            ),
+        ],
+    );
+    let alias = tmp.path().join("alias");
+    std::os::unix::fs::symlink(repo.join("sub"), &alias).unwrap();
+    let context = edit_context(&home, &alias, &alias.join("lib.js"), "return 1", "return 2");
+    assert!(context.contains("sub/real.js:2"), "{context}");
+    assert!(context.contains("1 direct importers"), "{context}");
+}

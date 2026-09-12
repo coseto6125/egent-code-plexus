@@ -20,6 +20,14 @@ fn check_in(cwd: &std::path::Path, fix: bool) -> CheckResult {
     let remediation = "ecp admin index --repo .";
     let mut result = match ensure_index(&graph, cwd) {
         Ok(EnsureResult::Ready) => return CheckResult::ok("index", "graph is fresh"),
+        Ok(EnsureResult::Stale {
+            needs_full_rebuild: true,
+            ..
+        }) => CheckResult::warn(
+            "index",
+            "stale — full rebuild required (binary, schema, or worktree root changed)",
+        )
+        .with_remediation("ecp admin index --force --repo ."),
         Ok(EnsureResult::Stale { age_seconds, .. }) => CheckResult::warn(
             "index",
             format!("stale — graph built {age_seconds}s before latest source change"),

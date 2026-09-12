@@ -225,6 +225,50 @@ pub fn sweep_sessions(repo_root: &Path) -> io::Result<SweepStats> {
 /// are pure waste. Skips dirs whose mtime is < 10s old or that have a sibling
 /// `.building` marker (another session may be mid-ingest). Reuses
 /// `CommitDirName::parse` rather than hand-rolling the name grammar.
+/// Retire commit dirs whose recorded worktree still exists but is not a
+/// worktree root (`orchestrator::built_below_worktree_root`): they were
+/// published from a subdirectory and hold that subtree's graph only. A
+/// recorded worktree that is gone is left alone; the query path rebuilds such
+/// a slot on first use.
+pub fn sweep_subtree_builds(repo_root: &Path) -> io::Result<SweepStats> {
+    let mut stats = SweepStats {
+        marked: 0,
+        removed: 0,
+    };
+    let Ok(it) = fs::read_dir(repo_root.join("commits")) else {
+        return Ok(stats);
+    };
+    for entry in it.flatten() {
+        let dir = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !dir.is_dir()
+            || name.starts_with('.')
+            || name.contains(".building")
+            || is_retired_dir(&name)
+        {
+            continue;
+        }
+        let Ok(meta) = ecp_core::registry::CommitBuildMeta::read(&dir.join("meta.json")) else {
+            continue;
+        };
+        let built = Path::new(&meta.built_from_worktree);
+        // `Path::new("")` as the root in use: no live root is exempt here.
+        if built.is_dir()
+            && crate::build::orchestrator::built_below_worktree_root(
+                built,
+                &meta.sha,
+                Path::new(""),
+            )
+        {
+            stats.marked += 1;
+            if ecp_core::registry::retire_dir_async(&dir)?.is_some() {
+                stats.removed += 1;
+            }
+        }
+    }
+    Ok(stats)
+}
+
 pub fn sweep_stale_generations(repo_root: &Path) -> io::Result<SweepStats> {
     let commits = repo_root.join("commits");
     let mut removed = 0usize;
@@ -442,5 +486,81 @@ mod tests {
 
         assert!(!is_retired_dir("sid_live"));
         assert!(!is_retired_dir("sid.dead.notanumber"));
+    }
+}
+
+#[cfg(test)]
+mod subtree_build_tests {
+    use super::*;
+    use ecp_core::registry::{EmbeddingStatus, SourceType};
+
+    fn publish(commits: &Path, name: &str, built_from_worktree: &Path) -> std::path::PathBuf {
+        publish_sha(commits, name, built_from_worktree, &"0".repeat(40))
+    }
+
+    fn publish_sha(
+        commits: &Path,
+        name: &str,
+        built_from_worktree: &Path,
+        sha: &str,
+    ) -> std::path::PathBuf {
+        let dir = commits.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        let meta = CommitBuildMeta {
+            version: 1,
+            sha: sha.into(),
+            source_type: SourceType::Branch,
+            source_id: None,
+            built_from_worktree: built_from_worktree.to_string_lossy().into(),
+            built_at: String::new(),
+            parent_sha: None,
+            node_count: 0,
+            embedding_status: EmbeddingStatus::None,
+            refs_at_build: vec![],
+            refs_seen_since: vec![],
+            builder_fingerprint: None,
+            binary_commit_sha: None,
+        };
+        CommitBuildMeta::write_atomic(&dir.join("meta.json"), &meta).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_sweep_subtree_builds_retires_only_slots_from_a_live_subdirectory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree = tmp.path().join("repo");
+        let subtree = worktree.join("crates").join("cli");
+        fs::create_dir_all(&subtree).unwrap();
+        fs::write(worktree.join(".git"), "gitdir: elsewhere\n").unwrap();
+        let repo_root = tmp.path().join("index");
+        let commits = repo_root.join("commits");
+        let from_subtree = publish(&commits, "branch_a__1111", &subtree);
+        let from_root = publish(&commits, "branch_b__2222", &worktree);
+        let from_gone = publish(&commits, "branch_c__3333", &tmp.path().join("gone"));
+        let plain = tmp.path().join("plain-source");
+        fs::create_dir_all(&plain).unwrap();
+        let from_non_git = publish_sha(
+            &commits,
+            "branch_d__4444",
+            &plain,
+            &crate::build::orchestrator::path_bound_sha(&plain).unwrap(),
+        );
+
+        let retired = publish(&commits, "branch_e__5555.dead.1", &subtree);
+
+        let stats = sweep_subtree_builds(&repo_root).unwrap();
+
+        assert_eq!((stats.marked, stats.removed), (1, 1));
+        assert!(
+            retired.exists(),
+            "an already retired dir is left to its sweeper"
+        );
+        assert!(!from_subtree.exists(), "subtree slot must be retired");
+        assert!(from_root.exists(), "root slot stays");
+        assert!(from_gone.exists(), "a slot whose worktree is gone stays");
+        assert!(
+            from_non_git.exists(),
+            "a non-git source tree keyed by its path stays"
+        );
     }
 }

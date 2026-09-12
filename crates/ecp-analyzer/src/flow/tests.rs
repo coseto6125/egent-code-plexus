@@ -273,10 +273,9 @@ fn test_analyze_ast_budget_reports_truncation() {
         path: "test.js".into(),
         source: "let x = 10; consume(x);".into(),
     }];
-    let report = analyze_lines(
+    let report = analyze_changes(
         &files,
-        "test.js",
-        &[1],
+        &BTreeMap::from([("test.js".into(), vec![1])]),
         &Budgets {
             max_steps: 3,
             ..Budgets::default()
@@ -674,4 +673,63 @@ fn test_analyze_two_call_sites_in_loop_stay_distinct() {
     );
     assert!(consumes(&report, "a"), "{report:#?}");
     assert!(!consumes(&report, "b"), "{report:#?}");
+}
+
+/// Contract: a budget cut or boundary raised by one file never costs another
+/// file's uncalled entry points their analysis; the review path runs over
+/// whole corpora, so this is what keeps a small diff's consumers visible.
+#[test]
+fn test_analyze_changes_ast_cut_in_a_sibling_keeps_edited_file_entry_points() {
+    let files = [
+        SourceFile {
+            path: "edited.js".into(),
+            source: "export function f() {\n  let x = 1;\n  consume(x);\n}\n".into(),
+        },
+        SourceFile {
+            path: "big.js".into(),
+            source: "0;\n".repeat(400),
+        },
+    ];
+    let report = analyze_changes(
+        &files,
+        &BTreeMap::from([("edited.js".into(), vec![2])]),
+        &Budgets {
+            max_steps: 300,
+            ..Budgets::default()
+        },
+    )
+    .unwrap();
+    assert!(report.truncated, "big.js must be cut by the AST budget");
+    // The cut lives in big.js, which the slice never reaches, so its boundary
+    // is only counted.
+    assert_eq!(report.boundaries_omitted, 1, "{:?}", report.boundaries);
+    assert!(
+        report.consumers.iter().any(|id| report
+            .nodes
+            .iter()
+            .any(|n| n.id == *id && n.file == "edited.js" && n.line == 3)),
+        "{:?}",
+        report.nodes
+    );
+}
+
+/// Contract: a node budget that is exactly spent before the entry-point sweep
+/// still reports the sweep it could not run as a truncation.
+#[test]
+fn test_analyze_changes_node_budget_spent_before_sweep_reports_truncation() {
+    let files = [SourceFile {
+        path: "f.js".into(),
+        source: "function f() {\n  consume(1);\n}\n".into(),
+    }];
+    let report = analyze_changes(
+        &files,
+        &BTreeMap::from([("f.js".into(), vec![2])]),
+        &Budgets {
+            max_nodes: 2,
+            ..Budgets::default()
+        },
+    )
+    .unwrap();
+    assert!(report.consumers.is_empty(), "{:?}", report.nodes);
+    assert!(report.truncated);
 }
