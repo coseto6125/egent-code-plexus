@@ -96,7 +96,7 @@ pub fn load_sources(repo: &Path, overlay: Option<&Path>) -> Result<Loaded, EcpEr
         None => BTreeMap::new(),
     };
     let mut sources = BTreeMap::new();
-    let mut skipped_files = Vec::new();
+    let mut skipped_files = BTreeMap::new();
     let mut bytes = 0;
     let scope = repo.to_path_buf();
     let walker = ignore::WalkBuilder::new(repo)
@@ -128,21 +128,25 @@ pub fn load_sources(repo: &Path, overlay: Option<&Path>) -> Result<Loaded, EcpEr
         let source = match read_source(entry.path())? {
             Ok(source) => source,
             Err(message) => {
-                // A skipped file still spent the read; it counts against the budget.
+                // Skipped sources count against the budget until replaced by an overlay.
                 bytes += size as usize;
-                skipped_files.push(skipped(&path, message));
+                skipped_files.insert(path.clone(), (skipped(&path, message), size as usize));
                 budget(sources.len() + skipped_files.len(), bytes)?;
                 continue;
             }
         };
         bytes += source.len();
         sources.insert(path, source);
-        budget(sources.len(), bytes)?;
+        budget(sources.len() + skipped_files.len(), bytes)?;
     }
     // Ignore rules select untracked sources. Tracked sources remain admitted in
     // both snapshots, so a new ignore rule cannot fabricate a source deletion.
     for path in tracked_paths(repo)? {
-        if sources.contains_key(&path) || !supported_path(&path) || !included(Path::new(&path)) {
+        if sources.contains_key(&path)
+            || skipped_files.contains_key(&path)
+            || !supported_path(&path)
+            || !included(Path::new(&path))
+        {
             continue;
         }
         let absolute = repo.join(&path);
@@ -168,14 +172,17 @@ pub fn load_sources(repo: &Path, overlay: Option<&Path>) -> Result<Loaded, EcpEr
             Ok(source) => source,
             Err(message) => {
                 bytes += metadata.len() as usize;
-                skipped_files.push(skipped(&path, message));
+                skipped_files.insert(
+                    path.clone(),
+                    (skipped(&path, message), metadata.len() as usize),
+                );
                 budget(sources.len() + skipped_files.len(), bytes)?;
                 continue;
             }
         };
         bytes += source.len();
         sources.insert(path, source);
-        budget(sources.len(), bytes)?;
+        budget(sources.len() + skipped_files.len(), bytes)?;
     }
     for (path, source) in overlay {
         let path = relative_path(repo, Path::new(&path))?;
@@ -185,17 +192,23 @@ pub fn load_sources(repo: &Path, overlay: Option<&Path>) -> Result<Loaded, EcpEr
             )));
         }
         bytes += source.len();
+        if let Some((_, size)) = skipped_files.remove(&path) {
+            bytes -= size;
+        }
         if let Some(old) = sources.insert(path, source) {
             bytes -= old.len();
         }
-        budget(sources.len(), bytes)?;
+        budget(sources.len() + skipped_files.len(), bytes)?;
     }
     Ok(Loaded {
         files: sources
             .into_iter()
             .map(|(path, source)| SourceFile { path, source })
             .collect(),
-        skipped: skipped_files,
+        skipped: skipped_files
+            .into_values()
+            .map(|(boundary, _)| boundary)
+            .collect(),
     })
 }
 
