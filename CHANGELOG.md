@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.14.0 - 2026-09-12
+
+### Features
+
+- add `ecp update` and announce the 0.15 end of channel upgrades (#775)
+- integrate value flow analysis with MCP, reviews, and edit hooks (#773)
+
+### Bug Fixes
+
+- count skipped sources once and replace overlay accounting (#776)
+
 ## v0.13.2 - 2026-09-11
 
 ### Features
