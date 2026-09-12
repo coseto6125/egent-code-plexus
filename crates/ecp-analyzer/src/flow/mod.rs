@@ -1,7 +1,6 @@
 //! Bounded source-based value dependency analysis.
 use ast::{lower, Ast};
 use engine::{Engine, Scope};
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use tree_sitter::Parser;
@@ -106,54 +105,6 @@ fn language(path: &str) -> Option<tree_sitter::Language> {
     })
 }
 
-struct Lowered {
-    ast: Vec<Ast>,
-    fields_of: Vec<Option<&'static str>>,
-    truncated: bool,
-    parse_error: bool,
-}
-
-/// `None` when parsing exceeds its time budget. `ast` ids are file-local; the
-/// caller rebases them onto the shared vector.
-fn parse_and_lower(index: usize, f: &SourceFile, limit: usize) -> Result<Option<Lowered>, String> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&language(&f.path).expect("validated before parsing"))
-        .map_err(|e| e.to_string())?;
-    let started = std::time::Instant::now();
-    let mut progress = |_: &tree_sitter::ParseState| {
-        if started.elapsed() > std::time::Duration::from_secs(2) {
-            std::ops::ControlFlow::Break(())
-        } else {
-            std::ops::ControlFlow::Continue(())
-        }
-    };
-    let bytes = f.source.as_bytes();
-    let Some(tree) = parser.parse_with_options(
-        &mut |offset, _| &bytes[offset..],
-        None,
-        Some(tree_sitter::ParseOptions::new().progress_callback(&mut progress)),
-    ) else {
-        return Ok(None);
-    };
-    let mut ast = Vec::new();
-    let mut fields_of = Vec::new();
-    let (_, truncated) = lower(
-        tree.root_node(),
-        index,
-        &f.source,
-        &mut ast,
-        &mut fields_of,
-        limit,
-    );
-    Ok(Some(Lowered {
-        ast,
-        fields_of,
-        truncated,
-        parse_error: tree.root_node().has_error(),
-    }))
-}
-
 fn build<'a>(files: &'a [SourceFile], budgets: &Budgets) -> Result<Engine<'a>, String> {
     if budgets.max_nodes == 0 || budgets.max_steps == 0 || budgets.max_call_depth == 0 {
         return Err("Analysis budgets must be positive".into());
@@ -188,91 +139,62 @@ fn build<'a>(files: &'a [SourceFile], budgets: &Budgets) -> Result<Engine<'a>, S
         links: BTreeSet::new(),
     };
     let mut paths = BTreeSet::new();
-    for f in files {
+    for (i, f) in files.iter().enumerate() {
         if !paths.insert(&f.path) {
             return Err(format!("Duplicate source path: {}", f.path));
         }
-        if language(&f.path).is_none() {
-            return Err(format!("Unsupported source language: {}", f.path));
+        let lang =
+            language(&f.path).ok_or_else(|| format!("Unsupported source language: {}", f.path))?;
+        let mut parser = Parser::new();
+        parser.set_language(&lang).map_err(|e| e.to_string())?;
+        let started = std::time::Instant::now();
+        let mut progress = |_: &tree_sitter::ParseState| {
+            if started.elapsed() > std::time::Duration::from_secs(2) {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        };
+        let bytes = f.source.as_bytes();
+        let Some(tree) = parser.parse_with_options(
+            &mut |offset, _| &bytes[offset..],
+            None,
+            Some(tree_sitter::ParseOptions::new().progress_callback(&mut progress)),
+        ) else {
+            // One pathological file must not take the whole corpus down with it.
+            engine.roots.push(None);
+            engine.boundaries.insert(Boundary {
+                file: f.path.clone(),
+                line: 1,
+                column: 1,
+                kind: "parse_timeout".into(),
+                message: "Parsing exceeded its time budget; the file is excluded from analysis."
+                    .into(),
+            });
+            continue;
+        };
+        let (root, truncated) = lower(
+            tree.root_node(),
+            i,
+            &f.source,
+            &mut engine.ast,
+            budgets.max_steps,
+        );
+        engine.roots.push(Some(root));
+        if truncated {
+            engine.truncated = true;
+            engine.boundary(
+                root,
+                "ast_budget",
+                "AST lowering reached the node or nesting budget.",
+            );
         }
-    }
-    // Parse and lower in parallel, one chunk of files at a time. The merge is
-    // serial: node ids are rebased per file and the shared node budget is cut
-    // at the node the sequential pass stopped at, so reports are byte-identical
-    // and deterministic. Each file lowers at most the budget left when its
-    // chunk started, so transient memory stays within chunk × remaining budget
-    // instead of every file lowering to the full cap before the cut.
-    let chunk_size = rayon::current_num_threads().max(1) * 2;
-    for (chunk_index, chunk) in files.chunks(chunk_size).enumerate() {
-        let remaining = budgets.max_steps.saturating_sub(engine.ast.len());
-        let lowered: Vec<Result<Option<Lowered>, String>> = chunk
-            .par_iter()
-            .enumerate()
-            .map(|(i, f)| parse_and_lower(chunk_index * chunk_size + i, f, remaining))
-            .collect();
-        for (f, lowered) in chunk.iter().zip(lowered) {
-            let Some(mut lowered) = lowered? else {
-                // One pathological file must not take the whole corpus down with it.
-                engine.roots.push(None);
-                engine.boundaries.insert(Boundary {
-                    file: f.path.clone(),
-                    line: 1,
-                    column: 1,
-                    kind: "parse_timeout".into(),
-                    message:
-                        "Parsing exceeded its time budget; the file is excluded from analysis."
-                            .into(),
-                });
-                continue;
-            };
-            let offset = engine.ast.len();
-            // The root is always kept; everything past the shared budget is cut,
-            // which is what the sequential lowering would have skipped.
-            let keep = budgets.max_steps.saturating_sub(offset).max(1);
-            if lowered.ast.len() > keep {
-                lowered.ast.truncate(keep);
-                lowered.truncated = true;
-                for a in &mut lowered.ast {
-                    a.children.retain(|c| *c < keep);
-                    a.fields.clear();
-                }
-                // Field maps are rebuilt in push order: a later child under the
-                // same field name must not leave the name unset once it is cut.
-                for (id, field) in lowered.fields_of.iter().enumerate().take(keep) {
-                    if let (Some(field), Some(parent)) = (field, lowered.ast[id].parent) {
-                        lowered.ast[parent].fields.insert((*field).into(), id);
-                    }
-                }
-            }
-            for a in &mut lowered.ast {
-                if let Some(p) = a.parent.as_mut() {
-                    *p += offset;
-                }
-                for c in &mut a.children {
-                    *c += offset;
-                }
-                for c in a.fields.values_mut() {
-                    *c += offset;
-                }
-            }
-            engine.ast.append(&mut lowered.ast);
-            let root = offset;
-            engine.roots.push(Some(root));
-            if lowered.truncated {
-                engine.truncated = true;
-                engine.boundary(
-                    root,
-                    "ast_budget",
-                    "AST lowering reached the node or nesting budget.",
-                );
-            }
-            if lowered.parse_error {
-                engine.boundary(
-                    root,
-                    "parse_error",
-                    "Syntax errors limit analysis coverage.",
-                );
-            }
+        if tree.root_node().has_error() {
+            engine.boundary(
+                root,
+                "parse_error",
+                "Syntax errors limit analysis coverage.",
+            );
         }
     }
     for i in 0..files.len() {
@@ -288,8 +210,15 @@ fn build<'a>(files: &'a [SourceFile], budgets: &Budgets) -> Result<Engine<'a>, S
     // Inspect uncalled functions independently, so source queries do not require a runtime entry point.
     // Each entry point starts from the module-exit state; otherwise the strong
     // writes of one uncalled function would kill values a sibling still reads.
+    // Gated on the budgets themselves, not the `truncated` latch: an AST cut,
+    // a recursion or loop boundary elsewhere in the corpus must not cost the
+    // remaining entry points their analysis. An exhausted step or node budget
+    // makes every further `invoke` return at once, so the loop stays bounded.
     let mut f = 0;
-    while f < engine.functions.len() && !engine.truncated {
+    while f < engine.functions.len()
+        && engine.steps <= budgets.max_steps
+        && engine.nodes.len() < budgets.max_nodes
+    {
         if !engine.called.contains(&f) {
             // Each entry point runs from the state it was discovered in (its
             // enclosing function's frame included) and leaves no effects behind.

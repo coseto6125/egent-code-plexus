@@ -166,7 +166,12 @@ pub fn context_in(input: &HookInput, after: bool, state: &Path) -> Option<String
             Some(std::slice::from_ref(&relative)),
             Some(phase),
         );
-        scope = "edited file only (its direct importers exceeded the analysis budget); cross-file consumers: ecp review --include flow --baseline <ref>".into();
+        scope = if report["truncated"].as_bool().unwrap_or(false) {
+            "edited file only (the analysis budget is exhausted by the edited file itself); cross-file consumers: ecp review --include flow --baseline <ref>"
+        } else {
+            "edited file only (its direct importers exceeded the analysis budget); cross-file consumers: ecp review --include flow --baseline <ref>"
+        }
+        .into();
     }
     if input.session_id.is_empty() || input.tool_use_id.is_empty() {
         let warning = "Hook identity unavailable: edit pairing uses input identity; context deduplication is disabled.\n";

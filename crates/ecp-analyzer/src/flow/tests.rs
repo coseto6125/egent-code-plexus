@@ -1,5 +1,4 @@
 use super::*;
-use tree_sitter::Parser;
 
 fn query(source: &str, line: usize, column: usize) -> FlowReport {
     analyze(
@@ -676,74 +675,40 @@ fn test_analyze_two_call_sites_in_loop_stay_distinct() {
     assert!(!consumes(&report, "b"), "{report:#?}");
 }
 
-/// Contract: parallel lowering plus the serial merge yields the same node
-/// vector as one sequential lowering with a shared budget, at every budget,
-/// including the field maps a cut leaves behind (PHP `alternative` repeats).
+/// Contract: a budget cut or boundary raised by one file never costs another
+/// file's uncalled entry points their analysis; the review path runs over
+/// whole corpora, so this is what keeps a small diff's consumers visible.
 #[test]
-fn test_build_parallel_lowering_matches_sequential_budget_cut() {
+fn test_analyze_changes_ast_cut_in_a_sibling_keeps_edited_file_entry_points() {
     let files = [
         SourceFile {
-            path: "a.php".into(),
-            source: "<?php\nif ($a) {} elseif ($b) { consume(1); } else {}\nfunction f($x) { return $x; }\n".into(),
+            path: "edited.js".into(),
+            source: "export function f() {\n  let x = 1;\n  consume(x);\n}\n".into(),
         },
         SourceFile {
-            path: "b.js".into(),
-            source: "let x = f(1) ? 2 : 3;\nconsume(x);\nif (x) { y = 1; } else { y = 2; }\n".into(),
-        },
-        SourceFile {
-            path: "c.py".into(),
-            source: "def g(a):\n    if a:\n        return 1\n    elif a > 2:\n        return 2\n    else:\n        return 3\nconsume(g(1))\n".into(),
+            path: "big.js".into(),
+            source: "0;\n".repeat(400),
         },
     ];
-    let full = build(&files, &Budgets::default()).unwrap().ast.len();
-    assert!(full > 60, "corpus is {full} nodes");
-    for budget in 1..=full + 1 {
-        let engine = build(
-            &files,
-            &Budgets {
-                max_steps: budget,
-                ..Budgets::default()
-            },
-        )
-        .unwrap();
-        let mut ast = Vec::new();
-        let mut fields_of = Vec::new();
-        for (i, f) in files.iter().enumerate() {
-            let mut parser = Parser::new();
-            parser.set_language(&language(&f.path).unwrap()).unwrap();
-            let tree = parser.parse(&f.source, None).unwrap();
-            lower(
-                tree.root_node(),
-                i,
-                &f.source,
-                &mut ast,
-                &mut fields_of,
-                budget,
-            );
-        }
-        assert_eq!(engine.ast.len(), ast.len(), "budget {budget}");
-        for (id, (a, b)) in engine.ast.iter().zip(&ast).enumerate() {
-            assert_eq!(
-                (
-                    a.parent,
-                    &a.kind,
-                    a.file,
-                    &a.children,
-                    &a.fields,
-                    a.line,
-                    a.column
-                ),
-                (
-                    b.parent,
-                    &b.kind,
-                    b.file,
-                    &b.children,
-                    &b.fields,
-                    b.line,
-                    b.column
-                ),
-                "budget {budget} node {id}"
-            );
-        }
-    }
+    let report = analyze_changes(
+        &files,
+        &BTreeMap::from([("edited.js".into(), vec![2])]),
+        &Budgets {
+            max_steps: 300,
+            ..Budgets::default()
+        },
+    )
+    .unwrap();
+    assert!(report.truncated, "big.js must be cut by the AST budget");
+    // The cut lives in big.js, which the slice never reaches, so its boundary
+    // is only counted.
+    assert_eq!(report.boundaries_omitted, 1, "{:?}", report.boundaries);
+    assert!(
+        report.consumers.iter().any(|id| report
+            .nodes
+            .iter()
+            .any(|n| n.id == *id && n.file == "edited.js" && n.line == 3)),
+        "{:?}",
+        report.nodes
+    );
 }

@@ -16,15 +16,11 @@ pub(super) struct Ast {
     pub(super) children: Vec<usize>,
     pub(super) fields: BTreeMap<String, usize>,
 }
-/// `fields_of[id]` records the field name each node was pushed under, so a
-/// caller that cuts the vector at a budget can rebuild parents' field maps
-/// exactly as a lowering that stopped at that node would have left them.
 pub(super) fn lower(
     n: Node<'_>,
     file: usize,
     source: &str,
     ast: &mut Vec<Ast>,
-    fields_of: &mut Vec<Option<&'static str>>,
     limit: usize,
 ) -> (usize, bool) {
     let root = ast.len();
@@ -73,7 +69,6 @@ pub(super) fn lower(
             children: vec![],
             fields: BTreeMap::new(),
         });
-        fields_of.push(field);
         if let Some(parent) = parent {
             ast[parent].children.push(id);
             if let Some(field) = field {
