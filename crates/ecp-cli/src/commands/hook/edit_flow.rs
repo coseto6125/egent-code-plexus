@@ -215,12 +215,13 @@ impl Importers {
     }
 }
 
-/// The physical spelling of `file`: its nearest existing ancestor
+/// The physical spelling of `file`: its nearest existing ancestor directory
 /// canonicalized with the rest re-appended, so a path under a symlinked cwd
-/// lands under the same root `git_root` found through the canonical cwd. A
+/// lands under the same root `git_root` found through the canonical cwd. The
+/// file itself is never resolved, so a symlinked source keeps its own path; a
 /// Write target, and the directories it creates, need not exist yet.
 fn physical(file: &Path) -> Option<PathBuf> {
-    let existing = file.ancestors().find(|dir| dir.exists())?;
+    let existing = file.parent()?.ancestors().find(|dir| dir.exists())?;
     let canonical = dunce::canonicalize(existing).ok()?;
     Some(canonical.join(file.strip_prefix(existing).ok()?))
 }
@@ -501,6 +502,26 @@ mod tests {
         let input = edit_input(&repo.join("sub"), Path::new("lib.js"), "1", "2");
         let rendered = context_in(&input, false, state.path()).unwrap();
         assert!(rendered.contains("sub/lib.js:2"), "{rendered}");
+    }
+
+    /// Contract: a symlinked source file keeps its own path; only the cwd is
+    /// resolved physically.
+    #[cfg(unix)]
+    #[test]
+    fn test_context_symlinked_cwd_keeps_a_symlinked_file_at_its_own_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        std::fs::write(repo.join(".git"), "gitdir: elsewhere\n").unwrap();
+        let shared = temp.path().join("shared.js");
+        std::fs::write(&shared, "let x = 1;\nconsume(x);\n").unwrap();
+        std::os::unix::fs::symlink(&shared, repo.join("sub/link.js")).unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(repo.join("sub"), &alias).unwrap();
+        let input = edit_input(&alias, Path::new("link.js"), "1", "2");
+        let rendered = context_in(&input, false, state.path()).unwrap();
+        assert!(rendered.contains("sub/link.js:2"), "{rendered}");
     }
 
     /// Contract: a Write through a symlinked cwd into a directory that does
