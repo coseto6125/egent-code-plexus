@@ -23,7 +23,9 @@ use clap::Args;
 use ecp_core::EcpError;
 use sha2::{Digest, Sha256};
 
-use crate::commands::admin::doctor::checks::install_source::InstallSource;
+use crate::commands::admin::doctor::checks::install_source::{
+    InstallSource, CHANNELS, CHANNEL_SUNSET,
+};
 use crate::commands::admin::doctor::checks::version::{latest_published_version, parse_semver};
 use crate::commands::admin::update_check;
 use crate::git::safe_exec;
@@ -51,7 +53,9 @@ pub fn run(args: UpdateArgs) -> Result<(), EcpError> {
 
     if latest <= local_parsed {
         println!("ecp v{local} is up to date (latest release v{latest_str})");
-        update_check::clear_notification();
+        if !args.check {
+            update_check::clear_available_notice();
+        }
         return Ok(());
     }
     if args.check {
@@ -98,19 +102,19 @@ pub fn run(args: UpdateArgs) -> Result<(), EcpError> {
     let installed = version_of(&exe)?;
     if !installed.contains(&latest_str) {
         return Err(EcpError::Output(format!(
-            "installed binary reports `{installed}`, expected v{latest_str}; the previous binary is at {}",
-            old_path(&exe).display()
+            "installed binary reports `{installed}`, expected v{latest_str}; the previous binary is next to it as {}.old*",
+            exe.display()
         )));
     }
     update_check::record_self_update(&latest_str);
-    update_check::clear_notification();
+    update_check::clear_available_notice();
     println!("✓ ecp v{latest_str} installed -> {}", exe.display());
 
     let source = InstallSource::detect();
     if source != InstallSource::Unknown {
         println!(
             "note: this binary came from {source:?}; that package manager still records v{local}. \
-             Upgrading through npm / uv / pip / brew / cargo is removed in 0.15; `ecp update` is the upgrade path."
+             Upgrading through {CHANNELS} is removed in {CHANNEL_SUNSET}; `ecp update` is the upgrade path."
         );
     }
     for other in other_copies_on_path(std::env::var_os("PATH"), &exe) {
@@ -153,31 +157,33 @@ fn bin_file_name() -> String {
     format!("{BIN}{}", std::env::consts::EXE_SUFFIX)
 }
 
+/// The file to replace: a symlink on PATH (npm `bin`, Homebrew `opt`) points
+/// at the real binary, and that is the one a new release must land on.
 fn current_exe() -> Result<PathBuf, EcpError> {
-    let exe = std::env::current_exe()
-        .map_err(|e| EcpError::Output(format!("locate running binary: {e}")))?;
+    let exe = crate::subprocess::self_exe()?;
     Ok(dunce::canonicalize(&exe).unwrap_or(exe))
 }
 
+/// `--max-time` caps one attempt; no `--retry`, because a retry restarts the
+/// transfer from zero and would only run into the outer kill. A stalled
+/// transfer (under 1 KiB/s for 30 s) fails fast instead.
 fn download(url: &str, dest: &Path) -> Result<(), EcpError> {
     let mut cmd = Command::new("curl");
     cmd.args([
         "-sSfL",
-        "--retry",
-        "2",
         "--max-time",
         "170",
+        "--speed-limit",
+        "1024",
+        "--speed-time",
+        "30",
         "-H",
         "User-Agent: ecp-update",
         "-o",
     ])
     .arg(dest)
     .arg(url);
-    let out = safe_exec::output_with_timeout(cmd, DOWNLOAD_TIMEOUT).ok_or_else(|| {
-        EcpError::Output(format!(
-            "curl did not complete for {url} (missing, or timed out)"
-        ))
-    })?;
+    let out = run_tool(cmd, "curl", DOWNLOAD_TIMEOUT)?;
     if !out.status.success() {
         return Err(EcpError::Output(format!(
             "download failed: {url}: {}",
@@ -185,6 +191,24 @@ fn download(url: &str, dest: &Path) -> Result<(), EcpError> {
         )));
     }
     Ok(())
+}
+
+/// `output_with_timeout` returns `None` for a missing tool and for a kill at
+/// `timeout` alike; the user needs to know which.
+fn run_tool(cmd: Command, tool: &str, timeout: Duration) -> Result<std::process::Output, EcpError> {
+    safe_exec::output_with_timeout(cmd, timeout).ok_or_else(|| {
+        let missing = Command::new(tool)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_err();
+        EcpError::Output(if missing {
+            format!("{tool} is not installed; ecp update needs curl and tar on PATH")
+        } else {
+            format!("{tool} did not finish within {}s", timeout.as_secs())
+        })
+    })
 }
 
 /// First token of a `<hex>  <file>` sidecar, lowercased. `None` unless it is a
@@ -218,8 +242,7 @@ pub(crate) fn extract(
 ) -> Result<PathBuf, EcpError> {
     let mut cmd = Command::new("tar");
     cmd.arg("-xf").arg(archive).arg("-C").arg(into);
-    let out = safe_exec::output_with_timeout(cmd, TOOL_TIMEOUT)
-        .ok_or_else(|| EcpError::Output("tar did not complete (missing, or timed out)".into()))?;
+    let out = run_tool(cmd, "tar", TOOL_TIMEOUT)?;
     if !out.status.success() {
         return Err(EcpError::Output(format!(
             "extract {}: {}",
@@ -240,31 +263,58 @@ pub(crate) fn extract(
     Ok(bin)
 }
 
-fn old_path(exe: &Path) -> PathBuf {
+/// Where the outgoing binary is parked: `<exe>.old`, or `<exe>.old.<pid>` when
+/// a still-running process holds that name (Windows keeps a mapped executable
+/// locked against unlink, not against rename).
+fn park_path(exe: &Path) -> PathBuf {
     let mut s: OsString = exe.as_os_str().to_owned();
     s.push(".old");
+    let base = PathBuf::from(s);
+    if std::fs::remove_file(&base).is_ok() || !base.exists() {
+        return base;
+    }
+    let mut s = base.into_os_string();
+    s.push(format!(".{}", std::process::id()));
     PathBuf::from(s)
 }
 
+/// Remove every parked copy the OS lets go of; one a running process still
+/// maps stays until the update after it.
+fn sweep_parked(exe: &Path) {
+    let (Some(dir), Some(name)) = (exe.parent(), exe.file_name().and_then(|n| n.to_str())) else {
+        return;
+    };
+    let prefix = format!("{name}.old");
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Swap `new_bin` into `exe`'s place. The previous file is moved aside first
-/// and restored if the second rename fails, so a half-done update never leaves
-/// the path empty.
+/// and restored if the second rename fails; when even that fails, the error
+/// names the parked file so the user can move it back by hand.
 pub(crate) fn replace_binary(exe: &Path, new_bin: &Path) -> Result<(), EcpError> {
-    let old = old_path(exe);
-    let _ = std::fs::remove_file(&old);
+    let old = park_path(exe);
     std::fs::rename(exe, &old)
         .map_err(|e| EcpError::Output(format!("move aside {}: {e}", exe.display())))?;
     if let Err(e) = std::fs::rename(new_bin, exe) {
-        let _ = std::fs::rename(&old, exe);
-        return Err(EcpError::Output(format!("install {}: {e}", exe.display())));
+        return Err(EcpError::Output(match std::fs::rename(&old, exe) {
+            Ok(()) => format!("install {}: {e}; the previous binary is back in place", exe.display()),
+            Err(back) => format!(
+                "install {}: {e}; restoring the previous binary failed too ({back}): move {} back by hand",
+                exe.display(),
+                old.display()
+            ),
+        }));
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(exe, std::fs::Permissions::from_mode(0o755));
     }
-    // Fails on Windows while the old binary is still running; swept next time.
-    let _ = std::fs::remove_file(&old);
+    sweep_parked(exe);
     Ok(())
 }
 
@@ -403,14 +453,19 @@ mod tests {
         let new_bin = dir.path().join("staged");
         std::fs::write(&exe, b"old").unwrap();
         std::fs::write(&new_bin, b"new").unwrap();
-        // A leftover from an earlier interrupted update must not block the swap.
-        std::fs::write(old_path(&exe), b"stale").unwrap();
+        // Leftovers from earlier updates (plain and pid-suffixed) must neither
+        // block the swap nor survive it.
+        let stale_plain = dir.path().join(format!("{}.old", bin_file_name()));
+        let stale_pid = dir.path().join(format!("{}.old.4242", bin_file_name()));
+        std::fs::write(&stale_plain, b"stale").unwrap();
+        std::fs::write(&stale_pid, b"stale").unwrap();
 
         replace_binary(&exe, &new_bin).unwrap();
 
         assert_eq!(std::fs::read(&exe).unwrap(), b"new");
         assert!(!new_bin.exists());
-        assert!(!old_path(&exe).exists());
+        assert!(!stale_plain.exists());
+        assert!(!stale_pid.exists());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -427,10 +482,50 @@ mod tests {
         let exe = dir.path().join(bin_file_name());
         std::fs::write(&exe, b"old").unwrap();
 
-        assert!(replace_binary(&exe, &dir.path().join("absent")).is_err());
+        let err = replace_binary(&exe, &dir.path().join("absent"))
+            .unwrap_err()
+            .to_string();
 
+        assert!(err.contains("back in place"), "{err}");
         assert_eq!(std::fs::read(&exe).unwrap(), b"old");
-        assert!(!old_path(&exe).exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn test_park_path_uses_plain_name_and_reclaims_a_removable_leftover() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join(bin_file_name());
+        let plain = dir.path().join(format!("{}.old", bin_file_name()));
+        assert_eq!(park_path(&exe), plain);
+        std::fs::write(&plain, b"stale").unwrap();
+        assert_eq!(park_path(&exe), plain);
+        assert!(!plain.exists());
+    }
+
+    /// Unix cannot hold a file against unlink the way Windows does, so the
+    /// fallback branch is driven by a read-only parent directory instead.
+    #[cfg(unix)]
+    #[test]
+    fn test_park_path_falls_back_to_pid_suffix_when_old_cannot_be_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join(bin_file_name());
+        let plain = dir.path().join(format!("{}.old", bin_file_name()));
+        std::fs::write(&plain, b"held").unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let parked = park_path(&exe);
+
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            parked,
+            dir.path()
+                .join(format!("{}.old.{}", bin_file_name(), std::process::id()))
+        );
+        assert!(plain.exists());
     }
 
     #[test]

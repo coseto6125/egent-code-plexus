@@ -9,6 +9,12 @@
 //! moved by hand, or symlinked onto PATH, may not match; the fallback lists
 //! every channel so the user is never stranded.
 
+/// Release in which the package-manager channels stop being an upgrade path.
+/// Every notice that names the cutoff reads it from here.
+pub(crate) const CHANNEL_SUNSET: &str = "0.15";
+/// The channels that cutoff covers, as the notices spell them.
+pub(crate) const CHANNELS: &str = "npm / uv / pip / brew / cargo";
+
 /// How the running binary was most likely installed.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum InstallSource {
@@ -61,7 +67,7 @@ impl InstallSource {
     /// channel command that still works until 0.15 removes it.
     pub(crate) fn upgrade_hint(self) -> String {
         format!(
-            "ecp update  (until 0.15 also via your install channel: {})",
+            "ecp update  (until {CHANNEL_SUNSET} also via your install channel: {})",
             self.channel_command()
         )
     }
@@ -161,7 +167,7 @@ mod tests {
             hint.contains("npm install -g egent-code-plexus@latest"),
             "{hint}"
         );
-        assert!(hint.contains("0.15"), "{hint}");
+        assert!(hint.contains(CHANNEL_SUNSET), "{hint}");
         assert!(InstallSource::Unknown
             .upgrade_hint()
             .contains("brew upgrade"));

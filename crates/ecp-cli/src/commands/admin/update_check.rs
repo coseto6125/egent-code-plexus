@@ -25,10 +25,11 @@
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ecp_core::registry::{atomic_write_json, resolve_home_ecp};
+use ecp_core::registry::{atomic_write_json, resolve_home_ecp, FileLock};
 use ecp_core::EcpError;
 use serde::{Deserialize, Serialize};
 
+use crate::commands::admin::doctor::checks::install_source::{CHANNELS, CHANNEL_SUNSET};
 use crate::commands::admin::doctor::checks::version::{latest_published_version, parse_semver};
 use crate::git::safe_exec;
 
@@ -41,15 +42,11 @@ const FAIL_BACKOFF_SECS: u64 = 8 * 3_600;
 /// from one ambiguous timestamp.
 #[derive(Default, Serialize, Deserialize)]
 struct CheckState {
-    /// Version of the binary that last ran the probe. Absent in files written
-    /// before `ecp update` existed, which reads as "nothing to compare yet".
+    /// Version of the binary that last ran the probe, or that `ecp update`
+    /// last installed. Absent in files written before `ecp update` existed,
+    /// which reads as "nothing to compare yet".
     #[serde(default)]
     seen_version: String,
-    /// Version `ecp update` last installed, recorded by the outgoing binary so
-    /// the incoming one's first probe does not read its own arrival as a
-    /// channel upgrade.
-    #[serde(default)]
-    self_updated_to: String,
     /// Day bucket (`epoch / 86400`) of the last *successful* network query.
     last_success_day: u64,
     /// Unix epoch (secs) of the last *failed* attempt. `0` = no pending
@@ -99,38 +96,63 @@ pub fn run() -> Result<(), EcpError> {
 }
 
 /// Called by `ecp update` from the outgoing binary, so the incoming binary's
-/// first probe sees its own version as expected.
+/// first probe sees its own version as expected. Takes the probe's flock: a
+/// probe mid-query would otherwise write back the version it read before the
+/// swap and the next session would report the update as a channel upgrade.
 pub(crate) fn record_self_update(version: &str) {
-    let state_path = resolve_home_ecp().join(".update-check.json");
-    let mut state = read_state(&state_path);
+    let home_ecp = resolve_home_ecp();
+    let _lock = FileLock::acquire_exclusive(&home_ecp.join(".update-check.lock"));
+    record_self_update_at(&home_ecp.join(".update-check.json"), version);
+}
+
+/// Only the version field changes; the throttle fields must survive so the
+/// next session does not re-query the network.
+fn record_self_update_at(state_path: &Path, version: &str) {
+    let mut state = read_state(state_path);
     state.seen_version = version.to_string();
-    state.self_updated_to = version.to_string();
-    write_state(&state_path, &state);
+    write_state(state_path, &state);
 }
 
-/// Drop a pending "newer version available" notice once it no longer applies.
-pub(crate) fn clear_notification() {
-    let _ = std::fs::remove_file(resolve_home_ecp().join(".update-available"));
+/// Text every "newer version available" line carries, and no other notice does.
+const AVAILABLE_MARK: &str = " is available (you have v";
+
+/// Drop the pending "newer version available" line once it no longer applies.
+/// Other lines (a channel-upgrade notice) fire once and must survive.
+pub(crate) fn clear_available_notice() {
+    clear_available_notice_at(&resolve_home_ecp().join(".update-available"));
 }
 
-/// The running version differs from the last recorded one, and `ecp update`
-/// did not install it. First run (nothing recorded) is silent.
+fn clear_available_notice_at(marker: &Path) {
+    let Ok(body) = std::fs::read_to_string(marker) else {
+        return;
+    };
+    let kept: Vec<&str> = body
+        .lines()
+        .filter(|line| !line.contains(AVAILABLE_MARK))
+        .collect();
+    if kept.is_empty() {
+        let _ = std::fs::remove_file(marker);
+    } else {
+        let _ = std::fs::write(marker, kept.join("\n"));
+    }
+}
+
+/// The running version differs from the last recorded one, which `ecp update`
+/// would have moved along with the binary. First run (nothing recorded) is
+/// silent.
 fn channel_update_notice(state: &CheckState, local: &str) -> Option<String> {
-    if state.seen_version.is_empty()
-        || state.seen_version == local
-        || state.self_updated_to == local
-    {
+    if state.seen_version.is_empty() || state.seen_version == local {
         return None;
     }
     Some(format!(
-        "ecp changed from v{} to v{local} outside `ecp update`. Upgrading through npm / uv / pip / brew / cargo is removed in 0.15; run `ecp update` from now on.",
+        "ecp changed from v{} to v{local} outside `ecp update`. Upgrading through {CHANNELS} is removed in {CHANNEL_SUNSET}; run `ecp update` from now on.",
         state.seen_version
     ))
 }
 
 fn available_notice(latest: &str, local: &str) -> String {
     format!(
-        "ecp v{latest} is available (you have v{local}). Run `ecp update`. Upgrading through npm / uv / pip / brew / cargo still works until 0.15, when `ecp update` becomes the only path."
+        "ecp v{latest}{AVAILABLE_MARK}{local}). Run `ecp update`. Upgrading through {CHANNELS} still works until {CHANNEL_SUNSET}, when `ecp update` becomes the only path."
     )
 }
 
@@ -199,44 +221,38 @@ mod tests {
         }
     }
 
-    fn versions(seen: &str, self_updated_to: &str) -> CheckState {
+    fn seen(version: &str) -> CheckState {
         CheckState {
-            seen_version: seen.into(),
-            self_updated_to: self_updated_to.into(),
+            seen_version: version.into(),
             ..Default::default()
         }
     }
 
     #[test]
     fn test_channel_update_notice_first_run_is_silent() {
-        assert_eq!(channel_update_notice(&versions("", ""), "0.13.3"), None);
+        assert_eq!(channel_update_notice(&seen(""), "0.13.3"), None);
     }
 
     #[test]
     fn test_channel_update_notice_same_version_is_silent() {
-        assert_eq!(
-            channel_update_notice(&versions("0.13.3", ""), "0.13.3"),
-            None
-        );
+        assert_eq!(channel_update_notice(&seen("0.13.3"), "0.13.3"), None);
     }
 
     #[test]
-    fn test_channel_update_notice_after_ecp_update_is_silent() {
-        // The outgoing binary recorded the version it installed.
-        assert_eq!(
-            channel_update_notice(&versions("0.13.3", "0.13.3"), "0.13.3"),
-            None
-        );
+    fn test_channel_update_notice_rollback_through_a_channel_is_reported() {
+        // 0.13.3 installed by `ecp update`, 0.13.4 via brew (reported), then
+        // `brew install ecp@0.13.3`: the walk back is a channel change too.
+        assert!(channel_update_notice(&seen("0.13.4"), "0.13.3").is_some());
     }
 
     #[test]
     fn test_channel_update_notice_foreign_change_names_both_versions_and_015() {
-        let notice = channel_update_notice(&versions("0.13.2", "0.13.2"), "0.13.4").unwrap();
+        let notice = channel_update_notice(&seen("0.13.2"), "0.13.4").unwrap();
         // Contract: the reader learns the old version, the new one, that
         // channel upgrades end in 0.15, and the command to use instead.
         assert!(notice.contains("v0.13.2"), "{notice}");
         assert!(notice.contains("v0.13.4"), "{notice}");
-        assert!(notice.contains("0.15"), "{notice}");
+        assert!(notice.contains(CHANNEL_SUNSET), "{notice}");
         assert!(notice.contains("`ecp update`"), "{notice}");
     }
 
@@ -258,6 +274,49 @@ mod tests {
         assert_eq!(state.latest_version, "0.13.2");
         assert_eq!(state.seen_version, "");
         assert_eq!(channel_update_notice(&state, "0.13.3"), None);
+    }
+
+    #[test]
+    fn test_record_self_update_at_keeps_throttle_fields_and_sets_seen_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".update-check.json");
+        std::fs::write(
+            &path,
+            r#"{"last_success_day":20705,"last_failure_epoch":7,"latest_version":"0.13.3","seen_version":"0.13.2"}"#,
+        )
+        .unwrap();
+
+        record_self_update_at(&path, "0.13.3");
+
+        let state = read_state(&path);
+        assert_eq!(state.last_success_day, 20705);
+        assert_eq!(state.last_failure_epoch, 7);
+        assert_eq!(state.latest_version, "0.13.3");
+        assert_eq!(state.seen_version, "0.13.3");
+        // The incoming binary's first probe must not report its own arrival.
+        assert_eq!(channel_update_notice(&state, "0.13.3"), None);
+    }
+
+    #[test]
+    fn test_clear_available_notice_at_keeps_channel_line_and_removes_empty_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(".update-available");
+        let channel = channel_update_notice(&seen("0.13.2"), "0.13.3").unwrap();
+        write_notification(
+            dir.path(),
+            &[available_notice("0.13.4", "0.13.3"), channel.clone()],
+        );
+
+        clear_available_notice_at(&marker);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), channel);
+
+        clear_available_notice_at(&marker);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), channel);
+
+        std::fs::write(&marker, available_notice("0.13.4", "0.13.3")).unwrap();
+        clear_available_notice_at(&marker);
+        assert!(!marker.exists());
+        clear_available_notice_at(&marker);
     }
 
     #[test]
