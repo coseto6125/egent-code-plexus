@@ -273,10 +273,9 @@ fn test_analyze_ast_budget_reports_truncation() {
         path: "test.js".into(),
         source: "let x = 10; consume(x);".into(),
     }];
-    let report = analyze_lines(
+    let report = analyze_changes(
         &files,
-        "test.js",
-        &[1],
+        &BTreeMap::from([("test.js".into(), vec![1])]),
         &Budgets {
             max_steps: 3,
             ..Budgets::default()

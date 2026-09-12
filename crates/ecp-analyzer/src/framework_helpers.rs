@@ -446,10 +446,42 @@ pub fn stamp_owner_fn_by_span(nodes: &mut [RawNode]) {
     }
 }
 
+/// For each span, the index of the innermost other span that contains it.
+///
+/// Spans from one syntax tree nest or are disjoint, so one sweep in start
+/// order with a stack of open spans replaces the pairwise scan: the stack top
+/// is the innermost open container. Identical spans do not enclose each other,
+/// and the lower index wins between identical containers, matching the
+/// pairwise scan's first-minimum rule.
+pub fn innermost_enclosing(spans: &[Span]) -> Vec<Option<usize>> {
+    let mut order: Vec<usize> = (0..spans.len()).collect();
+    order.sort_by_key(|&i| {
+        let (r1, c1, r2, c2) = spans[i];
+        ((r1, c1), std::cmp::Reverse((r2, c2)), std::cmp::Reverse(i))
+    });
+    let mut parents = vec![None; spans.len()];
+    let mut open: Vec<usize> = Vec::new();
+    for i in order {
+        while open
+            .last()
+            .is_some_and(|&top| !span_contains(spans[top], spans[i]))
+        {
+            open.pop();
+        }
+        parents[i] = open
+            .iter()
+            .rev()
+            .find(|&&top| spans[top] != spans[i])
+            .copied();
+        open.push(i);
+    }
+    parents
+}
+
 /// Preserve the full lexical function path for JS/TS closure identities.
 pub fn stamp_js_function_owners(nodes: &mut [RawNode]) {
     stamp_owner_fn_by_span(nodes);
-    let mut functions: Vec<usize> = nodes
+    let functions: Vec<usize> = nodes
         .iter()
         .enumerate()
         .filter(|(_, node)| {
@@ -460,21 +492,18 @@ pub fn stamp_js_function_owners(nodes: &mut [RawNode]) {
         })
         .map(|(index, _)| index)
         .collect();
-    functions.sort_by_key(|&index| std::cmp::Reverse(span_area(nodes[index].span)));
-    for &index in &functions {
+    let spans: Vec<Span> = functions.iter().map(|&index| nodes[index].span).collect();
+    let parents = innermost_enclosing(&spans);
+    // Outer functions first: a nested path is built from its parent's stamped path.
+    let mut order: Vec<usize> = (0..functions.len()).collect();
+    order.sort_by_key(|&k| std::cmp::Reverse(span_area(spans[k])));
+    for k in order {
+        let index = functions[k];
         if nodes[index].kind != NodeKind::Function {
             continue;
         }
-        let span = nodes[index].span;
-        let parent = functions
-            .iter()
-            .copied()
-            .filter(|&candidate| {
-                nodes[candidate].span != span && span_contains(nodes[candidate].span, span)
-            })
-            .min_by_key(|&candidate| span_area(nodes[candidate].span));
-        if let Some(parent) = parent {
-            let parent = &nodes[parent];
+        if let Some(parent) = parents[k] {
+            let parent = &nodes[functions[parent]];
             nodes[index].owner_class = Some(match &parent.owner_class {
                 Some(owner) => format!("{owner}::{}", parent.name),
                 None => parent.name.clone(),
@@ -1235,5 +1264,95 @@ mod normalize_tests {
             normalize_decorator("__attribute__((deprecated))"),
             vec![("deprecated".into(), "deprecated".into())]
         );
+    }
+}
+
+#[cfg(test)]
+mod innermost_enclosing_tests {
+    use super::{innermost_enclosing, span_area, span_contains, Span};
+
+    /// The pairwise rule the sweep replaces: innermost strictly-different
+    /// container, first minimum in index order.
+    fn pairwise(spans: &[Span]) -> Vec<Option<usize>> {
+        spans
+            .iter()
+            .map(|&s| {
+                spans
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &c)| c != s && span_contains(c, s))
+                    .min_by_key(|(_, &c)| span_area(c))
+                    .map(|(i, _)| i)
+            })
+            .collect()
+    }
+
+    /// Deterministic nested tree: every span either nests inside the previous
+    /// open one or starts after it closed, like functions in one file.
+    fn nested_tree(seed: u64, count: usize) -> Vec<Span> {
+        let mut state = seed;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as u32
+        };
+        let mut spans = Vec::with_capacity(count);
+        let mut open: Vec<Span> = Vec::new();
+        let mut line = 1u32;
+        while spans.len() < count {
+            let roll = next() % 4;
+            if roll == 0 && !open.is_empty() {
+                open.pop();
+                line += 1;
+                continue;
+            }
+            let outer_end = open.last().map(|s| s.2).unwrap_or(u32::MAX / 2);
+            let start = line + next() % 3;
+            if start + 2 >= outer_end {
+                open.pop();
+                line += 1;
+                continue;
+            }
+            let end = (start + 1 + next() % 40).min(outer_end - 1);
+            let span = (start, next() % 8, end, 1 + next() % 80);
+            spans.push(span);
+            open.push(span);
+            line = start + 1;
+        }
+        spans
+    }
+
+    #[test]
+    fn test_innermost_enclosing_nested_tree_matches_pairwise_rule() {
+        for seed in 1..40u64 {
+            let spans = nested_tree(seed, 120);
+            assert_eq!(innermost_enclosing(&spans), pairwise(&spans), "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn test_innermost_enclosing_identical_spans_lower_index_wins_and_never_self() {
+        let spans: Vec<Span> = vec![
+            (1, 0, 50, 1),
+            (1, 0, 50, 1),
+            (2, 0, 10, 1),
+            (2, 0, 10, 1),
+            (3, 0, 4, 1),
+            (20, 0, 30, 1),
+            (60, 0, 70, 1),
+        ];
+        let parents = innermost_enclosing(&spans);
+        assert_eq!(parents, pairwise(&spans));
+        assert_eq!(
+            parents,
+            vec![None, None, Some(0), Some(0), Some(2), Some(0), None]
+        );
+    }
+
+    #[test]
+    fn test_innermost_enclosing_empty_and_single() {
+        assert!(innermost_enclosing(&[]).is_empty());
+        assert_eq!(innermost_enclosing(&[(1, 0, 2, 0)]), vec![None]);
     }
 }
