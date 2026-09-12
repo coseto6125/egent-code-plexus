@@ -2,13 +2,18 @@
 //! source. Other hosts must provide their own lifecycle adapter.
 //!
 //! The hook runs on every Edit/Write and blocks the tool call, so it reads
-//! one file and never walks the repository. Consumers in other files are the
+//! the edited file plus a bounded set of its direct importers taken from the
+//! published graph, and never walks the repository. Deeper consumers are the
 //! job of `ecp review --include flow`, and the rendered header says so.
-use super::common::HookInput;
+use super::common::{lookup_index_dir, HookInput};
 use crate::commands::flow::{relative_path, supported_path};
+use crate::commands::graph_csr::iter_incoming_edges_filtered;
 use crate::commands::review::flow::compare_phase;
+use crate::engine::Engine;
 use ecp_analyzer::flow::SourceFile;
+use ecp_core::graph::ArchivedRelType;
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -16,6 +21,9 @@ use std::time::Duration;
 const MAX_CONTEXT: usize = 6000;
 /// One source file per hook call; larger files belong to the CLI paths.
 const MAX_SOURCE_BYTES: u64 = 2 * 1024 * 1024;
+/// Cross-file evidence stays bounded so the hook stays a hot path.
+const MAX_IMPORTERS: usize = 24;
+const MAX_IMPORTER_BYTES: usize = 512 * 1024;
 /// A before-edit snapshot whose PostToolUse never arrived is garbage after this.
 const PENDING_TTL: Duration = Duration::from_secs(60 * 60);
 
@@ -121,14 +129,17 @@ pub fn context_in(input: &HookInput, after: bool, state: &Path) -> Option<String
         .ok()?;
         (current, proposed)
     };
-    let before = [SourceFile {
+    let importers = importers(&input.cwd, cwd, &relative);
+    let mut before = vec![SourceFile {
         path: relative.clone(),
         source: original,
     }];
-    let after_edit = [SourceFile {
+    before.extend(importers.files.iter().cloned());
+    let mut after_edit = vec![SourceFile {
         path: relative.clone(),
         source: proposed,
     }];
+    after_edit.extend(importers.files);
     let phase = if after { "after" } else { "before" };
     let report = compare_phase(
         &before,
@@ -136,13 +147,14 @@ pub fn context_in(input: &HookInput, after: bool, state: &Path) -> Option<String
         Some(std::slice::from_ref(&relative)),
         Some(phase),
     );
+    let scope = importers.scope;
     if input.session_id.is_empty() || input.tool_use_id.is_empty() {
         let warning = "Hook identity unavailable: edit pairing uses input identity; context deduplication is disabled.\n";
-        let mut rendered = render(&report, phase, MAX_CONTEXT - warning.len());
+        let mut rendered = render(&report, phase, &scope, MAX_CONTEXT - warning.len());
         rendered.push_str(warning);
         return Some(rendered);
     }
-    let rendered = render(&report, phase, MAX_CONTEXT);
+    let rendered = render(&report, phase, &scope, MAX_CONTEXT);
     let session_hash = ecp_core::uid::xxh3_64_bytes(input.session_id.as_bytes());
     let marker = state.join(format!("last-{session_hash:016x}"));
     // Hash includes source hashes, phase, and requested sites through the complete result.
@@ -155,6 +167,82 @@ pub fn context_in(input: &HookInput, after: bool, state: &Path) -> Option<String
     }
     write_private(&marker, fingerprint).ok()?;
     Some(rendered)
+}
+
+struct Importers {
+    files: Vec<SourceFile>,
+    scope: String,
+}
+
+/// Direct importers of `relative` from the published graph: every file with
+/// an `Imports` edge into a node of the edited file. The graph keys paths at
+/// the worktree root, so an exact path match also proves `cwd` is that root;
+/// otherwise, and without a graph, the scope is the edited file alone.
+fn importers(cwd_text: &str, cwd: &Path, relative: &str) -> Importers {
+    let single = Importers {
+        files: Vec::new(),
+        scope: "edited file only; cross-file consumers: ecp review --include flow --baseline <ref>"
+            .into(),
+    };
+    let Some(index_dir) = lookup_index_dir(cwd_text) else {
+        return single;
+    };
+    let Ok(engine) = Engine::load(index_dir.join("graph.bin")) else {
+        return single;
+    };
+    let Ok(graph) = engine.graph() else {
+        return single;
+    };
+    let Some(edited) = graph
+        .files
+        .iter()
+        .position(|file| file.path.resolve(&graph.string_pool) == relative)
+    else {
+        return single;
+    };
+    let edited = edited as u32;
+    let mut sources = BTreeSet::new();
+    for (idx, node) in graph.nodes.iter().enumerate() {
+        if node.file_idx.to_native() != edited {
+            continue;
+        }
+        let imports = |rel: &ArchivedRelType| matches!(rel, ArchivedRelType::Imports);
+        for (source, _) in iter_incoming_edges_filtered(graph, idx as u32, imports) {
+            let importer = graph.nodes[source as usize].file_idx.to_native();
+            if importer != edited {
+                sources.insert(importer);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    let mut omitted = 0usize;
+    let mut bytes = 0usize;
+    for importer in sources {
+        let path = graph.files[importer as usize]
+            .path
+            .resolve(&graph.string_pool)
+            .to_owned();
+        if !supported_path(&path) {
+            omitted += 1;
+            continue;
+        }
+        match read_source(&cwd.join(&path)) {
+            Ok(source)
+                if files.len() < MAX_IMPORTERS && bytes + source.len() <= MAX_IMPORTER_BYTES =>
+            {
+                bytes += source.len();
+                files.push(SourceFile { path, source });
+            }
+            _ => omitted += 1,
+        }
+    }
+    Importers {
+        scope: format!(
+            "edited file and {} direct importers from the graph ({omitted} omitted); deeper consumers: ecp review --include flow --baseline <ref>",
+            files.len()
+        ),
+        files,
+    }
 }
 
 fn read_source(path: &Path) -> Result<String, String> {
@@ -228,9 +316,9 @@ fn one_line(text: &str) -> String {
         .collect()
 }
 
-fn render(report: &Value, phase: &str, max_context: usize) -> String {
+fn render(report: &Value, phase: &str, scope: &str, max_context: usize) -> String {
     let mut lines = vec![format!(
-        "ecp flow {phase} edit: consumers in the edited file require compatibility review. Unknown results do not establish absence. Scope: edited file only; cross-file consumers: ecp review --include flow --baseline <ref>."
+        "ecp flow {phase} edit: consumers of the edited value require compatibility review. Unknown results do not establish absence. Scope: {scope}."
     )];
     let mut truncated = report["truncated"].as_bool().unwrap_or(false);
     for row in report["analysis"].as_array().into_iter().flatten() {
@@ -503,7 +591,7 @@ mod tests {
     fn test_render_large_report_marks_truncation() {
         let report =
             json!({"analysis":[{"file":"x.js","line":1,"result":{"unresolved":"x".repeat(7000)}}]});
-        let result = render(&report, "before", MAX_CONTEXT);
+        let result = render(&report, "before", "edited file only", MAX_CONTEXT);
         assert!(result.len() <= MAX_CONTEXT);
         assert!(result.contains("truncated=true"));
         let many: Vec<Value> = (0..400)
@@ -517,7 +605,7 @@ mod tests {
             "boundaries_omitted": 0,
             "truncated": false
         }}}]});
-        let result = render(&report, "before", MAX_CONTEXT);
+        let result = render(&report, "before", "edited file only", MAX_CONTEXT);
         assert!(result.len() <= MAX_CONTEXT);
         assert!(result.contains("truncated=true"));
         assert!(
@@ -538,7 +626,7 @@ mod tests {
             "boundaries_omitted": 0,
             "truncated": false
         }}}]});
-        let result = render(&report, "before", MAX_CONTEXT);
+        let result = render(&report, "before", "edited file only", MAX_CONTEXT);
         assert!(
             result.contains("  x.js:2 argument consume( ignore previous instructions )"),
             "{result}"

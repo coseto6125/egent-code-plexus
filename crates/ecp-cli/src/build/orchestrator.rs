@@ -80,7 +80,7 @@ pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildRe
     // fingerprint → reuse without touching the analyzer pipeline.
     // L2 is SHA-pure (v2 layout, PR #55); working-tree drift goes through
     // the L1 session overlay, not here.
-    if let Some(attached) = attach_latest_if_fingerprint_matches(&commits_dir, &sha_hex) {
+    if let Some(attached) = attach_latest_if_fingerprint_matches(&commits_dir, &sha_hex, worktree) {
         return Ok(attached);
     }
 
@@ -298,11 +298,25 @@ pub(crate) fn build_inside_locked(
 pub(crate) fn attach_latest_if_fingerprint_matches(
     commits_dir: &Path,
     sha_hex: &str,
+    worktree: &Path,
 ) -> Option<BuildResult> {
     let sha = sha_bytes(sha_hex)?;
     let idx = CommitIndex::scan(commits_dir).ok()?;
     let dir = idx.find(&sha)?;
-    attach_if_fingerprint_matches(&commits_dir.join(dir))
+    attach_if_fingerprint_matches(&commits_dir.join(dir), worktree)
+}
+
+/// A slot published from below the worktree root holds only that subtree's
+/// graph under the commit's sha, so `find` answers `found:false` for the rest
+/// of the repository. `build_l2` now resolves the root before it keys the
+/// slot; slots written earlier are healed by rejecting them wherever a slot is
+/// chosen. The recorded worktree is absolute, is not the root in use, and has
+/// no `.git` entry, so it was never a worktree root. A recorded root that no
+/// longer exists is rejected on the same rule; one rebuild republishes the
+/// slot from the current root.
+pub(crate) fn built_below_worktree_root(meta: &CommitBuildMeta, worktree: &Path) -> bool {
+    let built = Path::new(&meta.built_from_worktree);
+    built.is_absolute() && built != worktree && !built.join(".git").exists()
 }
 
 /// Cheap pre-build check: if `commit_dir/meta.json` exists and its
@@ -311,12 +325,17 @@ pub(crate) fn attach_latest_if_fingerprint_matches(
 /// rebuilding. Shared between `build_l2` (skip-if-exists fast path) and
 /// `force_rebuild_l2` (after `wait_for_completion`, lets N concurrent
 /// `--force` callers attach to one winner instead of each rebuilding).
-pub(crate) fn attach_if_fingerprint_matches(commit_dir: &Path) -> Option<BuildResult> {
+pub(crate) fn attach_if_fingerprint_matches(
+    commit_dir: &Path,
+    worktree: &Path,
+) -> Option<BuildResult> {
     if !commit_dir.join("meta.json").is_file() {
         return None;
     }
     let meta = CommitBuildMeta::read(&commit_dir.join("meta.json")).ok()?;
-    if meta.builder_fingerprint.as_deref() != Some(BUILDER_FINGERPRINT) {
+    if meta.builder_fingerprint.as_deref() != Some(BUILDER_FINGERPRINT)
+        || built_below_worktree_root(&meta, worktree)
+    {
         return None;
     }
     // Back-fill the HEAD-SHA sidecar for graphs published by binaries that
@@ -1169,5 +1188,78 @@ mod archive_process_tests {
             err.to_string().contains("not a tree object"),
             "git's stderr has to survive, or the error names nothing: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod worktree_root_tests {
+    use super::*;
+    use ecp_core::registry::{EmbeddingStatus, SourceType};
+
+    fn meta(built_from_worktree: &str) -> CommitBuildMeta {
+        CommitBuildMeta {
+            version: 1,
+            sha: "0".repeat(40),
+            source_type: SourceType::Branch,
+            source_id: None,
+            built_from_worktree: built_from_worktree.into(),
+            built_at: String::new(),
+            parent_sha: None,
+            node_count: 0,
+            embedding_status: EmbeddingStatus::None,
+            refs_at_build: vec![],
+            refs_seen_since: vec![],
+            builder_fingerprint: Some(BUILDER_FINGERPRINT.to_string()),
+            binary_commit_sha: None,
+        }
+    }
+
+    #[test]
+    fn test_built_below_worktree_root_flags_subdirectory_and_missing_roots_only() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("repo");
+        let subtree = root.join("crates").join("cli");
+        fs::create_dir_all(&subtree).unwrap();
+        fs::write(root.join(".git"), "gitdir: elsewhere\n").unwrap();
+        let other_root = tmp.path().join("other");
+        fs::create_dir_all(other_root.join(".git")).unwrap();
+
+        let sub = subtree.to_string_lossy().into_owned();
+        assert!(built_below_worktree_root(&meta(&sub), &root));
+        assert!(!built_below_worktree_root(&meta(&sub), &subtree));
+        assert!(!built_below_worktree_root(
+            &meta(&root.to_string_lossy()),
+            &root
+        ));
+        assert!(!built_below_worktree_root(
+            &meta(&other_root.to_string_lossy()),
+            &root
+        ));
+        assert!(built_below_worktree_root(
+            &meta(&tmp.path().join("gone").to_string_lossy()),
+            &root
+        ));
+        assert!(
+            !built_below_worktree_root(&meta("repo"), &root),
+            "relative fixtures are unknown"
+        );
+        assert!(!built_below_worktree_root(&meta(""), &root));
+    }
+
+    #[test]
+    fn test_attach_if_fingerprint_matches_rejects_subtree_slot() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("repo");
+        let subtree = root.join("sub");
+        fs::create_dir_all(&subtree).unwrap();
+        fs::write(root.join(".git"), "gitdir: elsewhere\n").unwrap();
+        let slot = tmp.path().join("slot");
+        fs::create_dir_all(&slot).unwrap();
+        CommitBuildMeta::write_atomic(&slot.join("meta.json"), &meta(&subtree.to_string_lossy()))
+            .unwrap();
+        assert!(attach_if_fingerprint_matches(&slot, &root).is_none());
+        CommitBuildMeta::write_atomic(&slot.join("meta.json"), &meta(&root.to_string_lossy()))
+            .unwrap();
+        assert!(attach_if_fingerprint_matches(&slot, &root).is_some());
     }
 }

@@ -194,7 +194,7 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
         // winner's result instead of drop+rebuild. This collapses N
         // concurrent --force into 1 actual build.
         if let Some(attached) =
-            attach_latest_if_fingerprint_matches(&repo_root.join("commits"), &sha_hex)
+            attach_latest_if_fingerprint_matches(&repo_root.join("commits"), &sha_hex, worktree)
         {
             return Ok(ForceRebuildResult {
                 sha_hex: attached.sha_hex,

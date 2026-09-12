@@ -271,3 +271,63 @@ fn test_edit_hook_ignores_unreadable_sibling_sources() {
         "edit snapshots must not be written into the repository"
     );
 }
+
+fn git_in(repo: &std::path::Path, args: &[&str]) {
+    let status = Command::new("git")
+        .current_dir(repo)
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(args)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?}");
+}
+
+/// Contract: with a published graph, the edit hook's evidence covers the
+/// edited file plus its direct importers, and the header names that scope.
+/// Without one it stays single-file (`test_edit_hook_ignores_unreadable_sibling_sources`).
+#[test]
+fn test_edit_hook_reports_consumers_in_direct_importers_from_the_graph() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let repo = tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("x.js"), "export function x() { return 1; }\n").unwrap();
+    fs::write(
+        repo.join("y.js"),
+        "import { x } from './x.js';\nconsume(x());\n",
+    )
+    .unwrap();
+    fs::write(repo.join("z.js"), "consume(2);\n").unwrap();
+    git_in(&repo, &["init", "-q"]);
+    git_in(&repo, &["add", "."]);
+    git_in(&repo, &["commit", "-qm", "init"]);
+    let indexed = Command::new(ecp_bin())
+        .args(["admin", "index", "--repo"])
+        .arg(&repo)
+        .env("HOME", &home)
+        .env("ECP_SKIP_BG_REBUILD", "1")
+        .output()
+        .unwrap();
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+    let input = serde_json::json!({"session_id":"session-3","tool_use_id":"edit-3","cwd":repo,"tool_name":"Edit","tool_input":{"file_path":repo.join("x.js"),"old_string":"return 1","new_string":"return 2"}});
+    let output = run_edit_event("pre-tool-use", &input, &home);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let context = payload["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        context.contains("Scope: edited file and 1 direct importers from the graph (0 omitted)"),
+        "{context}"
+    );
+    assert!(context.contains("y.js:2"), "{context}");
+    assert!(!context.contains("z.js"), "{context}");
+}
