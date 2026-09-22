@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.14.2 - 2026-09-22
+
+### Dependencies
+
+- Update clap to 4.6.7 and rmcp to 3.4.0, including upstream MCP lifecycle fixes (#784).
+- Migrate the MCP handler to `ServerConfig` and require rmcp 3.4 to keep warning-free builds (#784).
+- Update toml to 1.1.6, smallvec to 1.16.1, and uuid to 1.26.1 (#780).
+- Upgrade the CI disk cleanup action to v2.0.0, including its input-injection fix, and use `preinstalled-runtimes` (#786).
+- Refresh CI installation, linting, and CodeQL actions.
+
 ## v0.14.1 - 2026-09-12
 
 - (no user-facing changes)
