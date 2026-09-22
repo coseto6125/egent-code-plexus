@@ -76,9 +76,9 @@ impl EcpMcpServer {
 struct RmcpHandler(Arc<EcpMcpServer>);
 
 impl rmcp::ServerHandler for RmcpHandler {
-    fn get_info(&self) -> rmcp::model::ServerInfo {
-        use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> rmcp::model::ServerConfig {
+        use rmcp::model::{Implementation, ServerCapabilities, ServerConfig};
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("ecp-mcp", env!("CARGO_PKG_VERSION")))
     }
 
