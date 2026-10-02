@@ -73,7 +73,7 @@ pub struct SymbolTable {
 
     /// Kind per node, indexed by `node_id`. Populated during build by
     /// `register_node` in monotonic-id order; consulted by
-    /// `lookup_unique_global` to filter candidates without allocating side
+    /// `lookup_global` to filter candidates without allocating side
     /// sets. Lives only during build — the finalized `ZeroCopyGraph.nodes[id].kind`
     /// is the steady-state source of truth.
     node_kinds: Vec<NodeKind>,

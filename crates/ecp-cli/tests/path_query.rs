@@ -150,9 +150,9 @@ fn indexed_polyglot_repo(repo: &Path) {
          export function makeChild(): TChild { return new TChild(); }\n",
     );
     // A production chain whose only link runs through a test file. Both the
-    // path walk and the impact walk have to exclude it by default and include
-    // it under --include-tests, which is what pins their two copies of the
-    // node guard to the same behaviour.
+    // path walk and the impact walk have to exclude it with tests excluded
+    // and include it with tests included, which is what pins their two
+    // copies of the node guard to the same behaviour.
     write(
         repo,
         "src/bridge.py",
