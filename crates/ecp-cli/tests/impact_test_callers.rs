@@ -255,3 +255,24 @@ fn test_impact_ambiguous_name_with_no_callers_does_not_suggest_dead_code() {
         "hint must not suggest dead code: {stderr}"
     );
 }
+
+#[test]
+fn test_impact_exclude_tests_keeps_a_test_file_target_and_does_not_count_it() {
+    // The start node is the question, not a caller: excluding tests must not
+    // drop it (the walk's first entry is always the target at depth 0), and
+    // it must not be counted as a hidden test caller.
+    let (repo, home) = fixture();
+    let json = json_of(&impact(
+        repo.path(),
+        home.path(),
+        &["test_normalize", "--direction", "down", "--exclude-tests"],
+    ));
+    let rows = json["impact"].as_array().unwrap();
+    assert_eq!(rows[0]["name"], "test_normalize", "{json}");
+    assert_eq!(rows[0]["depth"], 0, "{json}");
+    assert!(
+        rows.iter().any(|r| r["name"] == "normalize"),
+        "the production callee is still reached: {json}"
+    );
+    assert!(json.get("hidden_test_callers").is_none(), "{json}");
+}

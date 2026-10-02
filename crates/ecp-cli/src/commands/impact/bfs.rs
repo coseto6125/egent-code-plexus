@@ -219,7 +219,9 @@ pub(crate) fn shortest_path<'g>(
 
     let mut reached = None;
     while let Some((curr_idx, curr_depth)) = queue.pop_front() {
-        if !node_traversable(graph, view, curr_idx, opts.include_tests) {
+        // Seeds are the endpoints the user named; only hops are filtered,
+        // matching `run_bfs`, which never drops its depth-0 target.
+        if curr_depth > 0 && !node_traversable(graph, view, curr_idx, opts.include_tests) {
             continue;
         }
         if goals.contains(&curr_idx) {
@@ -307,7 +309,8 @@ pub(crate) fn shortest_path<'g>(
 ///   is false. These are the structural signal surfaced as
 ///   `hidden_heuristic_edges: N` in the output payload.
 /// - `hidden_test_callers`: test-file nodes reached but dropped because
-///   `include_tests` is false. Each node counts once (the visited set).
+///   `include_tests` is false. Each node counts once (the visited set). The
+///   depth-0 target is never filtered, so it is never counted.
 ///
 /// Every emitted node carries `test: bool`, so a caller list that mixes
 /// production and test callers stays separable.
@@ -375,7 +378,8 @@ pub(super) fn run_bfs<'g>(
             }
             let file_idx = curr_node.file_idx.to_native() as usize;
             is_test = base_file_is_test(graph, file_idx);
-            if is_test && !include_tests {
+            // Depth 0 is the target itself, never a caller to filter.
+            if is_test && !include_tests && curr_depth > 0 {
                 hidden_test_callers += 1;
                 continue;
             }
@@ -395,7 +399,7 @@ pub(super) fn run_bfs<'g>(
                 .and_then(|v| v.node(curr_idx as u32))
                 .expect("virtual index enqueued without a view");
             is_test = is_test_path(&vn.rel_path);
-            if is_test && !include_tests {
+            if is_test && !include_tests && curr_depth > 0 {
                 hidden_test_callers += 1;
                 continue;
             }
