@@ -322,3 +322,28 @@ fn heuristic_callers_do_not_affect_risk_or_coverage() {
         "--no-heuristic run must report hidden_heuristic_edges >= 1; got: {hidden}"
     );
 }
+
+/// A target whose only caller is heuristic is not uncalled: the empty-result
+/// hint ("0 incoming references", "no non-test callers") must stay silent.
+#[test]
+fn test_impact_heuristic_only_caller_suppresses_empty_hint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+
+    init_repo_with_fixtures(repo);
+    let graph_bin = find_graph_bin(repo);
+    std::fs::write(&graph_bin, synthetic_event_mirror_graph()).unwrap();
+
+    let out = Command::new(ecp_bin())
+        .args(["impact", "consume_order", "--format", "json", "--repo", "."])
+        .current_dir(repo)
+        .env("HOME", repo)
+        .output()
+        .expect("ecp impact failed to spawn");
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("0 incoming references") && !stderr.contains("no non-test callers"),
+        "a heuristic caller exists, the empty hint must not fire: {stderr}"
+    );
+}

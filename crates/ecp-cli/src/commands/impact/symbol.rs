@@ -220,10 +220,12 @@ pub(super) fn impact_by_name(
         hidden_test_total += hidden_tests;
     }
 
-    // Empty callers hint for upstream direction.
-    let reached_beyond_start = all_results
-        .iter()
-        .any(|e| e["depth"].as_u64().unwrap_or(0) > 0);
+    // Empty callers hint for upstream direction. A heuristic caller is still a
+    // caller: the hint would otherwise call the target uncalled or test-only.
+    let reached_beyond_start = !all_heuristic_results.is_empty()
+        || all_results
+            .iter()
+            .any(|e| e["depth"].as_u64().unwrap_or(0) > 0);
     let emit_empty_hint = !reached_beyond_start && args.direction == Direction::Up;
     // A field target with no readers: the hint must flag that some languages
     // don't model field reads yet, so empty != provably unread.
