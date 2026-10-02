@@ -173,8 +173,10 @@ impl Commands {
     /// in `main.rs`'s dispatch.
     pub fn needs_graph(&self) -> bool {
         match self {
+            // A bm25 registry selector answers from its own targets' graphs;
+            // loading (and ensuring) the cwd graph would be unused work.
+            Commands::Find(args) => !args.is_registry_selector(),
             Commands::Inspect(_)
-            | Commands::Find(_)
             | Commands::Impact(_)
             | Commands::Rename(_)
             | Commands::Pattern(_)

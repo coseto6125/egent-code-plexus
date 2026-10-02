@@ -275,9 +275,8 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
             engine.expect("needs_graph() gates this arm"),
             graph_path.as_ref().expect("needs_graph() gates this arm"),
         ),
-        Commands::Find(args) => {
-            commands::find::run(args, engine.expect("needs_graph() gates this arm"))
-        }
+        // `None` only for a bm25 registry selector (see `needs_graph`).
+        Commands::Find(args) => commands::find::run(args, engine),
         Commands::Impact(args) => {
             commands::impact::run(args, engine.expect("needs_graph() gates this arm"))
         }
