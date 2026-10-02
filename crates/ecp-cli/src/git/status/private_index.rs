@@ -49,11 +49,12 @@ const UNTRACKED_CACHE_CONFIG: [&str; 6] = [
 /// `GIT_CONFIG_NOSYSTEM` drops a file the identity reads. The last four
 /// redirect git away from the on-disk layout `git_layout_unchecked` reads;
 /// they are checked here, through the env seam, rather than in the process env.
-const BLOCKING_ENV: [&str; 8] = [
+const BLOCKING_ENV: [&str; 9] = [
     "GIT_INDEX_FILE",
     "GIT_CONFIG_PARAMETERS",
     "GIT_CONFIG_COUNT",
     "GIT_CONFIG_NOSYSTEM",
+    "GIT_ATTR_NOSYSTEM",
     "GIT_DIR",
     "GIT_COMMON_DIR",
     "GIT_WORK_TREE",
@@ -200,6 +201,8 @@ fn attribute_files(common: &Path, env: &dyn Fn(&str) -> Option<OsString>) -> Opt
         .map(PathBuf::from)
         .or_else(|| home.map(|h| h.join(".config")));
     files.extend(xdg.map(|dir| dir.join("git").join("attributes")));
+    // `config_files` already declined any git whose sysconfdir is not `/etc`.
+    files.push(PathBuf::from("/etc/gitattributes"));
     files.iter().all(|file| file.is_absolute()).then_some(files)
 }
 
@@ -1415,11 +1418,16 @@ mod tests {
     }
 
     #[test]
-    fn test_attribute_files_names_info_and_global_files() {
+    fn test_attribute_files_names_info_global_and_system_files() {
         let env = env_from([("HOME", "/h"), ("XDG_CONFIG_HOME", "/x")]);
         assert_eq!(
             attribute_files(Path::new("/r/.git"), &env).unwrap(),
-            ["/r/.git/info/attributes", "/x/git/attributes"].map(PathBuf::from)
+            [
+                "/r/.git/info/attributes",
+                "/x/git/attributes",
+                "/etc/gitattributes"
+            ]
+            .map(PathBuf::from)
         );
         let env = env_from([("HOME", "/h")]);
         assert_eq!(
@@ -1430,13 +1438,16 @@ mod tests {
 
     #[test]
     fn test_attribute_files_relative_path_none() {
-        for env in [
-            env_from([("HOME", "h")]),
-            env_from([("HOME", ""), ("XDG_CONFIG_HOME", "")]),
-            env_from([("XDG_CONFIG_HOME", "x"), ("HOME", "/h")]),
-        ] {
-            assert_eq!(attribute_files(Path::new("/r/.git"), &env), None);
-        }
+        let git = Path::new("/r/.git");
+        assert_eq!(attribute_files(git, &env_from([("HOME", "h")])), None);
+        assert_eq!(
+            attribute_files(git, &env_from([("HOME", ""), ("XDG_CONFIG_HOME", "")])),
+            None
+        );
+        assert_eq!(
+            attribute_files(git, &env_from([("XDG_CONFIG_HOME", "x"), ("HOME", "/h")])),
+            None
+        );
     }
 
     #[test]
@@ -1557,6 +1568,7 @@ mod tests {
             "GIT_CONFIG_PARAMETERS",
             "GIT_CONFIG_COUNT",
             "GIT_CONFIG_NOSYSTEM",
+            "GIT_ATTR_NOSYSTEM",
             "GIT_DIR",
             "GIT_COMMON_DIR",
             "GIT_WORK_TREE",
