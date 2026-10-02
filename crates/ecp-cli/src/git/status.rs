@@ -403,14 +403,22 @@ mod tests {
         eligible_gitdir(repo).is_some()
     }
 
-    /// Lets the real index stop changing. A status run within the same
-    /// timestamp tick as the commit may rewrite `.git/index` to settle racily
-    /// clean entries, which renames the copy a test is about to tamper with.
+    /// Stops the real index from changing. While a tracked file's mtime is not
+    /// older than the index (git may compare whole seconds), every status
+    /// rewrites `.git/index` to settle the racily clean entry, which renames
+    /// the copy a test is about to tamper with. Backdating the files and
+    /// refreshing once ends that without depending on the clock.
     fn settle(repo: &Path) {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        for _ in 0..2 {
-            plain(repo).unwrap();
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        for rel in ["lib.rs", "src/b.rs"] {
+            File::options()
+                .write(true)
+                .open(repo.join(rel))
+                .unwrap()
+                .set_times(FileTimes::new().set_modified(past))
+                .unwrap();
         }
+        git(repo, &["update-index", "-q", "--refresh"]);
     }
 
     #[test]
@@ -491,9 +499,28 @@ mod tests {
         let after = assert_matches_plain(&f.repo, &f.cache);
         assert_eq!(after, b"A  added.rs\0");
         if fast_path_expected(&f.repo) {
-            let second_copy = copies(&f.cache);
-            assert_eq!(second_copy.len(), 1, "old copy not pruned");
-            assert_ne!(first_copy, second_copy, "copy not refreshed");
+            let fresh: Vec<String> = copies(&f.cache)
+                .into_iter()
+                .filter(|c| !first_copy.contains(c))
+                .collect();
+            assert_eq!(fresh.len(), 1, "copy not refreshed");
+            // A sibling test thread spawning git holds a duplicate of the lock
+            // fd until its exec, so the inline prune may have been skipped as
+            // designed; once the lock is free, the old copy must go.
+            let dir = fs::read_dir(&f.cache)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            for _ in 0..100 {
+                if copies(&f.cache) == fresh {
+                    break;
+                }
+                prune(&dir, &fresh[0]);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(copies(&f.cache), fresh, "old copy not pruned");
         }
     }
 
