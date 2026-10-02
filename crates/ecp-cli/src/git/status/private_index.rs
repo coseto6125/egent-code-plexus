@@ -56,7 +56,6 @@ const LOCK_FILE: &str = "lock";
 const GITDIR_RECORD: &str = "gitdir";
 const COPY_PREFIX: &str = "index-";
 const FAILED_SUFFIX: &str = ".failed";
-const PENDING_SUFFIX: &str = ".pending";
 const MOUNTINFO: &str = "/proc/self/mountinfo";
 
 /// The private copy's answer for `worktree`, or `None` for the caller to run
@@ -305,7 +304,7 @@ fn status_on_private_index(worktree: &Path, repo: &Repo, cache_root: &Path) -> O
     if fs::canonicalize(&dir).ok()?.starts_with(&repo.top) {
         return None;
     }
-    let _lock = lock_dir(&dir)?;
+    let lock = lock_dir(&dir)?;
 
     let mut real = File::open(repo.gitdir.join("index")).ok()?;
     let real_meta = real.metadata().ok()?;
@@ -320,9 +319,10 @@ fn status_on_private_index(worktree: &Path, repo: &Repo, cache_root: &Path) -> O
         return None;
     }
     // A run that ended between git's rewrite of the copy and the stamp left
-    // git's write time on it, which keeps a same-second change hidden.
-    let pending = marker(&copy, PENDING_SUFFIX);
-    if fs::symlink_metadata(&pending).is_ok()
+    // git's write time on it, which keeps a same-second change hidden. Such a
+    // run also left the lock file one byte long: resizing the open lock marks
+    // the window without creating or unlinking a file on every query.
+    if lock.metadata().ok()?.len() != 0
         && fs::remove_file(&copy).is_err_and(|e| e.kind() != io::ErrorKind::NotFound)
     {
         return None;
@@ -349,7 +349,7 @@ fn status_on_private_index(worktree: &Path, repo: &Repo, cache_root: &Path) -> O
     }
     drop(real);
 
-    File::create(&pending).ok()?;
+    lock.set_len(1).ok()?;
     let started = SystemTime::now();
     let out = with_env(&mut safe_exec::git_at(&repo.git), repo.env)
         .args(UNTRACKED_CACHE_CONFIG)
@@ -371,9 +371,9 @@ fn status_on_private_index(worktree: &Path, repo: &Repo, cache_root: &Path) -> O
     }
     let config_held = config_identity(&repo.config_files) == Some(repo.config_id);
     if config_held && stamp_before(&copy, started, real_mtime) {
-        let _ = fs::remove_file(&pending);
+        let _ = lock.set_len(0);
     } else {
-        // The pending marker stays, so the next run discards a copy this one
+        // The lock stays marked, so the next run discards a copy this one
         // failed to remove.
         let _ = fs::remove_file(&copy);
     }
@@ -1636,7 +1636,7 @@ mod tests {
     /// git's rewrite and the stamp could leave a stale one; trusting it lists
     /// the file as deleted and untracked.
     #[test]
-    fn test_status_on_private_index_leftover_pending_marker_rebuilds_copy() {
+    fn test_status_on_private_index_marked_lock_rebuilds_copy() {
         let Some(f) = served_fixture() else {
             return;
         };
@@ -1649,9 +1649,15 @@ mod tests {
         serve(&f.repo, &repo, &f.cache);
         let copy = only_copy(&f.cache);
         fs::write(&copy, stale).unwrap();
-        File::create(marker(&copy, PENDING_SUFFIX)).unwrap();
+        let lock = copy.with_file_name(LOCK_FILE);
+        File::options()
+            .write(true)
+            .open(&lock)
+            .unwrap()
+            .set_len(1)
+            .unwrap();
         assert_eq!(serve(&f.repo, &repo, &f.cache), b"");
-        assert!(!marker(&copy, PENDING_SUFFIX).exists());
+        assert_eq!(fs::metadata(&lock).unwrap().len(), 0);
     }
 
     /// Requires `worktree` to take the plain command and leave no copy.
