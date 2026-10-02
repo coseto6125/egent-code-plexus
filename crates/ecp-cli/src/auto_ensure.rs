@@ -417,24 +417,9 @@ fn git_fingerprint_shortcut(
         return None;
     }
 
-    let porcelain = crate::git::safe_exec::git()
-        // `-z` (NUL-terminated) avoids git's C-quoting of paths with spaces or
-        // non-ASCII bytes, which the human-readable format would otherwise wrap
-        // in double quotes and escape — producing a path that doesn't exist on
-        // disk and silently dropping that file from the incremental refresh.
-        //
-        // `--untracked-files=all`: untracked files must enter the dirty set or
-        // a brand-new file (the most common agent edit: Write, then query) is
-        // invisible to the L1 overlay and `found:false` reads as a definitive
-        // "does not exist" (FU-2026-06-10-8b98d5e991a6). `all` rather than
-        // `normal` because `normal` collapses a new directory to one `dir/`
-        // entry, hiding the files inside it from `reanalyze_files`. Gitignored
-        // files stay excluded — porcelain honours .gitignore, so scratch dirs
-        // cost nothing.
-        .args(["status", "--porcelain", "-z", "--untracked-files=all"])
-        .current_dir(worktree_root)
-        .output()
-        .ok()?;
+    // Flags and their reasons: `STATUS_ARGS` in `git/status.rs`.
+    let home_ecp = ecp_core::registry::resolve_home_ecp();
+    let porcelain = crate::git::status::porcelain_all(worktree_root, &home_ecp).ok()?;
     if !porcelain.status.success() {
         return None;
     }
@@ -447,7 +432,7 @@ fn git_fingerprint_shortcut(
     // with `--untracked-files=all` they would otherwise keep porcelain
     // non-empty forever and downgrade every query from the Ready shortcut to
     // the Stale/reanalyze path.
-    let home_ecp_canonical = fs::canonicalize(ecp_core::registry::resolve_home_ecp()).ok();
+    let home_ecp_canonical = fs::canonicalize(&home_ecp).ok();
     let graph_canonical = fs::canonicalize(graph_path).ok();
     let dirty_files: Vec<PathBuf> = parse_porcelain_paths(&porcelain.stdout, worktree_root)
         .into_iter()

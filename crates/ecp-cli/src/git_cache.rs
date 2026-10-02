@@ -29,10 +29,13 @@ struct Cache {
     head_sha: HashMap<PathBuf, (Option<String>, Option<SystemTime>)>,
     common_dir: HashMap<PathBuf, io::Result<PathBuf>>,
     git_dir: HashMap<PathBuf, io::Result<PathBuf>>,
-    /// `(gitdir, common_dir)` from the file readers, `None` when they
+    /// `(top, gitdir, common_dir)` from the file readers, `None` when they
     /// declined and the spawn answered instead.
-    git_dirs: HashMap<PathBuf, Option<(PathBuf, PathBuf)>>,
+    git_layouts: HashMap<PathBuf, Option<GitLayout>>,
 }
+
+/// The worktree top (nearest ancestor holding `.git`), its gitdir and common dir.
+pub(crate) type GitLayout = (PathBuf, PathBuf, PathBuf);
 
 fn cache() -> &'static Mutex<Cache> {
     static CACHE: std::sync::OnceLock<Mutex<Cache>> = std::sync::OnceLock::new();
@@ -262,33 +265,45 @@ fn git_env_overrides_present() -> bool {
     .any(|k| std::env::var_os(k).is_some())
 }
 
-/// The worktree's own gitdir and its common dir, cached per canonical cwd
+/// The worktree's own gitdir and its common dir. See [`git_layout`].
+pub(crate) fn git_dirs(cwd: &Path) -> Option<(PathBuf, PathBuf)> {
+    git_layout(cwd).map(|(_, gitdir, common)| (gitdir, common))
+}
+
+/// The worktree's top, own gitdir and common dir, cached per canonical cwd
 /// for the process. `head_sha` and `common_dir` both need the pair, and a
 /// fresh walk for each would canonicalize and stat the same entries twice.
-fn git_dirs(cwd: &Path) -> Option<(PathBuf, PathBuf)> {
+/// Declines when the process env redirects git away from the on-disk layout.
+pub(crate) fn git_layout(cwd: &Path) -> Option<GitLayout> {
     if git_env_overrides_present() {
         return None;
     }
+    git_layout_unchecked(cwd)
+}
+
+/// [`git_layout`] without the process-env check, for a caller that checks
+/// those variables through its own env seam.
+pub(crate) fn git_layout_unchecked(cwd: &Path) -> Option<GitLayout> {
     let key = canon_key(cwd);
     if let Ok(guard) = cache().lock() {
-        if let Some(cached) = guard.git_dirs.get(&key) {
+        if let Some(cached) = guard.git_layouts.get(&key) {
             return cached.clone();
         }
     }
-    let computed = discover_gitdir(&key).and_then(|gitdir| {
+    let computed = discover_gitdir(&key).and_then(|(top, gitdir)| {
         let common = common_dir_of_gitdir(&gitdir)?;
-        Some((gitdir, common))
+        Some((top, gitdir, common))
     });
     if let Ok(mut guard) = cache().lock() {
-        guard.git_dirs.insert(key, computed.clone());
+        guard.git_layouts.insert(key, computed.clone());
     }
     computed
 }
 
-/// The worktree's own gitdir: `<root>/.git` when that is a directory, or the
-/// `gitdir:` target when it is a file (linked worktrees, submodules). `start`
-/// is already canonical.
-fn discover_gitdir(start: &Path) -> Option<PathBuf> {
+/// The worktree top and its own gitdir: `<top>/.git` when that is a
+/// directory, or the `gitdir:` target when it is a file (linked worktrees,
+/// submodules). `start` is already canonical.
+fn discover_gitdir(start: &Path) -> Option<(PathBuf, PathBuf)> {
     for dir in start.ancestors() {
         let dot_git = dir.join(".git");
         let Ok(meta) = fs::metadata(&dot_git) else {
@@ -312,7 +327,7 @@ fn discover_gitdir(start: &Path) -> Option<PathBuf> {
         return fs::metadata(gitdir.join("HEAD"))
             .ok()
             .filter(|m| m.is_file())
-            .map(|_| gitdir);
+            .map(|_| (dir.to_path_buf(), gitdir));
     }
     None
 }

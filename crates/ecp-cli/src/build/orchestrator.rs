@@ -448,11 +448,9 @@ pub(crate) fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io:
     // This is the same question `auto_ensure`'s freshness gate asks, and it now
     // gets the same answer from the same code: same flags, same artifact
     // filter. Two definitions of "clean" that disagree is what let this
-    // through.
-    let out = safe_exec::git()
-        .args(["status", "--porcelain", "-z", "--untracked-files=all"])
-        .current_dir(worktree)
-        .output()?;
+    // through. The plain command rather than the private index: a wrong
+    // "clean" here poisons that shared slot, and a build costs seconds anyway.
+    let out = crate::git::status::plain(worktree)?;
     if !out.status.success() {
         return Ok(false);
     }
