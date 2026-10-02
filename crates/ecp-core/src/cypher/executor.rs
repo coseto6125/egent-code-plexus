@@ -1228,6 +1228,12 @@ fn seed_virtuals(graph: MergedGraph<'_>, np: &NodePat, mut push: impl FnMut(u32)
 /// `None` keeps the scan. An overlay is excluded: its virtual seeds and
 /// merged edges have their own order. An empty name is excluded because the
 /// name index skips tombstones, which the scan still matches.
+fn is_bound(np: &NodePat, base: &Binding) -> bool {
+    np.var
+        .as_deref()
+        .is_some_and(|v| base.node_vars.contains_key(v))
+}
+
 fn far_end_name_seeds(
     pat: &Pattern,
     base: &Binding,
@@ -1240,18 +1246,14 @@ fn far_end_name_seeds(
     let [rel] = pat.rels.as_slice() else {
         return None;
     };
-    let bound = |np: &NodePat| {
-        np.var
-            .as_deref()
-            .is_some_and(|v| base.node_vars.contains_key(v))
-    };
+    // `exec_pattern` already reversed a pattern whose last node alone is
+    // bound, so only the first node can arrive bound here.
     if graph.view().is_some()
         || graph.name_index.is_empty()
         || rel.range.is_some()
         || rel.dir == Direction::Both
         || !first_np.props.is_empty()
-        || bound(first_np)
-        || bound(last_np)
+        || is_bound(first_np, base)
     {
         return None;
     }
@@ -1310,14 +1312,9 @@ fn exec_pattern(
     // Seeding from the bound endpoint replaces a full-node scan per prior row
     // with one adjacency walk — `OPTIONAL MATCH (c)-[:Calls]->(f)` with `f`
     // bound (the orphan-query shape) is O(deg f) instead of O(V+E).
-    let bound_in_base = |np: &NodePat| {
-        np.var
-            .as_deref()
-            .is_some_and(|v| base.node_vars.get(v).is_some())
-    };
     if pat.nodes.len() > 1
-        && !bound_in_base(&pat.nodes[0])
-        && bound_in_base(&pat.nodes[pat.nodes.len() - 1])
+        && !is_bound(&pat.nodes[0], base)
+        && is_bound(&pat.nodes[pat.nodes.len() - 1], base)
     {
         return exec_pattern(&invert_pattern(pat), base, graph);
     }
@@ -1952,14 +1949,9 @@ fn invert_pattern(pat: &Pattern) -> Pattern {
 /// (a cycle probe like `(x)-->(y)-->(x)`) stays consistent. Edge vars are
 /// ignored — a boolean answer never reads them.
 fn exists_dfs(pat: &Pattern, base: &Binding, graph: MergedGraph<'_>) -> Result<bool, CypherError> {
-    let bound_in_base = |np: &NodePat| {
-        np.var
-            .as_deref()
-            .is_some_and(|v| base.node_vars.get(v).is_some())
-    };
     if pat.nodes.len() > 1
-        && !bound_in_base(&pat.nodes[0])
-        && bound_in_base(&pat.nodes[pat.nodes.len() - 1])
+        && !is_bound(&pat.nodes[0], base)
+        && is_bound(&pat.nodes[pat.nodes.len() - 1], base)
     {
         return exists_dfs(&invert_pattern(pat), base, graph);
     }
@@ -4675,6 +4667,7 @@ mod tests {
         "MATCH (x {name:'lonely'}) MATCH (a)-[r:Calls]->(b {name:'parse'}) RETURN x.name, a.name, r.reason",
         "MATCH (x {name:'lonely'}) OPTIONAL MATCH (a)-[r:Calls]->(b {name:'parse'}) RETURN x.name, a.name, r.reason",
         "MATCH (a)-[:Calls]->(b {name:'parse'}) RETURN COUNT(a)",
+        "MATCH (a {name:'zeta'}) MATCH (a)-[r:Calls]->(b {name:'parse'}) RETURN a.name, r.reason",
     ];
 
     /// Contract: the fast path changes time and memory only. Every query's
