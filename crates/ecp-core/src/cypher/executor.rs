@@ -1216,6 +1216,12 @@ fn seed_virtuals(graph: MergedGraph<'_>, np: &NodePat, mut push: impl FnMut(u32)
     }
 }
 
+fn is_bound(np: &NodePat, base: &Binding) -> bool {
+    np.var
+        .as_deref()
+        .is_some_and(|v| base.node_vars.contains_key(v))
+}
+
 /// First-node seeds for the who-calls shape `(a)-[:Calls]->(b {name:'x'})`:
 /// one hop, and the only inline constraint is a `name` on the far end.
 /// The full first-node scan clones a `Binding` per node before the hop
@@ -1228,12 +1234,6 @@ fn seed_virtuals(graph: MergedGraph<'_>, np: &NodePat, mut push: impl FnMut(u32)
 /// `None` keeps the scan. An overlay is excluded: its virtual seeds and
 /// merged edges have their own order. An empty name is excluded because the
 /// name index skips tombstones, which the scan still matches.
-fn is_bound(np: &NodePat, base: &Binding) -> bool {
-    np.var
-        .as_deref()
-        .is_some_and(|v| base.node_vars.contains_key(v))
-}
-
 fn far_end_name_seeds(
     pat: &Pattern,
     base: &Binding,
