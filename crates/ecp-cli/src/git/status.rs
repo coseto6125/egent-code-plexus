@@ -1112,7 +1112,11 @@ mod tests {
             "[INCLUDE] path = other\n",
         ] {
             fs::write(&config, body).unwrap();
-            assert_eq!(config_identity(&[config.clone()]), None, "{body}");
+            assert_eq!(
+                config_identity(std::slice::from_ref(&config)),
+                None,
+                "{body}"
+            );
         }
     }
 
