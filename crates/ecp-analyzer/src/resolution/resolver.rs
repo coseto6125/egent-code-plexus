@@ -549,19 +549,37 @@ fn crate_root_prefix(path: &str) -> &str {
         .unwrap_or("")
 }
 
-/// `mod.rs`, `lib.rs` and `main.rs` name their directory's module; every
-/// other `.rs` file is a module named after its stem. `src/bin/<name>.rs`
-/// crate roots are not recognised and are treated as ordinary modules.
-fn is_rust_module_root(source_file: &std::path::Path) -> bool {
-    matches!(
+/// A file that names its own directory's module: `mod.rs`, `lib.rs`,
+/// `main.rs`, and every Cargo target root (`src/bin/<name>.rs`, top-level
+/// `examples/`, `benches/`, `tests/` files, `build.rs`). Every other `.rs`
+/// file is a module named after its stem. The top-level target rules require
+/// no `src` ancestor, so `src/a/tests/x.rs` stays an ordinary module.
+pub(crate) fn is_rust_module_root(source_file: &std::path::Path) -> bool {
+    if matches!(
         source_file.file_stem().and_then(|s| s.to_str()),
         Some("mod" | "lib" | "main")
-    )
+    ) {
+        return true;
+    }
+    let Some(dir) = source_file.parent() else {
+        return false;
+    };
+    let dir_name = dir.file_name().and_then(|n| n.to_str());
+    let in_src = |d: &std::path::Path| d.components().any(|c| c.as_os_str() == "src");
+    let is_build_rs = source_file.file_name().is_some_and(|n| n == "build.rs");
+    match dir_name {
+        Some("bin") => dir
+            .parent()
+            .and_then(|g| g.file_name())
+            .is_some_and(|n| n == "src"),
+        Some("examples" | "benches" | "tests") => !in_src(dir),
+        _ => is_build_rs && !in_src(dir),
+    }
 }
 
 /// Directory that holds the child modules of `source_file`'s module — the
 /// base of `self::`. Rust 2018 puts the children of `a/b.rs` in `a/b/`.
-fn rust_module_dir(source_file: &std::path::Path) -> Option<std::path::PathBuf> {
+pub(crate) fn rust_module_dir(source_file: &std::path::Path) -> Option<std::path::PathBuf> {
     let own_dir = source_file.parent()?;
     if is_rust_module_root(source_file) {
         Some(own_dir.to_path_buf())
@@ -609,16 +627,10 @@ fn rust_module_path_base(
         }
         (&"self", rest) => (rust_module_dir(source_file)?, rest),
         (&"super", mut rest) => {
-            // `super` is the parent module: for a module root (`a/b/mod.rs`)
-            // that is the grandparent directory, for any other file
-            // (`a/b.rs`) it is the file's own directory. Each further
-            // `super` climbs one more module.
-            let own_dir = source_file.parent()?;
-            let mut anchor = if is_rust_module_root(source_file) {
-                own_dir.parent()?.to_path_buf()
-            } else {
-                own_dir.to_path_buf()
-            };
+            // `super` is the parent of the file's own module, so it is
+            // `rust_module_dir`'s parent; each further `super` climbs one
+            // more module.
+            let mut anchor = rust_module_dir(source_file)?.parent()?.to_path_buf();
             while let Some((&"super", tail)) = rest.split_first() {
                 anchor = anchor.parent()?.to_path_buf();
                 rest = tail;
@@ -1676,6 +1688,57 @@ mod tests {
         assert_eq!(
             base("r/a/b/mod.rs", "super::super"),
             Some(PathBuf::from("r"))
+        );
+    }
+
+    #[test]
+    fn test_rust_module_path_base_self_from_cargo_target_roots_is_own_directory() {
+        let base = |f: &str, spec: &str| rust_module_path_base(&PathBuf::from(f), spec);
+        assert_eq!(
+            base("src/bin/tool.rs", "self"),
+            Some(PathBuf::from("src/bin"))
+        );
+        assert_eq!(base("tests/it.rs", "self"), Some(PathBuf::from("tests")));
+        assert_eq!(
+            base("crates/foo/examples/demo.rs", "self"),
+            Some(PathBuf::from("crates/foo/examples"))
+        );
+        assert_eq!(
+            base("crates/foo/benches/b.rs", "self::x"),
+            Some(PathBuf::from("crates/foo/benches/x"))
+        );
+        assert_eq!(base("build.rs", "self"), Some(PathBuf::from("")));
+        assert_eq!(
+            base("crates/foo/build.rs", "self::x"),
+            Some(PathBuf::from("crates/foo/x"))
+        );
+    }
+
+    #[test]
+    fn test_rust_module_path_base_tests_dir_under_src_stays_ordinary_module() {
+        let base = |f: &str, spec: &str| rust_module_path_base(&PathBuf::from(f), spec);
+        assert_eq!(
+            base("src/a/tests/x.rs", "self"),
+            Some(PathBuf::from("src/a/tests/x"))
+        );
+        assert_eq!(
+            base("src/a/tests/x.rs", "super"),
+            Some(PathBuf::from("src/a/tests"))
+        );
+        assert_eq!(
+            base("src/build.rs", "self"),
+            Some(PathBuf::from("src/build"))
+        );
+        assert_eq!(base("bin/tool.rs", "self"), Some(PathBuf::from("bin/tool")));
+    }
+
+    #[test]
+    fn test_rust_module_path_base_super_from_cargo_target_root_is_parent_directory() {
+        let base = |f: &str, spec: &str| rust_module_path_base(&PathBuf::from(f), spec);
+        assert_eq!(base("src/bin/tool.rs", "super"), Some(PathBuf::from("src")));
+        assert_eq!(
+            base("crates/foo/tests/it.rs", "super::x"),
+            Some(PathBuf::from("crates/foo/x"))
         );
     }
 

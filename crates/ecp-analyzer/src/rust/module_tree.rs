@@ -23,6 +23,7 @@
 //! * Proc-macro-generated re-exports (`paste!`, `derive_more`, etc.) — logged
 //!   as BlindSpot if encountered.
 
+use crate::resolution::resolver::rust_module_dir;
 use ecp_core::registry::uid_path;
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
@@ -715,18 +716,12 @@ fn collect_pub_use_entries(
 
 /// Locate the child module file for `mod NAME;` declared in `parent_file`.
 /// Convention mirrors the Rust reference:
-/// - `src/lib.rs`, `src/main.rs`, `foo/mod.rs` → children at `<dir>/NAME.rs`
+/// - `src/lib.rs`, `src/main.rs`, `foo/mod.rs` and Cargo target roots
+///   (`src/bin/x.rs`, `tests/x.rs`, ...) → children at `<dir>/NAME.rs`
 ///   or `<dir>/NAME/mod.rs`.
 /// - `foo/bar.rs` → children at `foo/bar/NAME.rs` or `foo/bar/NAME/mod.rs`.
 fn file_for_mod(parent_file: &Path, mod_name: &str) -> Option<PathBuf> {
-    let parent_dir = parent_file.parent()?;
-    let base = match parent_file.file_name()?.to_str()? {
-        "lib.rs" | "main.rs" | "mod.rs" => parent_dir.to_path_buf(),
-        stem_ext => {
-            let stem = Path::new(stem_ext).file_stem()?.to_str()?;
-            parent_dir.join(stem)
-        }
-    };
+    let base = rust_module_dir(parent_file)?;
     let flat = base.join(format!("{mod_name}.rs"));
     if flat.exists() {
         return Some(flat);
@@ -908,6 +903,31 @@ mod tests {
             fs::write(path, content).unwrap();
         }
         dir
+    }
+
+    #[test]
+    fn test_file_for_mod_cargo_bin_root_finds_sibling_module() {
+        let dir = make_tree(&[
+            ("src/bin/tool.rs", "mod support;\n"),
+            ("src/bin/support.rs", "pub fn f() {}\n"),
+        ]);
+        assert_eq!(
+            file_for_mod(&dir.path().join("src/bin/tool.rs"), "support"),
+            Some(dir.path().join("src/bin/support.rs"))
+        );
+    }
+
+    #[test]
+    fn test_file_for_mod_ordinary_file_finds_stem_directory_child() {
+        let dir = make_tree(&[
+            ("src/a/b.rs", "mod c;\n"),
+            ("src/a/b/c.rs", "pub fn f() {}\n"),
+            ("src/a/c.rs", "pub fn g() {}\n"),
+        ]);
+        assert_eq!(
+            file_for_mod(&dir.path().join("src/a/b.rs"), "c"),
+            Some(dir.path().join("src/a/b/c.rs"))
+        );
     }
 
     // ── 2-segment `mod::fn` (regression for PR #75's case) ─────────────────
