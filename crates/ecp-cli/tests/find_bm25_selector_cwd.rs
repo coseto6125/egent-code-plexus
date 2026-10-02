@@ -22,6 +22,8 @@ struct World {
     home: tempfile::TempDir,
     /// A directory that is neither a git repo nor indexed.
     non_repo: tempfile::TempDir,
+    /// The registry key `admin index` gave the repo (`selrepo__<hash>`).
+    key: String,
 }
 
 impl World {
@@ -34,10 +36,11 @@ impl World {
         std::fs::write(repo.join("lib.rs"), format!("pub fn {MARKER}() {{}}\n")).unwrap();
         run_git(&repo, &["init", "-q", "-b", "main"]);
         commit_all(&repo, "init");
-        let w = World {
+        let mut w = World {
             root,
             home,
             non_repo,
+            key: String::new(),
         };
         let out = w.ecp(&repo, &["admin", "index", "--repo", "."], None);
         assert!(
@@ -45,6 +48,14 @@ impl World {
             "admin index failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
+        w.key = std::fs::read_dir(w.home.path().join(".ecp"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|e| e.path().join("commits").is_dir())
+            .expect("admin index registered the repo")
+            .file_name()
+            .into_string()
+            .unwrap();
         w
     }
 
@@ -115,7 +126,7 @@ fn test_find_selector_non_repo_cwd_lists_target_hit() {
     let w = World::new();
     let before = w.indexed_repo_dirs();
 
-    let out = w.ecp(w.non_repo.path(), &selector_find(ALIAS), None);
+    let out = w.ecp(w.non_repo.path(), &selector_find(&w.key), None);
 
     assert_ok(&out, "selector find from a non-repo cwd");
     assert!(
@@ -134,8 +145,8 @@ fn test_find_selector_non_repo_cwd_lists_target_hit() {
 fn test_find_selector_indexed_cwd_matches_non_repo_cwd_stdout() {
     let w = World::new();
 
-    let from_repo = w.ecp(&w.repo(), &selector_find(ALIAS), None);
-    let from_non_repo = w.ecp(w.non_repo.path(), &selector_find(ALIAS), None);
+    let from_repo = w.ecp(&w.repo(), &selector_find(&w.key), None);
+    let from_non_repo = w.ecp(w.non_repo.path(), &selector_find(&w.key), None);
 
     assert_ok(&from_repo, "selector find from the indexed repo");
     assert_ok(&from_non_repo, "selector find from a non-repo cwd");
@@ -146,8 +157,8 @@ fn test_find_selector_indexed_cwd_matches_non_repo_cwd_stdout() {
 fn test_find_selector_all_and_csv_work_from_non_repo_cwd() {
     let w = World::new();
 
-    let csv = format!("{ALIAS},{ALIAS}");
-    for selector in ["@all", ALIAS, csv.as_str()] {
+    let csv = format!("{},{}", w.key, w.key);
+    for selector in ["@all", w.key.as_str(), csv.as_str()] {
         let out = w.ecp(w.non_repo.path(), &selector_find(selector), None);
         assert_ok(&out, &format!("selector {selector}"));
         assert!(
@@ -182,7 +193,7 @@ fn test_find_exact_and_fuzzy_selector_keep_rejection() {
 fn test_find_batch_selector_non_repo_cwd_matches_indexed_cwd() {
     let w = World::new();
     let args = [
-        "find", "--batch", "--mode", "bm25", "--repo", ALIAS, "--format", "json",
+        "find", "--batch", "--mode", "bm25", "--repo", &w.key, "--format", "json",
     ];
     let stdin = format!("{MARKER}\n# comment\n\n{MARKER}\n");
 
@@ -302,7 +313,7 @@ fn test_find_selector_named_like_cwd_directory_uses_path_semantics() {
 #[test]
 fn test_find_selector_twice_concurrently_prints_identical_stdout() {
     let w = World::new();
-    let args = selector_find(ALIAS);
+    let args = selector_find(&w.key);
 
     let first = spawn_ecp(w.non_repo.path(), w.home.path(), &args, None);
     let second = spawn_ecp(w.non_repo.path(), w.home.path(), &args, None);
