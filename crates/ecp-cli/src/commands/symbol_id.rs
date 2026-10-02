@@ -2,7 +2,7 @@
 //! `ecp inspect`, `ecp impact` and `ecp path`.
 
 use crate::commands::format::{kind_to_str, node_kind_to_str};
-use ecp_core::graph::{ArchivedNode, ArchivedZeroCopyGraph};
+use ecp_core::graph::ArchivedZeroCopyGraph;
 use ecp_core::session::OverlayView;
 
 /// Resolve the owner class name for a node by reading `Node.owner_class`
@@ -79,12 +79,8 @@ pub fn resolve_candidates(
     let mut same_name_defs = 0usize;
     let mut matches: Vec<usize> = Vec::new();
     // Ascending like the full scan, so the candidate list keeps node order.
-    let named = graph.nodes_named_sorted(bare_name);
-    let scanned: Box<dyn Iterator<Item = (usize, &ArchivedNode)> + '_> = match &named {
-        Some(hits) => Box::new(hits.iter().map(|&i| (i as usize, &graph.nodes[i as usize]))),
-        None => Box::new(graph.nodes.iter().enumerate()),
-    };
-    for (idx, node) in scanned {
+    for idx in graph.name_candidates(bare_name) {
+        let (idx, node) = (idx as usize, &graph.nodes[idx as usize]);
         if node.name.resolve(&graph.string_pool) != bare_name {
             continue;
         }
@@ -168,30 +164,28 @@ mod tests {
     use ecp_core::session::{OverlayFileInput, OverlaySymbol};
 
     /// "dup" repeats across kinds, owners and files; "shared" has 1200 nodes
-    /// so the index's hash-only unstable sort leaves them out of node order.
-    /// Also a tombstone (empty name) and a unicode name. Every node has its
-    /// own uid.
+    /// (see `same_name_nodes`). Also a tombstone (empty name) and a unicode
+    /// name. Every node has its own uid.
     fn same_name_graph() -> ZeroCopyGraph {
         let mut fx = GraphFixture::new();
-        for i in 0..1200 {
-            let path = format!("src/s{i}.ts");
-            match i % 3 {
-                0 => fx.func(&path, "shared"),
-                1 => fx.method(&path, "Owner", "shared"),
-                _ => fx.node(NodeKind::Class, &path, "shared"),
-            };
-            if i % 100 == 0 {
-                fx.func(&path, "");
-                fx.func(&path, "naïve_函数");
-                fx.func(&path, "dup");
-                fx.method("src/b.ts", &format!("Owner{i}"), "dup");
-                fx.method(&path, "Owner", "dup");
-            }
-        }
+        fx.same_name_nodes(
+            "shared",
+            1200,
+            |i| format!("src/s{i}.ts"),
+            |fx, i, path, _| {
+                if i % 100 == 0 {
+                    fx.func(path, "");
+                    fx.func(path, "naïve_函数");
+                    fx.func(path, "dup");
+                    fx.method("src/b.ts", &format!("Owner{i}"), "dup");
+                    fx.method(path, "Owner", "dup");
+                }
+            },
+        );
         fx.build()
     }
 
-    fn resolve(
+    fn resolve_matches(
         g: ZeroCopyGraph,
         name: &str,
         kind: Option<&str>,
@@ -256,8 +250,8 @@ mod tests {
             slow.name_index.clear();
             assert!(!fast.name_index.is_empty());
             assert_eq!(
-                resolve(fast, name, kind, file, overlay),
-                resolve(slow, name, kind, file, overlay),
+                resolve_matches(fast, name, kind, file, overlay),
+                resolve_matches(slow, name, kind, file, overlay),
                 "{name:?} kind={kind:?} file={file:?} overlay={overlay}"
             );
         }
@@ -265,7 +259,8 @@ mod tests {
 
     #[test]
     fn test_resolve_candidates_shared_name_lists_every_node_ascending() {
-        let (matches, same_name_defs) = resolve(same_name_graph(), "shared", None, None, false);
+        let (matches, same_name_defs) =
+            resolve_matches(same_name_graph(), "shared", None, None, false);
         assert_eq!(matches.len(), 1200);
         assert_eq!(same_name_defs, 1200);
         assert!(matches.windows(2).all(|w| w[0] < w[1]), "node order");
@@ -275,7 +270,7 @@ mod tests {
     /// empty bare name (`ecp impact --target Owner.`) must keep the scan.
     #[test]
     fn test_resolve_candidates_empty_bare_name_keeps_tombstone_matches() {
-        let (matches, same_name_defs) = resolve(same_name_graph(), "", None, None, false);
+        let (matches, same_name_defs) = resolve_matches(same_name_graph(), "", None, None, false);
         assert_eq!(matches.len(), 12);
         assert_eq!(same_name_defs, 12);
     }
@@ -284,12 +279,12 @@ mod tests {
     /// not a candidate; the overlay-only symbol still is.
     #[test]
     fn test_resolve_candidates_overlay_drops_suppressed_base_nodes() {
-        let (plain, plain_defs) = resolve(same_name_graph(), "dup", None, None, false);
-        let (merged, merged_defs) = resolve(same_name_graph(), "dup", None, None, true);
+        let (plain, plain_defs) = resolve_matches(same_name_graph(), "dup", None, None, false);
+        let (merged, merged_defs) = resolve_matches(same_name_graph(), "dup", None, None, true);
         assert_eq!(plain_defs, 36);
         assert!(merged_defs < plain_defs, "{merged_defs} vs {plain_defs}");
         assert!(merged.len() < plain.len());
-        let (new_only, _) = resolve(same_name_graph(), "brand_new", None, None, true);
+        let (new_only, _) = resolve_matches(same_name_graph(), "brand_new", None, None, true);
         assert_eq!(new_only.len(), 1);
     }
 }

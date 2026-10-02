@@ -79,6 +79,31 @@ impl GraphFixture {
     /// Append a node, registering its file if needed. Span defaults to all
     /// zeroes — set one with [`span`](Self::span) when the test asserts on
     /// line numbers.
+    /// `n` nodes all named `name`, kinds cycling Function / Method / Class,
+    /// `extra(fx, i, path, idx)` after each; returns their indices. With
+    /// n in the thousands the name index's hash-only unstable sort leaves
+    /// them out of node order, which the name-lookup tests rely on.
+    pub fn same_name_nodes(
+        &mut self,
+        name: &str,
+        n: usize,
+        path_of: impl Fn(usize) -> String,
+        mut extra: impl FnMut(&mut Self, usize, &str, u32),
+    ) -> Vec<u32> {
+        (0..n)
+            .map(|i| {
+                let path = path_of(i);
+                let idx = match i % 3 {
+                    0 => self.func(&path, name),
+                    1 => self.method(&path, "Owner", name),
+                    _ => self.node(NodeKind::Class, &path, name),
+                };
+                extra(self, i, &path, idx);
+                idx
+            })
+            .collect()
+    }
+
     pub fn node(&mut self, kind: NodeKind, path: &str, name: &str) -> u32 {
         self.push_node(kind, path, None, name)
     }
@@ -341,18 +366,16 @@ mod tests {
     #[test]
     fn test_nodes_named_sorted_many_same_name_nodes_returns_ascending() {
         let mut fx = GraphFixture::new();
-        let mut shared = Vec::new();
-        for i in 0..1200u32 {
-            let path = format!("f{}.rs", i % 5);
-            shared.push(match i % 3 {
-                0 => fx.func(&path, "shared"),
-                1 => fx.method(&path, "Owner", "shared"),
-                _ => fx.node(NodeKind::Class, &path, "shared"),
-            });
-            fx.func(&path, "other");
-            fx.func(&path, "naïve_函数");
-            fx.func(&path, "");
-        }
+        let shared = fx.same_name_nodes(
+            "shared",
+            1200,
+            |i| format!("f{}.rs", i % 5),
+            |fx, _, path, _| {
+                fx.func(path, "other");
+                fx.func(path, "naïve_函数");
+                fx.func(path, "");
+            },
+        );
         let bytes = fx.into_bytes();
         let g = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
 

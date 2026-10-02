@@ -588,19 +588,11 @@ fn search_nodes<'a>(
 
     // No overlay or corrupt overlay bytes — fall through to base graph only.
     // The name index yields indices ascending, like the scan.
-    match graph.nodes_named_sorted(bare_name) {
-        Some(hits) => hits
-            .into_iter()
-            .map(|i| (i as usize, &graph.nodes[i as usize]))
-            .filter(|(idx, node)| name_owner_matches(node, *idx))
-            .collect(),
-        None => graph
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(idx, node)| name_owner_matches(node, *idx))
-            .collect(),
-    }
+    graph
+        .name_candidates(bare_name)
+        .map(|i| (i as usize, &graph.nodes[i as usize]))
+        .filter(|(idx, node)| name_owner_matches(node, *idx))
+        .collect()
 }
 
 pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(), EcpError> {
@@ -868,25 +860,24 @@ mod tests {
     }
 
     /// "dup" repeats across kinds, owners and files; "shared" has 1200 nodes
-    /// so the index's hash-only unstable sort leaves them out of node order.
-    /// Also a tombstone (empty name) and a unicode name.
+    /// (see `same_name_nodes`). Also a tombstone (empty name) and a unicode
+    /// name.
     fn same_name_graph() -> ZeroCopyGraph {
         let mut fx = GraphFixture::new();
-        for i in 0..1200 {
-            let path = format!("src/s{i}.ts");
-            match i % 3 {
-                0 => fx.func(&path, "shared"),
-                1 => fx.method(&path, "Owner", "shared"),
-                _ => fx.node(ecp_core::graph::NodeKind::Class, &path, "shared"),
-            };
-            if i % 100 == 0 {
-                fx.func(&path, "");
-                fx.func(&path, "naïve_函数");
-                fx.func(&path, "dup");
-                fx.method(&path, "Owner", "dup");
-                fx.method(&path, "Other", "dup");
-            }
-        }
+        fx.same_name_nodes(
+            "shared",
+            1200,
+            |i| format!("src/s{i}.ts"),
+            |fx, i, path, _| {
+                if i % 100 == 0 {
+                    fx.func(path, "");
+                    fx.func(path, "naïve_函数");
+                    fx.func(path, "dup");
+                    fx.method(path, "Owner", "dup");
+                    fx.method(path, "Other", "dup");
+                }
+            },
+        );
         fx.build()
     }
 

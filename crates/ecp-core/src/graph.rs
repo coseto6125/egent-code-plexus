@@ -1190,6 +1190,16 @@ impl ArchivedZeroCopyGraph {
         hits.sort_unstable();
         Some(hits)
     }
+
+    /// Name-index hits in node order, or every node when the index cannot
+    /// answer (empty name, empty index). Callers still compare the name.
+    pub fn name_candidates(&self, name: &str) -> impl Iterator<Item = u32> + '_ {
+        let (hits, all) = match self.nodes_named_sorted(name) {
+            Some(h) => (h, 0..0),
+            None => (Vec::new(), 0..self.nodes.len() as u32),
+        };
+        hits.into_iter().chain(all)
+    }
 }
 
 /// Empty-but-header-valid graph for synthetic fixtures. New schema fields

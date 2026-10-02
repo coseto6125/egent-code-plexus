@@ -340,12 +340,12 @@ enum CandSrc {
 }
 
 /// Base-graph candidates for an Exact / Fuzzy query as
-/// `(source, caller_count, category priority, file path)`, in node order.
+/// `(node index, caller_count, category priority, file path)`, in node order,
+/// plus how many Test-category fuzzy hits were dropped.
 ///
 /// Exact walks the name index when the graph has one; the hits are node
 /// indices ascending, so ties in the caller's `sort_unstable_by` see the same
 /// input order as the full scan. Fuzzy (`contains`) must scan every node.
-#[allow(clippy::too_many_arguments)]
 fn base_candidates(
     graph: &ArchivedZeroCopyGraph,
     merged: &MergedGraph<'_>,
@@ -354,8 +354,8 @@ fn base_candidates(
     kind_filter: Option<&[String]>,
     file_filter: Option<&str>,
     include_tests: bool,
-    tests_excluded: &mut u32,
-) -> Vec<(CandSrc, u32, u8, String)> {
+) -> (Vec<(usize, u32, u8, String)>, u32) {
+    let mut tests_excluded = 0u32;
     let mut candidate = |node_idx: usize, node: &ecp_core::graph::ArchivedNode| {
         let name = node.name.resolve(&graph.string_pool);
         let matches = match mode {
@@ -388,31 +388,28 @@ fn base_candidates(
 
         let is_exact = matches!(mode, FindMode::Exact);
         if !include_tests && !is_exact && matches!(file.category, ArchivedFileCategory::Test) {
-            *tests_excluded += 1;
+            tests_excluded += 1;
             return None;
         }
 
         let prio = category_priority(&file.category);
         let caller_count = count_incoming(graph, node_idx);
-        Some((CandSrc::Base(node_idx), caller_count, prio, file_path))
+        Some((node_idx, caller_count, prio, file_path))
     };
 
-    let named = match mode {
-        FindMode::Exact => graph.nodes_named_sorted(pattern),
-        _ => None,
-    };
-    match named {
-        Some(hits) => hits
-            .into_iter()
+    let rows = match mode {
+        FindMode::Exact => graph
+            .name_candidates(pattern)
             .filter_map(|i| candidate(i as usize, &graph.nodes[i as usize]))
             .collect(),
-        None => graph
+        _ => graph
             .nodes
             .iter()
             .enumerate()
             .filter_map(|(i, node)| candidate(i, node))
             .collect(),
-    }
+    };
+    (rows, tests_excluded)
 }
 
 fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result<(), EcpError> {
@@ -433,8 +430,7 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
     let view = engine.overlay_dir().and_then(|_| engine.overlay_view());
     let merged = MergedGraph::new(graph, view);
 
-    let mut tests_excluded: u32 = 0;
-    let mut candidates = base_candidates(
+    let (base_rows, mut tests_excluded) = base_candidates(
         graph,
         &merged,
         pattern,
@@ -442,8 +438,11 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
         kind_filter.as_deref(),
         file_filter,
         args.include_tests,
-        &mut tests_excluded,
     );
+    let mut candidates: Vec<(CandSrc, u32, u8, String)> = base_rows
+        .into_iter()
+        .map(|(idx, callers, prio, path)| (CandSrc::Base(idx), callers, prio, path))
+        .collect();
 
     for (m, prio) in overlay_matches(&merged, pattern, mode, kind_filter.as_deref(), file_filter) {
         if !args.include_tests && mode == FindMode::Fuzzy && m.category == "Test" {
@@ -1768,32 +1767,31 @@ mod tests {
     use ecp_core::session::{OverlayFileInput, OverlaySymbol, OverlayView};
 
     /// "dup" and "shared" repeat across kinds, files and Test-category
-    /// files (every node has its own uid); "shared" has 1200 nodes so the index's hash-only unstable sort
-    /// leaves them out of node order. Also a tombstone (empty name) and a
-    /// unicode name. Calls edges give the dups different caller counts.
+    /// files (every node has its own uid); "shared" has 1200 nodes (see
+    /// `same_name_nodes`). Also a tombstone (empty name) and a unicode name.
+    /// Calls edges give the dups different caller counts.
     fn same_name_graph() -> ZeroCopyGraph {
         let mut fx = GraphFixture::new();
         let caller = fx.func("src/caller.ts", "caller");
-        for i in 0..1200 {
-            let path = format!("src/s{i}.ts");
-            let idx = match i % 3 {
-                0 => fx.func(&path, "shared"),
-                1 => fx.method(&path, "Owner", "shared"),
-                _ => fx.node(NodeKind::Class, &path, "shared"),
-            };
-            if i % 5 == 0 {
-                fx.edge(caller, idx, RelType::Calls);
-            }
-            if i % 100 == 0 {
-                fx.func(&path, "");
-                fx.func(&path, "naïve_函数");
-                fx.func(&path, "dup");
-                fx.method("src/b.ts", &format!("Owner{i}"), "dup");
-                let test_path = format!("tests/t{i}.ts");
-                fx.file_as(&test_path, FileCategory::Test);
-                fx.func(&test_path, "dup");
-            }
-        }
+        fx.same_name_nodes(
+            "shared",
+            1200,
+            |i| format!("src/s{i}.ts"),
+            |fx, i, path, idx| {
+                if i % 5 == 0 {
+                    fx.edge(caller, idx, RelType::Calls);
+                }
+                if i % 100 == 0 {
+                    fx.func(path, "");
+                    fx.func(path, "naïve_函数");
+                    fx.func(path, "dup");
+                    fx.method("src/b.ts", &format!("Owner{i}"), "dup");
+                    let test_path = format!("tests/t{i}.ts");
+                    fx.file_as(&test_path, FileCategory::Test);
+                    fx.func(&test_path, "dup");
+                }
+            },
+        );
         fx.build()
     }
 
@@ -1827,31 +1825,14 @@ mod tests {
             OverlayView::build(graph, &[dirty]).unwrap()
         });
         let merged = MergedGraph::new(graph, view.as_ref());
-        let mut excluded = 0;
-        let rows = base_candidates(
-            graph,
-            &merged,
-            pattern,
-            mode,
-            kinds,
-            file,
-            false,
-            &mut excluded,
-        )
-        .into_iter()
-        .map(|(src, callers, prio, path)| match src {
-            CandSrc::Base(idx) => (idx, callers, prio, path),
-            CandSrc::Overlay(_) => unreachable!("base_candidates yields base nodes only"),
-        })
-        .collect();
-        (rows, excluded)
+        base_candidates(graph, &merged, pattern, mode, kinds, file, false)
     }
 
     /// Contract: the name index changes time only. Same rows in the same
     /// order as the full scan that clearing `name_index` forces.
     #[test]
     fn test_base_candidates_exact_with_index_matches_full_scan() {
-        /// (pattern, kinds, file, exclude tests)
+        /// (pattern, kinds, file, overlay)
         type Case<'a> = (&'a str, Option<&'a [String]>, Option<&'a str>, bool);
         let kinds = vec!["method".to_string(), "function".to_string()];
         let cases: [Case; 10] = [
@@ -1893,8 +1874,8 @@ mod tests {
         assert!(rows.windows(2).all(|w| w[0].0 < w[1].0), "node order");
     }
 
-    /// The tombstone has an empty name: the scan matches it only through a
-    /// file-less guard, so an empty pattern must not lose that behaviour.
+    /// The tombstone has an empty name: the scan matches it by name equality
+    /// and the index skips it, so an empty pattern must keep the scan.
     #[test]
     fn test_base_candidates_exact_empty_pattern_matches_scan_with_tombstones() {
         let mut slow = same_name_graph();
