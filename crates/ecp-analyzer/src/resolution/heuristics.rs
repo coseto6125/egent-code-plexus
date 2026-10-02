@@ -27,12 +27,6 @@ pub enum ResolutionTier {
     /// unqualified callsites).
     HeritageScoped,
     Global,
-    /// Tier 3 test-double tie-break (`GlobalPick::NonTest`), gated on the
-    /// caller importing the candidate's module. Kept below `Global`: without
-    /// the gate, a sample of 80 such edges on one Python repo had 17 wrong
-    /// ones, all stdlib or third-party receivers (`asyncio.run`,
-    /// `dict.keys`), and the gate narrows that class but cannot rule it out.
-    GlobalNonTest,
     Fallback(FallbackReason),
 }
 
@@ -45,7 +39,6 @@ impl ResolutionTier {
             ResolutionTier::QualifierScoped => 0.85,
             ResolutionTier::HeritageScoped => 0.8,
             ResolutionTier::Global => 0.7,
-            ResolutionTier::GlobalNonTest => 0.6,
             ResolutionTier::Fallback(reason) => match reason {
                 FallbackReason::ImplicitSelf => 0.8,
                 FallbackReason::VueComponent => 0.8,

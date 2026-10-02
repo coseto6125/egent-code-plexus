@@ -43,8 +43,8 @@
 //!   never re-resolved at query time.
 
 use crate::analyzer::types::RawImport;
-use crate::file_category::{imports_reach, pick_global, FileMeta, GlobalPick};
-use crate::graph::{ArchivedZeroCopyGraph, FileCategory, NodeKind, RelType};
+use crate::file_category::{pick_global, FileMeta, GlobalPick};
+use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 
@@ -100,9 +100,6 @@ pub struct ViewEdge {
 const CONF_SAME_FILE: f32 = 1.0;
 const CONF_IMPORT_SCOPED: f32 = 0.95;
 const CONF_GLOBAL_UNIQUE: f32 = 0.7;
-/// Mirrors `ResolutionTier::GlobalNonTest`: the test-double tie-break is
-/// less certain than a unique global match.
-const CONF_GLOBAL_NON_TEST: f32 = 0.6;
 
 #[derive(Debug, Default)]
 pub struct OverlayView {
@@ -263,7 +260,6 @@ impl OverlayView {
                             file,
                             file_metas[file_ord],
                             &mut base_metas,
-                            &nodes,
                             &same_file_callables,
                             &overlay_callables,
                             &replaced,
@@ -389,7 +385,6 @@ fn resolve_callee(
     file: &OverlayFileInput,
     caller: FileMeta,
     base_metas: &mut FxHashMap<usize, FileMeta>,
-    nodes: &[ViewNode],
     same_file_callables: &FxHashMap<(usize, &str), Vec<u32>>,
     overlay_callables: &FxHashMap<&str, Vec<(u32, FileMeta)>>,
     replaced: &FxHashMap<u32, u32>,
@@ -460,38 +455,18 @@ fn resolve_callee(
                 .files
                 .get(file_idx)
                 .map_or_else(FileMeta::default, |f| {
-                    FileMeta::with_category(
-                        f.path.resolve(&graph.string_pool),
-                        FileCategory::from(&f.category),
-                    )
+                    FileMeta::from_path(f.path.resolve(&graph.string_pool))
                 })
         });
         (idx, meta)
     });
-    let (target, confidence) =
-        match pick_global(caller, base.chain(overlay_candidates.iter().copied())) {
-            GlobalPick::Unique(id) => (id, CONF_GLOBAL_UNIQUE),
-            // Same binding-evidence gate as the index resolver.
-            GlobalPick::NonTest(id) => {
-                let base_len = graph.nodes.len() as u32;
-                let path = if id < base_len {
-                    let file_idx = graph.nodes[id as usize].file_idx.to_native() as usize;
-                    graph
-                        .files
-                        .get(file_idx)
-                        .map(|f| f.path.resolve(&graph.string_pool))
-                } else {
-                    nodes.get((id - base_len) as usize).map(|n| &*n.rel_path)
-                };
-                if !path.is_some_and(|p| imports_reach(&file.imports, p)) {
-                    return None;
-                }
-                (id, CONF_GLOBAL_NON_TEST)
-            }
-            GlobalPick::NoMatch | GlobalPick::Ambiguous => return None,
-        };
+    let GlobalPick::Unique(target) =
+        pick_global(caller, base.chain(overlay_candidates.iter().copied()))
+    else {
+        return None;
+    };
     debug_assert!(!replaced.contains_key(&target));
-    Some((target, confidence))
+    Some((target, CONF_GLOBAL_UNIQUE))
 }
 
 /// Last path-ish segment of an import source across language conventions:
@@ -704,7 +679,7 @@ mod tests {
     fn barrier_graph_bytes() -> Vec<u8> {
         let mut fx = GraphFixture::new();
         fx.file("src/service.py");
-        fx.file_as("tests/fakes.py", FileCategory::Test);
+        fx.file_as("tests/fakes.py", crate::graph::FileCategory::Test);
         fx.file("src/helper.go");
         fx.func("src/service.py", "scan_range");
         fx.func("tests/fakes.py", "scan_range");
@@ -716,46 +691,20 @@ mod tests {
         OverlayFileInput {
             rel_path: rel_path.to_string(),
             symbols: vec![sym("search", &["scan_range", "go_only"])],
-            imports: vec![RawImport {
-                source: "src.service".to_string(),
-                imported_name: "FlightService".to_string(),
-                alias: None,
-                binding_kind: None,
-            }],
+            imports: vec![],
         }
     }
 
     #[test]
-    fn test_tier3_overlay_test_double_without_import_stays_ambiguous() {
+    fn test_tier3_overlay_test_double_keeps_name_ambiguous_like_index() {
         let bytes = barrier_graph_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
-        let mut input = search_input("src/search.py");
-        input.imports.clear();
-        let view = OverlayView::build(graph, &[input]).unwrap();
-        assert!(edge_to(&view, view.base_len(), 0).is_none());
-    }
-
-    #[test]
-    fn test_tier3_overlay_production_caller_skips_test_double() {
-        let bytes = barrier_graph_bytes();
-        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
-        let view = OverlayView::build(graph, &[search_input("src/search.py")]).unwrap();
-        let search = view.base_len();
-
-        let e = edge_to(&view, search, 0).expect("search → production scan_range");
-        assert_eq!(e.confidence, CONF_GLOBAL_NON_TEST);
-        assert!(edge_to(&view, search, 1).is_none());
-    }
-
-    #[test]
-    fn test_tier3_overlay_test_caller_with_test_double_stays_ambiguous() {
-        let bytes = barrier_graph_bytes();
-        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
-        let view = OverlayView::build(graph, &[search_input("tests/test_search.py")]).unwrap();
-        let search = view.base_len();
-
-        assert!(edge_to(&view, search, 0).is_none());
-        assert!(edge_to(&view, search, 1).is_none());
+        for caller in ["src/search.py", "tests/test_search.py"] {
+            let view = OverlayView::build(graph, &[search_input(caller)]).unwrap();
+            let search = view.base_len();
+            assert!(edge_to(&view, search, 0).is_none(), "{caller}");
+            assert!(edge_to(&view, search, 1).is_none(), "{caller}");
+        }
     }
 
     #[test]

@@ -4,8 +4,8 @@
 //!   them too, and an agent running the documented `ecp impact --target X`
 //!   saw 6 of 39 callers on a real repo when tests were dropped silently.
 //! - `--exclude-tests` drops them and reports `hidden_test_callers: N`.
-//! - A test fake sharing a production method's name no longer hides the
-//!   production callers (resolver test-double tie-break).
+//! - A test fake sharing a production method's name keeps untyped calls to
+//!   it unresolved, and the payload says the caller set is incomplete.
 
 mod common;
 
@@ -180,18 +180,22 @@ fn test_impact_legacy_include_tests_flag_before_positional_still_parses() {
 }
 
 #[test]
-fn test_impact_production_caller_resolves_past_test_double() {
-    // `service.scan_range(1)` has an untyped receiver, so the call resolves
-    // by bare name. The fake in tests/ used to make that AmbiguousGlobal.
+fn test_impact_test_double_keeps_untyped_call_unresolved_and_flagged() {
+    // `service.scan_range(1)` has an untyped receiver, so only the bare name
+    // reaches the resolver, and a fake in tests/ makes it ambiguous. The edge
+    // stays out (a production-preferring guess was measured wrong on driver
+    // `conn.execute` calls); the payload must say the set is incomplete.
     let (repo, home) = fixture();
     let json = json_of(&impact(
         repo.path(),
         home.path(),
         &["scan_range", "--file", "app/service.py"],
     ));
-    assert_eq!(
-        callers(&json),
-        vec![("search".to_string(), false)],
+    assert!(callers(&json).is_empty(), "{json}");
+    assert!(
+        json["result"]
+            .as_str()
+            .is_some_and(|r| r.contains("incomplete")),
         "{json}"
     );
 }

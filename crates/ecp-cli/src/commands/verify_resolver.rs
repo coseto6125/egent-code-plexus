@@ -202,7 +202,7 @@ fn diff(
         match t {
             "SameFile" => 0,
             "ImportScoped" => 1,
-            "Global" | "GlobalNonTest" => 2,
+            "Global" => 2,
             "AmbiguousGlobal" => 3,
             _ => 4,
         }
@@ -246,7 +246,7 @@ fn diff(
                             counts.tp += 1;
                             entry.tp += 1;
                             // tier_demoted: oracle says resolved, ecp fell back to Global
-                            if matches!(g.tier.as_str(), "Global" | "GlobalNonTest") {
+                            if g.tier == "Global" {
                                 counts.tier_demoted += 1;
                                 entry.tier_demoted += 1;
                                 push_offender(

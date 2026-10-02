@@ -82,11 +82,6 @@ pub struct SymbolTable {
     /// barrier check is O(1) per candidate. Parallel-indexed with `node_kinds`.
     node_file_meta: Vec<FileMeta>,
 
-    /// File metadata per registered file path. The resolver reads the
-    /// caller's meta here instead of re-classifying its path on every
-    /// Tier-3 probe.
-    file_meta: FxHashMap<String, FileMeta>,
-
     /// Basename-stem → file paths sharing that stem. Populated once after
     /// Pass 1 via [`SymbolTable::build_stem_index`]; the resolver's Tier-4
     /// module-file fallback reads it via [`SymbolTable::files_by_stem`].
@@ -181,16 +176,8 @@ impl SymbolTable {
         // Reverse map for dump-side lookup
         self.id_to_file.insert(node_id, file_path.to_string());
 
-        let meta = match self.file_meta.get(file_path) {
-            Some(&meta) => meta,
-            None => {
-                let meta = FileMeta::from_path(file_path);
-                self.file_meta.insert(file_path.to_string(), meta);
-                meta
-            }
-        };
         self.node_kinds.push(kind);
-        self.node_file_meta.push(meta);
+        self.node_file_meta.push(FileMeta::from_path(file_path));
     }
 
     /// Hot-path variant of `register_node` for callers that already
@@ -308,21 +295,6 @@ impl SymbolTable {
                 .filter(|&&id| predicate(self.node_kinds[id as usize]))
                 .map(|&id| (id, self.node_file_meta[id as usize])),
         )
-    }
-
-    /// Record a file's meta once, including files with no symbol node (an
-    /// import-only barrel still makes calls the resolver classifies).
-    pub fn register_file(&mut self, file_path: &str, file_meta: FileMeta) {
-        self.file_meta.insert(file_path.to_string(), file_meta);
-    }
-
-    /// The caller-side [`FileMeta`] for `file_path`, cached at registration.
-    /// A file with no registered node falls back to classifying the path.
-    pub fn file_meta(&self, file_path: &str) -> FileMeta {
-        self.file_meta
-            .get(file_path)
-            .copied()
-            .unwrap_or_else(|| FileMeta::from_path(file_path))
     }
 
     /// Total count of same-named candidates (before kind/locality filters).

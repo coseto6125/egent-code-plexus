@@ -858,13 +858,12 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
             raw_path
         };
         let path_ref = string_pool.add(&path_str);
-        // Hoisted once per file: `register_node` would otherwise classify
-        // the path per node (~25x redundant on the .sample_repo
-        // distribution). The persisted category feeds the resolver's test
-        // tie-break, so the graph and the resolver share one verdict.
+        // Hoisted once per file. `register_node` would otherwise call
+        // `FileMeta::from_path` per node (~25x redundant on the
+        // .sample_repo distribution), each allocating one `String` for the
+        // `\\` -> `/` normalisation. `path_str` is already forward-slash.
         let category = determine_category(&path_str);
-        let file_meta = crate::resolution::index::FileMeta::with_category(&path_str, category);
-        symbol_table.register_file(&path_str, file_meta);
+        let file_meta = crate::resolution::index::FileMeta::from_normalized_path(&path_str);
 
         files.push(File {
             path: path_ref,
@@ -2479,7 +2478,6 @@ mod tests {
                 | DecisionTier::QualifierScoped
                 | DecisionTier::HeritageScoped
                 | DecisionTier::Global
-                | DecisionTier::GlobalNonTest
                 | DecisionTier::AmbiguousGlobal
                 | DecisionTier::ModuleTree => {
                     panic!(

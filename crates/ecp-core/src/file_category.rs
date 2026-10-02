@@ -3,7 +3,6 @@
 //! and the session overlay. One classifier, so a path that `impact` hides as
 //! a test is also the path the resolver treats as a test candidate.
 
-use crate::analyzer::types::RawImport;
 use crate::graph::FileCategory;
 use aho_corasick::{AhoCorasick, MatchKind};
 use std::sync::OnceLock;
@@ -347,9 +346,6 @@ pub struct FileMeta {
     /// (`is_some`, `get`, `new`) with stdlib methods, producing one false edge
     /// per call site that survives the kind+unique filter.
     pub is_vendor: bool,
-    /// [`determine_category`] is `Test`. Production code cannot call a test
-    /// double, so a non-test caller prefers the one non-test candidate.
-    pub is_test: bool,
     pub language: Language,
 }
 
@@ -363,17 +359,12 @@ impl FileMeta {
         }
     }
 
-    /// Fast path for callers that have already normalised separators.
+    /// Fast path for callers that have already normalised separators. Skips
+    /// the `replace('\\','/')` allocation (one per call) — meaningful in Pass
+    /// 1, which calls it once per file.
     pub fn from_normalized_path(path: &str) -> Self {
-        Self::with_category(path, determine_category(path))
-    }
-
-    /// For callers that already hold the file's category: Pass 1 computes it
-    /// once for `File.category`, and the overlay reads it back from the graph.
-    pub fn with_category(path: &str, category: FileCategory) -> Self {
         Self {
             is_vendor: path.contains("/vendor/") || path.starts_with("vendor/"),
-            is_test: category == FileCategory::Test,
             language: Language::from_normalized_path(path),
         }
     }
@@ -392,148 +383,34 @@ pub enum GlobalPick {
     NoMatch,
     /// Exactly one candidate passed the barriers.
     Unique(u32),
-    /// Several candidates passed, only one of them outside test files, and
-    /// the caller is not a test file. That one is the target, once the
-    /// caller supplies binding evidence ([`imports_reach`]).
-    NonTest(u32),
     /// Several candidates remain, so the edge is suppressed.
     Ambiguous,
-}
-
-impl GlobalPick {
-    pub fn target(self) -> Option<u32> {
-        match self {
-            Self::Unique(id) | Self::NonTest(id) => Some(id),
-            Self::NoMatch | Self::Ambiguous => None,
-        }
-    }
 }
 
 /// The one Tier-3 candidate filter. The index-time resolver and the session
 /// overlay both call it, so a barrier added here applies to both and the two
 /// cannot disagree on a dirty file. `candidates` arrive kind-filtered.
 ///
-/// The test tie-break runs only when the hard barriers leave two or more
-/// candidates, and never changes a unique result. It is a preference, not a
-/// barrier: a production caller whose only candidate sits in a test path
-/// still resolves to it. On its own it is not evidence enough to emit an
-/// edge (a fake of `run` makes `asyncio.run` look like the production
-/// `run`), so callers gate `NonTest` on [`imports_reach`].
-///
-/// Returns as soon as the answer can only be `Ambiguous`: common names
-/// carry thousands of candidates, and the rest of the list cannot change it.
+/// A test double sharing a production name keeps the name ambiguous. A
+/// tie-break that preferred the production candidate was measured and
+/// dropped: the resolver sees only the bare name, so `conn.execute` on a
+/// driver connection resolved to a project `execute` (23 of 60 sampled
+/// edges wrong on one repo). Receiver typing is the fix for those calls.
 pub fn pick_global(
     caller: FileMeta,
     candidates: impl IntoIterator<Item = (u32, FileMeta)>,
 ) -> GlobalPick {
-    let (mut count, mut first) = (0u32, 0u32);
-    let (mut non_test, mut first_non_test) = (0u32, 0u32);
+    let mut found = None;
     for (id, meta) in candidates {
         if !caller.admits(meta) {
             continue;
         }
-        if count == 0 {
-            first = id;
-        }
-        count += 1;
-        if !meta.is_test {
-            if non_test == 0 {
-                first_non_test = id;
-            }
-            non_test += 1;
-        }
-        if count >= 2 && (caller.is_test || non_test >= 2) {
+        if found.is_some() {
             return GlobalPick::Ambiguous;
         }
+        found = Some(id);
     }
-    match count {
-        0 => GlobalPick::NoMatch,
-        1 => GlobalPick::Unique(first),
-        _ if non_test == 1 => GlobalPick::NonTest(first_non_test),
-        _ => GlobalPick::Ambiguous,
-    }
-}
-
-/// Binding evidence for the test-double tie-break: one of the caller's
-/// imports names the module that defines the candidate.
-///
-/// Import specifiers and paths are compared as lowercase segment lists, so
-/// one rule covers Python `a.b.service`, TS `../lib/store`, Java
-/// `com.x.Store`, PHP `App\\Models\\User`, Rust `crate::store`, C
-/// `"store.h"`, Go `example.com/app/pkg/store` (a package is a directory),
-/// C# `App.Services` and Swift `import Store` (both directories).
-pub fn imports_reach(imports: &[RawImport], candidate_path: &str) -> bool {
-    let (dir, module) = module_segments(candidate_path);
-    imports.iter().any(|imp| {
-        let source = if imp.source.is_empty() {
-            imp.imported_name.as_str()
-        } else {
-            imp.source.as_str()
-        };
-        let spec = specifier_segments(source);
-        if spec.is_empty() {
-            return false;
-        }
-        // `from pkg import module` names the module in the imported name.
-        let with_name = || {
-            let mut v = spec.clone();
-            v.extend(specifier_segments(&imp.imported_name));
-            v
-        };
-        ends_with(&module, &spec)
-            || (spec.len() >= 2 && ends_with(&module, &spec[..spec.len() - 1]))
-            || (!dir.is_empty() && (ends_with(&spec, &dir) || ends_with(&dir, &spec)))
-            || ends_with(&module, &with_name())
-    })
-}
-
-const MODULE_EXTS: &[&str] = &[
-    "h", "hh", "hpp", "hxx", "c", "cc", "cpp", "cxx", "py", "pyi", "ts", "tsx", "js", "jsx", "mjs",
-    "cjs", "rb", "php", "go", "rs", "dart", "swift", "kt", "java", "cs",
-];
-
-/// `(directory segments, module segments)` of a repo-relative path, with the
-/// extension and a package-entry basename (`index`, `__init__`, `mod`)
-/// removed from the module.
-fn module_segments(path: &str) -> (Vec<String>, Vec<String>) {
-    let lower = path.replace('\\', "/").to_ascii_lowercase();
-    let mut segs: Vec<String> = lower
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .collect();
-    let file = segs.pop().unwrap_or_default();
-    let stem = file
-        .rsplit_once('.')
-        .map_or(file.as_str(), |(stem, _)| stem);
-    let dir = segs.clone();
-    if !matches!(stem, "index" | "__init__" | "mod") {
-        segs.extend(stem.split('.').filter(|s| !s.is_empty()).map(String::from));
-    }
-    (dir, segs)
-}
-
-fn specifier_segments(spec: &str) -> Vec<String> {
-    let mut s = spec
-        .trim_matches(|c| matches!(c, '"' | '\'' | '<' | '>'))
-        .to_ascii_lowercase();
-    if let Some(rest) = s.strip_prefix("package:") {
-        // Dart `package:<name>/path` maps to the package's `lib/`.
-        s = rest.split_once('/').map_or("", |(_, p)| p).to_string();
-    }
-    if let Some((stem, ext)) = s.rsplit_once('.') {
-        if MODULE_EXTS.contains(&ext) && (s.contains('/') || !stem.contains('.')) {
-            s.truncate(stem.len());
-        }
-    }
-    s.split(|c| matches!(c, '/' | '.' | ':' | '\\'))
-        .filter(|seg| !matches!(*seg, "" | "crate" | "self" | "super"))
-        .map(String::from)
-        .collect()
-}
-
-fn ends_with(hay: &[String], tail: &[String]) -> bool {
-    !tail.is_empty() && hay.len() >= tail.len() && hay[hay.len() - tail.len()..] == *tail
+    found.map_or(GlobalPick::NoMatch, GlobalPick::Unique)
 }
 
 /// Test files named by their basename.
@@ -785,44 +662,19 @@ mod determine_category_tests {
     }
 
     #[test]
-    fn test_pick_global_production_caller_with_test_double_picks_production() {
-        let caller = meta("src/app/search.py");
-        let pick = pick_global(
-            caller,
-            [
-                (1, meta("src/client/service.py")),
-                (2, meta("tests/fakes.py")),
-            ],
-        );
-        assert_eq!(pick, GlobalPick::NonTest(1));
-    }
-
-    #[test]
-    fn test_pick_global_test_caller_with_test_double_stays_ambiguous() {
-        // A test may call either the real definition or its fake.
-        let caller = meta("tests/test_search.py");
-        let pick = pick_global(
-            caller,
-            [
-                (1, meta("src/client/service.py")),
-                (2, meta("tests/fakes.py")),
-            ],
-        );
-        assert_eq!(pick, GlobalPick::Ambiguous);
-    }
-
-    #[test]
-    fn test_pick_global_two_production_candidates_stay_ambiguous() {
-        let caller = meta("src/app/search.py");
-        let pick = pick_global(
-            caller,
-            [
-                (1, meta("src/a.py")),
-                (2, meta("src/b.py")),
-                (3, meta("tests/fakes.py")),
-            ],
-        );
-        assert_eq!(pick, GlobalPick::Ambiguous);
+    fn test_pick_global_test_double_keeps_name_ambiguous() {
+        // Measured and dropped: preferring the production candidate wired
+        // driver `conn.execute` calls to a project `execute`.
+        for caller in ["src/app/search.py", "tests/test_search.py"] {
+            let pick = pick_global(
+                meta(caller),
+                [
+                    (1, meta("src/client/service.py")),
+                    (2, meta("tests/fakes.py")),
+                ],
+            );
+            assert_eq!(pick, GlobalPick::Ambiguous, "{caller}");
+        }
     }
 
     #[test]
@@ -865,98 +717,5 @@ mod determine_category_tests {
             pick_global(meta("src/main.rs"), std::iter::empty()),
             GlobalPick::NoMatch
         );
-    }
-
-    use super::imports_reach;
-    use crate::analyzer::types::RawImport;
-
-    fn imp(source: &str, name: &str) -> RawImport {
-        RawImport {
-            source: source.to_string(),
-            imported_name: name.to_string(),
-            alias: None,
-            binding_kind: None,
-        }
-    }
-
-    #[test]
-    fn test_imports_reach_each_language_import_shape_reaches_its_module() {
-        // Specifier shapes as the 14 mainstream parsers emit them.
-        let cases: &[(&str, RawImport, &str)] = &[
-            (
-                "py",
-                imp("enoract.shared.client.google.service", "FlightService"),
-                "enoract/shared/client/google/service.py",
-            ),
-            ("py-module", imp("", "os.path"), "os/path.py"),
-            ("ts", imp("../lib/store", "scan"), "lib/store.ts"),
-            ("js", imp("./lib", "scan"), "src/lib/index.js"),
-            (
-                "java",
-                imp("com.app.store.Store", "Store"),
-                "src/main/java/com/app/store/Store.java",
-            ),
-            (
-                "kt",
-                imp("com.app.store.Store", "com.app.store.Store"),
-                "app/src/main/kotlin/com/app/store/Store.kt",
-            ),
-            (
-                "cs",
-                imp("App.Services", "App.Services"),
-                "src/App/Services/FlightService.cs",
-            ),
-            (
-                "go",
-                imp("example.com/app/pkg/store", "store"),
-                "pkg/store/scan.go",
-            ),
-            ("rs", imp("crate::store", "scan"), "src/store/mod.rs"),
-            (
-                "php",
-                imp("App\\Models\\User", "User"),
-                "app/Models/User.php",
-            ),
-            ("rb", imp("../lib/store", "../lib/store"), "lib/store.rb"),
-            (
-                "swift",
-                imp("Store", "Store"),
-                "Sources/Store/Scanner.swift",
-            ),
-            ("c", imp("\"store.h\"", "*"), "src/store.c"),
-            (
-                "cpp",
-                imp("net/store.hpp", "net/store.hpp"),
-                "src/net/store.cpp",
-            ),
-            (
-                "dart",
-                imp("package:app/store.dart", "package:app/store.dart"),
-                "lib/store.dart",
-            ),
-        ];
-        for (lang, import, path) in cases {
-            assert!(
-                imports_reach(std::slice::from_ref(import), path),
-                "{lang}: {:?} should reach {path}",
-                import.source
-            );
-        }
-    }
-
-    #[test]
-    fn test_imports_reach_unrelated_imports_do_not_reach() {
-        // `asyncio.run` in a CLI must not reach a project `cloudflare.run`.
-        let imports = [
-            imp("asyncio", "asyncio"),
-            imp("typing", "Any"),
-            imp("<stdio.h>", "*"),
-        ];
-        assert!(!imports_reach(
-            &imports,
-            "enoract/shared/client/cloudflare.py"
-        ));
-        assert!(!imports_reach(&imports, "src/stdio_utils.c"));
-        assert!(!imports_reach(&[], "src/store.py"));
     }
 }
