@@ -1851,8 +1851,10 @@ mod tests {
     /// order as the full scan that clearing `name_index` forces.
     #[test]
     fn test_base_candidates_exact_with_index_matches_full_scan() {
+        /// (pattern, kinds, file, exclude tests)
+        type Case<'a> = (&'a str, Option<&'a [String]>, Option<&'a str>, bool);
         let kinds = vec!["method".to_string(), "function".to_string()];
-        let cases: [(&str, Option<&[String]>, Option<&str>, bool); 10] = [
+        let cases: [Case; 10] = [
             ("shared", None, None, false),
             ("shared", Some(kinds.as_slice()), None, false),
             ("shared", None, Some("s3.ts"), false),
