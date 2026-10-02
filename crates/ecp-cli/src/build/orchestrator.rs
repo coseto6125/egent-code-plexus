@@ -449,10 +449,7 @@ pub(crate) fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io:
     // gets the same answer from the same code: same flags, same artifact
     // filter. Two definitions of "clean" that disagree is what let this
     // through.
-    let out = safe_exec::git()
-        .args(["status", "--porcelain", "-z", "--untracked-files=all"])
-        .current_dir(worktree)
-        .output()?;
+    let out = crate::git::status::porcelain_all(worktree)?;
     if !out.status.success() {
         return Ok(false);
     }

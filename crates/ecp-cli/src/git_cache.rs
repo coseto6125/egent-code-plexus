@@ -265,7 +265,7 @@ fn git_env_overrides_present() -> bool {
 /// The worktree's own gitdir and its common dir, cached per canonical cwd
 /// for the process. `head_sha` and `common_dir` both need the pair, and a
 /// fresh walk for each would canonicalize and stat the same entries twice.
-fn git_dirs(cwd: &Path) -> Option<(PathBuf, PathBuf)> {
+pub(crate) fn git_dirs(cwd: &Path) -> Option<(PathBuf, PathBuf)> {
     if git_env_overrides_present() {
         return None;
     }

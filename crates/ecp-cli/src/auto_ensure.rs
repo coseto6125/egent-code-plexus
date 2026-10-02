@@ -417,24 +417,22 @@ fn git_fingerprint_shortcut(
         return None;
     }
 
-    let porcelain = crate::git::safe_exec::git()
-        // `-z` (NUL-terminated) avoids git's C-quoting of paths with spaces or
-        // non-ASCII bytes, which the human-readable format would otherwise wrap
-        // in double quotes and escape — producing a path that doesn't exist on
-        // disk and silently dropping that file from the incremental refresh.
-        //
-        // `--untracked-files=all`: untracked files must enter the dirty set or
-        // a brand-new file (the most common agent edit: Write, then query) is
-        // invisible to the L1 overlay and `found:false` reads as a definitive
-        // "does not exist" (FU-2026-06-10-8b98d5e991a6). `all` rather than
-        // `normal` because `normal` collapses a new directory to one `dir/`
-        // entry, hiding the files inside it from `reanalyze_files`. Gitignored
-        // files stay excluded — porcelain honours .gitignore, so scratch dirs
-        // cost nothing.
-        .args(["status", "--porcelain", "-z", "--untracked-files=all"])
-        .current_dir(worktree_root)
-        .output()
-        .ok()?;
+    // `porcelain_all` is `git status --porcelain -z --untracked-files=all`.
+    //
+    // `-z` (NUL-terminated) avoids git's C-quoting of paths with spaces or
+    // non-ASCII bytes, which the human-readable format would otherwise wrap
+    // in double quotes and escape — producing a path that doesn't exist on
+    // disk and silently dropping that file from the incremental refresh.
+    //
+    // `--untracked-files=all`: untracked files must enter the dirty set or
+    // a brand-new file (the most common agent edit: Write, then query) is
+    // invisible to the L1 overlay and `found:false` reads as a definitive
+    // "does not exist" (FU-2026-06-10-8b98d5e991a6). `all` rather than
+    // `normal` because `normal` collapses a new directory to one `dir/`
+    // entry, hiding the files inside it from `reanalyze_files`. Gitignored
+    // files stay excluded — porcelain honours .gitignore, so scratch dirs
+    // cost nothing.
+    let porcelain = crate::git::status::porcelain_all(worktree_root).ok()?;
     if !porcelain.status.success() {
         return None;
     }
