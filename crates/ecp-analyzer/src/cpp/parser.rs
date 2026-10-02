@@ -9,7 +9,6 @@ use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode};
-use ecp_core::file_category::is_test_path;
 
 /// Blind-spot kind/hint pairs. P7 covers C++ dispatch sites that
 /// `indirect_dispatch.rs` doesn't already flag as CallMeta (virtual /
@@ -292,7 +291,9 @@ impl LanguageProvider for CppProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
+        let file_category =
+            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
+        let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
 
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_blind_dlsym = self.query.capture_index_for_name("blind.dlsym");
@@ -666,7 +667,6 @@ impl LanguageProvider for CppProvider {
         // fallback restores full recall.
         emit_macro_fallback(source, &mut nodes);
 
-        let file_category = ecp_core::file_category::determine_category(&path.to_string_lossy());
         let raw_function_metas =
             crate::function_meta::cpp::extract(tree.root_node(), source, &nodes, file_category);
 

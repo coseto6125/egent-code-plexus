@@ -15,7 +15,6 @@ use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
     BlindSpot, FrameworkId, LocalGraph, RawFrameworkRef, RawImport, RawNode, RawTxScope,
 };
-use ecp_core::file_category::is_test_path;
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -341,7 +340,9 @@ impl LanguageProvider for GoProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
+        let file_category =
+            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
+        let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
 
         detect_iota_const_blocks(tree.root_node(), path, is_test_file, &mut blind_spots);
 
@@ -997,7 +998,6 @@ impl LanguageProvider for GoProvider {
             }
         }
 
-        let file_category = ecp_core::file_category::determine_category(&path.to_string_lossy());
         let raw_function_metas =
             crate::function_meta::go::extract(tree.root_node(), source, &nodes, file_category);
 

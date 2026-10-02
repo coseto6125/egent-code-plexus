@@ -10,7 +10,6 @@ use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
     BlindSpot, FrameworkId, LocalGraph, RawImport, RawNode, RawRoute, RawTxScope,
 };
-use ecp_core::file_category::is_test_path;
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
 use std::path::Path;
@@ -394,7 +393,9 @@ impl LanguageProvider for RubyProvider {
         let mut imports = Vec::new();
         let mut routes: Vec<RawRoute> = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
+        let file_category =
+            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
+        let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
         // Mixin module additions, applied after primary node emission. Each
         // entry is (module_name, call_line) — we attach to the smallest
         // enclosing class node by span containment. Document-order traversal
@@ -978,7 +979,6 @@ impl LanguageProvider for RubyProvider {
             }
         }
 
-        let file_category = ecp_core::file_category::determine_category(&path.to_string_lossy());
         let raw_function_metas =
             crate::function_meta::ruby::extract(tree.root_node(), source, &nodes, file_category);
 

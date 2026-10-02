@@ -12,7 +12,6 @@ use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
     BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute,
 };
-use ecp_core::file_category::is_test_path;
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -224,7 +223,9 @@ impl LanguageProvider for JavaScriptProvider {
         let mut pending_express_handlers: Vec<(String, (u32, u32, u32, u32))> = Vec::new();
         let mut pending_hapi_handlers: Vec<(String, (u32, u32, u32, u32))> = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
+        let file_category =
+            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
+        let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
 
         while let Some(m) = matches.next() {
             let mut name_node = None;
@@ -698,7 +699,6 @@ impl LanguageProvider for JavaScriptProvider {
 
         let param_names = collect_js_param_names(tree.root_node(), source);
         let call_metas = detect_js_ts_indirect(tree.root_node(), source, &nodes, &param_names);
-        let file_category = ecp_core::file_category::determine_category(&path.to_string_lossy());
         let raw_function_metas = crate::function_meta::javascript::extract(
             tree.root_node(),
             source,

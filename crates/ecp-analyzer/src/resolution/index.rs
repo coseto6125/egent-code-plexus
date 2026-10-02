@@ -227,7 +227,6 @@ impl SymbolTable {
             let mut m = FxHashMap::default();
             m.insert(node_name.to_string(), vec![node_id]);
             self.file_scoped.insert(file_path.to_string(), m);
-            self.file_meta.insert(file_path.to_string(), file_meta);
         }
 
         if let Some(list) = self.global_scoped.get_mut(node_name) {
@@ -309,6 +308,12 @@ impl SymbolTable {
                 .filter(|&&id| predicate(self.node_kinds[id as usize]))
                 .map(|&id| (id, self.node_file_meta[id as usize])),
         )
+    }
+
+    /// Record a file's meta once, including files with no symbol node (an
+    /// import-only barrel still makes calls the resolver classifies).
+    pub fn register_file(&mut self, file_path: &str, file_meta: FileMeta) {
+        self.file_meta.insert(file_path.to_string(), file_meta);
     }
 
     /// The caller-side [`FileMeta`] for `file_path`, cached at registration.

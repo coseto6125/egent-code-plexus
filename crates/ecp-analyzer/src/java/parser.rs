@@ -8,7 +8,6 @@ use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode};
-use ecp_core::file_category::is_test_path;
 use ecp_core::graph::NodeKind;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::Path;
@@ -194,7 +193,9 @@ impl LanguageProvider for JavaProvider {
         // Buffer Spring refs and emit only if the file imports org.springframework.
         let mut pending_spring_refs: Vec<RawFrameworkRef> = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
+        let file_category =
+            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
+        let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
 
         let idx = &self.indices;
 
@@ -519,8 +520,6 @@ impl LanguageProvider for JavaProvider {
             extract_java_calls_and_path_literals(tree.root_node(), source, &mut nodes);
         crate::calls::extract_field_reads(tree.root_node(), source, &mut nodes, &["field_access"]);
 
-        let file_category =
-            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
         let raw_function_metas =
             crate::function_meta::java::extract(tree.root_node(), source, &nodes, file_category);
         let tx_scopes =

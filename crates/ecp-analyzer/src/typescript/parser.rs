@@ -13,7 +13,6 @@ use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
     BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute,
 };
-use ecp_core::file_category::is_test_path;
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -356,7 +355,9 @@ impl LanguageProvider for TypeScriptProvider {
         type NestJsDecoratorRoute = (String, String, (u32, u32, u32, u32));
         let mut pending_nestjs_decorator_routes: Vec<NestJsDecoratorRoute> = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
+        let file_category =
+            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
+        let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
 
         let idx = &self.indices;
 
@@ -807,7 +808,6 @@ impl LanguageProvider for TypeScriptProvider {
 
         let param_names = collect_js_param_names(tree.root_node(), source);
         let call_metas = detect_js_ts_indirect(tree.root_node(), source, &nodes, &param_names);
-        let file_category = ecp_core::file_category::determine_category(&path.to_string_lossy());
         let raw_function_metas = crate::function_meta::typescript::extract(
             tree.root_node(),
             source,

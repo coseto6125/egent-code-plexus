@@ -864,6 +864,7 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
         // tie-break, so the graph and the resolver share one verdict.
         let category = determine_category(&path_str);
         let file_meta = crate::resolution::index::FileMeta::with_category(&path_str, category);
+        symbol_table.register_file(&path_str, file_meta);
 
         files.push(File {
             path: path_ref,
