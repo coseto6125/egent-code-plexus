@@ -587,12 +587,20 @@ fn search_nodes<'a>(
     }
 
     // No overlay or corrupt overlay bytes — fall through to base graph only.
-    graph
-        .nodes
-        .iter()
-        .enumerate()
-        .filter(|(idx, node)| name_owner_matches(node, *idx))
-        .collect()
+    // The name index yields indices ascending, like the scan.
+    match graph.nodes_named_sorted(bare_name) {
+        Some(hits) => hits
+            .into_iter()
+            .map(|i| (i as usize, &graph.nodes[i as usize]))
+            .filter(|(idx, node)| name_owner_matches(node, *idx))
+            .collect(),
+        None => graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(idx, node)| name_owner_matches(node, *idx))
+            .collect(),
+    }
 }
 
 pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(), EcpError> {
@@ -857,5 +865,84 @@ mod tests {
             indices(&search_nodes(graph, Some(&corrupt[..]), "validate", None)),
             [0, 1]
         );
+    }
+
+    /// "dup" repeats across kinds, owners and files; "shared" has 1200 nodes
+    /// so the index's hash-only unstable sort leaves them out of node order.
+    /// Also a tombstone (empty name) and a unicode name.
+    fn same_name_graph() -> ZeroCopyGraph {
+        let mut fx = GraphFixture::new();
+        for i in 0..1200 {
+            let path = format!("src/s{i}.ts");
+            match i % 3 {
+                0 => fx.func(&path, "shared"),
+                1 => fx.method(&path, "Owner", "shared"),
+                _ => fx.node(ecp_core::graph::NodeKind::Class, &path, "shared"),
+            };
+            if i % 100 == 0 {
+                fx.func(&path, "");
+                fx.func(&path, "naïve_函数");
+                fx.func(&path, "dup");
+                fx.method(&path, "Owner", "dup");
+                fx.method(&path, "Other", "dup");
+            }
+        }
+        fx.build()
+    }
+
+    /// Same hits, indices and order from the name index as from the full scan
+    /// that clearing `name_index` forces, for every overlay state.
+    #[test]
+    fn test_search_nodes_with_index_matches_full_scan() {
+        let fast = same_name_graph();
+        let mut slow = same_name_graph();
+        slow.name_index.clear();
+        assert!(!fast.name_index.is_empty());
+        let twin = fast.nodes[1].clone();
+        let overlay = rkyv::to_bytes::<rkyv::rancor::Error>(&Overlay::new(vec![twin])).unwrap();
+        let corrupt = [0xFFu8; 3];
+        let fast_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&fast).unwrap();
+        let slow_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&slow).unwrap();
+        let fast = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&fast_bytes).unwrap();
+        let slow = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&slow_bytes).unwrap();
+
+        let cases: [(&str, Option<&str>); 8] = [
+            ("shared", None),
+            ("shared", Some("Owner")),
+            ("shared", Some("Nobody")),
+            ("dup", None),
+            ("dup", Some("Other")),
+            ("naïve_函数", None),
+            ("absent", None),
+            ("", None),
+        ];
+        for ov in [None, Some(&overlay[..]), Some(&corrupt[..])] {
+            for (name, owner) in cases {
+                assert_eq!(
+                    indices(&search_nodes(fast, ov, name, owner)),
+                    indices(&search_nodes(slow, ov, name, owner)),
+                    "{name:?} owner={owner:?} overlay={}",
+                    ov.map_or(0, <[u8]>::len)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_search_nodes_shared_name_lists_every_node_ascending() {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&same_name_graph()).unwrap();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let hits = indices(&search_nodes(graph, None, "shared", None));
+        assert_eq!(hits.len(), 1200);
+        assert!(hits.windows(2).all(|w| w[0] < w[1]), "node order");
+    }
+
+    /// The tombstone has an empty name but still owns a file: only the scan
+    /// matches it, so an empty bare name must keep the scan.
+    #[test]
+    fn test_search_nodes_empty_bare_name_keeps_tombstone_matches() {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&same_name_graph()).unwrap();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        assert_eq!(search_nodes(graph, None, "", None).len(), 12);
     }
 }
