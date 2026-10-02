@@ -206,6 +206,9 @@ impl OverlayView {
             // name → (virtual idx, file meta) of callable symbols anywhere in
             // the overlay: participates in the Tier-3 candidate filter.
             let mut overlay_callables: FxHashMap<&str, Vec<(u32, FileMeta)>> = FxHashMap::default();
+            // Base-file meta, filled on first sight: a common callee name has
+            // hundreds of candidates spread over far fewer files.
+            let mut base_metas: FxHashMap<usize, FileMeta> = FxHashMap::default();
             let file_metas: Vec<FileMeta> = files
                 .iter()
                 .map(|f| FileMeta::from_path(&f.rel_path))
@@ -256,6 +259,7 @@ impl OverlayView {
                             file_ord,
                             file,
                             file_metas[file_ord],
+                            &mut base_metas,
                             &same_file_callables,
                             &overlay_callables,
                             &replaced,
@@ -379,6 +383,7 @@ fn resolve_callee(
     file_ord: usize,
     file: &OverlayFileInput,
     caller: FileMeta,
+    base_metas: &mut FxHashMap<usize, FileMeta>,
     same_file_callables: &FxHashMap<(usize, &str), Vec<u32>>,
     overlay_callables: &FxHashMap<&str, Vec<(u32, FileMeta)>>,
     replaced: &FxHashMap<u32, u32>,
@@ -444,15 +449,17 @@ fn resolve_callee(
     // redirected; overlay candidates are virtual indices.
     let base = base_candidates.iter().map(|&idx| {
         let file_idx = graph.nodes[idx as usize].file_idx.to_native() as usize;
-        let meta = graph
-            .files
-            .get(file_idx)
-            .map_or_else(FileMeta::default, |f| {
-                FileMeta::with_category(
-                    f.path.resolve(&graph.string_pool),
-                    FileCategory::from(&f.category),
-                )
-            });
+        let meta = *base_metas.entry(file_idx).or_insert_with(|| {
+            graph
+                .files
+                .get(file_idx)
+                .map_or_else(FileMeta::default, |f| {
+                    FileMeta::with_category(
+                        f.path.resolve(&graph.string_pool),
+                        FileCategory::from(&f.category),
+                    )
+                })
+        });
         (idx, meta)
     });
     let target = pick_global(caller, base.chain(overlay_candidates.iter().copied())).target()?;
