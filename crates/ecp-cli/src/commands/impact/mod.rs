@@ -87,14 +87,15 @@ pub struct ImpactArgs {
     #[arg(long, alias = "min_confidence")]
     pub min_confidence: Option<f32>,
 
-    /// Default ON: test-file callers are listed and tagged `test: true`, since
-    /// a rename breaks them too. `--exclude-tests` drops them and reports
-    /// how many were hidden in `hidden_test_callers`.
-    #[arg(long, aliases = ["include_tests", "includeTests"], default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    /// Test-file callers are listed by default, tagged `test: true`, since a
+    /// rename breaks them too. This flag is kept for old callers; on its own
+    /// it changes one thing: `--baseline` also treats changed test files as
+    /// changed symbols.
+    #[arg(long, aliases = ["include_tests", "includeTests"], default_value_t = false)]
     pub include_tests: bool,
 
     /// Drop test-file callers; the payload reports `hidden_test_callers: N`.
-    #[arg(long, aliases = ["exclude_tests", "excludeTests"], conflicts_with = "include_tests")]
+    #[arg(long, aliases = ["exclude_tests", "excludeTests"], conflicts_with_all = ["include_tests", "test_coverage"])]
     pub exclude_tests: bool,
 
     /// Comma-separated relation types to follow (calls, extends, ...).
@@ -171,6 +172,15 @@ pub struct ImpactArgs {
     pub max_results: Option<usize>,
 }
 
+impl ImpactArgs {
+    /// Whether the walk lists test-file nodes. `--test-coverage` needs test
+    /// callers to classify coverage, and clap rejects it beside
+    /// `--exclude-tests`.
+    pub(crate) fn walks_tests(&self) -> bool {
+        !self.exclude_tests || self.test_coverage
+    }
+}
+
 /// Split a comma-separated flag value into a normalized lowercase Vec.
 /// Empty / whitespace-only parts are dropped so `--kind ,function,` works.
 pub(crate) fn parse_csv_lower(s: Option<&str>) -> Option<Vec<String>> {
@@ -204,12 +214,7 @@ struct ImpactHints {
     ambiguity_caveat: Option<String>,
 }
 
-pub fn run(mut args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
-    // Library callers set `include_tests` directly; only the CLI has the
-    // second spelling, so fold it here once.
-    if args.exclude_tests {
-        args.include_tests = false;
-    }
+pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
     if args.batch {
         return run_batch(args, engine);
     }
@@ -224,9 +229,14 @@ pub fn run(mut args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
     }
     let (payload, hints) = build_payload_with_hints(&args, engine)?;
     if let Some(name) = &hints.empty_hint_name {
-        if hints.ambiguity_caveat.is_some() {
+        if hints.hidden_test_callers > 0 {
             eprintln!(
-                "→ \"{name}\" has 0 resolved callers, but other definitions share its name, so bare calls to it were left unresolved. grep the call sites before treating it as dead code"
+                "→ \"{name}\" has no non-test callers; its {} test callers are hidden by --exclude-tests",
+                hints.hidden_test_callers
+            );
+        } else if hints.ambiguity_caveat.is_some() {
+            eprintln!(
+                "→ \"{name}\" has 0 resolved callers, but other definitions share its name, so bare calls to it may have been left unresolved. grep the call sites before treating it as dead code"
             );
         } else {
             eprintln!(

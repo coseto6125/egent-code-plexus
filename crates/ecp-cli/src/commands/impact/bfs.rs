@@ -219,9 +219,13 @@ pub(crate) fn shortest_path<'g>(
 
     let mut reached = None;
     while let Some((curr_idx, curr_depth)) = queue.pop_front() {
-        // Seeds are the endpoints the user named; only hops are filtered,
-        // matching `run_bfs`, which never drops its depth-0 target.
-        if curr_depth > 0 && !node_traversable(graph, view, curr_idx, opts.include_tests) {
+        // Both endpoints are nodes the user named, so neither is filtered;
+        // only the hops between them are. `path A B` and `path B A` then
+        // agree, and `run_bfs` likewise never drops its depth-0 target.
+        if curr_depth > 0
+            && !goals.contains(&curr_idx)
+            && !node_traversable(graph, view, curr_idx, opts.include_tests)
+        {
             continue;
         }
         if goals.contains(&curr_idx) {

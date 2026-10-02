@@ -62,7 +62,7 @@ fn base_args(name: &str) -> ImpactArgs {
         high_trust_only: false,
         min_confidence: None,
         include_tests: false,
-        exclude_tests: false,
+        exclude_tests: true,
         relation_types: None,
         repo: None,
         test_coverage: false,

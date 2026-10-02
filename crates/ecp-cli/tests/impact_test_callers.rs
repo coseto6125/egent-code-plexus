@@ -168,8 +168,8 @@ fn test_impact_exclude_tests_hides_and_counts_test_callers() {
 
 #[test]
 fn test_impact_legacy_include_tests_flag_before_positional_still_parses() {
-    // `--include-tests` takes an optional `=value`; a bare flag must not
-    // swallow the positional target that follows it.
+    // Old callers still pass `--include-tests`; it stays a bare flag, so it
+    // cannot swallow the positional target that follows it.
     let (repo, home) = fixture();
     let json = json_of(&impact(
         repo.path(),
@@ -275,4 +275,90 @@ fn test_impact_exclude_tests_keeps_a_test_file_target_and_does_not_count_it() {
         "the production callee is still reached: {json}"
     );
     assert!(json.get("hidden_test_callers").is_none(), "{json}");
+}
+
+#[test]
+fn test_impact_test_coverage_with_exclude_tests_is_rejected() {
+    // Coverage needs the test callers the other flag drops; accepting both
+    // used to drop the exclusion silently.
+    let (repo, home) = fixture();
+    let out = Command::new(ecp_bin())
+        .args([
+            "impact",
+            "normalize",
+            "--exclude-tests",
+            "--test-coverage",
+            "--repo",
+            ".",
+        ])
+        .current_dir(repo.path())
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("cannot be used with"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn test_impact_baseline_test_only_change_reports_no_changed_symbols() {
+    // Listing test callers is about who breaks; a PR's own test edits are
+    // not changed production symbols, as before the default flipped.
+    let (repo, home) = fixture();
+    write(
+        repo.path(),
+        "tests/test_util.py",
+        "from app.util import normalize\n\n\ndef test_normalize():\n    assert normalize(2) == 2\n",
+    );
+    run_git(repo.path(), &["add", "-A"]);
+    run_git(
+        repo.path(),
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "edit test",
+        ],
+    );
+    let json = json_of(&impact(repo.path(), home.path(), &["--baseline", "HEAD~1"]));
+    assert_eq!(json["changed_symbols"], serde_json::json!([]), "{json}");
+
+    let json = json_of(&impact(
+        repo.path(),
+        home.path(),
+        &["--baseline", "HEAD~1", "--include-tests"],
+    ));
+    assert_eq!(
+        json["changed_symbols"][0]["name"], "test_normalize",
+        "{json}"
+    );
+}
+
+#[test]
+fn test_impact_exclude_tests_with_only_test_callers_does_not_suggest_dead_code() {
+    // Written before the fixture indexes, so the graph holds them.
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    write(
+        repo.path(),
+        "app/lonely.py",
+        "def lonely():\n    return 1\n",
+    );
+    write(
+        repo.path(),
+        "tests/test_lonely.py",
+        "from app.lonely import lonely\n\n\ndef test_lonely():\n    assert lonely() == 1\n",
+    );
+    setup_repo(repo.path(), home.path());
+    let out = impact(repo.path(), home.path(), &["lonely", "--exclude-tests"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("no non-test callers"), "{stderr}");
+    assert!(!stderr.contains("dead code"), "{stderr}");
 }

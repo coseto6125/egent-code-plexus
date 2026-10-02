@@ -94,8 +94,8 @@ pub fn run_for_symbol(
         depth: max_depth.unwrap_or(5) as usize,
         high_trust_only: false,
         min_confidence: None,
-        include_tests,
-        exclude_tests: false,
+        include_tests: false,
+        exclude_tests: !include_tests,
         relation_types: None,
         repo: Some(member_repo.to_string()),
         test_coverage: false,
@@ -180,8 +180,7 @@ pub(super) fn impact_by_name(
 
     let min_conf = resolve_min_conf(args);
     let rel_filter = parse_csv_lower(args.relation_types.as_deref());
-    // --test-coverage implies --include-tests so test callers are reachable.
-    let effective_include_tests = args.include_tests || args.test_coverage;
+    let effective_include_tests = args.walks_tests();
 
     let mut all_results: Vec<Value> = Vec::new();
     let mut all_heuristic_results: Vec<Value> = Vec::new();
@@ -301,16 +300,17 @@ pub(super) fn impact_by_name(
     }
 
     // FU-2026-05-29-011: with ≥2 same-named defs in the graph, the resolver
-    // suppressed every bare call to this name at index time
-    // (`DecisionTier::AmbiguousGlobal`), so the upstream caller set is a
-    // lower bound — the payload must say so instead of reading as complete.
+    // may have suppressed bare calls to this name at index time
+    // (`DecisionTier::AmbiguousGlobal`; the test-double tie-break resolves
+    // some), so the upstream caller set is a lower bound — the payload must
+    // say so instead of reading as complete.
     let ambiguity_caveat = (same_name_defs >= 2
         && matches!(args.direction, Direction::Up | Direction::Both))
     .then(|| {
         format!(
             "caller set may be incomplete: {same_name_defs} same-named definitions of \
-             '{bare_name}' exist, so bare calls (no import/qualifier context) were \
-             ambiguity-suppressed at index time. Cross-check call sites with grep \
+             '{bare_name}' exist, so bare calls (no import/qualifier context) may have \
+             been ambiguity-suppressed at index time. Cross-check call sites with grep \
              before trusting the blast radius."
         )
     });

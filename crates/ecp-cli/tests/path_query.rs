@@ -577,3 +577,16 @@ fn path_walks_the_same_graph_as_impact() {
     );
     assert_eq!(calls_only["found"].as_bool(), Some(true), "{calls_only}");
 }
+
+/// The endpoints are the user's question, so a test-file endpoint is kept
+/// even with tests excluded, and the two directions give one answer.
+#[test]
+fn path_test_file_endpoint_is_found_from_either_end() {
+    let tmp = tempfile::tempdir().unwrap();
+    indexed_polyglot_repo(tmp.path());
+
+    let down = run_path(tmp.path(), &["t_bridge", "prod_end", "--direction", "down"]);
+    let up = run_path(tmp.path(), &["prod_end", "t_bridge", "--direction", "up"]);
+    assert_eq!(down["found"].as_bool(), Some(true), "{down}");
+    assert_eq!(up["found"].as_bool(), Some(true), "{up}");
+}
