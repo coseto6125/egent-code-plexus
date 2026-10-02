@@ -54,7 +54,7 @@ Options:
           Repository selector
 
       --test-coverage
-          Coverage gap analysis: for each touched symbol, classify by test-caller presence (uncovered / partial / covered). Uses FunctionMeta.is_test flag from per-language extraction. Outputs uncovered symbols first to support LLM PR review ("X 改了沒測試"). Implies --include-tests during traversal so test callers are reachable from the walker
+          Coverage gap analysis: for each touched symbol, classify by test-caller presence (uncovered / partial / covered). Uses FunctionMeta.is_test flag from per-language extraction. Outputs uncovered symbols first to support LLM PR review ("X 改了沒測試"). Needs test callers in the walk, so it conflicts with --exclude-tests
 
       --no-heuristic
           Suppress heuristic callers (MirrorsField, EventTopicMirror) from the blast radius. Default: heuristic callers ARE shown, in a separate `heuristic_callers` bucket tagged `requires_verification`. Pass this flag for a pure-deterministic blast radius
@@ -77,7 +77,7 @@ Options:
           Auto-detect likely path-literal split-brain pairs across all PathLiteral nodes. Conservative: same extension, similar basename, nearby directories, and read-only vs write-only sink separation
 
       --batch
-          Read target symbol names from stdin (one per line; `#` and blank lines skipped). The graph is loaded once and N symbols are resolved sequentially — amortises mmap + process spawn across queries. Each result is prefixed by `=== target: <name> ===` so callers can split the stream unambiguously. Flags like --direction / --depth / --include-tests apply uniformly to all targets.
+          Read target symbol names from stdin (one per line; `#` and blank lines skipped). The graph is loaded once and N symbols are resolved sequentially — amortises mmap + process spawn across queries. Each result is prefixed by `=== target: <name> ===` so callers can split the stream unambiguously. Flags like --direction / --depth / --exclude-tests apply uniformly to all targets.
           
           Symbol-mode only: `--batch` combined with `--baseline` or `--literal` is rejected as an invalid argument. A positional name is also rejected — stdin is the single source of targets, so a positional would be silently ignored otherwise.
 
