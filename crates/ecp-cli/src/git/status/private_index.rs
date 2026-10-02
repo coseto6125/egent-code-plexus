@@ -105,7 +105,7 @@ fn eligible<'a>(worktree: &Path, env: &'a EnvOverrides) -> Option<Repo<'a>> {
     }
     let git = git_on_path(&var("PATH")?)?;
     let config_files = config_files(&gitdir, &common, &git, &var)?;
-    let attribute_files = attribute_files(&common, &var)?;
+    let attribute_files = attribute_files(&common, &git, &var)?;
     let config_id = config_identity(&config_files, &attribute_files)?;
     Some(Repo {
         gitdir,
@@ -158,14 +158,7 @@ fn config_files(
 ) -> Option<Vec<PathBuf>> {
     let system = match env("GIT_CONFIG_SYSTEM") {
         Some(path) => PathBuf::from(path),
-        // Distribution packages build git with `/etc` as its sysconfdir. Any
-        // other build may read a system file that only git itself can name.
-        None if git
-            .parent()
-            .is_some_and(|dir| dir == Path::new("/usr/bin") || dir == Path::new("/bin")) =>
-        {
-            PathBuf::from("/etc/gitconfig")
-        }
+        None if distribution_git(git) => PathBuf::from("/etc/gitconfig"),
         None => return None,
     };
     let mut files = vec![
@@ -188,12 +181,28 @@ fn config_files(
     files.iter().all(|file| file.is_absolute()).then_some(files)
 }
 
+/// Distribution packages build git with `/etc` as its sysconfdir. Any other
+/// build may read system files that only git itself can name.
+fn distribution_git(git: &Path) -> bool {
+    git.parent()
+        .is_some_and(|dir| dir == Path::new("/usr/bin") || dir == Path::new("/bin"))
+}
+
 /// The attribute files git reads outside the tree. git normalises content by
 /// attributes, so an entry the copy re-verified under one set stays trusted
 /// after the set changes; their content is part of the copy's name too. A
 /// custom `core.attributesFile` is not modelled (see `blocks_copy`). Relative
 /// paths decline as in [`config_files`].
-fn attribute_files(common: &Path, env: &dyn Fn(&str) -> Option<OsString>) -> Option<Vec<PathBuf>> {
+fn attribute_files(
+    common: &Path,
+    git: &Path,
+    env: &dyn Fn(&str) -> Option<OsString>,
+) -> Option<Vec<PathBuf>> {
+    // `GIT_CONFIG_SYSTEM` names the system config for any git, but nothing
+    // names its system attributes file the way it does.
+    if !distribution_git(git) {
+        return None;
+    }
     let mut files = vec![common.join("info").join("attributes")];
     let home = env("HOME").map(PathBuf::from);
     let xdg = env("XDG_CONFIG_HOME")
@@ -201,7 +210,6 @@ fn attribute_files(common: &Path, env: &dyn Fn(&str) -> Option<OsString>) -> Opt
         .map(PathBuf::from)
         .or_else(|| home.map(|h| h.join(".config")));
     files.extend(xdg.map(|dir| dir.join("git").join("attributes")));
-    // `config_files` already declined any git whose sysconfdir is not `/etc`.
     files.push(PathBuf::from("/etc/gitattributes"));
     files.iter().all(|file| file.is_absolute()).then_some(files)
 }
@@ -1421,7 +1429,7 @@ mod tests {
     fn test_attribute_files_names_info_global_and_system_files() {
         let env = env_from([("HOME", "/h"), ("XDG_CONFIG_HOME", "/x")]);
         assert_eq!(
-            attribute_files(Path::new("/r/.git"), &env).unwrap(),
+            attribute_files(Path::new("/r/.git"), Path::new("/usr/bin/git"), &env).unwrap(),
             [
                 "/r/.git/info/attributes",
                 "/x/git/attributes",
@@ -1431,21 +1439,41 @@ mod tests {
         );
         let env = env_from([("HOME", "/h")]);
         assert_eq!(
-            attribute_files(Path::new("/r/.git"), &env).unwrap()[1],
+            attribute_files(Path::new("/r/.git"), Path::new("/usr/bin/git"), &env).unwrap()[1],
             PathBuf::from("/h/.config/git/attributes")
+        );
+    }
+
+    #[test]
+    fn test_attribute_files_other_git_none() {
+        let env = env_from([("HOME", "/h"), ("GIT_CONFIG_SYSTEM", "/dev/null")]);
+        assert_eq!(
+            attribute_files(Path::new("/r/.git"), Path::new("/opt/git/bin/git"), &env),
+            None
         );
     }
 
     #[test]
     fn test_attribute_files_relative_path_none() {
         let git = Path::new("/r/.git");
-        assert_eq!(attribute_files(git, &env_from([("HOME", "h")])), None);
         assert_eq!(
-            attribute_files(git, &env_from([("HOME", ""), ("XDG_CONFIG_HOME", "")])),
+            attribute_files(git, Path::new("/usr/bin/git"), &env_from([("HOME", "h")])),
             None
         );
         assert_eq!(
-            attribute_files(git, &env_from([("XDG_CONFIG_HOME", "x"), ("HOME", "/h")])),
+            attribute_files(
+                git,
+                Path::new("/usr/bin/git"),
+                &env_from([("HOME", ""), ("XDG_CONFIG_HOME", "")])
+            ),
+            None
+        );
+        assert_eq!(
+            attribute_files(
+                git,
+                Path::new("/usr/bin/git"),
+                &env_from([("XDG_CONFIG_HOME", "x"), ("HOME", "/h")])
+            ),
             None
         );
     }
