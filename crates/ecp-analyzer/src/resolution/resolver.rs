@@ -1574,6 +1574,79 @@ mod tests {
     }
 
     #[test]
+    fn test_rust_module_path_base_super_from_non_mod_file_is_own_directory() {
+        let base = |f: &str, spec: &str| rust_module_path_base(&PathBuf::from(f), spec);
+        assert_eq!(base("a/b.rs", "super"), Some(PathBuf::from("a")));
+        assert_eq!(
+            base("src/commands/impact/symbol.rs", "super::x"),
+            Some(PathBuf::from("src/commands/impact/x"))
+        );
+        assert_eq!(base("src/x.rs", "super"), Some(PathBuf::from("src")));
+    }
+
+    #[test]
+    fn test_rust_module_path_base_super_from_mod_rs_is_parent_directory() {
+        let base = |f: &str, spec: &str| rust_module_path_base(&PathBuf::from(f), spec);
+        assert_eq!(base("a/b/mod.rs", "super"), Some(PathBuf::from("a")));
+        assert_eq!(base("a/b/mod.rs", "super::x"), Some(PathBuf::from("a/x")));
+    }
+
+    #[test]
+    fn test_rust_module_path_base_self_from_non_mod_file_is_file_stem_directory() {
+        let base = |f: &str, spec: &str| rust_module_path_base(&PathBuf::from(f), spec);
+        assert_eq!(base("a/b.rs", "self"), Some(PathBuf::from("a/b")));
+        assert_eq!(base("a/b.rs", "self::x"), Some(PathBuf::from("a/b/x")));
+    }
+
+    #[test]
+    fn test_rust_module_path_base_self_from_mod_rs_is_own_directory() {
+        let base = |f: &str, spec: &str| rust_module_path_base(&PathBuf::from(f), spec);
+        assert_eq!(base("a/b/mod.rs", "self"), Some(PathBuf::from("a/b")));
+        assert_eq!(base("a/b/mod.rs", "self::x"), Some(PathBuf::from("a/b/x")));
+    }
+
+    #[test]
+    fn test_rust_module_path_base_crate_roots_keep_parent_directory_semantics() {
+        let base = |f: &str, spec: &str| rust_module_path_base(&PathBuf::from(f), spec);
+        assert_eq!(
+            base("c/src/lib.rs", "self::x"),
+            Some(PathBuf::from("c/src/x"))
+        );
+        assert_eq!(
+            base("c/src/main.rs", "self::x"),
+            Some(PathBuf::from("c/src/x"))
+        );
+        assert_eq!(base("c/src/lib.rs", "super"), Some(PathBuf::from("c")));
+        assert_eq!(base("c/src/main.rs", "super"), Some(PathBuf::from("c")));
+        assert_eq!(
+            base("c/src/a/b.rs", "crate::m"),
+            Some(PathBuf::from("c/src/m"))
+        );
+    }
+
+    #[test]
+    fn test_rust_module_path_base_super_chain_walks_one_module_per_super() {
+        let base = |f: &str, spec: &str| rust_module_path_base(&PathBuf::from(f), spec);
+        // a::b::c  ->  super = a::b (dir a/b), super::super = a (dir a)
+        assert_eq!(base("a/b/c.rs", "super::super"), Some(PathBuf::from("a")));
+        assert_eq!(
+            base("a/b/c.rs", "super::super::x"),
+            Some(PathBuf::from("a/x"))
+        );
+        // a::b (mod.rs)  ->  super = a, super::super = parent of a
+        assert_eq!(
+            base("r/a/b/mod.rs", "super::super"),
+            Some(PathBuf::from("r"))
+        );
+    }
+
+    #[test]
+    fn test_rust_module_path_base_non_rust_file_with_super_is_untouched() {
+        assert!(rust_module_path_base(&PathBuf::from("a/b.py"), "super::x").is_none());
+        assert!(rust_module_path_base(&PathBuf::from("a/b.ts"), "self::x").is_none());
+    }
+
+    #[test]
     fn tier2_5_member_kind_filtered_inside_qualifier_file() {
         // PR #71 round-3 flipped Tier 2.5 to kind-aware lookup (the
         // previous "prefer recall" stance was producing `Calls -> Const`
