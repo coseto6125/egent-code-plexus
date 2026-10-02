@@ -534,14 +534,6 @@ fn search_nodes<'a>(
     bare_name: &str,
     owner_filter: Option<&str>,
 ) -> Vec<(usize, &'a ecp_core::graph::ArchivedNode)> {
-    // uid → base index, built once regardless of overlay presence.
-    let uid_to_base: rustc_hash::FxHashMap<u64, usize> = graph
-        .nodes
-        .iter()
-        .enumerate()
-        .map(|(i, n)| (n.uid.to_native(), i))
-        .collect();
-
     let name_owner_matches = |node: &ecp_core::graph::ArchivedNode, base_idx: usize| -> bool {
         if node.name.resolve(&graph.string_pool) != bare_name {
             return false;
@@ -564,6 +556,14 @@ fn search_nodes<'a>(
         if let Ok(archived_overlay) =
             rkyv::access::<ecp_core::session::ArchivedOverlay, rkyv::rancor::Error>(ov_bytes)
         {
+            // uid → base index. Only the overlay join reads it, so the
+            // clean-tree path skips a map over every node.
+            let uid_to_base: rustc_hash::FxHashMap<u64, usize> = graph
+                .nodes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.uid.to_native(), i))
+                .collect();
             return merge_archived(graph, archived_overlay)
                 .filter_map(|node| {
                     let base_idx = uid_to_base.get(&node.uid.to_native()).copied()?;
@@ -783,4 +783,79 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
         }
     }
     emit_with_caveat(&result, format, engine.caveat())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ecp_core::graph::ZeroCopyGraph;
+    use ecp_core::graph_fixture::GraphFixture;
+    use ecp_core::session::Overlay;
+
+    /// nodes: 0 Foo.validate (foo.py) · 1 Bar.validate (bar.py) · 2 helper (foo.py)
+    fn validate_graph() -> ZeroCopyGraph {
+        let mut fx = GraphFixture::new();
+        fx.method("src/foo.py", "Foo", "validate");
+        fx.method("src/bar.py", "Bar", "validate");
+        fx.func("src/foo.py", "helper");
+        fx.build()
+    }
+
+    fn indices(hits: &[(usize, &ecp_core::graph::ArchivedNode)]) -> Vec<usize> {
+        hits.iter().map(|(idx, _)| *idx).collect()
+    }
+
+    #[test]
+    fn test_search_nodes_without_overlay_returns_base_matches_in_node_order() {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&validate_graph()).unwrap();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        assert_eq!(
+            indices(&search_nodes(graph, None, "validate", None)),
+            [0, 1]
+        );
+        assert_eq!(
+            indices(&search_nodes(graph, None, "validate", Some("Bar"))),
+            [1]
+        );
+        assert!(search_nodes(graph, None, "missing", None).is_empty());
+    }
+
+    /// The overlay join yields overlay twins first, then the base nodes it
+    /// did not replace; an overlay-only uid has no base twin and is skipped.
+    #[test]
+    fn test_search_nodes_with_overlay_returns_overlay_twins_first() {
+        let g = validate_graph();
+        let mut twin = g.nodes[1].clone();
+        twin.span = (9, 0, 12, 1);
+        let mut brand_new = g.nodes[0].clone();
+        brand_new.uid ^= 0x5a5a;
+        let overlay =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&Overlay::new(vec![twin, brand_new])).unwrap();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        assert_eq!(
+            indices(&search_nodes(graph, Some(&overlay[..]), "validate", None)),
+            [1, 0]
+        );
+        assert_eq!(
+            indices(&search_nodes(
+                graph,
+                Some(&overlay[..]),
+                "validate",
+                Some("Foo")
+            )),
+            [0]
+        );
+    }
+
+    #[test]
+    fn test_search_nodes_corrupt_overlay_falls_back_to_base_scan() {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&validate_graph()).unwrap();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let corrupt = [0xFFu8; 3];
+        assert_eq!(
+            indices(&search_nodes(graph, Some(&corrupt[..]), "validate", None)),
+            [0, 1]
+        );
+    }
 }
