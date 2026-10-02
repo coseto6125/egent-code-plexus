@@ -45,11 +45,19 @@ const UNTRACKED_CACHE_CONFIG: [&str; 6] = [
 
 /// A caller's `GIT_INDEX_FILE` (ecp run from a git hook) names the index the
 /// plain command must read, so it is honoured by not overriding it. Config
-/// passed through the environment is invisible to the config identity.
-const BLOCKING_ENV: [&str; 3] = [
+/// passed through the environment is invisible to the config identity, and
+/// `GIT_CONFIG_NOSYSTEM` drops a file the identity reads. The last four
+/// redirect git away from the on-disk layout `git_layout_unchecked` reads;
+/// they are checked here, through the env seam, rather than in the process env.
+const BLOCKING_ENV: [&str; 8] = [
     "GIT_INDEX_FILE",
     "GIT_CONFIG_PARAMETERS",
     "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_DIR",
+    "GIT_COMMON_DIR",
+    "GIT_WORK_TREE",
+    "GIT_CEILING_DIRECTORIES",
 ];
 
 const LOCK_FILE: &str = "lock";
@@ -75,6 +83,7 @@ struct Repo<'a> {
     top: PathBuf,
     git: PathBuf,
     config_files: Vec<PathBuf>,
+    attribute_files: Vec<PathBuf>,
     config_id: u64,
     env: &'a EnvOverrides,
 }
@@ -82,26 +91,27 @@ struct Repo<'a> {
 /// The worktree's repository when the private index may serve `worktree`.
 /// The checks run cheapest and likeliest to decline first.
 ///
-/// The file readers behind `git_dirs` decline env overrides and unmodelled
-/// layouts (bare repositories among them).
+/// The layout reader declines unmodelled layouts (bare repositories among
+/// them).
 fn eligible<'a>(worktree: &Path, env: &'a EnvOverrides) -> Option<Repo<'a>> {
     let var = |key: &str| env_var(env, key);
     if BLOCKING_ENV.iter().any(|key| var(key).is_some()) {
         return None;
     }
-    let top = toplevel(worktree)?;
+    let (top, gitdir, common) = crate::git_cache::git_layout_unchecked(worktree)?;
     if !dir_mtime_reliable(&top) || !no_mount_below(fs::read(MOUNTINFO), &top) {
         return None;
     }
-    let (gitdir, common) = crate::git_cache::git_dirs(worktree)?;
     let git = git_on_path(&var("PATH")?)?;
     let config_files = config_files(&gitdir, &common, &git, &var)?;
-    let config_id = config_identity(&config_files)?;
+    let attribute_files = attribute_files(&common, &var)?;
+    let config_id = config_identity(&config_files, &attribute_files)?;
     Some(Repo {
         gitdir,
         top,
         git,
         config_files,
+        attribute_files,
         config_id,
         env,
     })
@@ -177,13 +187,35 @@ fn config_files(
     files.iter().all(|file| file.is_absolute()).then_some(files)
 }
 
-/// A digest of the config files' content, absent files included. `None`
-/// when a file cannot be read or holds config the copy cannot honour.
-fn config_identity(files: &[PathBuf]) -> Option<u64> {
+/// The attribute files git reads outside the tree. git normalises content by
+/// attributes, so an entry the copy re-verified under one set stays trusted
+/// after the set changes; their content is part of the copy's name too. A
+/// custom `core.attributesFile` is not modelled (see `blocks_copy`). Relative
+/// paths decline as in [`config_files`].
+fn attribute_files(common: &Path, env: &dyn Fn(&str) -> Option<OsString>) -> Option<Vec<PathBuf>> {
+    let mut files = vec![common.join("info").join("attributes")];
+    let home = env("HOME").map(PathBuf::from);
+    let xdg = env("XDG_CONFIG_HOME")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home.map(|h| h.join(".config")));
+    files.extend(xdg.map(|dir| dir.join("git").join("attributes")));
+    files.iter().all(|file| file.is_absolute()).then_some(files)
+}
+
+/// A digest of the config and attribute files' content, absent files
+/// included. `None` when a file cannot be read or a config file holds config
+/// the copy cannot honour. Attribute files are free-form patterns, so only
+/// config files go through `blocks_copy`.
+fn config_identity(config: &[PathBuf], attributes: &[PathBuf]) -> Option<u64> {
     let mut seen = Vec::new();
-    for file in files {
+    let files = config
+        .iter()
+        .map(|file| (file, true))
+        .chain(attributes.iter().map(|file| (file, false)));
+    for (file, is_config) in files {
         match fs::read(file) {
-            Ok(body) if !blocks_copy(&body) => {
+            Ok(body) if !(is_config && blocks_copy(&body)) => {
                 seen.push(1);
                 seen.extend_from_slice(&(body.len() as u64).to_le_bytes());
                 seen.extend_from_slice(&body);
@@ -204,7 +236,8 @@ fn config_identity(files: &[PathBuf]) -> Option<u64> {
 /// - with `core.trustctime` or `core.checkStat` relaxed, an entry the copy
 ///   re-verified stays trusted where the real index still compares content;
 /// - `extensions.objectFormat` may widen the object names past the 20 bytes
-///   the gitlink scan steps over.
+///   the gitlink scan steps over;
+/// - `core.attributesFile` names an attributes file the identity does not read.
 ///
 /// Keys are matched by name in any section, which only ever over-matches. git
 /// skips a UTF-8 byte order mark at the start of the file.
@@ -231,18 +264,9 @@ fn blocks_copy(config: &[u8]) -> bool {
                 | "trustctime"
                 | "checkstat"
                 | "objectformat"
+                | "attributesfile"
         )
     })
-}
-
-/// The directory git walks for untracked files: the nearest ancestor of the
-/// worktree holding `.git`, which `git_dirs` resolved the gitdir from.
-fn toplevel(worktree: &Path) -> Option<PathBuf> {
-    let canonical = fs::canonicalize(worktree).ok()?;
-    canonical
-        .ancestors()
-        .find(|dir| fs::metadata(dir.join(".git")).is_ok())
-        .map(Path::to_path_buf)
 }
 
 /// True when `mountinfo` was read and lists no mount point strictly below
@@ -369,7 +393,8 @@ fn status_on_private_index(worktree: &Path, repo: &Repo, cache_root: &Path) -> O
         }
         return Some(plain);
     }
-    let config_held = config_identity(&repo.config_files) == Some(repo.config_id);
+    let config_held =
+        config_identity(&repo.config_files, &repo.attribute_files) == Some(repo.config_id);
     if config_held && stamp_before(&copy, started, real_mtime) {
         let _ = lock.set_len(0);
     } else {
@@ -512,6 +537,9 @@ fn write_copy(body: &[u8], real_mtime: SystemTime, copy: &Path) -> io::Result<()
         let mut dst = File::create(&tmp)?;
         dst.write_all(body)?;
         dst.set_times(FileTimes::new().set_modified(real_mtime))?;
+        // git does not verify the index checksum on read, so a copy truncated by
+        // power loss on an entry boundary reads as valid with wrong output.
+        dst.sync_all()?;
         drop(dst);
         fs::rename(&tmp, copy)
     })();
@@ -1312,9 +1340,9 @@ mod tests {
         let config = tmp.path().join("config");
         let files = [config.clone(), tmp.path().join("absent")];
         fs::write(&config, "[core]\n\tbare = false\n").unwrap();
-        let before = config_identity(&files).unwrap();
+        let before = config_identity(&files, &[]).unwrap();
         fs::write(&config, "[core]\n\tbare = false\n\tignorecase = true\n").unwrap();
-        assert_ne!(config_identity(&files).unwrap(), before);
+        assert_ne!(config_identity(&files, &[]).unwrap(), before);
     }
 
     #[test]
@@ -1322,15 +1350,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let global = tmp.path().join(".gitconfig");
         let files = [global.clone()];
-        let absent = config_identity(&files).expect("absent files are an identity");
+        let absent = config_identity(&files, &[]).expect("absent files are an identity");
         fs::write(&global, "").unwrap();
-        assert_ne!(config_identity(&files).unwrap(), absent);
+        assert_ne!(config_identity(&files, &[]).unwrap(), absent);
     }
 
     #[test]
     fn test_config_identity_unreadable_file_none() {
         let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(config_identity(&[tmp.path().to_path_buf()]), None);
+        assert_eq!(config_identity(&[tmp.path().to_path_buf()], &[]), None);
     }
 
     #[test]
@@ -1344,7 +1372,7 @@ mod tests {
         ] {
             fs::write(&config, body).unwrap();
             assert_eq!(
-                config_identity(std::slice::from_ref(&config)),
+                config_identity(std::slice::from_ref(&config), &[]),
                 None,
                 "{body}"
             );
@@ -1359,9 +1387,84 @@ mod tests {
             "[core]\n\ttrustctime = false\n",
             "[core]\n\tcheckStat = minimal\n",
             "[core] worktree = /elsewhere\n",
+            "[core]\n\tattributesFile = /elsewhere\n",
         ] {
             assert!(blocks_copy(body.as_bytes()), "{body}");
         }
+    }
+
+    #[test]
+    fn test_config_identity_attributes_change_new_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let attributes = [tmp.path().join("info").join("attributes")];
+        let absent = config_identity(&[], &attributes).expect("absent attributes are an identity");
+        fs::create_dir_all(tmp.path().join("info")).unwrap();
+        fs::write(&attributes[0], "*.txt text eol=crlf\n").unwrap();
+        let first = config_identity(&[], &attributes).unwrap();
+        assert_ne!(first, absent);
+        fs::write(&attributes[0], "*.txt -text\n").unwrap();
+        assert_ne!(config_identity(&[], &attributes).unwrap(), first);
+    }
+
+    #[test]
+    fn test_config_identity_attributes_not_screened_as_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let attributes = tmp.path().join("attributes");
+        fs::write(&attributes, "worktree text\n[include] x\n").unwrap();
+        assert!(config_identity(&[], &[attributes]).is_some());
+    }
+
+    #[test]
+    fn test_attribute_files_names_info_and_global_files() {
+        let env = env_from([("HOME", "/h"), ("XDG_CONFIG_HOME", "/x")]);
+        assert_eq!(
+            attribute_files(Path::new("/r/.git"), &env).unwrap(),
+            ["/r/.git/info/attributes", "/x/git/attributes"].map(PathBuf::from)
+        );
+        let env = env_from([("HOME", "/h")]);
+        assert_eq!(
+            attribute_files(Path::new("/r/.git"), &env).unwrap()[1],
+            PathBuf::from("/h/.config/git/attributes")
+        );
+    }
+
+    #[test]
+    fn test_attribute_files_relative_path_none() {
+        for env in [
+            env_from([("HOME", "h")]),
+            env_from([("HOME", ""), ("XDG_CONFIG_HOME", "")]),
+            env_from([("XDG_CONFIG_HOME", "x"), ("HOME", "/h")]),
+        ] {
+            assert_eq!(attribute_files(Path::new("/r/.git"), &env), None);
+        }
+    }
+
+    #[test]
+    fn test_status_on_private_index_git_runs_with_lock_marked() {
+        let Some(f) = served_fixture() else {
+            return;
+        };
+        let env = isolated_env();
+        let mut repo = served_repo(&f.repo, &env);
+        serve(&f.repo, &repo, &f.cache);
+        let lock = only_copy(&f.cache).with_file_name(LOCK_FILE);
+        let seen = f.cache.join("seen");
+        let wrapper = f.cache.join("git-wrapper");
+        fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\n/usr/bin/stat -c %s '{}' > '{}'\nexec '{}' \"$@\"\n",
+                lock.display(),
+                seen.display(),
+                repo.git.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        repo.git = wrapper;
+        serve(&f.repo, &repo, &f.cache);
+        assert_eq!(fs::read_to_string(&seen).unwrap().trim(), "1");
+        assert_eq!(fs::metadata(&lock).unwrap().len(), 0);
     }
 
     #[test]
@@ -1453,6 +1556,11 @@ mod tests {
             "GIT_INDEX_FILE",
             "GIT_CONFIG_PARAMETERS",
             "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_NOSYSTEM",
+            "GIT_DIR",
+            "GIT_COMMON_DIR",
+            "GIT_WORK_TREE",
+            "GIT_CEILING_DIRECTORIES",
         ] {
             let mut env = isolated_env();
             env.push((blocking.into(), Some("x".into())));
