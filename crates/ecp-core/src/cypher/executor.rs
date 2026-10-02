@@ -1302,6 +1302,28 @@ fn far_end_name_seeds(
     )
 }
 
+/// First-node seeds for an unbound first node, not served by the kind CSR, that carries a
+/// `name` string literal: the name-index hits, ascending like the full
+/// `0..nodes.len()` scan. The caller still runs `base_visible` and
+/// `node_matches` on each, so every other inline prop is still enforced.
+///
+/// `None` keeps the scan. An overlay is excluded: its virtual nodes are not in
+/// the index and `seed_virtuals` appends them after the base seeds. An empty
+/// name or an empty `name_index` is excluded by `nodes_named_sorted`.
+fn first_node_name_seeds(np: &NodePat, graph: MergedGraph<'_>) -> Option<Vec<u32>> {
+    if graph.view().is_some() {
+        return None;
+    }
+    let name = np
+        .props
+        .iter()
+        .find_map(|(key, lit)| match (key.as_str(), lit) {
+            ("name", Literal::Str(s)) => Some(s.as_str()),
+            _ => None,
+        })?;
+    graph.nodes_named_sorted(name)
+}
+
 fn exec_pattern(
     pat: &Pattern,
     base: &Binding,
@@ -1372,13 +1394,17 @@ fn exec_pattern(
                 frontier.push((b, idx));
             });
         } else {
-            for idx in 0..graph.nodes.len() as u32 {
+            let mut seed = |idx: u32| {
                 if !graph.base_visible(idx) || !node_matches(idx, first_np, graph) {
-                    continue;
+                    return;
                 }
                 let mut b = base.clone();
                 b.node_vars.insert(var, idx);
                 frontier.push((b, idx));
+            };
+            match first_node_name_seeds(first_np, graph) {
+                Some(hits) => hits.into_iter().for_each(&mut seed),
+                None => (0..graph.nodes.len() as u32).for_each(&mut seed),
             }
             seed_virtuals(graph, first_np, |idx| {
                 let mut b = base.clone();
@@ -1402,11 +1428,14 @@ fn exec_pattern(
         seed_virtuals(graph, first_np, |idx| frontier.push((base.clone(), idx)));
     } else {
         // Anonymous first node: scan all nodes.
-        for idx in 0..graph.nodes.len() as u32 {
-            if !graph.base_visible(idx) || !node_matches(idx, first_np, graph) {
-                continue;
+        let mut seed = |idx: u32| {
+            if graph.base_visible(idx) && node_matches(idx, first_np, graph) {
+                frontier.push((base.clone(), idx));
             }
-            frontier.push((base.clone(), idx));
+        };
+        match first_node_name_seeds(first_np, graph) {
+            Some(hits) => hits.into_iter().for_each(&mut seed),
+            None => (0..graph.nodes.len() as u32).for_each(&mut seed),
         }
         seed_virtuals(graph, first_np, |idx| frontier.push((base.clone(), idx)));
     }
@@ -4889,5 +4918,174 @@ mod tests {
                 Value::Str("target_fn".into())
             ]]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // First-node name seeds (`first_node_name_seeds`)
+    // -----------------------------------------------------------------------
+
+    /// Many same-name nodes of mixed kinds and files, a tombstone, a unicode
+    /// name, and one name shared by 1200 nodes (enough that the index's
+    /// unstable hash sort leaves them out of node order).
+    fn same_name_graph() -> ZeroCopyGraph {
+        let mut fx = GraphFixture::new();
+        for i in 0..1200 {
+            let path = format!("src/shared{i}.ts");
+            match i % 3 {
+                0 => fx.func(&path, "shared"),
+                1 => fx.method(&path, "Owner", "shared"),
+                _ => fx.node(NodeKind::Class, &path, "shared"),
+            };
+            if i % 100 == 0 {
+                fx.func(&path, "");
+                fx.func(&path, "naïve_函数");
+                fx.func(&path, "rare");
+            }
+        }
+        fx.build()
+    }
+
+    const FIRST_NODE_NAME_QUERIES: &[&str] = &[
+        "MATCH (n {name:'shared'}) RETURN n.name, n.filePath, n.kind",
+        "MATCH ({name:'shared'}) RETURN count(*)",
+        "MATCH (n {name:'shared', kind:'Method'}) RETURN n.filePath",
+        "MATCH (n:Class {name:'shared'}) RETURN n.filePath",
+        "MATCH (n:Function|Method {name:'shared'}) RETURN n.filePath",
+        "MATCH (n {name:'rare'}) RETURN n.filePath",
+        "MATCH (n {name:'naïve_函数'}) RETURN n.filePath",
+        "MATCH (n {name:'absent'}) RETURN n.filePath",
+        "MATCH (n {name:''}) RETURN count(*)",
+        "MATCH (n {name:1}) RETURN count(*)",
+        "MATCH (n) WHERE n.name = 'shared' RETURN n.filePath, n.kind",
+    ];
+
+    /// Contract: the name index changes time only. Every query's rows, in
+    /// order, equal the full-scan rows; clearing `name_index` forces the scan.
+    #[test]
+    fn test_first_node_name_seeds_queries_match_full_scan_rows() {
+        let fast = same_name_graph();
+        let mut slow = same_name_graph();
+        slow.name_index.clear();
+        assert!(!fast.name_index.is_empty());
+        for query in FIRST_NODE_NAME_QUERIES {
+            assert_eq!(rows_of(&fast, query), rows_of(&slow, query), "{query}");
+        }
+    }
+
+    #[test]
+    fn test_first_node_name_seeds_shared_name_returns_every_node_ascending() {
+        let g = same_name_graph();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap();
+        let archived =
+            rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                .unwrap();
+        let q = parse("MATCH (n {name:'shared'}) RETURN n.name").unwrap();
+        let seeds = first_node_name_seeds(
+            &q.matches[0].patterns[0].nodes[0],
+            MergedGraph::new(archived, None),
+        )
+        .expect("indexed graph, plain name literal");
+        assert_eq!(seeds.len(), 1200);
+        assert!(seeds.windows(2).all(|w| w[0] < w[1]), "ascending");
+        assert_eq!(rows_of(&g, FIRST_NODE_NAME_QUERIES[0]).len(), 1200);
+    }
+
+    #[test]
+    fn test_first_node_name_seeds_ineligible_inputs_return_none() {
+        let g = same_name_graph();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap();
+        let archived =
+            rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                .unwrap();
+        let seeds = |query: &str| {
+            let q = parse(query).unwrap();
+            first_node_name_seeds(
+                &q.matches[0].patterns[0].nodes[0],
+                MergedGraph::new(archived, None),
+            )
+        };
+        assert_eq!(seeds("MATCH (n {name:''}) RETURN n"), None);
+        assert_eq!(seeds("MATCH (n {name:1}) RETURN n"), None);
+        assert_eq!(seeds("MATCH (n {kind:'Class'}) RETURN n"), None);
+        assert_eq!(seeds("MATCH (n) RETURN n"), None);
+        assert_eq!(seeds("MATCH (n {name:'absent'}) RETURN n"), Some(vec![]));
+
+        let mut no_index = same_name_graph();
+        no_index.name_index.clear();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&no_index).unwrap();
+        let archived =
+            rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                .unwrap();
+        let q = parse("MATCH (n {name:'shared'}) RETURN n").unwrap();
+        assert_eq!(
+            first_node_name_seeds(
+                &q.matches[0].patterns[0].nodes[0],
+                MergedGraph::new(archived, None)
+            ),
+            None
+        );
+    }
+
+    /// The tombstone (empty name) is matched by the scan only, so an
+    /// empty-name query must keep the scan and still return it.
+    #[test]
+    fn test_first_node_name_seeds_empty_name_keeps_tombstone_rows() {
+        let g = same_name_graph();
+        assert_eq!(
+            rows_of(&g, "MATCH (n {name:''}) RETURN count(*)"),
+            vec![vec![Value::Int(12)]]
+        );
+    }
+
+    /// With an overlay the seeds stand down: rows equal the scan's with the
+    /// index cleared, and a base node the view suppresses stays hidden.
+    #[test]
+    fn test_first_node_name_seeds_with_overlay_matches_scan_and_hides_suppressed() {
+        use crate::session::{OverlayFileInput, OverlaySymbol};
+        let graph = || {
+            let mut fx = GraphFixture::new();
+            fx.func("src/dirty.rs", "keep_fn");
+            fx.func("src/dirty.rs", "gone_fn");
+            fx.func("src/clean.rs", "keep_fn");
+            fx.build()
+        };
+        let dirty = || OverlayFileInput {
+            rel_path: "src/dirty.rs".to_string(),
+            symbols: vec![OverlaySymbol {
+                name: "keep_fn".to_string(),
+                kind: NodeKind::Function,
+                owner_class: None,
+                start_line: 5,
+                end_line: 6,
+                calls: vec![],
+            }],
+            imports: vec![],
+        };
+        let rows_with_view = |g: ZeroCopyGraph, query: &str| {
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap();
+            let archived =
+                rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                    .unwrap();
+            let view = OverlayView::build(archived, &[dirty()]).unwrap();
+            let q = parse(query).unwrap();
+            assert_eq!(
+                first_node_name_seeds(
+                    &q.matches[0].patterns[0].nodes[0],
+                    MergedGraph::new(archived, Some(&view))
+                ),
+                None
+            );
+            execute(&q, archived, Some(&view), Path::new("."))
+                .unwrap()
+                .rows
+        };
+        let mut no_index = graph();
+        no_index.name_index.clear();
+        let keep = "MATCH (n {name:'keep_fn'}) RETURN n.filePath, n.startLine";
+        assert_eq!(
+            rows_with_view(graph(), keep),
+            rows_with_view(no_index, keep)
+        );
+        assert!(rows_with_view(graph(), "MATCH (n {name:'gone_fn'}) RETURN n.filePath").is_empty());
     }
 }
