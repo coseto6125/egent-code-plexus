@@ -5,9 +5,10 @@
 //! git's untracked cache (see `private_index`). Everywhere else, and wherever
 //! that copy cannot serve exactly, it comes from the plain command.
 
+use std::cell::OnceCell;
 use std::ffi::OsString;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use crate::git::safe_exec;
@@ -39,13 +40,27 @@ const PRIVATE_INDEX_DIR: &str = "git-index";
 type EnvOverrides = [(OsString, Option<OsString>)];
 
 /// The output of `git status --porcelain -z --untracked-files=all` in
-/// `worktree`, byte for byte.
-pub fn porcelain_all(worktree: &Path, home_ecp: &Path) -> io::Result<Output> {
-    porcelain_all_in(worktree, &home_ecp.join(PRIVATE_INDEX_DIR), &[])
+/// `worktree`, byte for byte. `home_ecp` is resolved only when the private
+/// index may serve: resolving it writes a probe file, and a clean or
+/// ineligible tree never needs it.
+pub fn porcelain_all(worktree: &Path, home_ecp: &OnceCell<PathBuf>) -> io::Result<Output> {
+    porcelain_all_in(
+        worktree,
+        || {
+            home_ecp
+                .get_or_init(ecp_core::registry::resolve_home_ecp)
+                .join(PRIVATE_INDEX_DIR)
+        },
+        &[],
+    )
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
-fn porcelain_all_in(worktree: &Path, cache_root: &Path, env: &EnvOverrides) -> io::Result<Output> {
+fn porcelain_all_in(
+    worktree: &Path,
+    cache_root: impl FnOnce() -> PathBuf,
+    env: &EnvOverrides,
+) -> io::Result<Output> {
     #[cfg(target_os = "linux")]
     if let Some(out) = private_index::status(worktree, cache_root, env) {
         return Ok(out);

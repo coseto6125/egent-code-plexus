@@ -418,7 +418,7 @@ fn git_fingerprint_shortcut(
     }
 
     // Flags and their reasons: `STATUS_ARGS` in `git/status.rs`.
-    let home_ecp = ecp_core::registry::resolve_home_ecp();
+    let home_ecp = std::cell::OnceCell::new();
     let porcelain = crate::git::status::porcelain_all(worktree_root, &home_ecp).ok()?;
     if !porcelain.status.success() {
         return None;
@@ -432,7 +432,8 @@ fn git_fingerprint_shortcut(
     // with `--untracked-files=all` they would otherwise keep porcelain
     // non-empty forever and downgrade every query from the Ready shortcut to
     // the Stale/reanalyze path.
-    let home_ecp_canonical = fs::canonicalize(&home_ecp).ok();
+    let home_ecp_canonical =
+        fs::canonicalize(home_ecp.get_or_init(ecp_core::registry::resolve_home_ecp)).ok();
     let graph_canonical = fs::canonicalize(graph_path).ok();
     let dirty_files: Vec<PathBuf> = parse_porcelain_paths(&porcelain.stdout, worktree_root)
         .into_iter()

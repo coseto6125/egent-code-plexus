@@ -60,12 +60,16 @@ const MOUNTINFO: &str = "/proc/self/mountinfo";
 
 /// The private copy's answer for `worktree`, or `None` for the caller to run
 /// the plain command.
-pub(super) fn status(worktree: &Path, cache_root: &Path, env: &EnvOverrides) -> Option<Output> {
+pub(super) fn status(
+    worktree: &Path,
+    cache_root: impl FnOnce() -> PathBuf,
+    env: &EnvOverrides,
+) -> Option<Output> {
     let repo = eligible(worktree, env)?;
     // git resolves `GIT_INDEX_FILE` against the worktree it runs in, not
     // ecp's cwd, and a path that names no file reads as an empty index with
     // success.
-    let root = std::path::absolute(cache_root).ok()?;
+    let root = std::path::absolute(cache_root()).ok()?;
     status_on_private_index(worktree, &repo, &root)
 }
 
@@ -806,7 +810,7 @@ mod tests {
         let env = isolated_env();
         let expected = plain_in(worktree, &env).unwrap();
         for run in 0..2 {
-            let got = porcelain_all_in(worktree, cache, &env).unwrap();
+            let got = porcelain_all_in(worktree, || cache.to_path_buf(), &env).unwrap();
             assert_eq!(
                 got.status.code(),
                 expected.status.code(),
@@ -1056,7 +1060,7 @@ mod tests {
     fn test_porcelain_all_not_a_repo_matches_plain_failure() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = fs::canonicalize(tmp.path()).unwrap();
-        let got = porcelain_all_in(&dir, &dir.join("cache"), &isolated_env()).unwrap();
+        let got = porcelain_all_in(&dir, || dir.join("cache"), &isolated_env()).unwrap();
         let expected = plain_out(&dir);
         assert_eq!(got.status.code(), expected.status.code());
         assert_eq!(got.stdout, expected.stdout);
@@ -1247,7 +1251,7 @@ mod tests {
         write(&f.repo, "new.rs", "pub fn n() {}\n");
         let env = isolated_env();
         for _ in 0..200 {
-            let got = porcelain_all_in(&f.repo, &relative, &env).unwrap();
+            let got = porcelain_all_in(&f.repo, || relative.clone(), &env).unwrap();
             assert_eq!(
                 got.stdout,
                 b"?? new.rs\0",
