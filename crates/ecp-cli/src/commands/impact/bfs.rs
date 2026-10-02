@@ -1,7 +1,7 @@
 use super::Direction;
 use crate::commands::format::{kind_to_str, node_kind_to_str, rel_type_to_str};
 use crate::commands::symbol_id::resolve_owner_class;
-use ecp_core::algorithms::process_trace::is_test_path;
+use ecp_core::file_category::is_test_path;
 use ecp_core::session::{MergedEdge, MergedGraph, OverlayView};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{json, Value};

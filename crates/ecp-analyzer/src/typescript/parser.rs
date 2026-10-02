@@ -8,12 +8,12 @@ use crate::framework_helpers::{
 };
 use crate::indirect_dispatch::{collect_js_param_names, detect_js_ts_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
     BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode, RawRoute,
 };
+use ecp_core::file_category::is_test_path;
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -807,7 +807,7 @@ impl LanguageProvider for TypeScriptProvider {
 
         let param_names = collect_js_param_names(tree.root_node(), source);
         let call_metas = detect_js_ts_indirect(tree.root_node(), source, &nodes, &param_names);
-        let file_category = crate::resolution::builder::determine_category(&path.to_string_lossy());
+        let file_category = ecp_core::file_category::determine_category(&path.to_string_lossy());
         let raw_function_metas = crate::function_meta::typescript::extract(
             tree.root_node(),
             source,

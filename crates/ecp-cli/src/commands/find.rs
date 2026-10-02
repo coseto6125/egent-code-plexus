@@ -311,7 +311,7 @@ fn overlay_matches(
                     &merged.files[node.file_idx.to_native() as usize].category,
                     count_incoming(merged, idx as usize),
                 )
-            } else if ecp_core::algorithms::process_trace::is_test_path(&h.rel_path) {
+            } else if ecp_core::file_category::is_test_path(&h.rel_path) {
                 (&ArchivedFileCategory::Test, 0)
             } else {
                 (&ArchivedFileCategory::Source, 0)

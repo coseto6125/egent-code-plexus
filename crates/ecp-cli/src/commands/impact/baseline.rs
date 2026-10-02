@@ -7,7 +7,7 @@ use crate::commands::impact::{attach_heuristic_fields, attach_hidden_edges, Dire
 use crate::engine::Engine;
 use crate::git::{DiffScope, GitDiffProvider, ShellGitProvider};
 use crate::reanalyze::make_pipeline_for_names;
-use ecp_core::algorithms::process_trace::is_test_path;
+use ecp_core::file_category::is_test_path;
 use ecp_core::graph::NodeKind;
 use ecp_core::EcpError;
 use rayon::prelude::*;

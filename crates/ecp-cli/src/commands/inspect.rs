@@ -4,7 +4,7 @@ use crate::engine::Engine;
 use crate::output::{emit_with_caveat, OutputFormat};
 use crate::session::overlay_reader::load_overlay;
 use clap::Args;
-use ecp_core::algorithms::process_trace::is_test_path;
+use ecp_core::file_category::is_test_path;
 use ecp_core::graph::ArchivedZeroCopyGraph;
 use ecp_core::session::merge_archived;
 use ecp_core::EcpError;

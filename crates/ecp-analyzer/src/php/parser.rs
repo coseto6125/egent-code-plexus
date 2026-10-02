@@ -6,10 +6,10 @@ use crate::framework_helpers::{
     push_blind_spot, MODULE_LEVEL_SOURCE,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode};
+use ecp_core::file_category::is_test_path;
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -835,19 +835,7 @@ impl LanguageProvider for PhpProvider {
             routes.clear();
         }
 
-        // PHPUnit test files are typically named *Test.php or placed in tests/ directories.
-        let file_category = {
-            let basename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let path_str = path.to_str().unwrap_or("");
-            if basename.ends_with("Test.php")
-                || path_str.contains("/tests/")
-                || path_str.contains("/test/")
-            {
-                ecp_core::graph::FileCategory::Test
-            } else {
-                ecp_core::graph::FileCategory::Source
-            }
-        };
+        let file_category = ecp_core::file_category::determine_category(&path.to_string_lossy());
         let raw_function_metas =
             crate::function_meta::php::extract(tree.root_node(), source, &nodes, file_category);
 

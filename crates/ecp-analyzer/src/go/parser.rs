@@ -10,12 +10,12 @@ use crate::framework_helpers::{
 };
 use crate::function_meta::subtree_contains_kind;
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
     BlindSpot, FrameworkId, LocalGraph, RawFrameworkRef, RawImport, RawNode, RawTxScope,
 };
+use ecp_core::file_category::is_test_path;
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -997,16 +997,7 @@ impl LanguageProvider for GoProvider {
             }
         }
 
-        let file_category = if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.ends_with("_test.go"))
-            .unwrap_or(false)
-        {
-            ecp_core::graph::FileCategory::Test
-        } else {
-            ecp_core::graph::FileCategory::Source
-        };
+        let file_category = ecp_core::file_category::determine_category(&path.to_string_lossy());
         let raw_function_metas =
             crate::function_meta::go::extract(tree.root_node(), source, &nodes, file_category);
 

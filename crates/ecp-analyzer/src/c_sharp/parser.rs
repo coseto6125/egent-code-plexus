@@ -7,10 +7,10 @@ use crate::framework_helpers::{
 };
 use crate::function_meta::subtree_contains_kind;
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode};
+use ecp_core::file_category::is_test_path;
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -646,7 +646,7 @@ impl LanguageProvider for CSharpProvider {
         let framework_refs = detect_ast_framework_patterns(source, CSHARP_FRAMEWORKS);
 
         let file_category =
-            crate::resolution::builder::determine_category(path.to_str().unwrap_or(""));
+            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
         let raw_function_metas =
             crate::function_meta::csharp::extract(tree.root_node(), source, &nodes, file_category);
 

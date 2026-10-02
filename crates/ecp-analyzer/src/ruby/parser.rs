@@ -5,12 +5,12 @@ use crate::framework_helpers::{
     detect_ast_framework_patterns, enclosing_fn_idx_by_span, push_blind_spot, FrameworkPatternSpec,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
     BlindSpot, FrameworkId, LocalGraph, RawImport, RawNode, RawRoute, RawTxScope,
 };
+use ecp_core::file_category::is_test_path;
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
 use std::path::Path;
@@ -978,20 +978,7 @@ impl LanguageProvider for RubyProvider {
             }
         }
 
-        // Ruby test files: spec/*_spec.rb (RSpec) or test/*_test.rb (Minitest).
-        let file_category = {
-            let basename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let path_str = path.to_str().unwrap_or("");
-            if basename.ends_with("_spec.rb")
-                || basename.ends_with("_test.rb")
-                || path_str.contains("/spec/")
-                || path_str.contains("/test/")
-            {
-                ecp_core::graph::FileCategory::Test
-            } else {
-                ecp_core::graph::FileCategory::Source
-            }
-        };
+        let file_category = ecp_core::file_category::determine_category(&path.to_string_lossy());
         let raw_function_metas =
             crate::function_meta::ruby::extract(tree.root_node(), source, &nodes, file_category);
 

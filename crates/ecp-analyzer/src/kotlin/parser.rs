@@ -6,10 +6,10 @@ use crate::framework_helpers::{
     MODULE_LEVEL_SOURCE,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode};
+use ecp_core::file_category::is_test_path;
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -568,7 +568,7 @@ impl LanguageProvider for KotlinProvider {
         };
 
         let file_category =
-            crate::resolution::builder::determine_category(path.to_str().unwrap_or(""));
+            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
         let raw_function_metas =
             crate::function_meta::kotlin::extract(tree.root_node(), source, &nodes, file_category);
         let tx_scopes = collect_jvm_transactional_scopes(

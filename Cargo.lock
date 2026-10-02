@@ -966,6 +966,7 @@ dependencies = [
 name = "ecp-core"
 version = "0.14.2"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "cc",
  "chrono",

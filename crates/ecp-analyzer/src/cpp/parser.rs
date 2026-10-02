@@ -6,10 +6,10 @@ use crate::framework_helpers::{
 };
 use crate::indirect_dispatch::{collect_c_cpp_fn_ptr_vars, detect_c_cpp_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode};
+use ecp_core::file_category::is_test_path;
 
 /// Blind-spot kind/hint pairs. P7 covers C++ dispatch sites that
 /// `indirect_dispatch.rs` doesn't already flag as CallMeta (virtual /
@@ -666,19 +666,7 @@ impl LanguageProvider for CppProvider {
         // fallback restores full recall.
         emit_macro_fallback(source, &mut nodes);
 
-        // C++ test files: placed in tests/ or test/ directories (Google Test / Catch2 / doctest).
-        let file_category = {
-            let path_str = path.to_str().unwrap_or("");
-            if path_str.contains("/tests/")
-                || path_str.contains("/test/")
-                || path_str.starts_with("tests/")
-                || path_str.starts_with("test/")
-            {
-                ecp_core::graph::FileCategory::Test
-            } else {
-                ecp_core::graph::FileCategory::Source
-            }
-        };
+        let file_category = ecp_core::file_category::determine_category(&path.to_string_lossy());
         let raw_function_metas =
             crate::function_meta::cpp::extract(tree.root_node(), source, &nodes, file_category);
 

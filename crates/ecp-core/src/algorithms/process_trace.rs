@@ -10,6 +10,7 @@
 //! Returns `Vec<TraceResult>` ordered by descending step count. Each result's
 //! `trace` is a sequence of node indices into the original `nodes` slice.
 
+use crate::file_category::is_test_path;
 use crate::graph::{Edge, Node, NodeKind, RelType};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -51,20 +52,6 @@ pub enum ProcessType {
 
 fn is_function_like(kind: NodeKind) -> bool {
     matches!(kind, NodeKind::Function | NodeKind::Method)
-}
-
-/// Heuristic: test files don't make good entry points for execution-flow
-/// detection. Matches paths whose basename hints at testing.
-pub fn is_test_path(path: &str) -> bool {
-    let lower = path.to_lowercase();
-    lower.contains("/test")
-        || lower.contains("/tests")
-        || lower.contains("__tests__")
-        || lower.contains("__mocks__")
-        || lower.contains(".test.")
-        || lower.contains(".spec.")
-        || lower.contains("_test.")
-        || lower.contains("_spec.")
 }
 
 /// Detect processes. Returns ordered list of traces (longest first).

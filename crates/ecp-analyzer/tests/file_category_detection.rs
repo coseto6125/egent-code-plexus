@@ -1,4 +1,4 @@
-use ecp_analyzer::resolution::builder::determine_category;
+use ecp_core::file_category::determine_category;
 use ecp_core::graph::FileCategory;
 
 // ── Reference: vendor/ ───────────────────────────────────────────────────────
