@@ -109,8 +109,8 @@ pub struct ImpactArgs {
     /// Coverage gap analysis: for each touched symbol, classify by test-caller
     /// presence (uncovered / partial / covered). Uses FunctionMeta.is_test
     /// flag from per-language extraction. Outputs uncovered symbols first to
-    /// support LLM PR review ("X 改了沒測試"). Implies --include-tests during
-    /// traversal so test callers are reachable from the walker.
+    /// support LLM PR review ("X 改了沒測試"). Needs test callers in the walk,
+    /// so it conflicts with --exclude-tests.
     #[arg(long, aliases = ["test_coverage", "testCoverage"], default_value_t = false)]
     pub test_coverage: bool,
 
@@ -155,7 +155,7 @@ pub struct ImpactArgs {
     /// sequentially — amortises mmap + process spawn across queries.
     /// Each result is prefixed by `=== target: <name> ===` so callers can
     /// split the stream unambiguously. Flags like --direction / --depth /
-    /// --include-tests apply uniformly to all targets.
+    /// --exclude-tests apply uniformly to all targets.
     ///
     /// Symbol-mode only: `--batch` combined with `--baseline` or `--literal`
     /// is rejected as an invalid argument. A positional name is also rejected

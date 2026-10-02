@@ -278,7 +278,7 @@ impl SymbolTable {
     }
 
     /// Tier-3 global lookup: kind-filtered same-name candidates through the
-    /// shared barrier and tie-break filter, [`pick_global`].
+    /// shared barrier filter, [`pick_global`].
     pub fn lookup_global(
         &self,
         node_name: &str,

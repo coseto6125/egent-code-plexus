@@ -308,7 +308,6 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
 
     let min_conf = resolve_min_conf(args);
     let rel_filter = parse_csv_lower(args.relation_types.as_deref());
-    // --test-coverage implies --include-tests so test callers are reachable.
     let effective_include_tests = args.walks_tests();
 
     // Run BFS from each changed symbol.

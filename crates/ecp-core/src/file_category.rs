@@ -84,16 +84,22 @@ fn path_pattern_ac() -> &'static (AhoCorasick, Vec<PathPatternKind>) {
             (PathPatternKind::Test, "/spec/"),
             (PathPatternKind::Test, "/test_"),
             (PathPatternKind::Test, "/conftest."),
-            // .NET test projects: `Foo.Tests/`, `Foo.UnitTests/` lowercase
-            // to `.tests/` / `tests/`; the latter is caught by `/tests/`
-            // only when it is a whole segment.
+            // .NET test projects: `Foo.Tests/`, `Foo.UnitTests/`,
+            // `Foo.IntegrationTests/`.
             (PathPatternKind::Test, ".tests/"),
+            (PathPatternKind::Test, ".unittests/"),
+            (PathPatternKind::Test, ".integrationtests/"),
+            // Flutter integration and driver tests.
+            (PathPatternKind::Test, "/integration_test/"),
+            (PathPatternKind::Test, "/test_driver/"),
+            // Shared test support dirs; `test_utils/` and `test_helpers/`
+            // are already caught by `/test_`.
             (PathPatternKind::Test, "/testdata/"),
             (PathPatternKind::Test, "/testutil"),
+            (PathPatternKind::Test, "/testhelper"),
+            (PathPatternKind::Test, "/testsupport/"),
             (PathPatternKind::Test, "/test-utils/"),
-            (PathPatternKind::Test, "/test_utils/"),
             (PathPatternKind::Test, "/test-helpers/"),
-            (PathPatternKind::Test, "/test_helpers/"),
         ];
         let strings: Vec<&str> = PATTERNS.iter().map(|(_, s)| *s).collect();
         let kinds: Vec<PathPatternKind> = PATTERNS.iter().map(|(k, _)| *k).collect();
@@ -119,7 +125,9 @@ pub fn determine_category(path: &str) -> FileCategory {
     let (ac, kinds) = path_pattern_ac();
     let mut hit_example = false;
     let mut hit_test_substring = false;
-    for m in ac.find_iter(&lower_path) {
+    // Overlapping: adjacent segments share a `/`, so `examples/tests/`
+    // must report `/tests/` after `/examples/` has matched.
+    for m in ac.find_overlapping_iter(&lower_path) {
         match kinds[m.pattern().as_usize()] {
             // Reference outranks Example and Test (vendored sample dirs
             // still classify as Reference); no later match can override.
@@ -421,7 +429,7 @@ pub fn pick_global(
 /// - Co-located suffixes, limited to the ecosystems whose runners use them:
 ///   Go `_test.go`, pytest `_test.py`, Minitest `_test.rb`, gtest
 ///   `_test.cc`, Jest/Jasmine `_test.ts` / `_spec.ts`, RSpec `_spec.rb`,
-///   Crystal `_spec.cr`. Rust, Dart and Move keep tests under `tests/` /
+///   Crystal `_spec.cr`, busted `_spec.lua`. Rust, Dart and Move keep tests under `tests/` /
 ///   `test/`, so `lang_spec.rs` or a package named `bloc_test` stays
 ///   production code.
 fn has_test_suffix(lower_path: &str) -> bool {
@@ -438,7 +446,7 @@ fn has_test_suffix(lower_path: &str) -> bool {
         || (stem.ends_with("_test")
             && (JS.contains(&ext)
                 || matches!(ext, "go" | "py" | "rb" | "c" | "cc" | "cpp" | "cxx" | "exs")))
-        || (stem.ends_with("_spec") && (JS.contains(&ext) || matches!(ext, "rb" | "cr")))
+        || (stem.ends_with("_spec") && (JS.contains(&ext) || matches!(ext, "rb" | "cr" | "lua")))
 }
 
 /// `true` when [`determine_category`] classifies `path` as `Test`. Every
@@ -611,6 +619,14 @@ mod determine_category_tests {
     #[test]
     fn test_determine_category_shared_test_support_dirs_classify_as_test() {
         for p in [
+            "src/Billing.UnitTests/Fakes/FakeClock.cs",
+            "src/Billing.IntegrationTests/Db.cs",
+            "integration_test/checkout_test.dart",
+            "test_driver/app.dart",
+            "spec/user_spec.lua",
+            "lua/plugin/parser_spec.lua",
+            "internal/testhelpers/db.go",
+            "pkg/testsupport/clock.go",
             "internal/testutil/fake.go",
             "pkg/parser/testdata/input.go",
             "src/test-helpers/render.ts",
@@ -624,6 +640,9 @@ mod determine_category_tests {
     fn test_determine_category_test_inside_example_app_classifies_as_test() {
         // Test outranks Example: a nested test must not emit fixture routes.
         assert_test("examples/todo/tests/test_routes.py");
+        // Adjacent segments share their `/`.
+        assert_test("examples/tests/helper.py");
+        assert_test("samples/test/helper.go");
         assert_test("test/node/fixtures/examples/a.js");
         assert_example("examples/todo/app.py");
     }
@@ -679,7 +698,7 @@ mod determine_category_tests {
 
     #[test]
     fn test_pick_global_only_test_candidate_still_resolves() {
-        // A tie-break, not a barrier: a production caller whose single
+        // A test path is no barrier: a production caller whose single
         // candidate sits in a test-classified path keeps the edge.
         let caller = meta("src/app/search.py");
         assert_eq!(

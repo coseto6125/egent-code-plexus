@@ -373,10 +373,9 @@ impl OverlayView {
 /// segment. Unique → 0.95.
 /// Tier 3 — global: all clean-base callables (via the archived `name_index`)
 /// plus all overlay callables, through the index-time candidate filter
-/// [`pick_global`] (language and vendor barriers, test tie-break). ≥2
+/// [`pick_global`] (language and vendor barriers, unique only). ≥2
 /// remaining → suppressed, matching `DecisionTier::AmbiguousGlobal` (an
-/// invented edge is worse than a missing one). Unique → 0.7, test-double
-/// tie-break → 0.6.
+/// invented edge is worse than a missing one). Unique → 0.7.
 #[allow(clippy::too_many_arguments)]
 fn resolve_callee(
     graph: &ArchivedZeroCopyGraph,

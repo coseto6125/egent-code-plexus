@@ -301,7 +301,7 @@ pub(super) fn impact_by_name(
 
     // FU-2026-05-29-011: with ≥2 same-named defs in the graph, the resolver
     // may have suppressed bare calls to this name at index time
-    // (`DecisionTier::AmbiguousGlobal`; the test-double tie-break resolves
+    // (`DecisionTier::AmbiguousGlobal`; language and vendor barriers exempt
     // some), so the upstream caller set is a lower bound — the payload must
     // say so instead of reading as complete.
     let ambiguity_caveat = (same_name_defs >= 2
