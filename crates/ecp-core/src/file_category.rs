@@ -12,6 +12,9 @@ enum PathPatternKind {
     Reference,
     Example,
     Test,
+    /// A whole test directory segment (`/tests/`, `__tests__/`). Unlike a
+    /// name prefix such as `/test_`, it outranks Example.
+    TestDir,
 }
 
 /// Substring patterns used by `determine_category`, scanned in one
@@ -102,7 +105,13 @@ fn path_pattern_ac() -> &'static (AhoCorasick, Vec<PathPatternKind>) {
             (PathPatternKind::Test, "/test-helpers/"),
         ];
         let strings: Vec<&str> = PATTERNS.iter().map(|(_, s)| *s).collect();
-        let kinds: Vec<PathPatternKind> = PATTERNS.iter().map(|(k, _)| *k).collect();
+        let kinds: Vec<PathPatternKind> = PATTERNS
+            .iter()
+            .map(|(k, s)| match k {
+                PathPatternKind::Test if s.ends_with('/') => PathPatternKind::TestDir,
+                k => *k,
+            })
+            .collect();
         let ac = AhoCorasick::builder()
             .match_kind(MatchKind::Standard)
             .build(strings)
@@ -125,6 +134,7 @@ pub fn determine_category(path: &str) -> FileCategory {
     let (ac, kinds) = path_pattern_ac();
     let mut hit_example = false;
     let mut hit_test_substring = false;
+    let mut hit_test_dir = false;
     // Overlapping: adjacent segments share a `/`, so `examples/tests/`
     // must report `/tests/` after `/examples/` has matched.
     for m in ac.find_overlapping_iter(&lower_path) {
@@ -134,10 +144,15 @@ pub fn determine_category(path: &str) -> FileCategory {
             PathPatternKind::Reference => return FileCategory::Reference,
             PathPatternKind::Example => hit_example = true,
             PathPatternKind::Test => hit_test_substring = true,
+            PathPatternKind::TestDir => hit_test_dir = true,
         }
     }
 
-    let is_test = hit_test_substring
+    // A test directory or a test-file naming convention marks a test even
+    // inside an example app (`examples/todo/tests/`), so its fixtures emit
+    // no routes. A bare `test_` name prefix does not: `examples/test_helpers/`
+    // is part of the example.
+    let is_named_test = hit_test_dir
         || has_test_suffix(&lower_path)
         // PascalCase test-class suffixes (Java/JUnit, Kotlin, Swift XCTest,
         // .NET MSTest/xUnit/NUnit, PHPUnit, ScalaTest/specs2). Case-sensitive
@@ -156,11 +171,14 @@ pub fn determine_category(path: &str) -> FileCategory {
         || path.ends_with("Test.php")
         || path.ends_with("Spec.scala")
         || path.ends_with("Test.scala");
-    if is_test {
+    if is_named_test {
         return FileCategory::Test;
     }
     if hit_example {
         return FileCategory::Example;
+    }
+    if hit_test_substring {
+        return FileCategory::Test;
     }
 
     if lower_path.ends_with(".md") || lower_path.ends_with(".txt") || lower_path.ends_with(".rst") {
@@ -423,9 +441,8 @@ pub fn pick_global(
 
 /// Test files named by their basename.
 ///
-/// - Sibling test modules: Rust `tests.rs`, Django `tests.py`, `test.js`.
-///   Doc and config files are excluded, so a CI workflow `test.yml` stays
-///   Config.
+/// - Sibling test modules: Rust `tests.rs`, Django `tests.py`. A plain
+///   `test.go` / `test.c` is ordinary source in those ecosystems.
 /// - Co-located suffixes, limited to the ecosystems whose runners use them:
 ///   Go `_test.go`, pytest `_test.py`, Minitest `_test.rb`, gtest
 ///   `_test.cc`, Jest/Jasmine `_test.ts` / `_spec.ts`, RSpec `_spec.rb`,
@@ -438,11 +455,7 @@ fn has_test_suffix(lower_path: &str) -> bool {
         return false;
     };
     const JS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "cjs"];
-    (matches!(stem, "test" | "tests")
-        && !matches!(
-            ext,
-            "md" | "txt" | "rst" | "json" | "toml" | "yaml" | "yml" | "html" | "css"
-        ))
+    (stem == "tests" && matches!(ext, "rs" | "py"))
         || (stem.ends_with("_test")
             && (JS.contains(&ext)
                 || matches!(ext, "go" | "py" | "rb" | "c" | "cc" | "cpp" | "cxx" | "exs")))
@@ -643,6 +656,9 @@ mod determine_category_tests {
         // Adjacent segments share their `/`.
         assert_test("examples/tests/helper.py");
         assert_test("samples/test/helper.go");
+        assert_test("examples/app/app_test.go");
+        // A `test_` name prefix is example code, not a test.
+        assert_example("examples/test_helpers/index.js");
         assert_test("test/node/fixtures/examples/a.js");
         assert_example("examples/todo/app.py");
     }
@@ -736,5 +752,14 @@ mod determine_category_tests {
             pick_global(meta("src/main.rs"), std::iter::empty()),
             GlobalPick::NoMatch
         );
+    }
+
+    #[test]
+    fn test_determine_category_plain_test_basename_is_source() {
+        // Go needs `_test.go`; `test.go` / `test.c` / `test.py` are ordinary
+        // files that happen to be named test.
+        for p in ["cmd/test.go", "src/test.c", "tools/test.py"] {
+            assert_eq!(determine_category(p), FileCategory::Source, "{p}");
+        }
     }
 }
