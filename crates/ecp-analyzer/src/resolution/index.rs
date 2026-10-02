@@ -1,3 +1,5 @@
+use ecp_core::file_category::pick_global;
+pub use ecp_core::file_category::{FileMeta, GlobalPick, Language};
 use ecp_core::graph::NodeKind;
 use rustc_hash::FxHashMap;
 
@@ -24,204 +26,13 @@ pub enum ResolveTarget {
     Field,
 }
 
-/// Per-parser-provider language tag. One variant per registered analyzer
-/// provider; `from_path` performs the lookup by file extension (multi-ext
-/// providers like JavaScript / TypeScript fold to a single variant).
-///
-/// Used by `lookup_unique_global` as a Tier-3 caller-vs-target barrier:
-/// bare callee names never cross language boundaries (a Rust `result.is_some()`
-/// never resolves to a vendored Move test fixture's `is_some` function).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Language {
-    #[default]
-    Unknown,
-    Rust,
-    Python,
-    TypeScript,
-    JavaScript,
-    Java,
-    Kotlin,
-    Go,
-    Ruby,
-    Php,
-    CSharp,
-    Swift,
-    Dart,
-    Solidity,
-    Sql,
-    C,
-    Cpp,
-    Move,
-    Nim,
-    Cairo,
-    Vyper,
-    Verilog,
-    Hcl,
-    Crystal,
-    Lua,
-    Zig,
-    Bash,
-    Dockerfile,
-    DockerCompose,
-    GitHubActions,
-    Yaml,
-    Markdown,
-    // Appended at the end to keep variant order stable (defensive — `Language`
-    // is not rkyv-archived today, but other resolution code matches on it).
-    Kubernetes,
-}
-
-impl Language {
-    /// Map a repo-relative file path to its provider language. Mirrors the
-    /// extension routing in `commands/analyze.rs` plus path-based overrides
-    /// for `Dockerfile` / `docker-compose.{yml,yaml}` / `.github/workflows/*`.
-    pub fn from_path(path: &str) -> Self {
-        if path.contains('\\') {
-            let normalized = path.replace('\\', "/");
-            Self::from_normalized_path(&normalized)
-        } else {
-            Self::from_normalized_path(path)
-        }
-    }
-
-    /// Fast path for callers that have already converted backslashes (Pass 1
-    /// in `builder.rs` and most repo-rooted paths on Linux/macOS). Skips the
-    /// `replace('\\','/')` allocation entirely.
-    pub fn from_normalized_path(path: &str) -> Self {
-        let normalized = path;
-        let basename = normalized.rsplit('/').next().unwrap_or("");
-
-        // Path / basename overrides before extension routing.
-        if matches!(basename, "Dockerfile" | "dockerfile") {
-            return Self::Dockerfile;
-        }
-        if matches!(
-            basename,
-            "docker-compose.yml" | "docker-compose.yaml" | "compose.yml" | "compose.yaml"
-        ) {
-            return Self::DockerCompose;
-        }
-        let ext = basename.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-        if matches!(ext, "yml" | "yaml")
-            && (normalized.contains("/.github/workflows/")
-                || normalized.starts_with(".github/workflows/"))
-        {
-            return Self::GitHubActions;
-        }
-
-        match ext {
-            "rs" => Self::Rust,
-            "py" | "pyi" => Self::Python,
-            "ts" | "tsx" => Self::TypeScript,
-            "js" | "jsx" | "mjs" | "cjs" => Self::JavaScript,
-            "java" => Self::Java,
-            "kt" | "kts" => Self::Kotlin,
-            "go" => Self::Go,
-            "rb" => Self::Ruby,
-            "php" => Self::Php,
-            "cs" => Self::CSharp,
-            "swift" => Self::Swift,
-            "dart" => Self::Dart,
-            "sol" => Self::Solidity,
-            "sql" => Self::Sql,
-            "c" => Self::C,
-            // `.h` routes to C++ (matches ref-gitnexus dispatch). `.h` is genuinely
-            // ambiguous — C headers and C++ headers share the extension — but C++
-            // parsing is a near-superset of C, while C parsing produces ERROR
-            // nodes on any C++-only construct (class, template, namespace, &,
-            // operator overload). Real codebases ship C++ libraries with `.h`
-            // headers (nlohmann/json, doctest, LLVM Fuzzer, Catch2, …); routing
-            // them to the C parser silently drops every class/method/template.
-            "cpp" | "hpp" | "cc" | "hh" | "cxx" | "hxx" | "h" => Self::Cpp,
-            "move" => Self::Move,
-            "nim" => Self::Nim,
-            "cairo" => Self::Cairo,
-            "vy" => Self::Vyper,
-            "v" | "sv" | "vh" | "svh" => Self::Verilog,
-            "tf" | "tfvars" | "hcl" => Self::Hcl,
-            "cr" => Self::Crystal,
-            "lua" | "luau" => Self::Lua,
-            "zig" => Self::Zig,
-            "sh" | "bash" => Self::Bash,
-            "yml" | "yaml" => Self::Yaml,
-            "md" | "txt" | "rst" => Self::Markdown,
-            _ => Self::Unknown,
-        }
-    }
-
-    /// Canonical display name. Used by `ecp find --mode bm25` to emit the `language`
-    /// field on each Hit. Overrides Debug formatting for `Php` ("PHP") and
-    /// `Cpp` ("C++") where the conventional name differs from the variant
-    /// identifier.
-    pub fn as_str(&self) -> &'static str {
+impl ResolveTarget {
+    pub fn kind_predicate(self) -> fn(NodeKind) -> bool {
         match self {
-            Self::Unknown => "Unknown",
-            Self::Rust => "Rust",
-            Self::Python => "Python",
-            Self::TypeScript => "TypeScript",
-            Self::JavaScript => "JavaScript",
-            Self::Java => "Java",
-            Self::Kotlin => "Kotlin",
-            Self::Go => "Go",
-            Self::Ruby => "Ruby",
-            Self::Php => "PHP",
-            Self::CSharp => "CSharp",
-            Self::Swift => "Swift",
-            Self::Dart => "Dart",
-            Self::Solidity => "Solidity",
-            Self::Sql => "SQL",
-            Self::C => "C",
-            Self::Cpp => "C++",
-            Self::Move => "Move",
-            Self::Nim => "Nim",
-            Self::Cairo => "Cairo",
-            Self::Vyper => "Vyper",
-            Self::Verilog => "Verilog",
-            Self::Hcl => "HCL",
-            Self::Crystal => "Crystal",
-            Self::Lua => "Lua",
-            Self::Zig => "Zig",
-            Self::Bash => "Bash",
-            Self::Dockerfile => "Dockerfile",
-            Self::DockerCompose => "DockerCompose",
-            Self::GitHubActions => "GitHubActions",
-            Self::Yaml => "YAML",
-            Self::Markdown => "Markdown",
-            Self::Kubernetes => "Kubernetes",
-        }
-    }
-}
-
-/// Build-time metadata about a file, cached per node id so `lookup_unique_global`
-/// can apply caller-vs-candidate barriers (language match + vendor isolation)
-/// without re-parsing the path on every Tier-3 probe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct FileMeta {
-    /// Path contains a `/vendor/` segment. Non-vendor callers must not resolve
-    /// to vendor targets — vendor grammar test corpora share short common names
-    /// (`is_some`, `get`, `new`) with stdlib methods, producing one false edge
-    /// per call site that survives the kind+unique filter.
-    pub is_vendor: bool,
-    pub language: Language,
-}
-
-impl FileMeta {
-    pub fn from_path(path: &str) -> Self {
-        if path.contains('\\') {
-            let normalized = path.replace('\\', "/");
-            Self::from_normalized_path(&normalized)
-        } else {
-            Self::from_normalized_path(path)
-        }
-    }
-
-    /// Fast path for callers that have already normalised separators. Skips
-    /// the `replace('\\','/')` allocation (one per call) — meaningful in Pass
-    /// 1 where this is called per node (~300k on `.sample_repo`).
-    pub fn from_normalized_path(path: &str) -> Self {
-        Self {
-            is_vendor: path.contains("/vendor/") || path.starts_with("vendor/"),
-            language: Language::from_normalized_path(path),
+            Self::Callable => NodeKind::is_callable,
+            Self::Type => NodeKind::is_type,
+            Self::Qualifier => NodeKind::is_qualifier,
+            Self::Field => NodeKind::is_property,
         }
     }
 }
@@ -270,6 +81,11 @@ pub struct SymbolTable {
     /// File metadata per node (language + vendor flag). Cached so the Tier-3
     /// barrier check is O(1) per candidate. Parallel-indexed with `node_kinds`.
     node_file_meta: Vec<FileMeta>,
+
+    /// File metadata per registered file path. The resolver reads the
+    /// caller's meta here instead of re-classifying its path on every
+    /// Tier-3 probe.
+    file_meta: FxHashMap<String, FileMeta>,
 
     /// Basename-stem → file paths sharing that stem. Populated once after
     /// Pass 1 via [`SymbolTable::build_stem_index`]; the resolver's Tier-4
@@ -324,7 +140,7 @@ impl SymbolTable {
     ///
     /// `node_id` must be the monotonic sequential index assigned by the builder
     /// (debug-asserted), so `node_kinds[id]` / `node_file_meta[id]` indexing
-    /// works in `lookup_unique_global`.
+    /// works in `lookup_global`.
     pub fn register_node(
         &mut self,
         file_path: &str,
@@ -365,8 +181,16 @@ impl SymbolTable {
         // Reverse map for dump-side lookup
         self.id_to_file.insert(node_id, file_path.to_string());
 
+        let meta = match self.file_meta.get(file_path) {
+            Some(&meta) => meta,
+            None => {
+                let meta = FileMeta::from_path(file_path);
+                self.file_meta.insert(file_path.to_string(), meta);
+                meta
+            }
+        };
         self.node_kinds.push(kind);
-        self.node_file_meta.push(FileMeta::from_path(file_path));
+        self.node_file_meta.push(meta);
     }
 
     /// Hot-path variant of `register_node` for callers that already
@@ -403,6 +227,7 @@ impl SymbolTable {
             let mut m = FxHashMap::default();
             m.insert(node_name.to_string(), vec![node_id]);
             self.file_scoped.insert(file_path.to_string(), m);
+            self.file_meta.insert(file_path.to_string(), file_meta);
         }
 
         if let Some(list) = self.global_scoped.get_mut(node_name) {
@@ -423,7 +248,7 @@ impl SymbolTable {
     /// the node to `file_scoped`, `global_scoped`, or `id_to_file`. Tombstones
     /// occupy a node-ID slot so that subsequent registrations get the correct
     /// ID, but they are invisible to all name-based lookups — no edge emitter
-    /// can obtain a tombstone node_id via `lookup_in_file` / `lookup_unique_global`.
+    /// can obtain a tombstone node_id via `lookup_in_file` / `lookup_global`.
     ///
     /// Used for UID-collision-dropped nodes (D1 recovery): the colliding raw node
     /// still needs to occupy a position in `nodes` (to keep `start_indices`
@@ -460,61 +285,39 @@ impl SymbolTable {
         target: ResolveTarget,
     ) -> Option<u32> {
         let ids = self.file_scoped.get(file_path)?.get(node_name)?;
-        let predicate: fn(NodeKind) -> bool = match target {
-            ResolveTarget::Callable => NodeKind::is_callable,
-            ResolveTarget::Type => NodeKind::is_type,
-            ResolveTarget::Qualifier => NodeKind::is_qualifier,
-            ResolveTarget::Field => NodeKind::is_property,
-        };
+        let predicate = target.kind_predicate();
         ids.iter()
             .copied()
             .find(|&id| predicate(self.node_kinds[id as usize]))
     }
 
-    /// Tier-3 global lookup: returns the single node id matching `name` whose
-    /// kind satisfies `target` AND whose file meta is reachable from the
-    /// caller (same language + non-vendor unless caller is also vendor), or
-    /// `None` if zero or ≥2 such candidates remain.
-    ///
-    /// Layered defences against bare-name fan-out:
-    ///   * Kind filter — Callable/Type narrowing.
-    ///   * Language barrier — Rust caller never resolves to a Move target.
-    ///   * Vendor barrier — non-vendor caller never reaches into vendor corpus.
-    ///   * Uniqueness — refuse to guess when ≥2 candidates remain post-filter.
-    ///
-    /// Short-circuits on the second matching candidate without allocating an
-    /// intermediate Vec.
-    pub fn lookup_unique_global(
+    /// Tier-3 global lookup: kind-filtered same-name candidates through the
+    /// shared barrier and tie-break filter, [`pick_global`].
+    pub fn lookup_global(
         &self,
         node_name: &str,
         target: ResolveTarget,
         caller: FileMeta,
-    ) -> Option<u32> {
-        let raw = self.global_scoped.get(node_name)?;
-        let predicate: fn(NodeKind) -> bool = match target {
-            ResolveTarget::Callable => NodeKind::is_callable,
-            ResolveTarget::Type => NodeKind::is_type,
-            ResolveTarget::Qualifier => NodeKind::is_qualifier,
-            ResolveTarget::Field => NodeKind::is_property,
+    ) -> GlobalPick {
+        let Some(raw) = self.global_scoped.get(node_name) else {
+            return GlobalPick::NoMatch;
         };
-        let mut found = None;
-        for &id in raw {
-            let cand = self.node_file_meta[id as usize];
-            if cand.language != caller.language {
-                continue;
-            }
-            if cand.is_vendor && !caller.is_vendor {
-                continue;
-            }
-            if !predicate(self.node_kinds[id as usize]) {
-                continue;
-            }
-            if found.is_some() {
-                return None;
-            }
-            found = Some(id);
-        }
-        found
+        let predicate = target.kind_predicate();
+        pick_global(
+            caller,
+            raw.iter()
+                .filter(|&&id| predicate(self.node_kinds[id as usize]))
+                .map(|&id| (id, self.node_file_meta[id as usize])),
+        )
+    }
+
+    /// The caller-side [`FileMeta`] for `file_path`, cached at registration.
+    /// A file with no registered node falls back to classifying the path.
+    pub fn file_meta(&self, file_path: &str) -> FileMeta {
+        self.file_meta
+            .get(file_path)
+            .copied()
+            .unwrap_or_else(|| FileMeta::from_path(file_path))
     }
 
     /// Total count of same-named candidates (before kind/locality filters).
@@ -524,43 +327,6 @@ impl SymbolTable {
             .get(node_name)
             .map(|v| v.len() as u32)
             .unwrap_or(0)
-    }
-
-    /// Post-filter candidate count for the same predicate chain that
-    /// `lookup_unique_global` walks (language barrier, vendor barrier,
-    /// kind filter). Called on lookup miss only — the hot Tier-3 path
-    /// still short-circuits via `lookup_unique_global` and only invokes
-    /// this when it needs to tell `AmbiguousGlobal` from `Unresolved`.
-    pub fn count_global_kind_filtered(
-        &self,
-        node_name: &str,
-        target: ResolveTarget,
-        caller: FileMeta,
-    ) -> u32 {
-        let Some(raw) = self.global_scoped.get(node_name) else {
-            return 0;
-        };
-        let predicate: fn(NodeKind) -> bool = match target {
-            ResolveTarget::Callable => NodeKind::is_callable,
-            ResolveTarget::Type => NodeKind::is_type,
-            ResolveTarget::Qualifier => NodeKind::is_qualifier,
-            ResolveTarget::Field => NodeKind::is_property,
-        };
-        let mut count = 0u32;
-        for &id in raw {
-            let cand = self.node_file_meta[id as usize];
-            if cand.language != caller.language {
-                continue;
-            }
-            if cand.is_vendor && !caller.is_vendor {
-                continue;
-            }
-            if !predicate(self.node_kinds[id as usize]) {
-                continue;
-            }
-            count += 1;
-        }
-        count
     }
 
     /// Reverse lookup: given a `node_id`, return its owning file path. Used by

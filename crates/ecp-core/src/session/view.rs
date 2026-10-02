@@ -43,7 +43,8 @@
 //!   never re-resolved at query time.
 
 use crate::analyzer::types::RawImport;
-use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
+use crate::file_category::{pick_global, FileMeta};
+use crate::graph::{ArchivedZeroCopyGraph, FileCategory, NodeKind, RelType};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 
@@ -202,9 +203,13 @@ impl OverlayView {
         {
             // (file ordinal, name) → virtual idxs of callable symbols: Tier 1.
             let mut same_file_callables: FxHashMap<(usize, &str), Vec<u32>> = FxHashMap::default();
-            // name → virtual idxs of callable symbols anywhere in the
-            // overlay: participates in Tier-3 global-uniqueness counting.
-            let mut overlay_callables: FxHashMap<&str, Vec<u32>> = FxHashMap::default();
+            // name → (virtual idx, file meta) of callable symbols anywhere in
+            // the overlay: participates in the Tier-3 candidate filter.
+            let mut overlay_callables: FxHashMap<&str, Vec<(u32, FileMeta)>> = FxHashMap::default();
+            let file_metas: Vec<FileMeta> = files
+                .iter()
+                .map(|f| FileMeta::from_path(&f.rel_path))
+                .collect();
 
             let mut virt_off = 0usize;
             for (file_ord, file) in files.iter().enumerate() {
@@ -219,7 +224,7 @@ impl OverlayView {
                         overlay_callables
                             .entry(node.name.as_str())
                             .or_default()
-                            .push(virt);
+                            .push((virt, file_metas[file_ord]));
                     }
                     virt_off += 1;
                 }
@@ -250,6 +255,7 @@ impl OverlayView {
                             callee,
                             file_ord,
                             file,
+                            file_metas[file_ord],
                             &same_file_callables,
                             &overlay_callables,
                             &replaced,
@@ -361,18 +367,20 @@ impl OverlayView {
 /// Tier 2 — import-scoped: callee name appears as an import's name/alias;
 /// candidates narrowed to files matching the import source's last path
 /// segment. Unique → 0.95.
-/// Tier 3 — global unique: all clean-base callables (via the archived
-/// `name_index`) plus all overlay callables. ≥2 candidates → suppressed,
-/// matching `DecisionTier::AmbiguousGlobal` (an invented edge is worse than
-/// a missing one). Unique → 0.7.
+/// Tier 3 — global: all clean-base callables (via the archived `name_index`)
+/// plus all overlay callables, through the index-time candidate filter
+/// [`pick_global`] (language and vendor barriers, test tie-break). ≥2
+/// remaining → suppressed, matching `DecisionTier::AmbiguousGlobal` (an
+/// invented edge is worse than a missing one). Picked → 0.7.
 #[allow(clippy::too_many_arguments)]
 fn resolve_callee(
     graph: &ArchivedZeroCopyGraph,
     callee: &str,
     file_ord: usize,
     file: &OverlayFileInput,
+    caller: FileMeta,
     same_file_callables: &FxHashMap<(usize, &str), Vec<u32>>,
-    overlay_callables: &FxHashMap<&str, Vec<u32>>,
+    overlay_callables: &FxHashMap<&str, Vec<(u32, FileMeta)>>,
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
 ) -> Option<(u32, f32)> {
@@ -395,7 +403,7 @@ fn resolve_callee(
                 && !dirty_base.contains(&idx)
         })
         .collect();
-    let overlay_candidates: &[u32] = overlay_callables
+    let overlay_candidates: &[(u32, FileMeta)] = overlay_callables
         .get(callee)
         .map(Vec::as_slice)
         .unwrap_or(&[]);
@@ -431,16 +439,25 @@ fn resolve_callee(
         }
     }
 
-    // Tier 3: global uniqueness over clean base + overlay. Same invariant as
-    // Tier 2: a base candidate is clean by construction, never redirected.
-    match (base_candidates.len(), overlay_candidates.len()) {
-        (1, 0) => {
-            debug_assert!(!replaced.contains_key(&base_candidates[0]));
-            Some((base_candidates[0], CONF_GLOBAL_UNIQUE))
-        }
-        (0, 1) => Some((overlay_candidates[0], CONF_GLOBAL_UNIQUE)),
-        _ => None,
-    }
+    // Tier 3: the shared candidate filter over clean base + overlay. Same
+    // invariant as Tier 2: a base candidate is clean by construction, never
+    // redirected; overlay candidates are virtual indices.
+    let base = base_candidates.iter().map(|&idx| {
+        let file_idx = graph.nodes[idx as usize].file_idx.to_native() as usize;
+        let meta = graph
+            .files
+            .get(file_idx)
+            .map_or_else(FileMeta::default, |f| {
+                FileMeta::with_category(
+                    f.path.resolve(&graph.string_pool),
+                    FileCategory::from(&f.category),
+                )
+            });
+        (idx, meta)
+    });
+    let target = pick_global(caller, base.chain(overlay_candidates.iter().copied())).target()?;
+    debug_assert!(!replaced.contains_key(&target));
+    Some((target, CONF_GLOBAL_UNIQUE))
 }
 
 /// Last path-ish segment of an import source across language conventions:
@@ -646,5 +663,59 @@ mod tests {
         assert!(view
             .overlay_in(keep_virt)
             .any(|(_, e)| e.source == caller_two_virt));
+    }
+
+    /// files: 0 = src/service.py · 1 = tests/fakes.py (Test) · 2 = src/helper.go
+    /// nodes: 0 scan_range(service) · 1 scan_range(fakes) · 2 go_only(helper)
+    fn barrier_graph_bytes() -> Vec<u8> {
+        let mut fx = GraphFixture::new();
+        fx.file("src/service.py");
+        fx.file_as("tests/fakes.py", FileCategory::Test);
+        fx.file("src/helper.go");
+        fx.func("src/service.py", "scan_range");
+        fx.func("tests/fakes.py", "scan_range");
+        fx.func("src/helper.go", "go_only");
+        fx.into_bytes()
+    }
+
+    fn search_input(rel_path: &str) -> OverlayFileInput {
+        OverlayFileInput {
+            rel_path: rel_path.to_string(),
+            symbols: vec![sym("search", &["scan_range", "go_only"])],
+            imports: vec![],
+        }
+    }
+
+    #[test]
+    fn test_tier3_overlay_production_caller_skips_test_double() {
+        let bytes = barrier_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let view = OverlayView::build(graph, &[search_input("src/search.py")]).unwrap();
+        let search = view.base_len();
+
+        let e = edge_to(&view, search, 0).expect("search → production scan_range");
+        assert_eq!(e.confidence, 0.7);
+        assert!(edge_to(&view, search, 1).is_none());
+    }
+
+    #[test]
+    fn test_tier3_overlay_test_caller_with_test_double_stays_ambiguous() {
+        let bytes = barrier_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let view = OverlayView::build(graph, &[search_input("tests/test_search.py")]).unwrap();
+        let search = view.base_len();
+
+        assert!(edge_to(&view, search, 0).is_none());
+        assert!(edge_to(&view, search, 1).is_none());
+    }
+
+    #[test]
+    fn test_tier3_overlay_language_barrier_matches_index() {
+        // The index never resolves a Python call to a Go function; the
+        // overlay used to, because its Tier 3 checked only the node kind.
+        let bytes = barrier_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let view = OverlayView::build(graph, &[search_input("src/search.py")]).unwrap();
+        assert!(edge_to(&view, view.base_len(), 2).is_none());
     }
 }

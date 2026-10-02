@@ -44,7 +44,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::resolution::heuristics::ResolutionTier;
-use crate::resolution::index::{FileMeta, ResolveTarget, SymbolTable};
+use crate::resolution::index::{GlobalPick, ResolveTarget, SymbolTable};
 use crate::resolution::path_aliases::PathAliases;
 use crate::rust::module_tree::RustWorkspaceModTree;
 
@@ -78,6 +78,10 @@ pub enum DecisionTier {
     /// [`ResolutionTier::HeritageScoped`]).
     HeritageScoped,
     Global,
+    /// Tier 3 left several candidates, exactly one outside test files, and
+    /// the caller is not a test: resolved to that one. Split from `Global`
+    /// so the verification harness can count the tie-break separately.
+    GlobalNonTest,
     /// Tier 3 produced ≥2 kind-filtered candidates and suppressed the edge.
     /// Distinct from `Unresolved` (=0 candidates) so the verification
     /// harness can tell "no defence needed" from "defence fired" without
@@ -460,45 +464,38 @@ impl<'a> Resolver<'a> {
             })
             .map(|i| i.source.as_str());
         let raw_count = self.symbol_table.global_match_count(symbol_name);
-        let caller_meta = FileMeta::from_path(&source_file_str);
+        let caller_meta = self.symbol_table.file_meta(&source_file_str);
 
-        if let Some(node_id) =
-            self.symbol_table
-                .lookup_unique_global(symbol_name, target, caller_meta)
-        {
-            results.push((node_id, ResolutionTier::Global.base_confidence()));
-            self.record(
-                &source_file_str,
-                symbol_name,
-                specifier,
-                DecisionTier::Global,
-                Some(node_id),
-                raw_count.saturating_sub(1),
-                Some(ResolutionTier::Global.base_confidence()),
-            );
-        } else {
-            // Distinguish "no candidates" from "≥2 candidates, suppressed
-            // by the unique-only cap". The post-filter count walks the
-            // same predicates as `lookup_unique_global` so the two views
-            // can't drift. Cost paid only on miss (Tier 3 hits skip this).
-            let filtered =
-                self.symbol_table
-                    .count_global_kind_filtered(symbol_name, target, caller_meta);
-            let tier = if filtered >= 2 {
-                DecisionTier::AmbiguousGlobal
-            } else {
-                DecisionTier::Unresolved
-            };
-            self.record(
-                &source_file_str,
-                symbol_name,
-                specifier,
-                tier,
-                None,
-                raw_count,
-                None,
-            );
+        let pick = self
+            .symbol_table
+            .lookup_global(symbol_name, target, caller_meta);
+        let tier = match pick {
+            GlobalPick::Unique(_) => DecisionTier::Global,
+            GlobalPick::NonTest(_) => DecisionTier::GlobalNonTest,
+            GlobalPick::Ambiguous(_) => DecisionTier::AmbiguousGlobal,
+            GlobalPick::NoMatch => DecisionTier::Unresolved,
+        };
+        // A test-double tie-break keeps Global confidence: the production
+        // candidate is as certain as a unique one, since production code
+        // cannot call into a test file.
+        let target_id = pick.target();
+        let confidence = target_id.map(|_| ResolutionTier::Global.base_confidence());
+        if let (Some(node_id), Some(conf)) = (target_id, confidence) {
+            results.push((node_id, conf));
         }
+        let alt_count = match target_id {
+            Some(_) => raw_count.saturating_sub(1),
+            None => raw_count,
+        };
+        self.record(
+            &source_file_str,
+            symbol_name,
+            specifier,
+            tier,
+            target_id,
+            alt_count,
+            confidence,
+        );
 
         results
     }
@@ -903,10 +900,11 @@ impl<'a> Resolver<'a> {
         // declaration-file from outranking the file-stem fallback when
         // members live elsewhere (`mod foo;` declaration in lib.rs vs.
         // `fn bar()` body in foo.rs).
-        let caller_meta = FileMeta::from_path(&source_file_str);
-        if let Some(id) =
-            self.symbol_table
-                .lookup_unique_global(qualifier, ResolveTarget::Qualifier, caller_meta)
+        let caller_meta = self.symbol_table.file_meta(&source_file_str);
+        if let Some(id) = self
+            .symbol_table
+            .lookup_global(qualifier, ResolveTarget::Qualifier, caller_meta)
+            .target()
         {
             if let Some(qf) = self.symbol_table.file_of(id) {
                 if self
@@ -1706,5 +1704,98 @@ mod tests {
 
         let last = r.take_decisions().unwrap().pop().unwrap();
         assert_eq!(last.tier, DecisionTier::Global);
+    }
+
+    // ── Test-double tie-break ────────────────────────────────────────────────
+
+    const LANGS_14: &[&str] = &[
+        "ts", "js", "py", "java", "kt", "cs", "go", "rs", "php", "rb", "swift", "c", "cpp", "dart",
+    ];
+
+    #[test]
+    fn tier3_test_double_does_not_hide_production_target_across_14_langs() {
+        // A test fake sharing a production method's name used to make every
+        // production call to it AmbiguousGlobal (no edge). Production code
+        // cannot call a test double, so the production definition wins.
+        for ext in LANGS_14 {
+            let st = st_with(&[
+                (
+                    Box::leak(format!("src/service.{ext}").into_boxed_str()),
+                    "scan_range",
+                    NodeKind::Function,
+                ),
+                (
+                    Box::leak(format!("tests/fakes.{ext}").into_boxed_str()),
+                    "scan_range",
+                    NodeKind::Function,
+                ),
+            ]);
+            let mut r = Resolver::new(&st);
+            r.enable_dump();
+            let out = r.resolve_symbol(
+                &PathBuf::from(format!("src/search.{ext}")),
+                "scan_range",
+                &[],
+                ResolveTarget::Callable,
+            );
+            assert_eq!(
+                out,
+                vec![(0, ResolutionTier::Global.base_confidence())],
+                "{ext}: production caller must resolve to the production definition"
+            );
+            let last = r.take_decisions().unwrap().pop().unwrap();
+            assert_eq!(last.tier, DecisionTier::GlobalNonTest, "{ext}");
+            assert_eq!(last.target_id, Some(0), "{ext}");
+        }
+    }
+
+    #[test]
+    fn tier3_test_caller_with_test_double_stays_ambiguous_across_14_langs() {
+        for ext in LANGS_14 {
+            let st = st_with(&[
+                (
+                    Box::leak(format!("src/service.{ext}").into_boxed_str()),
+                    "scan_range",
+                    NodeKind::Function,
+                ),
+                (
+                    Box::leak(format!("tests/fakes.{ext}").into_boxed_str()),
+                    "scan_range",
+                    NodeKind::Function,
+                ),
+            ]);
+            let mut r = Resolver::new(&st);
+            r.enable_dump();
+            let out = r.resolve_symbol(
+                &PathBuf::from(format!("tests/search_check.{ext}")),
+                "scan_range",
+                &[],
+                ResolveTarget::Callable,
+            );
+            assert!(out.is_empty(), "{ext}: a test caller may mean either one");
+            let last = r.take_decisions().unwrap().pop().unwrap();
+            assert_eq!(last.tier, DecisionTier::AmbiguousGlobal, "{ext}");
+        }
+    }
+
+    #[test]
+    fn tier3_two_production_definitions_stay_ambiguous_despite_test_double() {
+        let st = st_with(&[
+            ("src/ig.py", "refresh_long_lived", NodeKind::Method),
+            ("src/threads.py", "refresh_long_lived", NodeKind::Method),
+            (
+                "tests/test_refresh.py",
+                "refresh_long_lived",
+                NodeKind::Method,
+            ),
+        ]);
+        let r = Resolver::new(&st);
+        let out = r.resolve_symbol(
+            &PathBuf::from("src/job.py"),
+            "refresh_long_lived",
+            &[],
+            ResolveTarget::Callable,
+        );
+        assert!(out.is_empty());
     }
 }
