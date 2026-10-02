@@ -2,6 +2,7 @@ use super::Direction;
 use crate::commands::format::{kind_to_str, node_kind_to_str, rel_type_to_str};
 use crate::commands::symbol_id::resolve_owner_class;
 use ecp_core::file_category::is_test_path;
+use ecp_core::graph::ArchivedFileCategory;
 use ecp_core::session::{MergedEdge, MergedGraph, OverlayView};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{json, Value};
@@ -51,33 +52,30 @@ pub(super) fn merged_node_meta(
 /// copy and run `path_walks_the_same_graph_as_impact` in
 /// `tests/path_query.rs`, which holds the two together.
 ///
-/// `test_path_cache` is keyed by base file index; overlay nodes carry their own
-/// path and bypass it.
+/// Base nodes read the persisted `File.category`; overlay nodes carry only
+/// their path and classify it with the same function the indexer used.
 fn node_traversable(
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
     view: Option<&OverlayView>,
     idx: usize,
     include_tests: bool,
-    test_path_cache: &mut FxHashMap<usize, bool>,
 ) -> bool {
     if idx < graph.nodes.len() {
         let node = &graph.nodes[idx];
         if !node.has_owning_file() {
             return false;
         }
-        if include_tests {
-            return true;
-        }
-        let file_idx = node.file_idx.to_native() as usize;
-        !*test_path_cache
-            .entry(file_idx)
-            .or_insert_with(|| is_test_path(graph.files[file_idx].path.resolve(&graph.string_pool)))
+        include_tests || !base_file_is_test(graph, node.file_idx.to_native() as usize)
     } else {
         let vn = view
             .and_then(|v| v.node(idx as u32))
             .expect("virtual index probed without a view");
         include_tests || !is_test_path(&vn.rel_path)
     }
+}
+
+fn base_file_is_test(graph: &ecp_core::graph::ArchivedZeroCopyGraph, file_idx: usize) -> bool {
+    matches!(graph.files[file_idx].category, ArchivedFileCategory::Test)
 }
 
 /// `Some((heuristic, confidence))` when a walk may follow this edge.
@@ -212,7 +210,6 @@ pub(crate) fn shortest_path<'g>(
     let merged = MergedGraph::new(graph, view);
     let mut pred: FxHashMap<usize, Option<Hop<'g>>> = FxHashMap::default();
     let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
-    let mut test_path_cache = FxHashMap::default();
 
     for &start in starts {
         if pred.insert(start, None).is_none() {
@@ -222,13 +219,7 @@ pub(crate) fn shortest_path<'g>(
 
     let mut reached = None;
     while let Some((curr_idx, curr_depth)) = queue.pop_front() {
-        if !node_traversable(
-            graph,
-            view,
-            curr_idx,
-            opts.include_tests,
-            &mut test_path_cache,
-        ) {
+        if !node_traversable(graph, view, curr_idx, opts.include_tests) {
             continue;
         }
         if goals.contains(&curr_idx) {
@@ -303,7 +294,8 @@ pub(crate) fn shortest_path<'g>(
 /// `start_idx`, which is a MERGED-space index: `< graph.nodes.len()` = base
 /// node, above = overlay virtual node.
 ///
-/// Returns `(det_results, heur_results, hidden_conf_edges, hidden_heuristic_edges)`.
+/// Returns `(det_results, heur_results, hidden_conf_edges, hidden_heuristic_edges,
+/// hidden_test_callers)`.
 /// The start node appears at depth 0 in `det_results`.
 ///
 /// - `det_results`: nodes reached exclusively via deterministic edges.
@@ -314,6 +306,11 @@ pub(crate) fn shortest_path<'g>(
 /// - `hidden_heuristic_edges`: heuristic edges skipped when `include_heuristic`
 ///   is false. These are the structural signal surfaced as
 ///   `hidden_heuristic_edges: N` in the output payload.
+/// - `hidden_test_callers`: test-file nodes reached but dropped because
+///   `include_tests` is false. Each node counts once (the visited set).
+///
+/// Every emitted node carries `test: bool`, so a caller list that mixes
+/// production and test callers stays separable.
 ///
 /// `--include-tests` / `--relation-types` / `min_conf` are applied here;
 /// `--kind` / `--file` emission-only filtering is NOT applied here.
@@ -338,7 +335,7 @@ pub(super) fn run_bfs<'g>(
     rel_filter: &Option<Vec<String>>,
     include_heuristic: bool,
     max_results: Option<usize>,
-) -> (Vec<Value>, Vec<Value>, u64, u64) {
+) -> (Vec<Value>, Vec<Value>, u64, u64, u64) {
     // (node_idx, depth, via_edge_info, reached_via_heuristic). The reason is
     // borrowed from the string pool: a hub enqueues six figures of nodes at
     // depth 2, and an owned String per node was the largest allocation here.
@@ -351,22 +348,23 @@ pub(super) fn run_bfs<'g>(
     let mut queue: VecDeque<Step<'g>> = VecDeque::new();
     let mut det_results: Vec<Value> = Vec::new();
     let mut heur_results: Vec<Value> = Vec::new();
-    let mut test_path_cache = FxHashMap::default();
     let mut hidden_conf_edges: u64 = 0;
     let mut hidden_heuristic_edges: u64 = 0;
+    let mut hidden_test_callers: u64 = 0;
 
     queue.push_back((start_idx, 0, None, false));
     visited.insert(start_idx);
 
     while let Some((curr_idx, curr_depth, via, via_heuristic)) = queue.pop_front() {
         // ── node emission (merged space: < base_len = base, else virtual) ──
-        let (uid, name, owner_class, kind_str, file_path, line): (
+        let (uid, name, owner_class, kind_str, file_path, line, is_test): (
             u64,
             String,
             Option<String>,
             &'static str,
             String,
             u32,
+            bool,
         );
         if curr_idx < base_len {
             let curr_node = &graph.nodes[curr_idx];
@@ -376,14 +374,10 @@ pub(super) fn run_bfs<'g>(
                 continue;
             }
             let file_idx = curr_node.file_idx.to_native() as usize;
-            if !include_tests {
-                let is_test = *test_path_cache.entry(file_idx).or_insert_with(|| {
-                    let file_path = graph.files[file_idx].path.resolve(&graph.string_pool);
-                    is_test_path(file_path)
-                });
-                if is_test {
-                    continue;
-                }
+            is_test = base_file_is_test(graph, file_idx);
+            if is_test && !include_tests {
+                hidden_test_callers += 1;
+                continue;
             }
             uid = curr_node.uid.to_native();
             name = curr_node.name.resolve(&graph.string_pool).to_string();
@@ -400,7 +394,9 @@ pub(super) fn run_bfs<'g>(
             let vn = view
                 .and_then(|v| v.node(curr_idx as u32))
                 .expect("virtual index enqueued without a view");
-            if !include_tests && is_test_path(&vn.rel_path) {
+            is_test = is_test_path(&vn.rel_path);
+            if is_test && !include_tests {
+                hidden_test_callers += 1;
                 continue;
             }
             uid = vn.uid;
@@ -422,6 +418,7 @@ pub(super) fn run_bfs<'g>(
             "depth": curr_depth,
             "viaReason": via_reason,
             "viaConfidence": via_confidence,
+            "test": is_test,
         });
         if via_heuristic {
             heur_results.push(entry);
@@ -499,5 +496,6 @@ pub(super) fn run_bfs<'g>(
         heur_results,
         hidden_conf_edges,
         hidden_heuristic_edges,
+        hidden_test_callers,
     )
 }

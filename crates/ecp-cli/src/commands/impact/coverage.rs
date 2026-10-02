@@ -136,7 +136,7 @@ fn coverage_bfs_for_symbol(
     }
     // Coverage analysis only consumes deterministic upstream callers — discard
     // the heuristic / hidden-count fields from #264's expanded run_bfs return.
-    let (det_results, _heur, _hidden_conf, _hidden_heur) = run_bfs(
+    let (det_results, _heur, _hidden_conf, _hidden_heur, _hidden_tests) = run_bfs(
         graph,
         view,
         symbol_idx,

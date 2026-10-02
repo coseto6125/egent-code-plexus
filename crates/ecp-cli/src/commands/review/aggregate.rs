@@ -96,6 +96,7 @@ fn run_impact(
         high_trust_only: false,
         min_confidence: None,
         include_tests: false,
+        exclude_tests: false,
         relation_types: None,
         repo: Some(repo_dir.to_string_lossy().into_owned()),
         test_coverage: false,

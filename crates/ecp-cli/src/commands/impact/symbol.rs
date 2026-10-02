@@ -5,7 +5,8 @@ use super::{
     parse_csv_lower, resolve_min_conf, ImpactArgs, ImpactHints, DEFAULT_CONFIDENCE_THRESHOLD,
 };
 use crate::commands::impact::{
-    attach_heuristic_fields, attach_hidden_edges, direction_str, Direction,
+    attach_heuristic_fields, attach_hidden_edges, attach_hidden_test_callers, direction_str,
+    Direction,
 };
 use crate::commands::symbol_id::{format_fqn, resolve_candidates, split_fqn_target};
 use crate::engine::Engine;
@@ -94,6 +95,7 @@ pub fn run_for_symbol(
         high_trust_only: false,
         min_confidence: None,
         include_tests,
+        exclude_tests: false,
         relation_types: None,
         repo: Some(member_repo.to_string()),
         test_coverage: false,
@@ -185,6 +187,7 @@ pub(super) fn impact_by_name(
     let mut all_heuristic_results: Vec<Value> = Vec::new();
     let mut hidden_edges_total: u64 = 0;
     let mut hidden_heuristic_total: u64 = 0;
+    let mut hidden_test_total: u64 = 0;
     let mut per_match_bfs: Vec<(usize, Vec<Value>)> = Vec::new();
     for start_idx in &matches {
         // A budget across the WHOLE call, not per match: a name with k
@@ -194,7 +197,7 @@ pub(super) fn impact_by_name(
         if remaining == Some(0) {
             break;
         }
-        let (det_results, heur_results, hidden_conf, hidden_heur) = run_bfs(
+        let (det_results, heur_results, hidden_conf, hidden_heur, hidden_tests) = run_bfs(
             graph,
             view,
             *start_idx,
@@ -215,6 +218,7 @@ pub(super) fn impact_by_name(
         all_heuristic_results.extend(heur_results);
         hidden_edges_total += hidden_conf;
         hidden_heuristic_total += hidden_heur;
+        hidden_test_total += hidden_tests;
     }
 
     // Empty callers hint for upstream direction.
@@ -254,6 +258,7 @@ pub(super) fn impact_by_name(
     let mut result_obj =
         serde_json::to_value(&payload).map_err(|e| EcpError::Serialization(e.to_string()))?;
     attach_hidden_edges(&mut result_obj, hidden_edges_total);
+    attach_hidden_test_callers(&mut result_obj, hidden_test_total);
     attach_heuristic_fields(
         &mut result_obj,
         hidden_heuristic_total,
@@ -317,6 +322,7 @@ pub(super) fn impact_by_name(
             empty_hint_is_field,
             hidden_edges: hidden_edges_total,
             hidden_heuristic_edges: hidden_heuristic_total,
+            hidden_test_callers: hidden_test_total,
             ambiguity_caveat,
         },
     ))

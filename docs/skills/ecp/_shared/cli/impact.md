@@ -17,7 +17,7 @@ ecp impact <SYMBOL> [--direction up] [--repo <PATH>]
 - `--direction`: `up` (who calls me — default), `down` (who I call), or `both`.
 - `--baseline origin/main`: Compare against a branch to see impact of staged changes.
 - `--kind`, `--file_path`: Filter the results.
-- `--include-tests`: Include test files in the impact analysis.
+- Test-file callers are listed by default, each entry tagged `test: true`. `--exclude-tests` drops them and reports `hidden_test_callers: N`.
 
 ### Path-literal site lookup
 
