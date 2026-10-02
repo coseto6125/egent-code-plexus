@@ -1216,6 +1216,90 @@ fn seed_virtuals(graph: MergedGraph<'_>, np: &NodePat, mut push: impl FnMut(u32)
     }
 }
 
+/// First-node seeds for the who-calls shape `(a)-[:Calls]->(b {name:'x'})`:
+/// one hop, and the only inline constraint is a `name` on the far end.
+/// The full first-node scan clones a `Binding` per node before the hop
+/// filters on `b` (vscode: 496k clones, 0.27 s / 429 MB). Here the seeds come
+/// from the name-index hits, walked one hop backwards, so they are every
+/// scanned node that can still produce a row. They come back in the scan's
+/// own visit order, and the forward hop in `exec_pattern` still runs over
+/// them. The rows, their order and parallel edges therefore stay the scan's.
+///
+/// `None` keeps the scan. An overlay is excluded: its virtual seeds and
+/// merged edges have their own order. An empty name is excluded because the
+/// name index skips tombstones, which the scan still matches.
+fn far_end_name_seeds(
+    pat: &Pattern,
+    base: &Binding,
+    graph: MergedGraph<'_>,
+    use_kind_csr: bool,
+) -> Option<Vec<u32>> {
+    let [first_np, last_np] = pat.nodes.as_slice() else {
+        return None;
+    };
+    let [rel] = pat.rels.as_slice() else {
+        return None;
+    };
+    let bound = |np: &NodePat| {
+        np.var
+            .as_deref()
+            .is_some_and(|v| base.node_vars.contains_key(v))
+    };
+    if graph.view().is_some()
+        || graph.name_index.is_empty()
+        || rel.range.is_some()
+        || rel.dir == Direction::Both
+        || !first_np.props.is_empty()
+        || bound(first_np)
+        || bound(last_np)
+    {
+        return None;
+    }
+    let name = last_np
+        .props
+        .iter()
+        .find_map(|(key, lit)| match (key.as_str(), lit) {
+            ("name", Literal::Str(s)) if !s.is_empty() => Some(s.as_str()),
+            _ => None,
+        })?;
+
+    let back = RelPat {
+        dir: invert_dir(rel.dir),
+        ..rel.clone()
+    };
+    let mut seeds: Vec<u32> = Vec::new();
+    for far in graph.nodes_by_name(name) {
+        if !node_matches(far, last_np, graph) {
+            continue;
+        }
+        walk_rel(far, &back, graph, |near, _| {
+            if node_matches(near, first_np, graph) {
+                seeds.push(near);
+            }
+        });
+    }
+    seeds.sort_unstable();
+    seeds.dedup();
+    if !use_kind_csr {
+        return Some(seeds);
+    }
+    // The kind-CSR scan visits `first_np.kinds` in label order, and each
+    // kind's nodes ascending: graph_assembly fills `kind_node_idx` in node
+    // order. A kind listed twice is visited twice, so it is repeated here too.
+    Some(
+        first_np
+            .kinds
+            .iter()
+            .flat_map(|&kind| {
+                seeds
+                    .iter()
+                    .copied()
+                    .filter(move |&i| graph.node(i).is_some_and(|m| m.kind() == kind))
+            })
+            .collect(),
+    )
+}
+
 fn exec_pattern(
     pat: &Pattern,
     base: &Binding,
@@ -1256,8 +1340,16 @@ fn exec_pattern(
             graph.kind_offsets.len() > kidx + 1
         });
 
-    // If the first node var is already bound, pin to that node only.
-    if let Some(var) = &first_np.var {
+    if let Some(seeds) = far_end_name_seeds(pat, base, graph, use_kind_csr) {
+        for idx in seeds {
+            let mut b = base.clone();
+            if let Some(var) = &first_np.var {
+                b.node_vars.insert(var, idx);
+            }
+            frontier.push((b, idx));
+        }
+    } else if let Some(var) = &first_np.var {
+        // If the first node var is already bound, pin to that node only.
         if let Some(&already) = base.node_vars.get(var) {
             if node_matches(already, first_np, graph) {
                 frontier.push((base.clone(), already));
@@ -4498,5 +4590,311 @@ mod tests {
                 "NOT EXISTS((n)-[:Calls]->(caller)) must be true: caller has no incoming Calls edge"
             );
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // Who-calls fast path (`far_end_name_seeds`)
+    // -----------------------------------------------------------------------
+
+    /// nodes: 0 zeta(F a.ts) · 1 parse(F a.ts) · 2 alpha(M b.ts) · 3 parse(M b.ts)
+    ///        4 beta(F c.ts) · 5 lonely(F c.ts) · 6 ""(F d.ts, tombstone) · 7 gamma(F d.ts)
+    /// Edges are inserted out of source order, so the forward row order
+    /// (caller idx, then out-edge order) differs from both insertion order
+    /// and the reversed spelling's order (callee idx, then in-edge order).
+    fn who_calls_graph() -> ZeroCopyGraph {
+        let mut fx = GraphFixture::new();
+        let zeta = fx.func("src/a.ts", "zeta");
+        let parse_a = fx.func("src/a.ts", "parse");
+        let alpha = fx.method("src/b.ts", "Parser", "alpha");
+        let parse_b = fx.method("src/b.ts", "Parser", "parse");
+        let beta = fx.func("src/c.ts", "beta");
+        let lonely = fx.func("src/c.ts", "lonely");
+        let tomb = fx.func("src/d.ts", "");
+        let gamma = fx.func("src/d.ts", "gamma");
+        fx.edge_with(beta, parse_a, RelType::Calls, 1.0, "beta-p1");
+        fx.edge_with(zeta, parse_b, RelType::Calls, 1.0, "zeta-p3-first");
+        fx.edge_with(zeta, parse_b, RelType::Calls, 1.0, "zeta-p3-second");
+        fx.edge_with(alpha, parse_a, RelType::Calls, 1.0, "alpha-p1");
+        fx.edge_with(alpha, parse_b, RelType::Calls, 1.0, "alpha-p3");
+        fx.edge_with(zeta, parse_a, RelType::Calls, 1.0, "zeta-p1");
+        fx.edge_with(alpha, lonely, RelType::Calls, 1.0, "alpha-lonely");
+        fx.edge_with(beta, parse_b, RelType::ReadsField, 1.0, "beta-reads-p3");
+        fx.edge_with(gamma, tomb, RelType::Calls, 1.0, "gamma-tomb");
+        fx.build()
+    }
+
+    fn rows_of(g: &ZeroCopyGraph, query: &str) -> Vec<Vec<Value>> {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(g).unwrap();
+        let archived =
+            rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                .unwrap();
+        let q = parse(query).unwrap();
+        execute(&q, archived, None, Path::new(".")).unwrap().rows
+    }
+
+    /// Eligibility of the first pattern of `query`, after the same WHERE
+    /// pushdown `execute` applies. `use_kind_csr` is false: these probes
+    /// carry no first-node label, so the scan they replace is the plain one.
+    fn fast_path_seeds(g: &ZeroCopyGraph, query: &str) -> Option<Vec<u32>> {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(g).unwrap();
+        let archived =
+            rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                .unwrap();
+        let q = parse(query).unwrap();
+        let q = pushdown_where(&q).unwrap_or(q);
+        far_end_name_seeds(
+            &q.matches[0].patterns[0],
+            &Binding::default(),
+            MergedGraph::new(archived, None),
+            false,
+        )
+    }
+
+    fn row_strings(rows: &[Vec<Value>]) -> Vec<String> {
+        let mut out: Vec<String> = rows.iter().map(|r| format!("{r:?}")).collect();
+        out.sort();
+        out
+    }
+
+    const WHO_CALLS_QUERIES: &[&str] = &[
+        "MATCH (a)-[r:Calls]->(b {name:'parse'}) RETURN a.name, b.filePath, r.reason",
+        "MATCH (a)-[r:Calls]->(b {name:'parse'}) RETURN a.name, r.reason LIMIT 2",
+        "MATCH (a)-[:Calls]->(b {name:'nope'}) RETURN a.name",
+        "MATCH (a)-[r:Calls]->(b) WHERE b.name = 'parse' RETURN a.name, r.reason",
+        "MATCH (a {name:'zeta'})-[r:Calls]->(b {name:'parse'}) RETURN a.name, r.reason",
+        "MATCH (a:Callable)-[r:Calls]->(b {name:'parse'}) RETURN a.name, r.reason",
+        "MATCH (a:Function)-[r:Calls]->(b {name:'parse'}) RETURN a.name, r.reason",
+        "MATCH (a:Method|Function)-[r:Calls]->(b {name:'parse'}) RETURN a.name, r.reason",
+        "MATCH (a:Function|Callable)-[r:Calls]->(b {name:'parse'}) RETURN a.name, r.reason",
+        "MATCH (a)<-[r:Calls]-(b {name:'zeta'}) RETURN a.name, a.filePath, r.reason",
+        "MATCH (a)-[r]->(b {name:'parse'}) RETURN a.name, r.reason",
+        "MATCH (a)-[r:Imports]->(b {name:'parse'}) RETURN a.name",
+        "MATCH (a)-[r:Calls]->(b {name:''}) RETURN a.name, r.reason",
+        "MATCH ()-[r:Calls]->({name:'parse'}) RETURN r.reason",
+        "MATCH (a)-[r:Calls*1..1]->(b {name:'parse'}) RETURN a.name",
+        "MATCH (x {name:'lonely'}) MATCH (a)-[r:Calls]->(b {name:'parse'}) RETURN x.name, a.name, r.reason",
+        "MATCH (x {name:'lonely'}) OPTIONAL MATCH (a)-[r:Calls]->(b {name:'parse'}) RETURN x.name, a.name, r.reason",
+        "MATCH (a)-[:Calls]->(b {name:'parse'}) RETURN COUNT(a)",
+    ];
+
+    /// Contract: the fast path changes time and memory only. Every query's
+    /// rows, in order, equal the full-scan rows; clearing `name_index`
+    /// forces the full scan (the guard in `far_end_name_seeds`).
+    #[test]
+    fn test_far_end_name_seeds_who_calls_queries_match_full_scan_rows() {
+        let fast = who_calls_graph();
+        let mut slow = who_calls_graph();
+        slow.name_index.clear();
+        assert!(!fast.name_index.is_empty());
+        for query in WHO_CALLS_QUERIES {
+            assert_eq!(rows_of(&fast, query), rows_of(&slow, query), "{query}");
+        }
+    }
+
+    /// Same contract on a graph without the kind CSR: a labelled first node
+    /// then scans in node order instead of kind-grouped order.
+    #[test]
+    fn test_far_end_name_seeds_without_kind_csr_match_full_scan_rows() {
+        let strip_csr = |mut g: ZeroCopyGraph| {
+            g.kind_offsets.clear();
+            g.kind_node_idx.clear();
+            g
+        };
+        let fast = strip_csr(who_calls_graph());
+        let mut slow = strip_csr(who_calls_graph());
+        slow.name_index.clear();
+        for query in WHO_CALLS_QUERIES {
+            assert_eq!(rows_of(&fast, query), rows_of(&slow, query), "{query}");
+        }
+    }
+
+    /// Contract: forward order is caller idx ascending, then that caller's
+    /// out-edges in edge order; parallel edges each keep their row. The
+    /// reversed spelling returns the same multiset in callee order.
+    #[test]
+    fn test_far_end_name_seeds_forward_order_keeps_parallel_edges() {
+        let g = who_calls_graph();
+        let fwd = rows_of(
+            &g,
+            "MATCH (a)-[r:Calls]->(b {name:'parse'}) RETURN a.name, b.filePath, r.reason",
+        );
+        let row = |a: &str, f: &str, r: &str| {
+            vec![
+                Value::Str(a.into()),
+                Value::Str(f.into()),
+                Value::Str(r.into()),
+            ]
+        };
+        assert_eq!(
+            fwd,
+            vec![
+                row("zeta", "src/b.ts", "zeta-p3-first"),
+                row("zeta", "src/b.ts", "zeta-p3-second"),
+                row("zeta", "src/a.ts", "zeta-p1"),
+                row("alpha", "src/a.ts", "alpha-p1"),
+                row("alpha", "src/b.ts", "alpha-p3"),
+                row("beta", "src/a.ts", "beta-p1"),
+            ]
+        );
+        let rev = rows_of(
+            &g,
+            "MATCH (b {name:'parse'})<-[r:Calls]-(a) RETURN a.name, b.filePath, r.reason",
+        );
+        assert_ne!(
+            fwd, rev,
+            "fixture must make the two spellings' orders differ"
+        );
+        assert_eq!(row_strings(&fwd), row_strings(&rev));
+    }
+
+    #[test]
+    fn test_far_end_name_seeds_category_label_keeps_kind_grouped_order() {
+        let g = who_calls_graph();
+        let names: Vec<Value> = rows_of(
+            &g,
+            "MATCH (a:Callable)-[:Calls]->(b {name:'parse'}) RETURN a.name",
+        )
+        .into_iter()
+        .map(|mut r| r.remove(0))
+        .collect();
+        let s = |n: &str| Value::Str(n.into());
+        // Function callers (zeta, beta) before the Method caller (alpha).
+        assert_eq!(
+            names,
+            vec![
+                s("zeta"),
+                s("zeta"),
+                s("zeta"),
+                s("beta"),
+                s("alpha"),
+                s("alpha")
+            ]
+        );
+    }
+
+    #[test]
+    fn test_far_end_name_seeds_who_calls_shape_returns_callers() {
+        let g = who_calls_graph();
+        assert_eq!(
+            fast_path_seeds(&g, "MATCH (a)-[:Calls]->(b {name:'parse'}) RETURN a.name"),
+            Some(vec![0, 2, 4])
+        );
+        assert_eq!(
+            fast_path_seeds(
+                &g,
+                "MATCH (a)-[:Calls]->(b) WHERE b.name = 'parse' RETURN a.name"
+            ),
+            Some(vec![0, 2, 4])
+        );
+        assert_eq!(
+            fast_path_seeds(&g, "MATCH (a)<-[:Calls]-(b {name:'zeta'}) RETURN a.name"),
+            Some(vec![1, 3])
+        );
+        assert_eq!(
+            fast_path_seeds(&g, "MATCH (a)-[:Calls]->(b {name:'nope'}) RETURN a.name"),
+            Some(vec![])
+        );
+        assert_eq!(
+            fast_path_seeds(&g, "MATCH (a)-[:Imports]->(b {name:'parse'}) RETURN a.name"),
+            Some(vec![])
+        );
+    }
+
+    #[test]
+    fn test_far_end_name_seeds_ineligible_shapes_return_none() {
+        let g = who_calls_graph();
+        for query in [
+            "MATCH (a {name:'zeta'})-[:Calls]->(b {name:'parse'}) RETURN a.name",
+            "MATCH (a)-[:Calls]-(b {name:'parse'}) RETURN a.name",
+            "MATCH (a)-[:Calls*1..2]->(b {name:'parse'}) RETURN a.name",
+            "MATCH (a)-[:Calls]->(b {name:''}) RETURN a.name",
+            "MATCH (a)-[:Calls]->(b {name:1}) RETURN a.name",
+            "MATCH (a)-[:Calls]->(b:Function) RETURN a.name",
+            "MATCH (a)-[:Calls]->(b)-[:Calls]->(c {name:'parse'}) RETURN a.name",
+        ] {
+            assert_eq!(fast_path_seeds(&g, query), None, "{query}");
+        }
+        let mut no_index = who_calls_graph();
+        no_index.name_index.clear();
+        assert_eq!(
+            fast_path_seeds(
+                &no_index,
+                "MATCH (a)-[:Calls]->(b {name:'parse'}) RETURN a.name"
+            ),
+            None
+        );
+    }
+
+    /// The name index skips tombstones (empty name); the scan still matches
+    /// them, so an empty-name query must keep the scan and find the caller.
+    #[test]
+    fn test_far_end_name_seeds_empty_name_keeps_tombstone_rows() {
+        let g = who_calls_graph();
+        assert_eq!(
+            rows_of(
+                &g,
+                "MATCH (a)-[r:Calls]->(b {name:''}) RETURN a.name, r.reason"
+            ),
+            vec![vec![
+                Value::Str("gamma".into()),
+                Value::Str("gamma-tomb".into())
+            ]]
+        );
+    }
+
+    #[test]
+    fn test_far_end_name_seeds_empty_graph_returns_no_rows() {
+        let g = GraphFixture::new().build();
+        assert!(rows_of(&g, "MATCH (a)-[:Calls]->(b {name:'parse'}) RETURN a.name").is_empty());
+    }
+
+    /// With an overlay the fast path stands down; the overlay's own Calls
+    /// edge from the re-parsed `keep_fn` still answers who calls `target_fn`.
+    #[test]
+    fn test_far_end_name_seeds_with_overlay_keeps_full_scan() {
+        use crate::session::{OverlayFileInput, OverlaySymbol};
+        let mut fx = GraphFixture::new();
+        let keep = fx.func("src/dirty.rs", "keep_fn");
+        let gone = fx.func("src/dirty.rs", "gone_fn");
+        let caller = fx.func("src/clean.rs", "clean_caller");
+        let target = fx.func("src/clean.rs", "target_fn");
+        fx.edge(caller, keep, RelType::Calls);
+        fx.edge(keep, target, RelType::Calls);
+        fx.edge(caller, gone, RelType::Calls);
+        let bytes = fx.into_bytes();
+        let archived =
+            rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                .unwrap();
+        let dirty = OverlayFileInput {
+            rel_path: "src/dirty.rs".to_string(),
+            symbols: vec![OverlaySymbol {
+                name: "keep_fn".to_string(),
+                kind: NodeKind::Function,
+                owner_class: None,
+                start_line: 1,
+                end_line: 2,
+                calls: vec!["target_fn".to_string()],
+            }],
+            imports: vec![],
+        };
+        let view = OverlayView::build(archived, &[dirty]).unwrap();
+        let q = parse("MATCH (a)-[:Calls]->(b {name:'target_fn'}) RETURN a.name, b.name").unwrap();
+        assert_eq!(
+            far_end_name_seeds(
+                &q.matches[0].patterns[0],
+                &Binding::default(),
+                MergedGraph::new(archived, Some(&view)),
+                false,
+            ),
+            None
+        );
+        let r = execute(&q, archived, Some(&view), Path::new(".")).unwrap();
+        assert_eq!(
+            r.rows,
+            vec![vec![
+                Value::Str("keep_fn".into()),
+                Value::Str("target_fn".into())
+            ]]
+        );
     }
 }
