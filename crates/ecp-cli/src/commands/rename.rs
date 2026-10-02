@@ -21,6 +21,7 @@
 use clap::Args;
 use ecp_analyzer::identifier_finder::find_identifier_occurrences;
 use ecp_core::analyzer::types::IdentifierRange;
+use ecp_core::file_category::{determine_category, FileCategory};
 use ecp_core::registry::atomic_write_bytes;
 use ecp_core::EcpError;
 use regex::Regex;
@@ -91,11 +92,7 @@ struct Occurrence {
 
 fn classify_context(path: &Path) -> String {
     let s = path.to_string_lossy();
-    if s.contains("/test/")
-        || s.contains("/tests/")
-        || s.ends_with("_test.go")
-        || s.ends_with("_test.rs")
-    {
+    if determine_category(&s) == FileCategory::Test {
         "test".into()
     } else if s.ends_with(".md") || s.ends_with(".rst") || s.ends_with(".markdown") {
         "markdown".into()
@@ -610,4 +607,37 @@ fn collect_diff(
         }
     }
     out.push(String::new());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx(p: &str) -> String {
+        classify_context(Path::new(p))
+    }
+
+    #[test]
+    fn test_classify_context_conftest_is_test() {
+        assert_eq!(ctx("/r/tests/conftest.py"), "test");
+    }
+
+    #[test]
+    fn test_classify_context_testimonials_dir_not_test() {
+        assert_eq!(ctx("/r/src/testimonials/x.py"), "code");
+    }
+
+    #[test]
+    fn test_classify_context_flow_tests_rs_is_test() {
+        assert_eq!(ctx("/r/crates/x/src/flow/tests.rs"), "test");
+    }
+
+    #[test]
+    fn test_classify_context_other_labels_unchanged() {
+        assert_eq!(ctx("/r/src/main.rs"), "code");
+        assert_eq!(ctx("/r/docs/guide.md"), "markdown");
+        assert_eq!(ctx("/r/notes.rst"), "markdown");
+        assert_eq!(ctx("/r/Cargo.toml"), "data");
+        assert_eq!(ctx("/r/ci.yml"), "data");
+    }
 }
