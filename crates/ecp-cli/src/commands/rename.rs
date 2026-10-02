@@ -95,7 +95,7 @@ struct Occurrence {
 /// the directories the repo happens to live in (`/tmp/test/repo`).
 fn classify_context(rel_path: &str) -> String {
     let s = rel_path;
-    if determine_category(&s) == FileCategory::Test {
+    if determine_category(s) == FileCategory::Test {
         "test".into()
     } else if s.ends_with(".md") || s.ends_with(".rst") || s.ends_with(".markdown") {
         "markdown".into()
