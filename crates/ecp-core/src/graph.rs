@@ -1172,6 +1172,24 @@ impl ArchivedZeroCopyGraph {
                 }
             })
     }
+
+    /// Indices of every node named exactly `name`, ascending: the order a
+    /// `0..nodes.len()` scan visits them. `nodes_by_name` cannot promise it,
+    /// because `name_index` is sorted by hash alone with an unstable sort, so
+    /// same-name nodes come out in unspecified order, and callers break ties
+    /// by input order.
+    ///
+    /// `None` means "keep your scan": an empty `name` (the index skips
+    /// tombstones, which the scan still matches) or an empty `name_index`
+    /// (hand-built fixtures). `Some(vec![])` is a genuine miss.
+    pub fn nodes_named_sorted(&self, name: &str) -> Option<Vec<u32>> {
+        if name.is_empty() || self.name_index.is_empty() {
+            return None;
+        }
+        let mut hits: Vec<u32> = self.nodes_by_name(name).collect();
+        hits.sort_unstable();
+        Some(hits)
+    }
 }
 
 /// Empty-but-header-valid graph for synthetic fixtures. New schema fields

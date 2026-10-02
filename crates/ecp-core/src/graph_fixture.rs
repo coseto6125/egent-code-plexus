@@ -314,6 +314,64 @@ mod tests {
     }
 
     #[test]
+    fn test_nodes_named_sorted_empty_name_returns_none() {
+        let mut fx = GraphFixture::new();
+        fx.func("a.rs", "");
+        fx.func("a.rs", "solo");
+        let bytes = fx.into_bytes();
+        let g = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        assert!(!g.name_index.is_empty());
+        assert_eq!(g.nodes_named_sorted(""), None);
+    }
+
+    #[test]
+    fn test_nodes_named_sorted_empty_index_returns_none() {
+        let mut fx = GraphFixture::new();
+        fx.func("a.rs", "solo");
+        let mut graph = fx.build();
+        graph.name_index.clear();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&graph).unwrap();
+        let g = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        assert_eq!(g.nodes_named_sorted("solo"), None);
+    }
+
+    /// 1200 same-name nodes interleaved with other names, a tombstone and a
+    /// unicode name: the index holds them in hash order only, the helper must
+    /// hand them back in node order.
+    #[test]
+    fn test_nodes_named_sorted_many_same_name_nodes_returns_ascending() {
+        let mut fx = GraphFixture::new();
+        let mut shared = Vec::new();
+        for i in 0..1200u32 {
+            let path = format!("f{}.rs", i % 5);
+            shared.push(match i % 3 {
+                0 => fx.func(&path, "shared"),
+                1 => fx.method(&path, "Owner", "shared"),
+                _ => fx.node(NodeKind::Class, &path, "shared"),
+            });
+            fx.func(&path, "other");
+            fx.func(&path, "naïve_函数");
+            fx.func(&path, "");
+        }
+        let bytes = fx.into_bytes();
+        let g = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+
+        assert_eq!(g.nodes_named_sorted("shared"), Some(shared));
+        let unicode = g.nodes_named_sorted("naïve_函数").unwrap();
+        assert_eq!(unicode.len(), 1200);
+        assert!(unicode.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn test_nodes_named_sorted_absent_name_returns_some_empty() {
+        let mut fx = GraphFixture::new();
+        fx.func("a.rs", "solo");
+        let bytes = fx.into_bytes();
+        let g = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        assert_eq!(g.nodes_named_sorted("absent"), Some(vec![]));
+    }
+
+    #[test]
     fn fixture_owner_class_separates_same_named_methods() {
         let mut fx = GraphFixture::new();
         let foo = fx.method("a.rs", "Foo", "validate");
