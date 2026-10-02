@@ -27,11 +27,11 @@ pub enum ResolutionTier {
     /// unqualified callsites).
     HeritageScoped,
     Global,
-    /// Tier 3 test-double tie-break (`GlobalPick::NonTest`). Below `Global`
-    /// on measurement: a sampled 79% of these edges were correct on enoract
-    /// against 88% for unique-Global ones, because the production candidate
-    /// often stands in for a stdlib or third-party method (`asyncio.run`,
-    /// `dict.keys`) that a test fake used to make ambiguous.
+    /// Tier 3 test-double tie-break (`GlobalPick::NonTest`), gated on the
+    /// caller importing the candidate's module. Kept below `Global`: without
+    /// the gate, a sample of 80 such edges on one Python repo had 17 wrong
+    /// ones, all stdlib or third-party receivers (`asyncio.run`,
+    /// `dict.keys`), and the gate narrows that class but cannot rule it out.
     GlobalNonTest,
     Fallback(FallbackReason),
 }

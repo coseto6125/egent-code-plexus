@@ -43,7 +43,7 @@
 //!   never re-resolved at query time.
 
 use crate::analyzer::types::RawImport;
-use crate::file_category::{pick_global, FileMeta, GlobalPick};
+use crate::file_category::{imports_reach, pick_global, FileMeta, GlobalPick};
 use crate::graph::{ArchivedZeroCopyGraph, FileCategory, NodeKind, RelType};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
@@ -101,7 +101,7 @@ const CONF_SAME_FILE: f32 = 1.0;
 const CONF_IMPORT_SCOPED: f32 = 0.95;
 const CONF_GLOBAL_UNIQUE: f32 = 0.7;
 /// Mirrors `ResolutionTier::GlobalNonTest`: the test-double tie-break is
-/// measurably less precise than a unique global match.
+/// less certain than a unique global match.
 const CONF_GLOBAL_NON_TEST: f32 = 0.6;
 
 #[derive(Debug, Default)]
@@ -263,6 +263,7 @@ impl OverlayView {
                             file,
                             file_metas[file_ord],
                             &mut base_metas,
+                            &nodes,
                             &same_file_callables,
                             &overlay_callables,
                             &replaced,
@@ -388,6 +389,7 @@ fn resolve_callee(
     file: &OverlayFileInput,
     caller: FileMeta,
     base_metas: &mut FxHashMap<usize, FileMeta>,
+    nodes: &[ViewNode],
     same_file_callables: &FxHashMap<(usize, &str), Vec<u32>>,
     overlay_callables: &FxHashMap<&str, Vec<(u32, FileMeta)>>,
     replaced: &FxHashMap<u32, u32>,
@@ -469,8 +471,24 @@ fn resolve_callee(
     let (target, confidence) =
         match pick_global(caller, base.chain(overlay_candidates.iter().copied())) {
             GlobalPick::Unique(id) => (id, CONF_GLOBAL_UNIQUE),
-            GlobalPick::NonTest(id) => (id, CONF_GLOBAL_NON_TEST),
-            GlobalPick::NoMatch | GlobalPick::Ambiguous(_) => return None,
+            // Same binding-evidence gate as the index resolver.
+            GlobalPick::NonTest(id) => {
+                let base_len = graph.nodes.len() as u32;
+                let path = if id < base_len {
+                    let file_idx = graph.nodes[id as usize].file_idx.to_native() as usize;
+                    graph
+                        .files
+                        .get(file_idx)
+                        .map(|f| f.path.resolve(&graph.string_pool))
+                } else {
+                    nodes.get((id - base_len) as usize).map(|n| &*n.rel_path)
+                };
+                if !path.is_some_and(|p| imports_reach(&file.imports, p)) {
+                    return None;
+                }
+                (id, CONF_GLOBAL_NON_TEST)
+            }
+            GlobalPick::NoMatch | GlobalPick::Ambiguous => return None,
         };
     debug_assert!(!replaced.contains_key(&target));
     Some((target, confidence))
@@ -698,8 +716,23 @@ mod tests {
         OverlayFileInput {
             rel_path: rel_path.to_string(),
             symbols: vec![sym("search", &["scan_range", "go_only"])],
-            imports: vec![],
+            imports: vec![RawImport {
+                source: "src.service".to_string(),
+                imported_name: "FlightService".to_string(),
+                alias: None,
+                binding_kind: None,
+            }],
         }
+    }
+
+    #[test]
+    fn test_tier3_overlay_test_double_without_import_stays_ambiguous() {
+        let bytes = barrier_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let mut input = search_input("src/search.py");
+        input.imports.clear();
+        let view = OverlayView::build(graph, &[input]).unwrap();
+        assert!(edge_to(&view, view.base_len(), 0).is_none());
     }
 
     #[test]

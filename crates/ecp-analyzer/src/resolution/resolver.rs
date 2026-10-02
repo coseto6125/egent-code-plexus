@@ -47,6 +47,7 @@ use crate::resolution::heuristics::ResolutionTier;
 use crate::resolution::index::{GlobalPick, ResolveTarget, SymbolTable};
 use crate::resolution::path_aliases::PathAliases;
 use crate::rust::module_tree::RustWorkspaceModTree;
+use ecp_core::file_category::imports_reach;
 
 pub type NodeId = u32;
 
@@ -466,20 +467,36 @@ impl<'a> Resolver<'a> {
         let raw_count = self.symbol_table.global_match_count(symbol_name);
         let caller_meta = self.symbol_table.file_meta(&source_file_str);
 
-        let pick = self
+        // The test-double tie-break needs binding evidence and is limited to
+        // calls: on untyped field reads (`resp.status`) and type names (a
+        // generic `T`) it picked unrelated definitions, and a fake of `run`
+        // made `asyncio.run` look like the production `run`.
+        let pick = match self
             .symbol_table
-            .lookup_global(symbol_name, target, caller_meta);
+            .lookup_global(symbol_name, target, caller_meta)
+        {
+            GlobalPick::NonTest(id)
+                if target != ResolveTarget::Callable
+                    || !self
+                        .symbol_table
+                        .file_of(id)
+                        .is_some_and(|f| imports_reach(raw_imports, f)) =>
+            {
+                GlobalPick::Ambiguous
+            }
+            pick => pick,
+        };
         let tier = match pick {
             GlobalPick::Unique(_) => DecisionTier::Global,
             GlobalPick::NonTest(_) => DecisionTier::GlobalNonTest,
-            GlobalPick::Ambiguous(_) => DecisionTier::AmbiguousGlobal,
+            GlobalPick::Ambiguous => DecisionTier::AmbiguousGlobal,
             GlobalPick::NoMatch => DecisionTier::Unresolved,
         };
         let target_id = pick.target();
         let confidence = match pick {
             GlobalPick::Unique(_) => Some(ResolutionTier::Global.base_confidence()),
             GlobalPick::NonTest(_) => Some(ResolutionTier::GlobalNonTest.base_confidence()),
-            GlobalPick::NoMatch | GlobalPick::Ambiguous(_) => None,
+            GlobalPick::NoMatch | GlobalPick::Ambiguous => None,
         };
         if let (Some(node_id), Some(conf)) = (target_id, confidence) {
             results.push((node_id, conf));
@@ -901,9 +918,9 @@ impl<'a> Resolver<'a> {
         // declaration-file from outranking the file-stem fallback when
         // members live elsewhere (`mod foo;` declaration in lib.rs vs.
         // `fn bar()` body in foo.rs).
-        // Unique only: the test-double tie-break is measured for bare-name
-        // calls. On qualifiers it resolved generic parameters such as the
-        // `T` in `T.dispose` to an unrelated class named `T` (vscode corpus).
+        // Unique only: on qualifiers the test-double tie-break resolved
+        // generic parameters such as the `T` in `T.dispose` to an unrelated
+        // class named `T` (seen on the vscode corpus).
         let caller_meta = self.symbol_table.file_meta(&source_file_str);
         if let GlobalPick::Unique(id) =
             self.symbol_table
@@ -1715,11 +1732,34 @@ mod tests {
         "ts", "js", "py", "java", "kt", "cs", "go", "rs", "php", "rb", "swift", "c", "cpp", "dart",
     ];
 
+    /// One import per language, in the shape its parser emits, that names
+    /// the module `src/service.<ext>`.
+    fn service_import(ext: &str) -> RawImport {
+        let source = match ext {
+            "py" => "src.service",
+            "java" | "kt" => "src.service",
+            "cs" => "src",
+            "go" => "example.com/app/src",
+            "rs" => "crate::service",
+            "php" => "Src\\Service",
+            "swift" => "src",
+            "c" | "cpp" => "\"service.h\"",
+            "dart" => "package:app/../src/service.dart",
+            _ => "./service",
+        };
+        RawImport {
+            source: source.to_string(),
+            imported_name: "service".to_string(),
+            alias: None,
+            binding_kind: None,
+        }
+    }
+
     #[test]
     fn tier3_test_double_does_not_hide_production_target_across_14_langs() {
         // A test fake sharing a production method's name used to make every
-        // production call to it AmbiguousGlobal (no edge). Production code
-        // cannot call a test double, so the production definition wins.
+        // production call to it AmbiguousGlobal (no edge). With the caller
+        // importing the production module, the production definition wins.
         for ext in LANGS_14 {
             let st = st_with(&[
                 (
@@ -1738,7 +1778,7 @@ mod tests {
             let out = r.resolve_symbol(
                 &PathBuf::from(format!("src/search.{ext}")),
                 "scan_range",
-                &[],
+                &[service_import(ext)],
                 ResolveTarget::Callable,
             );
             assert_eq!(
@@ -1749,6 +1789,61 @@ mod tests {
             let last = r.take_decisions().unwrap().pop().unwrap();
             assert_eq!(last.tier, DecisionTier::GlobalNonTest, "{ext}");
             assert_eq!(last.target_id, Some(0), "{ext}");
+        }
+    }
+
+    #[test]
+    fn tier3_test_double_without_import_evidence_stays_ambiguous_across_14_langs() {
+        // `asyncio.run` vs a project `run` plus its fake: no import names
+        // the project module, so no edge.
+        for ext in LANGS_14 {
+            let st = st_with(&[
+                (
+                    Box::leak(format!("src/service.{ext}").into_boxed_str()),
+                    "run",
+                    NodeKind::Function,
+                ),
+                (
+                    Box::leak(format!("tests/fakes.{ext}").into_boxed_str()),
+                    "run",
+                    NodeKind::Function,
+                ),
+            ]);
+            let mut r = Resolver::new(&st);
+            r.enable_dump();
+            let out = r.resolve_symbol(
+                &PathBuf::from(format!("src/cli.{ext}")),
+                "run",
+                &[],
+                ResolveTarget::Callable,
+            );
+            assert!(out.is_empty(), "{ext}: got {out:?}");
+            let last = r.take_decisions().unwrap().pop().unwrap();
+            assert_eq!(last.tier, DecisionTier::AmbiguousGlobal, "{ext}");
+        }
+    }
+
+    #[test]
+    fn tier3_test_double_tie_break_ignores_field_and_type_targets() {
+        // Untyped `resp.status` and a generic `T` picked unrelated
+        // production definitions; only calls take the tie-break.
+        let import = [RawImport {
+            source: "src.order".to_string(),
+            imported_name: "Order".to_string(),
+            alias: None,
+            binding_kind: None,
+        }];
+        for (target, kind) in [
+            (ResolveTarget::Field, NodeKind::Property),
+            (ResolveTarget::Type, NodeKind::Class),
+        ] {
+            let st = st_with(&[
+                ("src/order.py", "status", kind),
+                ("tests/fake.py", "status", kind),
+            ]);
+            let r = Resolver::new(&st);
+            let out = r.resolve_symbol(&PathBuf::from("src/http.py"), "status", &import, target);
+            assert!(out.is_empty(), "{target:?}: got {out:?}");
         }
     }
 
