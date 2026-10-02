@@ -573,15 +573,19 @@ fn prune(dir: &Path, keep: &str) {
 }
 
 /// Removes each copy directory under `home_ecp` whose recorded gitdir is gone,
-/// and returns how many went. A directory without a record never got a copy.
-/// A directory whose lock is held is in use and stays.
-pub fn sweep_orphans(home_ecp: &Path) -> usize {
+/// and returns how many went. A missing cache root holds none. A directory
+/// without a record never got a copy. A directory whose lock is held is in use
+/// and stays.
+pub fn sweep_orphans(home_ecp: &Path) -> io::Result<usize> {
     static TOMBSTONES: AtomicU64 = AtomicU64::new(0);
     let root = home_ecp.join(PRIVATE_INDEX_DIR);
-    let Ok(dirs) = fs::read_dir(&root) else {
-        return 0;
+    let dirs = match fs::read_dir(&root) {
+        Ok(dirs) => dirs,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
     };
-    dirs.flatten()
+    Ok(dirs
+        .flatten()
         .filter(|entry| {
             let dir = entry.path();
             let Some(_lock) = lock_dir(&dir) else {
@@ -610,7 +614,7 @@ pub fn sweep_orphans(home_ecp: &Path) -> usize {
             ));
             fs::rename(&dir, &tombstone).is_ok() && fs::remove_dir_all(&tombstone).is_ok()
         })
-        .count()
+        .count())
 }
 
 /// The untracked cache trusts a directory's mtime to change whenever an entry
@@ -1566,7 +1570,7 @@ mod tests {
         let locked = make("locked", Some(gone.as_path()));
         let held = lock_dir(&locked).unwrap();
 
-        assert_eq!(sweep_orphans(&home), 2);
+        assert_eq!(sweep_orphans(&home).unwrap(), 2);
         assert!(!orphan.exists());
         assert!(!unrecorded.exists());
         assert!(live.join("index-1-2-3-00").exists());
@@ -1575,7 +1579,7 @@ mod tests {
         // A sibling test thread's spawn can hold a duplicate of the released
         // lock fd until its exec.
         for _ in 0..200 {
-            if sweep_orphans(&home) == 1 {
+            if sweep_orphans(&home).unwrap() == 1 {
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -1586,7 +1590,7 @@ mod tests {
     #[test]
     fn test_sweep_orphans_no_cache_root_zero() {
         let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(sweep_orphans(tmp.path()), 0);
+        assert_eq!(sweep_orphans(tmp.path()).unwrap(), 0);
     }
 
     #[test]
@@ -1794,7 +1798,7 @@ mod tests {
             eprintln!("skipped: directory permissions do not bind this user");
             return;
         }
-        sweep_orphans(&home);
+        sweep_orphans(&home).unwrap();
         let left_in_place = dir.exists();
         for entry in fs::read_dir(&root).unwrap().flatten() {
             let leftover = entry.path().join("stuck");

@@ -405,3 +405,36 @@ fn sweep_sessions_keeps_recently_touched_session_with_dead_pid() {
     assert_eq!(stats.marked, 0, "an active session must survive the sweep");
     assert!(sessions.exists());
 }
+
+/// `ecp admin gc` removes the private git index of a worktree that is gone
+/// and keeps the one of a worktree that still exists.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_admin_gc_private_index_of_deleted_worktree_removed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("ecp-home");
+    let index_dir = |name: &str, gitdir: &std::path::Path| {
+        let dir = home.join("git-index").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index-1-2-3-00"), b"copy").unwrap();
+        std::fs::write(dir.join("gitdir"), gitdir.to_str().unwrap()).unwrap();
+        dir
+    };
+    let orphan = index_dir("0123456789abcdef", &tmp.path().join("deleted/.git"));
+    let live = index_dir("fedcba9876543210", tmp.path());
+
+    let out = Command::new(env!("CARGO_BIN_EXE_ecp"))
+        .args(["admin", "gc"])
+        .env("ECP_HOME", &home)
+        .env("HOME", tmp.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!orphan.exists(), "orphan private index survived gc");
+    assert!(live.join("index-1-2-3-00").exists());
+}

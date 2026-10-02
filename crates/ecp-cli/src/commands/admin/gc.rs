@@ -31,8 +31,9 @@ pub fn run(args: GcArgs) -> Result<(), ecp_core::EcpError> {
         }
         // Private git-status indexes of worktrees that no longer exist.
         #[cfg(target_os = "linux")]
-        {
-            total_removed += crate::git::status::sweep_orphans(&home_ecp);
+        match crate::git::status::sweep_orphans(&home_ecp) {
+            Ok(removed) => total_removed += removed,
+            Err(e) => eprintln!("gc: sweep_git_index: {e}"),
         }
     }
 
