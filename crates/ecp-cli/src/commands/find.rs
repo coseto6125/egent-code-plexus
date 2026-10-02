@@ -334,6 +334,84 @@ fn overlay_matches(
         .collect()
 }
 
+enum CandSrc {
+    Base(usize),
+    Overlay(FindMatch),
+}
+
+/// Base-graph candidates for an Exact / Fuzzy query as
+/// `(node index, caller_count, category priority, file path)`, in node order,
+/// plus how many Test-category fuzzy hits were dropped.
+///
+/// Exact walks the name index when the graph has one; the hits are node
+/// indices ascending, so ties in the caller's `sort_unstable_by` see the same
+/// input order as the full scan. Fuzzy (`contains`) must scan every node.
+fn base_candidates(
+    graph: &ArchivedZeroCopyGraph,
+    merged: &MergedGraph<'_>,
+    pattern: &str,
+    mode: FindMode,
+    kind_filter: Option<&[String]>,
+    file_filter: Option<&str>,
+    include_tests: bool,
+) -> (Vec<(usize, u32, u8, String)>, u32) {
+    let mut tests_excluded = 0u32;
+    let mut candidate = |node_idx: usize, node: &ecp_core::graph::ArchivedNode| {
+        let name = node.name.resolve(&graph.string_pool);
+        let matches = match mode {
+            FindMode::Exact => name == pattern,
+            FindMode::Fuzzy => name.contains(pattern),
+            FindMode::Bm25 => unreachable!("run_exact_or_fuzzy only handles Exact / Fuzzy"),
+        };
+        if !matches || !merged.base_visible(node_idx as u32) {
+            return None;
+        }
+
+        if let Some(kinds) = kind_filter {
+            let node_kind = kind_to_str(&node.kind).to_ascii_lowercase();
+            if !kinds.iter().any(|k| k == &node_kind) {
+                return None;
+            }
+        }
+
+        if !node.has_owning_file() {
+            return None;
+        }
+        let file = &graph.files[node.file_idx.to_native() as usize];
+        let file_path = file.path.resolve(&graph.string_pool).to_string();
+
+        if let Some(needle) = file_filter {
+            if !file_path.contains(needle) {
+                return None;
+            }
+        }
+
+        let is_exact = matches!(mode, FindMode::Exact);
+        if !include_tests && !is_exact && matches!(file.category, ArchivedFileCategory::Test) {
+            tests_excluded += 1;
+            return None;
+        }
+
+        let prio = category_priority(&file.category);
+        let caller_count = count_incoming(graph, node_idx);
+        Some((node_idx, caller_count, prio, file_path))
+    };
+
+    let rows = match mode {
+        FindMode::Exact => graph
+            .name_candidates(pattern)
+            .filter_map(|i| candidate(i as usize, &graph.nodes[i as usize]))
+            .collect(),
+        _ => graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, node)| candidate(i, node))
+            .collect(),
+    };
+    (rows, tests_excluded)
+}
+
 fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result<(), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let format = OutputFormat::parse(args.format.as_deref());
@@ -352,59 +430,18 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
     let view = engine.overlay_dir().and_then(|_| engine.overlay_view());
     let merged = MergedGraph::new(graph, view);
 
-    enum CandSrc {
-        Base(usize),
-        Overlay(FindMatch),
-    }
-
-    let mut tests_excluded: u32 = 0;
-    let mut candidates: Vec<(CandSrc, u32, u8, String)> = graph
-        .nodes
-        .iter()
-        .enumerate()
-        .filter_map(|(node_idx, node)| {
-            let name = node.name.resolve(&graph.string_pool);
-            let matches = match mode {
-                FindMode::Exact => name == pattern,
-                FindMode::Fuzzy => name.contains(pattern),
-                FindMode::Bm25 => unreachable!("run_exact_or_fuzzy only handles Exact / Fuzzy"),
-            };
-            if !matches || !merged.base_visible(node_idx as u32) {
-                return None;
-            }
-
-            if let Some(ref kinds) = kind_filter {
-                let node_kind = kind_to_str(&node.kind).to_ascii_lowercase();
-                if !kinds.iter().any(|k| k == &node_kind) {
-                    return None;
-                }
-            }
-
-            if !node.has_owning_file() {
-                return None;
-            }
-            let file = &graph.files[node.file_idx.to_native() as usize];
-            let file_path = file.path.resolve(&graph.string_pool).to_string();
-
-            if let Some(needle) = file_filter {
-                if !file_path.contains(needle) {
-                    return None;
-                }
-            }
-
-            let is_exact = matches!(mode, FindMode::Exact);
-            if !args.include_tests
-                && !is_exact
-                && matches!(file.category, ArchivedFileCategory::Test)
-            {
-                tests_excluded += 1;
-                return None;
-            }
-
-            let prio = category_priority(&file.category);
-            let caller_count = count_incoming(graph, node_idx);
-            Some((CandSrc::Base(node_idx), caller_count, prio, file_path))
-        })
+    let (base_rows, mut tests_excluded) = base_candidates(
+        graph,
+        &merged,
+        pattern,
+        mode,
+        kind_filter.as_deref(),
+        file_filter,
+        args.include_tests,
+    );
+    let mut candidates: Vec<(CandSrc, u32, u8, String)> = base_rows
+        .into_iter()
+        .map(|(idx, callers, prio, path)| (CandSrc::Base(idx), callers, prio, path))
         .collect();
 
     for (m, prio) in overlay_matches(&merged, pattern, mode, kind_filter.as_deref(), file_filter) {
@@ -1725,6 +1762,163 @@ fn emit_bucketed_with_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ecp_core::graph::{NodeKind, RelType, ZeroCopyGraph};
+    use ecp_core::graph_fixture::GraphFixture;
+    use ecp_core::session::{OverlayFileInput, OverlaySymbol, OverlayView};
+
+    /// "dup" and "shared" repeat across kinds, files and Test-category
+    /// files (every node has its own uid); "shared" has 1200 nodes (see
+    /// `same_name_nodes`). Also a tombstone (empty name) and a unicode name.
+    /// Calls edges give the dups different caller counts.
+    fn same_name_graph() -> ZeroCopyGraph {
+        let mut fx = GraphFixture::new();
+        let caller = fx.func("src/caller.ts", "caller");
+        fx.same_name_nodes(
+            "shared",
+            1200,
+            |i| format!("src/s{i}.ts"),
+            |fx, i, path, idx| {
+                if i % 5 == 0 {
+                    fx.edge(caller, idx, RelType::Calls);
+                }
+                if i % 100 == 0 {
+                    fx.func(path, "");
+                    fx.func(path, "naïve_函数");
+                    fx.func(path, "dup");
+                    fx.method("src/b.ts", &format!("Owner{i}"), "dup");
+                    let test_path = format!("tests/t{i}.ts");
+                    fx.file_as(&test_path, FileCategory::Test);
+                    fx.func(&test_path, "dup");
+                }
+            },
+        );
+        fx.build()
+    }
+
+    type Row = (usize, u32, u8, String);
+
+    /// Candidates in the order `base_candidates` returns them (before the
+    /// caller's sort), so tie order between equal sort keys is compared too.
+    fn candidates(
+        g: ZeroCopyGraph,
+        pattern: &str,
+        mode: FindMode,
+        kinds: Option<&[String]>,
+        file: Option<&str>,
+        overlay: bool,
+    ) -> (Vec<Row>, u32) {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let view = overlay.then(|| {
+            let dirty = OverlayFileInput {
+                rel_path: "src/b.ts".to_string(),
+                symbols: vec![OverlaySymbol {
+                    name: "dup".to_string(),
+                    kind: NodeKind::Function,
+                    owner_class: None,
+                    start_line: 1,
+                    end_line: 2,
+                    calls: vec![],
+                }],
+                imports: vec![],
+            };
+            OverlayView::build(graph, &[dirty]).unwrap()
+        });
+        let merged = MergedGraph::new(graph, view.as_ref());
+        base_candidates(graph, &merged, pattern, mode, kinds, file, false)
+    }
+
+    /// Contract: the name index changes time only. Same rows in the same
+    /// order as the full scan that clearing `name_index` forces.
+    #[test]
+    fn test_base_candidates_exact_with_index_matches_full_scan() {
+        /// (pattern, kinds, file, overlay)
+        type Case<'a> = (&'a str, Option<&'a [String]>, Option<&'a str>, bool);
+        let kinds = vec!["method".to_string(), "function".to_string()];
+        let cases: [Case; 10] = [
+            ("shared", None, None, false),
+            ("shared", Some(kinds.as_slice()), None, false),
+            ("shared", None, Some("s3.ts"), false),
+            ("dup", None, None, false),
+            ("dup", None, None, true),
+            ("dup", Some(kinds.as_slice()), Some("src/"), true),
+            ("naïve_函数", None, None, false),
+            ("absent", None, None, false),
+            ("", None, None, false),
+            ("Shared", None, None, false),
+        ];
+        for (pattern, kind, file, overlay) in cases {
+            let fast = same_name_graph();
+            let mut slow = same_name_graph();
+            slow.name_index.clear();
+            assert!(!fast.name_index.is_empty());
+            assert_eq!(
+                candidates(fast, pattern, FindMode::Exact, kind, file, overlay),
+                candidates(slow, pattern, FindMode::Exact, kind, file, overlay),
+                "{pattern:?} kinds={kind:?} file={file:?} overlay={overlay}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_base_candidates_exact_shared_name_lists_every_node_ascending() {
+        let (rows, _) = candidates(
+            same_name_graph(),
+            "shared",
+            FindMode::Exact,
+            None,
+            None,
+            false,
+        );
+        assert_eq!(rows.len(), 1200);
+        assert!(rows.windows(2).all(|w| w[0].0 < w[1].0), "node order");
+    }
+
+    /// The tombstone has an empty name: the scan matches it by name equality
+    /// and the index skips it, so an empty pattern must keep the scan.
+    #[test]
+    fn test_base_candidates_exact_empty_pattern_matches_scan_with_tombstones() {
+        let mut slow = same_name_graph();
+        slow.name_index.clear();
+        let (scan_rows, _) = candidates(slow, "", FindMode::Exact, None, None, false);
+        assert_eq!(scan_rows.len(), 12);
+        let (rows, _) = candidates(same_name_graph(), "", FindMode::Exact, None, None, false);
+        assert_eq!(rows, scan_rows);
+    }
+
+    /// A base node the overlay replaced is hidden (its virtual twin scans
+    /// instead), with or without the index.
+    #[test]
+    fn test_base_candidates_exact_overlay_hides_replaced_base_nodes() {
+        let (plain, _) = candidates(same_name_graph(), "dup", FindMode::Exact, None, None, false);
+        let (hidden, _) = candidates(same_name_graph(), "dup", FindMode::Exact, None, None, true);
+        assert!(
+            hidden.len() < plain.len(),
+            "{} vs {}",
+            hidden.len(),
+            plain.len()
+        );
+        assert!(hidden.iter().all(|r| !r.3.ends_with("src/b.ts")));
+    }
+
+    /// Fuzzy keeps the scan: substring matches the name index cannot find.
+    #[test]
+    fn test_base_candidates_fuzzy_finds_substring_matches_with_index_present() {
+        let (rows, excluded) = candidates(
+            same_name_graph(),
+            "hare",
+            FindMode::Fuzzy,
+            None,
+            Some("s1.ts"),
+            false,
+        );
+        assert!(!rows.is_empty());
+        assert_eq!(excluded, 0);
+        let (dups, excluded) =
+            candidates(same_name_graph(), "up", FindMode::Fuzzy, None, None, false);
+        assert_eq!(dups.len(), 24, "Test-file dups are excluded, not listed");
+        assert_eq!(excluded, 12);
+    }
 
     #[test]
     fn top_k_heap_keeps_highest_scores() {

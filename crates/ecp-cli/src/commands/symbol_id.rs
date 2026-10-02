@@ -78,7 +78,9 @@ pub fn resolve_candidates(
 
     let mut same_name_defs = 0usize;
     let mut matches: Vec<usize> = Vec::new();
-    for (idx, node) in graph.nodes.iter().enumerate() {
+    // Ascending like the full scan, so the candidate list keeps node order.
+    for idx in graph.name_candidates(bare_name) {
+        let (idx, node) = (idx as usize, &graph.nodes[idx as usize]);
         if node.name.resolve(&graph.string_pool) != bare_name {
             continue;
         }
@@ -152,4 +154,137 @@ pub fn resolve_candidates(
         }
     }
     (matches, same_name_defs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ecp_core::graph::{NodeKind, ZeroCopyGraph};
+    use ecp_core::graph_fixture::GraphFixture;
+    use ecp_core::session::{OverlayFileInput, OverlaySymbol};
+
+    /// "dup" repeats across kinds, owners and files; "shared" has 1200 nodes
+    /// (see `same_name_nodes`). Also a tombstone (empty name) and a unicode
+    /// name. Every node has its own uid.
+    fn same_name_graph() -> ZeroCopyGraph {
+        let mut fx = GraphFixture::new();
+        fx.same_name_nodes(
+            "shared",
+            1200,
+            |i| format!("src/s{i}.ts"),
+            |fx, i, path, _| {
+                if i % 100 == 0 {
+                    fx.func(path, "");
+                    fx.func(path, "naïve_函数");
+                    fx.func(path, "dup");
+                    fx.method("src/b.ts", &format!("Owner{i}"), "dup");
+                    fx.method(path, "Owner", "dup");
+                }
+            },
+        );
+        fx.build()
+    }
+
+    fn resolve_matches(
+        g: ZeroCopyGraph,
+        name: &str,
+        kind: Option<&str>,
+        file: Option<&str>,
+        overlay: bool,
+    ) -> (Vec<usize>, usize) {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let view = overlay.then(|| {
+            let dirty = OverlayFileInput {
+                rel_path: "src/b.ts".to_string(),
+                symbols: vec![
+                    OverlaySymbol {
+                        name: "dup".to_string(),
+                        kind: NodeKind::Function,
+                        owner_class: None,
+                        start_line: 1,
+                        end_line: 2,
+                        calls: vec![],
+                    },
+                    OverlaySymbol {
+                        name: "brand_new".to_string(),
+                        kind: NodeKind::Function,
+                        owner_class: None,
+                        start_line: 3,
+                        end_line: 4,
+                        calls: vec![],
+                    },
+                ],
+                imports: vec![],
+            };
+            OverlayView::build(graph, &[dirty]).unwrap()
+        });
+        resolve_candidates(graph, view.as_ref(), name, kind, file)
+    }
+
+    /// Contract: the name index changes time only. Same candidates in the
+    /// same order, and the same `same_name_defs`, as the full scan that
+    /// clearing `name_index` forces. The order is what `ecp impact` prints
+    /// in its ambiguity list.
+    #[test]
+    fn test_resolve_candidates_with_index_matches_full_scan() {
+        let cases: [(&str, Option<&str>, Option<&str>, bool); 14] = [
+            ("shared", None, None, false),
+            ("shared", Some("Method"), None, false),
+            ("shared", Some("class"), Some("s3"), false),
+            ("Owner.shared", None, None, false),
+            ("Nobody.shared", None, None, false),
+            ("dup", None, None, false),
+            ("dup", None, None, true),
+            ("Owner.dup", None, None, true),
+            ("dup", Some("function"), Some("src/"), true),
+            ("brand_new", None, None, true),
+            ("naïve_函数", None, None, false),
+            ("absent", None, None, false),
+            ("Owner.", None, None, false),
+            ("", None, None, false),
+        ];
+        for (name, kind, file, overlay) in cases {
+            let fast = same_name_graph();
+            let mut slow = same_name_graph();
+            slow.name_index.clear();
+            assert!(!fast.name_index.is_empty());
+            assert_eq!(
+                resolve_matches(fast, name, kind, file, overlay),
+                resolve_matches(slow, name, kind, file, overlay),
+                "{name:?} kind={kind:?} file={file:?} overlay={overlay}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_candidates_shared_name_lists_every_node_ascending() {
+        let (matches, same_name_defs) =
+            resolve_matches(same_name_graph(), "shared", None, None, false);
+        assert_eq!(matches.len(), 1200);
+        assert_eq!(same_name_defs, 1200);
+        assert!(matches.windows(2).all(|w| w[0] < w[1]), "node order");
+    }
+
+    /// The tombstone has an empty name: only the scan matches it, so an
+    /// empty bare name (`ecp impact --target Owner.`) must keep the scan.
+    #[test]
+    fn test_resolve_candidates_empty_bare_name_keeps_tombstone_matches() {
+        let (matches, same_name_defs) = resolve_matches(same_name_graph(), "", None, None, false);
+        assert_eq!(matches.len(), 12);
+        assert_eq!(same_name_defs, 12);
+    }
+
+    /// A base node the overlay replaced or suppressed no longer counts and is
+    /// not a candidate; the overlay-only symbol still is.
+    #[test]
+    fn test_resolve_candidates_overlay_drops_suppressed_base_nodes() {
+        let (plain, plain_defs) = resolve_matches(same_name_graph(), "dup", None, None, false);
+        let (merged, merged_defs) = resolve_matches(same_name_graph(), "dup", None, None, true);
+        assert_eq!(plain_defs, 36);
+        assert!(merged_defs < plain_defs, "{merged_defs} vs {plain_defs}");
+        assert!(merged.len() < plain.len());
+        let (new_only, _) = resolve_matches(same_name_graph(), "brand_new", None, None, true);
+        assert_eq!(new_only.len(), 1);
+    }
 }
