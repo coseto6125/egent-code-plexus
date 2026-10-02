@@ -109,7 +109,33 @@ pub fn uid_path(absolute: &Path, repo_root: &Path) -> Result<String, PathError> 
 /// environment without extra flags.
 ///
 pub fn resolve_home_ecp() -> PathBuf {
-    resolve_home_ecp_from_env(std::env::var_os("ECP_HOME"), std::env::var_os("HOME"))
+    resolve_home_ecp_memoized(std::env::var_os("ECP_HOME"), std::env::var_os("HOME"))
+}
+
+/// One probe per process per `(ECP_HOME, HOME)` pair. Resolving writes and
+/// unlinks a probe file, and a single query resolved the home several times
+/// (startup gc check, graph path, freshness gate). A root that has since
+/// vanished is resolved again, so a long-lived process (the MCP server)
+/// re-creates it rather than writing into a missing directory.
+fn resolve_home_ecp_memoized(
+    ecp_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> PathBuf {
+    type Key = (Option<std::ffi::OsString>, Option<std::ffi::OsString>);
+    static MEMO: std::sync::Mutex<Vec<(Key, PathBuf)>> = std::sync::Mutex::new(Vec::new());
+    let key = (ecp_home, home);
+    let mut memo = MEMO
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, root)) = memo.iter().find(|(k, _)| *k == key) {
+        if root.is_dir() {
+            return root.clone();
+        }
+    }
+    let root = resolve_home_ecp_from_env(key.0.clone(), key.1.clone());
+    memo.retain(|(k, _)| *k != key);
+    memo.push((key, root.clone()));
+    root
 }
 
 /// Same resolution logic as [`resolve_home_ecp`], but with the HOME source
@@ -218,6 +244,38 @@ fn probe_writable(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_resolve_home_ecp_memoized_same_env_reused_vanished_root_recreated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ecp-home");
+        let env = Some(root.clone().into_os_string());
+        assert_eq!(resolve_home_ecp_memoized(env.clone(), None), root);
+        // A second resolve that probed again would find the root unwritable
+        // and fall back; the memo answers without probing.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let probe_fails = std::fs::write(root.join("x"), b"").is_err();
+            let again = resolve_home_ecp_memoized(env.clone(), None);
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+            if probe_fails {
+                assert_eq!(again, root);
+            }
+        }
+        assert_eq!(resolve_home_ecp_memoized(env.clone(), None), root);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(resolve_home_ecp_memoized(env, None), root);
+        assert!(
+            root.is_dir(),
+            "a vanished root must be probed (and created) again"
+        );
+
+        let other = tmp.path().join("other");
+        let env = Some(other.clone().into_os_string());
+        assert_eq!(resolve_home_ecp_memoized(env, None), other);
+    }
 
     #[test]
     fn probe_writable_true_for_normal_dir() {
