@@ -43,7 +43,7 @@
 //!   never re-resolved at query time.
 
 use crate::analyzer::types::RawImport;
-use crate::file_category::{pick_global, FileMeta};
+use crate::file_category::{pick_global, FileMeta, GlobalPick};
 use crate::graph::{ArchivedZeroCopyGraph, FileCategory, NodeKind, RelType};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
@@ -100,6 +100,9 @@ pub struct ViewEdge {
 const CONF_SAME_FILE: f32 = 1.0;
 const CONF_IMPORT_SCOPED: f32 = 0.95;
 const CONF_GLOBAL_UNIQUE: f32 = 0.7;
+/// Mirrors `ResolutionTier::GlobalNonTest`: the test-double tie-break is
+/// measurably less precise than a unique global match.
+const CONF_GLOBAL_NON_TEST: f32 = 0.6;
 
 #[derive(Debug, Default)]
 pub struct OverlayView {
@@ -375,7 +378,8 @@ impl OverlayView {
 /// plus all overlay callables, through the index-time candidate filter
 /// [`pick_global`] (language and vendor barriers, test tie-break). ≥2
 /// remaining → suppressed, matching `DecisionTier::AmbiguousGlobal` (an
-/// invented edge is worse than a missing one). Picked → 0.7.
+/// invented edge is worse than a missing one). Unique → 0.7, test-double
+/// tie-break → 0.6.
 #[allow(clippy::too_many_arguments)]
 fn resolve_callee(
     graph: &ArchivedZeroCopyGraph,
@@ -462,9 +466,14 @@ fn resolve_callee(
         });
         (idx, meta)
     });
-    let target = pick_global(caller, base.chain(overlay_candidates.iter().copied())).target()?;
+    let (target, confidence) =
+        match pick_global(caller, base.chain(overlay_candidates.iter().copied())) {
+            GlobalPick::Unique(id) => (id, CONF_GLOBAL_UNIQUE),
+            GlobalPick::NonTest(id) => (id, CONF_GLOBAL_NON_TEST),
+            GlobalPick::NoMatch | GlobalPick::Ambiguous(_) => return None,
+        };
     debug_assert!(!replaced.contains_key(&target));
-    Some((target, CONF_GLOBAL_UNIQUE))
+    Some((target, confidence))
 }
 
 /// Last path-ish segment of an import source across language conventions:
@@ -701,7 +710,7 @@ mod tests {
         let search = view.base_len();
 
         let e = edge_to(&view, search, 0).expect("search → production scan_range");
-        assert_eq!(e.confidence, 0.7);
+        assert_eq!(e.confidence, CONF_GLOBAL_NON_TEST);
         assert!(edge_to(&view, search, 1).is_none());
     }
 

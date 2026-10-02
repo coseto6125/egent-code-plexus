@@ -475,11 +475,12 @@ impl<'a> Resolver<'a> {
             GlobalPick::Ambiguous(_) => DecisionTier::AmbiguousGlobal,
             GlobalPick::NoMatch => DecisionTier::Unresolved,
         };
-        // A test-double tie-break keeps Global confidence: the production
-        // candidate is as certain as a unique one, since production code
-        // cannot call into a test file.
         let target_id = pick.target();
-        let confidence = target_id.map(|_| ResolutionTier::Global.base_confidence());
+        let confidence = match pick {
+            GlobalPick::Unique(_) => Some(ResolutionTier::Global.base_confidence()),
+            GlobalPick::NonTest(_) => Some(ResolutionTier::GlobalNonTest.base_confidence()),
+            GlobalPick::NoMatch | GlobalPick::Ambiguous(_) => None,
+        };
         if let (Some(node_id), Some(conf)) = (target_id, confidence) {
             results.push((node_id, conf));
         }
@@ -900,11 +901,13 @@ impl<'a> Resolver<'a> {
         // declaration-file from outranking the file-stem fallback when
         // members live elsewhere (`mod foo;` declaration in lib.rs vs.
         // `fn bar()` body in foo.rs).
+        // Unique only: the test-double tie-break is measured for bare-name
+        // calls. On qualifiers it resolved generic parameters such as the
+        // `T` in `T.dispose` to an unrelated class named `T` (vscode corpus).
         let caller_meta = self.symbol_table.file_meta(&source_file_str);
-        if let Some(id) = self
-            .symbol_table
-            .lookup_global(qualifier, ResolveTarget::Qualifier, caller_meta)
-            .target()
+        if let GlobalPick::Unique(id) =
+            self.symbol_table
+                .lookup_global(qualifier, ResolveTarget::Qualifier, caller_meta)
         {
             if let Some(qf) = self.symbol_table.file_of(id) {
                 if self
@@ -1740,7 +1743,7 @@ mod tests {
             );
             assert_eq!(
                 out,
-                vec![(0, ResolutionTier::Global.base_confidence())],
+                vec![(0, ResolutionTier::GlobalNonTest.base_confidence())],
                 "{ext}: production caller must resolve to the production definition"
             );
             let last = r.take_decisions().unwrap().pop().unwrap();
@@ -1797,5 +1800,25 @@ mod tests {
             ResolveTarget::Callable,
         );
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn tier3_qualifier_lookup_ignores_the_test_double_tie_break() {
+        // The tie-break applies to bare names only; a qualifier that is
+        // ambiguous between production and test stays unresolved.
+        let st = st_with(&[
+            ("src/a.py", "Foo", NodeKind::Class),
+            ("src/a.py", "bar", NodeKind::Method),
+            ("tests/fake.py", "Foo", NodeKind::Class),
+            ("tests/fake.py", "bar", NodeKind::Method),
+        ]);
+        let r = Resolver::new(&st);
+        let out = r.resolve_symbol(
+            &PathBuf::from("src/c.py"),
+            "Foo.bar",
+            &[],
+            ResolveTarget::Callable,
+        );
+        assert!(out.is_empty(), "got {out:?}");
     }
 }

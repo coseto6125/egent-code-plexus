@@ -27,6 +27,12 @@ pub enum ResolutionTier {
     /// unqualified callsites).
     HeritageScoped,
     Global,
+    /// Tier 3 test-double tie-break (`GlobalPick::NonTest`). Below `Global`
+    /// on measurement: a sampled 79% of these edges were correct on enoract
+    /// against 88% for unique-Global ones, because the production candidate
+    /// often stands in for a stdlib or third-party method (`asyncio.run`,
+    /// `dict.keys`) that a test fake used to make ambiguous.
+    GlobalNonTest,
     Fallback(FallbackReason),
 }
 
@@ -39,6 +45,7 @@ impl ResolutionTier {
             ResolutionTier::QualifierScoped => 0.85,
             ResolutionTier::HeritageScoped => 0.8,
             ResolutionTier::Global => 0.7,
+            ResolutionTier::GlobalNonTest => 0.6,
             ResolutionTier::Fallback(reason) => match reason {
                 FallbackReason::ImplicitSelf => 0.8,
                 FallbackReason::VueComponent => 0.8,
