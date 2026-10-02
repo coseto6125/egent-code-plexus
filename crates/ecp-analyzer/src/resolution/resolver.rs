@@ -549,6 +549,27 @@ fn crate_root_prefix(path: &str) -> &str {
         .unwrap_or("")
 }
 
+/// `mod.rs`, `lib.rs` and `main.rs` name their directory's module; every
+/// other `.rs` file is a module named after its stem. `src/bin/<name>.rs`
+/// crate roots are not recognised and are treated as ordinary modules.
+fn is_rust_module_root(source_file: &std::path::Path) -> bool {
+    matches!(
+        source_file.file_stem().and_then(|s| s.to_str()),
+        Some("mod" | "lib" | "main")
+    )
+}
+
+/// Directory that holds the child modules of `source_file`'s module — the
+/// base of `self::`. Rust 2018 puts the children of `a/b.rs` in `a/b/`.
+fn rust_module_dir(source_file: &std::path::Path) -> Option<std::path::PathBuf> {
+    let own_dir = source_file.parent()?;
+    if is_rust_module_root(source_file) {
+        Some(own_dir.to_path_buf())
+    } else {
+        Some(own_dir.join(source_file.file_stem()?))
+    }
+}
+
 /// Expand a Rust `use`-path module specifier to the caller crate's
 /// `src/<segments>` base so Tier-2 import resolution can pin the declaring
 /// module. Returns `None` for non-Rust specifiers (TS/Python/etc. keep their
@@ -559,8 +580,10 @@ fn crate_root_prefix(path: &str) -> &str {
 /// SymbolTable key and resolution correctly falls through:
 /// * `crate::output` from `crates/ecp-cli/src/commands/find.rs`
 ///   → `crates/ecp-cli/src/output`
-/// * `self::a` → caller-dir-relative `a`
-/// * `super::a` → caller parent-dir `a`
+/// * `self::a` → `a` under the caller module's child directory
+///   (`a/b.rs` → `a/b/a`, `a/b/mod.rs` → `a/b/a`)
+/// * `super::a` → `a` under the parent module's directory
+///   (`a/b.rs` → `a/a`, `a/b/mod.rs` → `a/a`)
 ///
 /// The trailing item name is NOT part of `import.source` (the parser splits
 /// `use crate::output::{emit}` into source=`crate::output`, name=`emit`), so
@@ -584,8 +607,24 @@ fn rust_module_path_base(
                 .map(|(root, _)| format!("{root}/src"))?;
             (std::path::PathBuf::from(src_root), rest)
         }
-        (&"self", rest) => (source_file.parent()?.to_path_buf(), rest),
-        (&"super", rest) => (source_file.parent()?.parent()?.to_path_buf(), rest),
+        (&"self", rest) => (rust_module_dir(source_file)?, rest),
+        (&"super", mut rest) => {
+            // `super` is the parent module: for a module root (`a/b/mod.rs`)
+            // that is the grandparent directory, for any other file
+            // (`a/b.rs`) it is the file's own directory. Each further
+            // `super` climbs one more module.
+            let own_dir = source_file.parent()?;
+            let mut anchor = if is_rust_module_root(source_file) {
+                own_dir.parent()?.to_path_buf()
+            } else {
+                own_dir.to_path_buf()
+            };
+            while let Some((&"super", tail)) = rest.split_first() {
+                anchor = anchor.parent()?.to_path_buf();
+                rest = tail;
+            }
+            (anchor, rest)
+        }
         _ => return None,
     };
     Some(rest.iter().fold(anchor, |p, seg| p.join(seg)))
