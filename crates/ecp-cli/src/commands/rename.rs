@@ -21,6 +21,8 @@
 use clap::Args;
 use ecp_analyzer::identifier_finder::find_identifier_occurrences;
 use ecp_core::analyzer::types::IdentifierRange;
+use ecp_core::file_category::determine_category;
+use ecp_core::graph::FileCategory;
 use ecp_core::registry::atomic_write_bytes;
 use ecp_core::EcpError;
 use regex::Regex;
@@ -89,13 +91,11 @@ struct Occurrence {
     context: String,
 }
 
-fn classify_context(path: &Path) -> String {
-    let s = path.to_string_lossy();
-    if s.contains("/test/")
-        || s.contains("/tests/")
-        || s.ends_with("_test.go")
-        || s.ends_with("_test.rs")
-    {
+/// `rel_path` is relative to the repo root, so the classifier never reads
+/// the directories the repo happens to live in (`/tmp/test/repo`).
+fn classify_context(rel_path: &str) -> String {
+    let s = rel_path;
+    if determine_category(s) == FileCategory::Test {
         "test".into()
     } else if s.ends_with(".md") || s.ends_with(".rst") || s.ends_with(".markdown") {
         "markdown".into()
@@ -127,16 +127,14 @@ fn scan_word_occurrences(root: &Path, word: &str) -> Vec<Occurrence> {
         let Ok(content) = std::fs::read_to_string(path) else {
             continue;
         };
+        let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy();
+        let context = classify_context(&rel);
         for (idx, line) in content.lines().enumerate() {
             if pattern.is_match(line) {
                 hits.push(Occurrence {
-                    file: path
-                        .strip_prefix(root)
-                        .unwrap_or(path)
-                        .to_string_lossy()
-                        .into_owned(),
+                    file: rel.clone().into_owned(),
                     line: (idx + 1) as u32,
-                    context: classify_context(path),
+                    context: context.clone(),
                 });
             }
         }
@@ -610,4 +608,47 @@ fn collect_diff(
         }
     }
     out.push(String::new());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_classify_context_root_conftest_is_test() {
+        // The old substring rule needed a `/tests/` segment.
+        assert_eq!(classify_context("conftest.py"), "test");
+        assert_eq!(classify_context("tests/conftest.py"), "test");
+    }
+
+    #[test]
+    fn test_classify_context_testimonials_dir_not_test() {
+        assert_eq!(classify_context("src/testimonials/x.py"), "code");
+    }
+
+    #[test]
+    fn test_classify_context_flow_tests_rs_is_test() {
+        assert_eq!(classify_context("crates/x/src/flow/tests.rs"), "test");
+    }
+
+    #[test]
+    fn test_classify_context_other_labels_unchanged() {
+        assert_eq!(classify_context("src/lib.rs"), "code");
+        assert_eq!(classify_context("docs/guide.md"), "markdown");
+        assert_eq!(classify_context("Cargo.toml"), "data");
+        assert_eq!(classify_context("ci.yml"), "data");
+    }
+
+    #[test]
+    fn test_scan_word_occurrences_repo_under_test_dir_is_not_all_test() {
+        // A repo checked out under a directory named `test` must classify by
+        // its own layout, not by the absolute path above the root.
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("test").join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "fn needle() {}\n").unwrap();
+        let hits = scan_word_occurrences(&root, "needle");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].context, "code");
+    }
 }
