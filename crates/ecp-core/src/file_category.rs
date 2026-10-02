@@ -55,18 +55,20 @@ fn path_pattern_ac() -> &'static (AhoCorasick, Vec<PathPatternKind>) {
             // content. Surfaced separately from Test so routes / tools /
             // handlers under `/examples/` stay visible to LLM consumers
             // (Express's `examples/auth/`, NestJS `sample/`, Flask
-            // `examples/tutorial/`). `/tests/` stays as Test because test
-            // fixtures (`@app.route('/test_setup')`, helper test endpoints)
-            // would pollute the production-route surface.
+            // `examples/tutorial/`). Test outranks Example: a test inside an
+            // example app (`examples/todo/tests/`) is still a test, and its
+            // fixtures (`@app.route('/test_setup')`) would pollute the
+            // production-route surface.
             (PathPatternKind::Example, "/examples/"),
             (PathPatternKind::Example, "/example/"),
             (PathPatternKind::Example, "/sample/"),
             (PathPatternKind::Example, "/samples/"),
             (PathPatternKind::Example, "/demo/"),
             (PathPatternKind::Example, "/demos/"),
-            // Test — substring forms. Suffix forms (`_test.go`, etc.) are
-            // handled separately because `ends_with` already runs in
-            // constant time against the path tail.
+            // Test — substring forms. Basename suffix forms (`_test.go`,
+            // `FooTest.java`) are handled separately: they depend on the
+            // extension, so a bare `_spec.` substring would also catch
+            // production files such as `lang_spec.rs`.
             (PathPatternKind::Test, ".test."),
             (PathPatternKind::Test, ".spec."),
             // NestJS / Angular `.e2e-spec.ts` etc.
@@ -82,10 +84,16 @@ fn path_pattern_ac() -> &'static (AhoCorasick, Vec<PathPatternKind>) {
             (PathPatternKind::Test, "/spec/"),
             (PathPatternKind::Test, "/test_"),
             (PathPatternKind::Test, "/conftest."),
-            // Co-located suffix forms in any language: Go `_test.go`, C++
-            // gtest `_test.cc`, Dart `_test.dart`, RSpec / Jasmine `_spec.`.
-            (PathPatternKind::Test, "_test."),
-            (PathPatternKind::Test, "_spec."),
+            // .NET test projects: `Foo.Tests/`, `Foo.UnitTests/` lowercase
+            // to `.tests/` / `tests/`; the latter is caught by `/tests/`
+            // only when it is a whole segment.
+            (PathPatternKind::Test, ".tests/"),
+            (PathPatternKind::Test, "/testdata/"),
+            (PathPatternKind::Test, "/testutil"),
+            (PathPatternKind::Test, "/test-utils/"),
+            (PathPatternKind::Test, "/test_utils/"),
+            (PathPatternKind::Test, "/test-helpers/"),
+            (PathPatternKind::Test, "/test_helpers/"),
         ];
         let strings: Vec<&str> = PATTERNS.iter().map(|(_, s)| *s).collect();
         let kinds: Vec<PathPatternKind> = PATTERNS.iter().map(|(k, _)| *k).collect();
@@ -98,36 +106,31 @@ fn path_pattern_ac() -> &'static (AhoCorasick, Vec<PathPatternKind>) {
 }
 
 pub fn determine_category(path: &str) -> FileCategory {
-    let normalized_path = path.replace('\\', "/");
-    // Prefix with "/" so patterns like "/vendor/" match both embedded
-    // segments AND top-level paths (e.g. `vendor/foo` → `/vendor/foo`).
-    let lower_path = format!("/{}", normalized_path.to_lowercase());
+    // One allocation: `/` prefix so patterns like "/vendor/" also match a
+    // top-level segment, `\\` folded to `/`, ASCII-lowercased (every
+    // pattern is ASCII, so Unicode case folding cannot change a match).
+    let mut lower_path = String::with_capacity(path.len() + 1);
+    lower_path.push('/');
+    lower_path.extend(path.chars().map(|c| match c {
+        '\\' => '/',
+        c => c.to_ascii_lowercase(),
+    }));
 
     let (ac, kinds) = path_pattern_ac();
-    let mut hit_reference = false;
     let mut hit_example = false;
     let mut hit_test_substring = false;
     for m in ac.find_iter(&lower_path) {
         match kinds[m.pattern().as_usize()] {
-            PathPatternKind::Reference => {
-                // Reference outranks Example and Test (vendored sample
-                // dirs still classify as Reference). Bail early — no
-                // later match can override.
-                hit_reference = true;
-                break;
-            }
+            // Reference outranks Example and Test (vendored sample dirs
+            // still classify as Reference); no later match can override.
+            PathPatternKind::Reference => return FileCategory::Reference,
             PathPatternKind::Example => hit_example = true,
             PathPatternKind::Test => hit_test_substring = true,
         }
     }
-    if hit_reference {
-        return FileCategory::Reference;
-    }
-    if hit_example {
-        return FileCategory::Example;
-    }
 
     let is_test = hit_test_substring
+        || has_test_suffix(&lower_path)
         // PascalCase test-class suffixes (Java/JUnit, Kotlin, Swift XCTest,
         // .NET MSTest/xUnit/NUnit, PHPUnit, ScalaTest/specs2). Case-sensitive
         // intentionally: `Manifest.java` lowercased ends with `test.java`, so
@@ -135,18 +138,21 @@ pub fn determine_category(path: &str) -> FileCategory {
         // (capital T) is the language-mandated convention for these
         // ecosystems, so a literal `Test.ext` / `Tests.ext` / `Spec.ext`
         // suffix is a reliable signal.
-        || normalized_path.ends_with("Test.java")
-        || normalized_path.ends_with("Tests.java")
-        || normalized_path.ends_with("Test.kt")
-        || normalized_path.ends_with("Tests.kt")
-        || normalized_path.ends_with("Tests.swift")
-        || normalized_path.ends_with("Tests.cs")
-        || normalized_path.ends_with("Test.cs")
-        || normalized_path.ends_with("Test.php")
-        || normalized_path.ends_with("Spec.scala")
-        || normalized_path.ends_with("Test.scala");
+        || path.ends_with("Test.java")
+        || path.ends_with("Tests.java")
+        || path.ends_with("Test.kt")
+        || path.ends_with("Tests.kt")
+        || path.ends_with("Tests.swift")
+        || path.ends_with("Tests.cs")
+        || path.ends_with("Test.cs")
+        || path.ends_with("Test.php")
+        || path.ends_with("Spec.scala")
+        || path.ends_with("Test.scala");
     if is_test {
         return FileCategory::Test;
+    }
+    if hit_example {
+        return FileCategory::Example;
     }
 
     if lower_path.ends_with(".md") || lower_path.ends_with(".txt") || lower_path.ends_with(".rst") {
@@ -440,6 +446,34 @@ pub fn pick_global(
     }
 }
 
+/// Test files named by their basename.
+///
+/// - Sibling test modules: Rust `tests.rs`, Django `tests.py`, `test.js`.
+///   Doc and config files are excluded, so a CI workflow `test.yml` stays
+///   Config.
+/// - Co-located suffixes, limited to the ecosystems whose runners use them:
+///   Go `_test.go`, pytest `_test.py`, Minitest `_test.rb`, gtest
+///   `_test.cc`, Jest/Jasmine `_test.ts` / `_spec.ts`, RSpec `_spec.rb`,
+///   Crystal `_spec.cr`. Rust, Dart and Move keep tests under `tests/` /
+///   `test/`, so `lang_spec.rs` or a package named `bloc_test` stays
+///   production code.
+fn has_test_suffix(lower_path: &str) -> bool {
+    let base = lower_path.rsplit('/').next().unwrap_or("");
+    let Some((stem, ext)) = base.rsplit_once('.') else {
+        return false;
+    };
+    const JS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "cjs"];
+    (matches!(stem, "test" | "tests")
+        && !matches!(
+            ext,
+            "md" | "txt" | "rst" | "json" | "toml" | "yaml" | "yml" | "html" | "css"
+        ))
+        || (stem.ends_with("_test")
+            && (JS.contains(&ext)
+                || matches!(ext, "go" | "py" | "rb" | "c" | "cc" | "cpp" | "cxx" | "exs")))
+        || (stem.ends_with("_spec") && (JS.contains(&ext) || matches!(ext, "rb" | "cr")))
+}
+
 /// `true` when [`determine_category`] classifies `path` as `Test`. Every
 /// test/non-test decision outside the persisted `File.category` goes through
 /// here, so impact, process detection, function-meta flags and the resolver
@@ -562,13 +596,84 @@ mod determine_category_tests {
     }
 
     #[test]
-    fn test_determine_category_underscore_test_any_extension_classifies_as_test() {
-        // Co-located `_test` / `_spec` suffixes beyond Go/Python/Ruby: C++
-        // gtest `foo_test.cc`, Dart `foo_test.dart`, Jasmine `foo_spec.js`.
-        assert_test("src/net/socket_test.cc");
-        assert_test("lib/src/parser_test.dart");
-        assert_test("src/app/util_spec.js");
-        assert_test("src/app/util_test.ts");
+    fn test_determine_category_per_language_conventions_classify_both_ways() {
+        // One test-file and one production-file convention per mainstream
+        // language, so narrowing a rule for one ecosystem shows up red.
+        let cases: &[(&str, &str, &str)] = &[
+            ("ts", "src/app/util.test.ts", "src/app/util.ts"),
+            ("js", "src/app/util_spec.js", "src/app/util.js"),
+            ("py", "pkg/app/tests.py", "pkg/app/models.py"),
+            (
+                "java",
+                "src/main/java/com/x/FooTest.java",
+                "src/main/java/com/x/Foo.java",
+            ),
+            ("kt", "app/src/FooTests.kt", "app/src/Foo.kt"),
+            ("cs", "src/Foo.Tests/TestObjects/Bar.cs", "src/Foo/Bar.cs"),
+            ("go", "pkg/store/store_test.go", "pkg/store/store.go"),
+            (
+                "rs",
+                "crates/x/src/flow/tests.rs",
+                "crates/x/src/lang_spec.rs",
+            ),
+            ("php", "app/Models/UserTest.php", "app/Models/User.php"),
+            ("rb", "lib/user_spec.rb", "lib/user.rb"),
+            (
+                "swift",
+                "Sources/AppTests/LoginTests.swift",
+                "Sources/App/Login.swift",
+            ),
+            ("c", "src/net/socket_test.c", "src/net/socket.c"),
+            ("cpp", "src/net/socket_test.cc", "src/net/socket.cc"),
+            ("dart", "test/parser_test.dart", "lib/bloc_test.dart"),
+        ];
+        for (lang, test_path, prod_path) in cases {
+            assert_eq!(
+                determine_category(test_path),
+                FileCategory::Test,
+                "{lang}: expected Test for {test_path}"
+            );
+            assert_eq!(
+                determine_category(prod_path),
+                FileCategory::Source,
+                "{lang}: expected Source for {prod_path}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_determine_category_shared_test_support_dirs_classify_as_test() {
+        for p in [
+            "internal/testutil/fake.go",
+            "pkg/parser/testdata/input.go",
+            "src/test-helpers/render.ts",
+            "src/test_utils/factory.py",
+        ] {
+            assert_test(p);
+        }
+    }
+
+    #[test]
+    fn test_determine_category_test_inside_example_app_classifies_as_test() {
+        // Test outranks Example: a nested test must not emit fixture routes.
+        assert_test("examples/todo/tests/test_routes.py");
+        assert_test("test/node/fixtures/examples/a.js");
+        assert_example("examples/todo/app.py");
+    }
+
+    #[test]
+    fn test_determine_category_test_named_config_stays_config() {
+        assert_eq!(
+            determine_category(".github/workflows/test.yml"),
+            FileCategory::Config
+        );
+        assert_eq!(determine_category("docs/tests.md"), FileCategory::Document);
+    }
+
+    #[test]
+    fn test_determine_category_windows_separators_classify_like_unix() {
+        assert_test("src\\Foo.Tests\\Bar.cs");
+        assert_test("pkg\\store\\store_test.go");
     }
 
     #[test]
