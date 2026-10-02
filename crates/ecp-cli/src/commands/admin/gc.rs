@@ -30,7 +30,10 @@ pub fn run(args: GcArgs) -> Result<(), ecp_core::EcpError> {
             Err(e) => eprintln!("gc: prune_ghost_entries: {e}"),
         }
         // Private git-status indexes of worktrees that no longer exist.
-        total_removed += crate::git::status::sweep_orphans(&home_ecp);
+        #[cfg(target_os = "linux")]
+        {
+            total_removed += crate::git::status::sweep_orphans(&home_ecp);
+        }
     }
 
     // L2 + L3: per-repo generation convergence + session sweep.
