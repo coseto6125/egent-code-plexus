@@ -449,11 +449,12 @@ pub(crate) fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io:
     // gets the same answer from the same code: same flags, same artifact
     // filter. Two definitions of "clean" that disagree is what let this
     // through.
-    let out = crate::git::status::porcelain_all(worktree)?;
+    let home_ecp = std::cell::OnceCell::new();
+    let out = crate::git::status::porcelain_all(worktree, &home_ecp)?;
     if !out.status.success() {
         return Ok(false);
     }
-    let home_ecp_canonical = fs::canonicalize(resolve_home_ecp()).ok();
+    let home_ecp_canonical = fs::canonicalize(home_ecp.get_or_init(resolve_home_ecp)).ok();
     let dirty = crate::auto_ensure::parse_porcelain_paths(&out.stdout, worktree)
         .into_iter()
         .any(|p| !crate::auto_ensure::is_ecp_artifact(&p, None, home_ecp_canonical.as_deref()));

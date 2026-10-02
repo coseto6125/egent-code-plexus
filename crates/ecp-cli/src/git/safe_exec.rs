@@ -33,7 +33,12 @@ use std::time::{Duration, Instant};
 /// directory` on every ordinary diff, so it breaks benign repositories while
 /// adding nothing `--no-ext-diff` does not already do.
 pub fn git() -> Command {
-    let mut cmd = Command::new("git");
+    git_at(Path::new("git"))
+}
+
+/// [`git`] for a binary the caller already resolved.
+pub fn git_at(program: &Path) -> Command {
+    let mut cmd = Command::new(program);
     cmd.args([
         "-c",
         "protocol.ext.allow=never",
