@@ -18,9 +18,10 @@
 use std::cell::OnceCell;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, FileTimes};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use xxhash_rust::xxh3::xxh3_64;
@@ -69,6 +70,7 @@ const LOCK_FILE: &str = "lock";
 const GITDIR_RECORD: &str = "gitdir";
 const COPY_PREFIX: &str = "index-";
 const FAILED_SUFFIX: &str = ".failed";
+const PENDING_SUFFIX: &str = ".pending";
 const MOUNTINFO: &str = "/proc/self/mountinfo";
 
 /// The output of `git status --porcelain -z --untracked-files=all` in
@@ -104,6 +106,7 @@ fn plain(worktree: &Path) -> io::Result<Output> {
 /// What the private copy needs from a worktree that passed every check.
 struct Repo {
     gitdir: PathBuf,
+    top: PathBuf,
     git: PathBuf,
     config_files: Vec<PathBuf>,
     config_id: u64,
@@ -127,6 +130,7 @@ fn eligible(worktree: &Path, env: &dyn Fn(&str) -> Option<OsString>) -> Option<R
     }
     Some(Repo {
         gitdir,
+        top,
         git,
         config_files,
         config_id,
@@ -164,7 +168,8 @@ fn executable(_meta: &fs::Metadata) -> bool {
 /// Every config file git reads for this worktree. The untracked cache does
 /// not record settings such as `core.ignorecase`, so a cache built under one
 /// config would keep answering under another; the files' content is part of
-/// the copy's name instead.
+/// the copy's name instead. A relative path resolves against the worktree in
+/// git but against ecp's cwd here, so any relative one declines.
 fn config_files(
     gitdir: &Path,
     common: &Path,
@@ -200,7 +205,7 @@ fn config_files(
             files.extend(home.map(|h| h.join(".gitconfig")));
         }
     }
-    Some(files)
+    files.iter().all(|file| file.is_absolute()).then_some(files)
 }
 
 /// A digest of the config files' content, absent files included. `None`
@@ -228,11 +233,16 @@ fn config_identity(files: &[PathBuf]) -> Option<u64> {
 /// - under sparse checkout, git clears skip-worktree on paths present in the
 ///   tree and writes that into the copy, while the real index keeps the bit;
 /// - with `core.trustctime` or `core.checkStat` relaxed, an entry the copy
-///   re-verified stays trusted where the real index still compares content.
+///   re-verified stays trusted where the real index still compares content;
+/// - `extensions.objectFormat` may widen the object names past the 20 bytes
+///   the gitlink scan steps over.
 ///
-/// Keys are matched by name in any section, which only ever over-matches.
+/// Keys are matched by name in any section, which only ever over-matches. git
+/// skips a UTF-8 byte order mark at the start of the file.
 fn blocks_copy(config: &[u8]) -> bool {
-    String::from_utf8_lossy(config).lines().any(|line| {
+    let text = String::from_utf8_lossy(config);
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    text.lines().any(|line| {
         let line = line.trim_start().to_ascii_lowercase();
         let rest = match line.strip_prefix('[') {
             Some(header) if header.starts_with("include") => return true,
@@ -246,7 +256,12 @@ fn blocks_copy(config: &[u8]) -> bool {
             .unwrap_or("");
         matches!(
             key,
-            "worktree" | "sparsecheckout" | "sparsecheckoutcone" | "trustctime" | "checkstat"
+            "worktree"
+                | "sparsecheckout"
+                | "sparsecheckoutcone"
+                | "trustctime"
+                | "checkstat"
+                | "objectformat"
         )
     })
 }
@@ -316,17 +331,30 @@ fn status_on_private_index(worktree: &Path, repo: &Repo, cache_root: &Path) -> O
     let gitdir = repo.gitdir.to_str()?;
     let dir = copy_dir(cache_root, gitdir);
     fs::create_dir_all(&dir).ok()?;
+    // A walk that reaches the copies lists git's transient `<copy>.lock`.
+    if fs::canonicalize(&dir).ok()?.starts_with(&repo.top) {
+        return None;
+    }
     let _lock = lock_dir(&dir)?;
 
     let mut real = File::open(repo.gitdir.join("index")).ok()?;
     let real_meta = real.metadata().ok()?;
+    let real_mtime = real_meta.modified().ok()?;
     let name = format!(
         "{}-{:016x}",
         copy_name(&mut real, &real_meta)?,
         repo.config_id
     );
     let copy = dir.join(&name);
-    if fs::symlink_metadata(failed_marker(&copy)).is_ok() {
+    if fs::symlink_metadata(marker(&copy, FAILED_SUFFIX)).is_ok() {
+        return None;
+    }
+    // A run that ended between git's rewrite of the copy and the stamp left
+    // git's write time on it, which keeps a same-second change hidden.
+    let pending = marker(&copy, PENDING_SUFFIX);
+    if fs::symlink_metadata(&pending).is_ok()
+        && fs::remove_file(&copy).is_err_and(|e| e.kind() != io::ErrorKind::NotFound)
+    {
         return None;
     }
     let created = fs::symlink_metadata(&copy).is_err();
@@ -338,10 +366,20 @@ fn status_on_private_index(worktree: &Path, repo: &Repo, cache_root: &Path) -> O
             return None;
         }
         fs::write(dir.join(GITDIR_RECORD), gitdir).ok()?;
-        write_copy(&mut real, &real_meta, &copy).ok()?;
+        let mut body = Vec::new();
+        real.read_to_end(&mut body).ok()?;
+        // git passes the `-c` settings on to the status it runs in each
+        // submodule, where they override the submodule's own config.
+        if !gitlink_free(&body) {
+            let _ = File::create(marker(&copy, FAILED_SUFFIX));
+            prune(&dir, &name);
+            return None;
+        }
+        write_copy(&body, real_mtime, &copy).ok()?;
     }
     drop(real);
 
+    File::create(&pending).ok()?;
     let started = SystemTime::now();
     let out = safe_exec::git_at(&repo.git)
         .args(UNTRACKED_CACHE_CONFIG)
@@ -357,20 +395,24 @@ fn status_on_private_index(worktree: &Path, repo: &Repo, cache_root: &Path) -> O
         // a repository the plain command refuses too, says nothing against
         // the copy.
         if out.status.code().is_some() && plain.status.success() {
-            let _ = File::create(failed_marker(&copy));
+            let _ = File::create(marker(&copy, FAILED_SUFFIX));
         }
         return Some(plain);
     }
-    // A copy whose stamp could not be set, or whose config changed while git
-    // ran, may hold a cache that a later run would wrongly trust.
-    if !stamp_before(&copy, started) || config_identity(&repo.config_files) != Some(repo.config_id)
-    {
+    let config_held = config_identity(&repo.config_files) == Some(repo.config_id);
+    if config_held && stamp_before(&copy, started, real_mtime) {
+        let _ = fs::remove_file(&pending);
+    } else {
+        // The pending marker stays, so the next run discards a copy this one
+        // failed to remove.
         let _ = fs::remove_file(&copy);
     }
     if created {
         prune(&dir, &name);
     }
-    Some(out)
+    // A config that changed while git ran may have met a cache built under
+    // the old one, so this run's answer is not trusted either.
+    config_held.then_some(out)
 }
 
 /// Takes `dir`'s lock without waiting. One run at a time chooses, writes,
@@ -385,15 +427,20 @@ fn lock_dir(dir: &Path) -> Option<File> {
         .write(true)
         .open(&path)
         .ok()?;
-    lock.try_lock().ok()?;
-    // `ecp admin gc` removes a directory while holding its lock, so a lock
-    // taken on the file it unlinked guards nothing.
-    (inode(&lock.metadata().ok()?) == inode(&fs::metadata(&path).ok()?)).then_some(lock)
+    lock_at_path(lock, &path)
 }
 
-fn failed_marker(copy: &Path) -> PathBuf {
+/// Takes `lock` while it is still the file at `path`. `ecp admin gc` moves a
+/// directory away while holding its lock, so a lock opened before that guards
+/// nothing.
+fn lock_at_path(lock: File, path: &Path) -> Option<File> {
+    lock.try_lock().ok()?;
+    (inode(&lock.metadata().ok()?) == inode(&fs::metadata(path).ok()?)).then_some(lock)
+}
+
+fn marker(copy: &Path, suffix: &str) -> PathBuf {
     let mut name = copy.as_os_str().to_owned();
-    name.push(FAILED_SUFFIX);
+    name.push(suffix);
     PathBuf::from(name)
 }
 
@@ -443,19 +490,69 @@ fn split_index_present(gitdir: &Path) -> bool {
     })
 }
 
-/// Copies `real` to `copy` through a temporary name, so a crash leaves either
-/// no copy or a whole one. The real index's mtime is carried over: git treats
-/// an entry whose mtime is not older than the index file as racily clean and
-/// compares its content, and a fresh mtime on the copy would trust entries the
-/// real index would have re-read.
-fn write_copy(real: &mut File, real_meta: &fs::Metadata, copy: &Path) -> io::Result<()> {
-    let mut tmp_name = copy.as_os_str().to_owned();
-    tmp_name.push(".tmp");
-    let tmp = PathBuf::from(tmp_name);
+/// True when the index's entries were walked and none is a gitlink. Entries
+/// follow a 12-byte header; each holds stat data with the mode at byte 24, a
+/// 20-byte object name, 16 bits of flags (32 with the extended bit), and the
+/// path. Versions 2 and 3 NUL-pad the entry to a multiple of eight bytes;
+/// version 4 prefixes the path with a varint and ends it with one NUL.
+fn gitlink_free(index: &[u8]) -> bool {
+    const GITLINK: u32 = 0o160_000;
+    const EXTENDED: u16 = 0x4000;
+    const FLAGS_AT: usize = 40 + 20;
+    let u32_at = |at: usize| {
+        let bytes = index.get(at..at.checked_add(4)?)?;
+        Some(u32::from_be_bytes(bytes.try_into().ok()?))
+    };
+    let (Some(b"DIRC"), Some(version @ 2..=4), Some(count)) =
+        (index.get(..4), u32_at(4), u32_at(8))
+    else {
+        return false;
+    };
+    let mut at = 12;
+    for _ in 0..count {
+        let (Some(mode), Some(&[hi, lo])) =
+            (u32_at(at + 24), index.get(at + FLAGS_AT..at + FLAGS_AT + 2))
+        else {
+            return false;
+        };
+        if mode & 0o170_000 == GITLINK {
+            return false;
+        }
+        let mut path = at + FLAGS_AT + 2;
+        if u16::from_be_bytes([hi, lo]) & EXTENDED != 0 {
+            path += 2;
+        }
+        if version == 4 {
+            while index.get(path).is_some_and(|b| b & 0x80 != 0) {
+                path += 1;
+            }
+            path += 1;
+        }
+        let Some(len) = index
+            .get(path..)
+            .and_then(|rest| rest.iter().position(|&b| b == 0))
+        else {
+            return false;
+        };
+        at = match version {
+            4 => path + len + 1,
+            _ => at + ((path - at + len + 8) & !7),
+        };
+    }
+    true
+}
+
+/// Writes the real index's bytes to `copy` through a temporary name, so a
+/// crash leaves either no copy or a whole one. The real index's mtime is
+/// carried over: git treats an entry whose mtime is not older than the index
+/// file as racily clean and compares its content, and a fresh mtime on the
+/// copy would trust entries the real index would have re-read.
+fn write_copy(body: &[u8], real_mtime: SystemTime, copy: &Path) -> io::Result<()> {
+    let tmp = marker(copy, ".tmp");
     let written = (|| -> io::Result<()> {
         let mut dst = File::create(&tmp)?;
-        io::copy(real, &mut dst)?;
-        dst.set_times(FileTimes::new().set_modified(real_meta.modified()?))?;
+        dst.write_all(body)?;
+        dst.set_times(FileTimes::new().set_modified(real_mtime))?;
         drop(dst);
         fs::rename(&tmp, copy)
     })();
@@ -465,24 +562,37 @@ fn write_copy(real: &mut File, real_meta: &fs::Metadata, copy: &Path) -> io::Res
     written
 }
 
-/// Stamps `copy` no later than one second before git started. git stamps a
-/// copy it rewrites with the write time and trusts a directory or entry whose
-/// recorded mtime is older than that stamp, in whole seconds unless git was
-/// built with nanosecond stamps. A file landing in a directory in the same
-/// second git stat'd it, with the write in the next second, would then stay
-/// hidden until the directory changes again. Every stat this run recorded is
-/// at or after `started`, so the earlier stamp keeps them racy; an older stamp
-/// only makes git re-check more.
-fn stamp_before(copy: &Path, started: SystemTime) -> bool {
+/// Stamps `copy` between the real index's mtime and the later of that mtime
+/// and one second before git started, and returns whether it holds such a
+/// stamp.
+///
+/// git stamps a copy it rewrites with the write time and trusts a directory or
+/// entry whose recorded mtime is older than that stamp, in whole seconds
+/// unless git was built with nanosecond stamps. A file landing in a directory
+/// in the same second git stat'd it, with the write in the next second, would
+/// then stay hidden until the directory changes again. Every stat this run
+/// recorded is at or after `started` and after the real index was written, so
+/// the ceiling keeps them racy. The floor keeps every entry the real index
+/// trusts trusted in the copy too: a racy entry is compared by content, and
+/// a `text` or `eol` attribute over a blob stored with CRLF reads as modified
+/// even though plain status trusts its stat. A real index stamped after
+/// `started` bounds nothing, and the copy is not kept.
+fn stamp_before(copy: &Path, started: SystemTime, real_mtime: SystemTime) -> bool {
     let Some(ceiling) = started.checked_sub(Duration::from_secs(1)) else {
         return false;
     };
+    if real_mtime > started {
+        return false;
+    }
+    let ceiling = ceiling.max(real_mtime);
     match fs::metadata(copy).and_then(|m| m.modified()) {
-        Ok(stamp) if stamp <= ceiling => true,
-        Ok(_) => File::options()
+        Ok(stamp) if (real_mtime..=ceiling).contains(&stamp) => true,
+        Ok(stamp) => File::options()
             .write(true)
             .open(copy)
-            .and_then(|f| f.set_times(FileTimes::new().set_modified(ceiling)))
+            .and_then(|f| {
+                f.set_times(FileTimes::new().set_modified(stamp.clamp(real_mtime, ceiling)))
+            })
             .is_ok(),
         Err(_) => false,
     }
@@ -507,7 +617,9 @@ fn prune(dir: &Path, keep: &str) {
 /// and returns how many went. A directory without a record never got a copy.
 /// A directory whose lock is held is in use and stays.
 pub fn sweep_orphans(home_ecp: &Path) -> usize {
-    let Ok(dirs) = fs::read_dir(home_ecp.join(PRIVATE_INDEX_DIR)) else {
+    static TOMBSTONES: AtomicU64 = AtomicU64::new(0);
+    let root = home_ecp.join(PRIVATE_INDEX_DIR);
+    let Ok(dirs) = fs::read_dir(&root) else {
         return 0;
     };
     dirs.flatten()
@@ -522,7 +634,22 @@ pub fn sweep_orphans(home_ecp: &Path) -> usize {
                 }
                 Err(e) => e.kind() == io::ErrorKind::NotFound,
             };
-            orphan && fs::remove_dir_all(&dir).is_ok()
+            if !orphan {
+                return false;
+            }
+            // Deleted in place, the directory loses its lock file first, and a
+            // query could lock a fresh one there while the rest is still being
+            // deleted. Moved away under the lock, it is out of every query's
+            // reach.
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let tombstone = root.join(format!(
+                "{}.gc-{}-{}",
+                name.split('.').next().unwrap_or_default(),
+                std::process::id(),
+                TOMBSTONES.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::rename(&dir, &tombstone).is_ok() && fs::remove_dir_all(&tombstone).is_ok()
         })
         .count()
 }
@@ -712,9 +839,29 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn fast(worktree: &Path, cache: &Path) -> Vec<u8> {
         let repo = eligible(worktree, &process_env).expect("Linux fixture must be eligible");
+        serve(worktree, &repo, cache)
+    }
+
+    /// The environment `eligible` reads, cut off from the developer's config
+    /// files: only `PATH` comes from the process, and the system and global
+    /// config are absent files under `dir`.
+    fn isolated_env(dir: &Path) -> impl Fn(&str) -> Option<OsString> {
+        let dir = dir.to_path_buf();
+        move |key| match key {
+            "PATH" => std::env::var_os("PATH"),
+            "HOME" => Some(dir.clone().into_os_string()),
+            "GIT_CONFIG_SYSTEM" => Some(dir.join("no-system").into_os_string()),
+            "GIT_CONFIG_GLOBAL" => Some(dir.join("no-global").into_os_string()),
+            _ => None,
+        }
+    }
+
+    /// [`fast`] for a worktree already judged eligible.
+    #[cfg(target_os = "linux")]
+    fn serve(worktree: &Path, repo: &Repo, cache: &Path) -> Vec<u8> {
         for _ in 0..200 {
             let expected = plain(worktree).unwrap();
-            if let Some(got) = status_on_private_index(worktree, &repo, cache) {
+            if let Some(got) = status_on_private_index(worktree, repo, cache) {
                 assert_eq!(got.status.code(), expected.status.code());
                 assert_eq!(
                     got.stdout,
@@ -945,19 +1092,66 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn test_status_on_private_index_after_run_copy_stamped_a_second_before_start() {
+    fn test_status_on_private_index_after_run_copy_stamped_between_real_index_and_start() {
         let f = fixture();
         settle(&f.repo);
         fast(&f.repo, &f.cache);
         let finished = SystemTime::now();
+        let real = fs::metadata(f.repo.join(".git/index"))
+            .unwrap()
+            .modified()
+            .unwrap();
         let stamp = fs::metadata(only_copy(&f.cache))
             .unwrap()
             .modified()
             .unwrap();
         assert!(
-            stamp <= finished - Duration::from_secs(1),
-            "copy stamped {stamp:?}, run finished {finished:?}"
+            real <= stamp && stamp <= (finished - Duration::from_secs(1)).max(real),
+            "copy stamped {stamp:?}, real index {real:?}, run finished {finished:?}"
         );
+    }
+
+    /// The real index trusts `a.txt` by stat, while its content reads as
+    /// modified once compared: the blob holds CRLF and a `text` attribute
+    /// normalises the worktree file to LF. Whole seconds are set explicitly,
+    /// with the entry one second older than the real index.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_status_on_private_index_crlf_blob_text_attribute_matches_plain() {
+        let f = fixture();
+        write(&f.repo, "a.txt", "x\r\n");
+        git(&f.repo, &["-c", "core.autocrlf=false", "add", "a.txt"]);
+        git(&f.repo, &["commit", "-qm", "crlf"]);
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let real = UNIX_EPOCH + Duration::from_secs(now.as_secs());
+        for (rel, age) in [("lib.rs", 10), ("src/b.rs", 10), ("a.txt", 1)] {
+            File::options()
+                .write(true)
+                .open(f.repo.join(rel))
+                .unwrap()
+                .set_times(FileTimes::new().set_modified(real - Duration::from_secs(age)))
+                .unwrap();
+        }
+        git(
+            &f.repo,
+            &[
+                "-c",
+                "core.autocrlf=false",
+                "update-index",
+                "-q",
+                "--refresh",
+            ],
+        );
+        write(&f.repo, ".git/info/attributes", "*.txt text\n");
+        File::options()
+            .write(true)
+            .open(f.repo.join(".git/index"))
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(real))
+            .unwrap();
+        let repo = eligible(&f.repo, &isolated_env(&f.repo.with_file_name("env"))).unwrap();
+        assert_eq!(serve(&f.repo, &repo, &f.cache), b"");
+        assert_eq!(serve(&f.repo, &repo, &f.cache), b"");
     }
 
     #[cfg(target_os = "linux")]
@@ -978,21 +1172,76 @@ mod tests {
         assert_eq!(fast(&f.repo, &f.cache), b"?? src/new.rs\0");
     }
 
+    /// A copy at `path` carrying `mtime`.
+    fn copy_stamped(path: &Path, mtime: SystemTime) {
+        File::create(path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(mtime))
+            .unwrap();
+    }
+
+    fn mtime(path: &Path) -> SystemTime {
+        fs::metadata(path).unwrap().modified().unwrap()
+    }
+
     #[test]
-    fn test_stamp_before_fresh_copy_moves_stamp_back() {
+    fn test_stamp_before_fresh_copy_old_real_index_moves_stamp_back() {
         let tmp = tempfile::tempdir().unwrap();
         let copy = tmp.path().join("index-x");
-        fs::write(&copy, b"x").unwrap();
         let started = SystemTime::now();
-        assert!(stamp_before(&copy, started));
-        let stamp = fs::metadata(&copy).unwrap().modified().unwrap();
-        assert!(stamp <= started - Duration::from_secs(1));
+        copy_stamped(&copy, started);
+        assert!(stamp_before(
+            &copy,
+            started,
+            started - Duration::from_secs(60)
+        ));
+        assert_eq!(mtime(&copy), started - Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_stamp_before_recent_real_index_stamp_at_real_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let copy = tmp.path().join("index-x");
+        let started = SystemTime::now();
+        let real = started - Duration::from_millis(300);
+        copy_stamped(&copy, started);
+        assert!(stamp_before(&copy, started, real));
+        assert_eq!(mtime(&copy), real);
+    }
+
+    #[test]
+    fn test_stamp_before_copy_older_than_real_index_raised_to_real_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let copy = tmp.path().join("index-x");
+        let started = SystemTime::now();
+        let real = started - Duration::from_secs(30);
+        copy_stamped(&copy, real - Duration::from_secs(5));
+        assert!(stamp_before(&copy, started, real));
+        assert_eq!(mtime(&copy), real);
+    }
+
+    #[test]
+    fn test_stamp_before_real_index_after_start_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        let copy = tmp.path().join("index-x");
+        let started = SystemTime::now();
+        copy_stamped(&copy, started - Duration::from_secs(5));
+        assert!(!stamp_before(
+            &copy,
+            started,
+            started + Duration::from_secs(5)
+        ));
     }
 
     #[test]
     fn test_stamp_before_missing_copy_false() {
         let tmp = tempfile::tempdir().unwrap();
-        assert!(!stamp_before(&tmp.path().join("gone"), SystemTime::now()));
+        let now = SystemTime::now();
+        assert!(!stamp_before(
+            &tmp.path().join("gone"),
+            now,
+            now - Duration::from_secs(5)
+        ));
     }
 
     // ── B: a relative cache root ───────────────────────────────────────────
@@ -1367,5 +1616,210 @@ mod tests {
     fn test_sweep_orphans_no_cache_root_zero() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(sweep_orphans(tmp.path()), 0);
+    }
+
+    #[test]
+    fn test_blocks_copy_byte_order_mark_first_line_true() {
+        for body in [
+            "\u{feff}[include]\n\tpath = other\n",
+            "\u{feff}[core] sparseCheckout = true\n",
+            "\u{feff}[extensions]\n\tobjectFormat = sha256\n",
+        ] {
+            assert!(blocks_copy(body.as_bytes()), "{body:?}");
+        }
+    }
+
+    #[test]
+    fn test_config_files_relative_path_none() {
+        for env in [
+            env_from([("GIT_CONFIG_SYSTEM", "etc/gitconfig"), ("HOME", "/h")]),
+            env_from([("GIT_CONFIG_GLOBAL", "gitconfig"), ("HOME", "/h")]),
+            env_from([("HOME", "h"), ("XDG_CONFIG_HOME", "/x")]),
+            env_from([("HOME", ""), ("XDG_CONFIG_HOME", "/x")]),
+            env_from([("XDG_CONFIG_HOME", "x"), ("HOME", "/h")]),
+        ] {
+            let files = config_files(
+                Path::new("/r/.git"),
+                Path::new("/r/.git"),
+                Path::new("/usr/bin/git"),
+                &env,
+            );
+            assert_eq!(files, None);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_status_on_private_index_config_changed_during_run_falls_back() {
+        let f = fixture();
+        settle(&f.repo);
+        let repo = eligible(&f.repo, &isolated_env(&f.repo.with_file_name("env"))).unwrap();
+        git(&f.repo, &["config", "core.ignorecase", "false"]);
+        assert!(status_on_private_index(&f.repo, &repo, &f.cache).is_none());
+        assert!(copies(&f.cache).is_empty());
+    }
+
+    /// The copy holds an index without `src/b.rs`, as a run killed between
+    /// git's rewrite and the stamp could leave a stale one; trusting it lists
+    /// the file as deleted and untracked.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_status_on_private_index_leftover_pending_marker_rebuilds_copy() {
+        let f = fixture();
+        git(&f.repo, &["rm", "-q", "--cached", "src/b.rs"]);
+        let stale = fs::read(f.repo.join(".git/index")).unwrap();
+        git(&f.repo, &["reset", "-q"]);
+        settle(&f.repo);
+        let repo = eligible(&f.repo, &isolated_env(&f.repo.with_file_name("env"))).unwrap();
+        serve(&f.repo, &repo, &f.cache);
+        let copy = only_copy(&f.cache);
+        fs::write(&copy, stale).unwrap();
+        File::create(marker(&copy, PENDING_SUFFIX)).unwrap();
+        assert_eq!(serve(&f.repo, &repo, &f.cache), b"");
+        assert!(!marker(&copy, PENDING_SUFFIX).exists());
+    }
+
+    /// Requires `worktree` to take the plain command and leave no copy.
+    #[cfg(target_os = "linux")]
+    fn assert_falls_back(worktree: &Path, cache: &Path) {
+        let repo = eligible(worktree, &isolated_env(&worktree.with_file_name("env"))).unwrap();
+        assert!(status_on_private_index(worktree, &repo, cache).is_none());
+        assert!(copies(cache).is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_status_on_private_index_submodule_falls_back() {
+        let f = fixture();
+        let source = fixture_named("source");
+        git(
+            &f.repo,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                source.repo.to_str().unwrap(),
+                "sub",
+            ],
+        );
+        git(&f.repo, &["commit", "-qm", "sub"]);
+        assert!(f.repo.join(".gitmodules").is_file());
+        assert!(f.repo.join(".git/modules").is_dir());
+        let sub = f.repo.join("sub");
+        git(&sub, &["config", "status.showUntrackedFiles", "no"]);
+        write(&sub, "untracked.rs", "pub fn u() {}\n");
+        assert_eq!(plain(&f.repo).unwrap().stdout, b"");
+        assert_falls_back(&f.repo, &f.cache);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_status_on_private_index_embedded_repo_gitlink_falls_back() {
+        let f = fixture();
+        let inner = f.repo.join("inner");
+        fs::create_dir(&inner).unwrap();
+        git(&inner, &["init", "-q", "-b", "main"]);
+        write(&inner, "f.rs", "pub fn f() {}\n");
+        git(&inner, &["add", "f.rs"]);
+        git(&inner, &["commit", "-qm", "inner"]);
+        git(&inner, &["config", "status.showUntrackedFiles", "no"]);
+        git(&f.repo, &["add", "inner"]);
+        git(&f.repo, &["commit", "-qm", "gitlink"]);
+        assert!(!f.repo.join(".gitmodules").exists());
+        write(&inner, "untracked.rs", "pub fn u() {}\n");
+        assert_eq!(plain(&f.repo).unwrap().stdout, b"");
+        assert_falls_back(&f.repo, &f.cache);
+    }
+
+    #[test]
+    fn test_gitlink_free_index_versions_walk_every_entry() {
+        let f = fixture();
+        write(&f.repo, "src/deeper/intent.rs", "pub fn i() {}\n");
+        git(&f.repo, &["add", "-N", "src/deeper/intent.rs"]);
+        let index = f.repo.join(".git/index");
+        for version in ["2", "3", "4"] {
+            git(&f.repo, &["update-index", "--index-version", version]);
+            assert!(gitlink_free(&fs::read(&index).unwrap()), "v{version}");
+        }
+        let inner = f.repo.join("zz/inner");
+        fs::create_dir_all(&inner).unwrap();
+        git(&inner, &["init", "-q", "-b", "main"]);
+        write(&inner, "f.rs", "pub fn f() {}\n");
+        git(&inner, &["add", "f.rs"]);
+        git(&inner, &["commit", "-qm", "inner"]);
+        git(&f.repo, &["add", "zz/inner"]);
+        for version in ["2", "3", "4"] {
+            git(&f.repo, &["update-index", "--index-version", version]);
+            assert!(!gitlink_free(&fs::read(&index).unwrap()), "v{version}");
+        }
+        assert!(!gitlink_free(b"DIRC\0\0\0\x02\0\0\0\x01"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_status_on_private_index_cache_inside_worktree_falls_back() {
+        let f = fixture();
+        settle(&f.repo);
+        let cache = f.repo.join("ecp-cache/git-index");
+        assert_falls_back(&f.repo, &cache);
+        assert_eq!(plain(&f.repo).unwrap().stdout, b"");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_lock_at_path_replaced_lock_file_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(LOCK_FILE);
+        let open = || {
+            File::options()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+                .unwrap()
+        };
+        let old = open();
+        fs::rename(&path, tmp.path().join("retired")).unwrap();
+        let fresh = open();
+        assert!(lock_at_path(old, &path).is_none());
+        assert!(lock_at_path(fresh, &path).is_some());
+    }
+
+    /// An entry gc cannot delete stops `remove_dir_all` part way. Deleting in
+    /// place would leave the directory, its lock gone, where the next query
+    /// locks a fresh file and shares it with gc.
+    #[cfg(unix)]
+    #[test]
+    fn test_sweep_orphans_undeletable_entry_leaves_no_dir_at_live_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = fs::canonicalize(tmp.path()).unwrap();
+        let root = home.join(PRIVATE_INDEX_DIR);
+        let dir = root.join("0123456789abcdef");
+        let stuck = dir.join("stuck");
+        fs::create_dir_all(&stuck).unwrap();
+        fs::write(stuck.join("f"), b"x").unwrap();
+        let gone = home.join("gone/.git");
+        fs::write(dir.join(GITDIR_RECORD), gone.to_str().unwrap()).unwrap();
+        let chmod = |path: &Path, mode| {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        };
+        chmod(&stuck, 0o500);
+        if File::create(stuck.join("probe")).is_ok() {
+            chmod(&stuck, 0o700);
+            eprintln!("skipped: directory permissions do not bind this user");
+            return;
+        }
+        sweep_orphans(&home);
+        let left_in_place = dir.exists();
+        for entry in fs::read_dir(&root).unwrap().flatten() {
+            let leftover = entry.path().join("stuck");
+            if leftover.exists() {
+                chmod(&leftover, 0o700);
+            }
+        }
+        assert!(!left_in_place, "gc left a half-deleted directory in place");
     }
 }
