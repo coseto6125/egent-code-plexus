@@ -11,7 +11,6 @@ use crate::framework_helpers::{
 };
 use crate::indirect_dispatch::{collect_rust_indirect_param_types, detect_rust_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode};
@@ -173,7 +172,9 @@ impl LanguageProvider for RustProvider {
             std::collections::HashSet::new();
         let mut imports: Vec<RawImport> = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
+        let file_category =
+            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
+        let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
 
         let idx = &self.indices;
 
@@ -597,7 +598,6 @@ impl LanguageProvider for RustProvider {
             }
         }
 
-        let file_category = crate::resolution::builder::determine_category(&path.to_string_lossy());
         let raw_function_metas = crate::function_meta::rust_lang::extract(
             tree.root_node(),
             source,

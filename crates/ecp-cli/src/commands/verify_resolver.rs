@@ -253,7 +253,7 @@ fn diff(
                                     &mut offenders,
                                     o,
                                     "tier_demoted",
-                                    &format!("ecp=Global oracle→{}", normalize(ot)),
+                                    &format!("ecp={} oracle→{}", g.tier, normalize(ot)),
                                 );
                             }
                             if g.alt_count > 0 {

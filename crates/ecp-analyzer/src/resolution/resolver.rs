@@ -44,7 +44,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::resolution::heuristics::ResolutionTier;
-use crate::resolution::index::{FileMeta, ResolveTarget, SymbolTable};
+use crate::resolution::index::{FileMeta, GlobalPick, ResolveTarget, SymbolTable};
 use crate::resolution::path_aliases::PathAliases;
 use crate::rust::module_tree::RustWorkspaceModTree;
 
@@ -462,43 +462,33 @@ impl<'a> Resolver<'a> {
         let raw_count = self.symbol_table.global_match_count(symbol_name);
         let caller_meta = FileMeta::from_path(&source_file_str);
 
-        if let Some(node_id) =
-            self.symbol_table
-                .lookup_unique_global(symbol_name, target, caller_meta)
-        {
-            results.push((node_id, ResolutionTier::Global.base_confidence()));
-            self.record(
-                &source_file_str,
-                symbol_name,
-                specifier,
-                DecisionTier::Global,
-                Some(node_id),
-                raw_count.saturating_sub(1),
-                Some(ResolutionTier::Global.base_confidence()),
-            );
-        } else {
-            // Distinguish "no candidates" from "≥2 candidates, suppressed
-            // by the unique-only cap". The post-filter count walks the
-            // same predicates as `lookup_unique_global` so the two views
-            // can't drift. Cost paid only on miss (Tier 3 hits skip this).
-            let filtered =
-                self.symbol_table
-                    .count_global_kind_filtered(symbol_name, target, caller_meta);
-            let tier = if filtered >= 2 {
-                DecisionTier::AmbiguousGlobal
-            } else {
-                DecisionTier::Unresolved
+        let (tier, target_id, confidence, alt_count) =
+            match self
+                .symbol_table
+                .lookup_global(symbol_name, target, caller_meta)
+            {
+                GlobalPick::Unique(node_id) => {
+                    let conf = ResolutionTier::Global.base_confidence();
+                    results.push((node_id, conf));
+                    (
+                        DecisionTier::Global,
+                        Some(node_id),
+                        Some(conf),
+                        raw_count.saturating_sub(1),
+                    )
+                }
+                GlobalPick::Ambiguous => (DecisionTier::AmbiguousGlobal, None, None, raw_count),
+                GlobalPick::NoMatch => (DecisionTier::Unresolved, None, None, raw_count),
             };
-            self.record(
-                &source_file_str,
-                symbol_name,
-                specifier,
-                tier,
-                None,
-                raw_count,
-                None,
-            );
-        }
+        self.record(
+            &source_file_str,
+            symbol_name,
+            specifier,
+            tier,
+            target_id,
+            alt_count,
+            confidence,
+        );
 
         results
     }
@@ -904,9 +894,9 @@ impl<'a> Resolver<'a> {
         // members live elsewhere (`mod foo;` declaration in lib.rs vs.
         // `fn bar()` body in foo.rs).
         let caller_meta = FileMeta::from_path(&source_file_str);
-        if let Some(id) =
+        if let GlobalPick::Unique(id) =
             self.symbol_table
-                .lookup_unique_global(qualifier, ResolveTarget::Qualifier, caller_meta)
+                .lookup_global(qualifier, ResolveTarget::Qualifier, caller_meta)
         {
             if let Some(qf) = self.symbol_table.file_of(id) {
                 if self
@@ -1706,5 +1696,44 @@ mod tests {
 
         let last = r.take_decisions().unwrap().pop().unwrap();
         assert_eq!(last.tier, DecisionTier::Global);
+    }
+
+    // ── Test doubles ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn tier3_test_double_keeps_production_name_ambiguous_across_14_langs() {
+        // Pins the measured decision: a test fake sharing a production
+        // method's name keeps every bare call to it AmbiguousGlobal. A
+        // production-preferring tie-break wired driver `conn.execute` calls
+        // to a project `execute`; receiver typing is the fix for those.
+        let langs: &[&str] = &[
+            "ts", "js", "py", "java", "kt", "cs", "go", "rs", "php", "rb", "swift", "c", "cpp",
+            "dart",
+        ];
+        for ext in langs {
+            let st = st_with(&[
+                (
+                    Box::leak(format!("src/service.{ext}").into_boxed_str()),
+                    "scan_range",
+                    NodeKind::Function,
+                ),
+                (
+                    Box::leak(format!("tests/fakes.{ext}").into_boxed_str()),
+                    "scan_range",
+                    NodeKind::Function,
+                ),
+            ]);
+            let mut r = Resolver::new(&st);
+            r.enable_dump();
+            let out = r.resolve_symbol(
+                &PathBuf::from(format!("src/search.{ext}")),
+                "scan_range",
+                &[],
+                ResolveTarget::Callable,
+            );
+            assert!(out.is_empty(), "{ext}: got {out:?}");
+            let last = r.take_decisions().unwrap().pop().unwrap();
+            assert_eq!(last.tier, DecisionTier::AmbiguousGlobal, "{ext}");
+        }
     }
 }

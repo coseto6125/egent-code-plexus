@@ -6,7 +6,6 @@ use crate::framework_helpers::{
     MODULE_LEVEL_SOURCE,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode};
@@ -260,7 +259,9 @@ impl LanguageProvider for KotlinProvider {
             rustc_hash::FxHashSet::default();
         let mut imports = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
+        let file_category =
+            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
+        let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
 
         // CI-L #2: capture indices pre-resolved in `new()`; this hot loop
         // borrows the cached struct instead of resolving ~10 strings per call.
@@ -567,8 +568,6 @@ impl LanguageProvider for KotlinProvider {
             Vec::new()
         };
 
-        let file_category =
-            crate::resolution::builder::determine_category(path.to_str().unwrap_or(""));
         let raw_function_metas =
             crate::function_meta::kotlin::extract(tree.root_node(), source, &nodes, file_category);
         let tx_scopes = collect_jvm_transactional_scopes(

@@ -185,11 +185,19 @@ impl BaselinePayload {
     }
 }
 
-/// Shells out to `ecp impact --baseline <ref> --format json` and parses.
+/// Shells out to `ecp impact --baseline <ref> --exclude-tests --format json`
+/// and parses. Test callers stay out of the risk count and the cross-PR
+/// symbol overlap, as before `impact` listed them by default.
 /// Returns an error if the impact CLI exits non-zero or produces invalid JSON.
 fn run_impact_subprocess(baseline: &str) -> Result<BaselinePayload, EcpError> {
-    let stdout =
-        crate::subprocess::run_self(&["impact", "--baseline", baseline, "--format", "json"])?;
+    let stdout = crate::subprocess::run_self(&[
+        "impact",
+        "--baseline",
+        baseline,
+        "--exclude-tests",
+        "--format",
+        "json",
+    ])?;
     let payload: BaselinePayload = serde_json::from_slice(&stdout)
         .map_err(|e| EcpError::Serialization(format!("parse impact JSON: {e}")))?;
     // A malformed BFS entry must fail here, not shrink the impact set and

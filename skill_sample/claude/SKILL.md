@@ -12,7 +12,7 @@ description: Symbol-level code analysis, blast-radius impact, cross-repo API con
 | Goal | Command |
 |---|---|
 | ONE symbol → signature + body + 1-hop edges + callers + impact | `ecp inspect --name X --repo .` |
-| ONE symbol → blast radius | `ecp impact X --direction upstream --repo .` (positional; `--target X` alias. `--direction`: `up`/`down`/`both`. Filters: `--kind --file_path --relation_types --depth --min-confidence --include-tests`) |
+| ONE symbol → blast radius | `ecp impact X --direction upstream --repo .` (positional; `--target X` alias. `--direction`: `up`/`down`/`both`. Filters: `--kind --file_path --relation_types --depth --min-confidence --exclude-tests`) |
 | PR blast radius — who breaks | `ecp impact --baseline origin/main --repo .` |
 | Find symbol by name / concept | `ecp find "term" --repo .` (auto bm25/hybrid/vector; force `--mode`) |
 | Schema mirrors (cross-service field alignment) | `ecp find-schema-bindings User.email --repo .` (bare = all classes). `--format json`. |

@@ -87,9 +87,16 @@ pub struct ImpactArgs {
     #[arg(long, alias = "min_confidence")]
     pub min_confidence: Option<f32>,
 
-    /// Include test files in traversal.
+    /// Test-file callers are listed by default, tagged `test: true`, since a
+    /// rename breaks them too. This flag is kept for old callers; on its own
+    /// it changes one thing: `--baseline` also treats changed test files as
+    /// changed symbols.
     #[arg(long, aliases = ["include_tests", "includeTests"], default_value_t = false)]
     pub include_tests: bool,
+
+    /// Drop test-file callers; the payload reports `hidden_test_callers: N`.
+    #[arg(long, aliases = ["exclude_tests", "excludeTests"], conflicts_with_all = ["include_tests", "test_coverage"])]
+    pub exclude_tests: bool,
 
     /// Comma-separated relation types to follow (calls, extends, ...).
     #[arg(long = "relation_types", alias = "relation-types")]
@@ -102,8 +109,8 @@ pub struct ImpactArgs {
     /// Coverage gap analysis: for each touched symbol, classify by test-caller
     /// presence (uncovered / partial / covered). Uses FunctionMeta.is_test
     /// flag from per-language extraction. Outputs uncovered symbols first to
-    /// support LLM PR review ("X 改了沒測試"). Implies --include-tests during
-    /// traversal so test callers are reachable from the walker.
+    /// support LLM PR review ("X 改了沒測試"). Needs test callers in the walk,
+    /// so it conflicts with --exclude-tests.
     #[arg(long, aliases = ["test_coverage", "testCoverage"], default_value_t = false)]
     pub test_coverage: bool,
 
@@ -148,7 +155,7 @@ pub struct ImpactArgs {
     /// sequentially — amortises mmap + process spawn across queries.
     /// Each result is prefixed by `=== target: <name> ===` so callers can
     /// split the stream unambiguously. Flags like --direction / --depth /
-    /// --include-tests apply uniformly to all targets.
+    /// --exclude-tests apply uniformly to all targets.
     ///
     /// Symbol-mode only: `--batch` combined with `--baseline` or `--literal`
     /// is rejected as an invalid argument. A positional name is also rejected
@@ -163,6 +170,15 @@ pub struct ImpactArgs {
     /// cache — set it so a hub symbol cannot materialise six figures of nodes.
     #[arg(skip)]
     pub max_results: Option<usize>,
+}
+
+impl ImpactArgs {
+    /// Whether the walk lists test-file nodes. `--test-coverage` needs test
+    /// callers to classify coverage, and clap rejects it beside
+    /// `--exclude-tests`.
+    pub(crate) fn walks_tests(&self) -> bool {
+        !self.exclude_tests || self.test_coverage
+    }
 }
 
 /// Split a comma-separated flag value into a normalized lowercase Vec.
@@ -189,6 +205,8 @@ struct ImpactHints {
     hidden_edges: u64,
     /// Heuristic edges hidden by the is_heuristic() filter (T-H1).
     hidden_heuristic_edges: u64,
+    /// Test-file callers dropped by `--exclude-tests`.
+    hidden_test_callers: u64,
     /// Payload caveat: the target name collides with other definitions, so
     /// bare calls were Tier-3-suppressed at index time and the caller set is
     /// a lower bound. Merged with `Engine::caveat()` into the `result` field
@@ -211,9 +229,20 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
     }
     let (payload, hints) = build_payload_with_hints(&args, engine)?;
     if let Some(name) = &hints.empty_hint_name {
-        eprintln!(
-            "→ \"{name}\" exists but has 0 incoming references. Possible: entry point, dead code, or recent rename. Try --direction both / --include-tests"
-        );
+        if hints.hidden_test_callers > 0 {
+            eprintln!(
+                "→ \"{name}\" has no non-test callers; its {} test callers are hidden by --exclude-tests",
+                hints.hidden_test_callers
+            );
+        } else if hints.ambiguity_caveat.is_some() {
+            eprintln!(
+                "→ \"{name}\" has 0 resolved callers, but other definitions share its name, so bare calls to it may have been left unresolved. grep the call sites before treating it as dead code"
+            );
+        } else {
+            eprintln!(
+                "→ \"{name}\" exists but has 0 incoming references. Possible: entry point, dead code, or recent rename. Try --direction both"
+            );
+        }
         if hints.empty_hint_is_field {
             eprintln!(
                 "→ \"{name}\" is a field: some languages don't capture field reads yet (JS class fields, Ruby attrs), so empty may mean uncaptured, not unread — grep to confirm"
@@ -221,6 +250,12 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
         }
     }
     emit_hidden_edges_footer(hints.hidden_edges);
+    if hints.hidden_test_callers > 0 {
+        eprintln!(
+            "note: {} test callers hidden (--exclude-tests); drop the flag to see them",
+            hints.hidden_test_callers
+        );
+    }
     if args.no_heuristic && hints.hidden_heuristic_edges > 0 {
         eprintln!(
             "note: {} heuristic callers suppressed (--no-heuristic); drop the flag to see them",
@@ -283,6 +318,7 @@ fn run_batch(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
             high_trust_only: args.high_trust_only,
             min_confidence: args.min_confidence,
             include_tests: args.include_tests,
+            exclude_tests: args.exclude_tests,
             relation_types: args.relation_types.clone(),
             repo: args.repo.clone(),
             test_coverage: args.test_coverage,
@@ -357,6 +393,12 @@ fn build_payload_with_hints(
 fn attach_hidden_edges(result: &mut Value, hidden_edges: u64) {
     if hidden_edges > 0 {
         result["hidden_edges"] = json!(hidden_edges);
+    }
+}
+
+fn attach_hidden_test_callers(result: &mut Value, hidden: u64) {
+    if hidden > 0 {
+        result["hidden_test_callers"] = json!(hidden);
     }
 }
 

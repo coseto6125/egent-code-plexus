@@ -6,7 +6,6 @@ use crate::framework_helpers::{
     FrameworkPatternSpec,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
@@ -183,7 +182,9 @@ impl LanguageProvider for DartProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
+        let file_category =
+            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
+        let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
 
         // CI-L #2: capture indices pre-resolved in `new()`.
         let idx = &self.indices;
@@ -488,8 +489,6 @@ impl LanguageProvider for DartProvider {
 
         let framework_refs = detect_ast_framework_patterns(source, DART_FRAMEWORKS);
 
-        let file_category =
-            crate::resolution::builder::determine_category(path.to_str().unwrap_or(""));
         let raw_function_metas =
             crate::function_meta::dart::extract(tree.root_node(), source, &nodes, file_category);
 

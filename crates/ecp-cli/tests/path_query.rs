@@ -150,9 +150,9 @@ fn indexed_polyglot_repo(repo: &Path) {
          export function makeChild(): TChild { return new TChild(); }\n",
     );
     // A production chain whose only link runs through a test file. Both the
-    // path walk and the impact walk have to exclude it by default and include
-    // it under --include-tests, which is what pins their two copies of the
-    // node guard to the same behaviour.
+    // path walk and the impact walk have to exclude it with tests excluded
+    // and include it with tests included, which is what pins their two
+    // copies of the node guard to the same behaviour.
     write(
         repo,
         "src/bridge.py",
@@ -483,9 +483,12 @@ fn path_rejects_an_out_of_range_confidence() {
 /// the tidier arrangement. This is what stops the copies drifting.
 ///
 /// Contract: the two walks agree about the same graph. `prod_start` reaches
-/// `prod_end` only through a function in a test file, so both must miss it by
-/// default and both must find it under `--include-tests`. A divergence in
-/// either copy of the guard flips exactly one of the four assertions.
+/// `prod_end` only through a function in a test file, so both must miss it
+/// with tests excluded and both must find it with tests included. The
+/// defaults differ on purpose (`path` excludes tests, `impact` includes them,
+/// since a rename breaks test callers too), so each side spells its flag. A
+/// divergence in either copy of the guard flips exactly one of the four
+/// assertions.
 #[test]
 fn path_walks_the_same_graph_as_impact() {
     let tmp = tempfile::tempdir().unwrap();
@@ -528,8 +531,8 @@ fn path_walks_the_same_graph_as_impact() {
         "a route through a test file must not be a production path: {path_default}"
     );
     assert!(
-        !reaches_via_impact(&[]),
-        "impact must exclude the same test-file hop"
+        !reaches_via_impact(&["--exclude-tests"]),
+        "impact --exclude-tests must exclude the same test-file hop"
     );
 
     let path_tests = run_path(
@@ -547,8 +550,8 @@ fn path_walks_the_same_graph_as_impact() {
         "{path_tests}"
     );
     assert!(
-        reaches_via_impact(&["--include-tests"]),
-        "--include-tests must open the same hop for impact"
+        reaches_via_impact(&[]),
+        "impact's default must open the same hop"
     );
 
     // The second copied rule is the relation filter inside `admit_edge`. The
@@ -573,4 +576,17 @@ fn path_walks_the_same_graph_as_impact() {
         &["d0", "d4", "--depth", "4", "--relation_types", "calls"],
     );
     assert_eq!(calls_only["found"].as_bool(), Some(true), "{calls_only}");
+}
+
+/// The endpoints are the user's question, so a test-file endpoint is kept
+/// even with tests excluded, and the two directions give one answer.
+#[test]
+fn path_test_file_endpoint_is_found_from_either_end() {
+    let tmp = tempfile::tempdir().unwrap();
+    indexed_polyglot_repo(tmp.path());
+
+    let down = run_path(tmp.path(), &["t_bridge", "prod_end", "--direction", "down"]);
+    let up = run_path(tmp.path(), &["prod_end", "t_bridge", "--direction", "up"]);
+    assert_eq!(down["found"].as_bool(), Some(true), "{down}");
+    assert_eq!(up["found"].as_bool(), Some(true), "{up}");
 }

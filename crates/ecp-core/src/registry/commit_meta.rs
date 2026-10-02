@@ -13,8 +13,10 @@ use std::path::Path;
 ///
 /// Bump the `+schema<N>` literal whenever `graph.bin`, `CommitBuildMeta`,
 /// or any persisted L2 artefact changes shape in a way pre-bump binaries
-/// can't read back.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema1");
+/// can't read back, or changes meaning under the same shape. schema2: the
+/// test-file classifier changed, and both `File.category` and the parse
+/// cache (per-parser test-only emission) carry its verdict.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema2");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

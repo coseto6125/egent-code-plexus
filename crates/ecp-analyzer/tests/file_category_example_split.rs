@@ -7,7 +7,7 @@
 //! Round 80: previously `is_test` blanket-grouped `/examples/` with `/tests/`
 //! and `builder.rs:332-340` skipped both — `ecp` emitted zero Routes for
 //! the entire `.sample_repo/JavaScript/examples/` corpus (82 ref-side rows).
-use ecp_analyzer::resolution::builder::determine_category;
+use ecp_core::file_category::determine_category;
 use ecp_core::graph::FileCategory;
 
 #[test]

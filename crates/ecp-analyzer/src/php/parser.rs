@@ -6,7 +6,6 @@ use crate::framework_helpers::{
     push_blind_spot, MODULE_LEVEL_SOURCE,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode};
@@ -378,7 +377,9 @@ impl LanguageProvider for PhpProvider {
         let mut imports = Vec::new();
         let mut routes = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
+        let file_category =
+            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
+        let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
 
         let idx = &self.indices;
         let idx_type_function = idx.type_function;
@@ -835,19 +836,6 @@ impl LanguageProvider for PhpProvider {
             routes.clear();
         }
 
-        // PHPUnit test files are typically named *Test.php or placed in tests/ directories.
-        let file_category = {
-            let basename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let path_str = path.to_str().unwrap_or("");
-            if basename.ends_with("Test.php")
-                || path_str.contains("/tests/")
-                || path_str.contains("/test/")
-            {
-                ecp_core::graph::FileCategory::Test
-            } else {
-                ecp_core::graph::FileCategory::Source
-            }
-        };
         let raw_function_metas =
             crate::function_meta::php::extract(tree.root_node(), source, &nodes, file_category);
 

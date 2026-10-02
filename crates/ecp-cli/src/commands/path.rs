@@ -216,8 +216,8 @@ fn build_payload(args: &PathArgs, engine: &Engine) -> Result<(Value, Option<Stri
     Ok((payload, merge_caveats(ambiguity, caveat)))
 }
 
-/// With two or more same-named definitions in the graph, the resolver
-/// suppressed every bare call to that name at index time
+/// With two or more same-named definitions in the graph, the resolver may
+/// have suppressed bare calls to that name at index time
 /// (`DecisionTier::AmbiguousGlobal`), so edges are missing from the walk. A
 /// miss under that condition is a lower bound, and this payload otherwise
 /// says an unreachable pair is a real answer.
@@ -225,8 +225,8 @@ fn ambiguity_caveat(name: &str, same_name_defs: usize) -> Option<String> {
     (same_name_defs >= 2).then(|| {
         format!(
             "route may be incomplete: {same_name_defs} same-named definitions of '{name}' \
-             exist, so bare calls (no import/qualifier context) were ambiguity-suppressed at \
-             index time. Narrow with --from-file / --to-file, and cross-check missing hops \
+             exist, so bare calls (no import/qualifier context) may have been \
+             ambiguity-suppressed at index time. Narrow with --from-file / --to-file, and cross-check missing hops \
              with grep before trusting a miss."
         )
     })

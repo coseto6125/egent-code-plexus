@@ -37,7 +37,7 @@ pub struct RoutesArgs {
     /// routes, not test fixtures. When set, the output gains a `test_results`
     /// array listing the test-only routes alongside the regular `results`.
     /// Test classification reuses `File.category = FileCategory::Test` set at
-    /// index time (`ecp-analyzer/src/resolution/builder.rs:32`).
+    /// index time (`ecp_core::file_category::determine_category`).
     #[arg(long)]
     pub include_tests: bool,
 

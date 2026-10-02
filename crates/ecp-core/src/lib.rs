@@ -4,6 +4,7 @@ pub mod config;
 pub mod cypher;
 pub mod daemon;
 pub mod error;
+pub mod file_category;
 pub mod graph;
 pub mod graph_assembly;
 #[doc(hidden)]

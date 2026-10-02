@@ -5,7 +5,6 @@ use crate::framework_helpers::{
     detect_ast_framework_patterns, enclosing_fn_idx_by_span, push_blind_spot, FrameworkPatternSpec,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
@@ -394,7 +393,9 @@ impl LanguageProvider for RubyProvider {
         let mut imports = Vec::new();
         let mut routes: Vec<RawRoute> = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
+        let file_category =
+            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
+        let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
         // Mixin module additions, applied after primary node emission. Each
         // entry is (module_name, call_line) — we attach to the smallest
         // enclosing class node by span containment. Document-order traversal
@@ -978,20 +979,6 @@ impl LanguageProvider for RubyProvider {
             }
         }
 
-        // Ruby test files: spec/*_spec.rb (RSpec) or test/*_test.rb (Minitest).
-        let file_category = {
-            let basename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let path_str = path.to_str().unwrap_or("");
-            if basename.ends_with("_spec.rb")
-                || basename.ends_with("_test.rb")
-                || path_str.contains("/spec/")
-                || path_str.contains("/test/")
-            {
-                ecp_core::graph::FileCategory::Test
-            } else {
-                ecp_core::graph::FileCategory::Source
-            }
-        };
         let raw_function_metas =
             crate::function_meta::ruby::extract(tree.root_node(), source, &nodes, file_category);
 

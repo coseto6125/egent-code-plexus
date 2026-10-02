@@ -3,11 +3,13 @@ use super::coverage::{build_coverage_json, coverage_analyses};
 use super::payload::{BaselinePayload, ChangedSymbol, ImpactBySymbol};
 use super::{parse_csv_lower, resolve_min_conf, tag_heuristic, ImpactArgs};
 use crate::commands::format::{kind_to_str, node_kind_to_str};
-use crate::commands::impact::{attach_heuristic_fields, attach_hidden_edges, Direction};
+use crate::commands::impact::{
+    attach_heuristic_fields, attach_hidden_edges, attach_hidden_test_callers, Direction,
+};
 use crate::engine::Engine;
 use crate::git::{DiffScope, GitDiffProvider, ShellGitProvider};
 use crate::reanalyze::make_pipeline_for_names;
-use ecp_core::algorithms::process_trace::is_test_path;
+use ecp_core::file_category::is_test_path;
 use ecp_core::graph::NodeKind;
 use ecp_core::EcpError;
 use rayon::prelude::*;
@@ -23,6 +25,7 @@ struct BaselineComputation {
     payload: BaselinePayload,
     hidden_edges_total: u64,
     hidden_heuristic_total: u64,
+    hidden_test_total: u64,
     per_symbol_bfs: Vec<(usize, Vec<Value>)>,
     min_conf: f32,
     rel_filter: Option<Vec<String>>,
@@ -55,6 +58,7 @@ pub(super) fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result
     }
 
     attach_hidden_edges(&mut result, comp.hidden_edges_total);
+    attach_hidden_test_callers(&mut result, comp.hidden_test_total);
     attach_heuristic_fields(
         &mut result,
         comp.hidden_heuristic_total,
@@ -110,6 +114,7 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
             },
             hidden_edges_total: 0,
             hidden_heuristic_total: 0,
+            hidden_test_total: 0,
             per_symbol_bfs: vec![],
             min_conf: 0.0,
             rel_filter: None,
@@ -303,13 +308,13 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
 
     let min_conf = resolve_min_conf(args);
     let rel_filter = parse_csv_lower(args.relation_types.as_deref());
-    // --test-coverage implies --include-tests so test callers are reachable.
-    let effective_include_tests = args.include_tests || args.test_coverage;
+    let effective_include_tests = args.walks_tests();
 
     // Run BFS from each changed symbol.
     let mut impact_by_symbol: Vec<ImpactBySymbol> = Vec::new();
     let mut hidden_edges_total: u64 = 0;
     let mut hidden_heuristic_total: u64 = 0;
+    let mut hidden_test_total: u64 = 0;
     let mut per_symbol_bfs: Vec<(usize, Vec<Value>)> = Vec::new();
     for &base_idx in &changed_node_indices {
         let node = &graph.nodes[base_idx];
@@ -328,7 +333,7 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
         };
         let meta = merged_node_meta(graph, view, start_idx);
         let (sym_name, sym_file) = (meta.name, meta.file_path);
-        let (det_results, heur_results, hidden_conf, hidden_heur) = run_bfs(
+        let (det_results, heur_results, hidden_conf, hidden_heur, hidden_tests) = run_bfs(
             graph,
             view,
             start_idx,
@@ -356,7 +361,7 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
         // `impact: []`. `det_results.len() <= 1` relies on the documented
         // `run_bfs` start-node-at-depth-0 invariant.
         if args.direction == Direction::Up && det_results.len() <= 1 {
-            let (downstream_results, _, _, _) = run_bfs(
+            let (downstream_results, _, _, _, _) = run_bfs(
                 graph,
                 view,
                 start_idx,
@@ -375,6 +380,7 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
         impact_by_symbol.push(sym_entry);
         hidden_edges_total += hidden_conf;
         hidden_heuristic_total += hidden_heur;
+        hidden_test_total += hidden_tests;
         per_symbol_bfs.push((start_idx, det_results));
     }
 
@@ -389,6 +395,7 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
         },
         hidden_edges_total,
         hidden_heuristic_total,
+        hidden_test_total,
         per_symbol_bfs,
         min_conf,
         rel_filter,

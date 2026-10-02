@@ -645,7 +645,7 @@ impl LocalGraph {
     /// `content_hash` stays zero on purpose. It is the parse cache's key, and a
     /// hash of content that was never read would be a lie the next run trusts.
     pub fn omitted(rel_path: &std::path::Path, kind: &str, hint: String) -> Self {
-        let is_test = crate::algorithms::process_trace::is_test_path(&rel_path.to_string_lossy());
+        let is_test = crate::file_category::is_test_path(&rel_path.to_string_lossy());
         Self {
             file_path: rel_path.to_path_buf(),
             content_hash: [0u8; 8],

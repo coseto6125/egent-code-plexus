@@ -10,6 +10,7 @@
 //! Returns `Vec<TraceResult>` ordered by descending step count. Each result's
 //! `trace` is a sequence of node indices into the original `nodes` slice.
 
+use crate::file_category::is_test_path;
 use crate::graph::{Edge, Node, NodeKind, RelType};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -51,20 +52,6 @@ pub enum ProcessType {
 
 fn is_function_like(kind: NodeKind) -> bool {
     matches!(kind, NodeKind::Function | NodeKind::Method)
-}
-
-/// Heuristic: test files don't make good entry points for execution-flow
-/// detection. Matches paths whose basename hints at testing.
-pub fn is_test_path(path: &str) -> bool {
-    let lower = path.to_lowercase();
-    lower.contains("/test")
-        || lower.contains("/tests")
-        || lower.contains("__tests__")
-        || lower.contains("__mocks__")
-        || lower.contains(".test.")
-        || lower.contains(".spec.")
-        || lower.contains("_test.")
-        || lower.contains("_spec.")
 }
 
 /// Detect processes. Returns ordered list of traces (longest first).
@@ -169,21 +156,25 @@ fn find_entry_points(
     config: &ProcessConfig,
 ) -> Vec<u32> {
     let mut candidates: Vec<(u32, f64)> = Vec::new();
+    // One verdict per file, not per node: a file holds ~20 function nodes
+    // and classifying its path is the costliest step of this loop.
+    let mut test_file: Vec<Option<bool>> = vec![None; file_paths.len()];
 
     for (i, node) in nodes.iter().enumerate() {
         if !is_function_like(node.kind) {
             continue;
         }
-        let path = file_paths
-            .get(node.file_idx as usize)
-            .map(|s| s.as_str())
-            .unwrap_or("");
-        if is_test_path(path) {
-            continue;
-        }
         let callees = fwd[i].len();
         if callees == 0 {
             continue; // can't trace forward
+        }
+        let file_idx = node.file_idx as usize;
+        let is_test = match test_file.get_mut(file_idx) {
+            Some(slot) => *slot.get_or_insert_with(|| is_test_path(&file_paths[file_idx])),
+            None => is_test_path(""),
+        };
+        if is_test {
+            continue;
         }
         let callers = rev[i].len();
 

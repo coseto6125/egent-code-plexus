@@ -85,6 +85,20 @@ fn admin_mcp_tools_json_format() {
         "{find}"
     );
     assert_eq!(find["prefix_args"], serde_json::json!([]));
+    // `{"include_tests": true}` from an MCP host becomes `--include-tests`
+    // only while the id is a bare flag; as a valued arg it is emitted as two
+    // tokens and the value lands in the positional NAME.
+    let impact = tools
+        .iter()
+        .find(|t| t["name"] == "ecp_impact")
+        .expect("ecp_impact is listed");
+    let impact_flags = impact["flag_args"].as_array().expect("flag_args array");
+    for id in ["include_tests", "exclude_tests"] {
+        assert!(
+            impact_flags.iter().any(|f| f == id),
+            "{id} must be a bare flag: {impact_flags:?}"
+        );
+    }
     assert!(find["subcmd_arg"].is_null());
     let schema = tools
         .iter()

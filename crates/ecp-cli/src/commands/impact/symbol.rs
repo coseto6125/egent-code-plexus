@@ -5,7 +5,8 @@ use super::{
     parse_csv_lower, resolve_min_conf, ImpactArgs, ImpactHints, DEFAULT_CONFIDENCE_THRESHOLD,
 };
 use crate::commands::impact::{
-    attach_heuristic_fields, attach_hidden_edges, direction_str, Direction,
+    attach_heuristic_fields, attach_hidden_edges, attach_hidden_test_callers, direction_str,
+    Direction,
 };
 use crate::commands::symbol_id::{format_fqn, resolve_candidates, split_fqn_target};
 use crate::engine::Engine;
@@ -93,7 +94,8 @@ pub fn run_for_symbol(
         depth: max_depth.unwrap_or(5) as usize,
         high_trust_only: false,
         min_confidence: None,
-        include_tests,
+        include_tests: false,
+        exclude_tests: !include_tests,
         relation_types: None,
         repo: Some(member_repo.to_string()),
         test_coverage: false,
@@ -178,13 +180,13 @@ pub(super) fn impact_by_name(
 
     let min_conf = resolve_min_conf(args);
     let rel_filter = parse_csv_lower(args.relation_types.as_deref());
-    // --test-coverage implies --include-tests so test callers are reachable.
-    let effective_include_tests = args.include_tests || args.test_coverage;
+    let effective_include_tests = args.walks_tests();
 
     let mut all_results: Vec<Value> = Vec::new();
     let mut all_heuristic_results: Vec<Value> = Vec::new();
     let mut hidden_edges_total: u64 = 0;
     let mut hidden_heuristic_total: u64 = 0;
+    let mut hidden_test_total: u64 = 0;
     let mut per_match_bfs: Vec<(usize, Vec<Value>)> = Vec::new();
     for start_idx in &matches {
         // A budget across the WHOLE call, not per match: a name with k
@@ -194,7 +196,7 @@ pub(super) fn impact_by_name(
         if remaining == Some(0) {
             break;
         }
-        let (det_results, heur_results, hidden_conf, hidden_heur) = run_bfs(
+        let (det_results, heur_results, hidden_conf, hidden_heur, hidden_tests) = run_bfs(
             graph,
             view,
             *start_idx,
@@ -215,12 +217,15 @@ pub(super) fn impact_by_name(
         all_heuristic_results.extend(heur_results);
         hidden_edges_total += hidden_conf;
         hidden_heuristic_total += hidden_heur;
+        hidden_test_total += hidden_tests;
     }
 
-    // Empty callers hint for upstream direction.
-    let reached_beyond_start = all_results
-        .iter()
-        .any(|e| e["depth"].as_u64().unwrap_or(0) > 0);
+    // Empty callers hint for upstream direction. A heuristic caller is still a
+    // caller: the hint would otherwise call the target uncalled or test-only.
+    let reached_beyond_start = !all_heuristic_results.is_empty()
+        || all_results
+            .iter()
+            .any(|e| e["depth"].as_u64().unwrap_or(0) > 0);
     let emit_empty_hint = !reached_beyond_start && args.direction == Direction::Up;
     // A field target with no readers: the hint must flag that some languages
     // don't model field reads yet, so empty != provably unread.
@@ -254,6 +259,7 @@ pub(super) fn impact_by_name(
     let mut result_obj =
         serde_json::to_value(&payload).map_err(|e| EcpError::Serialization(e.to_string()))?;
     attach_hidden_edges(&mut result_obj, hidden_edges_total);
+    attach_hidden_test_callers(&mut result_obj, hidden_test_total);
     attach_heuristic_fields(
         &mut result_obj,
         hidden_heuristic_total,
@@ -296,16 +302,17 @@ pub(super) fn impact_by_name(
     }
 
     // FU-2026-05-29-011: with ≥2 same-named defs in the graph, the resolver
-    // suppressed every bare call to this name at index time
-    // (`DecisionTier::AmbiguousGlobal`), so the upstream caller set is a
-    // lower bound — the payload must say so instead of reading as complete.
+    // may have suppressed bare calls to this name at index time
+    // (`DecisionTier::AmbiguousGlobal`; language and vendor barriers exempt
+    // some), so the upstream caller set is a lower bound — the payload must
+    // say so instead of reading as complete.
     let ambiguity_caveat = (same_name_defs >= 2
         && matches!(args.direction, Direction::Up | Direction::Both))
     .then(|| {
         format!(
             "caller set may be incomplete: {same_name_defs} same-named definitions of \
-             '{bare_name}' exist, so bare calls (no import/qualifier context) were \
-             ambiguity-suppressed at index time. Cross-check call sites with grep \
+             '{bare_name}' exist, so bare calls (no import/qualifier context) may have \
+             been ambiguity-suppressed at index time. Cross-check call sites with grep \
              before trusting the blast radius."
         )
     });
@@ -317,6 +324,7 @@ pub(super) fn impact_by_name(
             empty_hint_is_field,
             hidden_edges: hidden_edges_total,
             hidden_heuristic_edges: hidden_heuristic_total,
+            hidden_test_callers: hidden_test_total,
             ambiguity_caveat,
         },
     ))

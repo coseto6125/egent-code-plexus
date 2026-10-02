@@ -7,13 +7,13 @@ use crate::framework_helpers::{
 };
 use crate::indirect_dispatch::{collect_python_param_names, detect_python_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{
     BlindSpot, FrameworkId, LocalGraph, RawFanoutRef, RawFrameworkRef, RawImport, RawNode,
     RawRoute, RawTxScope,
 };
+use ecp_core::file_category::is_test_path;
 use ecp_core::graph::{FileCategory, NodeKind};
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -1370,17 +1370,7 @@ impl LanguageProvider for PythonProvider {
         });
         routes.dedup_by(|a, b| a.method == b.method && a.path == b.path && a.span == b.span);
 
-        // Python pytest convention: files named `test_*.py` or `*_test.py` are test files.
-        // `is_test_path` requires a `/test` dir prefix; supplement for bare filenames.
-        let basename = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-        let is_py_test_file = is_test_file
-            || basename.starts_with("test_")
-            || basename.ends_with("_test.py")
-            || basename == "conftest.py";
-        let file_category = if is_py_test_file {
+        let file_category = if is_test_file {
             FileCategory::Test
         } else {
             FileCategory::Source

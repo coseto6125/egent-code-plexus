@@ -6,7 +6,6 @@ use crate::framework_helpers::{
 };
 use crate::indirect_dispatch::{collect_c_cpp_fn_ptr_vars, detect_c_cpp_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
-use ecp_core::algorithms::process_trace::is_test_path;
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode};
@@ -292,7 +291,9 @@ impl LanguageProvider for CppProvider {
         let mut nodes = Vec::new();
         let mut imports = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
-        let is_test_file = is_test_path(path.to_str().unwrap_or(""));
+        let file_category =
+            ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
+        let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
 
         let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_blind_dlsym = self.query.capture_index_for_name("blind.dlsym");
@@ -666,19 +667,6 @@ impl LanguageProvider for CppProvider {
         // fallback restores full recall.
         emit_macro_fallback(source, &mut nodes);
 
-        // C++ test files: placed in tests/ or test/ directories (Google Test / Catch2 / doctest).
-        let file_category = {
-            let path_str = path.to_str().unwrap_or("");
-            if path_str.contains("/tests/")
-                || path_str.contains("/test/")
-                || path_str.starts_with("tests/")
-                || path_str.starts_with("test/")
-            {
-                ecp_core::graph::FileCategory::Test
-            } else {
-                ecp_core::graph::FileCategory::Source
-            }
-        };
         let raw_function_metas =
             crate::function_meta::cpp::extract(tree.root_node(), source, &nodes, file_category);
 
