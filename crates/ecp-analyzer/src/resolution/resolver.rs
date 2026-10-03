@@ -1087,6 +1087,24 @@ impl<'a> Resolver<'a> {
                 continue;
             }
             let exported = &import.imported_name;
+            // `use a::m; m::f()`: in Rust `m` may be the module `a::m`, whose
+            // own file holds `f`. The parent file declaring `mod m;` can
+            // define an `f` of its own, so it is not consulted then.
+            let module_path = if exported.contains("::") {
+                exported.clone()
+            } else {
+                format!("{}::{exported}", import.source)
+            };
+            if let Some(module_file) = self.rust_module_file(source_file, &module_path) {
+                if self
+                    .symbol_table
+                    .lookup_in_file_with_kind(&module_file, member, target)
+                    .is_some()
+                {
+                    return Some(module_file);
+                }
+                continue;
+            }
             let mut hit: Option<String> = None;
             for_each_specifier_candidate(
                 source_file,
@@ -1549,6 +1567,23 @@ impl<'a> Resolver<'a> {
             .take(2)
             .count()
             == 1
+    }
+
+    /// The indexed file of Rust module `module_path` (`crate::a::m` →
+    /// `src/a/m.rs` or `src/a/m/mod.rs`), when the path is crate-, self- or
+    /// super-anchored and such a file exists.
+    fn rust_module_file(&self, source_file: &Path, module_path: &str) -> Option<String> {
+        let base = rust_module_path_base(source_file, module_path)?;
+        let base = base.to_string_lossy().replace('\\', "/");
+        let mut found = None;
+        probe_rust_module(base.trim_start_matches("./"), &mut |candidate: &str| {
+            let indexed = self.symbol_table.has_file(candidate);
+            if indexed {
+                found = Some(candidate.to_string());
+            }
+            !indexed
+        });
+        found
     }
 
     /// Tier 3.5: attempt module-tree FQN resolution for Rust qualified calls.

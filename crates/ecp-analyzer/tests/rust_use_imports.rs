@@ -153,3 +153,58 @@ fn test_nested_use_binds_qualified_call_to_imported_module() {
         .collect();
     assert_eq!(targets, vec!["src/model.rs".to_string()]);
 }
+
+/// Callee files of `go`'s calls to `run` in a crate where the parent module
+/// `m` and its child `sub` both define `run`.
+fn run_targets(app: &str, sub_path: &str) -> Vec<String> {
+    let provider = RustProvider::new().expect("RustProvider::new");
+    let mut builder = GraphBuilder::new();
+    for (path, src) in [
+        ("crates/x/src/lib.rs", "pub mod m;\npub mod app;\n"),
+        ("crates/x/src/m/mod.rs", "pub mod sub;\npub fn run() {}\n"),
+        (sub_path, "pub fn run() {}\n"),
+        ("crates/x/src/app.rs", app),
+    ] {
+        builder.add_graph(
+            provider
+                .parse_file(Path::new(path), src.as_bytes())
+                .expect("parse_file"),
+        );
+    }
+    let graph = builder.build();
+    let pool = graph.string_pool.as_slice();
+    graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::Calls)
+        .filter(|e| graph.nodes[e.source as usize].name.resolve(pool) == "go")
+        .filter(|e| graph.nodes[e.target as usize].name.resolve(pool) == "run")
+        .map(|e| {
+            let file = graph.nodes[e.target as usize].file_idx as usize;
+            graph.files[file].path.resolve(pool).to_string()
+        })
+        .collect()
+}
+
+/// `use crate::m::sub; sub::run()` calls the module `sub`'s own `run`, not
+/// the parent file that declares `mod sub;` and happens to define `run`.
+#[test]
+fn test_module_import_qualifier_resolves_in_the_module_file() {
+    for app in [
+        "use crate::m::sub;\npub fn go() { sub::run(); }\n",
+        "use crate::m::sub::{self};\npub fn go() { sub::run(); }\n",
+    ] {
+        assert_eq!(
+            run_targets(app, "crates/x/src/m/sub.rs"),
+            vec!["crates/x/src/m/sub.rs".to_string()],
+            "{app}"
+        );
+    }
+    assert_eq!(
+        run_targets(
+            "use crate::m::sub;\npub fn go() { sub::run(); }\n",
+            "crates/x/src/m/sub/mod.rs"
+        ),
+        vec!["crates/x/src/m/sub/mod.rs".to_string()]
+    );
+}
