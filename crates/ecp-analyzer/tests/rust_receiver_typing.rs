@@ -104,6 +104,26 @@ fn callee_files(graph: &ZeroCopyGraph, caller: &str, callee: &str) -> Vec<String
         .collect()
 }
 
+/// A crate at the repo root has repo-relative paths that start at `src/`,
+/// with no `/src/` segment to anchor `crate::` on.
+#[test]
+fn test_crate_import_from_repo_root_crate_resolves_to_imported_module() {
+    let g = build(&[
+        ("src/lib.rs", "mod a;\nmod b;\nmod app;\n"),
+        ("src/a.rs", "pub fn emit() {}\n"),
+        ("src/b.rs", "pub fn emit() {}\n"),
+        (
+            "src/app.rs",
+            "use crate::a::emit;\npub fn run() { emit(); }\n",
+        ),
+    ]);
+    assert_eq!(
+        callee_files(&g, "run", "emit"),
+        vec!["src/a.rs".to_string()],
+        "`use crate::a::emit` from src/app.rs is src/a.rs, not the same-named src/b.rs"
+    );
+}
+
 #[test]
 fn test_self_import_from_non_mod_file_resolves_to_stem_directory_child() {
     let item = "pub struct Item;\nimpl Item { pub fn make() -> Item { Item } }\n";

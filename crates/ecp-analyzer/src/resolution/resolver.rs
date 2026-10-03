@@ -597,7 +597,8 @@ pub(crate) fn rust_module_dir(source_file: &std::path::Path) -> Option<std::path
 /// `serde::`) are never indexed, so their expanded base never matches a
 /// SymbolTable key and resolution correctly falls through:
 /// * `crate::output` from `crates/ecp-cli/src/commands/find.rs`
-///   → `crates/ecp-cli/src/output`
+///   → `crates/ecp-cli/src/output`; from a repo-root crate's
+///   `src/commands/find.rs` → `src/output`
 /// * `self::a` → `a` under the caller module's child directory
 ///   (`a/b.rs` → `a/b/a`, `a/b/mod.rs` → `a/b/a`)
 /// * `super::a` → `a` under the parent module's directory
@@ -619,10 +620,14 @@ fn rust_module_path_base(
     let segs: Vec<&str> = specifier.split("::").filter(|s| !s.is_empty()).collect();
     let (anchor, rest) = match segs.split_first()? {
         (&"crate", rest) => {
-            let src_root = source_file
-                .to_string_lossy()
-                .rsplit_once("/src/")
-                .map(|(root, _)| format!("{root}/src"))?;
+            let path = source_file.to_string_lossy();
+            let src_root = match path.rsplit_once("/src/") {
+                Some((root, _)) => format!("{root}/src"),
+                // A crate at the repo root: its repo-relative paths start at
+                // `src/`, with no `/src/` segment to split on.
+                None if path.starts_with("src/") => "src".to_owned(),
+                None => return None,
+            };
             (std::path::PathBuf::from(src_root), rest)
         }
         (&"self", rest) => (rust_module_dir(source_file)?, rest),
@@ -1769,6 +1774,22 @@ mod tests {
             base("crates/foo/tests/it.rs", "super::x"),
             Some(PathBuf::from("crates/foo/x"))
         );
+    }
+
+    #[test]
+    fn test_rust_module_path_base_crate_from_repo_root_crate_is_src() {
+        let base = |f: &str, spec: &str| rust_module_path_base(&PathBuf::from(f), spec);
+        assert_eq!(base("src/app.rs", "crate::a"), Some(PathBuf::from("src/a")));
+        assert_eq!(
+            base("src/lib.rs", "crate::a::b"),
+            Some(PathBuf::from("src/a/b"))
+        );
+        assert_eq!(
+            base("crates/x/src/app.rs", "crate::a"),
+            Some(PathBuf::from("crates/x/src/a"))
+        );
+        assert_eq!(base("mysrc/app.rs", "crate::a"), None);
+        assert_eq!(base("tests/it.rs", "crate::a"), None);
     }
 
     #[test]
