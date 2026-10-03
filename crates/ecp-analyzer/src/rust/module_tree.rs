@@ -629,7 +629,14 @@ fn build_mod_tree_and_reexports(entry: &Path) -> (ModTree, ReExportMap) {
                     .map(|d| d.join(override_rel))
                     .unwrap_or_else(|| PathBuf::from(override_rel))
             } else {
-                match file_for_mod(&file, &name) {
+                // The entry is the crate root whatever its file name
+                // (`[lib] path = "src/core.rs"`), so its modules sit beside it.
+                let found = if mod_path.is_empty() {
+                    file.parent().and_then(|dir| module_file_in(dir, &name))
+                } else {
+                    file_for_mod(&file, &name)
+                };
+                match found {
                     Some(p) => p,
                     None => continue,
                 }
@@ -719,7 +726,10 @@ fn collect_pub_use_entries(
 ///   or `<dir>/NAME/mod.rs`.
 /// - `foo/bar.rs` → children at `foo/bar/NAME.rs` or `foo/bar/NAME/mod.rs`.
 fn file_for_mod(parent_file: &Path, mod_name: &str) -> Option<PathBuf> {
-    let base = rust_module_dir(parent_file)?;
+    module_file_in(&rust_module_dir(parent_file)?, mod_name)
+}
+
+fn module_file_in(base: &Path, mod_name: &str) -> Option<PathBuf> {
     let flat = base.join(format!("{mod_name}.rs"));
     if flat.exists() {
         return Some(flat);
