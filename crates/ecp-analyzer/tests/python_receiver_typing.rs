@@ -128,3 +128,39 @@ fn test_unresolved_base_before_shared_ancestor_in_diamond_blocks_owner() {
     assert_binder_emits(&graphs, "run", "Derived.greet");
     assert!(callee_files(&build(graphs), "run", "greet").is_empty());
 }
+
+const A_WITH_ATTRIBUTE: &str = "class A:\n    greet = 5\n";
+
+fn greet_targets_with_attribute_base(derived: &str) -> Vec<String> {
+    let provider = PythonProvider::new().expect("PythonProvider::new");
+    let graphs = parse_all(
+        &provider,
+        &[
+            ("pkg/b.py", BASE_B),
+            ("pkg/a.py", A_WITH_ATTRIBUTE),
+            ("pkg/derived.py", derived),
+            ("pkg/decoy.py", DECOY),
+            ("pkg/app.py", APP),
+        ],
+    );
+    assert_binder_emits(&graphs, "run", "Derived.greet");
+    callee_files(&build(graphs), "run", "greet")
+}
+
+/// MRO of `Derived(A, B)` is Derived, A, B: `A.greet = 5` wins over the
+/// method `B.greet`, though A is off the walk path to B.
+#[test]
+fn test_attribute_on_earlier_branch_shadows_owner() {
+    let derived = "from .a import A\nfrom .b import B\n\n\nclass Derived(A, B):\n    pass\n";
+    assert!(greet_targets_with_attribute_base(derived).is_empty());
+}
+
+/// `Derived(B, A)`: the method on B's branch comes first.
+#[test]
+fn test_attribute_on_later_branch_keeps_owner() {
+    let derived = "from .a import A\nfrom .b import B\n\n\nclass Derived(B, A):\n    pass\n";
+    assert_eq!(
+        greet_targets_with_attribute_base(derived),
+        vec!["pkg/b.py".to_string()]
+    );
+}

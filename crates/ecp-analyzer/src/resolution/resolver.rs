@@ -1327,9 +1327,10 @@ impl<'a> Resolver<'a> {
     /// two owners on separate branches depend on the language's method
     /// resolution order, so they give `Unknown`. The result is also `Unknown`
     /// when something the lookup may meet before the owner could supply the
-    /// member instead: an unresolved base on a branch declared before the
-    /// owner's, or a same-named attribute on a type between `ty` and the
-    /// owner (`greet = replacement`).
+    /// member instead: an unresolved base, or a same-named attribute
+    /// (`greet = replacement`) where attributes hide methods, on the path to
+    /// the owner, on a branch declared before the owner's, or on a branch
+    /// that also reaches the owner.
     fn member_ownership(
         &self,
         ty: NodeId,
@@ -1348,11 +1349,18 @@ impl<'a> Resolver<'a> {
             MemberLookup::Miss => {}
         }
         let st = self.symbol_table;
+        let shadows =
+            attributes_shadow_methods(FileMeta::from_path(st.file_of(ty).unwrap_or_default()));
         // How each ancestor was first reached: (the type, base position).
         let mut parent: FxHashMap<NodeId, (NodeId, u32)> = FxHashMap::default();
         let mut frontier = vec![ty];
         // (type, number of resolved bases it declares before an unresolved one)
         let mut unresolved: Vec<(NodeId, u32)> = Vec::new();
+        // Types declaring a same-named attribute, which hides a method.
+        let mut attributes: Vec<NodeId> = Vec::new();
+        if shadows && self.declares_attribute(ty, ty_name, member) {
+            attributes.push(ty);
+        }
         let mut hits: Vec<(NodeId, NodeId)> = Vec::new();
         for _ in 0..MAX_HERITAGE_DEPTH {
             let mut next = Vec::new();
@@ -1372,6 +1380,9 @@ impl<'a> Resolver<'a> {
                     let Some(base_name) = st.name_in_file(base) else {
                         continue;
                     };
+                    if shadows && self.declares_attribute(base, base_name, member) {
+                        attributes.push(base);
+                    }
                     match self.owned_member(base, base_name, member, target) {
                         MemberLookup::Hit(id) => hits.push((base, id)),
                         MemberLookup::Ambiguous => return Ownership::Unknown,
@@ -1409,44 +1420,39 @@ impl<'a> Resolver<'a> {
             node = up;
         }
         let above_owner = st.ancestors(owner);
-        // An unresolved base above the owner is shadowed by it. Any other one
-        // hangs on the path somewhere: it comes first when its branch is
-        // declared before the one the path takes.
-        let precedes_owner = |holder: NodeId, at: u32| {
+        // Does lookup meet `holder`'s contribution before the owner? `slot`
+        // is an unresolved base of `holder` with `at` resolved bases before
+        // it; `None` is a member `holder` declares itself. Anything above
+        // the owner is hidden by it. Off the path, a holder that also
+        // reaches the owner puts the owner after its own bases (a diamond:
+        // C3 visits a shared ancestor last); otherwise its branch comes
+        // first when declared before the branch the path takes.
+        let before_owner = |holder: NodeId, slot: Option<u32>| {
             if holder == owner || above_owner.contains(&holder) {
                 return false;
             }
-            // Off the path, a holder that also reaches the owner puts the
-            // owner after its own bases (a diamond): C3 visits a shared
-            // ancestor last.
-            if !path.contains_key(&holder) && st.ancestors(holder).contains(&owner) {
-                return true;
-            }
-            // `at` counts resolved bases before the unresolved slot, so the
-            // slot precedes path base `taken` when `at <= taken`; a resolved
-            // branch at `pos` precedes it when `pos < taken`.
-            let (mut node, mut pos, mut slot) = (holder, at, true);
+            let (mut node, mut pos) = match (path.get(&holder), slot) {
+                (Some(&taken), Some(at)) => return at <= taken,
+                (Some(_), None) => return true,
+                (None, _) if st.ancestors(holder).contains(&owner) => return true,
+                (None, _) => match parent.get(&holder) {
+                    Some(&(up, at)) => (up, at),
+                    None => return true,
+                },
+            };
             loop {
                 if let Some(&taken) = path.get(&node) {
-                    return if slot { pos <= taken } else { pos < taken };
+                    return pos < taken;
                 }
-                let Some(&(up, up_pos)) = parent.get(&node) else {
+                let Some(&(up, at)) = parent.get(&node) else {
                     return true;
                 };
-                (node, pos, slot) = (up, up_pos, false);
+                (node, pos) = (up, at);
             }
         };
-        let shadowed =
-            attributes_shadow_methods(FileMeta::from_path(st.file_of(ty).unwrap_or_default()))
-                && path.keys().any(|&t| {
-                    let name = if t == ty {
-                        Some(ty_name)
-                    } else {
-                        st.name_in_file(t)
-                    };
-                    name.is_some_and(|name| self.declares_attribute(t, name, member))
-                });
-        if shadowed || unresolved.iter().any(|&(h, at)| precedes_owner(h, at)) {
+        if unresolved.iter().any(|&(h, at)| before_owner(h, Some(at)))
+            || attributes.iter().any(|&h| before_owner(h, None))
+        {
             return Ownership::Unknown;
         }
         Ownership::Owned {
