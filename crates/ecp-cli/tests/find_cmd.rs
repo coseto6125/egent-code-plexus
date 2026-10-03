@@ -60,6 +60,7 @@ fn run_find(graph: &Path, args: &[&str]) -> std::process::Output {
         .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("ECP_SESSION_ID")
         .env_remove("CODEX_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
         .env_remove("GEMINI_CLI_SESSION_ID")
         .arg("find")
         .args(args)
