@@ -2,11 +2,11 @@
 //! `self.method()` inside `impl Dog` rewrites to `Dog.method`. Typed param /
 //! `let x: Dog` bind locals to the type. `Dog::new()` already-qualified scoped
 //! paths are kept as-is. Inferred `let x = Dog::new()` (no annotation) falls
-//! back to bare method name.
+//! back to the method name, recorded as a `CallSite::UntypedMember`.
 
 use ecp_analyzer::rust::parser::RustProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{CallSite, RawNode};
 use ecp_core::graph::NodeKind;
 
 fn parse(src: &str) -> Vec<RawNode> {
@@ -90,8 +90,10 @@ fn unannotated_let_falls_back_to_bare() {
     let nodes = parse(src);
     let calls = calls_of(&nodes, "use_let_inferred");
     assert!(
-        calls.iter().any(|c| c == "bark"),
-        "`let d = Dog::new()` has no annotation — d.bark() must fall back to bare `bark`; got {:?}",
+        calls
+            .iter()
+            .any(|c| CallSite::parse(c) == CallSite::UntypedMember("bark")),
+        "`let d = Dog::new()` has no annotation — d.bark() must fall back to an untyped `bark`; got {:?}",
         calls,
     );
     assert!(

@@ -8,7 +8,7 @@ use ecp_analyzer::python::parser::PythonProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::rust::parser::RustProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::graph::RelType;
+use ecp_core::graph::{NodeKind, RelType};
 use std::path::Path;
 
 /// `(source, imported_name, alias)` of every import in `src`, sorted.
@@ -274,6 +274,15 @@ fn test_module_import_qualifier_missing_member_does_not_fall_back_to_parent() {
 /// Calls edges from `go` in a workspace written to disk, so the module tree
 /// (built from Cargo.toml) takes part. Every target file is returned.
 fn workspace_go_targets(files: &[(&str, &str)], callee: &str) -> Vec<String> {
+    workspace_go_target_kinds(files, callee)
+        .into_iter()
+        .map(|(file, _)| file)
+        .collect()
+}
+
+/// [`workspace_go_targets`] with each target's kind, for a callee name that
+/// a free `fn` and a method share in one file.
+fn workspace_go_target_kinds(files: &[(&str, &str)], callee: &str) -> Vec<(String, NodeKind)> {
     let tmp = tempfile::tempdir().expect("tempdir");
     let rust = RustProvider::new().expect("RustProvider::new");
     let python = PythonProvider::new().expect("PythonProvider::new");
@@ -295,18 +304,22 @@ fn workspace_go_targets(files: &[(&str, &str)], callee: &str) -> Vec<String> {
     }
     let graph = builder.build();
     let pool = graph.string_pool.as_slice();
-    let mut out: Vec<String> = graph
+    let mut out: Vec<(String, NodeKind)> = graph
         .edges
         .iter()
         .filter(|e| e.rel_type == RelType::Calls)
         .filter(|e| graph.nodes[e.source as usize].name.resolve(pool) == "go")
         .filter(|e| graph.nodes[e.target as usize].name.resolve(pool) == callee)
         .map(|e| {
-            let file = graph.nodes[e.target as usize].file_idx as usize;
-            graph.files[file].path.resolve(pool).to_string()
+            let target = &graph.nodes[e.target as usize];
+            let file = target.file_idx as usize;
+            (
+                graph.files[file].path.resolve(pool).to_string(),
+                target.kind,
+            )
         })
         .collect();
-    out.sort();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
 
@@ -613,6 +626,180 @@ fn test_super_in_a_path_attribute_module_names_the_declaring_module() {
             "use super::helper;\npub fn go() { helper(); }\n",
         ),
         ("src/imp.rs", "pub fn helper() {}\n"),
+    ];
+    assert_eq!(
+        workspace_go_targets(&files, "helper"),
+        vec!["src/lib.rs".to_string()]
+    );
+}
+
+/// `self.resolve()` inside `impl S` is method syntax with a known receiver:
+/// it binds the method, not the same-file free `fn resolve`, and keeps its
+/// edge.
+#[test]
+fn test_method_call_on_self_binds_the_method_not_the_same_file_free_function() {
+    let files = [(
+        "src/lib.rs",
+        "pub fn resolve(p: u32) -> u32 { p }\n\
+         pub struct S;\n\
+         impl S {\n    pub fn resolve(&self) -> u32 { 0 }\n    pub fn go(&self) { self.resolve(); }\n}\n",
+    )];
+    assert_eq!(
+        workspace_go_target_kinds(&files, "resolve"),
+        vec![("src/lib.rs".to_string(), NodeKind::Method)]
+    );
+}
+
+/// Path syntax still reaches a free `fn`: the method-syntax rule touches only
+/// `.` calls.
+#[test]
+fn test_path_call_to_a_free_function_still_binds_it() {
+    let bare = [(
+        "src/lib.rs",
+        "pub fn resolve() {}\npub fn go() { resolve(); }\n",
+    )];
+    assert_eq!(
+        workspace_go_target_kinds(&bare, "resolve"),
+        vec![("src/lib.rs".to_string(), NodeKind::Function)],
+        "bare call"
+    );
+    let crate_path = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        (
+            "src/lib.rs",
+            "pub mod util;\npub fn go() { crate::util::resolve(); }\n",
+        ),
+        ("src/util.rs", "pub fn resolve() {}\n"),
+    ];
+    assert_eq!(
+        workspace_go_targets(&crate_path, "resolve"),
+        vec!["src/util.rs".to_string()],
+        "crate path"
+    );
+}
+
+/// `de::Error::custom` where `de` is an inline module of the caller's file
+/// holding `Error`: the module path agrees, so the call binds.
+#[test]
+fn test_module_qualified_type_call_binds_an_inline_module_type() {
+    let files = [(
+        "src/lib.rs",
+        "mod de {\n    pub struct Error;\n    impl Error {\n        pub fn custom() {}\n    }\n}\n\
+         pub fn go() { de::Error::custom(); }\n",
+    )];
+    assert_eq!(
+        workspace_go_targets(&files, "custom"),
+        vec!["src/lib.rs".to_string()]
+    );
+}
+
+/// `error::Error::custom` where `mod error;` is a project module holding
+/// `Error`: the module path names `src/error.rs`, so the call binds there.
+#[test]
+fn test_module_qualified_type_call_binds_the_project_module_type() {
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        (
+            "src/lib.rs",
+            "pub mod error;\npub fn go() { error::Error::custom(); }\n",
+        ),
+        (
+            "src/error.rs",
+            "pub struct Error;\nimpl Error {\n    pub fn custom() {}\n}\n",
+        ),
+    ];
+    assert_eq!(
+        workspace_go_targets(&files, "custom"),
+        vec!["src/error.rs".to_string()]
+    );
+}
+
+/// A crate with only `src/main.rs`: `crate::` names `main.rs`.
+#[test]
+fn test_crate_path_in_a_main_only_crate_resolves_against_main_rs() {
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        (
+            "src/main.rs",
+            "mod cli;\npub fn helper() {}\nfn main() {}\n",
+        ),
+        (
+            "src/cli.rs",
+            "use crate::helper;\npub fn go() { helper(); }\n",
+        ),
+    ];
+    assert_eq!(
+        workspace_go_targets(&files, "helper"),
+        vec!["src/main.rs".to_string()]
+    );
+}
+
+/// A `crate::helper()` call, not only a `use`, in a module only `main.rs`
+/// declares names the bin crate's root.
+#[test]
+fn test_crate_path_call_in_a_bin_module_resolves_against_main_rs() {
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        ("src/lib.rs", "pub fn helper() {}\n"),
+        (
+            "src/main.rs",
+            "mod cli;\npub fn helper() {}\nfn main() {}\n",
+        ),
+        ("src/cli.rs", "pub fn go() { crate::helper(); }\n"),
+    ];
+    assert_eq!(
+        workspace_go_targets(&files, "helper"),
+        vec!["src/main.rs".to_string()]
+    );
+}
+
+/// A module both `lib.rs` and `main.rs` declare has two crate roots, and
+/// one with no Cargo.toml has no module tree: both keep the file-layout
+/// guess, which probes `lib.rs` first.
+#[test]
+fn test_crate_path_without_one_declaring_target_keeps_the_layout_guess() {
+    let both_roots = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        ("src/lib.rs", "pub mod cli;\npub fn helper() {}\n"),
+        (
+            "src/main.rs",
+            "mod cli;\npub fn helper() {}\nfn main() {}\n",
+        ),
+        (
+            "src/cli.rs",
+            "use crate::helper;\npub fn go() { helper(); }\n",
+        ),
+    ];
+    assert_eq!(
+        workspace_go_targets(&both_roots, "helper"),
+        vec!["src/lib.rs".to_string()],
+        "both roots"
+    );
+    let no_manifest = &both_roots[1..];
+    assert_eq!(
+        workspace_go_targets(no_manifest, "helper"),
+        vec!["src/lib.rs".to_string()],
+        "no Cargo.toml"
+    );
+}
+
+/// `super::super` from a `#[path]` module climbs the logical modules
+/// (`a::b` → crate root), not the file's directories. The layout guess
+/// climbs above `src/` and finds nothing; `src/a.rs` keeps the global tier
+/// ambiguous.
+#[test]
+fn test_super_super_in_a_path_attribute_module_climbs_logical_modules() {
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        ("src/lib.rs", "mod a;\npub fn helper() {}\n"),
+        (
+            "src/a.rs",
+            "#[path = \"b_impl.rs\"]\nmod b;\npub fn helper() {}\n",
+        ),
+        (
+            "src/b_impl.rs",
+            "use super::super::helper;\npub fn go() { helper(); }\n",
+        ),
     ];
     assert_eq!(
         workspace_go_targets(&files, "helper"),

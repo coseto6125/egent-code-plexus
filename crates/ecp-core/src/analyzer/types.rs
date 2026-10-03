@@ -21,7 +21,8 @@ pub enum CallSite<'a> {
     Construct(&'a str),
     /// A Python member call whose receiver is neither typed nor rooted in an
     /// imported name (`obj.widget()`): it resolves by the member name and
-    /// never constructs a type.
+    /// never constructs a type. A Rust method call on an untyped receiver
+    /// (`n.name.resolve()`) uses it too, so it never reaches a free `fn`.
     UntypedMember(&'a str),
 }
 

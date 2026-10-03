@@ -145,6 +145,21 @@ pub struct RustWorkspaceModTree {
     /// Maps an absolute canonical file path back to `(crate_name, mod_path)`,
     /// `crate_name` being the code-name key of `crates`.
     file_to_crate: FxHashMap<PathBuf, (String, Vec<String>)>,
+    /// One module tree per Cargo target: each crate's primary tree (the one
+    /// in `crates`), then its bin roots.
+    targets: Vec<TargetTree>,
+    /// Repo-relative file → each `(index into targets, mod_path)` that
+    /// declares it. A module both the lib and a bin declare has two entries.
+    file_targets: FxHashMap<String, Vec<(usize, Vec<String>)>>,
+}
+
+/// One Cargo target's modules, `mod_path → repo-relative file`.
+struct TargetTree {
+    /// Rooted at a bin entry beside the crate's primary entry
+    /// (`src/main.rs` next to `src/lib.rs`, `src/bin/*.rs`), whose modules
+    /// `file_to_crate` does not cover.
+    is_bin: bool,
+    modules: FxHashMap<Vec<String>, String>,
 }
 
 impl RustWorkspaceModTree {
@@ -158,6 +173,8 @@ impl RustWorkspaceModTree {
             workspace_canon,
             crates: FxHashMap::default(),
             file_to_crate: FxHashMap::default(),
+            targets: Vec::new(),
+            file_targets: FxHashMap::default(),
         };
         let root_toml = workspace_root.join("Cargo.toml");
         let Some(raw) = read_file(&root_toml) else {
@@ -185,6 +202,10 @@ impl RustWorkspaceModTree {
                 continue;
             };
             let (tree, reexports) = build_mod_tree_and_reexports(&entry_path);
+            out.add_target(&tree, false);
+            for bin_root in bin_roots(&crate_dir, &entry_path) {
+                out.add_target(&build_mod_tree_and_reexports(&bin_root).0, true);
+            }
             // Code names a crate by its lib target: the `[lib] name`, else the
             // package name with `-` → `_`. That key wins every collision; the
             // package-name spellings only fill keys nothing else claims.
@@ -238,6 +259,11 @@ impl RustWorkspaceModTree {
             return None;
         }
         let head = segs[0];
+        if matches!(head, "crate" | "self" | "super") {
+            if let Some(resolved) = self.resolve_in_bin_target(caller_file, &segs) {
+                return Some(resolved);
+            }
+        }
 
         // Determine crate root and module path for the caller. Only `crate`,
         // `self` and `super` need it, and it costs a `canonicalize` syscall.
@@ -310,6 +336,66 @@ impl RustWorkspaceModTree {
         // path_segs = [...module_path_parts..., item_name]
         let combined: Vec<String> = path_segs.iter().map(|s| s.to_string()).collect();
         self.resolve_in_crate(target_crate_name, &combined, workspace_root)
+    }
+
+    /// The repo-relative file of the module that `module_path` (`crate` /
+    /// `self` / `super`-anchored, e.g. `super::util`) names from
+    /// `caller_file`, read from the tree of each target that declares the
+    /// caller: `crate` in a module of `src/main.rs` is `main.rs`, and
+    /// `super` in a `#[path]` file is the module that declares it. `None`
+    /// when no target declares the caller, or one of them does not place
+    /// the module, or they place it at different files (a module both the
+    /// lib and a bin declare).
+    pub fn anchored_module_file(&self, caller_file: &str, module_path: &str) -> Option<&str> {
+        let segs: Vec<&str> = module_path.split("::").collect();
+        let mut found: Option<&str> = None;
+        for (target, mod_path) in self.file_targets.get(caller_file)? {
+            let key = anchored_mod_path(mod_path, &segs)?;
+            let file = self.targets[*target].modules.get(&key)?;
+            if found.is_some_and(|f| f != file.as_str()) {
+                return None;
+            }
+            found = Some(file.as_str());
+        }
+        found
+    }
+
+    /// [`Self::resolve_fqn`] for an anchored path from a file that only one
+    /// bin target declares. `file_to_crate` holds the primary tree alone, so
+    /// without this `crate::` there would name the lib's root. The bin's
+    /// `pub use` chains are not followed.
+    fn resolve_in_bin_target(&self, caller_file: &str, segs: &[&str]) -> Option<ResolvedFqn> {
+        let [(target, mod_path)] = self.file_targets.get(caller_file)?.as_slice() else {
+            return None;
+        };
+        let tree = &self.targets[*target];
+        if !tree.is_bin {
+            return None;
+        }
+        let combined = anchored_mod_path(mod_path, segs)?;
+        (0..combined.len()).rev().find_map(|prefix_len| {
+            let file = tree.modules.get(&combined[..prefix_len])?;
+            Some(ResolvedFqn {
+                file: file.clone(),
+                item_name: combined[prefix_len].clone(),
+            })
+        })
+    }
+
+    fn add_target(&mut self, tree: &ModTree, is_bin: bool) {
+        let index = self.targets.len();
+        let mut modules = FxHashMap::default();
+        for (mod_path, file) in tree {
+            let Ok(rel) = uid_path(file, &self.workspace_canon) else {
+                continue;
+            };
+            self.file_targets
+                .entry(rel.clone())
+                .or_default()
+                .push((index, mod_path.clone()));
+            modules.insert(mod_path.clone(), rel);
+        }
+        self.targets.push(TargetTree { is_bin, modules });
     }
 
     /// True when `path` (`<crate_name>::a::b`) names a module of a
@@ -590,6 +676,53 @@ impl RustWorkspaceModTree {
     pub fn is_empty(&self) -> bool {
         self.crates.is_empty()
     }
+}
+
+/// The module path that the `crate` / `self` / `super`-anchored `segs` name
+/// from the module at `mod_path`; `None` for another head, or a `super`
+/// chain that climbs above the crate root.
+fn anchored_mod_path(mod_path: &[String], segs: &[&str]) -> Option<Vec<String>> {
+    let (base, rest) = match *segs.first()? {
+        "crate" => (&mod_path[..0], &segs[1..]),
+        "self" => (mod_path, &segs[1..]),
+        "super" => {
+            let up = segs.iter().take_while(|&&s| s == "super").count();
+            (&mod_path[..mod_path.len().checked_sub(up)?], &segs[up..])
+        }
+        _ => return None,
+    };
+    Some(
+        base.iter()
+            .cloned()
+            .chain(rest.iter().map(|s| s.to_string()))
+            .collect(),
+    )
+}
+
+/// Cargo's auto-discovered bin roots, `src/main.rs`, `src/bin/*.rs` and
+/// `src/bin/*/main.rs`, other than the crate's primary `entry`.
+fn bin_roots(crate_dir: &Path, entry: &Path) -> Vec<PathBuf> {
+    let src = crate_dir.join("src");
+    let mut roots = vec![src.join("main.rs")];
+    if let Ok(dir) = std::fs::read_dir(src.join("bin")) {
+        let mut bins: Vec<PathBuf> = dir
+            .flatten()
+            .map(|e| {
+                let p = e.path();
+                if p.is_dir() {
+                    p.join("main.rs")
+                } else {
+                    p
+                }
+            })
+            .collect();
+        bins.sort();
+        roots.extend(bins);
+    }
+    roots.retain(|p| {
+        p.as_path() != entry && p.extension().is_some_and(|e| e == "rs") && p.is_file()
+    });
+    roots
 }
 
 /// Result of a successful FQN resolution.
@@ -1274,5 +1407,64 @@ mod tests {
             "expected mod.rs, got {}",
             r.file
         );
+    }
+
+    #[test]
+    fn test_anchored_module_file_follows_logical_modules_and_bin_roots() {
+        let dir = make_tree(&[
+            ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+            ("src/lib.rs", "pub mod a;\n"),
+            ("src/a.rs", "#[path = \"deep/b_impl.rs\"]\nmod b;\n"),
+            ("src/deep/b_impl.rs", "pub fn f() {}\n"),
+            ("src/main.rs", "mod cli;\nfn main() {}\n"),
+            ("src/cli.rs", "pub fn g() {}\n"),
+            ("src/bin/tool/main.rs", "mod support;\nfn main() {}\n"),
+            ("src/bin/tool/support.rs", "pub fn h() {}\n"),
+        ]);
+        let tree = RustWorkspaceModTree::build(dir.path());
+        let at = |caller: &str, path: &str| tree.anchored_module_file(caller, path);
+        assert_eq!(at("src/deep/b_impl.rs", "super"), Some("src/a.rs"));
+        assert_eq!(at("src/deep/b_impl.rs", "super::super"), Some("src/lib.rs"));
+        assert_eq!(at("src/deep/b_impl.rs", "self"), Some("src/deep/b_impl.rs"));
+        assert_eq!(at("src/a.rs", "crate"), Some("src/lib.rs"));
+        assert_eq!(at("src/a.rs", "self::b"), Some("src/deep/b_impl.rs"));
+        assert_eq!(at("src/cli.rs", "crate"), Some("src/main.rs"));
+        assert_eq!(
+            at("src/bin/tool/support.rs", "crate"),
+            Some("src/bin/tool/main.rs")
+        );
+    }
+
+    #[test]
+    fn test_anchored_module_file_unplaced_paths_are_none() {
+        let dir = make_tree(&[
+            ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+            ("src/lib.rs", "pub mod a;\npub mod cli;\n"),
+            ("src/a.rs", "pub fn f() {}\n"),
+            ("src/main.rs", "mod cli;\nfn main() {}\n"),
+            ("src/cli.rs", "pub fn g() {}\n"),
+            ("src/orphan.rs", "pub fn o() {}\n"),
+        ]);
+        let tree = RustWorkspaceModTree::build(dir.path());
+        let at = |caller: &str, path: &str| tree.anchored_module_file(caller, path);
+        assert_eq!(at("src/a.rs", "super::super"), None, "above the root");
+        assert_eq!(at("src/a.rs", "::"), None, "only separators");
+        assert_eq!(at("src/a.rs", ""), None, "empty");
+        assert_eq!(at("src/a.rs", "std::fs"), None, "unanchored");
+        assert_eq!(at("src/a.rs", "crate::missing"), None, "undeclared module");
+        assert_eq!(at("src/orphan.rs", "crate"), None, "file outside the tree");
+        assert_eq!(
+            at("src/cli.rs", "crate"),
+            None,
+            "lib and bin both declare it"
+        );
+        assert_eq!(at("src/cli.rs", "super"), None, "two roots disagree");
+    }
+
+    #[test]
+    fn test_anchored_module_file_without_manifest_is_none() {
+        let dir = make_tree(&[("src/lib.rs", "pub mod a;\n"), ("src/a.rs", "")]);
+        let tree = RustWorkspaceModTree::build(dir.path());
+        assert_eq!(tree.anchored_module_file("src/a.rs", "crate"), None);
     }
 }

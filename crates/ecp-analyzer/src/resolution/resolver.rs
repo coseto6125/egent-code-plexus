@@ -207,7 +207,37 @@ impl<'a> Resolver<'a> {
     where
         F: FnMut(&str) -> bool,
     {
+        self.for_each_candidate(source_file, specifier, visit);
+    }
+
+    /// [`for_each_specifier_candidate`], except that a Rust `crate` / `self`
+    /// / `super` path the module tree places is visited as that one file.
+    /// The tree knows which Cargo target declares the caller (`crate` in a
+    /// module of `src/main.rs` is `main.rs`, not `lib.rs`) and which module
+    /// a `#[path]` file is; the file-layout guess knows neither, so it does
+    /// not run after the tree has answered.
+    fn for_each_candidate<F>(&self, source_file: &Path, specifier: &str, mut visit: F)
+    where
+        F: FnMut(&str) -> bool,
+    {
+        if let Some(file) = self.anchored_rust_module(source_file, specifier) {
+            visit(file);
+            return;
+        }
         for_each_specifier_candidate(source_file, specifier, &self.path_aliases, visit);
+    }
+
+    /// The module tree's file for the `crate` / `self` / `super`-anchored
+    /// Rust module path `module_path`, as seen from `source_file`.
+    fn anchored_rust_module(&self, source_file: &Path, module_path: &str) -> Option<&'a str> {
+        let tree = self.mod_tree?;
+        if !matches!(
+            module_path.split("::").next(),
+            Some("crate" | "self" | "super")
+        ) {
+            return None;
+        }
+        tree.anchored_module_file(&normalize_source_path(source_file), module_path)
     }
 
     /// Resolves a symbol name to possible target nodes with confidence scores.
@@ -247,7 +277,7 @@ impl<'a> Resolver<'a> {
                 caller_heritage,
             )
         };
-        let mut targets = resolve(site.name(), ResolveTarget::Callable);
+        let mut targets = resolve(site.name(), call_target(source_file, site));
         if targets.is_empty() {
             targets.extend(self.resolve_instantiation(source_file, site, raw_imports, resolve));
         }
@@ -267,7 +297,7 @@ impl<'a> Resolver<'a> {
         let resolve = |name: &str, target| {
             self.resolve_imported_symbol(source_file, name, raw_imports, target)
         };
-        let mut targets = resolve(site.name(), ResolveTarget::Callable);
+        let mut targets = resolve(site.name(), call_target(source_file, site));
         if targets.is_empty() {
             targets.extend(self.resolve_instantiation(source_file, site, raw_imports, resolve));
         }
@@ -355,11 +385,8 @@ impl<'a> Resolver<'a> {
             if is_match {
                 let exported_name = &import.imported_name;
                 let mut hit: Option<NodeId> = None;
-                for_each_specifier_candidate(
-                    source_file,
-                    &import.source,
-                    &self.path_aliases,
-                    |candidate| match self.symbol_table.lookup_in_file_with_kind(
+                self.for_each_candidate(source_file, &import.source, |candidate| {
+                    match self.symbol_table.lookup_in_file_with_kind(
                         candidate,
                         exported_name,
                         target,
@@ -369,8 +396,8 @@ impl<'a> Resolver<'a> {
                             false // stop enumerating
                         }
                         None => true, // keep going
-                    },
-                );
+                    }
+                });
                 if let Some(node_id) = hit {
                     results.push((node_id, ResolutionTier::ImportScoped.base_confidence()));
                     self.record(
@@ -686,6 +713,28 @@ fn attributes_shadow_methods(meta: FileMeta) -> bool {
     )
 }
 
+/// The kinds a call site may reach. Rust method syntax (`x.f()`, recorded as
+/// `T.f` or as an untyped member) calls only methods: a free `fn` is never
+/// in scope through `.`. Paths use `::`, so a Rust callee holds `.` only
+/// when it was written with method syntax. Python / JS `obj.f()` can reach a
+/// module function, so other languages keep `Callable`.
+fn call_target(source_file: &Path, site: CallSite<'_>) -> ResolveTarget {
+    let method_syntax = match site {
+        CallSite::UntypedMember(_) => true,
+        CallSite::Plain(name) => name.contains('.'),
+        CallSite::Construct(_) => false,
+    };
+    if method_syntax
+        && source_file
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+    {
+        ResolveTarget::Method
+    } else {
+        ResolveTarget::Callable
+    }
+}
+
 /// For a Rust path call `a::b::Q::m`, does the module path `a::b` that the
 /// call names for `Q` agree with the import of `Q` from `import_source`?
 /// `de::Error::custom` with `use crate::error::Error` does not: `de::Error`
@@ -700,15 +749,35 @@ fn rust_path_prefix_agrees_with_import(
     import_source: &str,
     imports: &[RawImport],
 ) -> bool {
-    let Some((before_member, _)) = full_callee.rsplit_once("::") else {
+    let Some(prefix) = rust_type_path_prefix(full_callee, qualifier) else {
         return true;
     };
-    let Some((prefix, q)) = before_member.rsplit_once("::") else {
-        return true;
-    };
-    if q != qualifier {
-        return true;
+    let named = rust_expand_path_head(prefix, imports);
+    // `crate::a::Q` names one module from the crate root: the import must
+    // come from exactly that module. A relative path matches by suffix.
+    if named.first() == Some(&"crate") {
+        return import_source.split("::").eq(named);
     }
+    let is_anchor = |s: &&str| matches!(*s, "" | "self" | "super");
+    let named: Vec<&str> = named.into_iter().skip_while(is_anchor).collect();
+    let source: Vec<&str> = import_source
+        .split("::")
+        .skip_while(|s| *s == "crate" || is_anchor(s))
+        .collect();
+    source.ends_with(&named)
+}
+
+/// The module path `a::b` that the Rust path call `a::b::Q::m` names before
+/// its qualifier `Q`; `None` when there is none.
+fn rust_type_path_prefix<'c>(full_callee: &'c str, qualifier: &str) -> Option<&'c str> {
+    let (before_member, _) = full_callee.rsplit_once("::")?;
+    let (prefix, q) = before_member.rsplit_once("::")?;
+    (q == qualifier).then_some(prefix)
+}
+
+/// The segments of the Rust module path `prefix`, with a head that a `use`
+/// brings in (`use crate::error as err;`) expanded to its full path.
+fn rust_expand_path_head<'s>(prefix: &'s str, imports: &'s [RawImport]) -> Vec<&'s str> {
     let mut named: Vec<&str> = prefix.split("::").collect();
     if let Some(module) = named.first().and_then(|&head| {
         imports
@@ -726,18 +795,7 @@ fn rust_path_prefix_agrees_with_import(
         };
         named.splice(..1, path.split("::").chain(tail));
     }
-    // `crate::a::Q` names one module from the crate root: the import must
-    // come from exactly that module. A relative path matches by suffix.
-    if named.first() == Some(&"crate") {
-        return import_source.split("::").eq(named);
-    }
-    let is_anchor = |s: &&str| matches!(*s, "" | "self" | "super");
-    let named: Vec<&str> = named.into_iter().skip_while(is_anchor).collect();
-    let source: Vec<&str> = import_source
-        .split("::")
-        .skip_while(|s| *s == "crate" || is_anchor(s))
-        .collect();
-    source.ends_with(&named)
+    named
 }
 
 /// A file that names its own directory's module: `mod.rs`, `lib.rs`,
@@ -1161,6 +1219,14 @@ impl<'a> Resolver<'a> {
                     .symbol_table
                     .lookup_in_file_with_kind(qf, member, target)
                     .is_some()
+                    && self.rust_type_path_agrees(
+                        source_file,
+                        &source_file_str,
+                        full_callee,
+                        qualifier,
+                        qf,
+                        raw_imports,
+                    )
                 {
                     return Some(qf.to_string());
                 }
@@ -1241,27 +1307,22 @@ impl<'a> Resolver<'a> {
                     .map(|resolved| resolved.file);
             }
             let mut hit: Option<String> = None;
-            for_each_specifier_candidate(
-                source_file,
-                &import.source,
-                &self.path_aliases,
-                |candidate| {
-                    let qualifier_present = self
-                        .symbol_table
-                        .lookup_in_file_with_kind(candidate, exported, ResolveTarget::Qualifier)
-                        .is_some();
-                    let member_present = self
-                        .symbol_table
-                        .lookup_in_file_with_kind(candidate, member, target)
-                        .is_some();
-                    if qualifier_present && member_present {
-                        hit = Some(candidate.to_string());
-                        false
-                    } else {
-                        true
-                    }
-                },
-            );
+            self.for_each_candidate(source_file, &import.source, |candidate| {
+                let qualifier_present = self
+                    .symbol_table
+                    .lookup_in_file_with_kind(candidate, exported, ResolveTarget::Qualifier)
+                    .is_some();
+                let member_present = self
+                    .symbol_table
+                    .lookup_in_file_with_kind(candidate, member, target)
+                    .is_some();
+                if qualifier_present && member_present {
+                    hit = Some(candidate.to_string());
+                    false
+                } else {
+                    true
+                }
+            });
             if hit.is_some() {
                 return hit;
             }
@@ -1283,6 +1344,14 @@ impl<'a> Resolver<'a> {
                     .symbol_table
                     .lookup_in_file_with_kind(qf, member, target)
                     .is_some()
+                    && self.rust_type_path_agrees(
+                        source_file,
+                        &source_file_str,
+                        full_callee,
+                        qualifier,
+                        qf,
+                        raw_imports,
+                    )
                 {
                     return Some(qf.to_string());
                 }
@@ -1349,12 +1418,12 @@ impl<'a> Resolver<'a> {
         target: ResolveTarget,
         raw_imports: &[RawImport],
     ) -> TypeMember {
-        // Callable only: the supertypes pre-pass resolves heritage with this
+        // Call targets only: the supertypes pre-pass resolves heritage with this
         // resolver before the supertypes exist, so a Type-target ladder would
         // make Pass 2 heritage edges disagree with the pre-pass. A path whose
         // prefix is an external module (`std::sync::Arc::new`) names a type
         // the project cannot own, the same guard Tier 4 applies.
-        if target != ResolveTarget::Callable
+        if !matches!(target, ResolveTarget::Callable | ResolveTarget::Method)
             || !qualifier_prefix_is_internal(symbol_name, qualifier)
         {
             return TypeMember::NoEdge;
@@ -1442,7 +1511,7 @@ impl<'a> Resolver<'a> {
             let exported = import.imported_name.as_str();
             let mut in_project = false;
             let mut hit: Option<NodeId> = None;
-            for_each_specifier_candidate(source_file, &import.source, &self.path_aliases, |cand| {
+            self.for_each_candidate(source_file, &import.source, |cand| {
                 if !st.has_file(cand) {
                     return true;
                 }
@@ -1704,10 +1773,73 @@ impl<'a> Resolver<'a> {
             == 1
     }
 
+    /// For a Rust path call `a::b::Q::m`, may `Q` be the type declared in
+    /// `candidate_file`? The module path `a::b` names where `Q` lives, so the
+    /// candidate must sit in that module: the file the module tree or the
+    /// file layout places it at, or, when no file holds the module, an
+    /// inline `mod` of the caller's own file. A head brought in by a `use`
+    /// expands first; one that names an external crate (`use serde::de;`)
+    /// places `Q` outside the project. A call with no module path before
+    /// `Q`, or only `crate` / `self` / `super`, always agrees.
+    fn rust_type_path_agrees(
+        &self,
+        source_file: &Path,
+        source_file_str: &str,
+        full_callee: Option<&str>,
+        qualifier: &str,
+        candidate_file: &str,
+        imports: &[RawImport],
+    ) -> bool {
+        let Some(full) = full_callee else {
+            return true;
+        };
+        let Some(prefix) = rust_type_path_prefix(full, qualifier) else {
+            return true;
+        };
+        if qualifier_prefix_is_internal(full, qualifier)
+            || !source_file
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+        {
+            return true;
+        }
+        let named = rust_expand_path_head(prefix, imports);
+        let declared_here = |module: &str| {
+            self.symbol_table
+                .lookup_in_file_with_kind(source_file_str, module, ResolveTarget::Qualifier)
+                .is_some()
+        };
+        let module_path = match named[0] {
+            "crate" | "self" | "super" => named.join("::"),
+            head if declared_here(head) => format!("self::{}", named.join("::")),
+            _ => {
+                // Only a workspace crate's module is left; the tree places
+                // `Q` itself, through its `pub use` chain.
+                return self
+                    .mod_tree_resolve(
+                        source_file_str,
+                        &format!("{}::{qualifier}", named.join("::")),
+                    )
+                    .is_some_and(|resolved| resolved.file == candidate_file);
+            }
+        };
+        if let Some(module_file) = self.rust_module_file(source_file, &module_path) {
+            return module_file == candidate_file;
+        }
+        candidate_file == source_file_str
+            && named
+                .iter()
+                .filter(|seg| !matches!(**seg, "crate" | "self" | "super"))
+                .all(|&seg| declared_here(seg))
+    }
+
     /// The indexed file of Rust module `module_path` (`crate::a::m` →
     /// `src/a/m.rs` or `src/a/m/mod.rs`), when the path is crate-, self- or
     /// super-anchored and such a file exists.
     fn rust_module_file(&self, source_file: &Path, module_path: &str) -> Option<String> {
+        if let Some(file) = self.anchored_rust_module(source_file, module_path) {
+            return self.symbol_table.has_file(file).then(|| file.to_string());
+        }
         let base = rust_module_path_base(source_file, module_path)?;
         let base = base.to_string_lossy().replace('\\', "/");
         let mut found = None;

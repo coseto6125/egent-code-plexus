@@ -74,6 +74,9 @@ pub(crate) fn crate_root_prefix(path: &str) -> &str {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolveTarget {
     Callable,
+    /// A Rust method-syntax call (`x.f()`): only a `Method` can answer it,
+    /// never a free `fn` of the same name.
+    Method,
     Type,
     Qualifier,
     /// A struct/class field, for `ReadsField` edge resolution. Filters to
@@ -85,6 +88,7 @@ impl ResolveTarget {
     pub fn kind_predicate(self) -> fn(NodeKind) -> bool {
         match self {
             Self::Callable => NodeKind::is_callable,
+            Self::Method => |kind| kind == NodeKind::Method,
             Self::Type => NodeKind::is_type,
             Self::Qualifier => NodeKind::is_qualifier,
             Self::Field => NodeKind::is_property,

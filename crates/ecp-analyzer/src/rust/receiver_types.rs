@@ -19,7 +19,7 @@ use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_rust_string_value,
 };
 use crate::calls::{attach_to_enclosing, CallSiteIndex};
-use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -419,6 +419,7 @@ fn collect_let_binding(node: &Node<'_>, source: &[u8], out: &mut HashMap<String,
 /// - `obj.method()` where `obj: Dog` locally → `"Dog.method"`
 /// - `Foo::bar()` (scoped call) → `"Foo::bar"` (unchanged, already qualified)
 /// - bare `func()` → `"func"`
+/// - `obj.method()` on an untyped receiver → [`CallSite::untyped_member`]
 ///
 /// Path literals: every `string_literal` / `raw_string_literal` is fed
 /// through `path_literals::build_raw_path_literal`, which applies the
@@ -500,8 +501,9 @@ fn rust_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Optio
                     return Some(format!("{ty}.{method_name}"));
                 }
             }
-            // Fallback: bare method name.
-            Some(method_name)
+            // Untyped receiver: the member name, marked so the resolver
+            // never lands this method-syntax call on a free `fn`.
+            Some(CallSite::untyped_member(&method_name))
         }
 
         // Scoped path call: `Dog::new()` or `std::vec::Vec::new()`
