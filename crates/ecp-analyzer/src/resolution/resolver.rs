@@ -482,6 +482,19 @@ impl<'a> Resolver<'a> {
         // workspace crate index can distinguish `ecp_core::...` (internal,
         // safe to fall back) from `std::...` (external, refuse).
         if let Some((qualifier, member)) = split_qualifier(symbol_name) {
+            if qualifier == CallSite::SUPER_RECEIVER
+                && FileMeta::from_path(&source_file_str).language == Language::Python
+            {
+                return self.resolve_super_member(
+                    source_file,
+                    &source_file_str,
+                    symbol_name,
+                    member,
+                    target,
+                    raw_imports,
+                    caller_heritage,
+                );
+            }
             let hit = self
                 .resolve_qualifier_file(
                     source_file,
@@ -615,6 +628,19 @@ impl<'a> Resolver<'a> {
                     }
                 }
             }
+        }
+
+        if self.binds_external_package(source_file, &source_file_str, symbol_name, raw_imports) {
+            self.record(
+                &source_file_str,
+                symbol_name,
+                None,
+                DecisionTier::Unresolved,
+                None,
+                self.symbol_table.global_match_count(symbol_name),
+                None,
+            );
+            return results;
         }
 
         // Tier 3: Global fallback — emit only when the kind-filtered candidate
@@ -1256,6 +1282,28 @@ impl<'a> Resolver<'a> {
                 continue;
             }
             let exported = &import.imported_name;
+            // `import * as ns from './a'` / `const ns = require('./a')`: the
+            // qualifier is the module, so its file is the lookup scope. A
+            // miss ends the search: `ns.f()` never means another file's `f`.
+            if exported == "*"
+                && matches!(
+                    FileMeta::from_path(&source_file_str).language,
+                    Language::JavaScript | Language::TypeScript
+                )
+            {
+                let mut hit: Option<String> = None;
+                self.for_each_candidate(source_file, &import.source, |candidate| {
+                    let defines_member = self
+                        .symbol_table
+                        .lookup_in_file_with_kind(candidate, member, target)
+                        .is_some();
+                    if defines_member {
+                        hit = Some(candidate.to_string());
+                    }
+                    !defines_member
+                });
+                return hit;
+            }
             // `use a::m; m::f()`: in Rust `m` may be the module `a::m`, whose
             // own file holds `f`. The parent file declaring `mod m;` can
             // define an `f` of its own, so it is not consulted then; a miss
@@ -1398,6 +1446,102 @@ impl<'a> Resolver<'a> {
             hit = Some(fp);
         }
         hit.map(str::to_string)
+    }
+
+    /// True when the JS / TS file imports `name` only from bare package
+    /// specifiers that name no project file (`require('lodash')`): the name
+    /// is the library's, so the Tier 3 global guess would bind an unrelated
+    /// project symbol of the same name.
+    fn binds_external_package(
+        &self,
+        source_file: &Path,
+        source_file_str: &str,
+        name: &str,
+        raw_imports: &[RawImport],
+    ) -> bool {
+        if !matches!(
+            FileMeta::from_path(source_file_str).language,
+            Language::JavaScript | Language::TypeScript
+        ) {
+            return false;
+        }
+        let mut bound = false;
+        for import in raw_imports
+            .iter()
+            .filter(|i| i.alias.as_deref().unwrap_or(&i.imported_name) == name)
+        {
+            if import.source.starts_with(['.', '/']) {
+                return false;
+            }
+            let mut in_project = false;
+            self.for_each_candidate(source_file, &import.source, |candidate| {
+                in_project = self.symbol_table.has_file(candidate);
+                !in_project
+            });
+            if in_project {
+                return false;
+            }
+            bound = true;
+        }
+        bound
+    }
+
+    /// Python `super().member()`: `member` on the caller class's bases, by
+    /// the owner index, never by bare name. Bases are tried in declared order
+    /// (a single-pass approximation of the MRO); the first base that owns the
+    /// member wins. A base the project cannot see, an ambiguous one, or one
+    /// whose ownership is unknown stops the walk: it may own the member and
+    /// shadow every later base, so no edge beats a guess.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_super_member(
+        &self,
+        source_file: &Path,
+        source_file_str: &str,
+        symbol_name: &str,
+        member: &str,
+        target: ResolveTarget,
+        raw_imports: &[RawImport],
+        caller_heritage: &[String],
+    ) -> Vec<(NodeId, f32)> {
+        for base in caller_heritage {
+            let TypeCandidates::Unique(ty, ty_name) =
+                self.type_candidates(source_file, source_file_str, base, raw_imports)
+            else {
+                break;
+            };
+            match self.member_ownership(ty, ty_name, member, target) {
+                Ownership::Owned { id, inherited } => {
+                    let (tier, conf) = if inherited {
+                        (DecisionTier::TypeHeritage, ResolutionTier::HeritageScoped)
+                    } else {
+                        (DecisionTier::TypeOwned, ResolutionTier::QualifierScoped)
+                    };
+                    let conf = conf.base_confidence();
+                    self.record(
+                        source_file_str,
+                        symbol_name,
+                        Some(base.as_str()),
+                        tier,
+                        Some(id),
+                        0,
+                        Some(conf),
+                    );
+                    return vec![(id, conf)];
+                }
+                Ownership::NotOwned => {}
+                Ownership::Unknown => break,
+            }
+        }
+        self.record(
+            source_file_str,
+            symbol_name,
+            None,
+            DecisionTier::Unresolved,
+            None,
+            0,
+            None,
+        );
+        Vec::new()
     }
 
     /// Receiver-typing ladder (after Tier 3.5): resolve `qualifier.member`

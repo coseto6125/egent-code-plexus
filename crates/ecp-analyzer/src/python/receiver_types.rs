@@ -307,6 +307,9 @@ fn python_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Opt
                         return Some(format!("{ty}.{attr_name}"));
                     }
                 }
+                if is_super_call(obj, source) {
+                    return Some(format!("{}.{attr_name}", CallSite::SUPER_RECEIVER));
+                }
                 // Only a module receiver (`widget.Widget()`) can name a class
                 // to construct; any other untyped receiver calls a method,
                 // and a class may be spelled in any case (`class widget`).
@@ -318,4 +321,13 @@ fn python_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Opt
         }
         _ => None,
     }
+}
+
+/// `super()` / `super(C, self)`: the receiver of a call through the base
+/// classes. The resolver binds it from the caller class's heritage.
+fn is_super_call(receiver: Node<'_>, source: &[u8]) -> bool {
+    receiver.kind() == "call"
+        && receiver
+            .child_by_field_name("function")
+            .is_some_and(|f| f.kind() == "identifier" && f.utf8_text(source) == Ok("super"))
 }

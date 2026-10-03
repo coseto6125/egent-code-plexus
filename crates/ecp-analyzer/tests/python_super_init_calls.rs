@@ -10,6 +10,11 @@ use std::path::Path;
 
 /// `(caller owner, target owner)` for every Calls edge into an `__init__`.
 fn init_edges(files: &[(&str, &str)]) -> Vec<(String, String)> {
+    member_edges(files, "__init__")
+}
+
+/// `(caller owner, target owner)` for every Calls edge into a `callee`.
+fn member_edges(files: &[(&str, &str)], callee: &str) -> Vec<(String, String)> {
     let tmp = tempfile::tempdir().expect("tempdir");
     let py = PythonProvider::new().expect("PythonProvider::new");
     let mut builder = GraphBuilder::new().with_repo_root(tmp.path().to_path_buf());
@@ -32,7 +37,7 @@ fn init_edges(files: &[(&str, &str)]) -> Vec<(String, String)> {
         .edges
         .iter()
         .filter(|e| e.rel_type == RelType::Calls)
-        .filter(|e| graph.nodes[e.target as usize].name.resolve(pool) == "__init__")
+        .filter(|e| graph.nodes[e.target as usize].name.resolve(pool) == callee)
         .map(|e| (owner(e.source), owner(e.target)))
         .collect();
     out.sort();
@@ -90,4 +95,47 @@ fn test_super_init_with_an_external_base_emits_no_edge() {
          class Worker(threading.Thread):\n    def __init__(self):\n        super().__init__()\n",
     )];
     assert_eq!(init_edges(&files), Vec::<(String, String)>::new());
+}
+
+/// No base class: `super().__init__()` reaches `object`, which the project
+/// does not hold, so a same-file `__init__` must not be picked.
+#[test]
+fn test_super_init_in_a_class_without_a_base_emits_no_edge() {
+    let files = [(
+        "client.py",
+        "class _KeyPool:\n    def __init__(self):\n        pass\n\n\
+         class Plain:\n    def __init__(self):\n        super().__init__()\n",
+    )];
+    assert_eq!(init_edges(&files), Vec::<(String, String)>::new());
+}
+
+/// `super().other()` binds the base's `other`, not an `other` of an unrelated
+/// class.
+#[test]
+fn test_super_other_method_binds_the_base_that_defines_it() {
+    let files = [(
+        "client.py",
+        "class Unrelated:\n    def other(self):\n        pass\n\n\
+         class Base:\n    def other(self):\n        pass\n\n\
+         class Child(Base):\n    def run(self):\n        super().other()\n",
+    )];
+    assert_eq!(
+        member_edges(&files, "other"),
+        vec![("Child.run".to_string(), "Base.other".to_string())]
+    );
+}
+
+/// Several bases: the first base owning the method wins (MRO approximation).
+#[test]
+fn test_super_init_with_several_bases_binds_the_first_owning_base() {
+    let files = [(
+        "client.py",
+        "class Left:\n    pass\n\n\
+         class Right:\n    def __init__(self):\n        pass\n\n\
+         class Child(Left, Right):\n    def __init__(self):\n        super().__init__()\n",
+    )];
+    assert_eq!(
+        init_edges(&files),
+        vec![("Child.__init__".to_string(), "Right.__init__".to_string())]
+    );
 }

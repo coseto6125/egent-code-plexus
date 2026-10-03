@@ -30,6 +30,10 @@ impl<'a> CallSite<'a> {
     const CONSTRUCT_PREFIX: &'static str = "\u{1}new ";
     const UNTYPED_MEMBER_PREFIX: &'static str = "\u{1}member ";
 
+    /// The qualifier of a Python `super().m()` callee (`super().m`): the
+    /// resolver binds `m` on the caller class's bases, never by bare name.
+    pub const SUPER_RECEIVER: &'static str = "super()";
+
     /// The `RawNode.calls` entry of a site that constructs `ty`.
     pub fn construct(ty: &str) -> String {
         [Self::CONSTRUCT_PREFIX, ty].concat()

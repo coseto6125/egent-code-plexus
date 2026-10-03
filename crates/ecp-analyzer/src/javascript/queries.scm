@@ -145,6 +145,63 @@
       (identifier) @import.alias))
   source: (string (string_fragment) @import.source)) @import.namespace
 
+;; CommonJS `require` with a string-literal argument (`require(expr)` stays a
+;; blind spot). Each form emits the RawImport its ES import twin emits; `\S`
+;; rejects an all-whitespace specifier.
+;; `const m = require('lib')` ≡ `import * as m from 'lib'`
+(variable_declarator
+  name: (identifier) @import.alias
+  value: (call_expression
+      function: (identifier) @_require
+      arguments: (arguments . (string (string_fragment) @import.source) .))
+  (#eq? @_require "require")
+  (#match? @import.source "\\S")) @import.namespace
+
+;; `const { f } = require('lib')` ≡ `import { f } from 'lib'`
+(variable_declarator
+  name: (object_pattern (shorthand_property_identifier_pattern) @import.name)
+  value: (call_expression
+      function: (identifier) @_require
+      arguments: (arguments . (string (string_fragment) @import.source) .))
+  (#eq? @_require "require")
+  (#match? @import.source "\\S")) @import
+
+;; `const { f: g } = require('lib')` ≡ `import { f as g } from 'lib'`
+(variable_declarator
+  name: (object_pattern
+    (pair_pattern
+      key: (property_identifier) @import.name
+      value: (identifier) @import.alias))
+  value: (call_expression
+      function: (identifier) @_require
+      arguments: (arguments . (string (string_fragment) @import.source) .))
+  (#eq? @_require "require")
+  (#match? @import.source "\\S")) @import
+
+;; `const f = require('lib').f` ≡ `import { f } from 'lib'`
+(variable_declarator
+  name: (identifier) @_local
+  value: (member_expression
+    object: (call_expression
+        function: (identifier) @_require
+        arguments: (arguments . (string (string_fragment) @import.source) .))
+    property: (property_identifier) @import.name)
+  (#eq? @_require "require")
+  (#eq? @_local @import.name)
+  (#match? @import.source "\\S")) @import
+
+;; `const g = require('lib').f` ≡ `import { f as g } from 'lib'`
+(variable_declarator
+  name: (identifier) @import.alias
+  value: (member_expression
+    object: (call_expression
+        function: (identifier) @_require
+        arguments: (arguments . (string (string_fragment) @import.source) .))
+    property: (property_identifier) @import.name)
+  (#eq? @_require "require")
+  (#not-eq? @import.alias @import.name)
+  (#match? @import.source "\\S")) @import
+
 ;; Routes — generic method-call shape (.get/.post/... and .use with path-shaped string).
 ;; `use` is included here because router.use('/path', ...) and app.use('/path', ...)
 ;; register mount-point routes captured by ref-gitnexus. The path-shape filter in the

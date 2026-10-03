@@ -104,3 +104,77 @@ fn test_require_of_a_package_never_binds_a_project_function() {
     ];
     assert_eq!(go_targets(&files, "f"), Vec::<String>::new());
 }
+
+/// The imported module does not define `f`: no edge, and never another
+/// file's `f`.
+#[test]
+fn test_namespace_import_of_a_module_without_the_member_emits_no_edge() {
+    let files = [
+        ("a.js", "export function other() {}\n"),
+        ("b.js", "export function f() {}\n"),
+        (
+            "app.js",
+            "import * as ns from \"./a\";\nexport function go() { ns.f(); }\n",
+        ),
+    ];
+    assert_eq!(go_targets(&files, "f"), Vec::<String>::new());
+}
+
+/// A `require` inside a function body binds like one at the top level.
+#[test]
+fn test_require_inside_a_function_binds_like_top_level() {
+    let files = [
+        ("a.js", "function f() {}\nmodule.exports = { f };\n"),
+        ("b.js", "function f() {}\nmodule.exports = { f };\n"),
+        (
+            "app.js",
+            "function go() {\n  const { f } = require(\"./a\");\n  f();\n}\n",
+        ),
+    ];
+    assert_eq!(go_targets(&files, "f"), vec!["a.js".to_string()]);
+}
+
+/// `require` shadowed by a parameter is no module loader: no crash, and no
+/// edge into a file the call cannot be shown to name.
+#[test]
+fn test_shadowed_require_call_emits_no_edge() {
+    let files = [
+        ("a.js", "function f() {}\nmodule.exports = { f };\n"),
+        ("b.js", "function f() {}\nmodule.exports = { f };\n"),
+        (
+            "app.js",
+            "function go(require) {\n  require(\"./a\").f();\n}\n",
+        ),
+    ];
+    assert_eq!(go_targets(&files, "f"), Vec::<String>::new());
+}
+
+/// The same module imported by `import` and by `require` records two imports
+/// but yields one Calls edge per call site.
+#[test]
+fn test_es_import_and_require_of_one_module_emit_one_edge() {
+    let files = [
+        ("a.js", "function f() {}\nmodule.exports = { f };\n"),
+        ("b.js", "function f() {}\nmodule.exports = { f };\n"),
+        (
+            "app.js",
+            "import { f } from \"./a\";\nconst m = require(\"./a\");\nfunction go() { f(); }\n",
+        ),
+    ];
+    assert_eq!(go_targets(&files, "f"), vec!["a.js".to_string()]);
+}
+
+/// A require of a non-literal or whitespace-only specifier records no import
+/// and does not crash.
+#[test]
+fn test_require_with_a_blank_or_computed_specifier_binds_nothing() {
+    let files = [
+        ("a.js", "function f() {}\nmodule.exports = { f };\n"),
+        ("b.js", "function f() {}\nmodule.exports = { f };\n"),
+        (
+            "app.js",
+            "const { f } = require(\"  \");\nconst m = require(name);\nfunction go() { f(); }\n",
+        ),
+    ];
+    assert_eq!(go_targets(&files, "f"), Vec::<String>::new());
+}
