@@ -40,8 +40,8 @@ Use `ecp admin --help` for the full subcommand list. The admin namespace is the 
 | Goal | Command |
 |---|---|
 | Interactive host-integration management | `ecp admin` |
-| Install git / Claude Code hook integration | `ecp admin install-hook` |
-| Check hook install status | `ecp admin status` |
+| Install git ref-transaction hook (branch tracking) | `ecp admin install-hook` |
+| Check Codex integration status | `ecp admin codex status` |
 | Build or refresh the graph | `ecp admin index --repo .` |
 | Delete a repo's index data + registry entry | `ecp admin drop` |
 | Remove orphan index dirs | `ecp admin prune` |

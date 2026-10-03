@@ -53,8 +53,10 @@ fn marker_present_session_start_still_returns_quickly() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
+    // Guards against a watcher-spawn hang (30s+), not latency: 3s flaked at
+    // 4.29s on a loaded windows-latest runner (PR #653).
     assert!(
-        elapsed.as_secs() < 3,
+        elapsed.as_secs() < 15,
         "session_start blocked on watcher spawn (took {elapsed:?})"
     );
 }

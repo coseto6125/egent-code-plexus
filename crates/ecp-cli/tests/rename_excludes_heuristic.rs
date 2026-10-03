@@ -266,6 +266,14 @@ fn test_rename_output_surfaces_count_default() {
         "expected structural field in stdout;\nstdout={stdout}\nstderr={}",
         String::from_utf8_lossy(&out.stderr),
     );
+    // Contract: the hint teaches a live verb. `find-schema-bindings` is a
+    // hidden deprecated alias (cli.rs), so an agent following it lands on a
+    // deprecation notice instead of the answer.
+    assert!(
+        stdout.contains("ecp heuristics schema-bindings notify")
+            && !stdout.contains("find-schema-bindings"),
+        "hint must name the live heuristics verb;\nstdout={stdout}",
+    );
 }
 
 /// With `--show-heuristic-mirrors`, the output must include the candidate list
@@ -340,7 +348,7 @@ fn test_rename_zero_count_omits_hint_line() {
         String::from_utf8_lossy(&out.stderr),
     );
     assert!(
-        !stdout.contains("find-schema-bindings"),
+        !stdout.contains("schema-bindings"),
         "hint line must be suppressed when count is 0;\nstdout={stdout}",
     );
     assert!(
