@@ -2,16 +2,25 @@ name: ecp PR analyze
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  # No `push` trigger: ecp/cross-pr-conflict status is anchored to the
-  # PR HEAD commit and computed against merge-base, so a base-branch
-  # update doesn't invalidate it. Mergify re-runs its speculative trial
-  # natively on base movement.
+  # `push` to main only warms the caches below; it never analyses or posts a
+  # status. ecp/cross-pr-conflict is anchored to the PR HEAD commit and
+  # computed against merge-base, so a base-branch update doesn't invalidate
+  # it. Mergify re-runs its speculative trial natively on base movement.
+  #
+  # Why the warm run exists: a cache saved by a pull_request run is scoped to
+  # refs/pull/<n>/merge, which no other PR can restore. Without a save on
+  # main every fresh PR built ecp cold (23-26 min, PRs #808/#809/#811).
+  push:
+    branches: [main]
 
 # Each PR's analysis runs independently; multiple PRs can run in parallel.
 # Re-runs on the same PR cancel in-flight (only the latest analysis matters).
+# A running main warm run is never cancelled: a cancelled run saves no cache,
+# so merges landing faster than one build would otherwise never warm anything.
+# A newer push still replaces a main run that is only pending, which is fine.
 concurrency:
   group: ecp-pr-analyze-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -35,7 +44,6 @@ env:
 jobs:
   analyze:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -55,6 +63,7 @@ jobs:
 
       - name: Compute branch point + switch HEAD to PR head
         id: refs
+        if: github.event_name == 'pull_request'
         run: |
           # Branch point = merge-base of PR head and current base tip,
           # both available as parents of the merge ref's HEAD commit.
@@ -79,6 +88,10 @@ jobs:
         with:
           toolchain: stable
           components: ""
+          # The L1/L2 caches below replace the action's built-in Swatinem
+          # cache, which duplicated target/ under a PR-scoped key (~690 MB
+          # per PR) next to L2 in the shared 10 GB budget.
+          cache: false
 
       # Layered cache to enable cross-PR dep reuse.
       #
@@ -130,7 +143,7 @@ jobs:
           # Keyed by main HEAD SHA so a fresh PR opened after main moves
           # still finds the freshest viable starting graph (restore-keys
           # gives the fallback chain for partial hits).
-          key: ecp-graph-${{ runner.os }}-${{ github.event.pull_request.base.sha }}
+          key: ecp-graph-${{ runner.os }}-${{ github.event.pull_request.base.sha || github.sha }}
           restore-keys: |
             ecp-graph-${{ runner.os }}-
 
@@ -142,6 +155,7 @@ jobs:
 
       - name: Run pr-analyze
         id: analyze
+        if: github.event_name == 'pull_request'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -160,7 +174,7 @@ jobs:
           cat /tmp/analysis.json
 
       - name: Apply labels + commit status
-        if: steps.analyze.outcome == 'success'
+        if: github.event_name == 'pull_request' && steps.analyze.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
@@ -195,6 +209,6 @@ jobs:
             -f context="$CONTEXT" -f state="$STATE" -f description="$DESC"
 
       - name: Log analysis failure (non-blocking)
-        if: steps.analyze.outcome != 'success'
+        if: github.event_name == 'pull_request' && steps.analyze.outcome != 'success'
         run: |
           echo "::warning::ecp pr-analyze failed — PR falls to default Mergify queue"
