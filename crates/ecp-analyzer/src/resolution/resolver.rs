@@ -535,10 +535,10 @@ fn qualifier_prefix_is_internal(full_callee: &str, qualifier: &str) -> bool {
 /// call names for `Q` agree with the import of `Q` from `import_source`?
 /// `de::Error::custom` with `use crate::error::Error` does not: `de::Error`
 /// is another item than the imported `Error`. A head segment that a `use`
-/// brings in (`use crate::error as err;`) expands to its full path first,
-/// and leading `crate` / `self` / `super` segments are dropped on both sides
-/// before the suffix test. A call with no module path before `Q`, or one not
-/// written with `::`, always agrees.
+/// brings in (`use crate::error as err;`) expands to its full path first.
+/// A `crate::` path must equal the import source; a relative one, with its
+/// leading `self` / `super` dropped, must be a suffix of it. A call with no
+/// module path before `Q`, or one not written with `::`, always agrees.
 fn rust_path_prefix_agrees_with_import(
     full_callee: &str,
     qualifier: &str,
@@ -571,9 +571,17 @@ fn rust_path_prefix_agrees_with_import(
         };
         named.splice(..1, path.split("::").chain(tail));
     }
-    let is_anchor = |s: &&str| matches!(*s, "" | "crate" | "self" | "super");
+    // `crate::a::Q` names one module from the crate root: the import must
+    // come from exactly that module. A relative path matches by suffix.
+    if named.first() == Some(&"crate") {
+        return import_source.split("::").eq(named);
+    }
+    let is_anchor = |s: &&str| matches!(*s, "" | "self" | "super");
     let named: Vec<&str> = named.into_iter().skip_while(is_anchor).collect();
-    let source: Vec<&str> = import_source.split("::").skip_while(is_anchor).collect();
+    let source: Vec<&str> = import_source
+        .split("::")
+        .skip_while(|s| *s == "crate" || is_anchor(s))
+        .collect();
     source.ends_with(&named)
 }
 
@@ -666,7 +674,7 @@ fn rust_module_path_base(
     let segs: Vec<&str> = specifier.split("::").filter(|s| !s.is_empty()).collect();
     let (anchor, rest) = match segs.split_first()? {
         (&"crate", rest) => {
-            let path = source_file.to_string_lossy();
+            let path = source_file.to_string_lossy().replace('\\', "/");
             let src_root = match path.rsplit_once("/src/") {
                 Some((root, _)) => format!("{root}/src"),
                 // A crate at the repo root: its repo-relative paths start at
@@ -1862,6 +1870,14 @@ mod tests {
         );
         assert_eq!(base("mysrc/app.rs", "crate::a"), None);
         assert_eq!(base("tests/it.rs", "crate::a"), None);
+        assert_eq!(
+            base("src\\app.rs", "crate::a"),
+            Some(PathBuf::from("src/a"))
+        );
+        assert_eq!(
+            base("crates\\x\\src\\app.rs", "crate::a"),
+            Some(PathBuf::from("crates/x/src/a"))
+        );
     }
 
     #[test]
@@ -1880,6 +1896,12 @@ mod tests {
             "crate::error::Error::custom",
             "Error",
             "crate::error"
+        ));
+        // A crate-rooted path names one module, not any module ending in it.
+        assert!(!agrees(
+            "crate::error::Error::custom",
+            "Error",
+            "crate::other::error"
         ));
         assert!(agrees("error::Error::custom", "Error", "crate::error"));
         assert!(agrees(
