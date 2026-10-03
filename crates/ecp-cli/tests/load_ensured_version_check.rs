@@ -165,11 +165,20 @@ fn load_ensured_drift_loads_rebuilt_graph_not_stale_file() {
         .expect("git commit");
     let stale_graph = build_initial_graph(other.path());
     fs::copy(&stale_graph, &graph_path).expect("plant stale graph");
+    // An older binary records its fingerprint in meta.json as well as the
+    // sidecar. With meta.json current, build_l2 re-attaches the same dir
+    // instead of rebuilding, and the bug never shows.
+    let stale_fp = "v0.0.1+schema1";
     fs::write(
         auto_ensure::builder_fingerprint_sidecar_path(&graph_path),
-        "v0.0.1+schema1\n",
+        format!("{stale_fp}\n"),
     )
     .expect("write stale sidecar");
+    let meta_path = graph_path.with_file_name("meta.json");
+    let mut meta: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&meta_path).expect("read meta")).unwrap();
+    meta["builder_fingerprint"] = stale_fp.into();
+    fs::write(&meta_path, meta.to_string()).expect("write stale meta");
 
     test_counters::reset();
     let engine = auto_ensure::load_ensured(&graph_path, worktree)
