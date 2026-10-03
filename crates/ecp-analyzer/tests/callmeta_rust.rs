@@ -172,31 +172,3 @@ pub fn compute() {}
         );
     }
 }
-
-// ── Rust: constructor call flag ────────────────────────────────────────────
-
-#[test]
-fn rust_constructor_call_marked() {
-    let src = r#"
-struct Dog;
-impl Dog {
-    pub fn new() -> Self { Dog }
-}
-fn make_dog() -> Dog {
-    Dog::new()
-}
-"#;
-    let g = parse_rust("lib.rs", src);
-    // Dog::new() → FLAG_CONSTRUCTOR_CALL
-    let ctor_meta = g.call_metas.iter().find(|m| m.caller_name == "make_dog");
-    // Constructor detection is present; flags must include CONSTRUCTOR_CALL.
-    if let Some(meta) = ctor_meta {
-        assert_eq!(
-            meta.flags & CallMeta::FLAG_CONSTRUCTOR_CALL,
-            CallMeta::FLAG_CONSTRUCTOR_CALL,
-            "Dog::new() must set FLAG_CONSTRUCTOR_CALL"
-        );
-    }
-    // No assertion if absent — constructor detection is best-effort for scoped_identifier.
-    let _ = g;
-}

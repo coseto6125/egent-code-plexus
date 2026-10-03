@@ -724,8 +724,14 @@ impl LanguageProvider for TypeScriptProvider {
         // - `obj.method()` where `obj` has a type annotation → `Type.method`
         // - everything else falls back to the bare/qualified method name.
         let local_types = collect_local_types(tree.root_node(), source);
-        let (raw_path_literals, raw_sql_refs) =
-            extract_ts_calls_and_path_literals(tree.root_node(), source, &mut nodes, &local_types);
+        let mut call_sites = crate::calls::CallSiteIndex::default();
+        let (raw_path_literals, raw_sql_refs) = extract_ts_calls_and_path_literals(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &local_types,
+            &mut call_sites,
+        );
         crate::calls::extract_field_reads(
             tree.root_node(),
             source,
@@ -807,7 +813,8 @@ impl LanguageProvider for TypeScriptProvider {
         }
 
         let param_names = collect_js_param_names(tree.root_node(), source);
-        let call_metas = detect_js_ts_indirect(tree.root_node(), source, &nodes, &param_names);
+        let call_metas =
+            detect_js_ts_indirect(tree.root_node(), source, &nodes, &param_names, &call_sites);
         let raw_function_metas = crate::function_meta::typescript::extract(
             tree.root_node(),
             source,

@@ -632,8 +632,13 @@ impl LanguageProvider for JavaScriptProvider {
         // - `this.method()` inside a class body → `ClassName.method`
         // - `obj.method()` (no type info in JS) → `obj.method` (qualified for resolver)
         // - `fn()` → `fn`
-        let (raw_path_literals, raw_sql_refs) =
-            extract_js_calls_and_path_literals(tree.root_node(), source, &mut nodes);
+        let mut call_sites = crate::calls::CallSiteIndex::default();
+        let (raw_path_literals, raw_sql_refs) = extract_js_calls_and_path_literals(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &mut call_sites,
+        );
         crate::calls::extract_field_reads(
             tree.root_node(),
             source,
@@ -698,7 +703,8 @@ impl LanguageProvider for JavaScriptProvider {
         }
 
         let param_names = collect_js_param_names(tree.root_node(), source);
-        let call_metas = detect_js_ts_indirect(tree.root_node(), source, &nodes, &param_names);
+        let call_metas =
+            detect_js_ts_indirect(tree.root_node(), source, &nodes, &param_names, &call_sites);
         let raw_function_metas = crate::function_meta::javascript::extract(
             tree.root_node(),
             source,

@@ -17,7 +17,7 @@
 use super::path_literals::{
     build_concatenated, build_raw_path_literal, enclosing_symbol_and_owner, strip_quotes,
 };
-use crate::calls::{attach_to_enclosing, construction_call};
+use crate::calls::{attach_to_enclosing, construction_call, CallSiteIndex};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use rustc_hash::FxHashMap;
 use tree_sitter::Node;
@@ -221,6 +221,7 @@ pub fn extract_cpp_calls_and_path_literals(
     source: &[u8],
     nodes: &mut [RawNode],
     bindings: &CppBindings,
+    call_sites: &mut CallSiteIndex,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
@@ -231,7 +232,9 @@ pub fn extract_cpp_calls_and_path_literals(
             "call_expression" => {
                 if let Some(callee) = cpp_callee_name(n, source, bindings) {
                     let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                    if let Some(site) = attach_to_enclosing(line, callee, nodes) {
+                        call_sites.insert(n.id(), site);
+                    }
                 }
             }
             "new_expression" => {

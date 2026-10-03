@@ -730,8 +730,14 @@ impl LanguageProvider for CProvider {
         // resolver's Tier 2.5 qualifier-scoped lookup. Convention-driven,
         // not language-mandated — see `RECEIVER_NAMES` for the gate.
         let methods = collect_receiver_methods(tree.root_node(), source);
-        let (raw_path_literals, raw_sql_refs) =
-            extract_c_calls_and_path_literals(tree.root_node(), source, &mut nodes, &methods);
+        let mut call_sites = crate::calls::CallSiteIndex::default();
+        let (raw_path_literals, raw_sql_refs) = extract_c_calls_and_path_literals(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &methods,
+            &mut call_sites,
+        );
         crate::calls::extract_field_reads(
             tree.root_node(),
             source,
@@ -740,8 +746,14 @@ impl LanguageProvider for CProvider {
         );
 
         let fn_ptr_vars = collect_c_cpp_fn_ptr_vars(tree.root_node(), source);
-        let call_metas =
-            detect_c_cpp_indirect(tree.root_node(), source, &nodes, &fn_ptr_vars, false);
+        let call_metas = detect_c_cpp_indirect(
+            tree.root_node(),
+            source,
+            &nodes,
+            &fn_ptr_vars,
+            false,
+            &call_sites,
+        );
 
         // Named bindings: `typedef`, `#define`, `extern` declarations.
         // Emitted as `RawImport` with `alias = Some(short_name)` mirroring
