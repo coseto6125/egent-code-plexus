@@ -461,8 +461,12 @@ fn impact_empty_callers_includes_explanation() {
 
 // ── Updated versions of old filter tests (now using positional name) ─────────
 
+/// Contract: `--kind` disambiguates the START node (`--help`: "Disambiguate by
+/// kind"); it never filters the traversal. The old version asserted every
+/// descendant was a function and only held while `new Greeter()` emitted no
+/// edge, so a class descendant is now expected, not a leak.
 #[test]
-fn impact_kind_filter_drops_non_matching_results() {
+fn impact_kind_selects_start_node_not_descendants() {
     let tmp = tempfile::tempdir().unwrap();
     init_repo_and_analyze(tmp.path());
 
@@ -499,17 +503,23 @@ fn impact_kind_filter_drops_non_matching_results() {
             "function",
         ],
     );
-    let filtered_kinds = non_start_kinds(&filtered);
-    assert!(
-        !filtered_kinds.is_empty(),
-        "--kind function should still produce at least one descendant entry: {filtered}"
+    let start_kind = filtered["impact"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["depth"].as_u64() == Some(0))
+        .and_then(|e| e["kind"].as_str())
+        .map(str::to_ascii_lowercase);
+    assert_eq!(
+        start_kind.as_deref(),
+        Some("function"),
+        "--kind function must pick the function start node: {filtered}"
     );
-    for k in &filtered_kinds {
-        assert_eq!(
-            k, "function",
-            "--kind function leaked a non-function entry ({k}): {filtered}"
-        );
-    }
+    assert_eq!(
+        non_start_kinds(&filtered),
+        baseline_kinds,
+        "--kind must not filter descendants: {filtered}"
+    );
 }
 
 #[test]
