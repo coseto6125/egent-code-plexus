@@ -4,12 +4,14 @@
 //! the canonical file path that declares `fn_name`, by walking the module
 //! tree from each crate root.
 //!
-//! # Resolution model (matches rs_oracle.py spec)
+//! # Resolution model (rs_oracle.py spec, plus `[lib]` overrides)
 //!
-//! * `crate::a::b::Foo` (in crate X) → walk X's mod tree starting from
-//!   `src/lib.rs` / `src/main.rs`, following `mod foo;` decls.
+//! * `crate::a::b::Foo` (in crate X) → walk X's mod tree starting from the
+//!   crate entry (`[lib] path`, else `src/lib.rs` / `src/main.rs`), following
+//!   `mod foo;` decls.
 //! * `<crate_name>::a::b::Foo` → if `crate_name` is a workspace member,
-//!   resolve through its mod tree.
+//!   resolve through its mod tree. The name is the `[lib] name` when the
+//!   manifest sets one; rs_oracle.py knows only the package name.
 //! * `super::Foo` / `self::Foo` → resolved against caller's module path.
 //! * `std::*` / `core::*` / `alloc::*` → external, no file.
 //! * `pub use inner::Foo` re-export chains are walked transitively (max 16
@@ -136,10 +138,12 @@ pub struct RustWorkspaceModTree {
     /// `canonical_crate_dir_string` is the forward-slash-normalised
     /// canonical path of the crate directory — cached so `crate_for_file`
     /// doesn't re-canonicalize N crates on every resolution.
-    /// Includes both dash and underscore variants of hyphenated package
-    /// names (Cargo normalises `-` → `_` in imports).
+    /// Keyed by the name code writes (the `[lib] name`, else the package name
+    /// with `-` → `_`), plus the package-name spellings where no other
+    /// crate's code name takes them.
     crates: FxHashMap<String, (PathBuf, String, ModTree, ReExportMap)>,
-    /// Maps an absolute canonical file path back to `(crate_name, mod_path)`.
+    /// Maps an absolute canonical file path back to `(crate_name, mod_path)`,
+    /// `crate_name` being the code-name key of `crates`.
     file_to_crate: FxHashMap<PathBuf, (String, Vec<String>)>,
 }
 
@@ -161,63 +165,53 @@ impl RustWorkspaceModTree {
         };
 
         let members = parse_workspace_members(&raw, workspace_root);
-        let crate_infos: Vec<(String, Option<String>, PathBuf, Option<PathBuf>)> =
-            if members.is_empty() {
-                if let Some(name) = parse_package_name(&raw) {
-                    let entry = find_crate_entry(workspace_root, &raw);
-                    let lib_name = toml_section_value(&raw, "[lib]", "name");
-                    vec![(name, lib_name, workspace_root.to_path_buf(), entry)]
-                } else {
-                    vec![]
-                }
+        let members = if members.is_empty() {
+            vec![workspace_root.to_path_buf()]
+        } else {
+            members
+        };
+        let mut fallbacks = Vec::new();
+        for crate_dir in members {
+            let manifest = if crate_dir == workspace_root {
+                Some(raw.clone())
             } else {
-                let mut infos = Vec::new();
-                for member_dir in members {
-                    let ctoml = member_dir.join("Cargo.toml");
-                    let Some(craw) = read_file(&ctoml) else {
-                        continue;
-                    };
-                    let Some(name) = parse_package_name(&craw) else {
-                        continue;
-                    };
-                    let entry = find_crate_entry(&member_dir, &craw);
-                    let lib_name = toml_section_value(&craw, "[lib]", "name");
-                    infos.push((name, lib_name, member_dir, entry));
-                }
-                infos
+                read_file(&crate_dir.join("Cargo.toml"))
             };
-
-        for (name, lib_name, crate_dir, entry) in crate_infos {
-            let Some(entry_path) = entry else { continue };
+            let Some(manifest) = manifest.as_deref().and_then(read_crate_manifest) else {
+                continue;
+            };
+            let Some(entry_path) = find_crate_entry(&crate_dir, manifest.lib_path.as_deref())
+            else {
+                continue;
+            };
             let (tree, reexports) = build_mod_tree_and_reexports(&entry_path);
+            // Code names a crate by its lib target: the `[lib] name`, else the
+            // package name with `-` → `_`. That key wins every collision; the
+            // package-name spellings only fill keys nothing else claims.
+            let package_norm = manifest.name.replace('-', "_");
+            let code_name = manifest.lib_name.unwrap_or_else(|| package_norm.clone());
             for (mod_path, file) in &tree {
                 out.file_to_crate
-                    .insert(file.clone(), (name.clone(), mod_path.clone()));
+                    .insert(file.clone(), (code_name.clone(), mod_path.clone()));
             }
             let canon_str = crate_dir
                 .canonicalize()
                 .unwrap_or_else(|_| crate_dir.clone())
                 .to_string_lossy()
                 .replace('\\', "/");
+            let entry = (crate_dir, canon_str, tree, reexports);
             // Aliases need their own tree entry because lookups split by
-            // crate name first: the underscore-normalised package name
-            // (`-` → `_`) and a `[lib] name` override, which is the name the
-            // bin and every dependent write. One clone per alias is
-            // unavoidable; tree size is bounded by mod-tree depth × crate count.
-            let mut aliases = vec![name.replace('-', "_")];
-            aliases.extend(lib_name);
-            aliases.retain(|alias| *alias != name);
-            aliases.dedup();
-            for alias in aliases {
-                out.crates.entry(alias).or_insert((
-                    crate_dir.clone(),
-                    canon_str.clone(),
-                    tree.clone(),
-                    reexports.clone(),
-                ));
+            // crate name first. One clone per alias is unavoidable; tree size
+            // is bounded by mod-tree depth × crate count.
+            for alias in [manifest.name, package_norm] {
+                if alias != code_name && !fallbacks.iter().any(|(a, _)| *a == alias) {
+                    fallbacks.push((alias, entry.clone()));
+                }
             }
-            out.crates
-                .insert(name, (crate_dir, canon_str, tree, reexports));
+            out.crates.insert(code_name, entry);
+        }
+        for (alias, entry) in fallbacks {
+            out.crates.entry(alias).or_insert(entry);
         }
 
         out
@@ -245,19 +239,24 @@ impl RustWorkspaceModTree {
         }
         let head = segs[0];
 
-        // Determine crate root and module path for the caller.
-        let caller_crate = self.crate_for_file(caller_file, workspace_root);
+        // Determine crate root and module path for the caller. Only `crate`,
+        // `self` and `super` need it, and it costs a `canonicalize` syscall.
+        let caller_crate = || self.crate_for_file(caller_file, workspace_root);
 
         // Build the module-path segments for the target item.
         // For `crate::a::b::fn` → segs after `crate` minus last = `[a, b]`,
         // last = `fn`.
         let (target_crate_name, path_segs): (&str, &[&str]) = match head {
             "crate" => {
-                let crate_name = caller_crate.as_deref()?;
-                (crate_name, &segs[1..])
+                let crate_name = caller_crate()?;
+                return self.resolve_in_crate(
+                    &crate_name,
+                    &segs[1..].iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                    workspace_root,
+                );
             }
             "self" | "super" => {
-                let crate_name = caller_crate.as_deref()?;
+                let crate_name = caller_crate()?;
                 let caller_abs = if Path::new(caller_file).is_absolute() {
                     PathBuf::from(caller_file)
                 } else {
@@ -292,7 +291,7 @@ impl RustWorkspaceModTree {
                     .chain(rest.iter().copied())
                     .map(str::to_string)
                     .collect();
-                return self.resolve_in_crate(crate_name, &combined, workspace_root);
+                return self.resolve_in_crate(&crate_name, &combined, workspace_root);
             }
             other => {
                 // External std/core/alloc — skip.
@@ -311,6 +310,16 @@ impl RustWorkspaceModTree {
         // path_segs = [...module_path_parts..., item_name]
         let combined: Vec<String> = path_segs.iter().map(|s| s.to_string()).collect();
         self.resolve_in_crate(target_crate_name, &combined, workspace_root)
+    }
+
+    /// True when `path` (`<crate_name>::a::b`) names a module of a
+    /// workspace crate, as opposed to an item inside one.
+    pub fn names_module(&self, path: &str) -> bool {
+        let mut segs = path.split("::");
+        let Some((_, _, tree, _)) = segs.next().and_then(|head| self.crates.get(head)) else {
+            return false;
+        };
+        tree.contains_key(&segs.map(str::to_string).collect::<Vec<_>>())
     }
 
     /// Returns the canonical crate name for a caller file path.
@@ -742,7 +751,7 @@ fn module_file_in(base: &Path, mod_name: &str) -> Option<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// Cargo.toml parsing (stdlib only, no `toml` dep)
+// Cargo.toml parsing
 // ---------------------------------------------------------------------------
 
 fn parse_workspace_members(cargo_toml: &str, workspace_root: &Path) -> Vec<PathBuf> {
@@ -823,38 +832,26 @@ fn parse_workspace_members(cargo_toml: &str, workspace_root: &Path) -> Vec<PathB
     members
 }
 
-fn parse_package_name(cargo_toml: &str) -> Option<String> {
-    toml_section_value(cargo_toml, "[package]", "name")
+struct CrateManifest {
+    name: String,
+    lib_name: Option<String>,
+    lib_path: Option<String>,
 }
 
-/// The string value of `key` inside the `section` table (e.g. `[lib]`).
-fn toml_section_value(cargo_toml: &str, section: &str, key: &str) -> Option<String> {
-    let mut in_section = false;
-    for line in cargo_toml.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_section = trimmed == section;
-            continue;
-        }
-        if !in_section {
-            continue;
-        }
-        let Some((k, v)) = trimmed.split_once('=') else {
-            continue;
-        };
-        if k.trim() != key {
-            continue;
-        }
-        let val = v.trim().trim_matches('"').trim_matches('\'');
-        if !val.is_empty() {
-            return Some(val.to_string());
-        }
-    }
-    None
+/// `[package] name`, `[lib] name` and `[lib] path` of a crate manifest.
+fn read_crate_manifest(cargo_toml: &str) -> Option<CrateManifest> {
+    let table: toml::Table = toml::from_str(cargo_toml).ok()?;
+    let string_at =
+        |section: &str, key: &str| table.get(section)?.get(key)?.as_str().map(str::to_string);
+    Some(CrateManifest {
+        name: string_at("package", "name")?,
+        lib_name: string_at("lib", "name"),
+        lib_path: string_at("lib", "path"),
+    })
 }
 
-fn find_crate_entry(crate_dir: &Path, cargo_toml: &str) -> Option<PathBuf> {
-    if let Some(lib_path) = toml_section_value(cargo_toml, "[lib]", "path") {
+fn find_crate_entry(crate_dir: &Path, lib_path: Option<&str>) -> Option<PathBuf> {
+    if let Some(lib_path) = lib_path {
         let p = crate_dir.join(lib_path);
         if p.exists() {
             return Some(p);
