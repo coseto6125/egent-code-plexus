@@ -41,10 +41,9 @@ pub fn edges_from(graph: &ZeroCopyGraph, caller: &str, rel: RelType) -> Vec<Hit>
     graph
         .edges
         .iter()
-        .enumerate()
-        .filter(|(_, e)| e.rel_type == rel)
-        .filter(|(_, e)| graph.nodes[e.source as usize].name.resolve(pool) == caller)
-        .map(|(idx, e)| {
+        .filter(|e| e.rel_type == rel)
+        .filter(|e| graph.nodes[e.source as usize].name.resolve(pool) == caller)
+        .map(|e| {
             let target = &graph.nodes[e.target as usize];
             let file = if target.has_owning_file() {
                 graph.files[target.file_idx as usize]
