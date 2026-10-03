@@ -123,7 +123,6 @@ pub fn collect_rust_indirect_param_types(
 /// - `&dyn T` / `Box<dyn T>` / `Arc<dyn T>` / `Rc<dyn T>` receiver → `FLAG_DYNAMIC_DISPATCH`
 /// - `fn(...)` / `Fn(...)` / `FnMut(...)` / `FnOnce(...)` typed variable called → `FLAG_CALLBACK`
 /// - Generic `T: Trait` receiver (cannot resolve impl) → `FLAG_DYNAMIC_DISPATCH`
-/// - Constructor call (`X::new` or `X { }`) → `FLAG_DIRECT | FLAG_CONSTRUCTOR_CALL`
 pub fn detect_rust_indirect(
     root: Node<'_>,
     source: &[u8],
@@ -190,18 +189,6 @@ fn classify_rust_call(
                         return (CallMeta::FLAG_DYNAMIC_DISPATCH, dispatch_str, true);
                     }
                 }
-            }
-            (CallMeta::FLAG_DIRECT, String::new(), true)
-        }
-        "scoped_identifier" => {
-            // `Type::new(...)` — constructor pattern.
-            let text = node_text(function, source).unwrap_or_default();
-            if text.ends_with("::new") || text.ends_with("::default") {
-                return (
-                    CallMeta::FLAG_DIRECT | CallMeta::FLAG_CONSTRUCTOR_CALL,
-                    String::new(),
-                    true,
-                );
             }
             (CallMeta::FLAG_DIRECT, String::new(), true)
         }
