@@ -61,11 +61,13 @@ fn javascript_callback_meta_points_at_flagged_call() {
     let g = parse(
         &p,
         "a.js",
-        "function between(cb) { a(); cb(); b(); }\n\
+        "function last(cb) { a(); b(); cb(); }\n\
+         function first(cb) { cb(); a(); b(); }\n\
          function afterNew(cb) { new Widget(); cb(); }\n\
          function nested(cb) { a(cb()); }\n",
     );
-    assert_points_at(&g, "between", "cb");
+    assert_points_at(&g, "last", "cb");
+    assert_points_at(&g, "first", "cb");
     assert_points_at(&g, "afterNew", "cb");
     assert_points_at(&g, "nested", "cb");
 }
@@ -76,10 +78,10 @@ fn typescript_callback_meta_points_at_flagged_call() {
     let g = parse(
         &p,
         "a.ts",
-        "function between(cb: () => void) { a(); cb(); b(); }\n\
+        "function last(cb: () => void) { a(); b(); cb(); }\n\
          function afterNew(cb: () => void) { new Widget(); cb(); }\n",
     );
-    assert_points_at(&g, "between", "cb");
+    assert_points_at(&g, "last", "cb");
     assert_points_at(&g, "afterNew", "cb");
 }
 
@@ -90,11 +92,13 @@ fn python_callback_meta_points_at_flagged_call() {
         &p,
         "a.py",
         "class Widget:\n    pass\n\n\
-         def between(cb):\n    a()\n    cb()\n    b()\n\n\
+         def last(cb):\n    a()\n    b()\n    cb()\n\n\
+         def first(cb):\n    cb()\n    a()\n    b()\n\n\
          def after_new(cb):\n    Widget()\n    cb()\n\n\
          def nested(cb):\n    a(cb())\n",
     );
-    assert_points_at(&g, "between", "cb");
+    assert_points_at(&g, "last", "cb");
+    assert_points_at(&g, "first", "cb");
     assert_points_at(&g, "after_new", "cb");
     assert_points_at(&g, "nested", "cb");
 }
@@ -105,10 +109,12 @@ fn c_fn_pointer_meta_points_at_flagged_call() {
     let g = parse(
         &p,
         "a.c",
-        "void between(void (*fp)(int)) { a(); fp(1); b(); }\n\
-         void nested(void (*fp)(int)) { a(fp(1)); }\n",
+        "void last(void (*fp)(int)) { a(); b(); (*fp)(1); }\n\
+         void first(void (*fp)(int)) { (*fp)(1); a(); b(); }\n\
+         void nested(void (*fp)(int)) { a((*fp)(1)); }\n",
     );
-    assert_points_at(&g, "between", "fp");
+    assert_points_at(&g, "last", "fp");
+    assert_points_at(&g, "first", "fp");
     assert_points_at(&g, "nested", "fp");
 }
 
@@ -119,10 +125,12 @@ fn cpp_fn_pointer_meta_points_at_flagged_call() {
         &p,
         "a.cpp",
         "struct Widget {};\n\
-         void between(void (*fp)(int)) { a(); fp(1); b(); }\n\
-         void after_new(void (*fp)(int)) { Widget* w = new Widget(); fp(1); }\n",
+         void last(void (*fp)(int)) { a(); b(); (*fp)(1); }\n\
+         void first(void (*fp)(int)) { (*fp)(1); a(); b(); }\n\
+         void after_new(void (*fp)(int)) { Widget* w = new Widget(); (*fp)(1); }\n",
     );
-    assert_points_at(&g, "between", "fp");
+    assert_points_at(&g, "last", "fp");
+    assert_points_at(&g, "first", "fp");
     assert_points_at(&g, "after_new", "fp");
 }
 
@@ -133,9 +141,11 @@ fn rust_dyn_meta_points_at_flagged_call() {
         &p,
         "a.rs",
         "trait Handler { fn run(&self); }\n\
-         fn between(h: &dyn Handler) { a(); h.run(); b(); }\n\
+         fn last(h: &dyn Handler) { a(); b(); h.run(); }\n\
+         fn first(h: &dyn Handler) { h.run(); a(); b(); }\n\
          fn nested(h: &dyn Handler) { a(h.run()); }\n",
     );
-    assert_points_at(&g, "between", "run");
+    assert_points_at(&g, "last", "run");
+    assert_points_at(&g, "first", "run");
     assert_points_at(&g, "nested", "run");
 }
