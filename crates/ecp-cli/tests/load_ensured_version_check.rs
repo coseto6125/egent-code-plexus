@@ -130,6 +130,78 @@ fn load_ensured_rebuilds_on_fingerprint_drift() {
     );
 }
 
+fn has_symbol(engine: &ecp_cli::engine::Engine, name: &str) -> bool {
+    let graph = engine.graph().expect("graph view");
+    let pool = graph.string_pool.as_slice();
+    graph.nodes.iter().any(|n| n.name.resolve(pool) == name)
+}
+
+/// The rebuild publishes into a NEW `.gen` commit dir and leaves the stale
+/// file in place, so loading the caller's pre-rebuild path returns the stale
+/// graph. The stale file here carries a symbol the source never had, which
+/// the drift test above cannot tell apart: its stale and rebuilt graphs hold
+/// the same symbols.
+#[test]
+fn load_ensured_drift_loads_rebuilt_graph_not_stale_file() {
+    let _env_guard = lock_env();
+    let _snapshot = EnvSnapshot::take();
+
+    let tmp = TempDir::new().expect("tempdir");
+    let worktree = tmp.path();
+    git_init_with_commit(worktree);
+    std::env::set_var("HOME", worktree);
+    std::env::remove_var("ECP_HOME");
+
+    let graph_path = build_initial_graph(worktree);
+
+    let other = TempDir::new().expect("tempdir");
+    git_init_with_commit(other.path());
+    fs::write(other.path().join("lib.rs"), "pub fn stale_only_fn() {}\n").unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(other.path())
+        .args(["commit", "-qam", "stale content"])
+        .output()
+        .expect("git commit");
+    let stale_graph = build_initial_graph(other.path());
+    fs::copy(&stale_graph, &graph_path).expect("plant stale graph");
+    fs::write(
+        auto_ensure::builder_fingerprint_sidecar_path(&graph_path),
+        "v0.0.1+schema1\n",
+    )
+    .expect("write stale sidecar");
+
+    test_counters::reset();
+    let engine = auto_ensure::load_ensured(&graph_path, worktree)
+        .expect("load_ensured under fingerprint drift");
+
+    assert_eq!(test_counters::build_l2_calls(), 1);
+    assert!(
+        has_symbol(&engine, "sentinel_fn") && !has_symbol(&engine, "stale_only_fn"),
+        "load_ensured must answer from the rebuilt graph, not the stale file it was handed"
+    );
+}
+
+/// A repo with no graph yet resolves to the legacy `.ecp/graph.bin` default;
+/// the synchronous build publishes elsewhere, so the load must follow it.
+#[test]
+fn load_ensured_missing_graph_loads_fresh_build() {
+    let _env_guard = lock_env();
+    let _snapshot = EnvSnapshot::take();
+
+    let tmp = TempDir::new().expect("tempdir");
+    let worktree = tmp.path();
+    git_init_with_commit(worktree);
+    std::env::set_var("HOME", worktree);
+    std::env::remove_var("ECP_HOME");
+
+    let graph_path = ecp_cli::graph_path::resolve(Path::new(".ecp/graph.bin"), worktree);
+    let engine = auto_ensure::load_ensured(&graph_path, worktree)
+        .expect("load_ensured on a never-indexed repo");
+
+    assert!(has_symbol(&engine, "sentinel_fn"));
+}
+
 #[test]
 fn load_ensured_no_rebuild_when_fresh() {
     let _env_guard = lock_env();
