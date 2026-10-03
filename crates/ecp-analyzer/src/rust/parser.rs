@@ -513,6 +513,8 @@ impl LanguageProvider for RustProvider {
             }
         }
 
+        push_nested_use_imports(tree.root_node(), source, &mut imports);
+
         // Extract call sites with receiver-type binding. Replaces the shared
         // `extract_calls` for Rust so `self.method()` inside an impl block and
         // `obj.method()` with locally-typed `obj` are recorded as `Type.method`
@@ -652,5 +654,150 @@ impl LanguageProvider for RustProvider {
             call_metas,
             raw_function_metas,
         })
+    }
+}
+
+/// The `use` forms the import query does not reach: a path inside a list
+/// (`use a::{b::C}`), a nested list, `self` in a list, a glob (`use a::*`)
+/// and a list with no path (`use {a::B}`). One `RawImport` per item, with
+/// the module path as `source`. The query keeps the flat forms
+/// (`use a::b::C`, `use a::{C, D as E}`, `use a as b`), so this skips them.
+fn push_nested_use_imports(root: tree_sitter::Node, source: &[u8], out: &mut Vec<RawImport>) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() != "use_declaration" {
+            let mut cursor = node.walk();
+            stack.extend(node.named_children(&mut cursor));
+            continue;
+        }
+        let Some(arg) = node.child_by_field_name("argument") else {
+            continue;
+        };
+        match arg.kind() {
+            // The query reads the list of `use a::{..}` only when it has a
+            // path; `use ::{a, b}` has none.
+            "scoped_use_list" => {
+                let covered = arg.child_by_field_name("path").is_some();
+                use_list_items(arg, "", covered, source, out)
+            }
+            "use_list" => list_items(arg, "", false, source, out),
+            "use_wildcard" => push_wildcard(arg, "", source, out),
+            _ => {}
+        }
+    }
+}
+
+fn node_text<'s>(node: tree_sitter::Node, source: &'s [u8]) -> &'s str {
+    std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).unwrap_or("")
+}
+
+fn join_path(prefix: &str, path: &str) -> String {
+    if prefix.is_empty() {
+        path.to_string()
+    } else {
+        format!("{prefix}::{path}")
+    }
+}
+
+/// `prefix::path::{...}`: the items of the list under `prefix::path`.
+/// `top` marks the list the import query already reads item by item.
+fn use_list_items(
+    node: tree_sitter::Node,
+    prefix: &str,
+    top: bool,
+    source: &[u8],
+    out: &mut Vec<RawImport>,
+) {
+    let path = node
+        .child_by_field_name("path")
+        .map(|p| join_path(prefix, node_text(p, source)))
+        .unwrap_or_else(|| prefix.to_string());
+    if let Some(list) = node.child_by_field_name("list") {
+        list_items(list, &path, top, source, out);
+    }
+}
+
+fn list_items(
+    list: tree_sitter::Node,
+    prefix: &str,
+    covered: bool,
+    source: &[u8],
+    out: &mut Vec<RawImport>,
+) {
+    let mut cursor = list.walk();
+    let items: Vec<_> = list.named_children(&mut cursor).collect();
+    for item in items {
+        match item.kind() {
+            "identifier" if !covered => push_import(out, prefix, node_text(item, source), None),
+            "self" => push_self(out, prefix, None),
+            "scoped_identifier" => {
+                let (path, name) = split_last(node_text(item, source));
+                push_import(out, &join_path(prefix, path), name, None);
+            }
+            "use_as_clause" => {
+                let (Some(path), Some(alias)) = (
+                    item.child_by_field_name("path"),
+                    item.child_by_field_name("alias"),
+                ) else {
+                    continue;
+                };
+                if path.kind() == "identifier" && covered {
+                    continue;
+                }
+                if path.kind() == "self" {
+                    push_self(out, prefix, Some(node_text(alias, source)));
+                    continue;
+                }
+                let (module, name) = split_last(node_text(path, source));
+                push_import(
+                    out,
+                    &join_path(prefix, module),
+                    name,
+                    Some(node_text(alias, source)),
+                );
+            }
+            "scoped_use_list" => use_list_items(item, prefix, false, source, out),
+            "use_list" => list_items(item, prefix, false, source, out),
+            "use_wildcard" => push_wildcard(item, prefix, source, out),
+            _ => {}
+        }
+    }
+}
+
+/// One import of `name` from `module`; a bare top-level item (`use {c}`)
+/// is its own module, as the query records `use c`.
+fn push_import(out: &mut Vec<RawImport>, module: &str, name: &str, alias: Option<&str>) {
+    if name.is_empty() {
+        return;
+    }
+    out.push(RawImport {
+        source: if module.is_empty() { name } else { module }.to_string(),
+        imported_name: name.to_string(),
+        alias: alias.map(str::to_string),
+        binding_kind: None,
+    });
+}
+
+/// `use a::m::{self}` imports the module `m` itself: recorded as
+/// `use a::m;` is, source `a`, name `m`.
+fn push_self(out: &mut Vec<RawImport>, prefix: &str, alias: Option<&str>) {
+    match prefix.rsplit_once("::") {
+        Some((parent, module)) => push_import(out, parent, module, alias),
+        None => push_import(out, prefix, prefix, alias),
+    }
+}
+
+/// `a::b::C` → (`a::b`, `C`); a single segment has an empty module path.
+fn split_last(path: &str) -> (&str, &str) {
+    path.rsplit_once("::").unwrap_or(("", path))
+}
+
+fn push_wildcard(node: tree_sitter::Node, prefix: &str, source: &[u8], out: &mut Vec<RawImport>) {
+    let module = node
+        .named_child(0)
+        .map(|p| join_path(prefix, node_text(p, source)))
+        .unwrap_or_else(|| prefix.to_string());
+    if !module.is_empty() {
+        push_import(out, &module, "*", None);
     }
 }
