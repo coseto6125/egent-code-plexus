@@ -1,8 +1,7 @@
 //! C++ instantiation calls: `A(..)` and `new A(..)` must give `ecp impact` a
 //! caller for `A`. A declared constructor carries the class name, so the
 //! temporary form `A(..)` already resolves; `new A(..)` is not a captured call
-//! site, and a class with no constructor, or with overloads, has no single
-//! callable named `A`.
+//! site, and a class with no constructor has no callable named `A`.
 
 mod instantiation_calls_support;
 
@@ -84,10 +83,10 @@ fn test_cpp_same_file_new_calls_constructor() {
     assert_calls_constructor(&graph, "make_local", "Local", "src/local.cpp");
 }
 
-/// Two overloads: the resolver cannot pick one without argument types, so
-/// the edge goes to the class rather than to a guess.
+/// Overloads share one uid, so Pass 1 collapses them into one Constructor
+/// node: an edge to it means "a constructor of `Multi`", not a guess.
 #[test]
-fn test_cpp_overloaded_constructors_new_calls_class() {
+fn test_cpp_overloaded_constructors_new_calls_constructor() {
     let multi = (
         "src/multi.hpp",
         "class Multi {\npublic:\n    Multi(int x) {}\n    Multi(const char* s) {}\n};\n",
@@ -97,13 +96,7 @@ fn test_cpp_overloaded_constructors_new_calls_class() {
         "#include \"multi.hpp\"\n\nMulti* make_multi() {\n    return new Multi(1);\n}\n",
     );
     let graph = graph_of(&provider(), &[multi, app]);
-    assert_calls_type(
-        &graph,
-        "make_multi",
-        "Multi",
-        NodeKind::Class,
-        "src/multi.hpp",
-    );
+    assert_calls_constructor(&graph, "make_multi", "Multi", "src/multi.hpp");
 }
 
 #[test]

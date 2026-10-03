@@ -1,7 +1,7 @@
 //! Kotlin instantiation calls: `A()` must give `ecp impact` a caller for `A`.
 //! A primary constructor carries the class name, so the Callable lookup
-//! already finds it. A class with no constructor, or with several, has no
-//! single callable named `A`, and the call resolves nothing today.
+//! already finds it. A class with no constructor has no callable named `A`,
+//! and the call resolves nothing today.
 
 mod instantiation_calls_support;
 
@@ -54,10 +54,10 @@ fn test_kotlin_same_file_call_calls_constructor() {
     assert_calls_constructor(&graph, "makeLocal", "Local", "src/Local.kt");
 }
 
-/// Two secondary constructors: the resolver cannot pick one without
-/// argument types, so the edge goes to the class rather than to a guess.
+/// Overloads share one uid, so Pass 1 collapses them into one Constructor
+/// node: an edge to it means "a constructor of `Multi`", not a guess.
 #[test]
-fn test_kotlin_overloaded_constructors_call_calls_class() {
+fn test_kotlin_overloaded_constructors_call_calls_constructor() {
     let multi = (
         "src/Multi.kt",
         "class Multi {\n    constructor(x: Int) {\n    }\n\n    constructor(s: String) {\n    }\n}\n",
@@ -67,13 +67,7 @@ fn test_kotlin_overloaded_constructors_call_calls_class() {
         "fun makeMulti(): Multi {\n    return Multi(1)\n}\n",
     );
     let graph = graph_of(&provider(), &[multi, app]);
-    assert_calls_type(
-        &graph,
-        "makeMulti",
-        "Multi",
-        NodeKind::Class,
-        "src/Multi.kt",
-    );
+    assert_calls_constructor(&graph, "makeMulti", "Multi", "src/Multi.kt");
 }
 
 #[test]

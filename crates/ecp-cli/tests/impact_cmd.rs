@@ -59,6 +59,16 @@ export function duplicateTarget(): number {
 "#;
 
 fn init_repo_and_analyze(repo: &Path) {
+    init_repo_with(
+        repo,
+        &[
+            ("src/core/lib.ts", SOURCE_CORE),
+            ("src/extra/lib.ts", SOURCE_EXTRA),
+        ],
+    );
+}
+
+fn init_repo_with(repo: &Path, files: &[(&str, &str)]) {
     let out = Command::new("git")
         .args(["init", "-q", "-b", "main"])
         .current_dir(repo)
@@ -66,10 +76,11 @@ fn init_repo_and_analyze(repo: &Path) {
         .unwrap();
     assert!(out.status.success());
 
-    std::fs::create_dir_all(repo.join("src/core")).unwrap();
-    std::fs::create_dir_all(repo.join("src/extra")).unwrap();
-    std::fs::write(repo.join("src/core/lib.ts"), SOURCE_CORE).unwrap();
-    std::fs::write(repo.join("src/extra/lib.ts"), SOURCE_EXTRA).unwrap();
+    for (rel, src) in files {
+        let path = repo.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, src).unwrap();
+    }
 
     let _ = Command::new("git")
         .args(["add", "-A"])
@@ -640,4 +651,187 @@ fn impact_snake_case_alias_accepts_underscored_flag_name() {
         kebab["impact"], snake["impact"],
         "--high_trust_only must produce identical impact array to --high-trust-only.\nkebab={kebab}\nsnake={snake}"
     );
+}
+
+// ── Class targets: instantiators reach the class through its constructor ────
+
+/// `Widget` declares `__init__`, so `Widget(1)` lands on the constructor;
+/// `Gadget` declares none, so `Gadget()` lands on the class. `Lonely` has no
+/// instantiator, and because it follows `Widget` in the same file its
+/// `HasMethod` edge points at `Widget.__init__`. The JS `Widget` is a
+/// same-named free function with its own caller.
+const PY_WIDGET: &str = "class Widget:
+    def __init__(self, x):
+        self.x = x
+
+
+class Gadget:
+    pass
+
+
+class Lonely:
+    def __init__(self):
+        self.ready = True
+";
+
+const PY_APP: &str = "from .widget import Widget, Gadget
+
+
+def make_widget():
+    return Widget(1)
+
+
+def make_gadget():
+    return Gadget()
+";
+
+const JS_LEGACY: &str = "function Widget() {
+  return 0;
+}
+
+function callLegacy() {
+  return Widget();
+}
+";
+
+fn init_python_class_repo(repo: &Path) {
+    init_repo_with(
+        repo,
+        &[
+            ("pkg/widget.py", PY_WIDGET),
+            ("pkg/app.py", PY_APP),
+            ("web/legacy.js", JS_LEGACY),
+        ],
+    );
+}
+
+/// `(name, kind)` of every entry past the start node.
+fn reached(json: &Value) -> Vec<(String, String)> {
+    json["impact"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["depth"].as_u64().unwrap_or(0) > 0)
+        .map(|e| {
+            (
+                e["name"].as_str().unwrap_or_default().to_string(),
+                e["kind"].as_str().unwrap_or_default().to_ascii_lowercase(),
+            )
+        })
+        .collect()
+}
+
+fn reached_names(json: &Value) -> Vec<String> {
+    reached(json).into_iter().map(|(name, _)| name).collect()
+}
+
+fn class_impact(repo: &Path, name: &str, kind: &str, direction: &str) -> Value {
+    run_impact(
+        repo,
+        &[
+            name,
+            "--kind",
+            kind,
+            "--direction",
+            direction,
+            "--depth",
+            "1",
+        ],
+    )
+}
+
+#[test]
+fn test_impact_class_with_init_upstream_lists_instantiator() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_python_class_repo(tmp.path());
+
+    let up = class_impact(tmp.path(), "Widget", "class", "up");
+    let hits = reached(&up);
+    assert!(
+        hits.iter().any(|(name, _)| name == "make_widget"),
+        "the instantiator of Widget must be an upstream caller: {up}"
+    );
+    assert!(
+        !hits.iter().any(|(name, _)| name == "callLegacy"),
+        "a caller of the same-named JS function is not a Widget caller: {up}"
+    );
+    assert!(
+        !hits.iter().any(|(_, kind)| kind == "constructor"),
+        "the seeded constructor is part of the target, not a caller: {up}"
+    );
+}
+
+#[test]
+fn test_impact_class_without_constructor_upstream_lists_instantiator() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_python_class_repo(tmp.path());
+
+    let up = run_impact(tmp.path(), &["Gadget", "--direction", "up", "--depth", "1"]);
+    assert!(
+        reached_names(&up).iter().any(|n| n == "make_gadget"),
+        "a class with no constructor takes the Calls edge itself: {up}"
+    );
+}
+
+/// Empty: `Lonely.__init__` has no caller, and the `HasMethod` edge that
+/// points at `Widget.__init__` must not borrow Widget's instantiator.
+#[test]
+fn test_impact_class_never_instantiated_upstream_reaches_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_python_class_repo(tmp.path());
+
+    let up = run_impact(tmp.path(), &["Lonely", "--direction", "up", "--depth", "1"]);
+    assert!(reached(&up).is_empty(), "{up}");
+}
+
+#[test]
+fn test_impact_class_downstream_does_not_seed_constructor_callers() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_python_class_repo(tmp.path());
+
+    let down = class_impact(tmp.path(), "Widget", "class", "down");
+    assert!(
+        !reached_names(&down).iter().any(|n| n == "make_widget"),
+        "an instantiator is upstream, never downstream: {down}"
+    );
+}
+
+#[test]
+fn test_impact_class_both_directions_seeds_upstream_part() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_python_class_repo(tmp.path());
+
+    let both = class_impact(tmp.path(), "Widget", "class", "both");
+    assert!(
+        reached_names(&both).iter().any(|n| n == "make_widget"),
+        "--direction both keeps the upstream instantiator: {both}"
+    );
+}
+
+/// Java names the constructor like its class, so `--kind` picks the start;
+/// either start lists the instantiator.
+#[test]
+fn test_impact_java_class_and_constructor_share_name_both_list_instantiator() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_with(
+        tmp.path(),
+        &[
+            (
+                "src/Account.java",
+                "public class Account {\n    public Account() {\n    }\n}\n",
+            ),
+            (
+                "src/App.java",
+                "public class App {\n    public Account makeAccount() {\n        return new Account();\n    }\n}\n",
+            ),
+        ],
+    );
+
+    for kind in ["class", "constructor"] {
+        let up = class_impact(tmp.path(), "Account", kind, "up");
+        assert!(
+            reached_names(&up).iter().any(|n| n == "makeAccount"),
+            "--kind {kind} must list the instantiator: {up}"
+        );
+    }
 }

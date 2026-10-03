@@ -511,10 +511,10 @@ fn resolve_callee(
 /// [`resolve_callee`] to bare names: a qualified type path resolves by its
 /// last segment, and only when the site constructs for certain.
 ///
-/// Fidelity gaps: a clean type's overloaded constructors are one node in the
-/// base graph, so the overlay lands on it where the index lands on the type;
-/// a constructor outside the type's file counts only through the base
-/// `HasMethod` edges.
+/// Fidelity gap: a clean type's constructors come from its base `HasMethod`
+/// edges, which skip a constructor named like its class and, with two
+/// classes in one file, all point at the file's first same-named
+/// constructor (see `class_membership`).
 #[allow(clippy::too_many_arguments)]
 fn resolve_instantiation(
     graph: &ArchivedZeroCopyGraph,
@@ -546,7 +546,7 @@ fn resolve_instantiation(
             if !ty_node.kind.is_constructible() {
                 return None;
             }
-            nodes
+            let mut ctors: Vec<u32> = nodes
                 .iter()
                 .enumerate()
                 .filter(|(_, n)| {
@@ -555,7 +555,11 @@ fn resolve_instantiation(
                         && owned_by(n.owner_class.as_deref(), type_name)
                 })
                 .map(|(i, _)| base_len + i as u32)
-                .collect()
+                .collect();
+            // Overloads share a uid, and the index collapses them into the
+            // first one: count them as that one constructor.
+            ctors.dedup_by_key(|c| nodes[(*c - base_len) as usize].uid);
+            ctors
         }
         None => {
             if !NodeKind::from(&graph.nodes[ty as usize].kind).is_constructible() {
@@ -587,7 +591,7 @@ fn resolve_instantiation(
 
 /// Does `owner_class` name type `ty`? Compares its last path segment with
 /// generic arguments cut, like the index's owner key.
-fn owned_by(owner_class: Option<&str>, ty: &str) -> bool {
+pub fn owned_by(owner_class: Option<&str>, ty: &str) -> bool {
     owner_class.is_some_and(|owner| {
         let owner = owner.split_once('<').map_or(owner, |(o, _)| o);
         owner.rsplit(['.', ':', '\\']).next().map(str::trim) == Some(ty)
@@ -880,5 +884,50 @@ mod tests {
         assert!(edge_to(&view, make, 2).is_some(), "make → Gadget");
         // `obj.Widget()` on an untyped receiver is a method call.
         assert_eq!(view.overlay_out(use_factory).count(), 0);
+    }
+
+    /// The index collapses same-uid constructor overloads into the first
+    /// one and lands there; a dirty file's overloads stay separate virtual
+    /// nodes, so the overlay must count them as that one constructor too.
+    #[test]
+    fn test_build_construction_of_overloaded_dirty_type_calls_first_constructor_like_index() {
+        let bytes = construction_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let ctor = |line: u32| OverlaySymbol {
+            name: "Multi".to_string(),
+            kind: NodeKind::Constructor,
+            owner_class: Some("Multi".to_string()),
+            start_line: line,
+            end_line: line + 1,
+            calls: vec![],
+        };
+        let multi = OverlayFileInput {
+            rel_path: "src/Multi.java".to_string(),
+            symbols: vec![
+                OverlaySymbol {
+                    kind: NodeKind::Class,
+                    owner_class: None,
+                    end_line: 9,
+                    ..ctor(1)
+                },
+                ctor(2),
+                ctor(5),
+            ],
+            imports: vec![],
+        };
+        let app = OverlayFileInput {
+            rel_path: "src/App.java".to_string(),
+            symbols: vec![sym("makeMulti", &["Multi"])],
+            imports: vec![],
+        };
+        let view = OverlayView::build(graph, &[multi, app]).unwrap();
+        let first_ctor = view.base_len() + 1;
+        let make = view.base_len() + 3;
+
+        assert!(
+            edge_to(&view, make, first_ctor).is_some(),
+            "makeMulti → the first Multi overload"
+        );
+        assert_eq!(view.overlay_out(make).count(), 1, "one edge per call site");
     }
 }

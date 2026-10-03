@@ -1,7 +1,7 @@
 //! Java instantiation calls: `new A()` must give `ecp impact` a caller for
 //! `A`. A declared constructor carries the class name, so the Callable lookup
-//! already finds it. A class with no constructor, or with overloads, has no
-//! single callable named `A`, and the call resolves nothing today.
+//! already finds it. A class with no constructor has no callable named `A`,
+//! and the call resolves nothing today.
 
 mod instantiation_calls_support;
 
@@ -57,10 +57,10 @@ fn test_java_same_file_new_calls_constructor() {
     assert_calls_constructor(&graph, "makeLocal", "Local", "src/Local.java");
 }
 
-/// Two overloads: the resolver cannot pick one without argument types, so
-/// the edge goes to the class rather than to a guess.
+/// Overloads share one uid, so Pass 1 collapses them into one Constructor
+/// node: an edge to it means "a constructor of `Multi`", not a guess.
 #[test]
-fn test_java_overloaded_constructors_new_calls_class() {
+fn test_java_overloaded_constructors_new_calls_constructor() {
     let multi = (
         "src/Multi.java",
         "public class Multi {\n    public Multi(int x) {\n    }\n\n    public Multi(String s) {\n    }\n}\n",
@@ -70,13 +70,7 @@ fn test_java_overloaded_constructors_new_calls_class() {
         "public class App {\n    public Multi makeMulti() {\n        return new Multi(1);\n    }\n}\n",
     );
     let graph = graph_of(&provider(), &[multi, app]);
-    assert_calls_type(
-        &graph,
-        "makeMulti",
-        "Multi",
-        NodeKind::Class,
-        "src/Multi.java",
-    );
+    assert_calls_constructor(&graph, "makeMulti", "Multi", "src/Multi.java");
 }
 
 #[test]

@@ -114,7 +114,17 @@ fn ruby_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Option<Stri
             Some(method_name.to_string())
         }
         Some(receiver) => {
-            if let Some(inferred_type) = infer_receiver_type(receiver, source, ctx, line) {
+            // Only a construction keeps a scoped receiver (`Shop::Item.new`):
+            // other `A::B.m` calls resolve by the bare method name, and
+            // qualifying them drops the Method edges that name binds.
+            let receiver_type = match (receiver.kind(), method_name) {
+                ("scope_resolution", "new") => receiver
+                    .utf8_text(source)
+                    .ok()
+                    .map(|s| s.trim_start_matches("::").to_string()),
+                _ => infer_receiver_type(receiver, source, ctx, line),
+            };
+            if let Some(inferred_type) = receiver_type {
                 Some(format!("{inferred_type}.{method_name}"))
             } else {
                 // Bare name fallback.
@@ -133,10 +143,6 @@ fn infer_receiver_type(
     match node.kind() {
         "self" => ctx.enclosing_name(line).map(|s| s.to_string()),
         "constant" => node.utf8_text(source).ok().map(|s| s.to_string()),
-        "scope_resolution" => node
-            .utf8_text(source)
-            .ok()
-            .map(|s| s.trim_start_matches("::").to_string()),
         "call" => {
             let method_node = node.child_by_field_name("method")?;
             let method_name = method_node.utf8_text(source).ok()?;

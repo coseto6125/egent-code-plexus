@@ -1005,9 +1005,6 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
                 // tombstone uid unique-per-collision without inventing a
                 // counter, and "" can never match a real symbol-name query.
                 symbol_table.register_tombstone(raw_node.kind, file_meta);
-                if raw_node.kind == NodeKind::Constructor {
-                    symbol_table.mark_constructor_overloaded(prev_idx);
-                }
                 nodes.push(Node {
                     uid: !uid_u64,
                     name: StrRef::default(),

@@ -57,10 +57,10 @@ fn test_swift_same_file_call_calls_constructor() {
     assert_calls_constructor(&graph, "makeLocal", "Local", "Sources/Local.swift");
 }
 
-/// Two initializers: the resolver cannot pick one without argument labels,
-/// so the edge goes to the class rather than to a guess.
+/// Overloads share one uid, so Pass 1 collapses them into one Constructor
+/// node: an edge to it means "a constructor of `Multi`", not a guess.
 #[test]
-fn test_swift_overloaded_inits_call_calls_class() {
+fn test_swift_overloaded_inits_call_calls_constructor() {
     let multi = (
         "Sources/Multi.swift",
         "class Multi {\n    init(x: Int) {\n    }\n\n    init(s: String) {\n    }\n}\n",
@@ -70,13 +70,7 @@ fn test_swift_overloaded_inits_call_calls_class() {
         "func makeMulti() -> Multi {\n    return Multi(x: 1)\n}\n",
     );
     let graph = graph_of(&provider(), &[multi, app]);
-    assert_calls_type(
-        &graph,
-        "makeMulti",
-        "Multi",
-        NodeKind::Class,
-        "Sources/Multi.swift",
-    );
+    assert_calls_constructor(&graph, "makeMulti", "Multi", "Sources/Multi.swift");
 }
 
 /// A struct with no declared `init` gets the memberwise initializer, which

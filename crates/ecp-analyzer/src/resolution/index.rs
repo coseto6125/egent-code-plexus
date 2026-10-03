@@ -204,12 +204,6 @@ pub struct SymbolTable {
     /// the class name) and wherever they live (C++ out-of-line definitions,
     /// Swift extensions).
     constructors_by_owner: FxHashMap<u32, Vec<u32>>,
-
-    /// Constructors that stand for several overloads. Pass 1 keeps one node
-    /// per (kind, path, owner, name) uid, so overloads collapse into one
-    /// survivor that a call by name would otherwise pick as if it were the
-    /// only constructor.
-    overloaded_constructors: FxHashSet<u32>,
 }
 
 impl SymbolTable {
@@ -389,12 +383,6 @@ impl SymbolTable {
         }
     }
 
-    /// Record that a uid collision dropped an overload of constructor
-    /// `survivor`.
-    pub fn mark_constructor_overloaded(&mut self, survivor: u32) {
-        self.overloaded_constructors.insert(survivor);
-    }
-
     /// Register a tombstone node: advances `node_kinds` / `node_file_meta`
     /// alignment (keeping the monotonic-dense invariant intact) WITHOUT adding
     /// the node to `file_scoped`, `global_scoped`, or `id_to_file`. Tombstones
@@ -570,16 +558,18 @@ impl SymbolTable {
     }
 
     /// The one constructor a construction of type `type_id` (named
-    /// `type_name`) calls. `None` when the type declares no constructor,
-    /// several, or overloads collapsed into one node. The type's own file
-    /// decides when it declares any constructor; otherwise the type's scope
-    /// counts (C++ out-of-line definitions, Swift extensions), except a file
-    /// that declares another type of that name.
+    /// `type_name`) calls. `None` when the type declares no constructor or
+    /// several. Overloads are not several: Pass 1 collapses them into one
+    /// node per (kind, path, owner, name) uid, which then stands for "a
+    /// constructor of the type". The type's own file decides when it
+    /// declares any constructor; otherwise the type's scope counts (C++
+    /// out-of-line definitions, Swift extensions), except a file that
+    /// declares another type of that name.
     pub fn sole_constructor(&self, type_id: u32, type_name: &str) -> Option<u32> {
         let ctors = self.constructors_by_owner.get(&self.owner_id(type_name)?)?;
         let type_file = self.file_of(type_id)?;
         let in_type_file = |id: &u32| self.file_of(*id) == Some(type_file);
-        let sole = if ctors.iter().any(in_type_file) {
+        if ctors.iter().any(in_type_file) {
             single(ctors.iter().copied().filter(|id| in_type_file(id)))
         } else {
             let scope_meta = self.node_file_meta[type_id as usize];
@@ -591,24 +581,7 @@ impl SymbolTable {
                             && !self.declares_constructible_type(f, type_name)
                     })
             }))
-        }?;
-        (!self.overloaded_constructors.contains(&sole)).then_some(sole)
-    }
-
-    /// The Class / Struct named `name` that owns constructor `ctor_id`, when
-    /// `ctor_id` stands for several overloads: a call by name cannot pick one.
-    pub fn overloaded_constructor_type(&self, ctor_id: u32, name: &str) -> Option<u32> {
-        if !self.overloaded_constructors.contains(&ctor_id)
-            || self.node_owner[ctor_id as usize] != self.owner_id(name)?
-        {
-            return None;
         }
-        self.file_scoped
-            .get(self.file_of(ctor_id)?)?
-            .get(name)?
-            .iter()
-            .copied()
-            .find(|&id| self.node_kinds[id as usize].is_constructible())
     }
 
     /// Number of nodes named `node_name` in `file_path` that match `target`.

@@ -5,11 +5,13 @@
 mod instantiation_calls_support;
 
 use ecp_analyzer::ruby::parser::RubyProvider;
+use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::graph::NodeKind;
 use instantiation_calls_support::{
     assert_calls_constructor, assert_calls_type, assert_no_instantiation_call, assert_only_call,
     graph_of,
 };
+use std::path::Path;
 
 const WIDGET: (&str, &str) = (
     "lib/widget.rb",
@@ -81,4 +83,32 @@ fn test_ruby_class_method_call_targets_method() {
     let graph = graph_of(&provider(), &[WIDGET, app]);
     assert_no_instantiation_call(&graph, "build_widget", "Widget");
     assert_only_call(&graph, "build_widget", "create", "lib/widget.rb");
+}
+
+/// Raw callee strings of the node named `caller`, sorted.
+fn raw_calls(src: &str, caller: &str) -> Vec<String> {
+    let local = provider()
+        .parse_file(Path::new("lib/app.rb"), src.as_bytes())
+        .expect("parse lib/app.rb");
+    let mut calls = local
+        .nodes
+        .iter()
+        .find(|n| n.name == caller)
+        .unwrap_or_else(|| panic!("no node `{caller}`"))
+        .calls
+        .clone();
+    calls.sort();
+    calls
+}
+
+/// Only `.new` reads a scoped receiver: `Shop::Item.save` keeps the bare
+/// `save` callee that the resolver binds today, and so does `.save` on a
+/// `Shop::Item.new` chain.
+#[test]
+fn test_ruby_scoped_receiver_method_call_keeps_bare_callee() {
+    let save = "class App\n  def save_item\n    Shop::Item.save\n  end\nend\n";
+    assert_eq!(raw_calls(save, "save_item"), ["save"]);
+
+    let chain = "class App\n  def save_new\n    Shop::Item.new.save\n  end\nend\n";
+    assert_eq!(raw_calls(chain, "save_new"), ["Shop::Item.new", "save"]);
 }

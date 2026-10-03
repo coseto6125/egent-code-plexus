@@ -38,7 +38,6 @@
 //! the before/after bench numbers.
 
 use ecp_core::analyzer::types::{CallSite, RawImport};
-use ecp_core::graph::NodeKind;
 use serde::Serialize;
 use std::borrow::Cow;
 use std::path::Path;
@@ -254,13 +253,6 @@ impl<'a> Resolver<'a> {
                 raw_imports,
                 caller_heritage,
             ));
-        } else if let [(target, _)] = targets.as_mut_slice() {
-            if self.symbol_table.node_kind(*target) == NodeKind::Constructor {
-                let name = split_qualifier(callee).map_or(callee, |(_, member)| member);
-                if let Some(ty) = self.symbol_table.overloaded_constructor_type(*target, name) {
-                    *target = ty;
-                }
-            }
         }
         targets
     }
