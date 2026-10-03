@@ -555,7 +555,7 @@ fn emit_mirror_summary(symbol: &str, count: usize, mirror_names: &[String], show
     // (per test_rename_zero_count_omits_hint_line).
     if count > 0 {
         println!(
-            "hint: \"ecp find-schema-bindings {symbol}\" or rerun with --show-heuristic-mirrors"
+            "hint: \"ecp heuristics schema-bindings {symbol}\" or rerun with --show-heuristic-mirrors"
         );
     }
     if show_mirrors && !mirror_names.is_empty() {
