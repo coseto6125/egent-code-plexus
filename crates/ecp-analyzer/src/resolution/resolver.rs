@@ -1211,6 +1211,18 @@ impl<'a> Resolver<'a> {
                 // below would find `mod m;` in the parent and its own `f`.
                 return None;
             }
+            // `use other::m; m::f()` names a workspace crate's module by crate
+            // (or `[lib]`) name, which `rust_module_file` cannot place. The
+            // module tree can; past this point only file-stem guesses remain,
+            // and they pick the caller crate's own `m.rs`.
+            if let Some(resolved) =
+                self.mod_tree_resolve(&source_file_str, &format!("{module_path}::{member}"))
+            {
+                return self
+                    .symbol_table
+                    .lookup_in_file_with_kind(&resolved.file, &resolved.item_name, target)
+                    .map(|_| resolved.file);
+            }
             let mut hit: Option<String> = None;
             for_each_specifier_candidate(
                 source_file,
@@ -1709,9 +1721,7 @@ impl<'a> Resolver<'a> {
         member: &str,
         target: ResolveTarget,
     ) -> Option<NodeId> {
-        let tree = self.mod_tree?;
-        let workspace_root = self.workspace_root.as_ref()?;
-        let resolved = tree.resolve_fqn(symbol_name, source_file_str, workspace_root)?;
+        let resolved = self.mod_tree_resolve(source_file_str, symbol_name)?;
         self.symbol_table
             .lookup_in_file_with_kind(&resolved.file, &resolved.item_name, target)
             .or_else(|| {
@@ -1719,6 +1729,15 @@ impl<'a> Resolver<'a> {
                 self.symbol_table
                     .lookup_in_file_with_kind(&resolved.file, bare, target)
             })
+    }
+
+    fn mod_tree_resolve(
+        &self,
+        source_file_str: &str,
+        fqn: &str,
+    ) -> Option<crate::rust::module_tree::ResolvedFqn> {
+        self.mod_tree?
+            .resolve_fqn(fqn, source_file_str, self.workspace_root.as_ref()?)
     }
 
     #[allow(clippy::too_many_arguments)]
