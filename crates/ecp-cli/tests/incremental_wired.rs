@@ -29,6 +29,8 @@ static COUNTER_LOCK: Mutex<()> = Mutex::new(());
 /// The in-process `ensure_fresh` / hook calls resolve the ecp home from this
 /// process's env, so without the override every run left a
 /// `tmpXXXX__<hash>/sessions/` dir in the developer's real `~/.ecp`.
+/// ECP_HOME outranks HOME, so every subprocess here that isolates via HOME
+/// must also `env_remove("ECP_HOME")` or it inherits this override.
 struct CounterGuard {
     prev_ecp_home: Option<OsString>,
     _ecp_home: TempDir,
@@ -130,6 +132,7 @@ fn test_edit_file_then_impact_sees_new_symbol_without_full_reindex() {
     let idx_out = Command::new(env!("CARGO_BIN_EXE_ecp"))
         .args(["admin", "index", "--repo", worktree.to_str().unwrap()])
         .env("HOME", &home)
+        .env_remove("ECP_HOME")
         .output()
         .expect("admin index failed to spawn");
     assert!(
@@ -152,6 +155,7 @@ fn test_edit_file_then_impact_sees_new_symbol_without_full_reindex() {
     let _ = Command::new(env!("CARGO_BIN_EXE_ecp"))
         .args(["find", "original_fn", "--repo", worktree.to_str().unwrap()])
         .env("HOME", &home)
+        .env_remove("ECP_HOME")
         .env("CLAUDE_CODE_SESSION_ID", "t7-4-test-sid")
         .output()
         .expect("ecp find failed to spawn");
@@ -366,6 +370,7 @@ fn test_fresh_fragments_skip_reanalyze_on_repeat_query() {
     let idx_out = Command::new(env!("CARGO_BIN_EXE_ecp"))
         .args(["admin", "index", "--repo", worktree.to_str().unwrap()])
         .env("HOME", &home)
+        .env_remove("ECP_HOME")
         .output()
         .expect("admin index failed to spawn");
     assert!(
@@ -379,6 +384,7 @@ fn test_fresh_fragments_skip_reanalyze_on_repeat_query() {
         let out = Command::new(env!("CARGO_BIN_EXE_ecp"))
             .args(["find", "original_fn", "--repo", worktree.to_str().unwrap()])
             .env("HOME", &home)
+            .env_remove("ECP_HOME")
             .env("CLAUDE_CODE_SESSION_ID", "fresh-gate-sid")
             .output()
             .expect("ecp find failed to spawn");
@@ -456,6 +462,7 @@ fn test_fresh_gate_disengages_on_head_drift() {
     let idx_out = Command::new(env!("CARGO_BIN_EXE_ecp"))
         .args(["admin", "index", "--repo", worktree.to_str().unwrap()])
         .env("HOME", &home)
+        .env_remove("ECP_HOME")
         .output()
         .expect("admin index failed to spawn");
     assert!(idx_out.status.success());
@@ -464,6 +471,7 @@ fn test_fresh_gate_disengages_on_head_drift() {
         let out = Command::new(env!("CARGO_BIN_EXE_ecp"))
             .args(["find", "original_fn", "--repo", worktree.to_str().unwrap()])
             .env("HOME", &home)
+            .env_remove("ECP_HOME")
             .env("CLAUDE_CODE_SESSION_ID", "drift-gate-sid")
             .output()
             .expect("ecp find failed to spawn");
@@ -496,6 +504,7 @@ fn test_fresh_gate_disengages_on_head_drift() {
     let idx2 = Command::new(env!("CARGO_BIN_EXE_ecp"))
         .args(["admin", "index", "--repo", worktree.to_str().unwrap()])
         .env("HOME", &home)
+        .env_remove("ECP_HOME")
         .output()
         .expect("re-index failed to spawn");
     assert!(idx2.status.success());
