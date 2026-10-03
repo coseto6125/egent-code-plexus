@@ -37,7 +37,8 @@
 //! regression suite and `crates/ecp-analyzer/benches/resolver_lookup.rs` for
 //! the before/after bench numbers.
 
-use ecp_core::analyzer::types::RawImport;
+use ecp_core::analyzer::types::{CallSite, RawImport};
+use ecp_core::graph::NodeKind;
 use serde::Serialize;
 use std::borrow::Cow;
 use std::path::Path;
@@ -223,6 +224,97 @@ impl<'a> Resolver<'a> {
         target: ResolveTarget,
     ) -> Vec<(NodeId, f32)> {
         self.resolve_symbol_with_heritage(source_file, symbol_name, raw_imports, target, &[])
+    }
+
+    /// Resolve one call site to its `Calls` targets: the callable tiers,
+    /// then, only when they find nothing, the constructor fallback
+    /// ([`Self::resolve_instantiation`]). The fallback lives here, not in
+    /// [`Self::resolve_symbol_with_heritage`], because that method also
+    /// serves References / Decorates / Imports edges, which must never land
+    /// on a type through a construction rule.
+    pub fn resolve_call(
+        &self,
+        source_file: &Path,
+        site: CallSite<'_>,
+        raw_imports: &[RawImport],
+        caller_heritage: &[String],
+    ) -> Vec<(NodeId, f32)> {
+        let callee = site.name();
+        let mut targets = self.resolve_symbol_with_heritage(
+            source_file,
+            callee,
+            raw_imports,
+            ResolveTarget::Callable,
+            caller_heritage,
+        );
+        if targets.is_empty() {
+            targets.extend(self.resolve_instantiation(
+                source_file,
+                site,
+                raw_imports,
+                caller_heritage,
+            ));
+        } else if let [(target, _)] = targets.as_mut_slice() {
+            if self.symbol_table.node_kind(*target) == NodeKind::Constructor {
+                let name = split_qualifier(callee).map_or(callee, |(_, member)| member);
+                if let Some(ty) = self.symbol_table.overloaded_constructor_type(*target, name) {
+                    *target = ty;
+                }
+            }
+        }
+        targets
+    }
+
+    /// Constructor fallback for a call site the callable tiers left empty:
+    /// resolve the constructed type with the type tiers, keep a Class /
+    /// Struct, then land on its one constructor, or on the type itself when
+    /// it declares none or several.
+    ///
+    /// A qualified type path that does not resolve (`new shop.Widget()`
+    /// through a namespace import, PHP `new \App\Item()`) retries its last
+    /// segment only when the site constructs for certain; a plain
+    /// `pkg.A()` stays unresolved, like every qualified callee.
+    fn resolve_instantiation(
+        &self,
+        source_file: &Path,
+        site: CallSite<'_>,
+        raw_imports: &[RawImport],
+        caller_heritage: &[String],
+    ) -> Option<(NodeId, f32)> {
+        let source_file_str = normalize_source_path(source_file);
+        let (type_path, certain) =
+            site.constructed_type(Language::from_normalized_path(&source_file_str))?;
+        let type_name = split_qualifier(type_path).map_or(type_path, |(_, member)| member);
+        if !self.symbol_table.has_constructible_type(type_name) {
+            return None;
+        }
+        let mut types = self.resolve_symbol_with_heritage(
+            source_file,
+            type_path,
+            raw_imports,
+            ResolveTarget::Type,
+            caller_heritage,
+        );
+        if types.is_empty() && certain && type_name.len() < type_path.len() {
+            types = self.resolve_symbol_with_heritage(
+                source_file,
+                type_name,
+                raw_imports,
+                ResolveTarget::Type,
+                caller_heritage,
+            );
+        }
+        let &[(type_id, confidence)] = types.as_slice() else {
+            return None;
+        };
+        if !self.symbol_table.node_kind(type_id).is_constructible() {
+            return None;
+        }
+        let target = self
+            .symbol_table
+            .sole_constructor(type_id, type_name)
+            .unwrap_or(type_id);
+        Some((target, confidence))
     }
 
     /// Resolve an explicit import without selecting an inaccessible local binding.

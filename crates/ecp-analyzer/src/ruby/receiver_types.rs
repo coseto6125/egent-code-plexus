@@ -133,6 +133,10 @@ fn infer_receiver_type(
     match node.kind() {
         "self" => ctx.enclosing_name(line).map(|s| s.to_string()),
         "constant" => node.utf8_text(source).ok().map(|s| s.to_string()),
+        "scope_resolution" => node
+            .utf8_text(source)
+            .ok()
+            .map(|s| s.trim_start_matches("::").to_string()),
         "call" => {
             let method_node = node.child_by_field_name("method")?;
             let method_name = method_node.utf8_text(source).ok()?;

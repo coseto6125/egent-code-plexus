@@ -14,8 +14,8 @@
 use super::path_literals::build_raw_path_literal;
 use crate::calls::attach_to_enclosing;
 use crate::framework_helpers::strip_python_string_quotes;
-use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
-use std::collections::HashMap;
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
 /// Map of nested function scopes (by row span) to their var→type bindings.
@@ -24,6 +24,9 @@ use tree_sitter::Node;
 #[derive(Debug, Default)]
 pub struct LocalTypes {
     scopes: Vec<((u32, u32), HashMap<String, String>)>,
+    /// Names an `import` binds anywhere in the file: a receiver rooted in
+    /// one (`widget.Widget()`) names a module member, not an object's method.
+    imported: HashSet<String>,
 }
 
 impl LocalTypes {
@@ -43,14 +46,34 @@ impl LocalTypes {
         }
         best
     }
+
+    /// True when `receiver` (`m`, `m.sub`) is rooted in an imported name.
+    fn is_imported_path(&self, receiver: Node<'_>, source: &[u8]) -> bool {
+        let mut root = receiver;
+        while root.kind() == "attribute" {
+            let Some(object) = root.child_by_field_name("object") else {
+                return false;
+            };
+            root = object;
+        }
+        root.kind() == "identifier"
+            && root
+                .utf8_text(source)
+                .is_ok_and(|name| self.imported.contains(name))
+    }
 }
 
 /// Walk every `function_definition` node, collecting typed parameters and
-/// annotated assignments inside the function body.
+/// annotated assignments inside the function body, and every name an
+/// `import` statement binds.
 pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
     let mut scopes: Vec<((u32, u32), HashMap<String, String>)> = Vec::new();
+    let mut imported: HashSet<String> = HashSet::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
+        if matches!(n.kind(), "import_statement" | "import_from_statement") {
+            collect_import_bindings(n, source, &mut imported);
+        }
         if n.kind() == "function_definition" {
             let fn_span = (n.start_position().row as u32, n.end_position().row as u32);
             let mut map: HashMap<String, String> = HashMap::new();
@@ -72,7 +95,23 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
             stack.push(child);
         }
     }
-    LocalTypes { scopes }
+    LocalTypes { scopes, imported }
+}
+
+/// The local names one import statement binds: `import a.b` → `a`,
+/// `import a as x` / `from m import n as x` → `x`, `from m import n` → `n`.
+fn collect_import_bindings(stmt: Node<'_>, source: &[u8], out: &mut HashSet<String>) {
+    let mut c = stmt.walk();
+    for name in stmt.children_by_field_name("name", &mut c) {
+        let bound = match name.kind() {
+            "aliased_import" => name.child_by_field_name("alias"),
+            "dotted_name" => name.named_child(0),
+            _ => None,
+        };
+        if let Some(text) = bound.and_then(|b| b.utf8_text(source).ok()) {
+            out.insert(text.to_string());
+        }
+    }
 }
 
 /// Extract `typed_parameter` children under a `parameters` node.
@@ -264,6 +303,14 @@ fn python_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Opt
                     if let Some(ty) = locals.lookup(line, obj_name) {
                         return Some(format!("{ty}.{attr_name}"));
                     }
+                }
+                // PEP 8 spells classes in CapWords and methods in lowercase:
+                // only a CapWords member can pass for a construction, and only
+                // a module receiver (`widget.Widget()`) makes it one.
+                if attr_name.starts_with(char::is_uppercase)
+                    && !locals.is_imported_path(obj, source)
+                {
+                    return Some(format!("{}{attr_name}", CallSite::UNTYPED_MEMBER_PREFIX));
                 }
             }
             Some(attr_name.to_string())

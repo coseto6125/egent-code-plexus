@@ -1,6 +1,78 @@
+use crate::file_category::Language;
 use crate::graph::NodeKind;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// One [`RawNode::calls`] entry, decoded.
+///
+/// The callee text alone cannot say whether a call constructs its type: in
+/// TS / JS / PHP a construction is only ever `new T()`, and Python drops an
+/// untyped receiver (`obj.Widget()` and `Widget()` both name `Widget`). The
+/// extractors that know write a prefix; a prefix holds a space, which no
+/// callee text contains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallSite<'a> {
+    /// `f()`, `obj.m()`, `A::m()`; in Python, Swift, Kotlin, Dart and C++
+    /// also `A()`.
+    Plain(&'a str),
+    /// `new T(..)`: the site constructs `T`.
+    Construct(&'a str),
+    /// A Python member call named like a class (`obj.Widget()`) whose
+    /// receiver is neither typed nor an imported name: it resolves by the
+    /// member name and never constructs a type.
+    UntypedMember(&'a str),
+}
+
+impl<'a> CallSite<'a> {
+    pub const CONSTRUCT_PREFIX: &'static str = "new ";
+    pub const UNTYPED_MEMBER_PREFIX: &'static str = "member ";
+
+    pub fn parse(raw: &'a str) -> Self {
+        if let Some(ty) = raw.strip_prefix(Self::CONSTRUCT_PREFIX) {
+            Self::Construct(ty)
+        } else if let Some(member) = raw.strip_prefix(Self::UNTYPED_MEMBER_PREFIX) {
+            Self::UntypedMember(member)
+        } else {
+            Self::Plain(raw)
+        }
+    }
+
+    /// The callee the callable tiers resolve.
+    pub fn name(self) -> &'a str {
+        match self {
+            Self::Plain(name) | Self::Construct(name) | Self::UntypedMember(name) => name,
+        }
+    }
+
+    /// The type path this site may construct in `language`, and whether the
+    /// site constructs it for certain (`new T`, Ruby `T.new`) rather than
+    /// possibly (`A()`). Java and C# record `new T()` as a plain `T`, so a
+    /// plain call there counts as a possible construction. `None` when the
+    /// site cannot construct a type in `language`; Go, Rust and C have no
+    /// constructors.
+    pub fn constructed_type(self, language: Language) -> Option<(&'a str, bool)> {
+        match (language, self) {
+            (Language::Ruby, Self::Plain(callee)) => {
+                callee.strip_suffix(".new").map(|ty| (ty, true))
+            }
+            (
+                Language::TypeScript | Language::JavaScript | Language::Php | Language::Cpp,
+                Self::Construct(ty),
+            ) => Some((ty, true)),
+            (
+                Language::Python
+                | Language::Swift
+                | Language::Kotlin
+                | Language::Dart
+                | Language::Cpp
+                | Language::Java
+                | Language::CSharp,
+                Self::Plain(callee),
+            ) => Some((callee, false)),
+            _ => None,
+        }
+    }
+}
 
 /// Language-agnostic function metadata captured during parsing, before the
 /// string pool is available. Stored in `LocalGraph` and converted to
@@ -56,6 +128,8 @@ pub struct RawNode {
     /// Names of functions/methods invoked from inside this node's body.
     /// Each entry is the callee's *short* name (e.g. `method` for `obj.method()`).
     /// Resolved against imports + same-file symbols in Pass 2 → `RelType::Calls`.
+    /// An entry may carry a [`CallSite`] prefix; read entries through
+    /// [`CallSite::parse`].
     pub calls: Vec<String>,
     /// Short names of struct/class fields read inside this node's body (e.g.
     /// `rel_path` for `obj.rel_path`). Resolved against imports + same-file

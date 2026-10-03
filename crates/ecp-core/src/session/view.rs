@@ -42,7 +42,7 @@
 //!   previous ambiguity) keep their index-time resolution — clean files are
 //!   never re-resolved at query time.
 
-use crate::analyzer::types::RawImport;
+use crate::analyzer::types::{CallSite, RawImport};
 use crate::file_category::{pick_global, FileMeta, GlobalPick};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -201,11 +201,8 @@ impl OverlayView {
         let mut out_adj: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
         let mut in_adj: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
         {
-            // (file ordinal, name) → virtual idxs of callable symbols: Tier 1.
-            let mut same_file_callables: FxHashMap<(usize, &str), Vec<u32>> = FxHashMap::default();
-            // name → (virtual idx, file meta) of callable symbols anywhere in
-            // the overlay: participates in the Tier-3 candidate filter.
-            let mut overlay_callables: FxHashMap<&str, Vec<(u32, FileMeta)>> = FxHashMap::default();
+            let mut callables = OverlayNames::new(NodeKind::is_callable);
+            let mut types = OverlayNames::new(NodeKind::is_type);
             // Base-file meta, filled on first sight: a common callee name has
             // hundreds of candidates spread over far fewer files.
             let mut base_metas: FxHashMap<usize, FileMeta> = FxHashMap::default();
@@ -218,17 +215,9 @@ impl OverlayView {
             for (file_ord, file) in files.iter().enumerate() {
                 for _ in &file.symbols {
                     let node = &nodes[virt_off];
-                    if node.kind.is_callable() {
-                        let virt = base_len + virt_off as u32;
-                        same_file_callables
-                            .entry((file_ord, node.name.as_str()))
-                            .or_default()
-                            .push(virt);
-                        overlay_callables
-                            .entry(node.name.as_str())
-                            .or_default()
-                            .push((virt, file_metas[file_ord]));
-                    }
+                    let virt = base_len + virt_off as u32;
+                    callables.add(file_ord, node, virt, file_metas[file_ord]);
+                    types.add(file_ord, node, virt, file_metas[file_ord]);
                     virt_off += 1;
                 }
             }
@@ -252,19 +241,35 @@ impl OverlayView {
                 for sym in &file.symbols {
                     let source = virt_cursor;
                     virt_cursor += 1;
-                    for callee in &sym.calls {
-                        if let Some((target, confidence)) = resolve_callee(
+                    for raw_callee in &sym.calls {
+                        let site = CallSite::parse(raw_callee);
+                        let caller = file_metas[file_ord];
+                        let hit = resolve_callee(
                             graph,
-                            callee,
+                            site.name(),
                             file_ord,
                             file,
-                            file_metas[file_ord],
+                            caller,
                             &mut base_metas,
-                            &same_file_callables,
-                            &overlay_callables,
+                            &callables,
                             &replaced,
                             &dirty_base,
-                        ) {
+                        )
+                        .or_else(|| {
+                            resolve_instantiation(
+                                graph,
+                                site,
+                                file_ord,
+                                file,
+                                caller,
+                                &mut base_metas,
+                                &types,
+                                &nodes,
+                                &replaced,
+                                &dirty_base,
+                            )
+                        });
+                        if let Some((target, confidence)) = hit {
                             push_edge(ViewEdge {
                                 source,
                                 target,
@@ -363,8 +368,43 @@ impl OverlayView {
     }
 }
 
+/// Overlay symbols of one kind family (`kind`), by name: the Tier-1
+/// same-file and Tier-3 overlay-wide candidates of [`resolve_callee`].
+struct OverlayNames<'a> {
+    kind: fn(NodeKind) -> bool,
+    /// (file ordinal, name) → virtual idxs.
+    same_file: FxHashMap<(usize, &'a str), Vec<u32>>,
+    /// name → (virtual idx, file meta), anywhere in the overlay.
+    anywhere: FxHashMap<&'a str, Vec<(u32, FileMeta)>>,
+}
+
+impl<'a> OverlayNames<'a> {
+    fn new(kind: fn(NodeKind) -> bool) -> Self {
+        Self {
+            kind,
+            same_file: FxHashMap::default(),
+            anywhere: FxHashMap::default(),
+        }
+    }
+
+    fn add(&mut self, file_ord: usize, node: &'a ViewNode, virt: u32, meta: FileMeta) {
+        if !(self.kind)(node.kind) {
+            return;
+        }
+        self.same_file
+            .entry((file_ord, node.name.as_str()))
+            .or_default()
+            .push(virt);
+        self.anywhere
+            .entry(node.name.as_str())
+            .or_default()
+            .push((virt, meta));
+    }
+}
+
 /// Mirror of index-time Pass-2 `Calls` resolution, narrowed to the inputs
-/// available at query time. Returns the merged-space target index.
+/// available at query time, over the kind family of `names`. Returns the
+/// merged-space target index.
 ///
 /// Tier 1 — same file: the dirty file was FULLY re-parsed, so its own
 /// callable set is authoritative. Unique match → confidence 1.0.
@@ -384,13 +424,12 @@ fn resolve_callee(
     file: &OverlayFileInput,
     caller: FileMeta,
     base_metas: &mut FxHashMap<usize, FileMeta>,
-    same_file_callables: &FxHashMap<(usize, &str), Vec<u32>>,
-    overlay_callables: &FxHashMap<&str, Vec<(u32, FileMeta)>>,
+    names: &OverlayNames<'_>,
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
 ) -> Option<(u32, f32)> {
     // Tier 1: same-file.
-    if let Some(virts) = same_file_callables.get(&(file_ord, callee)) {
+    if let Some(virts) = names.same_file.get(&(file_ord, callee)) {
         if virts.len() == 1 {
             return Some((virts[0], CONF_SAME_FILE));
         }
@@ -404,14 +443,12 @@ fn resolve_callee(
     let base_candidates: Vec<u32> = graph
         .nodes_by_name(callee)
         .filter(|&idx| {
-            NodeKind::from(&graph.nodes[idx as usize].kind).is_callable()
+            (names.kind)(NodeKind::from(&graph.nodes[idx as usize].kind))
                 && !dirty_base.contains(&idx)
         })
         .collect();
-    let overlay_candidates: &[(u32, FileMeta)] = overlay_callables
-        .get(callee)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
+    let overlay_candidates: &[(u32, FileMeta)] =
+        names.anywhere.get(callee).map(Vec::as_slice).unwrap_or(&[]);
 
     // Tier 2: import-scoped.
     if let Some(import) = file
@@ -466,6 +503,95 @@ fn resolve_callee(
     };
     debug_assert!(!replaced.contains_key(&target));
     Some((target, CONF_GLOBAL_UNIQUE))
+}
+
+/// Mirror of the index-time constructor fallback (`Resolver::resolve_call`):
+/// a site the callable tiers left empty lands on the one constructor of the
+/// Class / Struct it constructs, or on the type itself. Narrowed like
+/// [`resolve_callee`] to bare names: a qualified type path resolves by its
+/// last segment, and only when the site constructs for certain.
+///
+/// Fidelity gaps: a clean type's overloaded constructors are one node in the
+/// base graph, so the overlay lands on it where the index lands on the type;
+/// a constructor outside the type's file counts only through the base
+/// `HasMethod` edges.
+#[allow(clippy::too_many_arguments)]
+fn resolve_instantiation(
+    graph: &ArchivedZeroCopyGraph,
+    site: CallSite<'_>,
+    file_ord: usize,
+    file: &OverlayFileInput,
+    caller: FileMeta,
+    base_metas: &mut FxHashMap<usize, FileMeta>,
+    types: &OverlayNames<'_>,
+    nodes: &[ViewNode],
+    replaced: &FxHashMap<u32, u32>,
+    dirty_base: &FxHashSet<u32>,
+) -> Option<(u32, f32)> {
+    let (type_path, certain) = site.constructed_type(caller.language)?;
+    let type_name = type_path
+        .rsplit(['.', ':', '\\'])
+        .next()
+        .unwrap_or(type_path);
+    if type_name.len() < type_path.len() && !certain {
+        return None;
+    }
+    let (ty, confidence) = resolve_callee(
+        graph, type_name, file_ord, file, caller, base_metas, types, replaced, dirty_base,
+    )?;
+    let base_len = graph.nodes.len() as u32;
+    let ctors: Vec<u32> = match ty.checked_sub(base_len) {
+        Some(virt_off) => {
+            let ty_node = &nodes[virt_off as usize];
+            if !ty_node.kind.is_constructible() {
+                return None;
+            }
+            nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| {
+                    n.kind == NodeKind::Constructor
+                        && Arc::ptr_eq(&n.rel_path, &ty_node.rel_path)
+                        && owned_by(n.owner_class.as_deref(), type_name)
+                })
+                .map(|(i, _)| base_len + i as u32)
+                .collect()
+        }
+        None => {
+            if !NodeKind::from(&graph.nodes[ty as usize].kind).is_constructible() {
+                return None;
+            }
+            let start = graph.out_offsets[ty as usize].to_native() as usize;
+            let end = graph.out_offsets[ty as usize + 1].to_native() as usize;
+            graph.edges.as_slice()[start..end]
+                .iter()
+                .filter(|e| RelType::from(&e.rel_type) == RelType::HasMethod)
+                .map(|e| e.target.to_native())
+                .filter(|&t| NodeKind::from(&graph.nodes[t as usize].kind) == NodeKind::Constructor)
+                .filter_map(|t| {
+                    if dirty_base.contains(&t) {
+                        replaced.get(&t).copied()
+                    } else {
+                        Some(t)
+                    }
+                })
+                .collect()
+        }
+    };
+    let target = match ctors.as_slice() {
+        [ctor] => *ctor,
+        _ => ty,
+    };
+    Some((target, confidence))
+}
+
+/// Does `owner_class` name type `ty`? Compares its last path segment with
+/// generic arguments cut, like the index's owner key.
+fn owned_by(owner_class: Option<&str>, ty: &str) -> bool {
+    owner_class.is_some_and(|owner| {
+        let owner = owner.split_once('<').map_or(owner, |(o, _)| o);
+        owner.rsplit(['.', ':', '\\']).next().map(str::trim) == Some(ty)
+    })
 }
 
 /// Last path-ish segment of an import source across language conventions:
@@ -714,5 +840,45 @@ mod tests {
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let view = OverlayView::build(graph, &[search_input("src/search.py")]).unwrap();
         assert!(edge_to(&view, view.base_len(), 2).is_none());
+    }
+
+    /// files: 0 = src/widget.py · 1 = src/gadget.py
+    /// nodes: 0 Widget(class) · 1 __init__(ctor of Widget) · 2 Gadget(class)
+    fn construction_graph_bytes() -> Vec<u8> {
+        let mut fx = GraphFixture::new();
+        fx.file("src/widget.py");
+        fx.file("src/gadget.py");
+        let widget = fx.node(NodeKind::Class, "src/widget.py", "Widget");
+        let init = fx.node_owned(NodeKind::Constructor, "src/widget.py", "Widget", "__init__");
+        fx.node(NodeKind::Class, "src/gadget.py", "Gadget");
+        fx.edge(widget, init, RelType::HasMethod);
+        fx.into_bytes()
+    }
+
+    #[test]
+    fn test_build_unresolved_construction_calls_constructor_like_index() {
+        let bytes = construction_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let untyped_member = format!("{}Widget", CallSite::UNTYPED_MEMBER_PREFIX);
+        let app = OverlayFileInput {
+            rel_path: "src/app.py".to_string(),
+            symbols: vec![
+                sym("make", &["Widget", "Gadget"]),
+                sym("use_factory", &[untyped_member.as_str()]),
+            ],
+            imports: vec![],
+        };
+        let view = OverlayView::build(graph, &[app]).unwrap();
+        let make = view.base_len();
+        let use_factory = view.base_len() + 1;
+
+        // `Widget()` lands on its one constructor, `Gadget()` on the class
+        // that declares none: the edges the index builds for the same file.
+        let e = edge_to(&view, make, 1).expect("make → Widget.__init__");
+        assert_eq!(e.confidence, 0.7);
+        assert!(edge_to(&view, make, 0).is_none(), "one edge per call site");
+        assert!(edge_to(&view, make, 2).is_some(), "make → Gadget");
+        // `obj.Widget()` on an untyped receiver is a method call.
+        assert_eq!(view.overlay_out(use_factory).count(), 0);
     }
 }

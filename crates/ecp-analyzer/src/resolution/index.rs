@@ -61,6 +61,12 @@ fn owner_key(raw: &str) -> Option<&str> {
     (!key.is_empty()).then_some(key)
 }
 
+/// The iterator's only item; `None` when it yields none or several.
+fn single(mut items: impl Iterator<Item = u32>) -> Option<u32> {
+    let first = items.next()?;
+    items.next().is_none().then_some(first)
+}
+
 /// Crate-root prefix of a normalized repo-relative path. The "crate root"
 /// here is the substring preceding the first `/src/` or `/tests/` segment,
 /// which is enough to keep a workspace member's files together (every Rust
@@ -192,6 +198,18 @@ pub struct SymbolTable {
     /// supertypes pre-pass, after Pass 1 and before Pass 2. Types with no
     /// declared heritage have no entry.
     supertypes: FxHashMap<u32, Supertypes>,
+
+    /// Owner id → constructor node ids, so a constructed type finds its
+    /// constructors whatever their name (`__init__`, `init`, `constructor`,
+    /// the class name) and wherever they live (C++ out-of-line definitions,
+    /// Swift extensions).
+    constructors_by_owner: FxHashMap<u32, Vec<u32>>,
+
+    /// Constructors that stand for several overloads. Pass 1 keeps one node
+    /// per (kind, path, owner, name) uid, so overloads collapse into one
+    /// survivor that a call by name would otherwise pick as if it were the
+    /// only constructor.
+    overloaded_constructors: FxHashSet<u32>,
 }
 
 impl SymbolTable {
@@ -363,6 +381,18 @@ impl SymbolTable {
         self.node_file_meta.push(file_meta);
         let owner_id = self.intern_owner(owner);
         self.node_owner.push(owner_id);
+        if kind == NodeKind::Constructor && owner_id != NO_OWNER {
+            self.constructors_by_owner
+                .entry(owner_id)
+                .or_default()
+                .push(node_id);
+        }
+    }
+
+    /// Record that a uid collision dropped an overload of constructor
+    /// `survivor`.
+    pub fn mark_constructor_overloaded(&mut self, survivor: u32) {
+        self.overloaded_constructors.insert(survivor);
     }
 
     /// Register a tombstone node: advances `node_kinds` / `node_file_meta`
@@ -518,6 +548,67 @@ impl SymbolTable {
                     })
             })
             .collect()
+    }
+
+    /// True when some Class / Struct is named `name`. The constructor
+    /// fallback runs on every unresolved call, so this is its first gate.
+    pub fn has_constructible_type(&self, name: &str) -> bool {
+        self.global_scoped.get(name).is_some_and(|ids| {
+            ids.iter()
+                .any(|&id| self.node_kinds[id as usize].is_constructible())
+        })
+    }
+
+    fn declares_constructible_type(&self, file_path: &str, name: &str) -> bool {
+        self.file_scoped
+            .get(file_path)
+            .and_then(|m| m.get(name))
+            .is_some_and(|ids| {
+                ids.iter()
+                    .any(|&id| self.node_kinds[id as usize].is_constructible())
+            })
+    }
+
+    /// The one constructor a construction of type `type_id` (named
+    /// `type_name`) calls. `None` when the type declares no constructor,
+    /// several, or overloads collapsed into one node. The type's own file
+    /// decides when it declares any constructor; otherwise the type's scope
+    /// counts (C++ out-of-line definitions, Swift extensions), except a file
+    /// that declares another type of that name.
+    pub fn sole_constructor(&self, type_id: u32, type_name: &str) -> Option<u32> {
+        let ctors = self.constructors_by_owner.get(&self.owner_id(type_name)?)?;
+        let type_file = self.file_of(type_id)?;
+        let in_type_file = |id: &u32| self.file_of(*id) == Some(type_file);
+        let sole = if ctors.iter().any(in_type_file) {
+            single(ctors.iter().copied().filter(|id| in_type_file(id)))
+        } else {
+            let scope_meta = self.node_file_meta[type_id as usize];
+            let scope_root = crate_root_prefix(type_file);
+            single(ctors.iter().copied().filter(|&id| {
+                scope_meta.admits(self.node_file_meta[id as usize])
+                    && self.file_of(id).is_some_and(|f| {
+                        crate_root_prefix(f) == scope_root
+                            && !self.declares_constructible_type(f, type_name)
+                    })
+            }))
+        }?;
+        (!self.overloaded_constructors.contains(&sole)).then_some(sole)
+    }
+
+    /// The Class / Struct named `name` that owns constructor `ctor_id`, when
+    /// `ctor_id` stands for several overloads: a call by name cannot pick one.
+    pub fn overloaded_constructor_type(&self, ctor_id: u32, name: &str) -> Option<u32> {
+        if !self.overloaded_constructors.contains(&ctor_id)
+            || self.node_owner[ctor_id as usize] != self.owner_id(name)?
+        {
+            return None;
+        }
+        self.file_scoped
+            .get(self.file_of(ctor_id)?)?
+            .get(name)?
+            .iter()
+            .copied()
+            .find(|&id| self.node_kinds[id as usize].is_constructible())
     }
 
     /// Number of nodes named `node_name` in `file_path` that match `target`.

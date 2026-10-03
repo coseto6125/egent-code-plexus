@@ -22,7 +22,7 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_csharp_string_value,
 };
-use crate::calls::attach_to_enclosing;
+use crate::calls::{attach_to_enclosing, type_without_arguments};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
@@ -260,9 +260,11 @@ pub fn extract_csharp_calls_and_path_literals(
             }
             "object_creation_expression" => {
                 // `new Foo(...)` → emit `Foo` as constructor call.
-                let callee = n
-                    .child_by_field_name("type")
-                    .and_then(|t| t.utf8_text(source).ok().map(|s| s.to_string()));
+                let callee = n.child_by_field_name("type").and_then(|t| {
+                    t.utf8_text(source)
+                        .ok()
+                        .map(|s| type_without_arguments(s).to_string())
+                });
                 if let Some(callee) = callee {
                     let line = n.start_position().row as u32;
                     attach_to_enclosing(line, callee, nodes);

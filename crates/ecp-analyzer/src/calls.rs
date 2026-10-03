@@ -1,4 +1,4 @@
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{CallSite, RawNode};
 use ecp_core::graph::NodeKind;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -14,6 +14,22 @@ use tree_sitter::Node;
 #[inline]
 pub fn safe_row(row: usize) -> u32 {
     u32::try_from(row).unwrap_or(u32::MAX)
+}
+
+/// The type a construction names, with its generic arguments cut:
+/// `Box<String>` → `Box`, `ns::Box<int>` → `ns::Box`.
+pub fn type_without_arguments(type_text: &str) -> &str {
+    type_text
+        .split_once('<')
+        .map_or(type_text, |(ty, _)| ty)
+        .trim()
+}
+
+/// The `RawNode.calls` entry of a `new T(..)` site; `None` for an empty
+/// type.
+pub fn construction_call(type_text: &str) -> Option<String> {
+    let ty = type_without_arguments(type_text);
+    (!ty.is_empty()).then(|| format!("{}{ty}", CallSite::CONSTRUCT_PREFIX))
 }
 
 /// Walk the AST and attach `callee` names to the smallest enclosing
