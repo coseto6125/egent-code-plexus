@@ -144,6 +144,25 @@ fn test_crate_import_from_repo_root_crate_resolves_to_imported_module() {
     );
 }
 
+/// `use crate::error as err;` makes `err::Error` name `crate::error::Error`:
+/// the module alias expands before the prefix is compared with the import.
+#[test]
+fn test_path_qualifier_through_module_alias_matches_import() {
+    let error_rs = "pub struct Error;\nimpl Error {\n    pub fn custom() -> Error { Error }\n}\n";
+    let app_rs = "use crate::error as err;\nuse crate::error::Error;\n\
+        pub fn aliased() { err::Error::custom(); }\n";
+    let g = build(&[
+        ("crates/x/src/lib.rs", "mod error;\nmod other;\nmod app;\n"),
+        ("crates/x/src/error.rs", error_rs),
+        ("crates/x/src/other.rs", error_rs),
+        ("crates/x/src/app.rs", app_rs),
+    ]);
+    assert_eq!(
+        callee_files(&g, "aliased", "custom"),
+        vec!["crates/x/src/error.rs".to_string()]
+    );
+}
+
 /// `use crate::X` names an item of the crate root module itself: `src/lib.rs`
 /// for a library, `src/main.rs` for a binary.
 #[test]

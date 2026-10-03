@@ -534,13 +534,16 @@ fn qualifier_prefix_is_internal(full_callee: &str, qualifier: &str) -> bool {
 /// For a Rust path call `a::b::Q::m`, does the module path `a::b` that the
 /// call names for `Q` agree with the import of `Q` from `import_source`?
 /// `de::Error::custom` with `use crate::error::Error` does not: `de::Error`
-/// is another item than the imported `Error`. Leading `crate` / `self` /
-/// `super` segments are dropped before the suffix test. A call with no
-/// module path before `Q`, or one not written with `::`, always agrees.
+/// is another item than the imported `Error`. A head segment that a `use`
+/// brings in (`use crate::error as err;`) expands to its full path first,
+/// and leading `crate` / `self` / `super` segments are dropped on both sides
+/// before the suffix test. A call with no module path before `Q`, or one not
+/// written with `::`, always agrees.
 fn rust_path_prefix_agrees_with_import(
     full_callee: &str,
     qualifier: &str,
     import_source: &str,
+    imports: &[RawImport],
 ) -> bool {
     let Some((before_member, _)) = full_callee.rsplit_once("::") else {
         return true;
@@ -551,11 +554,26 @@ fn rust_path_prefix_agrees_with_import(
     if q != qualifier {
         return true;
     }
-    let named: Vec<&str> = prefix
-        .split("::")
-        .skip_while(|s| matches!(*s, "" | "crate" | "self" | "super"))
-        .collect();
-    let source: Vec<&str> = import_source.split("::").collect();
+    let mut named: Vec<&str> = prefix.split("::").collect();
+    if let Some(module) = named.first().and_then(|&head| {
+        imports
+            .iter()
+            .find(|i| i.alias.as_deref().unwrap_or(&i.imported_name) == head)
+    }) {
+        // `use crate::error as err;` records the whole path as the imported
+        // name; `use crate::{error as err};` records source `crate`, name
+        // `error`.
+        let name = module.imported_name.as_str();
+        let (path, tail) = if name.contains("::") {
+            (name, None)
+        } else {
+            (module.source.as_str(), Some(name))
+        };
+        named.splice(..1, path.split("::").chain(tail));
+    }
+    let is_anchor = |s: &&str| matches!(*s, "" | "crate" | "self" | "super");
+    let named: Vec<&str> = named.into_iter().skip_while(is_anchor).collect();
+    let source: Vec<&str> = import_source.split("::").skip_while(is_anchor).collect();
     source.ends_with(&named)
 }
 
@@ -988,7 +1006,12 @@ impl<'a> Resolver<'a> {
             };
             if !matches_qualifier
                 || full_callee.is_some_and(|callee| {
-                    !rust_path_prefix_agrees_with_import(callee, qualifier, &import.source)
+                    !rust_path_prefix_agrees_with_import(
+                        callee,
+                        qualifier,
+                        &import.source,
+                        raw_imports,
+                    )
                 })
             {
                 continue;
@@ -1843,7 +1866,9 @@ mod tests {
 
     #[test]
     fn test_rust_path_prefix_agrees_with_import_cases() {
-        let agrees = rust_path_prefix_agrees_with_import;
+        let agrees = |callee: &str, q: &str, source: &str| {
+            rust_path_prefix_agrees_with_import(callee, q, source, &[])
+        };
         // No module path before the qualifier: nothing to disagree with.
         assert!(agrees("Error::custom", "Error", "crate::error"));
         assert!(agrees("custom", "Error", "crate::error"));
@@ -1866,6 +1891,32 @@ mod tests {
         assert!(!agrees("de::Error::custom", "Error", "crate::error"));
         assert!(!agrees("crate::de::Error::custom", "Error", "crate::error"));
         assert!(!agrees("a::error::Error::custom", "Error", "crate::error"));
+        // A module alias expands before the comparison, in both forms the
+        // parser records.
+        let alias = |source: &str, name: &str| RawImport {
+            source: source.to_string(),
+            imported_name: name.to_string(),
+            alias: Some("err".to_string()),
+            binding_kind: None,
+        };
+        for module in [
+            alias("crate::error", "crate::error"),
+            alias("crate", "error"),
+        ] {
+            let imports = [module];
+            assert!(rust_path_prefix_agrees_with_import(
+                "err::Error::custom",
+                "Error",
+                "crate::error",
+                &imports
+            ));
+            assert!(!rust_path_prefix_agrees_with_import(
+                "err::Error::custom",
+                "Error",
+                "crate::other",
+                &imports
+            ));
+        }
         // The qualifier is not the segment before the member: not this rule.
         assert!(agrees("de::Error::custom", "de", "crate::error"));
     }
