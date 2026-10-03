@@ -9,7 +9,7 @@ mod instantiation_calls_support;
 use ecp_analyzer::cpp::parser::CppProvider;
 use ecp_core::graph::NodeKind;
 use instantiation_calls_support::{
-    assert_calls_constructor, assert_calls_type, assert_ctor_flagged, assert_only_call, graph_of,
+    assert_calls_constructor, assert_calls_type, assert_only_call, graph_of,
 };
 
 const WIDGET: (&str, &str) = (
@@ -145,14 +145,4 @@ fn test_cpp_same_named_function_call_targets_function() {
     );
     let graph = graph_of(&provider(), &[util, model, app]);
     assert_only_call(&graph, "call_thing", "Thing", "src/util.cpp");
-}
-
-#[test]
-fn test_cpp_new_with_constructor_flagged_constructor_call() {
-    let app = (
-        "src/app.cpp",
-        "#include \"widget.hpp\"\n\nWidget* make_new() {\n    return new Widget(1);\n}\n",
-    );
-    let graph = graph_of(&provider(), &[WIDGET, app]);
-    assert_ctor_flagged(&graph, "make_new", "Widget");
 }

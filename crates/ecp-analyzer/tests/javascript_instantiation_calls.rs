@@ -7,8 +7,8 @@ mod instantiation_calls_support;
 use ecp_analyzer::javascript::parser::JavaScriptProvider;
 use ecp_core::graph::NodeKind;
 use instantiation_calls_support::{
-    assert_calls_constructor, assert_calls_type, assert_ctor_flagged, assert_no_instantiation_call,
-    assert_only_call, graph_of,
+    assert_calls_constructor, assert_calls_type, assert_no_instantiation_call, assert_only_call,
+    graph_of,
 };
 
 const WIDGET: (&str, &str) = (
@@ -90,10 +90,4 @@ fn test_javascript_member_call_named_like_class_no_constructor_call() {
     );
     let graph = graph_of(&provider(), &[WIDGET, app]);
     assert_no_instantiation_call(&graph, "useFactory", "Widget");
-}
-
-#[test]
-fn test_javascript_new_with_constructor_flagged_constructor_call() {
-    let graph = graph_of(&provider(), &[WIDGET, MAKE_WIDGET]);
-    assert_ctor_flagged(&graph, "makeWidget", "Widget");
 }

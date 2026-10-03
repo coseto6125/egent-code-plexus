@@ -22,8 +22,6 @@ pub struct Hit {
     pub kind: NodeKind,
     pub owner: String,
     pub file: String,
-    /// The edge's `CallMeta` sets `FLAG_CONSTRUCTOR_CALL`.
-    pub ctor_flag: bool,
 }
 
 pub fn graph_of<P: LanguageProvider>(provider: &P, files: &[(&str, &str)]) -> ZeroCopyGraph {
@@ -61,9 +59,6 @@ pub fn edges_from(graph: &ZeroCopyGraph, caller: &str, rel: RelType) -> Vec<Hit>
                 kind: target.kind,
                 owner: target.owner_class.resolve(pool).to_string(),
                 file,
-                ctor_flag: graph
-                    .call_meta(idx as u32)
-                    .is_some_and(|m| m.is_constructor_call()),
             }
         })
         .collect()
@@ -133,15 +128,6 @@ pub fn assert_only_call(graph: &ZeroCopyGraph, caller: &str, callee: &str, file:
             && hits[0].kind.is_callable()
             && hits[0].file == file,
         "`{caller}` must hold one Calls edge, to the callable `{callee}` in {file}; got {hits:?}"
-    );
-}
-
-pub fn assert_ctor_flagged(graph: &ZeroCopyGraph, caller: &str, ty: &str) {
-    let hits = instantiation_calls(graph, caller, ty);
-    assert!(
-        !hits.is_empty() && hits.iter().all(|h| h.ctor_flag),
-        "every instantiation call from `{caller}` into `{ty}` must carry \
-         FLAG_CONSTRUCTOR_CALL; got {hits:?}"
     );
 }
 

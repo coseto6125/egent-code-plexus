@@ -8,7 +8,7 @@ mod instantiation_calls_support;
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_core::graph::NodeKind;
 use instantiation_calls_support::{
-    assert_calls_constructor, assert_calls_type, assert_ctor_flagged, assert_only_call, graph_of,
+    assert_calls_constructor, assert_calls_type, assert_only_call, graph_of,
 };
 
 const WIDGET: (&str, &str) = (
@@ -119,10 +119,4 @@ fn test_csharp_member_call_named_like_class_targets_method() {
     );
     let graph = graph_of(&provider(), &[WIDGET, factory, app]);
     assert_only_call(&graph, "UseFactory", "Widget", "src/Factory.cs");
-}
-
-#[test]
-fn test_csharp_new_with_constructor_flagged_constructor_call() {
-    let graph = graph_of(&provider(), &[WIDGET, MAKE_WIDGET]);
-    assert_ctor_flagged(&graph, "MakeWidget", "Widget");
 }

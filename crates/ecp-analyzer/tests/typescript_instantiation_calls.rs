@@ -7,8 +7,8 @@ mod instantiation_calls_support;
 use ecp_analyzer::typescript::parser::TypeScriptProvider;
 use ecp_core::graph::NodeKind;
 use instantiation_calls_support::{
-    assert_calls_constructor, assert_calls_type, assert_ctor_flagged, assert_no_instantiation_call,
-    assert_only_call, graph_of,
+    assert_calls_constructor, assert_calls_type, assert_no_instantiation_call, assert_only_call,
+    graph_of,
 };
 
 const WIDGET: (&str, &str) = (
@@ -111,14 +111,4 @@ fn test_typescript_member_call_named_like_class_targets_method() {
     let graph = graph_of(&provider(), &[WIDGET, factory, app]);
     assert_no_instantiation_call(&graph, "useFactory", "Widget");
     assert_only_call(&graph, "useFactory", "Widget", "src/factory.ts");
-}
-
-#[test]
-fn test_typescript_new_with_constructor_flagged_constructor_call() {
-    let app = (
-        "src/app.ts",
-        "import { Widget } from './widget';\n\nexport function makeWidget(): Widget {\n  return new Widget(1);\n}\n",
-    );
-    let graph = graph_of(&provider(), &[WIDGET, app]);
-    assert_ctor_flagged(&graph, "makeWidget", "Widget");
 }

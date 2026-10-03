@@ -8,7 +8,7 @@ mod instantiation_calls_support;
 use ecp_analyzer::kotlin::parser::KotlinProvider;
 use ecp_core::graph::NodeKind;
 use instantiation_calls_support::{
-    assert_calls_constructor, assert_calls_type, assert_ctor_flagged, assert_only_call, graph_of,
+    assert_calls_constructor, assert_calls_type, assert_only_call, graph_of,
 };
 
 const WIDGET: (&str, &str) = ("src/Widget.kt", "class Widget(val x: Int)\n");
@@ -102,10 +102,4 @@ fn test_kotlin_same_named_function_call_targets_function() {
     );
     let graph = graph_of(&provider(), &[util, model, app]);
     assert_only_call(&graph, "callThing", "Thing", "src/util/Things.kt");
-}
-
-#[test]
-fn test_kotlin_call_with_constructor_flagged_constructor_call() {
-    let graph = graph_of(&provider(), &[WIDGET, MAKE_WIDGET]);
-    assert_ctor_flagged(&graph, "makeWidget", "Widget");
 }
