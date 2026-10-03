@@ -438,7 +438,7 @@ fn virtual_constructors(
 /// in one file binds each `__init__` / `constructor` to the first. So its
 /// edges only supply candidate names: the type's own name plus each
 /// constructor name they reach, each probed once in the name index.
-pub(crate) fn base_constructors(graph: &ArchivedZeroCopyGraph, type_idx: u32) -> Vec<u32> {
+pub fn base_constructors(graph: &ArchivedZeroCopyGraph, type_idx: u32) -> Vec<u32> {
     let pool = &graph.string_pool;
     let ty = &graph.nodes[type_idx as usize];
     if !NodeKind::from(&ty.kind).is_constructible() || !ty.has_owning_file() {
