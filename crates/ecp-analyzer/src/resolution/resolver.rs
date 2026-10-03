@@ -1214,9 +1214,13 @@ impl<'a> Resolver<'a> {
             // `use other::m; m::f()` names a workspace crate's module by crate
             // (or `[lib]`) name, which `rust_module_file` cannot place. The
             // module tree can; past this point only file-stem guesses remain,
-            // and they pick the caller crate's own `m.rs`.
-            if let Some(resolved) =
-                self.mod_tree_resolve(&source_file_str, &format!("{module_path}::{member}"))
+            // and they pick the caller crate's own `m.rs`. The tree matches
+            // the longest module prefix, so an item name other than `member`
+            // means the import named a type (`use other::T; T::new()`), which
+            // the tiers below handle.
+            if let Some(resolved) = self
+                .mod_tree_resolve(&source_file_str, &format!("{module_path}::{member}"))
+                .filter(|resolved| resolved.item_name == member)
             {
                 return self
                     .symbol_table
