@@ -44,7 +44,9 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::resolution::heuristics::ResolutionTier;
-use crate::resolution::index::{FileMeta, GlobalPick, ResolveTarget, SymbolTable};
+use crate::resolution::index::{
+    crate_root_prefix, FileMeta, GlobalPick, ResolveTarget, SymbolTable,
+};
 use crate::resolution::path_aliases::PathAliases;
 use crate::rust::module_tree::RustWorkspaceModTree;
 
@@ -585,24 +587,6 @@ fn rust_path_prefix_agrees_with_import(
     source.ends_with(&named)
 }
 
-/// Crate-root prefix of a normalized repo-relative path. The "crate root"
-/// here is the substring preceding the first `/src/` or `/tests/` segment,
-/// which is enough to keep a workspace member's files together (every Rust
-/// file in `crates/cli/src/...` shares prefix `crates/cli`) while keeping
-/// external paths (the std library is never indexed in a workspace, so its
-/// "prefix" never matches an indexed file's) outside the bucket.
-///
-/// Paths with no `/src/` or `/tests/` segment return `""` — single-crate
-/// repos at the repo root all share the empty prefix, so the Tier-4
-/// module-file fallback still fires for them.
-#[cfg(not(windows))]
-fn crate_root_prefix(path: &str) -> &str {
-    path.rsplit_once("/src/")
-        .or_else(|| path.rsplit_once("/tests/"))
-        .map(|(root, _)| root)
-        .unwrap_or("")
-}
-
 /// A file that names its own directory's module: `mod.rs`, `lib.rs`,
 /// `main.rs`, and every Cargo target root (`src/bin/<name>.rs`, top-level
 /// `examples/`, `benches/`, `tests/` files, `build.rs`). Every other `.rs`
@@ -699,17 +683,6 @@ fn rust_module_path_base(
         _ => return None,
     };
     Some(rest.iter().fold(anchor, |p, seg| p.join(seg)))
-}
-
-#[cfg(windows)]
-fn crate_root_prefix(path: &str) -> &str {
-    // Windows paths use backslashes natively.
-    path.rsplit_once("\\src\\")
-        .or_else(|| path.rsplit_once("\\tests\\"))
-        .or_else(|| path.rsplit_once("/src/")) // Fallback for mixed/normalized paths
-        .or_else(|| path.rsplit_once("/tests/"))
-        .map(|(root, _)| root)
-        .unwrap_or("")
 }
 
 fn split_qualifier(name: &str) -> Option<(&str, &str)> {
