@@ -68,29 +68,10 @@ pub fn detect_processes(
         return Vec::new();
     }
 
-    // Build CALLS adjacency (forward + reverse), filtered by confidence.
-    let n = nodes.len();
-    let mut calls_fwd: Vec<Vec<u32>> = vec![Vec::new(); n];
-    let mut calls_rev: Vec<Vec<u32>> = vec![Vec::new(); n];
-
-    for e in edges {
-        if e.rel_type != RelType::Calls {
-            continue;
-        }
-        if e.confidence < config.min_confidence {
-            continue;
-        }
-        let s = e.source as usize;
-        let t = e.target as usize;
-        if s >= n || t >= n || s == t {
-            continue;
-        }
-        calls_fwd[s].push(e.target);
-        calls_rev[t].push(e.source);
-    }
+    let (calls_fwd, in_degree) = build_call_adjacency(nodes.len(), edges, config.min_confidence);
 
     // Find entry points.
-    let entry_points = find_entry_points(nodes, &calls_fwd, &calls_rev, file_paths, config);
+    let entry_points = find_entry_points(nodes, &calls_fwd, &in_degree, file_paths, config);
     if entry_points.is_empty() {
         return Vec::new();
     }
@@ -145,13 +126,69 @@ pub fn detect_processes(
         .collect()
 }
 
+/// Forward CALLS adjacency in CSR form: the callees of node `i` are
+/// `targets[offsets[i]..offsets[i + 1]]`, in edge-list order.
+struct CallAdjacency {
+    offsets: Vec<u32>,
+    targets: Vec<u32>,
+}
+
+impl CallAdjacency {
+    fn callees(&self, i: usize) -> &[u32] {
+        &self.targets[self.offsets[i] as usize..self.offsets[i + 1] as usize]
+    }
+}
+
+/// Forward CALLS adjacency plus each node's caller count, keeping only Calls
+/// edges at or above `min_confidence` that are in range and not self-calls.
+///
+/// Callee order must equal edge-list order: `max_branching` takes the first
+/// callees, so a reorder changes which traces exist.
+fn build_call_adjacency(
+    n: usize,
+    edges: &[Edge],
+    min_confidence: f32,
+) -> (CallAdjacency, Vec<u32>) {
+    let keep = |e: &Edge| -> Option<(usize, u32)> {
+        // `<`, not `>=`: a NaN confidence has always passed this filter.
+        if e.rel_type != RelType::Calls || e.confidence < min_confidence {
+            return None;
+        }
+        let s = e.source as usize;
+        let t = e.target as usize;
+        (s < n && t < n && s != t).then_some((s, e.target))
+    };
+
+    let mut offsets = vec![0u32; n + 1];
+    let mut in_degree = vec![0u32; n];
+    for (s, t) in edges.iter().filter_map(keep) {
+        offsets[s] += 1;
+        in_degree[t as usize] += 1;
+    }
+    // Inclusive prefix sum leaves `offsets[s]` at the end of node s's run;
+    // the reverse fill below decrements it back to the start, so a second
+    // cursor array is not needed and each run keeps edge-list order.
+    let mut total = 0u32;
+    for slot in &mut offsets[..n] {
+        total += *slot;
+        *slot = total;
+    }
+    offsets[n] = total;
+    let mut targets = vec![0u32; total as usize];
+    for (s, t) in edges.iter().rev().filter_map(keep) {
+        offsets[s] -= 1;
+        targets[offsets[s] as usize] = t;
+    }
+    (CallAdjacency { offsets, targets }, in_degree)
+}
+
 /// Entry-point scoring (behavior cross-checked against GitNexus `calculateEntryPointScore`).
 /// We score by call ratio and name patterns. Routes/decorators are not exposed
 /// in `Node` directly — we approximate via name heuristics.
 fn find_entry_points(
     nodes: &[Node],
-    fwd: &[Vec<u32>],
-    rev: &[Vec<u32>],
+    fwd: &CallAdjacency,
+    in_degree: &[u32],
     file_paths: &[String],
     config: &ProcessConfig,
 ) -> Vec<u32> {
@@ -164,7 +201,7 @@ fn find_entry_points(
         if !is_function_like(node.kind) {
             continue;
         }
-        let callees = fwd[i].len();
+        let callees = fwd.callees(i).len();
         if callees == 0 {
             continue; // can't trace forward
         }
@@ -176,7 +213,7 @@ fn find_entry_points(
         if is_test {
             continue;
         }
-        let callers = rev[i].len();
+        let callers = in_degree[i];
 
         // Call ratio score: many callees, few callers → entry-point-ish.
         // TODO: also consider name patterns (handle*, on*, *Controller) and
@@ -194,7 +231,7 @@ fn find_entry_points(
 
 /// BFS forward from one entry point, producing distinct paths.
 /// Bounded by `max_trace_depth`, `max_branching`, and path-level cycle detection.
-fn trace_from_entry(entry: u32, fwd: &[Vec<u32>], config: &ProcessConfig) -> Vec<Vec<u32>> {
+fn trace_from_entry(entry: u32, fwd: &CallAdjacency, config: &ProcessConfig) -> Vec<Vec<u32>> {
     let mut traces: Vec<Vec<u32>> = Vec::new();
     let mut queue: VecDeque<Vec<u32>> = VecDeque::new();
     queue.push_back(vec![entry]);
@@ -206,7 +243,7 @@ fn trace_from_entry(entry: u32, fwd: &[Vec<u32>], config: &ProcessConfig) -> Vec
             break;
         }
         let cur = *path.last().unwrap();
-        let callees = &fwd[cur as usize];
+        let callees = fwd.callees(cur as usize);
 
         if callees.is_empty() {
             if path.len() >= config.min_steps {
@@ -407,5 +444,125 @@ mod tests {
         );
         // 0→1 dropped, so only 1→2 (2 steps, below min 3) → no traces.
         assert!(result.is_empty());
+    }
+
+    fn edge_with(s: u32, t: u32, rel_type: RelType, confidence: f32) -> Edge {
+        Edge {
+            source: s,
+            target: t,
+            rel_type,
+            confidence,
+            reason: StrRef { offset: 0, len: 0 },
+        }
+    }
+
+    fn sorted_traces(result: &[TraceResult]) -> Vec<Vec<u32>> {
+        // Equal-length traces leave `dedup_by_endpoints` in HashMap order,
+        // so only the multiset is stable across runs.
+        let mut traces: Vec<Vec<u32>> = result.iter().map(|r| r.trace.clone()).collect();
+        traces.sort();
+        traces
+    }
+
+    #[test]
+    fn test_detect_processes_ties_selfcalls_lowconf_cycle_pins_traces() {
+        // A0 B1 C2 D3 E4 F5 G6 H7 P8 Q9 S10 R11 T12 U13
+        let names = [
+            "a", "b", "c", "d", "e", "f", "g", "h", "p", "q", "s", "r", "t", "u",
+        ];
+        let mut pool = StringPool::new();
+        let nodes: Vec<Node> = names
+            .iter()
+            .map(|name| n(&mut pool, name, NodeKind::Function, 0))
+            .collect();
+        let low = |s, t| edge_with(s, t, RelType::Calls, 0.3);
+        let edges = vec![
+            e(0, 0), // self-call: would take A's first branch slot
+            e(0, 3),
+            low(0, 1), // would take A's second branch slot and give B a caller
+            e(0, 2),
+            e(0, 4), // third callee: cut by max_branching = 2
+            e(1, 5),
+            e(1, 6),
+            e(3, 5),
+            e(5, 6),
+            e(6, 5), // F <-> G cycle
+            e(2, 7),
+            e(4, 13), // reachable only if the branch cap were wider
+            e(8, 8),  // self-call on P must not count as a caller
+            e(8, 9),
+            e(9, 10),
+            e(11, 12),
+            low(11, 8), // would give P a caller and R a second callee
+            e(12, 13),
+        ];
+        let cfg = ProcessConfig {
+            max_branching: 2,
+            max_entry_points: 3,
+            ..ProcessConfig::default()
+        };
+        // Scores: A 3.0, B 2.0, P 1.0, R 1.0 — the P/R tie at the
+        // max_entry_points cut must keep node order, so P wins.
+        let result = detect_processes(&nodes, &edges, &["src/app.rs".to_string()], &cfg);
+
+        assert_eq!(result[0].trace, vec![0, 3, 5, 6], "unique longest first");
+        assert_eq!(
+            sorted_traces(&result),
+            vec![
+                vec![0, 2, 7],
+                vec![0, 3, 5, 6],
+                vec![1, 5, 6],
+                vec![1, 6, 5],
+                vec![8, 9, 10],
+            ]
+        );
+        for r in &result {
+            assert_eq!(r.process_type, ProcessType::IntraCommunity);
+            assert_eq!(r.communities, vec![1]);
+        }
+    }
+
+    fn callees_of(adj: &CallAdjacency, n: usize) -> Vec<Vec<u32>> {
+        (0..n).map(|i| adj.callees(i).to_vec()).collect()
+    }
+
+    #[test]
+    fn test_build_call_adjacency_interleaved_sources_keeps_edge_order() {
+        let edges = vec![
+            e(2, 1),
+            e(0, 3),
+            e(2, 0),
+            edge_with(0, 2, RelType::Imports, 1.0), // not a call
+            e(0, 1),
+            e(1, 1),                               // self-call
+            e(0, 9),                               // target out of range
+            e(9, 0),                               // source out of range
+            edge_with(3, 0, RelType::Calls, 0.49), // below threshold
+            edge_with(3, 2, RelType::Calls, 0.5),  // at threshold: kept
+            e(2, 1),                               // duplicate: kept
+        ];
+        let (adj, in_degree) = build_call_adjacency(4, &edges, 0.5);
+        assert_eq!(
+            callees_of(&adj, 4),
+            vec![vec![3, 1], vec![], vec![1, 0, 1], vec![2]]
+        );
+        assert_eq!(in_degree, vec![1, 3, 1, 1]);
+        assert_eq!(adj.offsets, vec![0, 2, 2, 5, 6]);
+    }
+
+    #[test]
+    fn test_build_call_adjacency_all_edges_filtered_returns_empty_runs() {
+        let edges = vec![e(0, 0), edge_with(0, 1, RelType::Calls, 0.1)];
+        let (adj, in_degree) = build_call_adjacency(2, &edges, 0.5);
+        assert_eq!(callees_of(&adj, 2), vec![Vec::<u32>::new(), Vec::new()]);
+        assert_eq!(in_degree, vec![0, 0]);
+        assert!(adj.targets.is_empty());
+    }
+
+    #[test]
+    fn test_build_call_adjacency_no_edges_returns_zero_offsets() {
+        let (adj, in_degree) = build_call_adjacency(3, &[], 0.5);
+        assert_eq!(adj.offsets, vec![0, 0, 0, 0]);
+        assert_eq!(in_degree, vec![0, 0, 0]);
     }
 }
