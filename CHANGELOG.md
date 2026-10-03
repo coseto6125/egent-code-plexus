@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.14.3 - 2026-10-03
+
+### Features
+
+- receiver typing P1 — resolve member calls through the receiver's type (#807)
+
+### Bug Fixes
+
+- record nested use-tree imports; module-import qualifiers resolve in the module's file (#808)
+- resolve Rust crate:: imports in a crate at the repo root (#806)
+- resolve Rust self/super from non-root module files (#802)
+- keep equal-length process traces in a stable order (#804)
+- list test callers by default; one test classifier and one Tier-3 filter (#796)
+
+### Performance
+
+- skip the cwd graph for a BM25 selector that cannot involve the cwd (#805)
+- exact-name lookups read the name index in node order (#803)
+- seed single-hop who-calls from the name index; inspect builds its uid map only for overlays (#800)
+- resolve the ecp home once per process per environment (#801)
+- serve the per-query git status from a private index with the untracked cache (#799)
+
 ## v0.14.2 - 2026-09-22
 
 ### Dependencies
