@@ -64,12 +64,15 @@ fn javascript_callback_meta_points_at_flagged_call() {
         "function last(cb) { a(); b(); cb(); }\n\
          function first(cb) { cb(); a(); b(); }\n\
          function afterNew(cb) { new Widget(); cb(); }\n\
-         function nested(cb) { a(cb()); }\n",
+         function nested(cb) { a(cb()); }\n\
+         function chained(cb) { cb().then(); }\n",
     );
     assert_points_at(&g, "last", "cb");
     assert_points_at(&g, "first", "cb");
     assert_points_at(&g, "afterNew", "cb");
     assert_points_at(&g, "nested", "cb");
+    // `cb()` and `cb().then()` start at the same byte.
+    assert_points_at(&g, "chained", "cb");
 }
 
 #[test]
@@ -143,9 +146,12 @@ fn rust_dyn_meta_points_at_flagged_call() {
         "trait Handler { fn run(&self); }\n\
          fn last(h: &dyn Handler) { a(); b(); h.run(); }\n\
          fn first(h: &dyn Handler) { h.run(); a(); b(); }\n\
-         fn nested(h: &dyn Handler) { a(h.run()); }\n",
+         fn nested(h: &dyn Handler) { a(h.run()); }\n\
+         fn chained(h: &dyn Handler) { h.run().into(); }\n",
     );
     assert_points_at(&g, "last", "run");
     assert_points_at(&g, "first", "run");
     assert_points_at(&g, "nested", "run");
+    // `h.run()` and `h.run().into()` start at the same byte.
+    assert_points_at(&g, "chained", "run");
 }

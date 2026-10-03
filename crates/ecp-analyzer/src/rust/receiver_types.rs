@@ -18,7 +18,7 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_rust_string_value,
 };
-use crate::calls::attach_to_enclosing;
+use crate::calls::{attach_to_enclosing, CallSiteIndex};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -430,6 +430,7 @@ pub fn extract_rust_calls_and_path_literals(
     source: &[u8],
     nodes: &mut [RawNode],
     local_types: &LocalTypes,
+    call_sites: &mut CallSiteIndex,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
@@ -441,7 +442,9 @@ pub fn extract_rust_calls_and_path_literals(
             "call_expression" => {
                 if let Some(callee) = rust_callee_name(n, source, local_types) {
                     let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                    if let Some(site) = attach_to_enclosing(line, callee, nodes) {
+                        call_sites.entry(n.start_byte()).or_insert(site);
+                    }
                 }
             }
             "string_literal" | "raw_string_literal" => {

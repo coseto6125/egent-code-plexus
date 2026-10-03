@@ -12,7 +12,7 @@
 //! call falls back to the bare member name as before.
 
 use super::path_literals::build_raw_path_literal;
-use crate::calls::attach_to_enclosing;
+use crate::calls::{attach_to_enclosing, CallSiteIndex};
 use crate::framework_helpers::strip_python_string_quotes;
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::{HashMap, HashSet};
@@ -201,6 +201,7 @@ pub fn extract_python_calls_and_path_literals(
     source: &[u8],
     nodes: &mut [RawNode],
     locals: &LocalTypes,
+    call_sites: &mut CallSiteIndex,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
@@ -210,7 +211,9 @@ pub fn extract_python_calls_and_path_literals(
             "call" => {
                 if let Some(callee) = python_callee_name(n, source, locals) {
                     let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                    if let Some(site) = attach_to_enclosing(line, callee, nodes) {
+                        call_sites.entry(n.start_byte()).or_insert(site);
+                    }
                 }
             }
             "string" => {

@@ -12,7 +12,7 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_js_string_value,
 };
-use crate::calls::{attach_to_enclosing_span, new_expression_call};
+use crate::calls::{attach_to_enclosing_span, new_expression_call, CallSiteIndex};
 use crate::framework_helpers::{enclosing_class, node_span, Span};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use tree_sitter::Node;
@@ -30,6 +30,7 @@ pub fn extract_js_calls_and_path_literals(
     root: Node<'_>,
     source: &[u8],
     nodes: &mut [RawNode],
+    call_sites: &mut CallSiteIndex,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
@@ -39,7 +40,9 @@ pub fn extract_js_calls_and_path_literals(
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = js_callee_name(n, source, nodes) {
-                    attach_to_enclosing_span(node_span(&n), callee, nodes);
+                    if let Some(site) = attach_to_enclosing_span(node_span(&n), callee, nodes) {
+                        call_sites.entry(n.start_byte()).or_insert(site);
+                    }
                 }
             }
             "new_expression" => {

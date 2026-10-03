@@ -4,11 +4,13 @@
 //! `LocalGraph`. Only non-direct calls get an entry; direct calls default to
 //! `FLAG_DIRECT` by the builder's sparse-population contract.
 //!
-//! Each per-language function takes the already-parsed tree-sitter tree and
-//! the fully-populated `nodes` (post call-extraction) so it can compute the
-//! correct `call_index` by re-walking in the same DFS order the call extractor
-//! uses and counting how many calls have been attached to each caller.
+//! Each per-language function takes the already-parsed tree-sitter tree, the
+//! fully-populated `nodes` and the `CallSiteIndex` the call extractor filled
+//! as it pushed each call. The index names the exact caller and `calls` slot of
+//! a call node, so `call_index` never depends on this walk matching the
+//! extractor's traversal order or its skip rules.
 
+use crate::calls::CallSiteIndex;
 use ecp_core::analyzer::types::{RawCallMeta, RawNode};
 use ecp_core::graph::{CallMeta, NodeKind};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -16,49 +18,19 @@ use tree_sitter::Node;
 
 // ── shared helpers ────────────────────────────────────────────────────────────
 
-/// Return the index of the innermost Function/Method/Constructor whose span
-/// contains `line`. Innermost = smallest row span. Used by both `record_indirect`
-/// (for emit + counter advance) and `advance_direct` (counter advance only).
-fn find_enclosing_caller(line: u32, nodes: &[RawNode]) -> Option<usize> {
-    let mut best: Option<usize> = None;
-    let mut best_span: u32 = u32::MAX;
-    for (i, n) in nodes.iter().enumerate() {
-        if !matches!(
-            n.kind,
-            NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-        ) {
-            continue;
-        }
-        if n.span.0 <= line && n.span.2 >= line {
-            let width = n.span.2 - n.span.0;
-            if width < best_span {
-                best_span = width;
-                best = Some(i);
-            }
-        }
-    }
-    best
-}
-
-/// Emit a `RawCallMeta` for a non-direct call site: locate the enclosing
-/// function/method/constructor node, compute the `call_index` from the
-/// current-call-counter for that node, then push the entry into `out`.
-///
-/// Returns whether a caller was found (to allow the counter to advance).
+/// Emit a `RawCallMeta` for a non-direct call node. A call the extractor did
+/// not record has no Calls edge to annotate, so it emits nothing.
 fn record_indirect(
-    line: u32,
+    call: Node<'_>,
     flags: u8,
     dispatch_type: &str,
     nodes: &[RawNode],
-    call_counts: &mut FxHashMap<usize, u32>,
+    call_sites: &CallSiteIndex,
     out: &mut Vec<RawCallMeta>,
-) -> bool {
-    let Some(caller_idx) = find_enclosing_caller(line, nodes) else {
-        return false;
+) {
+    let Some(&(caller_idx, call_index)) = call_sites.get(&call.start_byte()) else {
+        return;
     };
-    let count = call_counts.entry(caller_idx).or_insert(0);
-    let call_index = *count;
-    *count += 1;
     out.push(RawCallMeta {
         caller_name: nodes[caller_idx].name.clone(),
         caller_span: nodes[caller_idx].span,
@@ -66,14 +38,6 @@ fn record_indirect(
         flags,
         dispatch_type: dispatch_type.to_string(),
     });
-    true
-}
-
-/// Advance the call counter for a direct call (does not emit a `RawCallMeta`).
-fn advance_direct(line: u32, nodes: &[RawNode], call_counts: &mut FxHashMap<usize, u32>) {
-    if let Some(idx) = find_enclosing_caller(line, nodes) {
-        *call_counts.entry(idx).or_insert(0) += 1;
-    }
 }
 
 #[inline]
@@ -153,8 +117,7 @@ pub fn collect_rust_indirect_param_types(
     map
 }
 
-/// Walk the Rust AST in the same DFS order as `extract_rust_calls` and emit
-/// `RawCallMeta` for every non-direct call site.
+/// Walk the Rust AST and emit `RawCallMeta` for every non-direct call site.
 ///
 /// Detection rules:
 /// - `&dyn T` / `Box<dyn T>` / `Arc<dyn T>` / `Rc<dyn T>` receiver → `FLAG_DYNAMIC_DISPATCH`
@@ -167,10 +130,10 @@ pub fn detect_rust_indirect(
     nodes: &[RawNode],
     // Maps var_name → resolved type string (from LocalTypes)
     param_types: &FxHashMap<String, String>,
+    call_sites: &CallSiteIndex,
 ) -> Vec<RawCallMeta> {
     let mut out = Vec::new();
-    let mut call_counts: FxHashMap<usize, u32> = FxHashMap::default();
-    detect_rust_node(root, source, nodes, param_types, &mut call_counts, &mut out);
+    detect_rust_node(root, source, nodes, param_types, call_sites, &mut out);
     out
 }
 
@@ -179,28 +142,18 @@ fn detect_rust_node(
     source: &[u8],
     nodes: &[RawNode],
     param_types: &FxHashMap<String, String>,
-    call_counts: &mut FxHashMap<usize, u32>,
+    call_sites: &CallSiteIndex,
     out: &mut Vec<RawCallMeta>,
 ) {
     if node.kind() == "call_expression" {
-        let line = node.start_position().row as u32;
         let (flags, dispatch_type, is_real_call) = classify_rust_call(node, source, param_types);
-        if is_real_call {
-            if flags & CallMeta::FLAG_DIRECT == 0 || flags & CallMeta::FLAG_CONSTRUCTOR_CALL != 0 {
-                // Non-direct or constructor call — emit meta only for non-direct
-                if flags & CallMeta::FLAG_DIRECT == 0 {
-                    record_indirect(line, flags, &dispatch_type, nodes, call_counts, out);
-                } else {
-                    advance_direct(line, nodes, call_counts);
-                }
-            } else {
-                advance_direct(line, nodes, call_counts);
-            }
+        if is_real_call && flags & CallMeta::FLAG_DIRECT == 0 {
+            record_indirect(node, flags, &dispatch_type, nodes, call_sites, out);
         }
     }
     let mut c = node.walk();
     for child in node.children(&mut c) {
-        detect_rust_node(child, source, nodes, param_types, call_counts, out);
+        detect_rust_node(child, source, nodes, param_types, call_sites, out);
     }
 }
 
@@ -315,16 +268,16 @@ pub fn detect_c_cpp_indirect(
     nodes: &[RawNode],
     fn_ptr_vars: &FxHashMap<String, String>,
     is_cpp: bool,
+    call_sites: &CallSiteIndex,
 ) -> Vec<RawCallMeta> {
     let mut out = Vec::new();
-    let mut call_counts: FxHashMap<usize, u32> = FxHashMap::default();
     detect_c_cpp_node(
         root,
         source,
         nodes,
         fn_ptr_vars,
         is_cpp,
-        &mut call_counts,
+        call_sites,
         &mut out,
     );
     out
@@ -336,21 +289,18 @@ fn detect_c_cpp_node(
     nodes: &[RawNode],
     fn_ptr_vars: &FxHashMap<String, String>,
     is_cpp: bool,
-    call_counts: &mut FxHashMap<usize, u32>,
+    call_sites: &CallSiteIndex,
     out: &mut Vec<RawCallMeta>,
 ) {
     if node.kind() == "call_expression" {
-        let line = node.start_position().row as u32;
         let (flags, dispatch_type) = classify_c_cpp_call(node, source, fn_ptr_vars, is_cpp);
         if flags & CallMeta::FLAG_DIRECT == 0 {
-            record_indirect(line, flags, &dispatch_type, nodes, call_counts, out);
-        } else {
-            advance_direct(line, nodes, call_counts);
+            record_indirect(node, flags, &dispatch_type, nodes, call_sites, out);
         }
     }
     let mut c = node.walk();
     for child in node.children(&mut c) {
-        detect_c_cpp_node(child, source, nodes, fn_ptr_vars, is_cpp, call_counts, out);
+        detect_c_cpp_node(child, source, nodes, fn_ptr_vars, is_cpp, call_sites, out);
     }
 }
 
@@ -494,10 +444,10 @@ pub fn detect_js_ts_indirect(
     source: &[u8],
     nodes: &[RawNode],
     param_names: &FxHashSet<String>, // name → true if it's a param (not a declared fn)
+    call_sites: &CallSiteIndex,
 ) -> Vec<RawCallMeta> {
     let mut out = Vec::new();
-    let mut call_counts: FxHashMap<usize, u32> = FxHashMap::default();
-    detect_js_ts_node(root, source, nodes, param_names, &mut call_counts, &mut out);
+    detect_js_ts_node(root, source, nodes, param_names, call_sites, &mut out);
     out
 }
 
@@ -506,21 +456,18 @@ fn detect_js_ts_node(
     source: &[u8],
     nodes: &[RawNode],
     param_names: &FxHashSet<String>,
-    call_counts: &mut FxHashMap<usize, u32>,
+    call_sites: &CallSiteIndex,
     out: &mut Vec<RawCallMeta>,
 ) {
     if node.kind() == "call_expression" {
-        let line = node.start_position().row as u32;
         let (flags, dispatch_type) = classify_js_call(node, source, param_names);
         if flags & CallMeta::FLAG_DIRECT == 0 {
-            record_indirect(line, flags, &dispatch_type, nodes, call_counts, out);
-        } else {
-            advance_direct(line, nodes, call_counts);
+            record_indirect(node, flags, &dispatch_type, nodes, call_sites, out);
         }
     }
     let mut c = node.walk();
     for child in node.children(&mut c) {
-        detect_js_ts_node(child, source, nodes, param_names, call_counts, out);
+        detect_js_ts_node(child, source, nodes, param_names, call_sites, out);
     }
 }
 
@@ -633,10 +580,10 @@ pub fn detect_python_indirect(
     source: &[u8],
     nodes: &[RawNode],
     param_names: &FxHashSet<String>,
+    call_sites: &CallSiteIndex,
 ) -> Vec<RawCallMeta> {
     let mut out = Vec::new();
-    let mut call_counts: FxHashMap<usize, u32> = FxHashMap::default();
-    detect_python_node(root, source, nodes, param_names, &mut call_counts, &mut out);
+    detect_python_node(root, source, nodes, param_names, call_sites, &mut out);
     out
 }
 
@@ -645,21 +592,18 @@ fn detect_python_node(
     source: &[u8],
     nodes: &[RawNode],
     param_names: &FxHashSet<String>,
-    call_counts: &mut FxHashMap<usize, u32>,
+    call_sites: &CallSiteIndex,
     out: &mut Vec<RawCallMeta>,
 ) {
     if node.kind() == "call" {
-        let line = node.start_position().row as u32;
         let (flags, dispatch_type) = classify_python_call(node, source, param_names);
         if flags & CallMeta::FLAG_DIRECT == 0 {
-            record_indirect(line, flags, &dispatch_type, nodes, call_counts, out);
-        } else {
-            advance_direct(line, nodes, call_counts);
+            record_indirect(node, flags, &dispatch_type, nodes, call_sites, out);
         }
     }
     let mut c = node.walk();
     for child in node.children(&mut c) {
-        detect_python_node(child, source, nodes, param_names, call_counts, out);
+        detect_python_node(child, source, nodes, param_names, call_sites, out);
     }
 }
 
