@@ -35,7 +35,7 @@ use crate::output::{emit_with_caveat, OutputFormat};
 use clap::{Args, ValueEnum};
 use ecp_analyzer::resolution::index::Language;
 use ecp_core::graph::{ArchivedFileCategory, ArchivedRelType, ArchivedZeroCopyGraph, FileCategory};
-use ecp_core::registry::{resolve_home_ecp, CommitDirName, Registry, RegistryFile};
+use ecp_core::registry::{resolve_home_ecp, Registry, RegistryFile};
 use ecp_core::session::MergedGraph;
 use ecp_core::EcpError;
 use rayon::prelude::*;
@@ -1318,8 +1318,10 @@ fn run_multi(
 
 /// Caveat for a single resolved target: HEAD-mismatch staleness names the
 /// repo; otherwise the engine's own warm-attach caveat (if any) applies.
+/// `behind_head` is judged on the graph `load_ensured` actually loaded, which
+/// after a synchronous rebuild is not the commit dir the target picked.
 fn single_target_caveat(target: &RepoTarget, engine: &Engine) -> Option<String> {
-    if target.stale_for_head {
+    if engine.behind_head {
         stale_graph_caveat(&[target.display_name.as_str()])
     } else {
         engine.caveat()
@@ -1514,13 +1516,6 @@ pub(crate) struct RepoTarget {
     display_name: String,
     graph_path: String,
     worktree_root: String,
-    /// The picked commit dir (latest published, by mtime) is behind the
-    /// target worktree's HEAD. Queries read L2 only, so commits made after
-    /// the last index are invisible for this repo — surfaced as a `result`
-    /// caveat. The warm-attach flag can't represent this: the old graph
-    /// EXISTS, so `ensure_fresh` takes the Stale → L1-refresh path and
-    /// reports Ready.
-    stale_for_head: bool,
 }
 
 /// Registry entries whose `dir_name` shares a substring with something the
@@ -1651,24 +1646,10 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<RepoTarget>, EcpError> 
         ))
         .to_string_lossy()
         .into_owned();
-        // Commit dirs are named `<prefix>__<sha>[.gen.<…>]` — a same-SHA
-        // rebuild publishes a `.gen.` dir, so suffix matching would flag
-        // perfectly fresh repos. Parse the SHA out and compare against HEAD;
-        // an unparseable dir name proves nothing, so it stays un-flagged
-        // (the engine's own warm-attach caveat still covers that load).
-        let stale_for_head = crate::git_cache::head_sha(std::path::Path::new(&worktree_root))
-            .zip(graph_path.parent().and_then(|d| d.file_name()))
-            .map(|(head, dir)| {
-                CommitDirName::parse(&dir.to_string_lossy())
-                    .map(|parsed| parsed.sha_hex() != head)
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
         targets.push(RepoTarget {
             display_name,
             graph_path: graph_path.to_string_lossy().into_owned(),
             worktree_root,
-            stale_for_head,
         });
     }
 
@@ -1742,8 +1723,8 @@ fn stale_graph_caveat(names: &[&str]) -> Option<String> {
     })
 }
 
-/// Cross-repo staleness sweep: a repo is stale when its picked commit dir is
-/// behind HEAD (`stale_for_head`) or its engine warm-attached a sibling SHA.
+/// Cross-repo staleness sweep: a repo is stale when its loaded graph is
+/// behind HEAD or its engine warm-attached a sibling SHA.
 fn stale_repos_caveat(
     targets: &[RepoTarget],
     loaded: &[(String, Result<Engine, String>)],
@@ -1752,7 +1733,9 @@ fn stale_repos_caveat(
         .iter()
         .zip(loaded)
         .filter(|(target, (_, result))| {
-            target.stale_for_head || result.as_ref().is_ok_and(|engine| engine.is_stale_for_sha)
+            result
+                .as_ref()
+                .is_ok_and(|engine| engine.behind_head || engine.is_stale_for_sha)
         })
         .map(|(target, _)| target.display_name.as_str())
         .collect();

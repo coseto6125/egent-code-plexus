@@ -191,6 +191,55 @@ fn load_ensured_drift_loads_rebuilt_graph_not_stale_file() {
     );
 }
 
+/// The stale graph sits at an older commit than HEAD. The rebuild targets
+/// HEAD, so `behind_head` judged on the loaded graph is false; judged on the
+/// path the caller handed in it would be true.
+#[test]
+fn load_ensured_drift_behind_head_rebuilds_at_head() {
+    let _env_guard = lock_env();
+    let _snapshot = EnvSnapshot::take();
+
+    let tmp = TempDir::new().expect("tempdir");
+    let worktree = tmp.path();
+    git_init_with_commit(worktree);
+    std::env::set_var("HOME", worktree);
+    std::env::remove_var("ECP_HOME");
+
+    let graph_path = build_initial_graph(worktree);
+    fs::write(worktree.join("newer.rs"), "pub fn newer_fn() {}\n").unwrap();
+    for args in [&["add", "."][..], &["commit", "-qm", "advance"][..]] {
+        Command::new("git")
+            .arg("-C")
+            .arg(worktree)
+            .args(args)
+            .output()
+            .expect("git");
+    }
+    let stale_fp = "v0.0.1+schema1";
+    fs::write(
+        auto_ensure::builder_fingerprint_sidecar_path(&graph_path),
+        format!("{stale_fp}\n"),
+    )
+    .expect("write stale sidecar");
+    let meta_path = graph_path.with_file_name("meta.json");
+    let mut meta: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&meta_path).expect("read meta")).unwrap();
+    meta["builder_fingerprint"] = stale_fp.into();
+    fs::write(&meta_path, meta.to_string()).expect("write stale meta");
+
+    let engine = auto_ensure::load_ensured(&graph_path, worktree)
+        .expect("load_ensured on a stale graph behind HEAD");
+
+    assert!(
+        has_symbol(&engine, "newer_fn"),
+        "answers from the HEAD rebuild"
+    );
+    assert!(
+        !engine.behind_head,
+        "a graph rebuilt at HEAD is not behind it"
+    );
+}
+
 /// A repo with no graph yet resolves to the legacy `.ecp/graph.bin` default;
 /// the synchronous build publishes elsewhere, so the load must follow it.
 #[test]
