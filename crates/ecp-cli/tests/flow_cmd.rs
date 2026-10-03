@@ -160,7 +160,7 @@ fn test_flow_mcp_schema_exposes_position_and_selection_without_graph() {
         .unwrap()
         .contains(&json!("file")));
     let cli = Cli::try_parse_from(["ecp", "flow", "--file", "main.js", "--line", "1"]).unwrap();
-    assert!(!cli.command.needs_graph());
+    assert!(!cli.command.needs_graph(false));
 }
 
 #[test]
