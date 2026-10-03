@@ -12,7 +12,7 @@
 
 use crate::file_category::is_test_path;
 use crate::graph::{Edge, Node, NodeKind, RelType};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 
 #[derive(Debug, Clone)]
 pub struct ProcessConfig {
@@ -266,21 +266,19 @@ fn is_subsequence(needle: &[u32], haystack: &[u32]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
-/// Keep only the longest trace per unique (entry, terminal) endpoint pair.
+/// Keep only the longest trace per unique (entry, terminal) endpoint pair,
+/// in input order. Emitting from a hash map gave equal-length traces a new
+/// order on every build, so the process list (and which traces survived the
+/// `max_processes` cut) changed between two indexes of the same commit.
 fn dedup_by_endpoints(traces: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
-    if traces.is_empty() {
-        return traces;
-    }
     let mut sorted = traces;
     sorted.sort_by_key(|t| std::cmp::Reverse(t.len()));
-
-    let mut by_pair: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
-    for t in sorted {
-        let entry = *t.first().unwrap();
-        let terminal = *t.last().unwrap();
-        by_pair.entry((entry, terminal)).or_insert(t);
-    }
-    by_pair.into_values().collect()
+    let mut seen: HashSet<(u32, u32)> = HashSet::with_capacity(sorted.len());
+    sorted.retain(|t| match (t.first(), t.last()) {
+        (Some(&entry), Some(&terminal)) => seen.insert((entry, terminal)),
+        _ => false,
+    });
+    sorted
 }
 
 #[cfg(test)]
@@ -407,5 +405,45 @@ mod tests {
         );
         // 0→1 dropped, so only 1→2 (2 steps, below min 3) → no traces.
         assert!(result.is_empty());
+    }
+
+    /// Hash maps get a fresh seed per instance, so 30 runs in one process
+    /// would almost surely disagree if the order still came from one.
+    #[test]
+    fn test_detect_processes_equal_length_traces_same_order_every_run() {
+        let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
+        let mut pool = StringPool::new();
+        let nodes: Vec<Node> = names
+            .iter()
+            .map(|name| n(&mut pool, name, NodeKind::Function, 0))
+            .collect();
+        let edges = vec![
+            e(0, 1),
+            e(0, 2),
+            e(0, 3),
+            e(1, 4),
+            e(2, 5),
+            e(3, 6),
+            e(0, 7),
+        ];
+        let run = || -> Vec<Vec<u32>> {
+            detect_processes(
+                &nodes,
+                &edges,
+                &["src/app.rs".to_string()],
+                &ProcessConfig::default(),
+            )
+            .into_iter()
+            .map(|r| r.trace)
+            .collect()
+        };
+        let first = run();
+        assert!(
+            first.len() >= 3,
+            "fixture needs several equal-length traces: {first:?}"
+        );
+        for _ in 0..30 {
+            assert_eq!(run(), first);
+        }
     }
 }
