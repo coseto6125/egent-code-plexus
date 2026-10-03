@@ -135,8 +135,9 @@ pub fn callee_name_from(call_node: Node<'_>, source: &[u8]) -> Option<String> {
     }
 }
 
-/// Call-node start byte -> (caller node index, index in that node's `calls`);
+/// Call-node `Node::id` -> (caller node index, index in that node's `calls`);
 /// built during extraction, consumed by the indirect-dispatch detectors, never persisted.
+/// Keyed by id, not start byte: `a().b()` starts at the same byte as `a()`.
 pub type CallSiteIndex = rustc_hash::FxHashMap<usize, (usize, u32)>;
 
 /// Attach a call using columns as well as rows, including one-line closures.

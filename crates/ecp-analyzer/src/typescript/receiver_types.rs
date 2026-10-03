@@ -193,7 +193,7 @@ pub fn extract_ts_calls_and_path_literals(
             "call_expression" => {
                 if let Some(callee) = ts_callee_name(n, source, locals, nodes) {
                     if let Some(site) = attach_to_enclosing_span(node_span(&n), callee, nodes) {
-                        call_sites.entry(n.start_byte()).or_insert(site);
+                        call_sites.insert(n.id(), site);
                     }
                 }
             }

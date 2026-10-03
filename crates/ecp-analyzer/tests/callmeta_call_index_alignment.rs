@@ -116,9 +116,9 @@ fn c_fn_pointer_meta_points_at_flagged_call() {
          void first(void (*fp)(int)) { (*fp)(1); a(); b(); }\n\
          void nested(void (*fp)(int)) { a((*fp)(1)); }\n",
     );
-    assert_points_at(&g, "last", "fp");
-    assert_points_at(&g, "first", "fp");
-    assert_points_at(&g, "nested", "fp");
+    assert_points_at(&g, "last", "(*fp)");
+    assert_points_at(&g, "first", "(*fp)");
+    assert_points_at(&g, "nested", "(*fp)");
 }
 
 #[test]
@@ -132,9 +132,9 @@ fn cpp_fn_pointer_meta_points_at_flagged_call() {
          void first(void (*fp)(int)) { (*fp)(1); a(); b(); }\n\
          void after_new(void (*fp)(int)) { Widget* w = new Widget(); (*fp)(1); }\n",
     );
-    assert_points_at(&g, "last", "fp");
-    assert_points_at(&g, "first", "fp");
-    assert_points_at(&g, "after_new", "fp");
+    assert_points_at(&g, "last", "(*fp)");
+    assert_points_at(&g, "first", "(*fp)");
+    assert_points_at(&g, "after_new", "(*fp)");
 }
 
 #[test]

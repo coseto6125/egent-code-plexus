@@ -12,7 +12,7 @@
 
 use crate::calls::CallSiteIndex;
 use ecp_core::analyzer::types::{RawCallMeta, RawNode};
-use ecp_core::graph::{CallMeta, NodeKind};
+use ecp_core::graph::CallMeta;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tree_sitter::Node;
 
@@ -28,7 +28,7 @@ fn record_indirect(
     call_sites: &CallSiteIndex,
     out: &mut Vec<RawCallMeta>,
 ) {
-    let Some(&(caller_idx, call_index)) = call_sites.get(&call.start_byte()) else {
+    let Some(&(caller_idx, call_index)) = call_sites.get(&call.id()) else {
         return;
     };
     out.push(RawCallMeta {

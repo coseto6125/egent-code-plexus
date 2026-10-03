@@ -41,7 +41,7 @@ pub fn extract_js_calls_and_path_literals(
             "call_expression" => {
                 if let Some(callee) = js_callee_name(n, source, nodes) {
                     if let Some(site) = attach_to_enclosing_span(node_span(&n), callee, nodes) {
-                        call_sites.entry(n.start_byte()).or_insert(site);
+                        call_sites.insert(n.id(), site);
                     }
                 }
             }

@@ -443,7 +443,7 @@ pub fn extract_rust_calls_and_path_literals(
                 if let Some(callee) = rust_callee_name(n, source, local_types) {
                     let line = n.start_position().row as u32;
                     if let Some(site) = attach_to_enclosing(line, callee, nodes) {
-                        call_sites.entry(n.start_byte()).or_insert(site);
+                        call_sites.insert(n.id(), site);
                     }
                 }
             }
