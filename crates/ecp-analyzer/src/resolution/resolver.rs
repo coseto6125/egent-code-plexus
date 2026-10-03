@@ -44,9 +44,13 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::resolution::heuristics::ResolutionTier;
-use crate::resolution::index::{FileMeta, GlobalPick, ResolveTarget, SymbolTable};
+use crate::resolution::index::{
+    crate_root_prefix, FileMeta, GlobalPick, Language, ResolveTarget, SymbolTable,
+    MAX_HERITAGE_DEPTH,
+};
 use crate::resolution::path_aliases::PathAliases;
 use crate::rust::module_tree::RustWorkspaceModTree;
+use rustc_hash::FxHashMap;
 
 pub type NodeId = u32;
 
@@ -90,6 +94,16 @@ pub enum DecisionTier {
     /// heuristic edges (confidence 0.7).
     ModuleTree,
     Unresolved,
+    /// Receiver-typing ladder: the qualifier names one project type, and
+    /// that type owns the member (in its file, or for Rust impls / Go
+    /// methods / C# partials / Swift extensions, in its crate or package).
+    TypeOwned,
+    /// Receiver-typing ladder: a resolved declared supertype of the
+    /// qualifier's one project type owns the member.
+    TypeHeritage,
+    /// Receiver-typing ladder: the qualifier names several project types;
+    /// exactly one owns the member and every other provably does not.
+    TypeCandidates,
 }
 
 /// One resolver attempt, captured when the dump buffer is enabled. The
@@ -395,11 +409,38 @@ impl<'a> Resolver<'a> {
                 }
             }
 
+            // Receiver-typing ladder: runs only where every tier above found
+            // nothing, so it adds edges and never moves one.
+            let tier = match self.resolve_member_via_type(
+                source_file,
+                &source_file_str,
+                symbol_name,
+                qualifier,
+                member,
+                target,
+                raw_imports,
+            ) {
+                TypeMember::Edge(node_id, tier, conf) => {
+                    results.push((node_id, conf));
+                    self.record(
+                        &source_file_str,
+                        symbol_name,
+                        None,
+                        tier,
+                        Some(node_id),
+                        0,
+                        Some(conf),
+                    );
+                    return results;
+                }
+                TypeMember::Ambiguous => DecisionTier::AmbiguousGlobal,
+                TypeMember::NoEdge => DecisionTier::Unresolved,
+            };
             self.record(
                 &source_file_str,
                 symbol_name,
                 None,
-                DecisionTier::Unresolved,
+                tier,
                 None,
                 self.symbol_table.global_match_count(member),
                 None,
@@ -531,6 +572,17 @@ fn qualifier_prefix_is_internal(full_callee: &str, qualifier: &str) -> bool {
             .all(|s| matches!(s, "crate" | "self" | "super"))
 }
 
+/// Languages where a field or class attribute hides an inherited method of
+/// the same name: Python class attributes, JavaScript / TypeScript instance
+/// fields over prototype methods, and Go fields over promoted methods. Java,
+/// Kotlin, C#, Rust and the rest keep fields and methods apart.
+fn attributes_shadow_methods(meta: FileMeta) -> bool {
+    matches!(
+        meta.language,
+        Language::Python | Language::JavaScript | Language::TypeScript | Language::Go
+    )
+}
+
 /// For a Rust path call `a::b::Q::m`, does the module path `a::b` that the
 /// call names for `Q` agree with the import of `Q` from `import_source`?
 /// `de::Error::custom` with `use crate::error::Error` does not: `de::Error`
@@ -583,24 +635,6 @@ fn rust_path_prefix_agrees_with_import(
         .skip_while(|s| *s == "crate" || is_anchor(s))
         .collect();
     source.ends_with(&named)
-}
-
-/// Crate-root prefix of a normalized repo-relative path. The "crate root"
-/// here is the substring preceding the first `/src/` or `/tests/` segment,
-/// which is enough to keep a workspace member's files together (every Rust
-/// file in `crates/cli/src/...` shares prefix `crates/cli`) while keeping
-/// external paths (the std library is never indexed in a workspace, so its
-/// "prefix" never matches an indexed file's) outside the bucket.
-///
-/// Paths with no `/src/` or `/tests/` segment return `""` — single-crate
-/// repos at the repo root all share the empty prefix, so the Tier-4
-/// module-file fallback still fires for them.
-#[cfg(not(windows))]
-fn crate_root_prefix(path: &str) -> &str {
-    path.rsplit_once("/src/")
-        .or_else(|| path.rsplit_once("/tests/"))
-        .map(|(root, _)| root)
-        .unwrap_or("")
 }
 
 /// A file that names its own directory's module: `mod.rs`, `lib.rs`,
@@ -699,17 +733,6 @@ fn rust_module_path_base(
         _ => return None,
     };
     Some(rest.iter().fold(anchor, |p, seg| p.join(seg)))
-}
-
-#[cfg(windows)]
-fn crate_root_prefix(path: &str) -> &str {
-    // Windows paths use backslashes natively.
-    path.rsplit_once("\\src\\")
-        .or_else(|| path.rsplit_once("\\tests\\"))
-        .or_else(|| path.rsplit_once("/src/")) // Fallback for mixed/normalized paths
-        .or_else(|| path.rsplit_once("/tests/"))
-        .map(|(root, _)| root)
-        .unwrap_or("")
 }
 
 fn split_qualifier(name: &str) -> Option<(&str, &str)> {
@@ -950,6 +973,45 @@ where
     true
 }
 
+/// Outcome of the receiver-typing ladder for one qualified callee.
+enum TypeMember {
+    Edge(NodeId, DecisionTier, f32),
+    /// Several candidate types could own the member: no edge, and the dump
+    /// records `AmbiguousGlobal`.
+    Ambiguous,
+    NoEdge,
+}
+
+/// The project types a qualifier can name (ladder step 1).
+enum TypeCandidates<'q> {
+    /// One type, with the name it is declared under (an import alias names
+    /// the type differently from the qualifier).
+    Unique(NodeId, &'q str),
+    Set(Vec<NodeId>),
+    /// An import binds the qualifier to a file outside the project.
+    External,
+    None,
+}
+
+/// Whether a type owns a member, directly or through its supertypes.
+enum Ownership {
+    Owned {
+        id: NodeId,
+        inherited: bool,
+    },
+    NotOwned,
+    /// The member may come from a base the index cannot see, or from one of
+    /// several owners: no edge.
+    Unknown,
+}
+
+/// The owner index's answer for one type and one member name.
+enum MemberLookup {
+    Hit(NodeId),
+    Miss,
+    Ambiguous,
+}
+
 impl<'a> Resolver<'a> {
     /// Resolve `qualifier` as a Type (Class / Interface) via Tier 1 → Tier 2 →
     /// Tier 3 (kind-filtered, unique-only), returning the file_path of the
@@ -1114,6 +1176,379 @@ impl<'a> Resolver<'a> {
             hit = Some(fp);
         }
         hit.map(str::to_string)
+    }
+
+    /// Receiver-typing ladder (after Tier 3.5): resolve `qualifier.member`
+    /// through the member's owning type instead of the qualifier's file.
+    ///
+    /// It emits an edge only when the qualifier names a project type, and
+    /// that type or one of its resolved declared supertypes owns the member,
+    /// and no unresolved base can shadow the owner. It never matches the
+    /// member name alone.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_member_via_type(
+        &self,
+        source_file: &Path,
+        source_file_str: &str,
+        symbol_name: &str,
+        qualifier: &str,
+        member: &str,
+        target: ResolveTarget,
+        raw_imports: &[RawImport],
+    ) -> TypeMember {
+        // Callable only: the supertypes pre-pass resolves heritage with this
+        // resolver before the supertypes exist, so a Type-target ladder would
+        // make Pass 2 heritage edges disagree with the pre-pass. A path whose
+        // prefix is an external module (`std::sync::Arc::new`) names a type
+        // the project cannot own, the same guard Tier 4 applies.
+        if target != ResolveTarget::Callable
+            || !qualifier_prefix_is_internal(symbol_name, qualifier)
+        {
+            return TypeMember::NoEdge;
+        }
+        let confidence = |tier: ResolutionTier| tier.base_confidence();
+        match self.type_candidates(source_file, source_file_str, qualifier, raw_imports) {
+            TypeCandidates::Unique(ty, ty_name) => {
+                match self.member_ownership(ty, ty_name, member, target) {
+                    Ownership::Owned {
+                        id,
+                        inherited: false,
+                    } => TypeMember::Edge(
+                        id,
+                        DecisionTier::TypeOwned,
+                        confidence(ResolutionTier::QualifierScoped),
+                    ),
+                    Ownership::Owned {
+                        id,
+                        inherited: true,
+                    } => TypeMember::Edge(
+                        id,
+                        DecisionTier::TypeHeritage,
+                        confidence(ResolutionTier::HeritageScoped),
+                    ),
+                    Ownership::NotOwned | Ownership::Unknown => TypeMember::NoEdge,
+                }
+            }
+            TypeCandidates::Set(types) => {
+                let mut owner_member: Option<NodeId> = None;
+                for ty in types {
+                    match self.member_ownership(ty, qualifier, member, target) {
+                        Ownership::Owned { id, .. } if owner_member.is_none_or(|m| m == id) => {
+                            owner_member = Some(id);
+                        }
+                        Ownership::NotOwned => {}
+                        Ownership::Owned { .. } | Ownership::Unknown => {
+                            return TypeMember::Ambiguous;
+                        }
+                    }
+                }
+                owner_member.map_or(TypeMember::NoEdge, |id| {
+                    TypeMember::Edge(
+                        id,
+                        DecisionTier::TypeCandidates,
+                        confidence(ResolutionTier::Global),
+                    )
+                })
+            }
+            TypeCandidates::External | TypeCandidates::None => TypeMember::NoEdge,
+        }
+    }
+
+    /// Ladder step 1: the project types `qualifier` can name, with no member
+    /// gate. Kind filter `is_type` only: a Module / Namespace qualifier keeps
+    /// the Tier 2.5 / Tier 4 path.
+    ///
+    /// A Rust name reaches a file only through its own definition or a `use`.
+    /// With neither on record (a generic parameter `T`, or a `use` the parser
+    /// does not record, such as a nested `ext::{io::Builder}`), the global
+    /// candidates are a guess, so Rust takes them only behind an in-project
+    /// import (a `pub use` re-export).
+    fn type_candidates<'q>(
+        &self,
+        source_file: &Path,
+        source_file_str: &str,
+        qualifier: &'q str,
+        raw_imports: &'q [RawImport],
+    ) -> TypeCandidates<'q> {
+        let st = self.symbol_table;
+        if let Some(id) =
+            st.lookup_in_file_with_kind(source_file_str, qualifier, ResolveTarget::Type)
+        {
+            return TypeCandidates::Unique(id, qualifier);
+        }
+        let mut imported_in_project = false;
+        for import in raw_imports {
+            if import
+                .alias
+                .as_deref()
+                .unwrap_or(import.imported_name.as_str())
+                != qualifier
+            {
+                continue;
+            }
+            let exported = import.imported_name.as_str();
+            let mut in_project = false;
+            let mut hit: Option<NodeId> = None;
+            for_each_specifier_candidate(source_file, &import.source, &self.path_aliases, |cand| {
+                if !st.has_file(cand) {
+                    return true;
+                }
+                in_project = true;
+                hit = st.lookup_in_file_with_kind(cand, exported, ResolveTarget::Type);
+                hit.is_none()
+            });
+            if let Some(id) = hit {
+                return TypeCandidates::Unique(id, exported);
+            }
+            if !in_project {
+                // A library type (`from psqlpy import Connection`): a project
+                // type of the same name elsewhere is not this receiver.
+                return TypeCandidates::External;
+            }
+            imported_in_project = true;
+        }
+        let caller_meta = FileMeta::from_path(source_file_str);
+        if caller_meta.language == Language::Rust && !imported_in_project {
+            return TypeCandidates::None;
+        }
+        let ids = st.global_candidates(qualifier, ResolveTarget::Type, caller_meta);
+        match ids.len() {
+            0 => TypeCandidates::None,
+            1 => TypeCandidates::Unique(ids[0], qualifier),
+            _ => TypeCandidates::Set(ids),
+        }
+    }
+
+    /// Ladder steps 2 and 3: does type `ty` own `member`, directly or through
+    /// its resolved declared supertypes?
+    ///
+    /// The walk visits every ancestor (breadth-first, declared order, depth
+    /// [`MAX_HERITAGE_DEPTH`]). The owner is the most derived owning type;
+    /// two owners on separate branches depend on the language's method
+    /// resolution order, so they give `Unknown`. The result is also `Unknown`
+    /// when something the lookup may meet before the owner could supply the
+    /// member instead: an unresolved base, or a same-named attribute
+    /// (`greet = replacement`) where attributes hide methods, on the path to
+    /// the owner, on a branch declared before the owner's, or on a branch
+    /// that also reaches the owner.
+    fn member_ownership(
+        &self,
+        ty: NodeId,
+        ty_name: &str,
+        member: &str,
+        target: ResolveTarget,
+    ) -> Ownership {
+        match self.owned_member(ty, ty_name, member, target) {
+            MemberLookup::Hit(id) => {
+                return Ownership::Owned {
+                    id,
+                    inherited: false,
+                }
+            }
+            MemberLookup::Ambiguous => return Ownership::Unknown,
+            MemberLookup::Miss => {}
+        }
+        let st = self.symbol_table;
+        let shadows =
+            attributes_shadow_methods(FileMeta::from_path(st.file_of(ty).unwrap_or_default()));
+        // How each ancestor was first reached: (the type, base position).
+        let mut parent: FxHashMap<NodeId, (NodeId, u32)> = FxHashMap::default();
+        let mut frontier = vec![ty];
+        // (type, number of resolved bases it declares before an unresolved one)
+        let mut unresolved: Vec<(NodeId, u32)> = Vec::new();
+        // Types declaring a same-named attribute, which hides a method.
+        let mut attributes: Vec<NodeId> = Vec::new();
+        if shadows && self.declares_attribute(ty, ty_name, member) {
+            attributes.push(ty);
+        }
+        let mut hits: Vec<(NodeId, NodeId)> = Vec::new();
+        for _ in 0..MAX_HERITAGE_DEPTH {
+            let mut next = Vec::new();
+            for &current in &frontier {
+                let Some(sup) = st.supertypes(current) else {
+                    continue;
+                };
+                if let Some(at) = sup.first_unresolved {
+                    unresolved.push((current, at));
+                }
+                for (pos, &base) in sup.bases.iter().enumerate() {
+                    if base == ty || parent.contains_key(&base) {
+                        continue;
+                    }
+                    parent.insert(base, (current, pos as u32));
+                    next.push(base);
+                    let Some(base_name) = st.name_in_file(base) else {
+                        continue;
+                    };
+                    if shadows && self.declares_attribute(base, base_name, member) {
+                        attributes.push(base);
+                    }
+                    match self.owned_member(base, base_name, member, target) {
+                        MemberLookup::Hit(id) => hits.push((base, id)),
+                        MemberLookup::Ambiguous => return Ownership::Unknown,
+                        MemberLookup::Miss => {}
+                    }
+                }
+            }
+            frontier = next;
+            if frontier.is_empty() {
+                break;
+            }
+        }
+        // The depth cap cut the walk short: a deeper base may own the member.
+        if frontier.iter().any(|&t| st.supertypes(t).is_some()) {
+            return Ownership::Unknown;
+        }
+        let most_derived = hits.iter().find(|&&(owner, _)| {
+            let above = st.ancestors(owner);
+            hits.iter()
+                .all(|&(other, _)| other == owner || above.contains(&other))
+        });
+        let Some(&(owner, id)) = most_derived else {
+            return if hits.is_empty() && unresolved.is_empty() {
+                Ownership::NotOwned
+            } else {
+                Ownership::Unknown
+            };
+        };
+        // The walk path from `ty` to the owner: each type on it, with the
+        // position of the base it takes toward the owner.
+        let mut path: FxHashMap<NodeId, u32> = FxHashMap::default();
+        let mut node = owner;
+        while let Some(&(up, pos)) = parent.get(&node) {
+            path.insert(up, pos);
+            node = up;
+        }
+        let above_owner = st.ancestors(owner);
+        // Does lookup meet `holder`'s contribution before the owner? `slot`
+        // is an unresolved base of `holder` with `at` resolved bases before
+        // it; `None` is a member `holder` declares itself. Anything above
+        // the owner is hidden by it. Off the path, a holder that also
+        // reaches the owner puts the owner after its own bases (a diamond:
+        // C3 visits a shared ancestor last); otherwise its branch comes
+        // first when declared before the branch the path takes.
+        let before_owner = |holder: NodeId, slot: Option<u32>| {
+            if holder == owner || above_owner.contains(&holder) {
+                return false;
+            }
+            let (mut node, mut pos) = match (path.get(&holder), slot) {
+                (Some(&taken), Some(at)) => return at <= taken,
+                (Some(_), None) => return true,
+                (None, _) if st.ancestors(holder).contains(&owner) => return true,
+                (None, _) => match parent.get(&holder) {
+                    Some(&(up, at)) => (up, at),
+                    None => return true,
+                },
+            };
+            loop {
+                if let Some(&taken) = path.get(&node) {
+                    return pos < taken;
+                }
+                let Some(&(up, at)) = parent.get(&node) else {
+                    return true;
+                };
+                (node, pos) = (up, at);
+            }
+        };
+        if unresolved.iter().any(|&(h, at)| before_owner(h, Some(at)))
+            || attributes.iter().any(|&h| before_owner(h, None))
+        {
+            return Ownership::Unknown;
+        }
+        Ownership::Owned {
+            id,
+            inherited: true,
+        }
+    }
+
+    /// True when type `ty` declares a non-callable member named `member`
+    /// (a field or a class attribute), which hides an inherited method in
+    /// the languages [`attributes_shadow_methods`] lists.
+    fn declares_attribute(&self, ty: NodeId, ty_name: &str, member: &str) -> bool {
+        let st = self.symbol_table;
+        st.file_of(ty).is_some_and(|file| {
+            !st.owned_in_file(file, member, ty_name, ResolveTarget::Field)
+                .is_empty()
+        })
+    }
+
+    /// The member of `ty` named `member`, by the owner index: first in the
+    /// type's own file, then in the type's crate / package scope.
+    fn owned_member(
+        &self,
+        ty: NodeId,
+        ty_name: &str,
+        member: &str,
+        target: ResolveTarget,
+    ) -> MemberLookup {
+        let st = self.symbol_table;
+        let Some(ty_file) = st.file_of(ty) else {
+            return MemberLookup::Miss;
+        };
+        let declares_owner =
+            |file: &str| st.count_in_file_with_kind(file, ty_name, ResolveTarget::Qualifier);
+        let in_file = st.owned_in_file(ty_file, member, ty_name, target);
+        if let Some(&first) = in_file.first() {
+            // Several hits are overloads of the one type, unless the file
+            // declares two owners of that name (nested types, a type and a
+            // module); the owner index cannot tell those apart.
+            return if in_file.len() == 1 || declares_owner(ty_file) == 1 {
+                MemberLookup::Hit(first)
+            } else {
+                MemberLookup::Ambiguous
+            };
+        }
+        let elsewhere = st.owned_global(member, ty_name, target, ty_file);
+        let Some(&first) = elsewhere.first() else {
+            return MemberLookup::Miss;
+        };
+        if self.type_unique_in_scope(ty_name, ty_file) {
+            return MemberLookup::Hit(first);
+        }
+        // Another same-named type shares the scope. Where a type can be
+        // reopened in another file (Ruby `class Derived`, a C# partial class,
+        // a Swift / Dart extension), a member there may be this type's own;
+        // elsewhere a member in a file declaring that name belongs to that
+        // other type, and any other member cannot be attributed.
+        let reopenable = matches!(
+            FileMeta::from_path(ty_file).language,
+            Language::Ruby
+                | Language::Crystal
+                | Language::CSharp
+                | Language::Swift
+                | Language::Dart
+        );
+        if !reopenable
+            && elsewhere
+                .iter()
+                .all(|&id| st.file_of(id).is_some_and(|f| declares_owner(f) > 0))
+        {
+            MemberLookup::Miss
+        } else {
+            MemberLookup::Ambiguous
+        }
+    }
+
+    /// True when `ty_file`'s type `ty_name` is the only qualifier of that
+    /// name in the scope [`SymbolTable::owned_global`] searches: the same
+    /// language and vendor barrier and crate root, and for Go one package.
+    fn type_unique_in_scope(&self, ty_name: &str, ty_file: &str) -> bool {
+        let st = self.symbol_table;
+        let meta = FileMeta::from_path(ty_file);
+        let root = crate_root_prefix(ty_file);
+        let dir = Path::new(ty_file).parent();
+        let same_package_only = meta.language == Language::Go;
+        st.global_candidates(ty_name, ResolveTarget::Qualifier, meta)
+            .into_iter()
+            .filter(|&id| {
+                st.file_of(id).is_some_and(|f| {
+                    crate_root_prefix(f) == root
+                        && (!same_package_only || Path::new(f).parent() == dir)
+                })
+            })
+            .take(2)
+            .count()
+            == 1
     }
 
     /// Tier 3.5: attempt module-tree FQN resolution for Rust qualified calls.
@@ -2111,5 +2546,243 @@ mod tests {
             let last = r.take_decisions().unwrap().pop().unwrap();
             assert_eq!(last.tier, DecisionTier::AmbiguousGlobal, "{ext}");
         }
+    }
+
+    // ── Receiver-typing ladder ──────────────────────────────────────────────
+
+    /// `(file, name, kind, owner)` rows; ids are the row positions.
+    fn st_owned(rows: &[(&str, &str, NodeKind, Option<&str>)]) -> SymbolTable {
+        let mut st = SymbolTable::new();
+        for (id, &(file, name, kind, owner)) in rows.iter().enumerate() {
+            match owner {
+                Some(o) => st.register_node_owned(file, name, id as u32, kind, o),
+                None => st.register_node(file, name, id as u32, kind),
+            }
+        }
+        st
+    }
+
+    /// Resolve a Callable `callee` from `caller`; return the edges and the
+    /// tier of the last recorded decision.
+    fn resolve_dumped(
+        st: &SymbolTable,
+        caller: &str,
+        callee: &str,
+        imports: &[RawImport],
+    ) -> (Vec<(NodeId, f32)>, DecisionTier) {
+        let mut r = Resolver::new(st);
+        r.enable_dump();
+        let out = r.resolve_symbol(
+            &PathBuf::from(caller),
+            callee,
+            imports,
+            ResolveTarget::Callable,
+        );
+        let last = r.take_decisions().unwrap().pop().expect("a decision");
+        (out, last.tier)
+    }
+
+    fn import(source: &str, name: &str, alias: Option<&str>) -> RawImport {
+        RawImport {
+            source: source.to_string(),
+            imported_name: name.to_string(),
+            alias: alias.map(str::to_string),
+            binding_kind: None,
+        }
+    }
+
+    const HERITAGE: f32 = 0.8;
+
+    /// `pkg/base.py: class Base: def greet`, `pkg/derived.py: class Derived`,
+    /// and a decoy `greet` on an unrelated type. Ids: Base 0, Base.greet 1,
+    /// Derived 2, Decoy 3, Decoy.greet 4.
+    fn inherited_greet() -> SymbolTable {
+        st_owned(&[
+            ("pkg/base.py", "Base", NodeKind::Class, None),
+            ("pkg/base.py", "greet", NodeKind::Method, Some("Base")),
+            ("pkg/derived.py", "Derived", NodeKind::Class, None),
+            ("pkg/decoy.py", "Decoy", NodeKind::Class, None),
+            ("pkg/decoy.py", "greet", NodeKind::Method, Some("Decoy")),
+        ])
+    }
+
+    #[test]
+    fn test_resolve_member_via_type_member_in_sibling_impl_file_returns_type_owned() {
+        let st = st_owned(&[
+            ("src/model.rs", "Repo", NodeKind::Struct, None),
+            ("src/repo_impl.rs", "save", NodeKind::Method, Some("Repo")),
+            ("src/decoy.rs", "Decoy", NodeKind::Struct, None),
+            ("src/decoy.rs", "save", NodeKind::Method, Some("Decoy")),
+        ]);
+        let imports = [import("crate::model", "Repo", None)];
+        let (out, tier) = resolve_dumped(&st, "src/app.rs", "Repo.save", &imports);
+        assert_eq!(
+            out,
+            vec![(1, ResolutionTier::QualifierScoped.base_confidence())]
+        );
+        assert_eq!(tier, DecisionTier::TypeOwned);
+    }
+
+    #[test]
+    fn test_resolve_member_via_type_member_on_resolved_base_returns_type_heritage() {
+        let mut st = inherited_greet();
+        st.build_supertypes([(2, Some(0))]);
+        let (out, tier) = resolve_dumped(&st, "pkg/app.py", "Derived.greet", &[]);
+        assert_eq!(out, vec![(1, HERITAGE)]);
+        assert_eq!(tier, DecisionTier::TypeHeritage);
+    }
+
+    #[test]
+    fn test_resolve_member_via_type_no_supertypes_returns_unresolved() {
+        let st = inherited_greet();
+        let (out, tier) = resolve_dumped(&st, "pkg/app.py", "Derived.greet", &[]);
+        assert!(out.is_empty(), "closed heritage, no owner: got {out:?}");
+        assert_eq!(tier, DecisionTier::Unresolved);
+    }
+
+    #[test]
+    fn test_resolve_member_via_type_external_base_before_owner_returns_no_edge() {
+        // `class Derived(ExternalMixin, Base)`: the mixin comes first in the
+        // MRO and may define `greet`.
+        let mut st = inherited_greet();
+        st.build_supertypes([(2, None), (2, Some(0))]);
+        let (out, tier) = resolve_dumped(&st, "pkg/app.py", "Derived.greet", &[]);
+        assert!(out.is_empty(), "got {out:?}");
+        assert_eq!(tier, DecisionTier::Unresolved);
+    }
+
+    #[test]
+    fn test_resolve_member_via_type_external_base_after_owner_returns_type_heritage() {
+        let mut st = inherited_greet();
+        st.build_supertypes([(2, Some(0)), (2, None)]);
+        let (out, tier) = resolve_dumped(&st, "pkg/app.py", "Derived.greet", &[]);
+        assert_eq!(out, vec![(1, HERITAGE)]);
+        assert_eq!(tier, DecisionTier::TypeHeritage);
+    }
+
+    #[test]
+    fn test_resolve_member_via_type_owners_on_two_branches_returns_no_edge() {
+        // `class T(A, B)` with `greet` on both A and B: the winner depends on
+        // the language's method resolution order.
+        let mut st = st_owned(&[
+            ("pkg/a.py", "A", NodeKind::Class, None),
+            ("pkg/a.py", "greet", NodeKind::Method, Some("A")),
+            ("pkg/b.py", "B", NodeKind::Class, None),
+            ("pkg/b.py", "greet", NodeKind::Method, Some("B")),
+            ("pkg/t.py", "T", NodeKind::Class, None),
+        ]);
+        st.build_supertypes([(4, Some(0)), (4, Some(2))]);
+        let (out, tier) = resolve_dumped(&st, "pkg/app.py", "T.greet", &[]);
+        assert!(out.is_empty(), "got {out:?}");
+        assert_eq!(tier, DecisionTier::Unresolved);
+    }
+
+    #[test]
+    fn test_resolve_member_via_type_override_chain_returns_most_derived_owner() {
+        // T -> A -> B, both A and B define `greet`: A overrides B.
+        let mut st = st_owned(&[
+            ("pkg/a.py", "A", NodeKind::Class, None),
+            ("pkg/a.py", "greet", NodeKind::Method, Some("A")),
+            ("pkg/b.py", "B", NodeKind::Class, None),
+            ("pkg/b.py", "greet", NodeKind::Method, Some("B")),
+            ("pkg/t.py", "T", NodeKind::Class, None),
+        ]);
+        st.build_supertypes([(4, Some(0)), (0, Some(2))]);
+        let (out, tier) = resolve_dumped(&st, "pkg/app.py", "T.greet", &[]);
+        assert_eq!(out, vec![(1, HERITAGE)]);
+        assert_eq!(tier, DecisionTier::TypeHeritage);
+    }
+
+    /// Two `Repo` types in sibling packages. Ids: a.Repo 0, a.Repo.save 1,
+    /// b.Repo 2, b.Repo.load 3.
+    fn two_repos() -> SymbolTable {
+        st_owned(&[
+            ("app/a/models.py", "Repo", NodeKind::Class, None),
+            ("app/a/models.py", "save", NodeKind::Method, Some("Repo")),
+            ("app/b/models.py", "Repo", NodeKind::Class, None),
+            ("app/b/models.py", "load", NodeKind::Method, Some("Repo")),
+        ])
+    }
+
+    #[test]
+    fn test_resolve_member_via_type_ambiguous_qualifier_one_owner_returns_type_candidates() {
+        let st = two_repos();
+        let (out, tier) = resolve_dumped(&st, "app/c.py", "Repo.save", &[]);
+        assert_eq!(out, vec![(1, ResolutionTier::Global.base_confidence())]);
+        assert_eq!(tier, DecisionTier::TypeCandidates);
+    }
+
+    #[test]
+    fn test_resolve_member_via_type_ambiguous_qualifier_one_unknown_returns_ambiguous_global() {
+        // b.Repo has an external base that may define `save`.
+        let mut st = two_repos();
+        st.build_supertypes([(2, None)]);
+        let (out, tier) = resolve_dumped(&st, "app/c.py", "Repo.save", &[]);
+        assert!(out.is_empty(), "got {out:?}");
+        assert_eq!(tier, DecisionTier::AmbiguousGlobal);
+    }
+
+    #[test]
+    fn test_resolve_member_via_type_module_qualifier_returns_unresolved() {
+        // `cfg` is a module, not a type; a member owned under that name in
+        // another file must not resolve through the ladder.
+        let st = st_owned(&[
+            ("src/lib.rs", "cfg", NodeKind::Module, None),
+            ("src/loader.rs", "load", NodeKind::Function, Some("cfg")),
+        ]);
+        let (out, tier) = resolve_dumped(&st, "src/app.rs", "cfg::load", &[]);
+        assert!(out.is_empty(), "got {out:?}");
+        assert_eq!(tier, DecisionTier::Unresolved);
+    }
+
+    #[test]
+    fn test_resolve_member_via_type_library_import_returns_no_edge() {
+        // `from psqlpy import Connection`: the project's own `Connection`
+        // (whose base defines `execute`) is not this receiver's type.
+        let mut st = st_owned(&[
+            ("pkg/base.py", "BaseConn", NodeKind::Class, None),
+            ("pkg/base.py", "execute", NodeKind::Method, Some("BaseConn")),
+            ("pkg/models.py", "Connection", NodeKind::Class, None),
+        ]);
+        st.build_supertypes([(2, Some(0))]);
+        let lib = [import("psqlpy", "Connection", None)];
+        let (out, tier) = resolve_dumped(&st, "pkg/app.py", "Connection.execute", &lib);
+        assert!(out.is_empty(), "got {out:?}");
+        assert_eq!(tier, DecisionTier::Unresolved);
+
+        let (out, tier) = resolve_dumped(&st, "pkg/app.py", "Connection.execute", &[]);
+        assert_eq!(
+            out,
+            vec![(1, HERITAGE)],
+            "without the library import the project type resolves"
+        );
+        assert_eq!(tier, DecisionTier::TypeHeritage);
+    }
+
+    #[test]
+    fn test_resolve_member_via_type_aliased_project_import_uses_declared_name() {
+        // `from .models import Repo as R` then `R.save()`.
+        let mut st = st_owned(&[
+            ("pkg/models.py", "Repo", NodeKind::Class, None),
+            ("pkg/base.py", "BaseRepo", NodeKind::Class, None),
+            ("pkg/base.py", "save", NodeKind::Method, Some("BaseRepo")),
+        ]);
+        st.build_supertypes([(0, Some(1))]);
+        let aliased = [import(".models", "Repo", Some("R"))];
+        let (out, tier) = resolve_dumped(&st, "pkg/app.py", "R.save", &aliased);
+        assert_eq!(out, vec![(2, HERITAGE)]);
+        assert_eq!(tier, DecisionTier::TypeHeritage);
+    }
+
+    #[test]
+    fn test_resolve_member_via_type_external_path_prefix_returns_unresolved() {
+        // `std::sync::Arc::new` names std's Arc, not a project `Arc`.
+        let st = st_owned(&[
+            ("src/arc.rs", "Arc", NodeKind::Struct, None),
+            ("src/arc_impl.rs", "new", NodeKind::Function, Some("Arc")),
+        ]);
+        let (out, tier) = resolve_dumped(&st, "src/app.rs", "std::sync::Arc::new", &[]);
+        assert!(out.is_empty(), "got {out:?}");
+        assert_eq!(tier, DecisionTier::Unresolved);
     }
 }

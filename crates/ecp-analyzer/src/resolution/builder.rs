@@ -2,9 +2,10 @@ use crate::fetch_shape::{
     consumer_keys, fetch_urls, format_reason, normalize_route_path, response_shapes,
 };
 use crate::framework_helpers::Span;
-use crate::resolution::index::{ResolveTarget, SymbolTable};
+use crate::resolution::index::{Language, ResolveTarget, SymbolTable};
 use crate::resolution::path_aliases::PathAliases;
 use crate::resolution::resolver::Resolver;
+use crate::rust::module_tree::RustWorkspaceModTree;
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::file_category::determine_category;
@@ -252,7 +253,7 @@ impl GraphBuilder {
         let _t_pass1 = std::time::Instant::now();
 
         let Pass1Registration {
-            symbol_table,
+            mut symbol_table,
             mut string_pool,
             mut nodes,
             files,
@@ -329,6 +330,30 @@ impl GraphBuilder {
                 function_metas.len()
             );
         }
+        // Build the Rust workspace module tree once, for the supertypes
+        // pre-pass and Pass 2. This is Tier 3.5: resolves `crate::a::b::fn`
+        // FQN calls to concrete files by walking the filesystem mod tree from
+        // each crate root. Gated on `repo_root` being set — test harnesses
+        // that don't set a repo root simply skip module-tree resolution.
+        let mod_tree: Option<RustWorkspaceModTree> =
+            self.repo_root.as_deref().map(RustWorkspaceModTree::build);
+        let mod_tree_ctx = mod_tree.as_ref().zip(self.repo_root.as_deref());
+
+        let _t_pass19 = std::time::Instant::now();
+        let declared_supertypes = pass1_9_supertypes(
+            &self.local_graphs,
+            &symbol_table,
+            &self.path_aliases,
+            mod_tree_ctx,
+        );
+        symbol_table.build_supertypes(declared_supertypes);
+        if prof {
+            eprintln!(
+                "prof build.pass19_supertypes: {:.3}s",
+                _t_pass19.elapsed().as_secs_f32()
+            );
+        }
+
         let _t_pass2 = std::time::Instant::now();
         // Pass 2: resolve imports and build edges (rayon-vs-serial dual
         // path; see `pass2_resolve_edges` for the pre-computation +
@@ -338,7 +363,7 @@ impl GraphBuilder {
             &symbol_table,
             &mut string_pool,
             &self.path_aliases,
-            self.repo_root.as_deref(),
+            mod_tree_ctx,
             self.resolver_dump_path.as_deref(),
             self.symbol_skip_set.as_ref(),
         );
@@ -1003,6 +1028,7 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
                 &raw_node.name,
                 current_node_idx,
                 raw_node.kind,
+                raw_node.owner_class.as_deref(),
             );
 
             let name_ref = string_pool.add(&raw_node.name);
@@ -1659,6 +1685,104 @@ impl LexicalFunctionIndex {
     }
 }
 
+/// Pass 1.9: declared supertypes, as `(type_id, base)` pairs in declared
+/// order (`None` = the base resolved to no project type), for
+/// [`SymbolTable::build_supertypes`].
+///
+/// Each base goes through the same `resolve_symbol(.., ResolveTarget::Type)`
+/// call Pass 2 makes for `Extends` / `Implements`, with the same path aliases
+/// and module tree, so a resolved supertype here is exactly a heritage edge
+/// Pass 2 emits. The resolver has no dump enabled, so the decision dump is
+/// unchanged.
+///
+/// The subject is the type the heritage belongs to:
+/// - a type-kind node: itself;
+/// - an `Impl` node: the type it names;
+/// - a Rust trait-impl method (`impl Trait for O`, `rust/queries.scm`): its
+///   `owner_class` `O`. Rust records heritage on the methods, not the struct.
+///
+/// The `Impl` and Rust subjects resolve as a type from the declaring file;
+/// an ambiguous or missing type drops that heritage rather than guess.
+fn pass1_9_supertypes(
+    local_graphs: &[LocalGraph],
+    symbol_table: &SymbolTable,
+    path_aliases: &PathAliases,
+    mod_tree_ctx: Option<(&RustWorkspaceModTree, &std::path::Path)>,
+) -> Vec<(u32, Option<u32>)> {
+    let mut next_start = 0u32;
+    let starts: Vec<u32> = local_graphs
+        .iter()
+        .map(|lg| {
+            let start = next_start;
+            next_start += lg.nodes.len() as u32;
+            start
+        })
+        .collect();
+
+    let per_graph: Vec<Vec<(u32, Option<u32>)>> = local_graphs
+        .par_iter()
+        .zip(starts.par_iter())
+        .map(|(lg, &start)| {
+            if lg.nodes.iter().all(|n| n.heritage.is_empty()) {
+                return Vec::new();
+            }
+            let mut resolver = Resolver::new(symbol_table).with_path_aliases(path_aliases.clone());
+            if let Some((mt, root)) = mod_tree_ctx {
+                resolver = resolver.with_mod_tree(mt, root.to_path_buf());
+            }
+            let resolve_type = |name: &str| {
+                resolver.resolve_symbol(&lg.file_path, name, &lg.imports, ResolveTarget::Type)
+            };
+            let is_rust = Language::from_path(&lg.file_path.to_string_lossy()) == Language::Rust;
+            // One `impl Trait for O` block repeats its heritage on every
+            // method; the cache keeps that to one resolve per name per file.
+            let mut bases_cache: FxHashMap<&str, Vec<u32>> = FxHashMap::default();
+            let mut subject_cache: FxHashMap<&str, Option<u32>> = FxHashMap::default();
+            let mut out = Vec::new();
+            for (offset, raw) in lg.nodes.iter().enumerate() {
+                if raw.heritage.is_empty() {
+                    continue;
+                }
+                let node_id = start + offset as u32;
+                let subject = if raw.kind.is_type() {
+                    // A UID-collision tombstone holds the id but no name.
+                    symbol_table.file_of(node_id).map(|_| node_id)
+                } else {
+                    let type_name = match raw.kind {
+                        NodeKind::Impl => Some(raw.name.as_str()),
+                        _ if is_rust && raw.kind.is_callable() => raw.owner_class.as_deref(),
+                        _ => None,
+                    };
+                    let Some(type_name) = type_name.filter(|n| !n.is_empty()) else {
+                        continue;
+                    };
+                    *subject_cache.entry(type_name).or_insert_with(|| {
+                        match resolve_type(type_name).as_slice() {
+                            [(id, _)] => Some(*id),
+                            _ => None,
+                        }
+                    })
+                };
+                let Some(subject) = subject else {
+                    continue;
+                };
+                for base in &raw.heritage {
+                    let resolved = bases_cache.entry(base.as_str()).or_insert_with(|| {
+                        resolve_type(base).into_iter().map(|(id, _)| id).collect()
+                    });
+                    if resolved.is_empty() {
+                        out.push((subject, None));
+                    } else {
+                        out.extend(resolved.iter().map(|&id| (subject, Some(id))));
+                    }
+                }
+            }
+            out
+        })
+        .collect();
+    per_graph.into_iter().flatten().collect()
+}
+
 /// Emit Pass-2 edges for a single `raw_node`'s heritage / calls / type
 /// annotation. Factored out so the serial dump path and the parallel
 /// hot path can share the same per-node logic.
@@ -1891,7 +2015,7 @@ fn pass2_resolve_edges(
     symbol_table: &SymbolTable,
     string_pool: &mut StringPool,
     path_aliases: &PathAliases,
-    repo_root: Option<&std::path::Path>,
+    mod_tree_ctx: Option<(&RustWorkspaceModTree, &std::path::Path)>,
     resolver_dump_path: Option<&std::path::Path>,
     symbol_skip_set: Option<&FxHashMap<String, FxHashSet<u64>>>,
 ) -> Pass2Output {
@@ -1937,21 +2061,13 @@ fn pass2_resolve_edges(
     let dump_enabled = resolver_dump_path.is_some();
     let path_aliases = path_aliases.clone();
 
-    // Build the Rust workspace module tree once before Pass 2. This is
-    // Tier 3.5: resolves `crate::a::b::fn` FQN calls to concrete files
-    // by walking the filesystem mod tree from each crate root. Gated on
-    // `repo_root` being set — test harnesses that don't set a repo root
-    // simply skip module-tree resolution.
-    let mod_tree_opt: Option<crate::rust::module_tree::RustWorkspaceModTree> =
-        repo_root.map(crate::rust::module_tree::RustWorkspaceModTree::build);
-
     // When dumping is enabled we run the serial path so a single resolver
     // owns the decision stream. When disabled (the production case) we
     // create a fresh `Resolver` *inside* each par_iter worker so each
     // thread owns its own state.
     let mut resolver_for_dump = if dump_enabled {
         let mut r = Resolver::new(symbol_table).with_path_aliases(path_aliases.clone());
-        if let (Some(mt), Some(root)) = (mod_tree_opt.as_ref(), repo_root) {
+        if let Some((mt, root)) = mod_tree_ctx {
             r = r.with_mod_tree(mt, root.to_path_buf());
         }
         r.enable_dump();
@@ -2076,8 +2192,6 @@ fn pass2_resolve_edges(
         //
         // The mod_tree borrow is `&RustWorkspaceModTree` (read-only,
         // `Sync`), so sharing it across rayon workers is safe.
-        let mod_tree_ref = mod_tree_opt.as_ref();
-        let workspace_root_ref = repo_root;
         // Collect (local_edges, local_pending) per graph, then stitch.
         let per_graph: Vec<PerGraphPass2> = local_graphs
             .par_iter()
@@ -2085,7 +2199,7 @@ fn pass2_resolve_edges(
             .map(|(graph_idx, local_graph)| {
                 let mut resolver =
                     Resolver::new(symbol_table_ref).with_path_aliases(path_aliases.clone());
-                if let (Some(mt), Some(root)) = (mod_tree_ref, workspace_root_ref) {
+                if let Some((mt, root)) = mod_tree_ctx {
                     resolver = resolver.with_mod_tree(mt, root.to_path_buf());
                 }
                 let start_idx = start_indices[graph_idx];
@@ -2479,7 +2593,10 @@ mod tests {
                 | DecisionTier::HeritageScoped
                 | DecisionTier::Global
                 | DecisionTier::AmbiguousGlobal
-                | DecisionTier::ModuleTree => {
+                | DecisionTier::ModuleTree
+                | DecisionTier::TypeOwned
+                | DecisionTier::TypeHeritage
+                | DecisionTier::TypeCandidates => {
                     panic!(
                         "fixture should only produce ImportScoped/Unresolved, got {:?}",
                         original.tier
@@ -2557,6 +2674,214 @@ mod tests {
             out.collision_blind_spots.len(),
             1,
             "the collision is reported, not silently swallowed"
+        );
+    }
+
+    fn raw_decl(
+        name: &str,
+        kind: NodeKind,
+        start_row: u32,
+        heritage: &[&str],
+        owner: Option<&str>,
+    ) -> RawNode {
+        RawNode {
+            kind,
+            heritage: heritage.iter().map(|h| h.to_string()).collect(),
+            owner_class: owner.map(str::to_string),
+            ..raw_fn(name, start_row)
+        }
+    }
+
+    fn graph_of(path: &str, nodes: Vec<RawNode>) -> LocalGraph {
+        LocalGraph {
+            file_path: path.into(),
+            content_hash: [0; 8],
+            nodes,
+            ..Default::default()
+        }
+    }
+
+    /// Pass 1 plus the supertypes pre-pass. `graphs` must already be sorted
+    /// by path, as `build()` sorts them before Pass 1.
+    fn table_with_supertypes(graphs: &[LocalGraph]) -> SymbolTable {
+        let mut st = pass1_register_nodes(graphs).symbol_table;
+        let declared = pass1_9_supertypes(graphs, &st, &PathAliases::default(), None);
+        st.build_supertypes(declared);
+        st
+    }
+
+    #[test]
+    fn test_pass1_register_nodes_owner_class_feeds_owner_index() {
+        let g = graph_of(
+            "db.py",
+            vec![
+                raw_decl("Tx", NodeKind::Class, 0, &[], None),
+                raw_decl("execute", NodeKind::Method, 1, &[], Some("Tx")),
+                raw_decl("BaseDBPool", NodeKind::Class, 10, &[], None),
+                raw_decl("execute", NodeKind::Method, 11, &[], Some("BaseDBPool")),
+                raw_decl("helper", NodeKind::Function, 20, &[], None),
+            ],
+        );
+        let st = pass1_register_nodes(std::slice::from_ref(&g)).symbol_table;
+        let call = ResolveTarget::Callable;
+        assert_eq!(st.owned_in_file("db.py", "execute", "Tx", call), vec![1]);
+        assert_eq!(
+            st.owned_in_file("db.py", "execute", "BaseDBPool", call),
+            vec![3]
+        );
+        assert!(st.owned_in_file("db.py", "helper", "Tx", call).is_empty());
+    }
+
+    /// Ids: base.py AnimalBase=0; child.py Puppy=1, Kennel=2, bark=3,
+    /// Crate=4; mixin.py WagMixin=5.
+    fn python_heritage_graphs() -> Vec<LocalGraph> {
+        vec![
+            graph_of(
+                "base.py",
+                vec![raw_decl("AnimalBase", NodeKind::Class, 0, &[], None)],
+            ),
+            graph_of(
+                "child.py",
+                vec![
+                    raw_decl(
+                        "Puppy",
+                        NodeKind::Class,
+                        0,
+                        &["ExternalMixin", "AnimalBase", "WagMixin"],
+                        None,
+                    ),
+                    raw_decl(
+                        "Kennel",
+                        NodeKind::Class,
+                        10,
+                        &["Puppy", "AnimalBase"],
+                        None,
+                    ),
+                    // A non-Rust method carrying heritage is not attributed
+                    // to its owner.
+                    raw_decl("bark", NodeKind::Method, 11, &["WagMixin"], Some("Kennel")),
+                    raw_decl("Crate", NodeKind::Class, 20, &["AnimalBase[int]"], None),
+                ],
+            ),
+            graph_of(
+                "mixin.py",
+                vec![raw_decl("WagMixin", NodeKind::Class, 0, &[], None)],
+            ),
+        ]
+    }
+
+    #[test]
+    fn test_pass1_9_supertypes_external_base_first_keeps_declared_order_and_position() {
+        let st = table_with_supertypes(&python_heritage_graphs());
+        let puppy = st.supertypes(1).expect("Puppy declares heritage");
+        assert_eq!(
+            &*puppy.bases,
+            &[0, 5],
+            "declared order, external base skipped"
+        );
+        assert_eq!(
+            puppy.first_unresolved,
+            Some(0),
+            "the external mixin is declared before every project base"
+        );
+        assert_eq!(&*st.supertypes(2).unwrap().bases, &[1, 0]);
+        assert_eq!(st.ancestors(2), vec![1, 0, 5], "Kennel -> Puppy -> bases");
+        assert!(st.supertypes(0).is_none(), "no heritage, no entry");
+        assert!(
+            st.supertypes(3).is_none(),
+            "a Python method is not a subject"
+        );
+    }
+
+    /// A supertype is exactly a heritage edge Pass 2 emits from the same
+    /// type node: the pre-pass reuses Pass 2's resolution, so neither can
+    /// know a base the other does not (generic `AnimalBase[int]` included).
+    #[test]
+    fn test_pass1_9_supertypes_match_pass2_heritage_edges_from_type_nodes() {
+        let graphs = python_heritage_graphs();
+        let st = table_with_supertypes(&graphs);
+        let mut from_table: Vec<(u32, u32)> = (0..6u32)
+            .flat_map(|t| {
+                st.supertypes(t)
+                    .map(|s| s.bases.iter().map(|&b| (t, b)).collect::<Vec<_>>())
+                    .unwrap_or_default()
+            })
+            .collect();
+        from_table.sort_unstable();
+
+        let mut builder = GraphBuilder::new();
+        for g in graphs {
+            builder.add_graph(g);
+        }
+        let graph = builder.build();
+        let type_ids = [0u32, 1, 2, 4, 5];
+        let mut from_edges: Vec<(u32, u32)> = graph
+            .edges
+            .iter()
+            .filter(|e| matches!(e.rel_type, RelType::Extends | RelType::Implements))
+            .filter(|e| type_ids.contains(&e.source))
+            .map(|e| (e.source, e.target))
+            .collect();
+        from_edges.sort_unstable();
+        from_edges.dedup();
+
+        assert_eq!(from_table, from_edges);
+    }
+
+    #[test]
+    fn test_pass1_9_supertypes_rust_trait_impl_methods_attribute_to_owner_struct() {
+        let g = graph_of(
+            "src/lib.rs",
+            vec![
+                raw_decl("Dog", NodeKind::Struct, 0, &[], None),
+                raw_decl("Speak", NodeKind::Trait, 2, &[], None),
+                raw_decl("Walk", NodeKind::Trait, 4, &[], None),
+                raw_decl("speak", NodeKind::Method, 6, &["Speak"], Some("Dog")),
+                raw_decl("shout", NodeKind::Method, 8, &["Speak"], Some("Dog")),
+                raw_decl("fmt", NodeKind::Method, 10, &["Display"], Some("Dog")),
+                raw_decl("Dog", NodeKind::Impl, 12, &["Walk"], Some("Walk")),
+                raw_decl("helper", NodeKind::Function, 20, &["Speak"], None),
+            ],
+        );
+        let st = table_with_supertypes(std::slice::from_ref(&g));
+        let dog = st
+            .supertypes(0)
+            .expect("Dog gains the heritage of its impl blocks");
+        assert_eq!(&*dog.bases, &[1, 2], "one entry per trait, in source order");
+        assert_eq!(
+            dog.first_unresolved,
+            Some(1),
+            "the external Display impl sits after Speak"
+        );
+        for not_a_type in [3, 4, 5, 6, 7] {
+            assert!(st.supertypes(not_a_type).is_none());
+        }
+    }
+
+    #[test]
+    fn test_pass1_9_supertypes_uid_collision_tombstone_skipped() {
+        // Ids: bases.py A=0, B=1; dup.py Dup=2, Dup tombstone=3.
+        let graphs = vec![
+            graph_of(
+                "bases.py",
+                vec![
+                    raw_decl("A", NodeKind::Class, 0, &[], None),
+                    raw_decl("B", NodeKind::Class, 5, &[], None),
+                ],
+            ),
+            graph_of(
+                "dup.py",
+                vec![
+                    raw_decl("Dup", NodeKind::Class, 0, &["A"], None),
+                    raw_decl("Dup", NodeKind::Class, 10, &["B"], None),
+                ],
+            ),
+        ];
+        let st = table_with_supertypes(&graphs);
+        assert_eq!(&*st.supertypes(2).unwrap().bases, &[0]);
+        assert!(
+            st.supertypes(3).is_none(),
+            "a tombstone is unreachable by name and gets no supertypes"
         );
     }
 

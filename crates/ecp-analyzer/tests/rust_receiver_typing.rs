@@ -278,3 +278,104 @@ fn test_self_import_from_custom_lib_path_root_falls_back_to_own_directory() {
         "with no src/api/child.rs, `self::child` falls back to src/child.rs"
     );
 }
+
+const DECOY_RS: &str =
+    "pub struct Decoy;\n\nimpl Decoy {\n    pub fn greet(&self) -> u8 {\n        2\n    }\n}\n";
+
+const APP_RS: &str =
+    "use crate::model::Derived;\n\nfn run(d: &Derived) -> u8 {\n    d.greet()\n}\n";
+
+/// Rust has no class inheritance; its inherited member is a trait default
+/// method reached through `impl Greeter for Derived`. The trait-impl method
+/// carries the heritage (attributed to `Derived` by the supertypes pre-pass),
+/// and the trait-body method's owner is the trait. A decoy `greet` keeps the
+/// bare name ambiguous.
+#[test]
+fn test_typed_receiver_trait_default_method_resolves_to_trait() {
+    let greeter = "pub trait Greeter {\n    fn greet(&self) -> u8 {\n        1\n    }\n}\n";
+    let model = "use crate::greeter::Greeter;\n\npub struct Derived;\n\nimpl Greeter for Derived {\n    fn id(&self) -> u8 {\n        0\n    }\n}\n";
+    let g = build(&[
+        ("src/greeter.rs", greeter),
+        ("src/model.rs", model),
+        ("src/decoy.rs", DECOY_RS),
+        ("src/app.rs", APP_RS),
+    ]);
+    assert_eq!(
+        callee_files(&g, "run", "greet"),
+        vec!["src/greeter.rs".to_string()],
+        "`Derived.greet` is Greeter's default method, once"
+    );
+}
+
+/// An inherent method in an `impl` block in another file of the crate: the
+/// type's file declares no `greet`, so only the owner index finds it.
+#[test]
+fn test_typed_receiver_method_in_sibling_impl_file_resolves_to_impl() {
+    let model = "pub struct Derived;\n";
+    let model_impl = "use crate::model::Derived;\n\nimpl Derived {\n    pub fn greet(&self) -> u8 {\n        1\n    }\n}\n";
+    let g = build(&[
+        ("src/model.rs", model),
+        ("src/model_impl.rs", model_impl),
+        ("src/decoy.rs", DECOY_RS),
+        ("src/app.rs", APP_RS),
+    ]);
+    assert_eq!(
+        callee_files(&g, "run", "greet"),
+        vec!["src/model_impl.rs".to_string()]
+    );
+}
+
+const MODEL_IMPL_RS: &str =
+    "pub struct Derived;\n\nimpl Derived {\n    pub fn greet(&self) -> u8 {\n        1\n    }\n}\n";
+
+/// A Rust type name reaches a file only through a `use` or its own
+/// definition. With neither on record (here the parser drops the nested
+/// `io::Derived` of an external crate), the project type of that name is a
+/// guess: tokio's `use tokio_test::{io::Builder}` bound to its own Builder.
+/// A second project `Derived` keeps the earlier tiers ambiguous, as tokio's
+/// several `Builder` types do.
+#[test]
+fn test_typed_receiver_with_unrecorded_type_source_gets_no_edge() {
+    let app =
+        "use ext::{assert_ok, io::Derived};\n\nfn run(d: &Derived) -> u8 {\n    d.greet()\n}\n";
+    let g = build(&[
+        ("src/model.rs", MODEL_IMPL_RS),
+        ("src/other.rs", "pub struct Derived;\n"),
+        ("src/decoy.rs", DECOY_RS),
+        ("src/app.rs", app),
+    ]);
+    assert!(callee_files(&g, "run", "greet").is_empty());
+}
+
+/// A generic parameter is not a project type, even when a project type or
+/// a blanket impl's self type shares its one-letter name.
+#[test]
+fn test_typed_receiver_generic_parameter_gets_no_edge() {
+    let wait = "pub trait Wait {\n    fn id(&self) -> u32;\n}\n\nimpl<T: Wait> Wait for &mut T {\n    fn id(&self) -> u32 {\n        0\n    }\n}\n";
+    let alias = "pub type T = u8;\n";
+    let app = "fn run<T: crate::wait::Wait>(future: T) -> u32 {\n    future.id()\n}\n";
+    let g = build(&[
+        ("src/wait.rs", wait),
+        ("src/alias.rs", alias),
+        ("src/app.rs", app),
+    ]);
+    assert!(callee_files(&g, "run", "id").is_empty());
+}
+
+/// `use crate::model::Derived` through a module that re-exports it
+/// (`pub use`): the import is on record and in the project, so the type's
+/// global candidates still apply.
+#[test]
+fn test_typed_receiver_through_reexporting_module_import_resolves() {
+    let app = "use crate::model::Derived;\n\nfn run(d: &Derived) -> u8 {\n    d.greet()\n}\n";
+    let g = build(&[
+        ("src/model/mod.rs", "mod inner;\npub use inner::Derived;\n"),
+        ("src/model/inner.rs", MODEL_IMPL_RS),
+        ("src/decoy.rs", DECOY_RS),
+        ("src/app.rs", app),
+    ]);
+    assert_eq!(
+        callee_files(&g, "run", "greet"),
+        vec!["src/model/inner.rs".to_string()]
+    );
+}
