@@ -995,6 +995,70 @@ mod tests {
     }
 
     #[test]
+    fn lib_override_with_trailing_comments_resolves() {
+        let dir = make_tree(&[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"my-app\" # pkg\n\n[lib] # target\nname = \"app_core\" # code name\npath = \"src/core.rs\" # entry\n",
+            ),
+            ("src/core.rs", "pub mod foo;\n"),
+            ("src/foo.rs", "pub fn bar() {}\n"),
+        ]);
+        let tree = RustWorkspaceModTree::build(dir.path());
+        let r = tree
+            .resolve_fqn("app_core::foo::bar", "src/core.rs", dir.path())
+            .expect("commented [lib] values resolve");
+        assert!(r.file.ends_with("foo.rs"), "got {}", r.file);
+    }
+
+    /// Code names `alpha` as `shared` (its lib name); a package that happens
+    /// to be called `shared` must not take that key.
+    #[test]
+    fn lib_name_wins_over_another_crates_package_name() {
+        for members in [
+            "[\"crates/a\", \"crates/b\"]",
+            "[\"crates/b\", \"crates/a\"]",
+        ] {
+            let dir = make_tree(&[
+                ("Cargo.toml", &format!("[workspace]\nmembers = {members}\n")),
+                (
+                    "crates/a/Cargo.toml",
+                    "[package]\nname = \"alpha\"\n\n[lib]\nname = \"shared\"\n",
+                ),
+                ("crates/a/src/lib.rs", "pub mod registry;\n"),
+                ("crates/a/src/registry.rs", "pub fn lookup() {}\n"),
+                (
+                    "crates/b/Cargo.toml",
+                    "[package]\nname = \"shared\"\n\n[lib]\nname = \"backend\"\n",
+                ),
+                ("crates/b/src/lib.rs", "pub mod registry;\n"),
+                ("crates/b/src/registry.rs", "pub fn lookup() {}\n"),
+            ]);
+            let tree = RustWorkspaceModTree::build(dir.path());
+            let r = tree
+                .resolve_fqn(
+                    "shared::registry::lookup",
+                    "crates/a/src/lib.rs",
+                    dir.path(),
+                )
+                .expect("resolves");
+            assert!(
+                r.file.ends_with("crates/a/src/registry.rs"),
+                "{members}: got {}",
+                r.file
+            );
+            let own = tree
+                .resolve_fqn("crate::registry::lookup", "crates/b/src/lib.rs", dir.path())
+                .expect("crate:: in b resolves");
+            assert!(
+                own.file.ends_with("crates/b/src/registry.rs"),
+                "{members}: got {}",
+                own.file
+            );
+        }
+    }
+
+    #[test]
     fn lib_path_override_is_the_crate_entry() {
         let dir = make_tree(&[
             (

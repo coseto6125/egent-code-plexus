@@ -4,6 +4,7 @@
 //! to the global tier, which refuses common names or guesses a same-named
 //! project item.
 
+use ecp_analyzer::python::parser::PythonProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::rust::parser::RustProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
@@ -274,19 +275,23 @@ fn test_module_import_qualifier_missing_member_does_not_fall_back_to_parent() {
 /// (built from Cargo.toml) takes part. Every target file is returned.
 fn workspace_go_targets(files: &[(&str, &str)], callee: &str) -> Vec<String> {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let provider = RustProvider::new().expect("RustProvider::new");
+    let rust = RustProvider::new().expect("RustProvider::new");
+    let python = PythonProvider::new().expect("PythonProvider::new");
     let mut builder = GraphBuilder::new().with_repo_root(tmp.path().to_path_buf());
     for (rel, src) in files {
         let path = tmp.path().join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, src).unwrap();
-        if rel.ends_with(".rs") {
-            builder.add_graph(
-                provider
-                    .parse_file(Path::new(rel), src.as_bytes())
-                    .expect("parse_file"),
-            );
-        }
+        let provider: &dyn LanguageProvider = match Path::new(rel).extension() {
+            Some(ext) if ext == "rs" => &rust,
+            Some(ext) if ext == "py" => &python,
+            _ => continue,
+        };
+        builder.add_graph(
+            provider
+                .parse_file(Path::new(rel), src.as_bytes())
+                .expect("parse_file"),
+        );
     }
     let graph = builder.build();
     let pool = graph.string_pool.as_slice();
@@ -357,5 +362,146 @@ fn test_cross_crate_module_import_qualifier_resolves() {
     assert_eq!(
         workspace_go_targets(&files, "lookup"),
         vec!["crates/other/src/registry.rs".to_string()]
+    );
+}
+
+fn two_crates(
+    app_lib: &str,
+    other_files: &[(&'static str, &'static str)],
+) -> Vec<(String, String)> {
+    let mut files: Vec<(String, String)> = vec![
+        (
+            "Cargo.toml".into(),
+            "[workspace]\nmembers = [\"crates/app\", \"crates/other\"]\n".into(),
+        ),
+        (
+            "crates/app/Cargo.toml".into(),
+            "[package]\nname = \"app\"\n".into(),
+        ),
+        ("crates/app/src/lib.rs".into(), app_lib.into()),
+        (
+            "crates/other/Cargo.toml".into(),
+            "[package]\nname = \"other\"\n".into(),
+        ),
+    ];
+    files.extend(
+        other_files
+            .iter()
+            .map(|(p, s)| (p.to_string(), s.to_string())),
+    );
+    files
+}
+
+fn targets_of(files: &[(String, String)], callee: &str) -> Vec<String> {
+    let borrowed: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, s)| (p.as_str(), s.as_str()))
+        .collect();
+    workspace_go_targets(&borrowed, callee)
+}
+
+/// `use other::Widget; Widget::new()` imports a type, not a module: the
+/// crate-name module branch must leave it to the tiers that resolve it.
+#[test]
+fn test_cross_crate_type_import_qualifier_still_resolves() {
+    let files = two_crates(
+        "use other::Widget;\npub fn go() { Widget::new(); }\n",
+        &[(
+            "crates/other/src/lib.rs",
+            "pub struct Widget;\nimpl Widget { pub fn new() -> Self { Widget } }\n",
+        )],
+    );
+    assert_eq!(
+        targets_of(&files, "new"),
+        vec!["crates/other/src/lib.rs".to_string()]
+    );
+}
+
+/// A renamed re-export inside the imported module still names that module;
+/// the caller crate's own `registry.rs` is a decoy.
+#[test]
+fn test_module_import_through_renamed_reexport_resolves_to_the_original() {
+    let mut files = two_crates(
+        "pub mod registry;\nuse other::registry;\npub fn go() { registry::lookup(); }\n",
+        &[
+            ("crates/other/src/lib.rs", "pub mod registry;\n"),
+            (
+                "crates/other/src/registry.rs",
+                "mod imp;\npub use imp::lookup_impl as lookup;\n",
+            ),
+            (
+                "crates/other/src/registry/imp.rs",
+                "pub fn lookup_impl() {}\n",
+            ),
+        ],
+    );
+    files.push((
+        "crates/app/src/registry.rs".into(),
+        "pub fn lookup() {}\n".into(),
+    ));
+    assert!(
+        targets_of(&files, "lookup").is_empty(),
+        "the decoy must not bind"
+    );
+    assert_eq!(
+        targets_of(&files, "lookup_impl"),
+        vec!["crates/other/src/registry/imp.rs".to_string()]
+    );
+}
+
+/// `mod utils; use utils::fs;` names the caller's own module even when a
+/// workspace crate is also called `utils`.
+#[test]
+fn test_local_module_shadows_a_same_named_workspace_crate() {
+    let files: Vec<(String, String)> = [
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/app\", \"crates/utils\"]\n",
+        ),
+        ("crates/app/Cargo.toml", "[package]\nname = \"app\"\n"),
+        (
+            "crates/app/src/lib.rs",
+            "mod utils;\nuse utils::fs;\npub fn go() { fs::read_all(); }\n",
+        ),
+        ("crates/app/src/utils.rs", "pub mod fs;\n"),
+        ("crates/app/src/utils/fs.rs", "pub fn read_all() {}\n"),
+        ("crates/utils/Cargo.toml", "[package]\nname = \"utils\"\n"),
+        ("crates/utils/src/lib.rs", "pub mod fs;\n"),
+        ("crates/utils/src/fs.rs", "pub fn read_all() {}\n"),
+    ]
+    .iter()
+    .map(|(p, s)| (p.to_string(), s.to_string()))
+    .collect();
+    assert!(
+        !targets_of(&files, "read_all").contains(&"crates/utils/src/fs.rs".to_string()),
+        "the workspace crate `utils` is not what `mod utils;` names"
+    );
+}
+
+/// A PyO3-style repo: the Rust lib is named like the Python package. A Python
+/// call through `from mylib import utils` must not bind into the Rust crate.
+#[test]
+fn test_python_import_does_not_bind_into_a_same_named_rust_crate() {
+    let files: Vec<(String, String)> = [
+        (
+            "Cargo.toml",
+            "[package]\nname = \"mylib-rs\"\n\n[lib]\nname = \"mylib\"\n",
+        ),
+        ("src/lib.rs", "mod utils;\n"),
+        ("src/utils.rs", "pub fn helper() {}\n"),
+        ("python/mylib/__init__.py", ""),
+        ("python/mylib/utils.py", "def helper():\n    pass\n"),
+        (
+            "tests/test_x.py",
+            "from mylib import utils\n\ndef go():\n    utils.helper()\n",
+        ),
+    ]
+    .iter()
+    .map(|(p, s)| (p.to_string(), s.to_string()))
+    .collect();
+    assert!(
+        !targets_of(&files, "helper").contains(&"src/utils.rs".to_string()),
+        "a Python call must not reach Rust: {:?}",
+        targets_of(&files, "helper")
     );
 }
