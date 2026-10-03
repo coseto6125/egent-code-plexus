@@ -144,6 +144,20 @@ fn test_crate_import_from_repo_root_crate_resolves_to_imported_module() {
     );
 }
 
+/// `use crate::X` names an item of the crate root module itself: `src/lib.rs`
+/// for a library, `src/main.rs` for a binary.
+#[test]
+fn test_crate_root_item_import_resolves_to_root_file() {
+    for root_file in ["src/lib.rs", "src/main.rs"] {
+        let g = build(&[
+            (root_file, "mod app;\nmod other;\npub fn emit() {}\n"),
+            ("src/other.rs", "pub fn emit() {}\n"),
+            ("src/app.rs", "use crate::emit;\npub fn run() { emit(); }\n"),
+        ]);
+        assert_eq!(callee_files(&g, "run", "emit"), vec![root_file.to_string()]);
+    }
+}
+
 /// A Rust module path names a Rust file: a same-stem TypeScript file next
 /// to the module must not win the probe.
 #[test]

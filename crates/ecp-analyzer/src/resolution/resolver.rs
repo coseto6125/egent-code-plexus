@@ -856,13 +856,16 @@ fn for_each_specifier_candidate<F>(
 }
 
 /// [`probe_with_suffixes`] for a Rust module path, which only a Rust file
-/// can declare: `base.rs`, then `base/mod.rs`. A same-stem `base.ts` beside
-/// the module is another language's file, not this module.
+/// can declare: `base.rs`, then the directory module files. A same-stem
+/// `base.ts` beside the module is another language's file, not this module.
+/// `lib.rs` / `main.rs` cover `crate` itself (`use crate::X` maps to `src`).
 fn probe_rust_module<F>(base: &str, visit: &mut F) -> bool
 where
     F: FnMut(&str) -> bool,
 {
-    visit(&format!("{base}.rs")) && visit(&format!("{base}/mod.rs"))
+    [".rs", "/mod.rs", "/lib.rs", "/main.rs"]
+        .iter()
+        .all(|suffix| visit(&format!("{base}{suffix}")))
 }
 
 /// `self::rest` from an ordinary module file, anchored at the file's own
