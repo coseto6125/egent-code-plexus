@@ -2363,8 +2363,29 @@ mod tests {
 
     #[test]
     fn tier2_5_handles_multi_segment_qualifier_via_last_segment() {
-        // `std::vec::Vec::new` — qualifier folds to last segment `Vec`,
-        // which resolves uniquely to `vec.rs`, where `new` lives.
+        // `ns::sub::Vec::make` — qualifier folds to last segment `Vec`,
+        // which resolves uniquely to `vec.cpp`, where `make` lives.
+        let st = st_with(&[
+            ("vec.cpp", "Vec", NodeKind::Class),
+            ("vec.cpp", "make", NodeKind::Method),
+        ]);
+        let r = Resolver::new(&st);
+        let out = r.resolve_symbol(
+            &PathBuf::from("caller.cpp"),
+            "ns::sub::Vec::make",
+            &[],
+            ResolveTarget::Callable,
+        );
+        assert_eq!(
+            out,
+            vec![(1, ResolutionTier::QualifierScoped.base_confidence())]
+        );
+    }
+
+    #[test]
+    fn tier2_5_rust_external_module_path_never_binds_a_project_type() {
+        // Rust spells the module: `std::vec::Vec` is std's, not the
+        // project's only `Vec` (FU-2026-10-03-96ccd9c59f1e).
         let st = st_with(&[
             ("vec.rs", "Vec", NodeKind::Class),
             ("vec.rs", "new", NodeKind::Method),
@@ -2376,10 +2397,7 @@ mod tests {
             &[],
             ResolveTarget::Callable,
         );
-        assert_eq!(
-            out,
-            vec![(1, ResolutionTier::QualifierScoped.base_confidence())]
-        );
+        assert_eq!(out, vec![]);
     }
 
     #[test]
