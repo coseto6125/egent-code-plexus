@@ -930,6 +930,71 @@ mod tests {
         );
     }
 
+    // ── `[lib] name` / `[lib] path` overrides ──────────────────────────────
+
+    /// The bin and every dependent name a crate by its lib target, so a
+    /// `[lib] name` that differs from the package name is the only spelling
+    /// real code uses (`egent-code-plexus` is imported as `ecp_cli`).
+    #[test]
+    fn lib_name_override_resolves_as_crate_name() {
+        let dir = make_tree(&[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"my-app\"\n\n[lib]\nname = \"app_core\"\npath = \"src/lib.rs\"\n",
+            ),
+            ("src/lib.rs", "pub mod foo;\n"),
+            ("src/foo.rs", "pub fn bar() {}\n"),
+            ("src/main.rs", "fn main() { app_core::foo::bar(); }\n"),
+        ]);
+        let tree = RustWorkspaceModTree::build(dir.path());
+        let r = tree
+            .resolve_fqn("app_core::foo::bar", "src/main.rs", dir.path())
+            .expect("lib name resolves");
+        assert!(r.file.ends_with("foo.rs"), "got {}", r.file);
+        assert_eq!(r.item_name, "bar");
+    }
+
+    #[test]
+    fn lib_name_override_resolves_in_workspace_member() {
+        let dir = make_tree(&[
+            ("Cargo.toml", "[workspace]\nmembers = [\"crates/app\"]\n"),
+            (
+                "crates/app/Cargo.toml",
+                "[package]\nname = \"my-app\"\n\n[[bin]]\nname = \"app\"\npath = \"src/main.rs\"\n\n[lib]\nname = \"app_core\"\n",
+            ),
+            ("crates/app/src/lib.rs", "pub mod foo;\n"),
+            ("crates/app/src/foo.rs", "pub fn bar() {}\n"),
+            ("crates/app/src/main.rs", "fn main() {}\n"),
+        ]);
+        let tree = RustWorkspaceModTree::build(dir.path());
+        let r = tree
+            .resolve_fqn("app_core::foo::bar", "crates/app/src/main.rs", dir.path())
+            .expect("lib name resolves in a member crate");
+        assert!(r.file.ends_with("foo.rs"), "got {}", r.file);
+        assert!(
+            tree.resolve_fqn("my_app::foo::bar", "crates/app/src/main.rs", dir.path())
+                .is_some(),
+            "the package-name spelling keeps resolving"
+        );
+    }
+
+    #[test]
+    fn lib_path_override_is_the_crate_entry() {
+        let dir = make_tree(&[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"mycrate\"\n\n[lib]\npath = \"src/core.rs\"\n",
+            ),
+            ("src/core.rs", "pub mod foo;\n"),
+            ("src/foo.rs", "pub fn bar() {}\n"),
+        ]);
+        let tree = RustWorkspaceModTree::build(dir.path());
+        let r = tree
+            .resolve_fqn("crate::foo::bar", "src/core.rs", dir.path())
+            .expect("lib path is the module-tree root");
+        assert!(r.file.ends_with("foo.rs"), "got {}", r.file);
+    }
+
     // ── 2-segment `mod::fn` (regression for PR #75's case) ─────────────────
 
     #[test]
