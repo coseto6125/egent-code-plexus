@@ -398,7 +398,12 @@ pub fn remove_self_binary_at(exe: &Path) -> Result<SelfDeleteOutcome, EcpError> 
         use std::os::windows::process::CommandExt;
         // DETACHED_PROCESS | CREATE_NO_WINDOW: survive parent exit, no console.
         const FLAGS: u32 = 0x0000_0008 | 0x0800_0000;
+        // Null stdio: an inherited handle keeps the caller's pipe open for the
+        // whole wait, so a caller reading our output blocks until the delete.
         std::process::Command::new("cmd")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .args([
                 "/c",
                 &format!(
