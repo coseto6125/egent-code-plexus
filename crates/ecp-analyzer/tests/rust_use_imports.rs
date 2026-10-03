@@ -269,3 +269,93 @@ fn test_module_import_qualifier_missing_member_does_not_fall_back_to_parent() {
         .count();
     assert_eq!(parent_hits, 0);
 }
+
+/// Calls edges from `go` in a workspace written to disk, so the module tree
+/// (built from Cargo.toml) takes part. Every target file is returned.
+fn workspace_go_targets(files: &[(&str, &str)], callee: &str) -> Vec<String> {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let provider = RustProvider::new().expect("RustProvider::new");
+    let mut builder = GraphBuilder::new().with_repo_root(tmp.path().to_path_buf());
+    for (rel, src) in files {
+        let path = tmp.path().join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, src).unwrap();
+        if rel.ends_with(".rs") {
+            builder.add_graph(
+                provider
+                    .parse_file(Path::new(rel), src.as_bytes())
+                    .expect("parse_file"),
+            );
+        }
+    }
+    let graph = builder.build();
+    let pool = graph.string_pool.as_slice();
+    let mut out: Vec<String> = graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::Calls)
+        .filter(|e| graph.nodes[e.source as usize].name.resolve(pool) == "go")
+        .filter(|e| graph.nodes[e.target as usize].name.resolve(pool) == callee)
+        .map(|e| {
+            let file = graph.nodes[e.target as usize].file_idx as usize;
+            graph.files[file].path.resolve(pool).to_string()
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// A bin imports its own lib by the `[lib] name` (`egent-code-plexus` is
+/// written `ecp_cli`). The test file sharing the module's stem is a decoy a
+/// stem-based guess would bind to.
+#[test]
+fn test_lib_name_import_qualifier_resolves_through_the_module_tree() {
+    let manifest = (
+        "crates/app/Cargo.toml",
+        "[package]\nname = \"my-app\"\n\n[lib]\nname = \"app_core\"\npath = \"src/lib.rs\"\n",
+    );
+    let common = [
+        ("Cargo.toml", "[workspace]\nmembers = [\"crates/app\"]\n"),
+        manifest,
+        ("crates/app/src/lib.rs", "pub mod auto;\n"),
+        ("crates/app/src/auto.rs", "pub fn ensure() {}\n"),
+        ("crates/app/tests/auto.rs", "pub fn ensure() {}\n"),
+    ];
+    for main in [
+        "use app_core::{auto};\nfn go() { auto::ensure(); }\n",
+        "use app_core::auto;\nfn go() { auto::ensure(); }\n",
+        "fn go() { app_core::auto::ensure(); }\n",
+    ] {
+        let mut files = common.to_vec();
+        files.push(("crates/app/src/main.rs", main));
+        assert_eq!(
+            workspace_go_targets(&files, "ensure"),
+            vec!["crates/app/src/auto.rs".to_string()],
+            "{main}"
+        );
+    }
+}
+
+/// The same expansion for a dependency crate named by its package name.
+#[test]
+fn test_cross_crate_module_import_qualifier_resolves() {
+    let files = [
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/app\", \"crates/other\"]\n",
+        ),
+        ("crates/app/Cargo.toml", "[package]\nname = \"app\"\n"),
+        (
+            "crates/app/src/lib.rs",
+            "use other::registry;\npub fn go() { registry::lookup(); }\n",
+        ),
+        ("crates/other/Cargo.toml", "[package]\nname = \"other\"\n"),
+        ("crates/other/src/lib.rs", "pub mod registry;\n"),
+        ("crates/other/src/registry.rs", "pub fn lookup() {}\n"),
+        ("crates/app/src/registry.rs", "pub fn lookup() {}\n"),
+    ];
+    assert_eq!(
+        workspace_go_targets(&files, "lookup"),
+        vec!["crates/other/src/registry.rs".to_string()]
+    );
+}
