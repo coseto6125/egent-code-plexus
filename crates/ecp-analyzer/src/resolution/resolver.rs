@@ -810,7 +810,36 @@ fn for_each_specifier_candidate<F>(
 
     let Some(base) = base else { return };
 
-    probe_with_suffixes(&base, &mut visit);
+    if probe_with_suffixes(&base, &mut visit) {
+        if let Some(fallback) = rust_self_fallback_base(source_file, specifier) {
+            let fallback = fallback.to_string_lossy().replace('\\', "/");
+            probe_with_suffixes(fallback.trim_start_matches("./"), &mut visit);
+        }
+    }
+}
+
+/// `self::rest` from an ordinary module file, anchored at the file's own
+/// directory: where a crate root keeps its children. A root named by a
+/// Cargo `[lib] path` / `[[bin]] path` (e.g. `src/api.rs`) is not
+/// recognisable from its file name, so it is probed only after the module's
+/// own child directory came up empty.
+fn rust_self_fallback_base(
+    source_file: &std::path::Path,
+    specifier: &str,
+) -> Option<std::path::PathBuf> {
+    let rest = specifier.strip_prefix("self::")?;
+    let is_rs = source_file
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("rs"));
+    if !is_rs || is_rust_module_root(source_file) {
+        return None;
+    }
+    let dir = source_file.parent()?;
+    Some(
+        rest.split("::")
+            .filter(|s| !s.is_empty())
+            .fold(dir.to_path_buf(), |p, seg| p.join(seg)),
+    )
 }
 
 /// Probe `base`, then `base + ext` for each known extension, then

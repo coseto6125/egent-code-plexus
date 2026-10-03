@@ -134,3 +134,20 @@ fn test_self_import_from_cargo_test_root_resolves_to_sibling_module() {
         "tests/it.rs is a crate root: `self::support` is tests/support.rs"
     );
 }
+
+#[test]
+fn test_self_import_from_custom_lib_path_root_falls_back_to_own_directory() {
+    // `[lib] path = "src/api.rs"`: the root is not named lib.rs, so the
+    // module's own child directory (src/api/) is probed first and is empty.
+    let api_rs = "mod child;\nuse self::child::helper;\npub fn run() { helper(); }\n";
+    let g = build(&[
+        ("src/api.rs", api_rs),
+        ("src/child.rs", "pub fn helper() {}\n"),
+        ("src/other/child.rs", "pub fn helper() {}\n"),
+    ]);
+    assert_eq!(
+        callee_files(&g, "run", "helper"),
+        vec!["src/child.rs".to_string()],
+        "with no src/api/child.rs, `self::child` falls back to src/child.rs"
+    );
+}
