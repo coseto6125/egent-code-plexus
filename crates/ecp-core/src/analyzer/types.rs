@@ -6,10 +6,12 @@ use std::path::PathBuf;
 /// One [`RawNode::calls`] entry, decoded.
 ///
 /// The callee text alone cannot say whether a call constructs its type: in
-/// TS / JS / PHP a construction is only ever `new T()`, and Python drops an
-/// untyped receiver (`obj.Widget()` and `Widget()` both name `Widget`). The
-/// extractors that know write a prefix; a prefix holds a space, which no
-/// callee text contains.
+/// TS / JS / PHP / Java / C# only `new T()` constructs, and Python drops
+/// an untyped receiver (`obj.widget()` and `widget()` both name
+/// `widget`). The extractors that know encode the site with
+/// [`CallSite::construct`] / [`CallSite::untyped_member`]. Each marker starts
+/// with U+0001, a control character no callee text holds, so source text
+/// such as JS `new Router().Handler` never decodes as a marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallSite<'a> {
     /// `f()`, `obj.m()`, `A::m()`; in Python, Swift, Kotlin, Dart and C++
@@ -17,15 +19,25 @@ pub enum CallSite<'a> {
     Plain(&'a str),
     /// `new T(..)`: the site constructs `T`.
     Construct(&'a str),
-    /// A Python member call named like a class (`obj.Widget()`) whose
-    /// receiver is neither typed nor an imported name: it resolves by the
-    /// member name and never constructs a type.
+    /// A Python member call whose receiver is neither typed nor rooted in an
+    /// imported name (`obj.widget()`): it resolves by the member name and
+    /// never constructs a type.
     UntypedMember(&'a str),
 }
 
 impl<'a> CallSite<'a> {
-    pub const CONSTRUCT_PREFIX: &'static str = "new ";
-    pub const UNTYPED_MEMBER_PREFIX: &'static str = "member ";
+    const CONSTRUCT_PREFIX: &'static str = "\u{1}new ";
+    const UNTYPED_MEMBER_PREFIX: &'static str = "\u{1}member ";
+
+    /// The `RawNode.calls` entry of a site that constructs `ty`.
+    pub fn construct(ty: &str) -> String {
+        [Self::CONSTRUCT_PREFIX, ty].concat()
+    }
+
+    /// The `RawNode.calls` entry of an untyped-receiver member call.
+    pub fn untyped_member(member: &str) -> String {
+        [Self::UNTYPED_MEMBER_PREFIX, member].concat()
+    }
 
     pub fn parse(raw: &'a str) -> Self {
         if let Some(ty) = raw.strip_prefix(Self::CONSTRUCT_PREFIX) {
@@ -44,12 +56,18 @@ impl<'a> CallSite<'a> {
         }
     }
 
-    /// The type path this site may construct in `language`, and whether the
-    /// site constructs it for certain (`new T`, Ruby `T.new`) rather than
-    /// possibly (`A()`). Java and C# record `new T()` as a plain `T`, so a
-    /// plain call there counts as a possible construction. `None` when the
-    /// site cannot construct a type in `language`; Go, Rust and C have no
-    /// constructors.
+    /// The type path this site may construct in `language`, and whether an
+    /// unresolved qualified path may fall back to its last segment. `None`
+    /// when the site cannot construct a type in `language`: Go, Rust and C
+    /// have no constructors, and in TS / JS / PHP / Java / C# only `new T()`
+    /// constructs.
+    ///
+    /// The fallback holds only where the site constructs for certain and its
+    /// qualifier can name what the type tiers do not resolve: a TS / JS
+    /// namespace import (`new shop.Widget()`), a PHP or C++ namespace, a Ruby
+    /// `Shop::Item.new`. A possible construction (`pkg.A()`) never falls
+    /// back, and neither does a Java / C# `new`: its qualifier is a package
+    /// path, and `new java.util.Date()` must not land on a project `Date`.
     pub fn constructed_type(self, language: Language) -> Option<(&'a str, bool)> {
         match (language, self) {
             (Language::Ruby, Self::Plain(callee)) => {
@@ -59,19 +77,52 @@ impl<'a> CallSite<'a> {
                 Language::TypeScript | Language::JavaScript | Language::Php | Language::Cpp,
                 Self::Construct(ty),
             ) => Some((ty, true)),
+            (Language::Java | Language::CSharp, Self::Construct(ty)) => Some((ty, false)),
             (
                 Language::Python
                 | Language::Swift
                 | Language::Kotlin
                 | Language::Dart
-                | Language::Cpp
-                | Language::Java
-                | Language::CSharp,
+                | Language::Cpp,
                 Self::Plain(callee),
             ) => Some((callee, false)),
             _ => None,
         }
     }
+}
+
+/// The key that names an owning type in an `owner_class` string: the last
+/// `.` / `::` / `\` segment with generic arguments cut, trimmed. Parsers
+/// mostly emit a bare name (`Dog`), but C++ out-of-line definitions, Ruby
+/// `class A::B` and generic impls can carry a path or `<T>`. Collapsing to
+/// the last segment loses no identity: every owned lookup is also scoped to
+/// one file or one crate root, and the caller treats several hits as
+/// ambiguous. `None` for an empty owner (Rust inherent `impl` blocks).
+///
+/// The index and the query-time overlay both compare owners through this
+/// function, so a type's members are the same set on both sides.
+pub fn owner_key(raw: &str) -> Option<&str> {
+    let mut depth = 0u32;
+    let mut seg_start = 0;
+    let mut seg_end = None;
+    for (i, c) in raw.char_indices() {
+        match c {
+            '<' | '[' => {
+                if depth == 0 && seg_end.is_none() {
+                    seg_end = Some(i);
+                }
+                depth += 1;
+            }
+            '>' | ']' => depth = depth.saturating_sub(1),
+            '.' | ':' | '\\' if depth == 0 => {
+                seg_start = i + c.len_utf8();
+                seg_end = None;
+            }
+            _ => {}
+        }
+    }
+    let key = raw[seg_start..seg_end.unwrap_or(raw.len())].trim();
+    (!key.is_empty()).then_some(key)
 }
 
 /// Language-agnostic function metadata captured during parsing, before the
@@ -788,5 +839,44 @@ mod tests {
         assert!(!r.unresolved);
         assert_eq!(SqlVerb::Read.as_reason(), "read");
         assert_eq!(SqlVerb::Write.as_reason(), "write");
+    }
+
+    #[test]
+    fn test_owner_key_paths_and_generics_returns_last_bare_segment() {
+        for (raw, want) in [
+            ("Dog", Some("Dog")),
+            ("Foo<T>", Some("Foo")),
+            ("ns::Foo", Some("Foo")),
+            ("A::B", Some("B")),
+            ("Outer.Inner", Some("Inner")),
+            ("\\App\\Model", Some("Model")),
+            ("Map<K, V>::Entry", Some("Entry")),
+            ("Outer<T>.Inner", Some("Inner")),
+            ("Foo<a::B>", Some("Foo")),
+            ("List[int]", Some("List")),
+            ("  Dog ", Some("Dog")),
+            ("", None),
+            ("   ", None),
+            ("Foo::", None),
+        ] {
+            assert_eq!(owner_key(raw), want, "owner_key({raw:?})");
+        }
+    }
+
+    /// Contract: an encoded entry decodes to its own kind, and callee text
+    /// that merely starts like a marker stays a plain call.
+    #[test]
+    fn test_call_site_parse_encoded_and_lookalike_text_returns_kind() {
+        assert_eq!(
+            CallSite::parse(&CallSite::construct("ns.Widget")),
+            CallSite::Construct("ns.Widget")
+        );
+        assert_eq!(
+            CallSite::parse(&CallSite::untyped_member("widget")),
+            CallSite::UntypedMember("widget")
+        );
+        for text in ["new Router().Handler", "member widget", "Widget", ""] {
+            assert_eq!(CallSite::parse(text), CallSite::Plain(text));
+        }
     }
 }

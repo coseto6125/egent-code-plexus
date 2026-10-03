@@ -91,3 +91,23 @@ fn test_javascript_member_call_named_like_class_no_constructor_call() {
     let graph = graph_of(&provider(), &[WIDGET, app]);
     assert_no_instantiation_call(&graph, "useFactory", "Widget");
 }
+
+/// `new Router().Handler()` calls a method on a fresh `Router`: its callee
+/// text starts with `new `, yet it constructs no `Handler`.
+#[test]
+fn test_javascript_method_call_on_new_expression_no_constructor_call() {
+    let router = (
+        "src/router.js",
+        "export class Router {\n  Handler() {\n    return 1;\n  }\n}\n",
+    );
+    let handler = (
+        "src/handler.js",
+        "export class Handler {\n  constructor() {\n    this.n = 0;\n  }\n}\n",
+    );
+    let app = (
+        "src/app.js",
+        "import { Router } from './router';\n\nexport function wire() {\n  return new Router().Handler();\n}\n",
+    );
+    let graph = graph_of(&provider(), &[router, handler, app]);
+    assert_no_instantiation_call(&graph, "wire", "Handler");
+}

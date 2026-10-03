@@ -8,7 +8,7 @@
 use ecp_analyzer::python::PythonProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{CallSite, RawNode};
 use ecp_core::graph::{NodeKind, RelType};
 
 fn parse(src: &str) -> Vec<RawNode> {
@@ -27,18 +27,26 @@ fn calls_of<'a>(nodes: &'a [RawNode], fn_name: &str) -> &'a [String] {
         .unwrap_or(&[])
 }
 
+/// Callee names as the resolver reads them. An untyped-receiver call is
+/// recorded as a `CallSite::UntypedMember`, so the assertions decode
+/// entries instead of comparing the raw `RawNode.calls` text.
+fn callee_names(calls: &[String]) -> Vec<&str> {
+    calls.iter().map(|c| CallSite::parse(c).name()).collect()
+}
+
 #[test]
 fn local_var_annotation_binds_receiver_type() {
     let src = include_str!("fixtures/receiver_types.py");
     let nodes = parse(src);
-    let calls = calls_of(&nodes, "use_local_annotation");
+    // Decoded, so a duplicate untyped-member `eat` entry still fails.
+    let calls = callee_names(calls_of(&nodes, "use_local_annotation"));
     assert!(
-        calls.iter().any(|c| c == "Apple.eat"),
+        calls.contains(&"Apple.eat"),
         "expected `Apple.eat` in use_local_annotation calls; got {:?}",
         calls,
     );
     assert!(
-        !calls.iter().any(|c| c == "eat"),
+        !calls.contains(&"eat"),
         "bare `eat` should be replaced (not duplicated) when type is known; got {:?}",
         calls,
     );
@@ -60,9 +68,10 @@ fn param_annotation_binds_receiver_type() {
 fn unannotated_var_falls_back_to_bare_name() {
     let src = include_str!("fixtures/receiver_types.py");
     let nodes = parse(src);
-    let calls = calls_of(&nodes, "use_no_annotation");
+    // Contract: an untyped member call records the method name, unqualified.
+    let calls = callee_names(calls_of(&nodes, "use_no_annotation"));
     assert!(
-        calls.iter().any(|c| c == "eat"),
+        calls.contains(&"eat"),
         "without annotation, must keep bare `eat` fallback; got {:?}",
         calls,
     );
@@ -77,9 +86,10 @@ fn unannotated_var_falls_back_to_bare_name() {
 fn generic_type_annotation_is_not_bound() {
     let src = include_str!("fixtures/receiver_types.py");
     let nodes = parse(src);
-    let calls = calls_of(&nodes, "use_generic_annotation");
+    // Contract: an untyped member call records the method name, unqualified.
+    let calls = callee_names(calls_of(&nodes, "use_generic_annotation"));
     assert!(
-        calls.iter().any(|c| c == "append"),
+        calls.contains(&"append"),
         "generic `list[Apple]` is not a single identifier — call must stay bare; got {:?}",
         calls,
     );
@@ -201,14 +211,15 @@ fn closure_inherits_outer_scope_type() {
 fn mixed_annotated_and_bare_receivers_in_same_fn() {
     let src = include_str!("fixtures/receiver_types.py");
     let nodes = parse(src);
-    let calls = calls_of(&nodes, "use_mixed");
+    // Contract: an untyped member call records the method name, unqualified.
+    let calls = callee_names(calls_of(&nodes, "use_mixed"));
     assert!(
-        calls.iter().any(|c| c == "Apple.peel"),
+        calls.contains(&"Apple.peel"),
         "annotated `a.peel()` should bind to Apple.peel; got {:?}",
         calls,
     );
     assert!(
-        calls.iter().any(|c| c == "eat"),
+        calls.contains(&"eat"),
         "unannotated `unannotated.eat()` should fall back to bare `eat`; got {:?}",
         calls,
     );

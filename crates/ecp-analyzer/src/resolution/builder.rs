@@ -1066,6 +1066,7 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
     // (and the resolver) an O(1) `files_by_stem` lookup instead of an
     // O(N_files) scan per qualified call.
     symbol_table.build_stem_index();
+    symbol_table.build_constructor_index();
 
     Pass1Registration {
         symbol_table,
@@ -1844,12 +1845,9 @@ fn pass2_emit_node_edges(
         let site = CallSite::parse(raw_callee);
         let callee = site.name();
         let targets = match lexical_lookup.targets(raw_node.span, callee) {
-            Some(targets) if targets.is_empty() => resolver.resolve_imported_symbol(
-                &local_graph.file_path,
-                callee,
-                &local_graph.imports,
-                ResolveTarget::Callable,
-            ),
+            Some(targets) if targets.is_empty() => {
+                resolver.resolve_imported_call(&local_graph.file_path, site, &local_graph.imports)
+            }
             Some(targets) => targets,
             None => resolver.resolve_call(
                 &local_graph.file_path,

@@ -92,3 +92,24 @@ fn test_python_member_call_named_like_class_no_constructor_call() {
     let graph = graph_of(&provider(), &[WIDGET, app]);
     assert_no_instantiation_call(&graph, "use_factory", "Widget");
 }
+
+/// Python allows a lowercase class name: `obj.widget()` on an untyped
+/// receiver stays a method call, whatever the member's case.
+#[test]
+fn test_python_member_call_named_like_lowercase_class_no_constructor_call() {
+    let model = ("pkg/model.py", "class widget:\n    pass\n");
+    let app = ("pkg/app.py", "def use(obj):\n    return obj.widget()\n");
+    let graph = graph_of(&provider(), &[model, app]);
+    assert_no_instantiation_call(&graph, "use", "widget");
+}
+
+/// The alias names no declared type; the import maps it back to `Widget`.
+#[test]
+fn test_python_aliased_import_call_calls_constructor() {
+    let app = (
+        "pkg/app.py",
+        "from pkg.widget import Widget as W\n\n\ndef make_aliased():\n    return W(1)\n",
+    );
+    let graph = graph_of(&provider(), &[WIDGET, app]);
+    assert_calls_constructor(&graph, "make_aliased", "Widget", "pkg/widget.py");
+}

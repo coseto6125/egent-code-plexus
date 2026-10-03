@@ -8,7 +8,8 @@ mod instantiation_calls_support;
 use ecp_analyzer::java::parser::JavaProvider;
 use ecp_core::graph::NodeKind;
 use instantiation_calls_support::{
-    assert_calls_constructor, assert_calls_type, assert_only_call, graph_of,
+    assert_calls_constructor, assert_calls_type, assert_no_instantiation_call, assert_only_call,
+    graph_of,
 };
 
 const WIDGET: (&str, &str) = (
@@ -113,4 +114,40 @@ fn test_java_member_call_named_like_class_targets_method() {
     );
     let graph = graph_of(&provider(), &[WIDGET, factory, app]);
     assert_only_call(&graph, "useFactory", "Widget", "src/Factory.java");
+}
+
+/// `getFactory().Customer()` calls a method on an untyped receiver; only
+/// `new Customer()` constructs in Java.
+#[test]
+fn test_java_untyped_member_call_named_like_class_no_constructor_call() {
+    let customer = ("src/Customer.java", "public class Customer {\n}\n");
+    let app = (
+        "src/App.java",
+        "public class App {\n    public void use() {\n        getFactory().Customer();\n    }\n}\n",
+    );
+    let graph = graph_of(&provider(), &[customer, app]);
+    assert_no_instantiation_call(&graph, "use", "Customer");
+}
+
+/// Generic arguments in the middle of the path: `Outer<String>.Inner` names
+/// `Inner`, never `Outer`.
+#[test]
+fn test_java_new_nested_type_of_generic_outer_calls_inner() {
+    let outer = (
+        "src/Outer.java",
+        "public class Outer<T> {\n    public static class Inner {\n    }\n}\n",
+    );
+    let app = (
+        "src/App.java",
+        "public class App {\n    public Object makeInner() {\n        return new Outer<String>.Inner();\n    }\n}\n",
+    );
+    let graph = graph_of(&provider(), &[outer, app]);
+    assert_calls_type(
+        &graph,
+        "makeInner",
+        "Inner",
+        NodeKind::Class,
+        "src/Outer.java",
+    );
+    assert_no_instantiation_call(&graph, "makeInner", "Outer");
 }

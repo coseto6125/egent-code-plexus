@@ -2,8 +2,7 @@ use super::Direction;
 use crate::commands::format::{kind_to_str, node_kind_to_str, rel_type_to_str};
 use crate::commands::symbol_id::resolve_owner_class;
 use ecp_core::file_category::is_test_path;
-use ecp_core::graph::{ArchivedFileCategory, NodeKind, RelType};
-use ecp_core::session::view::owned_by;
+use ecp_core::graph::ArchivedFileCategory;
 use ecp_core::session::{MergedEdge, MergedGraph, OverlayView};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{json, Value};
@@ -300,56 +299,13 @@ pub(crate) fn shortest_path<'g>(
 /// Constructors an upstream walk from a Class / Struct start treats as the
 /// start itself: a construction's `Calls` edge lands on the type's sole
 /// constructor when it has one, else on the type, so the instantiators are
-/// the callers of both. Empty, with no allocation, for any other start and
-/// for a downstream-only walk.
-///
-/// `HasMethod` alone cannot list them: `class_membership` skips a
-/// constructor named like its class (Java, C#, Kotlin, C++, Dart), and with
-/// two classes in one file each `__init__` / `constructor` edge targets the
-/// first one. So the start's own name is probed, and a `HasMethod`
-/// constructor owned by another type is re-probed by its name; every hit
-/// must be a Constructor in the start's file whose owner names the start.
+/// the callers of both. Empty for any other start and for a downstream-only
+/// walk.
 fn constructor_seeds(merged: &MergedGraph<'_>, start_idx: u32, direction: &Direction) -> Vec<u32> {
-    let mut seeds: Vec<u32> = Vec::new();
-    let Some(start) = merged.node(start_idx) else {
-        return seeds;
-    };
-    if *direction == Direction::Down || !start.kind().is_constructible() {
-        return seeds;
+    if *direction == Direction::Down {
+        return Vec::new();
     }
-    let (name, file) = (start.name(merged), start.file_path(merged));
-    let owned_ctor = |idx: u32| {
-        merged.node(idx).is_some_and(|n| {
-            n.kind() == NodeKind::Constructor
-                && n.file_path(merged) == file
-                && owned_by(n.owner_class(merged), name)
-        })
-    };
-    if start_idx >= merged.base_len() {
-        // A virtual start lives in a dirty file, whose symbols are all
-        // virtual: the base name index holds only their stale twins.
-        seeds.extend((merged.base_len()..merged.node_count()).filter(|&i| owned_ctor(i)));
-        return seeds;
-    }
-    let probe = |probe_name: &str, seeds: &mut Vec<u32>| {
-        for idx in merged.nodes_by_name(probe_name) {
-            if owned_ctor(idx) && !seeds.contains(&idx) {
-                seeds.push(idx);
-            }
-        }
-    };
-    probe(name, &mut seeds);
-    for edge in merged.out_edges(start_idx) {
-        if edge.rel_type() != RelType::HasMethod || seeds.contains(&edge.target) {
-            continue;
-        }
-        match merged.node(edge.target) {
-            Some(_) if owned_ctor(edge.target) => seeds.push(edge.target),
-            Some(n) if n.kind() == NodeKind::Constructor => probe(n.name(merged), &mut seeds),
-            _ => {}
-        }
-    }
-    seeds
+    merged.constructors_of(start_idx)
 }
 
 /// Core BFS over the merged graph (base CSR + optional overlay view) from

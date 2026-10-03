@@ -112,3 +112,27 @@ fn test_typescript_member_call_named_like_class_targets_method() {
     assert_no_instantiation_call(&graph, "useFactory", "Widget");
     assert_only_call(&graph, "useFactory", "Widget", "src/factory.ts");
 }
+
+/// The alias names no declared type; the import maps it back to `Widget`.
+#[test]
+fn test_typescript_aliased_import_new_calls_constructor() {
+    let app = (
+        "src/app.ts",
+        "import { Widget as Renamed } from './widget';\n\nexport function makeRenamed() {\n  return new Renamed(1);\n}\n",
+    );
+    let graph = graph_of(&provider(), &[WIDGET, app]);
+    assert_calls_constructor(&graph, "makeRenamed", "Widget", "src/widget.ts");
+}
+
+/// A nested `function Widget` elsewhere in the file binds the name in a
+/// scope that does not enclose the call: only the import may resolve it,
+/// and the import names a class.
+#[test]
+fn test_typescript_unrelated_nested_function_named_like_imported_class_new_calls_constructor() {
+    let app = (
+        "src/app.ts",
+        "import { Widget } from './widget';\n\nfunction unrelated() {\n  function Widget() {}\n}\n\nexport function makeWidget() {\n  return new Widget(1);\n}\n",
+    );
+    let graph = graph_of(&provider(), &[WIDGET, app]);
+    assert_calls_constructor(&graph, "makeWidget", "Widget", "src/widget.ts");
+}

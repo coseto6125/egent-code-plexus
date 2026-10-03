@@ -304,13 +304,11 @@ fn python_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Opt
                         return Some(format!("{ty}.{attr_name}"));
                     }
                 }
-                // PEP 8 spells classes in CapWords and methods in lowercase:
-                // only a CapWords member can pass for a construction, and only
-                // a module receiver (`widget.Widget()`) makes it one.
-                if attr_name.starts_with(char::is_uppercase)
-                    && !locals.is_imported_path(obj, source)
-                {
-                    return Some(format!("{}{attr_name}", CallSite::UNTYPED_MEMBER_PREFIX));
+                // Only a module receiver (`widget.Widget()`) can name a class
+                // to construct; any other untyped receiver calls a method,
+                // and a class may be spelled in any case (`class widget`).
+                if !locals.is_imported_path(obj, source) {
+                    return Some(CallSite::untyped_member(attr_name));
                 }
             }
             Some(attr_name.to_string())

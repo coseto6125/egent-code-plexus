@@ -203,6 +203,20 @@ impl<'a> MergedGraph<'a> {
         base.chain(overlay)
     }
 
+    /// Constructors of the Class / Struct at `type_idx`: the Constructor
+    /// nodes in its file whose owner key names it, the set a construction of
+    /// it lands on (the index and the overlay pick from the same set). Empty
+    /// for any other kind.
+    pub fn constructors_of(&self, type_idx: u32) -> Vec<u32> {
+        match self.view {
+            Some(view) if type_idx >= self.base_len() => view.constructors_of(type_idx).to_vec(),
+            _ if type_idx < self.base_len() => {
+                crate::session::view::base_constructors(self.graph, type_idx)
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// Every edge in the graph, merged — for the "does any edge match" scans
     /// that have no endpoint to anchor on.
     #[inline]

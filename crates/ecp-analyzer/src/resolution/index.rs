@@ -1,3 +1,4 @@
+use ecp_core::analyzer::types::owner_key;
 use ecp_core::file_category::pick_global;
 pub use ecp_core::file_category::{FileMeta, GlobalPick, Language};
 use ecp_core::graph::NodeKind;
@@ -28,43 +29,6 @@ impl Supertypes {
     pub fn has_unresolved_base(&self) -> bool {
         self.first_unresolved.is_some()
     }
-}
-
-/// The key under which an `owner_class` string is interned: the last
-/// `.` / `::` / `\` segment with generic arguments cut, trimmed. Parsers
-/// mostly emit a bare name (`Dog`), but C++ out-of-line definitions, Ruby
-/// `class A::B` and generic impls can carry a path or `<T>`. Collapsing to
-/// the last segment loses no identity: every owned lookup is also scoped to
-/// one file or one crate root, and the caller treats several hits as
-/// ambiguous. `None` for an empty owner (Rust inherent `impl` blocks).
-fn owner_key(raw: &str) -> Option<&str> {
-    let mut depth = 0u32;
-    let mut seg_start = 0;
-    let mut seg_end = None;
-    for (i, c) in raw.char_indices() {
-        match c {
-            '<' | '[' => {
-                if depth == 0 && seg_end.is_none() {
-                    seg_end = Some(i);
-                }
-                depth += 1;
-            }
-            '>' | ']' => depth = depth.saturating_sub(1),
-            '.' | ':' | '\\' if depth == 0 => {
-                seg_start = i + c.len_utf8();
-                seg_end = None;
-            }
-            _ => {}
-        }
-    }
-    let key = raw[seg_start..seg_end.unwrap_or(raw.len())].trim();
-    (!key.is_empty()).then_some(key)
-}
-
-/// The iterator's only item; `None` when it yields none or several.
-fn single(mut items: impl Iterator<Item = u32>) -> Option<u32> {
-    let first = items.next()?;
-    items.next().is_none().then_some(first)
 }
 
 /// Crate-root prefix of a normalized repo-relative path. The "crate root"
@@ -199,11 +163,18 @@ pub struct SymbolTable {
     /// declared heritage have no entry.
     supertypes: FxHashMap<u32, Supertypes>,
 
-    /// Owner id → constructor node ids, so a constructed type finds its
-    /// constructors whatever their name (`__init__`, `init`, `constructor`,
-    /// the class name) and wherever they live (C++ out-of-line definitions,
-    /// Swift extensions).
-    constructors_by_owner: FxHashMap<u32, Vec<u32>>,
+    /// Every Constructor registered with an owner, in id order: the input of
+    /// [`SymbolTable::build_constructor_index`].
+    constructors: Vec<u32>,
+
+    /// Class / Struct id → its one constructor, whatever that is named
+    /// (`__init__`, `init`, `constructor`, the class name). Filled once
+    /// after Pass 1 by [`SymbolTable::build_constructor_index`].
+    sole_constructors: FxHashMap<u32, u32>,
+
+    /// Names some Class / Struct is registered under: the first gate of the
+    /// constructor fallback, which runs on every unresolved call.
+    constructible_names: FxHashSet<Box<str>>,
 }
 
 impl SymbolTable {
@@ -291,6 +262,13 @@ impl SymbolTable {
         self.node_kinds.push(kind);
         self.node_file_meta.push(FileMeta::from_path(file_path));
         self.node_owner.push(NO_OWNER);
+        self.note_constructible(node_name, kind);
+    }
+
+    fn note_constructible(&mut self, node_name: &str, kind: NodeKind) {
+        if kind.is_constructible() && !self.constructible_names.contains(node_name) {
+            self.constructible_names.insert(node_name.into());
+        }
     }
 
     /// [`register_node`] plus an owner, for tests that exercise the owner
@@ -376,11 +354,47 @@ impl SymbolTable {
         let owner_id = self.intern_owner(owner);
         self.node_owner.push(owner_id);
         if kind == NodeKind::Constructor && owner_id != NO_OWNER {
-            self.constructors_by_owner
-                .entry(owner_id)
-                .or_default()
-                .push(node_id);
+            self.constructors.push(node_id);
         }
+        self.note_constructible(node_name, kind);
+    }
+
+    /// Map every Class / Struct to its one constructor: the Constructor in
+    /// the type's own file whose owner key is the type's name. A type whose
+    /// file holds several (two same-named types, each with a constructor)
+    /// maps to none, and its constructions land on the type. Overloads are
+    /// not several: Pass 1 collapses them into one node per (kind, path,
+    /// owner, name) uid, which then stands for "a constructor of the type".
+    /// The query-time overlay applies the same rule. Call once after Pass 1.
+    pub fn build_constructor_index(&mut self) {
+        let mut owner_names: Vec<&str> = vec![""; self.owner_ids.len()];
+        for (key, &id) in &self.owner_ids {
+            owner_names[id as usize] = key;
+        }
+        let mut picks: FxHashMap<u32, Option<u32>> = FxHashMap::default();
+        for &ctor in &self.constructors {
+            let owner = owner_names[self.node_owner[ctor as usize] as usize];
+            let Some(types) = self
+                .id_to_file
+                .get(&ctor)
+                .and_then(|file| self.file_scoped.get(file))
+                .and_then(|names| names.get(owner))
+            else {
+                continue;
+            };
+            for &ty in types {
+                if self.node_kinds[ty as usize].is_constructible() {
+                    picks
+                        .entry(ty)
+                        .and_modify(|pick| *pick = None)
+                        .or_insert(Some(ctor));
+                }
+            }
+        }
+        self.sole_constructors = picks
+            .into_iter()
+            .filter_map(|(ty, ctor)| Some((ty, ctor?)))
+            .collect();
     }
 
     /// Register a tombstone node: advances `node_kinds` / `node_file_meta`
@@ -541,47 +555,14 @@ impl SymbolTable {
     /// True when some Class / Struct is named `name`. The constructor
     /// fallback runs on every unresolved call, so this is its first gate.
     pub fn has_constructible_type(&self, name: &str) -> bool {
-        self.global_scoped.get(name).is_some_and(|ids| {
-            ids.iter()
-                .any(|&id| self.node_kinds[id as usize].is_constructible())
-        })
+        self.constructible_names.contains(name)
     }
 
-    fn declares_constructible_type(&self, file_path: &str, name: &str) -> bool {
-        self.file_scoped
-            .get(file_path)
-            .and_then(|m| m.get(name))
-            .is_some_and(|ids| {
-                ids.iter()
-                    .any(|&id| self.node_kinds[id as usize].is_constructible())
-            })
-    }
-
-    /// The one constructor a construction of type `type_id` (named
-    /// `type_name`) calls. `None` when the type declares no constructor or
-    /// several. Overloads are not several: Pass 1 collapses them into one
-    /// node per (kind, path, owner, name) uid, which then stands for "a
-    /// constructor of the type". The type's own file decides when it
-    /// declares any constructor; otherwise the type's scope counts (C++
-    /// out-of-line definitions, Swift extensions), except a file that
-    /// declares another type of that name.
-    pub fn sole_constructor(&self, type_id: u32, type_name: &str) -> Option<u32> {
-        let ctors = self.constructors_by_owner.get(&self.owner_id(type_name)?)?;
-        let type_file = self.file_of(type_id)?;
-        let in_type_file = |id: &u32| self.file_of(*id) == Some(type_file);
-        if ctors.iter().any(in_type_file) {
-            single(ctors.iter().copied().filter(|id| in_type_file(id)))
-        } else {
-            let scope_meta = self.node_file_meta[type_id as usize];
-            let scope_root = crate_root_prefix(type_file);
-            single(ctors.iter().copied().filter(|&id| {
-                scope_meta.admits(self.node_file_meta[id as usize])
-                    && self.file_of(id).is_some_and(|f| {
-                        crate_root_prefix(f) == scope_root
-                            && !self.declares_constructible_type(f, type_name)
-                    })
-            }))
-        }
+    /// The one constructor a construction of type `type_id` calls; `None`
+    /// when the type declares none or several (see
+    /// [`Self::build_constructor_index`]).
+    pub fn sole_constructor(&self, type_id: u32) -> Option<u32> {
+        self.sole_constructors.get(&type_id).copied()
     }
 
     /// Number of nodes named `node_name` in `file_path` that match `target`.
@@ -935,27 +916,6 @@ mod tests {
         let st = st_owned(&[("pkg/models.py", "Repo", NodeKind::Class, None)]);
         assert!(st.has_file("pkg/models.py"));
         assert!(!st.has_file("psqlpy"));
-    }
-
-    #[test]
-    fn test_owner_key_paths_and_generics_returns_last_bare_segment() {
-        for (raw, want) in [
-            ("Dog", Some("Dog")),
-            ("Foo<T>", Some("Foo")),
-            ("ns::Foo", Some("Foo")),
-            ("A::B", Some("B")),
-            ("Outer.Inner", Some("Inner")),
-            ("\\App\\Model", Some("Model")),
-            ("Map<K, V>::Entry", Some("Entry")),
-            ("Foo<a::B>", Some("Foo")),
-            ("List[int]", Some("List")),
-            ("  Dog ", Some("Dog")),
-            ("", None),
-            ("   ", None),
-            ("Foo::", None),
-        ] {
-            assert_eq!(owner_key(raw), want, "owner_key({raw:?})");
-        }
     }
 
     #[test]

@@ -8,7 +8,8 @@ mod instantiation_calls_support;
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_core::graph::NodeKind;
 use instantiation_calls_support::{
-    assert_calls_constructor, assert_calls_type, assert_only_call, graph_of,
+    assert_calls_constructor, assert_calls_type, assert_no_instantiation_call, assert_only_call,
+    graph_of,
 };
 
 const WIDGET: (&str, &str) = (
@@ -113,4 +114,40 @@ fn test_csharp_member_call_named_like_class_targets_method() {
     );
     let graph = graph_of(&provider(), &[WIDGET, factory, app]);
     assert_only_call(&graph, "UseFactory", "Widget", "src/Factory.cs");
+}
+
+/// `GetFactory().Customer()` calls a method on an untyped receiver; only
+/// `new Customer()` constructs in C#.
+#[test]
+fn test_csharp_untyped_member_call_named_like_class_no_constructor_call() {
+    let customer = ("src/Customer.cs", "public class Customer\n{\n}\n");
+    let app = (
+        "src/App.cs",
+        "public class App\n{\n    public void Use()\n    {\n        GetFactory().Customer();\n    }\n}\n",
+    );
+    let graph = graph_of(&provider(), &[customer, app]);
+    assert_no_instantiation_call(&graph, "Use", "Customer");
+}
+
+/// Generic arguments in the middle of the path: `Outer<int>.Inner` names
+/// `Inner`, never `Outer`.
+#[test]
+fn test_csharp_new_nested_type_of_generic_outer_calls_inner() {
+    let outer = (
+        "src/Outer.cs",
+        "public class Outer<T>\n{\n    public class Inner\n    {\n    }\n}\n",
+    );
+    let app = (
+        "src/App.cs",
+        "public class App\n{\n    public object MakeInner()\n    {\n        return new Outer<int>.Inner();\n    }\n}\n",
+    );
+    let graph = graph_of(&provider(), &[outer, app]);
+    assert_calls_type(
+        &graph,
+        "MakeInner",
+        "Inner",
+        NodeKind::Class,
+        "src/Outer.cs",
+    );
+    assert_no_instantiation_call(&graph, "MakeInner", "Outer");
 }

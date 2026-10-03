@@ -20,7 +20,7 @@ use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_ts_string_value,
     strip_ts_template_value,
 };
-use crate::calls::{attach_to_enclosing_span, construction_call};
+use crate::calls::{attach_to_enclosing_span, new_expression_call};
 use crate::framework_helpers::{enclosing_class, node_span, Span};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
@@ -244,16 +244,6 @@ pub fn extract_ts_calls_and_path_literals(
         attach_to_enclosing_span(span, callee, nodes);
     }
     (path_literals, sql_refs)
-}
-
-/// The construction entry of `new T(..)` / `new ns.T(..)`; `None` for a
-/// computed constructor (`new (f())()`).
-fn new_expression_call(new_expr: Node<'_>, source: &[u8]) -> Option<String> {
-    let ctor = new_expr.child_by_field_name("constructor")?;
-    match ctor.kind() {
-        "identifier" | "member_expression" => construction_call(ctor.utf8_text(source).ok()?),
-        _ => None,
-    }
 }
 
 fn ts_callee_name(

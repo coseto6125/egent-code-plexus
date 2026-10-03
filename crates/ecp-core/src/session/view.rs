@@ -16,10 +16,11 @@
 //!   parse: deleted or renamed. Traversal must neither expand into nor
 //!   report them — this is what kills phantom callers after a rename.
 //! - **overlay edges** — `Calls` edges re-resolved from each dirty symbol's
-//!   callee names, mirroring index-time Pass-2 tier semantics (same-file →
-//!   import-scoped → unique-global with `AmbiguousGlobal` suppression)
-//!   against the archived `name_index` (O(log N) per lookup, no allocation
-//!   proportional to the graph).
+//!   [`CallSite`]s, mirroring index-time Pass-2 tier semantics (same-file →
+//!   import-scoped → unique-global with `AmbiguousGlobal` suppression, then
+//!   the constructor fallback onto a Class / Struct's one constructor or the
+//!   type) against the archived `name_index` (O(log N) per lookup, no
+//!   allocation proportional to the graph).
 //!
 //! ## The masking invariant: mask ⊆ rebuild
 //!
@@ -41,8 +42,11 @@
 //! - Clean files calling a name that only NOW resolves (new symbol breaks a
 //!   previous ambiguity) keep their index-time resolution — clean files are
 //!   never re-resolved at query time.
+//! - An import alias (`import { Widget as W }`) matches only by its local
+//!   name, so a dirty file's call or construction through it stays
+//!   unresolved; the index maps the alias back to the declared symbol.
 
-use crate::analyzer::types::{CallSite, RawImport};
+use crate::analyzer::types::{owner_key, CallSite, RawImport};
 use crate::file_category::{pick_global, FileMeta, GlobalPick};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -57,7 +61,8 @@ pub struct OverlaySymbol {
     /// 1-based, matching `Node::start_line` conventions.
     pub start_line: u32,
     pub end_line: u32,
-    /// Callee short names invoked inside this symbol's body (RawNode.calls).
+    /// `RawNode.calls` of this symbol: callee short names, some encoded as a
+    /// [`CallSite`] (read them through [`CallSite::parse`]).
     pub calls: Vec<String>,
 }
 
@@ -118,6 +123,10 @@ pub struct OverlayView {
     edges: Vec<ViewEdge>,
     out_adj: FxHashMap<u32, Vec<u32>>,
     in_adj: FxHashMap<u32, Vec<u32>>,
+    /// Virtual Class / Struct idx → the virtual constructors of its file
+    /// whose [`owner_key`] is its name, in source order. Types with none have
+    /// no entry.
+    type_ctors: FxHashMap<u32, Vec<u32>>,
 }
 
 impl OverlayView {
@@ -194,6 +203,8 @@ impl OverlayView {
             .filter(|idx| !replaced.contains_key(idx))
             .collect();
 
+        let type_ctors = virtual_constructors(files, &nodes, base_len);
+
         // ── overlay Calls edges ───────────────────────────────────────────
         // Inner scope: the name maps borrow `nodes`' strings and must drop
         // before `nodes` moves into Self.
@@ -206,6 +217,10 @@ impl OverlayView {
             // Base-file meta, filled on first sight: a common callee name has
             // hundreds of candidates spread over far fewer files.
             let mut base_metas: FxHashMap<usize, FileMeta> = FxHashMap::default();
+            // Constructed type → its `Calls` target: a type is often
+            // constructed at several sites, and a clean one costs name-index
+            // probes.
+            let mut construction_targets: FxHashMap<u32, u32> = FxHashMap::default();
             let file_metas: Vec<FileMeta> = files
                 .iter()
                 .map(|f| FileMeta::from_path(&f.rel_path))
@@ -256,7 +271,7 @@ impl OverlayView {
                             &dirty_base,
                         )
                         .or_else(|| {
-                            resolve_instantiation(
+                            let (ty, confidence) = resolve_constructed_type(
                                 graph,
                                 site,
                                 file_ord,
@@ -267,7 +282,11 @@ impl OverlayView {
                                 &nodes,
                                 &replaced,
                                 &dirty_base,
-                            )
+                            )?;
+                            let target = *construction_targets.entry(ty).or_insert_with(|| {
+                                construction_target(graph, &nodes, &type_ctors, ty)
+                            });
+                            Some((target, confidence))
                         });
                         if let Some((target, confidence)) = hit {
                             push_edge(ViewEdge {
@@ -291,6 +310,7 @@ impl OverlayView {
             edges,
             out_adj,
             in_adj,
+            type_ctors,
         })
     }
 
@@ -366,6 +386,122 @@ impl OverlayView {
             .iter()
             .map(|&ei| (ei, &self.edges[ei as usize]))
     }
+
+    /// Constructors of the virtual Class / Struct `idx`: the virtual
+    /// Constructor nodes of its file whose [`owner_key`] is its name, in
+    /// source order, overloads included. Empty for any other node.
+    pub fn constructors_of(&self, idx: u32) -> &[u32] {
+        self.type_ctors.get(&idx).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
+
+/// [`OverlayView::constructors_of`] for every virtual Class / Struct.
+fn virtual_constructors(
+    files: &[OverlayFileInput],
+    nodes: &[ViewNode],
+    base_len: u32,
+) -> FxHashMap<u32, Vec<u32>> {
+    let mut by_owner: FxHashMap<(usize, &str), Vec<u32>> = FxHashMap::default();
+    let mut types: Vec<(usize, u32)> = Vec::new();
+    let mut virt = base_len;
+    for (file_ord, file) in files.iter().enumerate() {
+        for _ in &file.symbols {
+            let node = &nodes[(virt - base_len) as usize];
+            if node.kind == NodeKind::Constructor {
+                if let Some(owner) = node.owner_class.as_deref().and_then(owner_key) {
+                    by_owner.entry((file_ord, owner)).or_default().push(virt);
+                }
+            } else if node.kind.is_constructible() {
+                types.push((file_ord, virt));
+            }
+            virt += 1;
+        }
+    }
+    types
+        .into_iter()
+        .filter_map(|(file_ord, ty)| {
+            let name = nodes[(ty - base_len) as usize].name.as_str();
+            by_owner
+                .get(&(file_ord, name))
+                .map(|ctors| (ty, ctors.clone()))
+        })
+        .collect()
+}
+
+/// Constructors of the base Class / Struct `type_idx`: the Constructor
+/// nodes in its file whose [`owner_key`] is its name. Empty for any other
+/// kind. The index's `SymbolTable::build_constructor_index` applies the
+/// same rule.
+///
+/// `HasMethod` cannot list them: `class_membership` skips a constructor
+/// named like its class (Java, C#, Kotlin, C++, Dart), and with two classes
+/// in one file binds each `__init__` / `constructor` to the first. So its
+/// edges only supply candidate names: the type's own name plus each
+/// constructor name they reach, each probed once in the name index.
+pub(crate) fn base_constructors(graph: &ArchivedZeroCopyGraph, type_idx: u32) -> Vec<u32> {
+    let pool = &graph.string_pool;
+    let ty = &graph.nodes[type_idx as usize];
+    if !NodeKind::from(&ty.kind).is_constructible() || !ty.has_owning_file() {
+        return Vec::new();
+    }
+    let name = ty.name.resolve(pool);
+    let start = graph.out_offsets[type_idx as usize].to_native() as usize;
+    let end = graph.out_offsets[type_idx as usize + 1].to_native() as usize;
+    let mut probes: Vec<&str> = vec![name];
+    for edge in &graph.edges.as_slice()[start..end] {
+        let member = &graph.nodes[edge.target.to_native() as usize];
+        if RelType::from(&edge.rel_type) == RelType::HasMethod
+            && NodeKind::from(&member.kind) == NodeKind::Constructor
+        {
+            let member_name = member.name.resolve(pool);
+            if !probes.contains(&member_name) {
+                probes.push(member_name);
+            }
+        }
+    }
+    probes
+        .iter()
+        .flat_map(|&probe| graph.nodes_by_name(probe))
+        .filter(|&idx| {
+            let node = &graph.nodes[idx as usize];
+            NodeKind::from(&node.kind) == NodeKind::Constructor
+                && node.file_idx == ty.file_idx
+                && owner_key(node.owner_class.resolve(pool)) == Some(name)
+        })
+        .collect()
+}
+
+/// The `Calls` target of a construction of the Class / Struct `ty`: its one
+/// constructor, else the type itself.
+fn construction_target(
+    graph: &ArchivedZeroCopyGraph,
+    nodes: &[ViewNode],
+    type_ctors: &FxHashMap<u32, Vec<u32>>,
+    ty: u32,
+) -> u32 {
+    let base_len = graph.nodes.len() as u32;
+    let uid = |idx: u32| match idx.checked_sub(base_len) {
+        Some(virt_off) => nodes[virt_off as usize].uid,
+        None => graph.nodes[idx as usize].uid.to_native(),
+    };
+    let base;
+    let ctors: &[u32] = if ty >= base_len {
+        type_ctors.get(&ty).map(Vec::as_slice).unwrap_or(&[])
+    } else {
+        base = base_constructors(graph, ty);
+        &base
+    };
+    sole_constructor(ctors, uid).unwrap_or(ty)
+}
+
+/// The one constructor among `ctors`, or `None`. A dirty file's overloads
+/// are separate virtual nodes sharing one uid, which the index collapses
+/// into the first: constructors that all share the first one's uid count as
+/// that one, whatever their order.
+fn sole_constructor(ctors: &[u32], uid: impl Fn(u32) -> u64) -> Option<u32> {
+    let (&first, rest) = ctors.split_first()?;
+    let first_uid = uid(first);
+    rest.iter().all(|&c| uid(c) == first_uid).then_some(first)
 }
 
 /// Overlay symbols of one kind family (`kind`), by name: the Tier-1
@@ -505,18 +641,14 @@ fn resolve_callee(
     Some((target, CONF_GLOBAL_UNIQUE))
 }
 
-/// Mirror of the index-time constructor fallback (`Resolver::resolve_call`):
-/// a site the callable tiers left empty lands on the one constructor of the
-/// Class / Struct it constructs, or on the type itself. Narrowed like
-/// [`resolve_callee`] to bare names: a qualified type path resolves by its
-/// last segment, and only when the site constructs for certain.
-///
-/// Fidelity gap: a clean type's constructors come from its base `HasMethod`
-/// edges, which skip a constructor named like its class and, with two
-/// classes in one file, all point at the file's first same-named
-/// constructor (see `class_membership`).
+/// Mirror of the index-time constructor fallback (`Resolver::resolve_call`)
+/// up to the constructed type: a site the callable tiers left empty resolves
+/// the Class / Struct it constructs; [`construction_target`] then picks the
+/// edge's target. Narrowed like [`resolve_callee`] to bare names: a
+/// qualified type path resolves by its last segment, and only where
+/// [`CallSite::constructed_type`] allows that fallback.
 #[allow(clippy::too_many_arguments)]
-fn resolve_instantiation(
+fn resolve_constructed_type(
     graph: &ArchivedZeroCopyGraph,
     site: CallSite<'_>,
     file_ord: usize,
@@ -528,74 +660,31 @@ fn resolve_instantiation(
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
 ) -> Option<(u32, f32)> {
-    let (type_path, certain) = site.constructed_type(caller.language)?;
+    let (type_path, last_segment_fallback) = site.constructed_type(caller.language)?;
     let type_name = type_path
         .rsplit(['.', ':', '\\'])
         .next()
         .unwrap_or(type_path);
-    if type_name.len() < type_path.len() && !certain {
+    if type_name.len() < type_path.len() && !last_segment_fallback {
+        return None;
+    }
+    // Most unresolved calls name no type at all: reject them before the
+    // candidate collection in `resolve_callee` allocates.
+    let names_constructible = types.anywhere.contains_key(type_name)
+        || graph
+            .nodes_by_name(type_name)
+            .any(|idx| NodeKind::from(&graph.nodes[idx as usize].kind).is_constructible());
+    if !names_constructible {
         return None;
     }
     let (ty, confidence) = resolve_callee(
         graph, type_name, file_ord, file, caller, base_metas, types, replaced, dirty_base,
     )?;
-    let base_len = graph.nodes.len() as u32;
-    let ctors: Vec<u32> = match ty.checked_sub(base_len) {
-        Some(virt_off) => {
-            let ty_node = &nodes[virt_off as usize];
-            if !ty_node.kind.is_constructible() {
-                return None;
-            }
-            let mut ctors: Vec<u32> = nodes
-                .iter()
-                .enumerate()
-                .filter(|(_, n)| {
-                    n.kind == NodeKind::Constructor
-                        && Arc::ptr_eq(&n.rel_path, &ty_node.rel_path)
-                        && owned_by(n.owner_class.as_deref(), type_name)
-                })
-                .map(|(i, _)| base_len + i as u32)
-                .collect();
-            // Overloads share a uid, and the index collapses them into the
-            // first one: count them as that one constructor.
-            ctors.dedup_by_key(|c| nodes[(*c - base_len) as usize].uid);
-            ctors
-        }
-        None => {
-            if !NodeKind::from(&graph.nodes[ty as usize].kind).is_constructible() {
-                return None;
-            }
-            let start = graph.out_offsets[ty as usize].to_native() as usize;
-            let end = graph.out_offsets[ty as usize + 1].to_native() as usize;
-            graph.edges.as_slice()[start..end]
-                .iter()
-                .filter(|e| RelType::from(&e.rel_type) == RelType::HasMethod)
-                .map(|e| e.target.to_native())
-                .filter(|&t| NodeKind::from(&graph.nodes[t as usize].kind) == NodeKind::Constructor)
-                .filter_map(|t| {
-                    if dirty_base.contains(&t) {
-                        replaced.get(&t).copied()
-                    } else {
-                        Some(t)
-                    }
-                })
-                .collect()
-        }
+    let kind = match ty.checked_sub(graph.nodes.len() as u32) {
+        Some(virt_off) => nodes[virt_off as usize].kind,
+        None => NodeKind::from(&graph.nodes[ty as usize].kind),
     };
-    let target = match ctors.as_slice() {
-        [ctor] => *ctor,
-        _ => ty,
-    };
-    Some((target, confidence))
-}
-
-/// Does `owner_class` name type `ty`? Compares its last path segment with
-/// generic arguments cut, like the index's owner key.
-pub fn owned_by(owner_class: Option<&str>, ty: &str) -> bool {
-    owner_class.is_some_and(|owner| {
-        let owner = owner.split_once('<').map_or(owner, |(o, _)| o);
-        owner.rsplit(['.', ':', '\\']).next().map(str::trim) == Some(ty)
-    })
+    kind.is_constructible().then_some((ty, confidence))
 }
 
 /// Last path-ish segment of an import source across language conventions:
@@ -863,7 +952,7 @@ mod tests {
     fn test_build_unresolved_construction_calls_constructor_like_index() {
         let bytes = construction_graph_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
-        let untyped_member = format!("{}Widget", CallSite::UNTYPED_MEMBER_PREFIX);
+        let untyped_member = CallSite::untyped_member("Widget");
         let app = OverlayFileInput {
             rel_path: "src/app.py".to_string(),
             symbols: vec![
@@ -915,9 +1004,11 @@ mod tests {
             ],
             imports: vec![],
         };
+        // The Java extractor encodes `new Multi(1)` as a construction.
+        let new_multi = CallSite::construct("Multi");
         let app = OverlayFileInput {
             rel_path: "src/App.java".to_string(),
-            symbols: vec![sym("makeMulti", &["Multi"])],
+            symbols: vec![sym("makeMulti", &[new_multi.as_str()])],
             imports: vec![],
         };
         let view = OverlayView::build(graph, &[multi, app]).unwrap();
@@ -929,5 +1020,94 @@ mod tests {
             "makeMulti → the first Multi overload"
         );
         assert_eq!(view.overlay_out(make).count(), 1, "one edge per call site");
+    }
+
+    /// files: 0 = src/models.py
+    /// nodes: 0 Alpha · 1 Alpha.__init__ · 2 Beta · 3 Beta.__init__
+    ///
+    /// `class_membership` binds both classes' `HasMethod` to the file's
+    /// first `__init__`; the fixture keeps that defect.
+    fn two_class_graph_bytes() -> Vec<u8> {
+        let mut fx = GraphFixture::new();
+        fx.file("src/models.py");
+        let alpha = fx.node(NodeKind::Class, "src/models.py", "Alpha");
+        let alpha_init = fx.node_owned(NodeKind::Constructor, "src/models.py", "Alpha", "__init__");
+        let beta = fx.node(NodeKind::Class, "src/models.py", "Beta");
+        fx.node_owned(NodeKind::Constructor, "src/models.py", "Beta", "__init__");
+        fx.edge(alpha, alpha_init, RelType::HasMethod);
+        fx.edge(beta, alpha_init, RelType::HasMethod);
+        fx.into_bytes()
+    }
+
+    /// The index picks the constructor its owner names, never the one a
+    /// `HasMethod` edge points at.
+    #[test]
+    fn test_build_construction_of_second_class_in_clean_file_calls_its_own_constructor() {
+        let bytes = two_class_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let app = OverlayFileInput {
+            rel_path: "src/app.py".to_string(),
+            symbols: vec![sym("make", &["Beta"])],
+            imports: vec![],
+        };
+        let view = OverlayView::build(graph, &[app]).unwrap();
+        let make = view.base_len();
+
+        assert!(edge_to(&view, make, 3).is_some(), "make → Beta.__init__");
+        assert_eq!(view.overlay_out(make).count(), 1, "one edge per call site");
+        let merged = crate::session::MergedGraph::new(graph, Some(&view));
+        assert_eq!(merged.constructors_of(2), [3], "Beta's constructors");
+        assert_eq!(merged.constructors_of(0), [1], "Alpha's constructors");
+    }
+
+    /// The overlay compares owners through the index's `owner_key`: a
+    /// generic path (`Outer<T>.Inner`) names its last segment, `Inner`.
+    #[test]
+    fn test_build_construction_owner_with_generic_path_calls_constructor_like_index() {
+        let bytes = construction_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let symbol = |name: &str, kind, owner: &str, line: u32| OverlaySymbol {
+            name: name.to_string(),
+            kind,
+            owner_class: Some(owner.to_string()),
+            start_line: line,
+            end_line: line + 1,
+            calls: vec![],
+        };
+        let outer = OverlayFileInput {
+            rel_path: "src/outer.ts".to_string(),
+            symbols: vec![
+                symbol("Inner", NodeKind::Class, "Outer<T>", 2),
+                symbol("constructor", NodeKind::Constructor, "Outer<T>.Inner", 3),
+            ],
+            imports: vec![],
+        };
+        let new_inner = CallSite::construct("Inner");
+        let app = OverlayFileInput {
+            rel_path: "src/app.ts".to_string(),
+            symbols: vec![sym("makeInner", &[new_inner.as_str()])],
+            imports: vec![],
+        };
+        let view = OverlayView::build(graph, &[outer, app]).unwrap();
+        let ctor = view.base_len() + 1;
+        let make = view.base_len() + 2;
+
+        assert!(
+            edge_to(&view, make, ctor).is_some(),
+            "makeInner → Inner's constructor"
+        );
+        assert_eq!(view.overlay_out(make).count(), 1, "one edge per call site");
+        assert_eq!(view.constructors_of(view.base_len()), [ctor]);
+    }
+
+    /// Contract: overloads (one uid) count as their first node in any
+    /// order; two distinct constructors are several.
+    #[test]
+    fn test_sole_constructor_overloads_and_distinct_returns_first_or_none() {
+        let uid = |idx: u32| if idx == 7 { 2 } else { 1 };
+        assert_eq!(sole_constructor(&[3, 5], uid), Some(3));
+        assert_eq!(sole_constructor(&[3, 7, 5], uid), None);
+        assert_eq!(sole_constructor(&[7], uid), Some(7));
+        assert_eq!(sole_constructor(&[], uid), None);
     }
 }
