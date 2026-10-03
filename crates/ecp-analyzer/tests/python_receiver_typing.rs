@@ -7,7 +7,9 @@
 mod receiver_typing_support;
 
 use ecp_analyzer::python::parser::PythonProvider;
-use receiver_typing_support::{assert_single_call_into_base, parse_all};
+use receiver_typing_support::{
+    assert_binder_emits, assert_single_call_into_base, build, callee_files, parse_all,
+};
 
 #[test]
 fn test_typed_param_inherited_method_resolves_to_base_class() {
@@ -50,4 +52,50 @@ def run(d: Derived):
         ],
     );
     assert_single_call_into_base(graphs, "run", "Derived.greet", "greet", "pkg/base.py");
+}
+
+const BASE_B: &str = "class B:\n    def greet(self):\n        return 1\n";
+const A_ON_EXTERNAL: &str = "from external_lib import External\n\n\nclass A(External):\n    pass\n";
+const DECOY: &str = "class Decoy:\n    def greet(self):\n        return 2\n";
+const APP: &str = "from .derived import Derived\n\n\ndef run(d: Derived):\n    return d.greet()\n";
+
+fn greet_targets(derived: &str) -> Vec<String> {
+    let provider = PythonProvider::new().expect("PythonProvider::new");
+    let graphs = parse_all(
+        &provider,
+        &[
+            ("pkg/b.py", BASE_B),
+            ("pkg/a.py", A_ON_EXTERNAL),
+            ("pkg/derived.py", derived),
+            ("pkg/decoy.py", DECOY),
+            ("pkg/app.py", APP),
+        ],
+    );
+    assert_binder_emits(&graphs, "run", "Derived.greet");
+    callee_files(&build(graphs), "run", "greet")
+}
+
+/// MRO of `Derived(A, B)` is Derived, A, External, B: the unindexed
+/// `External` comes before `B` and may define `greet`, though the
+/// breadth-first walk meets `B.greet` first.
+#[test]
+fn test_unresolved_base_on_earlier_branch_blocks_later_owner() {
+    let derived = "from .a import A\nfrom .b import B\n\n\nclass Derived(A, B):\n    pass\n";
+    assert!(greet_targets(derived).is_empty());
+}
+
+/// `Derived(B, A)`: B's branch precedes A's, so `External` (above A) cannot
+/// shadow `B.greet`.
+#[test]
+fn test_unresolved_base_on_later_branch_keeps_earlier_owner() {
+    let derived = "from .a import A\nfrom .b import B\n\n\nclass Derived(B, A):\n    pass\n";
+    assert_eq!(greet_targets(derived), vec!["pkg/b.py".to_string()]);
+}
+
+/// `greet = replacement` in `Derived` shadows the inherited method; the call
+/// runs `replacement`, not `B.greet`.
+#[test]
+fn test_attribute_on_receiver_type_shadows_inherited_method() {
+    let derived = "from .b import B\n\n\ndef replacement(self):\n    return 3\n\n\nclass Derived(B):\n    greet = replacement\n";
+    assert!(!greet_targets(derived).contains(&"pkg/b.py".to_string()));
 }

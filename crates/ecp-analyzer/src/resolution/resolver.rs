@@ -50,7 +50,7 @@ use crate::resolution::index::{
 };
 use crate::resolution::path_aliases::PathAliases;
 use crate::rust::module_tree::RustWorkspaceModTree;
-use rustc_hash::FxHashSet;
+use rustc_hash::FxHashMap;
 
 pub type NodeId = u32;
 
@@ -1314,9 +1314,11 @@ impl<'a> Resolver<'a> {
     /// The walk visits every ancestor (breadth-first, declared order, depth
     /// [`MAX_HERITAGE_DEPTH`]). The owner is the most derived owning type;
     /// two owners on separate branches depend on the language's method
-    /// resolution order, so they give `Unknown`. An unresolved base visited
-    /// before the owner (or anywhere, when no ancestor owns the member) may
-    /// supply the member itself, so it also gives `Unknown`.
+    /// resolution order, so they give `Unknown`. The result is also `Unknown`
+    /// when something the lookup may meet before the owner could supply the
+    /// member instead: an unresolved base on a branch declared before the
+    /// owner's, or a same-named attribute on a type between `ty` and the
+    /// owner (`greet = replacement`).
     fn member_ownership(
         &self,
         ty: NodeId,
@@ -1335,34 +1337,36 @@ impl<'a> Resolver<'a> {
             MemberLookup::Miss => {}
         }
         let st = self.symbol_table;
-        let mut seen: FxHashSet<NodeId> = FxHashSet::default();
-        seen.insert(ty);
+        // How each ancestor was first reached: (the type, base position).
+        let mut parent: FxHashMap<NodeId, (NodeId, u32)> = FxHashMap::default();
         let mut frontier = vec![ty];
-        let mut unresolved_seen = false;
-        // (owning ancestor, member id, an unresolved base came first)
-        let mut hits: Vec<(NodeId, NodeId, bool)> = Vec::new();
+        // (type, number of resolved bases it declares before an unresolved one)
+        let mut unresolved: Vec<(NodeId, u32)> = Vec::new();
+        let mut hits: Vec<(NodeId, NodeId)> = Vec::new();
         for _ in 0..MAX_HERITAGE_DEPTH {
             let mut next = Vec::new();
             for &current in &frontier {
                 let Some(sup) = st.supertypes(current) else {
                     continue;
                 };
+                if let Some(at) = sup.first_unresolved {
+                    unresolved.push((current, at));
+                }
                 for (pos, &base) in sup.bases.iter().enumerate() {
-                    unresolved_seen |= sup.first_unresolved == Some(pos as u32);
-                    if !seen.insert(base) {
+                    if base == ty || parent.contains_key(&base) {
                         continue;
                     }
+                    parent.insert(base, (current, pos as u32));
                     next.push(base);
                     let Some(base_name) = st.name_in_file(base) else {
                         continue;
                     };
                     match self.owned_member(base, base_name, member, target) {
-                        MemberLookup::Hit(id) => hits.push((base, id, unresolved_seen)),
+                        MemberLookup::Hit(id) => hits.push((base, id)),
                         MemberLookup::Ambiguous => return Ownership::Unknown,
                         MemberLookup::Miss => {}
                     }
                 }
-                unresolved_seen |= sup.first_unresolved == Some(sup.bases.len() as u32);
             }
             frontier = next;
             if frontier.is_empty() {
@@ -1373,20 +1377,73 @@ impl<'a> Resolver<'a> {
         if frontier.iter().any(|&t| st.supertypes(t).is_some()) {
             return Ownership::Unknown;
         }
-        let most_derived = hits.iter().find(|&&(owner, ..)| {
+        let most_derived = hits.iter().find(|&&(owner, _)| {
             let above = st.ancestors(owner);
             hits.iter()
-                .all(|&(other, ..)| other == owner || above.contains(&other))
+                .all(|&(other, _)| other == owner || above.contains(&other))
         });
-        match most_derived {
-            Some(&(_, id, false)) => Ownership::Owned {
-                id,
-                inherited: true,
-            },
-            Some(_) => Ownership::Unknown,
-            None if !hits.is_empty() || unresolved_seen => Ownership::Unknown,
-            None => Ownership::NotOwned,
+        let Some(&(owner, id)) = most_derived else {
+            return if hits.is_empty() && unresolved.is_empty() {
+                Ownership::NotOwned
+            } else {
+                Ownership::Unknown
+            };
+        };
+        // The walk path from `ty` to the owner: each type on it, with the
+        // position of the base it takes toward the owner.
+        let mut path: FxHashMap<NodeId, u32> = FxHashMap::default();
+        let mut node = owner;
+        while let Some(&(up, pos)) = parent.get(&node) {
+            path.insert(up, pos);
+            node = up;
         }
+        let above_owner = st.ancestors(owner);
+        // An unresolved base above the owner is shadowed by it. Any other one
+        // hangs on the path somewhere: it comes first when its branch is
+        // declared before the one the path takes.
+        let precedes_owner = |holder: NodeId, at: u32| {
+            if holder == owner || above_owner.contains(&holder) {
+                return false;
+            }
+            // `at` counts resolved bases before the unresolved slot, so the
+            // slot precedes path base `taken` when `at <= taken`; a resolved
+            // branch at `pos` precedes it when `pos < taken`.
+            let (mut node, mut pos, mut slot) = (holder, at, true);
+            loop {
+                if let Some(&taken) = path.get(&node) {
+                    return if slot { pos <= taken } else { pos < taken };
+                }
+                let Some(&(up, up_pos)) = parent.get(&node) else {
+                    return true;
+                };
+                (node, pos, slot) = (up, up_pos, false);
+            }
+        };
+        let shadowed = path.keys().any(|&t| {
+            let name = if t == ty {
+                Some(ty_name)
+            } else {
+                st.name_in_file(t)
+            };
+            name.is_some_and(|name| self.declares_attribute(t, name, member))
+        });
+        if shadowed || unresolved.iter().any(|&(h, at)| precedes_owner(h, at)) {
+            return Ownership::Unknown;
+        }
+        Ownership::Owned {
+            id,
+            inherited: true,
+        }
+    }
+
+    /// True when type `ty` declares a non-callable member named `member`
+    /// (a field or a class attribute), which hides an inherited method.
+    fn declares_attribute(&self, ty: NodeId, ty_name: &str, member: &str) -> bool {
+        let st = self.symbol_table;
+        st.file_of(ty).is_some_and(|file| {
+            !st.owned_in_file(file, member, ty_name, ResolveTarget::Field)
+                .is_empty()
+        })
     }
 
     /// The member of `ty` named `member`, by the owner index: first in the
@@ -1422,12 +1479,23 @@ impl<'a> Resolver<'a> {
         if self.type_unique_in_scope(ty_name, ty_file) {
             return MemberLookup::Hit(first);
         }
-        // Another same-named type shares the scope. A member in a file that
-        // declares one of them belongs to that type; any other member cannot
-        // be attributed.
-        if elsewhere
-            .iter()
-            .all(|&id| st.file_of(id).is_some_and(|f| declares_owner(f) > 0))
+        // Another same-named type shares the scope. Where a type can be
+        // reopened in another file (Ruby `class Derived`, a C# partial class,
+        // a Swift / Dart extension), a member there may be this type's own;
+        // elsewhere a member in a file declaring that name belongs to that
+        // other type, and any other member cannot be attributed.
+        let reopenable = matches!(
+            FileMeta::from_path(ty_file).language,
+            Language::Ruby
+                | Language::Crystal
+                | Language::CSharp
+                | Language::Swift
+                | Language::Dart
+        );
+        if !reopenable
+            && elsewhere
+                .iter()
+                .all(|&id| st.file_of(id).is_some_and(|f| declares_owner(f) > 0))
         {
             MemberLookup::Miss
         } else {
@@ -2520,7 +2588,8 @@ mod tests {
             ("src/decoy.rs", "Decoy", NodeKind::Struct, None),
             ("src/decoy.rs", "save", NodeKind::Method, Some("Decoy")),
         ]);
-        let (out, tier) = resolve_dumped(&st, "src/app.rs", "Repo.save", &[]);
+        let imports = [import("crate::model", "Repo", None)];
+        let (out, tier) = resolve_dumped(&st, "src/app.rs", "Repo.save", &imports);
         assert_eq!(
             out,
             vec![(1, ResolutionTier::QualifierScoped.base_confidence())]
