@@ -572,6 +572,17 @@ fn qualifier_prefix_is_internal(full_callee: &str, qualifier: &str) -> bool {
             .all(|s| matches!(s, "crate" | "self" | "super"))
 }
 
+/// Languages where a field or class attribute hides an inherited method of
+/// the same name: Python class attributes, JavaScript / TypeScript instance
+/// fields over prototype methods, and Go fields over promoted methods. Java,
+/// Kotlin, C#, Rust and the rest keep fields and methods apart.
+fn attributes_shadow_methods(meta: FileMeta) -> bool {
+    matches!(
+        meta.language,
+        Language::Python | Language::JavaScript | Language::TypeScript | Language::Go
+    )
+}
+
 /// For a Rust path call `a::b::Q::m`, does the module path `a::b` that the
 /// call names for `Q` agree with the import of `Q` from `import_source`?
 /// `de::Error::custom` with `use crate::error::Error` does not: `de::Error`
@@ -1405,6 +1416,12 @@ impl<'a> Resolver<'a> {
             if holder == owner || above_owner.contains(&holder) {
                 return false;
             }
+            // Off the path, a holder that also reaches the owner puts the
+            // owner after its own bases (a diamond): C3 visits a shared
+            // ancestor last.
+            if !path.contains_key(&holder) && st.ancestors(holder).contains(&owner) {
+                return true;
+            }
             // `at` counts resolved bases before the unresolved slot, so the
             // slot precedes path base `taken` when `at <= taken`; a resolved
             // branch at `pos` precedes it when `pos < taken`.
@@ -1419,14 +1436,16 @@ impl<'a> Resolver<'a> {
                 (node, pos, slot) = (up, up_pos, false);
             }
         };
-        let shadowed = path.keys().any(|&t| {
-            let name = if t == ty {
-                Some(ty_name)
-            } else {
-                st.name_in_file(t)
-            };
-            name.is_some_and(|name| self.declares_attribute(t, name, member))
-        });
+        let shadowed =
+            attributes_shadow_methods(FileMeta::from_path(st.file_of(ty).unwrap_or_default()))
+                && path.keys().any(|&t| {
+                    let name = if t == ty {
+                        Some(ty_name)
+                    } else {
+                        st.name_in_file(t)
+                    };
+                    name.is_some_and(|name| self.declares_attribute(t, name, member))
+                });
         if shadowed || unresolved.iter().any(|&(h, at)| precedes_owner(h, at)) {
             return Ownership::Unknown;
         }
@@ -1437,7 +1456,8 @@ impl<'a> Resolver<'a> {
     }
 
     /// True when type `ty` declares a non-callable member named `member`
-    /// (a field or a class attribute), which hides an inherited method.
+    /// (a field or a class attribute), which hides an inherited method in
+    /// the languages [`attributes_shadow_methods`] lists.
     fn declares_attribute(&self, ty: NodeId, ty_name: &str, member: &str) -> bool {
         let st = self.symbol_table;
         st.file_of(ty).is_some_and(|file| {

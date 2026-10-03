@@ -99,3 +99,32 @@ fn test_attribute_on_receiver_type_shadows_inherited_method() {
     let derived = "from .b import B\n\n\ndef replacement(self):\n    return 3\n\n\nclass Derived(B):\n    greet = replacement\n";
     assert!(!greet_targets(derived).contains(&"pkg/b.py".to_string()));
 }
+
+/// Diamond: `Derived(A, C)`, `A(M)`, `M(B)`, `C(External, N)`, `N(B)`. The
+/// MRO is Derived, A, M, C, External, N, B: `External` comes before the
+/// shared base `B`, though the first path the walk finds runs through A.
+#[test]
+fn test_unresolved_base_before_shared_ancestor_in_diamond_blocks_owner() {
+    let provider = PythonProvider::new().expect("PythonProvider::new");
+    let graphs = parse_all(
+        &provider,
+        &[
+            ("pkg/b.py", BASE_B),
+            ("pkg/m.py", "from .b import B\n\n\nclass M(B):\n    pass\n"),
+            ("pkg/a.py", "from .m import M\n\n\nclass A(M):\n    pass\n"),
+            ("pkg/n.py", "from .b import B\n\n\nclass N(B):\n    pass\n"),
+            (
+                "pkg/c.py",
+                "from external_lib import External\nfrom .n import N\n\n\nclass C(External, N):\n    pass\n",
+            ),
+            (
+                "pkg/derived.py",
+                "from .a import A\nfrom .c import C\n\n\nclass Derived(A, C):\n    pass\n",
+            ),
+            ("pkg/decoy.py", DECOY),
+            ("pkg/app.py", APP),
+        ],
+    );
+    assert_binder_emits(&graphs, "run", "Derived.greet");
+    assert!(callee_files(&build(graphs), "run", "greet").is_empty());
+}

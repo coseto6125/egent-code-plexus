@@ -52,3 +52,32 @@ fn test_typed_param_inherited_method_resolves_to_base_class() {
     );
     assert_single_call_into_base(graphs, "run", "Derived.greet", "greet", "src/Base.java");
 }
+
+/// Java keeps fields and methods in separate namespaces: a field `greet` on
+/// `Derived` does not hide the inherited `greet()`.
+#[test]
+fn test_same_named_field_does_not_hide_inherited_method() {
+    let provider = JavaProvider::new().expect("JavaProvider::new");
+    let graphs = parse_all(
+        &provider,
+        &[
+            (
+                "src/Base.java",
+                "public class Base {\n    public int greet() {\n        return 1;\n    }\n}\n",
+            ),
+            (
+                "src/Derived.java",
+                "public class Derived extends Base {\n    int greet;\n}\n",
+            ),
+            (
+                "src/Decoy.java",
+                "public class Decoy {\n    public int greet() {\n        return 2;\n    }\n}\n",
+            ),
+            (
+                "src/App.java",
+                "public class App {\n    public int run(Derived d) {\n        return d.greet();\n    }\n}\n",
+            ),
+        ],
+    );
+    assert_single_call_into_base(graphs, "run", "Derived.greet", "greet", "src/Base.java");
+}
