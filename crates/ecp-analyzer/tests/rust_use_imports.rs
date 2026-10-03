@@ -503,3 +503,119 @@ fn test_python_import_does_not_bind_into_a_same_named_rust_crate() {
         targets_of(&files, "helper")
     );
 }
+
+/// Method syntax never calls a free function in Rust, so `n.name.resolve(1)`
+/// on a value of an unindexed type must not bind to a same-file `fn resolve`
+/// (FU-2026-10-03-65d39a6471ea).
+#[test]
+fn test_method_call_never_binds_a_same_file_free_function() {
+    let files = [(
+        "src/lib.rs",
+        "pub fn resolve(p: u32) -> u32 { p }\n\
+         pub fn go(n: &ext::Node) { n.name.resolve(1); }\n",
+    )];
+    assert_eq!(
+        workspace_go_targets(&files, "resolve"),
+        Vec::<String>::new()
+    );
+}
+
+/// `de::Error::custom` names `Error` inside module `de` (here serde's). A
+/// project `Error` declared elsewhere is another item, whether it sits in the
+/// caller's file (Tier 1) or is the only `Error` in the repo (Tier 3)
+/// (FU-2026-10-03-96ccd9c59f1e).
+#[test]
+fn test_module_qualified_type_call_never_binds_an_unrelated_type() {
+    let same_file = [(
+        "src/lib.rs",
+        "use serde::de;\n\
+         pub struct Error;\n\
+         impl Error { pub fn custom() {} }\n\
+         pub fn go() { de::Error::custom(); }\n",
+    )];
+    assert_eq!(
+        workspace_go_targets(&same_file, "custom"),
+        Vec::<String>::new(),
+        "same file"
+    );
+    let unique_global = [
+        (
+            "src/lib.rs",
+            "pub mod error;\nuse serde::de;\npub fn go() { de::Error::custom(); }\n",
+        ),
+        (
+            "src/error.rs",
+            "pub struct Error;\nimpl Error { pub fn custom() {} }\n",
+        ),
+    ];
+    assert_eq!(
+        workspace_go_targets(&unique_global, "custom"),
+        Vec::<String>::new(),
+        "unique global"
+    );
+}
+
+/// A crate with both `src/lib.rs` and `src/main.rs`: `crate::` in a module
+/// that `main.rs` declares names the bin crate's root, not the lib's
+/// (FU-2026-10-03-95b377b1fafe).
+#[test]
+fn test_crate_path_in_a_bin_module_resolves_against_main_rs() {
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        ("src/lib.rs", "pub fn helper() {}\n"),
+        (
+            "src/main.rs",
+            "mod cli;\npub fn helper() {}\nfn main() {}\n",
+        ),
+        (
+            "src/cli.rs",
+            "use crate::helper;\npub fn go() { helper(); }\n",
+        ),
+    ];
+    assert_eq!(
+        workspace_go_targets(&files, "helper"),
+        vec!["src/main.rs".to_string()]
+    );
+}
+
+/// `super` inside an inline `mod tests { }` names the file's own module, not
+/// the file's parent (FU-2026-10-03-0b829952a712).
+#[test]
+fn test_super_in_an_inline_module_names_the_enclosing_file_module() {
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        ("src/lib.rs", "pub mod inner;\npub fn helper() {}\n"),
+        (
+            "src/inner.rs",
+            "pub fn helper() {}\n\
+             mod tests {\n    use super::helper;\n    pub fn go() { helper(); }\n}\n",
+        ),
+    ];
+    assert_eq!(
+        workspace_go_targets(&files, "helper"),
+        vec!["src/inner.rs".to_string()]
+    );
+}
+
+/// A `#[path]` module's `super` is the module that declares it, wherever the
+/// file sits. The undeclared `src/imp.rs` is a decoy a layout-based guess
+/// reaches (FU-2026-10-03-0b829952a712).
+#[test]
+fn test_super_in_a_path_attribute_module_names_the_declaring_module() {
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        (
+            "src/lib.rs",
+            "#[path = \"imp/real.rs\"]\nmod imp;\npub fn helper() {}\n",
+        ),
+        (
+            "src/imp/real.rs",
+            "use super::helper;\npub fn go() { helper(); }\n",
+        ),
+        ("src/imp.rs", "pub fn helper() {}\n"),
+    ];
+    assert_eq!(
+        workspace_go_targets(&files, "helper"),
+        vec!["src/lib.rs".to_string()]
+    );
+}
