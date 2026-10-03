@@ -153,8 +153,10 @@ pub enum IndexNeed<'a> {
 /// sibling commit's graph, it builds in the foreground and returns `Ready`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnsureFreshOutcome {
-    /// Graph is up-to-date (or was synchronously rebuilt / overlaid). No
-    /// special action needed; `graph_path::resolve` will find the right graph.
+    /// Graph is up-to-date (or was synchronously rebuilt / overlaid). A
+    /// rebuild publishes a new commit dir, so a caller holding a pre-ensure
+    /// path re-resolves it (`graph_path::resolve` for a cwd graph) or loads
+    /// through `load_ensured`, which follows the build.
     Ready,
     /// New HEAD has no published graph yet. The most-recent sibling SHA's graph
     /// is usable for this invocation; a background rebuild for the new SHA has
@@ -521,6 +523,18 @@ pub fn ensure_fresh(
     graph_path: &Path,
     worktree_root: &Path,
 ) -> Result<EnsureFreshOutcome, String> {
+    ensure_fresh_with_rebuild(need, graph_path, worktree_root).map(|(outcome, _)| outcome)
+}
+
+/// `ensure_fresh` plus the `graph.bin` a synchronous build published. A
+/// rebuild lands in a new `.gen` commit dir and leaves the probed file in
+/// place, so a caller that loads `graph_path` after a build reads the stale
+/// graph (or nothing, when `graph_path` was the never-built legacy default).
+fn ensure_fresh_with_rebuild(
+    need: IndexNeed<'_>,
+    graph_path: &Path,
+    worktree_root: &Path,
+) -> Result<(EnsureFreshOutcome, Option<PathBuf>), String> {
     beat_session_heartbeat(worktree_root);
     let state =
         ensure_index(graph_path, worktree_root).map_err(|e| format!("ensure_index probe: {e}"))?;
@@ -530,7 +544,7 @@ pub fn ensure_fresh(
         IndexNeed::NearCurrent => None,
     };
     match state {
-        EnsureResult::Ready => Ok(EnsureFreshOutcome::Ready),
+        EnsureResult::Ready => Ok((EnsureFreshOutcome::Ready, None)),
         EnsureResult::Missing => {
             // A sibling is a different commit, so it is only ever an answer to
             // `NearCurrent`. Deciding here rather than unwinding a warm-attach
@@ -545,9 +559,12 @@ pub fn ensure_fresh(
                         "l2.warm-attach sibling={} rebuild=background",
                         sibling.display()
                     );
-                    return Ok(EnsureFreshOutcome::WarmAttach {
-                        sibling_graph_path: sibling,
-                    });
+                    return Ok((
+                        EnsureFreshOutcome::WarmAttach {
+                            sibling_graph_path: sibling,
+                        },
+                        None,
+                    ));
                 }
             }
             let start = std::time::Instant::now();
@@ -557,7 +574,10 @@ pub fn ensure_fresh(
                 .map_err(|e| format!("build_l2: {e}"))?;
             park_tantivy_writer(&mut result, worktree_root);
             eprintln!("l2.built elapsed={:.2}s", start.elapsed().as_secs_f32());
-            Ok(EnsureFreshOutcome::Ready)
+            Ok((
+                EnsureFreshOutcome::Ready,
+                Some(result.commit_dir.join("graph.bin")),
+            ))
         }
         EnsureResult::Stale {
             needs_full_rebuild,
@@ -579,6 +599,10 @@ pub fn ensure_fresh(
                     .map_err(|e| format!("build_l2 (incompatible schema): {e}"))?;
                 park_tantivy_writer(&mut result, worktree_root);
                 eprintln!("l2.rebuilt elapsed={:.2}s", start.elapsed().as_secs_f32());
+                return Ok((
+                    EnsureFreshOutcome::Ready,
+                    Some(result.commit_dir.join("graph.bin")),
+                ));
             } else {
                 // Header-compatible + dirty files: incremental refresh path.
                 //
@@ -614,7 +638,7 @@ pub fn ensure_fresh(
                 if gate.rel_paths.is_empty() {
                     test_counters::FRESH_GATE_SKIP_COUNT
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    return Ok(EnsureFreshOutcome::Ready);
+                    return Ok((EnsureFreshOutcome::Ready, None));
                 }
                 // Stat BEFORE parsing: the manifest mtime must belong to the
                 // content that was parsed. Statting after the parse would let
@@ -659,7 +683,7 @@ pub fn ensure_fresh(
                 // current HEAD — refresh the fingerprint as the very last step.
                 write_head_sha_sidecar(graph_path, worktree_root);
             }
-            Ok(EnsureFreshOutcome::Ready)
+            Ok((EnsureFreshOutcome::Ready, None))
         }
     }
 }
@@ -681,8 +705,9 @@ pub fn load_ensured(
     graph_path: &Path,
     worktree_root: &Path,
 ) -> Result<crate::engine::Engine, String> {
-    match ensure_fresh(IndexNeed::NearCurrent, graph_path, worktree_root)? {
-        EnsureFreshOutcome::Ready => {
+    match ensure_fresh_with_rebuild(IndexNeed::NearCurrent, graph_path, worktree_root)? {
+        (EnsureFreshOutcome::Ready, rebuilt) => {
+            let graph_path = rebuilt.as_deref().unwrap_or(graph_path);
             let mut engine = crate::engine::Engine::load(graph_path)
                 .map_err(|e| format!("load graph {}: {e}", graph_path.display()))?;
             // Callers resolve `graph_path` as the latest *published* graph,
@@ -709,7 +734,7 @@ pub fn load_ensured(
             }
             Ok(engine)
         }
-        EnsureFreshOutcome::WarmAttach { sibling_graph_path } => {
+        (EnsureFreshOutcome::WarmAttach { sibling_graph_path }, _) => {
             crate::engine::Engine::load_warm(&sibling_graph_path).map_err(|e| {
                 format!(
                     "load warm-attach graph {}: {e}",

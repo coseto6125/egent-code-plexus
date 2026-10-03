@@ -130,6 +130,136 @@ fn load_ensured_rebuilds_on_fingerprint_drift() {
     );
 }
 
+fn has_symbol(engine: &ecp_cli::engine::Engine, name: &str) -> bool {
+    let graph = engine.graph().expect("graph view");
+    let pool = graph.string_pool.as_slice();
+    graph.nodes.iter().any(|n| n.name.resolve(pool) == name)
+}
+
+/// The rebuild publishes into a NEW `.gen` commit dir and leaves the stale
+/// file in place, so loading the caller's pre-rebuild path returns the stale
+/// graph. The stale file here carries a symbol the source never had, which
+/// the drift test above cannot tell apart: its stale and rebuilt graphs hold
+/// the same symbols.
+#[test]
+fn load_ensured_drift_loads_rebuilt_graph_not_stale_file() {
+    let _env_guard = lock_env();
+    let _snapshot = EnvSnapshot::take();
+
+    let tmp = TempDir::new().expect("tempdir");
+    let worktree = tmp.path();
+    git_init_with_commit(worktree);
+    std::env::set_var("HOME", worktree);
+    std::env::remove_var("ECP_HOME");
+
+    let graph_path = build_initial_graph(worktree);
+
+    let other = TempDir::new().expect("tempdir");
+    git_init_with_commit(other.path());
+    fs::write(other.path().join("lib.rs"), "pub fn stale_only_fn() {}\n").unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(other.path())
+        .args(["commit", "-qam", "stale content"])
+        .output()
+        .expect("git commit");
+    let stale_graph = build_initial_graph(other.path());
+    fs::copy(&stale_graph, &graph_path).expect("plant stale graph");
+    // An older binary records its fingerprint in meta.json as well as the
+    // sidecar. With meta.json current, build_l2 re-attaches the same dir
+    // instead of rebuilding, and the bug never shows.
+    let stale_fp = "v0.0.1+schema1";
+    fs::write(
+        auto_ensure::builder_fingerprint_sidecar_path(&graph_path),
+        format!("{stale_fp}\n"),
+    )
+    .expect("write stale sidecar");
+    let meta_path = graph_path.with_file_name("meta.json");
+    let mut meta: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&meta_path).expect("read meta")).unwrap();
+    meta["builder_fingerprint"] = stale_fp.into();
+    fs::write(&meta_path, meta.to_string()).expect("write stale meta");
+
+    test_counters::reset();
+    let engine = auto_ensure::load_ensured(&graph_path, worktree)
+        .expect("load_ensured under fingerprint drift");
+
+    assert_eq!(test_counters::build_l2_calls(), 1);
+    assert!(
+        has_symbol(&engine, "sentinel_fn") && !has_symbol(&engine, "stale_only_fn"),
+        "load_ensured must answer from the rebuilt graph, not the stale file it was handed"
+    );
+}
+
+/// The stale graph sits at an older commit than HEAD. The rebuild targets
+/// HEAD, so `behind_head` judged on the loaded graph is false; judged on the
+/// path the caller handed in it would be true.
+#[test]
+fn load_ensured_drift_behind_head_rebuilds_at_head() {
+    let _env_guard = lock_env();
+    let _snapshot = EnvSnapshot::take();
+
+    let tmp = TempDir::new().expect("tempdir");
+    let worktree = tmp.path();
+    git_init_with_commit(worktree);
+    std::env::set_var("HOME", worktree);
+    std::env::remove_var("ECP_HOME");
+
+    let graph_path = build_initial_graph(worktree);
+    fs::write(worktree.join("newer.rs"), "pub fn newer_fn() {}\n").unwrap();
+    for args in [&["add", "."][..], &["commit", "-qm", "advance"][..]] {
+        Command::new("git")
+            .arg("-C")
+            .arg(worktree)
+            .args(args)
+            .output()
+            .expect("git");
+    }
+    let stale_fp = "v0.0.1+schema1";
+    fs::write(
+        auto_ensure::builder_fingerprint_sidecar_path(&graph_path),
+        format!("{stale_fp}\n"),
+    )
+    .expect("write stale sidecar");
+    let meta_path = graph_path.with_file_name("meta.json");
+    let mut meta: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&meta_path).expect("read meta")).unwrap();
+    meta["builder_fingerprint"] = stale_fp.into();
+    fs::write(&meta_path, meta.to_string()).expect("write stale meta");
+
+    let engine = auto_ensure::load_ensured(&graph_path, worktree)
+        .expect("load_ensured on a stale graph behind HEAD");
+
+    assert!(
+        has_symbol(&engine, "newer_fn"),
+        "answers from the HEAD rebuild"
+    );
+    assert!(
+        !engine.behind_head,
+        "a graph rebuilt at HEAD is not behind it"
+    );
+}
+
+/// A repo with no graph yet resolves to the legacy `.ecp/graph.bin` default;
+/// the synchronous build publishes elsewhere, so the load must follow it.
+#[test]
+fn load_ensured_missing_graph_loads_fresh_build() {
+    let _env_guard = lock_env();
+    let _snapshot = EnvSnapshot::take();
+
+    let tmp = TempDir::new().expect("tempdir");
+    let worktree = tmp.path();
+    git_init_with_commit(worktree);
+    std::env::set_var("HOME", worktree);
+    std::env::remove_var("ECP_HOME");
+
+    let graph_path = ecp_cli::graph_path::resolve(Path::new(".ecp/graph.bin"), worktree);
+    let engine = auto_ensure::load_ensured(&graph_path, worktree)
+        .expect("load_ensured on a never-indexed repo");
+
+    assert!(has_symbol(&engine, "sentinel_fn"));
+}
+
 #[test]
 fn load_ensured_no_rebuild_when_fresh() {
     let _env_guard = lock_env();

@@ -220,3 +220,87 @@ fn bm25_cross_repo_all_fresh_stays_caveat_free() {
         "all-fresh cross-repo result must not carry a caveat: {json}"
     );
 }
+
+/// Mark every published graph under `home` as written by an older ecp: the
+/// fingerprint goes into meta.json and the sidecar, as an old binary writes
+/// both. The next query must fully rebuild instead of re-attaching.
+fn age_fingerprints(home: &Path) {
+    let stale_fp = "v0.0.1+schema1";
+    for repo_dir in std::fs::read_dir(home.join(".ecp")).unwrap().flatten() {
+        let Ok(commits) = std::fs::read_dir(repo_dir.path().join("commits")) else {
+            continue;
+        };
+        for commit in commits.flatten() {
+            let meta_path = commit.path().join("meta.json");
+            let Ok(text) = std::fs::read_to_string(&meta_path) else {
+                continue;
+            };
+            let mut meta: serde_json::Value = serde_json::from_str(&text).unwrap();
+            meta["builder_fingerprint"] = stale_fp.into();
+            std::fs::write(&meta_path, meta.to_string()).unwrap();
+            let graph = commit.path().join("graph.bin");
+            std::fs::write(
+                ecp_cli::auto_ensure::builder_fingerprint_sidecar_path(&graph),
+                format!("{stale_fp}\n"),
+            )
+            .unwrap();
+        }
+    }
+}
+
+/// The picked graph is one commit behind HEAD and from an older ecp, so the
+/// query rebuilds at HEAD and answers from it. A caveat judged on the picked
+/// dir would call that fresh answer stale.
+#[test]
+fn bm25_single_repo_rebuilt_at_head_stays_caveat_free() {
+    let repo_tmp = tempfile::tempdir().unwrap();
+    let home_tmp = tempfile::tempdir().unwrap();
+    let repo = repo_tmp.path().join("lagrepo");
+    std::fs::create_dir(&repo).unwrap();
+    init_repo(&repo, "lag_marker_fn");
+    index_repo(&repo, home_tmp.path());
+    make_stale(&repo);
+    age_fingerprints(home_tmp.path());
+
+    let json = find_bm25(&repo, home_tmp.path(), "newer_fn", &["--repo", "@all"]);
+    assert!(
+        json.to_string().contains("newer_fn"),
+        "the rebuilt HEAD graph must answer: {json}"
+    );
+    assert!(
+        json.get("result").is_none(),
+        "a graph rebuilt at HEAD is fresh — no caveat: {json}"
+    );
+}
+
+#[test]
+fn bm25_cross_repo_rebuilt_at_head_stays_caveat_free() {
+    let lag_tmp = tempfile::tempdir().unwrap();
+    let other_tmp = tempfile::tempdir().unwrap();
+    let home_tmp = tempfile::tempdir().unwrap();
+    let lag_repo = lag_tmp.path().join("lagrepo");
+    let other_repo = other_tmp.path().join("otherrepo");
+    std::fs::create_dir(&lag_repo).unwrap();
+    std::fs::create_dir(&other_repo).unwrap();
+    init_repo(&lag_repo, "shared_marker_fn");
+    init_repo(&other_repo, "shared_marker_fn");
+    index_repo(&lag_repo, home_tmp.path());
+    index_repo(&other_repo, home_tmp.path());
+    make_stale(&lag_repo);
+    age_fingerprints(home_tmp.path());
+
+    let json = find_bm25(
+        &other_repo,
+        home_tmp.path(),
+        "newer_fn",
+        &["--repo", "@all"],
+    );
+    assert!(
+        json.to_string().contains("newer_fn"),
+        "the rebuilt HEAD graph must answer: {json}"
+    );
+    assert!(
+        json.get("result").is_none(),
+        "graphs rebuilt at HEAD are fresh — no caveat: {json}"
+    );
+}
