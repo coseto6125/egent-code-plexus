@@ -171,11 +171,12 @@ impl Commands {
     /// (no `_` arm) so a new variant forces a decision here at compile time,
     /// instead of silently falling through to graph-loading (or skipping it)
     /// in `main.rs`'s dispatch.
-    pub fn needs_graph(&self) -> bool {
+    pub fn needs_graph(&self, custom_graph: bool) -> bool {
         match self {
-            // A bm25 registry selector answers from its own targets' graphs;
-            // loading (and ensuring) the cwd graph would be unused work.
-            Commands::Find(args) => !args.is_registry_selector(),
+            // A bm25 registry selector that provably excludes the cwd answers
+            // from its own targets' graphs; loading (and ensuring) the cwd
+            // graph would be unused work. `custom_graph` is the global `--graph`.
+            Commands::Find(args) => !args.skips_cwd_graph(custom_graph),
             Commands::Inspect(_)
             | Commands::Impact(_)
             | Commands::Rename(_)

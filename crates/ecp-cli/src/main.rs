@@ -159,7 +159,7 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
     // index scan, background reindex spawn); graph-free commands must not pay
     // for it, so the whole load is skipped rather than run and discarded —
     // down to the `current_dir()` syscall.
-    let (engine, graph_path) = if cli.command.needs_graph() {
+    let (engine, graph_path) = if cli.command.needs_graph(graph_path::is_custom(&cli.graph)) {
         // `--repo` names the directory this invocation answers about. When it
         // is not one, the value used to flow on as a relative path, resolve to
         // nothing, and leave the cwd's own graph attached — so `ecp impact
@@ -275,7 +275,7 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
             engine.expect("needs_graph() gates this arm"),
             graph_path.as_ref().expect("needs_graph() gates this arm"),
         ),
-        // `None` only for a bm25 registry selector (see `needs_graph`).
+        // `None` only for a bm25 registry selector (see `FindArgs::skips_cwd_graph`).
         Commands::Find(args) => commands::find::run(args, engine),
         Commands::Impact(args) => {
             commands::impact::run(args, engine.expect("needs_graph() gates this arm"))

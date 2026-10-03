@@ -35,7 +35,7 @@ use crate::output::{emit_with_caveat, OutputFormat};
 use clap::{Args, ValueEnum};
 use ecp_analyzer::resolution::index::Language;
 use ecp_core::graph::{ArchivedFileCategory, ArchivedRelType, ArchivedZeroCopyGraph, FileCategory};
-use ecp_core::registry::{resolve_home_ecp, CommitDirName, Registry};
+use ecp_core::registry::{resolve_home_ecp, CommitDirName, Registry, RegistryFile};
 use ecp_core::session::MergedGraph;
 use ecp_core::EcpError;
 use rayon::prelude::*;
@@ -133,11 +133,40 @@ impl FindArgs {
     }
 
     /// True when `--repo` names registry repos (alias / csv / `@all`) for the
-    /// bm25 fan-out, which answers from those repos' own graphs and never reads
-    /// the cwd graph. `main.rs` skips the cwd graph load for exactly this case.
+    /// bm25 fan-out, which answers from those repos' own graphs.
     pub fn is_registry_selector(&self) -> bool {
         self.effective_mode() == FindMode::Bm25
             && self.repo.as_deref().is_some_and(is_registry_selector_value)
+    }
+
+    /// True when the cwd graph cannot be part of this query's answer, so
+    /// `main.rs` may skip ensuring and loading it. `needs_graph` and this
+    /// predicate are the same decision; `custom_graph` is the global `--graph`
+    /// flag, which `main.rs` validates inside the graph-loading branch.
+    ///
+    /// | selector                              | cwd              | skips cwd graph |
+    /// |---------------------------------------|------------------|-----------------|
+    /// | not a bm25 registry selector          | any              | no              |
+    /// | any, with `--graph`                   | any              | no              |
+    /// | `@all` / `@group`                     | inside a git repo| no              |
+    /// | `@all` / `@group`                     | not a git repo   | yes             |
+    /// | entries name the cwd's repo           | inside a git repo| no              |
+    /// | entries name only other repos         | any              | yes             |
+    ///
+    /// Cost on the skip-candidate path: one `current_dir`, one cached git
+    /// common-dir lookup, and for an explicit list one read of `registry.json`
+    /// (the file `resolve_targets` reads right after; a few KB).
+    pub fn skips_cwd_graph(&self, custom_graph: bool) -> bool {
+        if custom_graph || !self.is_registry_selector() {
+            return false;
+        }
+        let Some(sel) = self.repo.as_deref() else {
+            return false;
+        };
+        let Ok(cwd) = std::env::current_dir() else {
+            return true;
+        };
+        selector_excludes_cwd(sel, &cwd)
     }
 }
 
@@ -148,10 +177,48 @@ fn is_registry_selector_value(sel: &str) -> bool {
     !matches!(sel, "." | "") && !std::path::Path::new(sel).is_dir()
 }
 
+/// The trimmed, non-empty entries of a comma-separated `--repo` list.
+fn selector_entries(sel: &str) -> impl Iterator<Item = &str> {
+    sel.split(',').map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// The registry key (map key) an entry selects: by `dir_name` or by alias.
+fn registry_key_for<'a>(snapshot: &'a RegistryFile, name: &str) -> Option<&'a String> {
+    snapshot
+        .repos
+        .iter()
+        .find(|(_k, v)| v.dir_name == name || v.aliases.iter().any(|a| a == name))
+        .map(|(k, _v)| k)
+}
+
+/// Whether the selector provably leaves the cwd's repo out of the answer.
+/// A cwd outside any git repo has no registry key and is part of no selection.
+/// The old flow indexed an unregistered cwd before resolving, so an entry that
+/// equals the cwd's key counts as naming it even when the registry lacks it.
+fn selector_excludes_cwd(sel: &str, cwd: &std::path::Path) -> bool {
+    if crate::git_cache::common_dir(cwd).is_err() {
+        return true;
+    }
+    if sel.starts_with('@') {
+        return false;
+    }
+    let Ok(cwd_key) = crate::repo_identity::repo_dir_name_for_cwd(cwd) else {
+        return true;
+    };
+    let Ok(registry) = Registry::open(&resolve_home_ecp()) else {
+        // `resolve_targets` fails on the same open with its own message.
+        return true;
+    };
+    let snapshot = registry.snapshot();
+    !selector_entries(sel).any(|name| {
+        name == cwd_key || registry_key_for(snapshot, name).is_some_and(|k| *k == cwd_key)
+    })
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
-/// `engine` is `None` only for a registry selector (`is_registry_selector`),
-/// where every answer comes from the selector's own targets.
+/// `engine` is `None` only when `skips_cwd_graph` held, where every answer comes
+/// from the selector's own targets.
 pub fn run(args: FindArgs, engine: Option<&Engine>) -> Result<(), EcpError> {
     let mode = args.effective_mode();
 
@@ -182,7 +249,7 @@ pub fn run(args: FindArgs, engine: Option<&Engine>) -> Result<(), EcpError> {
     match mode {
         FindMode::Exact | FindMode::Fuzzy => run_exact_or_fuzzy(
             args,
-            engine.expect("is_registry_selector() is false for exact/fuzzy"),
+            engine.expect("skips_cwd_graph() is false for exact/fuzzy"),
             mode,
         ),
         FindMode::Bm25 => run_bm25(args, engine),
@@ -1515,14 +1582,10 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<RepoTarget>, EcpError> 
         // Comma-separated list of names or dir_names.
         let mut matched = Vec::new();
         let mut unmatched = Vec::new();
-        for name in sel.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        for name in selector_entries(sel) {
             // Match by alias or dir_name; keep the dir_name (map key).
-            match snapshot
-                .repos
-                .iter()
-                .find(|(_k, v)| v.dir_name == name || v.aliases.iter().any(|a| a == name))
-            {
-                Some((k, _v)) => matched.push(k.clone()),
+            match registry_key_for(snapshot, name) {
+                Some(k) => matched.push(k.clone()),
                 None => unmatched.push(name.to_string()),
             }
         }
