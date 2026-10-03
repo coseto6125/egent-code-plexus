@@ -153,8 +153,10 @@ pub enum IndexNeed<'a> {
 /// sibling commit's graph, it builds in the foreground and returns `Ready`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnsureFreshOutcome {
-    /// Graph is up-to-date (or was synchronously rebuilt / overlaid). No
-    /// special action needed; `graph_path::resolve` will find the right graph.
+    /// Graph is up-to-date (or was synchronously rebuilt / overlaid). A
+    /// rebuild publishes a new commit dir, so a caller holding a pre-ensure
+    /// path re-resolves it (`graph_path::resolve` for a cwd graph) or loads
+    /// through `load_ensured`, which follows the build.
     Ready,
     /// New HEAD has no published graph yet. The most-recent sibling SHA's graph
     /// is usable for this invocation; a background rebuild for the new SHA has

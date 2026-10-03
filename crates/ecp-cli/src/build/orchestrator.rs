@@ -20,8 +20,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static GENERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub struct BuildResult {
-    // Read only by `tests/build_orchestrator.rs`; bin callers ignore it today.
-    #[allow(dead_code)]
     pub commit_dir: PathBuf,
     pub sha_hex: String,
     pub source_type: SourceType,
