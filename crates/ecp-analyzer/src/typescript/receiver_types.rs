@@ -20,8 +20,8 @@ use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_ts_string_value,
     strip_ts_template_value,
 };
-use crate::calls::attach_to_enclosing_span;
-use crate::framework_helpers::{enclosing_class, node_span};
+use crate::calls::{attach_to_enclosing_span, new_expression_call};
+use crate::framework_helpers::{enclosing_class, node_span, Span};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -185,12 +185,18 @@ pub fn extract_ts_calls_and_path_literals(
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
+    let mut constructions: Vec<(Span, String)> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = ts_callee_name(n, source, locals, nodes) {
                     attach_to_enclosing_span(node_span(&n), callee, nodes);
+                }
+            }
+            "new_expression" => {
+                if let Some(callee) = new_expression_call(n, source) {
+                    constructions.push((node_span(&n), callee));
                 }
             }
             "string" | "template_string" => {
@@ -231,6 +237,11 @@ pub fn extract_ts_calls_and_path_literals(
         for child in n.children(&mut c) {
             stack.push(child);
         }
+    }
+    // After every call: the call-meta detectors index `calls` in
+    // `call_expression` order, which a `new` site must not shift.
+    for (span, callee) in constructions {
+        attach_to_enclosing_span(span, callee, nodes);
     }
     (path_literals, sql_refs)
 }

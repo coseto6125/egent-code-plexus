@@ -327,6 +327,12 @@ impl NodeKind {
         )
     }
 
+    /// True for the type kinds a call site can construct (`new A()`, `A()`,
+    /// `A.new`), which then take the `Calls` edge of that construction.
+    pub const fn is_constructible(self) -> bool {
+        matches!(self, Self::Class | Self::Struct)
+    }
+
     /// True when the node can appear as the leading segment of a qualified
     /// callee (`outer::member()` / `outer.member()`). Superset of `is_type`
     /// plus `Namespace` (C++ / C# / PHP) and `Module` (Rust inline

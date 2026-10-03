@@ -17,7 +17,7 @@
 use super::path_literals::{
     build_concatenated, build_raw_path_literal, enclosing_symbol_and_owner, strip_quotes,
 };
-use crate::calls::attach_to_enclosing;
+use crate::calls::{attach_to_enclosing, construction_call};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use rustc_hash::FxHashMap;
 use tree_sitter::Node;
@@ -224,6 +224,7 @@ pub fn extract_cpp_calls_and_path_literals(
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
+    let mut constructions: Vec<(u32, String)> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
@@ -231,6 +232,11 @@ pub fn extract_cpp_calls_and_path_literals(
                 if let Some(callee) = cpp_callee_name(n, source, bindings) {
                     let line = n.start_position().row as u32;
                     attach_to_enclosing(line, callee, nodes);
+                }
+            }
+            "new_expression" => {
+                if let Some(callee) = cpp_new_expression_call(n, source) {
+                    constructions.push((n.start_position().row as u32, callee));
                 }
             }
             "string_literal" | "raw_string_literal" => {
@@ -267,7 +273,24 @@ pub fn extract_cpp_calls_and_path_literals(
             stack.push(child);
         }
     }
+    // After every call: the call-meta detectors index `calls` in
+    // `call_expression` order, which a `new` site must not shift.
+    for (line, callee) in constructions {
+        attach_to_enclosing(line, callee, nodes);
+    }
     (path_literals, sql_refs)
+}
+
+/// The construction entry of `new T(..)`, `new ns::T(..)` or
+/// `new Box<int>(..)`; `None` for a built-in type (`new int[4]`).
+fn cpp_new_expression_call(new_expr: Node<'_>, source: &[u8]) -> Option<String> {
+    let ty = new_expr.child_by_field_name("type")?;
+    match ty.kind() {
+        "type_identifier" | "template_type" | "qualified_identifier" => {
+            construction_call(ty.utf8_text(source).ok()?)
+        }
+        _ => None,
+    }
 }
 
 fn cpp_callee_name(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> Option<String> {

@@ -268,3 +268,55 @@ fn new_symbol_is_a_valid_downstream_target() {
          must reach its callees: {names:?}"
     );
 }
+
+/// Two classes in one clean file, each with an `__init__`. `class_membership`
+/// binds both classes' `HasMethod` to the file's first `__init__`, so the
+/// overlay must pick the constructor by its owner, as the index does.
+const PY_MODELS: &str = "class Alpha:
+    def __init__(self):
+        self.a = 1
+
+
+class Beta:
+    def __init__(self):
+        self.b = 2
+";
+
+#[test]
+fn test_impact_dirty_instantiator_of_second_class_lists_only_under_that_class() {
+    let repo_tmp = tempfile::tempdir().unwrap();
+    let home_tmp = tempfile::tempdir().unwrap();
+    let (repo, home) = (repo_tmp.path(), home_tmp.path());
+    fs::write(repo.join("models.py"), PY_MODELS).unwrap();
+    fs::write(
+        repo.join("app.py"),
+        "from models import Beta\n\n\ndef make():\n    return Beta()\n",
+    )
+    .unwrap();
+    run_git(repo, &["init", "-q", "-b", "main"]);
+    commit_all(repo, "init");
+    let out = ecp(repo, home, &["admin", "index", "--repo", "."]);
+    assert!(
+        out.status.success(),
+        "admin index failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // A renamed instantiator exists only in the overlay.
+    fs::write(
+        repo.join("app.py"),
+        "from models import Beta\n\n\ndef make_beta():\n    return Beta()\n",
+    )
+    .unwrap();
+
+    let beta = impact_names(&impact_json(repo, home, "Beta", "upstream"));
+    assert!(
+        beta.iter().any(|n| n == "make_beta"),
+        "the dirty instantiator of Beta must be its upstream caller: {beta:?}"
+    );
+    let alpha = impact_names(&impact_json(repo, home, "Alpha", "upstream"));
+    assert!(
+        !alpha.iter().any(|n| n == "make_beta"),
+        "an instantiator of Beta is not a caller of Alpha: {alpha:?}"
+    );
+}

@@ -1,4 +1,4 @@
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{CallSite, RawNode};
 use ecp_core::graph::NodeKind;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -14,6 +14,34 @@ use tree_sitter::Node;
 #[inline]
 pub fn safe_row(row: usize) -> u32 {
     u32::try_from(row).unwrap_or(u32::MAX)
+}
+
+/// The `RawNode.calls` entry of a `new T(..)` site, generic arguments cut
+/// from every path segment: `Box<String>` → `Box`, `ns::Box<int>` →
+/// `ns::Box`, `Outer<int>.Inner` → `Outer.Inner`. `None` for an empty type.
+pub fn construction_call(type_text: &str) -> Option<String> {
+    let mut ty = String::with_capacity(type_text.len());
+    let mut depth = 0u32;
+    for c in type_text.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => ty.push(c),
+            _ => {}
+        }
+    }
+    let ty = ty.trim();
+    (!ty.is_empty()).then(|| CallSite::construct(ty))
+}
+
+/// The construction entry of a TS / JS `new T(..)` / `new ns.T(..)`; `None`
+/// for a computed constructor (`new (f())()`).
+pub fn new_expression_call(new_expr: Node<'_>, source: &[u8]) -> Option<String> {
+    let ctor = new_expr.child_by_field_name("constructor")?;
+    match ctor.kind() {
+        "identifier" | "member_expression" => construction_call(ctor.utf8_text(source).ok()?),
+        _ => None,
+    }
 }
 
 /// Walk the AST and attach `callee` names to the smallest enclosing
@@ -425,5 +453,27 @@ mod tests {
         );
 
         assert_eq!(nodes[0].calls, ["later", "earlier"]);
+    }
+
+    #[test]
+    fn test_construction_call_generic_segments_returns_path_without_arguments() {
+        for (text, want) in [
+            ("Box", "Box"),
+            ("Box<String>", "Box"),
+            ("ns::Box<int>", "ns::Box"),
+            ("Outer<int>.Inner", "Outer.Inner"),
+            ("Outer<String>.Inner<Integer>", "Outer.Inner"),
+            ("Map<K, List<V>>::Entry", "Map::Entry"),
+            (" Widget ", "Widget"),
+        ] {
+            let entry = construction_call(text).expect(text);
+            assert_eq!(
+                CallSite::parse(&entry),
+                CallSite::Construct(want),
+                "{text:?}"
+            );
+        }
+        assert_eq!(construction_call(""), None);
+        assert_eq!(construction_call("<T>"), None);
     }
 }

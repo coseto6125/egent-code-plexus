@@ -37,7 +37,7 @@
 //! regression suite and `crates/ecp-analyzer/benches/resolver_lookup.rs` for
 //! the before/after bench numbers.
 
-use ecp_core::analyzer::types::RawImport;
+use ecp_core::analyzer::types::{CallSite, RawImport};
 use serde::Serialize;
 use std::borrow::Cow;
 use std::path::Path;
@@ -223,6 +223,109 @@ impl<'a> Resolver<'a> {
         target: ResolveTarget,
     ) -> Vec<(NodeId, f32)> {
         self.resolve_symbol_with_heritage(source_file, symbol_name, raw_imports, target, &[])
+    }
+
+    /// Resolve one call site to its `Calls` targets: the callable tiers,
+    /// then, only when they find nothing, the constructor fallback
+    /// ([`Self::resolve_instantiation`]). The fallback lives here, not in
+    /// [`Self::resolve_symbol_with_heritage`], because that method also
+    /// serves References / Decorates / Imports edges, which must never land
+    /// on a type through a construction rule.
+    pub fn resolve_call(
+        &self,
+        source_file: &Path,
+        site: CallSite<'_>,
+        raw_imports: &[RawImport],
+        caller_heritage: &[String],
+    ) -> Vec<(NodeId, f32)> {
+        let resolve = |name: &str, target| {
+            self.resolve_symbol_with_heritage(
+                source_file,
+                name,
+                raw_imports,
+                target,
+                caller_heritage,
+            )
+        };
+        let mut targets = resolve(site.name(), ResolveTarget::Callable);
+        if targets.is_empty() {
+            targets.extend(self.resolve_instantiation(source_file, site, raw_imports, resolve));
+        }
+        targets
+    }
+
+    /// [`Self::resolve_call`] for a name a lexical scope of the file binds,
+    /// though not one enclosing the call: only an import may resolve it,
+    /// never the inaccessible local, and the constructor fallback follows
+    /// the same rule.
+    pub fn resolve_imported_call(
+        &self,
+        source_file: &Path,
+        site: CallSite<'_>,
+        raw_imports: &[RawImport],
+    ) -> Vec<(NodeId, f32)> {
+        let resolve = |name: &str, target| {
+            self.resolve_imported_symbol(source_file, name, raw_imports, target)
+        };
+        let mut targets = resolve(site.name(), ResolveTarget::Callable);
+        if targets.is_empty() {
+            targets.extend(self.resolve_instantiation(source_file, site, raw_imports, resolve));
+        }
+        targets
+    }
+
+    /// Constructor fallback for a call site the callable tiers left empty:
+    /// resolve the constructed type through `resolve` with
+    /// [`ResolveTarget::Type`], keep a Class / Struct, then land on its one
+    /// constructor, or on the type itself when it declares none or several.
+    ///
+    /// A qualified type path that does not resolve (`new shop.Widget()`
+    /// through a namespace import, PHP `new \App\Item()`) retries its last
+    /// segment only where [`CallSite::constructed_type`] allows it; a plain
+    /// `pkg.A()` stays unresolved, like every qualified callee.
+    fn resolve_instantiation(
+        &self,
+        source_file: &Path,
+        site: CallSite<'_>,
+        raw_imports: &[RawImport],
+        resolve: impl Fn(&str, ResolveTarget) -> Vec<(NodeId, f32)>,
+    ) -> Option<(NodeId, f32)> {
+        let source_file_str = normalize_source_path(source_file);
+        let (type_path, last_segment_fallback) =
+            site.constructed_type(Language::from_normalized_path(&source_file_str))?;
+        let type_name = split_qualifier(type_path).map_or(type_path, |(_, member)| member);
+        if !self.names_constructible_type(type_name, raw_imports) {
+            return None;
+        }
+        let mut types = resolve(type_path, ResolveTarget::Type);
+        if types.is_empty() && last_segment_fallback && type_name.len() < type_path.len() {
+            types = resolve(type_name, ResolveTarget::Type);
+        }
+        let &[(type_id, confidence)] = types.as_slice() else {
+            return None;
+        };
+        if !self.symbol_table.node_kind(type_id).is_constructible() {
+            return None;
+        }
+        let target = self
+            .symbol_table
+            .sole_constructor(type_id)
+            .unwrap_or(type_id);
+        Some((target, confidence))
+    }
+
+    /// The cheap gate of [`Self::resolve_instantiation`]: some Class /
+    /// Struct is declared as `name`, or an import aliases a declared one to
+    /// it (`import { Widget as Renamed }`), which only the import tier maps
+    /// back.
+    fn names_constructible_type(&self, name: &str, raw_imports: &[RawImport]) -> bool {
+        self.symbol_table.has_constructible_type(name)
+            || raw_imports.iter().any(|import| {
+                import.alias.as_deref() == Some(name)
+                    && self
+                        .symbol_table
+                        .has_constructible_type(&import.imported_name)
+            })
     }
 
     /// Resolve an explicit import without selecting an inaccessible local binding.

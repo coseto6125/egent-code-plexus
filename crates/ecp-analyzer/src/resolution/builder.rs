@@ -7,7 +7,7 @@ use crate::resolution::path_aliases::PathAliases;
 use crate::resolution::resolver::Resolver;
 use crate::rust::module_tree::RustWorkspaceModTree;
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
-use ecp_core::analyzer::types::{LocalGraph, RawNode};
+use ecp_core::analyzer::types::{CallSite, LocalGraph, RawNode};
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::{
     BlindSpotRecord, CallMeta, Edge, File, FileCategory, FunctionMeta, Node, NodeKind, RelType,
@@ -1066,6 +1066,7 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
     // (and the resolver) an O(1) `files_by_stem` lookup instead of an
     // O(N_files) scan per qualified call.
     symbol_table.build_stem_index();
+    symbol_table.build_constructor_index();
 
     Pass1Registration {
         symbol_table,
@@ -1838,22 +1839,20 @@ fn pass2_emit_node_edges(
     }
 
     let call_heritage = enclosing_class_heritage(raw_node, local_graph);
-    for (call_idx, callee) in raw_node.calls.iter().enumerate() {
+    for (call_idx, raw_callee) in raw_node.calls.iter().enumerate() {
         let lookup_key = CallMetaKey::new(raw_node.span, call_idx as u32);
         let meta = indirect_lookup.get(&lookup_key);
+        let site = CallSite::parse(raw_callee);
+        let callee = site.name();
         let targets = match lexical_lookup.targets(raw_node.span, callee) {
-            Some(targets) if targets.is_empty() => resolver.resolve_imported_symbol(
-                &local_graph.file_path,
-                callee,
-                &local_graph.imports,
-                ResolveTarget::Callable,
-            ),
+            Some(targets) if targets.is_empty() => {
+                resolver.resolve_imported_call(&local_graph.file_path, site, &local_graph.imports)
+            }
             Some(targets) => targets,
-            None => resolver.resolve_symbol_with_heritage(
+            None => resolver.resolve_call(
                 &local_graph.file_path,
-                callee,
+                site,
                 &local_graph.imports,
-                ResolveTarget::Callable,
                 call_heritage,
             ),
         };
@@ -3262,6 +3261,56 @@ mod tests {
             1,
             "unique callable must emit exactly one CALLS edge"
         );
+    }
+
+    fn calls_edge_count(graphs: Vec<LocalGraph>) -> usize {
+        let mut builder = GraphBuilder::new();
+        for g in graphs {
+            builder.add_graph(g);
+        }
+        let graph = builder.build();
+        graph
+            .edges
+            .iter()
+            .filter(|e| e.rel_type == RelType::Calls)
+            .count()
+    }
+
+    /// The constructor fallback follows the Tier-3 rule: a construction of a
+    /// class declared in two files picks neither.
+    #[test]
+    fn test_resolve_call_type_in_two_files_emits_no_calls_edge() {
+        let count = calls_edge_count(vec![
+            mk_file("app.py", "make", NodeKind::Function, vec!["Widget".into()]),
+            mk_file("a.py", "Widget", NodeKind::Class, vec![]),
+            mk_file("b.py", "Widget", NodeKind::Class, vec![]),
+        ]);
+        assert_eq!(count, 0, "an ambiguous type must not get a Calls edge");
+    }
+
+    #[test]
+    fn test_resolve_call_name_neither_callable_nor_type_emits_no_calls_edge() {
+        let count = calls_edge_count(vec![
+            mk_file("app.py", "make", NodeKind::Function, vec!["Widget".into()]),
+            mk_file("a.py", "Widget", NodeKind::Variable, vec![]),
+        ]);
+        assert_eq!(count, 0, "a Variable is never constructed");
+    }
+
+    /// Rust has no constructors: a tuple-struct call `Point(1, 2)` keeps no
+    /// Calls edge into the struct.
+    #[test]
+    fn test_resolve_call_rust_tuple_struct_call_emits_no_calls_edge() {
+        let count = calls_edge_count(vec![
+            mk_file(
+                "src/app.rs",
+                "make",
+                NodeKind::Function,
+                vec!["Point".into()],
+            ),
+            mk_file("src/point.rs", "Point", NodeKind::Struct, vec![]),
+        ]);
+        assert_eq!(count, 0, "Rust is outside the constructor fallback");
     }
 
     /// Task A acceptance: `LocalGraph.blind_spots` survive the builder pass

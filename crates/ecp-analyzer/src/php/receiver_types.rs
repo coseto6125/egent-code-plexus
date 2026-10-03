@@ -16,7 +16,7 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, extract_php_string_value,
 };
-use crate::calls::attach_to_enclosing;
+use crate::calls::{attach_to_enclosing, construction_call};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use tree_sitter::Node;
@@ -82,9 +82,15 @@ pub fn extract_php_calls_and_path_literals(
     let ctx = ClassContext::from_nodes(nodes);
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
+    let mut constructions: Vec<(u32, String)> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
+            "object_creation_expression" => {
+                if let Some(callee) = php_object_creation_call(n, source) {
+                    constructions.push((n.start_position().row as u32, callee));
+                }
+            }
             "member_call_expression" => {
                 if let Some(callee) = php_member_callee(n, source, &ctx) {
                     let line = n.start_position().row as u32;
@@ -120,7 +126,21 @@ pub fn extract_php_calls_and_path_literals(
             stack.push(child);
         }
     }
+    // After every call, so a `new` site never shifts the index of a call
+    // recorded before it.
+    for (line, callee) in constructions {
+        attach_to_enclosing(line, callee, nodes);
+    }
     (path_literals, sql_refs)
+}
+
+/// The construction entry of `new Foo(..)` / `new \App\Foo(..)`; `None`
+/// for `new $class`, `new static` and anonymous classes.
+fn php_object_creation_call(creation: Node<'_>, source: &[u8]) -> Option<String> {
+    let class = creation
+        .named_children(&mut creation.walk())
+        .find(|c| matches!(c.kind(), "name" | "qualified_name"))?;
+    construction_call(class.utf8_text(source).ok()?.trim_start_matches('\\'))
 }
 
 /// Resolve the callee for `$obj->method(args)`.

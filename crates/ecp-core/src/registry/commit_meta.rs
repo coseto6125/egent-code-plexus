@@ -15,8 +15,9 @@ use std::path::Path;
 /// or any persisted L2 artefact changes shape in a way pre-bump binaries
 /// can't read back, or changes meaning under the same shape. schema2: the
 /// test-file classifier changed, and both `File.category` and the parse
-/// cache (per-parser test-only emission) carry its verdict.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema2");
+/// cache (per-parser test-only emission) carry its verdict. schema3:
+/// `RawNode.calls` entries carry `CallSite` markers.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema3");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

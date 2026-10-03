@@ -296,13 +296,27 @@ pub(crate) fn shortest_path<'g>(
     Some(chain)
 }
 
+/// Constructors an upstream walk from a Class / Struct start treats as the
+/// start itself: a construction's `Calls` edge lands on the type's sole
+/// constructor when it has one, else on the type, so the instantiators are
+/// the callers of both. Empty for any other start and for a downstream-only
+/// walk.
+fn constructor_seeds(merged: &MergedGraph<'_>, start_idx: u32, direction: &Direction) -> Vec<u32> {
+    if *direction == Direction::Down {
+        return Vec::new();
+    }
+    merged.constructors_of(start_idx)
+}
+
 /// Core BFS over the merged graph (base CSR + optional overlay view) from
 /// `start_idx`, which is a MERGED-space index: `< graph.nodes.len()` = base
 /// node, above = overlay virtual node.
 ///
 /// Returns `(det_results, heur_results, hidden_conf_edges, hidden_heuristic_edges,
 /// hidden_test_callers)`.
-/// The start node appears at depth 0 in `det_results`.
+/// The start node appears at depth 0 in `det_results`. An upstream walk from
+/// a Class / Struct also expands its [`constructor_seeds`] at depth 0; the
+/// constructors themselves are never emitted.
 ///
 /// - `det_results`: nodes reached exclusively via deterministic edges.
 /// - `heur_results`: nodes reached via a heuristic edge (only populated when
@@ -361,6 +375,8 @@ pub(super) fn run_bfs<'g>(
 
     queue.push_back((start_idx, 0, None, false));
     visited.insert(start_idx);
+    let ctor_seeds = constructor_seeds(&merged, start_idx as u32, direction);
+    visited.extend(ctor_seeds.iter().map(|&c| c as usize));
 
     while let Some((curr_idx, curr_depth, via, via_heuristic)) = queue.pop_front() {
         // ── node emission (merged space: < base_len = base, else virtual) ──
@@ -488,6 +504,12 @@ pub(super) fn run_bfs<'g>(
             for edge in merged.in_edges(curr_idx as u32) {
                 let source = edge.source as usize;
                 consider(&edge, source);
+            }
+            if curr_depth == 0 {
+                for edge in ctor_seeds.iter().flat_map(|&c| merged.in_edges(c)) {
+                    let source = edge.source as usize;
+                    consider(&edge, source);
+                }
             }
         }
 
