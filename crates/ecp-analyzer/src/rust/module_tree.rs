@@ -161,30 +161,33 @@ impl RustWorkspaceModTree {
         };
 
         let members = parse_workspace_members(&raw, workspace_root);
-        let crate_infos: Vec<(String, PathBuf, Option<PathBuf>)> = if members.is_empty() {
-            if let Some(name) = parse_package_name(&raw) {
-                let entry = find_crate_entry(workspace_root);
-                vec![(name, workspace_root.to_path_buf(), entry)]
+        let crate_infos: Vec<(String, Option<String>, PathBuf, Option<PathBuf>)> =
+            if members.is_empty() {
+                if let Some(name) = parse_package_name(&raw) {
+                    let entry = find_crate_entry(workspace_root, &raw);
+                    let lib_name = toml_section_value(&raw, "[lib]", "name");
+                    vec![(name, lib_name, workspace_root.to_path_buf(), entry)]
+                } else {
+                    vec![]
+                }
             } else {
-                vec![]
-            }
-        } else {
-            let mut infos = Vec::new();
-            for member_dir in members {
-                let ctoml = member_dir.join("Cargo.toml");
-                let Some(craw) = read_file(&ctoml) else {
-                    continue;
-                };
-                let Some(name) = parse_package_name(&craw) else {
-                    continue;
-                };
-                let entry = find_crate_entry(&member_dir);
-                infos.push((name, member_dir, entry));
-            }
-            infos
-        };
+                let mut infos = Vec::new();
+                for member_dir in members {
+                    let ctoml = member_dir.join("Cargo.toml");
+                    let Some(craw) = read_file(&ctoml) else {
+                        continue;
+                    };
+                    let Some(name) = parse_package_name(&craw) else {
+                        continue;
+                    };
+                    let entry = find_crate_entry(&member_dir, &craw);
+                    let lib_name = toml_section_value(&craw, "[lib]", "name");
+                    infos.push((name, lib_name, member_dir, entry));
+                }
+                infos
+            };
 
-        for (name, crate_dir, entry) in crate_infos {
+        for (name, lib_name, crate_dir, entry) in crate_infos {
             let Some(entry_path) = entry else { continue };
             let (tree, reexports) = build_mod_tree_and_reexports(&entry_path);
             for (mod_path, file) in &tree {
@@ -196,30 +199,25 @@ impl RustWorkspaceModTree {
                 .unwrap_or_else(|_| crate_dir.clone())
                 .to_string_lossy()
                 .replace('\\', "/");
-            // `mod_tree_clone_for_alias`: the underscore-normalised variant
-            // (`-` → `_`) needs its own tree entry because lookups split by
-            // package name first. Cargo allows both spellings at use sites
-            // so both have to resolve. A single clone here is unavoidable;
-            // tree size is bounded by mod-tree depth × crate count.
-            let norm = name.replace('-', "_");
-            let needs_alias = norm != name;
-            let alias_clone = if needs_alias {
-                Some((tree.clone(), reexports.clone()))
-            } else {
-                None
-            };
-            out.crates.insert(
-                name.clone(),
-                (crate_dir.clone(), canon_str.clone(), tree, reexports),
-            );
-            if let Some((alias_tree, alias_reexports)) = alias_clone {
-                out.crates.entry(norm).or_insert((
-                    crate_dir,
-                    canon_str,
-                    alias_tree,
-                    alias_reexports,
+            // Aliases need their own tree entry because lookups split by
+            // crate name first: the underscore-normalised package name
+            // (`-` → `_`) and a `[lib] name` override, which is the name the
+            // bin and every dependent write. One clone per alias is
+            // unavoidable; tree size is bounded by mod-tree depth × crate count.
+            let mut aliases = vec![name.replace('-', "_")];
+            aliases.extend(lib_name);
+            aliases.retain(|alias| *alias != name);
+            aliases.dedup();
+            for alias in aliases {
+                out.crates.entry(alias).or_insert((
+                    crate_dir.clone(),
+                    canon_str.clone(),
+                    tree.clone(),
+                    reexports.clone(),
                 ));
             }
+            out.crates
+                .insert(name, (crate_dir, canon_str, tree, reexports));
         }
 
         out
@@ -816,31 +814,42 @@ fn parse_workspace_members(cargo_toml: &str, workspace_root: &Path) -> Vec<PathB
 }
 
 fn parse_package_name(cargo_toml: &str) -> Option<String> {
-    let mut in_package = false;
+    toml_section_value(cargo_toml, "[package]", "name")
+}
+
+/// The string value of `key` inside the `section` table (e.g. `[lib]`).
+fn toml_section_value(cargo_toml: &str, section: &str, key: &str) -> Option<String> {
+    let mut in_section = false;
     for line in cargo_toml.lines() {
         let trimmed = line.trim();
-        if trimmed == "[package]" {
-            in_package = true;
-            continue;
-        }
         if trimmed.starts_with('[') {
-            in_package = false;
+            in_section = trimmed == section;
             continue;
         }
-        if in_package && trimmed.starts_with("name") {
-            if let Some(eq) = trimmed.find('=') {
-                let val = trimmed[eq + 1..].trim();
-                let val = val.trim_matches('"').trim_matches('\'');
-                if !val.is_empty() {
-                    return Some(val.to_string());
-                }
-            }
+        if !in_section {
+            continue;
+        }
+        let Some((k, v)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if k.trim() != key {
+            continue;
+        }
+        let val = v.trim().trim_matches('"').trim_matches('\'');
+        if !val.is_empty() {
+            return Some(val.to_string());
         }
     }
     None
 }
 
-fn find_crate_entry(crate_dir: &Path) -> Option<PathBuf> {
+fn find_crate_entry(crate_dir: &Path, cargo_toml: &str) -> Option<PathBuf> {
+    if let Some(lib_path) = toml_section_value(cargo_toml, "[lib]", "path") {
+        let p = crate_dir.join(lib_path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
     let src = crate_dir.join("src");
     for name in ["lib.rs", "main.rs"] {
         let p = src.join(name);
