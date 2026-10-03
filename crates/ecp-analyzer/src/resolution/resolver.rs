@@ -531,6 +531,60 @@ fn qualifier_prefix_is_internal(full_callee: &str, qualifier: &str) -> bool {
             .all(|s| matches!(s, "crate" | "self" | "super"))
 }
 
+/// For a Rust path call `a::b::Q::m`, does the module path `a::b` that the
+/// call names for `Q` agree with the import of `Q` from `import_source`?
+/// `de::Error::custom` with `use crate::error::Error` does not: `de::Error`
+/// is another item than the imported `Error`. A head segment that a `use`
+/// brings in (`use crate::error as err;`) expands to its full path first.
+/// A `crate::` path must equal the import source; a relative one, with its
+/// leading `self` / `super` dropped, must be a suffix of it. A call with no
+/// module path before `Q`, or one not written with `::`, always agrees.
+fn rust_path_prefix_agrees_with_import(
+    full_callee: &str,
+    qualifier: &str,
+    import_source: &str,
+    imports: &[RawImport],
+) -> bool {
+    let Some((before_member, _)) = full_callee.rsplit_once("::") else {
+        return true;
+    };
+    let Some((prefix, q)) = before_member.rsplit_once("::") else {
+        return true;
+    };
+    if q != qualifier {
+        return true;
+    }
+    let mut named: Vec<&str> = prefix.split("::").collect();
+    if let Some(module) = named.first().and_then(|&head| {
+        imports
+            .iter()
+            .find(|i| i.alias.as_deref().unwrap_or(&i.imported_name) == head)
+    }) {
+        // `use crate::error as err;` records the whole path as the imported
+        // name; `use crate::{error as err};` records source `crate`, name
+        // `error`.
+        let name = module.imported_name.as_str();
+        let (path, tail) = if name.contains("::") {
+            (name, None)
+        } else {
+            (module.source.as_str(), Some(name))
+        };
+        named.splice(..1, path.split("::").chain(tail));
+    }
+    // `crate::a::Q` names one module from the crate root: the import must
+    // come from exactly that module. A relative path matches by suffix.
+    if named.first() == Some(&"crate") {
+        return import_source.split("::").eq(named);
+    }
+    let is_anchor = |s: &&str| matches!(*s, "" | "self" | "super");
+    let named: Vec<&str> = named.into_iter().skip_while(is_anchor).collect();
+    let source: Vec<&str> = import_source
+        .split("::")
+        .skip_while(|s| *s == "crate" || is_anchor(s))
+        .collect();
+    source.ends_with(&named)
+}
+
 /// Crate-root prefix of a normalized repo-relative path. The "crate root"
 /// here is the substring preceding the first `/src/` or `/tests/` segment,
 /// which is enough to keep a workspace member's files together (every Rust
@@ -597,7 +651,8 @@ pub(crate) fn rust_module_dir(source_file: &std::path::Path) -> Option<std::path
 /// `serde::`) are never indexed, so their expanded base never matches a
 /// SymbolTable key and resolution correctly falls through:
 /// * `crate::output` from `crates/ecp-cli/src/commands/find.rs`
-///   → `crates/ecp-cli/src/output`
+///   → `crates/ecp-cli/src/output`; from a repo-root crate's
+///   `src/commands/find.rs` → `src/output`
 /// * `self::a` → `a` under the caller module's child directory
 ///   (`a/b.rs` → `a/b/a`, `a/b/mod.rs` → `a/b/a`)
 /// * `super::a` → `a` under the parent module's directory
@@ -619,10 +674,14 @@ fn rust_module_path_base(
     let segs: Vec<&str> = specifier.split("::").filter(|s| !s.is_empty()).collect();
     let (anchor, rest) = match segs.split_first()? {
         (&"crate", rest) => {
-            let src_root = source_file
-                .to_string_lossy()
-                .rsplit_once("/src/")
-                .map(|(root, _)| format!("{root}/src"))?;
+            let path = source_file.to_string_lossy().replace('\\', "/");
+            let src_root = match path.rsplit_once("/src/") {
+                Some((root, _)) => format!("{root}/src"),
+                // A crate at the repo root: its repo-relative paths start at
+                // `src/`, with no `/src/` segment to split on.
+                None if path.starts_with("src/") => "src".to_owned(),
+                None => return None,
+            };
             (std::path::PathBuf::from(src_root), rest)
         }
         (&"self", rest) => (rust_module_dir(source_file)?, rest),
@@ -753,6 +812,7 @@ fn for_each_specifier_candidate<F>(
     }
 
     let dir = source_file.parent().unwrap_or(std::path::Path::new(""));
+    let mut rust_module = false;
     let base_path: Option<std::path::PathBuf> = if let Some(rest) = specifier.strip_prefix("./") {
         Some(dir.join(rest))
     } else if specifier.starts_with("../") {
@@ -771,6 +831,7 @@ fn for_each_specifier_candidate<F>(
         // the Tier-3 same-name ambiguity cap. Without this, `ecp impact`
         // undercounts callers of any common-named cross-module Rust fn
         // (the #100-122 incident: `emit` reported 1 of 21 callers).
+        rust_module = true;
         Some(rust_base)
     } else if specifier.starts_with('.') {
         // Python-style relative: count leading dots, then a dotted submodule
@@ -810,12 +871,27 @@ fn for_each_specifier_candidate<F>(
 
     let Some(base) = base else { return };
 
-    if probe_with_suffixes(&base, &mut visit) {
+    if !rust_module {
+        probe_with_suffixes(&base, &mut visit);
+    } else if probe_rust_module(&base, &mut visit) {
         if let Some(fallback) = rust_self_fallback_base(source_file, specifier) {
             let fallback = fallback.to_string_lossy().replace('\\', "/");
-            probe_with_suffixes(fallback.trim_start_matches("./"), &mut visit);
+            probe_rust_module(fallback.trim_start_matches("./"), &mut visit);
         }
     }
+}
+
+/// [`probe_with_suffixes`] for a Rust module path, which only a Rust file
+/// can declare: `base.rs`, then the directory module files. A same-stem
+/// `base.ts` beside the module is another language's file, not this module.
+/// `lib.rs` / `main.rs` cover `crate` itself (`use crate::X` maps to `src`).
+fn probe_rust_module<F>(base: &str, visit: &mut F) -> bool
+where
+    F: FnMut(&str) -> bool,
+{
+    [".rs", "/mod.rs", "/lib.rs", "/main.rs"]
+        .iter()
+        .all(|suffix| visit(&format!("{base}{suffix}")))
 }
 
 /// `self::rest` from an ordinary module file, anchored at the file's own
@@ -936,7 +1012,16 @@ impl<'a> Resolver<'a> {
                 Some(alias) => alias == qualifier,
                 None => import.imported_name == qualifier,
             };
-            if !matches_qualifier {
+            if !matches_qualifier
+                || full_callee.is_some_and(|callee| {
+                    !rust_path_prefix_agrees_with_import(
+                        callee,
+                        qualifier,
+                        &import.source,
+                        raw_imports,
+                    )
+                })
+            {
                 continue;
             }
             let exported = &import.imported_name;
@@ -1769,6 +1854,93 @@ mod tests {
             base("crates/foo/tests/it.rs", "super::x"),
             Some(PathBuf::from("crates/foo/x"))
         );
+    }
+
+    #[test]
+    fn test_rust_module_path_base_crate_from_repo_root_crate_is_src() {
+        let base = |f: &str, spec: &str| rust_module_path_base(&PathBuf::from(f), spec);
+        assert_eq!(base("src/app.rs", "crate::a"), Some(PathBuf::from("src/a")));
+        assert_eq!(
+            base("src/lib.rs", "crate::a::b"),
+            Some(PathBuf::from("src/a/b"))
+        );
+        assert_eq!(
+            base("crates/x/src/app.rs", "crate::a"),
+            Some(PathBuf::from("crates/x/src/a"))
+        );
+        assert_eq!(base("mysrc/app.rs", "crate::a"), None);
+        assert_eq!(base("tests/it.rs", "crate::a"), None);
+        assert_eq!(
+            base("src\\app.rs", "crate::a"),
+            Some(PathBuf::from("src/a"))
+        );
+        assert_eq!(
+            base("crates\\x\\src\\app.rs", "crate::a"),
+            Some(PathBuf::from("crates/x/src/a"))
+        );
+    }
+
+    #[test]
+    fn test_rust_path_prefix_agrees_with_import_cases() {
+        let agrees = |callee: &str, q: &str, source: &str| {
+            rust_path_prefix_agrees_with_import(callee, q, source, &[])
+        };
+        // No module path before the qualifier: nothing to disagree with.
+        assert!(agrees("Error::custom", "Error", "crate::error"));
+        assert!(agrees("custom", "Error", "crate::error"));
+        assert!(agrees("err.custom", "err", "crate::error"));
+        assert!(agrees("self::Error::custom", "Error", "crate::error"));
+        assert!(agrees("::Error::custom", "Error", "crate::error"));
+        // The named module path is a suffix of the import source.
+        assert!(agrees(
+            "crate::error::Error::custom",
+            "Error",
+            "crate::error"
+        ));
+        // A crate-rooted path names one module, not any module ending in it.
+        assert!(!agrees(
+            "crate::error::Error::custom",
+            "Error",
+            "crate::other::error"
+        ));
+        assert!(agrees("error::Error::custom", "Error", "crate::error"));
+        assert!(agrees(
+            "super::error::Error::custom",
+            "Error",
+            "crate::error"
+        ));
+        // Another module names another item.
+        assert!(!agrees("de::Error::custom", "Error", "crate::error"));
+        assert!(!agrees("crate::de::Error::custom", "Error", "crate::error"));
+        assert!(!agrees("a::error::Error::custom", "Error", "crate::error"));
+        // A module alias expands before the comparison, in both forms the
+        // parser records.
+        let alias = |source: &str, name: &str| RawImport {
+            source: source.to_string(),
+            imported_name: name.to_string(),
+            alias: Some("err".to_string()),
+            binding_kind: None,
+        };
+        for module in [
+            alias("crate::error", "crate::error"),
+            alias("crate", "error"),
+        ] {
+            let imports = [module];
+            assert!(rust_path_prefix_agrees_with_import(
+                "err::Error::custom",
+                "Error",
+                "crate::error",
+                &imports
+            ));
+            assert!(!rust_path_prefix_agrees_with_import(
+                "err::Error::custom",
+                "Error",
+                "crate::other",
+                &imports
+            ));
+        }
+        // The qualifier is not the segment before the member: not this rule.
+        assert!(agrees("de::Error::custom", "de", "crate::error"));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::rust::parser::RustProvider;
+use ecp_analyzer::typescript::TypeScriptProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::graph::{RelType, ZeroCopyGraph};
 use std::path::Path;
@@ -28,6 +29,25 @@ fn build(files: &[(&str, &str)]) -> ZeroCopyGraph {
                 .expect("parse_file"),
         );
     }
+    builder.build()
+}
+
+/// `build` plus one TypeScript file.
+fn build_with_ts(rust: &[(String, &str)], ts_path: &str, ts_src: &str) -> ZeroCopyGraph {
+    let provider = RustProvider::new().expect("RustProvider::new");
+    let mut builder = GraphBuilder::new();
+    for (path, src) in rust {
+        builder.add_graph(
+            provider
+                .parse_file(Path::new(path), src.as_bytes())
+                .expect("parse_file"),
+        );
+    }
+    let ts = TypeScriptProvider::new().expect("TypeScriptProvider::new");
+    builder.add_graph(
+        ts.parse_file(Path::new(ts_path), ts_src.as_bytes())
+            .expect("parse_file"),
+    );
     builder.build()
 }
 
@@ -102,6 +122,113 @@ fn callee_files(graph: &ZeroCopyGraph, caller: &str, callee: &str) -> Vec<String
             graph.files[file_idx].path.resolve(pool).to_string()
         })
         .collect()
+}
+
+/// A crate at the repo root has repo-relative paths that start at `src/`,
+/// with no `/src/` segment to anchor `crate::` on.
+#[test]
+fn test_crate_import_from_repo_root_crate_resolves_to_imported_module() {
+    let g = build(&[
+        ("src/lib.rs", "mod a;\nmod b;\nmod app;\n"),
+        ("src/a.rs", "pub fn emit() {}\n"),
+        ("src/b.rs", "pub fn emit() {}\n"),
+        (
+            "src/app.rs",
+            "use crate::a::emit;\npub fn run() { emit(); }\n",
+        ),
+    ]);
+    assert_eq!(
+        callee_files(&g, "run", "emit"),
+        vec!["src/a.rs".to_string()],
+        "`use crate::a::emit` from src/app.rs is src/a.rs, not the same-named src/b.rs"
+    );
+}
+
+/// `use crate::error as err;` makes `err::Error` name `crate::error::Error`:
+/// the module alias expands before the prefix is compared with the import.
+#[test]
+fn test_path_qualifier_through_module_alias_matches_import() {
+    let error_rs = "pub struct Error;\nimpl Error {\n    pub fn custom() -> Error { Error }\n}\n";
+    let app_rs = "use crate::error as err;\nuse crate::error::Error;\n\
+        pub fn aliased() { err::Error::custom(); }\n";
+    let g = build(&[
+        ("crates/x/src/lib.rs", "mod error;\nmod other;\nmod app;\n"),
+        ("crates/x/src/error.rs", error_rs),
+        ("crates/x/src/other.rs", error_rs),
+        ("crates/x/src/app.rs", app_rs),
+    ]);
+    assert_eq!(
+        callee_files(&g, "aliased", "custom"),
+        vec!["crates/x/src/error.rs".to_string()]
+    );
+}
+
+/// `use crate::X` names an item of the crate root module itself: `src/lib.rs`
+/// for a library, `src/main.rs` for a binary.
+#[test]
+fn test_crate_root_item_import_resolves_to_root_file() {
+    for root_file in ["src/lib.rs", "src/main.rs"] {
+        let g = build(&[
+            (root_file, "mod app;\nmod other;\npub fn emit() {}\n"),
+            ("src/other.rs", "pub fn emit() {}\n"),
+            ("src/app.rs", "use crate::emit;\npub fn run() { emit(); }\n"),
+        ]);
+        assert_eq!(callee_files(&g, "run", "emit"), vec![root_file.to_string()]);
+    }
+}
+
+/// A Rust module path names a Rust file: a same-stem TypeScript file next
+/// to the module must not win the probe.
+#[test]
+fn test_crate_import_ignores_same_stem_file_of_another_language() {
+    for root in ["", "crates/x/"] {
+        let p = |f: &str| format!("{root}{f}");
+        let g = build_with_ts(
+            &[
+                (p("src/lib.rs"), "mod a;\nmod app;\n"),
+                (p("src/a.rs"), "pub fn emit() {}\n"),
+                (
+                    p("src/app.rs"),
+                    "use crate::a::emit;\npub fn run() { emit(); }\n",
+                ),
+            ],
+            &p("src/a.ts"),
+            "export function emit() {}\n",
+        );
+        assert_eq!(
+            callee_files(&g, "run", "emit"),
+            vec![p("src/a.rs")],
+            "root {root:?}"
+        );
+    }
+}
+
+/// `de::Error::custom` names `Error` through the module `de` (here the
+/// external `serde::de`); an import of a different `Error` from
+/// `crate::error` is not that qualifier. A second project `Error` keeps the
+/// global lookup ambiguous, as in serde_json.
+#[test]
+fn test_path_qualifier_whose_module_prefix_differs_from_import_is_not_bound() {
+    let error_rs = "pub struct Error;\nimpl Error {\n    pub fn custom() -> Error { Error }\n}\n";
+    let app_rs = "use crate::error::Error;\nuse serde::de;\n\
+        pub fn generic() { de::Error::custom(); }\n\
+        pub fn direct() { Error::custom(); }\n\
+        pub fn spelled() { crate::error::Error::custom(); }\n";
+    let g = build(&[
+        ("src/lib.rs", "mod error;\nmod other;\nmod app;\n"),
+        ("src/error.rs", error_rs),
+        ("src/other.rs", error_rs),
+        ("src/app.rs", app_rs),
+    ]);
+    assert!(callee_files(&g, "generic", "custom").is_empty());
+    assert_eq!(
+        callee_files(&g, "direct", "custom"),
+        vec!["src/error.rs".to_string()]
+    );
+    assert_eq!(
+        callee_files(&g, "spelled", "custom"),
+        vec!["src/error.rs".to_string()]
+    );
 }
 
 #[test]
