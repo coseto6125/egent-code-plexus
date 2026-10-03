@@ -324,3 +324,58 @@ fn test_typed_receiver_method_in_sibling_impl_file_resolves_to_impl() {
         vec!["src/model_impl.rs".to_string()]
     );
 }
+
+const MODEL_IMPL_RS: &str =
+    "pub struct Derived;\n\nimpl Derived {\n    pub fn greet(&self) -> u8 {\n        1\n    }\n}\n";
+
+/// A Rust type name reaches a file only through a `use` or its own
+/// definition. With neither on record (here the parser drops the nested
+/// `io::Derived` of an external crate), the project type of that name is a
+/// guess: tokio's `use tokio_test::{io::Builder}` bound to its own Builder.
+/// A second project `Derived` keeps the earlier tiers ambiguous, as tokio's
+/// several `Builder` types do.
+#[test]
+fn test_typed_receiver_with_unrecorded_type_source_gets_no_edge() {
+    let app =
+        "use ext::{assert_ok, io::Derived};\n\nfn run(d: &Derived) -> u8 {\n    d.greet()\n}\n";
+    let g = build(&[
+        ("src/model.rs", MODEL_IMPL_RS),
+        ("src/other.rs", "pub struct Derived;\n"),
+        ("src/decoy.rs", DECOY_RS),
+        ("src/app.rs", app),
+    ]);
+    assert!(callee_files(&g, "run", "greet").is_empty());
+}
+
+/// A generic parameter is not a project type, even when a project type or
+/// a blanket impl's self type shares its one-letter name.
+#[test]
+fn test_typed_receiver_generic_parameter_gets_no_edge() {
+    let wait = "pub trait Wait {\n    fn id(&self) -> u32;\n}\n\nimpl<T: Wait> Wait for &mut T {\n    fn id(&self) -> u32 {\n        0\n    }\n}\n";
+    let alias = "pub type T = u8;\n";
+    let app = "fn run<T: crate::wait::Wait>(future: T) -> u32 {\n    future.id()\n}\n";
+    let g = build(&[
+        ("src/wait.rs", wait),
+        ("src/alias.rs", alias),
+        ("src/app.rs", app),
+    ]);
+    assert!(callee_files(&g, "run", "id").is_empty());
+}
+
+/// `use crate::model::Derived` through a module that re-exports it
+/// (`pub use`): the import is on record and in the project, so the type's
+/// global candidates still apply.
+#[test]
+fn test_typed_receiver_through_reexporting_module_import_resolves() {
+    let app = "use crate::model::Derived;\n\nfn run(d: &Derived) -> u8 {\n    d.greet()\n}\n";
+    let g = build(&[
+        ("src/model/mod.rs", "mod inner;\npub use inner::Derived;\n"),
+        ("src/model/inner.rs", MODEL_IMPL_RS),
+        ("src/decoy.rs", DECOY_RS),
+        ("src/app.rs", app),
+    ]);
+    assert_eq!(
+        callee_files(&g, "run", "greet"),
+        vec!["src/model/inner.rs".to_string()]
+    );
+}

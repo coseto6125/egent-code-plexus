@@ -1246,6 +1246,12 @@ impl<'a> Resolver<'a> {
     /// Ladder step 1: the project types `qualifier` can name, with no member
     /// gate. Kind filter `is_type` only: a Module / Namespace qualifier keeps
     /// the Tier 2.5 / Tier 4 path.
+    ///
+    /// A Rust name reaches a file only through its own definition or a `use`.
+    /// With neither on record (a generic parameter `T`, or a `use` the parser
+    /// does not record, such as a nested `ext::{io::Builder}`), the global
+    /// candidates are a guess, so Rust takes them only behind an in-project
+    /// import (a `pub use` re-export).
     fn type_candidates<'q>(
         &self,
         source_file: &Path,
@@ -1259,6 +1265,7 @@ impl<'a> Resolver<'a> {
         {
             return TypeCandidates::Unique(id, qualifier);
         }
+        let mut imported_in_project = false;
         for import in raw_imports {
             if import
                 .alias
@@ -1287,8 +1294,12 @@ impl<'a> Resolver<'a> {
                 // type of the same name elsewhere is not this receiver.
                 return TypeCandidates::External;
             }
+            imported_in_project = true;
         }
         let caller_meta = FileMeta::from_path(source_file_str);
+        if caller_meta.language == Language::Rust && !imported_in_project {
+            return TypeCandidates::None;
+        }
         let ids = st.global_candidates(qualifier, ResolveTarget::Type, caller_meta);
         match ids.len() {
             0 => TypeCandidates::None,
