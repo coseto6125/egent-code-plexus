@@ -266,9 +266,8 @@ fn test_rename_output_surfaces_count_default() {
         "expected structural field in stdout;\nstdout={stdout}\nstderr={}",
         String::from_utf8_lossy(&out.stderr),
     );
-    // Contract: the hint teaches a live verb. `find-schema-bindings` is a
-    // hidden deprecated alias (cli.rs), so an agent following it lands on a
-    // deprecation notice instead of the answer.
+    // Contract: the hint teaches the canonical verb. `find-schema-bindings` is
+    // a hidden deprecated alias (cli.rs) that a later release may drop.
     assert!(
         stdout.contains("ecp heuristics schema-bindings notify")
             && !stdout.contains("find-schema-bindings"),
