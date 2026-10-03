@@ -13,6 +13,7 @@
 
 use ecp_cli::auto_ensure::test_counters;
 use ecp_core::graph_fixture::GraphFixture;
+use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -24,10 +25,37 @@ use tempfile::TempDir;
 /// sequences are not interleaved across threads.
 static COUNTER_LOCK: Mutex<()> = Mutex::new(());
 
-fn lock_counters() -> MutexGuard<'static, ()> {
+/// Holds `COUNTER_LOCK` and points `ECP_HOME` at a throwaway dir until drop.
+/// The in-process `ensure_fresh` / hook calls resolve the ecp home from this
+/// process's env, so without the override every run left a
+/// `tmpXXXX__<hash>/sessions/` dir in the developer's real `~/.ecp`.
+struct CounterGuard {
+    prev_ecp_home: Option<OsString>,
+    _ecp_home: TempDir,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl Drop for CounterGuard {
+    fn drop(&mut self) {
+        match self.prev_ecp_home.take() {
+            Some(v) => std::env::set_var("ECP_HOME", v),
+            None => std::env::remove_var("ECP_HOME"),
+        }
+    }
+}
+
+fn lock_counters() -> CounterGuard {
     // Poisoned mutex means a previous test panicked while holding the lock;
     // recover so the remaining tests can still run and report their failures.
-    COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    let lock = COUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let ecp_home = TempDir::new().unwrap();
+    let prev_ecp_home = std::env::var_os("ECP_HOME");
+    std::env::set_var("ECP_HOME", ecp_home.path());
+    CounterGuard {
+        prev_ecp_home,
+        _ecp_home: ecp_home,
+        _lock: lock,
+    }
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
