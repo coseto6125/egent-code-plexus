@@ -16,7 +16,7 @@ description: Symbol-level code analysis, blast-radius impact, cross-repo API con
 | PR blast radius — who breaks | `ecp impact --baseline origin/main --repo .` |
 | Find symbol by name / concept | `ecp find "term" --repo .` (auto bm25/hybrid/vector; force `--mode`) |
 | Schema mirrors (cross-service field alignment) | `ecp heuristics schema-bindings User.email --repo .` (bare = all classes). `--format json`. |
-| Saga compensate/undo/rollback pairs | `ecp heuristics saga [--class OrderService] --repo .` (bare = all classes). JSON; `POSSIBLY_RELATED` (≥0.75) or `BLIND_SPOT` (<0.75). Outbox half deferred (T5-33). |
+| Saga compensate/undo/rollback pairs | `ecp heuristics saga [--class OrderService] --repo .` (bare = all classes). `--format json`; `POSSIBLY_RELATED` (≥0.75) or `BLIND_SPOT` (<0.75). Outbox half deferred (T5-33). |
 | Arbitrary graph query / source body | `ecp cypher "MATCH (m:Method) WHERE m.name='X' RETURN m,m" --repo .` (positional; `--query` alias. Single-repo. Grammar below) |
 | AST-aware multi-file rename | `ecp rename --symbol old --new-name new --dry-run --repo .` then drop `--dry-run`. **Never find-replace.** |
 | HTTP route → handler → upstream callers | `ecp routes <path?> --repo .` (no path = list all) |
