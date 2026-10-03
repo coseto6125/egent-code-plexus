@@ -1732,7 +1732,7 @@ fn stale_repos_caveat(
     let stale: Vec<&str> = targets
         .iter()
         .zip(loaded)
-        .filter(|(target, (_, result))| {
+        .filter(|(_, (_, result))| {
             result
                 .as_ref()
                 .is_ok_and(|engine| engine.behind_head || engine.is_stale_for_sha)
