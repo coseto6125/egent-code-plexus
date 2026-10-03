@@ -400,6 +400,8 @@ pub fn remove_self_binary_at(exe: &Path) -> Result<SelfDeleteOutcome, EcpError> 
         const FLAGS: u32 = 0x0000_0008 | 0x0800_0000;
         // Null stdio: an inherited handle keeps the caller's pipe open for the
         // whole wait, so a caller reading our output blocks until the delete.
+        // `ping` waits instead of `timeout`, which exits at once when stdin is
+        // redirected and would run `del` while this process still holds the file.
         std::process::Command::new("cmd")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -407,7 +409,7 @@ pub fn remove_self_binary_at(exe: &Path) -> Result<SelfDeleteOutcome, EcpError> 
             .args([
                 "/c",
                 &format!(
-                    "timeout /t 3 /nobreak >nul 2>&1 & del /f /q \"{}\"",
+                    "ping -n 4 127.0.0.1 >nul 2>&1 & del /f /q \"{}\"",
                     exe.display()
                 ),
             ])
