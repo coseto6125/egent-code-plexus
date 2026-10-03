@@ -674,7 +674,12 @@ fn push_nested_use_imports(root: tree_sitter::Node, source: &[u8], out: &mut Vec
             continue;
         };
         match arg.kind() {
-            "scoped_use_list" => use_list_items(arg, "", true, source, out),
+            // The query reads the list of `use a::{..}` only when it has a
+            // path; `use ::{a, b}` has none.
+            "scoped_use_list" => {
+                let covered = arg.child_by_field_name("path").is_some();
+                use_list_items(arg, "", covered, source, out)
+            }
             "use_list" => list_items(arg, "", false, source, out),
             "use_wildcard" => push_wildcard(arg, "", source, out),
             _ => {}
@@ -724,10 +729,7 @@ fn list_items(
     for item in items {
         match item.kind() {
             "identifier" if !covered => push_import(out, prefix, node_text(item, source), None),
-            "self" => match prefix.rsplit_once("::") {
-                Some((parent, module)) => push_import(out, parent, module, None),
-                None => push_import(out, prefix, prefix, None),
-            },
+            "self" => push_self(out, prefix, None),
             "scoped_identifier" => {
                 let (path, name) = split_last(node_text(item, source));
                 push_import(out, &join_path(prefix, path), name, None);
@@ -740,6 +742,10 @@ fn list_items(
                     continue;
                 };
                 if path.kind() == "identifier" && covered {
+                    continue;
+                }
+                if path.kind() == "self" {
+                    push_self(out, prefix, Some(node_text(alias, source)));
                     continue;
                 }
                 let (module, name) = split_last(node_text(path, source));
@@ -770,6 +776,15 @@ fn push_import(out: &mut Vec<RawImport>, module: &str, name: &str, alias: Option
         alias: alias.map(str::to_string),
         binding_kind: None,
     });
+}
+
+/// `use a::m::{self}` imports the module `m` itself: recorded as
+/// `use a::m;` is, source `a`, name `m`.
+fn push_self(out: &mut Vec<RawImport>, prefix: &str, alias: Option<&str>) {
+    match prefix.rsplit_once("::") {
+        Some((parent, module)) => push_import(out, parent, module, alias),
+        None => push_import(out, prefix, prefix, alias),
+    }
 }
 
 /// `a::b::C` → (`a::b`, `C`); a single segment has an empty module path.

@@ -1089,7 +1089,8 @@ impl<'a> Resolver<'a> {
             let exported = &import.imported_name;
             // `use a::m; m::f()`: in Rust `m` may be the module `a::m`, whose
             // own file holds `f`. The parent file declaring `mod m;` can
-            // define an `f` of its own, so it is not consulted then.
+            // define an `f` of its own, so it is not consulted then; a miss
+            // leaves the call to the module tree (Tier 3.5).
             let module_path = if exported.contains("::") {
                 exported.clone()
             } else {
@@ -1103,7 +1104,9 @@ impl<'a> Resolver<'a> {
                 {
                     return Some(module_file);
                 }
-                continue;
+                // The qualifier is that module; the global qualifier lookup
+                // below would find `mod m;` in the parent and its own `f`.
+                return None;
             }
             let mut hit: Option<String> = None;
             for_each_specifier_candidate(

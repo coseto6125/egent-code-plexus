@@ -58,6 +58,34 @@ fn test_use_self_in_list_records_the_module_itself() {
 }
 
 #[test]
+fn test_use_aliased_self_in_list_records_the_module_with_alias() {
+    assert_eq!(
+        imports("use crate::m::sub::{self as s};\n"),
+        vec![(
+            "crate::m".to_string(),
+            "sub".to_string(),
+            Some("s".to_string())
+        )]
+    );
+}
+
+/// `use ::{a, b as c}` has no path, so the import query does not read it.
+#[test]
+fn test_use_pathless_scoped_list_records_each_item() {
+    assert_eq!(
+        imports("use ::{std, core as c};\n"),
+        vec![
+            (
+                "core".to_string(),
+                "core".to_string(),
+                Some("c".to_string())
+            ),
+            plain("std", "std"),
+        ]
+    );
+}
+
+#[test]
 fn test_use_glob_records_star_from_its_module() {
     assert_eq!(
         imports("use super::bignum::*;\n"),
@@ -207,4 +235,37 @@ fn test_module_import_qualifier_resolves_in_the_module_file() {
         ),
         vec!["crates/x/src/m/sub/mod.rs".to_string()]
     );
+}
+
+/// `sub.rs` exists but has no `run`: the qualifier is still the module, so
+/// the parent's own `run` is not the target.
+#[test]
+fn test_module_import_qualifier_missing_member_does_not_fall_back_to_parent() {
+    let provider = RustProvider::new().expect("RustProvider::new");
+    let mut builder = GraphBuilder::new();
+    for (path, src) in [
+        ("crates/x/src/lib.rs", "pub mod m;\npub mod app;\n"),
+        ("crates/x/src/m/mod.rs", "pub mod sub;\npub fn run() {}\n"),
+        ("crates/x/src/m/sub.rs", "pub fn other() {}\n"),
+        (
+            "crates/x/src/app.rs",
+            "use crate::m::sub;\npub fn go() { sub::run(); }\n",
+        ),
+    ] {
+        builder.add_graph(
+            provider
+                .parse_file(Path::new(path), src.as_bytes())
+                .expect("parse_file"),
+        );
+    }
+    let graph = builder.build();
+    let pool = graph.string_pool.as_slice();
+    let parent_hits = graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::Calls)
+        .filter(|e| graph.nodes[e.source as usize].name.resolve(pool) == "go")
+        .filter(|e| graph.nodes[e.target as usize].name.resolve(pool) == "run")
+        .count();
+    assert_eq!(parent_hits, 0);
 }
