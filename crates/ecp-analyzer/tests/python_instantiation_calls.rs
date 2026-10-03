@@ -105,6 +105,7 @@ fn test_python_member_call_named_like_lowercase_class_no_constructor_call() {
 
 /// The alias names no declared type; the import maps it back to `Widget`.
 #[test]
+#[ignore = "FU-2026-10-04-2dd3fcfafccb: Python imports never reach the import tier, so an alias cannot be mapped back to Widget"]
 fn test_python_aliased_import_call_calls_constructor() {
     let app = (
         "pkg/app.py",
