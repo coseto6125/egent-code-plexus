@@ -36,6 +36,7 @@ use clap::{Args, ValueEnum};
 use ecp_analyzer::resolution::index::Language;
 use ecp_core::graph::{ArchivedFileCategory, ArchivedRelType, ArchivedZeroCopyGraph, FileCategory};
 use ecp_core::registry::{resolve_home_ecp, CommitDirName, Registry, RegistryFile};
+use ecp_core::session::view::base_constructors;
 use ecp_core::session::MergedGraph;
 use ecp_core::EcpError;
 use rayon::prelude::*;
@@ -362,7 +363,24 @@ fn category_to_str(cat: &ArchivedFileCategory) -> &'static str {
     }
 }
 
-/// Number of `Calls` edges into `node_idx`.
+/// Sources of the `Calls` edges into `node_idx`. A Class / Struct also takes
+/// the callers of its constructors, since a construction lands on the sole
+/// constructor when there is one; a source reaching both counts once. Any
+/// other node yields its own `Calls` sources unchanged.
+fn call_sources(graph: &ArchivedZeroCopyGraph, node_idx: usize) -> impl Iterator<Item = u32> + '_ {
+    let constructors = base_constructors(graph, node_idx as u32);
+    let dedupe = !constructors.is_empty();
+    let mut seen = std::collections::HashSet::new();
+    std::iter::once(node_idx as u32)
+        .chain(constructors)
+        .flat_map(move |target| {
+            iter_incoming_edges_filtered(graph, target, |rel| matches!(rel, ArchivedRelType::Calls))
+                .map(|(src, _)| src)
+        })
+        .filter(move |&src| !dedupe || seen.insert(src))
+}
+
+/// Number of `Calls` edges into `node_idx` (see [`call_sources`]).
 ///
 /// The raw in-degree is not that number: it also counts the `Defines` edge
 /// from the declaring file and one `Imports` edge per file that pulls that
@@ -370,10 +388,7 @@ fn category_to_str(cat: &ArchivedFileCategory) -> &'static str {
 /// `compute_hits` in this repo had 17 callers when the graph held 11 `Calls`
 /// edges: the other 6 were the declaring file and 5 importing files.
 fn count_incoming(graph: &ArchivedZeroCopyGraph, node_idx: usize) -> u32 {
-    iter_incoming_edges_filtered(graph, node_idx as u32, |rel| {
-        matches!(rel, ArchivedRelType::Calls)
-    })
-    .count() as u32
+    call_sources(graph, node_idx).count() as u32
 }
 
 fn overlay_matches(
@@ -1244,10 +1259,7 @@ fn build_hit(
     // target into `callees` — the hook renders those two lists verbatim as
     // `Called by:` and `Calls:`, so a File node arrived at the model labelled
     // as a caller.
-    let caller_names = iter_incoming_edges_filtered(graph, idx as u32, |rel| {
-        matches!(rel, ArchivedRelType::Calls)
-    })
-    .map(|(src, _)| {
+    let caller_names = call_sources(graph, idx).map(|src| {
         graph.nodes[src as usize]
             .name
             .resolve(&graph.string_pool)
