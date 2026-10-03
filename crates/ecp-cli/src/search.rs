@@ -63,58 +63,72 @@ fn stale_tantivy_path(tantivy_dir: &Path) -> std::path::PathBuf {
 ///     `parseHTML` → `parse HTML`, `parseConfig` → `parse Config`)
 ///   - letter↔digit boundaries (`utf8` → `utf 8`)
 fn tokenize_identifier(name: &str) -> String {
-    // Subword tokens go here; the original identifier is prepended at
-    // the end if (and only if) any actual split occurred. Skipping the
-    // prepend for single-word names avoids `"config" → "config config"`,
-    // which would double the term frequency and skew BM25 IDF.
-    let mut tokens: Vec<String> = Vec::with_capacity(4);
+    // Every subword is a contiguous run of alphanumerics, so it is a byte
+    // range of `name` and needs no buffer of its own. The original
+    // identifier is written first only once a second subword appears:
+    // `"config" → "config config"` would double the term frequency and skew
+    // BM25 IDF, so a single subword is returned alone.
+    let mut out = String::new();
+    let mut only = 0..0;
+    let mut count = 0usize;
+    let mut emit = |token: std::ops::Range<usize>| {
+        match count {
+            0 => only = token,
+            1 => {
+                out.reserve(name.len() * 2);
+                out.push_str(name);
+                out.push(' ');
+                out.push_str(&name[only.clone()]);
+                out.push(' ');
+                out.push_str(&name[token]);
+            }
+            _ => {
+                out.push(' ');
+                out.push_str(&name[token]);
+            }
+        }
+        count += 1;
+    };
 
-    let mut current = String::new();
-    let chars: Vec<char> = name.chars().collect();
-    for i in 0..chars.len() {
-        let c = chars[i];
+    let mut start: Option<usize> = None;
+    let mut prev = '\0';
+    let mut chars = name.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
         if !c.is_alphanumeric() {
-            if !current.is_empty() {
-                tokens.push(std::mem::take(&mut current));
+            if let Some(s) = start.take() {
+                emit(s..i);
             }
             continue;
         }
-        if !current.is_empty() {
-            let prev = chars[i - 1];
-            // lower→Upper (parseConfig → parse | Config)
-            let camel_boundary = prev.is_lowercase() && c.is_uppercase();
-            // Upper→Upper→lower (HTTPServer → HTTP | Server): split between
-            // the trailing capital and the new word's leading capital.
-            let acronym_boundary = prev.is_uppercase()
-                && c.is_uppercase()
-                && i + 1 < chars.len()
-                && chars[i + 1].is_lowercase();
-            // letter↔digit boundary (utf8 → utf | 8, h2 → h | 2)
-            let digit_boundary = prev.is_alphabetic() != c.is_alphabetic()
-                && (prev.is_ascii_digit() || c.is_ascii_digit());
-            if camel_boundary || acronym_boundary || digit_boundary {
-                tokens.push(std::mem::take(&mut current));
+        match start {
+            None => start = Some(i),
+            Some(s) => {
+                // lower→Upper (parseConfig → parse | Config)
+                let camel_boundary = prev.is_lowercase() && c.is_uppercase();
+                // Upper→Upper→lower (HTTPServer → HTTP | Server): split between
+                // the trailing capital and the new word's leading capital.
+                let acronym_boundary = prev.is_uppercase()
+                    && c.is_uppercase()
+                    && chars.peek().is_some_and(|&(_, next)| next.is_lowercase());
+                // letter↔digit boundary (utf8 → utf | 8, h2 → h | 2)
+                let digit_boundary = prev.is_alphabetic() != c.is_alphabetic()
+                    && (prev.is_ascii_digit() || c.is_ascii_digit());
+                if camel_boundary || acronym_boundary || digit_boundary {
+                    emit(s..i);
+                    start = Some(i);
+                }
             }
         }
-        current.push(c);
+        prev = c;
     }
-    if !current.is_empty() {
-        tokens.push(current);
+    if let Some(s) = start {
+        emit(s..name.len());
     }
-    // Only one subword == the input itself: skip prepending the original
-    // to avoid the duplicate-token artefact.
-    match tokens.len() {
+
+    match count {
         0 => String::new(),
-        1 => tokens.into_iter().next().unwrap(),
-        _ => {
-            let mut out = String::with_capacity(name.len() * 2);
-            out.push_str(name);
-            for t in &tokens {
-                out.push(' ');
-                out.push_str(t);
-            }
-            out
-        }
+        1 => name[only].to_owned(),
+        _ => out,
     }
 }
 
@@ -331,6 +345,152 @@ mod tests {
     #[test]
     fn empty_string_yields_empty() {
         assert_eq!(tokenize_identifier(""), "");
+    }
+
+    #[test]
+    fn test_tokenize_identifier_case_digit_unicode_table_exact_tokens() {
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "parseConfigFile",
+                &["parseConfigFile", "parse", "Config", "File"],
+            ),
+            (
+                "ParseConfigFile",
+                &["ParseConfigFile", "Parse", "Config", "File"],
+            ),
+            (
+                "parse_config_file",
+                &["parse_config_file", "parse", "config", "file"],
+            ),
+            (
+                "MAX_BUFFER_SIZE",
+                &["MAX_BUFFER_SIZE", "MAX", "BUFFER", "SIZE"],
+            ),
+            (
+                "HTTPServer2Go",
+                &["HTTPServer2Go", "HTTP", "Server", "2", "Go"],
+            ),
+            ("parseHTML", &["parseHTML", "parse", "HTML"]),
+            ("ABCd", &["ABCd", "AB", "Cd"]),
+            ("x86_64", &["x86_64", "x", "86", "64"]),
+            ("A1", &["A1", "A", "1"]),
+            ("config", &["config"]),
+            ("ABC", &["ABC"]),
+            // One subword after stripping separators: the subword, not the input.
+            ("_config_", &["config"]),
+            ("", &[]),
+            ("___", &[]),
+            ("naïveÉtat", &["naïveÉtat", "naïve", "État"]),
+            // CJK letters are neither cased nor digits: no boundary inside.
+            ("解析設定", &["解析設定"]),
+            ("parse解析Config", &["parse解析Config"]),
+            ("rocket🚀Launch", &["rocket🚀Launch", "rocket", "Launch"]),
+            ("🚀", &[]),
+            // Non-ASCII digits are alphanumeric but not a digit boundary.
+            ("x١٢", &["x١٢"]),
+        ];
+        for (input, want) in cases {
+            assert_eq!(
+                tokenize_identifier(input),
+                want.join(" "),
+                "input {input:?}"
+            );
+        }
+    }
+
+    /// The tokenizer before it moved to byte ranges, kept verbatim as the
+    /// oracle: BM25 term frequencies depend on the exact token sequence.
+    fn tokenize_identifier_reference(name: &str) -> String {
+        let mut tokens: Vec<String> = Vec::with_capacity(4);
+        let mut current = String::new();
+        let chars: Vec<char> = name.chars().collect();
+        for i in 0..chars.len() {
+            let c = chars[i];
+            if !c.is_alphanumeric() {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+                continue;
+            }
+            if !current.is_empty() {
+                let prev = chars[i - 1];
+                let camel_boundary = prev.is_lowercase() && c.is_uppercase();
+                let acronym_boundary = prev.is_uppercase()
+                    && c.is_uppercase()
+                    && i + 1 < chars.len()
+                    && chars[i + 1].is_lowercase();
+                let digit_boundary = prev.is_alphabetic() != c.is_alphabetic()
+                    && (prev.is_ascii_digit() || c.is_ascii_digit());
+                if camel_boundary || acronym_boundary || digit_boundary {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            current.push(c);
+        }
+        if !current.is_empty() {
+            tokens.push(current);
+        }
+        match tokens.len() {
+            0 => String::new(),
+            1 => tokens.into_iter().next().unwrap(),
+            _ => {
+                let mut out = String::with_capacity(name.len() * 2);
+                out.push_str(name);
+                for t in &tokens {
+                    out.push(' ');
+                    out.push_str(t);
+                }
+                out
+            }
+        }
+    }
+
+    #[test]
+    fn test_tokenize_identifier_generated_inputs_match_reference() {
+        // Cased ASCII, digits, separators, a space, multi-byte cased letters
+        // (ï É ß İ), an uncased letter (解), a non-letter symbol (🚀) and a
+        // non-ASCII digit (١).
+        const ALPHABET: [char; 17] = [
+            'a', 'z', 'A', 'Z', '0', '9', '_', '-', '.', ' ', 'ï', 'É', 'ß', 'İ', '解', '🚀', '١',
+        ];
+        let check = |input: &str| {
+            assert_eq!(
+                tokenize_identifier(input),
+                tokenize_identifier_reference(input),
+                "input {input:?}"
+            );
+        };
+
+        // Every string of length 0..=3: 1 + 17 + 289 + 4913 inputs.
+        let mut short = vec![String::new()];
+        let mut frontier = vec![String::new()];
+        for _ in 0..3 {
+            frontier = frontier
+                .iter()
+                .flat_map(|p| ALPHABET.iter().map(move |&c| format!("{p}{c}")))
+                .collect();
+            short.extend(frontier.iter().cloned());
+        }
+        assert_eq!(short.len(), 5220);
+        for s in &short {
+            check(s);
+        }
+
+        // 3000 longer strings, lengths 4..=19, from a fixed-seed LCG.
+        let mut x: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = || {
+            x = x
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (x >> 33) as usize
+        };
+        for _ in 0..3000 {
+            let len = 4 + next() % 16;
+            let s: String = (0..len)
+                .map(|_| ALPHABET[next() % ALPHABET.len()])
+                .collect();
+            check(&s);
+        }
     }
 
     #[test]
