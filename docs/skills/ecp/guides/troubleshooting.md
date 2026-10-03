@@ -1,8 +1,8 @@
 # Guide: Troubleshooting misses & untrustworthy results
 
 Use this guide when `ecp` can't find a symbol you know exists, or when a
-result looks wrong before you act on it. §1–3 resolve real misses; §4–7 are
-the resolution steps for the four tells named in @ECP.md §"Reading output" —
+result looks wrong before you act on it. §1–3 resolve real misses; §4–8 are
+the resolution steps for the five tells named in @ECP.md §"Reading output" —
 the *what to do* once you've spotted one.
 
 ## 1. Check Index Freshness
@@ -30,3 +30,7 @@ the *what to do* once you've spotted one.
 
 ## 7. Surprising output — find the root cause before calling it a bug
 - **Do:** read the actual definition, run a fresh reindex, or grep to cross-check. doc-comment inference ≠ verification; a passing `parse_file` unit test ≠ the indexing pipeline uses that path. Confirm with a fresh query against a rebuilt graph.
+
+## 8. The hook's `ecp graph hits` looked like the whole caller set
+- The PreToolUse hook prints direct (d=1) callers only, to stay fast on every tool call.
+- **Do:** run the `ecp impact --target <name> --direction upstream` line the hook prints before you size a refactor from it.
