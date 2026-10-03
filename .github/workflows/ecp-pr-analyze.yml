@@ -15,8 +15,9 @@ on:
 
 # Each PR's analysis runs independently; multiple PRs can run in parallel.
 # Re-runs on the same PR cancel in-flight (only the latest analysis matters).
-# Main warm runs queue instead: a cancelled run saves no cache, so merges
-# landing faster than one build would otherwise never warm anything.
+# A running main warm run is never cancelled: a cancelled run saves no cache,
+# so merges landing faster than one build would otherwise never warm anything.
+# A newer push still replaces a main run that is only pending, which is fine.
 concurrency:
   group: ecp-pr-analyze-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
