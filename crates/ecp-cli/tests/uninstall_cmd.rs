@@ -315,6 +315,15 @@ fn test_remove_self_binary_at_schedules_on_windows() {
         ),
         "windows should schedule a delayed delete, not delete in-process"
     );
+    // The schedule must also run: a wait that exits early leaves the file.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while fake_bin.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    assert!(
+        !fake_bin.exists(),
+        "the scheduled delete must remove the file"
+    );
 }
 
 #[test]
