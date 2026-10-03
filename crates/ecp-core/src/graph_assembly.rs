@@ -105,18 +105,35 @@ impl GraphAssembly {
             edges.len()
         );
 
-        // Permutation first: `pre_sort_to_sorted[pre] = sorted`. Built with
-        // the same stable sort `edges.sort_by_key` uses below, so equal
-        // sources keep their relative order in both.
+        // One stable sort of edge indices by source. Stability makes the
+        // result the exact order `edges.sort_by_key(|e| e.source)` would
+        // give, so equal sources keep their insertion order.
         let mut pre_sort_to_sorted: Vec<u32> = vec![0; edges.len()];
         {
-            let mut perm: Vec<usize> = (0..edges.len()).collect();
-            perm.sort_by_key(|&i| edges[i].source);
+            let mut perm: Vec<u32> = (0..edges.len() as u32).collect();
+            perm.sort_by_key(|&i| edges[i as usize].source);
             for (sorted_idx, &pre_idx) in perm.iter().enumerate() {
-                pre_sort_to_sorted[pre_idx] = sorted_idx as u32;
+                pre_sort_to_sorted[pre_idx as usize] = sorted_idx as u32;
             }
         }
-        edges.sort_by_key(|e| e.source);
+
+        // Remap before the permutation is applied: applying it consumes
+        // `pre_sort_to_sorted` as its cycle buffer.
+        let mut call_metas: Vec<CallMeta> = call_metas
+            .into_iter()
+            .filter_map(|m| {
+                pre_sort_to_sorted
+                    .get(m.edge_idx as usize)
+                    .map(|&sorted_idx| CallMeta {
+                        edge_idx: sorted_idx,
+                        ..m
+                    })
+            })
+            .collect();
+        call_metas.sort_by_key(|m| m.edge_idx);
+        call_metas.dedup_by_key(|m| m.edge_idx);
+
+        apply_destination_permutation(&mut edges, pre_sort_to_sorted);
 
         let num_nodes = nodes.len();
         let mut out_offsets = vec![0u32; num_nodes + 1];
@@ -137,20 +154,6 @@ impl GraphAssembly {
         for i in 0..num_nodes {
             in_offsets[i + 1] += in_offsets[i];
         }
-
-        let mut call_metas: Vec<CallMeta> = call_metas
-            .into_iter()
-            .filter_map(|m| {
-                pre_sort_to_sorted
-                    .get(m.edge_idx as usize)
-                    .map(|&sorted_idx| CallMeta {
-                        edge_idx: sorted_idx,
-                        ..m
-                    })
-            })
-            .collect();
-        call_metas.sort_by_key(|m| m.edge_idx);
-        call_metas.dedup_by_key(|m| m.edge_idx);
 
         // `function_meta()` binary-searches by node_idx; `node_flags` is its
         // dense low-byte mirror, read by the hot boolean filters. Deriving
@@ -223,6 +226,24 @@ impl GraphAssembly {
             kind_offsets,
             kind_node_idx,
             node_flags,
+        }
+    }
+}
+
+/// Move `items[i]` to position `dest[i]` for every `i`, in place: each swap
+/// settles one element, so the cost is at most `items.len()` swaps and no
+/// second buffer of `T`. `dest` must be a permutation of `0..items.len()`;
+/// it is consumed as the cycle bookkeeping.
+fn apply_destination_permutation<T>(items: &mut [T], mut dest: Vec<u32>) {
+    debug_assert_eq!(items.len(), dest.len());
+    for i in 0..items.len() {
+        loop {
+            let d = dest[i] as usize;
+            if d == i {
+                break;
+            }
+            items.swap(i, d);
+            dest.swap(i, d);
         }
     }
 }
@@ -512,5 +533,171 @@ mod tests {
         let classes: Vec<u32> = archived.nodes_by_kind(NodeKind::Class).collect();
         assert_eq!(funcs, vec![0, 2]);
         assert_eq!(classes, vec![1]);
+    }
+
+    type EdgeKey = (u32, u32, RelType, u32, StrRef);
+    type MetaKey = (u32, u8, StrRef);
+
+    fn edge_key(e: &Edge) -> EdgeKey {
+        (
+            e.source,
+            e.target,
+            e.rel_type,
+            e.confidence.to_bits(),
+            e.reason,
+        )
+    }
+
+    fn meta_key(m: &CallMeta) -> MetaKey {
+        (m.edge_idx, m.flags, m.dispatch_type)
+    }
+
+    /// The pre-change derivation: a stable index sort for the call-meta
+    /// remap, then a second stable sort of the edges themselves.
+    fn reference_two_sorts(
+        mut edges: Vec<Edge>,
+        call_metas: &[CallMeta],
+    ) -> (Vec<EdgeKey>, Vec<MetaKey>) {
+        let mut pre_sort_to_sorted: Vec<u32> = vec![0; edges.len()];
+        let mut perm: Vec<usize> = (0..edges.len()).collect();
+        perm.sort_by_key(|&i| edges[i].source);
+        for (sorted_idx, &pre_idx) in perm.iter().enumerate() {
+            pre_sort_to_sorted[pre_idx] = sorted_idx as u32;
+        }
+        edges.sort_by_key(|e| e.source);
+        let mut metas: Vec<CallMeta> = call_metas
+            .iter()
+            .filter_map(|m| {
+                pre_sort_to_sorted
+                    .get(m.edge_idx as usize)
+                    .map(|&sorted_idx| CallMeta {
+                        edge_idx: sorted_idx,
+                        ..m.clone()
+                    })
+            })
+            .collect();
+        metas.sort_by_key(|m| m.edge_idx);
+        metas.dedup_by_key(|m| m.edge_idx);
+        (
+            edges.iter().map(edge_key).collect(),
+            metas.iter().map(meta_key).collect(),
+        )
+    }
+
+    fn assert_finish_matches_two_sorts(num_nodes: usize, edges: Vec<Edge>, metas: Vec<CallMeta>) {
+        let (want_edges, want_metas) = reference_two_sorts(edges.clone(), &metas);
+        let mut pool = StringPool::new();
+        let nodes = (0..num_nodes)
+            .map(|i| node(&mut pool, &format!("n{i}"), NodeKind::Function))
+            .collect();
+        let g = GraphAssembly {
+            string_pool: pool,
+            nodes,
+            edges,
+            call_metas: metas,
+            ..Default::default()
+        }
+        .finish();
+
+        let got_edges: Vec<EdgeKey> = g.edges.iter().map(edge_key).collect();
+        assert_eq!(got_edges, want_edges, "edge order");
+        assert_eq!(
+            g.call_metas.iter().map(meta_key).collect::<Vec<_>>(),
+            want_metas,
+            "call metas"
+        );
+
+        let mut want_out = vec![0u32; num_nodes + 1];
+        for e in &want_edges {
+            want_out[e.0 as usize + 1] += 1;
+        }
+        for i in 0..num_nodes {
+            want_out[i + 1] += want_out[i];
+        }
+        assert_eq!(g.out_offsets, want_out, "out_offsets");
+
+        let mut want_in_idx: Vec<u32> = (0..want_edges.len() as u32).collect();
+        want_in_idx.sort_by_key(|&i| want_edges[i as usize].1);
+        assert_eq!(g.in_edge_idx, want_in_idx, "in_edge_idx");
+        let mut want_in = vec![0u32; num_nodes + 1];
+        for e in &want_edges {
+            want_in[e.1 as usize + 1] += 1;
+        }
+        for i in 0..num_nodes {
+            want_in[i + 1] += want_in[i];
+        }
+        assert_eq!(g.in_offsets, want_in, "in_offsets");
+    }
+
+    fn tagged_edge(source: u32, target: u32, tag: u32) -> Edge {
+        // A distinct confidence per edge makes any reorder among equal
+        // sources visible in the comparison.
+        let mut e = edge(source, target);
+        e.confidence = tag as f32;
+        e
+    }
+
+    fn meta(edge_idx: u32, flags: u8) -> CallMeta {
+        CallMeta {
+            edge_idx,
+            flags,
+            dispatch_type: StrRef::default(),
+        }
+    }
+
+    #[test]
+    fn test_finish_shared_sources_interleaved_metas_matches_two_sorts() {
+        // Sources drawn from {0, 2, 3, 5, 8}: many edges share a source and
+        // nodes 1, 4, 6, 7 have no outgoing edges.
+        const SOURCES: [u32; 5] = [0, 2, 3, 5, 8];
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            x = x
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (x >> 33) as u32
+        };
+        let edges: Vec<Edge> = (0..600)
+            .map(|i| tagged_edge(SOURCES[next() as usize % 5], next() % 9, i))
+            .collect();
+        let mut metas: Vec<CallMeta> = Vec::new();
+        for i in (0..600u32).rev().step_by(3) {
+            metas.push(meta(i, CallMeta::FLAG_DIRECT));
+            if i % 7 == 0 {
+                // Second meta on one edge: the first one supplied must win.
+                metas.push(meta(i, CallMeta::FLAG_CALLBACK));
+            }
+        }
+        metas.push(meta(600, CallMeta::FLAG_DIRECT)); // past the edge list
+        assert_finish_matches_two_sorts(9, edges, metas);
+    }
+
+    #[test]
+    fn test_finish_degenerate_edge_orders_match_two_sorts() {
+        let all_one_source: Vec<Edge> = (0..50).map(|i| tagged_edge(3, i % 4, i)).collect();
+        let reverse_sorted: Vec<Edge> = (0..50).map(|i| tagged_edge(49 - i, i, i)).collect();
+        let already_sorted: Vec<Edge> = (0..50).map(|i| tagged_edge(i / 5, 0, i)).collect();
+        let metas = || -> Vec<CallMeta> {
+            (0..50)
+                .step_by(4)
+                .map(|i| meta(i, CallMeta::FLAG_DIRECT))
+                .collect()
+        };
+        assert_finish_matches_two_sorts(4, all_one_source, metas());
+        assert_finish_matches_two_sorts(50, reverse_sorted, metas());
+        assert_finish_matches_two_sorts(10, already_sorted, metas());
+        assert_finish_matches_two_sorts(2, Vec::new(), vec![meta(0, CallMeta::FLAG_DIRECT)]);
+    }
+
+    #[test]
+    fn test_apply_destination_permutation_cycles_moves_each_item_to_dest() {
+        // Two cycles (0→2→1→0, 3↔4) and one fixed point (5).
+        let mut items = vec!['a', 'b', 'c', 'd', 'e', 'f'];
+        apply_destination_permutation(&mut items, vec![2, 0, 1, 4, 3, 5]);
+        assert_eq!(items, vec!['b', 'c', 'a', 'e', 'd', 'f']);
+
+        let mut empty: Vec<char> = Vec::new();
+        apply_destination_permutation(&mut empty, Vec::new());
+        assert!(empty.is_empty());
     }
 }
