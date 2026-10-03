@@ -520,6 +520,44 @@ impl SymbolTable {
             .collect()
     }
 
+    /// Number of nodes named `node_name` in `file_path` that match `target`.
+    pub fn count_in_file_with_kind(
+        &self,
+        file_path: &str,
+        node_name: &str,
+        target: ResolveTarget,
+    ) -> usize {
+        let Some(ids) = self
+            .file_scoped
+            .get(file_path)
+            .and_then(|m| m.get(node_name))
+        else {
+            return 0;
+        };
+        let predicate = target.kind_predicate();
+        ids.iter()
+            .filter(|&&id| predicate(self.node_kinds[id as usize]))
+            .count()
+    }
+
+    /// True when at least one node is registered under `file_path`, i.e. the
+    /// file belongs to the indexed project.
+    pub fn has_file(&self, file_path: &str) -> bool {
+        self.file_scoped.contains_key(file_path)
+    }
+
+    /// The name `node_id` is registered under in its file. The index keeps no
+    /// id → name map; this scans the names of one file. The receiver-typing
+    /// ladder calls it only for the declared supertypes it walks.
+    pub fn name_in_file(&self, node_id: u32) -> Option<&str> {
+        let file = self.id_to_file.get(&node_id)?;
+        self.file_scoped
+            .get(file)?
+            .iter()
+            .find(|(_, ids)| ids.contains(&node_id))
+            .map(|(name, _)| name.as_str())
+    }
+
     /// Replace the supertypes map from `(type_id, base)` pairs in declared
     /// order; `None` marks a base that did not resolve to a project type.
     /// Repeated bases collapse to their first position, and a type never
@@ -795,6 +833,44 @@ mod tests {
             st.owned_in_file("cfg.rb", "load", "Config", CALL),
             vec![1, 3]
         );
+    }
+
+    #[test]
+    fn test_name_in_file_registered_and_unknown_ids_returns_name_or_none() {
+        let st = st_owned(&[
+            ("a.py", "Base", NodeKind::Class, None),
+            ("a.py", "greet", NodeKind::Method, Some("Base")),
+        ]);
+        assert_eq!(st.name_in_file(0), Some("Base"));
+        assert_eq!(st.name_in_file(1), Some("greet"));
+        assert_eq!(st.name_in_file(7), None);
+    }
+
+    #[test]
+    fn test_count_in_file_with_kind_type_and_module_share_name_counts_by_kind() {
+        let st = st_owned(&[
+            ("cfg.rb", "Config", NodeKind::Class, None),
+            ("cfg.rb", "Config", NodeKind::Module, None),
+        ]);
+        assert_eq!(
+            st.count_in_file_with_kind("cfg.rb", "Config", ResolveTarget::Qualifier),
+            2
+        );
+        assert_eq!(
+            st.count_in_file_with_kind("cfg.rb", "Config", ResolveTarget::Type),
+            1
+        );
+        assert_eq!(
+            st.count_in_file_with_kind("other.rb", "Config", ResolveTarget::Type),
+            0
+        );
+    }
+
+    #[test]
+    fn test_has_file_indexed_and_unknown_paths_returns_presence() {
+        let st = st_owned(&[("pkg/models.py", "Repo", NodeKind::Class, None)]);
+        assert!(st.has_file("pkg/models.py"));
+        assert!(!st.has_file("psqlpy"));
     }
 
     #[test]

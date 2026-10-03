@@ -2593,7 +2593,10 @@ mod tests {
                 | DecisionTier::HeritageScoped
                 | DecisionTier::Global
                 | DecisionTier::AmbiguousGlobal
-                | DecisionTier::ModuleTree => {
+                | DecisionTier::ModuleTree
+                | DecisionTier::TypeOwned
+                | DecisionTier::TypeHeritage
+                | DecisionTier::TypeCandidates => {
                     panic!(
                         "fixture should only produce ImportScoped/Unresolved, got {:?}",
                         original.tier
