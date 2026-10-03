@@ -54,7 +54,14 @@ fn build_graph(nodes_spec: &[NodeSpec<'_>], extra_edges: &[(usize, usize)]) -> (
 }
 
 fn run_find(graph: &Path, args: &[&str]) -> std::process::Output {
+    // A session id inherited from the agent running `cargo test` would attach
+    // that session's overlay to the fixture graph's answers.
     Command::new(ecp_bin())
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("ECP_SESSION_ID")
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("GEMINI_CLI_SESSION_ID")
         .arg("find")
         .args(args)
         .arg("--graph")
