@@ -63,6 +63,17 @@ impl World {
         self.root.path().join(ALIAS)
     }
 
+    /// A committed git repo `<root>/<name>` holding one function `marker`,
+    /// never indexed and never registered.
+    fn unindexed_repo(&self, name: &str, marker: &str) -> std::path::PathBuf {
+        let repo = self.root.path().join(name);
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::write(repo.join("lib.rs"), format!("pub fn {marker}() {{}}\n")).unwrap();
+        run_git(&repo, &["init", "-q", "-b", "main"]);
+        commit_all(&repo, "init");
+        repo
+    }
+
     fn ecp(&self, cwd: &Path, args: &[&str], stdin: Option<&str>) -> Output {
         spawn_ecp(cwd, self.home.path(), args, stdin)
             .wait_with_output()
@@ -326,4 +337,96 @@ fn test_find_selector_twice_concurrently_prints_identical_stdout() {
     assert_ok(&second, "second concurrent selector find");
     assert!(stdout(&first).contains(MARKER));
     assert_eq!(stdout(&first), stdout(&second));
+}
+
+/// Contract: a selector that names the cwd's own repo still answers when that
+/// repo's graph was pruned (`admin gc`), because the cwd graph is rebuilt before
+/// the selector resolves. Skipping the cwd graph there turns "pruned" into
+/// "registered, never indexed" and the query fails.
+#[test]
+fn test_find_selector_naming_cwd_repo_with_pruned_graph_rebuilds_and_lists_hit() {
+    let w = World::new();
+    let commits = w.home.path().join(".ecp").join(&w.key).join("commits");
+    for entry in std::fs::read_dir(&commits).unwrap() {
+        std::fs::remove_dir_all(entry.unwrap().path()).unwrap();
+    }
+
+    let out = w.ecp(&w.repo(), &selector_find(&w.key), None);
+
+    assert_ok(
+        &out,
+        "selector naming the cwd repo after its graph was pruned",
+    );
+    assert!(stdout(&out).contains(MARKER), "{}", stdout(&out));
+}
+
+/// Contract: `--graph <missing>` is an honest failure whatever `--repo` holds;
+/// it must not be ignored just because the selector fast path skips the cwd graph.
+#[test]
+fn test_find_selector_with_missing_custom_graph_fails_with_existing_message() {
+    let w = World::new();
+    let mut args = vec!["--graph", "/nonexistent.bin"];
+    args.extend(selector_find(&w.key));
+
+    for cwd in [w.repo(), w.non_repo.path().to_path_buf()] {
+        let out = w.ecp(&cwd, &args, None);
+        assert!(!out.status.success(), "{cwd:?} must fail");
+        assert!(
+            stderr(&out).contains("--graph path does not exist"),
+            "{cwd:?}: {}",
+            stderr(&out)
+        );
+    }
+}
+
+/// Contract: `@all` from inside a git repo that is not registered yet registers
+/// and indexes that repo first, so its own symbols are part of "all".
+#[test]
+fn test_find_all_from_unregistered_git_cwd_lists_cwd_repo_hit() {
+    let w = World::new();
+    let other_marker = "unregistered_cwd_marker_fn";
+    let other = w.unindexed_repo("unregistered", other_marker);
+    let before = w.indexed_repo_dirs();
+
+    let out = w.ecp(
+        &other,
+        &[
+            "find",
+            other_marker,
+            "--mode",
+            "bm25",
+            "--repo",
+            "@all",
+            "--format",
+            "json",
+        ],
+        None,
+    );
+
+    assert_ok(&out, "@all from an unregistered git repo");
+    assert!(stdout(&out).contains(other_marker), "{}", stdout(&out));
+    assert_eq!(
+        w.indexed_repo_dirs(),
+        before + 1,
+        "the cwd repo gets indexed"
+    );
+}
+
+/// Contract: a selector that excludes the cwd's repo keeps the fast path, so a
+/// git repo that is not part of the answer is not indexed as a side effect.
+#[test]
+fn test_find_selector_naming_another_repo_from_git_cwd_does_not_index_cwd() {
+    let w = World::new();
+    let other = w.unindexed_repo("bystander", "bystander_marker_fn");
+    let before = w.indexed_repo_dirs();
+
+    let out = w.ecp(&other, &selector_find(&w.key), None);
+
+    assert_ok(&out, "selector naming another repo from a git cwd");
+    assert!(stdout(&out).contains(MARKER), "{}", stdout(&out));
+    assert_eq!(
+        w.indexed_repo_dirs(),
+        before,
+        "the cwd repo is not part of the selection and must not be indexed"
+    );
 }
