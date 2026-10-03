@@ -402,17 +402,18 @@ pub fn remove_self_binary_at(exe: &Path) -> Result<SelfDeleteOutcome, EcpError> 
         // whole wait, so a caller reading our output blocks until the delete.
         // `ping` waits instead of `timeout`, which exits at once when stdin is
         // redirected and would run `del` while this process still holds the file.
+        // `raw_arg`: `arg` escapes the path's quotes as `\"`, which cmd reads
+        // literally, so `del` got a mangled path and the file stayed. cmd /c
+        // strips the outer pair of quotes around the whole command.
         std::process::Command::new("cmd")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .args([
-                "/c",
-                &format!(
-                    "ping -n 4 127.0.0.1 >nul 2>&1 & del /f /q \"{}\"",
-                    exe.display()
-                ),
-            ])
+            .arg("/c")
+            .raw_arg(format!(
+                "\"ping -n 4 127.0.0.1 >nul 2>&1 & del /f /q \"{}\"\"",
+                exe.display()
+            ))
             .creation_flags(FLAGS)
             .spawn()
             .map_err(|e| EcpError::Output(format!("schedule self-delete: {e}")))?;
