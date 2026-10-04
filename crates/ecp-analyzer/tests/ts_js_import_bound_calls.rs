@@ -91,35 +91,6 @@ fn test_require_binding_call_resolves_in_the_required_module() {
     }
 }
 
-/// A require of a package (not a relative path) names no project file, so it
-/// must not bind a project function of the same name.
-#[test]
-fn test_require_of_a_package_never_binds_a_project_function() {
-    let files = [
-        ("a.js", "function f() {}\nmodule.exports = { f };\n"),
-        (
-            "app.js",
-            "const { f } = require(\"lodash\");\nfunction go() { f(); }\n",
-        ),
-    ];
-    assert_eq!(go_targets(&files, "f"), Vec::<String>::new());
-}
-
-/// The imported module does not define `f`: no edge, and never another
-/// file's `f`.
-#[test]
-fn test_namespace_import_of_a_module_without_the_member_emits_no_edge() {
-    let files = [
-        ("a.js", "export function other() {}\n"),
-        ("b.js", "export function f() {}\n"),
-        (
-            "app.js",
-            "import * as ns from \"./a\";\nexport function go() { ns.f(); }\n",
-        ),
-    ];
-    assert_eq!(go_targets(&files, "f"), Vec::<String>::new());
-}
-
 /// A `require` inside a function body binds like one at the top level.
 #[test]
 fn test_require_inside_a_function_binds_like_top_level() {

@@ -630,19 +630,6 @@ impl<'a> Resolver<'a> {
             }
         }
 
-        if self.binds_external_package(source_file, &source_file_str, symbol_name, raw_imports) {
-            self.record(
-                &source_file_str,
-                symbol_name,
-                None,
-                DecisionTier::Unresolved,
-                None,
-                self.symbol_table.global_match_count(symbol_name),
-                None,
-            );
-            return results;
-        }
-
         // Tier 3: Global fallback — emit only when the kind-filtered candidate
         // set is unique. Refusing to guess on ambiguity is the dominant defence
         // against bare-name fan-out (`new`, `format`, `default`, `main`, ...).
@@ -1446,44 +1433,6 @@ impl<'a> Resolver<'a> {
             hit = Some(fp);
         }
         hit.map(str::to_string)
-    }
-
-    /// True when the JS / TS file imports `name` only from bare package
-    /// specifiers that name no project file (`require('lodash')`): the name
-    /// is the library's, so the Tier 3 global guess would bind an unrelated
-    /// project symbol of the same name.
-    fn binds_external_package(
-        &self,
-        source_file: &Path,
-        source_file_str: &str,
-        name: &str,
-        raw_imports: &[RawImport],
-    ) -> bool {
-        if !matches!(
-            FileMeta::from_path(source_file_str).language,
-            Language::JavaScript | Language::TypeScript
-        ) {
-            return false;
-        }
-        let mut bound = false;
-        for import in raw_imports
-            .iter()
-            .filter(|i| i.alias.as_deref().unwrap_or(&i.imported_name) == name)
-        {
-            if import.source.starts_with(['.', '/']) {
-                return false;
-            }
-            let mut in_project = false;
-            self.for_each_candidate(source_file, &import.source, |candidate| {
-                in_project = self.symbol_table.has_file(candidate);
-                !in_project
-            });
-            if in_project {
-                return false;
-            }
-            bound = true;
-        }
-        bound
     }
 
     /// Python `super().member()`: `member` on the caller class's bases, by
