@@ -471,6 +471,44 @@ pub fn base_constructors(graph: &ArchivedZeroCopyGraph, type_idx: u32) -> Vec<u3
         .collect()
 }
 
+/// [`base_constructors`] for many types: every base Constructor grouped by
+/// its file and [`owner_key`], built in one pass over the nodes. Every
+/// `constructor` / `__init__` shares one name, so probing the name index
+/// once per type costs types x constructors on a large repo (vscode: a
+/// fuzzy `find` over 12k classes against 10.7k `constructor` nodes).
+pub struct BaseConstructorIndex<'g> {
+    by_owner: FxHashMap<(u32, &'g str), Vec<u32>>,
+}
+
+impl<'g> BaseConstructorIndex<'g> {
+    pub fn build(graph: &'g ArchivedZeroCopyGraph) -> Self {
+        let pool = &graph.string_pool;
+        let mut by_owner: FxHashMap<(u32, &'g str), Vec<u32>> = FxHashMap::default();
+        for (idx, node) in graph.nodes.iter().enumerate() {
+            if NodeKind::from(&node.kind) != NodeKind::Constructor {
+                continue;
+            }
+            if let Some(owner) = owner_key(node.owner_class.resolve(pool)) {
+                by_owner
+                    .entry((node.file_idx.to_native(), owner))
+                    .or_default()
+                    .push(idx as u32);
+            }
+        }
+        Self { by_owner }
+    }
+
+    /// The same set [`base_constructors`] returns for `type_idx`.
+    pub fn of(&self, graph: &'g ArchivedZeroCopyGraph, type_idx: u32) -> &[u32] {
+        let ty = &graph.nodes[type_idx as usize];
+        if !NodeKind::from(&ty.kind).is_constructible() || !ty.has_owning_file() {
+            return &[];
+        }
+        let key = (ty.file_idx.to_native(), ty.name.resolve(&graph.string_pool));
+        self.by_owner.get(&key).map_or(&[], Vec::as_slice)
+    }
+}
+
 /// The `Calls` target of a construction of the Class / Struct `ty`: its one
 /// constructor, else the type itself.
 fn construction_target(

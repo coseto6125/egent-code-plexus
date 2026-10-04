@@ -377,3 +377,43 @@ fn test_find_json_caller_count_includes_instantiator_end_to_end() {
         .unwrap_or_else(|| panic!("no Widget hit: {result}"));
     assert_eq!(h["caller_count"], 1, "{h}");
 }
+
+/// A fuzzy match over more classes than `find` probes one by one switches to
+/// the one-pass constructor index; every class must keep the caller count the
+/// per-type probe gives (one instantiator through its `__init__`).
+#[test]
+fn test_find_fuzzy_many_classes_constructor_index_keeps_caller_counts() {
+    let tmp = tempdir().unwrap();
+    let mut models = String::new();
+    let mut app = String::from("from pkg.models import *\n\n");
+    for i in 0..20 {
+        models.push_str(&format!(
+            "class Gizmo{i}:\n    def __init__(self):\n        self.v = {i}\n\n"
+        ));
+        app.push_str(&format!("def make{i}():\n    return Gizmo{i}()\n\n"));
+    }
+    write(tmp.path(), "pkg/__init__.py", "");
+    write(tmp.path(), "pkg/models.py", &models);
+    write(tmp.path(), "pkg/app.py", &app);
+    init_and_analyze(tmp.path());
+
+    let result = run_json(
+        tmp.path(),
+        &[
+            "find", "Gizmo", "--mode", "fuzzy", "--all", "--kind", "class", "--format", "json",
+            "--repo", ".",
+        ],
+    );
+    let rows: Vec<&Value> = result
+        .as_object()
+        .expect("json object")
+        .values()
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter(|h| h["name"].as_str().is_some_and(|n| n.starts_with("Gizmo")))
+        .collect();
+    assert_eq!(rows.len(), 20, "{result}");
+    for h in rows {
+        assert_eq!(h["caller_count"], 1, "{h}");
+    }
+}
