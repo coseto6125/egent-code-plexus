@@ -96,6 +96,7 @@ pub fn build_payload(args: &SummaryArgs, _graph_arg: &Path) -> Result<Value, Ecp
                     dir_name: alias.dir_name.clone(),
                     common_dir: alias.common_dir.clone(),
                     aliases: alias.aliases.clone(),
+                    worktree_root: None,
                 };
                 sections.insert(
                     "per_repo".into(),
@@ -202,7 +203,10 @@ fn fetch_freshness(r: &crate::repo_selector::ResolvedRepo, detailed: bool) -> Va
         return json!({ "status": "missing" });
     };
     let common = Path::new(&r.common_dir);
-    let worktree = crate::git_cache::worktree_root_for_repo(common);
+    let worktree = r
+        .worktree_root
+        .clone()
+        .unwrap_or_else(|| crate::git_cache::worktree_root_for_repo(common));
 
     let mut out = match ensure_index(&graph_path, &worktree) {
         Ok(EnsureResult::Ready) => json!({ "status": "ready" }),
@@ -685,6 +689,7 @@ mod tests {
             dir_name: "demo__aabbccdd".into(),
             common_dir: "/nope/not-a-real-path/.git".into(),
             aliases: vec!["demo".into()],
+            worktree_root: None,
         };
         let v = fetch_freshness(&r, false);
         // graph_path will be None (no commits dir) → status: missing
@@ -704,6 +709,7 @@ mod tests {
             dir_name: "demo__aabbccdd".into(),
             common_dir: "/nope/not-a-real-path/.git".into(),
             aliases: vec!["demo".into()],
+            worktree_root: None,
         };
         let v = build_repo_health(&r, true);
         assert_eq!(v["repo"], json!("demo"));

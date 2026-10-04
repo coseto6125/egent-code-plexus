@@ -76,6 +76,7 @@ pub fn run(args: ImpactArgs) -> Result<(), EcpError> {
         dir_name: alias.dir_name.clone(),
         common_dir: alias.common_dir.clone(),
         aliases: alias.aliases.clone(),
+        worktree_root: None,
     };
 
     // 3. Load the member's Engine.

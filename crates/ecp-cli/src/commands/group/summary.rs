@@ -49,6 +49,7 @@ pub fn run(args: SummaryArgs) -> Result<(), EcpError> {
                 dir_name: alias.dir_name.clone(),
                 common_dir: alias.common_dir.clone(),
                 aliases: alias.aliases.clone(),
+                worktree_root: None,
             })
         })
         .collect();

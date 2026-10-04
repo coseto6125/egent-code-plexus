@@ -168,9 +168,9 @@ fn extract_member(
         )
     })?;
 
-    // Extract the caller's checkout for its repository, not the shared main tree.
+    // The shared group store must not depend on which worktree runs sync.
     let common_dir = std::path::PathBuf::from(&alias.common_dir);
-    let src_root = crate::git_cache::worktree_root_for_repo(&common_dir);
+    let src_root = crate::git_cache::worktree_root_from_common_dir(&common_dir);
 
     if !src_root.exists() {
         return Err((
@@ -180,10 +180,10 @@ fn extract_member(
     }
 
     // Capture last commit via `git rev-parse HEAD`.
-    let last_commit = git_head(&src_root).unwrap_or_else(|_| "unknown".to_string());
+    let last_commit = git_head(src_root).unwrap_or_else(|_| "unknown".to_string());
 
     // Walk files, run extractors per language.
-    let contracts = walk_and_extract(&src_root, member, all_extractors);
+    let contracts = walk_and_extract(src_root, member, all_extractors);
 
     let snapshot = RepoSnapshot {
         indexed_at: chrono_now(),

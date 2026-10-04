@@ -87,6 +87,7 @@ pub fn resolve_member_engines(
                 dir_name: alias.dir_name.clone(),
                 common_dir: alias.common_dir.clone(),
                 aliases: alias.aliases.clone(),
+                worktree_root: None,
             };
             let graph_path = impact::latest_graph_path_for(&resolved, home_ecp).or_else(|| {
                 tracing::warn!("group: no graph.bin found for '{member}'");
