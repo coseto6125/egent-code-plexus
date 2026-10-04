@@ -15,24 +15,19 @@ mod anonymous_callbacks_support;
 
 #[test]
 fn test_graph_builder_closure_references_preserve_lexical_boundaries() {
-    use ecp_analyzer::resolution::builder::GraphBuilder;
     use ecp_core::graph::RelType;
 
-    let mut builder = GraphBuilder::new();
-    builder.add_graph(parse(
+    let first = parse(
         "function outer() {\n function inner() {\n register(() => {\n target();\n });\n }\n}\n\
          function sibling() {}\nregister(() => { target(); });\n",
-    ));
+    );
     let mut second = parse("function second() { register(() => { target(); }); }");
     second.file_path = "second.ts".into();
-    builder.add_graph(second);
-    let graph = builder.build();
+    let mut without_closure = parse("function plain() {}");
+    without_closure.file_path = "plain.ts".into();
+    let graph = anonymous_callbacks_support::build_graph([without_closure, first, second]);
     let pool = graph.string_pool.as_slice();
-    let references: Vec<_> = graph
-        .edges
-        .iter()
-        .filter(|edge| edge.reason.resolve(pool) == "closure:lexical_reference")
-        .collect();
+    let references: Vec<_> = anonymous_callbacks_support::closure_references(&graph).collect();
     assert_eq!(references.len(), 2);
     let mut parents = Vec::new();
     for edge in references {

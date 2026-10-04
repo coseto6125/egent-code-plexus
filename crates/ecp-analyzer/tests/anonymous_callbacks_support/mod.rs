@@ -1,11 +1,27 @@
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::types::LocalGraph;
-use ecp_core::graph::RelType;
+use ecp_core::graph::{Edge, RelType, ZeroCopyGraph};
+
+pub fn build_graph(locals: impl IntoIterator<Item = LocalGraph>) -> ZeroCopyGraph {
+    let mut builder = GraphBuilder::new();
+    for local in locals {
+        builder.add_graph(local);
+    }
+    builder.build()
+}
+
+pub fn closure_references(graph: &ZeroCopyGraph) -> impl Iterator<Item = &Edge> {
+    graph.edges.iter().filter(|edge| {
+        edge.rel_type == RelType::References
+            && graph.nodes[edge.target as usize]
+                .name
+                .resolve(graph.string_pool.as_slice())
+                .starts_with("<anonymous:")
+    })
+}
 
 pub fn assert_enclosing_reachable(local: LocalGraph) {
-    let mut builder = GraphBuilder::new();
-    builder.add_graph(local);
-    let graph = builder.build();
+    let graph = build_graph([local]);
     let pool = graph.string_pool.as_slice();
     let node_id = |name: &str| {
         graph
@@ -44,4 +60,5 @@ pub fn assert_enclosing_reachable(local: LocalGraph) {
             ))
             .collect::<Vec<_>>()
     );
+    assert!(closure_references(&graph).next().is_some());
 }

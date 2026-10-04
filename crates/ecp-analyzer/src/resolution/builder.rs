@@ -1609,6 +1609,27 @@ fn pass1_8_function_metas(
     function_metas
 }
 
+fn callable_parents(graph: &LocalGraph) -> (Vec<(usize, &RawNode)>, Vec<Option<usize>>) {
+    let functions: Vec<_> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| {
+            matches!(
+                node.kind,
+                NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+            )
+        })
+        .collect();
+    let spans: Vec<_> = functions.iter().map(|(_, node)| node.span).collect();
+    let parents = crate::framework_helpers::innermost_enclosing(&spans);
+    (functions, parents)
+}
+
+fn is_anonymous_closure(node: &RawNode) -> bool {
+    node.kind == NodeKind::Function && node.name.starts_with("<anonymous:")
+}
+
 fn emit_closure_references(
     local_graphs: &[LocalGraph],
     nodes: &[Node],
@@ -1618,65 +1639,60 @@ fn emit_closure_references(
     let reason = string_pool.add("closure:lexical_reference");
     let mut start_index = 0u32;
     for graph in local_graphs {
-        if graph
-            .nodes
-            .iter()
-            .any(|node| node.kind == NodeKind::Function && node.name.starts_with("<anonymous:"))
-        {
-            let functions: Vec<_> = graph
-                .nodes
-                .iter()
-                .enumerate()
-                .filter(|(_, node)| {
-                    matches!(
-                        node.kind,
-                        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-                    )
-                })
-                .collect();
-            let spans: Vec<_> = functions.iter().map(|(_, node)| node.span).collect();
-            let parents = crate::framework_helpers::innermost_enclosing(&spans);
-            let mut live_by_uid: Option<FxHashMap<u64, u32>> = None;
-            for (i, &(offset, node)) in functions.iter().enumerate() {
-                if node.kind != NodeKind::Function || !node.name.starts_with("<anonymous:") {
-                    continue;
-                }
-                let Some(parent) = parents[i] else {
-                    continue;
-                };
-                let mut source = start_index + functions[parent].0 as u32;
-                let target = start_index + offset as u32;
-                if nodes[target as usize].name.len == 0 {
-                    continue;
-                }
-                // Overloads share an identity; collision tombstones clear the
-                // name and invert the survivor's UID. Preserve both callbacks.
-                if nodes[source as usize].name.len == 0 {
-                    let live_by_uid = live_by_uid.get_or_insert_with(|| {
-                        nodes[start_index as usize..start_index as usize + graph.nodes.len()]
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, node)| node.name.len != 0)
-                            .map(|(offset, node)| (node.uid, start_index + offset as u32))
-                            .collect()
-                    });
-                    let Some(&live_source) = live_by_uid.get(&!nodes[source as usize].uid) else {
-                        continue;
-                    };
-                    source = live_source;
-                }
-                // Creating a callback references its body without proving execution.
-                // References preserves upstream impact without inventing a direct call.
-                edges.push(Edge {
-                    source,
-                    target,
-                    rel_type: RelType::References,
-                    confidence: 1.0,
-                    reason,
-                });
-            }
-        }
+        emit_file_closure_references(graph, start_index, nodes, reason, edges);
         start_index += graph.nodes.len() as u32;
+    }
+}
+
+fn emit_file_closure_references(
+    graph: &LocalGraph,
+    start_index: u32,
+    nodes: &[Node],
+    reason: StrRef,
+    edges: &mut Vec<Edge>,
+) {
+    if !graph.nodes.iter().any(is_anonymous_closure) {
+        return;
+    }
+    let (functions, parents) = callable_parents(graph);
+    let mut live_by_uid: Option<FxHashMap<u64, u32>> = None;
+    for (i, &(offset, node)) in functions.iter().enumerate() {
+        if !is_anonymous_closure(node) {
+            continue;
+        }
+        let Some(parent) = parents[i] else {
+            continue;
+        };
+        let mut source = start_index + functions[parent].0 as u32;
+        let target = start_index + offset as u32;
+        if nodes[target as usize].name.len == 0 {
+            continue;
+        }
+        // Overloads share an identity; collision tombstones clear the
+        // name and invert the survivor's UID. Preserve both callbacks.
+        if nodes[source as usize].name.len == 0 {
+            let live_by_uid = live_by_uid.get_or_insert_with(|| {
+                nodes[start_index as usize..start_index as usize + graph.nodes.len()]
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, node)| node.name.len != 0)
+                    .map(|(offset, node)| (node.uid, start_index + offset as u32))
+                    .collect()
+            });
+            let Some(&live_source) = live_by_uid.get(&!nodes[source as usize].uid) else {
+                continue;
+            };
+            source = live_source;
+        }
+        // Creating a callback references its body without proving execution.
+        // References preserves upstream impact without inventing a direct call.
+        edges.push(Edge {
+            source,
+            target,
+            rel_type: RelType::References,
+            confidence: 1.0,
+            reason,
+        });
     }
 }
 
@@ -1698,25 +1714,13 @@ impl LexicalFunctionIndex {
         if graph.nodes.iter().all(|node| node.calls.is_empty()) {
             return index;
         }
-        let functions: Vec<_> = graph
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, node)| {
-                matches!(
-                    node.kind,
-                    NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-                )
-            })
-            .collect();
-        let spans: Vec<Span> = functions.iter().map(|(_, node)| node.span).collect();
-        let parents = crate::framework_helpers::innermost_enclosing(&spans);
+        let (functions, parents) = callable_parents(graph);
         for (k, &(offset, node)) in functions.iter().enumerate() {
             if node.kind != NodeKind::Function {
                 continue;
             }
             let candidates = index.by_name.entry(node.name.clone()).or_default();
-            let parent = parents[k].map(|parent| spans[parent]);
+            let parent = parents[k].map(|parent| functions[parent].1.span);
             if parent.is_some() || node.owner_class.is_none() {
                 candidates.push((parent, start_index + offset as u32));
             }

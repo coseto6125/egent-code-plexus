@@ -16,7 +16,6 @@ mod anonymous_callbacks_support;
 
 #[test]
 fn test_graph_builder_overload_closures_reference_surviving_method() {
-    use ecp_analyzer::resolution::builder::GraphBuilder;
     use ecp_core::graph::RelType;
 
     let local = parse(
@@ -50,20 +49,14 @@ fn test_graph_builder_overload_closures_reference_surviving_method() {
             .count(),
         2
     );
-    let mut builder = GraphBuilder::new();
-    builder.add_graph(local);
-    let graph = builder.build();
+    let graph = anonymous_callbacks_support::build_graph([local]);
     let pool = graph.string_pool.as_slice();
     let target = graph
         .nodes
         .iter()
         .position(|node| node.name.resolve(pool) == "target")
         .unwrap() as u32;
-    let references: Vec<_> = graph
-        .edges
-        .iter()
-        .filter(|edge| edge.reason.resolve(pool) == "closure:lexical_reference")
-        .collect();
+    let references: Vec<_> = anonymous_callbacks_support::closure_references(&graph).collect();
     assert_eq!(references.len(), 2);
     assert_eq!(references[0].source, references[1].source);
     assert_ne!(references[0].target, references[1].target);
