@@ -195,10 +195,10 @@ fn cached_git_path(
     to_return
 }
 
-/// Worktree root for a git `common_dir` (`<worktree>/.git`) — its parent.
+/// Repository-identity tree for a git `common_dir`: the main checkout.
 /// Falls back to `common_dir` itself when it has no parent (defensive: a
-/// bare-repo or root path). Used wherever a registry entry's `.git` common
-/// dir must be turned into the source tree `ensure_fresh` walks.
+/// bare-repo or root path). Used for persisted shared group state and as
+/// the fallback inside `worktree_root_for_repo`.
 ///
 /// `dunce::simplified` strips any Windows verbatim `\\?\` prefix the registry
 /// may carry — older builds wrote `common_dir` via `std::fs::canonicalize`,
@@ -209,6 +209,21 @@ fn cached_git_path(
 /// input (no allocation, borrow preserved).
 pub fn worktree_root_from_common_dir(common_dir: &Path) -> &Path {
     dunce::simplified(common_dir.parent().unwrap_or(common_dir))
+}
+
+/// Registry identity is shared, but source files and HEAD belong to a worktree.
+/// Prefer the caller's cached layout only for the matching repository; other
+/// group members retain the main-checkout fallback without spawning git.
+pub(crate) fn worktree_root_for_repo(common_dir: &Path) -> PathBuf {
+    if let Some((root, _, caller_common)) = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| git_layout(&cwd))
+    {
+        if canon_key(&caller_common) == canon_key(common_dir) {
+            return dunce::simplified(&root).to_path_buf();
+        }
+    }
+    worktree_root_from_common_dir(common_dir).to_path_buf()
 }
 
 fn read_git_dir(cwd: &Path) -> io::Result<PathBuf> {

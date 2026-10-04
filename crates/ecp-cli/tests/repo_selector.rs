@@ -213,6 +213,46 @@ fn find_by_path_matches_via_common_dir() {
 }
 
 #[test]
+fn test_resolve_relative_path_preserves_worktree_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let primary = tmp.path().join("primary");
+    std::fs::create_dir_all(primary.join("src")).unwrap();
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&primary)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let common = std::fs::canonicalize(primary.join(".git")).unwrap();
+    let mut reg = RegistryFile::empty();
+    reg.repos.insert(
+        "primary__xxxx".into(),
+        make_repo_alias("primary__xxxx", common.to_str().unwrap(), "primary"),
+    );
+    for selector in [
+        Selector(vec![Atom::Path("./src".into())]),
+        Selector(vec![Atom::Cwd]),
+    ] {
+        let repos = repo_selector::resolve(&selector, &reg, primary.to_str().unwrap()).unwrap();
+        assert_eq!(
+            repos[0].worktree_root.as_deref(),
+            Some(dunce::simplified(&std::fs::canonicalize(&primary).unwrap()))
+        );
+    }
+    let repos = repo_selector::resolve(
+        &Selector(vec![Atom::Name("primary".into())]),
+        &reg,
+        primary.to_str().unwrap(),
+    )
+    .unwrap();
+    assert!(
+        repos[0].worktree_root.is_none(),
+        "a name leaves caller-tree fallback to the reader"
+    );
+}
+
+#[test]
 fn find_by_path_returns_none_outside_any_repo() {
     let tmp = tempfile::tempdir().unwrap();
     let reg = RegistryFile::empty();

@@ -288,7 +288,7 @@ fn run_bm25(args: FindArgs, engine: Option<&Engine>) -> Result<(), EcpError> {
         let target = targets.into_iter().next().unwrap();
         let local_engine = crate::auto_ensure::load_ensured(
             std::path::Path::new(&target.graph_path),
-            std::path::Path::new(&target.worktree_root),
+            &target.worktree_root(),
         )
         .map_err(|e| EcpError::Rkyv(format!("{}: {e}", target.display_name)))?;
         let caveat = single_target_caveat(&target, &local_engine);
@@ -745,7 +745,7 @@ fn run_batch(args: FindArgs, engine: Option<&Engine>) -> Result<(), EcpError> {
         let target = &targets[0];
         let eng = crate::auto_ensure::load_ensured(
             std::path::Path::new(&target.graph_path),
-            std::path::Path::new(&target.worktree_root),
+            &target.worktree_root(),
         )
         .map_err(|e| EcpError::InvalidArgument(format!("{}: {e}", target.display_name)))?;
         Some((target.display_name.clone(), eng))
@@ -1393,7 +1393,7 @@ pub(crate) fn load_engines_lossy(targets: &[RepoTarget]) -> Vec<(String, Result<
         .map(|target| {
             let result = crate::auto_ensure::load_ensured(
                 std::path::Path::new(&target.graph_path),
-                std::path::Path::new(&target.worktree_root),
+                &target.worktree_root(),
             );
             (target.display_name.clone(), result)
         })
@@ -1540,7 +1540,7 @@ pub fn compute_hits(args: FindArgs, engine: &Engine) -> Result<Vec<Hit>, EcpErro
         let target = targets.into_iter().next().unwrap();
         let local_engine = crate::auto_ensure::load_ensured(
             std::path::Path::new(&target.graph_path),
-            std::path::Path::new(&target.worktree_root),
+            &target.worktree_root(),
         )
         .map_err(|e| EcpError::Rkyv(format!("{}: {e}", target.display_name)))?;
         compute_single(
@@ -1561,16 +1561,20 @@ pub fn compute_hits(args: FindArgs, engine: &Engine) -> Result<Vec<Hit>, EcpErro
 
 // ── Repo selector resolution ─────────────────────────────────────────────────
 
-/// One `--repo`-resolved target. `graph_path` and `worktree_root` are both
-/// `String`; a struct (not a tuple) keeps them from being transposed at a
-/// load site, which would silently load the wrong graph. `worktree_root` is
-/// passed to `ensure_fresh` so the per-repo load gets the same version
-/// (ecp-fingerprint → full rebuild) + freshness (git → incremental) checks
-/// the cwd graph gets in main.rs.
+/// The selected worktree is query-local; registry identity stays shared.
 pub(crate) struct RepoTarget {
     display_name: String,
     graph_path: String,
-    worktree_root: String,
+    common_dir: std::path::PathBuf,
+    worktree_root: Option<std::path::PathBuf>,
+}
+
+impl RepoTarget {
+    fn worktree_root(&self) -> std::path::PathBuf {
+        self.worktree_root
+            .clone()
+            .unwrap_or_else(|| crate::git_cache::worktree_root_for_repo(&self.common_dir))
+    }
 }
 
 /// Registry entries whose `dir_name` shares a substring with something the
@@ -1621,21 +1625,44 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<RepoTarget>, EcpError> 
         .map_err(|e| EcpError::InvalidArgument(format!("open registry: {e}")))?;
     let snapshot = registry.snapshot();
 
-    // Expand selector into dir_names (v2 key).
-    let dir_names: Vec<String> = if sel == "@all" {
-        snapshot.repos.keys().cloned().collect()
+    // Preserve explicit worktree paths alongside the shared registry keys.
+    let dir_names: Vec<(String, Option<std::path::PathBuf>)> = if sel == "@all" {
+        snapshot
+            .repos
+            .keys()
+            .map(|key| (key.clone(), None))
+            .collect()
     } else if let Some(group_name) = sel.strip_prefix('@') {
         return Err(EcpError::InvalidArgument(format!(
             "`@{group_name}` cannot be used at the top level — use `ecp group find` instead"
         )));
     } else {
-        // Comma-separated list of names or dir_names.
+        // A path inside a selector list needs the same precedence as a lone path.
         let mut matched = Vec::new();
         let mut unmatched = Vec::new();
         for name in selector_entries(sel) {
+            if std::path::Path::new(name).is_dir() {
+                let cwd = std::env::current_dir().map_err(EcpError::Io)?;
+                let selected = crate::repo_selector::resolve(
+                    &crate::repo_selector::Selector(vec![crate::repo_selector::Atom::Path(
+                        name.into(),
+                    )]),
+                    snapshot,
+                    &cwd.to_string_lossy(),
+                );
+                match selected {
+                    Ok(repos) => matched.extend(
+                        repos
+                            .into_iter()
+                            .map(|repo| (repo.dir_name, repo.worktree_root)),
+                    ),
+                    Err(_) => unmatched.push(name.to_string()),
+                }
+                continue;
+            }
             // Match by alias or dir_name; keep the dir_name (map key).
             match registry_key_for(snapshot, name) {
-                Some(k) => matched.push(k.clone()),
+                Some(k) => matched.push((k.clone(), None)),
                 None => unmatched.push(name.to_string()),
             }
         }
@@ -1667,7 +1694,7 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<RepoTarget>, EcpError> 
     // carries the repo it came from, while an empty one reaches the caller as
     // "no selector was given" and gets answered from the current directory.
     let mut skipped: Vec<String> = Vec::new();
-    for dir_name in &dir_names {
+    for (dir_name, selected_worktree) in &dir_names {
         let alias = match snapshot.repos.get(dir_name) {
             Some(a) => a,
             None => {
@@ -1693,18 +1720,11 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<RepoTarget>, EcpError> 
             .first()
             .cloned()
             .unwrap_or_else(|| dir_name.clone());
-        // worktree_root for ensure_fresh = the repo's source tree, i.e. the
-        // parent of its `<worktree>/.git` common_dir. The fingerprint (ecp-
-        // version) check ignores it; the incremental git-status check uses it.
-        let worktree_root = crate::git_cache::worktree_root_from_common_dir(std::path::Path::new(
-            &alias.common_dir,
-        ))
-        .to_string_lossy()
-        .into_owned();
         targets.push(RepoTarget {
             display_name,
             graph_path: graph_path.to_string_lossy().into_owned(),
-            worktree_root,
+            common_dir: alias.common_dir.clone().into(),
+            worktree_root: selected_worktree.clone(),
         });
     }
 
