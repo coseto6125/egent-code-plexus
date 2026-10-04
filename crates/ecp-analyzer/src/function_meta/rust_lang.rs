@@ -10,7 +10,11 @@ use ecp_core::graph::{FileCategory, FunctionMeta, NodeKind};
 use tree_sitter::Node;
 
 /// `function_item` = concrete fn; `function_signature_item` = trait abstract fn.
-const RUST_FN_KINDS: &[&str] = &["function_item", "function_signature_item"];
+const RUST_FN_KINDS: &[&str] = &[
+    "function_item",
+    "function_signature_item",
+    "closure_expression",
+];
 
 pub fn extract(
     root: Node<'_>,
@@ -41,7 +45,7 @@ fn extract_one(
     // NOT children of function_item. The query system doesn't capture them generically,
     // so we walk the parent's children to find contiguous attributes immediately before
     // this fn node. Merge with any decorators already captured by the query system.
-    let ast_decorators: Vec<String> = {
+    let decorators: Vec<String> = {
         let mut decs: Vec<String> = Vec::new();
         if let Some(parent) = fn_node.parent() {
             // Collect all siblings in order; capture attributes immediately preceding fn.
@@ -77,8 +81,6 @@ fn extract_one(
         }
         decs
     };
-    let decorators = ast_decorators.clone();
-
     // Detect flags from children of the function_item node.
     // In tree-sitter-rust, `async`/`unsafe`/`const` live inside a
     // `function_modifiers` named-child node (they are NOT direct `"async"` children).
@@ -93,6 +95,7 @@ fn extract_one(
             loop {
                 let child = c.node();
                 match child.kind() {
+                    "async" if fn_node.kind() == "closure_expression" => has_async = true,
                     "function_modifiers" => {
                         // Modifiers text may be "async", "unsafe async", etc.
                         let txt = node_text(&child, source);
@@ -155,13 +158,7 @@ fn extract_one(
         flags |= FunctionMeta::FLAG_STATIC;
     }
 
-    // is_test: #[test] / #[tokio::test] / #[async_std::test] etc.
-    let is_test = file_category == FileCategory::Test
-        || ast_decorators.iter().any(|d| {
-            let stripped = d.trim_start_matches('#').trim();
-            // Match [test], [tokio::test], [async_std::test], [actix_rt::test], etc.
-            stripped == "[test]" || stripped.ends_with("::test]") || stripped == "[cfg(test)]"
-        });
+    let is_test = file_category == FileCategory::Test || in_test_scope(*fn_node, source);
     if is_test {
         flags |= FunctionMeta::FLAG_TEST;
     }
@@ -184,6 +181,116 @@ fn extract_one(
         return_type,
         decorators,
     })
+}
+
+fn in_test_scope(mut node: Node<'_>, source: &[u8]) -> bool {
+    loop {
+        let mut previous = node.prev_named_sibling();
+        while let Some(sibling) = previous {
+            match sibling.kind() {
+                "attribute_item" => {
+                    if test_attribute(sibling, source, RUST_FN_KINDS.contains(&node.kind())) {
+                        return true;
+                    }
+                }
+                "line_comment" | "block_comment" => {}
+                _ => break,
+            }
+            previous = sibling.prev_named_sibling();
+        }
+
+        if matches!(node.kind(), "source_file" | "declaration_list" | "block") {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                match child.kind() {
+                    "inner_attribute_item" => {
+                        if test_attribute(child, source, false) {
+                            return true;
+                        }
+                    }
+                    "line_comment" | "block_comment" => {}
+                    _ => break,
+                }
+            }
+        }
+        let Some(parent) = node.parent() else {
+            return false;
+        };
+        node = parent;
+    }
+}
+
+fn test_attribute(item: Node<'_>, source: &[u8], allow_test: bool) -> bool {
+    let Some(attribute) = item.named_child(0) else {
+        return false;
+    };
+    let Some(path) = attribute.named_child(0) else {
+        return false;
+    };
+    let name = path.child_by_field_name("name").unwrap_or(path);
+    if allow_test && node_text(&name, source) == "test" {
+        return true;
+    }
+    if node_text(&path, source) != "cfg" {
+        return false;
+    }
+    let Some(arguments) = attribute.child_by_field_name("arguments") else {
+        return false;
+    };
+    cfg_outcomes(arguments, "cfg", source, false).is_some_and(|(possible, _)| !possible)
+        && cfg_outcomes(arguments, "cfg", source, true).is_some_and(|(possible, _)| possible)
+}
+
+// Other cfg options remain unknown, so mixed `any(test, feature = "...")`
+// never excludes production. Both configurations distinguish tests from dead code.
+fn cfg_outcomes(
+    tree: Node<'_>,
+    operator: &str,
+    source: &[u8],
+    test_enabled: bool,
+) -> Option<(bool, bool)> {
+    let mut cursor = tree.walk();
+    let mut tokens = tree
+        .children(&mut cursor)
+        .filter(|node| !matches!(node.kind(), "(" | ")" | "line_comment" | "block_comment"))
+        .peekable();
+    let mut count = 0;
+    let mut all = (true, false);
+    let mut any = (false, true);
+    while let Some(name) = tokens.next() {
+        if name.kind() != "identifier" {
+            return None;
+        }
+        let name = node_text(&name, source);
+        let outcome = match tokens.peek().map(|node| node.kind()) {
+            Some("token_tree") => cfg_outcomes(tokens.next()?, name, source, test_enabled)?,
+            Some("=") => {
+                tokens.next();
+                let value = tokens.next()?;
+                if !matches!(value.kind(), "string_literal" | "raw_string_literal") {
+                    return None;
+                }
+                (true, true)
+            }
+            _ if name == "test" => (test_enabled, !test_enabled),
+            _ => (true, true),
+        };
+        count += 1;
+        all = (all.0 && outcome.0, all.1 || outcome.1);
+        any = (any.0 || outcome.0, any.1 && outcome.1);
+        if let Some(separator) = tokens.next() {
+            if node_text(&separator, source) != "," {
+                return None;
+            }
+        }
+    }
+    match operator {
+        "all" => Some(all),
+        "any" => Some(any),
+        "not" if count == 1 => Some((all.1, all.0)),
+        "cfg" if count == 1 => Some(all),
+        _ => None,
+    }
 }
 
 /// Parse Rust's visibility modifier text into a 3-bit code.
