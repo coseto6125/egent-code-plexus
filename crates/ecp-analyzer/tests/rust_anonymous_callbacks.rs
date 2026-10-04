@@ -12,6 +12,21 @@ use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 
+mod anonymous_callbacks_support;
+
+#[test]
+fn test_graph_builder_closure_argument_enclosing_reachable() {
+    anonymous_callbacks_support::assert_enclosing_reachable(parse_rs(
+        r#"fn target() {}
+fn enclosing() {
+    register(|| {
+        target();
+    });
+}
+"#,
+    ));
+}
+
 fn parse_rs(src: &str) -> LocalGraph {
     let p = RustProvider::new().expect("provider");
     p.parse_file(Path::new("test.rs"), src.as_bytes())
@@ -73,4 +88,11 @@ fn named_function_path_arg_is_not_treated_as_anonymous_callback() {
         "named-fn path argument must not emit <anonymous>, nodes: {:?}",
         g.nodes
     );
+}
+
+#[test]
+fn test_graph_builder_nested_closures_enclosing_reachable() {
+    anonymous_callbacks_support::assert_enclosing_reachable(parse_rs(
+        "fn target() {}\nfn enclosing() {\n register(|| {\n register(|| {\n target();\n });\n });\n}",
+    ));
 }

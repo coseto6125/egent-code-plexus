@@ -12,6 +12,89 @@ use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 
+mod anonymous_callbacks_support;
+
+#[test]
+fn test_graph_builder_overload_closures_reference_surviving_method() {
+    use ecp_analyzer::resolution::builder::GraphBuilder;
+    use ecp_core::graph::RelType;
+
+    let local = parse(
+        r#"class App {
+    void target() {}
+    void setup() {
+        register(() -> {
+            target();
+        });
+    }
+    void setup(int value) {
+        register(() -> {
+            target();
+        });
+    }
+}"#,
+    );
+    assert_eq!(
+        local
+            .nodes
+            .iter()
+            .filter(|node| node.name == "setup")
+            .count(),
+        2
+    );
+    assert_eq!(
+        local
+            .nodes
+            .iter()
+            .filter(|node| node.name.starts_with("<anonymous:"))
+            .count(),
+        2
+    );
+    let mut builder = GraphBuilder::new();
+    builder.add_graph(local);
+    let graph = builder.build();
+    let pool = graph.string_pool.as_slice();
+    let target = graph
+        .nodes
+        .iter()
+        .position(|node| node.name.resolve(pool) == "target")
+        .unwrap() as u32;
+    let references: Vec<_> = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.reason.resolve(pool) == "closure:lexical_reference")
+        .collect();
+    assert_eq!(references.len(), 2);
+    assert_eq!(references[0].source, references[1].source);
+    assert_ne!(references[0].target, references[1].target);
+    for edge in references {
+        let parent = &graph.nodes[edge.source as usize];
+        let child = &graph.nodes[edge.target as usize];
+        assert_eq!(parent.kind, NodeKind::Method);
+        assert_eq!(parent.name.resolve(pool), "setup");
+        assert_eq!(child.kind, NodeKind::Function);
+        assert!(child.name.resolve(pool).starts_with("<anonymous:"));
+        assert!(graph.edges.iter().any(|call| {
+            call.rel_type == RelType::Calls && call.source == edge.target && call.target == target
+        }));
+    }
+}
+
+#[test]
+fn test_graph_builder_closure_argument_enclosing_reachable() {
+    anonymous_callbacks_support::assert_enclosing_reachable(parse(
+        r#"class App {
+    void target() {}
+    void enclosing() {
+        register(() -> {
+            target();
+        });
+    }
+}
+"#,
+    ));
+}
+
 fn parse(src: &str) -> LocalGraph {
     let p = JavaProvider::new().expect("provider");
     p.parse_file(Path::new("test.java"), src.as_bytes())
