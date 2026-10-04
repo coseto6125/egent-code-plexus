@@ -11,6 +11,21 @@ use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 
+mod anonymous_callbacks_support;
+
+#[test]
+fn test_graph_builder_closure_argument_enclosing_reachable() {
+    anonymous_callbacks_support::assert_enclosing_reachable(parse(
+        r#"function target() {}
+function enclosing() {
+    register(() => {
+        target();
+    });
+}
+"#,
+    ));
+}
+
 fn parse(src: &str) -> LocalGraph {
     let p = JavaScriptProvider::new().expect("provider");
     p.parse_file(Path::new("test.js"), src.as_bytes())

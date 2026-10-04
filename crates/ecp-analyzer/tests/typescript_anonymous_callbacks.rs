@@ -11,6 +11,57 @@ use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 
+mod anonymous_callbacks_support;
+
+#[test]
+fn test_graph_builder_closure_references_preserve_lexical_boundaries() {
+    use ecp_core::graph::RelType;
+
+    let first = parse(
+        "function outer() {\n function inner() {\n register(() => {\n target();\n });\n }\n}\n\
+         function sibling() {}\nregister(() => { target(); });\n",
+    );
+    let mut second = parse("function second() { register(() => { target(); }); }");
+    second.file_path = "second.ts".into();
+    let mut without_closure = parse("function plain() {}");
+    without_closure.file_path = "plain.ts".into();
+    let graph = anonymous_callbacks_support::build_graph([without_closure, first, second]);
+    let pool = graph.string_pool.as_slice();
+    let references: Vec<_> = anonymous_callbacks_support::closure_references(&graph).collect();
+    assert_eq!(references.len(), 2);
+    let mut parents = Vec::new();
+    for edge in references {
+        assert_eq!(edge.rel_type, RelType::References);
+        let parent = &graph.nodes[edge.source as usize];
+        let child = &graph.nodes[edge.target as usize];
+        assert_eq!(parent.file_idx, child.file_idx);
+        assert!(child.name.resolve(pool).starts_with("<anonymous:"));
+        parents.push(parent.name.resolve(pool));
+    }
+    parents.sort_unstable();
+    assert_eq!(parents, ["inner", "second"]);
+}
+
+#[test]
+fn test_graph_builder_same_line_closure_enclosing_reachable() {
+    anonymous_callbacks_support::assert_enclosing_reachable(parse(
+        "function target() {} function enclosing() { register(() => target()); }",
+    ));
+}
+
+#[test]
+fn test_graph_builder_closure_argument_enclosing_reachable() {
+    anonymous_callbacks_support::assert_enclosing_reachable(parse(
+        r#"function target() {}
+function enclosing() {
+    register(() => {
+        target();
+    });
+}
+"#,
+    ));
+}
+
 fn parse(src: &str) -> LocalGraph {
     let p = TypeScriptProvider::new().expect("provider");
     p.parse_file(Path::new("test.ts"), src.as_bytes())

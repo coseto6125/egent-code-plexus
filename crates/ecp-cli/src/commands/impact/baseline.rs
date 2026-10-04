@@ -17,6 +17,8 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+type SymbolKey = (&'static str, String, String);
+
 /// Bundles the typed envelope with the enrichment inputs that only the
 /// JSON-emitting path (`impact_with_baseline`) needs. Computed once in
 /// [`compute_baseline`] so [`impact_with_baseline`] and
@@ -208,14 +210,13 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
 
     let total_new = per_file.iter().map(|(n, _)| n.len()).sum();
     let total_old = per_file.iter().map(|(_, o)| o.len()).sum();
-    let mut new_map: HashMap<(&'static str, String, String), (u64, u32)> =
-        HashMap::with_capacity(total_new);
-    let mut old_map: HashMap<(&'static str, String, String), u64> =
-        HashMap::with_capacity(total_old);
+    let mut new_map: HashMap<SymbolKey, (u64, u32)> = HashMap::with_capacity(total_new);
+    let mut old_map: HashMap<SymbolKey, u64> = HashMap::with_capacity(total_old);
     for (new_local, old_local) in per_file {
         new_map.extend(new_local);
         old_map.extend(old_local);
     }
+    remove_unchanged_closures(&mut new_map, &mut old_map);
 
     // Build lookup from old graph: (kind_str, file_path, name) → node_idx.
     let parsed_paths_set: HashSet<&str> = parsed_paths.iter().map(|s| s.as_str()).collect();
@@ -402,6 +403,48 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
         effective_include_tests,
         no_changes: false,
     })
+}
+
+/// Anonymous names encode positions. Pair unchanged bodies within each file
+/// before comparing names, so line shifts do not seed spurious impact walks.
+fn remove_unchanged_closures(
+    new_map: &mut HashMap<SymbolKey, (u64, u32)>,
+    old_map: &mut HashMap<SymbolKey, u64>,
+) {
+    let mut old_by_body: HashMap<_, Vec<SymbolKey>> = HashMap::new();
+    for (key, &hash) in old_map.iter() {
+        // Keep exact unchanged identities out of the move matching pool.
+        if key.2.starts_with("<anonymous:")
+            && new_map.get(key).map(|&(new_hash, _)| new_hash) != Some(hash)
+        {
+            old_by_body
+                .entry((key.0, key.1.clone(), hash))
+                .or_default()
+                .push(key.clone());
+        }
+    }
+    for keys in old_by_body.values_mut() {
+        keys.sort_unstable();
+    }
+    let mut new_closures: Vec<_> = new_map
+        .keys()
+        .filter(|key| key.2.starts_with("<anonymous:"))
+        .cloned()
+        .collect();
+    new_closures.sort_unstable();
+    for key in new_closures {
+        let hash = new_map[&key].0;
+        if old_map.get(&key) == Some(&hash) {
+            continue;
+        }
+        if let Some(old_key) = old_by_body
+            .get_mut(&(key.0, key.1.clone(), hash))
+            .and_then(Vec::pop)
+        {
+            old_map.remove(&old_key);
+            new_map.remove(&key);
+        }
+    }
 }
 
 /// FNV-64 hash of the source lines spanning [start_row, end_row] (inclusive,
