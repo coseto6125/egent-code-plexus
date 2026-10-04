@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.14.4 - 2026-10-04
+
+### Bug Fixes
+
+- bundle — Rust lib alias, method/module-path misbinds, CallMeta index, ctor readers, super()/namespace/require, impact --ambiguous-callers (#817)
+- load_ensured loads the graph a synchronous rebuild published (#814)
+- ECP.md asks on any breaking change and names the d=1 hook preview (#815)
+- constructor calls emit Calls edges; impact on a class lists its instantiators (#812)
+- stop teaching deprecated verbs (rename hint, skill packs); widen session-start hang bound (#810)
+
 ## v0.14.3 - 2026-10-03
 
 ### Features
