@@ -107,6 +107,113 @@ fn impact_on_collision_name_flags_incomplete_callers() {
         caveat.contains("2 same-named"),
         "caveat must count the same-named definitions: {caveat}"
     );
+    // The contract: the caveat names a command the agent can run as-is,
+    // carrying the --kind that made the colliding name resolvable.
+    assert!(
+        caveat.contains("ecp impact --target process --kind function --ambiguous-callers"),
+        "caveat must name the runnable command: {caveat}"
+    );
+    assert!(
+        json.get("ambiguous_callers").is_none(),
+        "without the flag the payload must not carry the sites: {json}"
+    );
+}
+
+#[test]
+fn test_ambiguous_callers_json_format_parses_and_lists_suppressed_bare_call() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    setup_collision_repo(repo, home_tmp.path());
+
+    // run_impact parses stdout as JSON, so a parse failure fails this test.
+    let json = run_impact(
+        repo,
+        home_tmp.path(),
+        &["process", "--kind", "function", "--ambiguous-callers"],
+    );
+    let field = &json["ambiguous_callers"];
+    let sites = field["sites"]
+        .as_array()
+        .unwrap_or_else(|| panic!("ambiguous_callers.sites expected: {json}"));
+    assert!(
+        sites.iter().any(|s| s["file"] == "src/caller.py"
+            && s["line"] == 2
+            && s["enclosing"] == "run_all"
+            && s["form"] == "bare"),
+        "the suppressed bare call in run_all must be listed: {json}"
+    );
+    assert!(
+        sites
+            .iter()
+            .all(|s| s["file"] != "src/alpha.py" && s["file"] != "src/beta.py"),
+        "definition lines must be dropped: {json}"
+    );
+    assert_eq!(field["shown"].as_u64(), Some(sites.len() as u64));
+    let caveat = json["result"].as_str().unwrap_or_default();
+    assert!(
+        caveat.contains("`ambiguous_callers` field"),
+        "with the flag set the caveat points at the field: {caveat}"
+    );
+}
+
+#[test]
+fn test_ambiguous_callers_batch_targets_each_get_own_field() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    let home_tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    setup_collision_repo(repo, home_tmp.path());
+
+    let mut child = Command::new(ecp_bin())
+        .args([
+            "impact",
+            "--batch",
+            "--kind",
+            "function",
+            "--ambiguous-callers",
+            "--repo",
+            ".",
+            "--format",
+            "json",
+        ])
+        .current_dir(repo)
+        .env("HOME", home_tmp.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("impact --batch failed to spawn");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"process\nunique_entry\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "batch failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let blocks: Vec<(String, serde_json::Value)> = stdout
+        .split("=== target: ")
+        .filter(|b| !b.trim().is_empty())
+        .map(|b| {
+            let (name, body) = b.split_once(" ===\n").expect("block header");
+            (name.to_string(), serde_json::from_str(body.trim()).unwrap())
+        })
+        .collect();
+    assert_eq!(blocks.len(), 2, "one block per target: {stdout}");
+    assert!(
+        blocks[0].1["ambiguous_callers"]["sites"].is_array(),
+        "colliding target carries its own sites: {stdout}"
+    );
+    assert!(
+        blocks[1].1.get("ambiguous_callers").is_none(),
+        "collision-free target carries no field: {stdout}"
+    );
 }
 
 #[test]

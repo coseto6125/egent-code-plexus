@@ -240,8 +240,9 @@ fn ambiguity_caveat(name: &str, same_name_defs: usize) -> Option<String> {
         format!(
             "route may be incomplete: {same_name_defs} same-named definitions of '{name}' \
              exist, so bare calls (no import/qualifier context) may have been \
-             ambiguity-suppressed at index time. Narrow with --from-file / --to-file, and cross-check missing hops \
-             with grep before trusting a miss."
+             ambiguity-suppressed at index time. Narrow with --from-file / --to-file, and run \
+             `ecp impact --target {name} --file <path> --ambiguous-callers` to list the call \
+             sites the graph could not attribute before trusting a miss."
         )
     })
 }

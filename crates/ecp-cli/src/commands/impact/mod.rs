@@ -1,3 +1,4 @@
+mod ambiguous;
 mod baseline;
 pub(crate) mod bfs;
 mod coverage;
@@ -164,6 +165,23 @@ pub struct ImpactArgs {
     #[arg(long, conflicts_with_all = ["name", "baseline", "literal", "literal_coherence"])]
     pub batch: bool,
 
+    /// List the call sites the graph could not attribute: when the target's
+    /// name has two or more same-named definitions, the resolver drops bare
+    /// calls to it as ambiguous, so the caller set is a lower bound. This
+    /// runs one `git grep` over tracked files with the definitions'
+    /// extensions and reports, under `ambiguous_callers`, each `name(` /
+    /// `.name(` / `->name(` / `::name(` site outside the definitions and
+    /// outside functions already listed as callers (at most 50 sites, with
+    /// the full `total`). Sites are text-match candidates, never merged into
+    /// the caller list or counts. Ruby calls without parentheses are not
+    /// matched. Upstream walks only: ignored with `--direction down`.
+    #[arg(
+        long = "ambiguous-callers",
+        alias = "ambiguous_callers",
+        default_value_t = false
+    )]
+    pub ambiguous_callers: bool,
+
     /// Stop the traversal after this many reached nodes. Library-only (no CLI
     /// flag): the CLI's answer must be exhaustive or its caveat would be a lie.
     /// Callers that only need a bounded sample — the peers watcher's SOFT
@@ -235,8 +253,12 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
                 hints.hidden_test_callers
             );
         } else if hints.ambiguity_caveat.is_some() {
+            let action = match args.ambiguous_callers {
+                true => "check `ambiguous_callers`",
+                false => "rerun with --ambiguous-callers to list the candidate call sites",
+            };
             eprintln!(
-                "→ \"{name}\" has 0 resolved callers, but other definitions share its name, so bare calls to it may have been left unresolved. grep the call sites before treating it as dead code"
+                "→ \"{name}\" has 0 resolved callers, but other definitions share its name, so bare calls to it may have been left unresolved. {action} before treating it as dead code"
             );
         } else {
             eprintln!(
@@ -329,6 +351,7 @@ fn run_batch(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
             literal: None,
             literal_coherence: false,
             batch: false,
+            ambiguous_callers: args.ambiguous_callers,
             max_results: args.max_results,
         };
 
