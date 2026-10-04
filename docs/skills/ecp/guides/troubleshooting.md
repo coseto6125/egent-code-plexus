@@ -22,7 +22,7 @@ the *what to do* once you've spotted one.
 
 ## 5. `ecp impact` returned fewer callers than expected
 - The caller set is a lower bound — a bare call to a name with several same-named definitions is suppressed rather than mis-attributed.
-- **Do, when the result carries the ambiguity caveat:** rerun with `ecp impact --target <name> --ambiguous-callers`. It lists the call sites the graph could not attribute, as text-match candidates (at most 50).
+- **Do, when the result carries the ambiguity caveat:** run the command the caveat prints. It adds the `--file` or `--kind` filter a colliding name needs, plus `--ambiguous-callers`, and lists the call sites the graph could not attribute, as text-match candidates (at most 50).
 - **Do, when there is no caveat, or for Ruby calls without parentheses:** `grep` the call sites before a refactor. Count same-named defs with `ecp cypher 'MATCH (n) WHERE n.name = "<name>" RETURN count(n)'`.
 
 ## 6. A symbol-type ecp doesn't capture yet
