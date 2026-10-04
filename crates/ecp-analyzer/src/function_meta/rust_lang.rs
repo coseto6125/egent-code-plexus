@@ -184,6 +184,14 @@ fn extract_one(
 }
 
 fn in_test_scope(mut node: Node<'_>, source: &[u8]) -> bool {
+    // The ancestor walk never enters the callable's own body, yet a leading
+    // `#![cfg(test)]` there gates the whole function.
+    if node
+        .child_by_field_name("body")
+        .is_some_and(|body| leading_test_attribute(body, "inner_attribute_item", source))
+    {
+        return true;
+    }
     loop {
         let mut previous = node.prev_named_sibling();
         while let Some(sibling) = previous {
@@ -199,25 +207,37 @@ fn in_test_scope(mut node: Node<'_>, source: &[u8]) -> bool {
             previous = sibling.prev_named_sibling();
         }
 
-        if matches!(node.kind(), "source_file" | "declaration_list" | "block") {
-            let mut cursor = node.walk();
-            for child in node.named_children(&mut cursor) {
-                match child.kind() {
-                    "inner_attribute_item" => {
-                        if test_attribute(child, source, false) {
-                            return true;
-                        }
-                    }
-                    "line_comment" | "block_comment" => {}
-                    _ => break,
-                }
-            }
+        let leading = match node.kind() {
+            "source_file" | "declaration_list" | "block" => Some("inner_attribute_item"),
+            // These nodes hold their outer attributes as leading children,
+            // not as preceding siblings.
+            "match_arm" | "field_initializer" => Some("attribute_item"),
+            _ => None,
+        };
+        if leading.is_some_and(|kind| leading_test_attribute(node, kind, source)) {
+            return true;
         }
         let Some(parent) = node.parent() else {
             return false;
         };
         node = parent;
     }
+}
+
+fn leading_test_attribute(node: Node<'_>, attribute_kind: &str, source: &[u8]) -> bool {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "line_comment" | "block_comment" => {}
+            kind if kind == attribute_kind => {
+                if test_attribute(child, source, false) {
+                    return true;
+                }
+            }
+            _ => break,
+        }
+    }
+    false
 }
 
 fn test_attribute(item: Node<'_>, source: &[u8], allow_test: bool) -> bool {

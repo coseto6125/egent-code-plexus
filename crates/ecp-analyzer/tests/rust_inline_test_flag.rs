@@ -210,3 +210,77 @@ fn test_extract_async_closure_preserves_async_and_test_flags() {
         assert!(meta.is_async());
     }
 }
+
+fn closure_name(source: &str, needle: &str) -> String {
+    let offset = source.find(needle).expect("closure marker");
+    let line_start = source[..offset].rfind('\n').map_or(0, |index| index + 1);
+    let line = source[..offset].matches('\n').count() + 1;
+    format!("<anonymous:{line}:{}>", offset - line_start)
+}
+
+#[test]
+fn test_extract_cfg_match_arm_marks_only_that_arm_closure() {
+    let source = r#"
+fn run(x: bool) {
+    match x {
+        #[cfg(test)]
+        true => consume(|| target()),
+        _ => consume(|| other()),
+    }
+}
+"#;
+    assert_flags(
+        "src/lib.rs",
+        source,
+        &[
+            ("run", false),
+            (&closure_name(source, "|| target"), true),
+            (&closure_name(source, "|| other"), false),
+        ],
+    );
+}
+
+#[test]
+fn test_extract_cfg_field_initializer_marks_only_that_field_closure() {
+    let source = r#"
+fn run() {
+    let _ = S {
+        #[cfg(test)]
+        x: consume(|| target()),
+        y: consume(|| other()),
+    };
+}
+"#;
+    assert_flags(
+        "src/lib.rs",
+        source,
+        &[
+            ("run", false),
+            (&closure_name(source, "|| target"), true),
+            (&closure_name(source, "|| other"), false),
+        ],
+    );
+}
+
+#[test]
+fn test_extract_inner_cfg_in_own_body_marks_function() {
+    assert_flags(
+        "src/lib.rs",
+        r#"
+struct S;
+fn helper() {
+    #![cfg(test)]
+    target();
+}
+impl S {
+    fn method(&self) {
+        #![cfg(test)]
+    }
+}
+fn plain() {
+    target();
+}
+"#,
+        &[("helper", true), ("method", true), ("plain", false)],
+    );
+}
