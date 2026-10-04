@@ -151,6 +151,11 @@ pub struct SymbolTable {
     /// stem comparisons on cold-index build). The map collapses that to
     /// an O(1) lookup + O(candidates-per-stem) inner walk.
     stem_index: FxHashMap<String, Vec<String>>,
+    /// Empty package entries participate in namespace discovery, not the
+    /// existing symbol-backed module-stem fallback.
+    empty_stem_index: FxHashMap<String, Vec<String>>,
+    indexed_module_names:
+        FxHashMap<std::mem::Discriminant<Language>, rustc_hash::FxHashSet<String>>,
 
     /// Interned [`owner_key`] per node id (`NO_OWNER` when the node has no
     /// owning type), parallel to `node_kinds`. Answers "does type `T` own
@@ -187,6 +192,11 @@ impl SymbolTable {
         Self::default()
     }
 
+    /// Import-only package entry files still establish an indexed module.
+    pub(crate) fn register_file(&mut self, path: &str) {
+        self.file_scoped.entry(path.to_string()).or_default();
+    }
+
     /// Populate the `stem_index` from the file paths already in
     /// `file_scoped`. Call exactly once after Pass 1 finishes registering
     /// nodes, before any resolver tier reads from the index. Idempotent
@@ -194,14 +204,35 @@ impl SymbolTable {
     /// can re-finalize without leaking stale entries.
     pub fn build_stem_index(&mut self) {
         self.stem_index.clear();
-        for path in self.file_scoped.keys() {
+        self.empty_stem_index.clear();
+        self.indexed_module_names.clear();
+        for (path, symbols) in &self.file_scoped {
             let Some(stem) = std::path::Path::new(path)
                 .file_stem()
                 .and_then(|s| s.to_str())
             else {
                 continue;
             };
-            self.stem_index
+            let names = self
+                .indexed_module_names
+                .entry(std::mem::discriminant(&Language::from_normalized_path(
+                    path,
+                )))
+                .or_default();
+            names.insert(stem.to_string());
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                names.extend(
+                    parent
+                        .components()
+                        .filter_map(|component| component.as_os_str().to_str().map(str::to_string)),
+                );
+            }
+            let index = if symbols.is_empty() {
+                &mut self.empty_stem_index
+            } else {
+                &mut self.stem_index
+            };
+            index
                 .entry(stem.to_string())
                 .or_default()
                 .push(path.clone());
@@ -216,6 +247,19 @@ impl SymbolTable {
     /// than "index not built".
     pub fn files_by_stem(&self, stem: &str) -> &[String] {
         self.stem_index.get(stem).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub(crate) fn module_files_by_stem<'a>(&'a self, stem: &str) -> impl Iterator<Item = &'a str> {
+        self.files_by_stem(stem)
+            .iter()
+            .chain(self.empty_stem_index.get(stem).into_iter().flatten())
+            .map(String::as_str)
+    }
+
+    pub(crate) fn has_module_name(&self, language: Language, name: &str) -> bool {
+        self.indexed_module_names
+            .get(&std::mem::discriminant(&language))
+            .is_some_and(|names| names.contains(name))
     }
 
     /// Registers a node with the given file path, node name, node ID, and kind.
@@ -627,9 +671,15 @@ impl SymbolTable {
             .count()
     }
 
-    /// True when at least one node is registered under `file_path`, i.e. the
-    /// file belongs to the indexed project.
+    /// True when at least one node is registered under `file_path`.
     pub fn has_file(&self, file_path: &str) -> bool {
+        self.file_scoped
+            .get(file_path)
+            .is_some_and(|symbols| !symbols.is_empty())
+    }
+
+    /// Unlike `has_file`, includes empty and import-only files registered by the builder.
+    pub(crate) fn has_indexed_file(&self, file_path: &str) -> bool {
         self.file_scoped.contains_key(file_path)
     }
 

@@ -885,6 +885,7 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
             raw_path
         };
         let path_ref = string_pool.add(&path_str);
+        symbol_table.register_file(&path_str);
         // Hoisted once per file. `register_node` would otherwise call
         // `FileMeta::from_path` per node (~25x redundant on the
         // .sample_repo distribution), each allocating one `String` for the
