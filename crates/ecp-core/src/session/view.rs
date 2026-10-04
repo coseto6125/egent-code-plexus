@@ -296,8 +296,13 @@ impl OverlayView {
                     let source = virt_cursor;
                     virt_cursor += 1;
                     for raw_callee in &sym.calls {
-                        let site = CallSite::parse(raw_callee);
                         let caller = file_metas[file_ord];
+                        let site = match CallSite::parse(raw_callee) {
+                            CallSite::Plain(name) if caller.language == Language::Python => {
+                                CallSite::Plain(python_module_member(name, &file.imports))
+                            }
+                            site => site,
+                        };
                         let hit =
                             if caller.language == Language::Rust && site.name().contains("::") {
                                 *module_calls.entry(site.name()).or_insert_with(|| {
@@ -1112,6 +1117,25 @@ fn resolve_constructed_type(
         None => NodeKind::from(&graph.nodes[ty as usize].kind),
     };
     kind.is_constructible().then_some((ty, confidence))
+}
+
+/// The index-time import tier reads a Python callee rooted in a module
+/// import (`u.helper`, `pkg.util.helper`) with its qualifier. This overlay
+/// resolves bare names, so such a callee falls back to its member name, as
+/// the parser emitted it before module-qualified callees existed.
+fn python_module_member<'a>(callee: &'a str, imports: &[RawImport]) -> &'a str {
+    let rooted_in_module = imports.iter().any(|import| {
+        import.imported_name == "*"
+            && import.alias.as_deref().is_some_and(|alias| {
+                callee
+                    .strip_prefix(alias)
+                    .is_some_and(|rest| rest.len() > 1 && rest.starts_with('.'))
+            })
+    });
+    match callee.rsplit_once('.') {
+        Some((_, member)) if rooted_in_module => member,
+        _ => callee,
+    }
 }
 
 /// Last path-ish segment of an import source across language conventions:
