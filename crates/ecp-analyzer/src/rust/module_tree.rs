@@ -25,7 +25,7 @@
 //! * Proc-macro-generated re-exports (`paste!`, `derive_more`, etc.) — logged
 //!   as BlindSpot if encountered.
 
-use crate::resolution::resolver::rust_module_dir;
+use ecp_core::analyzer::rust_paths::rust_module_dir;
 use ecp_core::registry::uid_path;
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};

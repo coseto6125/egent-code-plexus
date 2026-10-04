@@ -61,6 +61,15 @@ impl<'a> CallSite<'a> {
         }
     }
 
+    /// Whether the call uses member syntax rather than a module path.
+    pub fn uses_method_syntax(self) -> bool {
+        match self {
+            Self::UntypedMember(_) => true,
+            Self::Plain(name) => name.contains('.'),
+            Self::Construct(_) => false,
+        }
+    }
+
     /// The type path this site may construct in `language`, and whether an
     /// unresolved qualified path may fall back to its last segment. `None`
     /// when the site cannot construct a type in `language`: Go, Rust and C
