@@ -61,6 +61,17 @@ impl<'a> CallSite<'a> {
         }
     }
 
+    /// Rust dot syntax cannot call a free function. Other languages allow
+    /// member syntax to reach module functions, so retain callable targets.
+    pub fn requires_method(self, language: Language) -> bool {
+        language == Language::Rust
+            && match self {
+                Self::UntypedMember(_) => true,
+                Self::Plain(name) => name.contains('.'),
+                Self::Construct(_) => false,
+            }
+    }
+
     /// The type path this site may construct in `language`, and whether an
     /// unresolved qualified path may fall back to its last segment. `None`
     /// when the site cannot construct a type in `language`: Go, Rust and C

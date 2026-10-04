@@ -46,8 +46,9 @@
 //!   name, so a dirty file's call or construction through it stays
 //!   unresolved; the index maps the alias back to the declared symbol.
 
+use crate::analyzer::rust_paths::{is_rust_module_root, rust_module_path_base};
 use crate::analyzer::types::{owner_key, CallSite, RawImport};
-use crate::file_category::{pick_global, FileMeta, GlobalPick};
+use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
@@ -261,12 +262,13 @@ impl OverlayView {
                         let caller = file_metas[file_ord];
                         let hit = resolve_callee(
                             graph,
-                            site.name(),
+                            site,
                             file_ord,
                             file,
                             caller,
                             &mut base_metas,
                             &callables,
+                            &nodes,
                             &replaced,
                             &dirty_base,
                         )
@@ -593,19 +595,31 @@ impl<'a> OverlayNames<'a> {
 #[allow(clippy::too_many_arguments)]
 fn resolve_callee(
     graph: &ArchivedZeroCopyGraph,
-    callee: &str,
+    site: CallSite<'_>,
     file_ord: usize,
     file: &OverlayFileInput,
     caller: FileMeta,
     base_metas: &mut FxHashMap<usize, FileMeta>,
     names: &OverlayNames<'_>,
+    nodes: &[ViewNode],
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
 ) -> Option<(u32, f32)> {
+    let callee = site.name();
+    if caller.language == Language::Rust && callee.contains("::") {
+        return resolve_rust_module_callee(graph, callee, file, names, nodes, dirty_base);
+    }
+    let accepts = |idx: u32| {
+        !site.requires_method(caller.language)
+            || match idx.checked_sub(graph.nodes.len() as u32) {
+                Some(offset) => nodes[offset as usize].kind == NodeKind::Method,
+                None => NodeKind::from(&graph.nodes[idx as usize].kind) == NodeKind::Method,
+            }
+    };
     // Tier 1: same-file.
     if let Some(virts) = names.same_file.get(&(file_ord, callee)) {
         if virts.len() == 1 {
-            return Some((virts[0], CONF_SAME_FILE));
+            return accepts(virts[0]).then_some((virts[0], CONF_SAME_FILE));
         }
         // Ambiguous within one file (overloads): suppress, like index time.
         return None;
@@ -650,7 +664,7 @@ fn resolve_callee(
                 // surviving dirty symbols compete as overlay candidates with
                 // their virtual index instead.
                 debug_assert!(!replaced.contains_key(&scoped[0]));
-                return Some((scoped[0], CONF_IMPORT_SCOPED));
+                return accepts(scoped[0]).then_some((scoped[0], CONF_IMPORT_SCOPED));
             }
         }
     }
@@ -676,7 +690,66 @@ fn resolve_callee(
         return None;
     };
     debug_assert!(!replaced.contains_key(&target));
-    Some((target, CONF_GLOBAL_UNIQUE))
+    accepts(target).then_some((target, CONF_GLOBAL_UNIQUE))
+}
+
+/// File-backed Rust modules use the same crate/self/super layout as Pass 2.
+/// Unknown heads stay unresolved: stripping a path would bind external
+/// calls such as `std::fs::read` to unrelated project functions.
+fn resolve_rust_module_callee(
+    graph: &ArchivedZeroCopyGraph,
+    callee: &str,
+    file: &OverlayFileInput,
+    names: &OverlayNames<'_>,
+    nodes: &[ViewNode],
+    dirty_base: &FxHashSet<u32>,
+) -> Option<(u32, f32)> {
+    let (module, member) = callee.rsplit_once("::")?;
+    let head = module.split("::").next()?;
+    if !matches!(head, "crate" | "self" | "super") {
+        return None;
+    }
+    let source = std::path::Path::new(&file.rel_path);
+    let anchored;
+    let module = if head == "crate" && is_rust_module_root(source) {
+        // Cargo target roots (including src/bin/*.rs) own their directory,
+        // not necessarily the nearest src directory.
+        anchored = module.replacen("crate", "self", 1);
+        anchored.as_str()
+    } else {
+        module
+    };
+    let path = rust_module_path_base(source, module)?;
+    let matches = |candidate: &str| {
+        candidate
+            .strip_suffix("/mod.rs")
+            .or_else(|| candidate.strip_suffix(".rs"))
+            .is_some_and(|stem| std::path::Path::new(stem) == path)
+    };
+    let base = graph.nodes_by_name(member).filter(|&idx| {
+        let node = &graph.nodes[idx as usize];
+        !dirty_base.contains(&idx)
+            && (names.kind)(NodeKind::from(&node.kind))
+            && matches(
+                graph.files[node.file_idx.to_native() as usize]
+                    .path
+                    .resolve(&graph.string_pool),
+            )
+    });
+    let overlay = names
+        .anywhere
+        .get(member)
+        .into_iter()
+        .flatten()
+        .filter_map(|&(idx, _)| {
+            matches(&nodes[(idx - graph.nodes.len() as u32) as usize].rel_path).then_some(idx)
+        });
+    let mut candidates = base.chain(overlay);
+    let target = candidates.next()?;
+    candidates
+        .next()
+        .is_none()
+        .then_some((target, CONF_SAME_FILE))
 }
 
 /// Mirror of the index-time constructor fallback (`Resolver::resolve_call`)
@@ -716,7 +789,16 @@ fn resolve_constructed_type(
         return None;
     }
     let (ty, confidence) = resolve_callee(
-        graph, type_name, file_ord, file, caller, base_metas, types, replaced, dirty_base,
+        graph,
+        CallSite::Plain(type_name),
+        file_ord,
+        file,
+        caller,
+        base_metas,
+        types,
+        nodes,
+        replaced,
+        dirty_base,
     )?;
     let kind = match ty.checked_sub(graph.nodes.len() as u32) {
         Some(virt_off) => nodes[virt_off as usize].kind,
