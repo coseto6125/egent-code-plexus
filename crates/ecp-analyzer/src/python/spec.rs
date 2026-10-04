@@ -11,6 +11,9 @@
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::graph::NodeKind;
 
+pub(crate) const IMPORT_MEMBER_FALLBACK: (ecp_core::file_category::Language, bool) =
+    (ecp_core::file_category::Language::Python, true);
+
 pub struct PythonSpec;
 
 impl LangSpec for PythonSpec {

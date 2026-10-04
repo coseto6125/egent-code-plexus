@@ -72,6 +72,30 @@ fn test_namespace_import_call_resolves_in_the_imported_module() {
     }
 }
 
+#[test]
+fn test_namespace_import_missing_member_keeps_no_fallback() {
+    for ext in ["ts", "js"] {
+        let module = format!("a.{ext}");
+        let other = format!("b.{ext}");
+        let app = format!("app.{ext}");
+        assert!(
+            go_targets(
+                &[
+                    (&module, "export const value = 1;\n"),
+                    (&other, "export function f() {}\n"),
+                    (
+                        &app,
+                        "import * as ns from './a';\nexport function go() { ns.f(); }\n"
+                    ),
+                ],
+                "f"
+            )
+            .is_empty(),
+            "{ext}"
+        );
+    }
+}
+
 /// CommonJS bindings: `const m = require("./a"); m.f()` and
 /// `const { f } = require("./a"); f()` (FU-2026-10-04-1fdc6ad9dc95).
 #[test]

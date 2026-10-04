@@ -15,7 +15,7 @@ use super::path_literals::build_raw_path_literal;
 use crate::calls::{attach_to_enclosing, CallSiteIndex};
 use crate::framework_helpers::strip_python_string_quotes;
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use tree_sitter::Node;
 
 /// Map of nested function scopes (by row span) to their var→type bindings.
@@ -24,9 +24,15 @@ use tree_sitter::Node;
 #[derive(Debug, Default)]
 pub struct LocalTypes {
     scopes: Vec<((u32, u32), HashMap<String, String>)>,
-    /// Names an `import` binds anywhere in the file: a receiver rooted in
-    /// one (`widget.Widget()`) names a module member, not an object's method.
-    imported: HashSet<String>,
+    /// A `from` binding may be an object; only a module import proves that
+    /// its receiver names a namespace for import-scoped resolution.
+    imported: HashMap<String, ImportedBinding>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ImportedBinding {
+    Module,
+    Symbol,
 }
 
 impl LocalTypes {
@@ -47,19 +53,15 @@ impl LocalTypes {
         best
     }
 
-    /// True when `receiver` (`m`, `m.sub`) is rooted in an imported name.
-    fn is_imported_path(&self, receiver: Node<'_>, source: &[u8]) -> bool {
+    fn imported_receiver(&self, receiver: Node<'_>, source: &[u8]) -> Option<ImportedBinding> {
         let mut root = receiver;
         while root.kind() == "attribute" {
-            let Some(object) = root.child_by_field_name("object") else {
-                return false;
-            };
-            root = object;
+            root = root.child_by_field_name("object")?;
         }
-        root.kind() == "identifier"
-            && root
-                .utf8_text(source)
-                .is_ok_and(|name| self.imported.contains(name))
+        if root.kind() != "identifier" {
+            return None;
+        }
+        self.imported.get(root.utf8_text(source).ok()?).copied()
     }
 }
 
@@ -68,7 +70,7 @@ impl LocalTypes {
 /// `import` statement binds.
 pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
     let mut scopes: Vec<((u32, u32), HashMap<String, String>)> = Vec::new();
-    let mut imported: HashSet<String> = HashSet::new();
+    let mut imported = HashMap::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         if matches!(n.kind(), "import_statement" | "import_from_statement") {
@@ -100,7 +102,11 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
 
 /// The local names one import statement binds: `import a.b` → `a`,
 /// `import a as x` / `from m import n as x` → `x`, `from m import n` → `n`.
-fn collect_import_bindings(stmt: Node<'_>, source: &[u8], out: &mut HashSet<String>) {
+fn collect_import_bindings(
+    stmt: Node<'_>,
+    source: &[u8],
+    out: &mut HashMap<String, ImportedBinding>,
+) {
     let mut c = stmt.walk();
     for name in stmt.children_by_field_name("name", &mut c) {
         let bound = match name.kind() {
@@ -109,7 +115,12 @@ fn collect_import_bindings(stmt: Node<'_>, source: &[u8], out: &mut HashSet<Stri
             _ => None,
         };
         if let Some(text) = bound.and_then(|b| b.utf8_text(source).ok()) {
-            out.insert(text.to_string());
+            let binding = if stmt.kind() == "import_statement" {
+                ImportedBinding::Module
+            } else {
+                ImportedBinding::Symbol
+            };
+            out.insert(text.to_string(), binding);
         }
     }
 }
@@ -313,8 +324,12 @@ fn python_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Opt
                 // Only a module receiver (`widget.Widget()`) can name a class
                 // to construct; any other untyped receiver calls a method,
                 // and a class may be spelled in any case (`class widget`).
-                if !locals.is_imported_path(obj, source) {
-                    return Some(CallSite::untyped_member(attr_name));
+                match locals.imported_receiver(obj, source) {
+                    Some(ImportedBinding::Module) => {
+                        return function.utf8_text(source).ok().map(str::to_string);
+                    }
+                    Some(ImportedBinding::Symbol) => {}
+                    None => return Some(CallSite::untyped_member(attr_name)),
                 }
             }
             Some(attr_name.to_string())

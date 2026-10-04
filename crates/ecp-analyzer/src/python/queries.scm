@@ -20,12 +20,12 @@
 
 ;; Imports (from ... import ...)
 (import_from_statement
-  module_name: (dotted_name) @import.source
+  module_name: [(dotted_name) (relative_import)] @import.source
   name: (dotted_name) @import.name) @import
 
 ;; Imports (from ... import aliased)
 (import_from_statement
-  module_name: (dotted_name) @import.source
+  module_name: [(dotted_name) (relative_import)] @import.source
   name: (aliased_import
     name: (dotted_name) @import.name
     alias: (identifier) @import.alias)) @import

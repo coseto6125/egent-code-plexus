@@ -54,6 +54,30 @@ use rustc_hash::FxHashMap;
 
 pub type NodeId = u32;
 
+// Adapter policies stay transient; RawImport also belongs to archived parse caches.
+const IMPORT_MEMBER_FALLBACK: &[(Language, bool)] = &[crate::python::spec::IMPORT_MEMBER_FALLBACK];
+
+fn import_member_fallback(language: Language) -> bool {
+    IMPORT_MEMBER_FALLBACK
+        .iter()
+        .any(|&(adapter, enabled)| adapter == language && enabled)
+}
+
+fn namespace_member<'a>(import: &RawImport, name: &'a str) -> Option<&'a str> {
+    if import.imported_name != "*" {
+        return None;
+    }
+    name.strip_prefix(import.alias.as_deref()?)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .filter(|member| !member.is_empty())
+}
+
+enum IndexedModule {
+    Missing,
+    Unique(String),
+    Ambiguous,
+}
+
 #[cfg(not(windows))]
 #[inline]
 fn normalize_source_path(path: &Path) -> Cow<'_, str> {
@@ -227,6 +251,71 @@ impl<'a> Resolver<'a> {
         for_each_specifier_candidate(source_file, specifier, &self.path_aliases, visit);
     }
 
+    /// Find a module beneath an indexed source root without guessing its member.
+    /// Relative specifiers stay anchored to their caller; absolute module paths
+    /// may have a source-root prefix, but multiple matching roots are ambiguous.
+    fn import_module_file(&self, source_file: &Path, specifier: &str) -> IndexedModule {
+        let language = Language::from_normalized_path(&normalize_source_path(source_file));
+        let mut exact = None;
+        self.for_each_candidate(source_file, specifier, |candidate| {
+            if Language::from_normalized_path(candidate) == language
+                && self.symbol_table.has_indexed_file(candidate)
+            {
+                exact = Some(candidate.to_string());
+                false
+            } else {
+                true
+            }
+        });
+        if exact.is_some() || specifier.starts_with('.') {
+            return exact.map_or(IndexedModule::Missing, IndexedModule::Unique);
+        }
+        let mut found = None;
+        let mut ambiguous = false;
+        self.for_each_candidate(source_file, specifier, |candidate| {
+            if Language::from_normalized_path(candidate) != language {
+                return true;
+            }
+            let Some(stem) = Path::new(candidate).file_stem().and_then(|s| s.to_str()) else {
+                return true;
+            };
+            for file in self.symbol_table.module_files_by_stem(stem) {
+                let Some(root) = file
+                    .strip_suffix(candidate)
+                    .filter(|prefix| prefix.ends_with('/'))
+                else {
+                    continue;
+                };
+                // A directory already indexed as a module is a package,
+                // not an implicit source root for an absolute import.
+                let mut nested_package = false;
+                self.for_each_candidate(source_file, root.trim_end_matches('/'), |parent| {
+                    if Language::from_normalized_path(parent) == language
+                        && self.symbol_table.has_indexed_file(parent)
+                    {
+                        nested_package = true;
+                        return false;
+                    }
+                    true
+                });
+                if nested_package {
+                    continue;
+                }
+                if found.as_ref().is_some_and(|previous| previous != file) {
+                    ambiguous = true;
+                    return false;
+                }
+                found = Some(file.to_string());
+            }
+            true
+        });
+        if ambiguous {
+            IndexedModule::Ambiguous
+        } else {
+            found.map_or(IndexedModule::Missing, IndexedModule::Unique)
+        }
+    }
+
     /// The module tree's file for the `crate` / `self` / `super`-anchored
     /// Rust module path `module_path`, as seen from `source_file`.
     fn anchored_rust_module(&self, source_file: &Path, module_path: &str) -> Option<&'a str> {
@@ -368,6 +457,8 @@ impl<'a> Resolver<'a> {
     ) -> Vec<(NodeId, f32)> {
         let source_file_str = normalize_source_path(source_file);
         let mut results = Vec::new();
+        let member_fallback =
+            import_member_fallback(Language::from_normalized_path(&source_file_str));
         // Tier 2: Try ImportScoped (with L0 path normalization).
         //
         // The literal `import.source` is rarely a SymbolTable key on its own
@@ -377,15 +468,16 @@ impl<'a> Resolver<'a> {
         // candidate keys (relative-resolution + extension/index/__init__
         // guesses) and probe them in order.
         for import in raw_imports {
-            let is_match = match &import.alias {
-                Some(alias) => alias == symbol_name,
-                None => import.imported_name == symbol_name,
+            let binding = import.alias.as_deref().unwrap_or(&import.imported_name);
+            let exported_name = if import.imported_name == "*" {
+                namespace_member(import, symbol_name)
+            } else {
+                (binding == symbol_name).then_some(import.imported_name.as_str())
             };
 
-            if is_match {
-                let exported_name = &import.imported_name;
+            if let Some(exported_name) = exported_name {
                 let mut hit: Option<NodeId> = None;
-                self.for_each_candidate(source_file, &import.source, |candidate| {
+                let mut probe = |candidate: &str| {
                     match self
                         .symbol_table
                         .lookup_call_in_file(candidate, exported_name, target)
@@ -396,7 +488,16 @@ impl<'a> Resolver<'a> {
                         }
                         None => true, // keep going
                     }
-                });
+                };
+                if member_fallback {
+                    if let IndexedModule::Unique(module) =
+                        self.import_module_file(source_file, &import.source)
+                    {
+                        probe(&module);
+                    }
+                } else {
+                    self.for_each_candidate(source_file, &import.source, probe);
+                }
                 if let Some(node_id) = hit {
                     results.push((node_id, ResolutionTier::ImportScoped.base_confidence()));
                     self.record(
@@ -456,6 +557,44 @@ impl<'a> Resolver<'a> {
         let imported = self.resolve_imported_symbol(source_file, symbol_name, raw_imports, target);
         if !imported.is_empty() {
             return imported;
+        }
+
+        if import_member_fallback(Language::from_normalized_path(&source_file_str)) {
+            for import in raw_imports {
+                let previous_name = match namespace_member(import, symbol_name) {
+                    Some(member) => member.rsplit('.').next().unwrap_or(member),
+                    None if import.alias.as_deref().unwrap_or(&import.imported_name)
+                        == symbol_name =>
+                    {
+                        symbol_name
+                    }
+                    None => continue,
+                };
+                // An indexed package can re-export its member. Preserve the
+                // adapter's previous short-name path until exports are modeled.
+                if !matches!(
+                    self.import_module_file(source_file, &import.source),
+                    IndexedModule::Missing
+                ) {
+                    return self.resolve_symbol_with_heritage(
+                        source_file,
+                        previous_name,
+                        &[],
+                        target,
+                        caller_heritage,
+                    );
+                }
+                self.record(
+                    &source_file_str,
+                    symbol_name,
+                    Some(&import.source),
+                    DecisionTier::Unresolved,
+                    None,
+                    0,
+                    None,
+                );
+                return Vec::new();
+            }
         }
 
         // Tier 2.5: Qualifier-scoped lookup. Callees that carry a qualifier
@@ -1267,12 +1406,7 @@ impl<'a> Resolver<'a> {
             // `import * as ns from './a'` / `const ns = require('./a')`: the
             // qualifier is the module, so its file is the lookup scope. A
             // miss ends the search: `ns.f()` never means another file's `f`.
-            if exported == "*"
-                && matches!(
-                    FileMeta::from_path(&source_file_str).language,
-                    Language::JavaScript | Language::TypeScript
-                )
-            {
+            if exported == "*" {
                 let mut hit: Option<String> = None;
                 self.for_each_candidate(source_file, &import.source, |candidate| {
                     let defines_member = self

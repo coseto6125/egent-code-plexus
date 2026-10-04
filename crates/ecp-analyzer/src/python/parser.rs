@@ -1471,6 +1471,36 @@ impl LanguageProvider for PythonProvider {
             (!raw_path_literals.is_empty()).then(|| raw_path_literals.into_boxed_slice());
         let sql_refs = (!raw_sql_refs.is_empty()).then(|| raw_sql_refs.into_boxed_slice());
 
+        // Framework extractors above need Python module names; the shared
+        // resolver consumes paths and explicit namespace bindings.
+        let mut root_imports = Vec::new();
+        for import in &mut imports {
+            if import.source.is_empty() {
+                // An unaliased dotted import also binds its root package.
+                if import.alias.is_none() {
+                    if let Some((root, _)) = import.imported_name.split_once('.') {
+                        root_imports.push(RawImport {
+                            alias: Some(root.to_string()),
+                            imported_name: "*".to_string(),
+                            source: root.to_string(),
+                            binding_kind: None,
+                        });
+                    }
+                }
+                import.source = import.imported_name.replace('.', "/");
+                import.alias = Some(
+                    import
+                        .alias
+                        .take()
+                        .unwrap_or_else(|| import.imported_name.clone()),
+                );
+                import.imported_name = "*".to_string();
+            } else if !import.source.starts_with('.') {
+                import.source = import.source.replace('.', "/");
+            }
+        }
+        imports.extend(root_imports);
+
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes,
