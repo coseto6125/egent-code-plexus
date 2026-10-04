@@ -17,6 +17,7 @@ ecp impact <SYMBOL> [--direction up] [--repo <PATH>]
 - `--direction`: `up` (who calls me — default), `down` (who I call), or `both`.
 - `--baseline origin/main`: Compare against a branch to see impact of staged changes.
 - `--kind`, `--file_path`: Filter the results.
+- `--ambiguous-callers`: When the name has several same-named definitions, also list the call sites the graph could not attribute (one `git grep`, at most 50). They are text-match candidates under `ambiguous_callers`, never counted as callers. Ruby calls without parentheses are not matched.
 - Test-file callers are listed by default, each entry tagged `test: true`. `--exclude-tests` drops them and reports `hidden_test_callers: N`.
 
 ### Path-literal site lookup
@@ -48,4 +49,4 @@ Scans all PathLiteral nodes and emits likely filename split-brain candidate pair
 
 ## Reading the blast radius
 
-`impact` returns the raw caller / callee set — it does not assign a risk label. Judge change risk from the result directly: a large upstream caller count, or callers in core / widely-imported modules, means a wide blast radius — stop and confirm with the user before a breaking change. Caller counts are a **lower bound** (the resolver suppresses ambiguous bare calls to common names); a suspiciously low count warrants a `grep` cross-check before trusting it.
+`impact` returns the raw caller / callee set — it does not assign a risk label. Judge change risk from the result directly: a large upstream caller count, or callers in core / widely-imported modules, means a wide blast radius — stop and confirm with the user before a breaking change. Caller counts are a **lower bound** (the resolver suppresses ambiguous bare calls to common names); when the result carries the ambiguity caveat, rerun with `--ambiguous-callers` to list the unattributed call sites before trusting it.
