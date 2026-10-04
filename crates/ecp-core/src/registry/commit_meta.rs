@@ -16,8 +16,11 @@ use std::path::Path;
 /// can't read back, or changes meaning under the same shape. schema2: the
 /// test-file classifier changed, and both `File.category` and the parse
 /// cache (per-parser test-only emission) carry its verdict. schema3:
-/// `RawNode.calls` entries carry `CallSite` markers.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema3");
+/// `RawNode.calls` entries carry `CallSite` markers. schema4: Python
+/// `RawImport` sources are repo paths and module imports use the `*`
+/// binding, Python callees keep their module qualifier, and Rust closures
+/// carry function metadata, all under the same parse-cache shape.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema4");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
