@@ -94,6 +94,61 @@ fn impact_names(v: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
+fn closure_impact(before: &str, after: &str) {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(repo.path().join("app.ts"), before).unwrap();
+    run_git(repo.path(), &["init", "-q", "-b", "main"]);
+    commit_all(repo.path(), "closure fixture");
+    assert!(
+        ecp(repo.path(), home.path(), &["admin", "index", "--repo", "."])
+            .status
+            .success()
+    );
+    fs::write(repo.path().join("app.ts"), after).unwrap();
+    let out = ecp(
+        repo.path(),
+        home.path(),
+        &[
+            "impact",
+            "--target",
+            "target",
+            "--direction",
+            "upstream",
+            "--depth",
+            "3",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        impact_names(&result).iter().any(|name| name == "enclosing"),
+        "{result}"
+    );
+}
+
+const CLOSURE_SOURCE: &str =
+    "function target() {}\nfunction enclosing() {\n register(() => target());\n}\n";
+
+#[test]
+fn test_impact_closure_shift_reaches_enclosing() {
+    closure_impact(CLOSURE_SOURCE, &format!("\n{CLOSURE_SOURCE}"));
+}
+
+#[test]
+fn test_impact_closure_added_reaches_enclosing() {
+    closure_impact(
+        "function target() {}\nfunction enclosing() {}\n",
+        CLOSURE_SOURCE,
+    );
+}
+
 #[test]
 fn new_caller_in_dirty_file_is_visible_upstream() {
     let repo_tmp = tempfile::tempdir().unwrap();

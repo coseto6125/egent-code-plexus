@@ -3,6 +3,51 @@ use crate::graph::NodeKind;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Source range as (start row, start column, end row, end column).
+pub type Span = (u32, u32, u32, u32);
+
+/// The lexical link from a callable to an anonymous closure it contains.
+pub const CLOSURE_REFERENCE_REASON: &str = "closure:lexical_reference";
+
+/// True iff `outer` fully contains `inner` in the same coordinate system.
+#[inline]
+pub fn span_contains(outer: Span, inner: Span) -> bool {
+    let (or1, oc1, or2, oc2) = outer;
+    let (ir1, ic1, ir2, ic2) = inner;
+    (or1, oc1) <= (ir1, ic1) && (ir2, ic2) <= (or2, oc2)
+}
+
+/// For each span, the index of the innermost other span that contains it.
+///
+/// Spans from one syntax tree nest or are disjoint. A sweep in start order
+/// keeps open containers on a stack. Identical spans do not enclose each
+/// other; the lower index wins between identical containers. Full indexing
+/// and session overlays use this same rule, including same-line closures.
+pub fn innermost_enclosing(spans: &[Span]) -> Vec<Option<usize>> {
+    let mut order: Vec<usize> = (0..spans.len()).collect();
+    order.sort_by_key(|&i| {
+        let (r1, c1, r2, c2) = spans[i];
+        ((r1, c1), std::cmp::Reverse((r2, c2)), std::cmp::Reverse(i))
+    });
+    let mut parents = vec![None; spans.len()];
+    let mut open: Vec<usize> = Vec::new();
+    for i in order {
+        while open
+            .last()
+            .is_some_and(|&top| !span_contains(spans[top], spans[i]))
+        {
+            open.pop();
+        }
+        parents[i] = open
+            .iter()
+            .rev()
+            .find(|&&top| spans[top] != spans[i])
+            .copied();
+        open.push(i);
+    }
+    parents
+}
+
 /// One [`RawNode::calls`] entry, decoded.
 ///
 /// The callee text alone cannot say whether a call constructs its type: in

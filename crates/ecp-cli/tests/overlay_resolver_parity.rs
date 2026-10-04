@@ -22,6 +22,8 @@ fn input(local: LocalGraph) -> OverlayFileInput {
                 owner_class: n.owner_class,
                 start_line: n.span.0 + 1,
                 end_line: n.span.2 + 1,
+                start_column: n.span.1,
+                end_column: n.span.3,
                 calls: n.calls,
             })
             .collect(),
@@ -29,6 +31,183 @@ fn input(local: LocalGraph) -> OverlayFileInput {
 }
 
 type Target = (String, String, String, u32);
+
+// Closure edges retain multiplicity here: deduplication would hide a stale
+// base edge surviving beside the freshly rebuilt lexical reference.
+fn closure_parity(
+    provider: &dyn LanguageProvider,
+    path: &str,
+    before: &str,
+    after: &str,
+    count: usize,
+) {
+    let parse = |source: &str| {
+        provider
+            .parse_file(Path::new(path), source.as_bytes())
+            .unwrap()
+    };
+    let build = |source: &str| {
+        let mut builder = GraphBuilder::new();
+        builder.add_graph(parse(source));
+        builder.build()
+    };
+    let base = build(before);
+    let full = build(after);
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&base).unwrap();
+    let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    let view = OverlayView::build(archived, &[input(parse(after))]).unwrap();
+    let merged = MergedGraph::new(archived, Some(&view));
+    let reason = "closure:lexical_reference";
+    let mut expected: Vec<_> = full
+        .edges
+        .iter()
+        .filter(|e| e.reason.resolve(&full.string_pool) == reason)
+        .map(|e| {
+            let source = &full.nodes[e.source as usize];
+            (
+                source.uid,
+                full.nodes[e.target as usize].uid,
+                source.span.0 + 1,
+                (e.confidence * 100.0).round() as u32,
+                e.reason.resolve(&full.string_pool).to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        expected.len(),
+        count,
+        "full rebuild must contain the intended closures: {path}: {after}"
+    );
+    let mut actual: Vec<_> = merged
+        .all_edges()
+        .filter(|e| {
+            e.rel_type() == RelType::References
+                && merged
+                    .node(e.target)
+                    .unwrap()
+                    .name(&merged)
+                    .starts_with("<anonymous:")
+        })
+        .map(|e| {
+            let source = merged.node(e.source).unwrap();
+            assert!(
+                e.is_overlay(),
+                "dirty lexical references must come from the fresh parse: {path}"
+            );
+            (
+                source.uid(),
+                merged.node(e.target).unwrap().uid(),
+                source.start_line(),
+                (e.confidence() * 100.0).round() as u32,
+                e.reason(archived).to_owned(),
+            )
+        })
+        .collect();
+    expected.sort();
+    actual.sort();
+    assert_eq!(
+        actual, expected,
+        "closure references differ: {path}: {after}"
+    );
+    // Exercise incoming traversal too, as upstream impact does.
+    let target = (merged.base_len()..merged.node_count())
+        .find(|&idx| merged.node(idx).unwrap().name(&merged) == "target")
+        .unwrap();
+    let mut reached = std::collections::HashSet::from([target]);
+    let mut frontier = vec![target];
+    for _ in 0..3 {
+        frontier = frontier
+            .into_iter()
+            .flat_map(|node| merged.in_edges(node))
+            .filter(|e| matches!(e.rel_type(), RelType::Calls | RelType::References))
+            .map(|e| e.source)
+            .filter(|node| reached.insert(*node))
+            .collect();
+    }
+    assert!(
+        reached
+            .into_iter()
+            .any(|node| merged.node(node).unwrap().name(&merged) == "enclosing"),
+        "upstream impact must reach enclosing: {path}: {after}"
+    );
+}
+
+macro_rules! closure_cases {
+    ($module:ident, $provider:path, $path:literal, $source:literal, $empty:literal, $nested:literal) => {
+        mod $module {
+            use super::*;
+            #[test]
+            fn test_overlay_closure_shift_preserves_enclosing() {
+                closure_parity(
+                    &<$provider>::new().unwrap(),
+                    $path,
+                    $source,
+                    &format!("\n{}", $source),
+                    1,
+                );
+            }
+            #[test]
+            fn test_overlay_closure_added_preserves_enclosing() {
+                closure_parity(&<$provider>::new().unwrap(), $path, $empty, $source, 1);
+            }
+            #[test]
+            fn test_overlay_closure_body_edit_has_one_reference() {
+                closure_parity(
+                    &<$provider>::new().unwrap(),
+                    $path,
+                    $source,
+                    &$source.replace("target(1)", "target(2)"),
+                    1,
+                );
+            }
+            #[test]
+            fn test_overlay_closure_nested_matches_rebuild() {
+                closure_parity(&<$provider>::new().unwrap(), $path, $source, $nested, 2);
+            }
+        }
+    };
+}
+
+closure_cases!(ts_closures, ecp_analyzer::typescript::TypeScriptProvider, "app.ts",
+    "function target(value: number) {}\nfunction enclosing() {\n register(() => target(1));\n}\n",
+    "function target(value: number) {}\nfunction enclosing() {}\n",
+    "function target(value: number) {}\nfunction enclosing() {\n register(() => register(() => target(1)));\n}\n");
+closure_cases!(js_closures, ecp_analyzer::javascript::parser::JavaScriptProvider, "app.js",
+    "function target(value) {}\nfunction enclosing() {\n register(() => target(1));\n}\n",
+    "function target(value) {}\nfunction enclosing() {}\n",
+    "function target(value) {}\nfunction enclosing() {\n register(() => register(() => target(1)));\n}\n");
+closure_cases!(
+    py_closures,
+    ecp_analyzer::python::PythonProvider,
+    "app.py",
+    "def target(value): pass\ndef enclosing():\n register(lambda: target(1))\n",
+    "def target(value): pass\ndef enclosing(): pass\n",
+    "def target(value): pass\ndef enclosing():\n register(lambda: register(lambda: target(1)))\n"
+);
+closure_cases!(rs_closures, ecp_analyzer::rust::parser::RustProvider, "app.rs",
+    "fn target(value: i32) {}\nfn enclosing() {\n register(|| { target(1); });\n}\n",
+    "fn target(value: i32) {}\nfn enclosing() {}\n",
+    "fn target(value: i32) {}\nfn enclosing() {\n register(|| { register(|| { target(1); }); });\n}\n");
+closure_cases!(go_closures, ecp_analyzer::go::parser::GoProvider, "app.go",
+    "package demo\nfunc target(value int) {}\nfunc enclosing() {\n register(func() { target(1) })\n}\n",
+    "package demo\nfunc target(value int) {}\nfunc enclosing() {}\n",
+    "package demo\nfunc target(value int) {}\nfunc enclosing() {\n register(func() { register(func() { target(1) }) })\n}\n");
+closure_cases!(java_closures, ecp_analyzer::java::parser::JavaProvider, "App.java",
+    "class App {\n void target(int value) {}\n void enclosing() {\n register(() -> target(1));\n }\n}\n",
+    "class App {\n void target(int value) {}\n void enclosing() {}\n}\n",
+    "class App {\n void target(int value) {}\n void enclosing() {\n register(() -> register(() -> target(1)));\n }\n}\n");
+
+#[test]
+fn test_overlay_closure_overloads_use_live_parent() {
+    let source = "class App {\n void target(int value) {}\n void enclosing() { register(() -> target(1)); }\n void enclosing(int value) { register(() -> target(1)); }\n}\n";
+    closure_parity(
+        &ecp_analyzer::java::parser::JavaProvider::new().unwrap(),
+        "App.java",
+        source,
+        &format!("\n{source}"),
+        2,
+    );
+}
 
 fn targets(graph: &ZeroCopyGraph) -> Vec<Target> {
     let pool = &graph.string_pool;
