@@ -135,27 +135,41 @@ pub fn callee_name_from(call_node: Node<'_>, source: &[u8]) -> Option<String> {
     }
 }
 
+/// Call-node `Node::id` -> (caller node index, index in that node's `calls`);
+/// built during extraction, consumed by the indirect-dispatch detectors, never persisted.
+/// Keyed by id, not start byte: `a().b()` starts at the same byte as `a()`.
+pub type CallSiteIndex = rustc_hash::FxHashMap<usize, (usize, u32)>;
+
 /// Attach a call using columns as well as rows, including one-line closures.
+/// Returns the caller's node index and the call's index in its `calls`.
 pub fn attach_to_enclosing_span(
     span: crate::framework_helpers::Span,
     callee: String,
     nodes: &mut [RawNode],
-) {
-    let target = nodes
-        .iter_mut()
-        .filter(|node| {
+) -> Option<(usize, u32)> {
+    let i = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| {
             matches!(
                 node.kind,
                 NodeKind::Function | NodeKind::Method | NodeKind::Constructor
             ) && crate::framework_helpers::span_contains(node.span, span)
         })
-        .min_by_key(|node| crate::framework_helpers::span_area(node.span));
-    if let Some(target) = target {
-        target.calls.push(callee);
-    }
+        .min_by_key(|(_, node)| crate::framework_helpers::span_area(node.span))
+        .map(|(i, _)| i)?;
+    let calls = &mut nodes[i].calls;
+    let idx = calls.len() as u32;
+    calls.push(callee);
+    Some((i, idx))
 }
 
-pub fn attach_to_enclosing(line: u32, callee: String, nodes: &mut [RawNode]) {
+/// Returns the caller's node index and the call's index in its `calls`.
+pub fn attach_to_enclosing(
+    line: u32,
+    callee: String,
+    nodes: &mut [RawNode],
+) -> Option<(usize, u32)> {
     let mut best: Option<usize> = None;
     let mut best_span: u32 = u32::MAX;
     for (i, n) in nodes.iter().enumerate() {
@@ -173,9 +187,10 @@ pub fn attach_to_enclosing(line: u32, callee: String, nodes: &mut [RawNode]) {
             }
         }
     }
-    if let Some(i) = best {
-        nodes[i].calls.push(callee);
-    }
+    let i = best?;
+    let idx = nodes[i].calls.len() as u32;
+    nodes[i].calls.push(callee);
+    Some((i, idx))
 }
 
 /// Walk the AST and attach the **field name** of each member-access read

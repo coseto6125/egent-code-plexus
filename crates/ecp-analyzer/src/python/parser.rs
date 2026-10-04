@@ -1294,16 +1294,19 @@ impl LanguageProvider for PythonProvider {
         // Tier 2.5 qualifier-scoped lookup. Falls back to bare member name
         // when no annotation is in scope.
         let local_types = collect_local_types(tree.root_node(), source);
+        let mut call_sites = crate::calls::CallSiteIndex::default();
         let (raw_path_literals, raw_sql_refs) = extract_python_calls_and_path_literals(
             tree.root_node(),
             source,
             &mut nodes,
             &local_types,
+            &mut call_sites,
         );
         crate::calls::extract_field_reads(tree.root_node(), source, &mut nodes, &["attribute"]);
 
         let param_names = collect_python_param_names(tree.root_node(), source);
-        let call_metas = detect_python_indirect(tree.root_node(), source, &nodes, &param_names);
+        let call_metas =
+            detect_python_indirect(tree.root_node(), source, &nodes, &param_names, &call_sites);
 
         // Resolve FastAPI Depends() refs: find the innermost enclosing
         // Function/Method node whose span contains the capture span. The site

@@ -1,5 +1,6 @@
 use ecp_analyzer::rust::parser::RustProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
+use ecp_core::analyzer::types::CallSite;
 use std::path::Path;
 
 /// Helper: run the Rust parser and return the union of `calls` from every
@@ -120,7 +121,8 @@ fn train() {
     );
 }
 
-/// Unknown receiver falls back to bare method name.
+/// Unknown receiver falls back to the method name, recorded as an untyped
+/// member call so it can only reach a method.
 #[test]
 fn test_rust_unknown_receiver_fallback() {
     let src = r#"
@@ -129,9 +131,11 @@ fn process(a: &dyn std::fmt::Debug) {
 }
 "#;
     let calls = calls_for(src, "process");
-    // dyn Trait is opaque — bare method name should appear as fallback.
+    // dyn Trait is opaque — the method name should appear as fallback.
     assert!(
-        calls.iter().any(|c| c == "speak"),
+        calls
+            .iter()
+            .any(|c| CallSite::parse(c) == CallSite::UntypedMember("speak")),
         "expected bare 'speak' fallback for dyn receiver, got: {calls:?}"
     );
 }

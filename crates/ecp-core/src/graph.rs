@@ -929,7 +929,8 @@ pub struct CallMeta {
     /// - bit 0: `is_direct` (1 = direct call resolved statically; 0 = indirect)
     /// - bit 1: `is_dynamic_dispatch` (1 = vtable / virtual / trait-object / interface call)
     /// - bit 2: `is_callback` (1 = invoked through function-pointer / closure passed as argument)
-    /// - bit 3: `is_constructor_call` (1 = invoking a constructor / `new` / Class())
+    /// - bit 3: reserved, formerly `is_constructor_call`. No extractor sets
+    ///   it; graphs written before its writer was removed may still hold it.
     /// - bits 4-7: reserved (zero)
     pub flags: u8,
     /// When the call goes through a known dispatch type, name of that
@@ -943,6 +944,8 @@ impl CallMeta {
     pub const FLAG_DIRECT: u8 = 0b0000_0001;
     pub const FLAG_DYNAMIC_DISPATCH: u8 = 0b0000_0010;
     pub const FLAG_CALLBACK: u8 = 0b0000_0100;
+    /// Reserved: no extractor writes this bit. It stays defined because
+    /// stored graphs may carry it.
     pub const FLAG_CONSTRUCTOR_CALL: u8 = 0b0000_1000;
 
     pub const fn is_direct(&self) -> bool {

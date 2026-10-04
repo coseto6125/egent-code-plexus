@@ -107,6 +107,7 @@ fn run_impact(
         literal: None,
         literal_coherence: false,
         batch: false,
+        ambiguous_callers: false,
         max_results: None,
     };
     let payload = match impact::build_baseline_payload(&args, engine) {

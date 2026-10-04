@@ -74,6 +74,9 @@ pub(crate) fn crate_root_prefix(path: &str) -> &str {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolveTarget {
     Callable,
+    /// A Rust method-syntax call (`x.f()`): only a `Method` can answer it,
+    /// never a free `fn` of the same name.
+    Method,
     Type,
     Qualifier,
     /// A struct/class field, for `ReadsField` edge resolution. Filters to
@@ -85,6 +88,7 @@ impl ResolveTarget {
     pub fn kind_predicate(self) -> fn(NodeKind) -> bool {
         match self {
             Self::Callable => NodeKind::is_callable,
+            Self::Method => |kind| kind == NodeKind::Method,
             Self::Type => NodeKind::is_type,
             Self::Qualifier => NodeKind::is_qualifier,
             Self::Field => NodeKind::is_property,
@@ -446,6 +450,31 @@ impl SymbolTable {
             .find(|&id| predicate(self.node_kinds[id as usize]))
     }
 
+    /// [`Self::lookup_in_file_with_kind`] for the bare name of a call site.
+    /// Method syntax narrows the result, not the field, as in
+    /// [`Self::lookup_global`]: a same-named free fn in the file makes the
+    /// name ambiguous, so `Path::new(".").join(..)` on a std type never binds
+    /// the file's `Local::join`.
+    pub fn lookup_call_in_file(
+        &self,
+        file_path: &str,
+        node_name: &str,
+        target: ResolveTarget,
+    ) -> Option<u32> {
+        if target == ResolveTarget::Method {
+            let ids = self.file_scoped.get(file_path)?.get(node_name)?;
+            let callable = ResolveTarget::Callable.kind_predicate();
+            let method = target.kind_predicate();
+            if ids.iter().any(|&id| {
+                let kind = self.node_kinds[id as usize];
+                callable(kind) && !method(kind)
+            }) {
+                return None;
+            }
+        }
+        self.lookup_in_file_with_kind(file_path, node_name, target)
+    }
+
     /// Tier-3 global lookup: kind-filtered same-name candidates through the
     /// shared barrier filter, [`pick_global`].
     pub fn lookup_global(
@@ -457,13 +486,26 @@ impl SymbolTable {
         let Some(raw) = self.global_scoped.get(node_name) else {
             return GlobalPick::NoMatch;
         };
-        let predicate = target.kind_predicate();
-        pick_global(
+        // Method syntax narrows the result, not the field: a same-named free
+        // fn still makes the name ambiguous, so `path.join(..)` on a std type
+        // never binds the project's only `join` method.
+        let field = match target {
+            ResolveTarget::Method => ResolveTarget::Callable,
+            other => other,
+        }
+        .kind_predicate();
+        let pick = pick_global(
             caller,
             raw.iter()
-                .filter(|&&id| predicate(self.node_kinds[id as usize]))
+                .filter(|&&id| field(self.node_kinds[id as usize]))
                 .map(|&id| (id, self.node_file_meta[id as usize])),
-        )
+        );
+        match pick {
+            GlobalPick::Unique(id) if !target.kind_predicate()(self.node_kinds[id as usize]) => {
+                GlobalPick::NoMatch
+            }
+            other => other,
+        }
     }
 
     /// Every candidate [`lookup_global`] weighs, as a set: kind-filtered, then

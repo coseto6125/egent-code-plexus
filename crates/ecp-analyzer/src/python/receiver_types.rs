@@ -12,7 +12,7 @@
 //! call falls back to the bare member name as before.
 
 use super::path_literals::build_raw_path_literal;
-use crate::calls::attach_to_enclosing;
+use crate::calls::{attach_to_enclosing, CallSiteIndex};
 use crate::framework_helpers::strip_python_string_quotes;
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::{HashMap, HashSet};
@@ -201,6 +201,7 @@ pub fn extract_python_calls_and_path_literals(
     source: &[u8],
     nodes: &mut [RawNode],
     locals: &LocalTypes,
+    call_sites: &mut CallSiteIndex,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
@@ -210,7 +211,9 @@ pub fn extract_python_calls_and_path_literals(
             "call" => {
                 if let Some(callee) = python_callee_name(n, source, locals) {
                     let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                    if let Some(site) = attach_to_enclosing(line, callee, nodes) {
+                        call_sites.insert(n.id(), site);
+                    }
                 }
             }
             "string" => {
@@ -304,6 +307,9 @@ fn python_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Opt
                         return Some(format!("{ty}.{attr_name}"));
                     }
                 }
+                if is_super_call(obj, source) {
+                    return Some(format!("{}.{attr_name}", CallSite::SUPER_RECEIVER));
+                }
                 // Only a module receiver (`widget.Widget()`) can name a class
                 // to construct; any other untyped receiver calls a method,
                 // and a class may be spelled in any case (`class widget`).
@@ -315,4 +321,18 @@ fn python_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Opt
         }
         _ => None,
     }
+}
+
+/// Zero-argument `super()`: the receiver of a call through the caller
+/// class's bases, which the resolver binds from its heritage. `super(C,
+/// self)` starts the lookup after `C`, not after the caller class, so it
+/// stays an untyped member call.
+fn is_super_call(receiver: Node<'_>, source: &[u8]) -> bool {
+    receiver.kind() == "call"
+        && receiver
+            .child_by_field_name("function")
+            .is_some_and(|f| f.kind() == "identifier" && f.utf8_text(source) == Ok("super"))
+        && receiver
+            .child_by_field_name("arguments")
+            .is_some_and(|args| args.named_child_count() == 0)
 }

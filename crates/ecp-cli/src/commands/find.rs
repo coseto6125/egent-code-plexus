@@ -34,8 +34,11 @@ use crate::engine::Engine;
 use crate::output::{emit_with_caveat, OutputFormat};
 use clap::{Args, ValueEnum};
 use ecp_analyzer::resolution::index::Language;
-use ecp_core::graph::{ArchivedFileCategory, ArchivedRelType, ArchivedZeroCopyGraph, FileCategory};
+use ecp_core::graph::{
+    ArchivedFileCategory, ArchivedRelType, ArchivedZeroCopyGraph, FileCategory, NodeKind,
+};
 use ecp_core::registry::{resolve_home_ecp, Registry, RegistryFile};
+use ecp_core::session::view::{base_constructors, BaseConstructorIndex};
 use ecp_core::session::MergedGraph;
 use ecp_core::EcpError;
 use rayon::prelude::*;
@@ -362,18 +365,72 @@ fn category_to_str(cat: &ArchivedFileCategory) -> &'static str {
     }
 }
 
-/// Number of `Calls` edges into `node_idx`.
+/// Sources of the `Calls` edges into `node_idx` and into its `constructors`
+/// (empty unless it is a Class / Struct): a construction lands on the sole
+/// constructor when there is one, and a source reaching both counts once.
+fn call_sources(
+    graph: &ArchivedZeroCopyGraph,
+    node_idx: usize,
+    constructors: Vec<u32>,
+) -> impl Iterator<Item = u32> + '_ {
+    let dedupe = !constructors.is_empty();
+    let mut seen = std::collections::HashSet::new();
+    std::iter::once(node_idx as u32)
+        .chain(constructors)
+        .flat_map(move |target| {
+            iter_incoming_edges_filtered(graph, target, |rel| matches!(rel, ArchivedRelType::Calls))
+                .map(|(src, _)| src)
+        })
+        .filter(move |&src| !dedupe || seen.insert(src))
+}
+
+/// Number of `Calls` edges into `node_idx` (see [`call_sources`]).
 ///
 /// The raw in-degree is not that number: it also counts the `Defines` edge
 /// from the declaring file and one `Imports` edge per file that pulls that
 /// module in. Reported under the name `caller_count`, it told an agent that
 /// `compute_hits` in this repo had 17 callers when the graph held 11 `Calls`
 /// edges: the other 6 were the declaring file and 5 importing files.
-fn count_incoming(graph: &ArchivedZeroCopyGraph, node_idx: usize) -> u32 {
-    iter_incoming_edges_filtered(graph, node_idx as u32, |rel| {
-        matches!(rel, ArchivedRelType::Calls)
-    })
-    .count() as u32
+fn count_incoming(graph: &ArchivedZeroCopyGraph, node_idx: usize, constructors: Vec<u32>) -> u32 {
+    call_sources(graph, node_idx, constructors).count() as u32
+}
+
+/// Constructors for every candidate of one `find` run. The first few types
+/// take a name-index probe each; past that one pass over the nodes builds
+/// [`BaseConstructorIndex`], so a fuzzy match over thousands of classes stays
+/// linear while an exact lookup of one class never pays for the pass.
+struct ConstructorLookup<'g> {
+    graph: &'g ArchivedZeroCopyGraph,
+    probes_left: u32,
+    index: Option<BaseConstructorIndex<'g>>,
+}
+
+impl<'g> ConstructorLookup<'g> {
+    const PROBES_BEFORE_INDEX: u32 = 16;
+
+    fn new(graph: &'g ArchivedZeroCopyGraph) -> Self {
+        Self {
+            graph,
+            probes_left: Self::PROBES_BEFORE_INDEX,
+            index: None,
+        }
+    }
+
+    fn of(&mut self, node_idx: usize) -> Vec<u32> {
+        let ty = &self.graph.nodes[node_idx];
+        if !NodeKind::from(&ty.kind).is_constructible() {
+            return Vec::new();
+        }
+        if self.index.is_none() {
+            if self.probes_left > 0 {
+                self.probes_left -= 1;
+                return base_constructors(self.graph, node_idx as u32);
+            }
+            self.index = Some(BaseConstructorIndex::build(self.graph));
+        }
+        let index = self.index.as_ref().expect("built above");
+        index.of(self.graph, node_idx as u32).to_vec()
+    }
 }
 
 fn overlay_matches(
@@ -407,7 +464,7 @@ fn overlay_matches(
                 let node = &merged.nodes[idx as usize];
                 (
                     &merged.files[node.file_idx.to_native() as usize].category,
-                    count_incoming(merged, idx as usize),
+                    count_incoming(merged, idx as usize, base_constructors(merged, idx)),
                 )
             } else if ecp_core::file_category::is_test_path(&h.rel_path) {
                 (&ArchivedFileCategory::Test, 0)
@@ -454,6 +511,7 @@ fn base_candidates(
     include_tests: bool,
 ) -> (Vec<(usize, u32, u8, String)>, u32) {
     let mut tests_excluded = 0u32;
+    let mut constructors = ConstructorLookup::new(graph);
     let mut candidate = |node_idx: usize, node: &ecp_core::graph::ArchivedNode| {
         let name = node.name.resolve(&graph.string_pool);
         let matches = match mode {
@@ -491,7 +549,7 @@ fn base_candidates(
         }
 
         let prio = category_priority(&file.category);
-        let caller_count = count_incoming(graph, node_idx);
+        let caller_count = count_incoming(graph, node_idx, constructors.of(node_idx));
         Some((node_idx, caller_count, prio, file_path))
     };
 
@@ -1244,10 +1302,7 @@ fn build_hit(
     // target into `callees` — the hook renders those two lists verbatim as
     // `Called by:` and `Calls:`, so a File node arrived at the model labelled
     // as a caller.
-    let caller_names = iter_incoming_edges_filtered(graph, idx as u32, |rel| {
-        matches!(rel, ArchivedRelType::Calls)
-    })
-    .map(|(src, _)| {
+    let caller_names = call_sources(graph, idx, base_constructors(graph, idx as u32)).map(|src| {
         graph.nodes[src as usize]
             .name
             .resolve(&graph.string_pool)

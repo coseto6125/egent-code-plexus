@@ -10,9 +10,12 @@ use crate::commands::impact::{
 };
 use crate::commands::symbol_id::{format_fqn, resolve_candidates, split_fqn_target};
 use crate::engine::Engine;
+use ecp_core::session::MergedGraph;
 use ecp_core::EcpError;
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::fmt::Write as _;
+use std::path::Path;
 
 // ── Per-symbol library API (used by `ecp group impact`) ─────────────────────
 
@@ -106,6 +109,7 @@ pub fn run_for_symbol(
         literal: None,
         literal_coherence: false,
         batch: false,
+        ambiguous_callers: false,
         max_results,
     };
     let _ = timeout_ms; // timeout enforcement is caller-side; passed for API parity
@@ -309,13 +313,26 @@ pub(super) fn impact_by_name(
     let ambiguity_caveat = (same_name_defs >= 2
         && matches!(args.direction, Direction::Up | Direction::Both))
     .then(|| {
+        let action = match args.ambiguous_callers {
+            true => "The `ambiguous_callers` field lists the call sites the graph could not \
+                     attribute."
+                .to_string(),
+            false => format!(
+                "Run `{}` to list the call sites the graph could not attribute.",
+                ambiguous_callers_command(name, args.file.as_deref(), args.kind.as_deref())
+            ),
+        };
         format!(
             "caller set may be incomplete: {same_name_defs} same-named definitions of \
              '{bare_name}' exist, so bare calls (no import/qualifier context) may have \
-             been ambiguity-suppressed at index time. Cross-check call sites with grep \
-             before trusting the blast radius."
+             been ambiguity-suppressed at index time. {action}"
         )
     });
+    if args.ambiguous_callers && ambiguity_caveat.is_some() {
+        let repo = Path::new(args.repo.as_deref().unwrap_or("."));
+        result_obj["ambiguous_callers"] =
+            super::ambiguous::ambiguous_callers(MergedGraph::new(graph, view), bare_name, repo);
+    }
 
     Ok((
         result_obj,
@@ -330,6 +347,31 @@ pub(super) fn impact_by_name(
     ))
 }
 
+/// The exact command that lists the unattributed call sites, carrying the
+/// `--file` / `--kind` that narrowed this run: a colliding name without them
+/// is rejected as ambiguous, so a bare `--target` would not run.
+fn ambiguous_callers_command(name: &str, file: Option<&str>, kind: Option<&str>) -> String {
+    let mut cmd = format!("ecp impact --target {}", shell_word(name));
+    if let Some(file) = file {
+        let _ = write!(cmd, " --file {}", shell_word(file));
+    }
+    if let Some(kind) = kind {
+        let _ = write!(cmd, " --kind {}", shell_word(kind));
+    }
+    cmd.push_str(" --ambiguous-callers");
+    cmd
+}
+
+/// `word` as one shell word: single-quoted when it is empty or holds a
+/// character outside the safe set, with embedded `'` written as `'\''`.
+fn shell_word(word: &str) -> String {
+    let safe = |c: char| c.is_alphanumeric() || "_-./:@%+=,".contains(c);
+    if !word.is_empty() && word.chars().all(safe) {
+        return word.to_string();
+    }
+    format!("'{}'", word.replace('\'', r"'\''"))
+}
+
 pub(super) fn collect_blind_spots(
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
     target_file_path: &str,
@@ -340,4 +382,27 @@ pub(super) fn collect_blind_spots(
         .filter(|bs| bs.file_path.resolve(&graph.string_pool) == target_file_path)
         .map(|bs| bs.kind.resolve(&graph.string_pool).to_string())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ambiguous_callers_command_path_with_space_is_single_quoted() {
+        assert_eq!(
+            ambiguous_callers_command("get", Some("my dir/a.py"), Some("function")),
+            "ecp impact --target get --file 'my dir/a.py' --kind function --ambiguous-callers"
+        );
+    }
+
+    #[test]
+    fn test_shell_word_metacharacters_and_quotes_escaped() {
+        assert_eq!(shell_word("src/a-b_c.py"), "src/a-b_c.py");
+        assert_eq!(shell_word("Owner.Method"), "Owner.Method");
+        assert_eq!(shell_word("it's"), r"'it'\''s'");
+        assert_eq!(shell_word("a;b"), "'a;b'");
+        assert_eq!(shell_word("$(x)"), "'$(x)'");
+        assert_eq!(shell_word(""), "''");
+    }
 }

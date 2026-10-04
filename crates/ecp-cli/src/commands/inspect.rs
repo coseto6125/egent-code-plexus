@@ -5,8 +5,9 @@ use crate::output::{emit_with_caveat, OutputFormat};
 use crate::session::overlay_reader::load_overlay;
 use clap::Args;
 use ecp_core::file_category::is_test_path;
-use ecp_core::graph::ArchivedZeroCopyGraph;
+use ecp_core::graph::{ArchivedRelType, ArchivedZeroCopyGraph};
 use ecp_core::session::merge_archived;
+use ecp_core::session::view::base_constructors;
 use ecp_core::EcpError;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
@@ -247,41 +248,61 @@ fn build_inspect_block(
         }
     }
 
-    // Incoming edges — split deterministic vs heuristic.
-    let in_start = graph.in_offsets[node_idx].to_native() as usize;
-    let in_end = graph.in_offsets[node_idx + 1].to_native() as usize;
-    for i in in_start..in_end {
-        let edge_idx = graph.in_edge_idx[i].to_native() as usize;
-        let edge = &graph.edges[edge_idx];
-        let source_node = &graph.nodes[edge.source.to_native() as usize];
-        let source_file_path = resolve_file_path(graph, source_node.file_idx.to_native());
-        let source_kind = kind_to_str(&source_node.kind);
-        let rel_str = rel_to_str(&edge.rel_type).to_string();
+    // Incoming edges — split deterministic vs heuristic. A Class / Struct
+    // also reads its constructors' in-edges: a construction lands on the sole
+    // constructor when there is one, so those callers are the instantiators.
+    // Each such entry names the constructor it came through.
+    let constructors = base_constructors(graph, node_idx as u32);
+    let read_from = std::iter::once((node_idx, None)).chain(constructors.iter().map(|&c| {
+        (
+            c as usize,
+            Some(graph.nodes[c as usize].name.resolve(&graph.string_pool)),
+        )
+    }));
+    for (read_idx, via_constructor) in read_from {
+        let in_start = graph.in_offsets[read_idx].to_native() as usize;
+        let in_end = graph.in_offsets[read_idx + 1].to_native() as usize;
+        for i in in_start..in_end {
+            let edge_idx = graph.in_edge_idx[i].to_native() as usize;
+            let edge = &graph.edges[edge_idx];
+            // A constructor's other in-edges (the owning class's `HasMethod`)
+            // are not instantiations.
+            if via_constructor.is_some() && !matches!(edge.rel_type, ArchivedRelType::Calls) {
+                continue;
+            }
+            let source_node = &graph.nodes[edge.source.to_native() as usize];
+            let source_file_path = resolve_file_path(graph, source_node.file_idx.to_native());
+            let source_kind = kind_to_str(&source_node.kind);
+            let rel_str = rel_to_str(&edge.rel_type).to_string();
 
-        // For incoming edges the "target" we filter against is the OTHER end —
-        // i.e. the caller / importer.
-        if !edge_keeps(source_kind, source_file_path, &rel_str) {
-            continue;
-        }
+            // For incoming edges the "target" we filter against is the OTHER end —
+            // i.e. the caller / importer.
+            if !edge_keeps(source_kind, source_file_path, &rel_str) {
+                continue;
+            }
 
-        let source_idx = edge.source.to_native() as usize;
-        let source_owner = resolve_owner_class(graph, source_idx);
-        let entry = serde_json::json!({
-            "name": source_node.name.resolve(&graph.string_pool),
-            "ownerClass": source_owner,
-            "kind": source_kind,
-            "filePath": source_file_path,
-            "reason": edge.reason.resolve(&graph.string_pool),
-            "confidence": edge.confidence.to_native(),
-            // See the outgoing-edge note above: `tier`/`checks` mirror
-            // find-schema-bindings; unresolved sentinel + empty object pre-T4-7.
-            "tier": "unresolved",
-            "checks": {},
-        });
-        if edge.rel_type.is_heuristic() {
-            heuristic_incoming.entry(rel_str).or_default().push(entry);
-        } else {
-            incoming.entry(rel_str).or_default().push(entry);
+            let source_idx = edge.source.to_native() as usize;
+            let source_owner = resolve_owner_class(graph, source_idx);
+            let mut entry = serde_json::json!({
+                "name": source_node.name.resolve(&graph.string_pool),
+                "ownerClass": source_owner,
+                "kind": source_kind,
+                "filePath": source_file_path,
+                "reason": edge.reason.resolve(&graph.string_pool),
+                "confidence": edge.confidence.to_native(),
+                // See the outgoing-edge note above: `tier`/`checks` mirror
+                // find-schema-bindings; unresolved sentinel + empty object pre-T4-7.
+                "tier": "unresolved",
+                "checks": {},
+            });
+            if let Some(ctor) = via_constructor {
+                entry["viaConstructor"] = serde_json::Value::from(ctor);
+            }
+            if edge.rel_type.is_heuristic() {
+                heuristic_incoming.entry(rel_str).or_default().push(entry);
+            } else {
+                incoming.entry(rel_str).or_default().push(entry);
+            }
         }
     }
 
@@ -475,32 +496,43 @@ where
     let mut visited = HashSet::new();
     visited.insert(node_idx);
 
-    let in_start = graph.in_offsets[node_idx].to_native() as usize;
-    let in_end = graph.in_offsets[node_idx + 1].to_native() as usize;
+    // A Class / Struct is also called through its constructors (see the
+    // `incoming` loop in `build_inspect_block`); a caller reaching both counts once.
+    let constructors = base_constructors(graph, node_idx as u32);
+    let read_from =
+        std::iter::once((node_idx, false)).chain(constructors.iter().map(|&c| (c as usize, true)));
 
     let mut queue = VecDeque::new();
-    for i in in_start..in_end {
-        let edge_idx = graph.in_edge_idx[i].to_native() as usize;
-        let edge = &graph.edges[edge_idx];
-        let src_idx = edge.source.to_native() as usize;
-        let source_node = &graph.nodes[src_idx];
-        if matches!(source_node.kind, ecp_core::graph::ArchivedNodeKind::File) {
-            continue;
-        }
-        // Synthetic Annotation nodes (Decorates resolver-miss) carry
-        // SYNTHETIC_FILE_IDX — skip from incoming traversal display.
-        if !source_node.has_owning_file() {
-            continue;
-        }
-        let source_file = &graph.files[source_node.file_idx.to_native() as usize];
-        let source_file_path = source_file.path.resolve(&graph.string_pool);
-        let source_kind = kind_to_str(&source_node.kind);
-        let rel_str = rel_to_str(&edge.rel_type);
-        if !edge_keeps(source_kind, source_file_path, rel_str) {
-            continue;
-        }
-        if visited.insert(src_idx) {
-            queue.push_back(src_idx);
+    for (idx, is_ctor) in read_from {
+        for i in graph.in_offsets[idx].to_native() as usize
+            ..graph.in_offsets[idx + 1].to_native() as usize
+        {
+            let edge_idx = graph.in_edge_idx[i].to_native() as usize;
+            let edge = &graph.edges[edge_idx];
+            // Constructor in-edges other than `Calls` are not instantiations.
+            if is_ctor && !matches!(edge.rel_type, ArchivedRelType::Calls) {
+                continue;
+            }
+            let src_idx = edge.source.to_native() as usize;
+            let source_node = &graph.nodes[src_idx];
+            if matches!(source_node.kind, ecp_core::graph::ArchivedNodeKind::File) {
+                continue;
+            }
+            // Synthetic Annotation nodes (Decorates resolver-miss) carry
+            // SYNTHETIC_FILE_IDX — skip from incoming traversal display.
+            if !source_node.has_owning_file() {
+                continue;
+            }
+            let source_file = &graph.files[source_node.file_idx.to_native() as usize];
+            let source_file_path = source_file.path.resolve(&graph.string_pool);
+            let source_kind = kind_to_str(&source_node.kind);
+            let rel_str = rel_to_str(&edge.rel_type);
+            if !edge_keeps(source_kind, source_file_path, rel_str) {
+                continue;
+            }
+            if visited.insert(src_idx) {
+                queue.push_back(src_idx);
+            }
         }
     }
 

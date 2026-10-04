@@ -315,6 +315,38 @@ fn test_remove_self_binary_at_schedules_on_windows() {
         ),
         "windows should schedule a delayed delete, not delete in-process"
     );
+    // The schedule must also run: a wait that exits early leaves the file.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while fake_bin.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    assert!(
+        !fake_bin.exists(),
+        "the scheduled delete must remove the file"
+    );
+}
+
+/// cmd expands `%NAME%` even inside quotes, so a path segment shaped like an
+/// environment variable must reach `del` unexpanded.
+#[cfg(windows)]
+#[test]
+fn test_remove_self_binary_at_percent_segment_deletes_the_real_path() {
+    let dir = TempDir::new().unwrap();
+    let odd = dir.path().join("a%USERNAME%b");
+    std::fs::create_dir(&odd).unwrap();
+    let fake_bin = odd.join("ecp.exe");
+    std::fs::write(&fake_bin, b"fake").unwrap();
+
+    ecp_cli::commands::uninstall::remove_self_binary_at(&fake_bin).unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while fake_bin.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    assert!(
+        !fake_bin.exists(),
+        "the scheduled delete must remove the file under a %-shaped directory"
+    );
 }
 
 #[test]

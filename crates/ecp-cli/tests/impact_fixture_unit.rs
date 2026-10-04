@@ -73,6 +73,7 @@ fn base_args(name: &str) -> ImpactArgs {
         literal: None,
         literal_coherence: false,
         batch: false,
+        ambiguous_callers: false,
         max_results: None,
     }
 }

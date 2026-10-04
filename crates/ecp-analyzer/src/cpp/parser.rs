@@ -641,8 +641,14 @@ impl LanguageProvider for CppProvider {
         // and typed-var `obj.method()` / `obj->method()` → `Type.method`.
         // Feeds the resolver's Tier 2.5 qualifier-scoped lookup.
         let bindings = collect_bindings(tree.root_node(), source);
-        let (raw_path_literals, raw_sql_refs) =
-            extract_cpp_calls_and_path_literals(tree.root_node(), source, &mut nodes, &bindings);
+        let mut call_sites = crate::calls::CallSiteIndex::default();
+        let (raw_path_literals, raw_sql_refs) = extract_cpp_calls_and_path_literals(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &bindings,
+            &mut call_sites,
+        );
         crate::calls::extract_field_reads(
             tree.root_node(),
             source,
@@ -654,8 +660,14 @@ impl LanguageProvider for CppProvider {
         let mut fn_ptr_vars = bindings.flat_bindings();
         let decl_vars = collect_c_cpp_fn_ptr_vars(tree.root_node(), source);
         fn_ptr_vars.extend(decl_vars);
-        let call_metas =
-            detect_c_cpp_indirect(tree.root_node(), source, &nodes, &fn_ptr_vars, true);
+        let call_metas = detect_c_cpp_indirect(
+            tree.root_node(),
+            source,
+            &nodes,
+            &fn_ptr_vars,
+            true,
+            &call_sites,
+        );
 
         let framework_refs = detect_ast_framework_patterns(source, CPP_FRAMEWORKS);
 

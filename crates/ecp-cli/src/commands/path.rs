@@ -26,6 +26,7 @@ use crate::commands::symbol_id::resolve_candidates;
 use crate::engine::Engine;
 use crate::output::{emit_with_caveat, merge_caveats, OutputFormat};
 use clap::Args;
+use ecp_core::session::MergedGraph;
 use ecp_core::EcpError;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -133,7 +134,20 @@ fn build_payload(args: &PathArgs, engine: &Engine) -> Result<(Value, Option<Stri
     if goal_vec.is_empty() {
         return Err(unresolved(&args.to));
     }
-    let goals: HashSet<usize> = goal_vec.iter().copied().collect();
+    let mut goals: HashSet<usize> = goal_vec.iter().copied().collect();
+    let to_candidates = goals.len();
+    // A construction lands on the type's constructor when it has one, so a
+    // route reaching `Foo.__init__` reaches `Foo`. The route still ends at
+    // the constructor node it actually reached.
+    let merged = MergedGraph::new(graph, view);
+    for &goal in &goal_vec {
+        goals.extend(
+            merged
+                .constructors_of(goal as u32)
+                .into_iter()
+                .map(|c| c as usize),
+        );
+    }
     let ambiguity = merge_caveats(
         ambiguity_caveat(&args.from, from_defs),
         ambiguity_caveat(&args.to, to_defs),
@@ -160,7 +174,7 @@ fn build_payload(args: &PathArgs, engine: &Engine) -> Result<(Value, Option<Stri
             "found": false,
             "depth": args.depth,
             "fromCandidates": starts.len(),
-            "toCandidates": goals.len(),
+            "toCandidates": to_candidates,
         });
         let mut caveat = format!(
             "no {direction} path from '{}' to '{}' within {} hops. Widen with --depth, \
@@ -202,7 +216,7 @@ fn build_payload(args: &PathArgs, engine: &Engine) -> Result<(Value, Option<Stri
         "found": true,
         "hops": steps.len() - 1,
         "fromCandidates": starts.len(),
-        "toCandidates": goals.len(),
+        "toCandidates": to_candidates,
         "path": steps.iter().map(step_json).collect::<Vec<_>>(),
     });
     let caveat = (heuristic_steps > 0).then(|| {
@@ -226,8 +240,9 @@ fn ambiguity_caveat(name: &str, same_name_defs: usize) -> Option<String> {
         format!(
             "route may be incomplete: {same_name_defs} same-named definitions of '{name}' \
              exist, so bare calls (no import/qualifier context) may have been \
-             ambiguity-suppressed at index time. Narrow with --from-file / --to-file, and cross-check missing hops \
-             with grep before trusting a miss."
+             ambiguity-suppressed at index time. Narrow with --from-file / --to-file, and run \
+             `ecp impact --target {name} --file <path> --ambiguous-callers` to list the call \
+             sites the graph could not attribute before trusting a miss."
         )
     })
 }

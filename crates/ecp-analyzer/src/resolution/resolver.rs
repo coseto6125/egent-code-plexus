@@ -207,7 +207,37 @@ impl<'a> Resolver<'a> {
     where
         F: FnMut(&str) -> bool,
     {
+        self.for_each_candidate(source_file, specifier, visit);
+    }
+
+    /// [`for_each_specifier_candidate`], except that a Rust `crate` / `self`
+    /// / `super` path the module tree places is visited as that one file.
+    /// The tree knows which Cargo target declares the caller (`crate` in a
+    /// module of `src/main.rs` is `main.rs`, not `lib.rs`) and which module
+    /// a `#[path]` file is; the file-layout guess knows neither, so it does
+    /// not run after the tree has answered.
+    fn for_each_candidate<F>(&self, source_file: &Path, specifier: &str, mut visit: F)
+    where
+        F: FnMut(&str) -> bool,
+    {
+        if let Some(file) = self.anchored_rust_module(source_file, specifier) {
+            visit(file);
+            return;
+        }
         for_each_specifier_candidate(source_file, specifier, &self.path_aliases, visit);
+    }
+
+    /// The module tree's file for the `crate` / `self` / `super`-anchored
+    /// Rust module path `module_path`, as seen from `source_file`.
+    fn anchored_rust_module(&self, source_file: &Path, module_path: &str) -> Option<&'a str> {
+        let tree = self.mod_tree?;
+        if !matches!(
+            module_path.split("::").next(),
+            Some("crate" | "self" | "super")
+        ) {
+            return None;
+        }
+        tree.anchored_module_file(&normalize_source_path(source_file), module_path)
     }
 
     /// Resolves a symbol name to possible target nodes with confidence scores.
@@ -247,7 +277,7 @@ impl<'a> Resolver<'a> {
                 caller_heritage,
             )
         };
-        let mut targets = resolve(site.name(), ResolveTarget::Callable);
+        let mut targets = resolve(site.name(), call_target(source_file, site));
         if targets.is_empty() {
             targets.extend(self.resolve_instantiation(source_file, site, raw_imports, resolve));
         }
@@ -267,7 +297,7 @@ impl<'a> Resolver<'a> {
         let resolve = |name: &str, target| {
             self.resolve_imported_symbol(source_file, name, raw_imports, target)
         };
-        let mut targets = resolve(site.name(), ResolveTarget::Callable);
+        let mut targets = resolve(site.name(), call_target(source_file, site));
         if targets.is_empty() {
             targets.extend(self.resolve_instantiation(source_file, site, raw_imports, resolve));
         }
@@ -355,22 +385,18 @@ impl<'a> Resolver<'a> {
             if is_match {
                 let exported_name = &import.imported_name;
                 let mut hit: Option<NodeId> = None;
-                for_each_specifier_candidate(
-                    source_file,
-                    &import.source,
-                    &self.path_aliases,
-                    |candidate| match self.symbol_table.lookup_in_file_with_kind(
-                        candidate,
-                        exported_name,
-                        target,
-                    ) {
+                self.for_each_candidate(source_file, &import.source, |candidate| {
+                    match self
+                        .symbol_table
+                        .lookup_call_in_file(candidate, exported_name, target)
+                    {
                         Some(id) => {
                             hit = Some(id);
                             false // stop enumerating
                         }
                         None => true, // keep going
-                    },
-                );
+                    }
+                });
                 if let Some(node_id) = hit {
                     results.push((node_id, ResolutionTier::ImportScoped.base_confidence()));
                     self.record(
@@ -412,7 +438,7 @@ impl<'a> Resolver<'a> {
         // see `SymbolTable::file_scoped` doc).
         if let Some(node_id) =
             self.symbol_table
-                .lookup_in_file_with_kind(&source_file_str, symbol_name, target)
+                .lookup_call_in_file(&source_file_str, symbol_name, target)
         {
             results.push((node_id, ResolutionTier::SameFile.base_confidence()));
             self.record(
@@ -455,6 +481,19 @@ impl<'a> Resolver<'a> {
         // workspace crate index can distinguish `ecp_core::...` (internal,
         // safe to fall back) from `std::...` (external, refuse).
         if let Some((qualifier, member)) = split_qualifier(symbol_name) {
+            if qualifier == CallSite::SUPER_RECEIVER
+                && FileMeta::from_path(&source_file_str).language == Language::Python
+            {
+                return self.resolve_super_member(
+                    source_file,
+                    &source_file_str,
+                    symbol_name,
+                    member,
+                    target,
+                    raw_imports,
+                    caller_heritage,
+                );
+            }
             let hit = self
                 .resolve_qualifier_file(
                     source_file,
@@ -686,6 +725,30 @@ fn attributes_shadow_methods(meta: FileMeta) -> bool {
     )
 }
 
+/// A Rust source file, by its `.rs` extension in any case.
+fn is_rust_source(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+}
+
+/// The kinds a call site may reach. Rust method syntax (`x.f()`, recorded as
+/// `T.f` or as an untyped member) calls only methods: a free `fn` is never
+/// in scope through `.`. Paths use `::`, so a Rust callee holds `.` only
+/// when it was written with method syntax. Python / JS `obj.f()` can reach a
+/// module function, so other languages keep `Callable`.
+fn call_target(source_file: &Path, site: CallSite<'_>) -> ResolveTarget {
+    let method_syntax = match site {
+        CallSite::UntypedMember(_) => true,
+        CallSite::Plain(name) => name.contains('.'),
+        CallSite::Construct(_) => false,
+    };
+    if method_syntax && is_rust_source(source_file) {
+        ResolveTarget::Method
+    } else {
+        ResolveTarget::Callable
+    }
+}
+
 /// For a Rust path call `a::b::Q::m`, does the module path `a::b` that the
 /// call names for `Q` agree with the import of `Q` from `import_source`?
 /// `de::Error::custom` with `use crate::error::Error` does not: `de::Error`
@@ -700,15 +763,35 @@ fn rust_path_prefix_agrees_with_import(
     import_source: &str,
     imports: &[RawImport],
 ) -> bool {
-    let Some((before_member, _)) = full_callee.rsplit_once("::") else {
+    let Some(prefix) = rust_type_path_prefix(full_callee, qualifier) else {
         return true;
     };
-    let Some((prefix, q)) = before_member.rsplit_once("::") else {
-        return true;
-    };
-    if q != qualifier {
-        return true;
+    let named = rust_expand_path_head(prefix, imports);
+    // `crate::a::Q` names one module from the crate root: the import must
+    // come from exactly that module. A relative path matches by suffix.
+    if named.first() == Some(&"crate") {
+        return import_source.split("::").eq(named);
     }
+    let is_anchor = |s: &&str| matches!(*s, "" | "self" | "super");
+    let named: Vec<&str> = named.into_iter().skip_while(is_anchor).collect();
+    let source: Vec<&str> = import_source
+        .split("::")
+        .skip_while(|s| *s == "crate" || is_anchor(s))
+        .collect();
+    source.ends_with(&named)
+}
+
+/// The module path `a::b` that the Rust path call `a::b::Q::m` names before
+/// its qualifier `Q`; `None` when there is none.
+fn rust_type_path_prefix<'c>(full_callee: &'c str, qualifier: &str) -> Option<&'c str> {
+    let (before_member, _) = full_callee.rsplit_once("::")?;
+    let (prefix, q) = before_member.rsplit_once("::")?;
+    (q == qualifier).then_some(prefix)
+}
+
+/// The segments of the Rust module path `prefix`, with a head that a `use`
+/// brings in (`use crate::error as err;`) expanded to its full path.
+fn rust_expand_path_head<'s>(prefix: &'s str, imports: &'s [RawImport]) -> Vec<&'s str> {
     let mut named: Vec<&str> = prefix.split("::").collect();
     if let Some(module) = named.first().and_then(|&head| {
         imports
@@ -726,18 +809,7 @@ fn rust_path_prefix_agrees_with_import(
         };
         named.splice(..1, path.split("::").chain(tail));
     }
-    // `crate::a::Q` names one module from the crate root: the import must
-    // come from exactly that module. A relative path matches by suffix.
-    if named.first() == Some(&"crate") {
-        return import_source.split("::").eq(named);
-    }
-    let is_anchor = |s: &&str| matches!(*s, "" | "self" | "super");
-    let named: Vec<&str> = named.into_iter().skip_while(is_anchor).collect();
-    let source: Vec<&str> = import_source
-        .split("::")
-        .skip_while(|s| *s == "crate" || is_anchor(s))
-        .collect();
-    source.ends_with(&named)
+    named
 }
 
 /// A file that names its own directory's module: `mod.rs`, `lib.rs`,
@@ -802,10 +874,7 @@ fn rust_module_path_base(
     source_file: &std::path::Path,
     specifier: &str,
 ) -> Option<std::path::PathBuf> {
-    if !source_file
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("rs"))
-    {
+    if !is_rust_source(source_file) {
         return None;
     }
     let segs: Vec<&str> = specifier.split("::").filter(|s| !s.is_empty()).collect();
@@ -1030,10 +1099,7 @@ fn rust_self_fallback_base(
     specifier: &str,
 ) -> Option<std::path::PathBuf> {
     let rest = specifier.strip_prefix("self::")?;
-    let is_rs = source_file
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("rs"));
-    if !is_rs || is_rust_module_root(source_file) {
+    if !is_rust_source(source_file) || is_rust_module_root(source_file) {
         return None;
     }
     let dir = source_file.parent()?;
@@ -1161,6 +1227,14 @@ impl<'a> Resolver<'a> {
                     .symbol_table
                     .lookup_in_file_with_kind(qf, member, target)
                     .is_some()
+                    && self.rust_type_path_agrees(
+                        source_file,
+                        &source_file_str,
+                        full_callee,
+                        qualifier,
+                        qf,
+                        raw_imports,
+                    )
                 {
                     return Some(qf.to_string());
                 }
@@ -1190,6 +1264,28 @@ impl<'a> Resolver<'a> {
                 continue;
             }
             let exported = &import.imported_name;
+            // `import * as ns from './a'` / `const ns = require('./a')`: the
+            // qualifier is the module, so its file is the lookup scope. A
+            // miss ends the search: `ns.f()` never means another file's `f`.
+            if exported == "*"
+                && matches!(
+                    FileMeta::from_path(&source_file_str).language,
+                    Language::JavaScript | Language::TypeScript
+                )
+            {
+                let mut hit: Option<String> = None;
+                self.for_each_candidate(source_file, &import.source, |candidate| {
+                    let defines_member = self
+                        .symbol_table
+                        .lookup_in_file_with_kind(candidate, member, target)
+                        .is_some();
+                    if defines_member {
+                        hit = Some(candidate.to_string());
+                    }
+                    !defines_member
+                });
+                return hit;
+            }
             // `use a::m; m::f()`: in Rust `m` may be the module `a::m`, whose
             // own file holds `f`. The parent file declaring `mod m;` can
             // define an `f` of its own, so it is not consulted then; a miss
@@ -1211,28 +1307,60 @@ impl<'a> Resolver<'a> {
                 // below would find `mod m;` in the parent and its own `f`.
                 return None;
             }
+            // `use other::m; m::f()` names a workspace crate's module by crate
+            // (or `[lib]`) name, which `rust_module_file` cannot place. The
+            // module tree can; past this point only file-stem guesses remain,
+            // and they pick the caller crate's own `m.rs`. Rust callers only:
+            // the tree is built for any repo with a Cargo.toml, and a Python
+            // `from pkg import m` must not reach a Rust crate named `pkg`. A
+            // head that is a module of the caller's own file (`mod utils;
+            // use utils::fs;`) is not a crate path.
+            let head = module_path.split("::").next().unwrap_or_default();
+            if is_rust_source(source_file)
+                && self
+                    .mod_tree
+                    .is_some_and(|tree| tree.names_module(&module_path))
+                && self
+                    .symbol_table
+                    .lookup_in_file_with_kind(&source_file_str, head, ResolveTarget::Qualifier)
+                    .is_none()
+            {
+                // The caller looks `member` up in the returned file, so a
+                // renamed re-export (`pub use imp::lookup_impl as lookup;`)
+                // would land on an unrelated `lookup` there: the tree must
+                // place `member` under its own name.
+                return self
+                    .mod_tree_resolve(&source_file_str, &format!("{module_path}::{member}"))
+                    .filter(|resolved| {
+                        resolved.item_name == member
+                            && self
+                                .symbol_table
+                                .lookup_in_file_with_kind(
+                                    &resolved.file,
+                                    &resolved.item_name,
+                                    target,
+                                )
+                                .is_some()
+                    })
+                    .map(|resolved| resolved.file);
+            }
             let mut hit: Option<String> = None;
-            for_each_specifier_candidate(
-                source_file,
-                &import.source,
-                &self.path_aliases,
-                |candidate| {
-                    let qualifier_present = self
-                        .symbol_table
-                        .lookup_in_file_with_kind(candidate, exported, ResolveTarget::Qualifier)
-                        .is_some();
-                    let member_present = self
-                        .symbol_table
-                        .lookup_in_file_with_kind(candidate, member, target)
-                        .is_some();
-                    if qualifier_present && member_present {
-                        hit = Some(candidate.to_string());
-                        false
-                    } else {
-                        true
-                    }
-                },
-            );
+            self.for_each_candidate(source_file, &import.source, |candidate| {
+                let qualifier_present = self
+                    .symbol_table
+                    .lookup_in_file_with_kind(candidate, exported, ResolveTarget::Qualifier)
+                    .is_some();
+                let member_present = self
+                    .symbol_table
+                    .lookup_in_file_with_kind(candidate, member, target)
+                    .is_some();
+                if qualifier_present && member_present {
+                    hit = Some(candidate.to_string());
+                    false
+                } else {
+                    true
+                }
+            });
             if hit.is_some() {
                 return hit;
             }
@@ -1254,6 +1382,14 @@ impl<'a> Resolver<'a> {
                     .symbol_table
                     .lookup_in_file_with_kind(qf, member, target)
                     .is_some()
+                    && self.rust_type_path_agrees(
+                        source_file,
+                        &source_file_str,
+                        full_callee,
+                        qualifier,
+                        qf,
+                        raw_imports,
+                    )
                 {
                     return Some(qf.to_string());
                 }
@@ -1302,6 +1438,155 @@ impl<'a> Resolver<'a> {
         hit.map(str::to_string)
     }
 
+    /// Python `super().member()`: `member` on the caller class's bases, by
+    /// the owner index, never by bare name. Bases are tried in declared order
+    /// (a single-pass approximation of the MRO); the first base that owns the
+    /// member wins. A base the project cannot see, an ambiguous one, or one
+    /// whose ownership is unknown stops the walk: it may own the member and
+    /// shadow every later base, so no edge beats a guess.
+    ///
+    /// A first base that only inherits the member is not enough: C3 puts a
+    /// later base ahead of a shared ancestor (`class D(B, C)` with `B(A)`,
+    /// `C(A)` reads `D, B, C, A`), so a later base that reaches the member
+    /// through another owner, or may do so, leaves no edge.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_super_member(
+        &self,
+        source_file: &Path,
+        source_file_str: &str,
+        symbol_name: &str,
+        member: &str,
+        target: ResolveTarget,
+        raw_imports: &[RawImport],
+        caller_heritage: &[String],
+    ) -> Vec<(NodeId, f32)> {
+        let mut bases = caller_heritage.iter();
+        let mut owner: Option<(&String, NodeId, bool)> = None;
+        for base in bases.by_ref() {
+            let TypeCandidates::Unique(ty, ty_name) =
+                self.super_base_type(source_file, source_file_str, base, raw_imports)
+            else {
+                break;
+            };
+            match self.member_ownership(ty, ty_name, member, target) {
+                Ownership::Owned { id, inherited } => {
+                    owner = Some((base, id, inherited));
+                    break;
+                }
+                Ownership::NotOwned => {}
+                Ownership::Unknown => break,
+            }
+        }
+        let owner = owner.filter(|&(_, id, inherited)| {
+            !inherited
+                || !bases.any(|later| {
+                    self.later_base_may_shadow(
+                        source_file,
+                        source_file_str,
+                        later,
+                        member,
+                        target,
+                        raw_imports,
+                        id,
+                    )
+                })
+        });
+        if let Some((base, id, inherited)) = owner {
+            let (tier, conf) = if inherited {
+                (DecisionTier::TypeHeritage, ResolutionTier::HeritageScoped)
+            } else {
+                (DecisionTier::TypeOwned, ResolutionTier::QualifierScoped)
+            };
+            let conf = conf.base_confidence();
+            self.record(
+                source_file_str,
+                symbol_name,
+                Some(base.as_str()),
+                tier,
+                Some(id),
+                0,
+                Some(conf),
+            );
+            return vec![(id, conf)];
+        }
+        self.record(
+            source_file_str,
+            symbol_name,
+            None,
+            DecisionTier::Unresolved,
+            None,
+            0,
+            None,
+        );
+        Vec::new()
+    }
+
+    /// Can `later`, a base declared after the one that inherits `member`
+    /// from `owner_member`, come first in the C3 order with another
+    /// `member`? A base outside the project cannot derive from a project
+    /// class, so it never comes first; an ambiguous base, or one whose
+    /// ownership is unknown, may.
+    #[allow(clippy::too_many_arguments)]
+    fn later_base_may_shadow(
+        &self,
+        source_file: &Path,
+        source_file_str: &str,
+        later: &str,
+        member: &str,
+        target: ResolveTarget,
+        raw_imports: &[RawImport],
+        owner_member: NodeId,
+    ) -> bool {
+        match self.super_base_type(source_file, source_file_str, later, raw_imports) {
+            TypeCandidates::Unique(ty, ty_name) => {
+                match self.member_ownership(ty, ty_name, member, target) {
+                    Ownership::Owned { id, .. } => id != owner_member,
+                    Ownership::NotOwned => false,
+                    Ownership::Unknown => true,
+                }
+            }
+            TypeCandidates::Set(_) => true,
+            TypeCandidates::External | TypeCandidates::None => false,
+        }
+    }
+
+    /// The project type a Python base expression names. A dotted base
+    /// (`base.Base` under `import base`) resolves its module through the
+    /// qualifier tiers, then the type inside that module; when the module is
+    /// in the project but does not declare the type (a package re-export),
+    /// the last segment goes through [`Self::type_candidates`]. A module the
+    /// project does not hold (`threading.Thread`) gives `None`: a project
+    /// `Thread` is not that base.
+    fn super_base_type<'q>(
+        &self,
+        source_file: &Path,
+        source_file_str: &str,
+        base: &'q str,
+        raw_imports: &'q [RawImport],
+    ) -> TypeCandidates<'q> {
+        let Some((qualifier, type_name)) = split_qualifier(base) else {
+            return self.type_candidates(source_file, source_file_str, base, raw_imports);
+        };
+        let Some(module_file) = self.resolve_qualifier_file(
+            source_file,
+            qualifier,
+            type_name,
+            ResolveTarget::Type,
+            raw_imports,
+            Some(base),
+        ) else {
+            return TypeCandidates::None;
+        };
+        match self.symbol_table.lookup_in_file_with_kind(
+            &module_file,
+            type_name,
+            ResolveTarget::Type,
+        ) {
+            Some(id) => TypeCandidates::Unique(id, type_name),
+            None => self.type_candidates(source_file, source_file_str, type_name, raw_imports),
+        }
+    }
+
     /// Receiver-typing ladder (after Tier 3.5): resolve `qualifier.member`
     /// through the member's owning type instead of the qualifier's file.
     ///
@@ -1320,12 +1605,12 @@ impl<'a> Resolver<'a> {
         target: ResolveTarget,
         raw_imports: &[RawImport],
     ) -> TypeMember {
-        // Callable only: the supertypes pre-pass resolves heritage with this
+        // Call targets only: the supertypes pre-pass resolves heritage with this
         // resolver before the supertypes exist, so a Type-target ladder would
         // make Pass 2 heritage edges disagree with the pre-pass. A path whose
         // prefix is an external module (`std::sync::Arc::new`) names a type
         // the project cannot own, the same guard Tier 4 applies.
-        if target != ResolveTarget::Callable
+        if !matches!(target, ResolveTarget::Callable | ResolveTarget::Method)
             || !qualifier_prefix_is_internal(symbol_name, qualifier)
         {
             return TypeMember::NoEdge;
@@ -1413,7 +1698,7 @@ impl<'a> Resolver<'a> {
             let exported = import.imported_name.as_str();
             let mut in_project = false;
             let mut hit: Option<NodeId> = None;
-            for_each_specifier_candidate(source_file, &import.source, &self.path_aliases, |cand| {
+            self.for_each_candidate(source_file, &import.source, |cand| {
                 if !st.has_file(cand) {
                     return true;
                 }
@@ -1675,10 +1960,78 @@ impl<'a> Resolver<'a> {
             == 1
     }
 
+    /// For a Rust path call `a::b::Q::m`, may `Q` be the type declared in
+    /// `candidate_file`? The module path `a::b` names where `Q` lives, so the
+    /// candidate must sit in that module: the file the module tree or the
+    /// file layout places it at, or, when no file holds the module, an
+    /// inline `mod` of the caller's own file. A head brought in by a `use`
+    /// expands first; one that names an external crate (`use serde::de;`)
+    /// places `Q` outside the project. A call with no module path before
+    /// `Q`, or only `crate` / `self` / `super`, always agrees.
+    fn rust_type_path_agrees(
+        &self,
+        source_file: &Path,
+        source_file_str: &str,
+        full_callee: Option<&str>,
+        qualifier: &str,
+        candidate_file: &str,
+        imports: &[RawImport],
+    ) -> bool {
+        let Some(full) = full_callee else {
+            return true;
+        };
+        let Some(prefix) = rust_type_path_prefix(full, qualifier) else {
+            return true;
+        };
+        if qualifier_prefix_is_internal(full, qualifier) || !is_rust_source(source_file) {
+            return true;
+        }
+        let named = rust_expand_path_head(prefix, imports);
+        let declared_here = |module: &str| {
+            self.symbol_table
+                .lookup_in_file_with_kind(source_file_str, module, ResolveTarget::Qualifier)
+                .is_some()
+        };
+        let module_path = match named[0] {
+            "crate" | "self" | "super" => named.join("::"),
+            head if declared_here(head) => format!("self::{}", named.join("::")),
+            _ => {
+                // Only a workspace crate's module is left; the tree places
+                // `Q` itself, through its `pub use` chain.
+                return self
+                    .mod_tree_resolve(
+                        source_file_str,
+                        &format!("{}::{qualifier}", named.join("::")),
+                    )
+                    .is_some_and(|resolved| resolved.file == candidate_file);
+            }
+        };
+        // The module may only re-export `Q` (`mod lock; pub use
+        // lock::FileLock;`): the tree follows that `pub use` chain to the
+        // defining file, which the module's own file is not.
+        if let Some(resolved) = self
+            .mod_tree_resolve(source_file_str, &format!("{module_path}::{qualifier}"))
+            .filter(|resolved| resolved.item_name == qualifier)
+        {
+            return resolved.file == candidate_file;
+        }
+        if let Some(module_file) = self.rust_module_file(source_file, &module_path) {
+            return module_file == candidate_file;
+        }
+        candidate_file == source_file_str
+            && named
+                .iter()
+                .filter(|seg| !matches!(**seg, "crate" | "self" | "super"))
+                .all(|&seg| declared_here(seg))
+    }
+
     /// The indexed file of Rust module `module_path` (`crate::a::m` →
     /// `src/a/m.rs` or `src/a/m/mod.rs`), when the path is crate-, self- or
     /// super-anchored and such a file exists.
     fn rust_module_file(&self, source_file: &Path, module_path: &str) -> Option<String> {
+        if let Some(file) = self.anchored_rust_module(source_file, module_path) {
+            return self.symbol_table.has_file(file).then(|| file.to_string());
+        }
         let base = rust_module_path_base(source_file, module_path)?;
         let base = base.to_string_lossy().replace('\\', "/");
         let mut found = None;
@@ -1709,9 +2062,7 @@ impl<'a> Resolver<'a> {
         member: &str,
         target: ResolveTarget,
     ) -> Option<NodeId> {
-        let tree = self.mod_tree?;
-        let workspace_root = self.workspace_root.as_ref()?;
-        let resolved = tree.resolve_fqn(symbol_name, source_file_str, workspace_root)?;
+        let resolved = self.mod_tree_resolve(source_file_str, symbol_name)?;
         self.symbol_table
             .lookup_in_file_with_kind(&resolved.file, &resolved.item_name, target)
             .or_else(|| {
@@ -1719,6 +2070,15 @@ impl<'a> Resolver<'a> {
                 self.symbol_table
                     .lookup_in_file_with_kind(&resolved.file, bare, target)
             })
+    }
+
+    fn mod_tree_resolve(
+        &self,
+        source_file_str: &str,
+        fqn: &str,
+    ) -> Option<crate::rust::module_tree::ResolvedFqn> {
+        self.mod_tree?
+            .resolve_fqn(fqn, source_file_str, self.workspace_root.as_ref()?)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2195,8 +2555,29 @@ mod tests {
 
     #[test]
     fn tier2_5_handles_multi_segment_qualifier_via_last_segment() {
-        // `std::vec::Vec::new` — qualifier folds to last segment `Vec`,
-        // which resolves uniquely to `vec.rs`, where `new` lives.
+        // `ns::sub::Vec::make` — qualifier folds to last segment `Vec`,
+        // which resolves uniquely to `vec.cpp`, where `make` lives.
+        let st = st_with(&[
+            ("vec.cpp", "Vec", NodeKind::Class),
+            ("vec.cpp", "make", NodeKind::Method),
+        ]);
+        let r = Resolver::new(&st);
+        let out = r.resolve_symbol(
+            &PathBuf::from("caller.cpp"),
+            "ns::sub::Vec::make",
+            &[],
+            ResolveTarget::Callable,
+        );
+        assert_eq!(
+            out,
+            vec![(1, ResolutionTier::QualifierScoped.base_confidence())]
+        );
+    }
+
+    #[test]
+    fn tier2_5_rust_external_module_path_never_binds_a_project_type() {
+        // Rust spells the module: `std::vec::Vec` is std's, not the
+        // project's only `Vec` (FU-2026-10-03-96ccd9c59f1e).
         let st = st_with(&[
             ("vec.rs", "Vec", NodeKind::Class),
             ("vec.rs", "new", NodeKind::Method),
@@ -2208,10 +2589,7 @@ mod tests {
             &[],
             ResolveTarget::Callable,
         );
-        assert_eq!(
-            out,
-            vec![(1, ResolutionTier::QualifierScoped.base_confidence())]
-        );
+        assert_eq!(out, vec![]);
     }
 
     #[test]

@@ -632,8 +632,13 @@ impl LanguageProvider for JavaScriptProvider {
         // - `this.method()` inside a class body → `ClassName.method`
         // - `obj.method()` (no type info in JS) → `obj.method` (qualified for resolver)
         // - `fn()` → `fn`
-        let (raw_path_literals, raw_sql_refs) =
-            extract_js_calls_and_path_literals(tree.root_node(), source, &mut nodes);
+        let mut call_sites = crate::calls::CallSiteIndex::default();
+        let (raw_path_literals, raw_sql_refs) = extract_js_calls_and_path_literals(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &mut call_sites,
+        );
         crate::calls::extract_field_reads(
             tree.root_node(),
             source,
@@ -650,11 +655,12 @@ impl LanguageProvider for JavaScriptProvider {
         let has_express = has_import_from(&imports, EXPRESS_REQUIRED);
         let has_hapi = has_import_from(&imports, HAPI_REQUIRED);
 
-        // Path-shape filter for generic Route emission. The JS parser
-        // captures imports via ES `import` statements only — CommonJS
-        // `require()` is not tracked, so a framework-presence gate would
-        // regress Node.js codebases that use `require('express')`. The
-        // path-shape predicate alone removes the dominant FP class
+        // Path-shape filter for generic Route emission. Imports record ES
+        // `import` statements and top-level `require('lib')` bindings only:
+        // a router built by `require('express').Router()`, a `require`
+        // inside a function, or an app handed in from another module
+        // leaves no import, so a framework-presence gate would drop real
+        // Node.js routes. The path-shape predicate alone removes the dominant FP class
         // (`Map.get("k")` / `headers.get("x-trace")` / `cache.get(id)`)
         // because none of those literals start with `/`. Spec:
         // `docs/superpowers/specs/2026-05-17-route-precision-design.md`.
@@ -698,7 +704,8 @@ impl LanguageProvider for JavaScriptProvider {
         }
 
         let param_names = collect_js_param_names(tree.root_node(), source);
-        let call_metas = detect_js_ts_indirect(tree.root_node(), source, &nodes, &param_names);
+        let call_metas =
+            detect_js_ts_indirect(tree.root_node(), source, &nodes, &param_names, &call_sites);
         let raw_function_metas = crate::function_meta::javascript::extract(
             tree.root_node(),
             source,

@@ -21,13 +21,18 @@ pub enum CallSite<'a> {
     Construct(&'a str),
     /// A Python member call whose receiver is neither typed nor rooted in an
     /// imported name (`obj.widget()`): it resolves by the member name and
-    /// never constructs a type.
+    /// never constructs a type. A Rust method call on an untyped receiver
+    /// (`n.name.resolve()`) uses it too, so it never reaches a free `fn`.
     UntypedMember(&'a str),
 }
 
 impl<'a> CallSite<'a> {
     const CONSTRUCT_PREFIX: &'static str = "\u{1}new ";
     const UNTYPED_MEMBER_PREFIX: &'static str = "\u{1}member ";
+
+    /// The qualifier of a Python `super().m()` callee (`super().m`): the
+    /// resolver binds `m` on the caller class's bases, never by bare name.
+    pub const SUPER_RECEIVER: &'static str = "super()";
 
     /// The `RawNode.calls` entry of a site that constructs `ty`.
     pub fn construct(ty: &str) -> String {

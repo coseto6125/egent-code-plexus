@@ -521,11 +521,13 @@ impl LanguageProvider for RustProvider {
         // for the resolver's qualifier-scoped (Tier 2.5) lookup.
         let impl_map = build_impl_map(tree.root_node(), source);
         let local_types = collect_local_types(tree.root_node(), source, &impl_map);
+        let mut call_sites = crate::calls::CallSiteIndex::default();
         let (raw_path_literals, raw_sql_refs) = extract_rust_calls_and_path_literals(
             tree.root_node(),
             source,
             &mut nodes,
             &local_types,
+            &mut call_sites,
         );
         crate::calls::extract_field_reads(
             tree.root_node(),
@@ -549,7 +551,8 @@ impl LanguageProvider for RustProvider {
                     .or_insert_with(|| st.clone());
             }
         }
-        let call_metas = detect_rust_indirect(tree.root_node(), source, &nodes, &param_types);
+        let call_metas =
+            detect_rust_indirect(tree.root_node(), source, &nodes, &param_types, &call_sites);
 
         // owner_class is now set at emit time via enclosing_impl_type() parent
         // walk (see emit block above). The legacy `__impl_target__:Type`

@@ -20,7 +20,7 @@ use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_ts_string_value,
     strip_ts_template_value,
 };
-use crate::calls::{attach_to_enclosing_span, new_expression_call};
+use crate::calls::{attach_to_enclosing_span, new_expression_call, CallSiteIndex};
 use crate::framework_helpers::{enclosing_class, node_span, Span};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
@@ -182,6 +182,7 @@ pub fn extract_ts_calls_and_path_literals(
     source: &[u8],
     nodes: &mut [RawNode],
     locals: &LocalTypes,
+    call_sites: &mut CallSiteIndex,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
@@ -191,7 +192,9 @@ pub fn extract_ts_calls_and_path_literals(
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = ts_callee_name(n, source, locals, nodes) {
-                    attach_to_enclosing_span(node_span(&n), callee, nodes);
+                    if let Some(site) = attach_to_enclosing_span(node_span(&n), callee, nodes) {
+                        call_sites.insert(n.id(), site);
+                    }
                 }
             }
             "new_expression" => {

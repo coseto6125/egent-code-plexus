@@ -398,14 +398,23 @@ pub fn remove_self_binary_at(exe: &Path) -> Result<SelfDeleteOutcome, EcpError> 
         use std::os::windows::process::CommandExt;
         // DETACHED_PROCESS | CREATE_NO_WINDOW: survive parent exit, no console.
         const FLAGS: u32 = 0x0000_0008 | 0x0800_0000;
+        // Null stdio: an inherited handle keeps the caller's pipe open for the
+        // whole wait, so a caller reading our output blocks until the delete.
+        // `ping` waits instead of `timeout`, which exits at once when stdin is
+        // redirected and would run `del` while this process still holds the file.
+        // `raw_arg`: `arg` escapes quotes as `\"`, which cmd reads literally.
+        // cmd /c strips the outer pair of quotes around the whole command.
+        // The path travels in an environment variable: cmd expands `%NAME%`
+        // inside quotes too, so a path segment like `%USERNAME%` written
+        // into the command would make `del` target another path. cmd expands
+        // the variable once and never re-expands its value.
         std::process::Command::new("cmd")
-            .args([
-                "/c",
-                &format!(
-                    "timeout /t 3 /nobreak >nul 2>&1 & del /f /q \"{}\"",
-                    exe.display()
-                ),
-            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .env("ECP_SELF_DELETE_PATH", exe)
+            .arg("/c")
+            .raw_arg("\"ping -n 4 127.0.0.1 >nul 2>&1 & del /f /q \"%ECP_SELF_DELETE_PATH%\"\"")
             .creation_flags(FLAGS)
             .spawn()
             .map_err(|e| EcpError::Output(format!("schedule self-delete: {e}")))?;

@@ -19,6 +19,7 @@ ecp inspect --name <SYMBOL_NAME> [--repo <PATH>]
 - `contained_methods` / `contained_properties` — for Class / Struct / Trait / Interface / Enum.
 - `contained_variants` — for `Enum`: the EnumVariant children with their `name`, `filePath`, `line`.
 - `outgoing` / `incoming` — edges keyed by RelType (`calls`, `implements`, `defines`, `decorates`, `opens_tx_scope`, `fetches`, ...). Heuristic edges land in `heuristic_outgoing` / `heuristic_incoming` with a `heuristic_note` flag.
+  A `Calls` entry in `incoming` that reached a class through its constructor carries `viaConstructor` (the constructor's name); only `Calls` edges are read through a constructor.
 
 ## Best For
 - Understanding a function's implementation without leaving the terminal.
