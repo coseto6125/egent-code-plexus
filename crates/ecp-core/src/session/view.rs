@@ -21,6 +21,10 @@
 //!   the constructor fallback onto a Class / Struct's one constructor or the
 //!   type) against the archived `name_index` (O(log N) per lookup, no
 //!   allocation proportional to the graph).
+//! - **closure references** — lexical `References` from each enclosing
+//!   callable to its anonymous closures, using the full index's span rule.
+//!   The merge replaces only base references with `closure:lexical_reference`
+//!   from dirty sources, preserving every other References reason.
 //!
 //! ## The masking invariant: mask ⊆ rebuild
 //!
@@ -52,7 +56,9 @@
 use crate::analyzer::rust_paths::{
     is_rust_source, is_rust_target_root, rust_module_dir, rust_module_path_base,
 };
-use crate::analyzer::types::{owner_key, CallSite, RawImport};
+use crate::analyzer::types::{
+    innermost_enclosing, owner_key, CallSite, RawImport, CLOSURE_REFERENCE_REASON,
+};
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -67,6 +73,9 @@ pub struct OverlaySymbol {
     /// 1-based, matching `Node::start_line` conventions.
     pub start_line: u32,
     pub end_line: u32,
+    /// 0-based columns from the fragment, preserving same-line containment.
+    pub start_column: u32,
+    pub end_column: u32,
     /// `RawNode.calls` of this symbol: callee short names, some encoded as a
     /// [`CallSite`] (read them through [`CallSite::parse`]).
     pub calls: Vec<String>,
@@ -105,6 +114,7 @@ pub struct ViewEdge {
     pub target: u32,
     pub rel_type: RelType,
     pub confidence: f32,
+    pub reason: &'static str,
 }
 
 /// Tier confidences mirroring index-time Pass-2 resolution.
@@ -211,7 +221,7 @@ impl OverlayView {
 
         let type_ctors = virtual_constructors(files, &nodes, base_len);
 
-        // ── overlay Calls edges ───────────────────────────────────────────
+        // ── overlay Calls and lexical closure References ──────────────────
         // Inner scope: the name maps borrow `nodes`' strings and must drop
         // before `nodes` moves into Self.
         let mut edges: Vec<ViewEdge> = Vec::new();
@@ -269,6 +279,13 @@ impl OverlayView {
                 })
                 .then(|| RustModules::new(graph, files));
             for (file_ord, file) in files.iter().enumerate() {
+                let first = (virt_cursor - base_len) as usize;
+                emit_closure_references(
+                    file,
+                    &nodes[first..first + file.symbols.len()],
+                    virt_cursor,
+                    &mut push_edge,
+                );
                 let chain = rust_modules
                     .as_ref()
                     .and_then(|modules| modules.caller_chain(&file.rel_path));
@@ -333,6 +350,7 @@ impl OverlayView {
                                 target,
                                 rel_type: RelType::Calls,
                                 confidence,
+                                reason: super::merged::OVERLAY_EDGE_REASON,
                             });
                         }
                     }
@@ -387,6 +405,11 @@ impl OverlayView {
         // REBUILT_RELS: extend alongside resolve_callee when fragments gain
         // inputs for more rel types (e.g. field_reads → ReadsField).
         matches!(rel, RelType::Calls) && self.dirty_base.contains(&base_idx)
+    }
+
+    /// Only lexical closure references are rebuilt, not References generally.
+    pub(crate) fn rebuilds_closure_references(&self, source: u32) -> bool {
+        self.dirty_base.contains(&source)
     }
 
     /// All overlay edges; index `i` here is overlay edge index `i`, addressed
@@ -579,6 +602,58 @@ fn sole_constructor(ctors: &[u32], uid: impl Fn(u32) -> u64) -> Option<u32> {
     let (&first, rest) = ctors.split_first()?;
     let first_uid = uid(first);
     rest.iter().all(|&c| uid(c) == first_uid).then_some(first)
+}
+
+/// Mirror full indexing's lexical references and first-UID survivor rule.
+fn emit_closure_references(
+    file: &OverlayFileInput,
+    nodes: &[ViewNode],
+    start: u32,
+    push: &mut impl FnMut(ViewEdge),
+) {
+    let anonymous =
+        |s: &OverlaySymbol| s.kind == NodeKind::Function && s.name.starts_with("<anonymous:");
+    if !file.symbols.iter().any(anonymous) {
+        return;
+    }
+    let functions: Vec<_> = file
+        .symbols
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| {
+            matches!(
+                s.kind,
+                NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+            )
+        })
+        .collect();
+    let spans: Vec<_> = functions
+        .iter()
+        .map(|(_, s)| (s.start_line, s.start_column, s.end_line, s.end_column))
+        .collect();
+    let parents = innermost_enclosing(&spans);
+    // Raw overlay nodes retain overloads. Full indexing tombstones later
+    // identical UIDs, skips closure tombstones, and redirects parent tombstones.
+    let mut live_by_uid = FxHashMap::default();
+    for (offset, node) in nodes.iter().enumerate() {
+        live_by_uid.entry(node.uid).or_insert(offset);
+    }
+    for (i, &(offset, symbol)) in functions.iter().enumerate() {
+        if !anonymous(symbol) || live_by_uid[&nodes[offset].uid] != offset {
+            continue;
+        }
+        let Some(parent) = parents[i] else {
+            continue;
+        };
+        let source = live_by_uid[&nodes[functions[parent].0].uid];
+        push(ViewEdge {
+            source: start + source as u32,
+            target: start + offset as u32,
+            rel_type: RelType::References,
+            confidence: 1.0,
+            reason: CLOSURE_REFERENCE_REASON,
+        });
+    }
 }
 
 /// Overlay symbols of one kind family (`kind`), by name: the Tier-1
@@ -1113,8 +1188,36 @@ mod tests {
             owner_class: None,
             start_line: 1,
             end_line: 2,
+            start_column: 0,
+            end_column: 0,
             calls: calls.iter().map(|c| c.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn test_build_closure_uid_collisions_use_first_live_nodes() {
+        let bytes = GraphFixture::new().into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let mut parent = sym("enclosing", &[]);
+        parent.end_line = 4;
+        let mut overload = parent.clone();
+        overload.start_line = 5;
+        overload.end_line = 9;
+        let mut closure = sym("<anonymous:5:2>", &[]);
+        closure.start_line = 6;
+        closure.end_line = 7;
+        let file = OverlayFileInput {
+            rel_path: "App.java".into(),
+            symbols: vec![parent, overload, closure.clone(), closure],
+            imports: vec![],
+        };
+        let view = OverlayView::build(graph, &[file]).unwrap();
+        let references: Vec<_> = view
+            .edges()
+            .iter()
+            .map(|edge| (edge.source, edge.target, edge.rel_type, edge.confidence))
+            .collect();
+        assert_eq!(references, vec![(0, 2, RelType::References, 1.0)]);
     }
 
     fn dirty_input() -> OverlayFileInput {
@@ -1356,6 +1459,8 @@ mod tests {
             owner_class: Some("Multi".to_string()),
             start_line: line,
             end_line: line + 1,
+            start_column: 0,
+            end_column: 0,
             calls: vec![],
         };
         let multi = OverlayFileInput {
@@ -1365,6 +1470,8 @@ mod tests {
                     kind: NodeKind::Class,
                     owner_class: None,
                     end_line: 9,
+                    start_column: 0,
+                    end_column: 0,
                     ..ctor(1)
                 },
                 ctor(2),
@@ -1440,6 +1547,8 @@ mod tests {
             owner_class: Some(owner.to_string()),
             start_line: line,
             end_line: line + 1,
+            start_column: 0,
+            end_column: 0,
             calls: vec![],
         };
         let outer = OverlayFileInput {

@@ -1622,7 +1622,7 @@ fn callable_parents(graph: &LocalGraph) -> (Vec<(usize, &RawNode)>, Vec<Option<u
         })
         .collect();
     let spans: Vec<_> = functions.iter().map(|(_, node)| node.span).collect();
-    let parents = crate::framework_helpers::innermost_enclosing(&spans);
+    let parents = ecp_core::analyzer::types::innermost_enclosing(&spans);
     (functions, parents)
 }
 
@@ -1636,7 +1636,7 @@ fn emit_closure_references(
     string_pool: &mut StringPool,
     edges: &mut Vec<Edge>,
 ) {
-    let reason = string_pool.add("closure:lexical_reference");
+    let reason = string_pool.add(ecp_core::analyzer::types::CLOSURE_REFERENCE_REASON);
     let mut start_index = 0u32;
     for graph in local_graphs {
         emit_file_closure_references(graph, start_index, nodes, reason, edges);

@@ -1976,6 +1976,8 @@ mod tests {
                     owner_class: None,
                     start_line: 1,
                     end_line: 2,
+                    start_column: 0,
+                    end_column: 0,
                     calls: vec![],
                 }],
                 imports: vec![],

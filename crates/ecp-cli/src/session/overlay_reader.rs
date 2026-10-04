@@ -259,6 +259,8 @@ pub fn load_view_inputs(
                     // span rows are 0-based; Node line conventions are 1-based.
                     start_line: s.span.0.to_native() + 1,
                     end_line: s.span.2.to_native() + 1,
+                    start_column: s.span.1.to_native(),
+                    end_column: s.span.3.to_native(),
                     calls: s.calls.iter().map(|c| c.as_str().to_owned()).collect(),
                 })
                 .collect(),
