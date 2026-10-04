@@ -92,10 +92,10 @@ pub fn resolve_member_engines(
                 tracing::warn!("group: no graph.bin found for '{member}'");
                 None
             })?;
-            let worktree_root = crate::git_cache::worktree_root_from_common_dir(
-                std::path::Path::new(&resolved.common_dir),
-            );
-            let engine = match crate::auto_ensure::load_ensured(&graph_path, worktree_root) {
+            let worktree_root = crate::git_cache::worktree_root_for_repo(std::path::Path::new(
+                &resolved.common_dir,
+            ));
+            let engine = match crate::auto_ensure::load_ensured(&graph_path, &worktree_root) {
                 Ok(e) => e,
                 Err(e) => {
                     tracing::warn!("group: failed to load engine for '{member}': {e}");

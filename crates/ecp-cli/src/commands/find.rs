@@ -1693,14 +1693,11 @@ fn resolve_targets(selector: Option<&str>) -> Result<Vec<RepoTarget>, EcpError> 
             .first()
             .cloned()
             .unwrap_or_else(|| dir_name.clone());
-        // worktree_root for ensure_fresh = the repo's source tree, i.e. the
-        // parent of its `<worktree>/.git` common_dir. The fingerprint (ecp-
-        // version) check ignores it; the incremental git-status check uses it.
-        let worktree_root = crate::git_cache::worktree_root_from_common_dir(std::path::Path::new(
-            &alias.common_dir,
-        ))
-        .to_string_lossy()
-        .into_owned();
+        // Freshness uses the caller's checkout when this is its repository.
+        let worktree_root =
+            crate::git_cache::worktree_root_for_repo(std::path::Path::new(&alias.common_dir))
+                .to_string_lossy()
+                .into_owned();
         targets.push(RepoTarget {
             display_name,
             graph_path: graph_path.to_string_lossy().into_owned(),

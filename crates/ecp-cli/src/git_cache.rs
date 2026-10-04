@@ -211,6 +211,21 @@ pub fn worktree_root_from_common_dir(common_dir: &Path) -> &Path {
     dunce::simplified(common_dir.parent().unwrap_or(common_dir))
 }
 
+/// Registry identity is shared, but source files and HEAD belong to a worktree.
+/// Prefer the caller's cached layout only for the matching repository; other
+/// group members retain the main-checkout fallback without spawning git.
+pub(crate) fn worktree_root_for_repo(common_dir: &Path) -> PathBuf {
+    if let Some((root, _, caller_common)) = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| git_layout(&cwd))
+    {
+        if canon_key(&caller_common) == canon_key(common_dir) {
+            return dunce::simplified(&root).to_path_buf();
+        }
+    }
+    worktree_root_from_common_dir(common_dir).to_path_buf()
+}
+
 fn read_git_dir(cwd: &Path) -> io::Result<PathBuf> {
     rev_parse_path(cwd, "--git-dir")
 }

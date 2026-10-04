@@ -194,21 +194,17 @@ fn try_load_engine(r: &crate::repo_selector::ResolvedRepo) -> Option<Engine> {
 }
 
 /// Freshness check: compare the latest graph.bin mtime to newest source file.
-/// Uses `common_dir` as a proxy for the worktree root (parent of `.git`).
+/// The registry's common directory identifies the repo, not the caller's tree.
 fn fetch_freshness(r: &crate::repo_selector::ResolvedRepo, detailed: bool) -> Value {
     use crate::auto_ensure::{ensure_index, EnsureResult};
 
     let Some(graph_path) = latest_graph_path(r) else {
         return json!({ "status": "missing" });
     };
-    // Derive worktree root from common_dir (parent of `.git`).
-    // Via the shared helper so a Windows verbatim `\\?\` prefix in the stored
-    // common_dir is stripped before it reaches `ensure_index`'s WalkBuilder
-    // (else os error 267 on Windows — see git_cache::worktree_root_from_common_dir).
     let common = Path::new(&r.common_dir);
-    let worktree = crate::git_cache::worktree_root_from_common_dir(common);
+    let worktree = crate::git_cache::worktree_root_for_repo(common);
 
-    let mut out = match ensure_index(&graph_path, worktree) {
+    let mut out = match ensure_index(&graph_path, &worktree) {
         Ok(EnsureResult::Ready) => json!({ "status": "ready" }),
         Ok(EnsureResult::Stale { age_seconds, .. }) => {
             json!({ "status": "stale", "age_seconds": age_seconds })
@@ -223,7 +219,7 @@ fn fetch_freshness(r: &crate::repo_selector::ResolvedRepo, detailed: bool) -> Va
 
     map.insert(
         "current_head_short".into(),
-        match crate::git::safe_exec::head_short(worktree) {
+        match crate::git::safe_exec::head_short(&worktree) {
             Some(sha) => json!(sha),
             None => Value::Null,
         },
