@@ -450,6 +450,31 @@ impl SymbolTable {
             .find(|&id| predicate(self.node_kinds[id as usize]))
     }
 
+    /// [`Self::lookup_in_file_with_kind`] for the bare name of a call site.
+    /// Method syntax narrows the result, not the field, as in
+    /// [`Self::lookup_global`]: a same-named free fn in the file makes the
+    /// name ambiguous, so `Path::new(".").join(..)` on a std type never binds
+    /// the file's `Local::join`.
+    pub fn lookup_call_in_file(
+        &self,
+        file_path: &str,
+        node_name: &str,
+        target: ResolveTarget,
+    ) -> Option<u32> {
+        if target == ResolveTarget::Method {
+            let ids = self.file_scoped.get(file_path)?.get(node_name)?;
+            let callable = ResolveTarget::Callable.kind_predicate();
+            let method = target.kind_predicate();
+            if ids.iter().any(|&id| {
+                let kind = self.node_kinds[id as usize];
+                callable(kind) && !method(kind)
+            }) {
+                return None;
+            }
+        }
+        self.lookup_in_file_with_kind(file_path, node_name, target)
+    }
+
     /// Tier-3 global lookup: kind-filtered same-name candidates through the
     /// shared barrier filter, [`pick_global`].
     pub fn lookup_global(

@@ -748,9 +748,12 @@ impl LanguageProvider for TypeScriptProvider {
 
         // Path-shape filter for generic Route emission — see
         // `docs/superpowers/specs/2026-05-17-route-precision-design.md`.
-        // No framework-presence gate here: the parser only captures ES
-        // `import` statements, so gating would regress Node.js code using
-        // `require('express')`. The path-shape predicate alone removes
+        // No framework-presence gate here: imports record ES `import`
+        // statements and top-level `require('lib')` bindings only, so a
+        // router built by `require('express').Router()`, a `require` inside
+        // a function, or an app handed in from another module leaves no
+        // import and gating would drop real routes. The path-shape
+        // predicate alone removes
         // the dominant FP class (Map/headers/cache `.get("key")`).
         routes.retain_mut(|r| match crate::route_detector::clean_route_path(&r.path) {
             Some(clean) => {

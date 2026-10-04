@@ -256,60 +256,125 @@
 
 ;; CommonJS `require` with a string-literal argument (`require(expr)` stays a
 ;; blind spot). Each form emits the RawImport its ES import twin emits; `\S`
-;; rejects an all-whitespace specifier.
+;; rejects an all-whitespace specifier. Imports are file-wide, so only a
+;; top-level declaration (a direct child of `program`, or of a top-level
+;; `export`) binds: a `require` inside a function is scoped to that function,
+;; and there `require` may be a parameter rather than the loader.
 ;; `const m = require('lib')` ≡ `import * as m from 'lib'`
-(variable_declarator
-  name: (identifier) @import.alias
-  value: (call_expression
-      function: (identifier) @_require
-      arguments: (arguments . (string (string_fragment) @import.source) .))
+(program
+  [
+    (_
+      (variable_declarator
+        name: (identifier) @import.alias
+        value: (call_expression
+            function: (identifier) @_require
+            arguments: (arguments . (string (string_fragment) @import.source) .))) @import.namespace)
+    (export_statement
+      (_
+        (variable_declarator
+          name: (identifier) @import.alias
+          value: (call_expression
+              function: (identifier) @_require
+              arguments: (arguments . (string (string_fragment) @import.source) .))) @import.namespace))
+  ]
   (#eq? @_require "require")
-  (#match? @import.source "\\S")) @import.namespace
+  (#match? @import.source "\\S"))
 
 ;; `const { f } = require('lib')` ≡ `import { f } from 'lib'`
-(variable_declarator
-  name: (object_pattern (shorthand_property_identifier_pattern) @import.name)
-  value: (call_expression
-      function: (identifier) @_require
-      arguments: (arguments . (string (string_fragment) @import.source) .))
+(program
+  [
+    (_
+      (variable_declarator
+        name: (object_pattern (shorthand_property_identifier_pattern) @import.name)
+        value: (call_expression
+            function: (identifier) @_require
+            arguments: (arguments . (string (string_fragment) @import.source) .))) @import)
+    (export_statement
+      (_
+        (variable_declarator
+          name: (object_pattern (shorthand_property_identifier_pattern) @import.name)
+          value: (call_expression
+              function: (identifier) @_require
+              arguments: (arguments . (string (string_fragment) @import.source) .))) @import))
+  ]
   (#eq? @_require "require")
-  (#match? @import.source "\\S")) @import
+  (#match? @import.source "\\S"))
 
 ;; `const { f: g } = require('lib')` ≡ `import { f as g } from 'lib'`
-(variable_declarator
-  name: (object_pattern
-    (pair_pattern
-      key: (property_identifier) @import.name
-      value: (identifier) @import.alias))
-  value: (call_expression
-      function: (identifier) @_require
-      arguments: (arguments . (string (string_fragment) @import.source) .))
+(program
+  [
+    (_
+      (variable_declarator
+        name: (object_pattern
+          (pair_pattern
+            key: (property_identifier) @import.name
+            value: (identifier) @import.alias))
+        value: (call_expression
+            function: (identifier) @_require
+            arguments: (arguments . (string (string_fragment) @import.source) .))) @import)
+    (export_statement
+      (_
+        (variable_declarator
+          name: (object_pattern
+            (pair_pattern
+              key: (property_identifier) @import.name
+              value: (identifier) @import.alias))
+          value: (call_expression
+              function: (identifier) @_require
+              arguments: (arguments . (string (string_fragment) @import.source) .))) @import))
+  ]
   (#eq? @_require "require")
-  (#match? @import.source "\\S")) @import
+  (#match? @import.source "\\S"))
 
 ;; `const f = require('lib').f` ≡ `import { f } from 'lib'`
-(variable_declarator
-  name: (identifier) @_local
-  value: (member_expression
-    object: (call_expression
-        function: (identifier) @_require
-        arguments: (arguments . (string (string_fragment) @import.source) .))
-    property: (property_identifier) @import.name)
+(program
+  [
+    (_
+      (variable_declarator
+        name: (identifier) @_local
+        value: (member_expression
+          object: (call_expression
+              function: (identifier) @_require
+              arguments: (arguments . (string (string_fragment) @import.source) .))
+          property: (property_identifier) @import.name)) @import)
+    (export_statement
+      (_
+        (variable_declarator
+          name: (identifier) @_local
+          value: (member_expression
+            object: (call_expression
+                function: (identifier) @_require
+                arguments: (arguments . (string (string_fragment) @import.source) .))
+            property: (property_identifier) @import.name)) @import))
+  ]
   (#eq? @_require "require")
   (#eq? @_local @import.name)
-  (#match? @import.source "\\S")) @import
+  (#match? @import.source "\\S"))
 
 ;; `const g = require('lib').f` ≡ `import { f as g } from 'lib'`
-(variable_declarator
-  name: (identifier) @import.alias
-  value: (member_expression
-    object: (call_expression
-        function: (identifier) @_require
-        arguments: (arguments . (string (string_fragment) @import.source) .))
-    property: (property_identifier) @import.name)
+(program
+  [
+    (_
+      (variable_declarator
+        name: (identifier) @import.alias
+        value: (member_expression
+          object: (call_expression
+              function: (identifier) @_require
+              arguments: (arguments . (string (string_fragment) @import.source) .))
+          property: (property_identifier) @import.name)) @import)
+    (export_statement
+      (_
+        (variable_declarator
+          name: (identifier) @import.alias
+          value: (member_expression
+            object: (call_expression
+                function: (identifier) @_require
+                arguments: (arguments . (string (string_fragment) @import.source) .))
+            property: (property_identifier) @import.name)) @import))
+  ]
   (#eq? @_require "require")
   (#not-eq? @import.alias @import.name)
-  (#match? @import.source "\\S")) @import
+  (#match? @import.source "\\S"))
 
 ;; Type aliases
 (type_alias_declaration

@@ -323,11 +323,16 @@ fn python_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Opt
     }
 }
 
-/// `super()` / `super(C, self)`: the receiver of a call through the base
-/// classes. The resolver binds it from the caller class's heritage.
+/// Zero-argument `super()`: the receiver of a call through the caller
+/// class's bases, which the resolver binds from its heritage. `super(C,
+/// self)` starts the lookup after `C`, not after the caller class, so it
+/// stays an untyped member call.
 fn is_super_call(receiver: Node<'_>, source: &[u8]) -> bool {
     receiver.kind() == "call"
         && receiver
             .child_by_field_name("function")
             .is_some_and(|f| f.kind() == "identifier" && f.utf8_text(source) == Ok("super"))
+        && receiver
+            .child_by_field_name("arguments")
+            .is_some_and(|args| args.named_child_count() == 0)
 }

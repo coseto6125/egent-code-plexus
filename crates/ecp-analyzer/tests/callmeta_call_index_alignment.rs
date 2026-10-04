@@ -1,10 +1,11 @@
 //! A `RawCallMeta` names its call by `(caller_span, call_index)`, an index into
-//! the caller's `RawNode.calls`. The indirect-dispatch detectors derive that
-//! index by counting call nodes in their own walk, so it only lands on the
-//! right Calls edge while both walks see the same calls in the same order.
-//! Each case puts the flagged call between direct calls (and after a
-//! construction, which `RawNode.calls` records but a `call_expression`
-//! counter does not see) and checks the meta points at the flagged call.
+//! the caller's `RawNode.calls`. The indirect-dispatch detectors once derived
+//! that index by counting call nodes in their own walk, so it landed on the
+//! right Calls edge only while both walks saw the same calls in the same
+//! order. These cases pin the index against that drift: each puts the
+//! flagged call between direct calls (and after a construction, which
+//! `RawNode.calls` records but a `call_expression` counter did not see) and
+//! checks the meta points at the flagged call.
 
 use ecp_analyzer::c::parser::CProvider;
 use ecp_analyzer::cpp::parser::CppProvider;

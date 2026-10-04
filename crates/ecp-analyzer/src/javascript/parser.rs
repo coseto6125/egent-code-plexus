@@ -655,11 +655,12 @@ impl LanguageProvider for JavaScriptProvider {
         let has_express = has_import_from(&imports, EXPRESS_REQUIRED);
         let has_hapi = has_import_from(&imports, HAPI_REQUIRED);
 
-        // Path-shape filter for generic Route emission. The JS parser
-        // captures imports via ES `import` statements only — CommonJS
-        // `require()` is not tracked, so a framework-presence gate would
-        // regress Node.js codebases that use `require('express')`. The
-        // path-shape predicate alone removes the dominant FP class
+        // Path-shape filter for generic Route emission. Imports record ES
+        // `import` statements and top-level `require('lib')` bindings only:
+        // a router built by `require('express').Router()`, a `require`
+        // inside a function, or an app handed in from another module
+        // leaves no import, so a framework-presence gate would drop real
+        // Node.js routes. The path-shape predicate alone removes the dominant FP class
         // (`Map.get("k")` / `headers.get("x-trace")` / `cache.get(id)`)
         // because none of those literals start with `/`. Spec:
         // `docs/superpowers/specs/2026-05-17-route-precision-design.md`.

@@ -169,10 +169,11 @@ pub struct RustWorkspaceModTree {
 
 /// One Cargo target's modules, `mod_path → repo-relative file`.
 struct TargetTree {
-    /// Rooted at a bin entry beside the crate's primary entry
-    /// (`src/main.rs` next to `src/lib.rs`, `src/bin/*.rs`), whose modules
-    /// `file_to_crate` does not cover.
-    is_bin: bool,
+    /// Set for a bin entry beside the crate's primary entry (`src/main.rs`
+    /// next to `src/lib.rs`, `src/bin/*.rs`), whose modules `file_to_crate`
+    /// does not cover: the bin's own module tree and `pub use` map, keyed
+    /// like a crate's, so its re-export chains can be followed.
+    bin_scope: Option<(ModTree, ReExportMap)>,
     modules: FxHashMap<Vec<String>, String>,
 }
 
@@ -216,9 +217,11 @@ impl RustWorkspaceModTree {
                 continue;
             };
             let (tree, reexports) = build_mod_tree_and_reexports(&entry_path);
-            out.add_target(&tree, false);
+            out.add_target(&tree);
             for bin_root in bin_roots(&crate_dir, &entry_path) {
-                out.add_target(&build_mod_tree_and_reexports(&bin_root).0, true);
+                let bin_scope = build_mod_tree_and_reexports(&bin_root);
+                let index = out.add_target(&bin_scope.0);
+                out.targets[index].bin_scope = Some(bin_scope);
             }
             // Code names a crate by its lib target: the `[lib] name`, else the
             // package name with `-` → `_`. That key wins every collision; the
@@ -274,7 +277,7 @@ impl RustWorkspaceModTree {
         }
         let head = segs[0];
         if matches!(head, "crate" | "self" | "super") {
-            if let Some(resolved) = self.resolve_in_bin_target(caller_file, &segs) {
+            if let Some(resolved) = self.resolve_in_bin_target(caller_file, &segs, workspace_root) {
                 return Some(resolved);
             }
         }
@@ -377,26 +380,37 @@ impl RustWorkspaceModTree {
     /// [`Self::resolve_fqn`] for an anchored path from a file that only one
     /// bin target declares. `file_to_crate` holds the primary tree alone, so
     /// without this `crate::` there would name the lib's root. The bin's
-    /// `pub use` chains are not followed.
-    fn resolve_in_bin_target(&self, caller_file: &str, segs: &[&str]) -> Option<ResolvedFqn> {
+    /// `pub use` chains are followed like [`Self::resolve_in_crate`] follows
+    /// a crate's.
+    fn resolve_in_bin_target(
+        &self,
+        caller_file: &str,
+        segs: &[&str],
+        workspace_root: &Path,
+    ) -> Option<ResolvedFqn> {
         let [(target, mod_path)] = self.file_targets.get(caller_file)?.as_slice() else {
             return None;
         };
         let tree = &self.targets[*target];
-        if !tree.is_bin {
-            return None;
-        }
+        let (bin_tree, bin_reexports) = tree.bin_scope.as_ref()?;
         let combined = anchored_mod_path(mod_path, segs)?;
         (0..combined.len()).rev().find_map(|prefix_len| {
-            let file = tree.modules.get(&combined[..prefix_len])?;
-            Some(ResolvedFqn {
+            let prefix = &combined[..prefix_len];
+            let file = tree.modules.get(prefix)?;
+            let item_name = &combined[prefix_len];
+            let chained = bin_tree.get(prefix).and_then(|abs| {
+                self.follow_chain_in((bin_tree, bin_reexports), abs, item_name, workspace_root, 0)
+            });
+            Some(chained.unwrap_or_else(|| ResolvedFqn {
                 file: file.clone(),
-                item_name: combined[prefix_len].clone(),
-            })
+                item_name: item_name.clone(),
+            }))
         })
     }
 
-    fn add_target(&mut self, tree: &ModTree, is_bin: bool) {
+    /// Register `tree`'s modules as one Cargo target; returns its index in
+    /// `targets`.
+    fn add_target(&mut self, tree: &ModTree) -> usize {
         let index = self.targets.len();
         let mut modules = FxHashMap::default();
         for (mod_path, file) in tree {
@@ -409,7 +423,11 @@ impl RustWorkspaceModTree {
                 .push((index, mod_path.clone()));
             modules.insert(mod_path.clone(), rel);
         }
-        self.targets.push(TargetTree { is_bin, modules });
+        self.targets.push(TargetTree {
+            bin_scope: None,
+            modules,
+        });
+        index
     }
 
     /// True when `path` (`<crate_name>::a::b`) names a module of a
@@ -518,12 +536,28 @@ impl RustWorkspaceModTree {
         workspace_root: &Path,
         depth: u8,
     ) -> Option<ResolvedFqn> {
+        let (_crate_dir, _cdir_str, tree, reexports) = self.crates.get(crate_name)?;
+        self.follow_chain_in((tree, reexports), file, item_name, workspace_root, depth)
+    }
+
+    /// [`Self::follow_pub_use_chain`] within `scope`, the module tree and
+    /// `pub use` map of the target that holds `file`: a crate's, or a bin
+    /// target's, whose own `crate::` paths stay in that bin. A prefix that
+    /// names another workspace crate moves to that crate's scope.
+    fn follow_chain_in(
+        &self,
+        scope: (&ModTree, &ReExportMap),
+        file: &Path,
+        item_name: &str,
+        workspace_root: &Path,
+        depth: u8,
+    ) -> Option<ResolvedFqn> {
         const MAX_DEPTH: u8 = 16;
         if depth >= MAX_DEPTH || item_name.is_empty() {
             return None;
         }
 
-        let (_crate_dir, _cdir_str, _tree, reexports) = self.crates.get(crate_name)?;
+        let (_tree, reexports) = scope;
 
         // Try exact-name lookup first, then glob wildcard lookup.
         let file_buf = file.to_path_buf();
@@ -549,30 +583,11 @@ impl RustWorkspaceModTree {
         // If it starts with "self" → use the containing mod's path as base.
         // If it starts with "super" → go one level up from containing mod.
         // Otherwise → the prefix is relative to the containing module; prepend it.
-        let mut new_combined: Vec<String>;
-
-        let (target_crate, segs_start): (&str, usize) =
-            if entry.path_prefix.first().map(String::as_str) == Some("crate") {
-                (crate_name, 1)
-            } else if entry.path_prefix.first().map(String::as_str) == Some("self") {
-                // "self" is equivalent to "crate" + the containing mod path.
-                new_combined = Vec::with_capacity(
-                    entry.containing_mod_path.len() + entry.path_prefix.len() + 1,
-                );
-                new_combined.extend_from_slice(&entry.containing_mod_path);
-                new_combined.extend(entry.path_prefix[1..].iter().cloned());
-                new_combined.push(target_item.to_string());
-                let (_cd, _cs, tree2, _re2) = self.crates.get(crate_name)?;
-                return self.resolve_chain_in_tree(
-                    crate_name,
-                    tree2,
-                    file,
-                    item_name,
-                    &new_combined,
-                    workspace_root,
-                    depth,
-                );
-            } else if entry.path_prefix.first().map(String::as_str) == Some("super") {
+        let first = entry.path_prefix.first().map(String::as_str);
+        let (base, rest): (&[String], &[String]) = match first {
+            Some("crate") => (&entry.path_prefix[..0], &entry.path_prefix[1..]),
+            Some("self") => (&entry.containing_mod_path[..], &entry.path_prefix[1..]),
+            Some("super") => {
                 // Each leading "super" removes one containing mod path segment.
                 let super_count = entry
                     .path_prefix
@@ -580,79 +595,57 @@ impl RustWorkspaceModTree {
                     .take_while(|s| s.as_str() == "super")
                     .count();
                 let base_len = entry.containing_mod_path.len().saturating_sub(super_count);
-                new_combined = Vec::with_capacity(base_len + entry.path_prefix.len() + 1);
-                new_combined.extend_from_slice(&entry.containing_mod_path[..base_len]);
-                new_combined.extend(entry.path_prefix[super_count..].iter().cloned());
-                new_combined.push(target_item.to_string());
-                let (_cd, _cs, tree2, _re2) = self.crates.get(crate_name)?;
+                (
+                    &entry.containing_mod_path[..base_len],
+                    &entry.path_prefix[super_count..],
+                )
+            }
+            Some(other) if self.crates.contains_key(other) => {
+                // Another workspace crate's name as prefix.
+                let (_cd, _cs, tree2, reexports2) = self.crates.get(other)?;
+                let new_combined: Vec<String> = entry.path_prefix[1..]
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(target_item.to_string()))
+                    .collect();
                 return self.resolve_chain_in_tree(
-                    crate_name,
-                    tree2,
+                    (tree2, reexports2),
                     file,
                     item_name,
                     &new_combined,
                     workspace_root,
                     depth,
                 );
-            } else if let Some(first) = entry.path_prefix.first() {
-                if self.crates.contains_key(first.as_str()) {
-                    // External crate name as prefix.
-                    (first.as_str(), 1)
-                } else {
-                    // Relative to containing module: prepend mod path.
-                    new_combined = Vec::with_capacity(
-                        entry.containing_mod_path.len() + entry.path_prefix.len() + 1,
-                    );
-                    new_combined.extend_from_slice(&entry.containing_mod_path);
-                    new_combined.extend(entry.path_prefix.iter().cloned());
-                    new_combined.push(target_item.to_string());
-                    let (_cd, _cs, tree2, _re2) = self.crates.get(crate_name)?;
-                    return self.resolve_chain_in_tree(
-                        crate_name,
-                        tree2,
-                        file,
-                        item_name,
-                        &new_combined,
-                        workspace_root,
-                        depth,
-                    );
-                }
-            } else {
-                (crate_name, 0)
-            };
-
-        new_combined = Vec::with_capacity(entry.path_prefix.len() + 1);
-        new_combined.extend(entry.path_prefix[segs_start..].iter().cloned());
-        new_combined.push(target_item.to_string());
-
-        let (_crate_dir2, _cdir_str2, tree2, _reexports2) = self.crates.get(target_crate)?;
-        self.resolve_chain_in_tree(
-            target_crate,
-            tree2,
-            file,
-            item_name,
-            &new_combined,
-            workspace_root,
-            depth,
-        )
+            }
+            // Relative to containing module: prepend mod path.
+            Some(_) => (&entry.containing_mod_path[..], &entry.path_prefix[..]),
+            None => (&entry.path_prefix[..], &entry.path_prefix[..]),
+        };
+        let new_combined: Vec<String> = base
+            .iter()
+            .chain(rest)
+            .cloned()
+            .chain(std::iter::once(target_item.to_string()))
+            .collect();
+        self.resolve_chain_in_tree(scope, file, item_name, &new_combined, workspace_root, depth)
     }
 
-    /// Inner helper used by [`follow_pub_use_chain`] to look up `new_combined`
-    /// in `tree2` and either recurse or return a terminal `ResolvedFqn`.
+    /// Inner helper used by [`Self::follow_chain_in`] to look up
+    /// `new_combined` in `scope`'s tree and either recurse or return a
+    /// terminal `ResolvedFqn`.
     ///
-    /// Returns `None` if the combined path doesn't match any entry in `tree2`
-    /// or if a direct cycle is detected.
-    #[allow(clippy::too_many_arguments)]
+    /// Returns `None` if the combined path doesn't match any entry in the
+    /// tree or if a direct cycle is detected.
     fn resolve_chain_in_tree(
         &self,
-        target_crate: &str,
-        tree2: &ModTree,
+        scope: (&ModTree, &ReExportMap),
         original_file: &Path,
         original_item: &str,
         new_combined: &[String],
         workspace_root: &Path,
         depth: u8,
     ) -> Option<ResolvedFqn> {
+        let (tree2, _reexports) = scope;
         for prefix_len in (0..new_combined.len()).rev() {
             let key: Vec<String> = new_combined[..prefix_len].to_vec();
             let Some(candidate_file) = tree2.get(&key) else {
@@ -667,8 +660,8 @@ impl RustWorkspaceModTree {
                 break;
             }
 
-            if let Some(deeper) = self.follow_pub_use_chain(
-                target_crate,
+            if let Some(deeper) = self.follow_chain_in(
+                scope,
                 candidate_file,
                 candidate_item,
                 workspace_root,

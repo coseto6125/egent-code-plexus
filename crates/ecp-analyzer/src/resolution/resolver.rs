@@ -386,11 +386,10 @@ impl<'a> Resolver<'a> {
                 let exported_name = &import.imported_name;
                 let mut hit: Option<NodeId> = None;
                 self.for_each_candidate(source_file, &import.source, |candidate| {
-                    match self.symbol_table.lookup_in_file_with_kind(
-                        candidate,
-                        exported_name,
-                        target,
-                    ) {
+                    match self
+                        .symbol_table
+                        .lookup_call_in_file(candidate, exported_name, target)
+                    {
                         Some(id) => {
                             hit = Some(id);
                             false // stop enumerating
@@ -439,7 +438,7 @@ impl<'a> Resolver<'a> {
         // see `SymbolTable::file_scoped` doc).
         if let Some(node_id) =
             self.symbol_table
-                .lookup_in_file_with_kind(&source_file_str, symbol_name, target)
+                .lookup_call_in_file(&source_file_str, symbol_name, target)
         {
             results.push((node_id, ResolutionTier::SameFile.base_confidence()));
             self.record(
@@ -726,6 +725,12 @@ fn attributes_shadow_methods(meta: FileMeta) -> bool {
     )
 }
 
+/// A Rust source file, by its `.rs` extension in any case.
+fn is_rust_source(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+}
+
 /// The kinds a call site may reach. Rust method syntax (`x.f()`, recorded as
 /// `T.f` or as an untyped member) calls only methods: a free `fn` is never
 /// in scope through `.`. Paths use `::`, so a Rust callee holds `.` only
@@ -737,11 +742,7 @@ fn call_target(source_file: &Path, site: CallSite<'_>) -> ResolveTarget {
         CallSite::Plain(name) => name.contains('.'),
         CallSite::Construct(_) => false,
     };
-    if method_syntax
-        && source_file
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
-    {
+    if method_syntax && is_rust_source(source_file) {
         ResolveTarget::Method
     } else {
         ResolveTarget::Callable
@@ -873,10 +874,7 @@ fn rust_module_path_base(
     source_file: &std::path::Path,
     specifier: &str,
 ) -> Option<std::path::PathBuf> {
-    if !source_file
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("rs"))
-    {
+    if !is_rust_source(source_file) {
         return None;
     }
     let segs: Vec<&str> = specifier.split("::").filter(|s| !s.is_empty()).collect();
@@ -1101,10 +1099,7 @@ fn rust_self_fallback_base(
     specifier: &str,
 ) -> Option<std::path::PathBuf> {
     let rest = specifier.strip_prefix("self::")?;
-    let is_rs = source_file
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("rs"));
-    if !is_rs || is_rust_module_root(source_file) {
+    if !is_rust_source(source_file) || is_rust_module_root(source_file) {
         return None;
     }
     let dir = source_file.parent()?;
@@ -1321,9 +1316,7 @@ impl<'a> Resolver<'a> {
             // head that is a module of the caller's own file (`mod utils;
             // use utils::fs;`) is not a crate path.
             let head = module_path.split("::").next().unwrap_or_default();
-            if source_file
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+            if is_rust_source(source_file)
                 && self
                     .mod_tree
                     .is_some_and(|tree| tree.names_module(&module_path))
@@ -1332,12 +1325,22 @@ impl<'a> Resolver<'a> {
                     .lookup_in_file_with_kind(&source_file_str, head, ResolveTarget::Qualifier)
                     .is_none()
             {
+                // The caller looks `member` up in the returned file, so a
+                // renamed re-export (`pub use imp::lookup_impl as lookup;`)
+                // would land on an unrelated `lookup` there: the tree must
+                // place `member` under its own name.
                 return self
                     .mod_tree_resolve(&source_file_str, &format!("{module_path}::{member}"))
                     .filter(|resolved| {
-                        self.symbol_table
-                            .lookup_in_file_with_kind(&resolved.file, &resolved.item_name, target)
-                            .is_some()
+                        resolved.item_name == member
+                            && self
+                                .symbol_table
+                                .lookup_in_file_with_kind(
+                                    &resolved.file,
+                                    &resolved.item_name,
+                                    target,
+                                )
+                                .is_some()
                     })
                     .map(|resolved| resolved.file);
             }
@@ -1441,6 +1444,11 @@ impl<'a> Resolver<'a> {
     /// member wins. A base the project cannot see, an ambiguous one, or one
     /// whose ownership is unknown stops the walk: it may own the member and
     /// shadow every later base, so no edge beats a guess.
+    ///
+    /// A first base that only inherits the member is not enough: C3 puts a
+    /// later base ahead of a shared ancestor (`class D(B, C)` with `B(A)`,
+    /// `C(A)` reads `D, B, C, A`), so a later base that reaches the member
+    /// through another owner, or may do so, leaves no edge.
     #[allow(clippy::too_many_arguments)]
     fn resolve_super_member(
         &self,
@@ -1452,34 +1460,54 @@ impl<'a> Resolver<'a> {
         raw_imports: &[RawImport],
         caller_heritage: &[String],
     ) -> Vec<(NodeId, f32)> {
-        for base in caller_heritage {
+        let mut bases = caller_heritage.iter();
+        let mut owner: Option<(&String, NodeId, bool)> = None;
+        for base in bases.by_ref() {
             let TypeCandidates::Unique(ty, ty_name) =
-                self.type_candidates(source_file, source_file_str, base, raw_imports)
+                self.super_base_type(source_file, source_file_str, base, raw_imports)
             else {
                 break;
             };
             match self.member_ownership(ty, ty_name, member, target) {
                 Ownership::Owned { id, inherited } => {
-                    let (tier, conf) = if inherited {
-                        (DecisionTier::TypeHeritage, ResolutionTier::HeritageScoped)
-                    } else {
-                        (DecisionTier::TypeOwned, ResolutionTier::QualifierScoped)
-                    };
-                    let conf = conf.base_confidence();
-                    self.record(
-                        source_file_str,
-                        symbol_name,
-                        Some(base.as_str()),
-                        tier,
-                        Some(id),
-                        0,
-                        Some(conf),
-                    );
-                    return vec![(id, conf)];
+                    owner = Some((base, id, inherited));
+                    break;
                 }
                 Ownership::NotOwned => {}
                 Ownership::Unknown => break,
             }
+        }
+        let owner = owner.filter(|&(_, id, inherited)| {
+            !inherited
+                || !bases.any(|later| {
+                    self.later_base_may_shadow(
+                        source_file,
+                        source_file_str,
+                        later,
+                        member,
+                        target,
+                        raw_imports,
+                        id,
+                    )
+                })
+        });
+        if let Some((base, id, inherited)) = owner {
+            let (tier, conf) = if inherited {
+                (DecisionTier::TypeHeritage, ResolutionTier::HeritageScoped)
+            } else {
+                (DecisionTier::TypeOwned, ResolutionTier::QualifierScoped)
+            };
+            let conf = conf.base_confidence();
+            self.record(
+                source_file_str,
+                symbol_name,
+                Some(base.as_str()),
+                tier,
+                Some(id),
+                0,
+                Some(conf),
+            );
+            return vec![(id, conf)];
         }
         self.record(
             source_file_str,
@@ -1491,6 +1519,72 @@ impl<'a> Resolver<'a> {
             None,
         );
         Vec::new()
+    }
+
+    /// Can `later`, a base declared after the one that inherits `member`
+    /// from `owner_member`, come first in the C3 order with another
+    /// `member`? A base outside the project cannot derive from a project
+    /// class, so it never comes first; an ambiguous base, or one whose
+    /// ownership is unknown, may.
+    #[allow(clippy::too_many_arguments)]
+    fn later_base_may_shadow(
+        &self,
+        source_file: &Path,
+        source_file_str: &str,
+        later: &str,
+        member: &str,
+        target: ResolveTarget,
+        raw_imports: &[RawImport],
+        owner_member: NodeId,
+    ) -> bool {
+        match self.super_base_type(source_file, source_file_str, later, raw_imports) {
+            TypeCandidates::Unique(ty, ty_name) => {
+                match self.member_ownership(ty, ty_name, member, target) {
+                    Ownership::Owned { id, .. } => id != owner_member,
+                    Ownership::NotOwned => false,
+                    Ownership::Unknown => true,
+                }
+            }
+            TypeCandidates::Set(_) => true,
+            TypeCandidates::External | TypeCandidates::None => false,
+        }
+    }
+
+    /// The project type a Python base expression names. A dotted base
+    /// (`base.Base` under `import base`) resolves its module through the
+    /// qualifier tiers, then the type inside that module; when the module is
+    /// in the project but does not declare the type (a package re-export),
+    /// the last segment goes through [`Self::type_candidates`]. A module the
+    /// project does not hold (`threading.Thread`) gives `None`: a project
+    /// `Thread` is not that base.
+    fn super_base_type<'q>(
+        &self,
+        source_file: &Path,
+        source_file_str: &str,
+        base: &'q str,
+        raw_imports: &'q [RawImport],
+    ) -> TypeCandidates<'q> {
+        let Some((qualifier, type_name)) = split_qualifier(base) else {
+            return self.type_candidates(source_file, source_file_str, base, raw_imports);
+        };
+        let Some(module_file) = self.resolve_qualifier_file(
+            source_file,
+            qualifier,
+            type_name,
+            ResolveTarget::Type,
+            raw_imports,
+            Some(base),
+        ) else {
+            return TypeCandidates::None;
+        };
+        match self.symbol_table.lookup_in_file_with_kind(
+            &module_file,
+            type_name,
+            ResolveTarget::Type,
+        ) {
+            Some(id) => TypeCandidates::Unique(id, type_name),
+            None => self.type_candidates(source_file, source_file_str, type_name, raw_imports),
+        }
     }
 
     /// Receiver-typing ladder (after Tier 3.5): resolve `qualifier.member`
@@ -1889,11 +1983,7 @@ impl<'a> Resolver<'a> {
         let Some(prefix) = rust_type_path_prefix(full, qualifier) else {
             return true;
         };
-        if qualifier_prefix_is_internal(full, qualifier)
-            || !source_file
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
-        {
+        if qualifier_prefix_is_internal(full, qualifier) || !is_rust_source(source_file) {
             return true;
         }
         let named = rust_expand_path_head(prefix, imports);
@@ -1916,6 +2006,15 @@ impl<'a> Resolver<'a> {
                     .is_some_and(|resolved| resolved.file == candidate_file);
             }
         };
+        // The module may only re-export `Q` (`mod lock; pub use
+        // lock::FileLock;`): the tree follows that `pub use` chain to the
+        // defining file, which the module's own file is not.
+        if let Some(resolved) = self
+            .mod_tree_resolve(source_file_str, &format!("{module_path}::{qualifier}"))
+            .filter(|resolved| resolved.item_name == qualifier)
+        {
+            return resolved.file == candidate_file;
+        }
         if let Some(module_file) = self.rust_module_file(source_file, &module_path) {
             return module_file == candidate_file;
         }

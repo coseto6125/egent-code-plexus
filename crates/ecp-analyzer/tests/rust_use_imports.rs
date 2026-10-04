@@ -882,3 +882,120 @@ fn test_cross_crate_type_through_grouped_pub_use_binds_its_definition() {
         vec!["crates/other/src/registry/lock.rs".to_string()]
     );
 }
+
+/// `registry::FileLock` where `registry/mod.rs` only re-exports `FileLock`
+/// with a plain `pub use lock::FileLock;`: the module path names the type
+/// through the re-export, so the call binds its definition in `lock.rs`,
+/// whether `registry` is declared in the caller's file or brought in by
+/// `use crate::registry;`.
+#[test]
+fn test_module_qualified_type_through_plain_pub_use_binds_its_definition() {
+    let common = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        (
+            "src/registry/mod.rs",
+            "mod lock;\npub use lock::FileLock;\n",
+        ),
+        (
+            "src/registry/lock.rs",
+            "pub struct FileLock;\nimpl FileLock { pub fn acquire() {} }\n",
+        ),
+    ];
+    let mut declared_here = common.to_vec();
+    declared_here.push((
+        "src/lib.rs",
+        "pub mod registry;\npub fn go() { registry::FileLock::acquire(); }\n",
+    ));
+    assert_eq!(
+        workspace_go_targets(&declared_here, "acquire"),
+        vec!["src/registry/lock.rs".to_string()],
+        "declared in the caller's file"
+    );
+    let mut imported = common.to_vec();
+    imported.push(("src/lib.rs", "pub mod registry;\npub mod foo;\n"));
+    imported.push((
+        "src/foo.rs",
+        "use crate::registry;\npub fn go() { registry::FileLock::acquire(); }\n",
+    ));
+    assert_eq!(
+        workspace_go_targets(&imported, "acquire"),
+        vec!["src/registry/lock.rs".to_string()],
+        "brought in by use crate::registry"
+    );
+}
+
+/// A same-file free `fn join` keeps method syntax on an unindexed type
+/// ambiguous in the same-file tier too: `Path::new(".").join("x")` binds
+/// neither `join`. With only the method in the file, an untyped `x.join()`
+/// still binds it.
+#[test]
+fn test_method_call_with_a_same_file_free_fn_binds_neither() {
+    let ambiguous = [(
+        "src/lib.rs",
+        "pub fn join(x: &str) {}\n\
+         pub struct Local;\n\
+         impl Local { pub fn join(&self) {} }\n\
+         pub fn go() { std::path::Path::new(\".\").join(\"x\"); }\n",
+    )];
+    assert_eq!(
+        workspace_go_target_kinds(&ambiguous, "join"),
+        Vec::<(String, NodeKind)>::new()
+    );
+    let method_only = [(
+        "src/lib.rs",
+        "pub struct Local;\n\
+         impl Local { pub fn join(&self) {} }\n\
+         pub fn go() { let x = ext::make(); x.join(); }\n",
+    )];
+    assert_eq!(
+        workspace_go_target_kinds(&method_only, "join"),
+        vec![("src/lib.rs".to_string(), NodeKind::Method)]
+    );
+}
+
+/// A bin root re-exports `f` from its own module (`pub use inner::f;`):
+/// `crate::f()` in a module only `main.rs` declares follows that re-export
+/// to `inner.rs`. The lib's `f` is a decoy.
+#[test]
+fn test_crate_path_in_a_bin_module_follows_the_bin_root_reexport() {
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        ("src/lib.rs", "pub fn f() {}\n"),
+        (
+            "src/main.rs",
+            "mod cli;\nmod inner;\npub use inner::f;\nfn main() {}\n",
+        ),
+        ("src/inner.rs", "pub fn f() {}\n"),
+        ("src/cli.rs", "pub fn go() { crate::f(); }\n"),
+    ];
+    assert_eq!(
+        workspace_go_targets(&files, "f"),
+        vec!["src/inner.rs".to_string()]
+    );
+}
+
+/// A renamed re-export (`pub use imp::lookup_impl as lookup;`) and a private
+/// `fn lookup` beside `lookup_impl`: the module tree places `lookup` at
+/// `lookup_impl`, so the private `lookup` must not bind.
+#[test]
+fn test_module_import_through_renamed_reexport_never_binds_a_private_namesake() {
+    let files = two_crates(
+        "use other::registry;\npub fn go() { registry::lookup(); }\n",
+        &[
+            ("crates/other/src/lib.rs", "pub mod registry;\n"),
+            (
+                "crates/other/src/registry.rs",
+                "mod imp;\npub use imp::lookup_impl as lookup;\n",
+            ),
+            (
+                "crates/other/src/registry/imp.rs",
+                "pub fn lookup_impl() {}\nfn lookup() {}\n",
+            ),
+        ],
+    );
+    assert!(
+        targets_of(&files, "lookup").is_empty(),
+        "the private namesake must not bind: {:?}",
+        targets_of(&files, "lookup")
+    );
+}

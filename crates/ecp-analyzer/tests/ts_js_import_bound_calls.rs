@@ -91,9 +91,10 @@ fn test_require_binding_call_resolves_in_the_required_module() {
     }
 }
 
-/// A `require` inside a function body binds like one at the top level.
+/// Imports are file-wide, so a `require` inside a function body binds
+/// nothing: it is scoped to that function.
 #[test]
-fn test_require_inside_a_function_binds_like_top_level() {
+fn test_require_inside_a_function_binds_no_edge() {
     let files = [
         ("a.js", "function f() {}\nmodule.exports = { f };\n"),
         ("b.js", "function f() {}\nmodule.exports = { f };\n"),
@@ -102,11 +103,28 @@ fn test_require_inside_a_function_binds_like_top_level() {
             "function go() {\n  const { f } = require(\"./a\");\n  f();\n}\n",
         ),
     ];
-    assert_eq!(go_targets(&files, "f"), vec!["a.js".to_string()]);
+    assert_eq!(go_targets(&files, "f"), Vec::<String>::new());
 }
 
-/// `require` shadowed by a parameter is no module loader: no crash, and no
-/// edge into a file the call cannot be shown to name.
+/// Two functions that each require `f` from a different module. A file-wide
+/// import would send `go`'s call to `./b`, the first require in the file;
+/// function-scoped requires bind nothing, so no wrong edge is made.
+#[test]
+fn test_function_scoped_requires_of_two_modules_bind_no_wrong_edge() {
+    let files = [
+        ("a.js", "function f() {}\nmodule.exports = { f };\n"),
+        ("b.js", "function f() {}\nmodule.exports = { f };\n"),
+        (
+            "app.js",
+            "function first() { const { f } = require(\"./b\"); f(); }\n\
+             function go() { const { f } = require(\"./a\"); f(); }\n",
+        ),
+    ];
+    assert_eq!(go_targets(&files, "f"), Vec::<String>::new());
+}
+
+/// `require` shadowed by a parameter is no module loader: the declarator
+/// form records no import, so no edge goes into the file it seems to name.
 #[test]
 fn test_shadowed_require_call_emits_no_edge() {
     let files = [
@@ -114,7 +132,7 @@ fn test_shadowed_require_call_emits_no_edge() {
         ("b.js", "function f() {}\nmodule.exports = { f };\n"),
         (
             "app.js",
-            "function go(require) {\n  require(\"./a\").f();\n}\n",
+            "function go(require) {\n  const { f } = require(\"./a\");\n  f();\n}\n",
         ),
     ];
     assert_eq!(go_targets(&files, "f"), Vec::<String>::new());
@@ -139,13 +157,16 @@ fn test_es_import_and_require_of_one_module_emit_one_edge() {
 /// and does not crash.
 #[test]
 fn test_require_with_a_blank_or_computed_specifier_binds_nothing() {
-    let files = [
-        ("a.js", "function f() {}\nmodule.exports = { f };\n"),
-        ("b.js", "function f() {}\nmodule.exports = { f };\n"),
-        (
-            "app.js",
-            "const { f } = require(\"  \");\nconst m = require(name);\nfunction go() { f(); }\n",
-        ),
-    ];
-    assert_eq!(go_targets(&files, "f"), Vec::<String>::new());
+    let src = "const { f } = require(\"  \");\nconst m = require(name);\nfunction go() { f(); }\n";
+    let js = JavaScriptProvider::new().expect("JavaScriptProvider::new");
+    let ts = TypeScriptProvider::new().expect("TypeScriptProvider::new");
+    for (path, provider) in [
+        ("app.js", &js as &dyn LanguageProvider),
+        ("app.ts", &ts as &dyn LanguageProvider),
+    ] {
+        let graph = provider
+            .parse_file(Path::new(path), src.as_bytes())
+            .expect("parse_file");
+        assert!(graph.imports.is_empty(), "{path}: {:?}", graph.imports);
+    }
 }

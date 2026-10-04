@@ -15,6 +15,14 @@ fn init_edges(files: &[(&str, &str)]) -> Vec<(String, String)> {
 
 /// `(caller owner, target owner)` for every Calls edge into a `callee`.
 fn member_edges(files: &[(&str, &str)], callee: &str) -> Vec<(String, String)> {
+    member_edge_files(files, callee)
+        .into_iter()
+        .map(|(caller, target, _)| (caller, target))
+        .collect()
+}
+
+/// [`member_edges`] with each target's file, for classes that share a name.
+fn member_edge_files(files: &[(&str, &str)], callee: &str) -> Vec<(String, String, String)> {
     let tmp = tempfile::tempdir().expect("tempdir");
     let py = PythonProvider::new().expect("PythonProvider::new");
     let mut builder = GraphBuilder::new().with_repo_root(tmp.path().to_path_buf());
@@ -33,12 +41,19 @@ fn member_edges(files: &[(&str, &str)], callee: &str) -> Vec<(String, String)> {
         let n = &graph.nodes[i as usize];
         format!("{}.{}", n.owner_class.resolve(pool), n.name.resolve(pool))
     };
-    let mut out: Vec<(String, String)> = graph
+    let mut out: Vec<(String, String, String)> = graph
         .edges
         .iter()
         .filter(|e| e.rel_type == RelType::Calls)
         .filter(|e| graph.nodes[e.target as usize].name.resolve(pool) == callee)
-        .map(|e| (owner(e.source), owner(e.target)))
+        .map(|e| {
+            let file = graph.nodes[e.target as usize].file_idx as usize;
+            (
+                owner(e.source),
+                owner(e.target),
+                graph.files[file].path.resolve(pool).to_string(),
+            )
+        })
         .collect();
     out.sort();
     out
@@ -137,5 +152,79 @@ fn test_super_init_with_several_bases_binds_the_first_owning_base() {
     assert_eq!(
         init_edges(&files),
         vec![("Child.__init__".to_string(), "Right.__init__".to_string())]
+    );
+}
+
+/// Diamond: `D(B, C)` with `B(A)` inheriting `m` and `C(A)` overriding it.
+/// C3 reads `D, B, C, A`, so Python calls `C.m`; the first base only inherits
+/// `m`, so `A.m` must not bind. A first base that defines `m` itself wins.
+#[test]
+fn test_super_member_in_a_diamond_never_binds_the_shared_ancestor() {
+    let diamond = [(
+        "client.py",
+        "class A:\n    def m(self):\n        pass\n\n\
+         class B(A):\n    pass\n\n\
+         class C(A):\n    def m(self):\n        pass\n\n\
+         class D(B, C):\n    def run(self):\n        super().m()\n",
+    )];
+    let edges = member_edges(&diamond, "m");
+    assert!(
+        !edges.contains(&("D.run".to_string(), "A.m".to_string())),
+        "{edges:?}"
+    );
+    let first_defines = [(
+        "client.py",
+        "class A:\n    def m(self):\n        pass\n\n\
+         class B(A):\n    def m(self):\n        pass\n\n\
+         class C(A):\n    def m(self):\n        pass\n\n\
+         class D(B, C):\n    def run(self):\n        super().m()\n",
+    )];
+    assert_eq!(
+        member_edges(&first_defines, "m")
+            .into_iter()
+            .filter(|(caller, _)| caller == "D.run")
+            .collect::<Vec<_>>(),
+        vec![("D.run".to_string(), "B.m".to_string())]
+    );
+}
+
+/// A base written through its module (`class Child(base.Base)` under
+/// `import base`) binds `super().m()` in that module. A second `Base`
+/// elsewhere keeps the bare name ambiguous, so only the module can pick it.
+#[test]
+fn test_super_member_through_a_module_qualified_base_binds_the_base() {
+    let files = [
+        ("base.py", "class Base:\n    def m(self):\n        pass\n"),
+        ("other.py", "class Base:\n    def m(self):\n        pass\n"),
+        (
+            "client.py",
+            "import base\n\nclass Child(base.Base):\n    def run(self):\n        super().m()\n",
+        ),
+    ];
+    let edges: Vec<(String, String, String)> = member_edge_files(&files, "m");
+    assert_eq!(
+        edges,
+        vec![(
+            "Child.run".to_string(),
+            "Base.m".to_string(),
+            "base.py".to_string()
+        )]
+    );
+}
+
+/// `super(E, self).m()` starts the lookup after `E`, so it never reaches
+/// `E.m`, the method the zero-argument form from `F` would bind.
+#[test]
+fn test_explicit_two_argument_super_never_binds_the_named_class() {
+    let files = [(
+        "client.py",
+        "class A:\n    def m(self):\n        pass\n\n\
+         class E(A):\n    def m(self):\n        pass\n\n\
+         class F(E):\n    def run(self):\n        super(E, self).m()\n",
+    )];
+    let edges = member_edges(&files, "m");
+    assert!(
+        !edges.contains(&("F.run".to_string(), "E.m".to_string())),
+        "{edges:?}"
     );
 }
