@@ -251,10 +251,12 @@ fn test_ambiguous_callers_more_than_cap_shown_50_total_full() {
     assert_eq!(lines, (1..=50).collect::<Vec<u64>>(), "sorted by line");
 }
 
+/// (extension, call-file body, expected (line, form) hits)
+type SyntaxCase<'a> = (&'a str, &'a str, &'a [(u64, &'a str)]);
+
 #[test]
 fn test_ambiguous_callers_call_syntaxes_across_languages_matched() {
-    // (extension, call-file body, expected (line, form) hits)
-    let langs: &[(&str, &str, &[(u64, &str)])] = &[
+    let langs: &[SyntaxCase] = &[
         ("py", "x = 1\nfetch(a)\n", &[(2, "bare")]),
         ("ts", "const a = 1;\nobj.fetch(a);\n", &[(2, "member")]),
         ("js", "obj.fetch (a);\n", &[(1, "member")]),
