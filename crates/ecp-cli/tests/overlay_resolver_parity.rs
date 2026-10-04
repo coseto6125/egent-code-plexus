@@ -5,6 +5,7 @@ use ecp_analyzer::typescript::TypeScriptProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::{ArchivedZeroCopyGraph, RelType, ZeroCopyGraph};
+use ecp_core::session::merged::MergedGraph;
 use ecp_core::session::view::{OverlayFileInput, OverlaySymbol, OverlayView};
 use std::path::Path;
 
@@ -27,7 +28,7 @@ fn input(local: LocalGraph) -> OverlayFileInput {
     }
 }
 
-type Target = (String, String, String);
+type Target = (String, String, String, u32);
 
 fn targets(graph: &ZeroCopyGraph) -> Vec<Target> {
     let pool = &graph.string_pool;
@@ -44,6 +45,7 @@ fn targets(graph: &ZeroCopyGraph) -> Vec<Target> {
                 graph.files[n.file_idx as usize].path.resolve(pool).into(),
                 n.name.resolve(pool).into(),
                 n.owner_class.resolve(pool).into(),
+                (e.confidence * 100.0).round() as u32,
             )
         })
         .collect();
@@ -58,6 +60,16 @@ fn parity(
     dirty: &[(&str, &str)],
     expected: &[Target],
 ) {
+    check_parity(provider, files, dirty, expected, expected);
+}
+
+fn check_parity(
+    provider: &dyn LanguageProvider,
+    files: &[(&str, &str)],
+    dirty: &[(&str, &str)],
+    expected: &[Target],
+    overlay_expected: &[Target],
+) {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(
         tmp.path().join("Cargo.toml"),
@@ -66,7 +78,13 @@ fn parity(
     .unwrap();
     let build = |edits: &[(&str, &str)]| {
         let mut builder = GraphBuilder::new().with_repo_root(tmp.path().to_path_buf());
-        for &(path, original) in files {
+        let mut sources = files.to_vec();
+        sources.extend(
+            edits
+                .iter()
+                .filter(|(p, _)| !files.iter().any(|(old, _)| old == p)),
+        );
+        for &(path, original) in &sources {
             let source = edits
                 .iter()
                 .find(|(p, _)| *p == path)
@@ -87,7 +105,7 @@ fn parity(
     assert_eq!(
         targets(&full),
         expected,
-        "full reindex fixture must exercise the intended target"
+        "full reindex fixture must exercise the intended target: {dirty:?}"
     );
     let files: Vec<_> = dirty
         .iter()
@@ -109,36 +127,36 @@ fn parity(
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&base).unwrap();
     let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
     let view = OverlayView::build(archived, &files).unwrap();
-    let mut actual: Vec<Target> = view
-        .edges()
-        .iter()
-        .filter(|e| e.rel_type == RelType::Calls && view.node(e.source).unwrap().name == "run")
+    let merged = MergedGraph::new(archived, Some(&view));
+    let mut actual: Vec<Target> = merged
+        .all_edges()
+        .filter(|e| {
+            e.rel_type() == RelType::Calls && merged.node(e.source).unwrap().name(&merged) == "run"
+        })
         .map(|e| {
-            if let Some(n) = view.node(e.target) {
-                (
-                    n.rel_path.to_string(),
-                    n.name.clone(),
-                    n.owner_class.clone().unwrap_or_default(),
-                )
-            } else {
-                let n = &base.nodes[e.target as usize];
-                (
-                    base.files[n.file_idx as usize]
-                        .path
-                        .resolve(&base.string_pool)
-                        .into(),
-                    n.name.resolve(&base.string_pool).into(),
-                    n.owner_class.resolve(&base.string_pool).into(),
-                )
+            let n = merged.node(e.target).unwrap();
+            if dirty
+                .iter()
+                .any(|(path, _)| Some(*path) == n.file_path(&merged))
+            {
+                assert!(
+                    e.target >= merged.base_len(),
+                    "dirty targets must redirect to virtual nodes"
+                );
             }
+            (
+                n.file_path(&merged).unwrap().into(),
+                n.name(&merged).into(),
+                n.owner_class(&merged).unwrap_or_default().into(),
+                (e.confidence() * 100.0).round() as u32,
+            )
         })
         .collect();
     actual.sort();
     actual.dedup();
     assert_eq!(
-        actual,
-        targets(&full),
-        "overlay Calls must equal a reindex of the dirty content"
+        actual, overlay_expected,
+        "merged overlay Calls must equal the expected reindex targets: {dirty:?}"
     );
 }
 
@@ -179,7 +197,7 @@ fn test_overlay_rust_module_path_selects_named_module_like_reindex() {
                 ("src/other.rs", "pub fn foo() {}"),
             ],
             &dirty,
-            &[("src/a/b.rs".into(), "foo".into(), "".into())],
+            &[("src/a/b.rs".into(), "foo".into(), "".into(), 100)],
         );
     }
 }
@@ -193,7 +211,7 @@ fn test_overlay_python_untyped_member_collision_matches_reindex() {
             ("other.py", "class Foo:\n    def foo(self): pass\n"),
         ],
         &[("app.py", "def foo(): pass\ndef run(x): x.foo()\n")],
-        &[("app.py".into(), "foo".into(), "".into())],
+        &[("app.py".into(), "foo".into(), "".into(), 100)],
     );
 }
 
@@ -209,7 +227,7 @@ fn test_overlay_rust_untyped_member_without_free_function_matches_reindex() {
             "src/lib.rs",
             "mod other; fn run() { let x = unknown(); x.foo(); }",
         )],
-        &[("src/other.rs".into(), "foo".into(), "Foo".into())],
+        &[("src/other.rs".into(), "foo".into(), "Foo".into(), 70)],
     );
 }
 
@@ -255,7 +273,7 @@ fn test_overlay_rust_bin_crate_root_matches_reindex() {
             "src/bin/tool.rs",
             "mod util;\nfn run() { crate::util::foo(); }",
         )],
-        &[("src/bin/util.rs".into(), "foo".into(), "".into())],
+        &[("src/bin/util.rs".into(), "foo".into(), "".into(), 100)],
     );
 }
 
@@ -283,7 +301,7 @@ macro_rules! language_parity {
                 &<$provider>::new().unwrap(),
                 &[($path, $before)],
                 &[($path, $after)],
-                &[($path.into(), "foo".into(), $owner.into())],
+                &[($path.into(), "foo".into(), $owner.into(), 100)],
             );
         }
     };
@@ -403,57 +421,252 @@ language_parity!(
 );
 
 #[test]
-#[ignore = "manual before/after timing over the tracked Rust sources of this repository"]
-fn test_overlay_build_real_repository_timings() {
-    let repo = std::env::var_os("T4_BENCH_REPO")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
-    let listed = std::process::Command::new("git")
-        .args(["ls-files", "-z", "*.rs"])
-        .current_dir(&repo)
-        .output()
-        .unwrap();
-    assert!(listed.status.success());
-    let provider = RustProvider::new().unwrap();
-    let mut builder = GraphBuilder::new();
-    let mut dirty = None;
-    for path in std::str::from_utf8(&listed.stdout)
-        .unwrap()
-        .split('\0')
-        .filter(|s| !s.is_empty())
-    {
-        let source = std::fs::read(repo.join(path)).unwrap();
-        let local = provider.parse_file(Path::new(path), &source).unwrap();
-        if path == "crates/ecp-cli/src/commands/impact/bfs.rs" {
-            let mut changed = source.clone();
-            changed.extend_from_slice(b"\nfn overlay_benchmark_dirty_call() { run_bfs(); crate::commands::format::kind_to_str(); super::bfs::run_bfs(); self::missing::probe(); let x = unknown(); x.foo(); }\n");
-            dirty = Some(input(
-                provider.parse_file(Path::new(path), &changed).unwrap(),
-            ));
-        }
-        builder.add_graph(local);
-    }
-    let graph = builder.build();
-    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&graph).unwrap();
-    let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
-    let files = [dirty.expect("tracked overlay source")];
-    let mut samples = Vec::new();
-    for _ in 0..6 {
-        let start = std::time::Instant::now();
-        let view = OverlayView::build(archived, &files).unwrap();
-        std::hint::black_box(&view);
-        samples.push(start.elapsed().as_secs_f64() * 1000.0);
-    }
-    samples.remove(0);
-    eprintln!(
-        "OVERLAY_BENCH files={} nodes={} dirty_symbols={} ms={samples:?}",
-        graph.files.len(),
-        graph.nodes.len(),
-        files[0].symbols.len()
+fn test_overlay_rust_mod_rs_crate_uses_crate_root() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "mod a;\nmod x;"),
+            ("src/a/mod.rs", "pub mod x;\nfn run() {}"),
+            ("src/a/x.rs", "pub fn foo() {}"),
+            ("src/x.rs", "pub fn foo() {}"),
+        ],
+        &[("src/a/mod.rs", "pub mod x;\nfn run() { crate::x::foo(); }")],
+        &[("src/x.rs".into(), "foo".into(), "".into(), 100)],
     );
-    samples.sort_by(f64::total_cmp);
-    eprintln!(
-        "OVERLAY_BENCH median_ms={} range_ms={}..{}",
-        samples[2], samples[0], samples[4]
+}
+
+#[test]
+fn test_overlay_rust_bin_descendant_uses_target_root() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "mod x;"),
+            ("src/x.rs", "pub fn foo() {}"),
+            ("src/bin/tool/main.rs", "mod support;\nmod x;\nfn main() {}"),
+            ("src/bin/tool/support.rs", "fn run() {}"),
+            ("src/bin/tool/x.rs", "pub fn foo() {}"),
+        ],
+        &[("src/bin/tool/support.rs", "fn run() { crate::x::foo(); }")],
+        &[("src/bin/tool/x.rs".into(), "foo".into(), "".into(), 100)],
+    );
+}
+
+#[test]
+fn test_overlay_rust_removed_module_does_not_bind_stale_file() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "mod a;\nfn run() { crate::a::b::foo(); }"),
+            ("src/a/mod.rs", "pub mod b;"),
+            ("src/a/b.rs", "pub fn foo() {}"),
+        ],
+        &[
+            ("src/lib.rs", "mod a;\nfn run() { crate::a::b::foo(); }"),
+            ("src/a/mod.rs", ""),
+        ],
+        &[],
+    );
+}
+
+#[test]
+fn test_overlay_rust_cfg_duplicates_share_target_identity() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "mod a;\nfn run() {}"),
+            ("src/a/mod.rs", "pub mod b;"),
+            ("src/a/b.rs", "pub fn foo() {}"),
+        ],
+        &[
+            ("src/lib.rs", "mod a;\nfn run() { crate::a::b::foo(); }"),
+            (
+                "src/a/b.rs",
+                "#[cfg(unix)]\npub fn foo() {}\n#[cfg(windows)]\npub fn foo() {}",
+            ),
+        ],
+        &[("src/a/b.rs".into(), "foo".into(), "".into(), 100)],
+    );
+}
+
+#[test]
+fn test_overlay_rust_root_member_heads_match_reindex() {
+    for call in ["crate::foo", "self::foo"] {
+        let dirty = format!("fn foo() {{}}\nfn run() {{ {call}(); }}");
+        parity(
+            &RustProvider::new().unwrap(),
+            &[("src/lib.rs", "fn foo() {}\nfn run() {}")],
+            &[("src/lib.rs", &dirty)],
+            &[("src/lib.rs".into(), "foo".into(), "".into(), 100)],
+        );
+    }
+}
+
+#[test]
+fn test_overlay_rust_parent_root_member_matches_reindex() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "mod util; pub fn foo() {}"),
+            ("src/util.rs", "fn run() {}"),
+        ],
+        &[("src/util.rs", "fn run() { super::foo(); }")],
+        &[("src/lib.rs".into(), "foo".into(), "".into(), 100)],
+    );
+}
+
+#[test]
+fn test_overlay_rust_module_path_excludes_method_despite_index_bug() {
+    check_parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "mod x;\nfn run() {}"),
+            ("src/x.rs", "pub struct P; impl P { pub fn parse() {} }"),
+        ],
+        &[("src/lib.rs", "mod x;\nfn run() { crate::x::parse(); }")],
+        &[("src/x.rs".into(), "parse".into(), "P".into(), 85)],
+        &[],
+    );
+}
+
+#[test]
+fn test_overlay_rust_declared_plain_module_matches_reindex() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "mod util;\nfn run() {}"),
+            ("src/util.rs", "pub fn foo() {}"),
+        ],
+        &[("src/lib.rs", "mod util;\nfn run() { util::foo(); }")],
+        &[("src/util.rs".into(), "foo".into(), "".into(), 85)],
+    );
+}
+
+#[test]
+fn test_overlay_rust_new_dirty_module_matches_reindex() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[("src/lib.rs", "fn run() {}")],
+        &[
+            ("src/lib.rs", "mod util;\nfn run() { util::foo(); }"),
+            ("src/util.rs", "pub fn foo() {}"),
+        ],
+        &[("src/util.rs".into(), "foo".into(), "".into(), 85)],
+    );
+}
+
+#[test]
+fn test_overlay_rust_nonroot_heads_match_reindex() {
+    for (caller, declaration, calls) in [
+        (
+            "src/a/b.rs",
+            "pub mod x;",
+            [
+                ("crate::x::foo", "src/x.rs", 100),
+                ("self::x::foo", "src/a/b/x.rs", 100),
+                ("super::x::foo", "src/a/x.rs", 100),
+                ("super::super::x::foo", "src/x.rs", 100),
+            ],
+        ),
+        (
+            "src/a/b/mod.rs",
+            "pub mod x;",
+            [
+                ("crate::x::foo", "src/x.rs", 100),
+                ("self::x::foo", "src/a/b/x.rs", 100),
+                ("super::x::foo", "src/a/x.rs", 100),
+                ("super::super::x::foo", "src/x.rs", 100),
+            ],
+        ),
+    ] {
+        for (call, target, confidence) in calls {
+            let before = format!("{declaration}\nfn run() {{}}");
+            let after = format!("{declaration}\nfn run() {{ {call}(); }}");
+            parity(
+                &RustProvider::new().unwrap(),
+                &[
+                    ("src/lib.rs", "mod a;\nmod x;"),
+                    ("src/a/mod.rs", "pub mod b;\npub mod x;"),
+                    (caller, &before),
+                    ("src/x.rs", "pub fn foo() {}"),
+                    ("src/a/x.rs", "pub fn foo() {}"),
+                    ("src/a/b/x.rs", "pub fn foo() {}"),
+                ],
+                &[(caller, &after)],
+                &[(target.into(), "foo".into(), "".into(), confidence)],
+            );
+        }
+    }
+}
+
+#[test]
+fn test_overlay_rust_unique_qualifier_confidence_matches_reindex() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "mod util;\nfn run() {}"),
+            ("src/util.rs", "pub fn foo() {}"),
+        ],
+        &[("src/lib.rs", "mod util;\nfn run() { crate::util::foo(); }")],
+        &[("src/util.rs".into(), "foo".into(), "".into(), 85)],
+    );
+}
+
+#[test]
+fn test_overlay_rust_mod_rs_relative_heads_match_reindex() {
+    for (call, target) in [
+        ("crate::x::foo", Some("src/x.rs")),
+        ("self::x::foo", Some("src/a/x.rs")),
+        ("super::x::foo", Some("src/x.rs")),
+        ("super::super::x::foo", None),
+    ] {
+        let dirty = format!("pub mod x;\nfn run() {{ {call}(); }}");
+        let expected: Vec<Target> = target
+            .into_iter()
+            .map(|file| (file.into(), "foo".into(), "".into(), 100))
+            .collect();
+        parity(
+            &RustProvider::new().unwrap(),
+            &[
+                ("src/lib.rs", "mod a;\nmod x;"),
+                ("src/a/mod.rs", "pub mod x;\nfn run() {}"),
+                ("src/x.rs", "pub fn foo() {}"),
+                ("src/a/x.rs", "pub fn foo() {}"),
+            ],
+            &[("src/a/mod.rs", &dirty)],
+            &expected,
+        );
+    }
+}
+
+#[test]
+fn test_overlay_rust_clean_caller_redirects_to_dirty_target() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "mod util;\nfn run() { foo(); }"),
+            ("src/util.rs", "pub fn foo() {}"),
+        ],
+        &[(
+            "src/util.rs",
+            "pub fn foo() {}\nfn bar() {}\nfn run() { bar(); }",
+        )],
+        &[
+            ("src/util.rs".into(), "bar".into(), "".into(), 100),
+            ("src/util.rs".into(), "foo".into(), "".into(), 70),
+        ],
+    );
+}
+
+#[test]
+fn test_overlay_rust_nested_main_is_an_ordinary_module() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "mod util;"),
+            ("src/util/mod.rs", "pub mod main;\npub fn foo() {}"),
+            ("src/util/main.rs", "fn run() {}"),
+        ],
+        &[("src/util/main.rs", "fn run() { crate::util::foo(); }")],
+        &[("src/util/mod.rs".into(), "foo".into(), "".into(), 100)],
     );
 }

@@ -37,8 +37,7 @@
 //! regression suite and `crates/ecp-analyzer/benches/resolver_lookup.rs` for
 //! the before/after bench numbers.
 
-use ecp_core::analyzer::rust_paths::rust_module_path_base;
-pub(crate) use ecp_core::analyzer::rust_paths::{is_rust_module_root, rust_module_dir};
+use ecp_core::analyzer::rust_paths::{is_rust_module_root, is_rust_source, rust_module_path_base};
 use ecp_core::analyzer::types::{CallSite, RawImport};
 use serde::Serialize;
 use std::borrow::Cow;
@@ -727,23 +726,13 @@ fn attributes_shadow_methods(meta: FileMeta) -> bool {
     )
 }
 
-/// A Rust source file, by its `.rs` extension in any case.
-fn is_rust_source(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
-}
-
 /// The kinds a call site may reach. Rust method syntax (`x.f()`, recorded as
 /// `T.f` or as an untyped member) calls only methods: a free `fn` is never
 /// in scope through `.`. Paths use `::`, so a Rust callee holds `.` only
 /// when it was written with method syntax. Python / JS `obj.f()` can reach a
 /// module function, so other languages keep `Callable`.
 fn call_target(source_file: &Path, site: CallSite<'_>) -> ResolveTarget {
-    if site.requires_method(if is_rust_source(source_file) {
-        Language::Rust
-    } else {
-        Language::Unknown
-    }) {
+    if site.uses_method_syntax() && is_rust_source(source_file) {
         ResolveTarget::Method
     } else {
         ResolveTarget::Callable

@@ -45,8 +45,13 @@
 //! - An import alias (`import { Widget as W }`) matches only by its local
 //!   name, so a dirty file's call or construction through it stays
 //!   unresolved; the index maps the alias back to the declared symbol.
+//! - Rust paths resolve by conventional file layout and module declarations.
+//!   `pub use` chains, `#[path]`, inline modules, and workspace crate-name
+//!   heads stay unresolved when that layout cannot establish the target.
 
-use crate::analyzer::rust_paths::{is_rust_module_root, rust_module_path_base};
+use crate::analyzer::rust_paths::{
+    is_rust_source, is_rust_target_root, rust_module_dir, rust_module_path_base,
+};
 use crate::analyzer::types::{owner_key, CallSite, RawImport};
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
@@ -253,43 +258,75 @@ impl OverlayView {
             };
 
             let mut virt_cursor = base_len;
+            let rust_modules = files
+                .iter()
+                .any(|file| {
+                    is_rust_source(std::path::Path::new(&file.rel_path))
+                        && file
+                            .symbols
+                            .iter()
+                            .any(|s| s.calls.iter().any(|c| c.contains("::")))
+                })
+                .then(|| RustModules::new(graph, files));
             for (file_ord, file) in files.iter().enumerate() {
+                let chain = rust_modules
+                    .as_ref()
+                    .and_then(|modules| modules.caller_chain(&file.rel_path));
+                // One cache per dirty file: a repeated qualified call reuses
+                // both successful and unresolved lookups without rebuilding paths.
+                let mut module_calls = FxHashMap::default();
                 for sym in &file.symbols {
                     let source = virt_cursor;
                     virt_cursor += 1;
                     for raw_callee in &sym.calls {
                         let site = CallSite::parse(raw_callee);
                         let caller = file_metas[file_ord];
-                        let hit = resolve_callee(
-                            graph,
-                            site,
-                            file_ord,
-                            file,
-                            caller,
-                            &mut base_metas,
-                            &callables,
-                            &nodes,
-                            &replaced,
-                            &dirty_base,
-                        )
-                        .or_else(|| {
-                            let (ty, confidence) = resolve_constructed_type(
-                                graph,
-                                site,
-                                file_ord,
-                                file,
-                                caller,
-                                &mut base_metas,
-                                &types,
-                                &nodes,
-                                &replaced,
-                                &dirty_base,
-                            )?;
-                            let target = *construction_targets.entry(ty).or_insert_with(|| {
-                                construction_target(graph, &nodes, &type_ctors, ty)
+                        let hit =
+                            if caller.language == Language::Rust && site.name().contains("::") {
+                                *module_calls.entry(site.name()).or_insert_with(|| {
+                                    resolve_rust_module_callee(
+                                        graph,
+                                        site.name(),
+                                        file,
+                                        &callables,
+                                        &nodes,
+                                        &dirty_base,
+                                        rust_modules.as_ref()?,
+                                        chain.as_deref()?,
+                                    )
+                                })
+                            } else {
+                                resolve_callee(
+                                    graph,
+                                    site,
+                                    file_ord,
+                                    file,
+                                    caller,
+                                    &mut base_metas,
+                                    &callables,
+                                    &nodes,
+                                    &replaced,
+                                    &dirty_base,
+                                )
+                            }
+                            .or_else(|| {
+                                let (ty, confidence) = resolve_constructed_type(
+                                    graph,
+                                    site,
+                                    file_ord,
+                                    file,
+                                    caller,
+                                    &mut base_metas,
+                                    &types,
+                                    &nodes,
+                                    &replaced,
+                                    &dirty_base,
+                                )?;
+                                let target = *construction_targets.entry(ty).or_insert_with(|| {
+                                    construction_target(graph, &nodes, &type_ctors, ty)
+                                });
+                                Some((target, confidence))
                             });
-                            Some((target, confidence))
-                        });
                         if let Some((target, confidence)) = hit {
                             push_edge(ViewEdge {
                                 source,
@@ -581,6 +618,9 @@ impl<'a> OverlayNames<'a> {
 /// Mirror of index-time Pass-2 `Calls` resolution, narrowed to the inputs
 /// available at query time, over the kind family of `names`. Returns the
 /// merged-space target index.
+/// Rust `::` calls use the cached module-path branch in `build` first.
+/// Method eligibility is a post-filter, like index-time `lookup_call_in_file`:
+/// removing free functions before uniqueness checks would invent a winner.
 ///
 /// Tier 1 — same file: the dirty file was FULLY re-parsed, so its own
 /// callable set is authoritative. Unique match → confidence 1.0.
@@ -606,11 +646,8 @@ fn resolve_callee(
     dirty_base: &FxHashSet<u32>,
 ) -> Option<(u32, f32)> {
     let callee = site.name();
-    if caller.language == Language::Rust && callee.contains("::") {
-        return resolve_rust_module_callee(graph, callee, file, names, nodes, dirty_base);
-    }
     let accepts = |idx: u32| {
-        !site.requires_method(caller.language)
+        !(site.uses_method_syntax() && caller.language == Language::Rust)
             || match idx.checked_sub(graph.nodes.len() as u32) {
                 Some(offset) => nodes[offset as usize].kind == NodeKind::Method,
                 None => NodeKind::from(&graph.nodes[idx as usize].kind) == NodeKind::Method,
@@ -696,6 +733,212 @@ fn resolve_callee(
 /// File-backed Rust modules use the same crate/self/super layout as Pass 2.
 /// Unknown heads stay unresolved: stripping a path would bind external
 /// calls such as `std::fs::read` to unrelated project functions.
+/// File-layout evidence shared by all qualified lookups in one overlay build.
+/// Dirty declarations replace archived declarations, including deletion.
+struct RustModules<'a> {
+    graph: &'a ArchivedZeroCopyGraph,
+    dirty: FxHashMap<&'a str, &'a OverlayFileInput>,
+    roots: Vec<&'a str>,
+}
+
+impl<'a> RustModules<'a> {
+    fn new(graph: &'a ArchivedZeroCopyGraph, dirty: &'a [OverlayFileInput]) -> Self {
+        let dirty: FxHashMap<_, _> = dirty
+            .iter()
+            .map(|file| (file.rel_path.as_str(), file))
+            .collect();
+        let mut roots = Vec::new();
+        for file in graph
+            .files
+            .iter()
+            .map(|f| f.path.resolve(&graph.string_pool))
+            .chain(dirty.keys().copied())
+        {
+            let directory = file.rsplit_once('/').map_or("", |(dir, _)| dir);
+            if !dirty.keys().any(|caller| {
+                caller
+                    .strip_prefix(directory)
+                    .is_some_and(|rest| directory.is_empty() || rest.starts_with('/'))
+            }) {
+                continue;
+            }
+            let mut parts = file.rsplit('/');
+            let filename = parts.next().unwrap_or_default();
+            let parent = parts.next().unwrap_or_default();
+            if (matches!(filename, "lib.rs" | "main.rs" | "build.rs")
+                || matches!(parent, "bin" | "examples" | "benches" | "tests"))
+                && is_rust_target_root(std::path::Path::new(file))
+            {
+                roots.push(file);
+            }
+        }
+        roots.sort_unstable();
+        roots.dedup();
+        Self {
+            graph,
+            dirty,
+            roots,
+        }
+    }
+
+    fn file(&self, path: &std::path::Path) -> Option<&'a str> {
+        let requested = path.to_str()?;
+        if let Some((&name, _)) = self.dirty.get_key_value(requested) {
+            return Some(name);
+        }
+        let name =
+            |file: &'a crate::graph::ArchivedFile| file.path.resolve(&self.graph.string_pool);
+        // Accept only an exact hit in the builder's usual Path order.
+        // Synthetic/older archives with another order use the safe scan.
+        if let Ok(idx) = self
+            .graph
+            .files
+            .binary_search_by(|file| std::path::Path::new(name(file)).cmp(path))
+        {
+            let found = name(&self.graph.files[idx]);
+            if found == requested {
+                return Some(found);
+            }
+        }
+        self.graph
+            .files
+            .iter()
+            .map(name)
+            .find(|file| *file == requested)
+    }
+
+    // Match the full resolver's qualifier file-stem scope bucket.
+    fn scope(path: &str) -> &str {
+        path.rsplit_once("/src/")
+            .or_else(|| path.rsplit_once("/tests/"))
+            .map_or("", |(root, _)| root)
+    }
+
+    fn child(&self, parent: &str, name: &str) -> Option<&'a str> {
+        let declared = match self.dirty.get(parent) {
+            Some(dirty) => dirty
+                .symbols
+                .iter()
+                .any(|s| s.kind == NodeKind::Module && s.name == name),
+            None => self.graph.nodes_by_name(name).any(|idx| {
+                let node = &self.graph.nodes[idx as usize];
+                NodeKind::from(&node.kind) == NodeKind::Module
+                    && self.graph.files[node.file_idx.to_native() as usize]
+                        .path
+                        .resolve(&self.graph.string_pool)
+                        == parent
+            }),
+        };
+        if !declared {
+            return None;
+        }
+        let base = rust_module_path_base(std::path::Path::new(parent), "self")?.join(name);
+        let flat = base.with_extension("rs");
+        let nested = base.join("mod.rs");
+        match (self.file(&flat), self.file(&nested)) {
+            (Some(path), None) | (None, Some(path)) => Some(path),
+            _ => None,
+        }
+    }
+
+    /// Establish the caller's unique target owner using declaration chains.
+    /// A bin descendant only belongs to a bin when its target root is indexed.
+    fn caller_chain(&self, caller: &str) -> Option<Vec<&'a str>> {
+        let mut found = None;
+        for &root in &self.roots {
+            let mut chain = vec![root];
+            if root != caller {
+                let root_dir = rust_module_dir(std::path::Path::new(root))?;
+                let Ok(relative) = std::path::Path::new(caller).strip_prefix(&root_dir) else {
+                    continue;
+                };
+                let mut module_path = relative.with_extension("");
+                if module_path.file_name().is_some_and(|name| name == "mod") {
+                    module_path.pop();
+                }
+                for part in module_path.components() {
+                    let Some(child) =
+                        self.child(chain.last().copied()?, part.as_os_str().to_str()?)
+                    else {
+                        break;
+                    };
+                    chain.push(child);
+                }
+                if chain.last().copied() != Some(caller) {
+                    continue;
+                }
+            }
+            if found.is_some() {
+                return None;
+            }
+            found = Some(chain);
+        }
+        found
+    }
+
+    fn resolve(&self, chain: &[&'a str], module: &str) -> Option<&'a str> {
+        let mut parts = module.split("::").peekable();
+        let head = parts.next()?;
+        let mut at = chain.len().checked_sub(1)?;
+        let mut file = match head {
+            "crate" => *chain.first()?,
+            "self" => chain[at],
+            "super" => {
+                at = at.checked_sub(1)?;
+                while parts.peek() == Some(&"super") {
+                    parts.next();
+                    at = at.checked_sub(1)?;
+                }
+                chain[at]
+            }
+            _ if !module.contains("::") => {
+                let child = self.child(chain[at], head)?;
+                // The full resolver handles simple declared heads through its
+                // file-stem tier; nested unanchored paths remain unresolved.
+                return (std::path::Path::new(child).file_stem()?.to_str()? == head)
+                    .then_some(child);
+            }
+            _ => return None,
+        };
+        for part in parts {
+            file = self.child(file, part)?;
+        }
+        Some(file)
+    }
+
+    fn confidence(&self, caller: &str, module: &str, target: &str) -> f32 {
+        const CONF_QUALIFIER_SCOPED: f32 = 0.85;
+        const CONF_MODULE_TREE: f32 = 1.0;
+        let (prefix, qualifier) = module.rsplit_once("::").unwrap_or(("", module));
+        let internal = prefix.is_empty()
+            || prefix
+                .split("::")
+                .all(|s| matches!(s, "crate" | "self" | "super"));
+        let qualifier_file = |file: &&str| {
+            file.rsplit('/')
+                .next()
+                .and_then(|name| name.strip_suffix(".rs"))
+                == Some(qualifier)
+                && Self::scope(file) == Self::scope(caller)
+        };
+        let mut matches = self
+            .graph
+            .files
+            .iter()
+            .map(|f| f.path.resolve(&self.graph.string_pool))
+            .filter(qualifier_file)
+            .filter(|file| !self.dirty.contains_key(file))
+            .chain(self.dirty.keys().copied())
+            .filter(qualifier_file);
+        if internal && matches.next() == Some(target) && matches.next().is_none() {
+            CONF_QUALIFIER_SCOPED
+        } else {
+            CONF_MODULE_TREE
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn resolve_rust_module_callee(
     graph: &ArchivedZeroCopyGraph,
     callee: &str,
@@ -703,38 +946,20 @@ fn resolve_rust_module_callee(
     names: &OverlayNames<'_>,
     nodes: &[ViewNode],
     dirty_base: &FxHashSet<u32>,
+    modules: &RustModules<'_>,
+    chain: &[&str],
 ) -> Option<(u32, f32)> {
     let (module, member) = callee.rsplit_once("::")?;
-    let head = module.split("::").next()?;
-    if !matches!(head, "crate" | "self" | "super") {
-        return None;
-    }
-    let source = std::path::Path::new(&file.rel_path);
-    let anchored;
-    let module = if head == "crate" && is_rust_module_root(source) {
-        // Cargo target roots (including src/bin/*.rs) own their directory,
-        // not necessarily the nearest src directory.
-        anchored = module.replacen("crate", "self", 1);
-        anchored.as_str()
-    } else {
-        module
-    };
-    let path = rust_module_path_base(source, module)?;
-    let matches = |candidate: &str| {
-        candidate
-            .strip_suffix("/mod.rs")
-            .or_else(|| candidate.strip_suffix(".rs"))
-            .is_some_and(|stem| std::path::Path::new(stem) == path)
-    };
+    let target_file = modules.resolve(chain, module)?;
     let base = graph.nodes_by_name(member).filter(|&idx| {
         let node = &graph.nodes[idx as usize];
         !dirty_base.contains(&idx)
             && (names.kind)(NodeKind::from(&node.kind))
-            && matches(
-                graph.files[node.file_idx.to_native() as usize]
-                    .path
-                    .resolve(&graph.string_pool),
-            )
+            && NodeKind::from(&node.kind) != NodeKind::Method
+            && graph.files[node.file_idx.to_native() as usize]
+                .path
+                .resolve(&graph.string_pool)
+                == target_file
     });
     let overlay = names
         .anywhere
@@ -742,14 +967,21 @@ fn resolve_rust_module_callee(
         .into_iter()
         .flatten()
         .filter_map(|&(idx, _)| {
-            matches(&nodes[(idx - graph.nodes.len() as u32) as usize].rel_path).then_some(idx)
+            let node = &nodes[(idx - graph.nodes.len() as u32) as usize];
+            (node.rel_path.as_ref() == target_file && node.kind != NodeKind::Method).then_some(idx)
         });
     let mut candidates = base.chain(overlay);
     let target = candidates.next()?;
-    candidates
-        .next()
-        .is_none()
-        .then_some((target, CONF_SAME_FILE))
+    let uid = |idx: u32| match idx.checked_sub(graph.nodes.len() as u32) {
+        Some(offset) => nodes[offset as usize].uid,
+        None => graph.nodes[idx as usize].uid.to_native(),
+    };
+    candidates.all(|other| uid(other) == uid(target)).then(|| {
+        (
+            target,
+            modules.confidence(&file.rel_path, module, target_file),
+        )
+    })
 }
 
 /// Mirror of the index-time constructor fallback (`Resolver::resolve_call`)
@@ -916,6 +1148,22 @@ mod tests {
         let bytes = base_graph_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         assert!(OverlayView::build(graph, &[]).is_none());
+    }
+
+    #[test]
+    fn test_rust_module_file_lookup_unordered_archive_finds_exact_paths() {
+        let mut fixture = GraphFixture::new();
+        let paths = ["src/z.rs", "src/lib.rs", "src/a/mod.rs", "src/b.rs"];
+        for path in paths {
+            fixture.file(path);
+        }
+        let bytes = fixture.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let modules = RustModules::new(graph, &[]);
+        for path in paths {
+            assert_eq!(modules.file(std::path::Path::new(path)), Some(path));
+        }
+        assert_eq!(modules.file(std::path::Path::new("src/missing.rs")), None);
     }
 
     #[test]

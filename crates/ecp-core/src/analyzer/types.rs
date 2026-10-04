@@ -61,15 +61,13 @@ impl<'a> CallSite<'a> {
         }
     }
 
-    /// Rust dot syntax cannot call a free function. Other languages allow
-    /// member syntax to reach module functions, so retain callable targets.
-    pub fn requires_method(self, language: Language) -> bool {
-        language == Language::Rust
-            && match self {
-                Self::UntypedMember(_) => true,
-                Self::Plain(name) => name.contains('.'),
-                Self::Construct(_) => false,
-            }
+    /// Whether the call uses member syntax rather than a module path.
+    pub fn uses_method_syntax(self) -> bool {
+        match self {
+            Self::UntypedMember(_) => true,
+            Self::Plain(name) => name.contains('.'),
+            Self::Construct(_) => false,
+        }
     }
 
     /// The type path this site may construct in `language`, and whether an

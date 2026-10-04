@@ -1,21 +1,43 @@
 //! Rust module layout shared by index-time and session-overlay resolution.
 
+/// A Rust source file, by its `.rs` extension in any case.
+pub fn is_rust_source(path: &std::path::Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+}
+
 /// A file that names its own directory's module: `mod.rs`, `lib.rs`,
 /// `main.rs`, and every Cargo target root (`src/bin/<name>.rs`, top-level
 /// `examples/`, `benches/`, `tests/` files, `build.rs`). Every other `.rs`
 /// file is a module named after its stem. The top-level target rules require
 /// no `src` ancestor, so `src/a/tests/x.rs` stays an ordinary module.
 pub fn is_rust_module_root(source_file: &std::path::Path) -> bool {
-    if matches!(
-        source_file.file_stem().and_then(|s| s.to_str()),
+    matches!(
+        source_file.file_stem().and_then(|stem| stem.to_str()),
         Some("mod" | "lib" | "main")
-    ) {
-        return true;
-    }
+    ) || is_rust_target_root(source_file)
+}
+
+/// Conventional Cargo target roots, excluding ordinary `mod.rs` files.
+pub fn is_rust_target_root(source_file: &std::path::Path) -> bool {
     let Some(dir) = source_file.parent() else {
         return false;
     };
     let dir_name = dir.file_name().and_then(|n| n.to_str());
+    let filename = source_file.file_name().and_then(|n| n.to_str());
+    if matches!(filename, Some("lib.rs" | "main.rs")) && dir_name == Some("src") {
+        return true;
+    }
+    if filename == Some("main.rs")
+        && dir.parent().is_some_and(|parent| {
+            parent.file_name().is_some_and(|name| name == "bin")
+                && parent
+                    .parent()
+                    .is_some_and(|src| src.file_name().is_some_and(|name| name == "src"))
+        })
+    {
+        return true;
+    }
     let in_src = |d: &std::path::Path| d.components().any(|c| c.as_os_str() == "src");
     let is_build_rs = source_file.file_name().is_some_and(|n| n == "build.rs");
     match dir_name {
@@ -44,9 +66,8 @@ pub fn rust_module_dir(source_file: &std::path::Path) -> Option<std::path::PathB
 /// module. Returns `None` for non-Rust specifiers (TS/Python/etc. keep their
 /// existing relative-resolution branches).
 ///
-/// Handles the workspace-internal forms only — external crates (`std::`,
-/// `serde::`) are never indexed, so their expanded base never matches a
-/// SymbolTable key and resolution correctly falls through:
+/// Both the full resolver and the session overlay use this layout helper.
+/// External crate heads (`std::`, `serde::`) have no local expansion:
 /// * `crate::output` from `crates/ecp-cli/src/commands/find.rs`
 ///   → `crates/ecp-cli/src/output`; from a repo-root crate's
 ///   `src/commands/find.rs` → `src/output`
@@ -62,10 +83,7 @@ pub fn rust_module_path_base(
     source_file: &std::path::Path,
     specifier: &str,
 ) -> Option<std::path::PathBuf> {
-    if !source_file
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
-    {
+    if !is_rust_source(source_file) {
         return None;
     }
     let segs: Vec<&str> = specifier.split("::").filter(|s| !s.is_empty()).collect();
