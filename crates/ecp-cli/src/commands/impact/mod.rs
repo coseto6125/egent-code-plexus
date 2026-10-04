@@ -168,13 +168,15 @@ pub struct ImpactArgs {
     /// List the call sites the graph could not attribute: when the target's
     /// name has two or more same-named definitions, the resolver drops bare
     /// calls to it as ambiguous, so the caller set is a lower bound. This
-    /// runs one `git grep` over tracked files with the definitions'
-    /// extensions and reports, under `ambiguous_callers`, each `name(` /
-    /// `.name(` / `->name(` / `::name(` site outside the definitions and
-    /// outside functions already listed as callers (at most 50 sites, with
-    /// the full `total`). Sites are text-match candidates, never merged into
-    /// the caller list or counts. Ruby calls without parentheses are not
-    /// matched. Upstream walks only: ignored with `--direction down`.
+    /// runs one `git grep` over tracked files in the definitions' language
+    /// family (`.ts` also searches `.tsx`) and reports, under
+    /// `ambiguous_callers`, each `name(` / `.name(` / `->name(` / `::name(`
+    /// site outside the definitions and outside functions already listed as
+    /// callers (at most 50 sites; `total` counts every call). A site whose
+    /// line holds several calls carries `count`; it is omitted when 1. Sites
+    /// are text-match candidates, never merged into the caller list or
+    /// counts. Ruby calls without parentheses are not matched. Upstream
+    /// walks only: ignored with `--direction down`.
     #[arg(
         long = "ambiguous-callers",
         alias = "ambiguous_callers",

@@ -1,11 +1,13 @@
 //! `--ambiguous-callers`: the call sites of a name whose bare calls the
 //! resolver suppressed at index time (`DecisionTier::AmbiguousGlobal`), found
 //! by text match at query time. Persisting every suppressed site in graph.bin
-//! was rejected (format bump, ~530k noise rows on vscode), so the graph is
+//! was rejected (format bump; the noise volume is measured in
+//! FU-2026-10-03-cab07766ef07), so the graph is
 //! consulted here only to drop the sites it already explains.
 
 use crate::git::safe_exec;
-use ecp_core::graph::{NodeKind, RelType};
+use ecp_core::file_category::Language;
+use ecp_core::graph::RelType;
 use ecp_core::session::MergedGraph;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{json, Value};
@@ -21,6 +23,8 @@ struct Hit {
     path: String,
     line: u32,
     form: &'static str,
+    /// Call occurrences of the name on this line.
+    count: u32,
 }
 
 struct Scope<'a> {
@@ -37,7 +41,7 @@ pub(super) fn ambiguous_callers(merged: MergedGraph<'_>, name: &str, repo: &Path
         return failure("empty symbol name");
     }
     let defs = same_name_defs(merged, name);
-    let pathspecs = pathspecs(merged, &defs);
+    let pathspecs = pathspecs(merged, &defs, repo);
     if pathspecs.is_empty() {
         return sites_json(Vec::new());
     }
@@ -57,22 +61,20 @@ fn failure(reason: &str) -> Value {
 
 fn sites_json(mut hits: Vec<(Hit, Option<&str>)>) -> Value {
     hits.sort_by(|(a, _), (b, _)| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
-    let total = hits.len();
+    let total: u32 = hits.iter().map(|(h, _)| h.count).sum();
     hits.truncate(MAX_SITES);
     let sites: Vec<Value> = hits
         .iter()
         .map(|(h, enclosing)| {
-            json!({ "file": h.path, "line": h.line, "enclosing": enclosing, "form": h.form })
+            let mut site =
+                json!({ "file": h.path, "line": h.line, "enclosing": enclosing, "form": h.form });
+            if h.count > 1 {
+                site["count"] = h.count.into();
+            }
+            site
         })
         .collect();
     json!({ "total": total, "shown": sites.len(), "note": NOTE, "sites": sites })
-}
-
-fn is_callable(kind: NodeKind) -> bool {
-    matches!(
-        kind,
-        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-    )
 }
 
 /// Every on-disk definition named `name`, in merged space: base nodes the
@@ -101,23 +103,66 @@ fn same_name_defs(merged: MergedGraph<'_>, name: &str) -> Vec<u32> {
     defs
 }
 
-/// One pathspec per distinct extension of the definitions' files, rooted at
-/// the top of the work tree so a subdirectory `--repo` still searches the
-/// whole repository the graph covers.
-fn pathspecs(merged: MergedGraph<'_>, defs: &[u32]) -> Vec<String> {
-    let specs: BTreeSet<String> = defs
+fn extension_of(path: &str) -> Option<&str> {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    match base.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => Some(ext),
+        _ => None,
+    }
+}
+
+/// Extensions of the tracked files that share a language with one of
+/// `languages`, taken from the same extension -> language table the indexer
+/// uses, so `.tsx` is searched when the definitions are in `.ts`.
+fn family_extensions(repo: &Path, languages: &[Language]) -> BTreeSet<String> {
+    let Ok(out) = safe_exec::git()
+        .arg("-C")
+        .arg(repo)
+        .args(["ls-files", "-z", "--full-name", "--", ":(top)*"])
+        .output()
+    else {
+        return BTreeSet::new();
+    };
+    out.stdout
+        .split(|&b| b == 0)
+        .filter_map(|p| extension_of(std::str::from_utf8(p).ok()?))
+        .filter(|ext| languages.contains(&Language::from_path(&format!("x.{ext}"))))
+        .map(str::to_string)
+        .collect()
+}
+
+/// One pathspec per distinct extension of the definitions' files and of their
+/// language family, rooted at the top of the work tree so a subdirectory
+/// `--repo` still searches the whole repository the graph covers.
+fn pathspecs(merged: MergedGraph<'_>, defs: &[u32], repo: &Path) -> Vec<String> {
+    let paths: Vec<&str> = defs
         .iter()
         .filter_map(|&d| merged.node(d)?.file_path(&merged))
-        .map(|path| {
-            let base = path.rsplit('/').next().unwrap_or(path);
-            match base.rsplit_once('.') {
-                Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => {
-                    format!(":(top)*.{ext}")
-                }
-                _ => format!(":(top,glob)**/{base}"),
-            }
-        })
         .collect();
+    let mut languages: Vec<Language> = Vec::new();
+    for lang in paths.iter().map(|p| Language::from_path(p)) {
+        if lang != Language::Unknown && !languages.contains(&lang) {
+            languages.push(lang);
+        }
+    }
+    let mut extensions: BTreeSet<String> = if languages.is_empty() {
+        BTreeSet::new()
+    } else {
+        family_extensions(repo, &languages)
+    };
+    let mut specs: BTreeSet<String> = BTreeSet::new();
+    for path in paths {
+        match extension_of(path) {
+            Some(ext) => {
+                extensions.insert(ext.to_string());
+            }
+            None => {
+                let base = path.rsplit('/').next().unwrap_or(path);
+                specs.insert(format!(":(top,glob)**/{base}"));
+            }
+        }
+    }
+    specs.extend(extensions.into_iter().map(|ext| format!(":(top)*.{ext}")));
     specs.into_iter().collect()
 }
 
@@ -172,39 +217,60 @@ fn parse_hits(stdout: &[u8], name: &[u8]) -> Vec<Hit> {
             let mut fields = record.splitn(3, |&b| b == 0);
             let path = std::str::from_utf8(fields.next()?).ok()?;
             let line = std::str::from_utf8(fields.next()?).ok()?.parse().ok()?;
-            let form = call_form(fields.next()?, name)?;
+            let (form, count) = call_form(fields.next()?, name)?;
             Some(Hit {
                 path: path.to_string(),
                 line,
                 form,
+                count,
             })
         })
         .collect()
 }
 
-fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
 }
 
-/// `"member"` for `x.name(` / `p->name(` / `T::name(`, `"bare"` for
+/// The character that ends `bytes`, or `None` when `bytes` is empty or ends
+/// in invalid UTF-8.
+fn last_char(bytes: &[u8]) -> Option<char> {
+    (1..=bytes.len().min(4)).find_map(|k| {
+        std::str::from_utf8(&bytes[bytes.len() - k..])
+            .ok()?
+            .chars()
+            .next()
+    })
+}
+
+/// `("member", n)` for `x.name(` / `p->name(` / `T::name(`, `("bare", n)` for
 /// `name(`, `None` when no whole-identifier call of `name` is on the line.
-/// Mirrors the git pattern so both agree on what a match is.
-fn call_form(content: &[u8], name: &[u8]) -> Option<&'static str> {
+/// The form is the first call's; `n` counts every call on the line. A call is
+/// whole-identifier when no Unicode letter, digit, `_` or `$` precedes it.
+/// Mirrors the git pattern (which is looser on non-ASCII) so both agree on
+/// what a match is.
+fn call_form(content: &[u8], name: &[u8]) -> Option<(&'static str, u32)> {
+    if name.is_empty() {
+        return None;
+    }
+    let mut first = None;
+    let mut count = 0;
     let mut from = 0;
     while let Some(off) = content[from..].windows(name.len()).position(|w| w == name) {
         let at = from + off;
         let end = at + name.len();
-        let boundary = at == 0 || !is_ident_byte(content[at - 1]);
+        let boundary = last_char(&content[..at]).is_none_or(|c| !is_ident_char(c));
         let paren = content[end..].iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'(');
         if boundary && paren {
             let prefix = &content[..at];
             let member =
                 prefix.ends_with(b".") || prefix.ends_with(b"->") || prefix.ends_with(b"::");
-            return Some(if member { "member" } else { "bare" });
+            first.get_or_insert(if member { "member" } else { "bare" });
+            count += 1;
         }
         from = at + 1;
     }
-    None
+    first.map(|form| (form, count))
 }
 
 /// Drop the hits the graph already explains: a definition's own line, and a
@@ -218,20 +284,24 @@ fn unattributed<'a>(
     let scopes = scopes_in(merged, &hit_paths);
 
     let mut callers: FxHashSet<u32> = FxHashSet::default();
+    // A construction lands on the type's constructor, which impact already
+    // counts as the type's callers, so those sources are explained too.
     for &d in defs {
-        callers.extend(
-            merged
-                .in_edges(d)
-                .filter(|e| e.rel_type() == RelType::Calls)
-                .map(|e| e.source),
-        );
+        for target in std::iter::once(d).chain(merged.constructors_of(d)) {
+            callers.extend(
+                merged
+                    .in_edges(target)
+                    .filter(|e| e.rel_type() == RelType::Calls)
+                    .map(|e| e.source),
+            );
+        }
     }
     // A caller that is not a function (a File / Module node) stands for the
     // file's top level, so top-level hits in its file are already shown.
     let file_level_callers: FxHashSet<&str> = callers
         .iter()
         .filter_map(|&c| merged.node(c))
-        .filter(|n| !is_callable(n.kind()))
+        .filter(|n| !n.kind().is_callable())
         .filter_map(|n| n.file_path(&merged))
         .collect();
 
@@ -243,7 +313,7 @@ fn unattributed<'a>(
             continue;
         };
         def_lines.insert((path, node.start_line()));
-        if is_callable(node.kind()) {
+        if node.kind().is_callable() {
             callable_defs.push((path, node.start_line(), node.end_line()));
         }
     }
@@ -264,7 +334,7 @@ fn unattributed<'a>(
     hits.into_iter()
         .filter(|h| !def_lines.contains(&(h.path.as_str(), h.line)))
         .filter_map(|h| {
-            let containing: Vec<&Scope<'a>> = scopes
+            let mut containing: Vec<&Scope<'a>> = scopes
                 .get(h.path.as_str())
                 .map(|v| {
                     v.iter()
@@ -272,20 +342,22 @@ fn unattributed<'a>(
                         .collect()
                 })
                 .unwrap_or_default();
+            containing.sort_by_key(|s| s.end.saturating_sub(s.start));
             if containing.is_empty() {
                 return (!file_level_callers.contains(h.path.as_str())).then_some((h, None));
             }
-            // Checked against every containing scope, not only the innermost:
-            // a call inside a lambda may be attributed to the named function
-            // around it.
-            if containing.iter().any(|s| callers.contains(&s.idx)) {
+            // Innermost outward, up to the first named callable: a lambda's
+            // call is attributed to the named function around it, but a
+            // named inner function is its own caller, so a known call in the
+            // outer function does not explain a hit inside it.
+            let named = containing
+                .iter()
+                .position(|s| !s.name.starts_with("<anonymous"));
+            let chain = &containing[..named.map_or(containing.len(), |i| i + 1)];
+            if chain.iter().any(|s| callers.contains(&s.idx)) {
                 return None;
             }
-            let enclosing = containing
-                .iter()
-                .filter(|s| !s.name.starts_with("<anonymous"))
-                .min_by_key(|s| s.end.saturating_sub(s.start))
-                .map(|s| s.name);
+            let enclosing = named.map(|i| containing[i].name);
             Some((h, enclosing))
         })
         .collect()
@@ -305,7 +377,7 @@ fn scopes_in<'a>(
     let mut scopes: FxHashMap<&'a str, Vec<Scope<'a>>> = FxHashMap::default();
     let push = |idx: u32, scopes: &mut FxHashMap<&'a str, Vec<Scope<'a>>>| {
         let Some(node) = merged.node(idx) else { return };
-        if !is_callable(node.kind()) {
+        if !node.kind().is_callable() {
             return;
         }
         let Some(path) = node.file_path(&merged) else {
@@ -357,9 +429,39 @@ mod tests {
             ("forget() + get()", Some("bare")),
         ];
         for (line, want) in cases {
-            assert_eq!(call_form(line.as_bytes(), b"get"), *want, "line: {line}");
+            assert_eq!(
+                call_form(line.as_bytes(), b"get").map(|(form, _)| form),
+                *want,
+                "line: {line}"
+            );
         }
-        assert_eq!(call_form(b"pkg.Get ()", b"Get"), Some("member"));
+        assert_eq!(
+            call_form(b"pkg.Get ()", b"Get").map(|(form, _)| form),
+            Some("member")
+        );
+    }
+
+    #[test]
+    fn test_call_form_several_calls_on_one_line_counted() {
+        assert_eq!(call_form(b"get(); get();", b"get"), Some(("bare", 2)));
+        assert_eq!(call_form(b"a.get(); get();", b"get"), Some(("member", 2)));
+        assert_eq!(
+            call_form(b"get(); getter(); x = get", b"get"),
+            Some(("bare", 1))
+        );
+    }
+
+    #[test]
+    fn test_call_form_non_ascii_letter_before_name_is_not_a_boundary() {
+        assert_eq!(call_form("éget()".as_bytes(), b"get"), None);
+        assert_eq!(call_form("日get()".as_bytes(), b"get"), None);
+        assert_eq!(call_form("é get()".as_bytes(), b"get"), Some(("bare", 1)));
+        assert_eq!(call_form(b"\xffget()", b"get"), Some(("bare", 1)));
+    }
+
+    #[test]
+    fn test_call_form_empty_name_matches_nothing() {
+        assert_eq!(call_form(b"x()", b""), None);
     }
 
     #[test]

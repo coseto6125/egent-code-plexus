@@ -308,3 +308,198 @@ fn test_ambiguous_callers_call_syntaxes_across_languages_matched() {
         "definition lines dropped: {payload}"
     );
 }
+
+/// Two `name` function definitions at `paths` (each a one-line file), tracked
+/// in git together with `extra` files; returns the fixture and both nodes.
+fn two_defs(
+    repo: &Path,
+    name: &str,
+    paths: [&str; 2],
+    extra: &[(&str, &str)],
+) -> (GraphFixture, [u32; 2]) {
+    let mut fx = GraphFixture::new();
+    let mut nodes = [0; 2];
+    for (slot, path) in nodes.iter_mut().zip(paths) {
+        write(repo, path, &format!("function {name}() {{}}\n"));
+        *slot = fx.func(path, name);
+        fx.span(*slot, (0, 0, 0, 20));
+    }
+    for (path, body) in extra {
+        write(repo, path, body);
+    }
+    git_track_all(repo);
+    (fx, nodes)
+}
+
+fn site_keys(payload: &Value) -> Vec<(String, u64)> {
+    sites(payload).into_iter().map(|s| (s.0, s.1)).collect()
+}
+
+/// Fails before the fix: the construction `new Config(1)` lands on the
+/// constructor, whose `Calls` in-edge impact already counts as a caller, but
+/// the unattributed-site filter read only the class's own in-edges.
+#[test]
+fn test_ambiguous_callers_instantiator_via_constructor_dropped() {
+    let repo = tempfile::tempdir().unwrap();
+    for f in ["src/a.ts", "src/b.ts"] {
+        write(
+            repo.path(),
+            f,
+            "export class Config {\n  constructor(n: number) {}\n}\n",
+        );
+    }
+    write(
+        repo.path(),
+        "src/use.ts",
+        "import { Config } from './a';\n\
+         export function load() {\n  return new Config(1);\n}\n\
+         export function other() {\n  return new Config(2);\n}\n",
+    );
+    git_track_all(repo.path());
+    let mut fx = GraphFixture::new();
+    let mut ctors = Vec::new();
+    for f in ["src/a.ts", "src/b.ts"] {
+        let class = fx.node(ecp_core::graph::NodeKind::Class, f, "Config");
+        fx.span(class, (0, 0, 2, 1));
+        let ctor = fx.node_owned(
+            ecp_core::graph::NodeKind::Constructor,
+            f,
+            "Config",
+            "constructor",
+        );
+        fx.span(ctor, (1, 2, 1, 25));
+        fx.edge(class, ctor, RelType::HasMethod);
+        ctors.push(ctor);
+    }
+    let load = fx.func("src/use.ts", "load");
+    fx.span(load, (1, 0, 3, 1));
+    let other = fx.func("src/use.ts", "other");
+    fx.span(other, (4, 0, 6, 1));
+    fx.edge_with(load, ctors[0], RelType::Calls, 1.0, "call");
+    let (_g, engine) = engine_from(fx);
+    let payload = build_payload(&args("Config", "a.ts", repo.path()), &engine).unwrap();
+    assert_eq!(
+        sites(&payload)
+            .iter()
+            .map(|s| (s.1, s.2.clone()))
+            .collect::<Vec<_>>(),
+        vec![(6, Value::from("other"))],
+        "`load` is already a counted instantiator; `other` is not: {payload}"
+    );
+}
+
+/// Fails before the fix: only the definitions' exact extension (`.ts`) was
+/// searched, so the call in `view.tsx` was never found.
+#[test]
+fn test_ambiguous_callers_language_family_extension_searched() {
+    let repo = tempfile::tempdir().unwrap();
+    let (fx, _) = two_defs(
+        repo.path(),
+        "fmt",
+        ["src/a.ts", "src/b.ts"],
+        &[("src/use.ts", "fmt();\n"), ("src/view.tsx", "fmt();\n")],
+    );
+    let (_g, engine) = engine_from(fx);
+    let payload = build_payload(&args("fmt", "a.ts", repo.path()), &engine).unwrap();
+    assert_eq!(
+        site_keys(&payload),
+        vec![
+            ("src/use.ts".to_string(), 1),
+            ("src/view.tsx".to_string(), 1)
+        ],
+        "{payload}"
+    );
+}
+
+const NESTED_CALLER: &str =
+    "def outer():\n    get()\n    def inner():\n        get()\n    return inner\n\
+                             def known():\n    f = lambda: get()\n";
+
+fn nested_fx(repo: &Path) -> GraphFixture {
+    write(repo, "src/alpha.py", "def get():\n    return 1\n");
+    write(repo, "src/beta.py", "def get():\n    return 2\n");
+    write(repo, "src/nested.py", NESTED_CALLER);
+    git_track_all(repo);
+    let mut fx = GraphFixture::new();
+    let alpha = fx.func("src/alpha.py", "get");
+    fx.span(alpha, (0, 0, 1, 12));
+    let beta = fx.func("src/beta.py", "get");
+    fx.span(beta, (0, 0, 1, 12));
+    let outer = fx.func("src/nested.py", "outer");
+    fx.span(outer, (0, 0, 4, 16));
+    let inner = fx.func("src/nested.py", "inner");
+    fx.span(inner, (2, 4, 3, 14));
+    let known = fx.func("src/nested.py", "known");
+    fx.span(known, (5, 0, 6, 24));
+    let lambda = fx.func("src/nested.py", "<anonymous>");
+    fx.span(lambda, (6, 8, 6, 24));
+    fx.edge_with(outer, alpha, RelType::Calls, 1.0, "call");
+    fx.edge_with(known, alpha, RelType::Calls, 1.0, "call");
+    fx
+}
+
+/// Fails before the fix on line 4: `outer` holds a `Calls` edge to `get`, and
+/// the check looked at every enclosing scope, hiding the call in `inner`.
+#[test]
+fn test_ambiguous_callers_nested_function_not_hidden_by_outer_caller() {
+    let repo = tempfile::tempdir().unwrap();
+    let (_g, engine) = engine_from(nested_fx(repo.path()));
+    let payload = build_payload(&args("get", "alpha.py", repo.path()), &engine).unwrap();
+    assert_eq!(
+        sites(&payload)
+            .iter()
+            .map(|s| (s.1, s.2.clone()))
+            .collect::<Vec<_>>(),
+        vec![(4, Value::from("inner"))],
+        "line 2 (outer) and line 7 (lambda inside known) are explained: {payload}"
+    );
+}
+
+/// Fails before the fix: `total` counted lines, so two calls on one line
+/// read as one.
+#[test]
+fn test_ambiguous_callers_two_calls_on_one_line_counted_twice() {
+    let repo = tempfile::tempdir().unwrap();
+    let (fx, _) = two_defs(
+        repo.path(),
+        "get",
+        ["src/a.js", "src/b.js"],
+        &[("src/use.js", "get(); get();\nget();\n")],
+    );
+    let (_g, engine) = engine_from(fx);
+    let payload = build_payload(&args("get", "a.js", repo.path()), &engine).unwrap();
+    let field = &payload["ambiguous_callers"];
+    assert_eq!(field["total"], 3, "{payload}");
+    assert_eq!(field["shown"], 2, "{payload}");
+    let counts: Vec<Option<u64>> = field["sites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.get("count").and_then(Value::as_u64))
+        .collect();
+    assert_eq!(
+        counts,
+        vec![Some(2), None],
+        "count is omitted when 1: {payload}"
+    );
+}
+
+/// Fails before the fix: `é` was not an identifier byte, so `éget()` was
+/// listed as a bare `get` call.
+#[test]
+fn test_ambiguous_callers_non_ascii_letter_before_name_not_listed() {
+    let repo = tempfile::tempdir().unwrap();
+    let (fx, _) = two_defs(
+        repo.path(),
+        "get",
+        ["src/a.js", "src/b.js"],
+        &[("src/use.js", "éget();\nget();\n")],
+    );
+    let (_g, engine) = engine_from(fx);
+    let payload = build_payload(&args("get", "a.js", repo.path()), &engine).unwrap();
+    assert_eq!(
+        site_keys(&payload),
+        vec![("src/use.js".to_string(), 2)],
+        "{payload}"
+    );
+}

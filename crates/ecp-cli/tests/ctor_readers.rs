@@ -117,7 +117,7 @@ fn test_inspect_class_with_constructor_lists_instantiator_via_constructor() {
         .iter()
         .find(|e| e["name"] == "make_widget")
         .unwrap_or_else(|| panic!("instantiator missing from incoming.calls: {result}"));
-    assert_eq!(entry["via_constructor"], "__init__", "{entry}");
+    assert_eq!(entry["viaConstructor"], "__init__", "{entry}");
     assert!(
         upstream_names(&result).contains(&"make_widget".to_string()),
         "impact_upstream_1hop must agree with incoming: {result}"
@@ -135,7 +135,7 @@ fn test_inspect_class_without_constructor_has_no_via_constructor_field() {
         .iter()
         .find(|e| e["name"] == "make_gadget")
         .unwrap_or_else(|| panic!("direct instantiator missing: {result}"));
-    assert!(entry.get("via_constructor").is_none(), "{entry}");
+    assert!(entry.get("viaConstructor").is_none(), "{entry}");
     assert_eq!(upstream_names(&result), vec!["make_gadget".to_string()]);
 }
 
@@ -148,7 +148,7 @@ fn test_inspect_constructor_without_callers_adds_nothing() {
     assert!(
         incoming_calls(&result)
             .iter()
-            .all(|e| e.get("via_constructor").is_none()),
+            .all(|e| e.get("viaConstructor").is_none()),
         "no instantiator, so no constructor-sourced entry: {result}"
     );
     assert!(upstream_names(&result).is_empty(), "{result}");
@@ -163,8 +163,57 @@ fn test_inspect_function_keeps_exactly_its_own_callers() {
     let calls = incoming_calls(&result);
     assert_eq!(calls.len(), 1, "{result}");
     assert_eq!(calls[0]["name"], "call_plain");
-    assert!(calls[0].get("via_constructor").is_none());
+    assert!(calls[0].get("viaConstructor").is_none());
     assert_eq!(upstream_names(&result), vec!["call_plain".to_string()]);
+}
+
+/// Contract: a class's constructor is read only for its `Calls` in-edges. The
+/// owning class's `HasMethod` edge into `__init__` is not an instantiation, so
+/// it must neither list the class under `has_method` nor make a sibling class
+/// in the same file look like an instantiator.
+#[test]
+fn test_inspect_class_constructor_non_call_in_edges_not_read() {
+    let tmp = tempdir().unwrap();
+    write(
+        tmp.path(),
+        "m.py",
+        "class A:
+    def __init__(self):
+        self.a = 1
+
+
+class B:
+    def __init__(self):
+        self.b = 1
+
+
+def make():
+    return A()
+",
+    );
+    init_and_analyze(tmp.path());
+
+    let result = inspect(tmp.path(), "A");
+    let incoming = &result["incoming"];
+    assert!(
+        incoming
+            .get("has_method")
+            .and_then(Value::as_array)
+            .is_none_or(|v| v.iter().all(|e| e.get("viaConstructor").is_none())),
+        "no has_method entry may come through the constructor: {result}"
+    );
+    let calls = incoming_calls(&result);
+    assert!(
+        calls
+            .iter()
+            .any(|e| e["name"] == "make" && e["viaConstructor"] == "__init__"),
+        "{result}"
+    );
+    assert_eq!(
+        upstream_names(&result),
+        vec!["make".to_string()],
+        "{result}"
+    );
 }
 
 fn path(repo: &Path, from: &str, to: &str) -> Value {
