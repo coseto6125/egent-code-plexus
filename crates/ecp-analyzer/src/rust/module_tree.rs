@@ -79,6 +79,20 @@ fn pub_use_re() -> &'static regex::Regex {
     })
 }
 
+/// Matches the one-level group form `pub use <path>::{A, b::C, D as E};`.
+/// Capture 1 is the shared prefix (with its trailing `::`), capture 2 the
+/// brace body. A nested group inside the braces does not match, so that
+/// statement keeps its pre-group behaviour (not collected).
+fn pub_use_group_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?m)^\s*pub(?:\s*\([^)]*\))?\s+use\s+((?:[A-Za-z_][A-Za-z0-9_]*::)+)\{([^{};]*)\}\s*;"
+        )
+        .expect("pub_use_group_re")
+    })
+}
+
 /// Strip `//` and `/* */` comments from source, preserving newlines so
 /// MULTILINE regex anchors keep working.
 fn strip_comments(src: &str) -> String {
@@ -826,39 +840,72 @@ fn collect_pub_use_entries(
     reexports: &mut ReExportMap,
 ) {
     for cap in pub_use_re().captures_iter(clean) {
-        // cap[1]: prefix like "inner::" or "crate::deep::"
-        // cap[2]: item name or "*"
-        // cap[3]: optional alias
-        let raw_prefix = &cap[1]; // includes trailing "::"
-        let item = cap[2].to_string();
-        let alias = cap.get(3).map(|m| m.as_str().to_string());
-
-        // Strip trailing "::" and split into segments.
-        let prefix_str = raw_prefix.trim_end_matches("::");
-        let path_prefix: Vec<String> = prefix_str
-            .split("::")
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect();
-
-        if path_prefix.is_empty() {
-            continue;
-        }
-
-        let is_glob = item == "*";
-        let exported_name = alias.as_deref().unwrap_or(item.as_str()).to_string();
-        let original_name = item.clone();
-
-        reexports.insert(
-            (file.to_path_buf(), exported_name),
-            ReExportEntry {
-                path_prefix,
-                original_name,
-                is_glob,
-                containing_mod_path: containing_mod_path.to_vec(),
-            },
+        // cap[1]: prefix like "inner::" or "crate::deep::" (trailing "::")
+        // cap[2]: item name or "*"; cap[3]: optional alias
+        insert_pub_use(
+            cap[1].split("::"),
+            &cap[2],
+            cap.get(3).map(|m| m.as_str()),
+            file,
+            containing_mod_path,
+            reexports,
         );
     }
+    for cap in pub_use_group_re().captures_iter(clean) {
+        for member in cap[2].split(',').map(str::trim).filter(|m| !m.is_empty()) {
+            let (path, alias) = match member.split_once(" as ") {
+                Some((path, alias)) => (path.trim(), Some(alias.trim())),
+                None => (member, None),
+            };
+            let (sub, item) = match path.rsplit_once("::") {
+                Some((sub, item)) => (Some(sub), item),
+                None => (None, path),
+            };
+            if item == "self" {
+                continue;
+            }
+            insert_pub_use(
+                cap[1]
+                    .split("::")
+                    .chain(sub.into_iter().flat_map(|s| s.split("::"))),
+                item,
+                alias,
+                file,
+                containing_mod_path,
+                reexports,
+            );
+        }
+    }
+}
+
+/// Record one re-exported item: `pub use <prefix>::<item> [as <alias>]`.
+fn insert_pub_use<'a>(
+    prefix: impl Iterator<Item = &'a str>,
+    item: &str,
+    alias: Option<&str>,
+    file: &Path,
+    containing_mod_path: &[String],
+    reexports: &mut ReExportMap,
+) {
+    let path_prefix: Vec<String> = prefix
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    if path_prefix.is_empty() {
+        return;
+    }
+    let is_glob = item == "*";
+    let exported_name = alias.unwrap_or(item).to_string();
+    reexports.insert(
+        (file.to_path_buf(), exported_name),
+        ReExportEntry {
+            path_prefix,
+            original_name: item.to_string(),
+            is_glob,
+            containing_mod_path: containing_mod_path.to_vec(),
+        },
+    );
 }
 
 /// Locate the child module file for `mod NAME;` declared in `parent_file`.

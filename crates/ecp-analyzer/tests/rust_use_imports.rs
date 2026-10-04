@@ -806,3 +806,79 @@ fn test_super_super_in_a_path_attribute_module_climbs_logical_modules() {
         vec!["src/lib.rs".to_string()]
     );
 }
+
+/// Method syntax narrows the result, not the ambiguity check: with a free fn
+/// `join` and one project method `join`, `p.join(..)` on an unindexed type
+/// stays ambiguous instead of binding the method. With only the method, the
+/// unique match still binds as before.
+#[test]
+fn test_method_call_with_a_same_named_free_fn_stays_ambiguous() {
+    let ambiguous = [
+        (
+            "src/lib.rs",
+            "pub mod a;\npub mod b;\npub fn go(p: &std::path::Path) { p.join(\"x\"); }\n",
+        ),
+        ("src/a.rs", "pub fn join(x: &str) {}\n"),
+        (
+            "src/b.rs",
+            "pub struct Set;\nimpl Set { pub fn join(&self, x: &str) {} }\n",
+        ),
+    ];
+    assert_eq!(
+        workspace_go_targets(&ambiguous, "join"),
+        Vec::<String>::new()
+    );
+    let unique = [
+        (
+            "src/lib.rs",
+            "pub mod b;\npub fn go(s: &b::Set) { s.join(\"x\"); }\n",
+        ),
+        (
+            "src/b.rs",
+            "pub struct Set;\nimpl Set { pub fn join(&self, x: &str) {} }\n",
+        ),
+    ];
+    assert_eq!(
+        workspace_go_targets(&unique, "join"),
+        vec!["src/b.rs".to_string()]
+    );
+}
+
+/// A type re-exported through a grouped `pub use lock::{a, FileLock};` sits
+/// in the module the path names, through the re-export. A decoy `FileLock`
+/// elsewhere keeps the bare name ambiguous, so only the path can pick it.
+#[test]
+fn test_module_qualified_type_through_grouped_pub_use_binds_its_definition() {
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+        ("src/lib.rs", "pub mod registry;\npub mod other;\npub fn go() { crate::registry::FileLock::acquire(); }\n"),
+        ("src/registry/mod.rs", "mod lock;\npub use lock::{\n    lock_within,\n    FileLock,\n};\n"),
+        ("src/registry/lock.rs", "pub fn lock_within() {}\npub struct FileLock;\nimpl FileLock { pub fn acquire() {} }\n"),
+        ("src/other.rs", "pub struct FileLock;\nimpl FileLock { pub fn acquire() {} }\n"),
+    ];
+    assert_eq!(
+        workspace_go_targets(&files, "acquire"),
+        vec!["src/registry/lock.rs".to_string()]
+    );
+}
+
+/// The same re-export reached through another workspace crate's name.
+#[test]
+fn test_cross_crate_type_through_grouped_pub_use_binds_its_definition() {
+    let files = two_crates(
+        "pub fn go() { other::registry::FileLock::acquire(); }\n",
+        &[
+            ("crates/other/src/lib.rs", "pub mod registry;\n"),
+            ("crates/other/src/registry/mod.rs", "mod lock;\npub use lock::{lock_within, FileLock as FileLock};\n"),
+            (
+                "crates/other/src/registry/lock.rs",
+                "pub fn lock_within() {}\npub struct FileLock;\nimpl FileLock { pub fn acquire() {} }\n",
+            ),
+            ("crates/app/src/decoy.rs", "pub struct FileLock;\nimpl FileLock { pub fn acquire() {} }\n"),
+        ],
+    );
+    assert_eq!(
+        targets_of(&files, "acquire"),
+        vec!["crates/other/src/registry/lock.rs".to_string()]
+    );
+}

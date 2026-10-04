@@ -461,13 +461,26 @@ impl SymbolTable {
         let Some(raw) = self.global_scoped.get(node_name) else {
             return GlobalPick::NoMatch;
         };
-        let predicate = target.kind_predicate();
-        pick_global(
+        // Method syntax narrows the result, not the field: a same-named free
+        // fn still makes the name ambiguous, so `path.join(..)` on a std type
+        // never binds the project's only `join` method.
+        let field = match target {
+            ResolveTarget::Method => ResolveTarget::Callable,
+            other => other,
+        }
+        .kind_predicate();
+        let pick = pick_global(
             caller,
             raw.iter()
-                .filter(|&&id| predicate(self.node_kinds[id as usize]))
+                .filter(|&&id| field(self.node_kinds[id as usize]))
                 .map(|&id| (id, self.node_file_meta[id as usize])),
-        )
+        );
+        match pick {
+            GlobalPick::Unique(id) if !target.kind_predicate()(self.node_kinds[id as usize]) => {
+                GlobalPick::NoMatch
+            }
+            other => other,
+        }
     }
 
     /// Every candidate [`lookup_global`] weighs, as a set: kind-filtered, then
