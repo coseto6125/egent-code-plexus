@@ -49,4 +49,4 @@ Scans all PathLiteral nodes and emits likely filename split-brain candidate pair
 
 ## Reading the blast radius
 
-`impact` returns the raw caller / callee set — it does not assign a risk label. Judge change risk from the result directly: a large upstream caller count, or callers in core / widely-imported modules, means a wide blast radius — stop and confirm with the user before a breaking change. Caller counts are a **lower bound** (the resolver suppresses ambiguous bare calls to common names); when the result carries the ambiguity caveat, rerun with `--ambiguous-callers` to list the unattributed call sites before trusting it.
+`impact` returns the raw caller / callee set — it does not assign a risk label. Judge change risk from the result directly: a large upstream caller count, or callers in core / widely-imported modules, means a wide blast radius — stop and confirm with the user before a breaking change. Caller counts are a **lower bound** (the resolver suppresses ambiguous bare calls to common names); a suspiciously low count warrants a `grep` cross-check before trusting it.
