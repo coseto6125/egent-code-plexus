@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.14.5 - 2026-10-05
+
+### Bug Fixes
+
+- relation-recall bundle — closure callers, Python/Java/Kotlin/PHP import tiers, overlay parity, streaming cypher aggregates (#819)
+
 ## v0.14.4 - 2026-10-04
 
 ### Bug Fixes
