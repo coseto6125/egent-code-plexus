@@ -572,6 +572,11 @@ impl SymbolTable {
         self.lookup_in_file_with_kind(file_path, node_name, target)
     }
 
+    /// Whether `id` is declared outside any owning type.
+    pub(crate) fn is_top_level(&self, id: NodeId) -> bool {
+        self.node_owner[id as usize] == NO_OWNER
+    }
+
     /// [`Self::lookup_call_in_file`] narrowed by the owner an import binding
     /// requires: [`MemberOwner::Any`] keeps the first match, `TopLevel` takes
     /// a declaration with no owning type, `Type` a member of that type.

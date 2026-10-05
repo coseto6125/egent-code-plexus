@@ -13,6 +13,7 @@ use crate::file_category::Language;
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::Path;
+use std::rc::Rc;
 
 /// Where an import's module lives in the repo.
 #[derive(Clone, Debug, PartialEq)]
@@ -22,7 +23,8 @@ pub(crate) enum Module<'a> {
     Ambiguous,
     /// Files declaring the imported namespace that define the imported
     /// member (all of them when the import names the namespace itself).
-    Namespace(Vec<&'a str>),
+    /// Shared, so a cache hit does not copy a large namespace.
+    Namespace(Rc<[&'a str]>),
 }
 
 /// One language's indexed files, as the resolver's `SymbolTable` keys them.
@@ -66,6 +68,10 @@ impl<'a> LanguageFiles<'a> {
                         .filter_map(|component| component.as_os_str().to_str()),
                 );
             }
+        }
+        // Only fully qualified discovery reads declared namespaces.
+        if fqn_extension(language).is_none() {
+            return files;
         }
         let fresh: FxHashSet<&str> = dirty.iter().map(|f| f.rel_path.as_str()).collect();
         let base = graph.nodes_by_kind(NodeKind::Namespace).filter_map(|idx| {
@@ -297,7 +303,8 @@ fn fqn_module<'a>(
                 declaring
                     .into_iter()
                     .filter(|file| member.is_empty() || defines(graph, dirty, file, member))
-                    .collect(),
+                    .collect::<Vec<_>>()
+                    .into(),
             );
         }
         let candidate = format!("{}.{extension}", name.replace('.', "/"));
@@ -340,6 +347,7 @@ fn namespace_files<'a>(
     name: &str,
 ) -> Vec<&'a str> {
     let mut found: Vec<&'a str> = Vec::new();
+    let mut seen: FxHashSet<&'a str> = FxHashSet::default();
     let backslashed = name.replace('.', "\\");
     let probes = std::iter::once(name).chain((backslashed != name).then_some(backslashed.as_str()));
     for probe in probes {
@@ -355,7 +363,7 @@ fn namespace_files<'a>(
             else {
                 continue;
             };
-            if files.paths.contains(path) && !found.contains(&path) {
+            if files.paths.contains(path) && seen.insert(path) {
                 found.push(path);
             }
         }
@@ -363,7 +371,7 @@ fn namespace_files<'a>(
     for file in dirty {
         let path = file.rel_path.as_str();
         if files.paths.contains(path)
-            && !found.contains(&path)
+            && !seen.contains(path)
             && file
                 .symbols
                 .iter()

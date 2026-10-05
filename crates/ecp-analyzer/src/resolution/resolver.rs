@@ -808,6 +808,29 @@ impl<'a> Resolver<'a> {
     /// so cross-file mixin / inherited-method references resolve through
     /// `Bar extends Foo` / `class Bar; include Foo; end` without falling
     /// through to the strict Global tier.
+    /// The bare-member retry of a Kotlin call through a class binding
+    /// ([`extension_retry`]). Only a top-level function can be an extension
+    /// on that type: a typed receiver of a library type (`gson.fromJson()`)
+    /// or `super.onResume()` must not land on a same-named member.
+    fn extension_fallback(
+        &self,
+        source_file: &Path,
+        member: &str,
+        raw_imports: &[RawImport],
+        target: ResolveTarget,
+        caller_heritage: &[String],
+    ) -> Vec<(NodeId, f32)> {
+        let mut hits = self.resolve_symbol_with_heritage(
+            source_file,
+            member,
+            raw_imports,
+            target,
+            caller_heritage,
+        );
+        hits.retain(|&(id, _)| self.symbol_table.is_top_level(id));
+        hits
+    }
+
     pub fn resolve_symbol_with_heritage(
         &self,
         source_file: &Path,
@@ -901,10 +924,10 @@ impl<'a> Resolver<'a> {
             }
             if bound {
                 if let (true, Some(member)) = (external, extension) {
-                    return self.resolve_symbol_with_heritage(
+                    return self.extension_fallback(
                         source_file,
                         member,
-                        &[],
+                        raw_imports,
                         target,
                         caller_heritage,
                     );
@@ -1075,10 +1098,10 @@ impl<'a> Resolver<'a> {
                         .is_some()
                 })
             {
-                return self.resolve_symbol_with_heritage(
+                return self.extension_fallback(
                     source_file,
                     member,
-                    &[],
+                    raw_imports,
                     target,
                     caller_heritage,
                 );

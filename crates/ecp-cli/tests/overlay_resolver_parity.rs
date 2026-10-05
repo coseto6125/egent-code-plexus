@@ -1134,6 +1134,45 @@ fn test_overlay_kotlin_extension_on_external_class_matches_reindex() {
     );
 }
 
+// The import's first segment names an in-repo directory, so it is not
+// external; the class-bound callee still reaches the extension function.
+#[test]
+fn test_overlay_kotlin_extension_under_indexed_root_matches_reindex() {
+    let factory = (
+        "kotlinx/conv/Factory.kt",
+        "package kotlinx.conv\nimport kotlinx.serialization.BinaryFormat\nfun BinaryFormat.asConverterFactory(t: String): Any = t\n",
+    );
+    parity(
+        &kotlin(),
+        &[
+            factory,
+            (
+                "conv/App.kt",
+                "package conv\nimport kotlinx.serialization.protobuf.ProtoBuf\nfun run() {}\n",
+            ),
+        ],
+        &[(
+            "conv/App.kt",
+            "package conv\nimport kotlinx.serialization.protobuf.ProtoBuf\nfun run() { ProtoBuf.asConverterFactory(\"x\") }\n",
+        )],
+        &[(factory.0.into(), "asConverterFactory".into(), "".into(), 70)],
+    );
+}
+
+// `super.onResume()` on an external base must not turn into a self-call.
+#[test]
+fn test_overlay_kotlin_super_of_external_base_matches_reindex() {
+    let before = "package com.example\nimport android.app.Activity\nclass Screen : Activity() {\n override fun onResume() {}\n}\n";
+    let after = "package com.example\nimport android.app.Activity\nclass Screen : Activity() {\n override fun onResume() { super.onResume() }\n}\n";
+    parity_from(
+        "onResume",
+        &kotlin(),
+        &[("com/example/Screen.kt", before)],
+        &[("com/example/Screen.kt", after)],
+        &[],
+    );
+}
+
 // Was: the alias `h` named no symbol (dropped caller).
 #[test]
 fn test_overlay_kotlin_alias_import_matches_reindex() {
@@ -1338,7 +1377,7 @@ fn test_overlay_php_single_segment_use_function_matches_reindex() {
 // (0.8). The overlay has no heritage tier and two `refresh` methods, so it
 // leaves no edge. Was: both bound the wildcard's `Adapter.refresh` at 0.95.
 #[test]
-fn test_overlay_kotlin_wildcard_below_heritage_matches_reindex() {
+fn test_overlay_kotlin_wildcard_below_heritage_documents_heritage_divergence() {
     let screen = |body: &str| {
         format!(
             "package app\nimport lib.Base\nimport util.*\nclass Screen : Base() {{\n fun run() {{ {body} }}\n}}\n"

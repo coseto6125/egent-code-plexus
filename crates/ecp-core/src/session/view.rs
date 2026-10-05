@@ -161,6 +161,8 @@ impl OverlayView {
     /// branch. Cost when dirty: one O(files) pass over `graph.files` plus one
     /// O(nodes) pass over `graph.nodes` (pure scans; allocation stays O(dirty
     /// symbols)), then O(dirty symbols × callees × log N) name-index lookups.
+    /// A Python/Java/Kotlin/PHP call through an import also builds, once per
+    /// language, a file index over `graph.files` for module discovery.
     pub fn build(graph: &ArchivedZeroCopyGraph, files: &[OverlayFileInput]) -> Option<Self> {
         if files.is_empty() {
             return None;
@@ -785,6 +787,22 @@ fn resolve_callee<'s>(
                     scope,
                 );
             }
+            Some(ImportBinding::Extension(member)) => {
+                let hit = resolve_callee(
+                    graph,
+                    CallSite::Plain(member),
+                    file_ord,
+                    imports,
+                    caller,
+                    base_metas,
+                    names,
+                    nodes,
+                    replaced,
+                    dirty_base,
+                    scope,
+                );
+                return hit.filter(|&(idx, _)| is_top_level(graph, nodes, idx));
+            }
             None => {}
         }
     }
@@ -1194,6 +1212,9 @@ enum ImportBinding<'s> {
     Resolved(Option<(u32, f32)>),
     /// Resolve this name through the remaining tiers, without imports.
     Fallback(&'s str),
+    /// A Kotlin call through a class binding retries its bare member, and
+    /// only a top-level function (an extension on that type) may answer.
+    Extension(&'s str),
 }
 
 /// One pass of the import-member tier over the explicit or the wildcard
@@ -1270,14 +1291,19 @@ fn bind_import<'s>(
         return None;
     }
     if external {
-        return Some(extension.map_or(ImportBinding::Resolved(None), ImportBinding::Fallback));
+        return Some(extension.map_or(ImportBinding::Resolved(None), ImportBinding::Extension));
     }
     if matches!(explicit, MemberHit::Unbound { bound: false }) && fqn_language(language) {
         if let MemberHit::Bound(target) = pass(true, scope) {
             return Some(ImportBinding::Resolved(Some((target, CONF_IMPORT_SCOPED))));
         }
     }
-    Some(ImportBinding::Fallback(retry.unwrap_or(callee)))
+    // The overlay has no qualifier tier or receiver ladder; the index's last
+    // resort for a class-bound Kotlin callee is the extension retry.
+    Some(extension.map_or(
+        ImportBinding::Fallback(retry.unwrap_or(callee)),
+        ImportBinding::Extension,
+    ))
 }
 
 /// The resolver's `import_member_hit`: the member the explicit (or the
@@ -1338,6 +1364,19 @@ fn import_member_hit<'s>(
         }
     }
     found.map_or(MemberHit::Unbound { bound }, MemberHit::Bound)
+}
+
+/// Whether `idx` (base or virtual) is declared outside any owning type.
+fn is_top_level(graph: &ArchivedZeroCopyGraph, nodes: &[ViewNode], idx: u32) -> bool {
+    let owner = match idx.checked_sub(graph.nodes.len() as u32) {
+        Some(virt) => nodes[virt as usize].owner_class.as_deref(),
+        None => Some(
+            graph.nodes[idx as usize]
+                .owner_class
+                .resolve(&graph.string_pool),
+        ),
+    };
+    owner.and_then(owner_key).is_none()
 }
 
 /// The index's `lookup_member_in_file` over the kind family of `names`: the

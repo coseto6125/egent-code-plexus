@@ -276,6 +276,47 @@ fn test_resolve_call_extension_on_unindexed_class_under_indexed_root_keeps_globa
     );
 }
 
+/// `gson: Gson` makes the callee `Gson.fromJson`; the library type's member
+/// is not the same-named method of the caller's own class.
+#[test]
+fn test_resolve_call_typed_receiver_of_library_type_skips_member_namesake_returns_no_edge() {
+    let graph = kotlin_graph(&[(
+        "src/main/kotlin/com/example/UserAdapter.kt",
+        "package com.example\nimport com.google.gson.Gson\nclass UserAdapter {\n fun fromJson(json: String): Any = json\n fun parse(json: String, gson: Gson): Any = gson.fromJson(json, Any::class.java)\n}\n",
+    )]);
+    assert_call_targets(&graph, "parse", &[]);
+}
+
+/// The extension retry keeps the file's imports, so an aliased member import
+/// still names the extension function.
+#[test]
+fn test_resolve_call_extension_through_aliased_member_import_returns_import_scoped() {
+    let graph = kotlin_graph(&[
+        (
+            "src/main/kotlin/conv/Convert.kt",
+            "package conv\nimport kotlinx.serialization.BinaryFormat\nfun BinaryFormat.convert(): Any = this\n",
+        ),
+        (
+            "src/main/kotlin/other/Other.kt",
+            "package other\nfun convert(): Any = 1\n",
+        ),
+        (
+            "src/test/kotlin/app/App.kt",
+            "package app\nimport conv.convert as cv\nimport kotlinx.serialization.protobuf.ProtoBuf\nfun setUp() { ProtoBuf.cv() }\n",
+        ),
+    ]);
+    assert_call_targets(
+        &graph,
+        "setUp",
+        &[(
+            "src/main/kotlin/conv/Convert.kt",
+            "",
+            "convert",
+            import_scoped(),
+        )],
+    );
+}
+
 /// `super.setup()` names the imported base, which does not declare
 /// `setup`: the call keeps the receiver ladder, which finds the inherited
 /// member, instead of retrying the bare name (a self-call).
