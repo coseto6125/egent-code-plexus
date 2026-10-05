@@ -1,4 +1,6 @@
 ; Imports
+(package_header (identifier) @namespace.name) @namespace
+
 (import_header
   (identifier) @import.source
   (import_alias (type_identifier) @alias)?) @import

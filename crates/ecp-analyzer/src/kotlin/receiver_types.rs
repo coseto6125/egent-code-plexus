@@ -24,6 +24,7 @@ use tree_sitter::Node;
 #[derive(Debug, Default)]
 struct LocalTypes {
     scopes: Vec<((u32, u32), HashMap<String, String>)>,
+    imports: HashMap<String, String>,
 }
 
 impl LocalTypes {
@@ -33,6 +34,9 @@ impl LocalTypes {
         for ((start, end), map) in &self.scopes {
             if *start <= line && line <= *end {
                 if let Some(t) = map.get(var) {
+                    if t.is_empty() && !self.imports.contains_key(var) {
+                        continue;
+                    }
                     let w = end - start;
                     if w < best_width {
                         best_width = w;
@@ -41,7 +45,9 @@ impl LocalTypes {
                 }
             }
         }
-        best
+        // An unknown local type still shadows an imported binding.
+        best.or_else(|| self.imports.get(var).map(String::as_str))
+            .filter(|ty| !ty.is_empty())
     }
 }
 
@@ -49,8 +55,28 @@ impl LocalTypes {
 /// `property_declaration` nodes (which represent `val`/`var` declarations).
 fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
     let mut scopes: Vec<((u32, u32), HashMap<String, String>)> = Vec::new();
+    let mut imports = HashMap::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
+        if n.kind() == "import_header" {
+            let mut children = n.named_children(&mut n.walk()).collect::<Vec<_>>();
+            let alias = children
+                .iter()
+                .find(|child| child.kind() == "import_alias")
+                .and_then(|child| child.named_child(0));
+            if let Some(binding) = alias
+                .or_else(|| {
+                    children
+                        .drain(..)
+                        .find(|child| child.kind() == "identifier")
+                })
+                .and_then(|child| child.utf8_text(source).ok())
+                .and_then(|name| name.rsplit('.').next())
+            {
+                imports.insert(binding.to_string(), binding.to_string());
+            }
+            continue;
+        }
         if n.kind() == "function_declaration" {
             let scope = (n.start_position().row as u32, n.end_position().row as u32);
             let mut map: HashMap<String, String> = HashMap::new();
@@ -78,7 +104,7 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
             stack.push(child);
         }
     }
-    LocalTypes { scopes }
+    LocalTypes { scopes, imports }
 }
 
 /// `function_value_parameters` → `parameter` with `simple_identifier` name
@@ -98,6 +124,9 @@ fn collect_params(params: Node<'_>, source: &[u8], out: &mut HashMap<String, Str
             } else if child.kind() == "user_type" {
                 type_node = Some(child);
             }
+        }
+        if let Some(name) = name_node.and_then(|name| name.utf8_text(source).ok()) {
+            out.insert(name.to_string(), String::new());
         }
         if let (Some(nm), Some(ty)) = (name_node, type_node) {
             if let Some((var, ty_s)) = simple_id_and_usertype(nm, ty, source) {
@@ -129,6 +158,9 @@ fn collect_property_decls(body: Node<'_>, source: &[u8], out: &mut HashMap<Strin
                             "user_type" => ty = Some(vc_child),
                             _ => {}
                         }
+                    }
+                    if let Some(name) = nm.and_then(|name| name.utf8_text(source).ok()) {
+                        out.insert(name.to_string(), String::new());
                     }
                     if let (Some(nm_n), Some(ty_n)) = (nm, ty) {
                         if let Some((var, ty_s)) = simple_id_and_usertype(nm_n, ty_n, source) {
@@ -206,7 +238,7 @@ fn kotlin_callee(
                     let var =
                         std::str::from_utf8(&source[receiver.start_byte()..receiver.end_byte()])
                             .ok()?;
-                    locals.lookup(line, var).map(|t| t.to_string())
+                    locals.lookup(line, var).map(str::to_string)
                 }
                 _ => None,
             };

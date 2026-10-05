@@ -85,14 +85,8 @@
 
 ;; Imports
 (namespace_use_clause
-  (_) @import.source
-  alias: (use_as_clause (_) @import.alias)?) @import
-
-(namespace_use_group
-  (_) @import.prefix
-  (namespace_use_clause
-    (_) @import.source
-    alias: (use_as_clause (_) @import.alias)?)) @import
+  . [(qualified_name) (name)] @import.source
+  alias: (name) @import.alias?) @import
 
 ;; Routes — capture scope (class name) + first string argument so the parser
 ;; can both gate emission on a router-class allowlist (skip `Cache::get`,
