@@ -1,3 +1,4 @@
+use ecp_core::analyzer::import_binding::{fqn_language, MemberOwner};
 use ecp_core::analyzer::types::owner_key;
 use ecp_core::file_category::pick_global;
 pub use ecp_core::file_category::{FileMeta, GlobalPick, Language};
@@ -151,6 +152,18 @@ pub struct SymbolTable {
     /// stem comparisons on cold-index build). The map collapses that to
     /// an O(1) lookup + O(candidates-per-stem) inner walk.
     stem_index: FxHashMap<String, Vec<String>>,
+    /// Empty package entries participate in namespace discovery, not the
+    /// existing symbol-backed module-stem fallback.
+    empty_stem_index: FxHashMap<String, Vec<String>>,
+    /// `.`-joined namespace name (PHP `A\B` is keyed `A.B`) → files of a
+    /// fully qualified language declaring it, filled as Pass 1 registers
+    /// Namespace nodes. FQN import discovery reads it: a Kotlin `package` or
+    /// PHP `namespace` need not match the file's directory.
+    namespace_files: FxHashMap<String, Vec<String>>,
+    /// The inverse of `namespace_files`: file → the namespaces it declares.
+    file_namespaces: FxHashMap<String, Vec<String>>,
+    indexed_module_names:
+        FxHashMap<std::mem::Discriminant<Language>, rustc_hash::FxHashSet<String>>,
 
     /// Interned [`owner_key`] per node id (`NO_OWNER` when the node has no
     /// owning type), parallel to `node_kinds`. Answers "does type `T` own
@@ -187,6 +200,11 @@ impl SymbolTable {
         Self::default()
     }
 
+    /// Import-only package entry files still establish an indexed module.
+    pub(crate) fn register_file(&mut self, path: &str) {
+        self.file_scoped.entry(path.to_string()).or_default();
+    }
+
     /// Populate the `stem_index` from the file paths already in
     /// `file_scoped`. Call exactly once after Pass 1 finishes registering
     /// nodes, before any resolver tier reads from the index. Idempotent
@@ -194,14 +212,35 @@ impl SymbolTable {
     /// can re-finalize without leaking stale entries.
     pub fn build_stem_index(&mut self) {
         self.stem_index.clear();
-        for path in self.file_scoped.keys() {
+        self.empty_stem_index.clear();
+        self.indexed_module_names.clear();
+        for (path, symbols) in &self.file_scoped {
             let Some(stem) = std::path::Path::new(path)
                 .file_stem()
                 .and_then(|s| s.to_str())
             else {
                 continue;
             };
-            self.stem_index
+            let names = self
+                .indexed_module_names
+                .entry(std::mem::discriminant(&Language::from_normalized_path(
+                    path,
+                )))
+                .or_default();
+            names.insert(stem.to_string());
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                names.extend(
+                    parent
+                        .components()
+                        .filter_map(|component| component.as_os_str().to_str().map(str::to_string)),
+                );
+            }
+            let index = if symbols.is_empty() {
+                &mut self.empty_stem_index
+            } else {
+                &mut self.stem_index
+            };
+            index
                 .entry(stem.to_string())
                 .or_default()
                 .push(path.clone());
@@ -216,6 +255,35 @@ impl SymbolTable {
     /// than "index not built".
     pub fn files_by_stem(&self, stem: &str) -> &[String] {
         self.stem_index.get(stem).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Whether `file` declares a namespace and none of them is `expected`
+    /// (`.`-joined; empty for the global namespace).
+    pub(crate) fn declares_other_namespace(&self, file: &str, expected: &str) -> bool {
+        self.file_namespaces
+            .get(file)
+            .is_some_and(|declared| declared.iter().all(|ns| ns != expected))
+    }
+
+    /// Files declaring `namespace` (`.`-joined), see `namespace_files`.
+    pub(crate) fn namespace_files(&self, namespace: &str) -> &[String] {
+        self.namespace_files
+            .get(namespace)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub(crate) fn module_files_by_stem<'a>(&'a self, stem: &str) -> impl Iterator<Item = &'a str> {
+        self.files_by_stem(stem)
+            .iter()
+            .chain(self.empty_stem_index.get(stem).into_iter().flatten())
+            .map(String::as_str)
+    }
+
+    pub(crate) fn has_module_name(&self, language: Language, name: &str) -> bool {
+        self.indexed_module_names
+            .get(&std::mem::discriminant(&language))
+            .is_some_and(|names| names.contains(name))
     }
 
     /// Registers a node with the given file path, node name, node ID, and kind.
@@ -263,15 +331,43 @@ impl SymbolTable {
         // Reverse map for dump-side lookup
         self.id_to_file.insert(node_id, file_path.to_string());
 
+        let file_meta = FileMeta::from_path(file_path);
         self.node_kinds.push(kind);
-        self.node_file_meta.push(FileMeta::from_path(file_path));
+        self.node_file_meta.push(file_meta);
         self.node_owner.push(NO_OWNER);
         self.note_constructible(node_name, kind);
+        self.note_namespace(file_path, file_meta.language, node_name, kind);
     }
 
     fn note_constructible(&mut self, node_name: &str, kind: NodeKind) {
         if kind.is_constructible() && !self.constructible_names.contains(node_name) {
             self.constructible_names.insert(node_name.into());
+        }
+    }
+
+    fn note_namespace(
+        &mut self,
+        file_path: &str,
+        language: Language,
+        node_name: &str,
+        kind: NodeKind,
+    ) {
+        if kind != NodeKind::Namespace || !fqn_language(language) {
+            return;
+        }
+        let namespace = node_name.replace('\\', ".");
+        let declared = self
+            .file_namespaces
+            .entry(file_path.to_string())
+            .or_default();
+        if !declared.contains(&namespace) {
+            declared.push(namespace.clone());
+        }
+        let files = self.namespace_files.entry(namespace).or_default();
+        // Pass 1 registers a file's nodes together, so a second declaration
+        // of the same namespace in one file is adjacent.
+        if files.last().map(String::as_str) != Some(file_path) {
+            files.push(file_path.to_string());
         }
     }
 
@@ -361,6 +457,7 @@ impl SymbolTable {
             self.constructors.push(node_id);
         }
         self.note_constructible(node_name, kind);
+        self.note_namespace(file_path, file_meta.language, node_name, kind);
     }
 
     /// Map every Class / Struct to its one constructor: the Constructor in
@@ -473,6 +570,37 @@ impl SymbolTable {
             }
         }
         self.lookup_in_file_with_kind(file_path, node_name, target)
+    }
+
+    /// Whether `id` is declared outside any owning type.
+    pub(crate) fn is_top_level(&self, id: NodeId) -> bool {
+        self.node_owner[id as usize] == NO_OWNER
+    }
+
+    /// [`Self::lookup_call_in_file`] narrowed by the owner an import binding
+    /// requires: [`MemberOwner::Any`] keeps the first match, `TopLevel` takes
+    /// a declaration with no owning type, `Type` a member of that type.
+    pub(crate) fn lookup_member_in_file(
+        &self,
+        file_path: &str,
+        node_name: &str,
+        target: ResolveTarget,
+        owner: MemberOwner<'_>,
+    ) -> Option<u32> {
+        let owner_id = match owner {
+            MemberOwner::Any => return self.lookup_call_in_file(file_path, node_name, target),
+            MemberOwner::TopLevel => NO_OWNER,
+            MemberOwner::Type(owner) => self.owner_id(owner)?,
+        };
+        let predicate = target.kind_predicate();
+        self.file_scoped
+            .get(file_path)?
+            .get(node_name)?
+            .iter()
+            .copied()
+            .find(|&id| {
+                self.node_owner[id as usize] == owner_id && predicate(self.node_kinds[id as usize])
+            })
     }
 
     /// Tier-3 global lookup: kind-filtered same-name candidates through the
@@ -627,9 +755,15 @@ impl SymbolTable {
             .count()
     }
 
-    /// True when at least one node is registered under `file_path`, i.e. the
-    /// file belongs to the indexed project.
+    /// True when at least one node is registered under `file_path`.
     pub fn has_file(&self, file_path: &str) -> bool {
+        self.file_scoped
+            .get(file_path)
+            .is_some_and(|symbols| !symbols.is_empty())
+    }
+
+    /// Unlike `has_file`, includes empty and import-only files registered by the builder.
+    pub(crate) fn has_indexed_file(&self, file_path: &str) -> bool {
         self.file_scoped.contains_key(file_path)
     }
 

@@ -446,8 +446,17 @@ fn parse_return_item(c: &mut Cursor) -> Result<ReturnItem, CypherError> {
                     }
                 }
                 c.expect(&Token::RParen)?;
+                let name = name.to_ascii_uppercase();
+                if args.is_empty()
+                    && matches!(
+                        name.as_str(),
+                        "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" | "COLLECT"
+                    )
+                {
+                    return Err(c.err("aggregate argument"));
+                }
                 ReturnExpr::FunCall {
-                    name: name.to_ascii_uppercase(),
+                    name,
                     distinct,
                     args,
                 }
@@ -1132,6 +1141,12 @@ mod tests {
         let item = &r.items[0];
         assert_eq!(item.alias.as_deref(), Some("n"));
         assert!(matches!(item.expr, ReturnExpr::FunCall { ref name, .. } if name == "COUNT"));
+    }
+
+    #[test]
+    fn test_parse_aggregate_without_argument_returns_error() {
+        let toks = tokenize("MATCH (a) RETURN count()").unwrap();
+        assert!(parse_query(&toks).is_err());
     }
 
     #[test]

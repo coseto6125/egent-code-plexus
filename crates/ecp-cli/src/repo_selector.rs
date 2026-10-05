@@ -88,6 +88,8 @@ pub struct ResolvedRepo {
     pub dir_name: String,
     pub common_dir: String,
     pub aliases: Vec<String>,
+    /// In-memory path selection; registry identity remains shared across trees.
+    pub worktree_root: Option<PathBuf>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -200,13 +202,24 @@ pub fn resolve(
             Atom::Cwd => {
                 let alias = find_by_path(registry, cwd)
                     .ok_or_else(|| ResolveError::PathNotRegistered(cwd.into()))?;
-                push_unique(&mut seen, &mut out, alias);
+                push_unique(
+                    &mut seen,
+                    &mut out,
+                    alias,
+                    Some(selected_worktree_root(Path::new(cwd))),
+                );
             }
             Atom::Path(p) => {
-                let s = p.to_string_lossy();
+                let path = Path::new(cwd).join(p);
+                let s = path.to_string_lossy();
                 let alias = find_by_path(registry, &s)
                     .ok_or_else(|| ResolveError::PathNotRegistered(s.into_owned()))?;
-                push_unique(&mut seen, &mut out, alias);
+                push_unique(
+                    &mut seen,
+                    &mut out,
+                    alias,
+                    Some(selected_worktree_root(&path)),
+                );
             }
             Atom::Name(n) => {
                 // Match by user-facing alias OR by storage dir_name.
@@ -215,7 +228,7 @@ pub fn resolve(
                     .values()
                     .find(|r| r.aliases.iter().any(|a| a == n) || r.dir_name == *n)
                     .ok_or_else(|| ResolveError::NotFound(n.clone()))?;
-                push_unique(&mut seen, &mut out, alias);
+                push_unique(&mut seen, &mut out, alias, None);
             }
             Atom::Group(g) => {
                 let group = registry
@@ -225,13 +238,13 @@ pub fn resolve(
                     .ok_or_else(|| ResolveError::GroupNotFound(g.clone()))?;
                 for member in &group.members {
                     if let Some(a) = registry.repos.get(member) {
-                        push_unique(&mut seen, &mut out, a);
+                        push_unique(&mut seen, &mut out, a, None);
                     }
                 }
             }
             Atom::All => {
                 for alias in registry.repos.values() {
-                    push_unique(&mut seen, &mut out, alias);
+                    push_unique(&mut seen, &mut out, alias, None);
                 }
             }
         }
@@ -268,12 +281,71 @@ fn git_common_dir_canonical(cwd: &Path) -> Option<std::path::PathBuf> {
     std::fs::canonicalize(cwd).ok()
 }
 
-fn push_unique(seen: &mut HashSet<String>, out: &mut Vec<ResolvedRepo>, alias: &RepoAlias) {
+fn selected_worktree_root(path: &Path) -> PathBuf {
+    let root = crate::git_cache::git_layout(path)
+        .map(|(root, _, _)| root)
+        .unwrap_or_else(|| toplevel_or_self(path));
+    dunce::simplified(&root).to_path_buf()
+}
+
+/// `git_layout` declines under `GIT_DIR` / `GIT_WORK_TREE`; a selected
+/// subdirectory (`--repo ./src`) must still map to its worktree top. A
+/// non-git directory is its own root, as the registry records it.
+fn toplevel_or_self(path: &Path) -> PathBuf {
+    let toplevel = safe_exec::git()
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(path)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|s| PathBuf::from(s.trim()));
+    toplevel
+        .and_then(|top| std::fs::canonicalize(top).ok())
+        .unwrap_or_else(|| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+}
+
+fn push_unique(
+    seen: &mut HashSet<String>,
+    out: &mut Vec<ResolvedRepo>,
+    alias: &RepoAlias,
+    worktree_root: Option<PathBuf>,
+) {
     if seen.insert(alias.dir_name.clone()) {
         out.push(ResolvedRepo {
             dir_name: alias.dir_name.clone(),
             common_dir: alias.common_dir.clone(),
             aliases: alias.aliases.clone(),
+            worktree_root,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_toplevel_or_self_subdirectory_returns_worktree_top() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let ok = safe_exec::git()
+            .args(["init", "-q"])
+            .current_dir(repo)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let sub = repo.join("src");
+        std::fs::create_dir(&sub).unwrap();
+        assert_eq!(toplevel_or_self(&sub), std::fs::canonicalize(repo).unwrap());
+    }
+
+    #[test]
+    fn test_toplevel_or_self_non_git_directory_returns_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plain");
+        std::fs::create_dir(&dir).unwrap();
+        assert_eq!(toplevel_or_self(&dir), std::fs::canonicalize(&dir).unwrap());
     }
 }

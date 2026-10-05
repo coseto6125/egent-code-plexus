@@ -11,7 +11,7 @@
 use ecp_core::analyzer::types::{FrameworkId, RawFrameworkRef, RawImport, RawNode, RawTxScope};
 use ecp_core::graph::NodeKind;
 
-pub type Span = (u32, u32, u32, u32);
+pub use ecp_core::analyzer::types::{innermost_enclosing, span_contains, Span};
 
 /// Scalar literal kinds that qualify an object pair value as a valid
 /// enum-imitation member. Function, call, identifier, and template
@@ -110,16 +110,6 @@ pub fn push_blind_spot(
         hint: spec.1.to_string(),
         is_test: is_test_file,
     });
-}
-
-/// True iff `outer` (row,col,row,col) fully contains `inner`.
-#[inline]
-pub fn span_contains(outer: Span, inner: Span) -> bool {
-    let (or1, oc1, or2, oc2) = outer;
-    let (ir1, ic1, ir2, ic2) = inner;
-    let starts_after = (or1, oc1) <= (ir1, ic1);
-    let ends_before = (ir2, ic2) <= (or2, oc2);
-    starts_after && ends_before
 }
 
 /// Area proxy (row-major byte count approximation) for picking the smallest enclosing span.
@@ -444,41 +434,6 @@ pub fn stamp_owner_fn_by_span(nodes: &mut [RawNode]) {
             node.owner_class = owner;
         }
     }
-}
-
-/// For each span, the index of the innermost other span that contains it.
-///
-/// Spans from one syntax tree nest or are disjoint, so one sweep in start
-/// order with a stack of open spans replaces the pairwise scan: the stack top
-/// is the innermost open container. Identical spans do not enclose each other,
-/// and the lower index wins between identical containers, matching the
-/// pairwise scan's first-minimum rule. The sweep decides by containment; the
-/// `span_area` proxy the pairwise scan ranked by differs only past its 10 000
-/// column saturation (one line of 10 000+ characters), where it could pick an
-/// outer function and this picks the true innermost one.
-pub fn innermost_enclosing(spans: &[Span]) -> Vec<Option<usize>> {
-    let mut order: Vec<usize> = (0..spans.len()).collect();
-    order.sort_by_key(|&i| {
-        let (r1, c1, r2, c2) = spans[i];
-        ((r1, c1), std::cmp::Reverse((r2, c2)), std::cmp::Reverse(i))
-    });
-    let mut parents = vec![None; spans.len()];
-    let mut open: Vec<usize> = Vec::new();
-    for i in order {
-        while open
-            .last()
-            .is_some_and(|&top| !span_contains(spans[top], spans[i]))
-        {
-            open.pop();
-        }
-        parents[i] = open
-            .iter()
-            .rev()
-            .find(|&&top| spans[top] != spans[i])
-            .copied();
-        open.push(i);
-    }
-    parents
 }
 
 /// Preserve the full lexical function path for JS/TS closure identities.

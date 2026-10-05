@@ -15,7 +15,7 @@ use super::path_literals::build_raw_path_literal;
 use crate::calls::{attach_to_enclosing, CallSiteIndex};
 use crate::framework_helpers::strip_python_string_quotes;
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use tree_sitter::Node;
 
 /// Map of nested function scopes (by row span) to their var→type bindings.
@@ -24,9 +24,16 @@ use tree_sitter::Node;
 #[derive(Debug, Default)]
 pub struct LocalTypes {
     scopes: Vec<((u32, u32), HashMap<String, String>)>,
-    /// Names an `import` binds anywhere in the file: a receiver rooted in
-    /// one (`widget.Widget()`) names a module member, not an object's method.
-    imported: HashSet<String>,
+    /// A `from` binding may be an object; only a module import proves that
+    /// its receiver names a namespace for import-scoped resolution.
+    imported: HashMap<String, ImportedBinding>,
+    shadows: Vec<((usize, usize), HashMap<String, usize>)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ImportedBinding {
+    Module,
+    Symbol,
 }
 
 impl LocalTypes {
@@ -47,19 +54,25 @@ impl LocalTypes {
         best
     }
 
-    /// True when `receiver` (`m`, `m.sub`) is rooted in an imported name.
-    fn is_imported_path(&self, receiver: Node<'_>, source: &[u8]) -> bool {
+    fn imported_receiver(&self, receiver: Node<'_>, source: &[u8]) -> Option<ImportedBinding> {
         let mut root = receiver;
         while root.kind() == "attribute" {
-            let Some(object) = root.child_by_field_name("object") else {
-                return false;
-            };
-            root = object;
+            root = root.child_by_field_name("object")?;
         }
-        root.kind() == "identifier"
-            && root
-                .utf8_text(source)
-                .is_ok_and(|name| self.imported.contains(name))
+        if root.kind() != "identifier" {
+            return None;
+        }
+        let name = root.utf8_text(source).ok()?;
+        if self.shadows.iter().any(|((start, end), names)| {
+            *start <= receiver.start_byte()
+                && receiver.end_byte() <= *end
+                && names
+                    .get(name)
+                    .is_some_and(|assigned| *assigned <= receiver.start_byte())
+        }) {
+            return None;
+        }
+        self.imported.get(name).copied()
     }
 }
 
@@ -68,7 +81,8 @@ impl LocalTypes {
 /// `import` statement binds.
 pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
     let mut scopes: Vec<((u32, u32), HashMap<String, String>)> = Vec::new();
-    let mut imported: HashSet<String> = HashSet::new();
+    let mut imported = HashMap::new();
+    let mut shadows = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         if matches!(n.kind(), "import_statement" | "import_from_statement") {
@@ -77,17 +91,56 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
         if n.kind() == "function_definition" {
             let fn_span = (n.start_position().row as u32, n.end_position().row as u32);
             let mut map: HashMap<String, String> = HashMap::new();
+            let mut names = HashMap::new();
 
             if let Some(params) = n.child_by_field_name("parameters") {
                 collect_typed_params(params, source, &mut map);
+                let mut cursor = params.walk();
+                for parameter in params.named_children(&mut cursor) {
+                    let binding = match parameter.kind() {
+                        "default_parameter" | "typed_default_parameter" => {
+                            parameter.child_by_field_name("name")
+                        }
+                        "typed_parameter" => parameter.named_child(0),
+                        _ => Some(parameter),
+                    };
+                    if let Some(binding) = binding {
+                        collect_shadow_names(binding, source, 0, &mut names);
+                    }
+                }
             }
 
             if let Some(body) = n.child_by_field_name("body") {
                 collect_typed_assignments(body, source, &mut map);
+                let mut pending = vec![body];
+                while let Some(node) = pending.pop() {
+                    if matches!(
+                        node.kind(),
+                        "function_definition" | "class_definition" | "lambda"
+                    ) {
+                        continue;
+                    }
+                    if matches!(
+                        node.kind(),
+                        "assignment" | "augmented_assignment" | "named_expression"
+                    ) {
+                        if let Some(left) = node
+                            .child_by_field_name("left")
+                            .or_else(|| node.child_by_field_name("name"))
+                        {
+                            collect_shadow_names(left, source, node.start_byte(), &mut names);
+                        }
+                    }
+                    let mut cursor = node.walk();
+                    pending.extend(node.named_children(&mut cursor));
+                }
             }
 
             if !map.is_empty() {
                 scopes.push((fn_span, map));
+            }
+            if !names.is_empty() {
+                shadows.push(((n.start_byte(), n.end_byte()), names));
             }
         }
         let mut c = n.walk();
@@ -95,12 +148,49 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
             stack.push(child);
         }
     }
-    LocalTypes { scopes, imported }
+    LocalTypes {
+        scopes,
+        imported,
+        shadows,
+    }
+}
+
+fn collect_shadow_names(
+    node: Node<'_>,
+    source: &[u8],
+    position: usize,
+    names: &mut HashMap<String, usize>,
+) {
+    match node.kind() {
+        "identifier" => {
+            if let Ok(name) = node.utf8_text(source) {
+                names
+                    .entry(name.to_string())
+                    .and_modify(|previous| *previous = (*previous).min(position))
+                    .or_insert(position);
+            }
+        }
+        "pattern_list"
+        | "tuple_pattern"
+        | "list_pattern"
+        | "list_splat_pattern"
+        | "dictionary_splat_pattern" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                collect_shadow_names(child, source, position, names);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The local names one import statement binds: `import a.b` → `a`,
 /// `import a as x` / `from m import n as x` → `x`, `from m import n` → `n`.
-fn collect_import_bindings(stmt: Node<'_>, source: &[u8], out: &mut HashSet<String>) {
+fn collect_import_bindings(
+    stmt: Node<'_>,
+    source: &[u8],
+    out: &mut HashMap<String, ImportedBinding>,
+) {
     let mut c = stmt.walk();
     for name in stmt.children_by_field_name("name", &mut c) {
         let bound = match name.kind() {
@@ -109,7 +199,12 @@ fn collect_import_bindings(stmt: Node<'_>, source: &[u8], out: &mut HashSet<Stri
             _ => None,
         };
         if let Some(text) = bound.and_then(|b| b.utf8_text(source).ok()) {
-            out.insert(text.to_string());
+            let binding = if stmt.kind() == "import_statement" {
+                ImportedBinding::Module
+            } else {
+                ImportedBinding::Symbol
+            };
+            out.insert(text.to_string(), binding);
         }
     }
 }
@@ -313,8 +408,24 @@ fn python_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Opt
                 // Only a module receiver (`widget.Widget()`) can name a class
                 // to construct; any other untyped receiver calls a method,
                 // and a class may be spelled in any case (`class widget`).
-                if !locals.is_imported_path(obj, source) {
-                    return Some(CallSite::untyped_member(attr_name));
+                match locals.imported_receiver(obj, source) {
+                    Some(ImportedBinding::Module) => {
+                        let mut segments = Vec::new();
+                        let mut node = function;
+                        while node.kind() == "attribute" {
+                            segments.push(
+                                node.child_by_field_name("attribute")?
+                                    .utf8_text(source)
+                                    .ok()?,
+                            );
+                            node = node.child_by_field_name("object")?;
+                        }
+                        segments.push(node.utf8_text(source).ok()?);
+                        segments.reverse();
+                        return Some(segments.join("."));
+                    }
+                    Some(ImportedBinding::Symbol) => {}
+                    None => return Some(CallSite::untyped_member(attr_name)),
                 }
             }
             Some(attr_name.to_string())

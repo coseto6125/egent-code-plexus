@@ -1,3 +1,4 @@
+pub mod import_scope;
 pub mod merged;
 pub mod meta;
 pub mod overlay;

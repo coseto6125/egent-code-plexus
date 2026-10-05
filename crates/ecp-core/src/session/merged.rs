@@ -87,13 +87,13 @@ impl<'a> MergedEdge<'a> {
         matches!(self.origin, EdgeOrigin::Overlay(_))
     }
 
-    /// Why the edge exists. Overlay edges carry a static marker so a consumer
-    /// can tell a caller comes from an uncommitted edit.
+    /// Why the edge exists. Rebuilt lexical references retain their semantic
+    /// reason; other overlay edges carry the uncommitted-edit marker.
     #[inline]
     pub fn reason(&self, graph: &'a ArchivedZeroCopyGraph) -> &'a str {
         match self.origin {
             EdgeOrigin::Base(e) => e.reason.resolve(&graph.string_pool),
-            EdgeOrigin::Overlay(_) => OVERLAY_EDGE_REASON,
+            EdgeOrigin::Overlay(e) => e.reason,
         }
     }
 }
@@ -272,6 +272,15 @@ fn merge_base_edge<'a>(
     if view.masks_base_edge(source, RelType::from(&edge.rel_type)) {
         return None;
     }
+    // Rebuild only this reason, never all References from a dirty file.
+    // Replacing even UID-stable references avoids duplicates and stale parents.
+    if RelType::from(&edge.rel_type) == RelType::References
+        && view.rebuilds_closure_references(source)
+        && edge.reason.resolve(&graph.string_pool)
+            == crate::analyzer::types::CLOSURE_REFERENCE_REASON
+    {
+        return None;
+    }
     Some(MergedEdge {
         idx: edge_idx,
         source: view.redirect(source)?,
@@ -385,6 +394,8 @@ mod tests {
                 owner_class: None,
                 start_line: 1,
                 end_line: 2,
+                start_column: 0,
+                end_column: 0,
                 calls: vec!["target_fn".to_string()],
             }],
             imports: vec![],
@@ -414,6 +425,65 @@ mod tests {
         assert_eq!(into, vec![2]);
         assert_eq!(merged.all_edges().count(), graph.edges.len());
         assert_eq!(merged.node_count(), graph.nodes.len() as u32);
+    }
+
+    #[test]
+    fn test_merge_closure_references_rebuilds_only_lexical_reason() {
+        const CLOSURE_REFERENCE_REASON: &str = "closure:lexical_reference";
+        let mut fx = GraphFixture::new();
+        let parent = fx.func("src/dirty.rs", "keep_fn");
+        let closure = fx.func("src/dirty.rs", "<anonymous:1:2>");
+        let old_closure = fx.func("src/dirty.rs", "<anonymous:9:2>");
+        fx.edge_with(
+            parent,
+            closure,
+            RelType::References,
+            1.0,
+            CLOSURE_REFERENCE_REASON,
+        );
+        fx.edge_with(
+            parent,
+            old_closure,
+            RelType::References,
+            1.0,
+            CLOSURE_REFERENCE_REASON,
+        );
+        fx.edge_with(
+            parent,
+            closure,
+            RelType::References,
+            0.8,
+            "framework-reference",
+        );
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let mut file = dirty_input();
+        file.symbols[0].calls.clear();
+        file.symbols[0].end_line = 3;
+        let mut fresh = file.symbols[0].clone();
+        fresh.name = "<anonymous:1:2>".into();
+        fresh.start_line = 2;
+        fresh.end_line = 2;
+        file.symbols.push(fresh);
+        let view = OverlayView::build(graph, &[file]).unwrap();
+        assert!(!view.masks_base_edge(parent, RelType::References));
+        let merged = MergedGraph::new(graph, Some(&view));
+        let references: Vec<_> = merged.all_edges().collect();
+        assert_eq!(references.len(), 2);
+        assert!(references
+            .iter()
+            .any(|edge| edge.reason(graph) == "framework-reference" && !edge.is_overlay()));
+        assert!(references
+            .iter()
+            .any(|edge| edge.reason(graph) == CLOSURE_REFERENCE_REASON && edge.is_overlay()));
+        let parent = view.redirect(parent).unwrap();
+        let closure = view.redirect(closure).unwrap();
+        assert!(references
+            .iter()
+            .all(|edge| edge.source == parent && edge.target == closure));
+        assert_eq!(merged.out_edges(parent).count(), 2);
+        assert_eq!(merged.in_edges(closure).count(), 2);
+        assert_eq!(view.redirect(old_closure), None);
     }
 
     #[test]

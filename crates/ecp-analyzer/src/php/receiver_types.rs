@@ -11,13 +11,14 @@
 //!
 //! Typed `$var->method()` where `$var` is not `$this` is intentionally left
 //! unbound: PHP 7 property/param type hints require a second pass to propagate
-//! types through the scope and are deferred to a later improvement task.
+//! types through the scope and are deferred to a later improvement task. It
+//! is recorded as a [`CallSite::untyped_member`].
 
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, extract_php_string_value,
 };
 use crate::calls::{attach_to_enclosing, construction_call};
-use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use tree_sitter::Node;
 
@@ -144,8 +145,9 @@ fn php_object_creation_call(creation: Node<'_>, source: &[u8]) -> Option<String>
 }
 
 /// Resolve the callee for `$obj->method(args)`.
-/// Only `$this` is bound to the enclosing class; other receivers fall back
-/// to the bare method name.
+/// Only `$this` is bound to the enclosing class; other receivers give an
+/// untyped member call, which resolves by the method name and never binds a
+/// `use function` import.
 fn php_member_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Option<String> {
     let name_node = call.child_by_field_name("name")?;
     let method_name = name_node.utf8_text(source).ok()?;
@@ -163,8 +165,7 @@ fn php_member_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Optio
         }
     }
 
-    // Unresolved receiver — emit bare method name as fallback.
-    Some(method_name.to_string())
+    Some(CallSite::untyped_member(method_name))
 }
 
 /// Resolve the callee for `Scope::method(args)`.

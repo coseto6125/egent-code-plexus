@@ -1,3 +1,11 @@
+; Package header -> Namespace node. Gate (A) graph completeness: a Kotlin
+; file's name and directory need not match its package or its top-level
+; functions (`pkg/Util.kt` declares `fun helper()` for `import pkg.helper`),
+; so FQN import discovery finds the declaring file only through this node.
+; Without it the import tier misses and `ecp impact` drops the caller to an
+; ambiguous global. The span is the header line, so it owns no member.
+(package_header (identifier) @namespace.name) @namespace
+
 ; Imports
 (import_header
   (identifier) @import.source

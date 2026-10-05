@@ -77,6 +77,7 @@ pub struct KotlinProvider {
     idx_constructor: Option<u32>,
     idx_property: Option<u32>,
     idx_variable: Option<u32>,
+    idx_namespace: Option<u32>,
     /// Capture index → NodeKind mapping, pre-resolved from
     /// `KotlinSpec::CAPTURE_KIND` at provider construction. The hot loop
     /// looks up by integer index (cap.index as usize) — equivalent perf
@@ -194,6 +195,7 @@ impl KotlinProvider {
         let idx_constructor = query.capture_index_for_name("constructor");
         let idx_property = query.capture_index_for_name("property");
         let idx_variable = query.capture_index_for_name("variable");
+        let idx_namespace = query.capture_index_for_name("namespace");
 
         // Pre-resolve capture-name → NodeKind from the spec table so the
         // hot loop stays an integer-index lookup (no per-capture string
@@ -230,6 +232,7 @@ impl KotlinProvider {
             idx_constructor,
             idx_property,
             idx_variable,
+            idx_namespace,
             capture_kind_by_idx,
             indices,
         })
@@ -409,6 +412,7 @@ impl LanguageProvider for KotlinProvider {
                     || Some(cap_idx) == self.idx_constructor
                     || Some(cap_idx) == self.idx_property
                     || Some(cap_idx) == self.idx_variable
+                    || Some(cap_idx) == self.idx_namespace
                     || Some(cap_idx) == idx_enum_entry
                     || Some(cap_idx) == idx_typedef)
                     && root_span_node.is_none()
@@ -514,7 +518,15 @@ impl LanguageProvider for KotlinProvider {
 
                     imports.push(RawImport {
                         alias,
-                        imported_name: src_str.to_string(),
+                        imported_name: if i_src.parent().is_some_and(|parent| {
+                            parent
+                                .named_children(&mut parent.walk())
+                                .any(|child| child.kind() == "wildcard_import")
+                        }) {
+                            "*".to_string()
+                        } else {
+                            src_str.rsplit('.').next().unwrap_or(src_str).to_string()
+                        },
                         source: src_str.to_string(),
                         binding_kind: None,
                     });

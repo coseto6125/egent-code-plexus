@@ -271,7 +271,6 @@ struct PhpCaptureIndices {
     decorator: Option<u32>,
     import_source: Option<u32>,
     import_alias: Option<u32>,
-    import_prefix: Option<u32>,
     function: Option<u32>,
     class: Option<u32>,
     interface: Option<u32>,
@@ -323,7 +322,6 @@ impl PhpProvider {
             decorator: query.capture_index_for_name("decorator"),
             import_source: query.capture_index_for_name("import.source"),
             import_alias: query.capture_index_for_name("import.alias"),
-            import_prefix: query.capture_index_for_name("import.prefix"),
             function: query.capture_index_for_name("function"),
             class: query.capture_index_for_name("class"),
             interface: query.capture_index_for_name("interface"),
@@ -390,7 +388,6 @@ impl LanguageProvider for PhpProvider {
 
         let idx_import_source = idx.import_source;
         let idx_import_alias = idx.import_alias;
-        let idx_import_prefix = idx.import_prefix;
 
         let idx_function = idx.function;
         let idx_class = idx.class;
@@ -439,7 +436,6 @@ impl LanguageProvider for PhpProvider {
 
             let mut import_src = None;
             let mut import_alias = None;
-            let mut import_prefix = None;
 
             let mut route_method = None;
             let mut route_path = None;
@@ -495,8 +491,6 @@ impl LanguageProvider for PhpProvider {
                     import_src = Some(cap.node);
                 } else if Some(cap_idx) == idx_import_alias {
                     import_alias = Some(cap.node);
-                } else if Some(cap_idx) == idx_import_prefix {
-                    import_prefix = Some(cap.node);
                 } else if Some(cap_idx) == idx_function
                     || Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_interface
@@ -747,7 +741,19 @@ impl LanguageProvider for PhpProvider {
                 if let Ok(src_str) =
                     std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()])
                 {
-                    let full_src = if let Some(p) = import_prefix {
+                    let group = i_src
+                        .parent()
+                        .and_then(|clause| clause.parent())
+                        .filter(|parent| parent.kind() == "namespace_use_group");
+                    let group_prefix =
+                        group
+                            .and_then(|group| group.parent())
+                            .and_then(|declaration| {
+                                declaration
+                                    .named_children(&mut declaration.walk())
+                                    .find(|child| child.kind() == "namespace_name")
+                            });
+                    let full_src = if let Some(p) = group_prefix {
                         if let Ok(p_str) =
                             std::str::from_utf8(&source[p.start_byte()..p.end_byte()])
                         {
@@ -771,15 +777,19 @@ impl LanguageProvider for PhpProvider {
                         None
                     };
 
-                    let imported_name = if let Some(ref a_str) = alias {
-                        a_str.clone()
-                    } else {
-                        full_src.split('\\').next_back().unwrap_or("").to_string()
-                    };
+                    let imported_name = full_src.split('\\').next_back().unwrap_or("").to_string();
 
                     imports.push(RawImport {
-                        alias,
-                        imported_name,
+                        alias: if group.is_some() {
+                            Some(alias.unwrap_or_else(|| imported_name.clone()))
+                        } else {
+                            alias
+                        },
+                        imported_name: if group.is_some() {
+                            "*".to_string()
+                        } else {
+                            imported_name
+                        },
                         source: full_src,
                         binding_kind: None,
                     });

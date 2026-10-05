@@ -1,4 +1,5 @@
-//! Shared harness for the `<lang>_instantiation_calls.rs` fixtures.
+//! Shared harness for the `<lang>_instantiation_calls.rs` and
+//! `<lang>_import_bound_calls.rs` fixtures.
 //!
 //! An instantiation (`new A()`, `A()`, `A.new`) must give `ecp impact` a
 //! caller for `A`. The contract: one `Calls` edge from the instantiating
@@ -22,6 +23,7 @@ pub struct Hit {
     pub kind: NodeKind,
     pub owner: String,
     pub file: String,
+    pub confidence: f32,
 }
 
 pub fn graph_of<P: LanguageProvider>(provider: &P, files: &[(&str, &str)]) -> ZeroCopyGraph {
@@ -33,6 +35,29 @@ pub fn graph_of<P: LanguageProvider>(provider: &P, files: &[(&str, &str)]) -> Ze
         builder.add_graph(local);
     }
     builder.build()
+}
+
+/// The `Calls` edges from `caller` are exactly `expected`, each given as
+/// `(file, owner, name, confidence)`, in edge order. The import tier is
+/// told apart from the global tier only by the confidence.
+pub fn assert_call_targets(
+    graph: &ZeroCopyGraph,
+    caller: &str,
+    expected: &[(&str, &str, &str, f32)],
+) {
+    let hits = calls_from(graph, caller);
+    let actual: Vec<_> = hits
+        .iter()
+        .map(|h| {
+            (
+                h.file.as_str(),
+                h.owner.as_str(),
+                h.name.as_str(),
+                h.confidence,
+            )
+        })
+        .collect();
+    assert_eq!(actual, expected, "`{caller}` Calls edges: {hits:?}");
 }
 
 /// Every `rel` edge whose source node is named `caller`, one entry per edge.
@@ -58,6 +83,7 @@ pub fn edges_from(graph: &ZeroCopyGraph, caller: &str, rel: RelType) -> Vec<Hit>
                 kind: target.kind,
                 owner: target.owner_class.resolve(pool).to_string(),
                 file,
+                confidence: e.confidence,
             }
         })
         .collect()

@@ -21,6 +21,10 @@
 //!   the constructor fallback onto a Class / Struct's one constructor or the
 //!   type) against the archived `name_index` (O(log N) per lookup, no
 //!   allocation proportional to the graph).
+//! - **closure references** — lexical `References` from each enclosing
+//!   callable to its anonymous closures, using the full index's span rule.
+//!   The merge replaces only base references with `closure:lexical_reference`
+//!   from dirty sources, preserving every other References reason.
 //!
 //! ## The masking invariant: mask ⊆ rebuild
 //!
@@ -42,12 +46,30 @@
 //! - Clean files calling a name that only NOW resolves (new symbol breaks a
 //!   previous ambiguity) keep their index-time resolution — clean files are
 //!   never re-resolved at query time.
-//! - An import alias (`import { Widget as W }`) matches only by its local
-//!   name, so a dirty file's call or construction through it stays
-//!   unresolved; the index maps the alias back to the declared symbol.
+//! - Outside the import-member languages ([`import_member_fallback`]), an
+//!   import alias (`import { Widget as W }`) matches only by its local name,
+//!   so a dirty file's call or construction through it stays unresolved; the
+//!   index maps the alias back to the declared symbol. A construction through
+//!   an alias stays unresolved in every language.
+//! - The qualifier tier, the heritage tier and the receiver-typing ladder
+//!   are not replayed. In an import-member language, a qualified callee
+//!   (`Base.setup`) that no import binds stays unresolved, and a wildcard
+//!   import binds a name that the index resolves on the caller's base class.
+//! - Rust paths resolve by conventional file layout and module declarations.
+//!   `pub use` chains, `#[path]`, inline modules, and workspace crate-name
+//!   heads stay unresolved when that layout cannot establish the target.
 
-use crate::analyzer::types::{owner_key, CallSite, RawImport};
-use crate::file_category::{pick_global, FileMeta, GlobalPick};
+use super::import_scope::{ImportScope, Module};
+use crate::analyzer::import_binding::{
+    extension_retry, fqn_language, import_binding, import_member_fallback, retry_name, MemberOwner,
+};
+use crate::analyzer::rust_paths::{
+    is_rust_source, is_rust_target_root, rust_module_dir, rust_module_path_base,
+};
+use crate::analyzer::types::{
+    innermost_enclosing, owner_key, CallSite, RawImport, CLOSURE_REFERENCE_REASON,
+};
+use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
@@ -61,6 +83,9 @@ pub struct OverlaySymbol {
     /// 1-based, matching `Node::start_line` conventions.
     pub start_line: u32,
     pub end_line: u32,
+    /// 0-based columns from the fragment, preserving same-line containment.
+    pub start_column: u32,
+    pub end_column: u32,
     /// `RawNode.calls` of this symbol: callee short names, some encoded as a
     /// [`CallSite`] (read them through [`CallSite::parse`]).
     pub calls: Vec<String>,
@@ -99,6 +124,7 @@ pub struct ViewEdge {
     pub target: u32,
     pub rel_type: RelType,
     pub confidence: f32,
+    pub reason: &'static str,
 }
 
 /// Tier confidences mirroring index-time Pass-2 resolution.
@@ -135,6 +161,8 @@ impl OverlayView {
     /// branch. Cost when dirty: one O(files) pass over `graph.files` plus one
     /// O(nodes) pass over `graph.nodes` (pure scans; allocation stays O(dirty
     /// symbols)), then O(dirty symbols × callees × log N) name-index lookups.
+    /// A Python/Java/Kotlin/PHP call through an import also builds, once per
+    /// language, a file index over `graph.files` for module discovery.
     pub fn build(graph: &ArchivedZeroCopyGraph, files: &[OverlayFileInput]) -> Option<Self> {
         if files.is_empty() {
             return None;
@@ -182,8 +210,10 @@ impl OverlayView {
                 );
                 let virt = base_len + nodes.len() as u32;
                 let replaced_base = dirty_base_by_uid.get(&uid).copied();
+                // First UID wins, as in full indexing: later twins are
+                // tombstones there, so base edges must reach the first one.
                 if let Some(base_idx) = replaced_base {
-                    replaced.insert(base_idx, virt);
+                    replaced.entry(base_idx).or_insert(virt);
                 }
                 nodes.push(ViewNode {
                     uid,
@@ -205,7 +235,7 @@ impl OverlayView {
 
         let type_ctors = virtual_constructors(files, &nodes, base_len);
 
-        // ── overlay Calls edges ───────────────────────────────────────────
+        // ── overlay Calls and lexical closure References ──────────────────
         // Inner scope: the name maps borrow `nodes`' strings and must drop
         // before `nodes` moves into Self.
         let mut edges: Vec<ViewEdge> = Vec::new();
@@ -251,49 +281,95 @@ impl OverlayView {
                 in_adj.entry(edge.target).or_default().push(ei);
             };
 
+            let mut scope = ImportScope::new(graph, files, &dirty_base);
             let mut virt_cursor = base_len;
+            let rust_modules = files
+                .iter()
+                .any(|file| {
+                    is_rust_source(std::path::Path::new(&file.rel_path))
+                        && file
+                            .symbols
+                            .iter()
+                            .any(|s| s.calls.iter().any(|c| c.contains("::")))
+                })
+                .then(|| RustModules::new(graph, files));
             for (file_ord, file) in files.iter().enumerate() {
+                let first = (virt_cursor - base_len) as usize;
+                emit_closure_references(
+                    file,
+                    &nodes[first..first + file.symbols.len()],
+                    virt_cursor,
+                    &mut push_edge,
+                );
+                let chain = rust_modules
+                    .as_ref()
+                    .and_then(|modules| modules.caller_chain(&file.rel_path));
+                // One cache per dirty file: a repeated qualified call reuses
+                // both successful and unresolved lookups without rebuilding paths.
+                let mut module_calls = FxHashMap::default();
                 for sym in &file.symbols {
                     let source = virt_cursor;
                     virt_cursor += 1;
                     for raw_callee in &sym.calls {
-                        let site = CallSite::parse(raw_callee);
                         let caller = file_metas[file_ord];
-                        let hit = resolve_callee(
-                            graph,
-                            site.name(),
-                            file_ord,
-                            file,
-                            caller,
-                            &mut base_metas,
-                            &callables,
-                            &replaced,
-                            &dirty_base,
-                        )
-                        .or_else(|| {
-                            let (ty, confidence) = resolve_constructed_type(
-                                graph,
-                                site,
-                                file_ord,
-                                file,
-                                caller,
-                                &mut base_metas,
-                                &types,
-                                &nodes,
-                                &replaced,
-                                &dirty_base,
-                            )?;
-                            let target = *construction_targets.entry(ty).or_insert_with(|| {
-                                construction_target(graph, &nodes, &type_ctors, ty)
+                        let site = CallSite::parse(raw_callee);
+                        let hit =
+                            if caller.language == Language::Rust && site.name().contains("::") {
+                                *module_calls.entry(site.name()).or_insert_with(|| {
+                                    resolve_rust_module_callee(
+                                        graph,
+                                        site.name(),
+                                        file,
+                                        &callables,
+                                        &nodes,
+                                        &dirty_base,
+                                        rust_modules.as_ref()?,
+                                        chain.as_deref()?,
+                                    )
+                                })
+                            } else {
+                                resolve_callee(
+                                    graph,
+                                    site,
+                                    file_ord,
+                                    &file.imports,
+                                    caller,
+                                    &mut base_metas,
+                                    &callables,
+                                    &nodes,
+                                    &replaced,
+                                    &dirty_base,
+                                    &mut scope,
+                                )
+                            }
+                            .or_else(|| {
+                                let (ty, confidence) = resolve_constructed_type(
+                                    graph,
+                                    site,
+                                    file_ord,
+                                    &file.imports,
+                                    caller,
+                                    &mut base_metas,
+                                    &types,
+                                    &nodes,
+                                    &replaced,
+                                    &dirty_base,
+                                    &mut scope,
+                                )?;
+                                let target = *construction_targets.entry(ty).or_insert_with(|| {
+                                    construction_target(graph, &nodes, &type_ctors, ty)
+                                });
+                                Some((target, confidence))
                             });
-                            Some((target, confidence))
-                        });
-                        if let Some((target, confidence)) = hit {
+                        // The index drops self-recursion Calls (builder's
+                        // `target_id == current_node_idx` skip).
+                        if let Some((target, confidence)) = hit.filter(|&(t, _)| t != source) {
                             push_edge(ViewEdge {
                                 source,
                                 target,
                                 rel_type: RelType::Calls,
                                 confidence,
+                                reason: super::merged::OVERLAY_EDGE_REASON,
                             });
                         }
                     }
@@ -348,6 +424,11 @@ impl OverlayView {
         // REBUILT_RELS: extend alongside resolve_callee when fragments gain
         // inputs for more rel types (e.g. field_reads → ReadsField).
         matches!(rel, RelType::Calls) && self.dirty_base.contains(&base_idx)
+    }
+
+    /// Only lexical closure references are rebuilt, not References generally.
+    pub(crate) fn rebuilds_closure_references(&self, source: u32) -> bool {
+        self.dirty_base.contains(&source)
     }
 
     /// All overlay edges; index `i` here is overlay edge index `i`, addressed
@@ -542,6 +623,58 @@ fn sole_constructor(ctors: &[u32], uid: impl Fn(u32) -> u64) -> Option<u32> {
     rest.iter().all(|&c| uid(c) == first_uid).then_some(first)
 }
 
+/// Mirror full indexing's lexical references and first-UID survivor rule.
+fn emit_closure_references(
+    file: &OverlayFileInput,
+    nodes: &[ViewNode],
+    start: u32,
+    push: &mut impl FnMut(ViewEdge),
+) {
+    let anonymous =
+        |s: &OverlaySymbol| s.kind == NodeKind::Function && s.name.starts_with("<anonymous:");
+    if !file.symbols.iter().any(anonymous) {
+        return;
+    }
+    let functions: Vec<_> = file
+        .symbols
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| {
+            matches!(
+                s.kind,
+                NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+            )
+        })
+        .collect();
+    let spans: Vec<_> = functions
+        .iter()
+        .map(|(_, s)| (s.start_line, s.start_column, s.end_line, s.end_column))
+        .collect();
+    let parents = innermost_enclosing(&spans);
+    // Raw overlay nodes retain overloads. Full indexing tombstones later
+    // identical UIDs, skips closure tombstones, and redirects parent tombstones.
+    let mut live_by_uid = FxHashMap::default();
+    for (offset, node) in nodes.iter().enumerate() {
+        live_by_uid.entry(node.uid).or_insert(offset);
+    }
+    for (i, &(offset, symbol)) in functions.iter().enumerate() {
+        if !anonymous(symbol) || live_by_uid[&nodes[offset].uid] != offset {
+            continue;
+        }
+        let Some(parent) = parents[i] else {
+            continue;
+        };
+        let source = live_by_uid[&nodes[functions[parent].0].uid];
+        push(ViewEdge {
+            source: start + source as u32,
+            target: start + offset as u32,
+            rel_type: RelType::References,
+            confidence: 1.0,
+            reason: CLOSURE_REFERENCE_REASON,
+        });
+    }
+}
+
 /// Overlay symbols of one kind family (`kind`), by name: the Tier-1
 /// same-file and Tier-3 overlay-wide candidates of [`resolve_callee`].
 struct OverlayNames<'a> {
@@ -579,36 +712,101 @@ impl<'a> OverlayNames<'a> {
 /// Mirror of index-time Pass-2 `Calls` resolution, narrowed to the inputs
 /// available at query time, over the kind family of `names`. Returns the
 /// merged-space target index.
+/// Rust `::` calls use the cached module-path branch in `build` first.
+/// Method eligibility is a post-filter, like index-time `lookup_call_in_file`:
+/// removing free functions before uniqueness checks would invent a winner.
 ///
 /// Tier 1 — same file: the dirty file was FULLY re-parsed, so its own
 /// callable set is authoritative. Unique match → confidence 1.0.
-/// Tier 2 — import-scoped: callee name appears as an import's name/alias;
-/// candidates narrowed to files matching the import source's last path
-/// segment. Unique → 0.95.
+/// Tier 2 — import-scoped. In an [`import_member_fallback`] language,
+/// [`bind_import`] replays the index's import-member tier; elsewhere the
+/// callee name appears as an import's name/alias and candidates narrow to
+/// files matching the import source's last path segment. Unique → 0.95.
 /// Tier 3 — global: all clean-base callables (via the archived `name_index`)
 /// plus all overlay callables, through the index-time candidate filter
 /// [`pick_global`] (language and vendor barriers, unique only). ≥2
 /// remaining → suppressed, matching `DecisionTier::AmbiguousGlobal` (an
 /// invented edge is worse than a missing one). Unique → 0.7.
 #[allow(clippy::too_many_arguments)]
-fn resolve_callee(
+fn resolve_callee<'s>(
     graph: &ArchivedZeroCopyGraph,
-    callee: &str,
+    site: CallSite<'s>,
     file_ord: usize,
-    file: &OverlayFileInput,
+    imports: &'s [RawImport],
     caller: FileMeta,
     base_metas: &mut FxHashMap<usize, FileMeta>,
     names: &OverlayNames<'_>,
+    nodes: &[ViewNode],
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
+    scope: &mut ImportScope<'s>,
 ) -> Option<(u32, f32)> {
+    let callee = site.name();
+    let accepts = |idx: u32| {
+        !(site.uses_method_syntax() && caller.language == Language::Rust)
+            || match idx.checked_sub(graph.nodes.len() as u32) {
+                Some(offset) => nodes[offset as usize].kind == NodeKind::Method,
+                None => NodeKind::from(&graph.nodes[idx as usize].kind) == NodeKind::Method,
+            }
+    };
     // Tier 1: same-file.
     if let Some(virts) = names.same_file.get(&(file_ord, callee)) {
         if virts.len() == 1 {
-            return Some((virts[0], CONF_SAME_FILE));
+            return accepts(virts[0]).then_some((virts[0], CONF_SAME_FILE));
         }
         // Ambiguous within one file (overloads): suppress, like index time.
         return None;
+    }
+
+    // The index binds no import for an untyped member call, and in these
+    // languages has no path-segment import tier either.
+    let member_policy = import_member_fallback(caller.language);
+    if member_policy && !imports.is_empty() && !matches!(site, CallSite::UntypedMember(_)) {
+        match bind_import(
+            graph,
+            callee,
+            file_ord,
+            imports,
+            caller.language,
+            names,
+            nodes,
+            dirty_base,
+            scope,
+        ) {
+            Some(ImportBinding::Resolved(hit)) => return hit,
+            Some(ImportBinding::Fallback(name)) => {
+                return resolve_callee(
+                    graph,
+                    CallSite::Plain(name),
+                    file_ord,
+                    &[],
+                    caller,
+                    base_metas,
+                    names,
+                    nodes,
+                    replaced,
+                    dirty_base,
+                    scope,
+                );
+            }
+            Some(ImportBinding::Extension(member)) => {
+                let hit = resolve_callee(
+                    graph,
+                    CallSite::Plain(member),
+                    file_ord,
+                    imports,
+                    caller,
+                    base_metas,
+                    names,
+                    nodes,
+                    replaced,
+                    dirty_base,
+                    scope,
+                );
+                return hit.filter(|&(idx, _)| is_top_level(graph, nodes, idx));
+            }
+            None => {}
+        }
     }
 
     // Clean-base candidates via the name index. Dirty-file base nodes are
@@ -625,8 +823,8 @@ fn resolve_callee(
         names.anywhere.get(callee).map(Vec::as_slice).unwrap_or(&[]);
 
     // Tier 2: import-scoped.
-    if let Some(import) = file
-        .imports
+    let segment_imports: &[RawImport] = if member_policy { &[] } else { imports };
+    if let Some(import) = segment_imports
         .iter()
         .find(|i| i.imported_name == callee || i.alias.as_deref() == Some(callee))
     {
@@ -650,7 +848,7 @@ fn resolve_callee(
                 // surviving dirty symbols compete as overlay candidates with
                 // their virtual index instead.
                 debug_assert!(!replaced.contains_key(&scoped[0]));
-                return Some((scoped[0], CONF_IMPORT_SCOPED));
+                return accepts(scoped[0]).then_some((scoped[0], CONF_IMPORT_SCOPED));
             }
         }
     }
@@ -676,7 +874,267 @@ fn resolve_callee(
         return None;
     };
     debug_assert!(!replaced.contains_key(&target));
-    Some((target, CONF_GLOBAL_UNIQUE))
+    accepts(target).then_some((target, CONF_GLOBAL_UNIQUE))
+}
+
+/// File-backed Rust modules use the same crate/self/super layout as Pass 2.
+/// Unknown heads stay unresolved: stripping a path would bind external
+/// calls such as `std::fs::read` to unrelated project functions.
+/// File-layout evidence shared by all qualified lookups in one overlay build.
+/// Dirty declarations replace archived declarations, including deletion.
+struct RustModules<'a> {
+    graph: &'a ArchivedZeroCopyGraph,
+    dirty: FxHashMap<&'a str, &'a OverlayFileInput>,
+    roots: Vec<&'a str>,
+}
+
+impl<'a> RustModules<'a> {
+    fn new(graph: &'a ArchivedZeroCopyGraph, dirty: &'a [OverlayFileInput]) -> Self {
+        let dirty: FxHashMap<_, _> = dirty
+            .iter()
+            .map(|file| (file.rel_path.as_str(), file))
+            .collect();
+        let mut roots = Vec::new();
+        for file in graph
+            .files
+            .iter()
+            .map(|f| f.path.resolve(&graph.string_pool))
+            .chain(dirty.keys().copied())
+        {
+            let directory = file.rsplit_once('/').map_or("", |(dir, _)| dir);
+            if !dirty.keys().any(|caller| {
+                caller
+                    .strip_prefix(directory)
+                    .is_some_and(|rest| directory.is_empty() || rest.starts_with('/'))
+            }) {
+                continue;
+            }
+            let mut parts = file.rsplit('/');
+            let filename = parts.next().unwrap_or_default();
+            let parent = parts.next().unwrap_or_default();
+            if (matches!(filename, "lib.rs" | "main.rs" | "build.rs")
+                || matches!(parent, "bin" | "examples" | "benches" | "tests"))
+                && is_rust_target_root(std::path::Path::new(file))
+            {
+                roots.push(file);
+            }
+        }
+        roots.sort_unstable();
+        roots.dedup();
+        Self {
+            graph,
+            dirty,
+            roots,
+        }
+    }
+
+    fn file(&self, path: &std::path::Path) -> Option<&'a str> {
+        // `PathBuf::join` writes `\` on Windows; archived paths use `/`, as
+        // the analyzer's path normalisation does.
+        let requested = match path.to_str()? {
+            raw if raw.contains('\\') => std::borrow::Cow::Owned(raw.replace('\\', "/")),
+            raw => std::borrow::Cow::Borrowed(raw),
+        };
+        let requested = requested.as_ref();
+        if let Some((&name, _)) = self.dirty.get_key_value(requested) {
+            return Some(name);
+        }
+        let name =
+            |file: &'a crate::graph::ArchivedFile| file.path.resolve(&self.graph.string_pool);
+        // Accept only an exact hit in the builder's usual Path order.
+        // Synthetic/older archives with another order use the safe scan.
+        if let Ok(idx) = self
+            .graph
+            .files
+            .binary_search_by(|file| std::path::Path::new(name(file)).cmp(path))
+        {
+            let found = name(&self.graph.files[idx]);
+            if found == requested {
+                return Some(found);
+            }
+        }
+        self.graph
+            .files
+            .iter()
+            .map(name)
+            .find(|file| *file == requested)
+    }
+
+    // Match the full resolver's qualifier file-stem scope bucket.
+    fn scope(path: &str) -> &str {
+        path.rsplit_once("/src/")
+            .or_else(|| path.rsplit_once("/tests/"))
+            .map_or("", |(root, _)| root)
+    }
+
+    fn child(&self, parent: &str, name: &str) -> Option<&'a str> {
+        let declared = match self.dirty.get(parent) {
+            Some(dirty) => dirty
+                .symbols
+                .iter()
+                .any(|s| s.kind == NodeKind::Module && s.name == name),
+            None => self.graph.nodes_by_name(name).any(|idx| {
+                let node = &self.graph.nodes[idx as usize];
+                NodeKind::from(&node.kind) == NodeKind::Module
+                    && self.graph.files[node.file_idx.to_native() as usize]
+                        .path
+                        .resolve(&self.graph.string_pool)
+                        == parent
+            }),
+        };
+        if !declared {
+            return None;
+        }
+        let base = rust_module_path_base(std::path::Path::new(parent), "self")?.join(name);
+        let flat = base.with_extension("rs");
+        let nested = base.join("mod.rs");
+        match (self.file(&flat), self.file(&nested)) {
+            (Some(path), None) | (None, Some(path)) => Some(path),
+            _ => None,
+        }
+    }
+
+    /// Establish the caller's unique target owner using declaration chains.
+    /// A bin descendant only belongs to a bin when its target root is indexed.
+    fn caller_chain(&self, caller: &str) -> Option<Vec<&'a str>> {
+        let mut found = None;
+        for &root in &self.roots {
+            let mut chain = vec![root];
+            if root != caller {
+                let root_dir = rust_module_dir(std::path::Path::new(root))?;
+                let Ok(relative) = std::path::Path::new(caller).strip_prefix(&root_dir) else {
+                    continue;
+                };
+                let mut module_path = relative.with_extension("");
+                if module_path.file_name().is_some_and(|name| name == "mod") {
+                    module_path.pop();
+                }
+                for part in module_path.components() {
+                    let Some(child) =
+                        self.child(chain.last().copied()?, part.as_os_str().to_str()?)
+                    else {
+                        break;
+                    };
+                    chain.push(child);
+                }
+                if chain.last().copied() != Some(caller) {
+                    continue;
+                }
+            }
+            if found.is_some() {
+                return None;
+            }
+            found = Some(chain);
+        }
+        found
+    }
+
+    fn resolve(&self, chain: &[&'a str], module: &str) -> Option<&'a str> {
+        let mut parts = module.split("::").peekable();
+        let head = parts.next()?;
+        let mut at = chain.len().checked_sub(1)?;
+        let mut file = match head {
+            "crate" => *chain.first()?,
+            "self" => chain[at],
+            "super" => {
+                at = at.checked_sub(1)?;
+                while parts.peek() == Some(&"super") {
+                    parts.next();
+                    at = at.checked_sub(1)?;
+                }
+                chain[at]
+            }
+            _ if !module.contains("::") => {
+                let child = self.child(chain[at], head)?;
+                // The full resolver handles simple declared heads through its
+                // file-stem tier; nested unanchored paths remain unresolved.
+                return (std::path::Path::new(child).file_stem()?.to_str()? == head)
+                    .then_some(child);
+            }
+            _ => return None,
+        };
+        for part in parts {
+            file = self.child(file, part)?;
+        }
+        Some(file)
+    }
+
+    fn confidence(&self, caller: &str, module: &str, target: &str) -> f32 {
+        const CONF_QUALIFIER_SCOPED: f32 = 0.85;
+        const CONF_MODULE_TREE: f32 = 1.0;
+        let (prefix, qualifier) = module.rsplit_once("::").unwrap_or(("", module));
+        let internal = prefix.is_empty()
+            || prefix
+                .split("::")
+                .all(|s| matches!(s, "crate" | "self" | "super"));
+        let qualifier_file = |file: &&str| {
+            file.rsplit('/')
+                .next()
+                .and_then(|name| name.strip_suffix(".rs"))
+                == Some(qualifier)
+                && Self::scope(file) == Self::scope(caller)
+        };
+        let mut matches = self
+            .graph
+            .files
+            .iter()
+            .map(|f| f.path.resolve(&self.graph.string_pool))
+            .filter(qualifier_file)
+            .filter(|file| !self.dirty.contains_key(file))
+            .chain(self.dirty.keys().copied())
+            .filter(qualifier_file);
+        if internal && matches.next() == Some(target) && matches.next().is_none() {
+            CONF_QUALIFIER_SCOPED
+        } else {
+            CONF_MODULE_TREE
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_rust_module_callee(
+    graph: &ArchivedZeroCopyGraph,
+    callee: &str,
+    file: &OverlayFileInput,
+    names: &OverlayNames<'_>,
+    nodes: &[ViewNode],
+    dirty_base: &FxHashSet<u32>,
+    modules: &RustModules<'_>,
+    chain: &[&str],
+) -> Option<(u32, f32)> {
+    let (module, member) = callee.rsplit_once("::")?;
+    let target_file = modules.resolve(chain, module)?;
+    let base = graph.nodes_by_name(member).filter(|&idx| {
+        let node = &graph.nodes[idx as usize];
+        !dirty_base.contains(&idx)
+            && (names.kind)(NodeKind::from(&node.kind))
+            && NodeKind::from(&node.kind) != NodeKind::Method
+            && graph.files[node.file_idx.to_native() as usize]
+                .path
+                .resolve(&graph.string_pool)
+                == target_file
+    });
+    let overlay = names
+        .anywhere
+        .get(member)
+        .into_iter()
+        .flatten()
+        .filter_map(|&(idx, _)| {
+            let node = &nodes[(idx - graph.nodes.len() as u32) as usize];
+            (node.rel_path.as_ref() == target_file && node.kind != NodeKind::Method).then_some(idx)
+        });
+    let mut candidates = base.chain(overlay);
+    let target = candidates.next()?;
+    let uid = |idx: u32| match idx.checked_sub(graph.nodes.len() as u32) {
+        Some(offset) => nodes[offset as usize].uid,
+        None => graph.nodes[idx as usize].uid.to_native(),
+    };
+    candidates.all(|other| uid(other) == uid(target)).then(|| {
+        (
+            target,
+            modules.confidence(&file.rel_path, module, target_file),
+        )
+    })
 }
 
 /// Mirror of the index-time constructor fallback (`Resolver::resolve_call`)
@@ -684,26 +1142,31 @@ fn resolve_callee(
 /// the Class / Struct it constructs; [`construction_target`] then picks the
 /// edge's target. Narrowed like [`resolve_callee`] to bare names: a
 /// qualified type path resolves by its last segment, and only where
-/// [`CallSite::constructed_type`] allows that fallback.
+/// [`CallSite::constructed_type`] allows that fallback. In an
+/// [`import_member_fallback`] language with imports, the whole path resolves
+/// first, as the index does, so `u.Widget()` binds through `import pkg as u`.
 #[allow(clippy::too_many_arguments)]
-fn resolve_constructed_type(
+fn resolve_constructed_type<'s>(
     graph: &ArchivedZeroCopyGraph,
-    site: CallSite<'_>,
+    site: CallSite<'s>,
     file_ord: usize,
-    file: &OverlayFileInput,
+    imports: &'s [RawImport],
     caller: FileMeta,
     base_metas: &mut FxHashMap<usize, FileMeta>,
     types: &OverlayNames<'_>,
     nodes: &[ViewNode],
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
+    scope: &mut ImportScope<'s>,
 ) -> Option<(u32, f32)> {
     let (type_path, last_segment_fallback) = site.constructed_type(caller.language)?;
     let type_name = type_path
         .rsplit(['.', ':', '\\'])
         .next()
         .unwrap_or(type_path);
-    if type_name.len() < type_path.len() && !last_segment_fallback {
+    let qualified = type_name.len() < type_path.len();
+    let whole_path = import_member_fallback(caller.language) && !imports.is_empty();
+    if qualified && !last_segment_fallback && !whole_path {
         return None;
     }
     // Most unresolved calls name no type at all: reject them before the
@@ -715,14 +1178,259 @@ fn resolve_constructed_type(
     if !names_constructible {
         return None;
     }
-    let (ty, confidence) = resolve_callee(
-        graph, type_name, file_ord, file, caller, base_metas, types, replaced, dirty_base,
-    )?;
+    let mut resolve = |name: &'s str, imports: &'s [RawImport]| {
+        resolve_callee(
+            graph,
+            CallSite::Plain(name),
+            file_ord,
+            imports,
+            caller,
+            base_metas,
+            types,
+            nodes,
+            replaced,
+            dirty_base,
+            scope,
+        )
+    };
+    let (ty, confidence) = if whole_path {
+        // A qualified type path (`new \App\User()`) never names its type
+        // through a `use` of its last segment.
+        let retry_imports: &'s [RawImport] = if fqn_language(caller.language) {
+            &[]
+        } else {
+            imports
+        };
+        resolve(type_path, imports).or_else(|| {
+            (qualified && last_segment_fallback).then(|| resolve(type_name, retry_imports))?
+        })
+    } else {
+        resolve(type_name, imports)
+    }?;
     let kind = match ty.checked_sub(graph.nodes.len() as u32) {
         Some(virt_off) => nodes[virt_off as usize].kind,
         None => NodeKind::from(&graph.nodes[ty as usize].kind),
     };
     kind.is_constructible().then_some((ty, confidence))
+}
+
+/// How the import-member policy settles one callee.
+enum ImportBinding<'s> {
+    /// The import tier's target, or no edge: every binding import is external.
+    Resolved(Option<(u32, f32)>),
+    /// Resolve this name through the remaining tiers, without imports.
+    Fallback(&'s str),
+    /// A Kotlin call through a class binding retries its bare member, and
+    /// only a top-level function (an extension on that type) may answer.
+    Extension(&'s str),
+}
+
+/// One pass of the import-member tier over the explicit or the wildcard
+/// imports (the resolver's `import_member_hit`).
+enum MemberHit {
+    Bound(u32),
+    /// No unique member. `bound` says whether an import of the pass binds
+    /// the callee at all.
+    Unbound {
+        bound: bool,
+    },
+}
+
+/// The index's import-member tier (`Resolver::resolve_symbol_with_import_binding`)
+/// for an [`import_member_fallback`] language. `None` when no import binds
+/// `callee`.
+///
+/// An explicit import binding `callee` whose module holds the member decides
+/// the target; two explicit imports that hold different members leave the
+/// general tiers to decide. When none does, a binding whose module may be
+/// local (relative, single segment, first segment an indexed module name, or
+/// module found) keeps the general tiers, under the member's short name for
+/// Python. Only when every binding import is certainly external is there no
+/// edge: a wrong suppression would drop a genuine caller. A wildcard binds
+/// only when no explicit import binds the name. The index ranks it below the
+/// caller's heritage too; the overlay has no heritage tier, so a heritage
+/// member called through a class that also star-imports the name binds the
+/// wildcard here.
+#[allow(clippy::too_many_arguments)]
+fn bind_import<'s>(
+    graph: &ArchivedZeroCopyGraph,
+    callee: &'s str,
+    file_ord: usize,
+    imports: &'s [RawImport],
+    language: Language,
+    names: &OverlayNames<'_>,
+    nodes: &[ViewNode],
+    dirty_base: &FxHashSet<u32>,
+    scope: &mut ImportScope<'s>,
+) -> Option<ImportBinding<'s>> {
+    let source_file = scope.dirty()[file_ord].rel_path.as_str();
+    let pass = |wildcard: bool, scope: &mut ImportScope<'s>| {
+        import_member_hit(
+            graph,
+            callee,
+            source_file,
+            imports,
+            language,
+            names,
+            nodes,
+            dirty_base,
+            scope,
+            wildcard,
+        )
+    };
+    let explicit = pass(false, scope);
+    if let MemberHit::Bound(target) = explicit {
+        return Some(ImportBinding::Resolved(Some((target, CONF_IMPORT_SCOPED))));
+    }
+    let mut retry = None;
+    let mut extension = None;
+    let mut bound = false;
+    let mut external = true;
+    for import in imports {
+        let Some(binding) = import_binding(import, callee, language) else {
+            continue;
+        };
+        bound = true;
+        retry = retry_name(import, binding.name, callee, language);
+        extension = extension.or(extension_retry(&binding, language));
+        external = external && scope.is_external(source_file, import, language);
+    }
+    if !bound {
+        return None;
+    }
+    if external {
+        return Some(extension.map_or(ImportBinding::Resolved(None), ImportBinding::Extension));
+    }
+    if matches!(explicit, MemberHit::Unbound { bound: false }) && fqn_language(language) {
+        if let MemberHit::Bound(target) = pass(true, scope) {
+            return Some(ImportBinding::Resolved(Some((target, CONF_IMPORT_SCOPED))));
+        }
+    }
+    // The overlay has no qualifier tier or receiver ladder; the index's last
+    // resort for a class-bound Kotlin callee is the extension retry.
+    Some(extension.map_or(
+        ImportBinding::Fallback(retry.unwrap_or(callee)),
+        ImportBinding::Extension,
+    ))
+}
+
+/// The resolver's `import_member_hit`: the member the explicit (or the
+/// wildcard) imports binding `callee` hold in their modules. Python keeps the
+/// first hit in source order; in a fully qualified language two different
+/// hits are no hit.
+#[allow(clippy::too_many_arguments)]
+fn import_member_hit<'s>(
+    graph: &ArchivedZeroCopyGraph,
+    callee: &'s str,
+    source_file: &'s str,
+    imports: &'s [RawImport],
+    language: Language,
+    names: &OverlayNames<'_>,
+    nodes: &[ViewNode],
+    dirty_base: &FxHashSet<u32>,
+    scope: &mut ImportScope<'s>,
+    wildcard: bool,
+) -> MemberHit {
+    let mut found = None;
+    let mut bound = false;
+    for import in imports {
+        let Some(binding) =
+            import_binding(import, callee, language).filter(|b| b.wildcard == wildcard)
+        else {
+            continue;
+        };
+        bound = true;
+        let in_file = |file: &str| {
+            member_in_file(
+                graph,
+                names,
+                nodes,
+                dirty_base,
+                file,
+                binding.name,
+                binding.owner,
+            )
+        };
+        let hit = match scope.module(source_file, &import.source, language) {
+            Module::Unique(file) => in_file(file),
+            Module::Namespace(files) => {
+                let mut hits = files.iter().filter_map(|&file| in_file(file));
+                hits.next().filter(|_| hits.next().is_none())
+            }
+            Module::Missing | Module::Ambiguous => None,
+        };
+        let Some(target) = hit else {
+            continue;
+        };
+        if !fqn_language(language) {
+            return MemberHit::Bound(target);
+        }
+        match found {
+            Some(previous) if previous != target => return MemberHit::Unbound { bound },
+            Some(_) => {}
+            None => found = Some(target),
+        }
+    }
+    found.map_or(MemberHit::Unbound { bound }, MemberHit::Bound)
+}
+
+/// Whether `idx` (base or virtual) is declared outside any owning type.
+fn is_top_level(graph: &ArchivedZeroCopyGraph, nodes: &[ViewNode], idx: u32) -> bool {
+    let owner = match idx.checked_sub(graph.nodes.len() as u32) {
+        Some(virt) => nodes[virt as usize].owner_class.as_deref(),
+        None => Some(
+            graph.nodes[idx as usize]
+                .owner_class
+                .resolve(&graph.string_pool),
+        ),
+    };
+    owner.and_then(owner_key).is_none()
+}
+
+/// The index's `lookup_member_in_file` over the kind family of `names`: the
+/// first `member` declared in `file` whose owner satisfies `owner`. A dirty
+/// file answers from its fresh parse only.
+fn member_in_file(
+    graph: &ArchivedZeroCopyGraph,
+    names: &OverlayNames<'_>,
+    nodes: &[ViewNode],
+    dirty_base: &FxHashSet<u32>,
+    file: &str,
+    member: &str,
+    owner: MemberOwner<'_>,
+) -> Option<u32> {
+    let owned = |owner_class: Option<&str>| match owner {
+        MemberOwner::Any => true,
+        MemberOwner::TopLevel => owner_class.and_then(owner_key).is_none(),
+        MemberOwner::Type(ty) => owner_class
+            .and_then(owner_key)
+            .is_some_and(|key| Some(key) == owner_key(ty)),
+    };
+    let base_len = graph.nodes.len() as u32;
+    graph
+        .nodes_by_name(member)
+        .filter(|&idx| {
+            let node = &graph.nodes[idx as usize];
+            (names.kind)(NodeKind::from(&node.kind))
+                && !dirty_base.contains(&idx)
+                && graph
+                    .files
+                    .get(node.file_idx.to_native() as usize)
+                    .is_some_and(|f| f.path.resolve(&graph.string_pool) == file)
+                && owned(Some(node.owner_class.resolve(&graph.string_pool)))
+        })
+        .min()
+        .or_else(|| {
+            names
+                .anywhere
+                .get(member)?
+                .iter()
+                .map(|&(virt, _)| (virt, &nodes[(virt - base_len) as usize]))
+                .find(|(_, node)| {
+                    node.rel_path.as_ref() == file && owned(node.owner_class.as_deref())
+                })
+                .map(|(virt, _)| virt)
+        })
 }
 
 /// Last path-ish segment of an import source across language conventions:
@@ -799,8 +1507,65 @@ mod tests {
             owner_class: None,
             start_line: 1,
             end_line: 2,
+            start_column: 0,
+            end_column: 0,
             calls: calls.iter().map(|c| c.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn test_build_closure_uid_collisions_use_first_live_nodes() {
+        let bytes = GraphFixture::new().into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let mut parent = sym("enclosing", &[]);
+        parent.end_line = 4;
+        let mut overload = parent.clone();
+        overload.start_line = 5;
+        overload.end_line = 9;
+        let mut closure = sym("<anonymous:5:2>", &[]);
+        closure.start_line = 6;
+        closure.end_line = 7;
+        let file = OverlayFileInput {
+            rel_path: "App.java".into(),
+            symbols: vec![parent, overload, closure.clone(), closure],
+            imports: vec![],
+        };
+        let view = OverlayView::build(graph, &[file]).unwrap();
+        let references: Vec<_> = view
+            .edges()
+            .iter()
+            .map(|edge| (edge.source, edge.target, edge.rel_type, edge.confidence))
+            .collect();
+        assert_eq!(references, vec![(0, 2, RelType::References, 1.0)]);
+    }
+
+    #[test]
+    fn test_build_overload_twins_redirect_base_to_closure_parent() {
+        let mut fx = GraphFixture::new();
+        let base_enclosing = fx.func("App.java", "enclosing");
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let mut parent = sym("enclosing", &[]);
+        parent.end_line = 4;
+        let mut overload = parent.clone();
+        overload.start_line = 5;
+        overload.end_line = 9;
+        let mut closure = sym("<anonymous:6:2>", &[]);
+        closure.start_line = 6;
+        closure.end_line = 7;
+        let file = OverlayFileInput {
+            rel_path: "App.java".into(),
+            symbols: vec![parent, overload, closure],
+            imports: vec![],
+        };
+        let view = OverlayView::build(graph, &[file]).unwrap();
+        let parent = view.redirect(base_enclosing).unwrap();
+        let closure = view.base_len() + 2;
+        assert!(
+            view.overlay_out(parent)
+                .any(|(_, e)| e.target == closure && e.rel_type == RelType::References),
+            "a clean caller of the base overload must reach the closure downstream"
+        );
     }
 
     fn dirty_input() -> OverlayFileInput {
@@ -834,6 +1599,37 @@ mod tests {
         let bytes = base_graph_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         assert!(OverlayView::build(graph, &[]).is_none());
+    }
+
+    #[test]
+    fn test_rust_module_file_lookup_unordered_archive_finds_exact_paths() {
+        let mut fixture = GraphFixture::new();
+        let paths = ["src/z.rs", "src/lib.rs", "src/a/mod.rs", "src/b.rs"];
+        for path in paths {
+            fixture.file(path);
+        }
+        let bytes = fixture.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let modules = RustModules::new(graph, &[]);
+        for path in paths {
+            assert_eq!(modules.file(std::path::Path::new(path)), Some(path));
+        }
+        assert_eq!(modules.file(std::path::Path::new("src/missing.rs")), None);
+    }
+
+    /// Module paths built with `PathBuf::join` carry `\\` on Windows; the
+    /// lookup still finds the archived `/` path.
+    #[test]
+    fn test_rust_module_file_lookup_backslash_path_finds_archived_path() {
+        let mut fixture = GraphFixture::new();
+        fixture.file("src/bin/util.rs");
+        let bytes = fixture.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let modules = RustModules::new(graph, &[]);
+        assert_eq!(
+            modules.file(std::path::Path::new("src\\bin\\util.rs")),
+            Some("src/bin/util.rs")
+        );
     }
 
     #[test]
@@ -1026,6 +1822,8 @@ mod tests {
             owner_class: Some("Multi".to_string()),
             start_line: line,
             end_line: line + 1,
+            start_column: 0,
+            end_column: 0,
             calls: vec![],
         };
         let multi = OverlayFileInput {
@@ -1035,6 +1833,8 @@ mod tests {
                     kind: NodeKind::Class,
                     owner_class: None,
                     end_line: 9,
+                    start_column: 0,
+                    end_column: 0,
                     ..ctor(1)
                 },
                 ctor(2),
@@ -1110,6 +1910,8 @@ mod tests {
             owner_class: Some(owner.to_string()),
             start_line: line,
             end_line: line + 1,
+            start_column: 0,
+            end_column: 0,
             calls: vec![],
         };
         let outer = OverlayFileInput {
