@@ -1144,7 +1144,7 @@ mod tests {
     }
 
     #[test]
-    fn return_empty_aggregate_is_rejected() {
+    fn test_parse_aggregate_without_argument_returns_error() {
         let toks = tokenize("MATCH (a) RETURN count()").unwrap();
         assert!(parse_query(&toks).is_err());
     }
