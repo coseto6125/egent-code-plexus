@@ -46,13 +46,18 @@
 //! - Clean files calling a name that only NOW resolves (new symbol breaks a
 //!   previous ambiguity) keep their index-time resolution — clean files are
 //!   never re-resolved at query time.
-//! - An import alias (`import { Widget as W }`) matches only by its local
-//!   name, so a dirty file's call or construction through it stays
-//!   unresolved; the index maps the alias back to the declared symbol.
+//! - Outside the import-member languages ([`import_member_fallback`]), an
+//!   import alias (`import { Widget as W }`) matches only by its local name,
+//!   so a dirty file's call or construction through it stays unresolved; the
+//!   index maps the alias back to the declared symbol. A construction through
+//!   an alias stays unresolved in every language.
 //! - Rust paths resolve by conventional file layout and module declarations.
 //!   `pub use` chains, `#[path]`, inline modules, and workspace crate-name
 //!   heads stay unresolved when that layout cannot establish the target.
 
+use super::import_scope::{
+    fqn_language, import_member_fallback, imported_member, ImportScope, Module,
+};
 use crate::analyzer::rust_paths::{
     is_rust_source, is_rust_target_root, rust_module_dir, rust_module_path_base,
 };
@@ -269,6 +274,7 @@ impl OverlayView {
                 in_adj.entry(edge.target).or_default().push(ei);
             };
 
+            let mut scope = ImportScope::new(graph, files, &dirty_base);
             let mut virt_cursor = base_len;
             let rust_modules = files
                 .iter()
@@ -299,12 +305,7 @@ impl OverlayView {
                     virt_cursor += 1;
                     for raw_callee in &sym.calls {
                         let caller = file_metas[file_ord];
-                        let site = match CallSite::parse(raw_callee) {
-                            CallSite::Plain(name) if caller.language == Language::Python => {
-                                CallSite::Plain(python_module_member(name, &file.imports))
-                            }
-                            site => site,
-                        };
+                        let site = CallSite::parse(raw_callee);
                         let hit =
                             if caller.language == Language::Rust && site.name().contains("::") {
                                 *module_calls.entry(site.name()).or_insert_with(|| {
@@ -324,13 +325,14 @@ impl OverlayView {
                                     graph,
                                     site,
                                     file_ord,
-                                    file,
+                                    &file.imports,
                                     caller,
                                     &mut base_metas,
                                     &callables,
                                     &nodes,
                                     &replaced,
                                     &dirty_base,
+                                    &mut scope,
                                 )
                             }
                             .or_else(|| {
@@ -338,13 +340,14 @@ impl OverlayView {
                                     graph,
                                     site,
                                     file_ord,
-                                    file,
+                                    &file.imports,
                                     caller,
                                     &mut base_metas,
                                     &types,
                                     &nodes,
                                     &replaced,
                                     &dirty_base,
+                                    &mut scope,
                                 )?;
                                 let target = *construction_targets.entry(ty).or_insert_with(|| {
                                     construction_target(graph, &nodes, &type_ctors, ty)
@@ -706,26 +709,28 @@ impl<'a> OverlayNames<'a> {
 ///
 /// Tier 1 — same file: the dirty file was FULLY re-parsed, so its own
 /// callable set is authoritative. Unique match → confidence 1.0.
-/// Tier 2 — import-scoped: callee name appears as an import's name/alias;
-/// candidates narrowed to files matching the import source's last path
-/// segment. Unique → 0.95.
+/// Tier 2 — import-scoped. In an [`import_member_fallback`] language,
+/// [`bind_import`] replays the index's import-member tier; elsewhere the
+/// callee name appears as an import's name/alias and candidates narrow to
+/// files matching the import source's last path segment. Unique → 0.95.
 /// Tier 3 — global: all clean-base callables (via the archived `name_index`)
 /// plus all overlay callables, through the index-time candidate filter
 /// [`pick_global`] (language and vendor barriers, unique only). ≥2
 /// remaining → suppressed, matching `DecisionTier::AmbiguousGlobal` (an
 /// invented edge is worse than a missing one). Unique → 0.7.
 #[allow(clippy::too_many_arguments)]
-fn resolve_callee(
+fn resolve_callee<'s>(
     graph: &ArchivedZeroCopyGraph,
-    site: CallSite<'_>,
+    site: CallSite<'s>,
     file_ord: usize,
-    file: &OverlayFileInput,
+    imports: &'s [RawImport],
     caller: FileMeta,
     base_metas: &mut FxHashMap<usize, FileMeta>,
     names: &OverlayNames<'_>,
     nodes: &[ViewNode],
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
+    scope: &mut ImportScope<'s>,
 ) -> Option<(u32, f32)> {
     let callee = site.name();
     let accepts = |idx: u32| {
@@ -744,6 +749,41 @@ fn resolve_callee(
         return None;
     }
 
+    // The index binds no import for an untyped member call, and in these
+    // languages has no path-segment import tier either.
+    let member_policy = import_member_fallback(caller.language);
+    if member_policy && !imports.is_empty() && !matches!(site, CallSite::UntypedMember(_)) {
+        match bind_import(
+            graph,
+            callee,
+            file_ord,
+            imports,
+            caller.language,
+            names,
+            nodes,
+            dirty_base,
+            scope,
+        ) {
+            Some(ImportBinding::Resolved(hit)) => return hit,
+            Some(ImportBinding::Fallback(name)) => {
+                return resolve_callee(
+                    graph,
+                    CallSite::Plain(name),
+                    file_ord,
+                    &[],
+                    caller,
+                    base_metas,
+                    names,
+                    nodes,
+                    replaced,
+                    dirty_base,
+                    scope,
+                );
+            }
+            None => {}
+        }
+    }
+
     // Clean-base candidates via the name index. Dirty-file base nodes are
     // excluded here: replaced ones already participate as overlay callables
     // (same name), suppressed ones no longer exist.
@@ -758,8 +798,8 @@ fn resolve_callee(
         names.anywhere.get(callee).map(Vec::as_slice).unwrap_or(&[]);
 
     // Tier 2: import-scoped.
-    if let Some(import) = file
-        .imports
+    let segment_imports: &[RawImport] = if member_policy { &[] } else { imports };
+    if let Some(import) = segment_imports
         .iter()
         .find(|i| i.imported_name == callee || i.alias.as_deref() == Some(callee))
     {
@@ -1071,26 +1111,31 @@ fn resolve_rust_module_callee(
 /// the Class / Struct it constructs; [`construction_target`] then picks the
 /// edge's target. Narrowed like [`resolve_callee`] to bare names: a
 /// qualified type path resolves by its last segment, and only where
-/// [`CallSite::constructed_type`] allows that fallback.
+/// [`CallSite::constructed_type`] allows that fallback. In an
+/// [`import_member_fallback`] language with imports, the whole path resolves
+/// first, as the index does, so `u.Widget()` binds through `import pkg as u`.
 #[allow(clippy::too_many_arguments)]
-fn resolve_constructed_type(
+fn resolve_constructed_type<'s>(
     graph: &ArchivedZeroCopyGraph,
-    site: CallSite<'_>,
+    site: CallSite<'s>,
     file_ord: usize,
-    file: &OverlayFileInput,
+    imports: &'s [RawImport],
     caller: FileMeta,
     base_metas: &mut FxHashMap<usize, FileMeta>,
     types: &OverlayNames<'_>,
     nodes: &[ViewNode],
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
+    scope: &mut ImportScope<'s>,
 ) -> Option<(u32, f32)> {
     let (type_path, last_segment_fallback) = site.constructed_type(caller.language)?;
     let type_name = type_path
         .rsplit(['.', ':', '\\'])
         .next()
         .unwrap_or(type_path);
-    if type_name.len() < type_path.len() && !last_segment_fallback {
+    let qualified = type_name.len() < type_path.len();
+    let whole_path = import_member_fallback(caller.language) && !imports.is_empty();
+    if qualified && !last_segment_fallback && !whole_path {
         return None;
     }
     // Most unresolved calls name no type at all: reject them before the
@@ -1102,18 +1147,27 @@ fn resolve_constructed_type(
     if !names_constructible {
         return None;
     }
-    let (ty, confidence) = resolve_callee(
-        graph,
-        CallSite::Plain(type_name),
-        file_ord,
-        file,
-        caller,
-        base_metas,
-        types,
-        nodes,
-        replaced,
-        dirty_base,
-    )?;
+    let mut resolve = |name: &'s str| {
+        resolve_callee(
+            graph,
+            CallSite::Plain(name),
+            file_ord,
+            imports,
+            caller,
+            base_metas,
+            types,
+            nodes,
+            replaced,
+            dirty_base,
+            scope,
+        )
+    };
+    let (ty, confidence) = if whole_path {
+        resolve(type_path)
+            .or_else(|| (qualified && last_segment_fallback).then(|| resolve(type_name))?)
+    } else {
+        resolve(type_name)
+    }?;
     let kind = match ty.checked_sub(graph.nodes.len() as u32) {
         Some(virt_off) => nodes[virt_off as usize].kind,
         None => NodeKind::from(&graph.nodes[ty as usize].kind),
@@ -1121,23 +1175,130 @@ fn resolve_constructed_type(
     kind.is_constructible().then_some((ty, confidence))
 }
 
-/// The index-time import tier reads a Python callee rooted in a module
-/// import (`u.helper`, `pkg.util.helper`) with its qualifier. This overlay
-/// resolves bare names, so such a callee falls back to its member name, as
-/// the parser emitted it before module-qualified callees existed.
-fn python_module_member<'a>(callee: &'a str, imports: &[RawImport]) -> &'a str {
-    let rooted_in_module = imports.iter().any(|import| {
-        import.imported_name == "*"
-            && import.alias.as_deref().is_some_and(|alias| {
-                callee
-                    .strip_prefix(alias)
-                    .is_some_and(|rest| rest.len() > 1 && rest.starts_with('.'))
-            })
-    });
-    match callee.rsplit_once('.') {
-        Some((_, member)) if rooted_in_module => member,
-        _ => callee,
+/// How the import-member policy settles one callee.
+enum ImportBinding<'s> {
+    /// The import tier's target, or no edge: every binding import is external.
+    Resolved(Option<(u32, f32)>),
+    /// Resolve this name through the remaining tiers, without imports.
+    Fallback(&'s str),
+}
+
+/// The index's import-member tier (`Resolver::resolve_symbol_with_import_binding`)
+/// for an [`import_member_fallback`] language. `None` when no import binds
+/// `callee`.
+///
+/// An import binding `callee` whose module holds the member decides the
+/// target. When none does, a binding whose module may be local (relative,
+/// first segment an indexed module name, or module found) keeps the general
+/// tiers, under the member's short name for Python and a Kotlin member
+/// import. Only when every binding import is certainly external is there no
+/// edge: a wrong suppression would drop a genuine caller.
+#[allow(clippy::too_many_arguments)]
+fn bind_import<'s>(
+    graph: &ArchivedZeroCopyGraph,
+    callee: &'s str,
+    file_ord: usize,
+    imports: &'s [RawImport],
+    language: Language,
+    names: &OverlayNames<'_>,
+    nodes: &[ViewNode],
+    dirty_base: &FxHashSet<u32>,
+    scope: &mut ImportScope<'s>,
+) -> Option<ImportBinding<'s>> {
+    let source_file = scope.dirty()[file_ord].rel_path.as_str();
+    for import in imports {
+        let Some(member) = imported_member(import, callee, language) else {
+            continue;
+        };
+        let hit = match scope.module(source_file, &import.source, language) {
+            Module::Unique(file) => member_in_file(graph, names, nodes, dirty_base, file, member),
+            Module::Namespace(files) => {
+                let mut hits = files.iter().filter_map(|file| {
+                    member_in_file(graph, names, nodes, dirty_base, file, member)
+                });
+                hits.next().filter(|_| hits.next().is_none())
+            }
+            Module::Missing | Module::Ambiguous => None,
+        };
+        if let Some(target) = hit {
+            return Some(ImportBinding::Resolved(Some((target, CONF_IMPORT_SCOPED))));
+        }
     }
+    let mut short_name = None;
+    let mut external = true;
+    for import in imports {
+        let Some(member) = imported_member(import, callee, language) else {
+            continue;
+        };
+        short_name = Some(
+            if (language == Language::Python && import.imported_name != "*")
+                || (language == Language::Kotlin && !callee.contains('.'))
+            {
+                callee
+            } else {
+                member.rsplit('.').next().unwrap_or(member)
+            },
+        );
+        let head = import
+            .source
+            .trim_start_matches('\\')
+            .split(['/', '.', '\\'])
+            .next()
+            .unwrap_or(&import.source);
+        external &= (!fqn_language(language) || import.imported_name != "*")
+            && !import.source.starts_with('.')
+            && !scope.has_module_name(language, head)
+            && scope.module(source_file, &import.source, language) == Module::Missing;
+    }
+    let short_name = short_name?;
+    if external {
+        return Some(ImportBinding::Resolved(None));
+    }
+    let shortened_receiver = language == Language::Kotlin
+        && imports.iter().any(|import| {
+            import.imported_name != "*" && imported_member(import, callee, language).is_some()
+        });
+    Some(ImportBinding::Fallback(
+        if language == Language::Python || shortened_receiver {
+            short_name
+        } else {
+            callee
+        },
+    ))
+}
+
+/// The index's `lookup_call_in_file` over the kind family of `names`: the
+/// first `member` declared in `file`. A dirty file answers from its fresh
+/// parse only.
+fn member_in_file(
+    graph: &ArchivedZeroCopyGraph,
+    names: &OverlayNames<'_>,
+    nodes: &[ViewNode],
+    dirty_base: &FxHashSet<u32>,
+    file: &str,
+    member: &str,
+) -> Option<u32> {
+    let base_len = graph.nodes.len() as u32;
+    graph
+        .nodes_by_name(member)
+        .filter(|&idx| {
+            let node = &graph.nodes[idx as usize];
+            (names.kind)(NodeKind::from(&node.kind))
+                && !dirty_base.contains(&idx)
+                && graph
+                    .files
+                    .get(node.file_idx.to_native() as usize)
+                    .is_some_and(|f| f.path.resolve(&graph.string_pool) == file)
+        })
+        .min()
+        .or_else(|| {
+            names
+                .anywhere
+                .get(member)?
+                .iter()
+                .find(|&&(virt, _)| nodes[(virt - base_len) as usize].rel_path.as_ref() == file)
+                .map(|&(virt, _)| virt)
+        })
 }
 
 /// Last path-ish segment of an import source across language conventions:

@@ -209,14 +209,14 @@ fn test_overlay_closure_overloads_use_live_parent() {
     );
 }
 
-fn targets(graph: &ZeroCopyGraph) -> Vec<Target> {
+fn targets(graph: &ZeroCopyGraph, caller: &str) -> Vec<Target> {
     let pool = &graph.string_pool;
     let mut result: Vec<_> = graph
         .edges
         .iter()
         .filter(|e| {
             e.rel_type == RelType::Calls
-                && graph.nodes[e.source as usize].name.resolve(pool) == "run"
+                && graph.nodes[e.source as usize].name.resolve(pool) == caller
         })
         .map(|e| {
             let n = &graph.nodes[e.target as usize];
@@ -243,6 +243,27 @@ fn parity(
 }
 
 fn check_parity(
+    provider: &dyn LanguageProvider,
+    files: &[(&str, &str)],
+    dirty: &[(&str, &str)],
+    expected: &[Target],
+    overlay_expected: &[Target],
+) {
+    check_parity_from("run", provider, files, dirty, expected, overlay_expected);
+}
+
+fn parity_from(
+    caller: &str,
+    provider: &dyn LanguageProvider,
+    files: &[(&str, &str)],
+    dirty: &[(&str, &str)],
+    expected: &[Target],
+) {
+    check_parity_from(caller, provider, files, dirty, expected, expected);
+}
+
+fn check_parity_from(
+    caller: &str,
     provider: &dyn LanguageProvider,
     files: &[(&str, &str)],
     dirty: &[(&str, &str)],
@@ -282,7 +303,7 @@ fn check_parity(
     let base = build(&[]);
     let full = build(dirty);
     assert_eq!(
-        targets(&full),
+        targets(&full, caller),
         expected,
         "full reindex fixture must exercise the intended target: {dirty:?}"
     );
@@ -300,7 +321,7 @@ fn check_parity(
         files
             .iter()
             .flat_map(|f| &f.symbols)
-            .any(|s| s.name == "run" && !s.calls.is_empty()),
+            .any(|s| s.name == caller && !s.calls.is_empty()),
         "the dirty caller must contain a parsed call, including unresolved fixtures"
     );
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&base).unwrap();
@@ -310,7 +331,7 @@ fn check_parity(
     let mut actual: Vec<Target> = merged
         .all_edges()
         .filter(|e| {
-            e.rel_type() == RelType::Calls && merged.node(e.source).unwrap().name(&merged) == "run"
+            e.rel_type() == RelType::Calls && merged.node(e.source).unwrap().name(&merged) == caller
         })
         .map(|e| {
             let n = merged.node(e.target).unwrap();
@@ -847,5 +868,329 @@ fn test_overlay_rust_nested_main_is_an_ordinary_module() {
         ],
         &[("src/util/main.rs", "fn run() { crate::util::foo(); }")],
         &[("src/util/mod.rs".into(), "foo".into(), "".into(), 100)],
+    );
+}
+
+// Import-member policy (Python, Java, Kotlin, PHP): the import that binds a
+// callee decides its target, or that it has none. Each fixture names the
+// overlay's pre-policy divergence from the reindex.
+
+fn py() -> PythonProvider {
+    PythonProvider::new().unwrap()
+}
+
+fn java() -> ecp_analyzer::java::JavaProvider {
+    ecp_analyzer::java::JavaProvider::new().unwrap()
+}
+
+fn kotlin() -> ecp_analyzer::kotlin::parser::KotlinProvider {
+    ecp_analyzer::kotlin::parser::KotlinProvider::new().unwrap()
+}
+
+fn php() -> ecp_analyzer::php::parser::PhpProvider {
+    ecp_analyzer::php::parser::PhpProvider::new().unwrap()
+}
+
+const JAVA_HELPER: (&str, &str) = (
+    "src/main/java/pkg/Helper.java",
+    "package pkg; public class Helper { public static void helper() {} }",
+);
+
+const KOTLIN_UTIL: (&str, &str) = (
+    "src/main/kotlin/pkg/Util.kt",
+    "package pkg\nfun helper() {}\n",
+);
+
+// Was: the member name bound the repo's only `helper` globally (false caller).
+#[test]
+fn test_overlay_python_external_module_alias_matches_reindex() {
+    parity(
+        &py(),
+        &[
+            ("elsewhere/util.py", "def helper():\n    pass\n"),
+            ("app.py", "import external as u\n\ndef run():\n    pass\n"),
+        ],
+        &[(
+            "app.py",
+            "import external as u\n\ndef run():\n    return u.helper()\n",
+        )],
+        &[],
+    );
+}
+
+// Was: two `helper`s made the member name ambiguous (dropped caller).
+#[test]
+fn test_overlay_python_module_alias_duplicate_name_matches_reindex() {
+    parity(
+        &py(),
+        &[
+            ("pkg/util.py", "def helper():\n    pass\n"),
+            ("pkg/other.py", "def helper():\n    pass\n"),
+            ("app.py", "import pkg.util as u\n\ndef run():\n    pass\n"),
+        ],
+        &[(
+            "app.py",
+            "import pkg.util as u\n\ndef run():\n    return u.helper()\n",
+        )],
+        &[("pkg/util.py".into(), "helper".into(), "".into(), 95)],
+    );
+}
+
+// Was: the stripped member name hit the wrapper itself at Tier 1.
+#[test]
+fn test_overlay_python_same_name_wrapper_matches_reindex() {
+    parity_from(
+        "helper",
+        &py(),
+        &[
+            ("pkg/util.py", "def helper():\n    pass\n"),
+            (
+                "app.py",
+                "import pkg.util as u\n\ndef helper():\n    pass\n",
+            ),
+        ],
+        &[(
+            "app.py",
+            "import pkg.util as u\n\ndef helper():\n    return u.helper()\n",
+        )],
+        &[("pkg/util.py".into(), "helper".into(), "".into(), 95)],
+    );
+}
+
+// Was: the named import fell through to the repo's only `helper` globally.
+#[test]
+fn test_overlay_python_from_external_import_matches_reindex() {
+    parity(
+        &py(),
+        &[
+            ("elsewhere/util.py", "def helper():\n    pass\n"),
+            (
+                "app.py",
+                "from external import helper\n\ndef run():\n    pass\n",
+            ),
+        ],
+        &[(
+            "app.py",
+            "from external import helper\n\ndef run():\n    return helper()\n",
+        )],
+        &[],
+    );
+}
+
+// `pkg` is an indexed directory, so the missing `pkg.extra` may be local: the
+// index keeps the global tier (0.7). Was: the path-segment tier matched
+// `lib/extra/` at 0.95. A wrong suppression would return no edge.
+#[test]
+fn test_overlay_python_indexed_first_segment_keeps_global_matches_reindex() {
+    parity(
+        &py(),
+        &[
+            ("pkg/util.py", "def other():\n    pass\n"),
+            ("lib/extra/x.py", "def helper():\n    pass\n"),
+            (
+                "app.py",
+                "from pkg.extra import helper\n\ndef run():\n    pass\n",
+            ),
+        ],
+        &[(
+            "app.py",
+            "from pkg.extra import helper\n\ndef run():\n    return helper()\n",
+        )],
+        &[("lib/extra/x.py".into(), "helper".into(), "".into(), 70)],
+    );
+}
+
+// Was: the qualified callee `Helper.helper` matched no name (dropped caller).
+#[test]
+fn test_overlay_java_class_import_matches_reindex() {
+    parity(
+        &java(),
+        &[
+            JAVA_HELPER,
+            ("App.java", "import pkg.Helper; class App { void run() {} }"),
+        ],
+        &[(
+            "App.java",
+            "import pkg.Helper; class App { void run() { Helper.helper(); } }",
+        )],
+        &[(JAVA_HELPER.0.into(), "helper".into(), "Helper".into(), 95)],
+    );
+}
+
+// Was: two `helper` methods made the static import's name ambiguous.
+#[test]
+fn test_overlay_java_static_import_matches_reindex() {
+    parity(
+        &java(),
+        &[
+            JAVA_HELPER,
+            (
+                "src/main/java/other/Tools.java",
+                "package other; public class Tools { public static void helper() {} }",
+            ),
+            (
+                "App.java",
+                "import static pkg.Helper.helper; class App { void run() {} }",
+            ),
+        ],
+        &[(
+            "App.java",
+            "import static pkg.Helper.helper; class App { void run() { helper(); } }",
+        )],
+        &[(JAVA_HELPER.0.into(), "helper".into(), "Helper".into(), 95)],
+    );
+}
+
+// Was: the external static import fell through to the repo's only `helper`.
+#[test]
+fn test_overlay_java_external_static_import_matches_reindex() {
+    parity(
+        &java(),
+        &[
+            JAVA_HELPER,
+            (
+                "App.java",
+                "import static com.ext.Other.helper; class App { void run() {} }",
+            ),
+        ],
+        &[(
+            "App.java",
+            "import static com.ext.Other.helper; class App { void run() { helper(); } }",
+        )],
+        &[],
+    );
+}
+
+// `pkg` is an indexed directory, so the missing `pkg.Missing` may be local:
+// the index keeps the global tier (0.7). Was: the path-segment tier matched
+// the `helper/` directory at 0.95. A wrong suppression would return no edge.
+#[test]
+fn test_overlay_java_indexed_first_segment_keeps_global_matches_reindex() {
+    parity(
+        &java(),
+        &[
+            (
+                "src/main/java/pkg/Other.java",
+                "package pkg; public class Other {}",
+            ),
+            (
+                "src/main/java/lib/helper/Tools.java",
+                "package lib.helper; public class Tools { public static void helper() {} }",
+            ),
+            (
+                "App.java",
+                "import static pkg.Missing.helper; class App { void run() {} }",
+            ),
+        ],
+        &[(
+            "App.java",
+            "import static pkg.Missing.helper; class App { void run() { helper(); } }",
+        )],
+        &[(
+            "src/main/java/lib/helper/Tools.java".into(),
+            "helper".into(),
+            "Tools".into(),
+            70,
+        )],
+    );
+}
+
+// Was: two `helper`s made the member import's name ambiguous.
+#[test]
+fn test_overlay_kotlin_member_import_matches_reindex() {
+    parity(
+        &kotlin(),
+        &[
+            KOTLIN_UTIL,
+            ("Other.kt", "fun helper() {}\n"),
+            ("App.kt", "import pkg.helper\nfun run() {}\n"),
+        ],
+        &[("App.kt", "import pkg.helper\nfun run() { helper() }\n")],
+        &[(KOTLIN_UTIL.0.into(), "helper".into(), "".into(), 95)],
+    );
+}
+
+// Was: the alias `h` named no symbol (dropped caller).
+#[test]
+fn test_overlay_kotlin_alias_import_matches_reindex() {
+    parity(
+        &kotlin(),
+        &[
+            KOTLIN_UTIL,
+            ("App.kt", "import pkg.helper as h\nfun run() {}\n"),
+        ],
+        &[("App.kt", "import pkg.helper as h\nfun run() { h() }\n")],
+        &[(KOTLIN_UTIL.0.into(), "helper".into(), "".into(), 95)],
+    );
+}
+
+// Was: two `Helper` classes made the construction ambiguous.
+#[test]
+fn test_overlay_php_class_use_construction_matches_reindex() {
+    parity(
+        &php(),
+        &[
+            ("src/pkg/Helper.php", "<?php namespace pkg; class Helper {}"),
+            (
+                "src/other/Helper.php",
+                "<?php namespace other; class Helper {}",
+            ),
+            ("app.php", "<?php use pkg\\Helper; function run() {}"),
+        ],
+        &[(
+            "app.php",
+            "<?php use pkg\\Helper; function run() { new Helper(); }",
+        )],
+        &[("src/pkg/Helper.php".into(), "Helper".into(), "".into(), 95)],
+    );
+}
+
+// Was: two `helper` functions made the function import's name ambiguous.
+#[test]
+fn test_overlay_php_use_function_matches_reindex() {
+    parity(
+        &php(),
+        &[
+            (
+                "src/pkg/Helper.php",
+                "<?php namespace pkg; function helper() {}",
+            ),
+            (
+                "src/other/util.php",
+                "<?php namespace other; function helper() {}",
+            ),
+            (
+                "app.php",
+                "<?php use function pkg\\helper; function run() {}",
+            ),
+        ],
+        &[(
+            "app.php",
+            "<?php use function pkg\\helper; function run() { helper(); }",
+        )],
+        &[("src/pkg/Helper.php".into(), "helper".into(), "".into(), 95)],
+    );
+}
+
+// Was: the vendor class import fell through to the repo's only `Command`.
+#[test]
+fn test_overlay_php_external_vendor_use_matches_reindex() {
+    parity(
+        &php(),
+        &[
+            (
+                "src/pkg/Command.php",
+                "<?php namespace pkg; class Command {}",
+            ),
+            (
+                "app.php",
+                "<?php use Symfony\\Component\\Console\\Command; function run() {}",
+            ),
+        ],
+        &[(
+            "app.php",
+            "<?php use Symfony\\Component\\Console\\Command; function run() { new Command(); }",
+        )],
+        &[],
     );
 }
