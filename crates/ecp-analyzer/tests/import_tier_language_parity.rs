@@ -92,7 +92,7 @@ parity!(
     "App.java",
     "import pkg.Helper; class App { void go() { Helper.helper(); } }",
     "helper",
-    QualifierScoped
+    ImportScoped
 );
 parity!(
     test_kotlin_import_target_and_tier,
@@ -102,7 +102,7 @@ parity!(
     "App.kt",
     "import pkg.helper\nfun go() { helper() }",
     "helper",
-    Global
+    ImportScoped
 );
 parity!(
     test_csharp_import_target_and_tier,

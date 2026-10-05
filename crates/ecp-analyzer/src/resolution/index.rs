@@ -154,6 +154,7 @@ pub struct SymbolTable {
     /// Empty package entries participate in namespace discovery, not the
     /// existing symbol-backed module-stem fallback.
     empty_stem_index: FxHashMap<String, Vec<String>>,
+    namespace_files: FxHashMap<String, Vec<String>>,
     indexed_module_names:
         FxHashMap<std::mem::Discriminant<Language>, rustc_hash::FxHashSet<String>>,
 
@@ -206,7 +207,19 @@ impl SymbolTable {
         self.stem_index.clear();
         self.empty_stem_index.clear();
         self.indexed_module_names.clear();
+        self.namespace_files.clear();
         for (path, symbols) in &self.file_scoped {
+            for (name, ids) in symbols {
+                if ids
+                    .iter()
+                    .any(|&id| self.node_kinds[id as usize] == NodeKind::Namespace)
+                {
+                    self.namespace_files
+                        .entry(name.replace('\\', "."))
+                        .or_default()
+                        .push(path.clone());
+                }
+            }
             let Some(stem) = std::path::Path::new(path)
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -247,6 +260,13 @@ impl SymbolTable {
     /// than "index not built".
     pub fn files_by_stem(&self, stem: &str) -> &[String] {
         self.stem_index.get(stem).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub(crate) fn namespace_files(&self, namespace: &str) -> &[String] {
+        self.namespace_files
+            .get(namespace)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     pub(crate) fn module_files_by_stem<'a>(&'a self, stem: &str) -> impl Iterator<Item = &'a str> {

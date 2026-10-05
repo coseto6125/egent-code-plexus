@@ -747,7 +747,19 @@ impl LanguageProvider for PhpProvider {
                 if let Ok(src_str) =
                     std::str::from_utf8(&source[i_src.start_byte()..i_src.end_byte()])
                 {
-                    let full_src = if let Some(p) = import_prefix {
+                    let group = i_src
+                        .parent()
+                        .and_then(|clause| clause.parent())
+                        .filter(|parent| parent.kind() == "namespace_use_group");
+                    let group_prefix =
+                        group
+                            .and_then(|group| group.parent())
+                            .and_then(|declaration| {
+                                declaration
+                                    .named_children(&mut declaration.walk())
+                                    .find(|child| child.kind() == "namespace_name")
+                            });
+                    let full_src = if let Some(p) = group_prefix.or(import_prefix) {
                         if let Ok(p_str) =
                             std::str::from_utf8(&source[p.start_byte()..p.end_byte()])
                         {
@@ -771,15 +783,19 @@ impl LanguageProvider for PhpProvider {
                         None
                     };
 
-                    let imported_name = if let Some(ref a_str) = alias {
-                        a_str.clone()
-                    } else {
-                        full_src.split('\\').next_back().unwrap_or("").to_string()
-                    };
+                    let imported_name = full_src.split('\\').next_back().unwrap_or("").to_string();
 
                     imports.push(RawImport {
-                        alias,
-                        imported_name,
+                        alias: if group.is_some() {
+                            Some(alias.unwrap_or_else(|| imported_name.clone()))
+                        } else {
+                            alias
+                        },
+                        imported_name: if group.is_some() {
+                            "*".to_string()
+                        } else {
+                            imported_name
+                        },
                         source: full_src,
                         binding_kind: None,
                     });

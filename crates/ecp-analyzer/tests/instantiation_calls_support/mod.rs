@@ -35,6 +35,45 @@ pub fn graph_of<P: LanguageProvider>(provider: &P, files: &[(&str, &str)]) -> Ze
     builder.build()
 }
 
+pub fn assert_calls_with_confidence(
+    graph: &ZeroCopyGraph,
+    caller: &str,
+    expected: &[(&str, &str, f32)],
+) {
+    let hits: Vec<_> = graph
+        .edges
+        .iter()
+        .filter(|edge| {
+            edge.rel_type == RelType::Calls
+                && graph.nodes[edge.source as usize]
+                    .name
+                    .resolve(&graph.string_pool)
+                    == caller
+        })
+        .map(|edge| {
+            let node = &graph.nodes[edge.target as usize];
+            (
+                graph.files[node.file_idx as usize]
+                    .path
+                    .resolve(&graph.string_pool),
+                node.name.resolve(&graph.string_pool),
+                edge.confidence,
+            )
+        })
+        .collect();
+    println!("{hits:?}");
+    assert_eq!(
+        hits,
+        expected,
+        "nodes: {:?}",
+        graph
+            .nodes
+            .iter()
+            .map(|node| (node.name.resolve(&graph.string_pool), node.kind))
+            .collect::<Vec<_>>()
+    );
+}
+
 /// Every `rel` edge whose source node is named `caller`, one entry per edge.
 pub fn edges_from(graph: &ZeroCopyGraph, caller: &str, rel: RelType) -> Vec<Hit> {
     let pool = graph.string_pool.as_slice();
