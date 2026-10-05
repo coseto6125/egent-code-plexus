@@ -198,8 +198,10 @@ impl OverlayView {
                 );
                 let virt = base_len + nodes.len() as u32;
                 let replaced_base = dirty_base_by_uid.get(&uid).copied();
+                // First UID wins, as in full indexing: later twins are
+                // tombstones there, so base edges must reach the first one.
                 if let Some(base_idx) = replaced_base {
-                    replaced.insert(base_idx, virt);
+                    replaced.entry(base_idx).or_insert(virt);
                 }
                 nodes.push(ViewNode {
                     uid,
@@ -1242,6 +1244,35 @@ mod tests {
             .map(|edge| (edge.source, edge.target, edge.rel_type, edge.confidence))
             .collect();
         assert_eq!(references, vec![(0, 2, RelType::References, 1.0)]);
+    }
+
+    #[test]
+    fn test_build_overload_twins_redirect_base_to_closure_parent() {
+        let mut fx = GraphFixture::new();
+        let base_enclosing = fx.func("App.java", "enclosing");
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let mut parent = sym("enclosing", &[]);
+        parent.end_line = 4;
+        let mut overload = parent.clone();
+        overload.start_line = 5;
+        overload.end_line = 9;
+        let mut closure = sym("<anonymous:6:2>", &[]);
+        closure.start_line = 6;
+        closure.end_line = 7;
+        let file = OverlayFileInput {
+            rel_path: "App.java".into(),
+            symbols: vec![parent, overload, closure],
+            imports: vec![],
+        };
+        let view = OverlayView::build(graph, &[file]).unwrap();
+        let parent = view.redirect(base_enclosing).unwrap();
+        let closure = view.base_len() + 2;
+        assert!(
+            view.overlay_out(parent)
+                .any(|(_, e)| e.target == closure && e.rel_type == RelType::References),
+            "a clean caller of the base overload must reach the closure downstream"
+        );
     }
 
     fn dirty_input() -> OverlayFileInput {

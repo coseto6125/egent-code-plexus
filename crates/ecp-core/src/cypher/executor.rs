@@ -892,7 +892,7 @@ fn eval_return_expr_with(
                             tgt: e.target,
                             rel_type: e.rel_type,
                             confidence: e.confidence,
-                            reason: crate::session::OVERLAY_EDGE_REASON.to_string(),
+                            reason: e.reason.to_string(),
                         };
                     }
                     let e = &graph.edges[eidx as usize];
@@ -1038,7 +1038,7 @@ fn eval_scalar_funcall(name: &str, args: &[Expr], b: &Binding, graph: MergedGrap
     // `computed` takes precedence over node_vars/edge_vars whenever the var
     // is present there at all — same order `prop_value` uses. A WITH clause
     // that shadows a surviving name (`WITH b AS a`) only overwrites
-    // `computed["a"]`; the plain-rebind branch of `exec_with` deliberately
+    // `computed["a"]`; `rebind_one` deliberately
     // preserves node_vars/edge_vars unchanged for downstream MATCH traversal,
     // so an old node_vars["a"] can still be sitting there stale. Falling
     // back to it after a `computed` miss would resolve the funcall against
@@ -1324,8 +1324,9 @@ fn far_end_name_seeds(
     let [rel] = pat.rels.as_slice() else {
         return None;
     };
-    // `exec_pattern` already reversed a pattern whose last node alone is
-    // bound, so only the first node can arrive bound here.
+    // `bound_start_pattern` (shared by `exec_pattern` and `visit_pattern`)
+    // already reversed a pattern whose last node alone is bound, so only the
+    // first node can arrive bound here.
     if graph.view().is_some()
         || graph.name_index.is_empty()
         || rel.range.is_some()
@@ -1909,7 +1910,7 @@ fn eval_expr(
                         tgt: e.target,
                         rel_type: e.rel_type,
                         confidence: e.confidence,
-                        reason: crate::session::OVERLAY_EDGE_REASON.to_string(),
+                        reason: e.reason.to_string(),
                     });
                 }
                 let e = &graph.edges[eidx as usize];
@@ -2389,7 +2390,7 @@ fn prop_value(
         if let Some(e) = graph.overlay_edge(edge_idx) {
             return match prop {
                 "confidence" => Value::Float(e.confidence as f64),
-                "reason" => Value::Str(crate::session::OVERLAY_EDGE_REASON.into()),
+                "reason" => Value::Str(e.reason.into()),
                 "rel_type" => Value::Str(e.rel_type.as_str().into()),
                 _ => Value::Null,
             };
@@ -3004,6 +3005,8 @@ mod tests {
                         owner_class: None,
                         start_line: 1,
                         end_line: 2,
+                        start_column: 0,
+                        end_column: 0,
                         calls: vec!["a".into()],
                     },
                     OverlaySymbol {
@@ -3012,6 +3015,8 @@ mod tests {
                         owner_class: None,
                         start_line: 3,
                         end_line: 4,
+                        start_column: 0,
+                        end_column: 0,
                         calls: vec!["a".into()],
                     },
                 ],
@@ -3515,9 +3520,8 @@ mod tests {
     #[test]
     fn exec_where_funcall_on_shadowing_with_alias_uses_new_binding() {
         // `WITH b AS a` shadows the surviving `a` name: computed["a"] becomes
-        // the new binding (callee, idx 1), but the plain-rebind branch of
-        // exec_with deliberately preserves the OLD node_vars["a"] (caller,
-        // idx 0) unchanged for downstream MATCH traversal. `ID(a) = 1` only
+        // the new binding (callee, idx 1), but `rebind_one` deliberately
+        // preserves the OLD node_vars["a"] (caller, idx 0) unchanged for downstream MATCH traversal. `ID(a) = 1` only
         // stays true if the funcall resolves against the shadowed (new)
         // binding — a lookup-order bug that falls back to node_vars first
         // would evaluate `ID(a)` as 0, filtering the row out entirely, while
@@ -5475,6 +5479,59 @@ mod tests {
             vec![vec![
                 Value::Str("keep_fn".into()),
                 Value::Str("target_fn".into())
+            ]]
+        );
+    }
+
+    /// A rebuilt lexical closure reference keeps the full index's reason in
+    /// every way cypher reads an overlay edge, not the uncommitted-edit marker.
+    #[test]
+    fn test_execute_overlay_closure_reference_reports_lexical_reason() {
+        use crate::session::{OverlayFileInput, OverlaySymbol};
+        let bytes = GraphFixture::new().into_bytes();
+        let archived =
+            rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                .unwrap();
+        let symbol = |name: &str, start_line, end_line| OverlaySymbol {
+            name: name.to_string(),
+            kind: NodeKind::Function,
+            owner_class: None,
+            start_line,
+            end_line,
+            start_column: 0,
+            end_column: 0,
+            calls: vec![],
+        };
+        let dirty = OverlayFileInput {
+            rel_path: "src/app.ts".to_string(),
+            symbols: vec![symbol("enclosing", 1, 9), symbol("<anonymous:3:2>", 3, 4)],
+            imports: vec![],
+        };
+        let view = OverlayView::build(archived, &[dirty]).unwrap();
+        let reason = Value::Str(crate::analyzer::types::CLOSURE_REFERENCE_REASON.into());
+        let filtered = format!(
+            "MATCH (a)-[r:References]->(b) WHERE r.reason = '{}' RETURN a.name, r.reason",
+            crate::analyzer::types::CLOSURE_REFERENCE_REASON
+        );
+        let r = execute(
+            &parse(&filtered).unwrap(),
+            archived,
+            Some(&view),
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(
+            r.rows,
+            vec![vec![Value::Str("enclosing".into()), reason.clone()]]
+        );
+        let q = parse("MATCH (a)-[r:References]->(b) RETURN r").unwrap();
+        let r = execute(&q, archived, Some(&view), Path::new(".")).unwrap();
+        assert_eq!(
+            r.rows,
+            vec![vec![
+                Value::Str("References".into()),
+                Value::Float(1.0),
+                reason
             ]]
         );
     }

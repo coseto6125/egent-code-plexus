@@ -274,8 +274,8 @@ fn merge_base_edge<'a>(
     }
     // Rebuild only this reason, never all References from a dirty file.
     // Replacing even UID-stable references avoids duplicates and stale parents.
-    if view.rebuilds_closure_references(source)
-        && RelType::from(&edge.rel_type) == RelType::References
+    if RelType::from(&edge.rel_type) == RelType::References
+        && view.rebuilds_closure_references(source)
         && edge.reason.resolve(&graph.string_pool)
             == crate::analyzer::types::CLOSURE_REFERENCE_REASON
     {
