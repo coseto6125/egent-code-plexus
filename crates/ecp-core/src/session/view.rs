@@ -929,7 +929,13 @@ impl<'a> RustModules<'a> {
     }
 
     fn file(&self, path: &std::path::Path) -> Option<&'a str> {
-        let requested = path.to_str()?;
+        // `PathBuf::join` writes `\` on Windows; archived paths use `/`, as
+        // the analyzer's path normalisation does.
+        let requested = match path.to_str()? {
+            raw if raw.contains('\\') => std::borrow::Cow::Owned(raw.replace('\\', "/")),
+            raw => std::borrow::Cow::Borrowed(raw),
+        };
+        let requested = requested.as_ref();
         if let Some((&name, _)) = self.dirty.get_key_value(requested) {
             return Some(name);
         }
@@ -1609,6 +1615,21 @@ mod tests {
             assert_eq!(modules.file(std::path::Path::new(path)), Some(path));
         }
         assert_eq!(modules.file(std::path::Path::new("src/missing.rs")), None);
+    }
+
+    /// Module paths built with `PathBuf::join` carry `\\` on Windows; the
+    /// lookup still finds the archived `/` path.
+    #[test]
+    fn test_rust_module_file_lookup_backslash_path_finds_archived_path() {
+        let mut fixture = GraphFixture::new();
+        fixture.file("src/bin/util.rs");
+        let bytes = fixture.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let modules = RustModules::new(graph, &[]);
+        assert_eq!(
+            modules.file(std::path::Path::new("src\\bin\\util.rs")),
+            Some("src/bin/util.rs")
+        );
     }
 
     #[test]
