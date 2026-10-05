@@ -1,77 +1,18 @@
-//! Import-member binding for the overlay, mirroring the full resolver's
-//! `IMPORT_MEMBER_FALLBACK` policy (ecp-analyzer `resolution/resolver.rs`).
+//! Module discovery for the overlay's import-member tier, mirroring the full
+//! resolver's `import_module_file` (ecp-analyzer `resolution/resolver.rs`).
 //!
-//! The binding rules ([`import_member_fallback`], [`imported_member`]) are
-//! pure functions of the parse, so the overlay applies them unchanged. Module
+//! The binding rules themselves live in
+//! [`crate::analyzer::import_binding`], shared with the resolver. Module
 //! discovery cannot reuse the resolver's `SymbolTable`; [`ImportScope`]
 //! replays it over the base graph's file paths plus the dirty files.
 
 use super::view::OverlayFileInput;
+use crate::analyzer::import_binding::{fqn_extension, import_family, may_suppress, module_head};
 use crate::analyzer::types::RawImport;
 use crate::file_category::Language;
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::Path;
-
-/// Languages whose calls bind through an import's member: an import that
-/// names the callee decides the target, or decides that there is none.
-pub fn import_member_fallback(language: Language) -> bool {
-    matches!(
-        language,
-        Language::Python | Language::Java | Language::Kotlin | Language::Php
-    )
-}
-
-/// Languages whose imports name a fully qualified class or member path.
-pub fn fqn_language(language: Language) -> bool {
-    matches!(language, Language::Java | Language::Kotlin | Language::Php)
-}
-
-/// The member a namespace import (`import pkg.util as u`) binds in `name`
-/// (`u.helper` → `helper`).
-pub fn namespace_member<'a>(import: &RawImport, name: &'a str) -> Option<&'a str> {
-    if import.imported_name != "*" {
-        return None;
-    }
-    name.strip_prefix(import.alias.as_deref()?)
-        .and_then(|rest| rest.strip_prefix('.'))
-        .filter(|member| !member.is_empty())
-}
-
-/// The module member `import` binds to the callee `name`, if it binds it.
-pub fn imported_member<'a>(
-    import: &'a RawImport,
-    name: &'a str,
-    language: Language,
-) -> Option<&'a str> {
-    if !fqn_language(language) {
-        return if import.imported_name == "*" {
-            namespace_member(import, name)
-        } else {
-            (import.alias.as_deref().unwrap_or(&import.imported_name) == name)
-                .then_some(import.imported_name.as_str())
-        };
-    }
-    let exported = import.imported_name.rsplit(['.', '\\']).next()?;
-    let binding = import.alias.as_deref().unwrap_or(exported);
-    if import.imported_name == "*"
-        && matches!(import.alias.as_deref(), None | Some("*") | Some("static:*"))
-    {
-        if name.contains('.') {
-            return None;
-        }
-        return Some(name.rsplit('.').next().unwrap_or(name));
-    }
-    if binding == name {
-        return Some(if exported == "*" {
-            import.source.rsplit(['.', '\\']).next()?
-        } else {
-            exported
-        });
-    }
-    name.strip_prefix(binding)
-        .and_then(|rest| rest.strip_prefix('.'))
-}
 
 /// Where an import's module lives in the repo.
 #[derive(Clone, Debug, PartialEq)]
@@ -91,6 +32,9 @@ struct LanguageFiles<'a> {
     by_stem: FxHashMap<&'a str, Vec<&'a str>>,
     /// File stems and directory components (`SymbolTable::has_module_name`).
     module_names: FxHashSet<&'a str>,
+    /// File → the namespaces it declares (`.`-joined), as the resolver's
+    /// `SymbolTable::declares_other_namespace` reads them.
+    namespaces: FxHashMap<&'a str, Vec<String>>,
 }
 
 impl<'a> LanguageFiles<'a> {
@@ -123,7 +67,38 @@ impl<'a> LanguageFiles<'a> {
                 );
             }
         }
+        let fresh: FxHashSet<&str> = dirty.iter().map(|f| f.rel_path.as_str()).collect();
+        let base = graph.nodes_by_kind(NodeKind::Namespace).filter_map(|idx| {
+            let node = &graph.nodes[idx as usize];
+            let path = graph
+                .files
+                .get(node.file_idx.to_native() as usize)?
+                .path
+                .resolve(&graph.string_pool);
+            (!fresh.contains(path)).then(|| (path, node.name.resolve(&graph.string_pool)))
+        });
+        let dirty_namespaces = dirty.iter().flat_map(|f| {
+            f.symbols
+                .iter()
+                .filter(|s| s.kind == NodeKind::Namespace)
+                .map(move |s| (f.rel_path.as_str(), s.name.as_str()))
+        });
+        for (path, name) in base.chain(dirty_namespaces) {
+            if files.paths.contains(path) {
+                let declared = files.namespaces.entry(path).or_default();
+                let name = name.replace('\\', ".");
+                if !declared.contains(&name) {
+                    declared.push(name);
+                }
+            }
+        }
         files
+    }
+
+    fn declares_other_namespace(&self, file: &str, expected: &str) -> bool {
+        self.namespaces
+            .get(file)
+            .is_some_and(|declared| declared.iter().all(|ns| ns != expected))
     }
 }
 
@@ -166,6 +141,22 @@ impl<'a> ImportScope<'a> {
             .contains(name)
     }
 
+    /// The resolver's `import_is_external`: a Missing import proves its callee
+    /// external only when [`may_suppress`] allows it and no language of its
+    /// [`import_family`] indexes its head or holds its module.
+    pub(crate) fn is_external(
+        &mut self,
+        source_file: &'a str,
+        import: &'a RawImport,
+        language: Language,
+    ) -> bool {
+        let head = module_head(&import.source);
+        may_suppress(import, language)
+            && import_family(language).all(|family| !self.has_module_name(family, head))
+            && import_family(language)
+                .all(|family| self.module(source_file, &import.source, family) == Module::Missing)
+    }
+
     /// The resolver's `import_module_file`: the module `specifier` names from
     /// `source_file`, without guessing its member.
     pub(crate) fn module(
@@ -188,10 +179,11 @@ impl<'a> ImportScope<'a> {
             .languages
             .entry(language as u8)
             .or_insert_with(|| LanguageFiles::build(graph, dirty, language));
-        let found = if fqn_language(language) {
-            fqn_module(files, graph, dirty, self.dirty_base, specifier, language)
-        } else {
-            python_module(files, source_file, specifier)
+        let found = match fqn_extension(language) {
+            Some(extension) => {
+                fqn_module(files, graph, dirty, self.dirty_base, specifier, extension)
+            }
+            None => python_module(files, source_file, specifier),
         };
         self.modules.insert(key, found.clone());
         found
@@ -287,14 +279,9 @@ fn fqn_module<'a>(
     dirty: &'a [OverlayFileInput],
     dirty_base: &FxHashSet<u32>,
     specifier: &str,
-    language: Language,
+    extension: &str,
 ) -> Module<'a> {
     let normalized = specifier.trim_start_matches('\\').replace('\\', ".");
-    let extension = match language {
-        Language::Java => "java",
-        Language::Kotlin => "kt",
-        _ => "php",
-    };
     let mut name = normalized.as_str();
     loop {
         let declaring = namespace_files(files, graph, dirty, dirty_base, name);
@@ -315,6 +302,7 @@ fn fqn_module<'a>(
         }
         let candidate = format!("{}.{extension}", name.replace('.', "/"));
         let stem = name.rsplit('.').next().unwrap_or(name);
+        let namespace = name.rsplit_once('.').map_or("", |(outer, _)| outer);
         let placed: Vec<&'a str> = files
             .by_stem
             .get(stem)
@@ -322,15 +310,16 @@ fn fqn_module<'a>(
             .flatten()
             .copied()
             .filter(|file| {
-                *file == candidate
+                (*file == candidate
                     || file
                         .strip_suffix(candidate.as_str())
-                        .is_some_and(|root| root.ends_with('/'))
+                        .is_some_and(|root| root.ends_with('/')))
+                    && !files.declares_other_namespace(file, namespace)
             })
             .collect();
         match placed.as_slice() {
             [] => {}
-            [file] => return Module::Unique(*file),
+            [file] => return Module::Unique(file),
             _ => return Module::Ambiguous,
         }
         let Some((outer, _)) = name.rsplit_once('.') else {
@@ -408,55 +397,6 @@ fn defines(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn import(source: &str, imported_name: &str, alias: Option<&str>) -> RawImport {
-        RawImport {
-            source: source.to_string(),
-            imported_name: imported_name.to_string(),
-            alias: alias.map(str::to_string),
-            binding_kind: None,
-        }
-    }
-
-    #[test]
-    fn test_imported_member_python_namespace_alias_binds_member() {
-        let u = import("pkg/util", "*", Some("u"));
-        assert_eq!(
-            imported_member(&u, "u.helper", Language::Python),
-            Some("helper")
-        );
-        assert_eq!(imported_member(&u, "helper", Language::Python), None);
-        assert_eq!(imported_member(&u, "u.", Language::Python), None);
-    }
-
-    #[test]
-    fn test_imported_member_fqn_class_static_and_wildcard_bind_like_resolver() {
-        let class = import("pkg.Helper", "Helper", None);
-        assert_eq!(
-            imported_member(&class, "Helper.helper", Language::Java),
-            Some("helper")
-        );
-        let static_member = import("pkg.Helper.helper", "helper", Some("helper"));
-        assert_eq!(
-            imported_member(&static_member, "helper", Language::Java),
-            Some("helper")
-        );
-        let wildcard = import("pkg", "*", None);
-        assert_eq!(
-            imported_member(&wildcard, "helper", Language::Kotlin),
-            Some("helper")
-        );
-        assert_eq!(
-            imported_member(&wildcard, "a.helper", Language::Kotlin),
-            None
-        );
-        let aliased = import("pkg.helper", "helper", Some("h"));
-        assert_eq!(
-            imported_member(&aliased, "h", Language::Kotlin),
-            Some("helper")
-        );
-        assert_eq!(imported_member(&aliased, "helper", Language::Kotlin), None);
-    }
 
     #[test]
     fn test_python_candidates_relative_and_absolute_match_resolver_order() {

@@ -11,9 +11,6 @@
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::graph::NodeKind;
 
-pub(crate) const IMPORT_MEMBER_FALLBACK: ecp_core::file_category::Language =
-    ecp_core::file_category::Language::Python;
-
 pub(crate) fn module_candidates(base: &str, visit: &mut impl FnMut(&str) -> bool) {
     // Python loads packages before modules, and implementation files before stubs.
     for suffix in ["/__init__.py", "/__init__.pyi", ".py", ".pyi"] {

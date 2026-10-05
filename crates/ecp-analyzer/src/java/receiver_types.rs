@@ -14,7 +14,7 @@ use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_java_string_value,
 };
 use crate::calls::{attach_to_enclosing, construction_call};
-use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -210,7 +210,9 @@ fn java_callee(
                         .unwrap_or_else(|| var.to_string()),
                 )
             }
-            _ => None,
+            // A computed receiver (`a.b().m()`, `this.f.m()`): the member is
+            // never a static import's name.
+            _ => return Some(CallSite::untyped_member(method_name)),
         }
     } else {
         None

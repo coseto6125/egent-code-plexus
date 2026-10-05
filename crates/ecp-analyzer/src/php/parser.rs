@@ -271,7 +271,6 @@ struct PhpCaptureIndices {
     decorator: Option<u32>,
     import_source: Option<u32>,
     import_alias: Option<u32>,
-    import_prefix: Option<u32>,
     function: Option<u32>,
     class: Option<u32>,
     interface: Option<u32>,
@@ -323,7 +322,6 @@ impl PhpProvider {
             decorator: query.capture_index_for_name("decorator"),
             import_source: query.capture_index_for_name("import.source"),
             import_alias: query.capture_index_for_name("import.alias"),
-            import_prefix: query.capture_index_for_name("import.prefix"),
             function: query.capture_index_for_name("function"),
             class: query.capture_index_for_name("class"),
             interface: query.capture_index_for_name("interface"),
@@ -390,7 +388,6 @@ impl LanguageProvider for PhpProvider {
 
         let idx_import_source = idx.import_source;
         let idx_import_alias = idx.import_alias;
-        let idx_import_prefix = idx.import_prefix;
 
         let idx_function = idx.function;
         let idx_class = idx.class;
@@ -439,7 +436,6 @@ impl LanguageProvider for PhpProvider {
 
             let mut import_src = None;
             let mut import_alias = None;
-            let mut import_prefix = None;
 
             let mut route_method = None;
             let mut route_path = None;
@@ -495,8 +491,6 @@ impl LanguageProvider for PhpProvider {
                     import_src = Some(cap.node);
                 } else if Some(cap_idx) == idx_import_alias {
                     import_alias = Some(cap.node);
-                } else if Some(cap_idx) == idx_import_prefix {
-                    import_prefix = Some(cap.node);
                 } else if Some(cap_idx) == idx_function
                     || Some(cap_idx) == idx_class
                     || Some(cap_idx) == idx_interface
@@ -759,7 +753,7 @@ impl LanguageProvider for PhpProvider {
                                     .named_children(&mut declaration.walk())
                                     .find(|child| child.kind() == "namespace_name")
                             });
-                    let full_src = if let Some(p) = group_prefix.or(import_prefix) {
+                    let full_src = if let Some(p) = group_prefix {
                         if let Ok(p_str) =
                             std::str::from_utf8(&source[p.start_byte()..p.end_byte()])
                         {

@@ -1110,6 +1110,30 @@ fn test_overlay_kotlin_member_import_matches_reindex() {
     );
 }
 
+// An external class receiver can still reach an in-repo extension function.
+#[test]
+fn test_overlay_kotlin_extension_on_external_class_matches_reindex() {
+    let factory = (
+        "conv/Factory.kt",
+        "package conv\nimport kotlinx.serialization.BinaryFormat\nfun BinaryFormat.asConverterFactory(t: String): Any = t\n",
+    );
+    parity(
+        &kotlin(),
+        &[
+            factory,
+            (
+                "conv/App.kt",
+                "package conv\nimport kotlinx.serialization.protobuf.ProtoBuf\nfun run() {}\n",
+            ),
+        ],
+        &[(
+            "conv/App.kt",
+            "package conv\nimport kotlinx.serialization.protobuf.ProtoBuf\nfun run() { ProtoBuf.asConverterFactory(\"x\") }\n",
+        )],
+        &[(factory.0.into(), "asConverterFactory".into(), "".into(), 70)],
+    );
+}
+
 // Was: the alias `h` named no symbol (dropped caller).
 #[test]
 fn test_overlay_kotlin_alias_import_matches_reindex() {
@@ -1142,6 +1166,31 @@ fn test_overlay_php_class_use_construction_matches_reindex() {
             "<?php use pkg\\Helper; function run() { new Helper(); }",
         )],
         &[("src/pkg/Helper.php".into(), "Helper".into(), "".into(), 95)],
+    );
+}
+
+// A global-namespace import is not a namespaced namesake's file.
+#[test]
+fn test_overlay_php_builtin_use_skips_namespaced_namesake_matches_reindex() {
+    parity(
+        &php(),
+        &[
+            (
+                "src/Testing/InvalidArgumentException.php",
+                "<?php namespace Lib\\Testing; class InvalidArgumentException {}",
+            ),
+            ("app.php", "<?php use InvalidArgumentException; function run() {}"),
+        ],
+        &[(
+            "app.php",
+            "<?php use InvalidArgumentException; function run() { new InvalidArgumentException(); }",
+        )],
+        &[(
+            "src/Testing/InvalidArgumentException.php".into(),
+            "InvalidArgumentException".into(),
+            "".into(),
+            70,
+        )],
     );
 }
 
@@ -1190,6 +1239,131 @@ fn test_overlay_php_external_vendor_use_matches_reindex() {
         &[(
             "app.php",
             "<?php use Symfony\\Component\\Console\\Command; function run() { new Command(); }",
+        )],
+        &[],
+    );
+}
+
+// `super.setup()` names the imported base, whose file lacks `setup`: the
+// index keeps the receiver ladder (Root.setup, inherited). The overlay has
+// no ladder, so it leaves the call unresolved. Was: both retried the bare
+// name and bound the caller to itself.
+#[test]
+fn test_overlay_kotlin_super_member_outside_imported_file_matches_reindex() {
+    let screen = |body: &str| {
+        format!(
+            "package app\nimport base.BaseScreen\nclass Screen : BaseScreen() {{\n override fun setup() {{ {body} }}\n}}\n"
+        )
+    };
+    let (clean, dirty) = (screen(""), screen("super.setup()"));
+    check_parity_from(
+        "setup",
+        &kotlin(),
+        &[
+            (
+                "src/main/kotlin/base/Root.kt",
+                "package base\nopen class Root {\n open fun setup() {}\n}\n",
+            ),
+            (
+                "src/main/kotlin/base/BaseScreen.kt",
+                "package base\nopen class BaseScreen : Root()\n",
+            ),
+            ("src/main/kotlin/app/Screen.kt", clean.as_str()),
+        ],
+        &[("src/main/kotlin/app/Screen.kt", dirty.as_str())],
+        &[(
+            "src/main/kotlin/base/Root.kt".into(),
+            "setup".into(),
+            "Root".into(),
+            80,
+        )],
+        &[],
+    );
+}
+
+// `import com.app.repository.*` binds no receiver, and a package wildcard
+// imports no class member: the call resolves by its member name (0.7). Was:
+// the receiver became `repository.fetchUsers`, which nothing resolves.
+#[test]
+fn test_overlay_kotlin_wildcard_package_named_receiver_matches_reindex() {
+    let vm = |body: &str| {
+        format!(
+            "package com.app.ui\nimport com.app.repository.*\nclass VM(private val repository: UserRepository) {{\n fun run() {{ {body} }}\n}}\n"
+        )
+    };
+    let (clean, dirty) = (vm(""), vm("repository.fetchUsers()"));
+    parity(
+        &kotlin(),
+        &[
+            (
+                "src/main/kotlin/com/app/repository/UserRepository.kt",
+                "package com.app.repository\nclass UserRepository {\n fun fetchUsers() {}\n}\n",
+            ),
+            ("src/main/kotlin/com/app/ui/VM.kt", clean.as_str()),
+        ],
+        &[("src/main/kotlin/com/app/ui/VM.kt", dirty.as_str())],
+        &[(
+            "src/main/kotlin/com/app/repository/UserRepository.kt".into(),
+            "fetchUsers".into(),
+            "UserRepository".into(),
+            70,
+        )],
+    );
+}
+
+// `use function helper;` names no namespace, so it may be the repo's global
+// function in `helpers.php`: the index keeps the global tier. Was: both
+// suppressed the genuine caller.
+#[test]
+fn test_overlay_php_single_segment_use_function_matches_reindex() {
+    parity(
+        &php(),
+        &[
+            ("helpers.php", "<?php function helper() {}"),
+            (
+                "app.php",
+                "<?php namespace App; use function helper; function run() {}",
+            ),
+        ],
+        &[(
+            "app.php",
+            "<?php namespace App; use function helper; function run() { helper(); }",
+        )],
+        &[("helpers.php".into(), "helper".into(), "".into(), 70)],
+    );
+}
+
+// A member the caller's class inherits beats a star import, and a package
+// wildcard imports no class member: the index resolves `refresh` on Base
+// (0.8). The overlay has no heritage tier and two `refresh` methods, so it
+// leaves no edge. Was: both bound the wildcard's `Adapter.refresh` at 0.95.
+#[test]
+fn test_overlay_kotlin_wildcard_below_heritage_matches_reindex() {
+    let screen = |body: &str| {
+        format!(
+            "package app\nimport lib.Base\nimport util.*\nclass Screen : Base() {{\n fun run() {{ {body} }}\n}}\n"
+        )
+    };
+    let (clean, dirty) = (screen(""), screen("refresh()"));
+    check_parity(
+        &kotlin(),
+        &[
+            (
+                "src/main/kotlin/lib/Base.kt",
+                "package lib\nopen class Base {\n fun refresh() {}\n}\n",
+            ),
+            (
+                "src/main/kotlin/util/Adapter.kt",
+                "package util\nclass Adapter {\n fun refresh() {}\n}\n",
+            ),
+            ("src/main/kotlin/app/Screen.kt", clean.as_str()),
+        ],
+        &[("src/main/kotlin/app/Screen.kt", dirty.as_str())],
+        &[(
+            "src/main/kotlin/lib/Base.kt".into(),
+            "refresh".into(),
+            "Base".into(),
+            80,
         )],
         &[],
     );

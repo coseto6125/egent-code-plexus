@@ -22,6 +22,7 @@ impl LangSpec for KotlinSpec {
     const NAME: &'static str = "kotlin";
 
     const CAPTURE_KIND: phf::Map<&'static str, NodeKind> = phf::phf_map! {
+        // `package` header: FQN import discovery (see queries.scm).
         "namespace.name"   => NodeKind::Namespace,
         "class.name"       => NodeKind::Class,
         "constructor.name" => NodeKind::Constructor,

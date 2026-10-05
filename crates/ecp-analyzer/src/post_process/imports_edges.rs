@@ -17,8 +17,9 @@
 //! **Tier 1 — named-symbol lookup** (target is the imported symbol node):
 //!
 //! - **Step 1**: `Resolver::resolve_symbol` with both `Callable` + `Type`
-//!   kinds against `RawImport.imported_name`. Covers TS/JS/Python/Java/PHP
-//!   where `imported_name` IS the symbol (`from a import foo`).
+//!   kinds against `RawImport.imported_name` (a PHP import: its alias, when
+//!   it has one). Covers TS/JS/Python/Java/PHP where `imported_name` IS the
+//!   symbol (`from a import foo`).
 //!   Confidence = tier-determined: `SameFile=1.0`, `ImportScoped=0.95`,
 //!   `QualifierScoped=0.85`, `HeritageScoped=0.85`, `Global=0.7`.
 //!
@@ -52,7 +53,7 @@
 //!   Swift `import Module` where the specifier names a directory
 //!   containing the implementation file. Uses `dir_component_idx`.
 
-use crate::resolution::index::ResolveTarget;
+use crate::resolution::index::{Language, ResolveTarget};
 use crate::resolution::resolver::Resolver;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::{Edge, RelType};
@@ -138,13 +139,21 @@ pub fn emit_edges(
             let emitted = &mut local_emitted;
             let edges_out = &mut local_edges;
 
+            // A PHP import binds its alias (`use A\B as C`, and every group
+            // member `use A\{B}`), not the declared name, which may be a
+            // same-file declaration's name.
+            let php = Language::from_normalized_path(&path_str) == Language::Php;
             for import in &local_graph.imports {
                 let before = *emitted;
+                let local_name = match &import.alias {
+                    Some(alias) if php => alias,
+                    _ => &import.imported_name,
+                };
                 // Step 1: named-symbol lookup.
                 *emitted += try_named(
                     resolver,
                     local_graph,
-                    &import.imported_name,
+                    local_name,
                     source_file_idx,
                     reason_named,
                     &mut dedupe,

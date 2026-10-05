@@ -60,6 +60,14 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
     while let Some(n) = stack.pop() {
         if n.kind() == "import_header" {
             let mut children = n.named_children(&mut n.walk()).collect::<Vec<_>>();
+            // `import a.b.*` binds no name: its last segment is a package,
+            // and a receiver of that name is a property or a lambda parameter.
+            if children
+                .iter()
+                .any(|child| child.kind() == "wildcard_import")
+            {
+                continue;
+            }
             let alias = children
                 .iter()
                 .find(|child| child.kind() == "import_alias")
@@ -456,5 +464,40 @@ class Standalone {
             "must NOT contain synthetic 'super.foo', got {:?}",
             do_work.calls
         );
+    }
+
+    /// `import a.b.*` binds no receiver: a property named like the package
+    /// keeps the bare member name.
+    #[test]
+    fn test_kotlin_callee_wildcard_package_named_receiver_emits_bare_method() {
+        let src = r#"
+package com.app.ui
+import com.app.repository.*
+class VM(private val repository: UserRepository) {
+    fun load() {
+        repository.fetchUsers()
+    }
+}
+"#;
+        let graph = parse(src);
+        let load = graph
+            .nodes
+            .iter()
+            .find(|n| n.name == "load")
+            .expect("load function not found");
+        assert_eq!(load.calls, ["fetchUsers"]);
+    }
+
+    /// An explicit class import still qualifies a static-style receiver.
+    #[test]
+    fn test_kotlin_callee_class_import_receiver_emits_qualified_method() {
+        let src = "import pkg.Helper\nfun go() { Helper.work() }\n";
+        let graph = parse(src);
+        let go = graph
+            .nodes
+            .iter()
+            .find(|n| n.name == "go")
+            .expect("go function not found");
+        assert_eq!(go.calls, ["Helper.work"]);
     }
 }

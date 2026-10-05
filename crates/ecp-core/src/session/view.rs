@@ -51,12 +51,17 @@
 //!   so a dirty file's call or construction through it stays unresolved; the
 //!   index maps the alias back to the declared symbol. A construction through
 //!   an alias stays unresolved in every language.
+//! - The qualifier tier, the heritage tier and the receiver-typing ladder
+//!   are not replayed. In an import-member language, a qualified callee
+//!   (`Base.setup`) that no import binds stays unresolved, and a wildcard
+//!   import binds a name that the index resolves on the caller's base class.
 //! - Rust paths resolve by conventional file layout and module declarations.
 //!   `pub use` chains, `#[path]`, inline modules, and workspace crate-name
 //!   heads stay unresolved when that layout cannot establish the target.
 
-use super::import_scope::{
-    fqn_language, import_member_fallback, imported_member, ImportScope, Module,
+use super::import_scope::{ImportScope, Module};
+use crate::analyzer::import_binding::{
+    extension_retry, fqn_language, import_binding, import_member_fallback, retry_name, MemberOwner,
 };
 use crate::analyzer::rust_paths::{
     is_rust_source, is_rust_target_root, rust_module_dir, rust_module_path_base,
@@ -1147,7 +1152,7 @@ fn resolve_constructed_type<'s>(
     if !names_constructible {
         return None;
     }
-    let mut resolve = |name: &'s str| {
+    let mut resolve = |name: &'s str, imports: &'s [RawImport]| {
         resolve_callee(
             graph,
             CallSite::Plain(name),
@@ -1163,10 +1168,18 @@ fn resolve_constructed_type<'s>(
         )
     };
     let (ty, confidence) = if whole_path {
-        resolve(type_path)
-            .or_else(|| (qualified && last_segment_fallback).then(|| resolve(type_name))?)
+        // A qualified type path (`new \App\User()`) never names its type
+        // through a `use` of its last segment.
+        let retry_imports: &'s [RawImport] = if fqn_language(caller.language) {
+            &[]
+        } else {
+            imports
+        };
+        resolve(type_path, imports).or_else(|| {
+            (qualified && last_segment_fallback).then(|| resolve(type_name, retry_imports))?
+        })
     } else {
-        resolve(type_name)
+        resolve(type_name, imports)
     }?;
     let kind = match ty.checked_sub(graph.nodes.len() as u32) {
         Some(virt_off) => nodes[virt_off as usize].kind,
@@ -1183,16 +1196,32 @@ enum ImportBinding<'s> {
     Fallback(&'s str),
 }
 
+/// One pass of the import-member tier over the explicit or the wildcard
+/// imports (the resolver's `import_member_hit`).
+enum MemberHit {
+    Bound(u32),
+    /// No unique member. `bound` says whether an import of the pass binds
+    /// the callee at all.
+    Unbound {
+        bound: bool,
+    },
+}
+
 /// The index's import-member tier (`Resolver::resolve_symbol_with_import_binding`)
 /// for an [`import_member_fallback`] language. `None` when no import binds
 /// `callee`.
 ///
-/// An import binding `callee` whose module holds the member decides the
-/// target. When none does, a binding whose module may be local (relative,
-/// first segment an indexed module name, or module found) keeps the general
-/// tiers, under the member's short name for Python and a Kotlin member
-/// import. Only when every binding import is certainly external is there no
-/// edge: a wrong suppression would drop a genuine caller.
+/// An explicit import binding `callee` whose module holds the member decides
+/// the target; two explicit imports that hold different members leave the
+/// general tiers to decide. When none does, a binding whose module may be
+/// local (relative, single segment, first segment an indexed module name, or
+/// module found) keeps the general tiers, under the member's short name for
+/// Python. Only when every binding import is certainly external is there no
+/// edge: a wrong suppression would drop a genuine caller. A wildcard binds
+/// only when no explicit import binds the name. The index ranks it below the
+/// caller's heritage too; the overlay has no heritage tier, so a heritage
+/// member called through a class that also star-imports the name binds the
+/// wildcard here.
 #[allow(clippy::too_many_arguments)]
 fn bind_import<'s>(
     graph: &ArchivedZeroCopyGraph,
@@ -1206,70 +1235,114 @@ fn bind_import<'s>(
     scope: &mut ImportScope<'s>,
 ) -> Option<ImportBinding<'s>> {
     let source_file = scope.dirty()[file_ord].rel_path.as_str();
+    let pass = |wildcard: bool, scope: &mut ImportScope<'s>| {
+        import_member_hit(
+            graph,
+            callee,
+            source_file,
+            imports,
+            language,
+            names,
+            nodes,
+            dirty_base,
+            scope,
+            wildcard,
+        )
+    };
+    let explicit = pass(false, scope);
+    if let MemberHit::Bound(target) = explicit {
+        return Some(ImportBinding::Resolved(Some((target, CONF_IMPORT_SCOPED))));
+    }
+    let mut retry = None;
+    let mut extension = None;
+    let mut bound = false;
+    let mut external = true;
     for import in imports {
-        let Some(member) = imported_member(import, callee, language) else {
+        let Some(binding) = import_binding(import, callee, language) else {
             continue;
         };
+        bound = true;
+        retry = retry_name(import, binding.name, callee, language);
+        extension = extension.or(extension_retry(&binding, language));
+        external = external && scope.is_external(source_file, import, language);
+    }
+    if !bound {
+        return None;
+    }
+    if external {
+        return Some(extension.map_or(ImportBinding::Resolved(None), ImportBinding::Fallback));
+    }
+    if matches!(explicit, MemberHit::Unbound { bound: false }) && fqn_language(language) {
+        if let MemberHit::Bound(target) = pass(true, scope) {
+            return Some(ImportBinding::Resolved(Some((target, CONF_IMPORT_SCOPED))));
+        }
+    }
+    Some(ImportBinding::Fallback(retry.unwrap_or(callee)))
+}
+
+/// The resolver's `import_member_hit`: the member the explicit (or the
+/// wildcard) imports binding `callee` hold in their modules. Python keeps the
+/// first hit in source order; in a fully qualified language two different
+/// hits are no hit.
+#[allow(clippy::too_many_arguments)]
+fn import_member_hit<'s>(
+    graph: &ArchivedZeroCopyGraph,
+    callee: &'s str,
+    source_file: &'s str,
+    imports: &'s [RawImport],
+    language: Language,
+    names: &OverlayNames<'_>,
+    nodes: &[ViewNode],
+    dirty_base: &FxHashSet<u32>,
+    scope: &mut ImportScope<'s>,
+    wildcard: bool,
+) -> MemberHit {
+    let mut found = None;
+    let mut bound = false;
+    for import in imports {
+        let Some(binding) =
+            import_binding(import, callee, language).filter(|b| b.wildcard == wildcard)
+        else {
+            continue;
+        };
+        bound = true;
+        let in_file = |file: &str| {
+            member_in_file(
+                graph,
+                names,
+                nodes,
+                dirty_base,
+                file,
+                binding.name,
+                binding.owner,
+            )
+        };
         let hit = match scope.module(source_file, &import.source, language) {
-            Module::Unique(file) => member_in_file(graph, names, nodes, dirty_base, file, member),
+            Module::Unique(file) => in_file(file),
             Module::Namespace(files) => {
-                let mut hits = files.iter().filter_map(|file| {
-                    member_in_file(graph, names, nodes, dirty_base, file, member)
-                });
+                let mut hits = files.iter().filter_map(|&file| in_file(file));
                 hits.next().filter(|_| hits.next().is_none())
             }
             Module::Missing | Module::Ambiguous => None,
         };
-        if let Some(target) = hit {
-            return Some(ImportBinding::Resolved(Some((target, CONF_IMPORT_SCOPED))));
-        }
-    }
-    let mut short_name = None;
-    let mut external = true;
-    for import in imports {
-        let Some(member) = imported_member(import, callee, language) else {
+        let Some(target) = hit else {
             continue;
         };
-        short_name = Some(
-            if (language == Language::Python && import.imported_name != "*")
-                || (language == Language::Kotlin && !callee.contains('.'))
-            {
-                callee
-            } else {
-                member.rsplit('.').next().unwrap_or(member)
-            },
-        );
-        let head = import
-            .source
-            .trim_start_matches('\\')
-            .split(['/', '.', '\\'])
-            .next()
-            .unwrap_or(&import.source);
-        external &= (!fqn_language(language) || import.imported_name != "*")
-            && !import.source.starts_with('.')
-            && !scope.has_module_name(language, head)
-            && scope.module(source_file, &import.source, language) == Module::Missing;
+        if !fqn_language(language) {
+            return MemberHit::Bound(target);
+        }
+        match found {
+            Some(previous) if previous != target => return MemberHit::Unbound { bound },
+            Some(_) => {}
+            None => found = Some(target),
+        }
     }
-    let short_name = short_name?;
-    if external {
-        return Some(ImportBinding::Resolved(None));
-    }
-    let shortened_receiver = language == Language::Kotlin
-        && imports.iter().any(|import| {
-            import.imported_name != "*" && imported_member(import, callee, language).is_some()
-        });
-    Some(ImportBinding::Fallback(
-        if language == Language::Python || shortened_receiver {
-            short_name
-        } else {
-            callee
-        },
-    ))
+    found.map_or(MemberHit::Unbound { bound }, MemberHit::Bound)
 }
 
-/// The index's `lookup_call_in_file` over the kind family of `names`: the
-/// first `member` declared in `file`. A dirty file answers from its fresh
-/// parse only.
+/// The index's `lookup_member_in_file` over the kind family of `names`: the
+/// first `member` declared in `file` whose owner satisfies `owner`. A dirty
+/// file answers from its fresh parse only.
 fn member_in_file(
     graph: &ArchivedZeroCopyGraph,
     names: &OverlayNames<'_>,
@@ -1277,7 +1350,15 @@ fn member_in_file(
     dirty_base: &FxHashSet<u32>,
     file: &str,
     member: &str,
+    owner: MemberOwner<'_>,
 ) -> Option<u32> {
+    let owned = |owner_class: Option<&str>| match owner {
+        MemberOwner::Any => true,
+        MemberOwner::TopLevel => owner_class.and_then(owner_key).is_none(),
+        MemberOwner::Type(ty) => owner_class
+            .and_then(owner_key)
+            .is_some_and(|key| Some(key) == owner_key(ty)),
+    };
     let base_len = graph.nodes.len() as u32;
     graph
         .nodes_by_name(member)
@@ -1289,6 +1370,7 @@ fn member_in_file(
                     .files
                     .get(node.file_idx.to_native() as usize)
                     .is_some_and(|f| f.path.resolve(&graph.string_pool) == file)
+                && owned(Some(node.owner_class.resolve(&graph.string_pool)))
         })
         .min()
         .or_else(|| {
@@ -1296,8 +1378,11 @@ fn member_in_file(
                 .anywhere
                 .get(member)?
                 .iter()
-                .find(|&&(virt, _)| nodes[(virt - base_len) as usize].rel_path.as_ref() == file)
-                .map(|&(virt, _)| virt)
+                .map(|&(virt, _)| (virt, &nodes[(virt - base_len) as usize]))
+                .find(|(_, node)| {
+                    node.rel_path.as_ref() == file && owned(node.owner_class.as_deref())
+                })
+                .map(|(virt, _)| virt)
         })
 }
 

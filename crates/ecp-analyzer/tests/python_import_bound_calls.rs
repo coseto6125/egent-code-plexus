@@ -504,3 +504,30 @@ fn test_import_mixed_language_same_module_selects_python() {
     assert_eq!(hits.len(), 1, "{hits:?}");
     assert_eq!(hits[0].file, "pkg/util.py");
 }
+
+/// `pkg` is an indexed directory, so the missing module `pkg.extra` may be
+/// local: the call keeps the global tier instead of being suppressed. The
+/// parser joins absolute sources with `/` (`pkg/extra`), so the first-segment
+/// split on `/` and on `.` agree.
+#[test]
+fn test_import_dotted_missing_module_with_indexed_root_keeps_global() {
+    let graph = graph_of(
+        &PythonProvider::new().unwrap(),
+        &[
+            ("pkg/util.py", "def other():\n    pass\n"),
+            ("lib/extra/x.py", "def helper():\n    pass\n"),
+            (
+                "app.py",
+                "from pkg.extra import helper\n\ndef go():\n    return helper()\n",
+            ),
+        ],
+    );
+    let hits = calls_from(&graph, "go");
+    assert!(
+        hits.len() == 1
+            && hits[0].file == "lib/extra/x.py"
+            && hits[0].confidence
+                == ecp_analyzer::resolution::heuristics::ResolutionTier::Global.base_confidence(),
+        "{hits:?}"
+    );
+}

@@ -19,8 +19,11 @@ use std::path::Path;
 /// `RawNode.calls` entries carry `CallSite` markers. schema4: Python
 /// `RawImport` sources are repo paths and module imports use the `*`
 /// binding, Python callees keep their module qualifier, and Rust closures
-/// carry function metadata, all under the same parse-cache shape.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema4");
+/// carry function metadata, all under the same parse-cache shape. schema5:
+/// Kotlin and PHP `RawImport.imported_name` is the short name (PHP group
+/// members are `*` imports), Kotlin `package` headers emit Namespace nodes,
+/// and PHP `$obj->m()` / Java computed-receiver callees are untyped members.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema5");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

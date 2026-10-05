@@ -67,7 +67,9 @@ pub enum CallSite<'a> {
     /// A Python member call whose receiver is neither typed nor rooted in an
     /// imported name (`obj.widget()`): it resolves by the member name and
     /// never constructs a type. A Rust method call on an untyped receiver
-    /// (`n.name.resolve()`) uses it too, so it never reaches a free `fn`.
+    /// (`n.name.resolve()`) uses it too, so it never reaches a free `fn`, and
+    /// so does a PHP `$obj->m()` other than `$this`, which a `use function`
+    /// import never names.
     UntypedMember(&'a str),
 }
 
