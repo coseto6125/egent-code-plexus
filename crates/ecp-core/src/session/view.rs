@@ -361,7 +361,9 @@ impl OverlayView {
                                 });
                                 Some((target, confidence))
                             });
-                        if let Some((target, confidence)) = hit {
+                        // The index drops self-recursion Calls (builder's
+                        // `target_id == current_node_idx` skip).
+                        if let Some((target, confidence)) = hit.filter(|&(t, _)| t != source) {
                             push_edge(ViewEdge {
                                 source,
                                 target,

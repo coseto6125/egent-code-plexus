@@ -317,6 +317,17 @@ fn test_resolve_call_extension_through_aliased_member_import_returns_import_scop
     );
 }
 
+/// `super.log()` names the external base; a top-level `log()` in the file
+/// is not an extension on that base call.
+#[test]
+fn test_resolve_call_super_of_external_base_skips_top_level_namesake_returns_no_edge() {
+    let graph = kotlin_graph(&[(
+        "src/main/kotlin/com/example/Screen.kt",
+        "package com.example\nimport android.app.Activity\nfun log() {}\nclass Screen : Activity() {\n override fun onResume() { super.log() }\n}\n",
+    )]);
+    assert_call_targets(&graph, "onResume", &[]);
+}
+
 /// `super.setup()` names the imported base, which does not declare
 /// `setup`: the call keeps the receiver ladder, which finds the inherited
 /// member, instead of retrying the bare name (a self-call).

@@ -1159,6 +1159,21 @@ fn test_overlay_kotlin_extension_under_indexed_root_matches_reindex() {
     );
 }
 
+// A typed library receiver that retries onto the caller itself: the index
+// drops self-recursion Calls, so the overlay must too.
+#[test]
+fn test_overlay_kotlin_typed_receiver_retry_onto_caller_matches_reindex() {
+    let before = "package com.example\nimport com.google.gson.Gson\nfun toJson(o: Any, gson: Gson): Any = o\n";
+    let after = "package com.example\nimport com.google.gson.Gson\nfun toJson(o: Any, gson: Gson): Any = gson.toJson(o)\n";
+    parity_from(
+        "toJson",
+        &kotlin(),
+        &[("com/example/Json.kt", before)],
+        &[("com/example/Json.kt", after)],
+        &[],
+    );
+}
+
 // `super.onResume()` on an external base must not turn into a self-call.
 #[test]
 fn test_overlay_kotlin_super_of_external_base_matches_reindex() {

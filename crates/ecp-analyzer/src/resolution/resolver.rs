@@ -803,11 +803,6 @@ impl<'a> Resolver<'a> {
         vec![(node_id, confidence)]
     }
 
-    /// Variant that exposes the caller's enclosing-class heritage to enable
-    /// Tier 2.75 (`HeritageScoped`). Production call edges should prefer this
-    /// so cross-file mixin / inherited-method references resolve through
-    /// `Bar extends Foo` / `class Bar; include Foo; end` without falling
-    /// through to the strict Global tier.
     /// The bare-member retry of a Kotlin call through a class binding
     /// ([`extension_retry`]). Only a top-level function can be an extension
     /// on that type: a typed receiver of a library type (`gson.fromJson()`)
@@ -831,6 +826,11 @@ impl<'a> Resolver<'a> {
         hits
     }
 
+    /// Variant that exposes the caller's enclosing-class heritage to enable
+    /// Tier 2.75 (`HeritageScoped`). Production call edges should prefer this
+    /// so cross-file mixin / inherited-method references resolve through
+    /// `Bar extends Foo` / `class Bar; include Foo; end` without falling
+    /// through to the strict Global tier.
     pub fn resolve_symbol_with_heritage(
         &self,
         source_file: &Path,
@@ -923,7 +923,11 @@ impl<'a> Resolver<'a> {
                 external = external && self.import_is_external(source_file, import, language);
             }
             if bound {
-                if let (true, Some(member)) = (external, extension) {
+                // `super.x()` names the caller's base, which no extension
+                // function call does.
+                let heritage_call = split_qualifier(symbol_name)
+                    .is_some_and(|(qualifier, _)| caller_heritage.iter().any(|b| b == qualifier));
+                if let (true, Some(member), false) = (external, extension, heritage_call) {
                     return self.extension_fallback(
                         source_file,
                         member,
