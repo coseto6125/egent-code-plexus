@@ -41,6 +41,16 @@ impl Value {
     /// `Int(1)` cannot alias `Float(1.0)`). `f64`/`f32` go through `to_bits`
     /// so the key hashes by exact bit pattern.
     pub fn write_dedup_key(&self, buf: &mut Vec<u8>) {
+        self.write_key(buf, false);
+    }
+
+    /// Aggregate keys retain edge reasons, matching their original Debug keys.
+    /// Row DISTINCT/UNION keep their existing reason-independent identity.
+    pub(super) fn write_aggregate_key(&self, buf: &mut Vec<u8>) {
+        self.write_key(buf, true);
+    }
+
+    fn write_key(&self, buf: &mut Vec<u8>, include_edge_reason: bool) {
         match self {
             Value::Null => buf.push(0),
             Value::Bool(b) => {
@@ -64,7 +74,7 @@ impl Value {
                 buf.push(5);
                 buf.extend_from_slice(&(items.len() as u32).to_le_bytes());
                 for item in items {
-                    item.write_dedup_key(buf);
+                    item.write_key(buf, include_edge_reason);
                 }
             }
             Value::NodeRef { idx, .. } => {
@@ -76,13 +86,17 @@ impl Value {
                 tgt,
                 rel_type,
                 confidence,
-                ..
+                reason,
             } => {
                 buf.push(7);
                 buf.extend_from_slice(&src.to_le_bytes());
                 buf.extend_from_slice(&tgt.to_le_bytes());
                 buf.push(*rel_type as u8);
                 buf.extend_from_slice(&confidence.to_bits().to_le_bytes());
+                if include_edge_reason {
+                    buf.extend_from_slice(&(reason.len() as u32).to_le_bytes());
+                    buf.extend_from_slice(reason.as_bytes());
+                }
             }
         }
     }

@@ -17,7 +17,7 @@ fn fixture() -> Vec<u8> {
 }
 
 #[test]
-fn test_execute_aggregate_semantics_match_main() {
+fn test_execute_aggregate_queries_return_pinned_rows() {
     let bytes = fixture();
     let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
     let queries = [
@@ -38,7 +38,7 @@ fn test_execute_aggregate_semantics_match_main() {
         "MATCH (a:Function), (b:Function) RETURN count(a), count(b)",
         "MATCH (a)-[r]->(b) RETURN b, count(*)",
     ];
-    // Captured from the materialising executor at edd45c5b before this change.
+    // Pinned results independently protect aggregate value semantics.
     use Value::{Int, List, Str};
     let text = |s: &str| Str(s.into());
     let expected = [
@@ -88,7 +88,7 @@ fn test_execute_aggregate_semantics_match_main() {
 }
 
 #[test]
-fn test_execute_overlay_aggregate_matches_main() {
+fn test_execute_aggregate_over_overlay_counts_virtual_and_base_edges() {
     let bytes = fixture();
     let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
     let view = OverlayView::build(
@@ -136,8 +136,9 @@ fn test_execute_overlay_aggregate_matches_main() {
 }
 
 #[test]
-fn test_execute_language_independent_aggregate_matches_main() {
+fn test_execute_aggregate_groups_rows_by_file_path() {
     let mut fx = GraphFixture::new();
+    // Each extension supplies one distinct file-path group; parser language support is not under test.
     for extension in [
         "ts", "js", "py", "java", "kt", "cs", "go", "rs", "php", "rb", "swift", "c", "cpp", "dart",
     ] {

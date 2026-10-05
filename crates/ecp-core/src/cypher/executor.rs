@@ -4,6 +4,7 @@ use crate::cypher::value::{QueryResult, Value};
 use crate::graph::{ArchivedZeroCopyGraph, RelType};
 use crate::session::{MergedGraph, MergedNode, OverlayView};
 use compact_str::CompactString;
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -306,9 +307,7 @@ fn project_return(
     // Detect aggregation in expanded items. Scalar function calls (`type(r)`,
     // `id(n)`, `labels(n)`) are NOT aggregates and must not trigger the
     // group-by path; `plain_rows` projects them per-row via `eval_return_expr`.
-    let has_agg = expanded_items
-        .iter()
-        .any(|(_, e)| matches!(e, ReturnExpr::FunCall { name, .. } if is_aggregate_fn(name)));
+    let has_agg = expanded_items.iter().any(|(_, e)| is_aggregate_expr(e));
 
     if has_agg {
         aggregate_rows(&expanded_items, bindings, graph, cache)
@@ -336,51 +335,67 @@ fn plain_rows(
     Ok((columns, rows))
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Stage {
+    Return,
+    With,
+}
+
 /// Aggregates retain group keys and accumulator state, never input bindings.
 struct Aggregation {
     items: Vec<(String, ReturnExpr)>,
     group_positions: Vec<usize>,
+    aggregate_positions: Vec<usize>,
     specs: Vec<(bool, Option<Expr>, AggregateKind, bool)>,
     groups: Vec<(Vec<Value>, Vec<Accumulator>)>,
-    key_index: HashMap<String, usize>,
+    key_index: FxHashMap<Vec<u8>, usize>,
+    key_buffer: Vec<u8>,
     collapse: VarCollapse,
-    count_only: bool,
-    count: usize,
+    stage: Stage,
 }
 
 impl Aggregation {
-    fn new(items: Vec<(String, ReturnExpr)>, collapse: VarCollapse) -> Self {
+    fn new(items: Vec<(String, ReturnExpr)>, stage: Stage) -> Self {
         let mut group_positions = Vec::new();
+        let mut aggregate_positions = Vec::new();
         let mut specs = Vec::new();
         for (i, (_, expr)) in items.iter().enumerate() {
-            if let ReturnExpr::FunCall {
-                name,
-                distinct,
-                args,
-            } = expr
-            {
-                if let Some(kind) = AggregateKind::parse(name) {
-                    let star = matches!(args.as_slice(), [Expr::Lit(Literal::Null)]);
-                    specs.push((star, args.first().cloned(), kind, *distinct));
-                    continue;
-                }
+            if is_aggregate_expr(expr) {
+                let ReturnExpr::FunCall {
+                    name,
+                    distinct,
+                    args,
+                } = expr
+                else {
+                    unreachable!()
+                };
+                let kind = AggregateKind::parse(name).unwrap();
+                let star = matches!(args.as_slice(), [Expr::Lit(Literal::Null)]);
+                aggregate_positions.push(i);
+                specs.push((star, args.first().cloned(), kind, *distinct));
+            } else {
+                group_positions.push(i);
             }
-            group_positions.push(i);
         }
-        // Preserve the RETURN fast path, including its existing NULL sentinel semantics.
-        let count_only = collapse == VarCollapse::ToStr
-            && group_positions.is_empty()
-            && specs.len() == 1
-            && specs[0].0;
+        // Legacy ungrouped RETURN treats a single NULL/star argument as a row
+        // count, even for a non-COUNT name. Preserve it through the same Counter.
+        if stage == Stage::Return && group_positions.is_empty() && specs.len() == 1 && specs[0].0 {
+            specs[0].2 = AggregateKind::Count;
+            specs[0].3 = false;
+        }
         Self {
             items,
             group_positions,
+            aggregate_positions,
             specs,
             groups: Vec::new(),
-            key_index: HashMap::new(),
-            collapse,
-            count_only,
-            count: 0,
+            key_index: FxHashMap::default(),
+            key_buffer: Vec::new(),
+            collapse: match stage {
+                Stage::Return => VarCollapse::ToStr,
+                Stage::With => VarCollapse::ToRef,
+            },
+            stage,
         }
     }
 
@@ -397,32 +412,30 @@ impl Aggregation {
         graph: MergedGraph<'_>,
         cache: &mut ContentCache,
     ) -> Result<(), CypherError> {
-        if self.count_only {
-            self.count += 1;
-            return Ok(());
-        }
         let slot = if self.group_positions.is_empty() {
             if self.groups.is_empty() {
                 self.groups.push((Vec::new(), self.accumulators()));
             }
             0
         } else {
-            let key_vals: Vec<Value> = self
-                .group_positions
-                .iter()
-                .map(|&i| eval_return_expr_with(&self.items[i].1, b, graph, cache, self.collapse))
-                .collect();
-            let key = key_vals
-                .iter()
-                .map(value_key)
-                .collect::<Vec<_>>()
-                .join("\x00");
-            if let Some(&slot) = self.key_index.get(&key) {
+            self.key_buffer.clear();
+            for &i in &self.group_positions {
+                eval_return_expr_with(&self.items[i].1, b, graph, cache, self.collapse)
+                    .write_aggregate_key(&mut self.key_buffer);
+            }
+            if let Some(&slot) = self.key_index.get(self.key_buffer.as_slice()) {
                 slot
             } else {
                 let slot = self.groups.len();
+                let key_vals = self
+                    .group_positions
+                    .iter()
+                    .map(|&i| {
+                        eval_return_expr_with(&self.items[i].1, b, graph, cache, self.collapse)
+                    })
+                    .collect();
                 self.groups.push((key_vals, self.accumulators()));
-                self.key_index.insert(key, slot);
+                self.key_index.insert(self.key_buffer.clone(), slot);
                 slot
             }
         };
@@ -443,7 +456,11 @@ impl Aggregation {
             .iter()
             .map(|&i| self.items[i].0.clone())
             .collect();
-        let agg_columns: Vec<_> = self.items.iter().filter(|(_, expr)| matches!(expr, ReturnExpr::FunCall { name, .. } if is_aggregate_fn(name))).map(|(col, _)| col.clone()).collect();
+        let agg_columns: Vec<_> = self
+            .aggregate_positions
+            .iter()
+            .map(|&i| self.items[i].0.clone())
+            .collect();
         self.groups
             .into_iter()
             .map(|(keys, accums)| {
@@ -465,31 +482,25 @@ impl Aggregation {
 
     fn finish(mut self) -> (Vec<String>, Vec<Vec<Value>>) {
         let columns = self.items.iter().map(|(col, _)| col.clone()).collect();
-        if self.count_only {
-            return (columns, vec![vec![Value::Int(self.count as i64)]]);
-        }
         // WITH historically emits no group for empty input; RETURN emits a zero row.
-        if self.groups.is_empty()
-            && self.group_positions.is_empty()
-            && self.collapse == VarCollapse::ToStr
+        if self.groups.is_empty() && self.group_positions.is_empty() && self.stage == Stage::Return
         {
             self.groups.push((Vec::new(), self.accumulators()));
         }
-        let rows =
-            self.groups
-                .into_iter()
-                .map(|(keys, accums)| {
-                    let mut keys = keys.into_iter();
-                    let mut accums = accums.into_iter();
-                    self.items.iter().map(|(_, expr)| {
-                if matches!(expr, ReturnExpr::FunCall { name, .. } if is_aggregate_fn(name)) {
-                    accums.next().unwrap().finalize()
-                } else {
-                    keys.next().unwrap_or(Value::Null)
+        let rows = self
+            .groups
+            .into_iter()
+            .map(|(keys, accums)| {
+                let mut row = vec![Value::Null; self.items.len()];
+                for (&i, value) in self.group_positions.iter().zip(keys) {
+                    row[i] = value;
                 }
-            }).collect()
-                })
-                .collect();
+                for (&i, accum) in self.aggregate_positions.iter().zip(accums) {
+                    row[i] = accum.finalize();
+                }
+                row
+            })
+            .collect();
         (columns, rows)
     }
 }
@@ -500,7 +511,7 @@ fn aggregate_rows(
     graph: MergedGraph<'_>,
     cache: &mut ContentCache,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>), CypherError> {
-    let mut agg = Aggregation::new(expanded_items.to_vec(), VarCollapse::ToStr);
+    let mut agg = Aggregation::new(expanded_items.to_vec(), Stage::Return);
     for b in bindings {
         agg.feed(b, graph, cache)?;
     }
@@ -508,9 +519,11 @@ fn aggregate_rows(
 }
 
 fn has_aggregate(items: &[ReturnItem]) -> bool {
-    items
-        .iter()
-        .any(|i| matches!(&i.expr, ReturnExpr::FunCall { name, .. } if is_aggregate_fn(name)))
+    items.iter().any(|i| is_aggregate_expr(&i.expr))
+}
+
+fn is_aggregate_expr(expr: &ReturnExpr) -> bool {
+    matches!(expr, ReturnExpr::FunCall { name, .. } if is_aggregate_fn(name))
 }
 
 fn stream_projection(
@@ -532,7 +545,7 @@ fn stream_projection(
                     )
                 })
                 .collect();
-            let mut agg = Aggregation::new(items, VarCollapse::ToRef);
+            let mut agg = Aggregation::new(items, Stage::With);
             let mut aggregate_error = None;
             visit_matches(&query.matches, graph, &mut |b| {
                 if passes_where(query.where_.as_ref(), b, graph, cache)?
@@ -557,20 +570,19 @@ fn stream_projection(
         if !passes_where(query.where_.as_ref(), b, graph, cache)? {
             return Ok(());
         }
-        // Plain WITH preserves rich node/edge identity and may filter its projected row.
         let rebound;
         let b = if let Some(wc) = &query.with {
             if with_error.is_some() {
                 return Ok(());
             }
-            rebound = match exec_with(wc, vec![b.clone()], graph, cache) {
-                Ok(rows) => rows,
+            rebound = match rebind_one(wc, b, graph, cache) {
+                Ok(row) => row,
                 Err(error) => {
                     with_error = Some(error);
                     return Ok(());
                 }
             };
-            let Some(b) = rebound.first() else {
+            let Some(b) = rebound.as_ref() else {
                 return Ok(());
             };
             b
@@ -583,7 +595,7 @@ fn stream_projection(
         }
         if agg.is_none() {
             match expand_return_items(&query.return_.items, Some(b)) {
-                Ok(items) => agg = Some(Aggregation::new(items, VarCollapse::ToStr)),
+                Ok(items) => agg = Some(Aggregation::new(items, Stage::Return)),
                 Err(error) => {
                     aggregate_error = Some(error);
                     return Ok(());
@@ -600,7 +612,7 @@ fn stream_projection(
         Some(agg) => agg,
         None => Aggregation::new(
             expand_return_items(&query.return_.items, None)?,
-            VarCollapse::ToStr,
+            Stage::Return,
         ),
     };
     Ok(agg.finish())
@@ -921,14 +933,8 @@ fn eval_return_expr(
     ))
 }
 
-/// Stable string key for a Value (used as group-by key; avoids Hash on Value).
-fn value_key(v: &Value) -> String {
-    format!("{v:?}")
-}
-
 /// Evaluate a ReturnItem's expression into a Value, preserving NodeRef/EdgeRef
-/// for variables bound to graph nodes/edges. Used by WITH group-key computation
-/// so that `a.name` still resolves after aggregation clears node_vars.
+/// so a plain WITH alias can still resolve node and edge properties.
 fn eval_return_item_rich(
     item: &ReturnItem,
     b: &Binding,
@@ -938,71 +944,46 @@ fn eval_return_item_rich(
     eval_return_expr_with(&item.expr, b, graph, cache, VarCollapse::ToRef)
 }
 
-/// Execute a WITH clause: rebind plain items into `computed`, or group+aggregate.
+/// Execute a plain WITH clause after aggregate WITH dispatch.
 fn exec_with(
     wc: &WithClause,
     bindings: Vec<Binding>,
     graph: MergedGraph<'_>,
     cache: &mut ContentCache,
 ) -> Result<Vec<Binding>, CypherError> {
-    let has_agg = wc
+    debug_assert!(!has_aggregate(&wc.items));
+    let mut out = Vec::with_capacity(bindings.len());
+    for b in &bindings {
+        if let Some(row) = rebind_one(wc, b, graph, cache)? {
+            out.push(row);
+        }
+    }
+    Ok(out)
+}
+
+fn rebind_one(
+    wc: &WithClause,
+    b: &Binding,
+    graph: MergedGraph<'_>,
+    cache: &mut ContentCache,
+) -> Result<Option<Binding>, CypherError> {
+    let computed = wc
         .items
         .iter()
-        .any(|i| matches!(&i.expr, ReturnExpr::FunCall { name, .. } if is_aggregate_fn(name)));
-
-    let mut out: Vec<Binding> = if has_agg {
-        let items = wc
-            .items
-            .iter()
-            .map(|i| {
-                (
-                    i.alias
-                        .clone()
-                        .unwrap_or_else(|| return_item_default_col(i)),
-                    i.expr.clone(),
-                )
-            })
-            .collect();
-        let mut agg = Aggregation::new(items, VarCollapse::ToRef);
-        for b in &bindings {
-            agg.feed(b, graph, cache)?;
-        }
-        agg.finish_with()
-    } else {
-        // Plain rebinding: no aggregation. Preserve node_vars/edge_vars so that
-        // subsequent MATCH clauses can still traverse them.
-        let mut result = Vec::with_capacity(bindings.len());
-        for b in &bindings {
-            let mut computed: HashMap<String, Value> = HashMap::new();
-            for item in &wc.items {
-                let col = item
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| return_item_default_col(item));
-                // Use rich projection to preserve NodeRef/EdgeRef identity.
-                let v = eval_return_item_rich(item, b, graph, cache);
-                computed.insert(col, v);
-            }
-            result.push(Binding {
-                node_vars: b.node_vars.clone(),
-                edge_vars: b.edge_vars.clone(),
-                computed,
-            });
-        }
-        result
+        .map(|item| {
+            let col = item
+                .alias
+                .clone()
+                .unwrap_or_else(|| return_item_default_col(item));
+            (col, eval_return_item_rich(item, b, graph, cache))
+        })
+        .collect();
+    let rebound = Binding {
+        node_vars: b.node_vars.clone(),
+        edge_vars: b.edge_vars.clone(),
+        computed,
     };
-
-    // Apply inner WHERE of WITH clause (filters post-aggregation output).
-    if let Some(w) = &wc.where_ {
-        let mask: Vec<bool> = out
-            .iter()
-            .map(|b| eval_expr(w, b, graph, cache).map(|v| value_truthy(&v)))
-            .collect::<Result<_, _>>()?;
-        let mut mask_iter = mask.into_iter();
-        out.retain(|_| mask_iter.next().unwrap_or(false));
-    }
-
-    Ok(out)
+    Ok(passes_where(wc.where_.as_ref(), &rebound, graph, cache)?.then_some(rebound))
 }
 
 /// Single source of truth for which FunCall names are aggregates. Parsed once
@@ -1110,7 +1091,7 @@ fn eval_scalar_funcall(name: &str, args: &[Expr], b: &Binding, graph: MergedGrap
 /// counter would require an explicit cast on finalize; `u64` makes the intent clear.
 enum Accumulator {
     Counter(u64),
-    CounterDistinct(HashSet<String>),
+    CounterDistinct(HashSet<Vec<u8>>, Vec<u8>),
     Summer {
         sum_i: i64,
         sum_f: f64,
@@ -1119,7 +1100,7 @@ enum Accumulator {
     MinAccum(Option<Value>),
     MaxAccum(Option<Value>),
     Collector(Vec<Value>),
-    CollectorDistinct(Vec<Value>, HashSet<String>),
+    CollectorDistinct(Vec<Value>, HashSet<Vec<u8>>, Vec<u8>),
     Avg {
         sum: f64,
         count: u64,
@@ -1133,7 +1114,7 @@ impl Accumulator {
         match kind {
             AggregateKind::Count => {
                 if distinct {
-                    Accumulator::CounterDistinct(HashSet::new())
+                    Accumulator::CounterDistinct(HashSet::new(), Vec::new())
                 } else {
                     Accumulator::Counter(0)
                 }
@@ -1147,7 +1128,7 @@ impl Accumulator {
             AggregateKind::Max => Accumulator::MaxAccum(None),
             AggregateKind::Collect => {
                 if distinct {
-                    Accumulator::CollectorDistinct(Vec::new(), HashSet::new())
+                    Accumulator::CollectorDistinct(Vec::new(), HashSet::new(), Vec::new())
                 } else {
                     Accumulator::Collector(Vec::new())
                 }
@@ -1165,9 +1146,13 @@ impl Accumulator {
                     *n += 1;
                 }
             }
-            Accumulator::CounterDistinct(seen) => {
+            Accumulator::CounterDistinct(seen, key) => {
                 if !matches!(v, Value::Null) {
-                    seen.insert(value_key(&v));
+                    key.clear();
+                    v.write_aggregate_key(key);
+                    if !seen.contains(key.as_slice()) {
+                        seen.insert(key.clone());
+                    }
                 }
             }
             Accumulator::Summer {
@@ -1215,10 +1200,12 @@ impl Accumulator {
                     items.push(v);
                 }
             }
-            Accumulator::CollectorDistinct(items, seen) => {
+            Accumulator::CollectorDistinct(items, seen, key) => {
                 if !matches!(v, Value::Null) {
-                    let k = value_key(&v);
-                    if seen.insert(k) {
+                    key.clear();
+                    v.write_aggregate_key(key);
+                    if !seen.contains(key.as_slice()) {
+                        seen.insert(key.clone());
                         items.push(v);
                     }
                 }
@@ -1240,7 +1227,7 @@ impl Accumulator {
     fn finalize(self) -> Value {
         match self {
             Accumulator::Counter(n) => Value::Int(n as i64),
-            Accumulator::CounterDistinct(seen) => Value::Int(seen.len() as i64),
+            Accumulator::CounterDistinct(seen, _) => Value::Int(seen.len() as i64),
             Accumulator::Summer {
                 sum_i,
                 sum_f,
@@ -1255,7 +1242,7 @@ impl Accumulator {
             Accumulator::MinAccum(v) => v.unwrap_or(Value::Null),
             Accumulator::MaxAccum(v) => v.unwrap_or(Value::Null),
             Accumulator::Collector(items) => Value::List(items),
-            Accumulator::CollectorDistinct(items, _) => Value::List(items),
+            Accumulator::CollectorDistinct(items, _, _) => Value::List(items),
             Accumulator::Avg { sum, count } => {
                 if count == 0 {
                     Value::Null
@@ -1319,7 +1306,7 @@ fn is_bound(np: &NodePat, base: &Binding) -> bool {
 /// filters on `b` (vscode: 496k clones, 0.27 s / 429 MB). Here the seeds come
 /// from the name-index hits, walked one hop backwards, so they are every
 /// scanned node that can still produce a row. They come back in the scan's
-/// own visit order, and the forward hop in `exec_pattern` still runs over
+/// own visit order, and both traversal paths still run their forward hop over
 /// them. The rows, their order and parallel edges therefore stay the scan's.
 ///
 /// `None` keeps the scan. An overlay is excluded: its virtual seeds and
@@ -1422,9 +1409,39 @@ fn for_each_first_node_seed(np: &NodePat, graph: MergedGraph<'_>, seed: impl FnM
     }
 }
 
-/// Pattern-major recursion preserves the materialising pipeline order, including
-/// its comma-separated pattern semantics and OPTIONAL null rows.
+// Each clause and fixed hop adds visitor frames. Deeper queries use the
+// iterative materializing traversal to bound native stack usage.
+const MAX_STREAM_DEPTH: usize = 64;
+
 fn visit_matches(
+    clauses: &[MatchClause],
+    graph: MergedGraph<'_>,
+    emit: &mut dyn FnMut(&Binding) -> Result<(), CypherError>,
+) -> Result<(), CypherError> {
+    let mut depth = 0;
+    for mc in clauses {
+        depth += 1 + mc
+            .patterns
+            .iter()
+            .map(|pat| pat.rels.len())
+            .max()
+            .unwrap_or(0);
+        if depth > MAX_STREAM_DEPTH {
+            let mut bindings = vec![Binding::default()];
+            for mc in clauses {
+                bindings = exec_match_clause(mc, &bindings, graph)?;
+            }
+            for b in &bindings {
+                emit(b)?;
+            }
+            return Ok(());
+        }
+    }
+    visit_matches_inner(clauses, graph, emit)
+}
+
+/// Pattern-major order matches materialization, including OPTIONAL null rows.
+fn visit_matches_inner(
     clauses: &[MatchClause],
     graph: MergedGraph<'_>,
     emit: &mut dyn FnMut(&Binding) -> Result<(), CypherError>,
@@ -1432,8 +1449,20 @@ fn visit_matches(
     let Some((mc, prior)) = clauses.split_last() else {
         return emit(&Binding::default());
     };
+    // Retain the prefix once: replaying it for each comma pattern compounds
+    // across clauses even when that prefix produces no bindings.
+    let prefix = if mc.patterns.len() > 1 && !prior.is_empty() {
+        let mut rows = Vec::new();
+        visit_matches_inner(prior, graph, &mut |b| {
+            rows.push(b.clone());
+            Ok(())
+        })?;
+        Some(rows)
+    } else {
+        None
+    };
     for pat in &mc.patterns {
-        visit_matches(prior, graph, &mut |base| {
+        let mut visit = |base: &Binding| {
             let mut matched = false;
             visit_pattern(pat, base, graph, &mut |b| {
                 matched = true;
@@ -1443,23 +1472,34 @@ fn visit_matches(
                 emit(base)?;
             }
             Ok(())
-        })?;
+        };
+        match &prefix {
+            Some(rows) => {
+                for b in rows {
+                    visit(b)?;
+                }
+            }
+            None => visit_matches_inner(prior, graph, &mut visit)?,
+        }
     }
     Ok(())
 }
 
-fn visit_pattern(
+#[inline]
+fn bound_start_pattern(pat: &Pattern, base: &Binding) -> Option<Pattern> {
+    (pat.nodes.len() > 1
+        && !is_bound(&pat.nodes[0], base)
+        && is_bound(&pat.nodes[pat.nodes.len() - 1], base))
+    .then(|| invert_pattern(pat))
+}
+
+#[inline]
+fn for_each_pattern_seed(
     pat: &Pattern,
     base: &Binding,
     graph: MergedGraph<'_>,
-    emit: &mut dyn FnMut(&Binding) -> Result<(), CypherError>,
-) -> Result<(), CypherError> {
-    if pat.nodes.len() > 1
-        && !is_bound(&pat.nodes[0], base)
-        && is_bound(&pat.nodes[pat.nodes.len() - 1], base)
-    {
-        return visit_pattern(&invert_pattern(pat), base, graph, emit);
-    }
+    mut seed: impl FnMut(u32),
+) {
     let first = &pat.nodes[0];
     let use_kind_csr = !graph.kind_offsets.is_empty()
         && !first.kinds.is_empty()
@@ -1467,21 +1507,8 @@ fn visit_pattern(
             .kinds
             .iter()
             .all(|k| graph.kind_offsets.len() > k.as_index() + 1);
-    let mut binding = base.clone();
-    let mut result = Ok(());
-    let mut seed = |idx| {
-        if result.is_err() {
-            return;
-        }
-        if let Some(var) = &first.var {
-            binding.node_vars.insert(var, idx);
-        }
-        result = visit_hops(pat, 0, &binding, idx, graph, emit);
-    };
     if let Some(seeds) = far_end_name_seeds(pat, base, graph, use_kind_csr) {
-        for idx in seeds {
-            seed(idx);
-        }
+        seeds.into_iter().for_each(seed);
     } else if let Some(&idx) = first.var.as_ref().and_then(|v| base.node_vars.get(v)) {
         if node_matches(idx, first, graph) {
             seed(idx);
@@ -1506,8 +1533,33 @@ fn visit_pattern(
                 }
             });
         }
-        seed_virtuals(graph, first, &mut seed);
+        seed_virtuals(graph, first, seed);
     }
+}
+
+fn visit_pattern(
+    pat: &Pattern,
+    base: &Binding,
+    graph: MergedGraph<'_>,
+    emit: &mut dyn FnMut(&Binding) -> Result<(), CypherError>,
+) -> Result<(), CypherError> {
+    #[cfg(test)]
+    tests::PATTERN_VISITS.with(|visits| visits.set(visits.get() + 1));
+    if let Some(reversed) = bound_start_pattern(pat, base) {
+        return visit_pattern(&reversed, base, graph, emit);
+    }
+    let first = &pat.nodes[0];
+    let mut binding = base.clone();
+    let mut result = Ok(());
+    for_each_pattern_seed(pat, base, graph, |idx| {
+        if result.is_err() {
+            return;
+        }
+        if let Some(var) = &first.var {
+            binding.node_vars.insert(var, idx);
+        }
+        result = visit_hops(pat, 0, &binding, idx, graph, emit);
+    });
     result
 }
 
@@ -1571,107 +1623,18 @@ fn exec_pattern(
     // Seeding from the bound endpoint replaces a full-node scan per prior row
     // with one adjacency walk — `OPTIONAL MATCH (c)-[:Calls]->(f)` with `f`
     // bound (the orphan-query shape) is O(deg f) instead of O(V+E).
-    if pat.nodes.len() > 1
-        && !is_bound(&pat.nodes[0], base)
-        && is_bound(&pat.nodes[pat.nodes.len() - 1], base)
-    {
-        return exec_pattern(&invert_pattern(pat), base, graph);
+    if let Some(reversed) = bound_start_pattern(pat, base) {
+        return exec_pattern(&reversed, base, graph);
     }
 
-    // Frontier: (binding, last_matched_node_idx)
     let mut frontier: Vec<(Binding, u32)> = Vec::new();
-    let first_np = &pat.nodes[0];
-
-    // Hotspot 1: when the first node carries a kind filter, iterate via the
-    // v10 `kind_offsets` CSR slice directly — `MATCH (m:Method)` against a
-    // 303k-node graph then visits only the ~110k Method indices. The CSR
-    // path uses a concrete slice iterator (no `Box<dyn Iterator>` vcall in
-    // the inner loop). Empty-kinds and legacy-v9 (no CSR) fall through to
-    // the full linear scan, or the name-index seeds when the first node has a
-    // `name` literal, that mirrors the previous behaviour.
-    let csr_ready = !graph.kind_offsets.is_empty();
-    let use_kind_csr = csr_ready
-        && !first_np.kinds.is_empty()
-        && first_np.kinds.iter().all(|k| {
-            let kidx = k.as_index();
-            graph.kind_offsets.len() > kidx + 1
-        });
-
-    if let Some(seeds) = far_end_name_seeds(pat, base, graph, use_kind_csr) {
-        for idx in seeds {
-            let mut b = base.clone();
-            if let Some(var) = &first_np.var {
-                b.node_vars.insert(var, idx);
-            }
-            frontier.push((b, idx));
+    for_each_pattern_seed(pat, base, graph, |idx| {
+        let mut binding = base.clone();
+        if let Some(var) = &pat.nodes[0].var {
+            binding.node_vars.insert(var, idx);
         }
-    } else if let Some(var) = &first_np.var {
-        // If the first node var is already bound, pin to that node only.
-        if let Some(&already) = base.node_vars.get(var) {
-            if node_matches(already, first_np, graph) {
-                frontier.push((base.clone(), already));
-            }
-        } else if use_kind_csr {
-            for &kind in &first_np.kinds {
-                let kidx = kind.as_index();
-                let start = graph.kind_offsets[kidx].to_native() as usize;
-                let end = graph.kind_offsets[kidx + 1].to_native() as usize;
-                for &raw in &graph.kind_node_idx[start..end] {
-                    let idx = raw.to_native();
-                    if !graph.base_visible(idx) || !node_matches(idx, first_np, graph) {
-                        continue;
-                    }
-                    let mut b = base.clone();
-                    b.node_vars.insert(var, idx);
-                    frontier.push((b, idx));
-                }
-            }
-            seed_virtuals(graph, first_np, |idx| {
-                let mut b = base.clone();
-                b.node_vars.insert(var, idx);
-                frontier.push((b, idx));
-            });
-        } else {
-            let mut seed = |idx: u32| {
-                if !graph.base_visible(idx) || !node_matches(idx, first_np, graph) {
-                    return;
-                }
-                let mut b = base.clone();
-                b.node_vars.insert(var, idx);
-                frontier.push((b, idx));
-            };
-            for_each_first_node_seed(first_np, graph, &mut seed);
-            seed_virtuals(graph, first_np, |idx| {
-                let mut b = base.clone();
-                b.node_vars.insert(var, idx);
-                frontier.push((b, idx));
-            });
-        }
-    } else if use_kind_csr {
-        for &kind in &first_np.kinds {
-            let kidx = kind.as_index();
-            let start = graph.kind_offsets[kidx].to_native() as usize;
-            let end = graph.kind_offsets[kidx + 1].to_native() as usize;
-            for &raw in &graph.kind_node_idx[start..end] {
-                let idx = raw.to_native();
-                if !graph.base_visible(idx) || !node_matches(idx, first_np, graph) {
-                    continue;
-                }
-                frontier.push((base.clone(), idx));
-            }
-        }
-        seed_virtuals(graph, first_np, |idx| frontier.push((base.clone(), idx)));
-    } else {
-        // Anonymous first node: name-index seeds when it has a `name`
-        // literal, else scan all nodes.
-        let mut seed = |idx: u32| {
-            if graph.base_visible(idx) && node_matches(idx, first_np, graph) {
-                frontier.push((base.clone(), idx));
-            }
-        };
-        for_each_first_node_seed(first_np, graph, &mut seed);
-        seed_virtuals(graph, first_np, |idx| frontier.push((base.clone(), idx)));
-    }
+        frontier.push((binding, idx));
+    });
 
     for (hop, rel) in pat.rels.iter().enumerate() {
         let next_np = &pat.nodes[hop + 1];
@@ -1938,7 +1901,7 @@ fn eval_expr(
             // Edge variables must resolve to non-Null so aggregates like
             // `count(r)` and `count(DISTINCT r)` see a value per binding.
             // Returns EdgeRef (same shape as the rich projection path uses)
-            // so `value_key` partitions on edge identity for DISTINCT.
+            // so DISTINCT keys retain edge identity.
             if let Some(&eidx) = b.edge_vars.get(var) {
                 if let Some(e) = graph.overlay_edge(eidx) {
                     return Ok(Value::EdgeRef {
@@ -2724,8 +2687,369 @@ fn return_item_default_col(item: &ReturnItem) -> String {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+fn execute_materialising(
+    query: &Query,
+    graph: MergedGraph<'_>,
+    cache: &mut ContentCache,
+) -> Result<QueryResult, CypherError> {
+    let bindings = exec_matches(query, graph)?;
+    let bindings = apply_where(query.where_.as_ref(), bindings, graph, cache)?;
+    let bindings = match &query.with {
+        Some(wc) if has_aggregate(&wc.items) => {
+            let items = wc
+                .items
+                .iter()
+                .map(|item| {
+                    (
+                        item.alias
+                            .clone()
+                            .unwrap_or_else(|| return_item_default_col(item)),
+                        item.expr.clone(),
+                    )
+                })
+                .collect();
+            let mut agg = Aggregation::new(items, Stage::With);
+            for binding in &bindings {
+                agg.feed(binding, graph, cache)?;
+            }
+            apply_where(wc.where_.as_ref(), agg.finish_with(), graph, cache)?
+        }
+        Some(wc) => exec_with(wc, bindings, graph, cache)?,
+        None => bindings,
+    };
+
+    let (columns, rows) = project_return(&query.return_.items, &bindings, graph, cache)?;
+
+    let rows = apply_order_by(&query.order_by, &columns, rows);
+    let rows = apply_distinct(query.return_.distinct, rows);
+    let rows = apply_skip_limit(query.skip, query.limit, rows);
+    let rows = apply_union(
+        query.union.as_deref(),
+        query.union_all,
+        &columns,
+        rows,
+        graph,
+        cache,
+    )?;
+
+    // Width invariant — every row must carry exactly one value per
+    // projected column. Downstream consumers (e.g. `cypher::build_payload`
+    // in the CLI) collapse single-column rows to scalars and fall back to
+    // null on empty rows; a violation here would silently surface as a
+    // legitimate null result. Caught in debug builds before it leaves the
+    // executor.
+    debug_assert!(
+        rows.iter().all(|row| row.len() == columns.len()),
+        "cypher executor invariant: every row must have row.len() == columns.len() (expected {})",
+        columns.len()
+    );
+
+    Ok(QueryResult { columns, rows })
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::{OverlayFileInput, OverlaySymbol};
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(super) static PATTERN_VISITS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    #[test]
+    fn test_execute_later_comma_patterns_visit_prefix_once() {
+        let mut fx = GraphFixture::new();
+        for i in 0..2_000 {
+            fx.func("src/prefix.rs", &format!("f{i}"));
+        }
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let query = format!(
+            "MATCH (a:Function {{startLine:0}}) {} RETURN count(*)",
+            "MATCH (b), (c) ".repeat(10)
+        );
+        PATTERN_VISITS.with(|visits| visits.set(0));
+        let result = execute(&parse(&query).unwrap(), graph, None, Path::new(".")).unwrap();
+        assert_eq!(result.rows, vec![vec![Value::Int(0)]]);
+        assert_eq!(PATTERN_VISITS.with(Cell::get), 1);
+    }
+
+    #[test]
+    fn test_execute_100000_clauses_returns_one_without_stack_overflow() {
+        const CHILD: &str = "ECP_TEST_DEEP_MATCH_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "cypher::executor::tests::test_execute_100000_clauses_returns_one_without_stack_overflow", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let mut fx = GraphFixture::new();
+        fx.func("src/deep.rs", "only");
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let query = format!("{} RETURN count(*)", "MATCH (:Function) ".repeat(100_000));
+        let result = execute(&parse(&query).unwrap(), graph, None, Path::new(".")).unwrap();
+        assert_eq!(result.rows, vec![vec![Value::Int(1)]]);
+    }
+
+    #[test]
+    fn test_execute_deep_fixed_hops_use_materialising_traversal() {
+        let mut fx = GraphFixture::new();
+        let node = fx.func("src/deep.rs", "only");
+        fx.edge(node, node, RelType::Calls);
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let text = format!(
+            "MATCH (a:Function){} RETURN count(*)",
+            "-[:Calls]->()".repeat(1_000)
+        );
+        PATTERN_VISITS.with(|visits| visits.set(0));
+        let result = execute(&parse(&text).unwrap(), graph, None, Path::new(".")).unwrap();
+        assert_eq!(result.rows, vec![vec![Value::Int(1)]]);
+        assert_eq!(PATTERN_VISITS.with(Cell::get), 0);
+    }
+
+    #[test]
+    fn test_execute_aggregate_keys_preserve_parallel_edge_reasons() {
+        let mut fx = GraphFixture::new();
+        let a = fx.func("src/keys.rs", "a");
+        let b = fx.func("src/keys.rs", "b");
+        fx.edge_with(a, b, RelType::Calls, 1.0, "first");
+        fx.edge_with(a, b, RelType::Calls, 1.0, "second");
+        fx.edge_with(a, b, RelType::Calls, 1.0, "first");
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let result = execute(
+            &parse("MATCH ()-[r:Calls]->() RETURN count(DISTINCT r), collect(DISTINCT r)").unwrap(),
+            graph,
+            None,
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(result.rows[0][0], Value::Int(2));
+        let Value::List(edges) = &result.rows[0][1] else {
+            panic!("expected edge list")
+        };
+        assert_eq!(edges.len(), 2);
+        let result = execute(
+            &parse("MATCH ()-[r:Calls]->() WITH r AS edge, count(*) AS n RETURN edge.reason, n")
+                .unwrap(),
+            graph,
+            None,
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Value::Str("first".into()), Value::Int(2)],
+                vec![Value::Str("second".into()), Value::Int(1)]
+            ]
+        );
+    }
+
+    #[test]
+    fn test_execute_single_null_aggregate_preserves_legacy_row_count() {
+        let mut fx = GraphFixture::new();
+        fx.func("src/null.rs", "one");
+        fx.func("src/null.rs", "two");
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        for name in ["count", "sum", "avg", "min", "max", "collect"] {
+            for arg in ["*", "null"] {
+                let text = format!("MATCH (a:Function) RETURN {name}({arg})");
+                let result = execute(&parse(&text).unwrap(), graph, None, Path::new(".")).unwrap();
+                assert_eq!(result.rows, vec![vec![Value::Int(2)]], "{text}");
+            }
+        }
+    }
+    const STREAMING_ORACLE_QUERIES: &[&str] = &[
+        "MATCH ()-[r]->() RETURN count(r)",
+        "MATCH ()-[r]->() WHERE type(r) = 'References' RETURN count(r)",
+        "MATCH (a)-[r]->(b) RETURN type(r), count(*)",
+        "MATCH (a:Function) OPTIONAL MATCH (a)-[r:Calls]->(b) RETURN a.name, count(r), count(*)",
+        "MATCH (a)-[r]->(b) RETURN count(DISTINCT b), collect(DISTINCT b.name)",
+        "MATCH (a)-[r]->(b) WITH type(r) AS t, count(*) AS n WHERE n > 1 RETURN t, n",
+        "MATCH (a:Function {name:'missing'}) WITH count(*) AS n RETURN n",
+        "MATCH (a)-[r]->(b) WITH b AS x RETURN count(DISTINCT x)",
+        "MATCH (a:Function) MATCH (a)-[r]->(b) RETURN a.name, count(r)",
+        "MATCH (a)-[r]->(b) RETURN type(r) AS t, count(*) AS n ORDER BY n DESC SKIP 1 LIMIT 1",
+        "MATCH (a:Function {name:'missing'}) RETURN count(*), sum(a.startLine), collect(a.name)",
+        "MATCH (a)-[:Calls]->(b)-[:Calls]->(c) RETURN collect(a.name), count(*)",
+        "MATCH (a)-[:Calls*0..2]->(b) RETURN collect(b.name), count(*)",
+        "MATCH (a:Function {name:'b'}) OPTIONAL MATCH (c)-[:Calls]->(a) RETURN count(c)",
+        "MATCH (a:Function), (b:Function) RETURN count(a), count(b)",
+        "MATCH (a)-[r]->(b) RETURN b, count(*)",
+    ];
+
+    // Extra shapes that have caused streaming/materialising drift in prior reviews.
+    // The fixture below gives every successful shape at least one matching row.
+    const EXTRA_SUCCESS_QUERIES: &[&str] = &[
+        "MATCH (a)-[r]->(b) RETURN type(r) AS value, count(*) AS value",
+        "MATCH (a)-[r]->(b) WITH type(r) AS value, count(*) AS value RETURN value, count(*)",
+        "MATCH (a)-[r]->(b) WITH count(*) AS n RETURN count(n) AS n",
+        "MATCH (a)-[r]->(b) WITH b AS x WHERE x.name = 'b' RETURN count(x)",
+        "MATCH (a)-[r:Calls*1..2]->(b) RETURN count(r)",
+        "MATCH (a:Function) MATCH (a)-[r:Calls]->(b) RETURN a.name, count(r)",
+        "MATCH (a:Function) MATCH (a)-[r:Calls]->(b), (c:Function) RETURN count(r)",
+        "MATCH (a)-[r:Calls]-(b) RETURN count(r)",
+        "MATCH (a)-[r:Calls|References]->(b) RETURN count(r)",
+        "MATCH (x)-[:Calls]->(y)-[:Calls]->(x) RETURN count(*)",
+        "MATCH (a:Function) MATCH (a)-[r:Calls]->(b) WITH a.name AS name, count(r) AS n RETURN name, count(n)",
+    ];
+
+    const EXTRA_ERROR_QUERIES: &[&str] = &[
+        "MATCH (a)-[r]->(b) WHERE a.uid = 'bad' RETURN type(r), count(*)",
+        "MATCH (a)-[r]->(b) WITH type(r) AS t, count(*) AS n WHERE t.uid = 'bad' RETURN t, n",
+        "MATCH (a)-[r]->(b) WHERE a.uid = 'bad' WITH a AS x WHERE EXISTS { (x)-[:Calls*0..1]->(y) } RETURN count(*)",
+        "MATCH (a)-[r]->(b) WHERE EXISTS { (a)-[:Calls*0..1]->(y) } WITH a AS x WHERE x.uid = 'bad' RETURN count(*)",
+    ];
+
+    fn aggregate_oracle_graph() -> ZeroCopyGraph {
+        let mut fx = GraphFixture::new();
+        let a = fx.func("src/clean.rs", "a");
+        let b = fx.func("src/dirty.rs", "b");
+        let c = fx.func("src/dirty.rs", "c");
+        fx.edge(a, b, RelType::Calls);
+        fx.edge(a, c, RelType::References);
+        fx.edge(b, c, RelType::Calls);
+        fx.edge(a, b, RelType::Calls);
+        fx.edge(c, a, RelType::Calls);
+        fx.edge(b, a, RelType::Calls);
+        fx.build()
+    }
+
+    fn assert_public_success_matches_materialising(
+        text: &str,
+        graph: &ArchivedZeroCopyGraph,
+        view: Option<&OverlayView>,
+    ) {
+        let query = parse(text).unwrap_or_else(|err| panic!("parse {text:?}: {err:?}"));
+        let fast = execute(&query, graph, view, Path::new("."))
+            .unwrap_or_else(|err| panic!("streaming execution {text:?}: {err:?}"));
+        let rewritten = pushdown_where(&query);
+        let mut cache = ContentCache::new(PathBuf::from("."));
+        let slow = execute_materialising(
+            rewritten.as_ref().unwrap_or(&query),
+            MergedGraph::new(graph, view),
+            &mut cache,
+        )
+        .unwrap_or_else(|err| panic!("materialising execution {text:?}: {err:?}"));
+        assert_eq!(fast.columns, slow.columns, "columns: {text}");
+        assert_eq!(fast.rows, slow.rows, "rows: {text}");
+    }
+
+    fn assert_public_error_matches_materialising(
+        text: &str,
+        graph: &ArchivedZeroCopyGraph,
+        view: Option<&OverlayView>,
+    ) {
+        let query = parse(text).unwrap_or_else(|err| panic!("parse {text:?}: {err:?}"));
+        let fast = execute(&query, graph, view, Path::new("."))
+            .expect_err("streaming path unexpectedly succeeded");
+        let rewritten = pushdown_where(&query);
+        let mut cache = ContentCache::new(PathBuf::from("."));
+        let slow = execute_materialising(
+            rewritten.as_ref().unwrap_or(&query),
+            MergedGraph::new(graph, view),
+            &mut cache,
+        )
+        .expect_err("materialising path unexpectedly succeeded");
+        assert_eq!(format!("{fast:?}"), format!("{slow:?}"), "{text}");
+    }
+
+    #[test]
+    fn test_execute_aggregate_streaming_matches_materialising_rows() {
+        let graph = aggregate_oracle_graph();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&graph).unwrap();
+        let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        for text in STREAMING_ORACLE_QUERIES {
+            assert_public_success_matches_materialising(text, archived, None);
+        }
+        for text in EXTRA_SUCCESS_QUERIES {
+            assert_public_success_matches_materialising(text, archived, None);
+        }
+        for text in EXTRA_ERROR_QUERIES {
+            assert_public_error_matches_materialising(text, archived, None);
+        }
+        assert_public_error_matches_materialising(
+            "MATCH (a:Function), (b:Function) WHERE EXISTS { (a)-[:Calls*0..1]->(x) } RETURN missing, count(*)",
+            archived,
+            None,
+        );
+    }
+
+    #[test]
+    fn test_execute_aggregate_streaming_matches_materialising_overlay_optional() {
+        let graph = aggregate_oracle_graph();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&graph).unwrap();
+        let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let view = OverlayView::build(
+            archived,
+            &[OverlayFileInput {
+                rel_path: "src/dirty.rs".into(),
+                symbols: vec![
+                    OverlaySymbol {
+                        name: "b".into(),
+                        kind: NodeKind::Function,
+                        owner_class: None,
+                        start_line: 1,
+                        end_line: 2,
+                        calls: vec!["a".into()],
+                    },
+                    OverlaySymbol {
+                        name: "virtual".into(),
+                        kind: NodeKind::Function,
+                        owner_class: None,
+                        start_line: 3,
+                        end_line: 4,
+                        calls: vec!["a".into()],
+                    },
+                ],
+                imports: vec![],
+            }],
+        )
+        .unwrap();
+        assert_public_success_matches_materialising(
+            "MATCH (a:Function) OPTIONAL MATCH (a)-[r:Calls]->(b) WITH a.name AS name, count(r) AS n RETURN name, count(n)",
+            archived,
+            Some(&view),
+        );
+        for text in [
+            "MATCH (a:Function) MATCH (a)-[r:Calls]->(b) RETURN a.name, count(r)",
+            "MATCH (a:Function) WITH a AS x WHERE x.name <> 'missing' RETURN x.name, count(*)",
+            "MATCH (a:Function) OPTIONAL MATCH (a)-[r:Calls]->(b) RETURN a.name, count(r), count(*)",
+        ] {
+            assert_public_success_matches_materialising(text, archived, Some(&view));
+        }
+    }
+
+    #[test]
+    fn test_execute_aggregate_streaming_matches_materialising_who_calls_rows() {
+        let graph = who_calls_graph();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&graph).unwrap();
+        let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        for text in WHO_CALLS_QUERIES {
+            assert_public_success_matches_materialising(text, archived, None);
+        }
+        for text in WHO_CALLS_QUERIES {
+            let aggregate_text = match text.rsplit_once(" LIMIT ") {
+                Some((before_limit, limit)) => format!("{before_limit}, count(*) LIMIT {limit}"),
+                None => format!("{text}, count(*)"),
+            };
+            assert_public_success_matches_materialising(&aggregate_text, archived, None);
+        }
+    }
+
     use crate::cypher::parse;
     // `NodeKind` is no longer imported by the parent module — the merged-node
     // accessors that used it moved to `session::merged`.
