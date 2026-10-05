@@ -179,6 +179,7 @@ fn assert_import_missing_member_binding() {
                 "package pkg\nfun helper() {}\nclass Helper {\n companion object {\n fun work() {}\n }\n}\n",
             ),
             ("App.kt", "import pkg.missing.helper\nfun go() { helper() }"),
+            ("pkg/missing/Empty.kt", "package pkg.missing\nfun other() {}"),
         ],
     );
     assert_calls_with_confidence(

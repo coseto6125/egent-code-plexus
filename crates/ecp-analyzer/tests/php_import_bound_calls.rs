@@ -123,7 +123,7 @@ fn assert_import_external_root_binding() {
 
 fn assert_import_missing_member_binding() {
     let provider = ecp_analyzer::php::parser::PhpProvider::new().unwrap();
-    let graph=graph_of(&provider, &[("src/pkg/Helper.php", "<?php namespace pkg; function helper() {} class Helper { public static function work() {} }"),("app.php", "<?php use function pkg\\missing\\helper; function go() { helper(); }")]);
+    let graph=graph_of(&provider, &[("src/pkg/Helper.php", "<?php namespace pkg; function helper() {} class Helper { public static function work() {} }"),("app.php", "<?php use function pkg\\missing\\helper; function go() { helper(); }"),("src/pkg/missing/Empty.php", "<?php namespace pkg\\missing; function other() {}")]);
     assert_calls_with_confidence(
         &graph,
         "go",
