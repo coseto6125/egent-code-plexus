@@ -284,8 +284,25 @@ fn git_common_dir_canonical(cwd: &Path) -> Option<std::path::PathBuf> {
 fn selected_worktree_root(path: &Path) -> PathBuf {
     let root = crate::git_cache::git_layout(path)
         .map(|(root, _, _)| root)
-        .unwrap_or_else(|| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
+        .unwrap_or_else(|| toplevel_or_self(path));
     dunce::simplified(&root).to_path_buf()
+}
+
+/// `git_layout` declines under `GIT_DIR` / `GIT_WORK_TREE`; a selected
+/// subdirectory (`--repo ./src`) must still map to its worktree top. A
+/// non-git directory is its own root, as the registry records it.
+fn toplevel_or_self(path: &Path) -> PathBuf {
+    let toplevel = safe_exec::git()
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(path)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|s| PathBuf::from(s.trim()));
+    toplevel
+        .and_then(|top| std::fs::canonicalize(top).ok())
+        .unwrap_or_else(|| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
 }
 
 fn push_unique(
@@ -301,5 +318,34 @@ fn push_unique(
             aliases: alias.aliases.clone(),
             worktree_root,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_toplevel_or_self_subdirectory_returns_worktree_top() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let ok = safe_exec::git()
+            .args(["init", "-q"])
+            .current_dir(repo)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let sub = repo.join("src");
+        std::fs::create_dir(&sub).unwrap();
+        assert_eq!(toplevel_or_self(&sub), std::fs::canonicalize(repo).unwrap());
+    }
+
+    #[test]
+    fn test_toplevel_or_self_non_git_directory_returns_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plain");
+        std::fs::create_dir(&dir).unwrap();
+        assert_eq!(toplevel_or_self(&dir), std::fs::canonicalize(&dir).unwrap());
     }
 }
