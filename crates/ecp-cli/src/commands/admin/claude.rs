@@ -148,7 +148,7 @@ pub(crate) fn install_skills_at(
     for &skill in target.expand() {
         let src = source_skill_dir_at(skill, cwd)?;
         let src = src.path();
-        let dst = claude_home.join("skills").join(skill.name());
+        let dst = skill_dir_in(claude_home, skill);
 
         let dst_was_installed = dst.join("SKILL.md").exists();
         println!("Claude Code skill `{}`:", skill.name());
@@ -220,8 +220,7 @@ pub(crate) fn inject_ecp_import_at(
     } else {
         String::new()
     };
-    let already_present = existing.lines().any(|l| l.trim() == "@ECP.md");
-    if !already_present {
+    if !has_ecp_import(&existing) {
         let separator = if existing.ends_with('\n') || existing.is_empty() {
             ""
         } else {
@@ -237,6 +236,10 @@ pub(crate) fn inject_ecp_import_at(
         );
     }
     Ok(())
+}
+
+pub(crate) fn has_ecp_import(claude_md: &str) -> bool {
+    claude_md.lines().any(|l| l.trim() == "@ECP.md")
 }
 
 /// Remove the `@ECP.md` line from `<claude_home>/CLAUDE.md` and delete
@@ -289,7 +292,11 @@ pub(crate) fn source_skill_dir_at(
 }
 
 pub(crate) fn claude_skill_dir(skill: ClaudeSkillTarget) -> PathBuf {
-    claude_home().join("skills").join(skill.name())
+    skill_dir_in(&claude_home(), skill)
+}
+
+pub(crate) fn skill_dir_in(claude_home: &Path, skill: ClaudeSkillTarget) -> PathBuf {
+    claude_home.join("skills").join(skill.name())
 }
 
 fn claude_home() -> PathBuf {

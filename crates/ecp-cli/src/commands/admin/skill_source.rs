@@ -94,7 +94,12 @@ pub(crate) fn resolve(tree: EmbeddedTree, cwd: &Path) -> Result<SkillSource, Ecp
             _temp: None,
         });
     }
+    embedded(tree)
+}
 
+/// Materialize the embedded copy of the skill within `tree` into a temp dir,
+/// with no repo checkout consulted.
+pub(crate) fn embedded(tree: EmbeddedTree) -> Result<SkillSource, EcpError> {
     // Extract the whole embedded tree to a temp dir; `extract` reproduces the
     // tree's internal paths, so the skill lands at `<temp>/<sub>`.
     let (root, sub) = tree.embedded();
@@ -213,6 +218,18 @@ mod tests {
         let src = resolve(EmbeddedTree::EcpSkill, cwd.path()).unwrap();
         assert_ne!(src.path(), cwd.path().join("docs/skills/ecp"));
         assert!(src.path().join("SKILL.md").is_file());
+    }
+
+    #[test]
+    fn embedded_ecp_skill_returns_bytes_compiled_into_binary() {
+        let src = embedded(EmbeddedTree::EcpSkill).unwrap();
+        for rel in ["SKILL.md", "ECP.md"] {
+            assert_eq!(
+                std::fs::read(src.path().join(rel)).unwrap(),
+                ECP_SKILL.get_file(rel).unwrap().contents(),
+                "{rel}"
+            );
+        }
     }
 
     #[test]
