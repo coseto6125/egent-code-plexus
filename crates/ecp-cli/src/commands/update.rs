@@ -1686,11 +1686,18 @@ mod tests {
         assert!(owned_by_other_than(dir.path(), me + 1));
         assert!(!owned_by_other_than(&dir.path().join("missing"), me));
 
-        // `/` is root-owned, the link itself is ours: only `metadata`, which
-        // follows the link, sees the foreign owner. As root there is no
-        // foreign owner to see.
+        // The link itself is ours; only `metadata`, which follows it, sees the
+        // target's owner. `/` is not root-owned everywhere (WSL gives it to the
+        // first user), so pick a target this host gives to someone else.
+        use std::os::unix::fs::MetadataExt;
+        let Some(foreign) = ["/usr", "/etc", "/proc", "/"]
+            .into_iter()
+            .find(|p| std::fs::metadata(p).is_ok_and(|m| m.uid() != me))
+        else {
+            return;
+        };
         let link = dir.path().join("claude-link");
-        std::os::unix::fs::symlink("/", &link).unwrap();
-        assert_eq!(owned_by_other_than(&link, me), me != 0);
+        std::os::unix::fs::symlink(foreign, &link).unwrap();
+        assert!(owned_by_other_than(&link, me));
     }
 }
