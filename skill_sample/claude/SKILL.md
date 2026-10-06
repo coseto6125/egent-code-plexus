@@ -80,7 +80,7 @@ ecp diff --section bindings --baseline origin/main --repo .
 ecp routes /api/foo --repo .
 ```
 
-Wide blast radius (many upstream callers, or callers in core / widely-imported modules) → **stop + confirm with user** before pushing. Cross-repo contract changes → `ecp contracts --repo @all --unmatched-only` for orphaned consumers.
+A breaking change to a public interface or an existing caller → **stop + confirm with user** before pushing, at any caller count. A wide blast radius (many upstream callers, or callers in core / widely-imported modules) decides how much to say when you ask. Cross-repo contract changes → `ecp contracts --repo @all --unmatched-only` for orphaned consumers.
 
 ## Group / multi-repo
 
