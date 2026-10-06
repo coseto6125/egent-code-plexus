@@ -809,7 +809,7 @@ fn refresh_ecp_skill(new_exe: &Path, home: Option<PathBuf>) -> Vec<String> {
                     install.skill_dir.display()
                 ),
                 Err(e) => format!(
-                    "note: refreshing the Claude ecp skill failed ({e}); run `{}`",
+                    "note: refreshing the Claude ecp skill failed ({e}); run `{}` ({OUTSIDE_CHECKOUT})",
                     skill_refresh_cmd(plan.no_claude_md)
                 ),
             },
@@ -1235,10 +1235,7 @@ mod tests {
         assert!(md.starts_with("note: "), "{md}");
         assert!(md.contains(&install.ecp_md.display().to_string()));
         assert!(md.contains("installed by an older release"), "{md}");
-        assert!(
-            !md.contains(&format!("`{}`", skill_refresh_cmd(false))),
-            "{md}"
-        );
+        assert!(!md.contains("ecp admin claude install"), "{md}");
         let root = RefreshNote::ForeignOwner { with_command: true }.line(&install, false);
         assert!(root.contains(&install.claude_home.display().to_string()));
         assert!(
@@ -1698,6 +1695,7 @@ mod tests {
             lines[0].contains("failed") && lines[0].contains("boom"),
             "{lines:?}"
         );
+        assert!(lines[0].contains(OUTSIDE_CHECKOUT), "{lines:?}");
     }
 
     #[cfg(unix)]
@@ -1744,6 +1742,8 @@ mod tests {
             lines[0].contains(&format!("`{}`", skill_refresh_cmd(true))),
             "{lines:?}"
         );
+        assert!(lines[0].contains(OUTSIDE_CHECKOUT), "{lines:?}");
+        assert!(!lines[0].contains("this release's"), "{lines:?}");
     }
 
     #[cfg(unix)]
