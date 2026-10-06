@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.14.6 - 2026-10-06
+
+### Features
+
+- refresh the unmodified ecp skill after a binary update (#826)
+
 ## v0.14.5 - 2026-10-05
 
 ### Bug Fixes
