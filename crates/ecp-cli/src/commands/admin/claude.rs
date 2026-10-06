@@ -220,8 +220,7 @@ pub(crate) fn inject_ecp_import_at(
     } else {
         String::new()
     };
-    let already_present = existing.lines().any(|l| l.trim() == "@ECP.md");
-    if !already_present {
+    if !has_ecp_import(&existing) {
         let separator = if existing.ends_with('\n') || existing.is_empty() {
             ""
         } else {
@@ -237,6 +236,10 @@ pub(crate) fn inject_ecp_import_at(
         );
     }
     Ok(())
+}
+
+pub(crate) fn has_ecp_import(claude_md: &str) -> bool {
+    claude_md.lines().any(|l| l.trim() == "@ECP.md")
 }
 
 /// Remove the `@ECP.md` line from `<claude_home>/CLAUDE.md` and delete
