@@ -25,8 +25,8 @@
 //!
 //! After the swap, the Claude `ecp` skill and `~/.claude/ECP.md` follow the
 //! new release, but only while they still equal the copy this outgoing binary
-//! embeds: a difference is a local edit, and it is kept. The new binary does
-//! the install, so the files come from its embedded copy, not this one's.
+//! embeds: a difference is kept, whether it is a local edit or a copy an older
+//! release installed. The new binary does the install, so the files come from its embedded copy, not this one's.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -38,7 +38,7 @@ use clap::Args;
 use ecp_core::EcpError;
 use sha2::{Digest, Sha256};
 
-use crate::commands::admin::claude::{has_ecp_import, ClaudeSkillTarget};
+use crate::commands::admin::claude::{has_ecp_import, skill_dir_in, ClaudeSkillTarget};
 use crate::commands::admin::doctor::checks::install_source::{
     InstallSource, CHANNELS, CHANNEL_SUNSET,
 };
@@ -159,7 +159,9 @@ pub fn run(args: UpdateArgs) -> Result<(), EcpError> {
     update_check::record_self_update(&latest_str);
     update_check::clear_available_notice();
     println!("✓ ecp v{latest_str} installed -> {}", exe.display());
-    refresh_ecp_skill(&exe, ecp_core::registry::home_dir());
+    for line in refresh_ecp_skill(&exe, ecp_core::registry::home_dir()) {
+        println!("{line}");
+    }
 
     let source = InstallSource::detect();
     if source != InstallSource::Unknown {
@@ -467,20 +469,34 @@ pub(crate) fn other_copies_on_path(path: Option<OsString>, exe: &Path) -> Vec<Pa
     seen
 }
 
-/// An installed artifact against the copy the outgoing binary shipped. An
-/// `ECP.md` that `CLAUDE.md` does not import counts as `Absent`: the refresh
-/// must not add the import, the same as when the file is missing.
+/// `ECP.md` against the copy the outgoing binary shipped. Content that
+/// matches but that `CLAUDE.md` does not import is `Absent`: the refresh must
+/// not add the import, the same as when the file is missing. Differing
+/// content is `Modified`. `Special` is a symlink or special file, which an
+/// install never writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocalState {
     Absent,
     Shipped,
     Modified,
+    Special,
+}
+
+/// The installed skill tree. It has no `Absent`: `refresh_ecp_skill` returns
+/// before classifying when the skill is not installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SkillState {
+    Shipped,
+    Modified,
+    Special,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RefreshNote {
     SkillModified,
+    SkillSpecial,
     EcpMdModified,
+    EcpMdSpecial,
     ForeignOwner,
 }
 
@@ -497,26 +513,26 @@ pub(crate) struct RefreshPlan {
 /// user's `~/.claude`) skips: the child would leave root-owned files there
 /// that the user can no longer edit.
 pub(crate) fn plan_ecp_refresh(
-    skill: LocalState,
+    skill: SkillState,
     ecp_md: LocalState,
     foreign_owner: bool,
 ) -> RefreshPlan {
-    let notes = match (skill, foreign_owner) {
-        (LocalState::Absent, _) => Vec::new(),
-        (_, true) => vec![RefreshNote::ForeignOwner],
-        _ => {
-            let mut notes = Vec::new();
-            if skill == LocalState::Modified {
-                notes.push(RefreshNote::SkillModified);
-            }
-            if ecp_md == LocalState::Modified {
-                notes.push(RefreshNote::EcpMdModified);
-            }
-            notes
-        }
-    };
+    let mut notes = Vec::new();
+    match skill {
+        SkillState::Shipped => {}
+        SkillState::Modified => notes.push(RefreshNote::SkillModified),
+        SkillState::Special => notes.push(RefreshNote::SkillSpecial),
+    }
+    match ecp_md {
+        LocalState::Modified => notes.push(RefreshNote::EcpMdModified),
+        LocalState::Special => notes.push(RefreshNote::EcpMdSpecial),
+        LocalState::Absent | LocalState::Shipped => {}
+    }
+    if foreign_owner {
+        notes.insert(0, RefreshNote::ForeignOwner);
+    }
     RefreshPlan {
-        run: skill == LocalState::Shipped && !foreign_owner,
+        run: skill == SkillState::Shipped && !foreign_owner,
         no_claude_md: ecp_md != LocalState::Shipped,
         notes,
     }
@@ -536,22 +552,33 @@ fn skill_refresh_cmd(no_claude_md: bool) -> String {
 // an older release differs too; the note must not call that a local edit.
 const DIFFERS: &str =
     "differs from this release's copy (local edits, or installed by an older release)";
+const OPAQUE: &str = "is a symlink or special file";
 
 impl RefreshNote {
     fn line(self, install: &EcpInstall, no_claude_md: bool) -> String {
-        let cmd = skill_refresh_cmd(no_claude_md);
         match self {
             RefreshNote::SkillModified => format!(
-                "note: {} {DIFFERS} and was not refreshed; `{cmd}` replaces it with this release's copy",
-                install.skill_dir.display()
+                "note: {} {DIFFERS} and was not refreshed; `{}` replaces it with this release's copy",
+                install.skill_dir.display(),
+                skill_refresh_cmd(no_claude_md)
+            ),
+            RefreshNote::SkillSpecial => format!(
+                "note: {} {OPAQUE} and was kept; `{}` replaces it with this release's copy",
+                install.skill_dir.display(),
+                skill_refresh_cmd(no_claude_md)
             ),
             RefreshNote::EcpMdModified => format!(
                 "note: {} {DIFFERS} and was kept ({NO_CLAUDE_MD})",
                 install.ecp_md.display()
             ),
+            RefreshNote::EcpMdSpecial => format!(
+                "note: {} {OPAQUE} and was kept ({NO_CLAUDE_MD})",
+                install.ecp_md.display()
+            ),
             RefreshNote::ForeignOwner => format!(
-                "note: running as root, and {} belongs to another user, so the Claude ecp skill was not refreshed; run `{cmd}` as that user",
-                install.claude_home.display()
+                "note: running as root, and {} belongs to another user, so the Claude ecp skill was not refreshed; run `{}` as that user",
+                install.claude_home.display(),
+                skill_refresh_cmd(no_claude_md)
             ),
         }
     }
@@ -566,9 +593,7 @@ struct EcpInstall {
 impl EcpInstall {
     fn at(claude_home: PathBuf) -> Self {
         Self {
-            skill_dir: claude_home
-                .join("skills")
-                .join(ClaudeSkillTarget::Ecp.name()),
+            skill_dir: skill_dir_in(&claude_home, ClaudeSkillTarget::Ecp),
             ecp_md: claude_home.join("ECP.md"),
             claude_home,
         }
@@ -593,14 +618,18 @@ fn skill_installed(skill_dir: &Path) -> bool {
 fn classify_ecp_install(
     install: &EcpInstall,
     shipped: &Path,
-) -> Result<(LocalState, LocalState), EcpError> {
+) -> Result<(SkillState, LocalState), EcpError> {
     Ok((
         skill_state(&install.skill_dir, shipped)?,
         ecp_md_state(install, shipped)?,
     ))
 }
 
-/// Files an OS file browser drops into any directory it shows.
+/// Names the path in an I/O error, so a permission failure says which file.
+fn io_err(path: &Path) -> impl Fn(std::io::Error) -> EcpError + '_ {
+    move |e| EcpError::Output(format!("read {}: {e}", path.display()))
+}
+
 fn is_os_junk(rel: &Path) -> bool {
     matches!(
         rel.file_name().and_then(|n| n.to_str()),
@@ -608,15 +637,18 @@ fn is_os_junk(rel: &Path) -> bool {
     )
 }
 
-/// An install writes only regular files and directories. A symlink, a
-/// special file or an extra directory is the user's own doing, so the copy
-/// counts as modified.
-fn skill_state(skill_dir: &Path, shipped: &Path) -> Result<LocalState, EcpError> {
-    if !std::fs::symlink_metadata(skill_dir)?.is_dir() {
-        return Ok(LocalState::Modified);
+/// An install writes only regular files and directories. A symlink or a
+/// special file is the user's own doing (`Special`); an extra directory, an
+/// extra or missing file, or other content is `Modified`.
+fn skill_state(skill_dir: &Path, shipped: &Path) -> Result<SkillState, EcpError> {
+    if !std::fs::symlink_metadata(skill_dir)
+        .map_err(io_err(skill_dir))?
+        .is_dir()
+    {
+        return Ok(SkillState::Special);
     }
     let (Some(local), Some(ours)) = (regular_tree(skill_dir)?, regular_tree(shipped)?) else {
-        return Ok(LocalState::Modified);
+        return Ok(SkillState::Special);
     };
     if local.dirs.difference(&ours.dirs).next().is_some()
         || local
@@ -624,16 +656,20 @@ fn skill_state(skill_dir: &Path, shipped: &Path) -> Result<LocalState, EcpError>
             .difference(&ours.files)
             .any(|rel| !is_os_junk(rel))
     {
-        return Ok(LocalState::Modified);
+        return Ok(SkillState::Modified);
     }
     for rel in &ours.files {
-        if !local.files.contains(rel)
-            || std::fs::read(skill_dir.join(rel))? != std::fs::read(shipped.join(rel))?
+        if !local.files.contains(rel) {
+            return Ok(SkillState::Modified);
+        }
+        let (local_file, shipped_file) = (skill_dir.join(rel), shipped.join(rel));
+        if std::fs::read(&local_file).map_err(io_err(&local_file))?
+            != std::fs::read(&shipped_file).map_err(io_err(&shipped_file))?
         {
-            return Ok(LocalState::Modified);
+            return Ok(SkillState::Modified);
         }
     }
-    Ok(LocalState::Shipped)
+    Ok(SkillState::Shipped)
 }
 
 #[derive(Default)]
@@ -644,20 +680,18 @@ struct RegularTree {
 
 /// `None` when an entry under `root` is neither a regular file nor a
 /// directory. `DirEntry::file_type` does not follow symlinks.
-fn regular_tree(root: &Path) -> std::io::Result<Option<RegularTree>> {
+fn regular_tree(root: &Path) -> Result<Option<RegularTree>, EcpError> {
     let mut tree = RegularTree::default();
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(dir) = pending.pop() {
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            let kind = entry.file_type()?;
-            let path = entry.path();
-            let Ok(rel) = path.strip_prefix(root).map(Path::to_path_buf) else {
-                continue;
-            };
+    let mut pending = vec![PathBuf::new()];
+    while let Some(rel_dir) = pending.pop() {
+        let dir = root.join(&rel_dir);
+        for entry in std::fs::read_dir(&dir).map_err(io_err(&dir))? {
+            let entry = entry.map_err(io_err(&dir))?;
+            let kind = entry.file_type().map_err(io_err(&entry.path()))?;
+            let rel = rel_dir.join(entry.file_name());
             if kind.is_dir() {
-                tree.dirs.insert(rel);
-                pending.push(path);
+                tree.dirs.insert(rel.clone());
+                pending.push(rel);
             } else if kind.is_file() {
                 tree.files.insert(rel);
             } else {
@@ -672,18 +706,13 @@ fn ecp_md_state(install: &EcpInstall, shipped: &Path) -> Result<LocalState, EcpE
     // The file type comes first: reading a FIFO would block the update.
     match std::fs::symlink_metadata(&install.ecp_md) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(LocalState::Absent),
-        Err(e) => {
-            return Err(EcpError::Output(format!(
-                "read {}: {e}",
-                install.ecp_md.display()
-            )))
-        }
-        Ok(meta) if !meta.is_file() => return Ok(LocalState::Modified),
+        Err(e) => return Err(io_err(&install.ecp_md)(e)),
+        Ok(meta) if !meta.is_file() => return Ok(LocalState::Special),
         Ok(_) => {}
     }
-    let local = std::fs::read(&install.ecp_md)
-        .map_err(|e| EcpError::Output(format!("read {}: {e}", install.ecp_md.display())))?;
-    if local != std::fs::read(shipped.join("ECP.md"))? {
+    let shipped_md = shipped.join("ECP.md");
+    let local = std::fs::read(&install.ecp_md).map_err(io_err(&install.ecp_md))?;
+    if local != std::fs::read(&shipped_md).map_err(io_err(&shipped_md))? {
         return Ok(LocalState::Modified);
     }
     let claude_md = install.claude_home.join("CLAUDE.md");
@@ -696,14 +725,21 @@ fn ecp_md_state(install: &EcpInstall, shipped: &Path) -> Result<LocalState, EcpE
     })
 }
 
-/// `sudo ecp update` keeps HOME, so the euid is root while `~/.claude`
-/// belongs to the user.
+/// `metadata` follows a symlinked `~/.claude` to the directory the child
+/// writes into; `symlink_metadata` would report the link's own owner.
+#[cfg(unix)]
+fn owned_by_other_than(dir: &Path, uid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(dir).is_ok_and(|m| m.uid() != uid)
+}
+
+/// When sudo preserves HOME, the euid is root while `~/.claude` belongs to
+/// the user.
 #[cfg(unix)]
 fn root_over_foreign_dir(dir: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
     // SAFETY: geteuid has no preconditions and cannot fail.
     let euid = unsafe { libc::geteuid() };
-    euid == 0 && std::fs::symlink_metadata(dir).is_ok_and(|m| m.uid() != 0)
+    euid == 0 && owned_by_other_than(dir, 0)
 }
 
 #[cfg(not(unix))]
@@ -712,47 +748,49 @@ fn root_over_foreign_dir(_dir: &Path) -> bool {
 }
 
 /// The binary is already installed, so a failed refresh is a note, never a
-/// failed update.
-fn refresh_ecp_skill(new_exe: &Path, home: Option<PathBuf>) {
+/// failed update. The returned lines are what `run` prints.
+fn refresh_ecp_skill(new_exe: &Path, home: Option<PathBuf>) -> Vec<String> {
     // One absolute home, passed to the child as HOME, keeps the comparison
     // and the child's install on the same directory: HOME may be relative,
     // and on Windows `home_dir` may have fallen back to USERPROFILE.
     let Some(Ok(home)) = home.map(std::path::absolute) else {
-        return;
+        return Vec::new();
     };
     let install = EcpInstall::at(home.join(".claude"));
     if !skill_installed(&install.skill_dir) {
-        return;
+        return Vec::new();
     }
     let compared = shipped_ecp_skill().and_then(|s| classify_ecp_install(&install, s.path()));
-    let plan = match compared {
-        Ok((skill, ecp_md)) => {
-            plan_ecp_refresh(skill, ecp_md, root_over_foreign_dir(&install.claude_home))
-        }
+    let (skill, ecp_md) = match compared {
+        Ok(states) => states,
         Err(e) => {
-            println!(
-                "note: could not compare the Claude ecp skill with the shipped copy ({e}); run `{}` to refresh it",
+            return vec![format!(
+                "note: could not compare the Claude ecp skill with the shipped copy ({e}); `{}` replaces the installed copy with this release's",
                 skill_refresh_cmd(true)
-            );
-            return;
+            )]
         }
     };
-    for note in &plan.notes {
-        println!("{}", note.line(&install, plan.no_claude_md));
+    let plan = plan_ecp_refresh(skill, ecp_md, root_over_foreign_dir(&install.claude_home));
+    let mut lines: Vec<String> = plan
+        .notes
+        .iter()
+        .map(|note| note.line(&install, plan.no_claude_md))
+        .collect();
+    if plan.run {
+        lines.push(
+            match run_skill_refresh(new_exe, &home, plan.no_claude_md, TOOL_TIMEOUT) {
+                Ok(()) => format!(
+                    "✓ Claude skill ecp refreshed -> {}",
+                    install.skill_dir.display()
+                ),
+                Err(e) => format!(
+                    "note: refreshing the Claude ecp skill failed ({e}); run `{}`",
+                    skill_refresh_cmd(plan.no_claude_md)
+                ),
+            },
+        );
     }
-    if !plan.run {
-        return;
-    }
-    match run_skill_refresh(new_exe, &home, plan.no_claude_md, TOOL_TIMEOUT) {
-        Ok(()) => println!(
-            "✓ Claude skill ecp refreshed -> {}",
-            install.skill_dir.display()
-        ),
-        Err(e) => println!(
-            "note: refreshing the Claude ecp skill failed ({e}); run `{}`",
-            skill_refresh_cmd(plan.no_claude_md)
-        ),
-    }
+    lines
 }
 
 /// Run `exe admin claude install skills ecp` from an empty scratch dir, so the
@@ -1049,27 +1087,25 @@ mod tests {
         assert!(other_copies_on_path(None, &exe).is_empty());
     }
 
-    const LOCAL_STATES: [LocalState; 3] = [
+    const LOCAL_STATES: [LocalState; 4] = [
         LocalState::Absent,
         LocalState::Shipped,
         LocalState::Modified,
+        LocalState::Special,
     ];
 
-    #[test]
-    fn test_plan_ecp_refresh_skill_not_installed_skips_silently() {
-        for foreign_owner in [true, false] {
-            for ecp_md in LOCAL_STATES {
-                let plan = plan_ecp_refresh(LocalState::Absent, ecp_md, foreign_owner);
-                assert!(!plan.run, "{foreign_owner} {ecp_md:?}");
-                assert!(plan.notes.is_empty(), "{foreign_owner} {ecp_md:?}");
-            }
+    fn ecp_md_note(state: LocalState) -> Option<RefreshNote> {
+        match state {
+            LocalState::Modified => Some(RefreshNote::EcpMdModified),
+            LocalState::Special => Some(RefreshNote::EcpMdSpecial),
+            LocalState::Absent | LocalState::Shipped => None,
         }
     }
 
     #[test]
     fn test_plan_ecp_refresh_unmodified_skill_and_shipped_ecp_md_refreshes_both() {
         assert_eq!(
-            plan_ecp_refresh(LocalState::Shipped, LocalState::Shipped, false),
+            plan_ecp_refresh(SkillState::Shipped, LocalState::Shipped, false),
             RefreshPlan {
                 run: true,
                 no_claude_md: false,
@@ -1081,7 +1117,7 @@ mod tests {
     #[test]
     fn test_plan_ecp_refresh_unmodified_skill_without_ecp_md_passes_no_claude_md() {
         assert_eq!(
-            plan_ecp_refresh(LocalState::Shipped, LocalState::Absent, false),
+            plan_ecp_refresh(SkillState::Shipped, LocalState::Absent, false),
             RefreshPlan {
                 run: true,
                 no_claude_md: true,
@@ -1093,7 +1129,7 @@ mod tests {
     #[test]
     fn test_plan_ecp_refresh_unmodified_skill_and_edited_ecp_md_keeps_it_with_note() {
         assert_eq!(
-            plan_ecp_refresh(LocalState::Shipped, LocalState::Modified, false),
+            plan_ecp_refresh(SkillState::Shipped, LocalState::Modified, false),
             RefreshPlan {
                 run: true,
                 no_claude_md: true,
@@ -1104,33 +1140,43 @@ mod tests {
 
     #[test]
     fn test_plan_ecp_refresh_edited_skill_skips_with_note() {
-        for ecp_md in LOCAL_STATES {
-            let mut notes = vec![RefreshNote::SkillModified];
-            if ecp_md == LocalState::Modified {
-                notes.push(RefreshNote::EcpMdModified);
+        for (skill, note) in [
+            (SkillState::Modified, RefreshNote::SkillModified),
+            (SkillState::Special, RefreshNote::SkillSpecial),
+        ] {
+            for ecp_md in LOCAL_STATES {
+                let mut notes = vec![note];
+                notes.extend(ecp_md_note(ecp_md));
+                assert_eq!(
+                    plan_ecp_refresh(skill, ecp_md, false),
+                    RefreshPlan {
+                        run: false,
+                        no_claude_md: ecp_md != LocalState::Shipped,
+                        notes
+                    },
+                    "{skill:?} {ecp_md:?}"
+                );
             }
-            assert_eq!(
-                plan_ecp_refresh(LocalState::Modified, ecp_md, false),
-                RefreshPlan {
-                    run: false,
-                    no_claude_md: ecp_md != LocalState::Shipped,
-                    notes
-                },
-                "{ecp_md:?}"
-            );
         }
     }
 
     #[test]
-    fn test_plan_ecp_refresh_root_over_foreign_home_skips_with_note() {
-        for skill in [LocalState::Shipped, LocalState::Modified] {
+    fn test_plan_ecp_refresh_root_over_foreign_home_skips_with_foreign_note_first() {
+        for (skill, skill_note) in [
+            (SkillState::Shipped, None),
+            (SkillState::Modified, Some(RefreshNote::SkillModified)),
+            (SkillState::Special, Some(RefreshNote::SkillSpecial)),
+        ] {
             for ecp_md in LOCAL_STATES {
+                let mut notes = vec![RefreshNote::ForeignOwner];
+                notes.extend(skill_note);
+                notes.extend(ecp_md_note(ecp_md));
                 assert_eq!(
                     plan_ecp_refresh(skill, ecp_md, true),
                     RefreshPlan {
                         run: false,
                         no_claude_md: ecp_md != LocalState::Shipped,
-                        notes: vec![RefreshNote::ForeignOwner]
+                        notes
                     },
                     "{skill:?} {ecp_md:?}"
                 );
@@ -1149,6 +1195,19 @@ mod tests {
             skill.contains(&format!("`{}`", skill_refresh_cmd(false))),
             "{skill}"
         );
+        let special = RefreshNote::SkillSpecial.line(&install, false);
+        assert!(
+            special.contains("is a symlink or special file and was kept"),
+            "{special}"
+        );
+        assert!(!special.contains("differs"), "{special}");
+        assert!(special.contains(&skill_refresh_cmd(false)), "{special}");
+        let md_special = RefreshNote::EcpMdSpecial.line(&install, true);
+        assert!(
+            md_special.contains("is a symlink or special file and was kept"),
+            "{md_special}"
+        );
+        assert!(!md_special.contains("differs"), "{md_special}");
         let md = RefreshNote::EcpMdModified.line(&install, true);
         assert!(md.starts_with("note: "), "{md}");
         assert!(md.contains(&install.ecp_md.display().to_string()));
@@ -1160,7 +1219,7 @@ mod tests {
     }
 
     #[test]
-    fn test_skill_refresh_cmd_matches_child_argv() {
+    fn test_skill_refresh_cmd_renders_argv_with_and_without_flag() {
         assert_eq!(
             skill_refresh_cmd(false),
             "ecp admin claude install skills ecp"
@@ -1176,7 +1235,7 @@ mod tests {
         let notes_for = |claude_home: &Path| {
             let install = EcpInstall::at(claude_home.to_path_buf());
             let (_, ecp_md) = classify(claude_home);
-            let plan = plan_ecp_refresh(LocalState::Modified, ecp_md, false);
+            let plan = plan_ecp_refresh(SkillState::Modified, ecp_md, false);
             plan.notes
                 .iter()
                 .map(|n| n.line(&install, plan.no_claude_md))
@@ -1212,13 +1271,13 @@ mod tests {
         inject_ecp_import_at(claude_home, &shipped.path().join("ECP.md"), false).unwrap();
     }
 
-    fn classify(claude_home: &Path) -> (LocalState, LocalState) {
+    fn classify(claude_home: &Path) -> (SkillState, LocalState) {
         let shipped = shipped_ecp_skill().unwrap();
         classify_ecp_install(&EcpInstall::at(claude_home.to_path_buf()), shipped.path()).unwrap()
     }
 
     fn skill_dir(claude_home: &Path) -> PathBuf {
-        EcpInstall::at(claude_home.to_path_buf()).skill_dir
+        skill_dir_in(claude_home, ClaudeSkillTarget::Ecp)
     }
 
     #[test]
@@ -1246,12 +1305,12 @@ mod tests {
         install_shipped(home.path());
         assert_eq!(
             classify(home.path()),
-            (LocalState::Shipped, LocalState::Shipped)
+            (SkillState::Shipped, LocalState::Shipped)
         );
         install_shipped(home.path());
         assert_eq!(
             classify(home.path()),
-            (LocalState::Shipped, LocalState::Shipped)
+            (SkillState::Shipped, LocalState::Shipped)
         );
         let claude_md = std::fs::read_to_string(home.path().join("CLAUDE.md")).unwrap();
         assert_eq!(claude_md.matches("@ECP.md").count(), 1);
@@ -1272,7 +1331,7 @@ mod tests {
             }
             assert_eq!(
                 classify(home.path()),
-                (LocalState::Modified, LocalState::Shipped),
+                (SkillState::Modified, LocalState::Shipped),
                 "{edit:?}"
             );
         }
@@ -1283,7 +1342,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         install_shipped(home.path());
         std::fs::write(skill_dir(home.path()).join("local.md"), "mine\n").unwrap();
-        assert_eq!(classify(home.path()).0, LocalState::Modified);
+        assert_eq!(classify(home.path()).0, SkillState::Modified);
     }
 
     #[test]
@@ -1291,7 +1350,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         install_shipped(home.path());
         std::fs::remove_file(skill_dir(home.path()).join("ECP.md")).unwrap();
-        assert_eq!(classify(home.path()).0, LocalState::Modified);
+        assert_eq!(classify(home.path()).0, SkillState::Modified);
     }
 
     #[test]
@@ -1299,7 +1358,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         install_shipped(home.path());
         std::fs::create_dir(skill_dir(home.path()).join("drafts")).unwrap();
-        assert_eq!(classify(home.path()).0, LocalState::Modified);
+        assert_eq!(classify(home.path()).0, SkillState::Modified);
     }
 
     #[test]
@@ -1313,7 +1372,7 @@ mod tests {
         }
         assert_eq!(
             classify(home.path()),
-            (LocalState::Shipped, LocalState::Shipped)
+            (SkillState::Shipped, LocalState::Shipped)
         );
     }
 
@@ -1350,7 +1409,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &ecp_md).unwrap();
         assert_eq!(
             classify(home.path()),
-            (LocalState::Shipped, LocalState::Modified)
+            (SkillState::Shipped, LocalState::Special)
         );
     }
 
@@ -1361,7 +1420,7 @@ mod tests {
         install_shipped(home.path());
         let dir = skill_dir(home.path());
         std::os::unix::fs::symlink(dir.join("SKILL.md"), dir.join("extra.md")).unwrap();
-        assert_eq!(classify(home.path()).0, LocalState::Modified);
+        assert_eq!(classify(home.path()).0, SkillState::Special);
     }
 
     #[cfg(unix)]
@@ -1373,7 +1432,7 @@ mod tests {
         let target = home.path().join("SKILL.copy.md");
         std::fs::rename(&skill_md, &target).unwrap();
         std::os::unix::fs::symlink(&target, &skill_md).unwrap();
-        assert_eq!(classify(home.path()).0, LocalState::Modified);
+        assert_eq!(classify(home.path()).0, SkillState::Special);
     }
 
     #[cfg(unix)]
@@ -1386,7 +1445,7 @@ mod tests {
         std::fs::rename(&dir, &target).unwrap();
         std::os::unix::fs::symlink(&target, &dir).unwrap();
         assert!(skill_installed(&dir));
-        assert_eq!(classify(home.path()).0, LocalState::Modified);
+        assert_eq!(classify(home.path()).0, SkillState::Special);
     }
 
     #[cfg(unix)]
@@ -1419,7 +1478,7 @@ mod tests {
         mkfifo(&ecp_md);
         let claude_home = home.path().to_path_buf();
         let state = within_deadline(move || classify(&claude_home));
-        assert_eq!(state, (LocalState::Shipped, LocalState::Modified));
+        assert_eq!(state, (SkillState::Shipped, LocalState::Special));
     }
 
     #[cfg(unix)]
@@ -1430,7 +1489,7 @@ mod tests {
         mkfifo(&skill_dir(home.path()).join("pipe"));
         let claude_home = home.path().to_path_buf();
         let state = within_deadline(move || classify(&claude_home));
-        assert_eq!(state.0, LocalState::Modified);
+        assert_eq!(state.0, SkillState::Special);
     }
 
     #[test]
@@ -1477,11 +1536,8 @@ mod tests {
         let logged = std::fs::read_to_string(&log).unwrap();
         let lines: Vec<&str> = logged.lines().collect();
         assert_eq!(lines.len(), 6, "{logged}");
-        assert_eq!(lines[0], skill_refresh_cmd(true).trim_start_matches("ecp "));
-        assert_eq!(
-            lines[3],
-            skill_refresh_cmd(false).trim_start_matches("ecp ")
-        );
+        assert_eq!(lines[0], "admin claude install skills ecp --no-claude-md");
+        assert_eq!(lines[3], "admin claude install skills ecp");
         let cwd = std::env::current_dir().unwrap();
         for i in [0, 3] {
             assert_eq!(Path::new(lines[i + 1]), home.path());
@@ -1523,7 +1579,6 @@ mod tests {
         run_skill_refresh(&exe, dir.path(), false, Duration::from_secs(20)).unwrap();
     }
 
-    /// A fake child that touches `<bin>/ran`, then runs `rest`.
     #[cfg(unix)]
     fn marking_exe(bin: &Path, rest: &str) -> (PathBuf, PathBuf) {
         let ran = bin.join("ran");
@@ -1536,7 +1591,7 @@ mod tests {
     fn test_refresh_ecp_skill_without_home_never_runs_child() {
         let bin = tempfile::tempdir().unwrap();
         let (exe, ran) = marking_exe(bin.path(), "");
-        refresh_ecp_skill(&exe, None);
+        assert!(refresh_ecp_skill(&exe, None).is_empty());
         assert!(!ran.exists());
     }
 
@@ -1551,8 +1606,9 @@ mod tests {
         let (exe, ran) = marking_exe(bin.path(), "");
 
         let home_path = home.path().to_path_buf();
-        within_deadline(move || refresh_ecp_skill(&exe, Some(home_path)));
+        let lines = within_deadline(move || refresh_ecp_skill(&exe, Some(home_path)));
 
+        assert!(lines.is_empty(), "{lines:?}");
         assert!(!ran.exists());
     }
 
@@ -1572,8 +1628,9 @@ mod tests {
             &format!("printf '%s' \"$HOME\" > '{}'", log.display()),
         );
 
-        refresh_ecp_skill(&exe, Some(relative));
+        let lines = refresh_ecp_skill(&exe, Some(relative));
 
+        assert!(lines.iter().any(|l| l.starts_with("✓")), "{lines:?}");
         assert!(ran.exists(), "the comparison missed the relative home");
         let child_home = PathBuf::from(std::fs::read_to_string(&log).unwrap());
         assert!(child_home.is_absolute(), "{}", child_home.display());
@@ -1585,19 +1642,21 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_refresh_ecp_skill_child_failure_keeps_skill_and_returns() {
+    fn test_refresh_ecp_skill_child_failure_runs_child_and_returns() {
         let home = tempfile::tempdir().unwrap();
         let claude_home = home.path().join(".claude");
         install_shipped(&claude_home);
-        let skill_md = skill_dir(&claude_home).join("SKILL.md");
-        let before = std::fs::read(&skill_md).unwrap();
         let bin = tempfile::tempdir().unwrap();
         let (exe, ran) = marking_exe(bin.path(), "echo boom >&2; exit 1");
 
-        refresh_ecp_skill(&exe, Some(home.path().to_path_buf()));
+        let lines = refresh_ecp_skill(&exe, Some(home.path().to_path_buf()));
 
         assert!(ran.exists(), "the child never ran");
-        assert_eq!(std::fs::read(&skill_md).unwrap(), before);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("failed") && lines[0].contains("boom"),
+            "{lines:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -1610,8 +1669,28 @@ mod tests {
         let bin = tempfile::tempdir().unwrap();
         let (exe, ran) = marking_exe(bin.path(), "");
 
-        refresh_ecp_skill(&exe, Some(home.path().to_path_buf()));
+        let lines = refresh_ecp_skill(&exe, Some(home.path().to_path_buf()));
 
         assert!(!ran.exists());
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("differs"), "{lines:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_owned_by_other_than_follows_symlinked_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let me = unsafe { libc::geteuid() };
+        assert!(!owned_by_other_than(dir.path(), me));
+        assert!(owned_by_other_than(dir.path(), me + 1));
+        assert!(!owned_by_other_than(&dir.path().join("missing"), me));
+
+        // `/` is root-owned, the link itself is ours: only `metadata`, which
+        // follows the link, sees the foreign owner. As root there is no
+        // foreign owner to see.
+        let link = dir.path().join("claude-link");
+        std::os::unix::fs::symlink("/", &link).unwrap();
+        assert_eq!(owned_by_other_than(&link, me), me != 0);
     }
 }

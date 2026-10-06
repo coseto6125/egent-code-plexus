@@ -221,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn test_embedded_ecp_skill_returns_bytes_compiled_into_binary() {
+    fn embedded_ecp_skill_returns_bytes_compiled_into_binary() {
         let src = embedded(EmbeddedTree::EcpSkill).unwrap();
         for rel in ["SKILL.md", "ECP.md"] {
             assert_eq!(

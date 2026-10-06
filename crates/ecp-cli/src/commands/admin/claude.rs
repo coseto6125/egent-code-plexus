@@ -148,7 +148,7 @@ pub(crate) fn install_skills_at(
     for &skill in target.expand() {
         let src = source_skill_dir_at(skill, cwd)?;
         let src = src.path();
-        let dst = claude_home.join("skills").join(skill.name());
+        let dst = skill_dir_in(claude_home, skill);
 
         let dst_was_installed = dst.join("SKILL.md").exists();
         println!("Claude Code skill `{}`:", skill.name());
@@ -292,7 +292,11 @@ pub(crate) fn source_skill_dir_at(
 }
 
 pub(crate) fn claude_skill_dir(skill: ClaudeSkillTarget) -> PathBuf {
-    claude_home().join("skills").join(skill.name())
+    skill_dir_in(&claude_home(), skill)
+}
+
+pub(crate) fn skill_dir_in(claude_home: &Path, skill: ClaudeSkillTarget) -> PathBuf {
+    claude_home.join("skills").join(skill.name())
 }
 
 fn claude_home() -> PathBuf {
