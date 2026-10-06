@@ -26,7 +26,8 @@
 //! After the swap, the Claude `ecp` skill and `~/.claude/ECP.md` follow the
 //! new release, but only while they still equal the copy this outgoing binary
 //! embeds: a difference is kept, whether it is a local edit or a copy an older
-//! release installed. The new binary does the install, so the files come from its embedded copy, not this one's.
+//! release installed. The new binary does the install, so the files come from
+//! its embedded copy, not this one's.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -319,8 +320,7 @@ pub(crate) fn parse_sha256_sidecar(body: &str) -> Option<String> {
 }
 
 pub(crate) fn verify_sha256(path: &Path, expected: &str) -> Result<(), EcpError> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| EcpError::Output(format!("read {}: {e}", path.display())))?;
+    let bytes = std::fs::read(path).map_err(io_err(path))?;
     let actual = hex::encode(Sha256::digest(&bytes));
     if actual != expected {
         return Err(EcpError::Output(format!(
@@ -497,7 +497,11 @@ pub(crate) enum RefreshNote {
     SkillSpecial,
     EcpMdModified,
     EcpMdSpecial,
-    ForeignOwner,
+    /// `with_command`: only the ownership blocks the refresh, so this line
+    /// carries the command. Otherwise a skill note below it does.
+    ForeignOwner {
+        with_command: bool,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -518,6 +522,11 @@ pub(crate) fn plan_ecp_refresh(
     foreign_owner: bool,
 ) -> RefreshPlan {
     let mut notes = Vec::new();
+    if foreign_owner {
+        notes.push(RefreshNote::ForeignOwner {
+            with_command: skill == SkillState::Shipped,
+        });
+    }
     match skill {
         SkillState::Shipped => {}
         SkillState::Modified => notes.push(RefreshNote::SkillModified),
@@ -527,9 +536,6 @@ pub(crate) fn plan_ecp_refresh(
         LocalState::Modified => notes.push(RefreshNote::EcpMdModified),
         LocalState::Special => notes.push(RefreshNote::EcpMdSpecial),
         LocalState::Absent | LocalState::Shipped => {}
-    }
-    if foreign_owner {
-        notes.insert(0, RefreshNote::ForeignOwner);
     }
     RefreshPlan {
         run: skill == SkillState::Shipped && !foreign_owner,
@@ -553,17 +559,19 @@ fn skill_refresh_cmd(no_claude_md: bool) -> String {
 const DIFFERS: &str =
     "differs from this release's copy (local edits, or installed by an older release)";
 const OPAQUE: &str = "is a symlink or special file";
+const OPAQUE_TREE: &str = "is, or contains, a symlink or special file";
+const OUTSIDE_CHECKOUT: &str = "run it outside an ecp checkout";
 
 impl RefreshNote {
     fn line(self, install: &EcpInstall, no_claude_md: bool) -> String {
         match self {
             RefreshNote::SkillModified => format!(
-                "note: {} {DIFFERS} and was not refreshed; `{}` replaces it with this release's copy",
+                "note: {} {DIFFERS} and was not refreshed; `{}` replaces it ({OUTSIDE_CHECKOUT})",
                 install.skill_dir.display(),
                 skill_refresh_cmd(no_claude_md)
             ),
             RefreshNote::SkillSpecial => format!(
-                "note: {} {OPAQUE} and was kept; `{}` replaces it with this release's copy",
+                "note: {} {OPAQUE_TREE} and was kept; `{}` replaces it ({OUTSIDE_CHECKOUT})",
                 install.skill_dir.display(),
                 skill_refresh_cmd(no_claude_md)
             ),
@@ -575,11 +583,17 @@ impl RefreshNote {
                 "note: {} {OPAQUE} and was kept ({NO_CLAUDE_MD})",
                 install.ecp_md.display()
             ),
-            RefreshNote::ForeignOwner => format!(
-                "note: running as root, and {} belongs to another user, so the Claude ecp skill was not refreshed; run `{}` as that user",
-                install.claude_home.display(),
-                skill_refresh_cmd(no_claude_md)
-            ),
+            RefreshNote::ForeignOwner { with_command } => {
+                let run = if with_command {
+                    format!("`{}`", skill_refresh_cmd(no_claude_md))
+                } else {
+                    "the command below".to_owned()
+                };
+                format!(
+                    "note: running as root, and {} belongs to another user, so the Claude ecp skill was not refreshed; run {run} as that user",
+                    install.claude_home.display()
+                )
+            }
         }
     }
 }
@@ -607,7 +621,7 @@ fn shipped_ecp_skill() -> Result<SkillSource, EcpError> {
 }
 
 /// `symlink_metadata`, so a dangling `SKILL.md` symlink still counts as an
-/// install, reported as modified rather than ignored.
+/// install, reported as special rather than ignored.
 fn skill_installed(skill_dir: &Path) -> bool {
     !matches!(
         std::fs::symlink_metadata(skill_dir.join("SKILL.md")),
@@ -760,17 +774,28 @@ fn refresh_ecp_skill(new_exe: &Path, home: Option<PathBuf>) -> Vec<String> {
     if !skill_installed(&install.skill_dir) {
         return Vec::new();
     }
+    let foreign_owner = root_over_foreign_dir(&install.claude_home);
     let compared = shipped_ecp_skill().and_then(|s| classify_ecp_install(&install, s.path()));
     let (skill, ecp_md) = match compared {
         Ok(states) => states,
         Err(e) => {
-            return vec![format!(
-                "note: could not compare the Claude ecp skill with the shipped copy ({e}); `{}` replaces the installed copy with this release's",
+            let mut lines: Vec<String> = foreign_owner
+                .then(|| {
+                    RefreshNote::ForeignOwner {
+                        with_command: false,
+                    }
+                    .line(&install, true)
+                })
+                .into_iter()
+                .collect();
+            lines.push(format!(
+                "note: could not compare the Claude ecp skill with the shipped copy ({e}); `{}` replaces the installed copy ({OUTSIDE_CHECKOUT})",
                 skill_refresh_cmd(true)
-            )]
+            ));
+            return lines;
         }
     };
-    let plan = plan_ecp_refresh(skill, ecp_md, root_over_foreign_dir(&install.claude_home));
+    let plan = plan_ecp_refresh(skill, ecp_md, foreign_owner);
     let mut lines: Vec<String> = plan
         .notes
         .iter()
@@ -1087,20 +1112,12 @@ mod tests {
         assert!(other_copies_on_path(None, &exe).is_empty());
     }
 
-    const LOCAL_STATES: [LocalState; 4] = [
-        LocalState::Absent,
-        LocalState::Shipped,
-        LocalState::Modified,
-        LocalState::Special,
+    const ECP_MD_NOTES: [(LocalState, Option<RefreshNote>); 4] = [
+        (LocalState::Absent, None),
+        (LocalState::Shipped, None),
+        (LocalState::Modified, Some(RefreshNote::EcpMdModified)),
+        (LocalState::Special, Some(RefreshNote::EcpMdSpecial)),
     ];
-
-    fn ecp_md_note(state: LocalState) -> Option<RefreshNote> {
-        match state {
-            LocalState::Modified => Some(RefreshNote::EcpMdModified),
-            LocalState::Special => Some(RefreshNote::EcpMdSpecial),
-            LocalState::Absent | LocalState::Shipped => None,
-        }
-    }
 
     #[test]
     fn test_plan_ecp_refresh_unmodified_skill_and_shipped_ecp_md_refreshes_both() {
@@ -1139,14 +1156,14 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_ecp_refresh_edited_skill_skips_with_note() {
+    fn test_plan_ecp_refresh_edited_or_special_skill_skips_with_note() {
         for (skill, note) in [
             (SkillState::Modified, RefreshNote::SkillModified),
             (SkillState::Special, RefreshNote::SkillSpecial),
         ] {
-            for ecp_md in LOCAL_STATES {
+            for (ecp_md, md_note) in ECP_MD_NOTES {
                 let mut notes = vec![note];
-                notes.extend(ecp_md_note(ecp_md));
+                notes.extend(md_note);
                 assert_eq!(
                     plan_ecp_refresh(skill, ecp_md, false),
                     RefreshPlan {
@@ -1167,10 +1184,12 @@ mod tests {
             (SkillState::Modified, Some(RefreshNote::SkillModified)),
             (SkillState::Special, Some(RefreshNote::SkillSpecial)),
         ] {
-            for ecp_md in LOCAL_STATES {
-                let mut notes = vec![RefreshNote::ForeignOwner];
+            for (ecp_md, md_note) in ECP_MD_NOTES {
+                let mut notes = vec![RefreshNote::ForeignOwner {
+                    with_command: skill_note.is_none(),
+                }];
                 notes.extend(skill_note);
-                notes.extend(ecp_md_note(ecp_md));
+                notes.extend(md_note);
                 assert_eq!(
                     plan_ecp_refresh(skill, ecp_md, true),
                     RefreshPlan {
@@ -1197,11 +1216,15 @@ mod tests {
         );
         let special = RefreshNote::SkillSpecial.line(&install, false);
         assert!(
-            special.contains("is a symlink or special file and was kept"),
+            special.contains("is, or contains, a symlink or special file and was kept"),
             "{special}"
         );
         assert!(!special.contains("differs"), "{special}");
-        assert!(special.contains(&skill_refresh_cmd(false)), "{special}");
+        assert!(!special.contains("this release's copy"), "{special}");
+        assert!(
+            special.contains(&format!("`{}`", skill_refresh_cmd(false))),
+            "{special}"
+        );
         let md_special = RefreshNote::EcpMdSpecial.line(&install, true);
         assert!(
             md_special.contains("is a symlink or special file and was kept"),
@@ -1212,10 +1235,28 @@ mod tests {
         assert!(md.starts_with("note: "), "{md}");
         assert!(md.contains(&install.ecp_md.display().to_string()));
         assert!(md.contains("installed by an older release"), "{md}");
-        assert!(!md.contains(&skill_refresh_cmd(false)), "{md}");
-        let root = RefreshNote::ForeignOwner.line(&install, false);
+        assert!(
+            !md.contains(&format!("`{}`", skill_refresh_cmd(false))),
+            "{md}"
+        );
+        let root = RefreshNote::ForeignOwner { with_command: true }.line(&install, false);
         assert!(root.contains(&install.claude_home.display().to_string()));
-        assert!(root.contains(&skill_refresh_cmd(false)), "{root}");
+        assert!(
+            root.contains(&format!("`{}`", skill_refresh_cmd(false))),
+            "{root}"
+        );
+        let root_bare = RefreshNote::ForeignOwner {
+            with_command: false,
+        }
+        .line(&install, false);
+        assert!(
+            root_bare.contains("run the command below as that user"),
+            "{root_bare}"
+        );
+        assert!(
+            !root_bare.contains(&skill_refresh_cmd(false)),
+            "{root_bare}"
+        );
     }
 
     #[test]
@@ -1398,7 +1439,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_classify_ecp_install_symlinked_ecp_md_reports_modified() {
+    fn test_classify_ecp_install_symlinked_ecp_md_reports_special() {
         // Identical content behind a symlink: a refresh would replace the
         // link with a file, so the link is the user's and is kept.
         let home = tempfile::tempdir().unwrap();
@@ -1415,7 +1456,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_classify_ecp_install_symlink_inside_skill_reports_modified() {
+    fn test_classify_ecp_install_symlink_inside_skill_reports_special() {
         let home = tempfile::tempdir().unwrap();
         install_shipped(home.path());
         let dir = skill_dir(home.path());
@@ -1425,7 +1466,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_classify_ecp_install_symlinked_shipped_file_reports_modified() {
+    fn test_classify_ecp_install_symlinked_shipped_file_reports_special() {
         let home = tempfile::tempdir().unwrap();
         install_shipped(home.path());
         let skill_md = skill_dir(home.path()).join("SKILL.md");
@@ -1437,7 +1478,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_classify_ecp_install_symlinked_skill_dir_reports_modified() {
+    fn test_classify_ecp_install_symlinked_skill_dir_reports_special() {
         let home = tempfile::tempdir().unwrap();
         install_shipped(home.path());
         let dir = skill_dir(home.path());
@@ -1470,7 +1511,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_classify_ecp_install_fifo_ecp_md_reports_modified_without_blocking() {
+    fn test_classify_ecp_install_fifo_ecp_md_reports_special_without_blocking() {
         let home = tempfile::tempdir().unwrap();
         install_shipped(home.path());
         let ecp_md = home.path().join("ECP.md");
@@ -1483,7 +1524,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_classify_ecp_install_fifo_inside_skill_reports_modified_without_blocking() {
+    fn test_classify_ecp_install_fifo_inside_skill_reports_special_without_blocking() {
         let home = tempfile::tempdir().unwrap();
         install_shipped(home.path());
         mkfifo(&skill_dir(home.path()).join("pipe"));
@@ -1678,6 +1719,35 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn test_refresh_ecp_skill_unreadable_skill_subdir_prints_one_command_and_never_runs_child() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: root reads a mode 000 directory");
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let claude_home = home.path().join(".claude");
+        install_shipped(&claude_home);
+        let locked = skill_dir(&claude_home).join("guides");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let (exe, ran) = marking_exe(bin.path(), "");
+
+        let lines = refresh_ecp_skill(&exe, Some(home.path().to_path_buf()));
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!ran.exists(), "the child ran");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("could not compare"), "{lines:?}");
+        assert!(
+            lines[0].contains(&format!("`{}`", skill_refresh_cmd(true))),
+            "{lines:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn test_owned_by_other_than_follows_symlinked_dir() {
         let dir = tempfile::tempdir().unwrap();
         // SAFETY: geteuid has no preconditions and cannot fail.
@@ -1694,6 +1764,7 @@ mod tests {
             .into_iter()
             .find(|p| std::fs::metadata(p).is_ok_and(|m| m.uid() != me))
         else {
+            eprintln!("skipped: no directory owned by another uid on this host");
             return;
         };
         let link = dir.path().join("claude-link");
