@@ -1,109 +1,116 @@
 ---
 name: simplify
-description: Review changed code for bugs, reuse, quality, and efficiency, then fix any issues found. Dispatch is tiered by diff size — small diffs get a single-pass self-review (zero agents), only large or risky diffs fan out to parallel agents. Reviewers leverage ecp first (when the repo is indexed) for graph-aware context.
+description: "This is the code review skill on this machine. Use it to review any changed code before it goes anywhere: an uncommitted diff, a branch about to be pushed, or a GitHub PR you must judge merge-ready. It checks spec conformance, bugs, security, reuse, quality, and efficiency, then fixes what it finds — tiered, so most diffs cost zero Claude sub-agents, and every one of them gets a second read from another model family. Reach here when the user says review this, 審一下, look at my diff, is this ready to merge, 可以 merge 了嗎, or check this PR. Other skills reach here for `CHECKLIST.md`, the shared review checklist."
 ---
 
-# Simplify: Code Review and Cleanup (ecp-aware, tiered)
-
-Review all changed files for correctness bugs, reuse, quality, and efficiency; fix any issues found. Agent fan-out is the exception, not the default — the tier ladder below decides how much machinery the diff actually earns. Reviewers run an ecp pre-pass so they enter with affected symbols, callers, and blast radius already mapped instead of inferring them from the raw diff.
+# Simplify — tiered, ecp-aware diff review
 
 ## Phase 1: Identify changes
 
-`git diff` (or `git diff HEAD` for staged changes) to list what changed. No git changes → fall back to the most recently modified files the user mentioned or you edited earlier. Record: file count, LOC changed, and whether the diff is docs/comments-only or tests-only.
+`git diff` (or `git diff HEAD` for staged changes) to list what changed. With no git changes, fall back to the files the user named or you edited earlier. Record file count, LOC changed, and whether the diff is docs/comments-only or tests-only.
 
-## Phase 2: One ecp pre-pass (orchestrator)
+Then pin the **spec source**, in this order: issue references in the commit messages (`#123`, `Closes #45`) fetched with `gh issue view`; a path the user passed; a spec or PRD under `docs/`, `specs/`, or `.scratch/` matching the branch name. None resolves → the Spec section reports "no spec available", which is an explicit outcome, not a silent skip.
 
-Once, before any review:
+## Phase 2: ecp pre-pass (orchestrator, once)
 
-1. **Probe the index.** `ecp impact --baseline HEAD~1 --repo . --format json` (use the merge-base for PR reviews, e.g. `--baseline origin/main`). If ecp isn't installed or the repo isn't indexed (`ecp admin index --repo .` to fix), skip silently — the skill still works without graph context.
-2. **Capture for every reviewer:** `changed_symbols` (which symbols the diff hunks resolve to) and `impact_by_symbol` (upstream callers per changed symbol) — both from `impact --baseline`.
-3. If a changed symbol's upstream caller count is high (>10) or it hits auth / payment / external-API paths, surface that as **HIGH risk** before reviewing — don't bury it in reports.
+1. `ecp impact --baseline HEAD~1 --repo . --format json` — use the merge-base for PR reviews (`--baseline origin/main`). Not installed or not indexed → `ecp admin index --repo .`, or skip silently; the skill works without graph context.
+2. Capture `changed_symbols` (which symbols the hunks resolve to) and `impact_by_symbol` (upstream callers per changed symbol).
+3. Risk floor, per CLAUDE.md Dispatch *Risk is inferred*: a changed symbol with >10 upstream callers, or one on an auth / payment / schema-migration / concurrency / external-API path, is **HIGH**. Tell the user before you review, not at the end of the report.
 
-## Phase 2.5: Tier the dispatch
+## Phase 3: Tier the dispatch
 
-Pick the LOWEST tier the diff qualifies for. Size alone never rounds up; only the risk signals listed in Tier 3 do.
+Pick the LOWEST tier the diff qualifies for; Phase-2 risk moves it up.
 
 | Tier | When | Dispatch |
 |------|------|----------|
-| 0 | docs / comments / lockfile-only diff | No review. Say so and stop. |
-| 1 | <3 files **or** <100 LOC | **Zero agents.** Single-pass self-review by the orchestrator against the merged checklist below (~50–70k tokens saved vs fan-out). |
-| 2 | ≤10 files **and** ≤400 LOC | **One agent** carrying the merged checklist (all dimensions in one prompt). |
-| 3 | bigger, or cross-crate/cross-package, or Phase-2 flagged HIGH risk | Parallel agents — but only the dimensions the diff earns (next section). |
+| 0 | docs / comments / lockfile-only | No review. Say so and stop. |
+| 1 | <3 files **or** <100 LOC | **Zero Claude agents** — the orchestrator self-reviews against [`CHECKLIST.md`](CHECKLIST.md), plus the free third reader below. |
+| 2 | ≤10 files **and** ≤400 LOC | **One Claude agent** carrying every checklist section, plus the free third reader below. |
+| 3 | bigger, or cross-crate/cross-package, or Phase-2 HIGH risk | Parallel Claude agents, one per dimension the diff can violate. |
 
-**Dimension selection for Tier 3** — drop dimensions the diff can't violate instead of always launching all of them:
+Every tier from 1 up also runs codex — see **Cross-family** below. The tier sets how many Claude agents read the diff. A second model family reads it either way.
 
-- **Correctness (bugs)** — always. Prefer `subagent_type: feature-dev:code-reviewer` when available (its built-in system prompt is tuned for bug/security hunting with confidence filtering); else general-purpose with the checklist below.
-- **Quality** — always.
-- **Reuse** — only when the diff ADDS new functions/utilities (pure deletions, renames, or edits inside existing bodies can't duplicate anything new).
-- **Efficiency** — only when the diff touches non-test code (a tests-only diff gets Correctness + Quality only).
+**Reviewer agent** — Tier 2 and Tier 3 both dispatch `subagent_type: deep-review` with `model: sonnet`: read-only, ecp-aware, already carrying the confidence protocol. At Phase-2 HIGH risk, drop the model override so Correctness runs on its native opus. When the agent list has no `deep-review`, dispatch `general-purpose` with the same model. The Phase-4 preamble carries the same rules.
 
-Typical Tier 3 is therefore 2–4 agents, not an unconditional full fan-out.
+**HIGH runs Tier 3.** HIGH is the top level Phase 2 assigns, so it never qualifies a diff out of the tier it just earned.
 
-## Phase 3: Run the review
+**Cross-family — always.** Every tier from 1 up launches `codex` alongside its own agents: a different model family is the only reader whose mistakes are uncorrelated with yours. Tier 0 launches nothing.
 
-Reviewers (or the orchestrator at Tier 1) get the diff plus the Phase-2 artefacts.
+Without the `peer-agent` skill, use the detached form below. With it, pick the mode from its *Two ways to run a peer*: supervised through
+Orca when Orca is up, so the report arrives as a `worker_done` message you wait on;
+detached otherwise. The detached form runs from the repo root at the same time as the
+tier's agents. Write the brief to a file, then start this as a background Bash call:
 
-**Common preamble (agents only):**
+```bash
+bash ~/.claude/skills/simplify/codex-review.sh "<scratchpad>/codex-brief.md" "<scratchpad>/codex-review.md"
+```
 
-> Repo at `<absolute path>`. Diff in `<location>`. ecp pre-pass found:
-> - changed_symbols: `<list>`
-> - impact_by_symbol: `<symbol → upstream callers>`
-> - risk: `<level>`
->
-> Focus on the symbols that actually changed; skip rename-only / formatting-only sections (the graph confirms those don't alter execution). Dig in with `ecp inspect --name X --repo .`; blast radius with `ecp impact --target X --direction upstream --repo .`; "does this duplicate an existing function?" with `ecp find "<concept>" --repo .`.
-> Report each finding as: file:line, what and why, suggested fix, **confidence 0–100**. Report only findings you'd defend at 50+; do not pad with nitpicks.
+The script launches codex read-only at `medium`, waits for its report, and ends the codex process. It returns when the review ends, so the harness's completion notification is the signal: wait for it, then read the report file. A background call you start this way is the only watcher it needs.
 
-### Checklist — Correctness (bugs)
+The brief carries the diff location and what the change is for. It also carries the decisions that were settled by argument rather than measurement, what any earlier round already found, and the finding format the agent preamble names. Ask it for a **challenge list**: every way a reader could legitimately attack this diff. Tell it that "clean, no findings" is a welcome result. The challenge list is the part same-family reviewers cannot give you.
 
-1. **Logic errors** — inverted conditions, off-by-one, wrong operator, dead branches that should be live
-2. **Boundary/empty cases** — empty input, zero/one element, max sizes, saturating vs wrapping arithmetic
-3. **Error-handling gaps** — swallowed errors, unwrap/expect on fallible paths reachable in production, partial-failure states left inconsistent
-4. **Null/None/undefined flows** — optional values dereferenced on paths where absence is possible
-5. **Concurrency** — racy check-then-act, shared state without synchronization, lock ordering, await points invalidating earlier reads
-6. **Resource lifecycle** — leaks (files, sockets, listeners), double-free/double-close, missing cleanup on early return
-7. **Contract breakage** — callers relying on the OLD behavior of a changed function (`ecp impact --target X --direction upstream` enumerates them; verify each caller survives the change)
-8. **Security** — injection (SQL/shell/path), unvalidated external input crossing a trust boundary, secrets in logs
+Every tier launches at `medium`; the `peer-agent` skill's *Model and effort* holds that rule. A brief wider than one reader holds is split across several peers at `medium`, one per dimension, each carrying only its own dimension: one brief file and one report file per peer.
 
-### Checklist — Reuse
+A non-zero exit is a downgrade. Exit 2 means codex ended without a report, 3 means no report before the timeout, and 4 means codex is missing or not logged in. Report the stderr reason in the summary as `cross-family skipped: <reason>`. A failed run keeps its log at `<report>.log`: read the end of that log before you call the run skipped.
 
-1. **Existing utilities that replace new code.** Graph first — `ecp find "upsert bot" --repo .` / `ecp inspect --name BotInfo --repo .` finds matches grep won't; fall back to grep only when the graph is empty.
-2. **New function duplicating existing functionality** — suggest the existing one (file:line).
-3. **Inline logic that an existing utility covers** — hand-rolled string manipulation, manual path handling, custom env checks, ad-hoc type guards.
+**Free third reader — Tiers 1 and 2.** Both tiers also send the whole diff to `nvidia/nemotron-3-ultra-550b-a55b:free`, a third model family whose capacity costs nothing. Start it as a background Bash call, as for codex. Read its report after the completion notification arrives.
 
-### Checklist — Quality
+```bash
+python3 ~/.claude/skills/simplify/free-reader.py "<scratchpad>/free-brief.md" "<scratchpad>/free-review.md"
+```
 
-1. **Redundant state** — duplicates existing state, cacheable-derivable values, observers that could be direct calls
-2. **Parameter sprawl** — new params instead of restructuring existing ones
-3. **Copy-paste with variation** — near-duplicate blocks needing a shared abstraction (`ecp find` to confirm it isn't already canonical somewhere)
-4. **Leaky abstractions** — exposing internals or breaking abstraction boundaries (`ecp inspect` shows the boundary)
-5. **Stringly-typed code** — raw strings where constants / enums / branded types exist
-6. **Unnecessary JSX nesting** — wrapper elements adding no layout value
-7. **Nested conditionals 3+ deep** — flatten with early returns, guard clauses, lookup tables
-8. **Nested ternaries** — replace with `match`/switch or if-else chains
-9. **WHAT-comments** — delete (identifiers say it); keep only non-obvious WHY
+Write the brief to a file first. It is the Phase-4 agent preamble with the diff pasted in full and the ecp lines dropped: this reader has no tools and no repo access, so a path it cannot open is a section it cannot review. Drop the absolute repo path with them, and say what the code is for instead — this brief leaves the machine, and the path names the user, the client and the project. Read the diff before you send it: a hunk that REMOVES a credential still carries that credential in its `-` lines.
 
-**Readability guardrail** — a fix must make code *easier* to read, not just shorter. Reject clarity-for-line-count trades: dense one-liners, over-clever collapses, merging distinct concerns, dropping an abstraction that earned its place.
+**Read its report as leads, not as findings.** Take the file:line and the claim, verify the location yourself, and discard its failure_scenario and confidence: they never enter the Phase-5 ladder. Treat concurrency and lock scope as uncovered by this reader, whatever its report says.
 
-### Checklist — Efficiency
+A third argument naming a context file (the full text of the touched files, plus the callers `ecp impact --direction upstream` names) makes it re-report against that file. It is optional; skip it when you verify the locations yourself anyway.
 
-1. **Unnecessary work** — redundant computation, repeated reads, duplicate API calls, N+1
-2. **Missed concurrency** — independent operations run sequentially
-3. **Hot-path bloat** — new blocking work in startup / per-request / per-render paths; `ecp impact --target X --direction upstream --repo .` shows if it sits in a hot path
-4. **Recurring no-op updates** — unconditional store updates in polling loops; verify wrappers honour same-reference returns
-5. **TOCTOU existence checks** — operate directly and handle the error instead of pre-checking
-6. **Memory** — unbounded structures, missing cleanup, listener leaks
-7. **Overly broad ops** — reading whole files / loading all items when a portion suffices
+Launch exactly one, and only at Tier 1 or Tier 2: its recall falls as the diff grows, and parallel calls hang. A `TRUNCATED` line at the end of its report means the tail is missing, not clean. A non-zero exit prints its reason; report it as `free reader skipped: <reason>` and carry on.
 
-## Phase 4: Aggregate and fix (confidence-gated)
+> Measured 2026-09-11 on the earlier `nemotron-3-super-120b-a12b:free`, not yet on ultra: 4 of 5 planted defects located per trial, every failure_scenario invented, a lock held across a network call missed in every read; 4 of 4 on a 52-line diff, 2.3 of 4 on a 2034-line one.
 
-Wait for all reviewers, aggregate, then act by confidence — mirrors the built-in code-reviewer's high-priority-only filtering:
+**Dispatching is part of the invocation.** The agents the tier names need no separate approval; launch them.
 
-- **≥70**: fix directly.
-- **50–69**: list in the summary as "worth a look", don't fix unprompted.
-- **<50**: drop silently.
+Walk the dimensions yourself only when the `Agent` tool is absent from your tool set, and open the summary with `Tier <n>, run inline: Agent tool unavailable`. That is a downgrade you report, not a judgement call you justify.
 
-False positive at any confidence → note and skip, don't argue. After fixing, if the repo is ecp-indexed, `ecp find <changed-symbol> --repo .` to confirm fixed symbols still resolve. Summarise what was fixed (or confirm it was already clean), including the tier chosen and why.
+**Tier-3 dimensions** — launch only the ones the diff can violate, typically 2–4:
 
-## Cost
+- **Correctness** and **Quality** — always. The Quality agent carries the Conventions section too, so project rules cost no extra agent.
+- **Spec** — only when Phase 1 resolved a spec source. Its own agent, so intent findings are never reranked against style findings.
+- **Reuse** — only when the diff ADDS functions or utilities (deletions, renames, and edits inside existing bodies duplicate nothing new). Mechanical graph lookup, so `subagent_type: lite-scan` instead, or `general-purpose` with `model: haiku` when `lite-scan` is not defined.
+- **Security** — only when the diff touches a route table, an auth or session path, a tenancy check, a permission, a credential, a webhook handler, a tool the model can call, or a server-side fetch of a caller-supplied URL. The Security section routes into `~/.claude/skills/simplify/security/SURFACES.md`, which probes the repo for surfaces and loads depth only for those it finds. Phase 2 already raises those paths to HIGH, so this dimension and Tier 3 arrive together. Runs on `deep-review` at its native opus.
+- **Efficiency** — only when the diff touches non-test code.
 
-The tier ladder is the main cost control: most pre-push diffs are Tier 1 and cost zero agents. The pre-pass is one CLI call; per-reviewer ecp calls are bounded — start narrow (one symbol), widen only if needed. Graph-aware review is **token-cheaper than reading large diffs**: reviewers skip mechanical noise (renames, formatting) the graph already proved is structure-preserving.
+## Phase 4: Run the review
+
+Every reviewer — the orchestrator itself at Tier 1 — walks **every rung of every checklist section it owns**, and is done only once each rung has ended as a finding or as explicitly clear.
+
+The preamble below carries the review rules, not just the dispatch text: scope, confidence floor, and blind spots bind an inline pass exactly as they bind an agent.
+
+Agent preamble:
+
+> Repo at `<absolute path>`. Diff in `<location>`. Spec at `<path or fetched issue, else "none">`. Apply every rung of the `<sections>` sections of `~/.claude/skills/simplify/CHECKLIST.md`.
+> ecp pre-pass — changed_symbols: `<list>` · impact_by_symbol: `<symbol → upstream callers>` · risk: `<level>` · commands: one `ecp impact --target <symbol> --direction upstream --repo .` per changed symbol, listed here.
+> Review the symbols that actually changed; the graph already proved the rename-only and formatting-only sections structure-preserving. That proof covers code only: *Prose drift* still searches the text for every renamed name. Read the enclosing function of every hunk: a bug on an unchanged line of a touched function is in scope, because the diff re-exposes it. Run every command the pre-pass lists and paste each output under the finding it supports; a definition question goes to `ecp inspect --name X --repo .` and a reuse question to `ecp find "<concept>" --repo .`, output pasted the same way.
+> Open with the rung ledger that CHECKLIST.md defines. Report each finding as file:line, what and why, suggested fix, a **failure_scenario** (concrete inputs or state, and the wrong output or crash they produce), and **confidence 0–100**. A finding you cannot give a failure_scenario for is not a finding — drop it rather than lowering its confidence. Realistic-but-rare state keeps its confidence: a race, a nil on a cold-cache path, a falsy zero, a boundary the code does not exclude. Score a finding below 50 only when the code refutes it — quote the line that makes it impossible, or the guard that already handles it. Carry the command you ran and its raw output so the orchestrator re-checks without redoing your search. Close with your blind spots: what you did not read, run, or verify. Report the findings you would defend at 50 or above.
+
+**Sweep — Phase-2 HIGH risk only.** Once the reviewers return, take one more pass yourself over the diff and its enclosing functions, holding their finding list. Look only for what the list misses: moved code that dropped a guard or an anchor, a default evaluated once at definition, a lock scope that shrank, setup/teardown asymmetry in tests, a config default flipped. An empty sweep is a valid result.
+
+## Phase 5: Aggregate and fix
+
+Wait for every reviewer, codex and the free reader included. Act by confidence, scored against the anchors in [`CHECKLIST.md`](CHECKLIST.md#confidence); the free reader's own scores do not count toward these bands, per its section above:
+
+- **≥50, the fix gate** — re-check the finding against the evidence it carries, then fix. Re-checking is one jump to the cited line or command output, not a repeat of the reviewer's search. The 50 anchor already means the finding is real. A finding whose evidence the re-check cannot confirm is not fixed: it goes under `## Scanned, not acted on`.
+- **<50** — drop. A finding you spent a command investigating and then rejected goes under a `## Scanned, not acted on` heading instead: one line each, carrying its score and why it stays.
+
+Fix everything you can reach. Three classes stay unapplied and go to the summary as proposals, each carrying the concrete change it proposes and one line saying why it stays unapplied:
+
+- a fix that changes intended behaviour
+- a fix that reaches outside the files the diff touches, except a *Prose drift* fix: rewrite that stale sentence in any file of the repo
+- a fix big enough to be its own change: a refactor, an API change, a migration
+
+A false positive at any confidence → note it and move on. After fixing, `ecp find <changed-symbol> --repo .` confirms the fixed symbols still resolve.
+
+Summarise what was fixed (or that the diff was already clean), and which tier ran and why. Report the cross-family findings separately from the tier's. A finding two model families reach independently outranks its confidence score. A finding only codex reached is the reason it runs. Rank Correctness findings above Reuse, Quality, Conventions, and Efficiency findings.
+
+Spec findings sit under their own `## Spec` heading above the ranked list, and keep their own worst-issue line — a diff can be clean on every other axis and still build the wrong thing, so the two are never ranked against each other.
