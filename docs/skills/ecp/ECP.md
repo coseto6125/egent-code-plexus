@@ -8,7 +8,7 @@ Calls alone do not prove value dependency. Check unresolved boundaries and refre
 
 ## The reflex
 
-**Wanting to explore code IS the ecp trigger.** The moment the thought forms — "understand this codebase / map the architecture / find who calls X / trace how this connects / fan out and read these files" — the first action is `ecp find` / `ecp impact` / `ecp inspect`, the way "find a string" reaches for grep. It's the default expansion of "explore the code," **ecp's own codebase included**. An Explore agent reads text; ecp reads the graph in one query.
+**Before you open source files or dispatch an Explore agent to learn how code connects, run `ecp find` / `ecp impact` / `ecp inspect`.** This includes ecp's own codebase. An Explore agent reads text; ecp reads the graph in one query.
 
 ## The one rule
 
@@ -33,7 +33,7 @@ Fall back to grep or an Explore agent only when the target is non-code text, or 
 
 ## Reading output — five tells
 
-High-signal, with five narrow failure modes. Spot the tell, cross-check, trust the rest. (Resolution steps: `guides/troubleshooting.md`.)
+High-signal, with five narrow failure modes. Spot the tell, cross-check, trust the rest. (Resolution steps: the `ecp` skill's `guides/troubleshooting.md`.)
 
 - **`found:false` + a `result` field (or `l2.warm-attach`/`note:` on stderr)** → provisional, not a real miss: HEAD's graph isn't built yet, a sibling commit's is attached. Rerun or `ecp admin index --force --repo .`. No `result` field → trustworthy — and a trustworthy miss means *report "doesn't exist"*, never synthesize a caller list / blast radius for a symbol ecp couldn't find.
 - **`ecp impact` caller counts are a lower bound** → the resolver suppresses ambiguous bare calls to common names. Suspiciously low count → `grep` the call sites before trusting a refactor's blast radius.
