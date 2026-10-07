@@ -346,7 +346,10 @@ fn test_impact_caveat_class_and_function_same_name_kind_filter_fires() {
 }
 
 #[test]
-fn test_impact_caveat_same_name_twice_in_one_file_fires() {
+fn test_impact_caveat_same_name_twice_in_one_file_absent_and_caller_listed() {
+    // Two same-named defs in one file share a uid, so the index keeps one
+    // node (reported as a uid-collision blind spot) and resolves the bare
+    // call to it: no suppressed callers, so no ambiguity caveat.
     let fx = Fixture::index(
         &[
             (
@@ -365,7 +368,15 @@ fn test_impact_caveat_same_name_twice_in_one_file_fires() {
         &["--target", NAME, "--kind", "function", "--direction", "up"],
         false,
     );
-    assert!(has_ambiguity_caveat(&json), "{json}");
+    assert!(!has_ambiguity_caveat(&json), "{json}");
+    let callers: Vec<&str> = json["impact"]
+        .as_array()
+        .expect("impact array")
+        .iter()
+        .filter(|n| n["depth"] == 1)
+        .filter_map(|n| n["filePath"].as_str())
+        .collect();
+    assert_eq!(callers, ["e.ts"], "{json}");
 }
 
 #[test]
