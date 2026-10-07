@@ -1,7 +1,9 @@
 //! `OverlayView` against a full reindex for three fidelity defects: the
 //! builder-made nodes of a dirty file (FU-2026-10-08-264b182adee6), the
 //! import tier over a dirty target file (FU-2026-10-08-7bd2cba6a72c), and
-//! calls and constructions through an import alias.
+//! calls and constructions through an import alias. Also the import tier's
+//! candidate files, namespace imports, and a uid declared twice in a dirty
+//! file.
 
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::provider::LanguageProvider;
@@ -732,5 +734,397 @@ fn test_build_php_construction_through_use_alias_calls_declared_class() {
         )],
         "run",
         &[("src/pkg/Helper.php", "Helper", "", 95)],
+    );
+}
+
+// ── Import tier: the candidate files a relative specifier names ────────────
+// The index expands `./` and `../` from the importer's directory into
+// concrete files and takes the first that declares the bound name
+// (`resolve_named_import`), so a same-stem file elsewhere never competes.
+// Rust: n/a for the relative rule — a `use` path (`crate::`, `super::`,
+// `self::`) is never a `./` specifier. It keeps the last-segment match,
+// tested here only for the duplicate-declaration rule; a `::` call resolves
+// through the module layout instead.
+// Python, Java, Kotlin, PHP: n/a — `bind_import` discovers their modules.
+// Go, Swift, Dart, C, C++, Ruby, C#: n/a — no import of theirs binds a
+// symbol by name (see the U2 note above), so no candidate file is probed.
+
+const TS_TESTS_HELPER: (&str, &str) = ("tests/a.ts", "export function helper() {}\n");
+
+#[test]
+fn test_build_typescript_relative_import_beside_dirty_same_stem_file_binds_importer_dir() {
+    assert_calls(
+        &ecp_analyzer::typescript::TypeScriptProvider::new().unwrap(),
+        &[TS_HELPER, TS_TESTS_HELPER, ("src/b.ts", TS_IMPORTER)],
+        &[
+            ("tests/a.ts", "export function helper() { return 1; }\n"),
+            ("src/b.ts", TS_IMPORTER_CALLS),
+        ],
+        "useIt",
+        &[("src/a.ts", "helper", "", 95)],
+    );
+}
+
+#[test]
+fn test_build_javascript_relative_import_beside_dirty_same_stem_file_binds_importer_dir() {
+    assert_calls(
+        &ecp_analyzer::javascript::parser::JavaScriptProvider::new().unwrap(),
+        &[
+            ("src/a.js", "export function helper() {}\n"),
+            ("tests/a.js", "export function helper() {}\n"),
+            (
+                "src/b.js",
+                "import { helper } from './a';\nexport function useIt() { return 1; }\n",
+            ),
+        ],
+        &[
+            ("tests/a.js", "export function helper() { return 1; }\n"),
+            (
+                "src/b.js",
+                "import { helper } from './a';\nexport function useIt() { return helper(); }\n",
+            ),
+        ],
+        "useIt",
+        &[("src/a.js", "helper", "", 95)],
+    );
+}
+
+#[test]
+fn test_build_typescript_relative_import_beside_dirty_mock_binds_module() {
+    assert_calls(
+        &ecp_analyzer::typescript::TypeScriptProvider::new().unwrap(),
+        &[
+            ("src/utils.ts", "export function fmt() {}\n"),
+            ("src/__mocks__/utils.ts", "export function fmt() {}\n"),
+            (
+                "src/app.ts",
+                "import { fmt } from './utils';\nexport function run() { return 1; }\n",
+            ),
+        ],
+        &[
+            (
+                "src/__mocks__/utils.ts",
+                "export function fmt() { return 1; }\n",
+            ),
+            (
+                "src/app.ts",
+                "import { fmt } from './utils';\nexport function run() { return fmt(); }\n",
+            ),
+        ],
+        "run",
+        &[("src/utils.ts", "fmt", "", 95)],
+    );
+}
+
+#[test]
+fn test_build_typescript_parent_dir_specifier_binds_parent_module() {
+    assert_calls(
+        &ecp_analyzer::typescript::TypeScriptProvider::new().unwrap(),
+        &[
+            TS_HELPER,
+            ("src/x/a.ts", "export function helper() {}\n"),
+            (
+                "src/x/b.ts",
+                "import { helper } from '../a';\nexport function useIt() { return 1; }\n",
+            ),
+        ],
+        &[(
+            "src/x/b.ts",
+            "import { helper } from '../a';\nexport function useIt() { return helper(); }\n",
+        )],
+        "useIt",
+        &[("src/a.ts", "helper", "", 95)],
+    );
+}
+
+#[test]
+fn test_build_typescript_directory_specifier_binds_index_file() {
+    assert_calls(
+        &ecp_analyzer::typescript::TypeScriptProvider::new().unwrap(),
+        &[
+            ("src/lib/index.ts", "export function helper() {}\n"),
+            ("tests/lib.ts", "export function helper() {}\n"),
+            (
+                "src/b.ts",
+                "import { helper } from './lib';\nexport function useIt() { return 1; }\n",
+            ),
+        ],
+        &[(
+            "src/b.ts",
+            "import { helper } from './lib';\nexport function useIt() { return helper(); }\n",
+        )],
+        "useIt",
+        &[("src/lib/index.ts", "helper", "", 95)],
+    );
+}
+
+#[test]
+fn test_build_typescript_specifier_with_extension_binds_named_file() {
+    assert_calls(
+        &ecp_analyzer::typescript::TypeScriptProvider::new().unwrap(),
+        &[
+            TS_HELPER,
+            TS_NAMESAKE,
+            (
+                "src/b.ts",
+                "import { helper } from './a.ts';\nexport function useIt() { return 1; }\n",
+            ),
+        ],
+        &[(
+            "src/b.ts",
+            "import { helper } from './a.ts';\nexport function useIt() { return helper(); }\n",
+        )],
+        "useIt",
+        &[("src/a.ts", "helper", "", 95)],
+    );
+}
+
+#[test]
+fn test_build_typescript_specifier_naming_new_dirty_file_binds_it() {
+    assert_calls(
+        &ecp_analyzer::typescript::TypeScriptProvider::new().unwrap(),
+        &[TS_NAMESAKE, ("src/b.ts", TS_IMPORTER)],
+        &[TS_HELPER, ("src/b.ts", TS_IMPORTER_CALLS)],
+        "useIt",
+        &[("src/a.ts", "helper", "", 95)],
+    );
+}
+
+// The first probed file wins even when a later probe declares the name too.
+#[test]
+fn test_build_typescript_dirty_module_file_beats_clean_index_file() {
+    assert_calls(
+        &ecp_analyzer::typescript::TypeScriptProvider::new().unwrap(),
+        &[
+            TS_HELPER,
+            ("src/a/index.ts", "export function helper() {}\n"),
+            ("src/b.ts", TS_IMPORTER),
+        ],
+        &[
+            ("src/a.ts", "export function helper() { return 1; }\n"),
+            ("src/b.ts", TS_IMPORTER_CALLS),
+        ],
+        "useIt",
+        &[("src/a.ts", "helper", "", 95)],
+    );
+}
+
+// Guard: the first probed file is dirty and deleted the name, so the probe
+// falls through to the next file and never binds the suppressed node.
+#[test]
+fn test_build_typescript_dirty_module_file_without_name_falls_through_to_index_file() {
+    assert_calls(
+        &ecp_analyzer::typescript::TypeScriptProvider::new().unwrap(),
+        &[
+            TS_HELPER,
+            ("src/a/index.ts", "export function helper() {}\n"),
+            ("src/b.ts", TS_IMPORTER),
+        ],
+        &[
+            ("src/a.ts", "export function other() {}\n"),
+            ("src/b.ts", TS_IMPORTER_CALLS),
+        ],
+        "useIt",
+        &[("src/a/index.ts", "helper", "", 95)],
+    );
+}
+
+// ── Import tier: alias and namespace bindings (`import_binding`) ───────────
+// Python, Java, Kotlin, PHP: n/a — `bind_import` already uses
+// `import_binding`. Other languages: n/a, as above.
+// Rust: n/a for the namespace import — `use crate::a;` + `a::f()` is a `::`
+// path resolved through the module layout, and a glob `use a::*` has no
+// alias to bind.
+
+#[test]
+fn test_build_typescript_alias_into_dirty_module_binds_declared_function() {
+    assert_calls(
+        &ecp_analyzer::typescript::TypeScriptProvider::new().unwrap(),
+        &[
+            TS_HELPER,
+            TS_NAMESAKE,
+            (
+                "src/b.ts",
+                "import { helper as h } from './a';\nexport function useIt() { return 1; }\n",
+            ),
+        ],
+        &[
+            ("src/a.ts", "export function helper() { return 1; }\n"),
+            (
+                "src/b.ts",
+                "import { helper as h } from './a';\nexport function useIt() { return h(); }\n",
+            ),
+        ],
+        "useIt",
+        &[("src/a.ts", "helper", "", 95)],
+    );
+}
+
+#[test]
+fn test_build_javascript_alias_into_dirty_module_binds_declared_function() {
+    assert_calls(
+        &ecp_analyzer::javascript::parser::JavaScriptProvider::new().unwrap(),
+        &[
+            ("src/a.js", "export function helper() {}\n"),
+            ("src/c.js", "export function helper() {}\n"),
+            (
+                "src/b.js",
+                "import { helper as h } from './a';\nexport function useIt() { return 1; }\n",
+            ),
+        ],
+        &[
+            ("src/a.js", "export function helper() { return 1; }\n"),
+            (
+                "src/b.js",
+                "import { helper as h } from './a';\nexport function useIt() { return h(); }\n",
+            ),
+        ],
+        "useIt",
+        &[("src/a.js", "helper", "", 95)],
+    );
+}
+
+#[test]
+fn test_build_rust_use_alias_into_dirty_module_binds_declared_function() {
+    assert_calls(
+        &ecp_analyzer::rust::parser::RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "mod a;\nmod b;\nmod c;\n"),
+            ("src/a.rs", "pub fn helper() {}\n"),
+            ("src/c.rs", "pub fn helper() {}\n"),
+            (
+                "src/b.rs",
+                "use crate::a::{helper as h};\npub fn run() {}\n",
+            ),
+        ],
+        &[
+            ("src/a.rs", "pub fn helper() { let _ = 1; }\n"),
+            (
+                "src/b.rs",
+                "use crate::a::{helper as h};\npub fn run() { h(); }\n",
+            ),
+        ],
+        "run",
+        &[("src/a.rs", "helper", "", 95)],
+    );
+}
+
+macro_rules! namespace_import_binds {
+    ($test:ident, $provider:expr, $ext:literal) => {
+        #[test]
+        fn $test() {
+            let module = concat!("src/a.", $ext);
+            let importer = concat!("src/app.", $ext);
+            assert_calls(
+                &$provider,
+                &[
+                    (module, "export function f() {}\n"),
+                    (concat!("src/b.", $ext), "export function f() {}\n"),
+                    (
+                        importer,
+                        "import * as ns from './a';\nexport function go() { return 1; }\n",
+                    ),
+                ],
+                &[(
+                    importer,
+                    "import * as ns from './a';\nexport function go() { return ns.f(); }\n",
+                )],
+                "go",
+                &[(module, "f", "", 95)],
+            );
+        }
+    };
+}
+
+namespace_import_binds!(
+    test_build_typescript_namespace_import_call_binds_imported_module,
+    ecp_analyzer::typescript::TypeScriptProvider::new().unwrap(),
+    "ts"
+);
+namespace_import_binds!(
+    test_build_javascript_namespace_import_call_binds_imported_module,
+    ecp_analyzer::javascript::parser::JavaScriptProvider::new().unwrap(),
+    "js"
+);
+
+// ── A uid declared twice in one dirty file ─────────────────────────────────
+// The builder keeps the first declaration and tombstones the later one, so
+// a half-finished edit that repeats a function leaves one candidate.
+// Language-independent (the uid rule is the builder's); one test per tier,
+// plus Rust `#[cfg]` twins through the last-segment import match.
+
+const TS_HELPER_TWICE: &str =
+    "export function helper() {}\nexport function helper() { return 1; }\n";
+
+#[test]
+fn test_build_typescript_duplicate_uid_same_file_call_binds_first() {
+    assert_calls(
+        &ecp_analyzer::typescript::TypeScriptProvider::new().unwrap(),
+        &[(
+            "src/a.ts",
+            "export function helper() {}\nexport function run() { return 1; }\n",
+        )],
+        &[(
+            "src/a.ts",
+            "export function helper() {}\nexport function helper() {}\nexport function run() { return helper(); }\n",
+        )],
+        "run",
+        &[("src/a.ts", "helper", "", 100)],
+    );
+}
+
+#[test]
+fn test_build_typescript_duplicate_uid_import_scoped_binds_first() {
+    assert_calls(
+        &ecp_analyzer::typescript::TypeScriptProvider::new().unwrap(),
+        &[TS_HELPER, TS_NAMESAKE, ("src/b.ts", TS_IMPORTER)],
+        &[
+            ("src/a.ts", TS_HELPER_TWICE),
+            ("src/b.ts", TS_IMPORTER_CALLS),
+        ],
+        "useIt",
+        &[("src/a.ts", "helper", "", 95)],
+    );
+}
+
+#[test]
+fn test_build_typescript_duplicate_uid_global_call_binds_unique() {
+    assert_calls(
+        &ecp_analyzer::typescript::TypeScriptProvider::new().unwrap(),
+        &[
+            TS_HELPER,
+            ("src/b.ts", "export function useIt() { return 1; }\n"),
+        ],
+        &[
+            ("src/a.ts", TS_HELPER_TWICE),
+            ("src/b.ts", "export function useIt() { return helper(); }\n"),
+        ],
+        "useIt",
+        &[("src/a.ts", "helper", "", 70)],
+    );
+}
+
+#[test]
+fn test_build_rust_duplicate_uid_segment_import_binds_first() {
+    assert_calls(
+        &ecp_analyzer::rust::parser::RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "mod a;\nmod b;\nmod c;\n"),
+            ("src/a.rs", "pub fn helper() {}\n"),
+            ("src/c.rs", "pub fn helper() {}\n"),
+            ("src/b.rs", "use crate::a::helper;\npub fn use_it() {}\n"),
+        ],
+        &[
+            (
+                "src/a.rs",
+                "#[cfg(unix)]\npub fn helper() {}\n#[cfg(windows)]\npub fn helper() {}\n",
+            ),
+            (
+                "src/b.rs",
+                "use crate::a::helper;\npub fn use_it() { helper(); }\n",
+            ),
+        ],
+        "use_it",
+        &[("src/a.rs", "helper", "", 95)],
     );
 }
