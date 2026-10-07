@@ -97,8 +97,7 @@ pub fn resolve_candidates(
         }
         base_defs += 1;
         // Working-tree truth: a dirty-file symbol deleted/renamed on disk
-        // (suppressed by the overlay view) is not a valid impact target. It
-        // still counts toward `base_defs` but not `disk_defs`.
+        // (suppressed by the overlay view) is not a valid impact target.
         if view.is_some_and(|v| v.redirect(idx as u32).is_none()) {
             continue;
         }
@@ -292,7 +291,8 @@ mod tests {
         let (plain, plain_defs) = resolve_matches(same_name_graph(), "dup", None, None, false);
         let (merged, merged_defs) = resolve_matches(same_name_graph(), "dup", None, None, true);
         assert_eq!(plain_defs, 36);
-        assert!(merged_defs >= plain_defs, "{merged_defs} vs {plain_defs}");
+        // base 36, disk 36 - 12 (src/b.ts) + 1 (overlay `dup`) = 25; max, not sum.
+        assert_eq!(merged_defs, 36, "plain {plain_defs}");
         assert!(merged.len() < plain.len());
         let (new_only, _) = resolve_matches(same_name_graph(), "brand_new", None, None, true);
         assert_eq!(new_only.len(), 1);

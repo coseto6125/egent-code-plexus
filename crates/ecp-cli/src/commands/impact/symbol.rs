@@ -325,7 +325,7 @@ pub(super) fn impact_by_name(
         };
         format!(
             "caller set may be incomplete: {same_name_defs} same-named definitions of \
-             '{bare_name}' exist, so bare calls (no import/qualifier context) may have \
+             '{bare_name}' were indexed, so bare calls (no import/qualifier context) may have \
              been ambiguity-suppressed at index time. {action}"
         )
     });

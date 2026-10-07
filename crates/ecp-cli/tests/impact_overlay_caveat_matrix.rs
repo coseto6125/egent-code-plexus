@@ -312,11 +312,12 @@ fn test_impact_caveat_file_filter_after_rename_still_fires() {
     assert!(has_ambiguity_caveat(&json), "{json}");
 }
 
-/// A class and a function share the name: the count is taken before `--kind`
-/// narrowing, so narrowing to the class keeps the caveat after the function
-/// is renamed away.
+/// A class and a function share the name. Contract: `--kind class` keeps
+/// resolving the class target before and after the function is renamed away.
+/// The caveat is not asserted: calls resolve with a callable-only kind filter,
+/// so the index suppressed nothing for this pair.
 #[test]
-fn test_impact_caveat_class_and_function_same_name_kind_filter_fires() {
+fn test_impact_class_and_function_same_name_kind_filter_resolves_class() {
     let fx = Fixture::index(
         &[
             ("c.ts".to_string(), format!("export class {NAME} {{}}\n")),
@@ -332,17 +333,37 @@ fn test_impact_caveat_class_and_function_same_name_kind_filter_fires() {
         "ts",
         "",
     );
-    let before = fx.impact_ok(
-        &["--target", NAME, "--kind", "class", "--direction", "up"],
-        false,
-    );
-    assert!(has_ambiguity_caveat(&before), "{before}");
+    let args = ["--target", NAME, "--kind", "class", "--direction", "up"];
+    let before = fx.impact_ok(&args, false);
     fx.write("d.ts", "export function renamedfn() {}\n");
-    let after = fx.impact_ok(
-        &["--target", NAME, "--kind", "class", "--direction", "up"],
+    let after = fx.impact_ok(&args, true);
+    for json in [&before, &after] {
+        assert!(json.to_string().contains("c.ts"), "{json}");
+    }
+}
+
+/// Route caveat parity with impact. One language: the counting is shared with
+/// the 14-language impact test above.
+#[test]
+fn test_path_caveat_after_uncommitted_rename_fires() {
+    let (_, ext, template, caller) = LANGS[0];
+    let fx = Fixture::two_defs(ext, template, caller);
+    fx.rename_in_d();
+    let out = fx.ecp(
+        &["path", "run", NAME, "--repo", ".", "--format", "json"],
         true,
     );
-    assert!(has_ambiguity_caveat(&after), "{after}");
+    assert!(
+        out.status.success(),
+        "path failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let caveat = json["result"].as_str().unwrap_or_default();
+    assert!(
+        caveat.contains("route may be incomplete") && caveat.contains("same-named definitions"),
+        "{json}"
+    );
 }
 
 #[test]
