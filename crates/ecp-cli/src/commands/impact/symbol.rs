@@ -305,7 +305,8 @@ pub(super) fn impact_by_name(
         result_obj["coverage"] = build_coverage_json(analyses);
     }
 
-    // FU-2026-05-29-011: with ≥2 same-named defs in the graph, the resolver
+    // FU-2026-05-29-011: with ≥2 same-named defs in the index (counting base
+    // defs an uncommitted edit renamed away), the resolver
     // may have suppressed bare calls to this name at index time
     // (`DecisionTier::AmbiguousGlobal`; language and vendor barriers exempt
     // some), so the upstream caller set is a lower bound — the payload must
