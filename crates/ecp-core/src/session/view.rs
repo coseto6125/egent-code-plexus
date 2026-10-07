@@ -277,18 +277,19 @@ impl OverlayView {
                 .collect();
 
             // Full indexing tombstones a later same-uid declaration (a
-            // half-finished edit, an overload) and never registers it by
-            // name, so only the first one of each uid is a candidate.
+            // half-finished edit, an overload) and never registers it in the
+            // global name table, so only the first one of each uid is a
+            // cross-file candidate. The same-file tier still sees both: the
+            // index's own-file lookup treats them as ambiguous and binds none.
             let mut named_uids: FxHashSet<u64> = FxHashSet::default();
             let mut virt_off = 0usize;
             for (file_ord, file) in files.iter().enumerate() {
                 for _ in &file.symbols {
                     let node = &nodes[virt_off];
                     let virt = base_len + virt_off as u32;
-                    if named_uids.insert(node.uid) {
-                        callables.add(file_ord, node, virt, file_metas[file_ord]);
-                        types.add(file_ord, node, virt, file_metas[file_ord]);
-                    }
+                    let first_of_uid = named_uids.insert(node.uid);
+                    callables.add(file_ord, node, virt, file_metas[file_ord], first_of_uid);
+                    types.add(file_ord, node, virt, file_metas[file_ord], first_of_uid);
                     virt_off += 1;
                 }
             }
@@ -761,7 +762,14 @@ impl<'a> OverlayNames<'a> {
         }
     }
 
-    fn add(&mut self, file_ord: usize, node: &'a ViewNode, virt: u32, meta: FileMeta) {
+    fn add(
+        &mut self,
+        file_ord: usize,
+        node: &'a ViewNode,
+        virt: u32,
+        meta: FileMeta,
+        first_of_uid: bool,
+    ) {
         if !(self.kind)(node.kind) {
             return;
         }
@@ -769,10 +777,12 @@ impl<'a> OverlayNames<'a> {
             .entry((file_ord, node.name.as_str()))
             .or_default()
             .push(virt);
-        self.anywhere
-            .entry(node.name.as_str())
-            .or_default()
-            .push((virt, meta));
+        if first_of_uid {
+            self.anywhere
+                .entry(node.name.as_str())
+                .or_default()
+                .push((virt, meta));
+        }
     }
 }
 
@@ -825,9 +835,8 @@ fn resolve_callee<'s>(
         if virts.len() == 1 {
             return accepts(virts[0]).then_some((virts[0], CONF_SAME_FILE));
         }
-        // Ambiguous within one file (same name, distinct uids: two owners
-        // or kinds; same-uid overloads are named once): suppress, like
-        // index time.
+        // Ambiguous within one file (overloads, same-uid twins included):
+        // suppress, like index time.
         return None;
     }
 

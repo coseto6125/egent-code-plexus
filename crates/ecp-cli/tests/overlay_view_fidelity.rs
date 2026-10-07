@@ -1057,7 +1057,9 @@ const TS_HELPER_TWICE: &str =
     "export function helper() {}\nexport function helper() { return 1; }\n";
 
 #[test]
-fn test_build_typescript_duplicate_uid_same_file_call_binds_first() {
+fn test_build_typescript_duplicate_uid_same_file_call_stays_unresolved() {
+    // The index's own-file lookup sees both same-uid twins and binds none;
+    // only its cross-file name table keeps just the first.
     assert_calls(
         &ecp_analyzer::typescript::TypeScriptProvider::new().unwrap(),
         &[(
@@ -1069,7 +1071,7 @@ fn test_build_typescript_duplicate_uid_same_file_call_binds_first() {
             "export function helper() {}\nexport function helper() {}\nexport function run() { return helper(); }\n",
         )],
         "run",
-        &[("src/a.ts", "helper", "", 100)],
+        &[],
     );
 }
 
