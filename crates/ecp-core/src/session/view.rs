@@ -3,7 +3,9 @@
 //! `OverlayView` makes uncommitted-edit symbols AND edges visible to graph
 //! traversals (impact, cypher) without rebuilding L2 and without loading
 //! O(graph) data. The base `ArchivedZeroCopyGraph` stays an immutable mmap;
-//! the view is a small in-memory delta strictly O(dirty files):
+//! the view is a small in-memory delta whose allocation is O(dirty symbols).
+//! Building it scans `graph.files` and `graph.nodes` once each per query
+//! ([`OverlayView::build`]):
 //!
 //! - **virtual nodes** — every symbol in a dirty file, addressed by virtual
 //!   index `base_len + i` so they compose with the base graph's dense `u32`
@@ -14,7 +16,11 @@
 //!   from the on-disk version; base IN-edges from clean files stay valid).
 //! - **suppressed** — base nodes of dirty files NOT re-emitted by the fresh
 //!   parse: deleted or renamed. Traversal must neither expand into nor
-//!   report them — this is what kills phantom callers after a rename.
+//!   report them — this is what kills phantom callers after a rename. Only
+//!   kinds a fragment can carry are suppressed; nodes the graph builder
+//!   makes (File, Route, EntryPoint, Process, PathLiteral, detector nodes)
+//!   stay visible as indexed, and their edges into dirty symbols redirect
+//!   or drop like any other base edge.
 //! - **overlay edges** — `Calls` edges re-resolved from each dirty symbol's
 //!   [`CallSite`]s, mirroring index-time Pass-2 tier semantics (same-file →
 //!   import-scoped → unique-global with `AmbiguousGlobal` suppression, then
@@ -40,17 +46,14 @@
 //!
 //! ## What stays out of scope (documented fidelity gaps)
 //!
-//! - Heuristic `References` edges from `fanout_refs` are not re-resolved
-//!   (impact filters heuristic edges by default; the loss is bounded).
-//! - Containment / file-level edges for virtual nodes are not synthesized.
+//! - `References` edges other than lexical closure references are not
+//!   re-resolved: a dirty file keeps the base ones of its surviving symbols
+//!   (stale) and gains none for new code.
+//! - Builder-made nodes of a dirty file and their edges are as indexed; a
+//!   brand-new symbol gets no containment edge (`File -Defines->`, …).
 //! - Clean files calling a name that only NOW resolves (new symbol breaks a
 //!   previous ambiguity) keep their index-time resolution — clean files are
 //!   never re-resolved at query time.
-//! - Outside the import-member languages ([`import_member_fallback`]), an
-//!   import alias (`import { Widget as W }`) matches only by its local name,
-//!   so a dirty file's call or construction through it stays unresolved; the
-//!   index maps the alias back to the declared symbol. A construction through
-//!   an alias stays unresolved in every language.
 //! - The qualifier tier, the heritage tier and the receiver-typing ladder
 //!   are not replayed. In an import-member language, a qualified callee
 //!   (`Base.setup`) that no import binds stays unresolved, and a wildcard
@@ -140,8 +143,10 @@ pub struct OverlayView {
     replaced: FxHashMap<u32, u32>,
     /// base idxs of dirty-file symbols NOT re-emitted (deleted/renamed).
     suppressed: FxHashSet<u32>,
-    /// every base idx living in a dirty file (replaced ∪ suppressed):
-    /// base edges sourced here are masked in favour of overlay adjacency.
+    /// every base idx of a dirty file whose kind [`fragment_emits`]
+    /// (replaced ∪ suppressed): base edges sourced here are masked in
+    /// favour of overlay adjacency. Builder-made nodes (File, Route, …)
+    /// stay outside it, visible and slightly stale.
     dirty_base: FxHashSet<u32>,
     /// Flat overlay-edge store; adjacency maps hold indices into it so
     /// consumers (cypher edge vars) can address an overlay edge by a stable
@@ -183,12 +188,15 @@ impl OverlayView {
         // Single O(N) scan, collecting only matches. uid → base idx lets the
         // virtual-node pass detect survivors exactly (uid embeds kind, path,
         // owner_class and name — Fragment v2 carries owner_class so methods
-        // match too, see overlay_writer).
+        // match too, see overlay_writer). Only kinds a fragment can re-emit
+        // are collected: mask ⊆ rebuild applies to nodes too.
         let mut dirty_base_by_uid: FxHashMap<u64, u32> = FxHashMap::default();
         let mut dirty_base: FxHashSet<u32> = FxHashSet::default();
         if !dirty_file_idx.is_empty() {
             for (i, node) in graph.nodes.iter().enumerate() {
-                if dirty_file_idx.contains(&node.file_idx.to_native()) {
+                if dirty_file_idx.contains(&node.file_idx.to_native())
+                    && fragment_emits(NodeKind::from(&node.kind))
+                {
                     dirty_base_by_uid.insert(node.uid.to_native(), i as u32);
                     dirty_base.insert(i as u32);
                 }
@@ -476,6 +484,47 @@ impl OverlayView {
     }
 }
 
+/// Whether a fresh parse (a fragment's `RawNode`s) can carry a node of
+/// `kind`. The graph builder makes the rest from whole-repo passes (File,
+/// routes, entry points, processes, detector and path-literal nodes), so a
+/// fragment never re-emits them: absence there says nothing about deletion.
+/// Exhaustive on purpose — a new kind must decide which side it is on.
+fn fragment_emits(kind: NodeKind) -> bool {
+    match kind {
+        NodeKind::Function
+        | NodeKind::Class
+        | NodeKind::Method
+        | NodeKind::Interface
+        | NodeKind::Constructor
+        | NodeKind::Property
+        | NodeKind::Variable
+        | NodeKind::Const
+        | NodeKind::Section
+        | NodeKind::Struct
+        | NodeKind::Enum
+        | NodeKind::Typedef
+        | NodeKind::Namespace
+        | NodeKind::Module
+        | NodeKind::Macro
+        | NodeKind::Annotation
+        | NodeKind::Trait
+        | NodeKind::Impl
+        | NodeKind::EnumVariant => true,
+        // Import and Document have no producer today; keeping a node beats
+        // suppressing one nothing can re-emit.
+        NodeKind::File
+        | NodeKind::Import
+        | NodeKind::Route
+        | NodeKind::Process
+        | NodeKind::Document
+        | NodeKind::EntryPoint
+        | NodeKind::SchemaField
+        | NodeKind::EventTopic
+        | NodeKind::TransactionScope
+        | NodeKind::PathLiteral => false,
+    }
+}
+
 /// [`OverlayView::constructors_of`] for every virtual Class / Struct.
 fn virtual_constructors(
     files: &[OverlayFileInput],
@@ -719,9 +768,10 @@ impl<'a> OverlayNames<'a> {
 /// Tier 1 — same file: the dirty file was FULLY re-parsed, so its own
 /// callable set is authoritative. Unique match → confidence 1.0.
 /// Tier 2 — import-scoped. In an [`import_member_fallback`] language,
-/// [`bind_import`] replays the index's import-member tier; elsewhere the
-/// callee name appears as an import's name/alias and candidates narrow to
-/// files matching the import source's last path segment. Unique → 0.95.
+/// [`bind_import`] replays the index's import-member tier; elsewhere an
+/// import binds the callee by its alias, else its name, and candidates named
+/// as the import declares them narrow to clean and dirty files matching the
+/// import source's last path segment. Unique → 0.95.
 /// Tier 3 — global: all clean-base callables (via the archived `name_index`)
 /// plus all overlay callables, through the index-time candidate filter
 /// [`pick_global`] (language and vendor barriers, unique only). ≥2
@@ -812,25 +862,38 @@ fn resolve_callee<'s>(
     // Clean-base candidates via the name index. Dirty-file base nodes are
     // excluded here: replaced ones already participate as overlay callables
     // (same name), suppressed ones no longer exist.
-    let base_candidates: Vec<u32> = graph
-        .nodes_by_name(callee)
-        .filter(|&idx| {
-            (names.kind)(NodeKind::from(&graph.nodes[idx as usize].kind))
-                && !dirty_base.contains(&idx)
-        })
-        .collect();
+    let clean_base = |name: &str| -> Vec<u32> {
+        graph
+            .nodes_by_name(name)
+            .filter(|&idx| {
+                (names.kind)(NodeKind::from(&graph.nodes[idx as usize].kind))
+                    && !dirty_base.contains(&idx)
+            })
+            .collect()
+    };
+    let base_candidates = clean_base(callee);
     let overlay_candidates: &[(u32, FileMeta)] =
         names.anywhere.get(callee).map(Vec::as_slice).unwrap_or(&[]);
 
-    // Tier 2: import-scoped.
+    // Tier 2: import-scoped. Like the index's named-import tier, an alias
+    // binds only its local name and looks up the declared one.
     let segment_imports: &[RawImport] = if member_policy { &[] } else { imports };
     if let Some(import) = segment_imports
         .iter()
-        .find(|i| i.imported_name == callee || i.alias.as_deref() == Some(callee))
+        .find(|i| i.alias.as_deref().unwrap_or(&i.imported_name) == callee)
     {
         let segment = import_last_segment(&import.source);
         if !segment.is_empty() {
-            let scoped: Vec<u32> = base_candidates
+            let declared = import.imported_name.as_str();
+            let base_declared;
+            let base_scoped: &[u32] = if declared == callee {
+                &base_candidates
+            } else {
+                base_declared = clean_base(declared);
+                &base_declared
+            };
+            let base_len = graph.nodes.len() as u32;
+            let scoped: Vec<u32> = base_scoped
                 .iter()
                 .copied()
                 .filter(|&idx| {
@@ -841,12 +904,25 @@ fn resolve_callee<'s>(
                         .map(|f| path_matches_segment(f.path.resolve(&graph.string_pool), segment))
                         .unwrap_or(false)
                 })
+                .chain(
+                    names
+                        .anywhere
+                        .get(declared)
+                        .into_iter()
+                        .flatten()
+                        .map(|&(virt, _)| virt)
+                        .filter(|&virt| {
+                            path_matches_segment(
+                                &nodes[(virt - base_len) as usize].rel_path,
+                                segment,
+                            )
+                        }),
+                )
                 .collect();
             if scoped.len() == 1 {
-                // `base_candidates` excludes every dirty-base node, so a
-                // scoped match can never need a replaced-base redirect —
-                // surviving dirty symbols compete as overlay candidates with
-                // their virtual index instead.
+                // Base candidates exclude every dirty-base node, so a scoped
+                // match never needs a replaced-base redirect: surviving dirty
+                // symbols compete with their virtual index instead.
                 debug_assert!(!replaced.contains_key(&scoped[0]));
                 return accepts(scoped[0]).then_some((scoped[0], CONF_IMPORT_SCOPED));
             }
@@ -1170,12 +1246,21 @@ fn resolve_constructed_type<'s>(
         return None;
     }
     // Most unresolved calls name no type at all: reject them before the
-    // candidate collection in `resolve_callee` allocates.
-    let names_constructible = types.anywhere.contains_key(type_name)
-        || graph
-            .nodes_by_name(type_name)
-            .any(|idx| NodeKind::from(&graph.nodes[idx as usize].kind).is_constructible());
-    if !names_constructible {
+    // candidate collection in `resolve_callee` allocates. An import alias
+    // names no declared type, so it passes through its imported name, as
+    // the index's `names_constructible_type` gate does.
+    let names_constructible = |name: &str| {
+        types.anywhere.contains_key(name)
+            || graph
+                .nodes_by_name(name)
+                .any(|idx| NodeKind::from(&graph.nodes[idx as usize].kind).is_constructible())
+    };
+    if !names_constructible(type_name)
+        && !imports.iter().any(|import| {
+            import.alias.as_deref() == Some(type_name)
+                && names_constructible(import.imported_name.as_str())
+        })
+    {
         return None;
     }
     let mut resolve = |name: &'s str, imports: &'s [RawImport]| {
