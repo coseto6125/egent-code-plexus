@@ -325,8 +325,8 @@ pub(super) fn impact_by_name(
         };
         format!(
             "caller set may be incomplete: {same_name_defs} same-named definitions of \
-             '{bare_name}' were indexed, so bare calls (no import/qualifier context) may have \
-             been ambiguity-suppressed at index time. {action}"
+             '{bare_name}' exist in the index or working tree, so bare calls (no \
+             import/qualifier context) may be unattributed. {action}"
         )
     });
     if args.ambiguous_callers && ambiguity_caveat.is_some() {
