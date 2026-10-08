@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.14.7 - 2026-10-08
+
+### Bug Fixes
+
+- close four OverlayView fidelity gaps (File nodes, dirty imports, aliases, rename caveat) (#830)
+
 ## v0.14.6 - 2026-10-06
 
 ### Features
