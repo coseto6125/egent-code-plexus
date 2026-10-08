@@ -305,7 +305,8 @@ pub(super) fn impact_by_name(
         result_obj["coverage"] = build_coverage_json(analyses);
     }
 
-    // FU-2026-05-29-011: with ≥2 same-named defs in the graph, the resolver
+    // FU-2026-05-29-011: with ≥2 same-named defs in the index (counting base
+    // defs an uncommitted edit renamed away), the resolver
     // may have suppressed bare calls to this name at index time
     // (`DecisionTier::AmbiguousGlobal`; language and vendor barriers exempt
     // some), so the upstream caller set is a lower bound — the payload must
@@ -324,8 +325,8 @@ pub(super) fn impact_by_name(
         };
         format!(
             "caller set may be incomplete: {same_name_defs} same-named definitions of \
-             '{bare_name}' exist, so bare calls (no import/qualifier context) may have \
-             been ambiguity-suppressed at index time. {action}"
+             '{bare_name}' exist in the index or working tree, so bare calls (no \
+             import/qualifier context) may be unattributed. {action}"
         )
     });
     if args.ambiguous_callers && ambiguity_caveat.is_some() {

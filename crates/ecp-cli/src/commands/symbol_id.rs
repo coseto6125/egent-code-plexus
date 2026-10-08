@@ -58,6 +58,10 @@ pub fn split_fqn_target(s: &str) -> (Option<&str>, &str) {
 /// of same-named definitions seen BEFORE `--kind` / `--file` / FQN narrowing
 /// (the Tier-3 resolver-defence counter, which keys on the global name
 /// collision rather than on whichever single def the caller disambiguated to).
+/// The count is the larger of the on-disk world (surviving base defs plus
+/// working-tree-only defs) and the indexed world (every base def, including
+/// those the overlay suppressed): the index decided whether to drop bare
+/// calls from the indexed collision, which an uncommitted rename must not hide.
 ///
 /// `name` takes the bare symbol or the `Owner.Method` FQN form. `kind_needle`
 /// matches the node kind case-insensitively; `file_needle` is a substring of
@@ -76,7 +80,8 @@ pub fn resolve_candidates(
     let (owner_filter, bare_name) = split_fqn_target(name);
     let kind_needle = kind_needle.map(|s| s.to_ascii_lowercase());
 
-    let mut same_name_defs = 0usize;
+    let mut base_defs = 0usize;
+    let mut disk_defs = 0usize;
     let mut matches: Vec<usize> = Vec::new();
     // Ascending like the full scan, so the candidate list keeps node order.
     for idx in graph.name_candidates(bare_name) {
@@ -90,14 +95,13 @@ pub fn resolve_candidates(
         if !node.has_owning_file() {
             continue;
         }
+        base_defs += 1;
         // Working-tree truth: a dirty-file symbol deleted/renamed on disk
-        // (suppressed by the overlay view) is not a valid impact target, and
-        // deliberately stops counting toward `same_name_defs` — the ambiguity
-        // caveat describes the on-disk world, not the stale base graph.
+        // (suppressed by the overlay view) is not a valid impact target.
         if view.is_some_and(|v| v.redirect(idx as u32).is_none()) {
             continue;
         }
-        same_name_defs += 1;
+        disk_defs += 1;
         if let Some(ref kn) = kind_needle {
             let node_kind = kind_to_str(&node.kind).to_ascii_lowercase();
             if &node_kind != kn {
@@ -134,7 +138,7 @@ pub fn resolve_candidates(
             if vn.replaced_base.is_some() || vn.name != bare_name {
                 continue;
             }
-            same_name_defs += 1;
+            disk_defs += 1;
             if let Some(ref kn) = kind_needle {
                 if &node_kind_to_str(&vn.kind).to_ascii_lowercase() != kn {
                     continue;
@@ -153,7 +157,7 @@ pub fn resolve_candidates(
             matches.push(v.base_len() as usize + i);
         }
     }
-    (matches, same_name_defs)
+    (matches, base_defs.max(disk_defs))
 }
 
 #[cfg(test)]
@@ -279,14 +283,16 @@ mod tests {
         assert_eq!(same_name_defs, 12);
     }
 
-    /// A base node the overlay replaced or suppressed no longer counts and is
-    /// not a candidate; the overlay-only symbol still is.
+    /// A base node the overlay replaced or suppressed is not a candidate, but
+    /// still counts toward `same_name_defs` (the index saw that collision);
+    /// the overlay-only symbol is a candidate.
     #[test]
     fn test_resolve_candidates_overlay_drops_suppressed_base_nodes() {
         let (plain, plain_defs) = resolve_matches(same_name_graph(), "dup", None, None, false);
         let (merged, merged_defs) = resolve_matches(same_name_graph(), "dup", None, None, true);
         assert_eq!(plain_defs, 36);
-        assert!(merged_defs < plain_defs, "{merged_defs} vs {plain_defs}");
+        // base 36, disk 36 - 12 (src/b.ts) + 1 (overlay `dup`) = 25; max, not sum.
+        assert_eq!(merged_defs, 36, "plain {plain_defs}");
         assert!(merged.len() < plain.len());
         let (new_only, _) = resolve_matches(same_name_graph(), "brand_new", None, None, true);
         assert_eq!(new_only.len(), 1);

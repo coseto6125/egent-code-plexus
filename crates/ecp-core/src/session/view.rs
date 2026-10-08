@@ -3,7 +3,10 @@
 //! `OverlayView` makes uncommitted-edit symbols AND edges visible to graph
 //! traversals (impact, cypher) without rebuilding L2 and without loading
 //! O(graph) data. The base `ArchivedZeroCopyGraph` stays an immutable mmap;
-//! the view is a small in-memory delta strictly O(dirty files):
+//! the view is a small in-memory delta whose own allocation is O(dirty
+//! symbols). Building it scans `graph.files` and `graph.nodes` once each per
+//! query; two lazy helpers cost more, and only when their call shapes occur
+//! ([`OverlayView::build`] has the full cost):
 //!
 //! - **virtual nodes** — every symbol in a dirty file, addressed by virtual
 //!   index `base_len + i` so they compose with the base graph's dense `u32`
@@ -14,7 +17,11 @@
 //!   from the on-disk version; base IN-edges from clean files stay valid).
 //! - **suppressed** — base nodes of dirty files NOT re-emitted by the fresh
 //!   parse: deleted or renamed. Traversal must neither expand into nor
-//!   report them — this is what kills phantom callers after a rename.
+//!   report them — this is what kills phantom callers after a rename. Only
+//!   kinds a fragment can carry are suppressed; nodes the graph builder
+//!   makes (File, Route, EntryPoint, Process, PathLiteral, detector nodes)
+//!   stay visible as indexed, and their edges into dirty symbols redirect
+//!   or drop like any other base edge.
 //! - **overlay edges** — `Calls` edges re-resolved from each dirty symbol's
 //!   [`CallSite`]s, mirroring index-time Pass-2 tier semantics (same-file →
 //!   import-scoped → unique-global with `AmbiguousGlobal` suppression, then
@@ -40,17 +47,19 @@
 //!
 //! ## What stays out of scope (documented fidelity gaps)
 //!
-//! - Heuristic `References` edges from `fanout_refs` are not re-resolved
-//!   (impact filters heuristic edges by default; the loss is bounded).
-//! - Containment / file-level edges for virtual nodes are not synthesized.
+//! - `References` edges other than lexical closure references are not
+//!   re-resolved: a dirty file keeps the base ones of its surviving symbols
+//!   (stale) and gains none for new code.
+//! - Builder-made nodes of a dirty file and their edges are as indexed; a
+//!   brand-new symbol gets no containment edge (`File -Defines->`, …).
 //! - Clean files calling a name that only NOW resolves (new symbol breaks a
 //!   previous ambiguity) keep their index-time resolution — clean files are
 //!   never re-resolved at query time.
-//! - Outside the import-member languages ([`import_member_fallback`]), an
-//!   import alias (`import { Widget as W }`) matches only by its local name,
-//!   so a dirty file's call or construction through it stays unresolved; the
-//!   index maps the alias back to the declared symbol. A construction through
-//!   an alias stays unresolved in every language.
+//! - Outside the import-member languages, only a `./` / `../` import source
+//!   probes the index's candidate files. Any other source (a tsconfig path
+//!   alias, a package or `crate::` path) narrows by its last path segment,
+//!   unique only, an approximation of the index's alias expansion and module
+//!   tree; a namespace import through such a source binds nothing.
 //! - The qualifier tier, the heritage tier and the receiver-typing ladder
 //!   are not replayed. In an import-member language, a qualified callee
 //!   (`Base.setup`) that no import binds stays unresolved, and a wildcard
@@ -140,8 +149,10 @@ pub struct OverlayView {
     replaced: FxHashMap<u32, u32>,
     /// base idxs of dirty-file symbols NOT re-emitted (deleted/renamed).
     suppressed: FxHashSet<u32>,
-    /// every base idx living in a dirty file (replaced ∪ suppressed):
-    /// base edges sourced here are masked in favour of overlay adjacency.
+    /// every base idx of a dirty file whose kind [`fragment_emits`]
+    /// (replaced ∪ suppressed): base edges sourced here are masked in
+    /// favour of overlay adjacency. Builder-made nodes (File, Route, …)
+    /// stay outside it, visible and slightly stale.
     dirty_base: FxHashSet<u32>,
     /// Flat overlay-edge store; adjacency maps hold indices into it so
     /// consumers (cypher edge vars) can address an overlay edge by a stable
@@ -159,10 +170,16 @@ impl OverlayView {
     /// Build the view. Returns `None` when `files` is empty — the clean-tree
     /// path must stay literally view-free so traversals take their original
     /// branch. Cost when dirty: one O(files) pass over `graph.files` plus one
-    /// O(nodes) pass over `graph.nodes` (pure scans; allocation stays O(dirty
-    /// symbols)), then O(dirty symbols × callees × log N) name-index lookups.
-    /// A Python/Java/Kotlin/PHP call through an import also builds, once per
-    /// language, a file index over `graph.files` for module discovery.
+    /// O(nodes) pass over `graph.nodes` (pure scans; the view's own
+    /// allocation stays O(dirty symbols)), then O(dirty symbols × callees ×
+    /// log N) name-index lookups. Two lazy helpers add more:
+    /// - a Python/Java/Kotlin/PHP call through an import builds, once per
+    ///   such language, a file index over `graph.files` that allocates
+    ///   O(files of that language) for module discovery;
+    /// - a dirty Rust file with a `::` call makes one more pass over
+    ///   `graph.files` for crate roots, plus one per distinct resolved
+    ///   qualified callee of each dirty file for the qualifier-scope
+    ///   confidence.
     pub fn build(graph: &ArchivedZeroCopyGraph, files: &[OverlayFileInput]) -> Option<Self> {
         if files.is_empty() {
             return None;
@@ -183,12 +200,15 @@ impl OverlayView {
         // Single O(N) scan, collecting only matches. uid → base idx lets the
         // virtual-node pass detect survivors exactly (uid embeds kind, path,
         // owner_class and name — Fragment v2 carries owner_class so methods
-        // match too, see overlay_writer).
+        // match too, see overlay_writer). Only kinds a fragment can re-emit
+        // are collected: mask ⊆ rebuild applies to nodes too.
         let mut dirty_base_by_uid: FxHashMap<u64, u32> = FxHashMap::default();
         let mut dirty_base: FxHashSet<u32> = FxHashSet::default();
         if !dirty_file_idx.is_empty() {
             for (i, node) in graph.nodes.iter().enumerate() {
-                if dirty_file_idx.contains(&node.file_idx.to_native()) {
+                if dirty_file_idx.contains(&node.file_idx.to_native())
+                    && fragment_emits(NodeKind::from(&node.kind))
+                {
                     dirty_base_by_uid.insert(node.uid.to_native(), i as u32);
                     dirty_base.insert(i as u32);
                 }
@@ -256,13 +276,20 @@ impl OverlayView {
                 .map(|f| FileMeta::from_path(&f.rel_path))
                 .collect();
 
+            // Full indexing tombstones a later same-uid declaration (a
+            // half-finished edit, an overload) and never registers it in the
+            // global name table, so only the first one of each uid is a
+            // cross-file candidate. The same-file tier still sees both: the
+            // index's own-file lookup treats them as ambiguous and binds none.
+            let mut named_uids: FxHashSet<u64> = FxHashSet::default();
             let mut virt_off = 0usize;
             for (file_ord, file) in files.iter().enumerate() {
                 for _ in &file.symbols {
                     let node = &nodes[virt_off];
                     let virt = base_len + virt_off as u32;
-                    callables.add(file_ord, node, virt, file_metas[file_ord]);
-                    types.add(file_ord, node, virt, file_metas[file_ord]);
+                    let first_of_uid = named_uids.insert(node.uid);
+                    callables.add(file_ord, node, virt, file_metas[file_ord], first_of_uid);
+                    types.add(file_ord, node, virt, file_metas[file_ord], first_of_uid);
                     virt_off += 1;
                 }
             }
@@ -473,6 +500,47 @@ impl OverlayView {
     /// source order, overloads included. Empty for any other node.
     pub fn constructors_of(&self, idx: u32) -> &[u32] {
         self.type_ctors.get(&idx).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
+
+/// Whether a fresh parse (a fragment's `RawNode`s) can carry a node of
+/// `kind`. The graph builder makes the rest from whole-repo passes (File,
+/// routes, entry points, processes, detector and path-literal nodes), so a
+/// fragment never re-emits them: absence there says nothing about deletion.
+/// Exhaustive on purpose — a new kind must decide which side it is on.
+fn fragment_emits(kind: NodeKind) -> bool {
+    match kind {
+        NodeKind::Function
+        | NodeKind::Class
+        | NodeKind::Method
+        | NodeKind::Interface
+        | NodeKind::Constructor
+        | NodeKind::Property
+        | NodeKind::Variable
+        | NodeKind::Const
+        | NodeKind::Section
+        | NodeKind::Struct
+        | NodeKind::Enum
+        | NodeKind::Typedef
+        | NodeKind::Namespace
+        | NodeKind::Module
+        | NodeKind::Macro
+        | NodeKind::Annotation
+        | NodeKind::Trait
+        | NodeKind::Impl
+        | NodeKind::EnumVariant => true,
+        // Import and Document have no producer today; keeping a node beats
+        // suppressing one nothing can re-emit.
+        NodeKind::File
+        | NodeKind::Import
+        | NodeKind::Route
+        | NodeKind::Process
+        | NodeKind::Document
+        | NodeKind::EntryPoint
+        | NodeKind::SchemaField
+        | NodeKind::EventTopic
+        | NodeKind::TransactionScope
+        | NodeKind::PathLiteral => false,
     }
 }
 
@@ -694,7 +762,14 @@ impl<'a> OverlayNames<'a> {
         }
     }
 
-    fn add(&mut self, file_ord: usize, node: &'a ViewNode, virt: u32, meta: FileMeta) {
+    fn add(
+        &mut self,
+        file_ord: usize,
+        node: &'a ViewNode,
+        virt: u32,
+        meta: FileMeta,
+        first_of_uid: bool,
+    ) {
         if !(self.kind)(node.kind) {
             return;
         }
@@ -702,10 +777,12 @@ impl<'a> OverlayNames<'a> {
             .entry((file_ord, node.name.as_str()))
             .or_default()
             .push(virt);
-        self.anywhere
-            .entry(node.name.as_str())
-            .or_default()
-            .push((virt, meta));
+        if first_of_uid {
+            self.anywhere
+                .entry(node.name.as_str())
+                .or_default()
+                .push((virt, meta));
+        }
     }
 }
 
@@ -719,9 +796,13 @@ impl<'a> OverlayNames<'a> {
 /// Tier 1 — same file: the dirty file was FULLY re-parsed, so its own
 /// callable set is authoritative. Unique match → confidence 1.0.
 /// Tier 2 — import-scoped. In an [`import_member_fallback`] language,
-/// [`bind_import`] replays the index's import-member tier; elsewhere the
-/// callee name appears as an import's name/alias and candidates narrow to
-/// files matching the import source's last path segment. Unique → 0.95.
+/// [`bind_import`] replays the index's import-member tier; elsewhere
+/// [`import_binding`] maps the callee to the name the import declares, as the
+/// index's named-import tier does. A relative source (`./`, `../`) probes the
+/// index's candidate files in its order ([`relative_module_rank`]) and the
+/// first one declaring that name wins; any other source narrows the
+/// candidates to files matching its last path segment, unique only. Hit →
+/// 0.95.
 /// Tier 3 — global: all clean-base callables (via the archived `name_index`)
 /// plus all overlay callables, through the index-time candidate filter
 /// [`pick_global`] (language and vendor barriers, unique only). ≥2
@@ -754,7 +835,8 @@ fn resolve_callee<'s>(
         if virts.len() == 1 {
             return accepts(virts[0]).then_some((virts[0], CONF_SAME_FILE));
         }
-        // Ambiguous within one file (overloads): suppress, like index time.
+        // Ambiguous within one file (overloads, same-uid twins included):
+        // suppress, like index time.
         return None;
     }
 
@@ -812,44 +894,81 @@ fn resolve_callee<'s>(
     // Clean-base candidates via the name index. Dirty-file base nodes are
     // excluded here: replaced ones already participate as overlay callables
     // (same name), suppressed ones no longer exist.
-    let base_candidates: Vec<u32> = graph
-        .nodes_by_name(callee)
-        .filter(|&idx| {
-            (names.kind)(NodeKind::from(&graph.nodes[idx as usize].kind))
-                && !dirty_base.contains(&idx)
-        })
-        .collect();
+    let clean_base = |name: &str| -> Vec<u32> {
+        graph
+            .nodes_by_name(name)
+            .filter(|&idx| {
+                (names.kind)(NodeKind::from(&graph.nodes[idx as usize].kind))
+                    && !dirty_base.contains(&idx)
+            })
+            .collect()
+    };
+    let base_candidates = clean_base(callee);
     let overlay_candidates: &[(u32, FileMeta)] =
         names.anywhere.get(callee).map(Vec::as_slice).unwrap_or(&[]);
 
-    // Tier 2: import-scoped.
+    // Tier 2: import-scoped, the index's named-import tier: every import
+    // binding the callee, in order, until one's module declares the name.
     let segment_imports: &[RawImport] = if member_policy { &[] } else { imports };
-    if let Some(import) = segment_imports
+    let importer = scope.dirty()[file_ord].rel_path.as_str();
+    let base_len = graph.nodes.len() as u32;
+    let base_path = |idx: u32| {
+        graph
+            .files
+            .get(graph.nodes[idx as usize].file_idx.to_native() as usize)
+            .map(|f| f.path.resolve(&graph.string_pool))
+    };
+    for (import, declared) in segment_imports
         .iter()
-        .find(|i| i.imported_name == callee || i.alias.as_deref() == Some(callee))
+        .filter_map(|i| Some((i, import_binding(i, callee, caller.language)?.name)))
     {
-        let segment = import_last_segment(&import.source);
-        if !segment.is_empty() {
-            let scoped: Vec<u32> = base_candidates
+        let base_declared;
+        let (base_scoped, overlay_scoped): (&[u32], &[(u32, FileMeta)]) = if declared == callee {
+            (base_candidates.as_slice(), overlay_candidates)
+        } else {
+            base_declared = clean_base(declared);
+            (
+                base_declared.as_slice(),
+                names
+                    .anywhere
+                    .get(declared)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            )
+        };
+        // Base candidates exclude every dirty-base node, so a hit never needs
+        // a replaced-base redirect and never lands on a suppressed node:
+        // surviving dirty symbols compete with their virtual index instead.
+        let scoped = base_scoped.iter().map(|&idx| (idx, base_path(idx))).chain(
+            overlay_scoped
                 .iter()
-                .copied()
-                .filter(|&idx| {
-                    let file_idx = graph.nodes[idx as usize].file_idx.to_native() as usize;
-                    graph
-                        .files
-                        .get(file_idx)
-                        .map(|f| path_matches_segment(f.path.resolve(&graph.string_pool), segment))
-                        .unwrap_or(false)
-                })
-                .collect();
-            if scoped.len() == 1 {
-                // `base_candidates` excludes every dirty-base node, so a
-                // scoped match can never need a replaced-base redirect —
-                // surviving dirty symbols compete as overlay candidates with
-                // their virtual index instead.
-                debug_assert!(!replaced.contains_key(&scoped[0]));
-                return accepts(scoped[0]).then_some((scoped[0], CONF_IMPORT_SCOPED));
+                .map(|&(virt, _)| (virt, Some(&*nodes[(virt - base_len) as usize].rel_path))),
+        );
+        let hit = match relative_module_base(importer, &import.source) {
+            // The first probed file declaring the name, then its first
+            // declaration: base and virtual indices both follow source order
+            // within a file, and one file is either clean or dirty.
+            Some(module) => scoped
+                .filter_map(|(idx, path)| Some((relative_module_rank(&module, path?)?, idx)))
+                .min()
+                .map(|(_, idx)| idx),
+            // A namespace import of a package path names a module the
+            // segment match can only guess; the index probes it as written.
+            None if import.imported_name == "*" => None,
+            None => {
+                let segment = import_last_segment(&import.source);
+                let mut matching = scoped.filter(|&(_, path)| {
+                    !segment.is_empty() && path.is_some_and(|p| path_matches_segment(p, segment))
+                });
+                match (matching.next(), matching.next()) {
+                    (Some((idx, _)), None) => Some(idx),
+                    _ => None,
+                }
             }
+        };
+        if let Some(target) = hit {
+            debug_assert!(!replaced.contains_key(&target));
+            return accepts(target).then_some((target, CONF_IMPORT_SCOPED));
         }
     }
 
@@ -1170,12 +1289,21 @@ fn resolve_constructed_type<'s>(
         return None;
     }
     // Most unresolved calls name no type at all: reject them before the
-    // candidate collection in `resolve_callee` allocates.
-    let names_constructible = types.anywhere.contains_key(type_name)
-        || graph
-            .nodes_by_name(type_name)
-            .any(|idx| NodeKind::from(&graph.nodes[idx as usize].kind).is_constructible());
-    if !names_constructible {
+    // candidate collection in `resolve_callee` allocates. An import alias
+    // names no declared type, so it passes through its imported name, as
+    // the index's `names_constructible_type` gate does.
+    let names_constructible = |name: &str| {
+        types.anywhere.contains_key(name)
+            || graph
+                .nodes_by_name(name)
+                .any(|idx| NodeKind::from(&graph.nodes[idx as usize].kind).is_constructible())
+    };
+    if !names_constructible(type_name)
+        && !imports.iter().any(|import| {
+            import.alias.as_deref() == Some(type_name)
+                && names_constructible(import.imported_name.as_str())
+        })
+    {
         return None;
     }
     let mut resolve = |name: &'s str, imports: &'s [RawImport]| {
@@ -1431,6 +1559,81 @@ fn member_in_file(
                 })
                 .map(|(virt, _)| virt)
         })
+}
+
+/// The resolver's `EXT_CANDIDATES` and `INDEX_SUFFIXES`, in its probe order.
+/// A copy: ecp-analyzer depends on this crate, not the reverse. Keep in sync.
+const MODULE_EXTENSIONS: &[&str] = &[
+    ".ts", ".tsx", ".jsx", ".js", ".mjs", ".cjs", ".py", ".pyi", ".rs", ".go", ".java", ".kt",
+    ".rb", ".php", ".cs", ".swift", ".dart", ".sol", ".sql",
+];
+const MODULE_INDEX_SUFFIXES: &[&str] = &[
+    "/index.ts",
+    "/index.tsx",
+    "/index.js",
+    "/index.jsx",
+    "/__init__.py",
+    "/mod.rs",
+    "/lib.rs",
+    "/main.rs",
+];
+
+/// The repo-relative module path a `./` or `../` import `specifier` names
+/// from `importer`, built as the resolver's `for_each_specifier_candidate`
+/// builds it (no `..` collapsing inside the rest). `None` for any other
+/// specifier. The resolver's verbatim first probe is skipped: no
+/// repo-relative path starts with `./` or `../`.
+fn relative_module_base(importer: &str, specifier: &str) -> Option<String> {
+    let dir = std::path::Path::new(importer)
+        .parent()
+        .unwrap_or(std::path::Path::new(""));
+    let base = if let Some(rest) = specifier.strip_prefix("./") {
+        dir.join(rest)
+    } else if specifier.starts_with("../") {
+        let mut parent = dir;
+        let mut rest = specifier;
+        while let Some(tail) = rest.strip_prefix("../") {
+            parent = parent.parent().unwrap_or(std::path::Path::new(""));
+            rest = tail;
+        }
+        parent.join(rest)
+    } else {
+        return None;
+    };
+    let base = base.to_string_lossy().replace('\\', "/");
+    Some(
+        base.trim_start_matches("./")
+            .trim_end_matches('/')
+            .to_string(),
+    )
+}
+
+/// Where `path` falls in the resolver's probe order for `module`: the bare
+/// path, then each extension, then each index suffix. `None` when the
+/// resolver never probes it. Ranking a candidate's own path avoids building
+/// the probe list.
+fn relative_module_rank(module: &str, path: &str) -> Option<usize> {
+    let rest = path.strip_prefix(module)?;
+    if rest.is_empty() {
+        return Some(0);
+    }
+    let index_suffix = |suffix: &&str| {
+        if module.is_empty() {
+            suffix.trim_start_matches('/') == rest
+        } else {
+            *suffix == rest
+        }
+    };
+    MODULE_EXTENSIONS
+        .iter()
+        .position(|ext| *ext == rest)
+        .or_else(|| {
+            MODULE_INDEX_SUFFIXES
+                .iter()
+                .position(index_suffix)
+                .map(|i| MODULE_EXTENSIONS.len() + i)
+        })
+        .map(|i| i + 1)
 }
 
 /// Last path-ish segment of an import source across language conventions:
@@ -1949,5 +2152,75 @@ mod tests {
         assert_eq!(sole_constructor(&[3, 7, 5], uid), None);
         assert_eq!(sole_constructor(&[7], uid), Some(7));
         assert_eq!(sole_constructor(&[], uid), None);
+    }
+
+    /// Contract: builder-made kinds are never in a fragment, so a dirty file
+    /// keeps them as indexed; every other kind is the parser's to re-emit.
+    #[test]
+    fn test_fragment_emits_builder_made_kinds_false_parser_kinds_true() {
+        const BUILDER_MADE: [NodeKind; 10] = [
+            NodeKind::File,
+            NodeKind::Route,
+            NodeKind::Process,
+            NodeKind::EntryPoint,
+            NodeKind::SchemaField,
+            NodeKind::EventTopic,
+            NodeKind::TransactionScope,
+            NodeKind::PathLiteral,
+            NodeKind::Import,
+            NodeKind::Document,
+        ];
+        for kind in NodeKind::ALL {
+            assert_eq!(
+                fragment_emits(kind),
+                !BUILDER_MADE.contains(&kind),
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// The resolver's relative candidates: `./` and `../` from the
+    /// importer's directory, nothing for any other specifier.
+    #[test]
+    fn test_relative_module_base_relative_specifiers_join_importer_dir() {
+        let cases = [
+            ("src/b.ts", "./a", Some("src/a")),
+            ("src/b.ts", "./a.ts", Some("src/a.ts")),
+            ("src/b.ts", "./lib/", Some("src/lib")),
+            ("src/x/b.ts", "../a", Some("src/a")),
+            ("src/x/b.ts", "../../a", Some("a")),
+            ("b.ts", "../a", Some("a")),
+            ("b.ts", "./a", Some("a")),
+            ("src/b.ts", "a", None),
+            ("src/b.ts", "@/a", None),
+            ("src/b.rs", "crate::a", None),
+            ("src/b.py", ".a", None),
+        ];
+        for (importer, specifier, expected) in cases {
+            assert_eq!(
+                relative_module_base(importer, specifier).as_deref(),
+                expected,
+                "{importer} {specifier}"
+            );
+        }
+    }
+
+    /// Probe order: the bare path, the extensions (`.ts` before `.js`), then
+    /// the index suffixes; anything else is never probed.
+    #[test]
+    fn test_relative_module_rank_follows_resolver_probe_order() {
+        let rank = |path: &str| relative_module_rank("src/a", path);
+        assert_eq!(rank("src/a"), Some(0));
+        assert!(rank("src/a.ts") < rank("src/a.js"));
+        assert!(rank("src/a.js") < rank("src/a/index.ts"));
+        assert!(rank("src/a/index.ts") < rank("src/a/index.js"));
+        assert_eq!(rank("src/ab.ts"), None);
+        assert_eq!(rank("src/a/other.ts"), None);
+        assert_eq!(rank("tests/a.ts"), None);
+        assert_eq!(rank("src/__mocks__/a.ts"), None);
+        assert_eq!(
+            relative_module_rank("", "index.ts"),
+            Some(1 + MODULE_EXTENSIONS.len())
+        );
     }
 }
