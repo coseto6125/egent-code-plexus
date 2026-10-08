@@ -10,6 +10,8 @@ Calls alone do not prove value dependency. Check unresolved boundaries and refre
 
 **Before you open source files or dispatch an Explore agent to learn how code connects, run `ecp find` / `ecp impact` / `ecp inspect`.** This includes ecp's own codebase. An Explore agent reads text; ecp reads the graph in one query.
 
+**Before you grep for a function, class or method name (`grep -rn "CacheKeyQueue"`, `rg "def parse_config"`), run `ecp find <name>` or `ecp impact --target <name> --direction upstream`.** This holds in every repo you read, a read-only copy of another team's repo included. ecp builds a missing index on the first query.
+
 ## The one rule
 
 **Code structure → ecp. Text → grep.**
@@ -21,9 +23,9 @@ Calls alone do not prove value dependency. Check unresolved boundaries and refre
 | Blast radius of a diff                               | `ecp impact --baseline <ref>`                    | manual trace |
 | How A reaches B (the route, not just the endpoints)  | `ecp path <from> <to>`                           | `ecp cypher` |
 | Routes / API contracts / event topics                | `ecp routes` / `ecp contracts` / `ecp heuristics event-mirrors` | grep |
-| Understand any indexed repo's internals              | `ecp impact` / `ecp inspect` / `ecp cypher`      | Explore agent |
+| Understand any repo's internals                      | `ecp impact` / `ecp inspect` / `ecp cypher`      | Explore agent |
 | Cross-repo / arbitrary graph query                   | `ecp cypher '<query>'`                           | —    |
-| String literal / config key / fs layout / vendored   | grep / glob                                      | ecp  |
+| String literal / config key / fs layout / vendored deps (`node_modules/`, `.venv/`) | grep / glob                                      | ecp  |
 
 Fall back to grep or an Explore agent only when the target is non-code text, or the repo can't be indexed.
 

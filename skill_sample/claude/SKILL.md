@@ -1,6 +1,6 @@
 ---
 name: ecp
-description: Symbol-level code analysis, blast-radius impact, cross-repo API contracts, AST-aware rename, route map. Defer to grep for string literals, config keys, vendored/generated code, fs layout.
+description: Symbol-level code analysis, blast-radius impact, cross-repo API contracts, AST-aware rename, route map. Defer to grep for string literals, config keys, vendored deps/generated code, fs layout.
 ---
 
 # ecp — egent-code-plexus-rs CLI
@@ -24,7 +24,7 @@ description: Symbol-level code analysis, blast-radius impact, cross-repo API con
 | HTTP consumer → Route shape drift | `ecp shape-check [--route <path>] --repo .` (no `--route` = scan all; drift = consumer reads key absent from Route's response/error keys) |
 | Binding / route / contract delta — edge view | `ecp diff --section <bindings\|routes\|contracts\|all> --baseline <ref> --repo .` (`--baseline` required: branch / tag / SHA / `HEAD~N` / `PR/<n>`; multi via `,`; `--verbose` full lists) |
 | Registry health / freshness / frameworks / blind spots | `ecp summary [--repo @all --detailed]` (was `ecp coverage`, aliased one release) |
-| String literals / config keys / vendored / generated / fs layout | grep / glob |
+| String literals / config keys / vendored deps (`node_modules/`, `.venv/`) / generated / fs layout | grep / glob |
 | MCP host integration / install hooks / config TUI / **MCP server (`mcp serve\|tools`)** / **resolver-vs-LSP benchmark (`verify-resolver`)** | `ecp admin` (hidden namespace) |
 
 ## Repo + graph path resolution
