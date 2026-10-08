@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.14.8 - 2026-10-08
+
+### Documentation
+
+- ECP.md fires on grepping a symbol name; vendored means deps (#832)
+
 ## v0.14.7 - 2026-10-08
 
 ### Bug Fixes
