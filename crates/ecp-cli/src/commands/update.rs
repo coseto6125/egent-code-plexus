@@ -557,7 +557,7 @@ fn skill_refresh_cmd(no_claude_md: bool) -> String {
 // The comparison is against the outgoing binary's copy, so an install from
 // an older release differs too; the note must not call that a local edit.
 const DIFFERS: &str =
-    "differs from this release's copy (local edits, or installed by an older release)";
+    "differs from the copy the replaced binary shipped (local edits, or installed by an older release)";
 const OPAQUE: &str = "is a symlink or special file";
 const OPAQUE_TREE: &str = "is, or contains, a symlink or special file";
 const OUTSIDE_CHECKOUT: &str = "run it outside an ecp checkout";
@@ -725,7 +725,9 @@ fn ecp_md_state(install: &EcpInstall, shipped: &Path) -> Result<LocalState, EcpE
         Ok(_) => {}
     }
     let shipped_md = shipped.join("ECP.md");
-    let local = std::fs::read(&install.ecp_md).map_err(io_err(&install.ecp_md))?;
+    let Some(local) = read_regular(&install.ecp_md).map_err(io_err(&install.ecp_md))? else {
+        return Ok(LocalState::Special);
+    };
     if local != std::fs::read(&shipped_md).map_err(io_err(&shipped_md))? {
         return Ok(LocalState::Modified);
     }
@@ -796,26 +798,70 @@ fn refresh_ecp_skill(new_exe: &Path, home: Option<PathBuf>) -> Vec<String> {
         }
     };
     let plan = plan_ecp_refresh(skill, ecp_md, foreign_owner);
+    let refreshed = plan
+        .run
+        .then(|| run_skill_refresh(new_exe, &home, plan.no_claude_md, TOOL_TIMEOUT));
+    // The comparison above used the outgoing binary's copy. The refreshed
+    // skill carries the incoming release's ECP.md, so a kept ECP.md that
+    // already equals it is current, not a divergence worth a note. Only a
+    // `Modified` ECP.md is read: a `Special` one may be a FIFO.
+    let ecp_md_is_incoming = ecp_md == LocalState::Modified
+        && matches!(refreshed, Some(Ok(())))
+        && ecp_md_matches_skill_copy(&install);
     let mut lines: Vec<String> = plan
         .notes
         .iter()
+        .filter(|note| !(ecp_md_is_incoming && **note == RefreshNote::EcpMdModified))
         .map(|note| note.line(&install, plan.no_claude_md))
         .collect();
-    if plan.run {
-        lines.push(
-            match run_skill_refresh(new_exe, &home, plan.no_claude_md, TOOL_TIMEOUT) {
-                Ok(()) => format!(
-                    "✓ Claude skill ecp refreshed -> {}",
-                    install.skill_dir.display()
-                ),
-                Err(e) => format!(
-                    "note: refreshing the Claude ecp skill failed ({e}); run `{}` ({OUTSIDE_CHECKOUT})",
-                    skill_refresh_cmd(plan.no_claude_md)
-                ),
-            },
-        );
+    if let Some(result) = refreshed {
+        lines.push(match result {
+            Ok(()) => format!(
+                "✓ Claude skill ecp refreshed -> {}",
+                install.skill_dir.display()
+            ),
+            Err(e) => format!(
+                "note: refreshing the Claude ecp skill failed ({e}); run `{}` ({OUTSIDE_CHECKOUT})",
+                skill_refresh_cmd(plan.no_claude_md)
+            ),
+        });
     }
     lines
+}
+
+/// The `ecp` skill carries the release's ECP.md, so after a refresh its copy
+/// is the incoming one. A read failure or a non-regular file counts as
+/// different: the note stays.
+fn ecp_md_matches_skill_copy(install: &EcpInstall) -> bool {
+    match (
+        read_regular(&install.ecp_md),
+        read_regular(&install.skill_dir.join("ECP.md")),
+    ) {
+        (Ok(Some(local)), Ok(Some(incoming))) => local == incoming,
+        _ => false,
+    }
+}
+
+/// Read `path` only if the opened handle is a regular file. A type check by
+/// path before the read leaves a window in which the path can be swapped for
+/// a FIFO, and reading that blocks the update past every timeout. `None` for
+/// any other file type; a symlink fails to open on Unix.
+fn read_regular(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    let mut file = opts.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
 }
 
 /// Run `exe admin claude install skills ecp` from an empty scratch dir, so the
@@ -1220,7 +1266,7 @@ mod tests {
             "{special}"
         );
         assert!(!special.contains("differs"), "{special}");
-        assert!(!special.contains("this release's copy"), "{special}");
+        assert!(!special.contains("replaced binary shipped"), "{special}");
         assert!(
             special.contains(&format!("`{}`", skill_refresh_cmd(false))),
             "{special}"
@@ -1696,6 +1742,126 @@ mod tests {
             "{lines:?}"
         );
         assert!(lines[0].contains(OUTSIDE_CHECKOUT), "{lines:?}");
+    }
+
+    /// A shipped skill plus an ECP.md edited away from the outgoing copy, and
+    /// a child that writes `incoming` as the refreshed skill's ECP.md, then
+    /// runs `then` (e.g. `exit 1`).
+    #[cfg(unix)]
+    fn refresh_with_edited_ecp_md(
+        local: &str,
+        incoming: &str,
+        then: &str,
+    ) -> (Vec<String>, tempfile::TempDir) {
+        let home = tempfile::tempdir().unwrap();
+        let claude_home = home.path().join(".claude");
+        install_shipped(&claude_home);
+        std::fs::write(claude_home.join("ECP.md"), local).unwrap();
+        assert_eq!(
+            classify(&claude_home),
+            (SkillState::Shipped, LocalState::Modified),
+            "fixture must reach the kept-ECP.md branch"
+        );
+        let bin = tempfile::tempdir().unwrap();
+        let incoming_src = bin.path().join("incoming.md");
+        std::fs::write(&incoming_src, incoming).unwrap();
+        let (exe, ran) = marking_exe(
+            bin.path(),
+            &format!(
+                "cp '{}' \"$HOME/.claude/skills/ecp/ECP.md\"; {then}",
+                incoming_src.display()
+            ),
+        );
+        let lines = refresh_ecp_skill(&exe, Some(home.path().to_path_buf()));
+        assert!(ran.exists(), "the child never ran");
+        assert_eq!(
+            std::fs::read_to_string(claude_home.join("ECP.md")).unwrap(),
+            local,
+            "an edited ECP.md is never overwritten"
+        );
+        (lines, home)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_refresh_ecp_skill_edited_ecp_md_equal_to_incoming_copy_drops_note() {
+        let (lines, _home) = refresh_with_edited_ecp_md("# next release\n", "# next release\n", "");
+        assert!(!lines.iter().any(|l| l.contains(DIFFERS)), "{lines:?}");
+        assert!(lines.iter().any(|l| l.starts_with("✓")), "{lines:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_refresh_ecp_skill_edited_ecp_md_unlike_incoming_copy_keeps_note() {
+        let (lines, _home) = refresh_with_edited_ecp_md("# my edit\n", "# next release\n", "");
+        let note = lines
+            .iter()
+            .find(|l| l.contains(DIFFERS))
+            .unwrap_or_else(|| panic!("{lines:?}"));
+        assert!(note.contains("was kept"), "{note}");
+        assert!(lines.iter().any(|l| l.starts_with("✓")), "{lines:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_refresh_ecp_skill_edited_ecp_md_failed_refresh_keeps_note() {
+        // The child wrote a matching copy but failed: a failed refresh
+        // vouches for nothing, so the note stays.
+        let (lines, _home) =
+            refresh_with_edited_ecp_md("# next release\n", "# next release\n", "exit 1");
+        assert!(lines.iter().any(|l| l.contains(DIFFERS)), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("failed")), "{lines:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_refresh_ecp_skill_fifo_ecp_md_successful_refresh_never_reads_it() {
+        let home = tempfile::tempdir().unwrap();
+        let claude_home = home.path().join(".claude");
+        install_shipped(&claude_home);
+        std::fs::remove_file(claude_home.join("ECP.md")).unwrap();
+        mkfifo(&claude_home.join("ECP.md"));
+        let bin = tempfile::tempdir().unwrap();
+        let (exe, ran) = marking_exe(bin.path(), "");
+
+        let home_path = home.path().to_path_buf();
+        let lines = within_deadline(move || refresh_ecp_skill(&exe, Some(home_path)));
+
+        assert!(ran.exists(), "a shipped skill still refreshes");
+        assert!(lines.iter().any(|l| l.contains(OPAQUE)), "{lines:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_refresh_ecp_skill_ecp_md_swapped_for_fifo_during_refresh_keeps_note() {
+        let home = tempfile::tempdir().unwrap();
+        let claude_home = home.path().join(".claude");
+        install_shipped(&claude_home);
+        std::fs::write(claude_home.join("ECP.md"), "# my edit\n").unwrap();
+        assert_eq!(classify(&claude_home).1, LocalState::Modified);
+        let bin = tempfile::tempdir().unwrap();
+        // Classification saw a regular file; the swap lands between it and
+        // the post-refresh comparison.
+        let (exe, ran) = marking_exe(
+            bin.path(),
+            "rm \"$HOME/.claude/ECP.md\" && mkfifo \"$HOME/.claude/ECP.md\"",
+        );
+
+        let home_path = home.path().to_path_buf();
+        let lines = within_deadline(move || refresh_ecp_skill(&exe, Some(home_path)));
+
+        assert!(ran.exists(), "the child never ran");
+        assert!(lines.iter().any(|l| l.contains(DIFFERS)), "{lines:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_read_regular_fifo_returns_none_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        mkfifo(&fifo);
+        let read = within_deadline(move || read_regular(&fifo).unwrap());
+        assert!(read.is_none());
     }
 
     #[cfg(unix)]
