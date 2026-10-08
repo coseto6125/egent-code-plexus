@@ -725,7 +725,9 @@ fn ecp_md_state(install: &EcpInstall, shipped: &Path) -> Result<LocalState, EcpE
         Ok(_) => {}
     }
     let shipped_md = shipped.join("ECP.md");
-    let local = std::fs::read(&install.ecp_md).map_err(io_err(&install.ecp_md))?;
+    let Some(local) = read_regular(&install.ecp_md).map_err(io_err(&install.ecp_md))? else {
+        return Ok(LocalState::Special);
+    };
     if local != std::fs::read(&shipped_md).map_err(io_err(&shipped_md))? {
         return Ok(LocalState::Modified);
     }
@@ -828,15 +830,38 @@ fn refresh_ecp_skill(new_exe: &Path, home: Option<PathBuf>) -> Vec<String> {
 }
 
 /// The `ecp` skill carries the release's ECP.md, so after a refresh its copy
-/// is the incoming one. Any read failure counts as different: the note stays.
+/// is the incoming one. A read failure or a non-regular file counts as
+/// different: the note stays.
 fn ecp_md_matches_skill_copy(install: &EcpInstall) -> bool {
     match (
-        std::fs::read(&install.ecp_md),
-        std::fs::read(install.skill_dir.join("ECP.md")),
+        read_regular(&install.ecp_md),
+        read_regular(&install.skill_dir.join("ECP.md")),
     ) {
-        (Ok(local), Ok(incoming)) => local == incoming,
+        (Ok(Some(local)), Ok(Some(incoming))) => local == incoming,
         _ => false,
     }
+}
+
+/// Read `path` only if the opened handle is a regular file. A type check by
+/// path before the read leaves a window in which the path can be swapped for
+/// a FIFO, and reading that blocks the update past every timeout. `None` for
+/// any other file type; a symlink fails to open on Unix.
+fn read_regular(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    let mut file = opts.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
 }
 
 /// Run `exe admin claude install skills ecp` from an empty scratch dir, so the
@@ -1804,6 +1829,39 @@ mod tests {
 
         assert!(ran.exists(), "a shipped skill still refreshes");
         assert!(lines.iter().any(|l| l.contains(OPAQUE)), "{lines:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_refresh_ecp_skill_ecp_md_swapped_for_fifo_during_refresh_keeps_note() {
+        let home = tempfile::tempdir().unwrap();
+        let claude_home = home.path().join(".claude");
+        install_shipped(&claude_home);
+        std::fs::write(claude_home.join("ECP.md"), "# my edit\n").unwrap();
+        assert_eq!(classify(&claude_home).1, LocalState::Modified);
+        let bin = tempfile::tempdir().unwrap();
+        // Classification saw a regular file; the swap lands between it and
+        // the post-refresh comparison.
+        let (exe, ran) = marking_exe(
+            bin.path(),
+            "rm \"$HOME/.claude/ECP.md\" && mkfifo \"$HOME/.claude/ECP.md\"",
+        );
+
+        let home_path = home.path().to_path_buf();
+        let lines = within_deadline(move || refresh_ecp_skill(&exe, Some(home_path)));
+
+        assert!(ran.exists(), "the child never ran");
+        assert!(lines.iter().any(|l| l.contains(DIFFERS)), "{lines:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_read_regular_fifo_returns_none_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        mkfifo(&fifo);
+        let read = within_deadline(move || read_regular(&fifo).unwrap());
+        assert!(read.is_none());
     }
 
     #[cfg(unix)]
