@@ -93,6 +93,27 @@ pub fn calls_from(graph: &ZeroCopyGraph, caller: &str) -> Vec<Hit> {
     edges_from(graph, caller, RelType::Calls)
 }
 
+/// The `Imports` edges of the File node named `file` (a basename), as
+/// `(target file, target name, target kind, confidence in percent)`, sorted.
+pub fn imports_edges_of(
+    graph: &ZeroCopyGraph,
+    file: &str,
+) -> Vec<(String, String, &'static str, u32)> {
+    let mut edges: Vec<_> = edges_from(graph, file, RelType::Imports)
+        .into_iter()
+        .map(|hit| {
+            (
+                hit.file,
+                hit.name,
+                hit.kind.as_str(),
+                (hit.confidence * 100.0).round() as u32,
+            )
+        })
+        .collect();
+    edges.sort();
+    edges
+}
+
 /// `Calls` edges from `caller` that instantiate `ty`: into a type node named
 /// `ty`, or into a constructor of `ty`. Java-family constructors carry the
 /// type's name; the others (`constructor`, `__init__`, `init`, `initialize`,

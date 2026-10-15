@@ -1180,7 +1180,7 @@ fn resolve_callee<'s>(
     }
     let ecmascript = is_ecmascript(caller.language);
     if ecmascript && binds_imports {
-        if let Some((target, _)) = reexport::named_import(
+        if let Some(hit) = reexport::named_import(
             facts,
             importer,
             imports.iter().map(ImportRef::from),
@@ -1188,8 +1188,8 @@ fn resolve_callee<'s>(
             names.target,
             |_| true,
         ) {
-            debug_assert!(!replaced.contains_key(&target));
-            return accepts(target).then_some((target, CONF_IMPORT_SCOPED));
+            debug_assert!(!replaced.contains_key(&hit.decl));
+            return accepts(hit.decl).then_some((hit.decl, CONF_IMPORT_SCOPED));
         }
     }
 

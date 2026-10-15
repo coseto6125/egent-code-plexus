@@ -583,7 +583,7 @@ impl LanguageProvider for JavaScriptProvider {
                         alias,
                         imported_name: name_str.to_string(),
                         source: src_str.to_string(),
-                        binding_kind: None,
+                        binding_kind: crate::framework_helpers::js_ts_reexport_kind(i_src),
                     });
                 }
             }
@@ -733,7 +733,7 @@ impl LanguageProvider for JavaScriptProvider {
 
         let export_aliases =
             crate::framework_helpers::stamp_js_ts_exports(tree.root_node(), source, &mut nodes);
-        crate::framework_helpers::mark_js_ts_default_imports(
+        crate::framework_helpers::mark_js_ts_import_bindings(
             tree.root_node(),
             source,
             &mut imports,

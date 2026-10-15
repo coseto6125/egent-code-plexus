@@ -4,6 +4,10 @@
 //! these calls kept the global tier: 0.7 for a unique name, no edge for an
 //! ambiguous one, and the parsers emitted nothing for `export * from`.
 //!
+//! Only what the barrel exports is followed (a plain import is not; codex
+//! c3), the default-export barrel forms bind the default declaration (R1
+//! F4), and a consumer keeps its File edge to the barrel (codex c1).
+//!
 //! The guard tests pin what must not change: two star modules declaring the
 //! name stay unresolved, a second hop is not followed, a cycle ends, a
 //! missing re-exported name keeps the global tier, CommonJS
@@ -18,9 +22,9 @@ use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::resolution::heuristics::ResolutionTier;
 use ecp_analyzer::typescript::TypeScriptProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::RawImport;
+use ecp_core::analyzer::types::{BindingKind, RawImport};
 use ecp_core::graph::ZeroCopyGraph;
-use instantiation_calls_support::{assert_call_targets, graph_of};
+use instantiation_calls_support::{assert_call_targets, graph_of, imports_edges_of};
 use std::path::Path;
 
 fn import_tier() -> f32 {
@@ -214,19 +218,26 @@ fn test_ts_reexport_name_missing_in_source_keeps_global_tier() {
     );
 }
 
-/// `a` star-exports `b` and `b` star-exports `a`: resolution ends, with no
-/// edge, as no module declares `render`.
+/// `a` star-exports `b` and `b` star-exports `a`. One hop through the cycle
+/// reaches `b`'s own `render` (`other.ts` makes the name ambiguous to the
+/// global tier), and a name no module declares ends with no edge instead
+/// of following the cycle.
 #[test]
-fn test_ts_reexport_circular_star_terminates_without_edge() {
+fn test_ts_reexport_circular_star_binds_one_hop_and_terminates() {
     let graph = graph(&[
         ("ts/a.ts", "export * from './b';\n"),
-        ("ts/b.ts", "export * from './a';\n"),
+        (
+            "ts/b.ts",
+            "export * from './a';\nexport function render() { return 1; }\n",
+        ),
+        NAMESAKE,
         (
             "ts/app.ts",
-            "import { render } from './a';\nexport function go() { return render(); }\n",
+            "import { render, missing } from './a';\nexport function go() { return render(); }\nexport function stop() { return missing(); }\n",
         ),
     ]);
-    assert_call_targets(&graph, "go", &[]);
+    assert_call_targets(&graph, "go", &[("ts/b.ts", "", "render", import_tier())]);
+    assert_call_targets(&graph, "stop", &[]);
 }
 
 #[test]
@@ -290,4 +301,229 @@ fn test_dart_barrel_export_resolves_as_before() {
         "go",
         &[("lib/impl.dart", "", "stamp", global_tier())],
     );
+}
+
+/// `{ext}/<name>.{ext}`, the layout of the TS and JS fixtures below.
+fn at(ext: &str, name: &str) -> String {
+    format!("{ext}/{name}.{ext}")
+}
+
+/// codex c1 / R1 F1: a consumer's import through a barrel binds the
+/// re-exported declaration and keeps its File → barrel File edge (0.9),
+/// which ecp 0.14.8 emitted and the edit hook's `importers()` reads. Before
+/// this fix only the symbol edge was left, so the barrel had no importer.
+/// An import of the module that declares the name gets no File edge.
+#[test]
+fn test_emit_edges_named_import_through_barrel_keeps_barrel_file_edge() {
+    for ext in ["ts", "js"] {
+        for barrel in [
+            "export * from './impl';\n",
+            "export { render } from './impl';\n",
+            "import { render } from './impl';\nexport { render };\n",
+        ] {
+            let (index, implementation) = (at(ext, "index"), at(ext, "impl"));
+            let (app, direct) = (at(ext, "app"), at(ext, "direct"));
+            let graph = graph(&[
+                (index.as_str(), barrel),
+                (implementation.as_str(), IMPL.1),
+                (app.as_str(), APP),
+                (
+                    direct.as_str(),
+                    "import { render } from './impl';\nexport function go2() { return render(); }\n",
+                ),
+            ]);
+            assert_eq!(
+                imports_edges_of(&graph, &format!("app.{ext}")),
+                [
+                    (implementation.clone(), "render".to_string(), "Function", 95),
+                    (index.clone(), format!("index.{ext}"), "File", 90),
+                ],
+                "{ext}: {barrel}"
+            );
+            assert_eq!(
+                imports_edges_of(&graph, &format!("direct.{ext}")),
+                [(implementation.clone(), "render".to_string(), "Function", 95)],
+                "{ext}: a direct import"
+            );
+        }
+    }
+}
+
+/// codex c3 / R1 F5: a barrel's plain `import { render } from './impl'`
+/// exports nothing. `api.render()` through `import * as api` and a named
+/// import of `render` reach no export of the barrel, so neither binds
+/// `impl`'s `render` (no edge, as on ecp 0.14.8); before this fix both bound
+/// it at 0.95. The barrel's own call still binds its import.
+#[test]
+fn test_ts_reexport_plain_import_in_barrel_is_not_followed() {
+    for ext in ["ts", "js"] {
+        let [index, implementation, other, app, app2] =
+            ["index", "impl", "other", "app", "app2"].map(|name| at(ext, name));
+        let graph = graph(&[
+            (
+                index.as_str(),
+                "import { render } from './impl';\nexport function local() { return render(); }\n",
+            ),
+            (implementation.as_str(), IMPL.1),
+            (other.as_str(), NAMESAKE.1),
+            (
+                app.as_str(),
+                "import * as api from './index';\nexport function go() { return api.render(); }\n",
+            ),
+            (
+                app2.as_str(),
+                "import { render } from './index';\nexport function go2() { return render(); }\n",
+            ),
+        ]);
+        assert_call_targets(&graph, "go", &[]);
+        assert_call_targets(&graph, "go2", &[]);
+        assert_call_targets(
+            &graph,
+            "local",
+            &[(implementation.as_str(), "", "render", import_tier())],
+        );
+    }
+}
+
+/// R1 F5: the barrel imports `render` from `legacy` for its own use and
+/// star-exports `impl`. The plain import does not shadow the star export,
+/// so a consumer binds `impl`'s `render`; before this fix it bound
+/// `legacy`'s at 0.95.
+#[test]
+fn test_ts_reexport_plain_import_does_not_shadow_star_binds_star_module() {
+    for ext in ["ts", "js"] {
+        let [index, implementation, legacy, app] =
+            ["index", "impl", "legacy", "app"].map(|name| at(ext, name));
+        let graph = graph(&[
+            (
+                index.as_str(),
+                "import { render } from './legacy';\nexport * from './impl';\nexport function draw() { return render(); }\n",
+            ),
+            (implementation.as_str(), IMPL.1),
+            (legacy.as_str(), "export function render() { return 3; }\n"),
+            (app.as_str(), APP),
+        ]);
+        assert_call_targets(
+            &graph,
+            "go",
+            &[(implementation.as_str(), "", "render", import_tier())],
+        );
+        assert_call_targets(
+            &graph,
+            "draw",
+            &[(legacy.as_str(), "", "render", import_tier())],
+        );
+    }
+}
+
+/// R1 F4 / codex c7: the default-export barrel forms bind `impl`'s default
+/// export `Button` (`other`'s namesake makes the global tier ambiguous):
+/// `export { default as Button } from` (the JS query did not capture it),
+/// a default import the barrel exports (`import Button from; export {
+/// Button }`, also renamed, which the re-export gate must reach), and a
+/// default import through `export { default } from`. Before this fix none
+/// bound in JS, and only the first in TS.
+#[test]
+fn test_ts_reexport_default_export_barrel_forms_bind_default_declaration() {
+    for ext in ["ts", "js"] {
+        let [index, implementation, other, app_path] =
+            ["index", "impl", "other", "app"].map(|name| at(ext, name));
+        for (barrel, app) in [
+            (
+                "export { default as Button } from './impl';\n",
+                "import { Button } from './index';\nexport function go() { return Button(); }\n",
+            ),
+            (
+                "import Button from './impl';\nexport { Button };\n",
+                "import { Button } from './index';\nexport function go() { return Button(); }\n",
+            ),
+            (
+                "import Btn from './impl';\nexport { Btn };\n",
+                "import { Btn } from './index';\nexport function go() { return Btn(); }\n",
+            ),
+            (
+                "export { default } from './impl';\n",
+                "import Button from './index';\nexport function go() { return Button(); }\n",
+            ),
+        ] {
+            let graph = graph(&[
+                (index.as_str(), barrel),
+                (
+                    implementation.as_str(),
+                    "export default function Button() { return 1; }\n",
+                ),
+                (
+                    other.as_str(),
+                    "export default function Button() { return 2; }\n",
+                ),
+                (app_path.as_str(), app),
+            ]);
+            assert_call_targets(
+                &graph,
+                "go",
+                &[(implementation.as_str(), "", "Button", import_tier())],
+            );
+        }
+    }
+}
+
+/// The parsers mark what the barrel exports: a re-export (`export { x }
+/// from`, `export { default as X } from`) and an import its own `export { }`
+/// clause exports under its local name are [`BindingKind::EsReexport`],
+/// [`BindingKind::EsDefaultReexport`] for a default import. An import
+/// exported only under another name (`z as w`) and a plain import stay
+/// unmarked.
+#[test]
+fn test_parse_file_reexport_marks_exported_bindings() {
+    let ts = TypeScriptProvider::new().unwrap();
+    let js = JavaScriptProvider::new().unwrap();
+    let source = "import d from './a';\nimport { e, z } from './a';\nimport { g as h } from './a';\nimport k from './a';\nimport { p } from './a';\nimport q from './a';\nexport { default as X } from './m';\nexport { y } from './m';\nexport { q } from './a';\nexport { e, h, k, z as w };\n";
+    for (provider, path) in [
+        (&ts as &dyn LanguageProvider, "index.ts"),
+        (&js as &dyn LanguageProvider, "index.js"),
+    ] {
+        let imports = imports_of(provider, path, source);
+        let kind_of = |name: &str, alias: Option<&str>| {
+            let found: Vec<_> = imports
+                .iter()
+                .filter(|import| import.imported_name == name && import.alias.as_deref() == alias)
+                .map(|import| import.binding_kind)
+                .collect();
+            assert_eq!(found.len(), 1, "{path}: {name} in {imports:?}");
+            found[0]
+        };
+        assert_eq!(kind_of("d", None), Some(BindingKind::EsDefault), "{path}");
+        assert_eq!(kind_of("e", None), Some(BindingKind::EsReexport), "{path}");
+        assert_eq!(
+            kind_of("g", Some("h")),
+            Some(BindingKind::EsReexport),
+            "{path}"
+        );
+        assert_eq!(
+            kind_of("k", None),
+            Some(BindingKind::EsDefaultReexport),
+            "{path}"
+        );
+        assert_eq!(
+            kind_of("default", Some("X")),
+            Some(BindingKind::EsReexport),
+            "{path}"
+        );
+        assert_eq!(kind_of("y", None), Some(BindingKind::EsReexport), "{path}");
+        assert_eq!(kind_of("z", None), None, "{path}: exported only as `w`");
+        assert_eq!(kind_of("p", None), None, "{path}: a plain import");
+        // `import q` and `export { q } from` emit the same shape; each keeps
+        // the kind of its own statement.
+        let q: Vec<_> = imports
+            .iter()
+            .filter(|import| import.imported_name == "q" && import.alias.is_none())
+            .map(|import| import.binding_kind)
+            .collect();
+        assert!(
+            q.len() == 2
+                && q.contains(&Some(BindingKind::EsDefault))
+                && q.contains(&Some(BindingKind::EsReexport)),
+            "{path}: {q:?}"
+        );
+    }
 }

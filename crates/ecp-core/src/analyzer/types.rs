@@ -302,6 +302,15 @@ pub enum BindingKind {
     /// as `imported_name` `d` with no alias, like `import { d } from './m'`,
     /// but `d` binds module `m`'s default export, whatever its declared name.
     EsDefault,
+    /// A TS / JS binding the module exports: a re-export (`export { x } from
+    /// './m'`), which the parsers emit like `import { x } from './m'`, or an
+    /// import the module's own `export { x }` clause exports under its name.
+    /// A plain import exports nothing, so another module's import of the
+    /// file never reaches through it.
+    EsReexport,
+    /// An [`Self::EsDefault`] import the module also exports, as
+    /// [`Self::EsReexport`] says: `import d from './m'; export { d };`.
+    EsDefaultReexport,
 }
 
 impl From<&ArchivedBindingKind> for BindingKind {
@@ -312,6 +321,8 @@ impl From<&ArchivedBindingKind> for BindingKind {
             ArchivedBindingKind::Macro => Self::Macro,
             ArchivedBindingKind::Flag => Self::Flag,
             ArchivedBindingKind::EsDefault => Self::EsDefault,
+            ArchivedBindingKind::EsReexport => Self::EsReexport,
+            ArchivedBindingKind::EsDefaultReexport => Self::EsDefaultReexport,
         }
     }
 }
@@ -324,7 +335,8 @@ pub struct RawImport {
     pub alias: Option<String>,
     /// `None` for ordinary import statements; `Some(_)` for C named bindings
     /// (`typedef`, `#define`, `extern`) classified by body shape, and for a
-    /// TS / JS default import ([`BindingKind::EsDefault`]).
+    /// TS / JS default import or exported binding ([`BindingKind::EsDefault`],
+    /// [`BindingKind::EsReexport`], [`BindingKind::EsDefaultReexport`]).
     pub binding_kind: Option<BindingKind>,
 }
 
@@ -820,7 +832,8 @@ pub struct RawCallMeta {
 /// One name a TS / JS module exports and the local declaration it binds:
 /// `export { g as f }` is `f` → `g`, `export default h` and
 /// `export default function h() {}` are `default` → `h`, and `export function
-/// k() {}` is `k` → `k`.
+/// k() {}` is `k` → `k`. `export default wrap(h)` binds no declaration: it is
+/// `default` with an empty local.
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 #[rkyv(derive(Debug))]
 pub struct RawExportAlias {

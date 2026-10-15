@@ -20,6 +20,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Edge kinds the resolver resolves towards. Constrains Tier-3 fallback so a
 /// bare callee like `format` never resolves to a Variable/Const that happens
@@ -113,6 +114,23 @@ impl<'a> ImportRef<'a> {
     pub fn is_star_export(&self) -> bool {
         self.imported_name == "*" && self.alias.is_none()
     }
+
+    /// A TS / JS default import, exported or not: it binds its module's
+    /// default export.
+    pub fn is_es_default(&self) -> bool {
+        matches!(
+            self.binding_kind,
+            Some(BindingKind::EsDefault | BindingKind::EsDefaultReexport)
+        )
+    }
+
+    /// A TS / JS binding its module exports ([`BindingKind::EsReexport`]).
+    pub fn is_es_reexport(&self) -> bool {
+        matches!(
+            self.binding_kind,
+            Some(BindingKind::EsReexport | BindingKind::EsDefaultReexport)
+        )
+    }
 }
 
 /// The ordered imports of one file.
@@ -159,12 +177,15 @@ pub struct ExportAliasTable {
     /// Local names the module exports only under other names: an import of
     /// one binds nothing.
     hidden: FxHashSet<Box<str>>,
+    /// `export default wrap(f)`: the default export binds no declaration.
+    expression_default: bool,
 }
 
 impl ExportAliasTable {
     /// The table of a file's `(exported, local)` pairs ([`RawExportAlias`]).
     /// `None` when no pair names both sides: the file then exports every
-    /// declaration under its own name.
+    /// declaration under its own name. `default` with an empty local is an
+    /// expression default.
     ///
     /// [`RawExportAlias`]: crate::analyzer::types::RawExportAlias
     pub fn build<'p, I>(pairs: I) -> Option<Self>
@@ -176,6 +197,10 @@ impl ExportAliasTable {
         let mut table = Self::default();
         for (exported, local) in pairs.clone() {
             let (exported, local) = (exported.trim(), local.trim());
+            if exported == "default" && local.is_empty() {
+                table.expression_default = true;
+                continue;
+            }
             if exported.is_empty() || local.is_empty() {
                 continue;
             }
@@ -205,7 +230,7 @@ impl ExportAliasTable {
     /// own (`export { g as name }`, `export default`): no `export *` of the
     /// module can then supply the name.
     pub fn exports(&self, name: &str) -> bool {
-        self.locals.contains_key(name)
+        self.locals.contains_key(name) || (self.expression_default && name == "default")
     }
 
     /// The local declaration name an import of `name` binds; `None` when it
@@ -214,8 +239,15 @@ impl ExportAliasTable {
         match self.locals.get(name) {
             Some(local) => local.as_deref(),
             None if self.hidden.contains(name) => None,
+            None if self.expression_default && name == "default" => None,
             None => Some(name),
         }
+    }
+
+    /// Whether the default export is an expression (`export default
+    /// wrap(f)`), which binds no declaration.
+    pub fn exports_expression_default(&self) -> bool {
+        self.expression_default
     }
 }
 
@@ -250,10 +282,11 @@ pub trait ModuleFacts {
     fn is_es_module(&self, file: &str) -> bool;
     /// `file`'s [`ExportAliasTable`], `None` when it has none.
     fn export_aliases(&self, file: &str) -> Option<Cow<'_, ExportAliasTable>>;
-    /// The ordered imports of a Python / TS / JS `file`. `None` when there
-    /// is no record of them, which no rule reads as "no imports".
+    /// The ordered imports of a Python / TS / JS `file`, with the binding
+    /// kinds the parsers marked. `None` when there is no record of them,
+    /// which no rule reads as "no imports".
     fn imports(&self, file: &str) -> Option<FileImports<'_>>;
-    /// The resolved `export *` / `from m import *` modules of `module`
+    /// The resolved `export *` modules of the TS / JS `module`
     /// ([`resolve_star_modules`]).
     fn star_modules(&self, module: &str) -> Cow<'_, [Box<str>]>;
     /// The resolver's `import_module_file` for a Python specifier.
@@ -325,40 +358,86 @@ pub fn ecmascript_module<F: ModuleFacts + ?Sized>(
     found
 }
 
-/// The modules the star imports of `module` name, resolved once per module:
-/// a barrel can hold dozens of `export *` lines, and each call through it
-/// would otherwise re-probe every specifier. Empty outside Python / TS / JS.
+/// The modules the `export *` imports of the TS / JS module `module` name,
+/// resolved once per module: a barrel can hold dozens of `export *` lines,
+/// and each call through it would otherwise re-probe every specifier.
+/// Empty outside TS / JS: a Python star import binds in source order among
+/// the module's other imports ([`python_reexport`]).
 pub fn resolve_star_modules<'i, F: ModuleFacts + ?Sized>(
     facts: &F,
     module: &str,
     imports: impl IntoIterator<Item = ImportRef<'i>>,
 ) -> Box<[Box<str>]> {
-    let language = Language::from_normalized_path(module);
-    let stars = imports.into_iter().filter(ImportRef::is_star_export);
-    if is_ecmascript(language) {
-        stars
-            .filter_map(|import| ecmascript_module(facts, module, import.source))
-            .collect()
-    } else if language == Language::Python {
-        stars
-            .filter_map(|import| match facts.python_module(module, import.source) {
-                PyModule::Unique(file) => Some(Box::<str>::from(file.as_ref())),
-                PyModule::Missing | PyModule::Ambiguous => None,
-            })
-            .collect()
-    } else {
-        Box::default()
+    if !is_ecmascript(Language::from_normalized_path(module)) {
+        return Box::default();
     }
+    imports
+        .into_iter()
+        .filter(ImportRef::is_star_export)
+        .filter_map(|import| ecmascript_module(facts, module, import.source))
+        .collect()
+}
+
+/// The declaration a default import (`import d from './a'`, local name
+/// `local`) binds in module `file`: its default export. A module with no
+/// default on record (CommonJS, a script) keeps the by-name lookup of the
+/// local name. So does an expression default (`export default
+/// withAuth(handler)`): it binds no declaration, and the local name is the
+/// evidence of what it wraps. Any private namesake is in reach then.
+pub fn default_import_in_file<F: ModuleFacts + ?Sized>(
+    facts: &F,
+    file: &str,
+    local: &str,
+    target: ResolveTarget,
+) -> Option<u32> {
+    lookup_export_in_file(facts, file, "default", target).or_else(|| {
+        if facts
+            .export_aliases(file)
+            .is_some_and(|table| table.exports_expression_default())
+        {
+            call_in_file(facts, file, local, target)
+        } else {
+            lookup_export_in_file(facts, file, local, target)
+        }
+    })
+}
+
+/// The declaration an import of `imported` binds in module `file`: a
+/// default import binds the default export ([`default_import_in_file`]),
+/// any other its export of that name ([`lookup_export_in_file`]).
+fn imported_in_file<F: ModuleFacts + ?Sized>(
+    facts: &F,
+    file: &str,
+    imported: &str,
+    default_import: bool,
+    target: ResolveTarget,
+) -> Option<u32> {
+    if default_import {
+        default_import_in_file(facts, file, imported, target)
+    } else {
+        lookup_export_in_file(facts, file, imported, target)
+    }
+}
+
+/// What [`named_import`] binds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedImport {
+    pub decl: u32,
+    /// The position of the import that bound it.
+    pub position: usize,
+    /// The module the import names, when the declaration lives in a module
+    /// that one re-exports from ([`ecmascript_reexport`]): the importer
+    /// still depends on that barrel.
+    pub barrel: Option<Arc<str>>,
 }
 
 /// Tier 2 outside the import-member policy: the first import binding `name`
 /// whose module, probed through the specifier's candidate files, exports
-/// the name it imports. `import d from './a'` binds `a`'s default export; a
-/// module with no default on record (CommonJS, a script) keeps the by-name
-/// lookup of the local name. When the module exports nothing under that
-/// name and `follow_reexport` allows it, the module's re-export
-/// ([`ecmascript_hop`]) binds it. Returns the declaration and the position
-/// of the import that bound it.
+/// the name it imports. `import d from './a'` binds `a`'s default export
+/// ([`default_import_in_file`]). When no candidate exports it and
+/// `follow_reexport` allows it, the re-export ([`ecmascript_reexport`]) of
+/// the first indexed candidate, the module the specifier names, binds it;
+/// for a default import that is the re-export of `default`.
 pub fn named_import<'i, F: ModuleFacts + ?Sized>(
     facts: &F,
     importer: &str,
@@ -366,62 +445,63 @@ pub fn named_import<'i, F: ModuleFacts + ?Sized>(
     name: &str,
     target: ResolveTarget,
     follow_reexport: impl Fn(&str) -> bool,
-) -> Option<(u32, usize)> {
+) -> Option<NamedImport> {
     for (position, import) in imports.into_iter().enumerate() {
         let Some(exported_name) = plain_binding(import.imported_name, import.alias, name) else {
             continue;
         };
-        let default_import = import.binding_kind == Some(BindingKind::EsDefault);
+        let default_import = import.is_es_default();
         let mut hit: Option<u32> = None;
+        let mut module: Option<Arc<str>> = None;
         facts.for_each_candidate(importer, import.source, &mut |candidate| {
-            hit = default_import
-                .then(|| lookup_export_in_file(facts, candidate, "default", target))
-                .flatten()
-                .or_else(|| lookup_export_in_file(facts, candidate, exported_name, target));
+            hit = imported_in_file(facts, candidate, exported_name, default_import, target);
+            if hit.is_none() && module.is_none() && facts.has_file(candidate) {
+                module = Some(Arc::from(candidate));
+            }
             hit.is_none()
         });
-        // An npm package's export reaches nothing through an in-repo
-        // re-export, so it skips the second probe.
-        if hit.is_none() && follow_reexport(exported_name) {
-            hit = ecmascript_hop(facts, importer, import.source, exported_name, target);
-        }
         if let Some(decl) = hit {
-            return Some((decl, position));
+            return Some(NamedImport {
+                decl,
+                position,
+                barrel: None,
+            });
+        }
+        // A specifier that names no indexed file (an npm package) has no
+        // re-export to follow.
+        let Some(module) = module else {
+            continue;
+        };
+        let reexported = if default_import {
+            "default"
+        } else {
+            exported_name
+        };
+        if !follow_reexport(reexported) {
+            continue;
+        }
+        if let Some(decl) = ecmascript_reexport(facts, &module, reexported, target) {
+            return Some(NamedImport {
+                decl,
+                position,
+                barrel: Some(module),
+            });
         }
     }
     None
 }
 
-/// `name` through the TS / JS module `specifier` names from `importer`
-/// when that module does not declare it: the re-export of the first
-/// indexed candidate file ([`ecmascript_reexport`]).
-pub fn ecmascript_hop<F: ModuleFacts + ?Sized>(
-    facts: &F,
-    importer: &str,
-    specifier: &str,
-    name: &str,
-    target: ResolveTarget,
-) -> Option<u32> {
-    let mut hit = None;
-    facts.for_each_candidate(importer, specifier, &mut |candidate| {
-        if !facts.has_file(candidate) {
-            return true;
-        }
-        hit = ecmascript_reexport(facts, candidate, name, target);
-        false
-    });
-    hit
-}
-
-/// `name` re-exported one hop by the TS / JS module `module`: an
-/// `export { x } from` (or an import, which the parsers emit alike)
-/// binding the name, else the one `export * from` module declaring it.
-/// An explicit binding shadows every star export, as in ES modules. Two
-/// star modules declaring different targets leave the name unexported
-/// in ES modules, so neither binds. A module that re-exports the name
-/// again is not followed: one hop, so a cycle ends here. A module whose
-/// own export clause gives the name (`export { g as name }`) re-exports
-/// nothing under it, and the target module binds only what it exports.
+/// `name` re-exported one hop by the TS / JS module `module`: a binding
+/// the module exports under the name ([`ImportRef::is_es_reexport`]: an
+/// `export { x } from`, or an import its own `export { x }` exports), else
+/// the one `export * from` module declaring it. A plain import exports
+/// nothing, so it neither binds the name nor shadows a star export. An
+/// explicit binding shadows every star export, as in ES modules. Two star
+/// modules declaring different targets leave the name unexported in ES
+/// modules, so neither binds. A module that re-exports the name again is
+/// not followed: one hop, so a cycle ends here. A module whose own export
+/// clause gives the name (`export { g as name }`) re-exports nothing under
+/// it, and the target module binds only what it exports.
 pub fn ecmascript_reexport<F: ModuleFacts + ?Sized>(
     facts: &F,
     module: &str,
@@ -439,11 +519,20 @@ pub fn ecmascript_reexport<F: ModuleFacts + ?Sized>(
     }
     let imports = facts.imports(module)?;
     if let Some(import) = imports.iter().find(|import| {
-        import.imported_name != "*" && !import.source.is_empty() && import.local_name() == name
+        import.is_es_reexport()
+            && import.imported_name != "*"
+            && !import.source.is_empty()
+            && import.local_name() == name
     }) {
         let mut hit = None;
         facts.for_each_candidate(module, import.source, &mut |candidate| {
-            hit = lookup_export_in_file(facts, candidate, import.imported_name, target);
+            hit = imported_in_file(
+                facts,
+                candidate,
+                import.imported_name,
+                import.is_es_default(),
+                target,
+            );
             hit.is_none()
         });
         return hit;
@@ -463,14 +552,14 @@ pub fn ecmascript_reexport<F: ModuleFacts + ?Sized>(
 /// `name` re-exported by the Python module `module`: an import of
 /// `module` binding `name` makes it an attribute of the module, so
 /// `from .core import compute` in `pkg/__init__.py` is `pkg.compute`.
-/// The first such import whose module declares it wins, which keeps a
-/// `try:` / `except ImportError:` pair on the module that exists.
-///
-/// When no import binds the name, a star import (`from .core import *`)
-/// does: the one star module that declares it, as in ES modules. Two
-/// that declare different targets bind nothing, and so does a `_` name,
-/// which a star import skips. A star module with `__all__` exports only
-/// what it lists, which the index does not read, so it binds nothing.
+/// Python runs the bindings in source order and the last one wins: an
+/// explicit import, or a star import (`from .core import *`) whose module
+/// declares the name. A star import skips a `_` name, and a star module
+/// with `__all__` exports only what it lists, which the index does not
+/// read, so it leaves the name unknown. An import whose module the index
+/// does not hold, or does not declare the name, rebinds nothing: it is the
+/// missing side of a `try:` / `except ImportError:` pair, an external
+/// module, or a second hop.
 ///
 /// One hop: a module that re-exports the name again is not followed, so
 /// a longer chain keeps the general tiers instead of a guessed target,
@@ -484,33 +573,34 @@ pub fn python_reexport<F: ModuleFacts + ?Sized>(
     if Language::from_normalized_path(module) != Language::Python {
         return None;
     }
-    let imports = facts.imports(module)?;
-    let mut bound = false;
-    let explicit = imports.iter().find_map(|import| {
-        let member = plain_binding(import.imported_name, import.alias, name)?;
-        bound = true;
-        match facts.python_module(module, import.source) {
-            PyModule::Unique(file) => call_in_file(facts, file.as_ref(), member, target),
-            PyModule::Missing | PyModule::Ambiguous => None,
-        }
-    });
-    if bound || name.starts_with('_') {
-        return explicit;
+    let mut bound = None;
+    for import in facts.imports(module)?.iter() {
+        let star = import.is_star_export();
+        let member = if star {
+            (!name.starts_with('_')).then_some(name)
+        } else {
+            plain_binding(import.imported_name, import.alias, name)
+        };
+        let Some(member) = member else {
+            continue;
+        };
+        let file = match facts.python_module(module, import.source) {
+            PyModule::Unique(file) => file,
+            PyModule::Missing | PyModule::Ambiguous => continue,
+        };
+        let Some(hit) = call_in_file(facts, file.as_ref(), member, target) else {
+            continue;
+        };
+        bound = Some((!star || !facts.declares(file.as_ref(), "__all__")).then_some(hit));
     }
-    let stars = facts.star_modules(module);
-    let mut hits = stars.iter().filter_map(|file| {
-        let hit = call_in_file(facts, file, name, target)?;
-        Some((!facts.declares(file, "__all__")).then_some(hit))
-    });
-    let first = hits.next()??;
-    hits.all(|other| other == Some(first)).then_some(first)
+    bound.flatten()
 }
 
 /// `from pkg.sub import mod; mod.compute()`: a from-import of a name its
-/// module does not declare imports the submodule `pkg.sub.mod`, so the
-/// call binds as through `import pkg.sub.mod as mod`. `None` on any miss:
-/// the call then resolves as the bare member. Returns the declaration and
-/// the position of the import that bound it.
+/// module does not bind imports the submodule `pkg.sub.mod`, so the call
+/// binds as through `import pkg.sub.mod as mod`. `None` on any miss: the
+/// call then resolves as the bare member. Returns the declaration and the
+/// position of the import that bound it.
 pub fn python_submodule_member<'i, F: ModuleFacts + ?Sized>(
     facts: &F,
     importer: &str,
@@ -530,18 +620,13 @@ pub fn python_submodule_member<'i, F: ModuleFacts + ?Sized>(
             {
                 return None;
             }
-            let shadowed = match facts.python_module(importer, import.source) {
-                // The module's own `mod` is an attribute, which shadows the
-                // submodule.
-                PyModule::Unique(module) => facts.declares(module.as_ref(), import.imported_name),
-                PyModule::Ambiguous => true,
+            let package = match facts.python_module(importer, import.source) {
+                PyModule::Unique(package) => Some(package),
+                PyModule::Ambiguous => return None,
                 // A namespace package (no `__init__.py`) is Missing yet holds
                 // submodules.
-                PyModule::Missing => false,
+                PyModule::Missing => None,
             };
-            if shadowed {
-                return None;
-            }
             let separator = if import.source.bytes().all(|b| b == b'.') {
                 ""
             } else if import.source.starts_with('.') {
@@ -550,13 +635,66 @@ pub fn python_submodule_member<'i, F: ModuleFacts + ?Sized>(
                 "/"
             };
             let submodule = [import.source, separator, import.imported_name].concat();
-            let decl = match facts.python_module(importer, &submodule) {
-                PyModule::Unique(module) => call_in_file(facts, module.as_ref(), member, target)
-                    .or_else(|| python_reexport(facts, module.as_ref(), member, target)),
-                PyModule::Missing | PyModule::Ambiguous => None,
-            }?;
+            let module = match facts.python_module(importer, &submodule) {
+                PyModule::Unique(module) => module,
+                PyModule::Missing | PyModule::Ambiguous => return None,
+            };
+            if package.is_some_and(|package| {
+                attribute_shadows_submodule(
+                    facts,
+                    package.as_ref(),
+                    import.imported_name,
+                    module.as_ref(),
+                )
+            }) {
+                return None;
+            }
+            let decl = call_in_file(facts, module.as_ref(), member, target)
+                .or_else(|| python_reexport(facts, module.as_ref(), member, target))?;
             Some((decl, position))
         })
+}
+
+/// Whether the Python package module `package` binds `name` to something
+/// other than its submodule file `submodule`: that attribute shadows the
+/// submodule, as in Python. A declaration binds it, and so does an import:
+/// `from .other import name`, `from .client import client`, or a star
+/// import of a module that declares it. `from . import name` and
+/// `import pkg.name as name` bind the submodule itself.
+fn attribute_shadows_submodule<F: ModuleFacts + ?Sized>(
+    facts: &F,
+    package: &str,
+    name: &str,
+    submodule: &str,
+) -> bool {
+    if facts.declares(package, name) {
+        return true;
+    }
+    let Some(imports) = facts.imports(package) else {
+        return false;
+    };
+    let names_file = |specifier: &str, file: &str| match facts.python_module(package, specifier) {
+        PyModule::Unique(found) => found.as_ref() == file,
+        PyModule::Missing | PyModule::Ambiguous => false,
+    };
+    imports.iter().any(|import| {
+        if import.is_star_export() {
+            return !name.starts_with('_')
+                && match facts.python_module(package, import.source) {
+                    PyModule::Unique(module) => facts.declares(module.as_ref(), name),
+                    PyModule::Missing | PyModule::Ambiguous => false,
+                };
+        }
+        if import.local_name() != name {
+            return false;
+        }
+        let binds_submodule = if import.imported_name == "*" {
+            names_file(import.source, submodule)
+        } else {
+            import.imported_name == name && names_file(import.source, package)
+        };
+        !binds_submodule
+    })
 }
 
 /// Whether a TS / JS import binding `name` names the ES module that
@@ -813,6 +951,20 @@ mod tests {
         assert!(table.exports("f") && !table.exports("g"));
         // `z` pairs with a blank export name: no entry, yet it is hidden.
         assert_eq!(table.local("z"), None);
+    }
+
+    #[test]
+    fn test_export_alias_table_expression_default_binds_no_declaration() {
+        let table = ExportAliasTable::build([("config", "config"), ("default", " ")])
+            .expect("a named pair makes a table");
+        assert!(table.exports_expression_default());
+        assert!(table.exports("default"), "no `export *` supplies it");
+        assert_eq!(table.local("default"), None);
+        assert_eq!(table.local("config"), Some("config"));
+        assert!(
+            ExportAliasTable::build([("default", "")]).is_none(),
+            "an expression default alone names no pair"
+        );
     }
 
     #[test]

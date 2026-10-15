@@ -6,7 +6,10 @@
 //! FU-2026-10-15-2c1620b091e0: a submodule bound by a from-import
 //! (`from pkg.sub import mod; mod.compute()`) binds `pkg/sub/mod.py` the same
 //! way. FU-2026-10-15-73b85f10c8fa: a star re-export (`from .core import *`)
-//! is followed one hop like an explicit one.
+//! is followed one hop like an explicit one. The bindings of a package's
+//! `__init__.py` apply in source order (codex c8), an import there shadows a
+//! submodule as a declaration does (codex c9), and a consumer keeps its File
+//! edge to the package it imports through (codex c1).
 //!
 //! The guard tests pin what must not change: a second hop is not followed,
 //! a cycle ends, a missing re-exported name keeps the global tier, a module
@@ -21,7 +24,7 @@ use ecp_analyzer::resolution::heuristics::ResolutionTier;
 use ecp_analyzer::typescript::TypeScriptProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::graph::ZeroCopyGraph;
-use instantiation_calls_support::{assert_call_targets, graph_of};
+use instantiation_calls_support::{assert_call_targets, calls_from, graph_of, imports_edges_of};
 
 fn import_tier() -> f32 {
     ResolutionTier::ImportScoped.base_confidence()
@@ -53,6 +56,15 @@ fn python(files: &[&[(&str, &str)]], caller: (&str, &str)) -> ZeroCopyGraph {
 
 fn go(import: &str, call: &str) -> String {
     format!("{import}\n\ndef go():\n    return {call}\n")
+}
+
+/// The `Calls` edges from `caller` as `(file, name, confidence)`, for
+/// assertions that name the fixture they fail on.
+fn call_targets(graph: &ZeroCopyGraph, caller: &str) -> Vec<(String, String, f32)> {
+    calls_from(graph, caller)
+        .into_iter()
+        .map(|hit| (hit.file, hit.name, hit.confidence))
+        .collect()
 }
 
 #[test]
@@ -140,28 +152,31 @@ fn test_python_reexport_aliased_reexport_binds_declared_name() {
     );
 }
 
-/// The re-export's first module is not indexed (a compiled extension): the
-/// next import binding the name decides.
+/// One side of a `try:` / `except ImportError:` pair is not indexed (a
+/// compiled extension), before or after the fallback: the import of the
+/// module the index holds binds, as the missing one rebinds nothing.
 #[test]
 fn test_python_reexport_conditional_missing_module_binds_fallback_import() {
-    let graph = python(
-        &[
+    for init in [
+        "try:\n    from ._speedups import compute\nexcept ImportError:\n    from .core import compute\n",
+        "try:\n    from .core import compute\nexcept ImportError:\n    from ._speedups import compute\n",
+    ] {
+        let graph = python(
             &[
-                (
-                    "pkg/__init__.py",
-                    "try:\n    from ._speedups import compute\nexcept ImportError:\n    from .core import compute\n",
-                ),
-                ("pkg/core.py", "def compute():\n    return 1\n"),
+                &[
+                    ("pkg/__init__.py", init),
+                    ("pkg/core.py", "def compute():\n    return 1\n"),
+                ],
+                NAMESAKES,
             ],
-            NAMESAKES,
-        ],
-        ("app.py", &go("from pkg import compute", "compute()")),
-    );
-    assert_call_targets(
-        &graph,
-        "go",
-        &[("pkg/core.py", "", "compute", import_tier())],
-    );
+            ("app.py", &go("from pkg import compute", "compute()")),
+        );
+        assert_eq!(
+            call_targets(&graph, "go"),
+            [("pkg/core.py".to_string(), "compute".to_string(), import_tier())],
+            "{init}"
+        );
+    }
 }
 
 /// One hop: `pkg/__init__.py` → `pkg/mid.py` → `pkg/core.py` is two. The
@@ -207,19 +222,29 @@ fn test_python_reexport_name_missing_in_source_keeps_global_tier() {
     );
 }
 
-/// `a` re-exports `spin` from `b` and `b` from `a`: resolution ends, with no
-/// edge, as no module declares `spin`.
+/// `a` re-exports `spin` from `b`, and `b` imports it back from `a` before
+/// declaring its own. One hop through the cycle reaches `b`'s `spin`
+/// (`other.py` makes the name ambiguous to the global tier), and a name no
+/// module declares ends with no edge instead of following the cycle.
 #[test]
-fn test_python_reexport_circular_reexport_terminates_without_edge() {
+fn test_python_reexport_circular_reexport_binds_one_hop_and_terminates() {
     let graph = python(
         &[&[
             ("pkg/__init__.py", ""),
-            ("pkg/a.py", "from .b import spin\n"),
-            ("pkg/b.py", "from .a import spin\n"),
+            ("pkg/a.py", "from .b import spin, stall\n"),
+            (
+                "pkg/b.py",
+                "from .a import spin, stall\n\ndef spin():\n    pass\n",
+            ),
+            ("pkg/other.py", "def spin():\n    pass\n"),
         ]],
-        ("app.py", &go("from pkg.a import spin", "spin()")),
+        (
+            "app.py",
+            "from pkg.a import spin, stall\n\ndef go():\n    return spin()\n\ndef stop():\n    return stall()\n",
+        ),
     );
-    assert_call_targets(&graph, "go", &[]);
+    assert_call_targets(&graph, "go", &[("pkg/b.py", "", "spin", import_tier())]);
+    assert_call_targets(&graph, "stop", &[]);
 }
 
 /// Sibling language, same shape: a Kotlin file that imports `impl.helper`
@@ -315,6 +340,108 @@ fn test_python_submodule_from_import_module_attribute_keeps_previous_path() {
         ("app.py", &go("from pkg.sub import mod", "mod.compute()")),
     );
     assert_call_targets(&graph, "go", &[]);
+}
+
+/// codex c9 / R1 F3: `pkg/__init__.py` binds `mod` by import, which makes
+/// `pkg.mod` that attribute, not the submodule `pkg/mod.py`: an explicit
+/// import, a star import of a module declaring `mod`, and a module import
+/// named `mod`. The call keeps its previous path: no edge, as on ecp 0.14.8
+/// (`compute` is ambiguous). Before this fix each bound `pkg/mod.py` at
+/// 0.95.
+#[test]
+fn test_python_submodule_from_import_shadowed_by_init_import_binds_no_submodule() {
+    let other = "class mod:\n    @staticmethod\n    def compute():\n        return 4\n";
+    for init in [
+        "from .other import mod\n",
+        "from .other import *\n",
+        "import pkg.other as mod\n",
+    ] {
+        let graph = python(
+            &[&[
+                ("pkg/__init__.py", init),
+                ("pkg/other.py", other),
+                ("pkg/mod.py", "def compute():\n    return 3\n"),
+            ]],
+            ("app.py", &go("from pkg import mod", "mod.compute()")),
+        );
+        let targets = call_targets(&graph, "go");
+        assert!(targets.is_empty(), "{init}: {targets:?}");
+    }
+}
+
+/// R1 F3: `pkg/__init__.py`: `from .client import client` replaces the
+/// submodule `pkg.client` with the object `client`, whose `get` is
+/// `Client.get`. The call must not bind the module-level `get` of
+/// `pkg/client.py`, which it did at 0.95 before this fix; `get` is
+/// ambiguous, so no edge, as on ecp 0.14.8.
+#[test]
+fn test_python_submodule_from_import_object_imported_into_init_binds_no_module_function() {
+    let graph = python(
+        &[&[
+            ("pkg/__init__.py", "from .client import client\n"),
+            (
+                "pkg/client.py",
+                "def get(key):\n    return 1\n\nclass Client:\n    def get(self, key):\n        return 2\n\nclient = Client()\n",
+            ),
+        ]],
+        ("app.py", &go("from pkg import client", "client.get(\"x\")")),
+    );
+    assert_call_targets(&graph, "go", &[]);
+}
+
+/// `from . import mod` and `import pkg.mod as mod` in `pkg/__init__.py`
+/// import the submodule itself, so the package attribute is still
+/// `pkg/mod.py` and the call binds it. ecp 0.14.8 drew no edge.
+#[test]
+fn test_python_submodule_from_import_init_importing_the_submodule_binds_it() {
+    for init in ["from . import mod\n", "import pkg.mod as mod\n"] {
+        let graph = python(
+            &[&[
+                ("pkg/__init__.py", init),
+                ("pkg/mod.py", "def compute():\n    return 3\n"),
+                ("pkg/other.py", "def compute():\n    return 2\n"),
+            ]],
+            ("app.py", &go("from pkg import mod", "mod.compute()")),
+        );
+        assert_eq!(
+            call_targets(&graph, "go"),
+            [(
+                "pkg/mod.py".to_string(),
+                "compute".to_string(),
+                import_tier()
+            )],
+            "{init}"
+        );
+    }
+}
+
+/// codex c1 / R1 F1: `from pkg import compute` through `pkg/__init__.py`
+/// binds `pkg/core.py`'s `compute` and keeps the importer's File → package
+/// File edge (0.9), which ecp 0.14.8 emitted and the edit hook's
+/// `importers()` reads. Before this fix only the symbol edge was left.
+#[test]
+fn test_emit_edges_from_import_through_package_keeps_init_file_edge() {
+    let graph = python(
+        &[PACKAGE, NAMESAKES],
+        ("app.py", &go("from pkg import compute", "compute()")),
+    );
+    assert_eq!(
+        imports_edges_of(&graph, "app.py"),
+        [
+            (
+                "pkg/__init__.py".to_string(),
+                "__init__.py".to_string(),
+                "File",
+                90
+            ),
+            (
+                "pkg/core.py".to_string(),
+                "compute".to_string(),
+                "Function",
+                95
+            ),
+        ]
+    );
 }
 
 /// `from m import obj` binds an instance: the method call resolves as on
@@ -468,19 +595,47 @@ fn test_python_star_reexport_unique_name_binds_import_tier() {
     );
 }
 
-/// Two star sources both declare `compute`: neither binds, and the global
-/// tier drops the ambiguous name (no edge on ecp 0.14.8).
+/// codex c8: Python runs `pkg/__init__.py` in source order, so the last
+/// binding of `compute` wins, an explicit import or a star import of a
+/// module declaring it alike. Through `from pkg import compute` and
+/// `pkg.compute()` both. ecp 0.14.8 drew no edge for any of these (the name
+/// is ambiguous to the global tier). Before this fix an explicit import
+/// beat every star import, the first explicit import won, and two star
+/// imports declaring the name bound nothing.
 #[test]
-fn test_python_star_reexport_two_sources_define_name_binds_nothing() {
-    let graph = python(
-        &[&[
-            ("pkg/__init__.py", "from .a import *\nfrom .b import *\n"),
-            ("pkg/a.py", "def compute():\n    return 1\n"),
-            ("pkg/b.py", "def compute():\n    return 2\n"),
-        ]],
-        ("app.py", &go("from pkg import compute", "compute()")),
-    );
-    assert_call_targets(&graph, "go", &[]);
+fn test_python_reexport_later_binding_in_init_wins() {
+    for (init, target) in [
+        ("from .a import compute\nfrom .b import *\n", "pkg/b.py"),
+        ("from .b import *\nfrom .a import compute\n", "pkg/a.py"),
+        (
+            "from .a import compute\nfrom .b import compute\n",
+            "pkg/b.py",
+        ),
+        (
+            "from .b import compute\nfrom .a import compute\n",
+            "pkg/a.py",
+        ),
+        ("from .a import *\nfrom .b import *\n", "pkg/b.py"),
+    ] {
+        for (import, call) in [
+            ("from pkg import compute", "compute()"),
+            ("import pkg", "pkg.compute()"),
+        ] {
+            let graph = python(
+                &[&[
+                    ("pkg/__init__.py", init),
+                    ("pkg/a.py", "def compute():\n    return 1\n"),
+                    ("pkg/b.py", "def compute():\n    return 2\n"),
+                ]],
+                ("app.py", &go(import, call)),
+            );
+            assert_eq!(
+                call_targets(&graph, "go"),
+                [(target.to_string(), "compute".to_string(), import_tier())],
+                "{init} / {import}"
+            );
+        }
+    }
 }
 
 /// Of two star sources only one declares `compute`: it binds. ecp 0.14.8
@@ -499,9 +654,8 @@ fn test_python_star_reexport_one_of_two_sources_defines_name_binds_it() {
     assert_call_targets(&graph, "go", &[("pkg/a.py", "", "compute", import_tier())]);
 }
 
-/// An explicit re-export shadows every star re-export, so the star import
-/// leaves the explicit hop's answer (`pkg/b.py`, 0.95, before the star was
-/// followed) as it was. ecp 0.14.8, without the hop, drew no edge.
+/// The explicit re-export comes after the star import, so it rebinds the
+/// name (`pkg/b.py`, 0.95). ecp 0.14.8, without the hop, drew no edge.
 #[test]
 fn test_python_star_reexport_explicit_import_shadows_star() {
     let graph = python(

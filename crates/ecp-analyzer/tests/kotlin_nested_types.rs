@@ -170,13 +170,39 @@ fn test_parse_file_empty_source_returns_no_nodes() {
     assert!(parse("   \n").nodes.is_empty());
 }
 
-/// The recovery overwrites a blank, never inserts one: a `}` inside a string
-/// literal must not shift or change a later node's span.
+/// The recovery overwrites a blank, never inserts one, and node data reads
+/// the unpatched source. Line 0 holds a nested class body that closes on
+/// its last member's line, so it needs the recovery, and a `}` after a blank
+/// inside a string literal, which the recovery patches for the re-parse
+/// too. Every class and member is recorded with its owner, `g` keeps its
+/// column on that line, and `Outer`'s hash covers the bytes the file holds.
 #[test]
-fn test_parse_file_closer_in_string_keeps_later_spans() {
-    let g = parse("class A { fun f() { val s = \"a }\" } }\nclass B {\n  fun g() {}\n}\n");
-    assert_eq!(shape(&g, "B"), (NodeKind::Class, None, 1));
-    assert_eq!(shape(&g, "g"), (NodeKind::Method, owned("B"), 2));
+fn test_parse_file_closer_in_string_keeps_columns_and_source_bytes() {
+    let line = "class Outer { class A { fun f() { val s = \"a }\" }; fun g() {} } }";
+    let source = format!("{line}\nclass B {{\n  fun h() {{}}\n}}\n");
+    let graph = parse(&source);
+    assert_eq!(shape(&graph, "Outer"), (NodeKind::Class, None, 0));
+    assert_eq!(shape(&graph, "A"), (NodeKind::Class, owned("Outer"), 0));
+    assert_eq!(shape(&graph, "f"), (NodeKind::Method, owned("A"), 0));
+    assert_eq!(shape(&graph, "g"), (NodeKind::Method, owned("A"), 0));
+    assert_eq!(shape(&graph, "B"), (NodeKind::Class, None, 1));
+    assert_eq!(shape(&graph, "h"), (NodeKind::Method, owned("B"), 2));
+    let node = |name: &str| graph.nodes.iter().find(|n| n.name == name).unwrap();
+    let column = line.find("fun g").unwrap() as u32;
+    assert_eq!(
+        (node("g").span.0, node("g").span.1),
+        (0, column),
+        "a byte inserted before `g` would move it"
+    );
+    let outer = node("Outer");
+    assert_eq!((outer.span.0, outer.span.2), (0, 0));
+    assert_eq!(
+        outer.content_hash,
+        ecp_core::uid::xxh3_64_bytes(
+            &line.as_bytes()[outer.span.1 as usize..outer.span.3 as usize]
+        ),
+        "the hash reads the unpatched source"
+    );
 }
 
 /// Upstream fwcd/tree-sitter-kotlin #280: a declaration with two or more

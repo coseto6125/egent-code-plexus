@@ -31,8 +31,12 @@ use std::path::Path;
 /// schema8: `LocalGraph.export_aliases` and `BindingKind::EsDefault` (TS / JS
 /// export aliases and default imports). schema9: `graph.bin` v13 carries the
 /// import / export facts of each file, and session fragments (format v3)
-/// carry export aliases and record the builder that parsed them.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema9");
+/// carry export aliases and record the builder that parsed them. schema10:
+/// TS / JS `RawImport.binding_kind` marks exported bindings
+/// (`BindingKind::EsReexport` / `EsDefaultReexport`), `export default
+/// <expression>` records a `default` export alias with an empty local, and
+/// the JS re-export query captures `export { default as X } from`.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema10");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

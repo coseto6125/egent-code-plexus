@@ -123,10 +123,12 @@
   source: (string (string_fragment) @import.source)) @import
 
 ;; Re-exports — `export { X as Y } from 'lib'` (alias preserved on RawImport).
+;; JS parses `default` in `export { default as X } from` as an anonymous
+;; token, not an identifier (TS parses it as an identifier).
 (export_statement
   (export_clause
     (export_specifier
-      name: (identifier) @import.name
+      name: [(identifier) "default"] @import.name
       alias: (identifier)? @import.alias))
   source: (string (string_fragment) @import.source)) @import
 

@@ -448,7 +448,8 @@ pub fn stamp_owner_fn_by_span(nodes: &mut [RawNode]) {
 ///
 /// Returns the file's export names with the declaration each binds when one
 /// of them differs from its declaration's name (`export { g as f }`,
-/// `export default h`), else `None`: see `LocalGraph::export_aliases`.
+/// `export default h`, `export default wrap(h)` with an empty local), else
+/// `None`: see `LocalGraph::export_aliases`.
 pub fn stamp_js_ts_exports(
     root: tree_sitter::Node<'_>,
     source: &[u8],
@@ -481,12 +482,16 @@ pub fn stamp_js_ts_exports(
             );
             continue;
         }
-        if let Some(local) = statement
-            .child_by_field_name("value")
-            .and_then(|value| js_ts_identifier(value, source))
-        {
-            locals.insert(local);
-            names.push(("default", local));
+        if let Some(value) = statement.child_by_field_name("value") {
+            match js_ts_identifier(value, source) {
+                Some(local) => {
+                    locals.insert(local);
+                    names.push(("default", local));
+                }
+                // `export default wrap(h)`: an empty local records that the
+                // default binds no declaration.
+                None => names.push(("default", "")),
+            }
         }
         let mut clauses = statement.walk();
         for clause in statement
@@ -571,56 +576,105 @@ fn js_ts_export_name<'s>(node: tree_sitter::Node<'_>, source: &'s [u8]) -> Optio
     std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).ok()
 }
 
-/// Mark each default import (`import d from './m'`)
-/// [`BindingKind::EsDefault`]: the import queries emit it like
-/// `import { d } from './m'`, which binds a different export.
-pub fn mark_js_ts_default_imports(
+/// [`BindingKind::EsReexport`] for a named import the TS / JS import
+/// queries capture from a re-export (`export { x } from './m'`), which the
+/// parsers emit like `import { x } from './m'`. `source` is the captured
+/// specifier fragment; its string sits in the statement.
+pub fn js_ts_reexport_kind(source: tree_sitter::Node<'_>) -> Option<BindingKind> {
+    let statement = source.parent()?.parent()?;
+    (statement.kind() == "export_statement").then_some(BindingKind::EsReexport)
+}
+
+/// Mark the binding kinds of `imports` that the import queries cannot see.
+/// A default import (`import d from './m'`) is [`BindingKind::EsDefault`]:
+/// the queries emit it like `import { d } from './m'`, which binds a
+/// different export. An import the file's own `export { x }` clause exports
+/// under its local name is [`BindingKind::EsReexport`], or
+/// [`BindingKind::EsDefaultReexport`] for a default import. The parsers mark
+/// an `export { x } from` re-export as they emit it
+/// ([`js_ts_reexport_kind`]), which this leaves as it is.
+pub fn mark_js_ts_import_bindings(
     root: tree_sitter::Node<'_>,
     source: &[u8],
     imports: &mut [RawImport],
 ) {
     let mut defaults: Vec<(&str, &str)> = Vec::new();
+    // `export { x as y }` exports `y`, not the import `x`.
+    let mut exported: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
     let mut cursor = root.walk();
     for statement in root.named_children(&mut cursor) {
-        if statement.kind() != "import_statement" {
-            continue;
-        }
-        let Some(specifier) = statement
-            .child_by_field_name("source")
-            .and_then(|string| string.named_child(0))
-            .and_then(|fragment| {
-                std::str::from_utf8(&source[fragment.start_byte()..fragment.end_byte()]).ok()
-            })
-        else {
-            continue;
-        };
-        let mut clauses = statement.walk();
-        for clause in statement
-            .named_children(&mut clauses)
-            .filter(|child| child.kind() == "import_clause")
-        {
-            let mut bindings = clause.walk();
-            defaults.extend(
-                clause
-                    .named_children(&mut bindings)
-                    .filter_map(|binding| js_ts_identifier(binding, source))
-                    .map(|local| (local, specifier)),
-            );
+        match statement.kind() {
+            "import_statement" => {
+                let Some(specifier) = statement
+                    .child_by_field_name("source")
+                    .and_then(|string| string.named_child(0))
+                    .and_then(|fragment| {
+                        std::str::from_utf8(&source[fragment.start_byte()..fragment.end_byte()])
+                            .ok()
+                    })
+                else {
+                    continue;
+                };
+                let mut clauses = statement.walk();
+                for clause in statement
+                    .named_children(&mut clauses)
+                    .filter(|child| child.kind() == "import_clause")
+                {
+                    let mut bindings = clause.walk();
+                    defaults.extend(
+                        clause
+                            .named_children(&mut bindings)
+                            .filter_map(|binding| js_ts_identifier(binding, source))
+                            .map(|local| (local, specifier)),
+                    );
+                }
+            }
+            "export_statement" if statement.child_by_field_name("source").is_none() => {
+                let mut clauses = statement.walk();
+                for clause in statement
+                    .named_children(&mut clauses)
+                    .filter(|child| child.kind() == "export_clause")
+                {
+                    let mut specifiers = clause.walk();
+                    for specifier in clause.named_children(&mut specifiers) {
+                        let Some(local) = specifier
+                            .child_by_field_name("name")
+                            .and_then(|name| js_ts_identifier(name, source))
+                        else {
+                            continue;
+                        };
+                        let export = match specifier.child_by_field_name("alias") {
+                            Some(alias) => js_ts_export_name(alias, source),
+                            None => Some(local),
+                        };
+                        if export == Some(local) {
+                            exported.insert(local);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
-    if defaults.is_empty() {
+    if defaults.is_empty() && exported.is_empty() {
         return;
     }
     for import in imports
         .iter_mut()
-        .filter(|import| import.alias.is_none() && import.binding_kind.is_none())
+        .filter(|import| import.binding_kind.is_none())
     {
-        if defaults
-            .iter()
-            .any(|&(local, specifier)| import.imported_name == local && import.source == specifier)
-        {
-            import.binding_kind = Some(BindingKind::EsDefault);
-        }
+        let default = import.alias.is_none()
+            && defaults.iter().any(|&(local, specifier)| {
+                import.imported_name == local && import.source == specifier
+            });
+        let reexported =
+            exported.contains(import.alias.as_deref().unwrap_or(&import.imported_name));
+        import.binding_kind = match (default, reexported) {
+            (true, true) => Some(BindingKind::EsDefaultReexport),
+            (true, false) => Some(BindingKind::EsDefault),
+            (false, true) => Some(BindingKind::EsReexport),
+            (false, false) => None,
+        };
     }
 }
 

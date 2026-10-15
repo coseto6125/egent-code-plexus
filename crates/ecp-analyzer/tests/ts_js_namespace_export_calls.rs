@@ -370,11 +370,10 @@ fn test_resolve_call_commonjs_exports_keep_binding() {
 
 /// A barrel re-exports `impl` with `export *` and declares a private
 /// `inner` of its own, which `export *` does not shadow: `ns.inner` is
-/// `impl`'s. Before the fix the barrel's private `inner` was bound. Following
-/// `export *` belongs to FU-2026-10-05-0ee319339782, so this accepts no edge
-/// or `impl`'s `inner`, and nothing else.
+/// `impl`'s `inner` (line 1), bound by the import tier. Before the fix the
+/// barrel's private `inner` was bound.
 #[test]
-fn test_resolve_call_namespace_member_through_reexport_never_binds_barrel_private() {
+fn test_resolve_call_namespace_member_through_reexport_binds_star_module_export() {
     for ext in TS_JS {
         let implementation = format!("impl.{ext}");
         let barrel = format!("a.{ext}");
@@ -393,12 +392,7 @@ fn test_resolve_call_namespace_member_through_reexport_never_binds_barrel_privat
             ],
             "use",
         );
-        assert!(
-            calls.iter().all(|(callee, file, line, _)| callee == "inner"
-                && *file == implementation
-                && *line == 1),
-            "{ext}: {calls:?}"
-        );
+        assert_eq!(calls, vec![call("inner", &implementation, 1, 95)], "{ext}");
     }
 }
 
@@ -504,6 +498,39 @@ fn test_resolve_call_default_import_of_commonjs_module_keeps_by_name_binding() {
             ),
             vec![call("f", &format!("a.{ext}"), 1, 95)],
             "{ext}"
+        );
+    }
+}
+
+/// R1 F2: `export default withAuth(handler)` binds no declaration, so a
+/// default import keeps the by-name binding of its local name (`handler`,
+/// line 2), as ecp 0.14.8 did. Before this fix the module's other export
+/// made it an ES module, the import bound nothing, and the private
+/// `handler` was hidden from the global tier. A module with no default
+/// export at all still binds no default import (codex c6).
+#[test]
+fn test_resolve_call_default_import_of_expression_default_binds_local_name() {
+    let importer = "import handler from './a';\nfunction use() { handler(); }\n";
+    for ext in TS_JS {
+        let module = format!("a.{ext}");
+        for module_src in [
+            "export const config = 1;\nfunction handler() {}\nexport default withAuth(handler);\n",
+            "function x() {}\nfunction handler() {}\nexport default withAuth(handler);\n",
+        ] {
+            assert_eq!(
+                importer_calls(ext, module_src, importer),
+                vec![call("handler", &module, 2, 95)],
+                "{ext}: {module_src}"
+            );
+        }
+        assert_eq!(
+            importer_calls(
+                ext,
+                "export const config = 1;\nfunction handler() {}\n",
+                importer
+            ),
+            Vec::<Call>::new(),
+            "{ext}: no default export"
         );
     }
 }
@@ -817,7 +844,8 @@ fn test_resolve_call_python_from_import_of_underscore_function_keeps_binding() {
 }
 
 /// The parsers record export names that differ from their declaration, with
-/// every other export of the file, and nothing for a file without one.
+/// every other export of the file, and nothing for a file without one. An
+/// expression default records `default` with an empty local.
 #[test]
 fn test_parse_file_export_alias_records_pairs() {
     let ts = TypeScriptProvider::new().expect("TypeScriptProvider::new");
@@ -852,6 +880,11 @@ fn test_parse_file_export_alias_records_pairs() {
             parse("export function k() {}\nfunction f() {}\nexport { f };\n"),
             None,
             "{ext}"
+        );
+        assert_eq!(
+            parse("export const config = 1;\nfunction h() {}\nexport default wrap(h);\n"),
+            Some(vec![alias("config", "config"), alias("default", "")]),
+            "{ext}: an expression default binds no declaration"
         );
         assert_eq!(parse(""), None, "{ext}: empty file");
     }

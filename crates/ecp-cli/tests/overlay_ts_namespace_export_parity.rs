@@ -3,7 +3,8 @@
 //! FU-2026-10-15-1a48011441a4). The overlay reads a clean module's export
 //! flags and aliases from `graph.bin` and a dirty module's from its fresh
 //! parse, so it binds what a full reindex binds
-//! (FU-2026-10-15-61d656576fc8).
+//! (FU-2026-10-15-61d656576fc8). An expression default (`export default
+//! wrap(f)`) binds a default import by its local name (R1 F2).
 
 #[path = "common/parity.rs"]
 mod parity;
@@ -101,5 +102,56 @@ fn test_overlay_private_declaration_of_imported_module_left_unbound_like_reindex
             parity.reindex
         );
         assert_eq!(parity.overlay, parity.reindex, "{ext}: overlay vs reindex");
+    }
+}
+
+/// R1 F2: `export default withAuth(handler)` binds no declaration, so a
+/// default import binds the module's `handler` by its local name in both.
+/// The module is clean (its archived alias record) or dirty (its fresh
+/// parse turns a declared default into an expression default).
+#[test]
+fn test_overlay_default_import_of_expression_default_matches_reindex() {
+    let expression =
+        "export const config = 1;\nfunction handler() {}\nexport default withAuth(handler);\n";
+    let declared =
+        "export const config = 1;\nfunction handler() {}\nexport default function main() {}\n";
+    for (provider, ext) in providers() {
+        let module = format!("a.{ext}");
+        let importer = format!("b.{ext}");
+        let calling = "import handler from './a';\nfunction use() { handler(); }\n";
+        for (label, module_src, edits) in [
+            (
+                "clean module",
+                expression,
+                vec![(importer.as_str(), calling)],
+            ),
+            (
+                "dirty module",
+                declared,
+                vec![(importer.as_str(), calling), (module.as_str(), expression)],
+            ),
+        ] {
+            let parity = calls_after_edit_in(
+                provider.as_ref(),
+                &[
+                    (module.as_str(), module_src),
+                    (
+                        importer.as_str(),
+                        "import handler from './a';\nfunction use() {}\n",
+                    ),
+                ],
+                &edits,
+                &named("use"),
+            );
+            assert_eq!(
+                callees(&parity.reindex),
+                [(module.as_str(), "handler", 2, 0.95)],
+                "{ext} {label}: reindex"
+            );
+            assert_eq!(
+                parity.overlay, parity.reindex,
+                "{ext} {label}: overlay vs reindex"
+            );
+        }
     }
 }

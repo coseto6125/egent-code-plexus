@@ -8,7 +8,7 @@ use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::typescript::TypeScriptProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::reexport::ImportRef;
-use ecp_core::analyzer::types::LocalGraph;
+use ecp_core::analyzer::types::{BindingKind, LocalGraph};
 use ecp_core::graph::ArchivedZeroCopyGraph;
 use std::path::Path;
 
@@ -24,6 +24,14 @@ const FILES: &[(&str, &str)] = &[
     ),
     ("web/b.ts", "export function x() {}\nfunction h() {}\n"),
     ("web/c.ts", "function k() {}\n"),
+    (
+        "web/barrel.ts",
+        "import d from './b';\nimport { x } from './b';\nexport { x, d };\nexport { y } from './c';\n",
+    ),
+    (
+        "web/page.ts",
+        "export const config = 1;\nfunction h() {}\nexport default wrap(h);\n",
+    ),
     ("web/types.d.ts", "export function t(): void;\n"),
 ];
 
@@ -100,4 +108,33 @@ fn test_build_module_facts_mirror_each_files_parse() {
             .any(|idx| graph.is_exported_node(idx))
     };
     assert!(exported("g") && !exported("f"));
+
+    // What the barrel exports, the binding kind the overlay's re-export
+    // rule reads.
+    let barrel = graph.file_idx_of("web/barrel.ts").unwrap();
+    let kinds: Vec<(&str, Option<BindingKind>)> = graph
+        .file_imports(barrel)
+        .unwrap()
+        .iter()
+        .map(|row| {
+            let import = row.to_ref(pool);
+            (import.imported_name, import.binding_kind)
+        })
+        .collect();
+    for kind in [
+        ("d", Some(BindingKind::EsDefaultReexport)),
+        ("x", Some(BindingKind::EsReexport)),
+        ("y", Some(BindingKind::EsReexport)),
+    ] {
+        assert!(kinds.contains(&kind), "{kind:?} in {kinds:?}");
+    }
+    // An expression default keeps its empty local through the archive.
+    let page = graph.file_idx_of("web/page.ts").unwrap();
+    let page_aliases: Vec<(&str, &str)> = graph
+        .file_export_aliases(page)
+        .unwrap()
+        .iter()
+        .map(|row| (row.exported.resolve(pool), row.local.resolve(pool)))
+        .collect();
+    assert_eq!(page_aliases, [("config", "config"), ("default", "")]);
 }

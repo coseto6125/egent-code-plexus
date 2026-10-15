@@ -75,12 +75,12 @@ enum IndexedModule {
 /// One pass of the import-member tier over the explicit or the wildcard
 /// imports.
 enum MemberHit<'i> {
-    Bound(NodeId, &'i RawImport),
+    /// The member, the import that bound it, and the Python package whose
+    /// re-export it went through ([`reexport::python_reexport`]).
+    Bound(NodeId, &'i RawImport, Option<Arc<str>>),
     /// No unique member. `bound` says whether an import of the pass binds
     /// the callee at all.
-    Unbound {
-        bound: bool,
-    },
+    Unbound { bound: bool },
 }
 
 type ModuleCache = FxHashMap<
@@ -90,17 +90,16 @@ type ModuleCache = FxHashMap<
 
 /// What the import tier reads to follow a module's re-export one hop: the
 /// imports of each Python / TypeScript / JavaScript file, and the modules
-/// each TS / JS file's `export * from` or Python file's `from m import *`
-/// names. Built once per index build, after Pass 1, and shared by every
-/// resolver of that build.
+/// each TS / JS file's `export * from` names. Built once per index build,
+/// after Pass 1, and shared by every resolver of that build.
 #[derive(Default)]
 pub struct ReexportIndex<'g> {
     modules: FxHashMap<Cow<'g, str>, ModuleExports<'g>>,
     /// Local names that a TS / JS import or `export { x as y } from` gives
-    /// to a declaration of another name, and the export names a module gives
-    /// its own declarations (`export { g as f }`). A TS / JS re-export
-    /// reaches a name only when the symbol table declares it or this set
-    /// holds it.
+    /// to a declaration of another name (a default import included), and
+    /// the export names a module gives its own declarations (`export { g as
+    /// f }`). A TS / JS re-export reaches a name only when the symbol table
+    /// declares it or this set holds it.
     ecmascript_aliases: FxHashSet<&'g str>,
 }
 
@@ -131,10 +130,12 @@ impl<'g> ReexportIndex<'g> {
                 let language = Language::from_normalized_path(&path);
                 if is_ecmascript(language) {
                     ecmascript_aliases.extend(graph.imports.iter().filter_map(|import| {
-                        import
-                            .alias
-                            .as_deref()
-                            .filter(|_| import.imported_name != "*")
+                        let import = ImportRef::from(import);
+                        if import.is_es_default() {
+                            Some(import.imported_name)
+                        } else {
+                            import.alias.filter(|_| import.imported_name != "*")
+                        }
                     }));
                 } else if language != Language::Python {
                     return None;
@@ -682,6 +683,7 @@ impl<'a> Resolver<'a> {
                 (raw_imports, bind && bind_import),
                 target,
                 caller_heritage,
+                &mut None,
             )
         };
         let mut targets = resolve(site.name(), call_target(source_file, site), true);
@@ -810,7 +812,9 @@ impl<'a> Resolver<'a> {
             return Vec::new();
         }
         if !(bind_import && import_member_fallback(language)) {
-            return self.resolve_named_import(source_file, symbol_name, raw_imports, target);
+            return self
+                .resolve_named_import(source_file, symbol_name, raw_imports, target)
+                .0;
         }
         let hit = match self.import_member_hit(
             source_file,
@@ -831,7 +835,7 @@ impl<'a> Resolver<'a> {
             explicit => explicit,
         };
         match hit {
-            MemberHit::Bound(node_id, import) => {
+            MemberHit::Bound(node_id, import, _) => {
                 self.import_scoped(source_file, symbol_name, import, node_id)
             }
             MemberHit::Unbound { .. } => Vec::new(),
@@ -840,14 +844,15 @@ impl<'a> Resolver<'a> {
 
     /// Tier 2 outside the import-member policy: an import whose local name
     /// is the callee, probed through the specifier's candidate files
-    /// ([`reexport::named_import`]).
+    /// ([`reexport::named_import`]), and the barrel a re-export hop went
+    /// through.
     fn resolve_named_import(
         &self,
         source_file: &Path,
         symbol_name: &str,
         raw_imports: &[RawImport],
         target: ResolveTarget,
-    ) -> Vec<(NodeId, f32)> {
+    ) -> (Vec<(NodeId, f32)>, Option<Arc<str>>) {
         let importer = normalize_source_path(source_file);
         // Only a TS / JS caller follows a TS / JS re-export.
         let reexports = self
@@ -863,10 +868,16 @@ impl<'a> Resolver<'a> {
                 reexports.is_some_and(|index| index.may_reach(self.symbol_table, exported_name))
             },
         ) {
-            Some((node_id, position)) => {
-                self.import_scoped(source_file, symbol_name, &raw_imports[position], node_id)
-            }
-            None => Vec::new(),
+            Some(hit) => (
+                self.import_scoped(
+                    source_file,
+                    symbol_name,
+                    &raw_imports[hit.position],
+                    hit.decl,
+                ),
+                hit.barrel,
+            ),
+            None => (Vec::new(), None),
         }
     }
 
@@ -899,8 +910,9 @@ impl<'a> Resolver<'a> {
                     .lookup_member_in_file(file, binding.name, target, binding.owner)
             };
             let hit = match self.import_module_file(source_file, &import.source, language) {
-                IndexedModule::Unique(module) => in_file(&module).or_else(|| {
-                    (language == Language::Python)
+                IndexedModule::Unique(module) => match in_file(&module) {
+                    Some(node_id) => Some((node_id, None)),
+                    None => (language == Language::Python)
                         .then(|| {
                             reexport::python_reexport(
                                 &IndexFacts(self),
@@ -910,18 +922,21 @@ impl<'a> Resolver<'a> {
                             )
                         })
                         .flatten()
-                }),
+                        .map(|node_id| (node_id, Some(module))),
+                },
                 IndexedModule::Namespace(files) => {
                     let mut hits = files.iter().filter_map(|file| in_file(file));
-                    hits.next().filter(|_| hits.next().is_none())
+                    hits.next()
+                        .filter(|_| hits.next().is_none())
+                        .map(|node_id| (node_id, None))
                 }
                 IndexedModule::Missing | IndexedModule::Ambiguous => None,
             };
-            let Some(node_id) = hit else {
+            let Some((node_id, barrel)) = hit else {
                 continue;
             };
             if !fqn_language(language) {
-                return MemberHit::Bound(node_id, import);
+                return MemberHit::Bound(node_id, import, barrel);
             }
             match found {
                 Some((previous, _)) if previous != node_id => {
@@ -932,7 +947,7 @@ impl<'a> Resolver<'a> {
             }
         }
         found.map_or(MemberHit::Unbound { bound }, |(node_id, import)| {
-            MemberHit::Bound(node_id, import)
+            MemberHit::Bound(node_id, import, None)
         })
     }
 
@@ -1041,6 +1056,52 @@ impl<'a> Resolver<'a> {
         target: ResolveTarget,
         caller_heritage: &[String],
     ) -> Vec<(NodeId, f32)> {
+        self.resolve_symbol_with_barrel(
+            source_file,
+            symbol_name,
+            raw_imports,
+            target,
+            caller_heritage,
+            &mut None,
+        )
+    }
+
+    /// [`Self::resolve_symbol`] for the name an import statement binds, and
+    /// the barrel the import tier's re-export hop went through: the module
+    /// the import names, when the bound declaration lives in a module that
+    /// barrel re-exports from (`import { render } from './index'` binds
+    /// `impl.ts`'s `render` through `index.ts`). `post_process::imports_edges`
+    /// keeps the importer's edge to that barrel.
+    pub fn resolve_import(
+        &self,
+        source_file: &Path,
+        symbol_name: &str,
+        raw_imports: &[RawImport],
+        target: ResolveTarget,
+    ) -> (Vec<(NodeId, f32)>, Option<Arc<str>>) {
+        let mut barrel = None;
+        let targets = self.resolve_symbol_with_barrel(
+            source_file,
+            symbol_name,
+            raw_imports,
+            target,
+            &[],
+            &mut barrel,
+        );
+        (targets, barrel)
+    }
+
+    /// [`Self::resolve_symbol_with_heritage`]; `barrel` receives the barrel
+    /// an import-tier hit went through ([`Self::resolve_import`]).
+    fn resolve_symbol_with_barrel(
+        &self,
+        source_file: &Path,
+        symbol_name: &str,
+        raw_imports: &[RawImport],
+        target: ResolveTarget,
+        caller_heritage: &[String],
+        barrel: &mut Option<Arc<str>>,
+    ) -> Vec<(NodeId, f32)> {
         let language = Language::from_normalized_path(&normalize_source_path(source_file));
         // FQN call binding must not change the heritage graph underneath the
         // receiver ladder. Constructors enter through resolve_call instead.
@@ -1052,9 +1113,11 @@ impl<'a> Resolver<'a> {
             (raw_imports, bind_import),
             target,
             caller_heritage,
+            barrel,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve_symbol_with_import_binding(
         &self,
         source_file: &Path,
@@ -1063,6 +1126,7 @@ impl<'a> Resolver<'a> {
         (raw_imports, bind_import): (&[RawImport], bool),
         target: ResolveTarget,
         caller_heritage: &[String],
+        barrel: &mut Option<Arc<str>>,
     ) -> Vec<(NodeId, f32)> {
         let mut results = Vec::new();
         // Normalize path to use forward slashes to match indexed paths.
@@ -1106,7 +1170,8 @@ impl<'a> Resolver<'a> {
                 target,
                 false,
             ) {
-                MemberHit::Bound(node_id, import) => {
+                MemberHit::Bound(node_id, import, via) => {
+                    *barrel = via;
                     return self.import_scoped(source_file, symbol_name, import, node_id);
                 }
                 MemberHit::Unbound { bound } => wildcard_open = !bound && fqn_language(language),
@@ -1164,8 +1229,10 @@ impl<'a> Resolver<'a> {
                 }
             }
         } else if has_imports {
-            let imported = self.resolve_named_import(source_file, symbol_name, raw_imports, target);
+            let (imported, via) =
+                self.resolve_named_import(source_file, symbol_name, raw_imports, target);
             if !imported.is_empty() {
+                *barrel = via;
                 return imported;
             }
         }
@@ -1364,7 +1431,7 @@ impl<'a> Resolver<'a> {
         }
 
         if wildcard_open {
-            if let MemberHit::Bound(node_id, import) = self.import_member_hit(
+            if let MemberHit::Bound(node_id, import, via) = self.import_member_hit(
                 source_file,
                 language,
                 symbol_name,
@@ -1372,6 +1439,7 @@ impl<'a> Resolver<'a> {
                 target,
                 true,
             ) {
+                *barrel = via;
                 return self.import_scoped(source_file, symbol_name, import, node_id);
             }
         }

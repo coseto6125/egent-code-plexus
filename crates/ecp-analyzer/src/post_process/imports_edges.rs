@@ -21,7 +21,10 @@
 //!   it has one). Covers TS/JS/Python/Java/PHP where `imported_name` IS the
 //!   symbol (`from a import foo`).
 //!   Confidence = tier-determined: `SameFile=1.0`, `ImportScoped=0.95`,
-//!   `QualifierScoped=0.85`, `HeritageScoped=0.85`, `Global=0.7`.
+//!   `QualifierScoped=0.85`, `HeritageScoped=0.85`, `Global=0.7`. A hit
+//!   through a re-export (a TS / JS barrel, a Python package's
+//!   `__init__.py`) also emits the File → barrel File edge of Tier 2
+//!   (0.9, `post_process:imports:module`).
 //!
 //! - **Step 2**: FQN last-segment retry — if `imported_name` contains `.`
 //!   (Kotlin / Java `import com.x.Alpha` surfaces with `imported_name =
@@ -60,6 +63,7 @@ use ecp_core::graph::{Edge, RelType};
 use ecp_core::pool::StringPool;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
+use std::sync::Arc;
 
 /// Emit `Imports` edges from each `File` node to the resolved targets of
 /// every `RawImport` in that file. Returns the number of edges appended.
@@ -150,7 +154,7 @@ pub fn emit_edges(
                     _ => &import.imported_name,
                 };
                 // Step 1: named-symbol lookup.
-                *emitted += try_named(
+                let (named, barrel) = try_named(
                     resolver,
                     local_graph,
                     local_name,
@@ -159,6 +163,27 @@ pub fn emit_edges(
                     &mut dedupe,
                     edges_out,
                 );
+                *emitted += named;
+                // A hit through a re-export lands outside the module the
+                // import names. The importer still depends on that barrel,
+                // and the edit hook's `importers()` finds a barrel's
+                // consumers only through this edge.
+                if let Some(&barrel_file) =
+                    barrel.as_deref().and_then(|path| file_node_idx.get(path))
+                {
+                    if barrel_file != source_file_idx
+                        && dedupe.insert((source_file_idx, barrel_file))
+                    {
+                        edges_out.push(Edge {
+                            source: source_file_idx,
+                            target: barrel_file,
+                            rel_type: RelType::Imports,
+                            confidence: 0.9,
+                            reason: reason_module,
+                        });
+                        *emitted += 1;
+                    }
+                }
 
                 // Step 2: FQN last-segment retry (Kotlin / Java / PHP qualified imports).
                 if *emitted == before && import.imported_name.contains('.') {
@@ -172,7 +197,8 @@ pub fn emit_edges(
                                 reason_named,
                                 &mut dedupe,
                                 edges_out,
-                            );
+                            )
+                            .0;
                         }
                     }
                 }
@@ -382,6 +408,8 @@ fn suffix_match_single(
     hit
 }
 
+/// Step 1 for `name`: the edges it emitted, and the barrel a re-export hop
+/// of the import tier went through ([`Resolver::resolve_import`]).
 fn try_named(
     resolver: &Resolver<'_>,
     local_graph: &LocalGraph,
@@ -390,15 +418,17 @@ fn try_named(
     reason: ecp_core::pool::StrRef,
     dedupe: &mut FxHashSet<(u32, u32)>,
     edges_out: &mut Vec<Edge>,
-) -> usize {
+) -> (usize, Option<Arc<str>>) {
     let mut emitted = 0usize;
+    let mut barrel = None;
     for target_kind in [ResolveTarget::Callable, ResolveTarget::Type] {
-        let targets = resolver.resolve_symbol(
+        let (targets, via) = resolver.resolve_import(
             &local_graph.file_path,
             name,
             &local_graph.imports,
             target_kind,
         );
+        barrel = barrel.or(via);
         for (target_id, confidence) in targets {
             if !dedupe.insert((source_file_idx, target_id)) {
                 continue;
@@ -413,5 +443,5 @@ fn try_named(
             emitted += 1;
         }
     }
-    emitted
+    (emitted, barrel)
 }
