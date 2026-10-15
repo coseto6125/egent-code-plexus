@@ -5,7 +5,7 @@
 
 use crate::git::safe_exec;
 use ecp_core::registry::{CommitBuildMeta, CommitDirName};
-use ecp_core::session::SessionMeta;
+use ecp_core::session::{DirtyFiles, SessionMeta};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::fs;
 use std::io;
@@ -384,6 +384,120 @@ pub fn sweep_stale_parse_caches(repo_root: &Path) -> io::Result<SweepStats> {
         }
         stats.marked += 1;
         stats.removed += usize::from(retire_and_remove(&dir));
+    }
+    Ok(stats)
+}
+
+/// Removes commit dirs whose `graph.bin` is in an older
+/// `GRAPH_FORMAT_VERSION` layout, which this binary never reads again: it
+/// rebuilds such a slot. The same grace as [`sweep_stale_parse_caches`]
+/// applies, because a second installed ecp version may still read them.
+pub fn sweep_old_format_commits(repo_root: &Path) -> io::Result<SweepStats> {
+    let mut stats = SweepStats {
+        marked: 0,
+        removed: 0,
+    };
+    let Ok(it) = fs::read_dir(repo_root.join("commits")) else {
+        return Ok(stats);
+    };
+    let now = std::time::SystemTime::now();
+    for entry in it.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !meta.is_dir()
+            || name.starts_with('.')
+            || name.contains(".building")
+            || name.contains(".stale")
+            || is_retired_dir(&name)
+        {
+            continue;
+        }
+        let idle = meta
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age.as_secs() >= PARSE_CACHE_IDLE_SECS);
+        let graph = entry.path().join("graph.bin");
+        if !idle || !graph.is_file() || !older_graph_format(&graph) {
+            continue;
+        }
+        stats.marked += 1;
+        stats.removed += usize::from(retire_and_remove(&entry.path()));
+    }
+    Ok(stats)
+}
+
+/// Whether `graph` is in an older layout than this binary reads: its
+/// version sidecar says so, or, with no sidecar (a binary before the
+/// sidecar, or a lost detached write), its header fails validation.
+fn older_graph_format(graph: &Path) -> bool {
+    match crate::auto_ensure::read_compatible_version_sidecar(graph) {
+        Some(version) => version < ecp_core::graph::GRAPH_FORMAT_VERSION,
+        None => !crate::engine::header_compatible(graph),
+    }
+}
+
+/// A fragment bin younger than this may belong to a writer that renamed it
+/// in and has not yet committed the manifest naming it.
+const ORPHAN_FRAGMENT_IDLE_SECS: u64 = 3600;
+
+/// Removes the fragment bins of each session that its `dirty_files.json`
+/// no longer names: bins are content-addressed, so every save of a dirty
+/// file writes a new one, and a manifest another builder wrote is replaced
+/// whole. Leftover `.tmp` writes go too. A session whose manifest cannot be
+/// read keeps its bins.
+pub fn sweep_stale_fragments(repo_root: &Path) -> io::Result<SweepStats> {
+    let mut stats = SweepStats {
+        marked: 0,
+        removed: 0,
+    };
+    let Ok(sessions) = fs::read_dir(repo_root.join("sessions")) else {
+        return Ok(stats);
+    };
+    let now = std::time::SystemTime::now();
+    for session in sessions.flatten() {
+        let name = session.file_name().to_string_lossy().to_string();
+        if is_retired_dir(&name) || name.contains(".stale-") {
+            continue;
+        }
+        let dir = session.path();
+        let Ok(bins) = fs::read_dir(dir.join("graph_overlay")) else {
+            continue;
+        };
+        let referenced: FxHashSet<String> = match DirtyFiles::read(&dir.join("dirty_files.json")) {
+            Ok(manifest) => manifest
+                .entries
+                .into_values()
+                .map(|entry| entry.fragment_id)
+                .collect(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => FxHashSet::default(),
+            Err(_) => continue,
+        };
+        for bin in bins.flatten() {
+            let file_name = bin.file_name().to_string_lossy().to_string();
+            let orphan = match file_name.strip_suffix(".bin") {
+                Some(fragment_id) => !referenced.contains(fragment_id),
+                None => file_name.ends_with(".tmp"),
+            };
+            let Ok(meta) = bin.metadata() else {
+                continue;
+            };
+            let settled = meta
+                .modified()
+                .ok()
+                .and_then(|m| now.duration_since(m).ok())
+                .is_some_and(|age| age.as_secs() >= ORPHAN_FRAGMENT_IDLE_SECS);
+            if !orphan || !meta.is_file() || !settled {
+                continue;
+            }
+            stats.marked += 1;
+            match fs::remove_file(bin.path()) {
+                Ok(()) => stats.removed += 1,
+                Err(e) => eprintln!("gc: remove {}: {e}", bin.path().display()),
+            }
+        }
     }
     Ok(stats)
 }

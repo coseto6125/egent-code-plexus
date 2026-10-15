@@ -300,7 +300,7 @@ pub fn write_compatible_version_sidecar(graph_path: &Path) {
     });
 }
 
-fn read_compatible_version_sidecar(graph_path: &Path) -> Option<u32> {
+pub(crate) fn read_compatible_version_sidecar(graph_path: &Path) -> Option<u32> {
     let content = fs::read_to_string(compatible_version_sidecar_path(graph_path)).ok()?;
     content.trim().parse::<u32>().ok()
 }
@@ -1071,11 +1071,13 @@ pub fn resolve_session_overlay_dir(worktree_root: &Path) -> Option<PathBuf> {
 /// L1 freshness gate: drop dirty files whose overlay fragment is provably
 /// current, keep the rest for re-parse.
 ///
-/// A fragment is current when its `dirty_files.json` entry is a v2 bin that
-/// parsed cleanly AND records exactly the file's present mtime_ns. Any doubt
-/// (no session dir / meta / manifest, HEAD drifted since the fragments were
-/// based, v1 bin, parse_failed, stat error) keeps the file in the re-parse
-/// set — the gate may only ever skip work it can prove redundant.
+/// A fragment is current when its `dirty_files.json` entry is a v3 bin that
+/// parsed cleanly AND records exactly the file's present mtime_ns, in a
+/// manifest the running binary's parser wrote. Any doubt (no session dir /
+/// meta / manifest, HEAD drifted since the fragments were based, another
+/// builder fingerprint, older bin, parse_failed, stat error) keeps the file
+/// in the re-parse set — the gate may only ever skip work it can prove
+/// redundant.
 ///
 /// The HEAD-drift check matters: promotion (rebasing fragments onto the new
 /// base SHA) runs inside the full overlay path, so a drifted session must
@@ -1104,7 +1106,7 @@ struct L1FreshnessGate {
 }
 
 fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1FreshnessGate {
-    use ecp_core::session::{DirtyFiles, FRAGMENT_FORMAT_V2};
+    use ecp_core::session::{DirtyFiles, FRAGMENT_FORMAT_V3};
 
     let pass = |rel_paths, session_meta| L1FreshnessGate {
         rel_paths,
@@ -1126,6 +1128,11 @@ fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1Fre
     let Ok(manifest) = DirtyFiles::read(&session_dir.join("dirty_files.json")) else {
         return pass(rel_paths, Some(meta));
     };
+    // Fragments another binary parsed hold other parse rules
+    // (FU-2026-10-05-36d0314fefe4): every dirty file is re-parsed.
+    if !manifest.from_current_builder() {
+        return pass(rel_paths, Some(meta));
+    }
     let mut pre_mtimes = HashMap::new();
     let retained = rel_paths
         .into_iter()
@@ -1133,7 +1140,7 @@ fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1Fre
             let Some(entry) = manifest.entries.get(rel) else {
                 return true;
             };
-            if entry.format != FRAGMENT_FORMAT_V2 || entry.parse_failed {
+            if entry.format != FRAGMENT_FORMAT_V3 || entry.parse_failed {
                 return true;
             }
             match mtime_ns_of(&worktree_root.join(rel)) {

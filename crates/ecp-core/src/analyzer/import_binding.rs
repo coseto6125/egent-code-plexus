@@ -114,12 +114,36 @@ pub struct ImportedMember<'a> {
 /// The member a namespace import (`import pkg.util as u`) binds in `name`
 /// (`u.helper` → `helper`).
 pub fn namespace_member<'a>(import: &RawImport, name: &'a str) -> Option<&'a str> {
-    if import.imported_name != "*" {
+    namespace_member_of(&import.imported_name, import.alias.as_deref(), name)
+}
+
+fn namespace_member_of<'a>(
+    imported_name: &str,
+    alias: Option<&str>,
+    name: &'a str,
+) -> Option<&'a str> {
+    if imported_name != "*" {
         return None;
     }
-    name.strip_prefix(import.alias.as_deref()?)
+    name.strip_prefix(alias?)
         .and_then(|rest| rest.strip_prefix('.'))
         .filter(|member| !member.is_empty())
+}
+
+/// The member an import of a language that binds by name (not a fully
+/// qualified path) binds to the callee `name`: through a namespace import
+/// (`import pkg.util as u`, `u.helper` → `helper`), or the imported name of
+/// an import whose local name is `name`.
+pub fn plain_binding<'a>(
+    imported_name: &'a str,
+    alias: Option<&'a str>,
+    name: &'a str,
+) -> Option<&'a str> {
+    if imported_name == "*" {
+        namespace_member_of(imported_name, alias, name)
+    } else {
+        (alias.unwrap_or(imported_name) == name).then_some(imported_name)
+    }
 }
 
 /// The last `.` / `\` segment of a fully qualified import path.
@@ -134,12 +158,7 @@ pub fn import_binding<'a>(
     language: Language,
 ) -> Option<ImportedMember<'a>> {
     if !fqn_language(language) {
-        let member = if import.imported_name == "*" {
-            namespace_member(import, name)?
-        } else {
-            (import.alias.as_deref().unwrap_or(&import.imported_name) == name)
-                .then_some(import.imported_name.as_str())?
-        };
+        let member = plain_binding(&import.imported_name, import.alias.as_deref(), name)?;
         return Some(ImportedMember {
             name: member,
             owner: MemberOwner::Any,

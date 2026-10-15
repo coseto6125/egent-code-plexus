@@ -8,31 +8,14 @@ use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::{ArchivedZeroCopyGraph, RelType, ZeroCopyGraph};
 use ecp_core::session::merged::MergedGraph;
-use ecp_core::session::view::{OverlayFileInput, OverlaySymbol, OverlayView};
+use ecp_core::session::view::{OverlayFileInput, OverlayView};
 use std::path::Path;
 
 /// (file, name, owner, confidence in hundredths).
 type Target = (String, String, String, u32);
 
 fn input(local: LocalGraph) -> OverlayFileInput {
-    OverlayFileInput {
-        rel_path: local.file_path.to_string_lossy().into_owned(),
-        imports: local.imports,
-        symbols: local
-            .nodes
-            .into_iter()
-            .map(|n| OverlaySymbol {
-                name: n.name,
-                kind: n.kind,
-                owner_class: n.owner_class,
-                start_line: n.span.0 + 1,
-                end_line: n.span.2 + 1,
-                start_column: n.span.1,
-                end_column: n.span.3,
-                calls: n.calls,
-            })
-            .collect(),
-    }
+    local.into()
 }
 
 fn build(files: &[(&str, &str)]) -> ZeroCopyGraph {

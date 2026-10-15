@@ -1,12 +1,12 @@
 use ecp_core::analyzer::import_binding::{
     fqn_language, owner_path_agrees, DeclaredType, MemberOwner,
 };
+use ecp_core::analyzer::reexport::{pick_call, ExportAliasTable};
 use ecp_core::analyzer::types::{owner_key, RawExportAlias};
 use ecp_core::file_category::pick_global;
 pub use ecp_core::file_category::{FileMeta, GlobalPick, Language};
 use ecp_core::graph::NodeKind;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::hash_map::Entry;
 
 pub type NodeId = u32;
 
@@ -64,41 +64,7 @@ pub(crate) fn crate_root_prefix(path: &str) -> &str {
         .unwrap_or("")
 }
 
-/// Edge kinds the resolver resolves towards. Constrains Tier-3 fallback so a
-/// bare callee like `format` never resolves to a Variable/Const that happens
-/// to share the name.
-///
-/// `Qualifier` is the leading-segment lookup used by `resolve_qualifier_file`
-/// — it accepts Type (Class/Struct/Enum/Typedef/Trait/Interface) plus
-/// Namespace (C++ / C# / PHP) and Module (Rust inline `mod`). Without
-/// these, every qualified call whose leading segment isn't a class /
-/// struct / enum / typedef / trait / interface drops at Tier 2.5 since
-/// the qualifier kind doesn't pass `is_type` — falling to the bare-name
-/// Tier 3 which rejects ultra-common member names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResolveTarget {
-    Callable,
-    /// A Rust method-syntax call (`x.f()`): only a `Method` can answer it,
-    /// never a free `fn` of the same name.
-    Method,
-    Type,
-    Qualifier,
-    /// A struct/class field, for `ReadsField` edge resolution. Filters to
-    /// `NodeKind::is_property`.
-    Field,
-}
-
-impl ResolveTarget {
-    pub fn kind_predicate(self) -> fn(NodeKind) -> bool {
-        match self {
-            Self::Callable => NodeKind::is_callable,
-            Self::Method => |kind| kind == NodeKind::Method,
-            Self::Type => NodeKind::is_type,
-            Self::Qualifier => NodeKind::is_qualifier,
-            Self::Field => NodeKind::is_property,
-        }
-    }
-}
+pub use ecp_core::analyzer::reexport::ResolveTarget;
 
 /// A high-performance global symbol index mapping node names and file locations
 /// to their corresponding globally unique node IDs.
@@ -197,8 +163,8 @@ pub struct SymbolTable {
     constructible_names: FxHashSet<Box<str>>,
 
     /// Exported declarations of the files in `es_modules`, see
-    /// [`SymbolTable::lookup_export_in_file`]. Sparse: only TS / JS nodes the
-    /// parser marks `is_exported` are listed.
+    /// [`ecp_core::analyzer::reexport::lookup_export_in_file`]. Sparse: only
+    /// TS / JS nodes the parser marks `is_exported` are listed.
     exported_ids: FxHashSet<u32>,
 
     /// TS / JS files that export at least one declaration, see
@@ -208,19 +174,7 @@ pub struct SymbolTable {
     /// The export names of the files in `es_modules` that bind a declaration
     /// of another name, see [`SymbolTable::note_export_aliases`]. Sparse:
     /// only files with such an export have an entry.
-    export_aliases: FxHashMap<Box<str>, ExportAliases>,
-}
-
-/// The export names of one ES module, recorded because one of them differs
-/// from the declaration it binds.
-#[derive(Debug, Default)]
-struct ExportAliases {
-    /// Export name → the local declaration name it binds. `None` when the
-    /// module exports the name for two declarations, which ES rejects.
-    locals: FxHashMap<Box<str>, Option<Box<str>>>,
-    /// Local names the module exports only under other names: an import of
-    /// one binds nothing.
-    hidden: FxHashSet<Box<str>>,
+    export_aliases: FxHashMap<Box<str>, ExportAliasTable>,
 }
 
 impl SymbolTable {
@@ -576,29 +530,33 @@ impl SymbolTable {
             .find(|&id| predicate(self.node_kinds[id as usize]))
     }
 
-    /// [`Self::lookup_in_file_with_kind`] for the bare name of a call site.
-    /// Method syntax narrows the result, not the field, as in
-    /// [`Self::lookup_global`]: a same-named free fn in the file makes the
-    /// name ambiguous, so `Path::new(".").join(..)` on a std type never binds
-    /// the file's `Local::join`.
+    /// [`Self::lookup_in_file_with_kind`] for the bare name of a call site,
+    /// through the shared [`pick_call`] rule.
     pub fn lookup_call_in_file(
         &self,
         file_path: &str,
         node_name: &str,
         target: ResolveTarget,
     ) -> Option<u32> {
-        if target == ResolveTarget::Method {
-            let ids = self.file_scoped.get(file_path)?.get(node_name)?;
-            let callable = ResolveTarget::Callable.kind_predicate();
-            let method = target.kind_predicate();
-            if ids.iter().any(|&id| {
-                let kind = self.node_kinds[id as usize];
-                callable(kind) && !method(kind)
-            }) {
-                return None;
-            }
-        }
-        self.lookup_in_file_with_kind(file_path, node_name, target)
+        let ids = self.file_scoped.get(file_path)?.get(node_name)?;
+        pick_call(
+            ids.iter().map(|&id| (id, self.node_kinds[id as usize])),
+            target,
+        )
+    }
+
+    /// `file_path`'s declarations of `node_name` in source order, with their
+    /// kinds: what the shared import rules read
+    /// ([`ecp_core::analyzer::reexport::ModuleFacts::decls_in_file`]).
+    pub(crate) fn decls_in_file(&self, file_path: &str, node_name: &str) -> Vec<(u32, NodeKind)> {
+        self.file_scoped
+            .get(file_path)
+            .and_then(|names| names.get(node_name))
+            .map_or_else(Vec::new, |ids| {
+                ids.iter()
+                    .map(|&id| (id, self.node_kinds[id as usize]))
+                    .collect()
+            })
     }
 
     /// Record that `node_id`, declared in `file_path`, is exported. A TS / JS
@@ -632,32 +590,13 @@ impl SymbolTable {
         {
             return;
         }
-        let mut table = ExportAliases::default();
-        for alias in aliases {
-            let (exported, local) = (alias.exported.trim(), alias.local.trim());
-            if exported.is_empty() || local.is_empty() {
-                continue;
-            }
-            match table.locals.entry(exported.into()) {
-                Entry::Vacant(slot) => {
-                    slot.insert(Some(local.into()));
-                }
-                Entry::Occupied(mut slot) => {
-                    if slot.get().as_deref() != Some(local) {
-                        *slot.get_mut() = None;
-                    }
-                }
-            }
-        }
-        if table.locals.is_empty() {
+        let Some(table) = ExportAliasTable::build(
+            aliases
+                .iter()
+                .map(|alias| (&*alias.exported, &*alias.local)),
+        ) else {
             return;
-        }
-        table.hidden = aliases
-            .iter()
-            .map(|alias| alias.local.trim())
-            .filter(|local| !local.is_empty() && !table.locals.contains_key(*local))
-            .map(Box::<str>::from)
-            .collect();
+        };
         if !self.es_modules.contains(file_path) {
             self.es_modules.insert(file_path.into());
         }
@@ -670,45 +609,19 @@ impl SymbolTable {
         self.es_modules.contains(file_path)
     }
 
-    /// Whether the ES module `file_path` itself exports `name` under an
-    /// export name of its own (`export { g as name }`, `export default`):
-    /// no `export *` of the module can then supply the name.
-    pub(crate) fn exports_alias(&self, file_path: &str, name: &str) -> bool {
-        self.export_aliases
-            .get(file_path)
-            .is_some_and(|aliases| aliases.locals.contains_key(name))
+    /// The export alias table of the ES module `file_path`, if it has one.
+    pub(crate) fn export_aliases(&self, file_path: &str) -> Option<&ExportAliasTable> {
+        self.export_aliases.get(file_path)
     }
 
-    /// The declaration an import of `node_name` from module `file_path`
-    /// binds. In an ES module that is an exported one, found under the
-    /// declaration name the export name stands for (`export { g as f }`
-    /// binds `f` to `g`): a module-private or nested namesake is out of the
-    /// importer's reach, so a module that does not export the name answers
-    /// `None`. Any other module keeps [`Self::lookup_call_in_file`].
-    pub(crate) fn lookup_export_in_file(
-        &self,
-        file_path: &str,
-        node_name: &str,
-        target: ResolveTarget,
-    ) -> Option<u32> {
-        if !self.es_modules.contains(file_path) {
-            return self.lookup_call_in_file(file_path, node_name, target);
-        }
-        let local = match self.export_aliases.get(file_path) {
-            Some(aliases) => match aliases.locals.get(node_name) {
-                Some(local) => local.as_deref()?,
-                None if aliases.hidden.contains(node_name) => return None,
-                None => node_name,
-            },
-            None => node_name,
-        };
-        let predicate = target.kind_predicate();
-        self.file_scoped
-            .get(file_path)?
-            .get(local)?
-            .iter()
-            .copied()
-            .find(|id| self.exported_ids.contains(id) && predicate(self.node_kinds[*id as usize]))
+    /// Whether `node_id` is an exported declaration of an ES module.
+    pub(crate) fn is_exported(&self, node_id: u32) -> bool {
+        self.exported_ids.contains(&node_id)
+    }
+
+    /// Every exported declaration of an ES module, in no order.
+    pub(crate) fn exported_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.exported_ids.iter().copied()
     }
 
     /// Whether `id` is declared outside any owning type.

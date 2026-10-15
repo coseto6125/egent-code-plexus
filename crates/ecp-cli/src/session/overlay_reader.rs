@@ -7,7 +7,8 @@
 //! - `load_overlay` — `ecp_core::session::Overlay` for `merge_archived`
 //!   (inspect's node-set merge).
 //! - `load_view_inputs` — per-file `OverlayFileInput`s (symbols + imports +
-//!   calls) for the query-time `OverlayView` edge merge.
+//!   calls + export flags and aliases) for the query-time `OverlayView`
+//!   edge merge.
 //!
 //! Fragment → Node conversion:
 //! - `uid`:  `ecp_core::uid::compute(kind, rel_path, owner, name)` — same
@@ -21,15 +22,18 @@
 //! Fragment bins with `parse_failed = true` are skipped. Bins are decoded
 //! per the manifest's `DirtyEntry.format` marker — never guessed.
 
+use ecp_core::analyzer::types::{RawExportAlias, RawImport};
 use ecp_core::graph::{Node, NodeKind};
 use ecp_core::pool::{StrRef, StringPool};
-use ecp_core::session::{DirtyFiles, Overlay, OverlayFileInput, OverlaySymbol, FRAGMENT_FORMAT_V2};
+use ecp_core::session::{
+    DirtyFiles, Overlay, OverlayFileInput, OverlaySymbol, FRAGMENT_FORMAT_V2, FRAGMENT_FORMAT_V3,
+};
 use rkyv::rancor::Error as RkyvError;
 use std::fs;
 use std::io;
 use std::path::Path;
 
-use super::overlay_writer::{ArchivedFragment, ArchivedFragmentFile};
+use super::overlay_writer::{ArchivedFragment, ArchivedFragmentFile, ArchivedFragmentFileV2};
 
 /// A single overlay symbol with the source-relative path it came from.
 ///
@@ -103,10 +107,15 @@ fn for_each_fragment(session_dir: &Path, mut f: impl FnMut(&str, FragSym<'_>)) -
             continue; // fragment not written yet or already promoted
         };
         if entry.format >= FRAGMENT_FORMAT_V2 {
-            let Ok(archived) = rkyv::access::<ArchivedFragmentFile, RkyvError>(&bytes) else {
+            let symbols = if entry.format == FRAGMENT_FORMAT_V2 {
+                rkyv::access::<ArchivedFragmentFileV2, RkyvError>(&bytes).map(|file| &file.symbols)
+            } else {
+                rkyv::access::<ArchivedFragmentFile, RkyvError>(&bytes).map(|file| &file.symbols)
+            };
+            let Ok(symbols) = symbols else {
                 continue; // corrupt fragment — skip
             };
-            for sym in archived.symbols.iter() {
+            for sym in symbols.iter() {
                 f(
                     rel_path,
                     FragSym::new(
@@ -196,12 +205,14 @@ pub fn load_overlay(session_dir: &Path) -> io::Result<Option<Overlay>> {
 }
 
 /// Read the dirty-file set as `OverlayView` inputs: one `OverlayFileInput`
-/// per VALID v2 manifest entry. Entry validation guards the two staleness
-/// holes the manifest has by construction:
+/// per VALID v3 manifest entry. Entry validation guards the staleness holes
+/// the manifest has by construction:
 ///
-/// - **format < v2** — written by an older binary; carries no calls/imports.
-///   Treating the file as clean (skip) is the conservative choice: the next
-///   `ensure_fresh` on a still-dirty file rewrites the bin as v2.
+/// - **another builder** — a manifest without the running binary's
+///   `BUILDER_FINGERPRINT` holds parse output of other rules (a v2 bin has
+///   no export aliases at all). Treating its files as clean (skip) is the
+///   conservative choice: the next `ensure_fresh` re-parses every dirty
+///   file into a fresh manifest.
 /// - **mtime mismatch** — `commit_fragment_results` only ever inserts
 ///   entries, so a file edited and then REVERTED keeps its (now stale)
 ///   manifest entry. Serving that fragment would beat fresh base data with
@@ -219,11 +230,14 @@ pub fn load_view_inputs(
         return Ok(Vec::new());
     }
     let df = DirtyFiles::read(&manifest)?;
+    if !df.from_current_builder() {
+        return Ok(Vec::new());
+    }
     let overlay_dir = session_dir.join("graph_overlay");
     let mut out = Vec::new();
 
     for (rel_path, entry) in &df.entries {
-        if entry.parse_failed || entry.format < FRAGMENT_FORMAT_V2 {
+        if entry.parse_failed || entry.format != FRAGMENT_FORMAT_V3 {
             continue;
         }
         let on_disk_mtime_ns = crate::auto_ensure::mtime_ns_of(&worktree_root.join(rel_path));
@@ -240,10 +254,12 @@ pub fn load_view_inputs(
         // Symbols copy straight off the archived view — a full
         // `rkyv::deserialize` of the whole FragmentFile would allocate every
         // string twice (once into FragmentFile, once into OverlaySymbol).
-        // Imports keep the one-line deserialize: their `binding_kind` enum
-        // makes a manual field map noisier than the small allocation it saves.
-        let Ok(imports) = rkyv::deserialize::<Vec<ecp_core::analyzer::types::RawImport>, RkyvError>(
-            &archived.imports,
+        // Imports and export aliases keep the one-line deserialize: the
+        // `binding_kind` enum makes a manual field map noisier than the
+        // small allocation it saves.
+        let (Ok(imports), Ok(export_aliases)) = (
+            rkyv::deserialize::<Vec<RawImport>, RkyvError>(&archived.imports),
+            rkyv::deserialize::<Vec<RawExportAlias>, RkyvError>(&archived.export_aliases),
         ) else {
             continue;
         };
@@ -262,9 +278,11 @@ pub fn load_view_inputs(
                     start_column: s.span.1.to_native(),
                     end_column: s.span.3.to_native(),
                     calls: s.calls.iter().map(|c| c.as_str().to_owned()).collect(),
+                    is_exported: s.is_exported,
                 })
                 .collect(),
             imports,
+            export_aliases,
         });
     }
     Ok(out)

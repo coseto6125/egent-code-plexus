@@ -14,8 +14,8 @@
 //! are applied once, here.
 
 use crate::graph::{
-    BlindSpotRecord, CallMeta, Edge, File, FunctionMeta, NameIndexEntry, Node, NodeKind,
-    RouteShape, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
+    BlindSpotRecord, CallMeta, Edge, ExportAliasFact, File, FunctionMeta, ImportFact,
+    NameIndexEntry, Node, NodeKind, RouteShape, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
 };
 use crate::pool::StringPool;
 
@@ -56,6 +56,24 @@ pub struct GraphAssembly {
     pub traces_offsets: Vec<u32>,
     pub traces_data: Vec<u32>,
     pub fingerprint: [u8; 32],
+    pub module_facts: ModuleFactTables,
+}
+
+/// The import / export facts of each file and node, as the builder records
+/// them (see the v13 fields of [`ZeroCopyGraph`]).
+#[derive(Debug, Default)]
+pub struct ModuleFactTables {
+    /// CSR offsets over `files` into `imports`. Empty records no import
+    /// for any file.
+    pub file_imports: Vec<u32>,
+    pub imports: Vec<ImportFact>,
+    /// CSR offsets over `files` into `export_aliases`, like `file_imports`.
+    pub file_export_aliases: Vec<u32>,
+    pub export_aliases: Vec<ExportAliasFact>,
+    /// One byte per file; files past its end have no flag.
+    pub file_flags: Vec<u8>,
+    /// Exported-node bitmap; nodes past its end are not exported.
+    pub exported_nodes: Vec<u8>,
 }
 
 impl Default for GraphAssembly {
@@ -75,6 +93,7 @@ impl Default for GraphAssembly {
             traces_offsets: vec![0],
             traces_data: Vec::new(),
             fingerprint: [0; 32],
+            module_facts: ModuleFactTables::default(),
         }
     }
 }
@@ -97,6 +116,7 @@ impl GraphAssembly {
             traces_offsets,
             traces_data,
             fingerprint,
+            module_facts,
         } = self;
 
         assert!(
@@ -201,6 +221,25 @@ impl GraphAssembly {
             cursors[k] += 1;
         }
 
+        let ModuleFactTables {
+            file_imports,
+            imports,
+            file_export_aliases,
+            export_aliases,
+            mut file_flags,
+            mut exported_nodes,
+        } = module_facts;
+        let file_imports = csr_offsets(file_imports, imports.len(), files.len(), "imports");
+        let file_export_aliases = csr_offsets(
+            file_export_aliases,
+            export_aliases.len(),
+            files.len(),
+            "export_aliases",
+        );
+        file_flags.resize(files.len(), 0);
+        exported_nodes.resize(num_nodes.div_ceil(8), 0);
+        let file_path_order = file_path_order(&files, &string_pool);
+
         ZeroCopyGraph {
             magic: GRAPH_MAGIC,
             version: GRAPH_FORMAT_VERSION,
@@ -223,8 +262,49 @@ impl GraphAssembly {
             kind_offsets,
             kind_node_idx,
             node_flags,
+            file_imports,
+            imports,
+            file_export_aliases,
+            export_aliases,
+            file_flags,
+            exported_nodes,
+            file_path_order,
         }
     }
+}
+
+/// `offsets` checked as a CSR table over `files` files into `rows` rows;
+/// empty offsets with no rows give every file an empty range.
+fn csr_offsets(offsets: Vec<u32>, rows: usize, files: usize, what: &str) -> Vec<u32> {
+    if offsets.is_empty() && rows == 0 {
+        return vec![0; files + 1];
+    }
+    assert!(
+        offsets.len() == files + 1
+            && offsets.first() == Some(&0)
+            && offsets.last().map(|&o| o as usize) == Some(rows)
+            && offsets.windows(2).all(|pair| pair[0] <= pair[1]),
+        "{what}: {} offsets for {files} files and {rows} rows is no CSR table",
+        offsets.len()
+    );
+    offsets
+}
+
+/// `ZeroCopyGraph::file_path_order`: empty when `files` is strictly in
+/// `Path` order, else the indices sorted by path.
+fn file_path_order(files: &[File], pool: &StringPool) -> Vec<u32> {
+    fn path<'p>(file: &File, pool: &'p StringPool) -> &'p std::path::Path {
+        std::path::Path::new(pool.resolve(&file.path))
+    }
+    if files
+        .windows(2)
+        .all(|pair| path(&pair[0], pool) < path(&pair[1], pool))
+    {
+        return Vec::new();
+    }
+    let mut order: Vec<u32> = (0..files.len() as u32).collect();
+    order.sort_by(|&a, &b| path(&files[a as usize], pool).cmp(path(&files[b as usize], pool)));
+    order
 }
 
 #[cfg(test)]
@@ -512,5 +592,194 @@ mod tests {
         let classes: Vec<u32> = archived.nodes_by_kind(NodeKind::Class).collect();
         assert_eq!(funcs, vec![0, 2]);
         assert_eq!(classes, vec![1]);
+    }
+
+    fn file(pool: &mut StringPool, path: &str) -> File {
+        File {
+            path: pool.add(path),
+            mtime: 0,
+            content_hash: [0; 8],
+            category: crate::graph::FileCategory::Source,
+        }
+    }
+
+    /// The facts round-trip per file, and a file with no recorded import
+    /// reads as an empty slice, not as missing. An alias of `""` stays
+    /// distinct from no alias.
+    #[test]
+    fn test_finish_module_facts_roundtrip_per_file_keeps_none_and_empty_alias() {
+        use crate::analyzer::reexport::ImportRef;
+        use crate::analyzer::types::BindingKind;
+        let mut pool = StringPool::new();
+        let files = vec![file(&mut pool, "a.py"), file(&mut pool, "b.ts")];
+        let nodes = vec![
+            node(&mut pool, "x", NodeKind::Function),
+            node(&mut pool, "y", NodeKind::Function),
+        ];
+        let imports = vec![
+            ImportFact {
+                source: pool.add("./m"),
+                imported_name: pool.add("d"),
+                alias: None,
+                binding_kind: Some(BindingKind::EsDefault),
+            },
+            ImportFact {
+                source: pool.add("./m"),
+                imported_name: pool.add("e"),
+                alias: Some(pool.add("")),
+                binding_kind: None,
+            },
+        ];
+        let export_aliases = vec![ExportAliasFact {
+            exported: pool.add("f"),
+            local: pool.add("y"),
+        }];
+        let graph = GraphAssembly {
+            string_pool: pool,
+            files,
+            nodes,
+            module_facts: ModuleFactTables {
+                file_imports: vec![0, 2, 2],
+                imports,
+                file_export_aliases: vec![0, 0, 1],
+                export_aliases,
+                file_flags: vec![0, crate::graph::FILE_FLAG_ES_MODULE],
+                exported_nodes: vec![0b10],
+            },
+            ..Default::default()
+        }
+        .finish();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&graph).unwrap();
+        let archived =
+            rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                .unwrap();
+        assert!(archived.has_module_facts());
+        let pool = archived.string_pool.as_slice();
+        let a: Vec<ImportRef<'_>> = archived
+            .file_imports(0)
+            .unwrap()
+            .iter()
+            .map(|row| row.to_ref(pool))
+            .collect();
+        assert_eq!(
+            a,
+            [
+                ImportRef {
+                    source: "./m",
+                    imported_name: "d",
+                    alias: None,
+                    binding_kind: Some(BindingKind::EsDefault),
+                },
+                ImportRef {
+                    source: "./m",
+                    imported_name: "e",
+                    alias: Some(""),
+                    binding_kind: None,
+                },
+            ]
+        );
+        assert_eq!(archived.file_imports(1).map(<[_]>::len), Some(0));
+        assert!(archived.file_imports(2).is_none(), "past the last file");
+        let b = archived.file_export_aliases(1).unwrap();
+        assert_eq!(
+            (b[0].exported.resolve(pool), b[0].local.resolve(pool)),
+            ("f", "y")
+        );
+        assert!(!archived.is_es_module_file(0) && archived.is_es_module_file(1));
+        assert!(!archived.is_exported_node(0) && archived.is_exported_node(1));
+        assert!(!archived.is_exported_node(64), "past the bitmap");
+    }
+
+    /// A builder that records no facts still produces tables: every file
+    /// has none, which is not the same as having lost them.
+    #[test]
+    fn test_finish_default_module_facts_every_file_empty_not_missing() {
+        let mut pool = StringPool::new();
+        let files = vec![file(&mut pool, "a.py"), file(&mut pool, "b.py")];
+        let graph = GraphAssembly {
+            string_pool: pool,
+            files,
+            nodes: (0..9).map(|_| Node::default()).collect(),
+            ..Default::default()
+        }
+        .finish();
+        assert_eq!(graph.file_imports, [0, 0, 0]);
+        assert_eq!(graph.file_flags, [0, 0]);
+        assert_eq!(graph.exported_nodes.len(), 2, "9 nodes need 2 bitmap bytes");
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&graph).unwrap();
+        let archived =
+            rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                .unwrap();
+        assert!(archived.has_module_facts());
+        assert_eq!(archived.file_imports(1).map(<[_]>::len), Some(0));
+
+        let mut missing = graph;
+        missing.file_imports.clear();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&missing).unwrap();
+        let archived =
+            rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                .unwrap();
+        assert!(!archived.has_module_facts());
+        assert!(
+            archived.file_imports(0).is_none(),
+            "missing must not read as empty"
+        );
+    }
+
+    #[test]
+    fn test_file_idx_of_unordered_and_ordered_files_finds_exact_paths_only() {
+        for paths in [
+            ["src/b.rs", "src/a.rs", "src/a/x.rs", "lib.rs"],
+            // `Path` order, which the builder sorts by: `src/a/x.rs` sorts
+            // before `src/a.rs`, unlike the bytes.
+            ["lib.rs", "src/a/x.rs", "src/a.rs", "src/b.rs"],
+        ] {
+            let mut pool = StringPool::new();
+            let files = paths.iter().map(|path| file(&mut pool, path)).collect();
+            let graph = GraphAssembly {
+                string_pool: pool,
+                files,
+                ..Default::default()
+            }
+            .finish();
+            assert_eq!(
+                graph.file_path_order.is_empty(),
+                paths[0] == "lib.rs",
+                "{paths:?}: a builder-ordered list needs no permutation"
+            );
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&graph).unwrap();
+            let archived =
+                rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
+                    .unwrap();
+            for (idx, path) in paths.iter().enumerate() {
+                assert_eq!(archived.file_idx_of(path), Some(idx as u32), "{path}");
+            }
+            assert_eq!(archived.file_idx_of("src/a//x.rs"), None);
+            assert_eq!(archived.file_idx_of("src/c.rs"), None);
+            assert_eq!(archived.file_idx_of(""), None);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "no CSR table")]
+    fn test_finish_imports_without_offsets_panics() {
+        let mut pool = StringPool::new();
+        let files = vec![file(&mut pool, "a.py")];
+        let source = pool.add("m");
+        GraphAssembly {
+            string_pool: pool,
+            files,
+            module_facts: ModuleFactTables {
+                imports: vec![ImportFact {
+                    source,
+                    imported_name: source,
+                    alias: None,
+                    binding_kind: None,
+                }],
+                ..ModuleFactTables::default()
+            },
+            ..Default::default()
+        }
+        .finish();
     }
 }

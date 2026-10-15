@@ -1023,3 +1023,269 @@ fn test_query_after_fingerprint_change_starts_gc() {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
+
+const GRAPH_WRITTEN_BY_0_14_8: &[u8] = include_bytes!("fixtures/graph-written-by-0.14.8.bin");
+
+/// A commit dir holding `graph`, with the format sidecar the build writes
+/// when `sidecar` names a version, untouched for `idle_days`.
+fn format_commit_dir(
+    repo_root: &std::path::Path,
+    name: &str,
+    graph: &[u8],
+    sidecar: Option<u32>,
+    idle_days: u64,
+) -> std::path::PathBuf {
+    let dir = repo_root.join("commits").join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("graph.bin"), graph).unwrap();
+    if let Some(version) = sidecar {
+        std::fs::write(
+            dir.join("graph.bin.compatible_version"),
+            format!("{version}\n"),
+        )
+        .unwrap();
+    }
+    let then = std::time::SystemTime::now() - std::time::Duration::from_secs(idle_days * 86_400);
+    filetime::set_file_mtime(&dir, filetime::FileTime::from_system_time(then)).unwrap();
+    dir
+}
+
+fn current_format_graph() -> Vec<u8> {
+    let mut fx = ecp_core::graph_fixture::GraphFixture::new();
+    fx.func("a.py", "f");
+    fx.into_bytes()
+}
+
+/// The graph ecp 0.14.8 wrote, with the sidecar it writes beside it.
+#[test]
+fn test_sweep_old_format_commits_idle_v12_graph_removed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let old = format_commit_dir(
+        tmp.path(),
+        "branch_main__1111",
+        GRAPH_WRITTEN_BY_0_14_8,
+        Some(12),
+        8,
+    );
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    assert_eq!((stats.marked, stats.removed), (1, 1));
+    assert!(!old.exists(), "an idle v12 graph survived gc");
+}
+
+/// A graph whose detached sidecar write was lost is judged by its header.
+#[test]
+fn test_sweep_old_format_commits_v12_graph_without_sidecar_removed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let old = format_commit_dir(
+        tmp.path(),
+        "branch_main__2222",
+        GRAPH_WRITTEN_BY_0_14_8,
+        None,
+        8,
+    );
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 1);
+    assert!(!old.exists());
+}
+
+/// A second installed ecp version may still read its own graphs.
+#[test]
+fn test_sweep_old_format_commits_recent_v12_graph_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let recent = format_commit_dir(
+        tmp.path(),
+        "branch_main__3333",
+        GRAPH_WRITTEN_BY_0_14_8,
+        Some(12),
+        1,
+    );
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 0);
+    assert!(recent.exists());
+}
+
+#[test]
+fn test_sweep_old_format_commits_current_format_graph_kept_however_idle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let current = ecp_core::graph::GRAPH_FORMAT_VERSION;
+    let with_sidecar = format_commit_dir(
+        tmp.path(),
+        "branch_main__4444",
+        &current_format_graph(),
+        Some(current),
+        400,
+    );
+    let without_sidecar = format_commit_dir(
+        tmp.path(),
+        "branch_main__5555",
+        &current_format_graph(),
+        None,
+        400,
+    );
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 0);
+    assert!(with_sidecar.exists() && without_sidecar.exists());
+}
+
+#[test]
+fn test_sweep_old_format_commits_building_dir_and_no_commits_dir_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 0);
+    let building = format_commit_dir(
+        tmp.path(),
+        "branch_main__6666.building",
+        GRAPH_WRITTEN_BY_0_14_8,
+        Some(12),
+        30,
+    );
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 0);
+    assert!(building.exists());
+}
+
+/// End to end: `ecp admin gc` runs the sweep for every repo under its home.
+#[test]
+fn test_admin_gc_idle_v12_commit_removed() {
+    let home = tempfile::tempdir().unwrap();
+    let old = format_commit_dir(
+        &home.path().join("repo__00000000"),
+        "branch_main__7777",
+        GRAPH_WRITTEN_BY_0_14_8,
+        Some(12),
+        30,
+    );
+    run_gc(home.path(), &[]);
+    assert!(!old.exists(), "end-to-end gc left an idle v12 graph");
+}
+
+fn backdate_secs(path: &std::path::Path, secs: u64) {
+    let then = std::time::SystemTime::now() - std::time::Duration::from_secs(secs);
+    filetime::set_file_mtime(path, filetime::FileTime::from_system_time(then)).unwrap();
+}
+
+/// `sessions/<sid>/` with `manifest` as `dirty_files.json` (written as is
+/// when given) and the named bins in `graph_overlay/`, each `age_secs` old.
+fn fragment_session(
+    repo_root: &std::path::Path,
+    manifest: Option<&str>,
+    bins: &[(&str, u64)],
+) -> std::path::PathBuf {
+    let session = repo_root.join("sessions").join("sid");
+    let overlay = session.join("graph_overlay");
+    std::fs::create_dir_all(&overlay).unwrap();
+    if let Some(manifest) = manifest {
+        std::fs::write(session.join("dirty_files.json"), manifest).unwrap();
+    }
+    for (name, age_secs) in bins {
+        let bin = overlay.join(name);
+        std::fs::write(&bin, b"x").unwrap();
+        backdate_secs(&bin, *age_secs);
+    }
+    overlay
+}
+
+fn manifest_naming(fragment_id: &str) -> String {
+    format!(
+        r#"{{"version":1,"entries":{{"a.py":{{"mtime_ns":1,"content_hash":"{fragment_id}","fragment_id":"{fragment_id}","tantivy_delta_segment":null,"format":3}}}}}}"#
+    )
+}
+
+#[test]
+fn test_sweep_stale_fragments_settled_orphans_removed_named_and_young_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let overlay = fragment_session(
+        tmp.path(),
+        Some(manifest_naming("aaaa").as_str()),
+        &[
+            ("aaaa.bin", 7200),
+            ("bbbb.bin", 7200),
+            ("cccc.bin", 0),
+            ("dddd.1.2.tmp", 7200),
+            ("notes.txt", 7200),
+        ],
+    );
+    let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 2);
+    assert!(overlay.join("aaaa.bin").exists(), "a named bin was removed");
+    assert!(
+        !overlay.join("bbbb.bin").exists(),
+        "a settled orphan survived"
+    );
+    assert!(
+        overlay.join("cccc.bin").exists(),
+        "a bin a writer may not have committed yet was removed"
+    );
+    assert!(!overlay.join("dddd.1.2.tmp").exists());
+    assert!(overlay.join("notes.txt").exists());
+}
+
+#[test]
+fn test_sweep_stale_fragments_unreadable_manifest_keeps_every_bin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let overlay = fragment_session(tmp.path(), Some("not json"), &[("bbbb.bin", 7200)]);
+    let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 0);
+    assert!(overlay.join("bbbb.bin").exists());
+}
+
+/// The session ecp 0.14.8 left: its manifest names its bin, so the bin
+/// stays. Once this binary refreshes the session, the old manifest is
+/// replaced whole, and the old bin goes on the next gc.
+#[test]
+fn test_sweep_stale_fragments_session_written_by_0_14_8_bin_removed_after_refresh() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/overlay-written-by-0.14.8");
+    let tmp = tempfile::tempdir().unwrap();
+    let old_bin = "553e94275e6085db.bin";
+    let overlay = fragment_session(
+        tmp.path(),
+        Some(
+            std::fs::read_to_string(fixture.join("dirty_files.json"))
+                .unwrap()
+                .as_str(),
+        ),
+        &[],
+    );
+    std::fs::copy(
+        fixture.join("graph_overlay").join(old_bin),
+        overlay.join(old_bin),
+    )
+    .unwrap();
+    backdate_secs(&overlay.join(old_bin), 7200);
+    let session = overlay.parent().unwrap();
+    let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 0, "a bin its manifest names was removed");
+
+    let sm = SessionMeta {
+        version: 1,
+        session_id: "sid".into(),
+        pid: None,
+        started_at: chrono::Utc::now().to_rfc3339(),
+        last_touched: chrono::Utc::now().to_rfc3339(),
+        base_sha: "0".repeat(40),
+        source_worktree: String::new(),
+        overlay_version: 0,
+        watcher_pid: None,
+        last_drained_offset: 0,
+        agent_name: None,
+    };
+    SessionMeta::write_atomic(&session.join("session_meta.json"), &sm).unwrap();
+    let fresh = ecp_core::analyzer::types::LocalGraph {
+        file_path: "other.py".into(),
+        content_hash: [9; 8],
+        ..Default::default()
+    };
+    ecp_cli::session::overlay_writer::write_dirty_fragments_from_graphs(session, &[fresh], &[1])
+        .unwrap();
+    let manifest = ecp_core::session::DirtyFiles::read(&session.join("dirty_files.json")).unwrap();
+    assert!(manifest.from_current_builder());
+    assert_eq!(
+        manifest.entries.keys().collect::<Vec<_>>(),
+        ["other.py"],
+        "the 0.14.8 entry outlived the refresh"
+    );
+    let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 1);
+    assert!(!overlay.join(old_bin).exists());
+}

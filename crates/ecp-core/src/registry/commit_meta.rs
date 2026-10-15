@@ -29,8 +29,10 @@ use std::path::Path;
 /// `CallSite::FromReceiver`, Python `from x import *` emits an unaliased `*`
 /// import, and Kotlin class bodies closed on the last member's line reparse.
 /// schema8: `LocalGraph.export_aliases` and `BindingKind::EsDefault` (TS / JS
-/// export aliases and default imports).
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema8");
+/// export aliases and default imports). schema9: `graph.bin` v13 carries the
+/// import / export facts of each file, and session fragments (format v3)
+/// carry export aliases and record the builder that parsed them.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema9");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

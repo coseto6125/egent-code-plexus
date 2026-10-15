@@ -387,8 +387,10 @@ mod tests {
     /// `target_fn`; `gone_fn` is deleted.
     fn dirty_input() -> OverlayFileInput {
         OverlayFileInput {
+            export_aliases: Vec::new(),
             rel_path: "src/dirty.rs".to_string(),
             symbols: vec![OverlaySymbol {
+                is_exported: false,
                 name: "keep_fn".to_string(),
                 kind: NodeKind::Function,
                 owner_class: None,

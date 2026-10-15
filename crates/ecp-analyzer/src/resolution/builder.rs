@@ -7,13 +7,14 @@ use crate::resolution::path_aliases::PathAliases;
 use crate::resolution::resolver::{ReexportIndex, Resolver};
 use crate::rust::module_tree::RustWorkspaceModTree;
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
+use ecp_core::analyzer::reexport::export_filter_applies;
 use ecp_core::analyzer::types::{CallSite, LocalGraph, RawNode};
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::{
-    BlindSpotRecord, CallMeta, Edge, File, FileCategory, FunctionMeta, Node, NodeKind, RelType,
-    RouteShape, ZeroCopyGraph,
+    BlindSpotRecord, CallMeta, Edge, ExportAliasFact, File, FileCategory, FunctionMeta, ImportFact,
+    Node, NodeKind, RelType, RouteShape, ZeroCopyGraph, FILE_FLAG_ES_MODULE,
 };
-use ecp_core::graph_assembly::GraphAssembly;
+use ecp_core::graph_assembly::{GraphAssembly, ModuleFactTables};
 use ecp_core::pool::{StrRef, StringPool};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -267,6 +268,13 @@ impl GraphBuilder {
         // Calls/Accesses edges in the resolver tiers.
         let mut file_node_idx: FxHashMap<String, u32> =
             FxHashMap::with_capacity_and_hasher(self.local_graphs.len(), Default::default());
+
+        let module_facts = record_module_facts(
+            &self.local_graphs,
+            &symbol_table,
+            nodes.len(),
+            &mut string_pool,
+        );
 
         if prof {
             eprintln!(
@@ -830,6 +838,7 @@ impl GraphBuilder {
             traces_offsets,
             traces_data,
             fingerprint: [0; 32],
+            module_facts,
         }
         .finish();
 
@@ -843,6 +852,66 @@ impl GraphBuilder {
 
         graph
     }
+}
+
+/// The import / export facts the overlay replays the import tier from
+/// (the v13 fields of `ZeroCopyGraph`): each Python / TS / JS file's
+/// imports in source order, each TS / JS file's export alias pairs and
+/// ES-module flag, and the exported declarations, as Pass 1 recorded them
+/// in `symbol_table`. `raw_nodes` is the node count after Pass 1.
+fn record_module_facts(
+    local_graphs: &[LocalGraph],
+    symbol_table: &SymbolTable,
+    raw_nodes: usize,
+    string_pool: &mut StringPool,
+) -> ModuleFactTables {
+    let mut facts = ModuleFactTables {
+        file_imports: Vec::with_capacity(local_graphs.len() + 1),
+        file_export_aliases: Vec::with_capacity(local_graphs.len() + 1),
+        file_flags: Vec::with_capacity(local_graphs.len()),
+        exported_nodes: vec![0; raw_nodes.div_ceil(8)],
+        ..ModuleFactTables::default()
+    };
+    facts.file_imports.push(0);
+    facts.file_export_aliases.push(0);
+    for local_graph in local_graphs {
+        let path = local_graph.file_path.to_string_lossy().replace('\\', "/");
+        if matches!(
+            Language::from_normalized_path(&path),
+            Language::Python | Language::TypeScript | Language::JavaScript
+        ) {
+            facts
+                .imports
+                .extend(local_graph.imports.iter().map(|import| ImportFact {
+                    source: string_pool.add(&import.source),
+                    imported_name: string_pool.add(&import.imported_name),
+                    alias: import.alias.as_deref().map(|alias| string_pool.add(alias)),
+                    binding_kind: import.binding_kind,
+                }));
+        }
+        facts.file_imports.push(facts.imports.len() as u32);
+        if export_filter_applies(&path) {
+            let aliases = local_graph.export_aliases.as_deref().unwrap_or(&[]);
+            facts
+                .export_aliases
+                .extend(aliases.iter().map(|alias| ExportAliasFact {
+                    exported: string_pool.add(&alias.exported),
+                    local: string_pool.add(&alias.local),
+                }));
+        }
+        facts
+            .file_export_aliases
+            .push(facts.export_aliases.len() as u32);
+        facts.file_flags.push(if symbol_table.is_es_module(&path) {
+            FILE_FLAG_ES_MODULE
+        } else {
+            0
+        });
+    }
+    for id in symbol_table.exported_ids() {
+        facts.exported_nodes[id as usize / 8] |= 1 << (id % 8);
+    }
+    facts
 }
 
 /// Pass 1: register every `LocalGraph`'s File + symbol nodes into the
