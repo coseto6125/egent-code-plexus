@@ -28,8 +28,6 @@ fn main() {
         )
         .init();
 
-    maybe_spawn_background_gc();
-
     let cli = Cli::parse();
     // `command_label` + `subcommand_label` borrow `&cli.command` before
     // `dispatch(cli)` consumes `cli`; compute both first so dispatch can take
@@ -400,26 +398,4 @@ fn check_group_atom(cli: &Cli) {
         ),
     }
     std::process::exit(1);
-}
-
-/// Auto-trigger background GC when the home heartbeat stamp is missing
-/// or older than 24h. Spawned detached; failures are silent (best-effort).
-fn maybe_spawn_background_gc() {
-    let home = ecp_core::registry::resolve_home_ecp();
-    let stamp = home.join(".last-gc");
-    let stale = std::fs::metadata(&stamp)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
-        .map(|d| d.as_secs() > 24 * 3600)
-        .unwrap_or(true);
-    if !stale {
-        return;
-    }
-    // Touch the stamp synchronously so concurrent CLI invocations don't all spawn.
-    let _ = std::fs::create_dir_all(&home);
-    let _ = std::fs::write(&stamp, b"");
-    // Detach background sweep — gc admin command not yet wired (Phase 8 Task 8.5),
-    // so until then this fn just touches the stamp. Once `ecp admin gc` lands,
-    // change the body to spawn it as a detached subprocess.
 }

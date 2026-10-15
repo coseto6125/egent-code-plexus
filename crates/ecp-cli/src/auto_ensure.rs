@@ -58,6 +58,11 @@ pub mod test_counters {
     /// proves every dirty file's fragment current (manifest mtime_ns match)
     /// and skips the refresh entirely.
     pub static FRESH_GATE_SKIP_COUNT: AtomicUsize = AtomicUsize::new(0);
+    /// Incremented each time `spawn_upgrade_gc` passes its once-per-process
+    /// guard, before the env / binary-name gates that skip the spawn in
+    /// tests. Left out of `reset` with the guard it counts: the guard is
+    /// never re-armed, so this reads 1 after any number of drift queries.
+    pub static UPGRADE_GC_INTENT_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     pub fn reset() {
         REANALYZE_CALL_COUNT.store(0, Ordering::Relaxed);
@@ -790,6 +795,9 @@ static SIBLING_CACHE: OnceLock<Mutex<HashMap<PathBuf, Option<PathBuf>>>> = OnceL
 static BEHIND_HEAD_SPAWNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+static UPGRADE_GC_SPAWNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Returns the `graph.bin` path of the best published sibling commit dir for
 /// this repo to warm-attach, or `None` if none qualifies.
 ///
@@ -949,7 +957,17 @@ fn spawn_background_rebuild(worktree_root: &Path) {
 /// whichever package manager installed the binary. Shares SessionStart's
 /// `.prune.lock`, so the two triggers never run gc concurrently; `admin gc`
 /// keeps a grace period for caches another installed version may still use.
+///
+/// The drift branch answers every query until a rebuild lands, and callers
+/// such as `summary` and `doctor` never rebuild. Once per process stops a
+/// long-lived MCP process forking `sh` per query; `--auto` stops each
+/// one-shot CLI call running a full gc. The `--auto` stamp names the binary
+/// that wrote it, so this binary's first trigger still runs once.
 fn spawn_upgrade_gc() {
+    if UPGRADE_GC_SPAWNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    test_counters::UPGRADE_GC_INTENT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if std::env::var_os("ECP_SKIP_BG_REBUILD").is_some() {
         return;
     }
@@ -965,7 +983,7 @@ fn spawn_upgrade_gc() {
     let home_ecp = ecp_core::registry::resolve_home_ecp();
     let lock = home_ecp.join(".prune.lock");
     let _ = crate::background::spawn_bg(crate::background::BgJob {
-        args: &["admin", "gc"],
+        args: &["admin", "gc", "--auto"],
         lock: &lock,
         cwd: &home_ecp,
         retry: (1, 0),

@@ -1,4 +1,5 @@
-//! Garbage collection: reachability-based LRU eviction + session orphan sweep.
+//! Garbage collection: generation convergence, retired-dir sweeps, stale parse
+//! caches, and commit graphs no live ref or session names.
 //!
 //! Covered by `tests/gc.rs` integration tests.
 
@@ -10,8 +11,6 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-pub const DEFAULT_QUOTA_BYTES: u64 = 5 * 1024 * 1024 * 1024;
-const TARGET_LOAD_FACTOR: f64 = 0.8;
 const SESSION_IDLE_HOURS: i64 = 24;
 /// A dir/file younger than this may belong to an in-flight build or a writer
 /// still mid-`rename`; skip it so gc never races a live producer.
@@ -28,17 +27,11 @@ fn is_in_flight(meta: &std::fs::Metadata, now: std::time::SystemTime) -> bool {
         .unwrap_or(false)
 }
 
-pub struct EvictStats {
-    pub evicted: usize,
-    pub freed_bytes: u64,
-}
-
 pub struct SweepStats {
     pub marked: usize,
     pub removed: usize,
 }
 
-/// SHAs that must be retained: branch/tag/ref objects from the worktree
 /// A directory marked dead: `<name>.dead`, or `.dead.` followed by any number
 /// of numeric segments.
 ///
@@ -57,30 +50,6 @@ pub fn is_retired_dir(name: &str) -> bool {
                     .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()))
             })
             .unwrap_or(false)
-}
-
-/// plus pinned `base_sha` of active sessions (last_touched within 24h).
-pub fn reachability(repo_root: &Path, worktree: &Path) -> io::Result<FxHashSet<String>> {
-    let mut set = FxHashSet::default();
-
-    // Branch / tag / ref objects from the live worktree
-    if let Ok(out) = safe_exec::git()
-        .args(["for-each-ref", "--format=%(objectname)"])
-        .current_dir(worktree)
-        .output()
-    {
-        if out.status.success() {
-            for line in std::str::from_utf8(&out.stdout).unwrap_or("").lines() {
-                let s = line.trim();
-                if s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit()) {
-                    set.insert(s.to_string());
-                }
-            }
-        }
-    }
-
-    insert_active_session_bases(repo_root, &mut set);
-    Ok(set)
 }
 
 /// Adds the base SHA of every session touched within [`SESSION_IDLE_HOURS`].
@@ -106,8 +75,14 @@ fn insert_active_session_bases(repo_root: &Path, set: &mut FxHashSet<String>) ->
         let sm = match SessionMeta::read(&entry.path().join("session_meta.json")) {
             Ok(sm) => sm,
             // Absent: a dir mid-creation or mid-removal. `Other`: unparsable
-            // JSON, which no retry will fix. Neither names a live base.
-            Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::Other) => {
+            // JSON, which no retry will fix. Not a directory: a stray file
+            // such as `.DS_Store`. None of them names a live base.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::Other | io::ErrorKind::NotADirectory
+                ) =>
+            {
                 continue;
             }
             Err(_) => {
@@ -128,9 +103,9 @@ fn insert_active_session_bases(repo_root: &Path, set: &mut FxHashSet<String>) ->
 
 /// A commit graph no ref, no worktree HEAD and no live session points at,
 /// built longer ago than this, is reclaimed. A merged branch or a deleted
-/// worktree otherwise leaves every graph it built behind: `enforce_quota`
-/// only acts above 5 GiB per repo. The grace covers short-lived use such as
-/// `impact --baseline <old ref>`; a swept graph is rebuilt on demand.
+/// worktree otherwise leaves every graph it built behind. The grace covers
+/// short-lived use such as `impact --baseline <old ref>`; a swept graph is
+/// rebuilt on demand.
 const UNREACHABLE_COMMIT_IDLE_SECS: i64 = 7 * 86_400;
 
 /// Every SHA a ref or a worktree HEAD of the repo at `common_dir` names, or
@@ -210,8 +185,10 @@ pub fn sweep_unreachable_commits(repo_root: &Path) -> io::Result<SweepStats> {
         return Ok(stats);
     };
     let now = std::time::SystemTime::now();
-    // Pass 1, stat only: a dir modified within the grace period cannot have
-    // been built before it, so a repo with no older dir pays no git call.
+    // Pass 1, stat only: a dir modified within the grace period is kept, so a
+    // repo with no older dir pays no git call. Not only an optimisation: an
+    // attach back-fills sidecars into a dir built long ago, and that recent
+    // write keeps the graph in use.
     let mut candidates = Vec::new();
     for entry in it.flatten() {
         let dir = entry.path();
@@ -250,11 +227,7 @@ pub fn sweep_unreachable_commits(repo_root: &Path) -> io::Result<SweepStats> {
     let Ok(repo_meta) = ecp_core::registry::RepoMeta::read(&repo_root.join("meta.json")) else {
         return Ok(stats);
     };
-    let common_dir = Path::new(&repo_meta.common_dir);
-    if !common_dir.is_dir() {
-        return Ok(stats);
-    }
-    let Some(live) = live_commit_shas(repo_root, common_dir) else {
+    let Some(live) = live_commit_shas(repo_root, Path::new(&repo_meta.common_dir)) else {
         return Ok(stats);
     };
     for (dir, sha) in candidates {
@@ -277,76 +250,6 @@ pub fn sweep_unreachable_commits(repo_root: &Path) -> io::Result<SweepStats> {
         stats.removed += usize::from(retire_and_remove(&dir));
     }
     Ok(stats)
-}
-
-pub fn enforce_quota(repo_root: &Path, worktree: &Path, quota: u64) -> io::Result<EvictStats> {
-    let reachable = reachability(repo_root, worktree)?;
-    let commits_dir = repo_root.join("commits");
-    let it = match fs::read_dir(&commits_dir) {
-        Ok(d) => d,
-        Err(_) => {
-            return Ok(EvictStats {
-                evicted: 0,
-                freed_bytes: 0,
-            })
-        }
-    };
-
-    let mut entries: Vec<(std::path::PathBuf, String, u64, i64)> = vec![];
-    for e in it.flatten() {
-        let Ok(ft) = e.file_type() else { continue };
-        if !ft.is_dir() {
-            continue;
-        }
-        let name = e.file_name().to_string_lossy().to_string();
-        if name.contains(".building") || name.contains(".stale") {
-            continue;
-        }
-        let Ok(parsed_name) = CommitDirName::parse(&name) else {
-            continue;
-        };
-        let meta_path = e.path().join("meta.json");
-        let Ok(cm) = CommitBuildMeta::read(&meta_path) else {
-            continue;
-        };
-        let size = dir_size(&e.path()).unwrap_or(0);
-        let built_at_epoch = chrono::DateTime::parse_from_rfc3339(&cm.built_at)
-            .map(|d| d.timestamp())
-            .unwrap_or(0);
-        entries.push((e.path(), parsed_name.sha_hex(), size, built_at_epoch));
-    }
-
-    let total: u64 = entries.iter().map(|(_, _, s, _)| *s).sum();
-    if total <= quota {
-        return Ok(EvictStats {
-            evicted: 0,
-            freed_bytes: 0,
-        });
-    }
-    let target_size = (quota as f64 * TARGET_LOAD_FACTOR) as u64;
-
-    entries.sort_by_key(|(_, _, _, t)| *t); // ASC = oldest first
-
-    let mut freed = 0u64;
-    let mut evicted = 0usize;
-    let mut current = total;
-    for (path, sha, size, _) in entries {
-        if current <= target_size {
-            break;
-        }
-        if reachable.contains(&sha) {
-            continue;
-        }
-        fs::remove_dir_all(&path)?;
-        current = current.saturating_sub(size);
-        freed += size;
-        evicted += 1;
-    }
-
-    Ok(EvictStats {
-        evicted,
-        freed_bytes: freed,
-    })
 }
 
 pub fn sweep_sessions(repo_root: &Path) -> io::Result<SweepStats> {
@@ -391,13 +294,6 @@ pub fn sweep_sessions(repo_root: &Path) -> io::Result<SweepStats> {
     Ok(SweepStats { marked, removed })
 }
 
-/// Converge same-SHA generation dirs under `<repo_root>/commits/`: for each SHA,
-/// keep only the dir with the greatest `Generation` (a base dir with no `.gen`
-/// suffix has `generation == None`, ordering below any `Some(_)`), remove the
-/// rest. Same SHA → identical graph (ingest is idempotent), so older generations
-/// are pure waste. Skips dirs whose mtime is < 10s old or that have a sibling
-/// `.building` marker (another session may be mid-ingest). Reuses
-/// `CommitDirName::parse` rather than hand-rolling the name grammar.
 /// Retire commit dirs whose recorded worktree still exists but is not a
 /// worktree root (`orchestrator::built_below_worktree_root`): they were
 /// published from a subdirectory and hold that subtree's graph only. A
@@ -519,6 +415,13 @@ fn remove_retired(dir: &Path) -> bool {
     }
 }
 
+/// Converge same-SHA generation dirs under `<repo_root>/commits/`: for each SHA,
+/// keep only the dir with the greatest `Generation` (a base dir with no `.gen`
+/// suffix has `generation == None`, ordering below any `Some(_)`), remove the
+/// rest. Same SHA → identical graph (ingest is idempotent), so older generations
+/// are pure waste. Skips dirs whose mtime is < 10s old or that have a sibling
+/// `.building` marker (another session may be mid-ingest). Reuses
+/// `CommitDirName::parse` rather than hand-rolling the name grammar.
 pub fn sweep_stale_generations(repo_root: &Path) -> io::Result<SweepStats> {
     let commits = repo_root.join("commits");
     let mut removed = 0usize;
@@ -591,14 +494,14 @@ pub fn sweep_stale_generations(repo_root: &Path) -> io::Result<SweepStats> {
     Ok(SweepStats { marked: 0, removed })
 }
 
-/// Remove top-level retired repo dirs (`<repo>__<hash>.dead.<pid>.<n>.<ts>`)
-/// left behind when `fs_safe::retire_dir_async`'s background delete thread died
-/// with the process before finishing. Already marked dead → removal is
-/// unconditional. The `.dead.` infix with a trailing all-digit timestamp segment
-/// is the marker (mirrors `sweep_sessions`' dead-detection).
-pub fn sweep_retired_repos(home_ecp: &Path) -> io::Result<SweepStats> {
+/// Remove retired dirs (`<name>.dead.<pid>.<n>.<ts>`) directly under
+/// `parent` left behind when `fs_safe::retire_dir_async`'s background delete
+/// thread died with the process before finishing: repo dirs under `~/.ecp`,
+/// and a repo root's `parse_cache` that `admin index --force` retires whole.
+/// Already marked dead → removal is unconditional.
+pub fn sweep_retired_dirs(parent: &Path) -> io::Result<SweepStats> {
     let mut removed = 0usize;
-    let Ok(it) = fs::read_dir(home_ecp) else {
+    let Ok(it) = fs::read_dir(parent) else {
         return Ok(SweepStats { marked: 0, removed });
     };
     for entry in it.flatten() {
@@ -612,7 +515,7 @@ pub fn sweep_retired_repos(home_ecp: &Path) -> io::Result<SweepStats> {
         }
         match fs::remove_dir_all(&path) {
             Ok(()) => removed += 1,
-            Err(e) => eprintln!("gc: failed to remove retired repo {}: {e}", path.display()),
+            Err(e) => eprintln!("gc: failed to remove retired dir {}: {e}", path.display()),
         }
     }
     Ok(SweepStats { marked: 0, removed })
@@ -649,19 +552,6 @@ pub fn sweep_orphan_tmp(home_ecp: &Path) -> io::Result<SweepStats> {
         }
     }
     Ok(SweepStats { marked: 0, removed })
-}
-
-fn dir_size(dir: &Path) -> io::Result<u64> {
-    let mut total = 0u64;
-    for e in walkdir::WalkDir::new(dir)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
-        if e.file_type().is_file() {
-            total += e.metadata()?.len();
-        }
-    }
-    Ok(total)
 }
 
 #[cfg(test)]

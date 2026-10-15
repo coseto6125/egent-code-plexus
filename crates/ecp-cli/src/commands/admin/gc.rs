@@ -1,30 +1,39 @@
 use clap::Args;
 
-/// `ecp admin gc` — converge stale graph generations + sweep retired repo/session
-/// dirs across all repos under `~/.ecp`. Idempotent; safe to run repeatedly.
+/// `ecp admin gc` — converge stale graph generations, sweep retired dirs,
+/// other versions' parse caches idle 7 days, and commit graphs no ref,
+/// worktree HEAD or live session names (built 7+ days ago), across all repos
+/// under `~/.ecp`. Idempotent; safe to run repeatedly.
 #[derive(Args, Debug, Clone)]
 pub struct GcArgs {
     /// Skip all deletions (no-op run). Does not yet enumerate candidates.
     #[arg(long)]
     pub dry_run: bool,
-    /// Skip when the last completed gc finished less than 12 h ago. For
-    /// automatic triggers; an upgrade or a manual run omits it.
+    /// Skip when this binary's last completed gc finished less than 12 h ago.
+    /// For automatic triggers; `ecp update` and a manual run omit it.
     #[arg(long)]
     pub auto: bool,
 }
 
 /// The sweeps judge on a 7-day grace (24 h for sessions), so an automatic
-/// run more often than this finds nothing new; each run costs two git calls
-/// per indexed repo (~3 s with ~120 repos, measured 2026-10-15).
+/// run more often than this finds nothing new. A run costs up to three git
+/// calls per repo that holds a commit dir older than the grace (0.22 s
+/// steady state on 126 repos, see [`GC_REPO_WORKERS`]).
 const AUTO_GC_INTERVAL_SECS: u64 = 12 * 3600;
 const LAST_GC_STAMP: &str = ".gc-last";
 
+/// The stamp holds the `BUILDER_FINGERPRINT` of the binary that wrote it. A
+/// run by another version does not count: the first automatic trigger after
+/// an upgrade must run once, whatever an older binary did an hour ago.
 fn ran_recently(home_ecp: &std::path::Path) -> bool {
-    std::fs::metadata(home_ecp.join(LAST_GC_STAMP))
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
-        .is_some_and(|age| age.as_secs() < AUTO_GC_INTERVAL_SECS)
+    let stamp = home_ecp.join(LAST_GC_STAMP);
+    std::fs::read_to_string(&stamp)
+        .is_ok_and(|by| by.trim() == ecp_core::registry::BUILDER_FINGERPRINT)
+        && std::fs::metadata(&stamp)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+            .is_some_and(|age| age.as_secs() < AUTO_GC_INTERVAL_SECS)
 }
 
 /// Repos are swept in parallel, never one repo by two workers: each repo's
@@ -40,6 +49,7 @@ fn sweep_repos(repo_roots: &[std::path::PathBuf]) -> usize {
     use rayon::prelude::*;
     let sweep = |repo_root: &std::path::PathBuf| -> usize {
         [
+            crate::admin::gc::sweep_retired_dirs(repo_root),
             crate::admin::gc::sweep_stale_generations(repo_root),
             crate::admin::gc::sweep_subtree_builds(repo_root),
             crate::admin::gc::sweep_sessions(repo_root),
@@ -80,9 +90,9 @@ pub fn run(args: GcArgs) -> Result<(), ecp_core::EcpError> {
 
     // L1: top-level retired repo dirs.
     if !args.dry_run {
-        match crate::admin::gc::sweep_retired_repos(&home_ecp) {
+        match crate::admin::gc::sweep_retired_dirs(&home_ecp) {
             Ok(s) => total_removed += s.removed,
-            Err(e) => eprintln!("gc: sweep_retired_repos: {e}"),
+            Err(e) => eprintln!("gc: sweep_retired_dirs: {e}"),
         }
         // Orphaned `<name>.<pid>.<n>.tmp` from interrupted atomic writes.
         match crate::admin::gc::sweep_orphan_tmp(&home_ecp) {
@@ -136,7 +146,10 @@ pub fn run(args: GcArgs) -> Result<(), ecp_core::EcpError> {
     total_removed += sweep_repos(&repo_roots);
 
     if !args.dry_run {
-        let _ = std::fs::write(home_ecp.join(LAST_GC_STAMP), b"");
+        let _ = std::fs::write(
+            home_ecp.join(LAST_GC_STAMP),
+            ecp_core::registry::BUILDER_FINGERPRINT,
+        );
     }
     println!("gc: removed {total_removed} stale/retired dirs");
     Ok(())

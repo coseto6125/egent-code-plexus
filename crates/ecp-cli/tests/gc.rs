@@ -1,115 +1,45 @@
-use ecp_cli::admin::gc::{
-    enforce_quota, reachability, sweep_retired_repos, sweep_sessions, sweep_stale_generations,
-};
+use ecp_cli::admin::gc::{sweep_retired_dirs, sweep_sessions, sweep_stale_generations};
 use ecp_core::registry::{CommitBuildMeta, EmbeddingStatus, SourceType};
 use ecp_core::session::SessionMeta;
 use std::process::Command;
 
-fn git_init_with_commit(p: &std::path::Path) -> String {
-    Command::new("git")
+/// Runs git in `dir` and returns its stdout, failing the test on a non-zero
+/// exit. The developer's global and system config stay out (a
+/// `commit.gpgsign` or a hooks path would make a commit fail or differ), and
+/// so does a `GIT_DIR` inherited from a git hook that runs the tests.
+fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = Command::new("git")
         .arg("-C")
-        .arg(p)
-        .arg("init")
-        .arg("-q")
-        .status()
-        .unwrap();
-    Command::new("git")
-        .arg("-C")
-        .arg(p)
-        .args(["config", "user.email", "t@t"])
-        .status()
-        .unwrap();
-    Command::new("git")
-        .arg("-C")
-        .arg(p)
-        .args(["config", "user.name", "t"])
-        .status()
-        .unwrap();
-    std::fs::write(p.join("a"), "x").unwrap();
-    Command::new("git")
-        .arg("-C")
-        .arg(p)
-        .args(["add", "."])
-        .status()
-        .unwrap();
-    Command::new("git")
-        .arg("-C")
-        .arg(p)
-        .args(["commit", "-qm", "x"])
-        .status()
-        .unwrap();
-    let o = Command::new("git")
-        .arg("-C")
-        .arg(p)
-        .args(["rev-parse", "HEAD"])
+        .arg(dir)
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .output()
         .unwrap();
-    String::from_utf8(o.stdout).unwrap().trim().to_string()
-}
-
-#[test]
-fn reachability_includes_branch_refs_and_active_sessions() {
-    let tmp = tempfile::tempdir().unwrap();
-    let wt = tmp.path().join("wt");
-    std::fs::create_dir(&wt).unwrap();
-    let main_sha = git_init_with_commit(&wt);
-
-    let repo_root = tmp.path().join("repo_root");
-    let sessions = repo_root.join("sessions").join("sid1");
-    std::fs::create_dir_all(&sessions).unwrap();
-    let session_sha = "0".repeat(40);
-    let sm = SessionMeta {
-        version: 1,
-        session_id: "sid1".into(),
-        pid: None,
-        started_at: "2026-05-17T10:00:00Z".into(),
-        last_touched: chrono::Utc::now().to_rfc3339(),
-        base_sha: session_sha.clone(),
-        source_worktree: wt.to_string_lossy().into(),
-        overlay_version: 0,
-        watcher_pid: None,
-        last_drained_offset: 0,
-        agent_name: None,
-    };
-    SessionMeta::write_atomic(&sessions.join("session_meta.json"), &sm).unwrap();
-
-    let r = reachability(&repo_root, &wt).unwrap();
-    assert!(r.contains(&main_sha), "missing branch ref sha: {r:?}");
-    assert!(r.contains(&session_sha), "missing session base sha: {r:?}");
-}
-
-#[test]
-fn reachability_excludes_idle_sessions() {
-    let tmp = tempfile::tempdir().unwrap();
-    let wt = tmp.path().join("wt");
-    std::fs::create_dir(&wt).unwrap();
-    let _main_sha = git_init_with_commit(&wt);
-
-    let repo_root = tmp.path().join("repo_root");
-    let sessions = repo_root.join("sessions").join("old-sid");
-    std::fs::create_dir_all(&sessions).unwrap();
-    let session_sha = "1".repeat(40);
-    let old = chrono::Utc::now() - chrono::Duration::hours(48);
-    let sm = SessionMeta {
-        version: 1,
-        session_id: "old-sid".into(),
-        pid: None,
-        started_at: old.to_rfc3339(),
-        last_touched: old.to_rfc3339(),
-        base_sha: session_sha.clone(),
-        source_worktree: wt.to_string_lossy().into(),
-        overlay_version: 0,
-        watcher_pid: None,
-        last_drained_offset: 0,
-        agent_name: None,
-    };
-    SessionMeta::write_atomic(&sessions.join("session_meta.json"), &sm).unwrap();
-
-    let r = reachability(&repo_root, &wt).unwrap();
     assert!(
-        !r.contains(&session_sha),
-        "idle session sha must not be reachable"
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+fn git_in(dir: &std::path::Path, args: &[&str]) {
+    git_out(dir, args);
+}
+
+fn git_init_with_commit(p: &std::path::Path) -> String {
+    git_in(p, &["init", "-q"]);
+    std::fs::write(p.join("a"), "x").unwrap();
+    git_in(p, &["add", "."]);
+    git_in(p, &["commit", "-qm", "x"]);
+    git_out(p, &["rev-parse", "HEAD"])
 }
 
 fn make_commit_dir(commits: &std::path::Path, sha_hex: &str, built_at: &str, size_bytes: usize) {
@@ -133,68 +63,6 @@ fn make_commit_dir(commits: &std::path::Path, sha_hex: &str, built_at: &str, siz
     };
     CommitBuildMeta::write_atomic(&dir.join("meta.json"), &meta).unwrap();
     std::fs::write(dir.join("graph.bin"), vec![0u8; size_bytes]).unwrap();
-}
-
-#[test]
-fn enforce_quota_evicts_oldest_unreachable() {
-    let tmp = tempfile::tempdir().unwrap();
-    let wt = tmp.path().join("wt");
-    std::fs::create_dir(&wt).unwrap();
-    let _main_sha = git_init_with_commit(&wt);
-
-    let repo_root = tmp.path().join("repo_root");
-    let commits = repo_root.join("commits");
-    std::fs::create_dir_all(&commits).unwrap();
-
-    // Three commit dirs; none reachable (random SHAs)
-    let sha_a = "a".repeat(40);
-    let sha_b = "b".repeat(40);
-    let sha_c = "c".repeat(40);
-    make_commit_dir(&commits, &sha_a, "2026-01-01T00:00:00Z", 10_000); // oldest
-    make_commit_dir(&commits, &sha_b, "2026-03-01T00:00:00Z", 10_000);
-    make_commit_dir(&commits, &sha_c, "2026-05-01T00:00:00Z", 10_000); // newest
-
-    // Tiny quota: forces eviction down to 80% × quota
-    let stats = enforce_quota(&repo_root, &wt, 15_000).unwrap();
-    assert!(
-        stats.evicted >= 1,
-        "expected eviction, got: {} evicted",
-        stats.evicted
-    );
-
-    // Oldest (sha_a) should be the one gone first
-    assert!(
-        !commits.join(format!("commit__{sha_a}")).exists(),
-        "oldest should be evicted"
-    );
-}
-
-#[test]
-fn enforce_quota_protects_reachable_even_when_oldest() {
-    let tmp = tempfile::tempdir().unwrap();
-    let wt = tmp.path().join("wt");
-    std::fs::create_dir(&wt).unwrap();
-    let main_sha = git_init_with_commit(&wt);
-
-    let repo_root = tmp.path().join("repo_root");
-    let commits = repo_root.join("commits");
-    std::fs::create_dir_all(&commits).unwrap();
-
-    // Two dirs: main_sha (reachable, OLD built_at) + sha_b (unreachable, newer)
-    make_commit_dir(&commits, &main_sha, "2026-01-01T00:00:00Z", 10_000);
-    let sha_b = "b".repeat(40);
-    make_commit_dir(&commits, &sha_b, "2026-05-01T00:00:00Z", 10_000);
-
-    enforce_quota(&repo_root, &wt, 15_000).unwrap();
-    // main_sha must survive (reachable), sha_b evicted (unreachable)
-    assert!(
-        commits.join(format!("commit__{main_sha}")).exists(),
-        "reachable main_sha must survive eviction"
-    );
-    assert!(
-        !commits.join(format!("commit__{sha_b}")).exists(),
-        "unreachable sha_b should be evicted"
-    );
 }
 
 #[test]
@@ -361,7 +229,7 @@ fn sweep_retired_repos_removes_dead() {
     std::fs::create_dir_all(home_ecp.join("myrepo__abc123.dead.111.0.1700000000000")).unwrap();
     std::fs::create_dir_all(home_ecp.join("other__def456.dead.222.1.1700000000001")).unwrap();
 
-    let stats = sweep_retired_repos(home_ecp).unwrap();
+    let stats = sweep_retired_dirs(home_ecp).unwrap();
 
     assert_eq!(stats.removed, 2, "both .dead.* repo dirs removed");
     assert!(
@@ -491,8 +359,8 @@ fn test_sweep_stale_parse_caches_no_parse_cache_dir_removes_nothing() {
     assert_eq!(stats.removed, 0);
 }
 
-/// A short-lived CLI can exit before `retire_dir_async`'s background delete
-/// finishes, leaving `<fp>.dead.<pid>.<n>.<ms>` behind.
+/// gc's own retire renames before it removes; a remove that fails leaves
+/// `<fp>.dead.<pid>.<n>.<ms>` behind for the next run.
 #[test]
 fn test_sweep_stale_parse_caches_retired_leftover_removed() {
     let tmp = tempfile::tempdir().unwrap();
@@ -550,32 +418,31 @@ impl CommitFixture {
 
     fn commit(&self, file: &str) -> String {
         std::fs::write(self.wt.join(file), file).unwrap();
-        for args in [vec!["add", "."], vec!["commit", "-qm", file]] {
-            Command::new("git")
-                .arg("-C")
-                .arg(&self.wt)
-                .args(&args)
-                .status()
-                .unwrap();
-        }
-        let o = Command::new("git")
-            .arg("-C")
-            .arg(&self.wt)
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .unwrap();
-        String::from_utf8(o.stdout).unwrap().trim().to_string()
+        git_in(&self.wt, &["add", "."]);
+        git_in(&self.wt, &["commit", "-qm", file]);
+        git_out(&self.wt, &["rev-parse", "HEAD"])
     }
 
-    fn graph(&self, sha: &str, built_days_ago: i64) -> std::path::PathBuf {
-        let built = chrono::Utc::now() - chrono::Duration::days(built_days_ago);
+    fn graph(&self, sha: &str, built_days_ago: u64) -> std::path::PathBuf {
+        self.graph_aged(sha, built_days_ago, built_days_ago)
+    }
+
+    /// A graph whose `built_at` and dir mtime differ: an attach writes into a
+    /// dir long after its build.
+    fn graph_aged(
+        &self,
+        sha: &str,
+        built_days_ago: u64,
+        mtime_days_ago: u64,
+    ) -> std::path::PathBuf {
+        let days = |n: u64| std::time::Duration::from_secs(n * 86_400);
+        let built = chrono::Utc::now() - chrono::Duration::from_std(days(built_days_ago)).unwrap();
         make_commit_dir(&self.repo_root.join("commits"), sha, &built.to_rfc3339(), 8);
         let dir = self
             .repo_root
             .join("commits")
             .join(format!("commit__{sha}"));
-        let then = std::time::SystemTime::now()
-            - std::time::Duration::from_secs(built_days_ago.max(0) as u64 * 86_400);
+        let then = std::time::SystemTime::now() - days(mtime_days_ago);
         filetime::set_file_mtime(&dir, filetime::FileTime::from_system_time(then)).unwrap();
         dir
     }
@@ -597,12 +464,51 @@ fn test_sweep_unreachable_commits_old_graph_at_no_ref_removed() {
     assert!(!orphan.exists());
 }
 
+/// The 7-day grace is on `built_at`; a dir whose mtime alone is old (the
+/// build wrote nothing since) is not old enough.
 #[test]
-fn test_sweep_unreachable_commits_recent_unreachable_graph_kept() {
+fn test_sweep_unreachable_commits_recently_built_old_mtime_graph_kept() {
     let fx = CommitFixture::new();
-    let recent = fx.graph(&"a".repeat(40), 1);
+    let recent = fx.graph_aged(&"a".repeat(40), 1, 30);
     assert_eq!(fx.sweep().removed, 0);
     assert!(recent.exists());
+}
+
+/// An attach back-fills sidecars into a dir built long ago; that recent write
+/// marks the graph as in use, whatever `built_at` says.
+#[test]
+fn test_sweep_unreachable_commits_recently_modified_old_build_graph_kept() {
+    let fx = CommitFixture::new();
+    let attached = fx.graph_aged(&"a".repeat(40), 30, 1);
+    assert_eq!(fx.sweep().removed, 0);
+    assert!(attached.exists());
+}
+
+/// A branch that is not checked out anywhere is live through its ref alone:
+/// no worktree HEAD and no HEAD parent names it.
+#[test]
+fn test_sweep_unreachable_commits_unchecked_out_branch_tip_kept() {
+    let fx = CommitFixture::new();
+    let side = fx.commit("b");
+    git_in(&fx.wt, &["branch", "side"]);
+    fx.commit("c");
+    fx.commit("d");
+    let live = fx.graph(&side, 30);
+    assert_eq!(fx.sweep().removed, 0);
+    assert!(live.exists());
+}
+
+/// A stray file in `sessions/` (`.DS_Store`, an editor backup) holds no
+/// session; it must not read as an unreadable session meta, which would stop
+/// the sweep for the repo on every run.
+#[test]
+fn test_sweep_unreachable_commits_stray_file_in_sessions_still_sweeps() {
+    let fx = CommitFixture::new();
+    let orphan = fx.graph(&"a".repeat(40), 30);
+    std::fs::create_dir_all(fx.repo_root.join("sessions")).unwrap();
+    std::fs::write(fx.repo_root.join("sessions").join(".DS_Store"), b"x").unwrap();
+    assert_eq!(fx.sweep().removed, 1);
+    assert!(!orphan.exists());
 }
 
 #[test]
@@ -621,14 +527,17 @@ fn test_sweep_unreachable_commits_detached_worktree_head_kept() {
     let detached = fx.commit("b");
     fx.commit("c");
     let other = fx.wt.parent().unwrap().join("detached");
-    Command::new("git")
-        .arg("-C")
-        .arg(&fx.wt)
-        .args(["worktree", "add", "-q", "--detach"])
-        .arg(&other)
-        .arg(&detached)
-        .status()
-        .unwrap();
+    git_in(
+        &fx.wt,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            other.to_str().unwrap(),
+            &detached,
+        ],
+    );
     let live = fx.graph(&detached, 30);
     assert_eq!(fx.sweep().removed, 0);
     assert!(live.exists());
@@ -679,22 +588,35 @@ fn test_sweep_unreachable_commits_missing_repo_meta_removes_nothing() {
     assert!(graph.exists());
 }
 
+/// A `.building` dir is never a candidate, however old its mtime and its
+/// `built_at`. The generation-shaped name parses as a commit dir, so the
+/// name filter alone keeps it; the base-shaped one is what the orchestrator
+/// writes today.
 #[test]
 fn test_sweep_unreachable_commits_building_dir_kept() {
     let fx = CommitFixture::new();
     let sha = "a".repeat(40);
-    fx.graph(&sha, 30);
-    let building = fx
-        .repo_root
-        .join("commits")
-        .join(format!("commit__{sha}.building"));
-    std::fs::create_dir_all(&building).unwrap();
-    fx.sweep();
-    assert!(building.exists(), "an in-progress build dir was swept");
+    let commits = fx.repo_root.join("commits");
+    let mut kept = Vec::new();
+    for name in [
+        format!("commit__{sha}.building"),
+        format!("commit__{sha}.gen.1000.10.0.building"),
+    ] {
+        let graph = fx.graph(&sha, 30);
+        let building = commits.join(name);
+        std::fs::rename(&graph, &building).unwrap();
+        let then = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86_400);
+        filetime::set_file_mtime(&building, filetime::FileTime::from_system_time(then)).unwrap();
+        kept.push(building);
+    }
+    assert_eq!(fx.sweep().removed, 0);
+    for building in kept {
+        assert!(building.exists(), "an in-progress build dir was swept");
+    }
 }
 
 /// `retire_dir_async` hands the delete to a thread that dies with the
-/// short-lived gc process; the next sweep must finish the job.
+/// short-lived CLI process; the next sweep must finish the job.
 #[test]
 fn test_sweep_unreachable_commits_retired_leftover_removed() {
     let fx = CommitFixture::new();
@@ -769,14 +691,18 @@ fn run_gc(home: &std::path::Path, extra: &[&str]) -> String {
 }
 
 fn stamp(home: &std::path::Path, hours_ago: u64) {
+    stamp_by(home, hours_ago, ecp_core::registry::BUILDER_FINGERPRINT);
+}
+
+fn stamp_by(home: &std::path::Path, hours_ago: u64, fingerprint: &str) {
     let path = home.join(".gc-last");
-    std::fs::write(&path, b"").unwrap();
+    std::fs::write(&path, fingerprint).unwrap();
     let then = std::time::SystemTime::now() - std::time::Duration::from_secs(hours_ago * 3600);
     filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(then)).unwrap();
 }
 
-/// Each run spends two git calls per indexed repo, and the sweeps judge on a
-/// 7-day grace: SessionStart (every Claude session) must not repeat it.
+/// The sweeps judge on a 7-day grace, so a repeat within hours finds
+/// nothing: SessionStart (every Claude session) must not run it again.
 #[test]
 fn test_admin_gc_auto_recent_run_skips() {
     let home = tempfile::tempdir().unwrap();
@@ -784,6 +710,17 @@ fn test_admin_gc_auto_recent_run_skips() {
     stamp(home.path(), 1);
     assert!(run_gc(home.path(), &["--auto"]).contains("skipped"));
     assert!(stale.exists());
+}
+
+/// A run by another installed version does not throttle this one: the first
+/// automatic trigger after an upgrade must run once.
+#[test]
+fn test_admin_gc_auto_recent_run_by_other_version_sweeps() {
+    let home = tempfile::tempdir().unwrap();
+    let stale = parse_cache_dir(&home.path().join("repo__00000000"), "deadbeef", 30);
+    stamp_by(home.path(), 1, "v0.0.0+schema0");
+    run_gc(home.path(), &["--auto"]);
+    assert!(!stale.exists());
 }
 
 #[test]
@@ -811,19 +748,30 @@ fn test_admin_gc_run_writes_stamp_dry_run_does_not() {
     run_gc(home.path(), &["--dry-run"]);
     assert!(!home.path().join(".gc-last").exists());
     run_gc(home.path(), &[]);
-    assert!(home.path().join(".gc-last").exists());
+    assert_eq!(
+        std::fs::read_to_string(home.path().join(".gc-last")).unwrap(),
+        ecp_core::registry::BUILDER_FINGERPRINT
+    );
 }
 
-fn git_in(dir: &std::path::Path, args: &[&str]) {
-    let ok = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
-        .args(args)
-        .status()
+/// `admin index --force` retires a repo's whole `parse_cache/` and deletes it
+/// on a thread that dies with the process; the leftover sits beside
+/// `parse_cache/`, not inside it.
+#[test]
+fn test_admin_gc_repo_root_retired_parse_cache_removed() {
+    let home = tempfile::tempdir().unwrap();
+    let repo_root = home.path().join("repo__00000000");
+    let cache = repo_root.join("parse_cache").join("deadbeef");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("0000000000000000.rkyv"), b"x").unwrap();
+    let retired = ecp_core::registry::retire_dir(&repo_root.join("parse_cache"))
         .unwrap()
-        .success();
-    assert!(ok, "git {args:?} failed");
+        .unwrap();
+    let stray_file = repo_root.join("notes.dead.1.2.3");
+    std::fs::write(&stray_file, b"x").unwrap();
+    run_gc(home.path(), &[]);
+    assert!(!retired.exists(), "retired parse cache survived gc");
+    assert!(stray_file.exists(), "a file is not a retired dir");
 }
 
 /// `%(objectname)` of an annotated tag is the tag object, not the commit
@@ -1006,4 +954,72 @@ fn test_session_start_relative_ecp_home_background_job_completes() {
         !home.join("home").exists(),
         "job resolved home against its own cwd"
     );
+}
+
+/// A binary upgrade is when the old caches become garbage: the first query
+/// that finds its graph built by another fingerprint starts gc in the
+/// background, although another version's gc ran within the throttle window.
+/// `ecp update` (the other upgrade trigger) needs the network; not tested.
+#[test]
+fn test_query_after_fingerprint_change_starts_gc() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wt = tmp.path().join("wt");
+    std::fs::create_dir(&wt).unwrap();
+    git_init_with_commit(&wt);
+    std::fs::write(wt.join("lib.rs"), "pub fn upgrade_probe() {}\n").unwrap();
+    git_in(&wt, &["add", "."]);
+    git_in(&wt, &["commit", "-qm", "lib"]);
+    let home = tmp.path().join("home");
+    let ecp = |args: &[&str], skip_bg: bool| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ecp"));
+        cmd.args(args)
+            .env("ECP_HOME", &home)
+            .env("HOME", tmp.path())
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("ECP_SKIP_BG_REBUILD");
+        if skip_bg {
+            cmd.env("ECP_SKIP_BG_REBUILD", "1");
+        }
+        cmd.output().unwrap()
+    };
+    let indexed = ecp(&["admin", "index", "--repo", wt.to_str().unwrap()], true);
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+    let mut graphs = 0;
+    for repo in std::fs::read_dir(&home).unwrap().flatten() {
+        let Ok(commits) = std::fs::read_dir(repo.path().join("commits")) else {
+            continue;
+        };
+        for dir in commits.flatten() {
+            let graph = dir.path().join("graph.bin");
+            if graph.is_file() {
+                std::fs::write(
+                    ecp_cli::auto_ensure::builder_fingerprint_sidecar_path(&graph),
+                    "v0.0.0+schema0",
+                )
+                .unwrap();
+                graphs += 1;
+            }
+        }
+    }
+    assert!(graphs > 0, "admin index published no graph");
+    let stale = parse_cache_dir(&home.join("other__00000000"), "deadbeef", 30);
+    stamp_by(&home, 1, "v0.0.0+schema0");
+
+    let query = ecp(
+        &["find", "upgrade_probe", "--repo", wt.to_str().unwrap()],
+        false,
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while stale.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no gc ran after the first query on a drifted graph; query stderr: {}",
+            String::from_utf8_lossy(&query.stderr)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
