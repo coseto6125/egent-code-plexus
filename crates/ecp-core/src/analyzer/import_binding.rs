@@ -51,9 +51,53 @@ pub enum MemberOwner<'a> {
     /// A declaration with no owning type: a package wildcard imports
     /// top-level functions and types, never the members of a class.
     TopLevel,
-    /// A member of this type: `Helper.work()` through `import pkg.Helper`,
-    /// or a static wildcard `import static pkg.Helper.*`.
+    /// A member of the type this path names (`pkg.Outer.Helper`, innermost
+    /// last): `Helper.work()` through `import pkg.Helper`, a Java static
+    /// import `import static pkg.Helper.work`, or a static wildcard
+    /// `import static pkg.Helper.*`. The owner index keys only the last
+    /// segment; [`owner_path_agrees`] checks the rest.
     Type(&'a str),
+}
+
+/// How a module file declares one type name of an import's type path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclaredType<O> {
+    /// No type of that name: the file cannot contradict the path.
+    Undeclared,
+    /// Several: their members share one owner key, so none can be told apart.
+    Ambiguous,
+    /// One, with its owner's key (`None` at top level).
+    Unique(Option<O>),
+}
+
+/// Whether a module file's type declarations agree with the type path an
+/// import names (`pkg.Outer1.Helper`). A member records only its owner's last
+/// segment, so `Outer2.Helper.run` and `Outer1.Helper.run` both look owned by
+/// `Helper`. The walk starts at the innermost type: each type must be
+/// declared once, and its owner must appear further out on the path, until a
+/// type with no owner or one the file does not declare. `declared` answers
+/// for a name in the file; `owner_of` maps a path segment to the key
+/// `declared` reports owners in.
+pub fn owner_path_agrees<'p, O: PartialEq>(
+    path: &'p str,
+    mut declared: impl FnMut(&'p str) -> DeclaredType<O>,
+    mut owner_of: impl FnMut(&'p str) -> Option<O>,
+) -> bool {
+    let mut segments = path.rsplit(['.', '\\']);
+    let mut name = segments.next().unwrap_or(path);
+    loop {
+        let owner = match declared(name) {
+            DeclaredType::Undeclared | DeclaredType::Unique(None) => return true,
+            DeclaredType::Ambiguous => return false,
+            DeclaredType::Unique(Some(owner)) => owner,
+        };
+        // Skipping segments tolerates a container the owner stamp passes
+        // over (an enum between a nested class and its outer class).
+        match segments.find(|&outer| owner_of(outer).is_some_and(|o| o == owner)) {
+            Some(outer) => name = outer,
+            None => return false,
+        }
+    }
 }
 
 /// What one import binds for one callee.
@@ -110,7 +154,7 @@ pub fn import_binding<'a>(
         return Some(ImportedMember {
             name,
             owner: if alias == Some("static:*") {
-                MemberOwner::Type(last_segment(&import.source))
+                MemberOwner::Type(import.source.as_str())
             } else {
                 MemberOwner::TopLevel
             },
@@ -128,16 +172,41 @@ pub fn import_binding<'a>(
     if binding == name {
         return Some(ImportedMember {
             name: exported,
-            owner: MemberOwner::Any,
+            owner: static_member_owner(import, language)
+                .map_or(MemberOwner::Any, MemberOwner::Type),
             wildcard: false,
         });
     }
     let member = name.strip_prefix(binding)?.strip_prefix('.')?;
     (!member.is_empty()).then_some(ImportedMember {
         name: member,
-        owner: MemberOwner::Type(exported),
+        owner: MemberOwner::Type(fqn_type_path(import)),
         wildcard: false,
     })
+}
+
+/// The type path of a Java static member import (`pkg.Helper` for `import
+/// static pkg.Helper.work`); Java records only a static import with an alias.
+/// A Kotlin import of `pkg.a.helper` may name a top-level function or an
+/// object member, so only Java gets an owner.
+fn static_member_owner(import: &RawImport, language: Language) -> Option<&str> {
+    import
+        .source
+        .rsplit_once('.')
+        .filter(|_| language == Language::Java && import.alias.is_some())
+        .map(|(owner, _)| owner)
+}
+
+/// The fully qualified path of the type a class import names (`pkg.Helper`
+/// for `import pkg.Helper`, `A\B` for the PHP group member `use A\{B}`),
+/// or its declared name when the source does not end in it.
+pub fn fqn_type_path(import: &RawImport) -> &str {
+    let exported = fqn_imported_name(import);
+    if last_segment(&import.source) == exported {
+        import.source.as_str()
+    } else {
+        exported
+    }
 }
 
 /// The declared name a fully qualified import brings into scope under its
@@ -232,7 +301,7 @@ mod tests {
             import_binding(&class, "Helper.helper", Language::Java),
             Some(ImportedMember {
                 name: "helper",
-                owner: MemberOwner::Type("Helper"),
+                owner: MemberOwner::Type("pkg.Helper"),
                 wildcard: false,
             })
         );
@@ -255,6 +324,66 @@ mod tests {
     }
 
     #[test]
+    fn test_import_binding_java_static_member_import_returns_type_owner() {
+        let static_member = import("r.Util.run", "run", Some("run"));
+        assert_eq!(
+            import_binding(&static_member, "run", Language::Java).map(|b| b.owner),
+            Some(MemberOwner::Type("r.Util"))
+        );
+        let kotlin_member = import("r.Obj.run", "run", None);
+        assert_eq!(
+            import_binding(&kotlin_member, "run", Language::Kotlin).map(|b| b.owner),
+            Some(MemberOwner::Any)
+        );
+        let java_class = import("r.Util", "Util", None);
+        assert_eq!(
+            import_binding(&java_class, "Util", Language::Java).map(|b| b.owner),
+            Some(MemberOwner::Any)
+        );
+    }
+
+    /// Owners keyed by name; `files` maps a type name to its declarations'
+    /// owners in the module file.
+    fn agrees(path: &str, files: &[(&str, &[Option<&'static str>])]) -> bool {
+        owner_path_agrees(
+            path,
+            |name| match files.iter().find(|(n, _)| *n == name).map(|(_, o)| *o) {
+                None | Some([]) => DeclaredType::Undeclared,
+                Some([owner]) => DeclaredType::Unique(*owner),
+                Some(_) => DeclaredType::Ambiguous,
+            },
+            |segment| Some(segment),
+        )
+    }
+
+    #[test]
+    fn test_owner_path_agrees_nested_and_top_level_paths() {
+        assert!(agrees("r.Util", &[("Util", &[None][..])]));
+        assert!(agrees(
+            "h.Outer1.Helper",
+            &[("Helper", &[Some("Outer1")][..]), ("Outer1", &[None][..])]
+        ));
+        assert!(!agrees(
+            "h.Outer1.Helper",
+            &[("Helper", &[Some("Outer2")][..]), ("Outer2", &[None][..])]
+        ));
+        assert!(!agrees(
+            "h.Outer1.Helper",
+            &[("Helper", &[Some("Outer2"), Some("Outer1")][..])]
+        ));
+        assert!(agrees(
+            "a.B.C.D",
+            &[
+                ("D", &[Some("C")][..]),
+                ("C", &[Some("B")][..]),
+                ("B", &[None][..])
+            ]
+        ));
+        assert!(!agrees("Helper", &[("Helper", &[Some("Outer")][..])]));
+        assert!(agrees("pkg.Missing", &[]));
+    }
+
+    #[test]
     fn test_import_binding_wildcards_bind_bare_names_with_owner_rule() {
         let package = import("pkg", "*", None);
         assert_eq!(
@@ -269,7 +398,7 @@ mod tests {
         let static_wildcard = import("pkg.Helper", "*", Some("static:*"));
         assert_eq!(
             import_binding(&static_wildcard, "helper", Language::Java).map(|b| b.owner),
-            Some(MemberOwner::Type("Helper"))
+            Some(MemberOwner::Type("pkg.Helper"))
         );
     }
 
