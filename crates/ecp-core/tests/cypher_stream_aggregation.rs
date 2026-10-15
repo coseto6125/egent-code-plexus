@@ -94,9 +94,11 @@ fn test_execute_aggregate_over_overlay_counts_virtual_and_base_edges() {
     let view = OverlayView::build(
         graph,
         &[OverlayFileInput {
+            export_aliases: Vec::new(),
             rel_path: "src/dirty.rs".into(),
             symbols: vec![
                 OverlaySymbol {
+                    is_exported: false,
                     name: "b".into(),
                     kind: NodeKind::Function,
                     owner_class: None,
@@ -107,6 +109,7 @@ fn test_execute_aggregate_over_overlay_counts_virtual_and_base_edges() {
                     calls: vec!["a".into()],
                 },
                 OverlaySymbol {
+                    is_exported: false,
                     name: "virtual".into(),
                     kind: NodeKind::Function,
                     owner_class: None,

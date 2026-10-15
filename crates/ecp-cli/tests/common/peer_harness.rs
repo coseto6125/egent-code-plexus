@@ -140,6 +140,7 @@ impl PeerHarness {
         DirtyFiles::write_atomic(
             &sdir.join("dirty_files.json"),
             &DirtyFiles {
+                builder_fingerprint: None,
                 version: 1,
                 entries,
             },

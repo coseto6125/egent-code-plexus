@@ -18,7 +18,9 @@
 
 #![allow(dead_code)]
 
-use ecp_core::analyzer::types::{LocalGraph, RawEventTopic, RawSchemaField, RawTxScope};
+use ecp_core::analyzer::types::{
+    LocalGraph, RawEventTopic, RawExportAlias, RawImport, RawSchemaField, RawTxScope,
+};
 use ecp_core::graph::NodeKind;
 use ecp_core::registry::{atomic_write_json, replace_file};
 use ecp_core::session::overlay::{SymbolKind, SymbolRef};
@@ -87,15 +89,26 @@ pub struct FragmentSymbol {
     pub calls: Vec<String>,
 }
 
-/// v2 fragment bin payload: the whole dirty file's fresh parse, including
-/// file-level imports for query-time Tier-2 (import-scoped) resolution.
-/// `DirtyEntry.format == FRAGMENT_FORMAT_V2` marks bins of this shape —
-/// readers MUST dispatch on the manifest marker, not guess the encoding.
+/// v3 fragment bin payload: the whole dirty file's fresh parse, including
+/// file-level imports and export aliases for query-time Tier-2
+/// (import-scoped) resolution. `DirtyEntry.format == FRAGMENT_FORMAT_V3`
+/// marks bins of this shape — readers MUST dispatch on the manifest marker,
+/// not guess the encoding.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct FragmentFile {
     pub symbols: Vec<FragmentSymbol>,
-    pub imports: Vec<ecp_core::analyzer::types::RawImport>,
+    pub imports: Vec<RawImport>,
+    pub export_aliases: Vec<RawExportAlias>,
+}
+
+/// The v2 fragment bin payload (`FragmentFile` before `export_aliases`),
+/// kept to read the symbol list of a bin an older binary wrote.
+#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
+pub struct FragmentFileV2 {
+    pub symbols: Vec<FragmentSymbol>,
+    pub imports: Vec<RawImport>,
 }
 
 pub fn fragment_file_from_local_graph(graph: &LocalGraph) -> FragmentFile {
@@ -113,6 +126,7 @@ pub fn fragment_file_from_local_graph(graph: &LocalGraph) -> FragmentFile {
             })
             .collect(),
         imports: graph.imports.clone(),
+        export_aliases: graph.export_aliases.as_deref().unwrap_or(&[]).to_vec(),
     }
 }
 
@@ -247,6 +261,11 @@ fn commit_fragment_results(
     } else {
         DirtyFiles::empty()
     };
+    // Another binary's entries parse by other rules. The freshness gate
+    // re-parses every dirty file of such a manifest, so none is kept.
+    if !df.from_current_builder() {
+        df = DirtyFiles::empty();
+    }
     for (rel, entry) in pending {
         df.entries.insert(rel, entry);
     }
@@ -299,7 +318,7 @@ fn write_fragment_file(
         tantivy_delta_segment: None,
         parse_failed,
         dirty_symbols,
-        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V2,
+        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V3,
     };
 
     let outcome = FragmentOutcome {
@@ -367,7 +386,7 @@ fn write_fragment_from_graph(
         tantivy_delta_segment: None,
         parse_failed,
         dirty_symbols: symbols_from_graph(graph, &rel_path),
-        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V2,
+        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V3,
     };
     let outcome = FragmentOutcome {
         fragment_id,
@@ -463,7 +482,7 @@ impl OverlayWriter {
                 tantivy_delta_segment: None,
                 parse_failed,
                 dirty_symbols,
-                format: ecp_core::session::overlay::FRAGMENT_FORMAT_V2,
+                format: ecp_core::session::overlay::FRAGMENT_FORMAT_V3,
             },
         );
         atomic_write_json(&manifest_path, &df)

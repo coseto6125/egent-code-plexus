@@ -570,6 +570,7 @@ mod tests {
         DirtyFiles::write_atomic(
             &dir.join("dirty_files.json"),
             &DirtyFiles {
+                builder_fingerprint: None,
                 version: 1,
                 entries,
             },

@@ -307,5 +307,12 @@ fn validate_header(bytes: &[u8]) -> io::Result<()> {
             ),
         ));
     }
+    if !archived.has_module_facts() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "graph.bin: import / export facts missing or inconsistent — run `ecp analyze` to \
+             regenerate",
+        ));
+    }
     Ok(())
 }

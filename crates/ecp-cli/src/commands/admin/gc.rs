@@ -45,6 +45,8 @@ fn sweep_repos(repo_roots: &[std::path::PathBuf]) -> usize {
             crate::admin::gc::sweep_sessions(repo_root),
             crate::admin::gc::sweep_stale_parse_caches(repo_root),
             crate::admin::gc::sweep_unreachable_commits(repo_root),
+            crate::admin::gc::sweep_old_format_commits(repo_root),
+            crate::admin::gc::sweep_stale_fragments(repo_root),
         ]
         .into_iter()
         .filter_map(Result::ok)

@@ -12,6 +12,7 @@ use crate::analyzer::types::RawImport;
 use crate::file_category::Language;
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -111,13 +112,18 @@ impl<'a> LanguageFiles<'a> {
 /// Module discovery for one overlay build. The file index is built lazily per
 /// language, on the first import a policy-language call needs, and each
 /// (directory, specifier) answer is cached as the resolver's `module_cache`.
+/// The shared import rules read it through `&self` while they probe, so the
+/// caches sit in cells.
 pub(crate) struct ImportScope<'a> {
     graph: &'a ArchivedZeroCopyGraph,
     dirty: &'a [OverlayFileInput],
     dirty_base: &'a FxHashSet<u32>,
-    languages: FxHashMap<u8, LanguageFiles<'a>>,
-    modules: FxHashMap<(u8, &'a str, &'a str), Module<'a>>,
+    languages: RefCell<FxHashMap<u8, LanguageFiles<'a>>>,
+    modules: RefCell<ModuleCache<'a>>,
 }
+
+/// language → directory → specifier → module.
+type ModuleCache<'a> = FxHashMap<u8, FxHashMap<Box<str>, FxHashMap<Box<str>, Module<'a>>>>;
 
 impl<'a> ImportScope<'a> {
     pub(crate) fn new(
@@ -129,8 +135,8 @@ impl<'a> ImportScope<'a> {
             graph,
             dirty,
             dirty_base,
-            languages: FxHashMap::default(),
-            modules: FxHashMap::default(),
+            languages: RefCell::default(),
+            modules: RefCell::default(),
         }
     }
 
@@ -138,22 +144,25 @@ impl<'a> ImportScope<'a> {
         self.dirty
     }
 
-    pub(crate) fn has_module_name(&mut self, language: Language, name: &str) -> bool {
-        let (graph, dirty) = (self.graph, self.dirty);
-        self.languages
+    fn with_files<R>(&self, language: Language, f: impl FnOnce(&LanguageFiles<'a>) -> R) -> R {
+        let mut languages = self.languages.borrow_mut();
+        let files = languages
             .entry(language as u8)
-            .or_insert_with(|| LanguageFiles::build(graph, dirty, language))
-            .module_names
-            .contains(name)
+            .or_insert_with(|| LanguageFiles::build(self.graph, self.dirty, language));
+        f(files)
+    }
+
+    pub(crate) fn has_module_name(&self, language: Language, name: &str) -> bool {
+        self.with_files(language, |files| files.module_names.contains(name))
     }
 
     /// The resolver's `import_is_external`: a Missing import proves its callee
     /// external only when [`may_suppress`] allows it and no language of its
     /// [`import_family`] indexes its head or holds its module.
     pub(crate) fn is_external(
-        &mut self,
-        source_file: &'a str,
-        import: &'a RawImport,
+        &self,
+        source_file: &str,
+        import: &RawImport,
         language: Language,
     ) -> bool {
         let head = module_head(&import.source);
@@ -166,9 +175,9 @@ impl<'a> ImportScope<'a> {
     /// The resolver's `import_module_file`: the module `specifier` names from
     /// `source_file`, without guessing its member.
     pub(crate) fn module(
-        &mut self,
-        source_file: &'a str,
-        specifier: &'a str,
+        &self,
+        source_file: &str,
+        specifier: &str,
         language: Language,
     ) -> Module<'a> {
         let directory = if specifier.starts_with('.') {
@@ -176,22 +185,33 @@ impl<'a> ImportScope<'a> {
         } else {
             ""
         };
-        let key = (language as u8, directory, specifier);
-        if let Some(hit) = self.modules.get(&key) {
+        if let Some(hit) = self
+            .modules
+            .borrow()
+            .get(&(language as u8))
+            .and_then(|directories| directories.get(directory))
+            .and_then(|specifiers| specifiers.get(specifier))
+        {
             return hit.clone();
         }
-        let (graph, dirty) = (self.graph, self.dirty);
-        let files = self
-            .languages
-            .entry(language as u8)
-            .or_insert_with(|| LanguageFiles::build(graph, dirty, language));
-        let found = match fqn_extension(language) {
-            Some(extension) => {
-                fqn_module(files, graph, dirty, self.dirty_base, specifier, extension)
-            }
+        let found = self.with_files(language, |files| match fqn_extension(language) {
+            Some(extension) => fqn_module(
+                files,
+                self.graph,
+                self.dirty,
+                self.dirty_base,
+                specifier,
+                extension,
+            ),
             None => python_module(files, source_file, specifier),
-        };
-        self.modules.insert(key, found.clone());
+        });
+        self.modules
+            .borrow_mut()
+            .entry(language as u8)
+            .or_default()
+            .entry(directory.into())
+            .or_default()
+            .insert(specifier.into(), found.clone());
         found
     }
 }

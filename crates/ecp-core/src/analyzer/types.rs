@@ -304,6 +304,18 @@ pub enum BindingKind {
     EsDefault,
 }
 
+impl From<&ArchivedBindingKind> for BindingKind {
+    fn from(archived: &ArchivedBindingKind) -> Self {
+        match archived {
+            ArchivedBindingKind::Alias => Self::Alias,
+            ArchivedBindingKind::Constant => Self::Constant,
+            ArchivedBindingKind::Macro => Self::Macro,
+            ArchivedBindingKind::Flag => Self::Flag,
+            ArchivedBindingKind::EsDefault => Self::EsDefault,
+        }
+    }
+}
+
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct RawImport {

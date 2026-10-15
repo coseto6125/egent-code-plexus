@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "entries": {
+    "app.py": {
+      "mtime_ns": 1792081243968467114,
+      "content_hash": "553e94275e6085db",
+      "fragment_id": "553e94275e6085db",
+      "tantivy_delta_segment": null,
+      "parse_failed": false,
+      "dirty_symbols": [
+        {
+          "name": "go",
+          "kind": "function",
+          "file": "app.py",
+          "line_start": 4,
+          "line_end": 5
+        },
+        {
+          "name": "added",
+          "kind": "function",
+          "file": "app.py",
+          "line_start": 8,
+          "line_end": 9
+        }
+      ],
+      "format": 2
+    }
+  }
+}
