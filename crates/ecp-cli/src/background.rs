@@ -68,6 +68,28 @@ pub fn spawn_bg(job: BgJob) -> bool {
         Ok(p) => p,
         Err(_) => return false,
     };
+    // A relative ECP_HOME makes the lock, cwd and marker paths relative, and
+    // the child runs in `cwd`: it would resolve them, and its own home,
+    // against the wrong directory. Pin every one to an absolute path here.
+    let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let (lock, cwd) = (abs(job.lock), abs(job.cwd));
+    let marker_paths = job
+        .markers
+        .as_ref()
+        .map(|m| (abs(m.log), abs(m.complete), abs(m.failed)));
+    let job = BgJob {
+        lock: &lock,
+        cwd: &cwd,
+        markers: marker_paths
+            .as_ref()
+            .map(|(log, complete, failed)| BgMarkers {
+                log,
+                complete,
+                failed,
+            }),
+        ..job
+    };
+    let home = std::env::var_os("ECP_HOME").map(|h| abs(Path::new(&h)));
 
     let args_quoted: Vec<String> = job.args.iter().map(|arg| shell_quote(*arg)).collect();
     let args_joined = args_quoted.join(" ");
@@ -131,15 +153,17 @@ done
         )
     };
 
-    Command::new("sh")
-        .arg("-c")
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
         .arg(&shell)
         .current_dir(job.cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .is_ok()
+        .stderr(Stdio::null());
+    if let Some(home) = home {
+        cmd.env("ECP_HOME", home);
+    }
+    cmd.spawn().is_ok()
 }
 
 pub(crate) fn shell_quote<P: AsRef<Path>>(p: P) -> String {

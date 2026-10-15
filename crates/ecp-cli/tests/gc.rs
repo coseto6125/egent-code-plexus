@@ -813,3 +813,197 @@ fn test_admin_gc_run_writes_stamp_dry_run_does_not() {
     run_gc(home.path(), &[]);
     assert!(home.path().join(".gc-last").exists());
 }
+
+fn git_in(dir: &std::path::Path, args: &[&str]) {
+    let ok = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(args)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "git {args:?} failed");
+}
+
+/// `%(objectname)` of an annotated tag is the tag object, not the commit
+/// the graph dir is keyed by; the peeled target must count as live.
+#[test]
+fn test_sweep_unreachable_commits_annotated_tag_target_kept() {
+    let fx = CommitFixture::new();
+    let tagged = fx.commit("b");
+    git_in(&fx.wt, &["tag", "-a", "v1", "-m", "v1"]);
+    fx.commit("c");
+    fx.commit("d");
+    let live = fx.graph(&tagged, 30);
+    assert_eq!(fx.sweep().removed, 0);
+    assert!(live.exists());
+}
+
+/// Warm-attach serves a HEAD that has no graph yet from its parent's graph,
+/// so that graph must outlive its branch moving on.
+#[test]
+fn test_sweep_unreachable_commits_worktree_head_parent_kept() {
+    let fx = CommitFixture::new();
+    let parent = fx.commit("b");
+    fx.commit("c");
+    let warm = fx.graph(&parent, 30);
+    assert_eq!(fx.sweep().removed, 0);
+    assert!(warm.exists());
+}
+
+/// An existing git dir whose git command fails (not a repo) must keep every
+/// graph: a failed call's empty output is not "nothing is live".
+#[test]
+fn test_sweep_unreachable_commits_git_command_failure_removes_nothing() {
+    let fx = CommitFixture::new();
+    let graph = fx.graph(&"a".repeat(40), 30);
+    let not_git = fx.wt.parent().unwrap().join("not-git");
+    std::fs::create_dir_all(&not_git).unwrap();
+    let mut meta = ecp_core::registry::RepoMeta::read(&fx.repo_root.join("meta.json")).unwrap();
+    meta.common_dir = not_git.to_string_lossy().into();
+    ecp_core::registry::RepoMeta::write_atomic(&fx.repo_root.join("meta.json"), &meta).unwrap();
+    assert_eq!(fx.sweep().removed, 0);
+    assert!(graph.exists());
+}
+
+/// A session meta that exists but cannot be read may name a live base: the
+/// sweep must not trust the partial session list.
+#[cfg(unix)]
+#[test]
+fn test_sweep_unreachable_commits_unreadable_session_meta_removes_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = CommitFixture::new();
+    let graph = fx.graph(&"a".repeat(40), 30);
+    let session = fx.repo_root.join("sessions").join("sid1");
+    std::fs::create_dir_all(&session).unwrap();
+    let meta = session.join("session_meta.json");
+    std::fs::write(&meta, b"{}").unwrap();
+    std::fs::set_permissions(&meta, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&meta).is_ok() {
+        eprintln!("skipped: running with permission override (root)");
+        return;
+    }
+    let removed = fx.sweep().removed;
+    std::fs::set_permissions(&meta, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(removed, 0);
+    assert!(graph.exists());
+}
+
+/// An inherited GIT_COMMON_DIR overrides `--git-dir` for `worktree list`; the
+/// detached HEAD of this repo must still be seen.
+#[test]
+fn test_admin_gc_inherited_git_common_dir_keeps_detached_head() {
+    let fx = CommitFixture::new();
+    let detached = fx.commit("b");
+    fx.commit("c");
+    fx.commit("d");
+    let other = fx.wt.parent().unwrap().join("detached");
+    git_in(
+        &fx.wt,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            other.to_str().unwrap(),
+            &detached,
+        ],
+    );
+    let live = fx.graph(&detached, 30);
+    let foreign = tempfile::tempdir().unwrap();
+    git_init_with_commit(foreign.path());
+    let out = Command::new(env!("CARGO_BIN_EXE_ecp"))
+        .args(["admin", "gc"])
+        .env("ECP_HOME", fx.repo_root.parent().unwrap())
+        .env("ECP_SKIP_BG_REBUILD", "1")
+        .env("GIT_COMMON_DIR", foreign.path().join(".git"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        live.exists(),
+        "detached HEAD graph swept under a foreign GIT_COMMON_DIR"
+    );
+}
+
+/// A cache read without writes leaves the dir's mtime old; the stamp
+/// `ParseCache::open` rewrites marks the use.
+#[test]
+fn test_sweep_stale_parse_caches_recently_opened_old_dir_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = parse_cache_dir(tmp.path(), "cafef00d", 30);
+    std::fs::write(dir.join(ecp_cli::parse_cache::LAST_USED_STAMP), b"").unwrap();
+    filetime::set_file_mtime(
+        &dir,
+        filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86_400),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path())
+            .unwrap()
+            .removed,
+        0
+    );
+    assert!(dir.exists());
+}
+
+#[test]
+fn test_parse_cache_open_writes_last_used_stamp() {
+    let tmp = tempfile::tempdir().unwrap();
+    ecp_cli::parse_cache::ParseCache::open(tmp.path()).unwrap();
+    let stamp = tmp
+        .path()
+        .join("parse_cache")
+        .join(ecp_cli::parse_cache::ParseCache::current_dir_name())
+        .join(ecp_cli::parse_cache::LAST_USED_STAMP);
+    assert!(stamp.exists());
+}
+
+/// A relative ECP_HOME made the background job's lock and markers relative
+/// to the job's own cwd, so the job never ran. SessionStart's detached
+/// `admin prune --orphans` must finish and drop its marker under the home.
+#[test]
+fn test_session_start_relative_ecp_home_background_job_completes() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let envelope = format!(r#"{{"cwd": {:?}}}"#, tmp.path().to_string_lossy());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ecp"))
+        .args(["hook", "session-start", "--claude-code"])
+        .current_dir(tmp.path())
+        .env("ECP_HOME", "home")
+        .env("HOME", tmp.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(envelope.as_bytes())
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+    let done = |name: &str| home.join(name).exists();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !(done(".prune-complete") || done(".prune-failed")) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "background prune never finished under a relative ECP_HOME"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        !home.join("home").exists(),
+        "job resolved home against its own cwd"
+    );
+}

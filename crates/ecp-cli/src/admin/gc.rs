@@ -83,19 +83,37 @@ pub fn reachability(repo_root: &Path, worktree: &Path) -> io::Result<FxHashSet<S
     Ok(set)
 }
 
-fn insert_active_session_bases(repo_root: &Path, set: &mut FxHashSet<String>) {
-    let Ok(it) = fs::read_dir(repo_root.join("sessions")) else {
-        return;
+/// Adds the base SHA of every session touched within [`SESSION_IDLE_HOURS`].
+/// Returns false when the scan may have missed one: an unreadable sessions
+/// dir, entry or meta file (not absent, not corrupt) leaves a live base
+/// unseen, and a caller that deletes on this set must not trust it then.
+fn insert_active_session_bases(repo_root: &Path, set: &mut FxHashSet<String>) -> bool {
+    let it = match fs::read_dir(repo_root.join("sessions")) {
+        Ok(it) => it,
+        Err(e) => return e.kind() == io::ErrorKind::NotFound,
     };
-    for entry in it.flatten() {
+    let mut complete = true;
+    for entry in it {
+        let Ok(entry) = entry else {
+            complete = false;
+            continue;
+        };
         let name = entry.file_name();
         let s = name.to_string_lossy();
         if is_retired_dir(&s) || s.contains(".stale-") {
             continue;
         }
-        let sm_path = entry.path().join("session_meta.json");
-        let Ok(sm) = SessionMeta::read(&sm_path) else {
-            continue;
+        let sm = match SessionMeta::read(&entry.path().join("session_meta.json")) {
+            Ok(sm) => sm,
+            // Absent: a dir mid-creation or mid-removal. `Other`: unparsable
+            // JSON, which no retry will fix. Neither names a live base.
+            Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::Other) => {
+                continue;
+            }
+            Err(_) => {
+                complete = false;
+                continue;
+            }
         };
         if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&sm.last_touched) {
             let age = chrono::Utc::now().signed_duration_since(parsed.with_timezone(&chrono::Utc));
@@ -105,6 +123,7 @@ fn insert_active_session_bases(repo_root: &Path, set: &mut FxHashSet<String>) {
         }
         set.insert(sm.base_sha);
     }
+    complete
 }
 
 /// A commit graph no ref, no worktree HEAD and no live session points at,
@@ -117,9 +136,28 @@ const UNREACHABLE_COMMIT_IDLE_SECS: i64 = 7 * 86_400;
 /// Every SHA a ref or a worktree HEAD of the repo at `common_dir` names, or
 /// `None` when git cannot answer. Only a complete answer may justify a
 /// delete: an empty set from a failed git call would mark every graph dead.
+///
+/// Also live: the commit an annotated tag points at (the tag's own object id
+/// is not a commit dir), the parents of each worktree HEAD (warm-attach
+/// serves a HEAD that has no graph yet from its parent's graph), and the
+/// bases of live sessions.
 fn live_commit_shas(repo_root: &Path, common_dir: &Path) -> Option<FxHashSet<String>> {
     let git = |args: &[&str]| {
-        let out = safe_exec::git()
+        let mut cmd = safe_exec::git();
+        // An inherited GIT_DIR / GIT_COMMON_DIR overrides `--git-dir` for
+        // some subcommands (`worktree list` answered for another repo).
+        for var in [
+            "GIT_DIR",
+            "GIT_COMMON_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_NAMESPACE",
+        ] {
+            cmd.env_remove(var);
+        }
+        let out = cmd
             .arg("--git-dir")
             .arg(common_dir)
             .args(args)
@@ -129,24 +167,35 @@ fn live_commit_shas(repo_root: &Path, common_dir: &Path) -> Option<FxHashSet<Str
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
     };
-    let is_sha = |s: &str| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit());
-    let mut set: FxHashSet<String> = git(&["for-each-ref", "--format=%(objectname)"])?
+    let is_sha = |s: &str| {
+        s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()) && s.bytes().any(|b| b != b'0')
+    };
+    let mut set: FxHashSet<String> =
+        git(&["for-each-ref", "--format=%(objectname) %(*objectname)"])?
+            .split_whitespace()
+            .filter(|s| is_sha(s))
+            .map(str::to_owned)
+            .collect();
+    // A detached worktree HEAD is not a ref.
+    let heads: Vec<String> = git(&["worktree", "list", "--porcelain"])?
         .lines()
+        .filter_map(|line| line.strip_prefix("HEAD "))
         .map(str::trim)
         .filter(|s| is_sha(s))
         .map(str::to_owned)
         .collect();
-    // A detached worktree HEAD is not a ref.
-    set.extend(
-        git(&["worktree", "list", "--porcelain"])?
-            .lines()
-            .filter_map(|line| line.strip_prefix("HEAD "))
-            .map(str::trim)
-            .filter(|s| is_sha(s))
-            .map(str::to_owned),
-    );
-    insert_active_session_bases(repo_root, &mut set);
-    Some(set)
+    if !heads.is_empty() {
+        let mut args = vec!["rev-list", "--no-walk", "--parents"];
+        args.extend(heads.iter().map(String::as_str));
+        set.extend(
+            git(&args)?
+                .split_whitespace()
+                .filter(|s| is_sha(s))
+                .map(str::to_owned),
+        );
+    }
+    set.extend(heads);
+    insert_active_session_bases(repo_root, &mut set).then_some(set)
 }
 
 /// Retires commit graphs whose SHA is not live (see [`live_commit_shas`])
@@ -423,9 +472,15 @@ pub fn sweep_stale_parse_caches(repo_root: &Path) -> io::Result<SweepStats> {
             stats.removed += usize::from(remove_retired(&dir));
             continue;
         }
-        let idle = meta
-            .modified()
-            .ok()
+        // Last use: the newer of the dir's mtime (an entry written) and the
+        // stamp `ParseCache::open` rewrites (a run that only read). A binary
+        // older than the stamp leaves only the first; its read-only reuse can
+        // then be swept, which costs one re-parse, never a wrong answer.
+        let stamp = fs::metadata(dir.join(crate::parse_cache::LAST_USED_STAMP))
+            .and_then(|m| m.modified())
+            .ok();
+        let last_use = meta.modified().ok().max(stamp);
+        let idle = last_use
             .and_then(|m| now.duration_since(m).ok())
             .is_some_and(|age| age.as_secs() >= PARSE_CACHE_IDLE_SECS);
         if name == current || !idle {
