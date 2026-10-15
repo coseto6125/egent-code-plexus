@@ -1267,6 +1267,12 @@ mod worktree_root_tests {
         fs::write(root.join(".git"), "gitdir: elsewhere\n").unwrap();
         let slot = tmp.path().join("slot");
         fs::create_dir_all(&slot).unwrap();
+        let graph = ecp_core::graph_fixture::GraphFixture::new().build();
+        fs::write(
+            slot.join("graph.bin"),
+            rkyv::to_bytes::<rkyv::rancor::Error>(&graph).unwrap(),
+        )
+        .unwrap();
         CommitBuildMeta::write_atomic(&slot.join("meta.json"), &meta(&subtree.to_string_lossy()))
             .unwrap();
         assert!(attach_if_fingerprint_matches(&slot, &root).is_none());
