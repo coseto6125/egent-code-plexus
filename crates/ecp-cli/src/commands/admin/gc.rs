@@ -31,6 +31,9 @@ fn ran_recently(home_ecp: &std::path::Path) -> bool {
 /// dirs live under its own root, so the workers' unlinks never contend for
 /// one directory's lock, and each repo's two git calls overlap too. Kept
 /// small because gc runs in the background beside a foreground index build.
+/// Measured 2026-10-15 on a copy of a 4.0 GB `~/.ecp` (126 repos, release):
+/// first sweep 0.88 s vs 2.33 s with one worker (993 dirs, 3.2 GB freed,
+/// identical leftovers), steady run 0.22 s vs 0.47 s, RSS 43-51 MB.
 const GC_REPO_WORKERS: usize = 4;
 
 fn sweep_repos(repo_roots: &[std::path::PathBuf]) -> usize {
