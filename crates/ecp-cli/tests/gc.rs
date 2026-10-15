@@ -442,6 +442,13 @@ impl CommitFixture {
             .repo_root
             .join("commits")
             .join(format!("commit__{sha}"));
+        // The stub graph.bin fails header validation; without a current-version
+        // sidecar `sweep_old_format_commits` would retire it as an old layout.
+        std::fs::write(
+            dir.join("graph.bin.compatible_version"),
+            ecp_core::graph::GRAPH_FORMAT_VERSION.to_string(),
+        )
+        .unwrap();
         let then = std::time::SystemTime::now() - days(mtime_days_ago);
         filetime::set_file_mtime(&dir, filetime::FileTime::from_system_time(then)).unwrap();
         dir

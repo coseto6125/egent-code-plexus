@@ -104,6 +104,22 @@ fn test_header_compatible_missing_module_facts_false_empty_facts_true() {
 /// the old graph knows, so finding it proves the answer came from a rebuild.
 #[test]
 fn test_find_on_graph_written_by_0_14_8_rebuilds_before_answering() {
+    find_after_swapping_in_old_graph(Some("v0.14.8+schema5"));
+}
+
+/// A graph.bin that fails validation behind a meta.json naming the current
+/// build (a torn write, a disk that filled mid-publish) must not be reused by
+/// the rebuild the failed check asked for.
+#[test]
+fn test_find_on_unreadable_graph_with_current_meta_rebuilds_before_answering() {
+    find_after_swapping_in_old_graph(None);
+}
+
+/// Swaps 0.14.8's graph into a freshly built slot, with the sidecars 0.14.8
+/// writes, then asks for a symbol only the rebuilt graph has. `meta_fingerprint`
+/// is what meta.json records: 0.14.8's own for a real upgrade, or `None` to
+/// keep the current build's.
+fn find_after_swapping_in_old_graph(meta_fingerprint: Option<&str>) {
     let repo = tempfile::tempdir().unwrap();
     let root = repo.path();
     write(
@@ -121,6 +137,13 @@ fn test_find_on_graph_written_by_0_14_8_rebuilds_before_answering() {
     std::fs::write(graph, GRAPH_WRITTEN_BY_0_14_8).unwrap();
     std::fs::write(sidecar(graph, ".compatible_version"), "12\n").unwrap();
     std::fs::write(sidecar(graph, ".builder_fingerprint"), "v0.14.8+schema5\n").unwrap();
+    if let Some(fingerprint) = meta_fingerprint {
+        let meta_path = graph.with_file_name("meta.json");
+        let mut meta: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+        meta["builder_fingerprint"] = fingerprint.into();
+        std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+    }
     assert!(!header_compatible(graph));
 
     let out = Command::new(ecp_bin())

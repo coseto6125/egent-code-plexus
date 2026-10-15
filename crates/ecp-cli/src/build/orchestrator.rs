@@ -335,8 +335,13 @@ pub(crate) fn attach_if_fingerprint_matches(
         return None;
     }
     let meta = CommitBuildMeta::read(&commit_dir.join("meta.json")).ok()?;
+    // A matching meta.json says nothing about graph.bin itself: a torn or
+    // swapped graph.bin behind a current meta would be handed back on every
+    // rebuild request, and the query that asked for the rebuild then fails to
+    // load it. The validation result is cached, so the load pays nothing extra.
     if meta.builder_fingerprint.as_deref() != Some(BUILDER_FINGERPRINT)
         || built_below_worktree_root(Path::new(&meta.built_from_worktree), &meta.sha, worktree)
+        || !crate::engine::header_compatible(&commit_dir.join("graph.bin"))
     {
         return None;
     }
