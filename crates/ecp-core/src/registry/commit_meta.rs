@@ -25,8 +25,10 @@ use std::path::Path;
 /// and PHP `$obj->m()` / Java computed-receiver callees are untyped members.
 /// schema6: TS / JS `RawNode.is_exported` also marks declarations exported
 /// through a local `export { … }` clause or `export default <name>`, and the
-/// import tier reads it.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema6");
+/// import tier reads it. schema7: Python calls on a `from`-bound receiver are
+/// `CallSite::FromReceiver`, Python `from x import *` emits an unaliased `*`
+/// import, and Kotlin class bodies closed on the last member's line reparse.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema7");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
