@@ -79,31 +79,155 @@ pub fn reachability(repo_root: &Path, worktree: &Path) -> io::Result<FxHashSet<S
         }
     }
 
-    // Active sessions
-    let sessions_dir = repo_root.join("sessions");
-    if let Ok(it) = fs::read_dir(&sessions_dir) {
-        for entry in it.flatten() {
-            let name = entry.file_name();
-            let s = name.to_string_lossy();
-            if is_retired_dir(&s) || s.contains(".stale-") {
-                continue;
-            }
-            let sm_path = entry.path().join("session_meta.json");
-            let Ok(sm) = SessionMeta::read(&sm_path) else {
-                continue;
-            };
-            if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&sm.last_touched) {
-                let age =
-                    chrono::Utc::now().signed_duration_since(parsed.with_timezone(&chrono::Utc));
-                if age.num_hours() > SESSION_IDLE_HOURS {
-                    continue;
-                }
-            }
-            set.insert(sm.base_sha);
-        }
-    }
-
+    insert_active_session_bases(repo_root, &mut set);
     Ok(set)
+}
+
+fn insert_active_session_bases(repo_root: &Path, set: &mut FxHashSet<String>) {
+    let Ok(it) = fs::read_dir(repo_root.join("sessions")) else {
+        return;
+    };
+    for entry in it.flatten() {
+        let name = entry.file_name();
+        let s = name.to_string_lossy();
+        if is_retired_dir(&s) || s.contains(".stale-") {
+            continue;
+        }
+        let sm_path = entry.path().join("session_meta.json");
+        let Ok(sm) = SessionMeta::read(&sm_path) else {
+            continue;
+        };
+        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&sm.last_touched) {
+            let age = chrono::Utc::now().signed_duration_since(parsed.with_timezone(&chrono::Utc));
+            if age.num_hours() > SESSION_IDLE_HOURS {
+                continue;
+            }
+        }
+        set.insert(sm.base_sha);
+    }
+}
+
+/// A commit graph no ref, no worktree HEAD and no live session points at,
+/// built longer ago than this, is reclaimed. A merged branch or a deleted
+/// worktree otherwise leaves every graph it built behind: `enforce_quota`
+/// only acts above 5 GiB per repo. The grace covers short-lived use such as
+/// `impact --baseline <old ref>`; a swept graph is rebuilt on demand.
+const UNREACHABLE_COMMIT_IDLE_SECS: i64 = 7 * 86_400;
+
+/// Every SHA a ref or a worktree HEAD of the repo at `common_dir` names, or
+/// `None` when git cannot answer. Only a complete answer may justify a
+/// delete: an empty set from a failed git call would mark every graph dead.
+fn live_commit_shas(repo_root: &Path, common_dir: &Path) -> Option<FxHashSet<String>> {
+    let git = |args: &[&str]| {
+        let out = safe_exec::git()
+            .arg("--git-dir")
+            .arg(common_dir)
+            .args(args)
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let is_sha = |s: &str| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit());
+    let mut set: FxHashSet<String> = git(&["for-each-ref", "--format=%(objectname)"])?
+        .lines()
+        .map(str::trim)
+        .filter(|s| is_sha(s))
+        .map(str::to_owned)
+        .collect();
+    // A detached worktree HEAD is not a ref.
+    set.extend(
+        git(&["worktree", "list", "--porcelain"])?
+            .lines()
+            .filter_map(|line| line.strip_prefix("HEAD "))
+            .map(str::trim)
+            .filter(|s| is_sha(s))
+            .map(str::to_owned),
+    );
+    insert_active_session_bases(repo_root, &mut set);
+    Some(set)
+}
+
+/// Retires commit graphs whose SHA is not live (see [`live_commit_shas`])
+/// and that were built more than [`UNREACHABLE_COMMIT_IDLE_SECS`] ago.
+/// Removes nothing when the repo's git dir is unknown or git fails.
+pub fn sweep_unreachable_commits(repo_root: &Path) -> io::Result<SweepStats> {
+    let mut stats = SweepStats {
+        marked: 0,
+        removed: 0,
+    };
+    let Ok(it) = fs::read_dir(repo_root.join("commits")) else {
+        return Ok(stats);
+    };
+    let now = std::time::SystemTime::now();
+    // Pass 1, stat only: a dir modified within the grace period cannot have
+    // been built before it, so a repo with no older dir pays no git call.
+    let mut candidates = Vec::new();
+    for entry in it.flatten() {
+        let dir = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_dir() {
+            continue;
+        }
+        // Leftover of an earlier retire whose delete did not finish.
+        if is_retired_dir(&name) {
+            stats.removed += usize::from(remove_retired(&dir));
+            continue;
+        }
+        let idle_by_mtime = meta
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age.as_secs() >= UNREACHABLE_COMMIT_IDLE_SECS as u64);
+        if name.starts_with('.')
+            || name.contains(".building")
+            || name.contains(".stale")
+            || !idle_by_mtime
+        {
+            continue;
+        }
+        let Ok(parsed) = CommitDirName::parse(&name) else {
+            continue;
+        };
+        candidates.push((dir, parsed.sha_hex()));
+    }
+    if candidates.is_empty() {
+        return Ok(stats);
+    }
+    let Ok(repo_meta) = ecp_core::registry::RepoMeta::read(&repo_root.join("meta.json")) else {
+        return Ok(stats);
+    };
+    let common_dir = Path::new(&repo_meta.common_dir);
+    if !common_dir.is_dir() {
+        return Ok(stats);
+    }
+    let Some(live) = live_commit_shas(repo_root, common_dir) else {
+        return Ok(stats);
+    };
+    for (dir, sha) in candidates {
+        if live.contains(&sha) {
+            continue;
+        }
+        let Ok(cm) = CommitBuildMeta::read(&dir.join("meta.json")) else {
+            continue;
+        };
+        let old_enough = chrono::DateTime::parse_from_rfc3339(&cm.built_at).is_ok_and(|built| {
+            chrono::Utc::now()
+                .signed_duration_since(built.with_timezone(&chrono::Utc))
+                .num_seconds()
+                >= UNREACHABLE_COMMIT_IDLE_SECS
+        });
+        if !old_enough {
+            continue;
+        }
+        stats.marked += 1;
+        stats.removed += usize::from(retire_and_remove(&dir));
+    }
+    Ok(stats)
 }
 
 pub fn enforce_quota(repo_root: &Path, worktree: &Path, quota: u64) -> io::Result<EvictStats> {
@@ -261,12 +385,83 @@ pub fn sweep_subtree_builds(repo_root: &Path) -> io::Result<SweepStats> {
             )
         {
             stats.marked += 1;
-            if ecp_core::registry::retire_dir_async(&dir)?.is_some() {
-                stats.removed += 1;
-            }
+            stats.removed += usize::from(retire_and_remove(&dir));
         }
     }
     Ok(stats)
+}
+
+/// Every release and every `BUILDER_FINGERPRINT` bump opens a new
+/// `parse_cache/<fp>/` dir and never reads the old one again. The grace
+/// period keeps a second installed ecp version's live cache from being
+/// evicted on each gc, which would make the two binaries re-parse in turn.
+const PARSE_CACHE_IDLE_SECS: u64 = 7 * 86_400;
+
+/// Removes `parse_cache/<fp>/` dirs of other fingerprints that no writer
+/// touched for [`PARSE_CACHE_IDLE_SECS`], plus `.dead.*` leftovers of an
+/// earlier retire whose background delete did not finish.
+pub fn sweep_stale_parse_caches(repo_root: &Path) -> io::Result<SweepStats> {
+    let mut stats = SweepStats {
+        marked: 0,
+        removed: 0,
+    };
+    let Ok(it) = fs::read_dir(repo_root.join("parse_cache")) else {
+        return Ok(stats);
+    };
+    let current = crate::parse_cache::ParseCache::current_dir_name();
+    let now = std::time::SystemTime::now();
+    for entry in it.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let dir = entry.path();
+        if is_retired_dir(&name) {
+            stats.removed += usize::from(remove_retired(&dir));
+            continue;
+        }
+        let idle = meta
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age.as_secs() >= PARSE_CACHE_IDLE_SECS);
+        if name == current || !idle {
+            continue;
+        }
+        stats.marked += 1;
+        stats.removed += usize::from(retire_and_remove(&dir));
+    }
+    Ok(stats)
+}
+
+/// Renames `dir` out of readers' view, then deletes it in this process.
+/// `retire_dir_async` would hand the delete to a thread that dies when the
+/// short-lived `admin gc` exits, leaving the bytes on disk under `.dead.*`.
+/// A failure is logged and skipped so one locked dir (a Windows mapping, a
+/// concurrent delete) never stops the rest of the sweep.
+fn retire_and_remove(dir: &Path) -> bool {
+    match ecp_core::registry::retire_dir(dir) {
+        Ok(Some(retired)) => remove_retired(&retired),
+        Ok(None) => false,
+        Err(e) => {
+            eprintln!("gc: retire {}: {e}", dir.display());
+            false
+        }
+    }
+}
+
+fn remove_retired(dir: &Path) -> bool {
+    match fs::remove_dir_all(dir) {
+        Ok(()) => true,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+        Err(e) => {
+            eprintln!("gc: remove {}: {e}", dir.display());
+            false
+        }
+    }
 }
 
 pub fn sweep_stale_generations(repo_root: &Path) -> io::Result<SweepStats> {

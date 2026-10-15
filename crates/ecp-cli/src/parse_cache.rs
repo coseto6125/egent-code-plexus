@@ -57,6 +57,11 @@ impl ParseCache {
     /// Open (and create on demand) the cache at
     /// `<repo_root>/parse_cache/<fp>/`. `repo_root` should be the per-repo
     /// dir under `~/.ecp/` (e.g. `~/.ecp/myrepo__abc123`).
+    /// The `<fp>` dir name this binary reads and writes under `parse_cache/`.
+    pub fn current_dir_name() -> &'static str {
+        fingerprint_dir_name()
+    }
+
     pub fn open(repo_root: &Path) -> std::io::Result<Self> {
         let root = repo_root.join("parse_cache").join(fingerprint_dir_name());
         std::fs::create_dir_all(&root)?;

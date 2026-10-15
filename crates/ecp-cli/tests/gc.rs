@@ -438,3 +438,378 @@ fn test_admin_gc_private_index_of_deleted_worktree_removed() {
     assert!(!orphan.exists(), "orphan private index survived gc");
     assert!(live.join("index-1-2-3-00").exists());
 }
+
+/// Every release and every `BUILDER_FINGERPRINT` bump opens a new
+/// `parse_cache/<fp>/` dir; the old ones are never read again. Measured on
+/// 2026-10-15: 173 such dirs, 831 MB under one `~/.ecp`.
+fn parse_cache_dir(repo_root: &std::path::Path, name: &str, idle_days: u64) -> std::path::PathBuf {
+    let dir = repo_root.join("parse_cache").join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("0000000000000000.rkyv"), b"x").unwrap();
+    let then = std::time::SystemTime::now() - std::time::Duration::from_secs(idle_days * 86_400);
+    filetime::set_file_mtime(&dir, filetime::FileTime::from_system_time(then)).unwrap();
+    dir
+}
+
+#[test]
+fn test_sweep_stale_parse_caches_idle_foreign_fingerprint_removed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let stale = parse_cache_dir(tmp.path(), "deadbeef", 8);
+    let stats = ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 1);
+    assert!(!stale.exists(), "idle foreign fingerprint dir survived gc");
+}
+
+/// Another installed ecp version may still write its own fingerprint dir;
+/// sweeping it on every gc would make the two binaries evict each other.
+#[test]
+fn test_sweep_stale_parse_caches_recent_foreign_fingerprint_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let recent = parse_cache_dir(tmp.path(), "cafef00d", 1);
+    let stats = ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 0);
+    assert!(recent.exists());
+}
+
+#[test]
+fn test_sweep_stale_parse_caches_current_fingerprint_kept_however_idle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let current = parse_cache_dir(
+        tmp.path(),
+        ecp_cli::parse_cache::ParseCache::current_dir_name(),
+        400,
+    );
+    let stats = ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 0);
+    assert!(current.exists());
+}
+
+#[test]
+fn test_sweep_stale_parse_caches_no_parse_cache_dir_removes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let stats = ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 0);
+}
+
+/// A short-lived CLI can exit before `retire_dir_async`'s background delete
+/// finishes, leaving `<fp>.dead.<pid>.<n>.<ms>` behind.
+#[test]
+fn test_sweep_stale_parse_caches_retired_leftover_removed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let leftover = parse_cache_dir(tmp.path(), "deadbeef.dead.1.2.3", 0);
+    let stats = ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 1);
+    assert!(!leftover.exists());
+}
+
+#[test]
+fn test_sweep_stale_parse_caches_stray_file_ignored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = tmp.path().join("parse_cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    let stray = cache.join("notes.txt");
+    std::fs::write(&stray, b"x").unwrap();
+    let stats = ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 0);
+    assert!(stray.exists());
+}
+
+/// A repo whose commit graphs gc may judge: `~/.ecp/<repo>/meta.json` points
+/// at the work tree's `.git`, and `commits/` holds one graph per SHA.
+struct CommitFixture {
+    _tmp: tempfile::TempDir,
+    wt: std::path::PathBuf,
+    repo_root: std::path::PathBuf,
+}
+
+impl CommitFixture {
+    fn new() -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join("wt");
+        std::fs::create_dir(&wt).unwrap();
+        git_init_with_commit(&wt);
+        let repo_root = tmp.path().join("repo_root");
+        std::fs::create_dir_all(repo_root.join("commits")).unwrap();
+        let meta = ecp_core::registry::RepoMeta {
+            version: 1,
+            common_dir: wt.join(".git").to_string_lossy().into(),
+            remote_url: None,
+            aliases: vec![],
+            known_refs: Default::default(),
+            last_built_sha: None,
+            total_size_bytes: 0,
+            last_touched: chrono::Utc::now().to_rfc3339(),
+        };
+        ecp_core::registry::RepoMeta::write_atomic(&repo_root.join("meta.json"), &meta).unwrap();
+        Self {
+            _tmp: tmp,
+            wt,
+            repo_root,
+        }
+    }
+
+    fn commit(&self, file: &str) -> String {
+        std::fs::write(self.wt.join(file), file).unwrap();
+        for args in [vec!["add", "."], vec!["commit", "-qm", file]] {
+            Command::new("git")
+                .arg("-C")
+                .arg(&self.wt)
+                .args(&args)
+                .status()
+                .unwrap();
+        }
+        let o = Command::new("git")
+            .arg("-C")
+            .arg(&self.wt)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8(o.stdout).unwrap().trim().to_string()
+    }
+
+    fn graph(&self, sha: &str, built_days_ago: i64) -> std::path::PathBuf {
+        let built = chrono::Utc::now() - chrono::Duration::days(built_days_ago);
+        make_commit_dir(&self.repo_root.join("commits"), sha, &built.to_rfc3339(), 8);
+        let dir = self
+            .repo_root
+            .join("commits")
+            .join(format!("commit__{sha}"));
+        let then = std::time::SystemTime::now()
+            - std::time::Duration::from_secs(built_days_ago.max(0) as u64 * 86_400);
+        filetime::set_file_mtime(&dir, filetime::FileTime::from_system_time(then)).unwrap();
+        dir
+    }
+
+    fn sweep(&self) -> ecp_cli::admin::gc::SweepStats {
+        ecp_cli::admin::gc::sweep_unreachable_commits(&self.repo_root).unwrap()
+    }
+}
+
+/// A merged branch or a deleted worktree leaves every graph it built behind;
+/// before this sweep nothing reclaimed them below the 5 GiB quota (measured
+/// 2026-10-15: 245 of 252 graphs, 1.2 GB, at no live ref or HEAD).
+#[test]
+fn test_sweep_unreachable_commits_old_graph_at_no_ref_removed() {
+    let fx = CommitFixture::new();
+    let orphan = fx.graph(&"a".repeat(40), 30);
+    let stats = fx.sweep();
+    assert_eq!(stats.removed, 1);
+    assert!(!orphan.exists());
+}
+
+#[test]
+fn test_sweep_unreachable_commits_recent_unreachable_graph_kept() {
+    let fx = CommitFixture::new();
+    let recent = fx.graph(&"a".repeat(40), 1);
+    assert_eq!(fx.sweep().removed, 0);
+    assert!(recent.exists());
+}
+
+#[test]
+fn test_sweep_unreachable_commits_branch_tip_graph_kept_however_old() {
+    let fx = CommitFixture::new();
+    let tip = fx.commit("b");
+    let live = fx.graph(&tip, 400);
+    assert_eq!(fx.sweep().removed, 0);
+    assert!(live.exists());
+}
+
+/// A detached worktree HEAD is not a ref; `for-each-ref` alone misses it.
+#[test]
+fn test_sweep_unreachable_commits_detached_worktree_head_kept() {
+    let fx = CommitFixture::new();
+    let detached = fx.commit("b");
+    fx.commit("c");
+    let other = fx.wt.parent().unwrap().join("detached");
+    Command::new("git")
+        .arg("-C")
+        .arg(&fx.wt)
+        .args(["worktree", "add", "-q", "--detach"])
+        .arg(&other)
+        .arg(&detached)
+        .status()
+        .unwrap();
+    let live = fx.graph(&detached, 30);
+    assert_eq!(fx.sweep().removed, 0);
+    assert!(live.exists());
+}
+
+#[test]
+fn test_sweep_unreachable_commits_active_session_base_kept() {
+    let fx = CommitFixture::new();
+    let base = "b".repeat(40);
+    let sessions = fx.repo_root.join("sessions").join("sid1");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let sm = SessionMeta {
+        version: 1,
+        session_id: "sid1".into(),
+        pid: None,
+        started_at: "2026-05-17T10:00:00Z".into(),
+        last_touched: chrono::Utc::now().to_rfc3339(),
+        base_sha: base.clone(),
+        source_worktree: fx.wt.to_string_lossy().into(),
+        overlay_version: 0,
+        watcher_pid: None,
+        last_drained_offset: 0,
+        agent_name: None,
+    };
+    SessionMeta::write_atomic(&sessions.join("session_meta.json"), &sm).unwrap();
+    let live = fx.graph(&base, 30);
+    assert_eq!(fx.sweep().removed, 0);
+    assert!(live.exists());
+}
+
+/// No git answer means no proof a graph is unreachable: an empty live set
+/// must never read as "everything is garbage".
+#[test]
+fn test_sweep_unreachable_commits_missing_git_dir_removes_nothing() {
+    let fx = CommitFixture::new();
+    let graph = fx.graph(&"a".repeat(40), 30);
+    std::fs::remove_dir_all(fx.wt.join(".git")).unwrap();
+    assert_eq!(fx.sweep().removed, 0);
+    assert!(graph.exists());
+}
+
+#[test]
+fn test_sweep_unreachable_commits_missing_repo_meta_removes_nothing() {
+    let fx = CommitFixture::new();
+    let graph = fx.graph(&"a".repeat(40), 30);
+    std::fs::remove_file(fx.repo_root.join("meta.json")).unwrap();
+    assert_eq!(fx.sweep().removed, 0);
+    assert!(graph.exists());
+}
+
+#[test]
+fn test_sweep_unreachable_commits_building_dir_kept() {
+    let fx = CommitFixture::new();
+    let sha = "a".repeat(40);
+    fx.graph(&sha, 30);
+    let building = fx
+        .repo_root
+        .join("commits")
+        .join(format!("commit__{sha}.building"));
+    std::fs::create_dir_all(&building).unwrap();
+    fx.sweep();
+    assert!(building.exists(), "an in-progress build dir was swept");
+}
+
+/// `retire_dir_async` hands the delete to a thread that dies with the
+/// short-lived gc process; the next sweep must finish the job.
+#[test]
+fn test_sweep_unreachable_commits_retired_leftover_removed() {
+    let fx = CommitFixture::new();
+    let leftover = fx
+        .repo_root
+        .join("commits")
+        .join(format!("commit__{}.dead.1.2.3", "a".repeat(40)));
+    std::fs::create_dir_all(&leftover).unwrap();
+    std::fs::write(leftover.join("graph.bin"), b"x").unwrap();
+    assert_eq!(fx.sweep().removed, 1);
+    assert!(!leftover.exists());
+}
+
+/// SessionStart, the first query after an upgrade, `ecp update` and a manual
+/// run can all start gc; a second one must back off instead of racing the
+/// first to retire the same dirs.
+#[test]
+fn test_admin_gc_lock_held_skips_run() {
+    let home = tempfile::tempdir().unwrap();
+    let stale = parse_cache_dir(&home.path().join("repo__00000000"), "deadbeef", 30);
+    let _held = ecp_core::registry::FileLock::try_exclusive(&home.path().join(".gc.lock")).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ecp"))
+        .args(["admin", "gc"])
+        .env("ECP_HOME", home.path())
+        .env("ECP_SKIP_BG_REBUILD", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("another gc is running"),
+        "stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(stale.exists(), "a locked-out gc still deleted");
+}
+
+#[test]
+fn test_admin_gc_idle_foreign_parse_cache_removed() {
+    let home = tempfile::tempdir().unwrap();
+    let stale = parse_cache_dir(&home.path().join("repo__00000000"), "deadbeef", 30);
+    let out = Command::new(env!("CARGO_BIN_EXE_ecp"))
+        .args(["admin", "gc"])
+        .env("ECP_HOME", home.path())
+        .env("ECP_SKIP_BG_REBUILD", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !stale.exists(),
+        "end-to-end gc left an idle foreign parse cache"
+    );
+}
+
+fn run_gc(home: &std::path::Path, extra: &[&str]) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_ecp"))
+        .args(["admin", "gc"])
+        .args(extra)
+        .env("ECP_HOME", home)
+        .env("ECP_SKIP_BG_REBUILD", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn stamp(home: &std::path::Path, hours_ago: u64) {
+    let path = home.join(".gc-last");
+    std::fs::write(&path, b"").unwrap();
+    let then = std::time::SystemTime::now() - std::time::Duration::from_secs(hours_ago * 3600);
+    filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(then)).unwrap();
+}
+
+/// Each run spends two git calls per indexed repo, and the sweeps judge on a
+/// 7-day grace: SessionStart (every Claude session) must not repeat it.
+#[test]
+fn test_admin_gc_auto_recent_run_skips() {
+    let home = tempfile::tempdir().unwrap();
+    let stale = parse_cache_dir(&home.path().join("repo__00000000"), "deadbeef", 30);
+    stamp(home.path(), 1);
+    assert!(run_gc(home.path(), &["--auto"]).contains("skipped"));
+    assert!(stale.exists());
+}
+
+#[test]
+fn test_admin_gc_auto_old_run_sweeps() {
+    let home = tempfile::tempdir().unwrap();
+    let stale = parse_cache_dir(&home.path().join("repo__00000000"), "deadbeef", 30);
+    stamp(home.path(), 13);
+    run_gc(home.path(), &["--auto"]);
+    assert!(!stale.exists());
+}
+
+/// An upgrade trigger or a manual run omits `--auto` and ignores the stamp.
+#[test]
+fn test_admin_gc_without_auto_ignores_recent_stamp() {
+    let home = tempfile::tempdir().unwrap();
+    let stale = parse_cache_dir(&home.path().join("repo__00000000"), "deadbeef", 30);
+    stamp(home.path(), 1);
+    run_gc(home.path(), &[]);
+    assert!(!stale.exists());
+}
+
+#[test]
+fn test_admin_gc_run_writes_stamp_dry_run_does_not() {
+    let home = tempfile::tempdir().unwrap();
+    run_gc(home.path(), &["--dry-run"]);
+    assert!(!home.path().join(".gc-last").exists());
+    run_gc(home.path(), &[]);
+    assert!(home.path().join(".gc-last").exists());
+}

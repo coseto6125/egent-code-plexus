@@ -177,6 +177,7 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
     // schema break the same as a stale graph so ensure_fresh transparently
     // rebuilds.
     if !crate::engine::header_compatible(graph_path) {
+        spawn_upgrade_gc();
         return Ok(EnsureResult::Stale {
             age_seconds: 0,
             needs_full_rebuild: true,
@@ -194,6 +195,7 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
     // circuited past. Stale ⇒ ensure_fresh rebuilds via the header-compatible
     // or build_l2 branch.
     if fingerprint_drifted(graph_path) {
+        spawn_upgrade_gc();
         return Ok(EnsureResult::Stale {
             age_seconds: 0,
             needs_full_rebuild: true,
@@ -936,6 +938,36 @@ fn spawn_background_rebuild(worktree_root: &Path) {
         args: &args,
         lock: &lock,
         cwd: worktree_root,
+        retry: (1, 0),
+        markers: None,
+        then_args: None,
+    });
+}
+
+/// A binary upgrade (format or fingerprint change) is when the old caches
+/// become garbage, and the first query after it lands here on every host,
+/// whichever package manager installed the binary. Shares SessionStart's
+/// `.prune.lock`, so the two triggers never run gc concurrently; `admin gc`
+/// keeps a grace period for caches another installed version may still use.
+fn spawn_upgrade_gc() {
+    if std::env::var_os("ECP_SKIP_BG_REBUILD").is_some() {
+        return;
+    }
+    // In-process tests run a test harness as `current_exe`; only the real
+    // binary may re-exec itself as `admin gc`.
+    let is_ecp = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.file_stem().map(|stem| stem == "ecp"))
+        .unwrap_or(false);
+    if !is_ecp {
+        return;
+    }
+    let home_ecp = ecp_core::registry::resolve_home_ecp();
+    let lock = home_ecp.join(".prune.lock");
+    let _ = crate::background::spawn_bg(crate::background::BgJob {
+        args: &["admin", "gc"],
+        lock: &lock,
+        cwd: &home_ecp,
         retry: (1, 0),
         markers: None,
         then_args: None,
