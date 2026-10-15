@@ -112,11 +112,27 @@ fn separate_same_line_closers(source: &[u8]) -> Option<Vec<u8>> {
     patched
 }
 
+/// `object O { fun a() {} }` on one line parses without an ERROR node, as a
+/// top-level `infix_expression` led by an `object_literal`. A `.kt` file has no
+/// top-level expressions, so that shape marks the same separator misparse.
+fn has_top_level_object_misparse(root: tree_sitter::Node) -> bool {
+    let mut cursor = root.walk();
+    let found = root.named_children(&mut cursor).any(|child| {
+        child.kind() == "infix_expression"
+            && child
+                .named_child(0)
+                .is_some_and(|lhs| lhs.kind() == "object_literal")
+    });
+    found
+}
+
 /// Re-parses `source` with [`separate_same_line_closers`] applied when the
-/// first parse has errors, and keeps the result only if it parses cleanly.
-/// Node offsets index the unpatched `source` unchanged.
+/// first parse has errors or the error-free object misparse, and keeps the
+/// result only if it parses cleanly. Node offsets index the unpatched
+/// `source` unchanged.
 fn recover_same_line_closers(tree: tree_sitter::Tree, source: &[u8]) -> tree_sitter::Tree {
-    if !tree.root_node().has_error() {
+    let root = tree.root_node();
+    if !root.has_error() && !has_top_level_object_misparse(root) {
         return tree;
     }
     separate_same_line_closers(source)

@@ -179,10 +179,12 @@ fn test_parse_file_closer_in_string_keeps_later_spans() {
     assert_eq!(shape(&g, "g"), (NodeKind::Method, owned("B"), 2));
 }
 
-/// Two members on one line stay unrecoverable (the patch is rejected as still
-/// erroring). The parse must still return the class instead of failing.
+/// Upstream fwcd/tree-sitter-kotlin #280: a declaration with two or more
+/// modifiers followed by another declaration parsed, without an ERROR node,
+/// as an infix expression, so `First` was never a class.
 #[test]
-fn test_parse_file_two_members_one_line_still_returns_class() {
-    let g = parse("class A { fun f() {} fun g() {} }\n");
-    assert!(g.nodes.iter().any(|n| n.name == "A"));
+fn test_parse_file_multi_modifier_class_before_class_is_recorded() {
+    let g = parse("internal open class First {}\nclass Second {}\n");
+    assert_eq!(shape(&g, "First"), (NodeKind::Class, None, 0));
+    assert_eq!(shape(&g, "Second"), (NodeKind::Class, None, 1));
 }
