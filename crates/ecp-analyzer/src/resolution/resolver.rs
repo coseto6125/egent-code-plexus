@@ -38,8 +38,8 @@
 //! the before/after bench numbers.
 
 use ecp_core::analyzer::import_binding::{
-    extension_retry, fqn_extension, fqn_imported_name, fqn_language, import_binding, import_family,
-    import_member_fallback, may_suppress, module_head, namespace_member, retry_name,
+    extension_retry, fqn_extension, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
+    import_family, import_member_fallback, may_suppress, module_head, namespace_member, retry_name,
 };
 use ecp_core::analyzer::rust_paths::{is_rust_module_root, is_rust_source, rust_module_path_base};
 use ecp_core::analyzer::types::{CallSite, RawImport};
@@ -2153,6 +2153,14 @@ impl<'a> Resolver<'a> {
                 let in_file =
                     |file: &str| st.lookup_in_file_with_kind(file, exported, ResolveTarget::Type);
                 let hit = match self.import_module_file(source_file, &import.source, language) {
+                    // The file declares the name under another owner, or
+                    // twice: the import's type is not this one, and a
+                    // global namesake would be no better.
+                    IndexedModule::Unique(file)
+                        if !st.owner_path_agrees(&file, fqn_type_path(import)) =>
+                    {
+                        return TypeCandidates::None;
+                    }
                     IndexedModule::Unique(file) => in_file(&file),
                     IndexedModule::Namespace(files) => {
                         let mut hits = files.iter().filter_map(|file| in_file(file));

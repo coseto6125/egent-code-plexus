@@ -70,7 +70,8 @@
 
 use super::import_scope::{ImportScope, Module};
 use crate::analyzer::import_binding::{
-    extension_retry, fqn_language, import_binding, import_member_fallback, retry_name, MemberOwner,
+    extension_retry, fqn_language, import_binding, import_member_fallback, owner_path_agrees,
+    retry_name, DeclaredType, MemberOwner,
 };
 use crate::analyzer::rust_paths::{
     is_rust_source, is_rust_target_root, rust_module_dir, rust_module_path_base,
@@ -363,6 +364,7 @@ impl OverlayView {
                                     caller,
                                     &mut base_metas,
                                     &callables,
+                                    &types,
                                     &nodes,
                                     &replaced,
                                     &dirty_base,
@@ -817,6 +819,7 @@ fn resolve_callee<'s>(
     caller: FileMeta,
     base_metas: &mut FxHashMap<usize, FileMeta>,
     names: &OverlayNames<'_>,
+    types: &OverlayNames<'_>,
     nodes: &[ViewNode],
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
@@ -851,6 +854,7 @@ fn resolve_callee<'s>(
             imports,
             caller.language,
             names,
+            types,
             nodes,
             dirty_base,
             scope,
@@ -865,6 +869,7 @@ fn resolve_callee<'s>(
                     caller,
                     base_metas,
                     names,
+                    types,
                     nodes,
                     replaced,
                     dirty_base,
@@ -880,6 +885,7 @@ fn resolve_callee<'s>(
                     caller,
                     base_metas,
                     names,
+                    types,
                     nodes,
                     replaced,
                     dirty_base,
@@ -1315,6 +1321,7 @@ fn resolve_constructed_type<'s>(
             caller,
             base_metas,
             types,
+            types,
             nodes,
             replaced,
             dirty_base,
@@ -1387,6 +1394,7 @@ fn bind_import<'s>(
     imports: &'s [RawImport],
     language: Language,
     names: &OverlayNames<'_>,
+    types: &OverlayNames<'_>,
     nodes: &[ViewNode],
     dirty_base: &FxHashSet<u32>,
     scope: &mut ImportScope<'s>,
@@ -1400,6 +1408,7 @@ fn bind_import<'s>(
             imports,
             language,
             names,
+            types,
             nodes,
             dirty_base,
             scope,
@@ -1454,6 +1463,7 @@ fn import_member_hit<'s>(
     imports: &'s [RawImport],
     language: Language,
     names: &OverlayNames<'_>,
+    types: &OverlayNames<'_>,
     nodes: &[ViewNode],
     dirty_base: &FxHashSet<u32>,
     scope: &mut ImportScope<'s>,
@@ -1469,6 +1479,15 @@ fn import_member_hit<'s>(
         };
         bound = true;
         let in_file = |file: &str| {
+            let owner_agrees = match binding.owner {
+                MemberOwner::Type(path) => {
+                    owner_path_agrees_in_file(graph, types, nodes, dirty_base, file, path)
+                }
+                MemberOwner::Any | MemberOwner::TopLevel => true,
+            };
+            if !owner_agrees {
+                return None;
+            }
             member_in_file(
                 graph,
                 names,
@@ -1513,6 +1532,58 @@ fn is_top_level(graph: &ArchivedZeroCopyGraph, nodes: &[ViewNode], idx: u32) -> 
         ),
     };
     owner.and_then(owner_key).is_none()
+}
+
+/// The index's `SymbolTable::owner_path_agrees`: [`owner_path_agrees`] over
+/// the types `file` declares. A dirty file answers from its fresh parse only,
+/// first declaration of each uid, as the index tombstones the rest.
+fn owner_path_agrees_in_file(
+    graph: &ArchivedZeroCopyGraph,
+    types: &OverlayNames<'_>,
+    nodes: &[ViewNode],
+    dirty_base: &FxHashSet<u32>,
+    file: &str,
+    path: &str,
+) -> bool {
+    let base_len = graph.nodes.len() as u32;
+    owner_path_agrees(
+        path,
+        |name| {
+            let base = graph
+                .nodes_by_name(name)
+                .filter(|&idx| {
+                    let node = &graph.nodes[idx as usize];
+                    NodeKind::from(&node.kind).is_type()
+                        && !dirty_base.contains(&idx)
+                        && graph
+                            .files
+                            .get(node.file_idx.to_native() as usize)
+                            .is_some_and(|f| f.path.resolve(&graph.string_pool) == file)
+                })
+                .map(|idx| {
+                    owner_key(
+                        graph.nodes[idx as usize]
+                            .owner_class
+                            .resolve(&graph.string_pool),
+                    )
+                });
+            let fresh = types
+                .anywhere
+                .get(name)
+                .into_iter()
+                .flatten()
+                .map(|&(virt, _)| &nodes[(virt - base_len) as usize])
+                .filter(|node| node.rel_path.as_ref() == file)
+                .map(|node| node.owner_class.as_deref().and_then(owner_key));
+            let mut owners = base.chain(fresh);
+            match (owners.next(), owners.next()) {
+                (None, _) => DeclaredType::Undeclared,
+                (Some(_), Some(_)) => DeclaredType::Ambiguous,
+                (Some(owner), None) => DeclaredType::Unique(owner),
+            }
+        },
+        owner_key,
+    )
 }
 
 /// The index's `lookup_member_in_file` over the kind family of `names`: the

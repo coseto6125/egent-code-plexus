@@ -1,4 +1,6 @@
-use ecp_core::analyzer::import_binding::{fqn_language, MemberOwner};
+use ecp_core::analyzer::import_binding::{
+    fqn_language, owner_path_agrees, DeclaredType, MemberOwner,
+};
 use ecp_core::analyzer::types::owner_key;
 use ecp_core::file_category::pick_global;
 pub use ecp_core::file_category::{FileMeta, GlobalPick, Language};
@@ -579,7 +581,8 @@ impl SymbolTable {
 
     /// [`Self::lookup_call_in_file`] narrowed by the owner an import binding
     /// requires: [`MemberOwner::Any`] keeps the first match, `TopLevel` takes
-    /// a declaration with no owning type, `Type` a member of that type.
+    /// a declaration with no owning type, `Type` a member of the type its path
+    /// names, when the file's types agree with that path.
     pub(crate) fn lookup_member_in_file(
         &self,
         file_path: &str,
@@ -590,7 +593,8 @@ impl SymbolTable {
         let owner_id = match owner {
             MemberOwner::Any => return self.lookup_call_in_file(file_path, node_name, target),
             MemberOwner::TopLevel => NO_OWNER,
-            MemberOwner::Type(owner) => self.owner_id(owner)?,
+            MemberOwner::Type(path) if !self.owner_path_agrees(file_path, path) => return None,
+            MemberOwner::Type(path) => self.owner_id(path)?,
         };
         let predicate = target.kind_predicate();
         self.file_scoped
@@ -601,6 +605,30 @@ impl SymbolTable {
             .find(|&id| {
                 self.node_owner[id as usize] == owner_id && predicate(self.node_kinds[id as usize])
             })
+    }
+
+    /// [`owner_path_agrees`] over the types `file_path` declares.
+    pub(crate) fn owner_path_agrees(&self, file_path: &str, path: &str) -> bool {
+        let names = self.file_scoped.get(file_path);
+        let is_type = ResolveTarget::Type.kind_predicate();
+        owner_path_agrees(
+            path,
+            |name| {
+                let mut types = names
+                    .and_then(|m| m.get(name))
+                    .into_iter()
+                    .flatten()
+                    .filter(|&&id| is_type(self.node_kinds[id as usize]));
+                match (types.next(), types.next()) {
+                    (None, _) => DeclaredType::Undeclared,
+                    (Some(_), Some(_)) => DeclaredType::Ambiguous,
+                    (Some(&id), None) => DeclaredType::Unique(
+                        Some(self.node_owner[id as usize]).filter(|&owner| owner != NO_OWNER),
+                    ),
+                }
+            },
+            |segment| self.owner_id(segment),
+        )
     }
 
     /// Tier-3 global lookup: kind-filtered same-name candidates through the
@@ -989,6 +1017,29 @@ mod tests {
         assert_eq!(
             st.owned_in_file("db.py", "execute", "BaseDBPool", CALL),
             vec![3]
+        );
+    }
+
+    #[test]
+    fn test_lookup_member_in_file_type_path_checks_enclosing_types() {
+        let st = st_owned(&[
+            ("h/Outer1.java", "Outer2", NodeKind::Class, None),
+            ("h/Outer1.java", "Helper", NodeKind::Class, Some("Outer2")),
+            ("h/Outer1.java", "run", NodeKind::Method, Some("Helper")),
+            ("h/Outer1.java", "Outer1", NodeKind::Class, None),
+            ("r/Util.java", "Other", NodeKind::Class, None),
+            ("r/Util.java", "run", NodeKind::Method, Some("Other")),
+            ("r/Util.java", "Util", NodeKind::Class, None),
+            ("r/Util.java", "run", NodeKind::Method, Some("Util")),
+        ]);
+        let lookup =
+            |file, path| st.lookup_member_in_file(file, "run", CALL, MemberOwner::Type(path));
+        assert_eq!(lookup("r/Util.java", "r.Util"), Some(7));
+        assert_eq!(lookup("h/Outer1.java", "h.Outer2.Helper"), Some(2));
+        assert_eq!(
+            lookup("h/Outer1.java", "h.Outer1.Helper"),
+            None,
+            "`Helper` is nested in `Outer2`, not in the imported `Outer1`"
         );
     }
 
