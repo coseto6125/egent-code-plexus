@@ -70,6 +70,7 @@ fn lg(path: &str, nodes: Vec<RawNode>, imports: Vec<RawImport>) -> LocalGraph {
         sql_refs: None,
         call_metas: vec![],
         raw_function_metas: vec![],
+        export_aliases: None,
     }
 }
 

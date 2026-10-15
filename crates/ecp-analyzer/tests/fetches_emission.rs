@@ -60,6 +60,7 @@ fn route_graph(rel_path: &str, method: &str, route_path: &str, handler: &str) ->
         sql_refs: None,
         call_metas: vec![],
         raw_function_metas: vec![],
+        export_aliases: None,
     }
 }
 
@@ -84,6 +85,7 @@ fn consumer_graph(rel_path: &str) -> LocalGraph {
         sql_refs: None,
         call_metas: vec![],
         raw_function_metas: vec![],
+        export_aliases: None,
     }
 }
 

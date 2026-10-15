@@ -45,6 +45,7 @@ fn empty_lg(path: &str, nodes: Vec<RawNode>) -> LocalGraph {
         sql_refs: None,
         call_metas: Vec::new(),
         raw_function_metas: vec![],
+        export_aliases: None,
     }
 }
 

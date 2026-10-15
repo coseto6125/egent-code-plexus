@@ -731,7 +731,13 @@ impl LanguageProvider for JavaScriptProvider {
             file_category,
         );
 
-        crate::framework_helpers::stamp_js_ts_exports(tree.root_node(), source, &mut nodes);
+        let export_aliases =
+            crate::framework_helpers::stamp_js_ts_exports(tree.root_node(), source, &mut nodes);
+        crate::framework_helpers::mark_js_ts_default_imports(
+            tree.root_node(),
+            source,
+            &mut imports,
+        );
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         crate::framework_helpers::stamp_js_function_owners(&mut nodes);
 
@@ -771,6 +777,7 @@ impl LanguageProvider for JavaScriptProvider {
             sql_refs: (!raw_sql_refs.is_empty()).then(|| raw_sql_refs.into_boxed_slice()),
             call_metas,
             raw_function_metas,
+            export_aliases,
         })
     }
 }

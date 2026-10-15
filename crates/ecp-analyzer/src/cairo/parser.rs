@@ -169,6 +169,7 @@ impl LanguageProvider for CairoProvider {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         })
     }
 }

@@ -60,6 +60,7 @@ fn local_graph(file_path: &str, nodes: Vec<RawNode>) -> LocalGraph {
         sql_refs: None,
         call_metas: vec![],
         raw_function_metas: vec![],
+        export_aliases: None,
     }
 }
 

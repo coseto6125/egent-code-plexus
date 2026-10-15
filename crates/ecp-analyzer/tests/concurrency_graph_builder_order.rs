@@ -138,6 +138,7 @@ fn make_fixture_files() -> Vec<LocalGraph> {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         })
         .collect()
 }

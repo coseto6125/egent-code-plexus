@@ -179,6 +179,7 @@ impl LanguageProvider for HclProvider {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         })
     }
 }
