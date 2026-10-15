@@ -31,7 +31,7 @@ Fall back to grep or an Explore agent only when the target is non-code text, or 
 
 ## Before any refactor / rename / signature change
 
-`ecp impact --target <symbol> --direction upstream` to see callers. Before a breaking change, decide from the whole situation whether the user must judge it. They usually must when it alters what an end user or an agent calls, reads or must do, or when the options trade off architecture or extensibility. Otherwise make the change, update the internal callers, and report what broke and which callers changed.
+`ecp impact --target <symbol> --direction upstream` to see callers. Before a breaking change, decide from the whole situation whether the user must judge it. The user usually must when the change alters what an end user or an agent calls, reads or must do. The same holds when the options trade off architecture or extensibility. Otherwise make the change, update the internal callers, and report what broke and which callers changed.
 
 ## Reading output — five tells
 
