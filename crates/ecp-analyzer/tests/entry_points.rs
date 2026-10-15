@@ -59,6 +59,7 @@ fn mk_local_graph(
         sql_refs: None,
         call_metas: vec![],
         raw_function_metas: vec![],
+        export_aliases: None,
     }
 }
 

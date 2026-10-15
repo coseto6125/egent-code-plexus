@@ -298,6 +298,10 @@ pub enum BindingKind {
     Macro,
     /// Empty body, non-guard (`#define DEBUG`, `#define ENABLE_FOO`).
     Flag,
+    /// TS / JS default import (`import d from './m'`). The parsers emit it
+    /// as `imported_name` `d` with no alias, like `import { d } from './m'`,
+    /// but `d` binds module `m`'s default export, whatever its declared name.
+    EsDefault,
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
@@ -307,7 +311,8 @@ pub struct RawImport {
     pub imported_name: String,
     pub alias: Option<String>,
     /// `None` for ordinary import statements; `Some(_)` for C named bindings
-    /// (`typedef`, `#define`, `extern`) classified by body shape.
+    /// (`typedef`, `#define`, `extern`) classified by body shape, and for a
+    /// TS / JS default import ([`BindingKind::EsDefault`]).
     pub binding_kind: Option<BindingKind>,
 }
 
@@ -800,6 +805,17 @@ pub struct RawCallMeta {
     pub dispatch_type: String,
 }
 
+/// One name a TS / JS module exports and the local declaration it binds:
+/// `export { g as f }` is `f` → `g`, `export default h` and
+/// `export default function h() {}` are `default` → `h`, and `export function
+/// k() {}` is `k` → `k`.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub struct RawExportAlias {
+    pub exported: Box<str>,
+    pub local: Box<str>,
+}
+
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct LocalGraph {
@@ -838,6 +854,12 @@ pub struct LocalGraph {
     /// span at build time; only populated for `Function`/`Method`/`Constructor`
     /// nodes. Empty for languages not yet covered by Phase 1/2.
     pub raw_function_metas: Vec<RawFunctionMeta>,
+    /// TS / JS export names that differ from the declaration they bind, with
+    /// every other export of the same file, so an import of a name the file
+    /// exports only under another name binds nothing. `None` when every
+    /// export keeps its declaration's name (most files) and for other
+    /// languages.
+    pub export_aliases: Option<Box<[RawExportAlias]>>,
 }
 
 impl LocalGraph {
@@ -878,6 +900,7 @@ impl LocalGraph {
             sql_refs: None,
             call_metas: Vec::new(),
             raw_function_metas: Vec::new(),
+            export_aliases: None,
         }
     }
 }
@@ -901,6 +924,7 @@ impl Default for LocalGraph {
             sql_refs: None,
             call_metas: Vec::new(),
             raw_function_metas: Vec::new(),
+            export_aliases: None,
         }
     }
 }

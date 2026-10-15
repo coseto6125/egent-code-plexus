@@ -1,11 +1,12 @@
 use ecp_core::analyzer::import_binding::{
     fqn_language, owner_path_agrees, DeclaredType, MemberOwner,
 };
-use ecp_core::analyzer::types::owner_key;
+use ecp_core::analyzer::types::{owner_key, RawExportAlias};
 use ecp_core::file_category::pick_global;
 pub use ecp_core::file_category::{FileMeta, GlobalPick, Language};
 use ecp_core::graph::NodeKind;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::hash_map::Entry;
 
 pub type NodeId = u32;
 
@@ -203,6 +204,23 @@ pub struct SymbolTable {
     /// TS / JS files that export at least one declaration, see
     /// [`SymbolTable::note_export`].
     es_modules: FxHashSet<Box<str>>,
+
+    /// The export names of the files in `es_modules` that bind a declaration
+    /// of another name, see [`SymbolTable::note_export_aliases`]. Sparse:
+    /// only files with such an export have an entry.
+    export_aliases: FxHashMap<Box<str>, ExportAliases>,
+}
+
+/// The export names of one ES module, recorded because one of them differs
+/// from the declaration it binds.
+#[derive(Debug, Default)]
+struct ExportAliases {
+    /// Export name → the local declaration name it binds. `None` when the
+    /// module exports the name for two declarations, which ES rejects.
+    locals: FxHashMap<Box<str>, Option<Box<str>>>,
+    /// Local names the module exports only under other names: an import of
+    /// one binds nothing.
+    hidden: FxHashSet<Box<str>>,
 }
 
 impl SymbolTable {
@@ -600,11 +618,73 @@ impl SymbolTable {
         }
     }
 
+    /// Record the export names of `file_path` that the parser pairs with
+    /// their declarations ([`RawExportAlias`]). Each makes the file an ES
+    /// module, as an exported declaration does ([`Self::note_export`]).
+    pub(crate) fn note_export_aliases(
+        &mut self,
+        file_path: &str,
+        language: Language,
+        aliases: &[RawExportAlias],
+    ) {
+        if !matches!(language, Language::TypeScript | Language::JavaScript)
+            || file_path.ends_with(".d.ts")
+        {
+            return;
+        }
+        let mut table = ExportAliases::default();
+        for alias in aliases {
+            let (exported, local) = (alias.exported.trim(), alias.local.trim());
+            if exported.is_empty() || local.is_empty() {
+                continue;
+            }
+            match table.locals.entry(exported.into()) {
+                Entry::Vacant(slot) => {
+                    slot.insert(Some(local.into()));
+                }
+                Entry::Occupied(mut slot) => {
+                    if slot.get().as_deref() != Some(local) {
+                        *slot.get_mut() = None;
+                    }
+                }
+            }
+        }
+        if table.locals.is_empty() {
+            return;
+        }
+        table.hidden = aliases
+            .iter()
+            .map(|alias| alias.local.trim())
+            .filter(|local| !local.is_empty() && !table.locals.contains_key(*local))
+            .map(Box::<str>::from)
+            .collect();
+        if !self.es_modules.contains(file_path) {
+            self.es_modules.insert(file_path.into());
+        }
+        self.export_aliases.insert(file_path.into(), table);
+    }
+
+    /// Whether `file_path` is a TS / JS file that exports a declaration, so
+    /// another module reaches only its exports.
+    pub(crate) fn is_es_module(&self, file_path: &str) -> bool {
+        self.es_modules.contains(file_path)
+    }
+
+    /// Whether the ES module `file_path` itself exports `name` under an
+    /// export name of its own (`export { g as name }`, `export default`):
+    /// no `export *` of the module can then supply the name.
+    pub(crate) fn exports_alias(&self, file_path: &str, name: &str) -> bool {
+        self.export_aliases
+            .get(file_path)
+            .is_some_and(|aliases| aliases.locals.contains_key(name))
+    }
+
     /// The declaration an import of `node_name` from module `file_path`
-    /// binds. In an ES module that is an exported one: a module-private or
-    /// nested namesake is out of the importer's reach, so a module that does
-    /// not export the name answers `None`. Any other module keeps
-    /// [`Self::lookup_call_in_file`].
+    /// binds. In an ES module that is an exported one, found under the
+    /// declaration name the export name stands for (`export { g as f }`
+    /// binds `f` to `g`): a module-private or nested namesake is out of the
+    /// importer's reach, so a module that does not export the name answers
+    /// `None`. Any other module keeps [`Self::lookup_call_in_file`].
     pub(crate) fn lookup_export_in_file(
         &self,
         file_path: &str,
@@ -614,10 +694,18 @@ impl SymbolTable {
         if !self.es_modules.contains(file_path) {
             return self.lookup_call_in_file(file_path, node_name, target);
         }
+        let local = match self.export_aliases.get(file_path) {
+            Some(aliases) => match aliases.locals.get(node_name) {
+                Some(local) => local.as_deref()?,
+                None if aliases.hidden.contains(node_name) => return None,
+                None => node_name,
+            },
+            None => node_name,
+        };
         let predicate = target.kind_predicate();
         self.file_scoped
             .get(file_path)?
-            .get(node_name)?
+            .get(local)?
             .iter()
             .copied()
             .find(|id| self.exported_ids.contains(id) && predicate(self.node_kinds[*id as usize]))

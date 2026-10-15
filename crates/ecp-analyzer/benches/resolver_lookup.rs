@@ -61,6 +61,7 @@ fn build_test_graph(n: usize) -> (Vec<u8>, Vec<u64>) {
         sql_refs: None,
         call_metas: vec![],
         raw_function_metas: vec![],
+        export_aliases: None,
     });
     let g = b.build();
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&g)

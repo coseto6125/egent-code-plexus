@@ -1,9 +1,11 @@
 //! Recorded divergence (FU-2026-10-04-14079e7e2d8b): the full index binds a
-//! TS / JS import only to a declaration the module exports, and the overlay
-//! does not. Export status lives in the analyzer's in-memory symbol table;
-//! `graph.bin` carries no export flag, so the overlay cannot tell a clean
-//! module's private `f` from an exported one and keeps taking the module's
-//! first `f`. These tests pin both sides, so a change to either shows up.
+//! TS / JS import only to a declaration the module exports, under the name
+//! it is exported as (`export { g as f }` binds `f` to `g`,
+//! FU-2026-10-15-1a48011441a4), and the overlay does not. Export status and
+//! export aliases live in the analyzer's in-memory symbol table; `graph.bin`
+//! carries neither, so the overlay cannot tell a clean module's private `f`
+//! from an exported one and keeps taking the module's first `f`. These tests
+//! pin both sides, so a change to either shows up.
 
 use ecp_analyzer::javascript::parser::JavaScriptProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
@@ -125,10 +127,12 @@ fn reindex_and_overlay(
     (reindex_targets(&full, caller), overlay)
 }
 
-/// The FU repro, edited into a dirty importer. The reindex binds no edge;
-/// the overlay still binds the clean module's private `f` at the import
-/// tier. Closing the gap needs export status in `graph.bin` (or in the
-/// overlay's inputs for clean files), a format change outside this fix.
+/// The FU repro, edited into a dirty importer. The reindex binds `g`, the
+/// declaration `a` exports as `f` (it bound no edge until the parse output
+/// carried export aliases); the overlay still binds the clean module's
+/// private `f` at the import tier. Closing the gap needs export status and
+/// aliases in `graph.bin` (or in the overlay's inputs for clean files), a
+/// format change outside this fix (FU-2026-10-15-61d656576fc8).
 #[test]
 fn test_overlay_namespace_member_shadowed_by_export_alias_diverges_from_reindex() {
     let ts = TypeScriptProvider::new().unwrap();
@@ -154,7 +158,11 @@ fn test_overlay_namespace_member_shadowed_by_export_alias_diverges_from_reindex(
             )],
             "use",
         );
-        assert_eq!(reindex, Vec::<Target>::new(), "{ext}: reindex");
+        assert_eq!(
+            reindex,
+            vec![(module.clone(), "g".to_string(), String::new(), 95)],
+            "{ext}: reindex"
+        );
         assert_eq!(
             overlay,
             vec![(module.clone(), "f".to_string(), String::new(), 95)],

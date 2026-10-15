@@ -58,6 +58,7 @@ fn reassigned_field_graph(path: &str) -> LocalGraph {
         sql_refs: None,
         call_metas: vec![],
         raw_function_metas: vec![],
+        export_aliases: None,
     }
 }
 
@@ -135,6 +136,7 @@ fn non_field_duplicate_still_reports_uid_collision() {
         sql_refs: None,
         call_metas: vec![],
         raw_function_metas: vec![],
+        export_aliases: None,
     });
     let g = b.build();
     let pool = g.string_pool.as_slice();

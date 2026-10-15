@@ -8,7 +8,9 @@
 //! This module consolidates those helpers so each parser stays focused on its own
 //! grammar quirks, not span arithmetic.
 
-use ecp_core::analyzer::types::{FrameworkId, RawFrameworkRef, RawImport, RawNode, RawTxScope};
+use ecp_core::analyzer::types::{
+    BindingKind, FrameworkId, RawExportAlias, RawFrameworkRef, RawImport, RawNode, RawTxScope,
+};
 use ecp_core::graph::NodeKind;
 
 pub use ecp_core::analyzer::types::{innermost_enclosing, span_contains, Span};
@@ -443,9 +445,19 @@ pub fn stamp_owner_fn_by_span(nodes: &mut [RawNode]) {
 /// `is_exported` means "reachable from another module", which is what the
 /// resolver's import tier reads. A re-export (`export … from`) names another
 /// module's declarations and marks nothing here.
-pub fn stamp_js_ts_exports(root: tree_sitter::Node<'_>, source: &[u8], nodes: &mut [RawNode]) {
+///
+/// Returns the file's export names with the declaration each binds when one
+/// of them differs from its declaration's name (`export { g as f }`,
+/// `export default h`), else `None`: see `LocalGraph::export_aliases`.
+pub fn stamp_js_ts_exports(
+    root: tree_sitter::Node<'_>,
+    source: &[u8],
+    nodes: &mut [RawNode],
+) -> Option<Box<[RawExportAlias]>> {
     let mut exported: Vec<(&str, Span)> = Vec::new();
     let mut locals: Vec<&str> = Vec::new();
+    // `(export name, local name)` of every export of the file.
+    let mut names: Vec<(&str, &str)> = Vec::new();
     let mut cursor = root.walk();
     for statement in root.named_children(&mut cursor) {
         if statement.kind() != "export_statement"
@@ -453,12 +465,26 @@ pub fn stamp_js_ts_exports(root: tree_sitter::Node<'_>, source: &[u8], nodes: &m
         {
             continue;
         }
+        let mut tokens = statement.walk();
+        let is_default = statement
+            .children(&mut tokens)
+            .any(|child| child.kind() == "default");
         if let Some(declaration) = statement.child_by_field_name("declaration") {
+            let first = exported.len();
             js_ts_declared_names(declaration, source, &mut exported);
+            names.extend(
+                exported[first..]
+                    .iter()
+                    .map(|&(name, _)| (if is_default { "default" } else { name }, name)),
+            );
             continue;
         }
-        if let Some(value) = statement.child_by_field_name("value") {
-            locals.extend(js_ts_identifier(value, source));
+        if let Some(local) = statement
+            .child_by_field_name("value")
+            .and_then(|value| js_ts_identifier(value, source))
+        {
+            locals.push(local);
+            names.push(("default", local));
         }
         let mut clauses = statement.walk();
         for clause in statement
@@ -467,14 +493,22 @@ pub fn stamp_js_ts_exports(root: tree_sitter::Node<'_>, source: &[u8], nodes: &m
         {
             let mut specifiers = clause.walk();
             for specifier in clause.named_children(&mut specifiers) {
-                locals.extend(
-                    specifier
-                        .child_by_field_name("name")
-                        .and_then(|name| js_ts_identifier(name, source)),
-                );
+                let Some(local) = specifier
+                    .child_by_field_name("name")
+                    .and_then(|name| js_ts_identifier(name, source))
+                else {
+                    continue;
+                };
+                locals.push(local);
+                let export = match specifier.child_by_field_name("alias") {
+                    Some(alias) => js_ts_export_name(alias, source),
+                    None => Some(local),
+                };
+                names.extend(export.map(|export| (export, local)));
             }
         }
     }
+    let aliases = js_ts_export_aliases(names);
     if !locals.is_empty() {
         let mut declarations = Vec::new();
         let mut cursor = root.walk();
@@ -488,7 +522,7 @@ pub fn stamp_js_ts_exports(root: tree_sitter::Node<'_>, source: &[u8], nodes: &m
         );
     }
     if exported.is_empty() {
-        return;
+        return aliases;
     }
     let mut by_span: rustc_hash::FxHashMap<Span, Vec<&str>> = rustc_hash::FxHashMap::default();
     for (name, span) in exported {
@@ -500,6 +534,90 @@ pub fn stamp_js_ts_exports(root: tree_sitter::Node<'_>, source: &[u8], nodes: &m
             .is_some_and(|names| names.iter().any(|name| *name == node.name))
         {
             node.is_exported = true;
+        }
+    }
+    aliases
+}
+
+/// `names` as export aliases when some export name differs from its local
+/// name. Each pair is kept once.
+fn js_ts_export_aliases(mut names: Vec<(&str, &str)>) -> Option<Box<[RawExportAlias]>> {
+    if names.iter().all(|(export, local)| export == local) {
+        return None;
+    }
+    names.sort_unstable();
+    names.dedup();
+    Some(
+        names
+            .into_iter()
+            .map(|(exported, local)| RawExportAlias {
+                exported: exported.into(),
+                local: local.into(),
+            })
+            .collect(),
+    )
+}
+
+/// The name an `export { x as name }` gives: an identifier, `default`, or a
+/// string (`export { x as "a-b" }`).
+fn js_ts_export_name<'s>(node: tree_sitter::Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    let node = match node.kind() {
+        "identifier" | "default" => node,
+        "string" => node.named_child(0)?,
+        _ => return None,
+    };
+    std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).ok()
+}
+
+/// Mark each default import (`import d from './m'`)
+/// [`BindingKind::EsDefault`]: the import queries emit it like
+/// `import { d } from './m'`, which binds a different export.
+pub fn mark_js_ts_default_imports(
+    root: tree_sitter::Node<'_>,
+    source: &[u8],
+    imports: &mut [RawImport],
+) {
+    let mut defaults: Vec<(&str, &str)> = Vec::new();
+    let mut cursor = root.walk();
+    for statement in root.named_children(&mut cursor) {
+        if statement.kind() != "import_statement" {
+            continue;
+        }
+        let Some(specifier) = statement
+            .child_by_field_name("source")
+            .and_then(|string| string.named_child(0))
+            .and_then(|fragment| {
+                std::str::from_utf8(&source[fragment.start_byte()..fragment.end_byte()]).ok()
+            })
+        else {
+            continue;
+        };
+        let mut clauses = statement.walk();
+        for clause in statement
+            .named_children(&mut clauses)
+            .filter(|child| child.kind() == "import_clause")
+        {
+            let mut bindings = clause.walk();
+            defaults.extend(
+                clause
+                    .named_children(&mut bindings)
+                    .filter_map(|binding| js_ts_identifier(binding, source))
+                    .map(|local| (local, specifier)),
+            );
+        }
+    }
+    if defaults.is_empty() {
+        return;
+    }
+    for import in imports
+        .iter_mut()
+        .filter(|import| import.alias.is_none() && import.binding_kind.is_none())
+    {
+        if defaults
+            .iter()
+            .any(|&(local, specifier)| import.imported_name == local && import.source == specifier)
+        {
+            import.binding_kind = Some(BindingKind::EsDefault);
         }
     }
 }

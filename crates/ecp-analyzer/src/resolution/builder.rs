@@ -897,6 +897,9 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
         // `\\` -> `/` normalisation. `path_str` is already forward-slash.
         let category = determine_category(&path_str);
         let file_meta = crate::resolution::index::FileMeta::from_normalized_path(&path_str);
+        if let Some(aliases) = &local_graph.export_aliases {
+            symbol_table.note_export_aliases(&path_str, file_meta.language, aliases);
+        }
 
         files.push(File {
             path: path_ref,
@@ -2578,6 +2581,7 @@ mod tests {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         };
         let target = LocalGraph {
             file_path: "src/b.ts".into(),
@@ -2608,6 +2612,7 @@ mod tests {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         };
 
         let mut builder = GraphBuilder::new();
@@ -3080,6 +3085,7 @@ mod tests {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         };
 
         let mut builder = GraphBuilder::new();
@@ -3175,6 +3181,7 @@ mod tests {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         };
         let mut builder = GraphBuilder::new();
         builder.add_graph(g);
@@ -3248,6 +3255,7 @@ mod tests {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         };
 
         let mut builder = GraphBuilder::new();
@@ -3299,6 +3307,7 @@ mod tests {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         }
     }
 
@@ -3454,6 +3463,7 @@ mod tests {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         };
 
         let mut builder = GraphBuilder::new();
@@ -3575,6 +3585,7 @@ mod tests {
                     sql_refs: None,
                     call_metas: vec![],
                     raw_function_metas: vec![],
+                    export_aliases: None,
                 },
                 LocalGraph {
                     file_path: "src/bar.rs".into(),
@@ -3641,6 +3652,7 @@ mod tests {
                     sql_refs: None,
                     call_metas: vec![],
                     raw_function_metas: vec![],
+                    export_aliases: None,
                 },
                 // iface.rs: defines Interface IThing so the Implementor →
                 // IThing heritage edge dispatches to Implements (not Extends).
@@ -3673,6 +3685,7 @@ mod tests {
                     sql_refs: None,
                     call_metas: vec![],
                     raw_function_metas: vec![],
+                    export_aliases: None,
                 },
             ]
         }
@@ -3836,6 +3849,7 @@ mod tests {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         }
     }
 
@@ -3869,6 +3883,7 @@ mod tests {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         }
     }
 

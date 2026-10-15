@@ -42,7 +42,7 @@ use ecp_core::analyzer::import_binding::{
     import_family, import_member_fallback, may_suppress, module_head, namespace_member, retry_name,
 };
 use ecp_core::analyzer::rust_paths::{is_rust_module_root, is_rust_source, rust_module_path_base};
-use ecp_core::analyzer::types::{CallSite, LocalGraph, RawImport};
+use ecp_core::analyzer::types::{BindingKind, CallSite, LocalGraph, RawImport};
 use serde::Serialize;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -92,8 +92,10 @@ type ModuleCache = FxHashMap<
 pub struct ReexportIndex<'g> {
     modules: FxHashMap<Cow<'g, str>, ModuleExports<'g>>,
     /// Local names that a TS / JS import or `export { x as y } from` gives
-    /// to a declaration of another name. A TS / JS re-export reaches a name
-    /// only when the symbol table declares it or this set holds it.
+    /// to a declaration of another name, and the export names a module gives
+    /// its own declarations (`export { g as f }`). A TS / JS re-export
+    /// reaches a name only when the symbol table declares it or this set
+    /// holds it.
     ecmascript_aliases: FxHashSet<&'g str>,
 }
 
@@ -112,7 +114,12 @@ impl<'g> ReexportIndex<'g> {
         path_aliases: &PathAliases,
     ) -> Self {
         let resolver = Resolver::new(symbol_table).with_path_aliases(path_aliases.clone());
-        let mut ecmascript_aliases = FxHashSet::default();
+        let mut ecmascript_aliases: FxHashSet<&'g str> = local_graphs
+            .iter()
+            .filter_map(|graph| graph.export_aliases.as_deref())
+            .flatten()
+            .map(|alias| &*alias.exported)
+            .collect();
         let modules = local_graphs
             .iter()
             .filter(|graph| !graph.imports.is_empty())
@@ -823,11 +830,22 @@ impl<'a> Resolver<'a> {
             let Some(exported_name) = exported_name else {
                 continue;
             };
+            // `import d from './a'` binds `a`'s default export. A module with
+            // no default on record (CommonJS, a script) keeps the by-name
+            // lookup of the local name.
+            let default_import = import.binding_kind == Some(BindingKind::EsDefault);
             let mut hit: Option<NodeId> = None;
             self.for_each_candidate(source_file, &import.source, |candidate| {
-                hit = self
-                    .symbol_table
-                    .lookup_export_in_file(candidate, exported_name, target);
+                hit = default_import
+                    .then(|| {
+                        self.symbol_table
+                            .lookup_export_in_file(candidate, "default", target)
+                    })
+                    .flatten()
+                    .or_else(|| {
+                        self.symbol_table
+                            .lookup_export_in_file(candidate, exported_name, target)
+                    });
                 hit.is_none()
             });
             // An npm package's export reaches nothing through an in-repo
@@ -1069,13 +1087,18 @@ impl<'a> Resolver<'a> {
     /// An explicit binding shadows every star export, as in ES modules. Two
     /// star modules declaring different targets leave the name unexported
     /// in ES modules, so neither binds. A module that re-exports the name
-    /// again is not followed: one hop, so a cycle ends here.
+    /// again is not followed: one hop, so a cycle ends here. A module whose
+    /// own export clause gives the name (`export { g as name }`) re-exports
+    /// nothing under it, and the target module binds only what it exports.
     fn ecmascript_reexport(
         &self,
         module: &str,
         name: &str,
         target: ResolveTarget,
     ) -> Option<NodeId> {
+        if self.symbol_table.exports_alias(module, name) {
+            return None;
+        }
         let exports = self
             .reexports?
             .modules
@@ -1089,19 +1112,57 @@ impl<'a> Resolver<'a> {
         }) {
             let mut hit = None;
             self.for_each_candidate(hub, &import.source, |candidate| {
-                hit =
-                    self.symbol_table
-                        .lookup_call_in_file(candidate, &import.imported_name, target);
+                hit = self.symbol_table.lookup_export_in_file(
+                    candidate,
+                    &import.imported_name,
+                    target,
+                );
                 hit.is_none()
             });
             return hit;
         }
+        // `export *` never re-exports a module's default export.
+        if name == "default" {
+            return None;
+        }
         let mut hits = exports
             .star_modules
             .iter()
-            .filter_map(|file| self.symbol_table.lookup_call_in_file(file, name, target));
+            .filter_map(|file| self.symbol_table.lookup_export_in_file(file, name, target));
         let first = hits.next()?;
         hits.all(|other| other == first).then_some(first)
+    }
+
+    /// Whether a TS / JS import binding `symbol_name` names the ES module
+    /// that declares `node_id`. The import tier found no export of that name
+    /// there, so the declaration is private to its module and out of the
+    /// importer's reach: the global tier must not bind it.
+    fn import_hides(
+        &self,
+        source_file: &Path,
+        language: Language,
+        symbol_name: &str,
+        raw_imports: &[RawImport],
+        node_id: NodeId,
+    ) -> bool {
+        if !ecmascript(language) {
+            return false;
+        }
+        let Some(module) = self
+            .symbol_table
+            .file_of(node_id)
+            .filter(|module| self.symbol_table.is_es_module(module))
+        else {
+            return false;
+        };
+        raw_imports.iter().any(|import| {
+            import.imported_name != "*"
+                && import.alias.as_deref().unwrap_or(&import.imported_name) == symbol_name
+                && self
+                    .ecmascript_module(source_file, &import.source)
+                    .as_deref()
+                    == Some(module)
+        })
     }
 
     /// Whether `import` proves its callee external: [`may_suppress`] allows
@@ -1539,6 +1600,17 @@ impl<'a> Resolver<'a> {
                 .symbol_table
                 .lookup_global(symbol_name, target, caller_meta)
             {
+                GlobalPick::Unique(node_id)
+                    if self.import_hides(
+                        source_file,
+                        language,
+                        symbol_name,
+                        raw_imports,
+                        node_id,
+                    ) =>
+                {
+                    (DecisionTier::Unresolved, None, None, raw_count)
+                }
                 GlobalPick::Unique(node_id) => {
                     let conf = ResolutionTier::Global.base_confidence();
                     results.push((node_id, conf));
