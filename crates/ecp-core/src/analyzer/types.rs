@@ -72,11 +72,17 @@ pub enum CallSite<'a> {
     /// import never names, and a Java call on a computed receiver
     /// (`a.b().m()`), which no static import names.
     UntypedMember(&'a str),
+    /// A Python member call whose receiver is a name a `from` import binds
+    /// (`from pkg import mod; mod.f()`). That name may be a submodule, which
+    /// the import tier binds as a module import; anywhere else the site
+    /// resolves as `Plain(member)`.
+    FromReceiver { receiver: &'a str, member: &'a str },
 }
 
 impl<'a> CallSite<'a> {
     const CONSTRUCT_PREFIX: &'static str = "\u{1}new ";
     const UNTYPED_MEMBER_PREFIX: &'static str = "\u{1}member ";
+    const FROM_RECEIVER_PREFIX: &'static str = "\u{1}from ";
 
     /// The qualifier of a Python `super().m()` callee (`super().m`): the
     /// resolver binds `m` on the caller class's bases, never by bare name.
@@ -92,11 +98,21 @@ impl<'a> CallSite<'a> {
         [Self::UNTYPED_MEMBER_PREFIX, member].concat()
     }
 
+    /// The `RawNode.calls` entry of a member call on a `from`-imported name.
+    pub fn from_receiver(receiver: &str, member: &str) -> String {
+        [Self::FROM_RECEIVER_PREFIX, receiver, ".", member].concat()
+    }
+
     pub fn parse(raw: &'a str) -> Self {
         if let Some(ty) = raw.strip_prefix(Self::CONSTRUCT_PREFIX) {
             Self::Construct(ty)
         } else if let Some(member) = raw.strip_prefix(Self::UNTYPED_MEMBER_PREFIX) {
             Self::UntypedMember(member)
+        } else if let Some((receiver, member)) = raw
+            .strip_prefix(Self::FROM_RECEIVER_PREFIX)
+            .and_then(|site| site.split_once('.'))
+        {
+            Self::FromReceiver { receiver, member }
         } else {
             Self::Plain(raw)
         }
@@ -105,14 +121,17 @@ impl<'a> CallSite<'a> {
     /// The callee the callable tiers resolve.
     pub fn name(self) -> &'a str {
         match self {
-            Self::Plain(name) | Self::Construct(name) | Self::UntypedMember(name) => name,
+            Self::Plain(name)
+            | Self::Construct(name)
+            | Self::UntypedMember(name)
+            | Self::FromReceiver { member: name, .. } => name,
         }
     }
 
     /// Whether the call uses member syntax rather than a module path.
     pub fn uses_method_syntax(self) -> bool {
         match self {
-            Self::UntypedMember(_) => true,
+            Self::UntypedMember(_) | Self::FromReceiver { .. } => true,
             Self::Plain(name) => name.contains('.'),
             Self::Construct(_) => false,
         }
@@ -148,6 +167,9 @@ impl<'a> CallSite<'a> {
                 | Language::Cpp,
                 Self::Plain(callee),
             ) => Some((callee, false)),
+            (Language::Python, Self::FromReceiver { member, .. }) => Some((member, false)),
+            // Only the Python parser emits a `from` receiver.
+            (_, Self::FromReceiver { .. }) => None,
             _ => None,
         }
     }
@@ -940,5 +962,31 @@ mod tests {
         for text in ["new Router().Handler", "member widget", "Widget", ""] {
             assert_eq!(CallSite::parse(text), CallSite::Plain(text));
         }
+    }
+
+    /// Contract: a `from`-receiver entry decodes to its receiver and member,
+    /// and keeps the member as the name every callable tier resolves.
+    #[test]
+    fn test_call_site_parse_from_receiver_returns_receiver_and_member() {
+        let raw = CallSite::from_receiver("mod", "compute");
+        let site = CallSite::parse(&raw);
+        assert_eq!(
+            site,
+            CallSite::FromReceiver {
+                receiver: "mod",
+                member: "compute"
+            }
+        );
+        assert_eq!(site.name(), "compute");
+        assert_eq!(
+            site.constructed_type(Language::Python),
+            Some(("compute", false))
+        );
+        assert_eq!(
+            CallSite::parse("from mod.compute"),
+            CallSite::Plain("from mod.compute")
+        );
+        let malformed = "\u{1}from compute";
+        assert_eq!(CallSite::parse(malformed), CallSite::Plain(malformed));
     }
 }

@@ -9,6 +9,17 @@
 //! `Imports` edges. So a dirty caller of a clean barrel keeps the overlay's
 //! pre-fix answer: the global tier, which drops an ambiguous name.
 //!
+//! The same holds for a star re-export (`from .core import *`,
+//! FU-2026-10-15-73b85f10c8fa).
+//!
+//! A submodule from-import (`from pkg.sub import mod; mod.compute()`,
+//! FU-2026-10-15-2c1620b091e0) diverges for another reason: the overlay
+//! resolves the call as its bare member. Its module discovery
+//! (`ImportScope::module`) caches by a specifier borrowed from the dirty
+//! file's imports, and the submodule specifier (`pkg/sub/mod`) is built per
+//! call; the shadow check also needs an any-kind declaration lookup the
+//! overlay lacks.
+//!
 //! When the overlay gains the hop, these tests go red: replace each
 //! `overlay_expected` with the reindex row and fold them into
 //! `overlay_resolver_parity.rs`.
@@ -175,6 +186,47 @@ fn test_overlay_typescript_star_reexport_diverges_from_reindex() {
             "import { render } from './index';\nexport function go() { return render(); }\n",
         ),
         &[("ts/impl.ts".into(), "render".into(), 95)],
+        &[],
+    );
+}
+
+#[test]
+fn test_overlay_python_star_reexport_diverges_from_reindex() {
+    let files = [
+        ("pkg/__init__.py", "from .core import *\n"),
+        ("pkg/core.py", "def compute():\n    return 1\n"),
+        ("pkg/other.py", "def compute():\n    return 2\n"),
+        ("app.py", "from pkg import compute\n\ndef go():\n    pass\n"),
+    ];
+    check(
+        &PythonProvider::new().unwrap(),
+        &files,
+        (
+            "app.py",
+            "from pkg import compute\n\ndef go():\n    return compute()\n",
+        ),
+        &[("pkg/core.py".into(), "compute".into(), 95)],
+        &[],
+    );
+}
+
+#[test]
+fn test_overlay_python_submodule_from_import_diverges_from_reindex() {
+    let files = [
+        ("pkg/__init__.py", ""),
+        ("pkg/sub/__init__.py", ""),
+        ("pkg/sub/mod.py", "def compute():\n    return 3\n"),
+        ("pkg/other.py", "def compute():\n    return 2\n"),
+        ("app.py", "from pkg.sub import mod\n\ndef go():\n    pass\n"),
+    ];
+    check(
+        &PythonProvider::new().unwrap(),
+        &files,
+        (
+            "app.py",
+            "from pkg.sub import mod\n\ndef go():\n    return mod.compute()\n",
+        ),
+        &[("pkg/sub/mod.py".into(), "compute".into(), 95)],
         &[],
     );
 }

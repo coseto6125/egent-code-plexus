@@ -85,8 +85,9 @@ type ModuleCache = FxHashMap<
 
 /// What the import tier reads to follow a module's re-export one hop: the
 /// imports of each Python / TypeScript / JavaScript file, and the modules
-/// each TS / JS file's `export * from` names. Built once per index build,
-/// after Pass 1, and shared by every resolver of that build.
+/// each TS / JS file's `export * from` or Python file's `from m import *`
+/// names. Built once per index build, after Pass 1, and shared by every
+/// resolver of that build.
 #[derive(Default)]
 pub struct ReexportIndex<'g> {
     modules: FxHashMap<Cow<'g, str>, ModuleExports<'g>>,
@@ -133,7 +134,24 @@ impl<'g> ReexportIndex<'g> {
                         .filter_map(|import| resolver.ecmascript_module(importer, &import.source))
                         .collect()
                 } else if language == Language::Python {
-                    Box::default()
+                    let importer = Path::new(&*path);
+                    graph
+                        .imports
+                        .iter()
+                        .filter(|import| is_star_export(import))
+                        .filter_map(|import| {
+                            match resolver.import_module_file(
+                                importer,
+                                &import.source,
+                                Language::Python,
+                            ) {
+                                IndexedModule::Unique(file) => Some(Box::<str>::from(&*file)),
+                                IndexedModule::Missing
+                                | IndexedModule::Ambiguous
+                                | IndexedModule::Namespace(_) => None,
+                            }
+                        })
+                        .collect()
                 } else {
                     return None;
                 };
@@ -163,8 +181,9 @@ fn ecmascript(language: Language) -> bool {
     matches!(language, Language::TypeScript | Language::JavaScript)
 }
 
-/// `export * from 'lib'`: the TS / JS parsers emit it as a `*` import with no
-/// local binding, which no import of the file itself resolves through.
+/// `export * from 'lib'` / Python `from lib import *`: the parsers emit it as
+/// a `*` import with no local binding, which no import of the file itself
+/// resolves through.
 fn is_star_export(import: &RawImport) -> bool {
     import.imported_name == "*" && import.alias.is_none()
 }
@@ -603,6 +622,11 @@ impl<'a> Resolver<'a> {
         caller_heritage: &[String],
     ) -> Vec<(NodeId, f32)> {
         let language = Language::from_normalized_path(&normalize_source_path(source_file));
+        if let Some((node_id, import)) =
+            self.python_submodule_member(source_file, language, site, raw_imports)
+        {
+            return self.import_scoped(source_file, site.name(), import, node_id);
+        }
         let bind_import = !matches!(site, CallSite::UntypedMember(_));
         let resolve = |name: &str, target, bind: bool| {
             self.resolve_symbol_with_import_binding(
@@ -635,6 +659,11 @@ impl<'a> Resolver<'a> {
             return Vec::new();
         }
         let language = Language::from_normalized_path(&normalize_source_path(source_file));
+        if let Some((node_id, import)) =
+            self.python_submodule_member(source_file, language, site, raw_imports)
+        {
+            return self.import_scoped(source_file, site.name(), import, node_id);
+        }
         let resolve = |name: &str, target, bind: bool| {
             self.resolve_import_tiers(source_file, language, name, raw_imports, target, bind)
         };
@@ -878,10 +907,17 @@ impl<'a> Resolver<'a> {
     /// `module` binding `name` makes it an attribute of the module, so
     /// `from .core import compute` in `pkg/__init__.py` is `pkg.compute`.
     /// The first such import whose module declares it wins, which keeps a
-    /// `try:` / `except ImportError:` pair on the module that exists. One
-    /// hop: a module that re-exports the name again is not followed, so a
-    /// longer chain keeps the general tiers instead of a guessed target, and
-    /// a cycle ends here.
+    /// `try:` / `except ImportError:` pair on the module that exists.
+    ///
+    /// When no import binds the name, a star import (`from .core import *`)
+    /// does: the one star module that declares it, as in ES modules. Two
+    /// that declare different targets bind nothing, and so does a `_` name,
+    /// which a star import skips. A star module with `__all__` exports only
+    /// what it lists, which the index does not read, so it binds nothing.
+    ///
+    /// One hop: a module that re-exports the name again is not followed, so
+    /// a longer chain keeps the general tiers instead of a guessed target,
+    /// and a cycle ends here.
     fn python_reexport(&self, module: &str, name: &str, target: ResolveTarget) -> Option<NodeId> {
         let exports = self
             .reexports?
@@ -889,8 +925,10 @@ impl<'a> Resolver<'a> {
             .get(module)
             .filter(|exports| exports.language == Language::Python)?;
         let hub = Path::new(module);
-        exports.imports.iter().find_map(|import| {
+        let mut bound = false;
+        let explicit = exports.imports.iter().find_map(|import| {
             let member = import_binding(import, name, Language::Python)?.name;
+            bound = true;
             match self.import_module_file(hub, &import.source, Language::Python) {
                 IndexedModule::Unique(file) => {
                     self.symbol_table.lookup_call_in_file(&file, member, target)
@@ -899,6 +937,91 @@ impl<'a> Resolver<'a> {
                     None
                 }
             }
+        });
+        if bound || name.starts_with('_') {
+            return explicit;
+        }
+        let mut hits = exports.star_modules.iter().filter_map(|file| {
+            let hit = self.symbol_table.lookup_call_in_file(file, name, target)?;
+            Some(
+                self.symbol_table
+                    .lookup_in_file(file, "__all__")
+                    .is_none()
+                    .then_some(hit),
+            )
+        });
+        let first = hits.next()??;
+        hits.all(|other| other == Some(first)).then_some(first)
+    }
+
+    /// `from pkg.sub import mod; mod.compute()`: a from-import of a name its
+    /// module does not declare imports the submodule `pkg.sub.mod`, so the
+    /// call binds as through `import pkg.sub.mod as mod`. `None` on any miss:
+    /// the call then resolves as the bare member, as before.
+    fn python_submodule_member<'i>(
+        &self,
+        source_file: &Path,
+        language: Language,
+        site: CallSite<'_>,
+        raw_imports: &'i [RawImport],
+    ) -> Option<(NodeId, &'i RawImport)> {
+        let CallSite::FromReceiver { receiver, member } = site else {
+            return None;
+        };
+        if language != Language::Python {
+            return None;
+        }
+        let target = call_target(source_file, site);
+        raw_imports.iter().find_map(|import| {
+            // The cheap gate first: most receivers are objects, whose names
+            // no module file or package directory carries.
+            if import.imported_name == "*"
+                || import.alias.as_deref().unwrap_or(&import.imported_name) != receiver
+                || !self
+                    .symbol_table
+                    .has_module_name(Language::Python, &import.imported_name)
+            {
+                return None;
+            }
+            let shadowed =
+                match self.import_module_file(source_file, &import.source, Language::Python) {
+                    // The module's own `mod` is an attribute, which shadows the
+                    // submodule.
+                    IndexedModule::Unique(module) => self
+                        .symbol_table
+                        .lookup_in_file(&module, &import.imported_name)
+                        .is_some(),
+                    IndexedModule::Ambiguous => true,
+                    // A namespace package (no `__init__.py`) is Missing yet holds
+                    // submodules.
+                    IndexedModule::Missing | IndexedModule::Namespace(_) => false,
+                };
+            if shadowed {
+                return None;
+            }
+            let separator = if import.source.bytes().all(|b| b == b'.') {
+                ""
+            } else if import.source.starts_with('.') {
+                "."
+            } else {
+                "/"
+            };
+            let submodule = [
+                import.source.as_str(),
+                separator,
+                import.imported_name.as_str(),
+            ]
+            .concat();
+            let node_id = match self.import_module_file(source_file, &submodule, Language::Python) {
+                IndexedModule::Unique(module) => self
+                    .symbol_table
+                    .lookup_call_in_file(&module, member, target)
+                    .or_else(|| self.python_reexport(&module, member, target)),
+                IndexedModule::Missing | IndexedModule::Ambiguous | IndexedModule::Namespace(_) => {
+                    None
+                }
+            }?;
+            Some((node_id, import))
         })
     }
 
