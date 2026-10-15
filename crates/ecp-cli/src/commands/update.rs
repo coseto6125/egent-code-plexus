@@ -163,6 +163,19 @@ pub fn run(args: UpdateArgs) -> Result<(), EcpError> {
     for line in refresh_ecp_skill(&exe, ecp_core::registry::home_dir()) {
         println!("{line}");
     }
+    // The NEW binary judges which caches are stale: it alone knows the new
+    // fingerprint and format. `current_exe` may still name the parked old
+    // copy, so launch `exe` explicitly and do not wait for it.
+    if std::process::Command::new(&exe)
+        .args(["admin", "gc"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
+    {
+        println!("==> clearing caches left by older versions in the background");
+    }
 
     let source = InstallSource::detect();
     if source != InstallSource::Unknown {

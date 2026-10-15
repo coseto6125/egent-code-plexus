@@ -167,3 +167,78 @@ fn v1_format_entry_is_skipped() {
         "v1 bins carry no calls/imports — the view must treat them as clean"
     );
 }
+
+/// The session ecp 0.14.8 left for a dirty `app.py`: a v2 bin in a manifest
+/// with no builder fingerprint. Only the recorded mtime is moved to the
+/// copied file's, so the mtime check alone would accept it. Its parse is
+/// another builder's, so the reader must serve the base graph instead.
+#[test]
+fn test_load_view_inputs_session_written_by_0_14_8_returns_no_input() {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/overlay-written-by-0.14.8");
+    let tmp = tempfile::tempdir().unwrap();
+    let worktree = tmp.path().join("wt");
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::copy(fixture.join("app.py"), worktree.join("app.py")).unwrap();
+    let mtime = std::fs::metadata(worktree.join("app.py"))
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    let session_dir = make_session_dir(tmp.path(), "old-sid");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture.join("dirty_files.json")).unwrap())
+            .unwrap();
+    manifest["entries"]["app.py"]["mtime_ns"] = mtime.into();
+    std::fs::write(
+        session_dir.join("dirty_files.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    std::fs::create_dir_all(session_dir.join("graph_overlay")).unwrap();
+    std::fs::copy(
+        fixture.join("graph_overlay/553e94275e6085db.bin"),
+        session_dir.join("graph_overlay/553e94275e6085db.bin"),
+    )
+    .unwrap();
+    let old = DirtyFiles::read(&session_dir.join("dirty_files.json")).unwrap();
+    assert!(!old.from_current_builder());
+    assert_eq!(old.entries["app.py"].mtime_ns, mtime);
+
+    let inputs = load_view_inputs(&session_dir, &worktree).unwrap();
+    assert!(
+        inputs.is_empty(),
+        "another builder's fragment beat the base graph: {inputs:?}"
+    );
+}
+
+/// The fragment carries what the overlay's export rule reads: each
+/// symbol's export flag and the file's export aliases.
+#[test]
+fn test_load_view_inputs_export_flag_and_aliases_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let worktree = tmp.path().join("wt");
+    let session_dir = make_session_dir(tmp.path(), "exp-sid");
+    let mtime = write_worktree_file(&worktree, "src/a.ts");
+    let mut private = rn("f", None, &[]);
+    private.is_exported = false;
+    let mut graph = graph_for("src/a.ts", vec![private, rn("g", None, &[])], vec![]);
+    let aliases = vec![ecp_core::analyzer::types::RawExportAlias {
+        exported: "f".into(),
+        local: "g".into(),
+    }];
+    graph.export_aliases = Some(aliases.clone().into_boxed_slice());
+    write_dirty_fragments_from_graphs(&session_dir, &[graph], &[mtime]).unwrap();
+
+    let inputs = load_view_inputs(&session_dir, &worktree).unwrap();
+    assert_eq!(inputs.len(), 1);
+    let exported: Vec<(&str, bool)> = inputs[0]
+        .symbols
+        .iter()
+        .map(|s| (s.name.as_str(), s.is_exported))
+        .collect();
+    assert_eq!(exported, [("f", false), ("g", true)]);
+    assert_eq!(inputs[0].export_aliases, aliases);
+}

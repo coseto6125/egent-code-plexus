@@ -19,6 +19,7 @@ fn head_sha() -> String {
 fn diff_text_output_has_section_header() {
     let sha = head_sha();
     let output = Command::new(ecp_bin())
+        .env("ECP_SKIP_BG_REBUILD", "1")
         .args([
             "diff",
             "--section",
@@ -46,6 +47,7 @@ fn diff_text_output_has_section_header() {
 fn diff_toon_output_parses() {
     let sha = head_sha();
     let output = Command::new(ecp_bin())
+        .env("ECP_SKIP_BG_REBUILD", "1")
         .args([
             "diff",
             "--section",
@@ -74,6 +76,7 @@ fn diff_toon_output_parses() {
 fn diff_json_output_parses_as_valid_json() {
     let sha = head_sha();
     let output = Command::new(ecp_bin())
+        .env("ECP_SKIP_BG_REBUILD", "1")
         .args([
             "diff",
             "--section",

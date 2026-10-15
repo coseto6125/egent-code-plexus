@@ -8,7 +8,9 @@
 //! This module consolidates those helpers so each parser stays focused on its own
 //! grammar quirks, not span arithmetic.
 
-use ecp_core::analyzer::types::{FrameworkId, RawFrameworkRef, RawImport, RawNode, RawTxScope};
+use ecp_core::analyzer::types::{
+    BindingKind, FrameworkId, RawExportAlias, RawFrameworkRef, RawImport, RawNode, RawTxScope,
+};
 use ecp_core::graph::NodeKind;
 
 pub use ecp_core::analyzer::types::{innermost_enclosing, span_contains, Span};
@@ -432,6 +434,289 @@ pub fn stamp_owner_fn_by_span(nodes: &mut [RawNode]) {
             .map(|(name, _)| name.clone());
         if owner.is_some() {
             node.owner_class = owner;
+        }
+    }
+}
+
+/// Mark the top-level declarations a JS / TS module exports in the forms the
+/// declaration queries do not see: a local `export { f }` clause,
+/// `export default f`, and an exported `declare` declaration. A declaration
+/// exported under another name (`export { g as f }`) is marked as well:
+/// `is_exported` means "reachable from another module", which is what the
+/// resolver's import tier reads. A re-export (`export … from`) names another
+/// module's declarations and marks nothing here.
+///
+/// Returns the file's export names with the declaration each binds when one
+/// of them differs from its declaration's name (`export { g as f }`,
+/// `export default h`, `export default wrap(h)` with an empty local), else
+/// `None`: see `LocalGraph::export_aliases`.
+pub fn stamp_js_ts_exports(
+    root: tree_sitter::Node<'_>,
+    source: &[u8],
+    nodes: &mut [RawNode],
+) -> Option<Box<[RawExportAlias]>> {
+    let mut exported: Vec<(&str, Span)> = Vec::new();
+    // A set: every top-level declaration is checked against it below, and a
+    // barrel file can export hundreds of names.
+    let mut locals: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
+    // `(export name, local name)` of every export of the file.
+    let mut names: Vec<(&str, &str)> = Vec::new();
+    let mut cursor = root.walk();
+    for statement in root.named_children(&mut cursor) {
+        if statement.kind() != "export_statement"
+            || statement.child_by_field_name("source").is_some()
+        {
+            continue;
+        }
+        let mut tokens = statement.walk();
+        let is_default = statement
+            .children(&mut tokens)
+            .any(|child| child.kind() == "default");
+        if let Some(declaration) = statement.child_by_field_name("declaration") {
+            let first = exported.len();
+            js_ts_declared_names(declaration, source, &mut exported);
+            names.extend(
+                exported[first..]
+                    .iter()
+                    .map(|&(name, _)| (if is_default { "default" } else { name }, name)),
+            );
+            continue;
+        }
+        if let Some(value) = statement.child_by_field_name("value") {
+            match js_ts_identifier(value, source) {
+                Some(local) => {
+                    locals.insert(local);
+                    names.push(("default", local));
+                }
+                // `export default wrap(h)`: an empty local records that the
+                // default binds no declaration.
+                None => names.push(("default", "")),
+            }
+        }
+        js_ts_clause_exports(statement, source, |export, local| {
+            locals.insert(local);
+            names.extend(export.map(|export| (export, local)));
+        });
+    }
+    let aliases = js_ts_export_aliases(names);
+    if !locals.is_empty() {
+        let mut declarations = Vec::new();
+        let mut cursor = root.walk();
+        for declaration in root.named_children(&mut cursor) {
+            js_ts_declared_names(declaration, source, &mut declarations);
+        }
+        exported.extend(
+            declarations
+                .into_iter()
+                .filter(|(name, _)| locals.contains(name)),
+        );
+    }
+    if exported.is_empty() {
+        return aliases;
+    }
+    let mut by_span: rustc_hash::FxHashMap<Span, Vec<&str>> = rustc_hash::FxHashMap::default();
+    for (name, span) in exported {
+        by_span.entry(span).or_default().push(name);
+    }
+    for node in nodes.iter_mut() {
+        if by_span
+            .get(&node.span)
+            .is_some_and(|names| names.iter().any(|name| *name == node.name))
+        {
+            node.is_exported = true;
+        }
+    }
+    aliases
+}
+
+/// `names` as export aliases when some export name differs from its local
+/// name. Each pair is kept once.
+fn js_ts_export_aliases(mut names: Vec<(&str, &str)>) -> Option<Box<[RawExportAlias]>> {
+    if names.iter().all(|(export, local)| export == local) {
+        return None;
+    }
+    names.sort_unstable();
+    names.dedup();
+    Some(
+        names
+            .into_iter()
+            .map(|(exported, local)| RawExportAlias {
+                exported: exported.into(),
+                local: local.into(),
+            })
+            .collect(),
+    )
+}
+
+/// Each `(export name, local name)` of the `export { }` clauses of the
+/// export statement `statement`, in source order. The export name is
+/// `None` when it is no name [`js_ts_export_name`] reads.
+fn js_ts_clause_exports<'s>(
+    statement: tree_sitter::Node<'_>,
+    source: &'s [u8],
+    mut visit: impl FnMut(Option<&'s str>, &'s str),
+) {
+    let mut clauses = statement.walk();
+    for clause in statement
+        .named_children(&mut clauses)
+        .filter(|child| child.kind() == "export_clause")
+    {
+        let mut specifiers = clause.walk();
+        for specifier in clause.named_children(&mut specifiers) {
+            let Some(local) = specifier
+                .child_by_field_name("name")
+                .and_then(|name| js_ts_identifier(name, source))
+            else {
+                continue;
+            };
+            let export = match specifier.child_by_field_name("alias") {
+                Some(alias) => js_ts_export_name(alias, source),
+                None => Some(local),
+            };
+            visit(export, local);
+        }
+    }
+}
+
+/// The name an `export { x as name }` gives: an identifier, `default`, or a
+/// string (`export { x as "a-b" }`).
+fn js_ts_export_name<'s>(node: tree_sitter::Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    let node = match node.kind() {
+        "identifier" | "default" => node,
+        "string" => node.named_child(0)?,
+        _ => return None,
+    };
+    std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).ok()
+}
+
+/// [`BindingKind::EsReexport`] for a named import the TS / JS import
+/// queries capture from a re-export (`export { x } from './m'`), which the
+/// parsers emit like `import { x } from './m'`. `source` is the captured
+/// specifier fragment; its string sits in the statement.
+pub fn js_ts_reexport_kind(source: tree_sitter::Node<'_>) -> Option<BindingKind> {
+    let statement = source.parent()?.parent()?;
+    (statement.kind() == "export_statement").then_some(BindingKind::EsReexport)
+}
+
+/// Mark the binding kinds of `imports` that the import queries cannot see.
+/// A default import (`import d from './m'`) is [`BindingKind::EsDefault`]:
+/// the queries emit it like `import { d } from './m'`, which binds a
+/// different export. An import the file's own `export { x }` clause exports
+/// under its local name is [`BindingKind::EsReexport`], or
+/// [`BindingKind::EsDefaultReexport`] for a default import. The parsers mark
+/// an `export { x } from` re-export as they emit it
+/// ([`js_ts_reexport_kind`]), which this leaves as it is.
+pub fn mark_js_ts_import_bindings(
+    root: tree_sitter::Node<'_>,
+    source: &[u8],
+    imports: &mut [RawImport],
+) {
+    let mut defaults: Vec<(&str, &str)> = Vec::new();
+    // `export { x as y }` exports `y`, not the import `x`.
+    let mut exported: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
+    let mut cursor = root.walk();
+    for statement in root.named_children(&mut cursor) {
+        match statement.kind() {
+            "import_statement" => {
+                let Some(specifier) = statement
+                    .child_by_field_name("source")
+                    .and_then(|string| string.named_child(0))
+                    .and_then(|fragment| {
+                        std::str::from_utf8(&source[fragment.start_byte()..fragment.end_byte()])
+                            .ok()
+                    })
+                else {
+                    continue;
+                };
+                let mut clauses = statement.walk();
+                for clause in statement
+                    .named_children(&mut clauses)
+                    .filter(|child| child.kind() == "import_clause")
+                {
+                    let mut bindings = clause.walk();
+                    defaults.extend(
+                        clause
+                            .named_children(&mut bindings)
+                            .filter_map(|binding| js_ts_identifier(binding, source))
+                            .map(|local| (local, specifier)),
+                    );
+                }
+            }
+            "export_statement" if statement.child_by_field_name("source").is_none() => {
+                js_ts_clause_exports(statement, source, |export, local| {
+                    if export == Some(local) {
+                        exported.insert(local);
+                    }
+                });
+            }
+            _ => {}
+        }
+    }
+    if defaults.is_empty() && exported.is_empty() {
+        return;
+    }
+    for import in imports
+        .iter_mut()
+        .filter(|import| import.binding_kind.is_none())
+    {
+        let default = import.alias.is_none()
+            && defaults.iter().any(|&(local, specifier)| {
+                import.imported_name == local && import.source == specifier
+            });
+        let reexported =
+            exported.contains(import.alias.as_deref().unwrap_or(&import.imported_name));
+        import.binding_kind = match (default, reexported) {
+            (true, true) => Some(BindingKind::EsDefaultReexport),
+            (true, false) => Some(BindingKind::EsDefault),
+            (false, true) => Some(BindingKind::EsReexport),
+            (false, false) => None,
+        };
+    }
+}
+
+/// The text of `node` when it is a plain identifier.
+fn js_ts_identifier<'s>(node: tree_sitter::Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    if node.kind() != "identifier" {
+        return None;
+    }
+    std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).ok()
+}
+
+/// `(name, span)` of every binding `declaration` introduces, with the spans
+/// the parsers give its nodes.
+fn js_ts_declared_names<'s>(
+    declaration: tree_sitter::Node<'_>,
+    source: &'s [u8],
+    out: &mut Vec<(&'s str, Span)>,
+) {
+    let mut cursor = declaration.walk();
+    match declaration.kind() {
+        "lexical_declaration" | "variable_declaration" => {
+            let span = node_span(&declaration);
+            for declarator in declaration.named_children(&mut cursor) {
+                let Some(name) = declarator
+                    .child_by_field_name("name")
+                    .and_then(|name| js_ts_identifier(name, source))
+                else {
+                    continue;
+                };
+                // A Const / Variable spans its declaration, a function-valued
+                // binding its declarator.
+                out.push((name, span));
+                out.push((name, node_span(&declarator)));
+            }
+        }
+        "ambient_declaration" => {
+            for inner in declaration.named_children(&mut cursor) {
+                js_ts_declared_names(inner, source, out);
+            }
+        }
+        _ => {
+            if let Some(name) = declaration.child_by_field_name("name").and_then(|name| {
+                std::str::from_utf8(&source[name.start_byte()..name.end_byte()]).ok()
+            }) {
+                out.push((name, node_span(&declaration)));
+            }
         }
     }
 }

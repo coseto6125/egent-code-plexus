@@ -72,11 +72,17 @@ pub enum CallSite<'a> {
     /// import never names, and a Java call on a computed receiver
     /// (`a.b().m()`), which no static import names.
     UntypedMember(&'a str),
+    /// A Python member call whose receiver is a name a `from` import binds
+    /// (`from pkg import mod; mod.f()`). That name may be a submodule, which
+    /// the import tier binds as a module import; anywhere else the site
+    /// resolves as `Plain(member)`.
+    FromReceiver { receiver: &'a str, member: &'a str },
 }
 
 impl<'a> CallSite<'a> {
     const CONSTRUCT_PREFIX: &'static str = "\u{1}new ";
     const UNTYPED_MEMBER_PREFIX: &'static str = "\u{1}member ";
+    const FROM_RECEIVER_PREFIX: &'static str = "\u{1}from ";
 
     /// The qualifier of a Python `super().m()` callee (`super().m`): the
     /// resolver binds `m` on the caller class's bases, never by bare name.
@@ -92,11 +98,21 @@ impl<'a> CallSite<'a> {
         [Self::UNTYPED_MEMBER_PREFIX, member].concat()
     }
 
+    /// The `RawNode.calls` entry of a member call on a `from`-imported name.
+    pub fn from_receiver(receiver: &str, member: &str) -> String {
+        [Self::FROM_RECEIVER_PREFIX, receiver, ".", member].concat()
+    }
+
     pub fn parse(raw: &'a str) -> Self {
         if let Some(ty) = raw.strip_prefix(Self::CONSTRUCT_PREFIX) {
             Self::Construct(ty)
         } else if let Some(member) = raw.strip_prefix(Self::UNTYPED_MEMBER_PREFIX) {
             Self::UntypedMember(member)
+        } else if let Some((receiver, member)) = raw
+            .strip_prefix(Self::FROM_RECEIVER_PREFIX)
+            .and_then(|site| site.split_once('.'))
+        {
+            Self::FromReceiver { receiver, member }
         } else {
             Self::Plain(raw)
         }
@@ -105,14 +121,17 @@ impl<'a> CallSite<'a> {
     /// The callee the callable tiers resolve.
     pub fn name(self) -> &'a str {
         match self {
-            Self::Plain(name) | Self::Construct(name) | Self::UntypedMember(name) => name,
+            Self::Plain(name)
+            | Self::Construct(name)
+            | Self::UntypedMember(name)
+            | Self::FromReceiver { member: name, .. } => name,
         }
     }
 
     /// Whether the call uses member syntax rather than a module path.
     pub fn uses_method_syntax(self) -> bool {
         match self {
-            Self::UntypedMember(_) => true,
+            Self::UntypedMember(_) | Self::FromReceiver { .. } => true,
             Self::Plain(name) => name.contains('.'),
             Self::Construct(_) => false,
         }
@@ -148,6 +167,9 @@ impl<'a> CallSite<'a> {
                 | Language::Cpp,
                 Self::Plain(callee),
             ) => Some((callee, false)),
+            (Language::Python, Self::FromReceiver { member, .. }) => Some((member, false)),
+            // Only the Python parser emits a `from` receiver.
+            (_, Self::FromReceiver { .. }) => None,
             _ => None,
         }
     }
@@ -276,6 +298,33 @@ pub enum BindingKind {
     Macro,
     /// Empty body, non-guard (`#define DEBUG`, `#define ENABLE_FOO`).
     Flag,
+    /// TS / JS default import (`import d from './m'`). The parsers emit it
+    /// as `imported_name` `d` with no alias, like `import { d } from './m'`,
+    /// but `d` binds module `m`'s default export, whatever its declared name.
+    EsDefault,
+    /// A TS / JS binding the module exports: a re-export (`export { x } from
+    /// './m'`), which the parsers emit like `import { x } from './m'`, or an
+    /// import the module's own `export { x }` clause exports under its name.
+    /// A plain import exports nothing, so another module's import of the
+    /// file never reaches through it.
+    EsReexport,
+    /// An [`Self::EsDefault`] import the module also exports, as
+    /// [`Self::EsReexport`] says: `import d from './m'; export { d };`.
+    EsDefaultReexport,
+}
+
+impl From<&ArchivedBindingKind> for BindingKind {
+    fn from(archived: &ArchivedBindingKind) -> Self {
+        match archived {
+            ArchivedBindingKind::Alias => Self::Alias,
+            ArchivedBindingKind::Constant => Self::Constant,
+            ArchivedBindingKind::Macro => Self::Macro,
+            ArchivedBindingKind::Flag => Self::Flag,
+            ArchivedBindingKind::EsDefault => Self::EsDefault,
+            ArchivedBindingKind::EsReexport => Self::EsReexport,
+            ArchivedBindingKind::EsDefaultReexport => Self::EsDefaultReexport,
+        }
+    }
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
@@ -285,7 +334,9 @@ pub struct RawImport {
     pub imported_name: String,
     pub alias: Option<String>,
     /// `None` for ordinary import statements; `Some(_)` for C named bindings
-    /// (`typedef`, `#define`, `extern`) classified by body shape.
+    /// (`typedef`, `#define`, `extern`) classified by body shape, and for a
+    /// TS / JS default import or exported binding ([`BindingKind::EsDefault`],
+    /// [`BindingKind::EsReexport`], [`BindingKind::EsDefaultReexport`]).
     pub binding_kind: Option<BindingKind>,
 }
 
@@ -778,6 +829,18 @@ pub struct RawCallMeta {
     pub dispatch_type: String,
 }
 
+/// One name a TS / JS module exports and the local declaration it binds:
+/// `export { g as f }` is `f` → `g`, `export default h` and
+/// `export default function h() {}` are `default` → `h`, and `export function
+/// k() {}` is `k` → `k`. `export default wrap(h)` binds no declaration: it is
+/// `default` with an empty local.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub struct RawExportAlias {
+    pub exported: Box<str>,
+    pub local: Box<str>,
+}
+
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct LocalGraph {
@@ -816,6 +879,12 @@ pub struct LocalGraph {
     /// span at build time; only populated for `Function`/`Method`/`Constructor`
     /// nodes. Empty for languages not yet covered by Phase 1/2.
     pub raw_function_metas: Vec<RawFunctionMeta>,
+    /// TS / JS export names that differ from the declaration they bind, with
+    /// every other export of the same file, so an import of a name the file
+    /// exports only under another name binds nothing. `None` when every
+    /// export keeps its declaration's name (most files) and for other
+    /// languages.
+    pub export_aliases: Option<Box<[RawExportAlias]>>,
 }
 
 impl LocalGraph {
@@ -856,6 +925,7 @@ impl LocalGraph {
             sql_refs: None,
             call_metas: Vec::new(),
             raw_function_metas: Vec::new(),
+            export_aliases: None,
         }
     }
 }
@@ -879,6 +949,7 @@ impl Default for LocalGraph {
             sql_refs: None,
             call_metas: Vec::new(),
             raw_function_metas: Vec::new(),
+            export_aliases: None,
         }
     }
 }
@@ -940,5 +1011,31 @@ mod tests {
         for text in ["new Router().Handler", "member widget", "Widget", ""] {
             assert_eq!(CallSite::parse(text), CallSite::Plain(text));
         }
+    }
+
+    /// Contract: a `from`-receiver entry decodes to its receiver and member,
+    /// and keeps the member as the name every callable tier resolves.
+    #[test]
+    fn test_call_site_parse_from_receiver_returns_receiver_and_member() {
+        let raw = CallSite::from_receiver("mod", "compute");
+        let site = CallSite::parse(&raw);
+        assert_eq!(
+            site,
+            CallSite::FromReceiver {
+                receiver: "mod",
+                member: "compute"
+            }
+        );
+        assert_eq!(site.name(), "compute");
+        assert_eq!(
+            site.constructed_type(Language::Python),
+            Some(("compute", false))
+        );
+        assert_eq!(
+            CallSite::parse("from mod.compute"),
+            CallSite::Plain("from mod.compute")
+        );
+        let malformed = "\u{1}from compute";
+        assert_eq!(CallSite::parse(malformed), CallSite::Plain(malformed));
     }
 }

@@ -30,6 +30,12 @@
     name: (dotted_name) @import.name
     alias: (identifier) @import.alias)) @import
 
+;; Imports (from ... import *): `imported_name` "*" with no alias, the shape a
+;; TS / JS `export * from` has, so a re-export index can follow it.
+(import_from_statement
+  module_name: [(dotted_name) (relative_import)] @import.source
+  (wildcard_import) @import.name) @import
+
 ;; Imports (import ...)
 (import_statement
   name: (dotted_name) @import.name) @import

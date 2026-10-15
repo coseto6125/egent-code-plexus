@@ -382,6 +382,51 @@ fn edit_context(
         .to_owned()
 }
 
+/// Contract (codex c1 / R1 F1): an edit to a barrel scopes the consumers
+/// that import a name through it. Their symbol edge lands in the module the
+/// barrel re-exports from, so only the File → barrel edge kept beside it
+/// makes them the barrel's direct importers: a TS `export *` barrel and a
+/// Python package `__init__.py`. Before the fix both edits reported 0.
+#[test]
+fn test_edit_hook_barrel_edit_finds_importers_through_the_barrel() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = indexed_repo(
+        tmp.path(),
+        &[
+            ("ts/index.ts", "export * from './impl';\n".into()),
+            (
+                "ts/impl.ts",
+                "export function render() { return 1; }\n".into(),
+            ),
+            (
+                "ts/use.ts",
+                "import { render } from './index';\nconsume(render());\n".into(),
+            ),
+            ("pkg/__init__.py", "from .core import compute\n".into()),
+            ("pkg/core.py", "def compute():\n    return 1\n".into()),
+            (
+                "use1.py",
+                "from pkg import compute\n\nconsume(compute())\n".into(),
+            ),
+        ],
+    );
+    for (barrel, old, new) in [
+        ("ts/index.ts", "./impl", "./impl.ts"),
+        (
+            "pkg/__init__.py",
+            "import compute",
+            "import compute as compute",
+        ),
+    ] {
+        let context = edit_context(&home, &repo, &repo.join(barrel), old, new);
+        assert!(
+            context
+                .contains("Scope: edited file and 1 direct importers from the graph (0 omitted)"),
+            "{barrel}: {context}"
+        );
+    }
+}
+
 /// Contract: importers never cost the edited file its own evidence. When the
 /// cross-file corpus exhausts the analysis budget, the hook reports the
 /// single-file result and says why the scope shrank.

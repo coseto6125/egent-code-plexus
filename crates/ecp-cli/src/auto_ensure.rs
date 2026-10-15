@@ -58,6 +58,11 @@ pub mod test_counters {
     /// proves every dirty file's fragment current (manifest mtime_ns match)
     /// and skips the refresh entirely.
     pub static FRESH_GATE_SKIP_COUNT: AtomicUsize = AtomicUsize::new(0);
+    /// Incremented each time `spawn_upgrade_gc` passes its once-per-process
+    /// guard, before the env / binary-name gates that skip the spawn in
+    /// tests. Left out of `reset` with the guard it counts: the guard is
+    /// never re-armed, so this reads 1 after any number of drift queries.
+    pub static UPGRADE_GC_INTENT_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     pub fn reset() {
         REANALYZE_CALL_COUNT.store(0, Ordering::Relaxed);
@@ -177,6 +182,7 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
     // schema break the same as a stale graph so ensure_fresh transparently
     // rebuilds.
     if !crate::engine::header_compatible(graph_path) {
+        spawn_upgrade_gc();
         return Ok(EnsureResult::Stale {
             age_seconds: 0,
             needs_full_rebuild: true,
@@ -194,6 +200,7 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
     // circuited past. Stale ⇒ ensure_fresh rebuilds via the header-compatible
     // or build_l2 branch.
     if fingerprint_drifted(graph_path) {
+        spawn_upgrade_gc();
         return Ok(EnsureResult::Stale {
             age_seconds: 0,
             needs_full_rebuild: true,
@@ -293,7 +300,7 @@ pub fn write_compatible_version_sidecar(graph_path: &Path) {
     });
 }
 
-fn read_compatible_version_sidecar(graph_path: &Path) -> Option<u32> {
+pub(crate) fn read_compatible_version_sidecar(graph_path: &Path) -> Option<u32> {
     let content = fs::read_to_string(compatible_version_sidecar_path(graph_path)).ok()?;
     content.trim().parse::<u32>().ok()
 }
@@ -788,6 +795,9 @@ static SIBLING_CACHE: OnceLock<Mutex<HashMap<PathBuf, Option<PathBuf>>>> = OnceL
 static BEHIND_HEAD_SPAWNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+static UPGRADE_GC_SPAWNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Returns the `graph.bin` path of the best published sibling commit dir for
 /// this repo to warm-attach, or `None` if none qualifies.
 ///
@@ -942,6 +952,46 @@ fn spawn_background_rebuild(worktree_root: &Path) {
     });
 }
 
+/// A binary upgrade (format or fingerprint change) is when the old caches
+/// become garbage, and the first query after it lands here on every host,
+/// whichever package manager installed the binary. Shares SessionStart's
+/// `.prune.lock`, so the two triggers never run gc concurrently; `admin gc`
+/// keeps a grace period for caches another installed version may still use.
+///
+/// The drift branch answers every query until a rebuild lands, and callers
+/// such as `summary` and `doctor` never rebuild. Once per process stops a
+/// long-lived MCP process forking `sh` per query; `--auto` stops each
+/// one-shot CLI call running a full gc. The `--auto` stamp names the binary
+/// that wrote it, so this binary's first trigger still runs once.
+fn spawn_upgrade_gc() {
+    if UPGRADE_GC_SPAWNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    test_counters::UPGRADE_GC_INTENT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if std::env::var_os("ECP_SKIP_BG_REBUILD").is_some() {
+        return;
+    }
+    // In-process tests run a test harness as `current_exe`; only the real
+    // binary may re-exec itself as `admin gc`.
+    let is_ecp = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.file_stem().map(|stem| stem == "ecp"))
+        .unwrap_or(false);
+    if !is_ecp {
+        return;
+    }
+    let home_ecp = ecp_core::registry::resolve_home_ecp();
+    let lock = home_ecp.join(".prune.lock");
+    let _ = crate::background::spawn_bg(crate::background::BgJob {
+        args: &["admin", "gc", "--auto"],
+        lock: &lock,
+        cwd: &home_ecp,
+        retry: (1, 0),
+        markers: None,
+        then_args: None,
+    });
+}
+
 /// FU-2026-05-23-047: when `resolve_home_ecp()` resolves to a path NESTED
 /// under the current worktree, the background tantivy writer spawned by
 /// `build_l2` (orchestrator.rs:233) will race with any subsequent
@@ -1021,11 +1071,14 @@ pub fn resolve_session_overlay_dir(worktree_root: &Path) -> Option<PathBuf> {
 /// L1 freshness gate: drop dirty files whose overlay fragment is provably
 /// current, keep the rest for re-parse.
 ///
-/// A fragment is current when its `dirty_files.json` entry is a v2 bin that
-/// parsed cleanly AND records exactly the file's present mtime_ns. Any doubt
-/// (no session dir / meta / manifest, HEAD drifted since the fragments were
-/// based, v1 bin, parse_failed, stat error) keeps the file in the re-parse
-/// set — the gate may only ever skip work it can prove redundant.
+/// A fragment is current when its `dirty_files.json` entry is a v3 bin that
+/// parsed cleanly, is on disk, AND records exactly the file's present
+/// mtime_ns, in a manifest the running binary's parser wrote. Any doubt (no
+/// session dir / meta / manifest, HEAD drifted since the fragments were
+/// based, another builder fingerprint, older bin, parse_failed, missing bin,
+/// stat error) keeps the file
+/// in the re-parse set — the gate may only ever skip work it can prove
+/// redundant.
 ///
 /// The HEAD-drift check matters: promotion (rebasing fragments onto the new
 /// base SHA) runs inside the full overlay path, so a drifted session must
@@ -1054,7 +1107,7 @@ struct L1FreshnessGate {
 }
 
 fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1FreshnessGate {
-    use ecp_core::session::{DirtyFiles, FRAGMENT_FORMAT_V2};
+    use ecp_core::session::{DirtyFiles, FRAGMENT_FORMAT_V3};
 
     let pass = |rel_paths, session_meta| L1FreshnessGate {
         rel_paths,
@@ -1076,6 +1129,12 @@ fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1Fre
     let Ok(manifest) = DirtyFiles::read(&session_dir.join("dirty_files.json")) else {
         return pass(rel_paths, Some(meta));
     };
+    // Fragments another binary parsed hold other parse rules
+    // (FU-2026-10-05-36d0314fefe4): every dirty file is re-parsed.
+    if !manifest.from_current_builder() {
+        return pass(rel_paths, Some(meta));
+    }
+    let overlay_dir = session_dir.join("graph_overlay");
     let mut pre_mtimes = HashMap::new();
     let retained = rel_paths
         .into_iter()
@@ -1083,11 +1142,22 @@ fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1Fre
             let Some(entry) = manifest.entries.get(rel) else {
                 return true;
             };
-            if entry.format != FRAGMENT_FORMAT_V2 || entry.parse_failed {
+            if entry.format != FRAGMENT_FORMAT_V3 || entry.parse_failed {
                 return true;
             }
+            // A bin the manifest names can still be gone (a cleanup that
+            // raced its writer, a hand-deleted file); the reader skips a
+            // missing bin, so without the re-parse the file serves L2 until
+            // it changes again.
             match mtime_ns_of(&worktree_root.join(rel)) {
-                Some(ns) if ns == entry.mtime_ns => false,
+                Some(ns)
+                    if ns == entry.mtime_ns
+                        && overlay_dir
+                            .join(format!("{}.bin", entry.fragment_id))
+                            .is_file() =>
+                {
+                    false
+                }
                 Some(ns) => {
                     pre_mtimes.insert(rel.clone(), ns);
                     true

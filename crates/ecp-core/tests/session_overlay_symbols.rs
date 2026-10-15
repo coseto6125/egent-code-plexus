@@ -60,6 +60,7 @@ fn dirty_files_round_trip_via_disk() {
         },
     );
     let files = DirtyFiles {
+        builder_fingerprint: None,
         version: 1,
         entries,
     };

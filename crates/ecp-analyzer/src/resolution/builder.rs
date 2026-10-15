@@ -4,16 +4,17 @@ use crate::fetch_shape::{
 use crate::framework_helpers::Span;
 use crate::resolution::index::{Language, ResolveTarget, SymbolTable};
 use crate::resolution::path_aliases::PathAliases;
-use crate::resolution::resolver::Resolver;
+use crate::resolution::resolver::{ReexportIndex, Resolver};
 use crate::rust::module_tree::RustWorkspaceModTree;
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
-use ecp_core::analyzer::types::{CallSite, LocalGraph, RawNode};
+use ecp_core::analyzer::reexport::{export_filter_applies, is_ecmascript, ImportRef};
+use ecp_core::analyzer::types::{CallSite, LocalGraph, RawImport, RawNode};
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::{
-    BlindSpotRecord, CallMeta, Edge, File, FileCategory, FunctionMeta, Node, NodeKind, RelType,
-    RouteShape, ZeroCopyGraph,
+    BlindSpotRecord, CallMeta, Edge, ExportAliasFact, File, FileCategory, FunctionMeta, ImportFact,
+    Node, NodeKind, RelType, RouteShape, ZeroCopyGraph, FILE_FLAG_ES_MODULE,
 };
-use ecp_core::graph_assembly::GraphAssembly;
+use ecp_core::graph_assembly::{GraphAssembly, ModuleFactTables};
 use ecp_core::pool::{StrRef, StringPool};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -268,6 +269,14 @@ impl GraphBuilder {
         let mut file_node_idx: FxHashMap<String, u32> =
             FxHashMap::with_capacity_and_hasher(self.local_graphs.len(), Default::default());
 
+        let module_facts = record_module_facts(
+            &self.local_graphs,
+            &symbol_table,
+            &self.path_aliases,
+            nodes.len(),
+            &mut string_pool,
+        );
+
         if prof {
             eprintln!(
                 "prof build.pass1_register: {:.3}s",
@@ -338,6 +347,7 @@ impl GraphBuilder {
         let mod_tree: Option<RustWorkspaceModTree> =
             self.repo_root.as_deref().map(RustWorkspaceModTree::build);
         let mod_tree_ctx = mod_tree.as_ref().zip(self.repo_root.as_deref());
+        let reexports = ReexportIndex::build(&self.local_graphs, &symbol_table, &self.path_aliases);
 
         let _t_pass19 = std::time::Instant::now();
         let declared_supertypes = pass1_9_supertypes(
@@ -345,6 +355,7 @@ impl GraphBuilder {
             &symbol_table,
             &self.path_aliases,
             mod_tree_ctx,
+            &reexports,
         );
         symbol_table.build_supertypes(declared_supertypes);
         if prof {
@@ -364,6 +375,7 @@ impl GraphBuilder {
             &mut string_pool,
             &self.path_aliases,
             mod_tree_ctx,
+            &reexports,
             self.resolver_dump_path.as_deref(),
             self.symbol_skip_set.as_ref(),
         );
@@ -664,8 +676,9 @@ impl GraphBuilder {
         // `Decorates` edges from decorated symbols to `Annotation` nodes (resolved
         // or synthetic). Runs before File-node loop so synthetic Annotation nodes
         // land in the raw-symbol index range, consistent with EventTopic / SchemaField.
-        let decorates_resolver =
-            Resolver::new(&symbol_table).with_path_aliases(self.path_aliases.clone());
+        let decorates_resolver = Resolver::new(&symbol_table)
+            .with_path_aliases(self.path_aliases.clone())
+            .with_reexports(&reexports);
         crate::post_process::decorates_edges::emit_edges(
             &self.local_graphs,
             &decorates_resolver,
@@ -751,8 +764,9 @@ impl GraphBuilder {
         // emit — refuse gitnexus-style cross-language false positives
         // (`.mjs → Path.java`). Must run BEFORE CSR construction below so
         // new edges land in `out_offsets` / `in_offsets`.
-        let imports_resolver =
-            Resolver::new(&symbol_table).with_path_aliases(self.path_aliases.clone());
+        let imports_resolver = Resolver::new(&symbol_table)
+            .with_path_aliases(self.path_aliases.clone())
+            .with_reexports(&reexports);
         if prof {
             eprintln!(
                 "prof build.class_membership: {:.3}s",
@@ -825,6 +839,7 @@ impl GraphBuilder {
             traces_offsets,
             traces_data,
             fingerprint: [0; 32],
+            module_facts,
         }
         .finish();
 
@@ -838,6 +853,116 @@ impl GraphBuilder {
 
         graph
     }
+}
+
+/// The import / export facts the overlay replays the import tier from
+/// (the v13 fields of `ZeroCopyGraph`): each Python / TS / JS file's
+/// imports in source order, each TS / JS file's export alias pairs and
+/// ES-module flag, and the exported declarations, as Pass 1 recorded them
+/// in `symbol_table`. `raw_nodes` is the node count after Pass 1. A TS / JS
+/// row the re-export hop follows keeps the file its specifier resolves to,
+/// through `path_aliases` as the resolver probes it.
+fn record_module_facts(
+    local_graphs: &[LocalGraph],
+    symbol_table: &SymbolTable,
+    path_aliases: &PathAliases,
+    raw_nodes: usize,
+    string_pool: &mut StringPool,
+) -> ModuleFactTables {
+    let resolver = Resolver::new(symbol_table).with_path_aliases(path_aliases.clone());
+    // Built on the first re-export row: most files re-export nothing.
+    let mut file_idx: Option<FxHashMap<String, u32>> = None;
+    let mut facts = ModuleFactTables {
+        file_imports: Vec::with_capacity(local_graphs.len() + 1),
+        file_export_aliases: Vec::with_capacity(local_graphs.len() + 1),
+        file_flags: Vec::with_capacity(local_graphs.len()),
+        exported_nodes: vec![0; raw_nodes.div_ceil(8)],
+        ..ModuleFactTables::default()
+    };
+    facts.file_imports.push(0);
+    facts.file_export_aliases.push(0);
+    for local_graph in local_graphs {
+        let path = local_graph.file_path.to_string_lossy().replace('\\', "/");
+        let language = Language::from_normalized_path(&path);
+        if matches!(
+            language,
+            Language::Python | Language::TypeScript | Language::JavaScript
+        ) {
+            let ecmascript = is_ecmascript(language);
+            for import in &local_graph.imports {
+                let target_file = if ecmascript && followed_by_reexport(local_graph, import) {
+                    resolver
+                        .ecmascript_module(&path, import)
+                        .and_then(|module| {
+                            file_idx
+                                .get_or_insert_with(|| file_indices(local_graphs))
+                                .get(&*module)
+                                .copied()
+                        })
+                } else {
+                    None
+                };
+                facts.imports.push(ImportFact {
+                    source: string_pool.add(&import.source),
+                    imported_name: string_pool.add(&import.imported_name),
+                    alias: import.alias.as_deref().map(|alias| string_pool.add(alias)),
+                    binding_kind: import.binding_kind,
+                    target_file,
+                });
+            }
+        }
+        facts.file_imports.push(facts.imports.len() as u32);
+        if export_filter_applies(&path) {
+            let aliases = local_graph.export_aliases.as_deref().unwrap_or(&[]);
+            facts
+                .export_aliases
+                .extend(aliases.iter().map(|alias| ExportAliasFact {
+                    exported: string_pool.add(&alias.exported),
+                    local: string_pool.add(&alias.local),
+                }));
+        }
+        facts
+            .file_export_aliases
+            .push(facts.export_aliases.len() as u32);
+        facts.file_flags.push(if symbol_table.is_es_module(&path) {
+            FILE_FLAG_ES_MODULE
+        } else {
+            0
+        });
+    }
+    for id in symbol_table.exported_ids() {
+        facts.exported_nodes[id as usize / 8] |= 1 << (id % 8);
+    }
+    facts
+}
+
+/// Whether the TS / JS re-export hop may follow `import` of `local_graph`
+/// (`reexport::ecmascript_reexport`): an `export *`, a binding the file
+/// exports under its own name, or the local of an export alias.
+fn followed_by_reexport(local_graph: &LocalGraph, import: &RawImport) -> bool {
+    let import = ImportRef::from(import);
+    import.is_star_export()
+        || import.is_es_reexport()
+        || local_graph
+            .export_aliases
+            .as_deref()
+            .into_iter()
+            .flatten()
+            .any(|alias| &*alias.local == import.local_name())
+}
+
+/// Forward-slash path → file index, as Pass 1 numbers the files.
+fn file_indices(local_graphs: &[LocalGraph]) -> FxHashMap<String, u32> {
+    local_graphs
+        .iter()
+        .enumerate()
+        .map(|(idx, graph)| {
+            (
+                graph.file_path.to_string_lossy().replace('\\', "/"),
+                idx as u32,
+            )
+        })
+        .collect()
 }
 
 /// Pass 1: register every `LocalGraph`'s File + symbol nodes into the
@@ -892,6 +1017,9 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
         // `\\` -> `/` normalisation. `path_str` is already forward-slash.
         let category = determine_category(&path_str);
         let file_meta = crate::resolution::index::FileMeta::from_normalized_path(&path_str);
+        if let Some(aliases) = &local_graph.export_aliases {
+            symbol_table.note_export_aliases(&path_str, file_meta.language, aliases);
+        }
 
         files.push(File {
             path: path_ref,
@@ -1033,6 +1161,9 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
                 raw_node.kind,
                 raw_node.owner_class.as_deref(),
             );
+            if raw_node.is_exported {
+                symbol_table.note_export(&path_str, file_meta.language, current_node_idx);
+            }
 
             let name_ref = string_pool.add(&raw_node.name);
             // Skip hash-lookup when there is no owner: `StrRef::default()`
@@ -1787,6 +1918,7 @@ fn pass1_9_supertypes(
     symbol_table: &SymbolTable,
     path_aliases: &PathAliases,
     mod_tree_ctx: Option<(&RustWorkspaceModTree, &std::path::Path)>,
+    reexports: &ReexportIndex<'_>,
 ) -> Vec<(u32, Option<u32>)> {
     let mut next_start = 0u32;
     let starts: Vec<u32> = local_graphs
@@ -1805,7 +1937,9 @@ fn pass1_9_supertypes(
             if lg.nodes.iter().all(|n| n.heritage.is_empty()) {
                 return Vec::new();
             }
-            let mut resolver = Resolver::new(symbol_table).with_path_aliases(path_aliases.clone());
+            let mut resolver = Resolver::new(symbol_table)
+                .with_path_aliases(path_aliases.clone())
+                .with_reexports(reexports);
             if let Some((mt, root)) = mod_tree_ctx {
                 resolver = resolver.with_mod_tree(mt, root.to_path_buf());
             }
@@ -2087,12 +2221,14 @@ fn pass2_emit_framework_and_fanout(
 ///      `fanout_refs.reason` interned into `string_pool` up front.
 ///      `string_pool.add` is `&mut self` so the inner loop can't
 ///      touch it; pre-interning + lookup-by-cache is `&StrRef`-only.
+#[allow(clippy::too_many_arguments)]
 fn pass2_resolve_edges(
     local_graphs: &[LocalGraph],
     symbol_table: &SymbolTable,
     string_pool: &mut StringPool,
     path_aliases: &PathAliases,
     mod_tree_ctx: Option<(&RustWorkspaceModTree, &std::path::Path)>,
+    reexports: &ReexportIndex<'_>,
     resolver_dump_path: Option<&std::path::Path>,
     symbol_skip_set: Option<&FxHashMap<String, FxHashSet<u64>>>,
 ) -> Pass2Output {
@@ -2143,7 +2279,9 @@ fn pass2_resolve_edges(
     // create a fresh `Resolver` *inside* each par_iter worker so each
     // thread owns its own state.
     let mut resolver_for_dump = if dump_enabled {
-        let mut r = Resolver::new(symbol_table).with_path_aliases(path_aliases.clone());
+        let mut r = Resolver::new(symbol_table)
+            .with_path_aliases(path_aliases.clone())
+            .with_reexports(reexports);
         if let Some((mt, root)) = mod_tree_ctx {
             r = r.with_mod_tree(mt, root.to_path_buf());
         }
@@ -2274,8 +2412,9 @@ fn pass2_resolve_edges(
             .par_iter()
             .enumerate()
             .map(|(graph_idx, local_graph)| {
-                let mut resolver =
-                    Resolver::new(symbol_table_ref).with_path_aliases(path_aliases.clone());
+                let mut resolver = Resolver::new(symbol_table_ref)
+                    .with_path_aliases(path_aliases.clone())
+                    .with_reexports(reexports);
                 if let Some((mt, root)) = mod_tree_ctx {
                     resolver = resolver.with_mod_tree(mt, root.to_path_buf());
                 }
@@ -2562,6 +2701,7 @@ mod tests {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         };
         let target = LocalGraph {
             file_path: "src/b.ts".into(),
@@ -2592,6 +2732,7 @@ mod tests {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         };
 
         let mut builder = GraphBuilder::new();
@@ -2782,7 +2923,13 @@ mod tests {
     /// by path, as `build()` sorts them before Pass 1.
     fn table_with_supertypes(graphs: &[LocalGraph]) -> SymbolTable {
         let mut st = pass1_register_nodes(graphs).symbol_table;
-        let declared = pass1_9_supertypes(graphs, &st, &PathAliases::default(), None);
+        let declared = pass1_9_supertypes(
+            graphs,
+            &st,
+            &PathAliases::default(),
+            None,
+            &ReexportIndex::default(),
+        );
         st.build_supertypes(declared);
         st
     }
@@ -3058,6 +3205,7 @@ mod tests {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         };
 
         let mut builder = GraphBuilder::new();
@@ -3153,6 +3301,7 @@ mod tests {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         };
         let mut builder = GraphBuilder::new();
         builder.add_graph(g);
@@ -3226,6 +3375,7 @@ mod tests {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         };
 
         let mut builder = GraphBuilder::new();
@@ -3277,6 +3427,7 @@ mod tests {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         }
     }
 
@@ -3432,6 +3583,7 @@ mod tests {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         };
 
         let mut builder = GraphBuilder::new();
@@ -3553,6 +3705,7 @@ mod tests {
                     sql_refs: None,
                     call_metas: vec![],
                     raw_function_metas: vec![],
+                    export_aliases: None,
                 },
                 LocalGraph {
                     file_path: "src/bar.rs".into(),
@@ -3619,6 +3772,7 @@ mod tests {
                     sql_refs: None,
                     call_metas: vec![],
                     raw_function_metas: vec![],
+                    export_aliases: None,
                 },
                 // iface.rs: defines Interface IThing so the Implementor →
                 // IThing heritage edge dispatches to Implements (not Extends).
@@ -3651,6 +3805,7 @@ mod tests {
                     sql_refs: None,
                     call_metas: vec![],
                     raw_function_metas: vec![],
+                    export_aliases: None,
                 },
             ]
         }
@@ -3814,6 +3969,7 @@ mod tests {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         }
     }
 
@@ -3847,6 +4003,7 @@ mod tests {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         }
     }
 

@@ -203,6 +203,7 @@ impl LanguageProvider for GitHubActionsProvider {
                     sql_refs: None,
                     call_metas: vec![],
                     raw_function_metas: vec![],
+                    export_aliases: None,
                 });
             }
         };
@@ -236,6 +237,7 @@ impl LanguageProvider for GitHubActionsProvider {
                 sql_refs: None,
                 call_metas: vec![],
                 raw_function_metas: vec![],
+                export_aliases: None,
             });
         };
 
@@ -411,6 +413,7 @@ impl LanguageProvider for GitHubActionsProvider {
             sql_refs: None,
             call_metas: vec![],
             raw_function_metas: vec![],
+            export_aliases: None,
         })
     }
 }

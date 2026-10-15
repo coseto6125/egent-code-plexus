@@ -424,6 +424,14 @@ fn python_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Opt
                         segments.reverse();
                         return Some(segments.join("."));
                     }
+                    // A `from` binding may name a submodule, which only the
+                    // resolver can tell from an object.
+                    Some(ImportedBinding::Symbol) if obj.kind() == "identifier" => {
+                        return Some(CallSite::from_receiver(
+                            obj.utf8_text(source).ok()?,
+                            attr_name,
+                        ));
+                    }
                     Some(ImportedBinding::Symbol) => {}
                     None => return Some(CallSite::untyped_member(attr_name)),
                 }

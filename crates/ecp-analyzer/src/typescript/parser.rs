@@ -229,6 +229,9 @@ struct TypeScriptCaptureIndices {
     /// `export * as ns from 'lib'` — captured separately because there's no
     /// `name` identifier; `imported_name` is set to the "*" sentinel.
     import_namespace: Option<u32>,
+    /// `export * from 'lib'` — no name and no alias; emitted as a "*" import
+    /// with `alias: None`.
+    import_star: Option<u32>,
     // Route captures.
     route_method: Option<u32>,
     route_path: Option<u32>,
@@ -287,6 +290,7 @@ impl TypeScriptProvider {
             import_source: query.capture_index_for_name("import.source"),
             import: query.capture_index_for_name("import"),
             import_namespace: query.capture_index_for_name("import.namespace"),
+            import_star: query.capture_index_for_name("import.star"),
             route_method: query.capture_index_for_name("route.method"),
             route_path: query.capture_index_for_name("route.path"),
             route_call: query.capture_index_for_name("route.call"),
@@ -375,6 +379,7 @@ impl LanguageProvider for TypeScriptProvider {
             let mut import_src = None;
             let mut is_import = false;
             let mut is_import_namespace = false;
+            let mut is_import_star = false;
 
             let mut route_method = None;
             let mut route_path = None;
@@ -430,6 +435,8 @@ impl LanguageProvider for TypeScriptProvider {
                     is_import = true;
                 } else if cap_idx == idx.import_namespace {
                     is_import_namespace = true;
+                } else if cap_idx == idx.import_star {
+                    is_import_star = true;
                 } else if cap_idx == idx.route_method {
                     route_method = Some(cap.node);
                 } else if cap_idx == idx.route_path {
@@ -620,7 +627,7 @@ impl LanguageProvider for TypeScriptProvider {
                             alias: alias_str,
                             imported_name: name_str.to_string(),
                             source: src_str.to_string(),
-                            binding_kind: None,
+                            binding_kind: crate::framework_helpers::js_ts_reexport_kind(i_src),
                         });
                     }
                 }
@@ -642,6 +649,19 @@ impl LanguageProvider for TypeScriptProvider {
                             binding_kind: None,
                         });
                     }
+                }
+            }
+
+            if is_import_star {
+                if let Some(src_str) = import_src
+                    .and_then(|s| std::str::from_utf8(&source[s.start_byte()..s.end_byte()]).ok())
+                {
+                    imports.push(RawImport {
+                        alias: None,
+                        imported_name: "*".to_string(),
+                        source: src_str.to_string(),
+                        binding_kind: None,
+                    });
                 }
             }
 
@@ -825,6 +845,13 @@ impl LanguageProvider for TypeScriptProvider {
             file_category,
         );
 
+        let export_aliases =
+            crate::framework_helpers::stamp_js_ts_exports(tree.root_node(), source, &mut nodes);
+        crate::framework_helpers::mark_js_ts_import_bindings(
+            tree.root_node(),
+            source,
+            &mut imports,
+        );
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         crate::framework_helpers::stamp_js_function_owners(&mut nodes);
 
@@ -879,6 +906,7 @@ impl LanguageProvider for TypeScriptProvider {
             sql_refs,
             call_metas,
             raw_function_metas,
+            export_aliases,
         })
     }
 }

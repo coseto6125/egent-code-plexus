@@ -88,6 +88,61 @@ pub struct KotlinProvider {
     indices: KotlinCaptureIndices,
 }
 
+/// tree-sitter-kotlin needs a separator between a class-body member and the
+/// `}` that closes the body: `class A { fun f() {} }` (the last member and the
+/// closer on one line) parses to an ERROR node, which drops the nested
+/// classes and their owners. Overwriting the one blank before such a `}` with
+/// `;` fixes that without moving any byte, so spans stay valid. `None` when no
+/// blank qualifies.
+fn separate_same_line_closers(source: &[u8]) -> Option<Vec<u8>> {
+    let mut patched: Option<Vec<u8>> = None;
+    for (i, &b) in source.iter().enumerate() {
+        if b != b'}' || i == 0 || !matches!(source[i - 1], b' ' | b'\t') {
+            continue;
+        }
+        let needs_separator = source[..i - 1]
+            .iter()
+            .rev()
+            .find(|c| !matches!(c, b' ' | b'\t'))
+            .is_some_and(|c| !matches!(c, b'{' | b';' | b'\n' | b'\r'));
+        if needs_separator {
+            patched.get_or_insert_with(|| source.to_vec())[i - 1] = b';';
+        }
+    }
+    patched
+}
+
+/// `object O { fun a() {} }` on one line parses without an ERROR node, as a
+/// top-level `infix_expression` led by an `object_literal`. A `.kt` file has no
+/// top-level expressions, so that shape marks the same separator misparse.
+fn has_top_level_object_misparse(root: tree_sitter::Node) -> bool {
+    let mut cursor = root.walk();
+    let found = root.named_children(&mut cursor).any(|child| {
+        child.kind() == "infix_expression"
+            && child
+                .named_child(0)
+                .is_some_and(|lhs| lhs.kind() == "object_literal")
+    });
+    found
+}
+
+/// Re-parses `source` with [`separate_same_line_closers`] applied when the
+/// first parse has errors or the error-free object misparse, and keeps the
+/// result only if it parses cleanly. Node offsets index the unpatched
+/// `source` unchanged.
+fn recover_same_line_closers(tree: tree_sitter::Tree, source: &[u8]) -> tree_sitter::Tree {
+    let root = tree.root_node();
+    if !root.has_error() && !has_top_level_object_misparse(root) {
+        return tree;
+    }
+    separate_same_line_closers(source)
+        .and_then(|patched| {
+            PARSER.with(|p| parse_with_budget(&mut p.borrow_mut(), &patched, ParseBudget::DEFAULT))
+        })
+        .filter(|recovered| !recovered.root_node().has_error())
+        .unwrap_or(tree)
+}
+
 /// True when `func` is a Kotlin `fun` declared directly inside a class body
 /// (so its kind should be `Method`, not `Function`). Walks the tree-sitter
 /// parent chain `function_declaration → class_body → class_declaration`.
@@ -248,6 +303,7 @@ impl LanguageProvider for KotlinProvider {
         let tree = PARSER
             .with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
             .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
+        let tree = recover_same_line_closers(tree, source);
 
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
@@ -618,6 +674,7 @@ impl LanguageProvider for KotlinProvider {
             sql_refs: (!raw_sql_refs.is_empty()).then(|| raw_sql_refs.into_boxed_slice()),
             call_metas: vec![],
             raw_function_metas,
+            export_aliases: None,
         })
     }
 }

@@ -2997,9 +2997,11 @@ mod tests {
         let view = OverlayView::build(
             archived,
             &[OverlayFileInput {
+                export_aliases: Vec::new(),
                 rel_path: "src/dirty.rs".into(),
                 symbols: vec![
                     OverlaySymbol {
+                        is_exported: false,
                         name: "b".into(),
                         kind: NodeKind::Function,
                         owner_class: None,
@@ -3010,6 +3012,7 @@ mod tests {
                         calls: vec!["a".into()],
                     },
                     OverlaySymbol {
+                        is_exported: false,
                         name: "virtual".into(),
                         kind: NodeKind::Function,
                         owner_class: None,
@@ -5449,8 +5452,10 @@ mod tests {
             rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
                 .unwrap();
         let dirty = OverlayFileInput {
+            export_aliases: Vec::new(),
             rel_path: "src/dirty.rs".to_string(),
             symbols: vec![OverlaySymbol {
+                is_exported: false,
                 name: "keep_fn".to_string(),
                 kind: NodeKind::Function,
                 owner_class: None,
@@ -5493,6 +5498,7 @@ mod tests {
             rkyv::access::<crate::graph::ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes)
                 .unwrap();
         let symbol = |name: &str, start_line, end_line| OverlaySymbol {
+            is_exported: false,
             name: name.to_string(),
             kind: NodeKind::Function,
             owner_class: None,
@@ -5503,6 +5509,7 @@ mod tests {
             calls: vec![],
         };
         let dirty = OverlayFileInput {
+            export_aliases: Vec::new(),
             rel_path: "src/app.ts".to_string(),
             symbols: vec![symbol("enclosing", 1, 9), symbol("<anonymous:3:2>", 3, 4)],
             imports: vec![],
@@ -5660,8 +5667,10 @@ mod tests {
             fx.build()
         };
         let dirty = || OverlayFileInput {
+            export_aliases: Vec::new(),
             rel_path: "src/dirty.rs".to_string(),
             symbols: vec![OverlaySymbol {
+                is_exported: false,
                 name: "keep_fn".to_string(),
                 kind: NodeKind::Function,
                 owner_class: None,

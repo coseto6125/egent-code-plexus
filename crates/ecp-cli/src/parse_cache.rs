@@ -49,17 +49,28 @@ fn path_key(rel_path: &Path) -> u64 {
     xxhash_rust::xxh3::xxh3_64(rel_path.as_os_str().as_encoded_bytes())
 }
 
+/// Rewritten on every [`ParseCache::open`]; its mtime is the dir's last use.
+pub const LAST_USED_STAMP: &str = ".last-used";
+
 pub struct ParseCache {
     root: PathBuf,
 }
 
 impl ParseCache {
+    /// The `<fp>` dir name this binary reads and writes under `parse_cache/`.
+    pub fn current_dir_name() -> &'static str {
+        fingerprint_dir_name()
+    }
+
     /// Open (and create on demand) the cache at
     /// `<repo_root>/parse_cache/<fp>/`. `repo_root` should be the per-repo
     /// dir under `~/.ecp/` (e.g. `~/.ecp/myrepo__abc123`).
     pub fn open(repo_root: &Path) -> std::io::Result<Self> {
         let root = repo_root.join("parse_cache").join(fingerprint_dir_name());
         std::fs::create_dir_all(&root)?;
+        // A run that only hits the cache writes no entry, so the dir's mtime
+        // would say "idle" while a binary still uses it; gc reads this stamp.
+        let _ = std::fs::write(root.join(LAST_USED_STAMP), b"");
         Ok(Self { root })
     }
 

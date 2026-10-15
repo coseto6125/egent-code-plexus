@@ -1532,6 +1532,7 @@ impl LanguageProvider for PythonProvider {
             sql_refs,
             call_metas,
             raw_function_metas,
+            export_aliases: None,
         })
     }
 }

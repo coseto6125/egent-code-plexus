@@ -51,6 +51,7 @@ fn dirty_files_deterministic_btreemap_order() {
         },
     );
     let df = DirtyFiles {
+        builder_fingerprint: None,
         version: 1,
         entries,
     };

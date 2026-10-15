@@ -13,6 +13,12 @@ pub struct DirtyFiles {
     pub version: u32,
     #[serde(default)]
     pub entries: BTreeMap<String, DirtyEntry>,
+    /// `BUILDER_FINGERPRINT` of the binary that parsed the fragments. A
+    /// manifest without one, or with another, holds parse output of other
+    /// rules: its fragments are stale, and the next refresh re-parses every
+    /// dirty file into a fresh manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builder_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,8 +34,9 @@ pub struct DirtyEntry {
     /// Fragment bin encoding version. `1` (the serde default, so pre-field
     /// manifests parse unchanged) = `Vec<Fragment>` symbol list; `2` =
     /// `FragmentFile` (symbols + imports + per-symbol calls) consumed by the
-    /// query-time `OverlayView`. Readers MUST dispatch on this — decoding a
-    /// v1 bin as v2 is undefined under rkyv.
+    /// query-time `OverlayView`; `3` adds the file's export aliases. Readers
+    /// MUST dispatch on this — decoding a bin as another version is
+    /// undefined under rkyv.
     #[serde(default = "default_fragment_format")]
     pub format: u32,
 }
@@ -40,8 +47,10 @@ fn default_fragment_format() -> u32 {
     1
 }
 
-/// Current fragment bin encoding version written by `overlay_writer`.
+/// Fragment bins with symbols, imports and calls, without export aliases.
 pub const FRAGMENT_FORMAT_V2: u32 = 2;
+/// Current fragment bin encoding version written by `overlay_writer`.
+pub const FRAGMENT_FORMAT_V3: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolRef {
@@ -75,11 +84,18 @@ impl DirtyFiles {
         let bytes = fs::read(path)?;
         serde_json::from_slice(&bytes).map_err(io::Error::other)
     }
+    /// An empty manifest of the running binary.
     pub fn empty() -> Self {
         Self {
             version: 1,
             entries: BTreeMap::new(),
+            builder_fingerprint: Some(crate::registry::BUILDER_FINGERPRINT.to_string()),
         }
+    }
+
+    /// Whether the running binary's parser wrote these fragments.
+    pub fn from_current_builder(&self) -> bool {
+        self.builder_fingerprint.as_deref() == Some(crate::registry::BUILDER_FINGERPRINT)
     }
 }
 

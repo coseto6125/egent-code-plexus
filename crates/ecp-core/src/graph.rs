@@ -1,3 +1,4 @@
+use crate::analyzer::types::BindingKind;
 use crate::pool::StrRef;
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -21,7 +22,13 @@ pub const GRAPH_MAGIC: [u8; 8] = *b"ECP-RS\0\0";
 /// v9: `name_index: Vec<NameIndexEntry>` populated for name lookup.
 /// v10: `kind_offsets` / `kind_node_idx` CSR added for NodeKind lookup.
 /// v11: `node_flags: Vec<u8>` added for dense per-node FunctionMeta flags.
-pub const GRAPH_FORMAT_VERSION: u32 = 12;
+/// v13: per-file import / export facts (`file_imports`, `imports`,
+///     `file_export_aliases`, `export_aliases`, `file_flags`,
+///     `exported_nodes`) and `file_path_order`, so the overlay replays the
+///     import tier's re-export hop and ES-module export rule over a clean
+///     module; `ImportFact::target_file` keeps the module a TS / JS
+///     re-export row resolved to, tsconfig path aliases included.
+pub const GRAPH_FORMAT_VERSION: u32 = 13;
 
 impl std::str::FromStr for NodeKind {
     type Err = ();
@@ -793,6 +800,36 @@ impl From<&ArchivedFileCategory> for FileCategory {
     }
 }
 
+/// One import of a Python / TS / JS file, in source order: its
+/// [`crate::analyzer::types::RawImport`], kept so the overlay can follow a
+/// clean module's re-export without the module's parse.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub struct ImportFact {
+    pub source: StrRef,
+    pub imported_name: StrRef,
+    pub alias: Option<StrRef>,
+    pub binding_kind: Option<BindingKind>,
+    /// The index of the file the index resolved `source` to, for a TS / JS
+    /// row the re-export hop follows: `graph.bin` keeps no tsconfig path
+    /// aliases, so the overlay cannot resolve an aliased specifier itself.
+    /// `None` for every other row and for a specifier naming no indexed file.
+    pub target_file: Option<u32>,
+}
+
+/// One `(exported, local)` pair of a TS / JS file's
+/// [`crate::analyzer::types::RawExportAlias`] list.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub struct ExportAliasFact {
+    pub exported: StrRef,
+    pub local: StrRef,
+}
+
+/// `ZeroCopyGraph.file_flags` bit: the file is an ES module, so another file
+/// imports only its exports ([`crate::analyzer::reexport::lookup_export_in_file`]).
+pub const FILE_FLAG_ES_MODULE: u8 = 1;
+
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct File {
@@ -1108,6 +1145,27 @@ pub struct ZeroCopyGraph {
     /// without FunctionMeta use 0. This keeps hot boolean flag filters out of
     /// the sparse `function_metas` binary-search side table.
     pub node_flags: Vec<u8>,
+
+    // ── Schema v13 additions ─────────────────────────────────────────
+    /// CSR offsets over `files`, length `files.len() + 1`: the imports of
+    /// file `f` are `imports[file_imports[f] .. file_imports[f + 1]]`.
+    /// Recorded for Python / TS / JS files; any other file has an empty
+    /// range.
+    pub file_imports: Vec<u32>,
+    pub imports: Vec<ImportFact>,
+    /// CSR offsets over `files` into `export_aliases`, like `file_imports`:
+    /// a TS / JS file's `LocalGraph.export_aliases` pairs.
+    pub file_export_aliases: Vec<u32>,
+    pub export_aliases: Vec<ExportAliasFact>,
+    /// One byte per file, see [`FILE_FLAG_ES_MODULE`].
+    pub file_flags: Vec<u8>,
+    /// Bit `i % 8` of byte `i / 8` is set when `nodes[i]` is an exported
+    /// declaration of an ES module.
+    pub exported_nodes: Vec<u8>,
+    /// Indices of `files` in `Path` order, for a path lookup without a scan.
+    /// Empty when `files` already is in that order, as every graph the
+    /// builder makes is.
+    pub file_path_order: Vec<u32>,
 }
 
 impl ZeroCopyGraph {
@@ -1200,6 +1258,73 @@ impl ArchivedZeroCopyGraph {
         Some(hits)
     }
 
+    /// Whether the v13 import / export facts are present and consistent
+    /// with `files` and `nodes`. An archive without them cannot tell a file
+    /// with no imports from a file whose imports were never recorded, so
+    /// the loader rejects it and the graph is rebuilt.
+    ///
+    /// O(1): the loader runs it on every load. The per-file accessors
+    /// bounds-check each range they read.
+    pub fn has_module_facts(&self) -> bool {
+        let files = self.files.len();
+        csr_consistent(&self.file_imports, files, self.imports.len())
+            && csr_consistent(&self.file_export_aliases, files, self.export_aliases.len())
+            && self.file_flags.len() == files
+            && self.exported_nodes.len() == self.nodes.len().div_ceil(8)
+            && (self.file_path_order.is_empty() || self.file_path_order.len() == files)
+    }
+
+    /// Index of the file whose path is exactly `path`: O(log files), through
+    /// `file_path_order` when `files` is not in `Path` order.
+    pub fn file_idx_of(&self, path: &str) -> Option<u32> {
+        let pool = &self.string_pool;
+        let key = std::path::Path::new(path);
+        let path_of = |idx: usize| std::path::Path::new(self.files[idx].path.resolve(pool));
+        let found = if self.file_path_order.is_empty() {
+            self.files
+                .binary_search_by(|file| std::path::Path::new(file.path.resolve(pool)).cmp(key))
+                .ok()?
+        } else {
+            let at = self
+                .file_path_order
+                .binary_search_by(|idx| path_of(idx.to_native() as usize).cmp(key))
+                .ok()?;
+            self.file_path_order[at].to_native() as usize
+        };
+        // `Path` order ignores a doubled or trailing `/`.
+        (self.files[found].path.resolve(pool) == path).then_some(found as u32)
+    }
+
+    /// The recorded imports of `files[file_idx]`; `None` without module
+    /// facts.
+    pub fn file_imports(&self, file_idx: u32) -> Option<&[ArchivedImportFact]> {
+        let i = file_idx as usize;
+        let start = self.file_imports.get(i)?.to_native() as usize;
+        let end = self.file_imports.get(i + 1)?.to_native() as usize;
+        self.imports.get(start..end)
+    }
+
+    /// The export alias pairs of `files[file_idx]`; `None` without module
+    /// facts.
+    pub fn file_export_aliases(&self, file_idx: u32) -> Option<&[ArchivedExportAliasFact]> {
+        let i = file_idx as usize;
+        let start = self.file_export_aliases.get(i)?.to_native() as usize;
+        let end = self.file_export_aliases.get(i + 1)?.to_native() as usize;
+        self.export_aliases.get(start..end)
+    }
+
+    pub fn is_es_module_file(&self, file_idx: u32) -> bool {
+        self.file_flags
+            .get(file_idx as usize)
+            .is_some_and(|flags| *flags & FILE_FLAG_ES_MODULE != 0)
+    }
+
+    pub fn is_exported_node(&self, node_idx: u32) -> bool {
+        self.exported_nodes
+            .get(node_idx as usize / 8)
+            .is_some_and(|bits| *bits & (1u8 << (node_idx % 8)) != 0)
+    }
+
     /// Name-index hits in node order, or every node when the index cannot
     /// answer (empty name, empty index). Callers still compare the name.
     pub fn name_candidates(&self, name: &str) -> impl Iterator<Item = u32> + '_ {
@@ -1209,6 +1334,14 @@ impl ArchivedZeroCopyGraph {
         };
         hits.into_iter().chain(all)
     }
+}
+
+/// Whether `offsets` can be a CSR offset table over `len` entries into
+/// `rows` rows: `len + 1` offsets from 0 to `rows`.
+fn csr_consistent(offsets: &[rkyv::Archived<u32>], len: usize, rows: usize) -> bool {
+    offsets.len() == len + 1
+        && offsets.first().map(|o| o.to_native()) == Some(0)
+        && offsets.last().map(|o| o.to_native() as usize) == Some(rows)
 }
 
 /// Empty-but-header-valid graph for synthetic fixtures. New schema fields
@@ -1240,6 +1373,14 @@ impl Default for ZeroCopyGraph {
             kind_offsets: Vec::new(),
             kind_node_idx: Vec::new(),
             node_flags: Vec::new(),
+            // The CSR sentinels of a graph with no files.
+            file_imports: vec![0],
+            imports: Vec::new(),
+            file_export_aliases: vec![0],
+            export_aliases: Vec::new(),
+            file_flags: Vec::new(),
+            exported_nodes: Vec::new(),
+            file_path_order: Vec::new(),
         }
     }
 }

@@ -55,11 +55,20 @@
 //! - Clean files calling a name that only NOW resolves (new symbol breaks a
 //!   previous ambiguity) keep their index-time resolution — clean files are
 //!   never re-resolved at query time.
-//! - Outside the import-member languages, only a `./` / `../` import source
-//!   probes the index's candidate files. Any other source (a tsconfig path
-//!   alias, a package or `crate::` path) narrows by its last path segment,
-//!   unique only, an approximation of the index's alias expansion and module
-//!   tree; a namespace import through such a source binds nothing.
+//! - TS / JS imports run the index's named-import tier through the shared
+//!   rules ([`reexport`]): candidate probing, ES-module export eligibility,
+//!   export aliases and the one-hop barrel re-export, over the archived
+//!   import / export facts of clean files. `graph.bin` keeps no tsconfig
+//!   path aliases, so an aliased specifier of a dirty importer that probes
+//!   no file falls to the segment match below and follows no re-export. A
+//!   clean barrel's re-export rows keep the file the index resolved them to,
+//!   aliased specifiers included, so the hop through a clean barrel follows
+//!   them; an aliased specifier inside a dirty barrel is not resolved.
+//! - Outside the import-member languages and TS / JS, only a `./` / `../`
+//!   import source probes the index's candidate files. Any other source (a
+//!   package or `crate::` path) narrows by its last path segment, unique
+//!   only, an approximation of the index's module tree; a namespace import
+//!   through such a source binds nothing.
 //! - The qualifier tier, the heritage tier and the receiver-typing ladder
 //!   are not replayed. In an import-member language, a qualified callee
 //!   (`Base.setup`) that no import binds stays unresolved, and a wildcard
@@ -70,17 +79,25 @@
 
 use super::import_scope::{ImportScope, Module};
 use crate::analyzer::import_binding::{
-    extension_retry, fqn_language, import_binding, import_member_fallback, retry_name, MemberOwner,
+    extension_retry, fqn_language, import_binding, import_member_fallback, owner_path_agrees,
+    retry_name, DeclaredType, MemberOwner,
+};
+use crate::analyzer::reexport::{
+    self, export_filter_applies, is_ecmascript, ExportAliasTable, Fact, FileImports, ImportRef,
+    ModuleFacts, PyModule, ResolveTarget,
 };
 use crate::analyzer::rust_paths::{
     is_rust_source, is_rust_target_root, rust_module_dir, rust_module_path_base,
 };
 use crate::analyzer::types::{
-    innermost_enclosing, owner_key, CallSite, RawImport, CLOSURE_REFERENCE_REASON,
+    innermost_enclosing, owner_key, CallSite, LocalGraph, RawExportAlias, RawImport,
+    CLOSURE_REFERENCE_REASON,
 };
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// One symbol from a freshly parsed dirty file.
@@ -98,15 +115,46 @@ pub struct OverlaySymbol {
     /// `RawNode.calls` of this symbol: callee short names, some encoded as a
     /// [`CallSite`] (read them through [`CallSite::parse`]).
     pub calls: Vec<String>,
+    /// `RawNode.is_exported`: in an ES module, only an exported declaration
+    /// is another file's import target.
+    pub is_exported: bool,
 }
 
-/// One dirty file's fresh parse, as loaded from a v2 fragment bin.
+/// One dirty file's fresh parse, as loaded from a fragment bin. Its imports
+/// and exports replace the archived ones of the same file, empty included.
 #[derive(Debug, Clone)]
 pub struct OverlayFileInput {
     /// Repo-relative path, same normalization as `File.path` in the graph.
     pub rel_path: String,
     pub symbols: Vec<OverlaySymbol>,
     pub imports: Vec<RawImport>,
+    /// `LocalGraph.export_aliases`, empty when the file has none.
+    pub export_aliases: Vec<RawExportAlias>,
+}
+
+impl From<LocalGraph> for OverlayFileInput {
+    fn from(local: LocalGraph) -> Self {
+        Self {
+            rel_path: local.file_path.to_string_lossy().replace('\\', "/"),
+            symbols: local
+                .nodes
+                .into_iter()
+                .map(|n| OverlaySymbol {
+                    name: n.name,
+                    kind: n.kind,
+                    owner_class: n.owner_class,
+                    start_line: n.span.0 + 1,
+                    end_line: n.span.2 + 1,
+                    start_column: n.span.1,
+                    end_column: n.span.3,
+                    calls: n.calls,
+                    is_exported: n.is_exported,
+                })
+                .collect(),
+            imports: local.imports,
+            export_aliases: local.export_aliases.map(Vec::from).unwrap_or_default(),
+        }
+    }
 }
 
 /// A materialized overlay node. `rel_path` is shared per file via `Arc`.
@@ -180,6 +228,11 @@ impl OverlayView {
     ///   `graph.files` for crate roots, plus one per distinct resolved
     ///   qualified callee of each dirty file for the qualifier-scope
     ///   confidence.
+    ///
+    /// The shared import rules scan nothing: a TS / JS import probes its
+    /// candidate paths by binary search over `graph.files`, reads one
+    /// module's archived import rows per re-export hop, and looks
+    /// declarations up through the name index.
     pub fn build(graph: &ArchivedZeroCopyGraph, files: &[OverlayFileInput]) -> Option<Self> {
         if files.is_empty() {
             return None;
@@ -262,8 +315,8 @@ impl OverlayView {
         let mut out_adj: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
         let mut in_adj: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
         {
-            let mut callables = OverlayNames::new(NodeKind::is_callable);
-            let mut types = OverlayNames::new(NodeKind::is_type);
+            let mut callables = OverlayNames::new(ResolveTarget::Callable);
+            let mut types = OverlayNames::new(ResolveTarget::Type);
             // Base-file meta, filled on first sight: a common callee name has
             // hundreds of candidates spread over far fewer files.
             let mut base_metas: FxHashMap<usize, FileMeta> = FxHashMap::default();
@@ -308,7 +361,7 @@ impl OverlayView {
                 in_adj.entry(edge.target).or_default().push(ei);
             };
 
-            let mut scope = ImportScope::new(graph, files, &dirty_base);
+            let facts = OverlayFacts::new(graph, files, &nodes, &dirty_base);
             let mut virt_cursor = base_len;
             let rust_modules = files
                 .iter()
@@ -363,10 +416,11 @@ impl OverlayView {
                                     caller,
                                     &mut base_metas,
                                     &callables,
+                                    &types,
                                     &nodes,
                                     &replaced,
                                     &dirty_base,
-                                    &mut scope,
+                                    &facts,
                                 )
                             }
                             .or_else(|| {
@@ -381,7 +435,7 @@ impl OverlayView {
                                     &nodes,
                                     &replaced,
                                     &dirty_base,
-                                    &mut scope,
+                                    &facts,
                                 )?;
                                 let target = *construction_targets.entry(ty).or_insert_with(|| {
                                     construction_target(graph, &nodes, &type_ctors, ty)
@@ -746,7 +800,8 @@ fn emit_closure_references(
 /// Overlay symbols of one kind family (`kind`), by name: the Tier-1
 /// same-file and Tier-3 overlay-wide candidates of [`resolve_callee`].
 struct OverlayNames<'a> {
-    kind: fn(NodeKind) -> bool,
+    /// The kind family, as the index's lookups name it.
+    target: ResolveTarget,
     /// (file ordinal, name) → virtual idxs.
     same_file: FxHashMap<(usize, &'a str), Vec<u32>>,
     /// name → (virtual idx, file meta), anywhere in the overlay.
@@ -754,9 +809,9 @@ struct OverlayNames<'a> {
 }
 
 impl<'a> OverlayNames<'a> {
-    fn new(kind: fn(NodeKind) -> bool) -> Self {
+    fn new(target: ResolveTarget) -> Self {
         Self {
-            kind,
+            target,
             same_file: FxHashMap::default(),
             anywhere: FxHashMap::default(),
         }
@@ -770,7 +825,7 @@ impl<'a> OverlayNames<'a> {
         meta: FileMeta,
         first_of_uid: bool,
     ) {
-        if !(self.kind)(node.kind) {
+        if !self.target.kind_predicate()(node.kind) {
             return;
         }
         self.same_file
@@ -786,6 +841,290 @@ impl<'a> OverlayNames<'a> {
     }
 }
 
+type StarModuleCache = FxHashMap<Box<str>, Rc<[Box<str>]>>;
+type NamedImportCache = FxHashMap<(usize, ResolveTarget), FxHashMap<Box<str>, Option<u32>>>;
+
+/// The facts the shared import rules ([`reexport`]) read over the overlay:
+/// the base graph, with each dirty file's fresh parse in place of its
+/// archived facts, empty imports and exports included. Lookups touch only
+/// the files a rule names: the name index, a binary search of the file
+/// paths, and the file's CSR rows.
+struct OverlayFacts<'a> {
+    graph: &'a ArchivedZeroCopyGraph,
+    scope: ImportScope<'a>,
+    nodes: &'a [ViewNode],
+    /// Dirty rel_path → file ordinal.
+    dirty: FxHashMap<&'a str, usize>,
+    /// (file ordinal, name) → the virtual idxs of the first declaration of
+    /// each uid, in source order: the index registers no later twin.
+    declared: FxHashMap<(usize, &'a str), Vec<u32>>,
+    /// Per virtual offset: the fresh parse's `is_exported`.
+    exported: Vec<bool>,
+    /// Per dirty file: whether it is an ES module.
+    es_modules: Vec<bool>,
+    /// Per dirty file: its [`ExportAliasTable`].
+    dirty_aliases: Vec<Option<ExportAliasTable>>,
+    /// Clean file index → its archived [`ExportAliasTable`], built on first
+    /// read: a barrel is read once per name probed through it.
+    clean_aliases: RefCell<FxHashMap<u32, Option<Rc<ExportAliasTable>>>>,
+    /// Module → its resolved `export *` modules, as the index resolves them
+    /// once per module.
+    star_modules: RefCell<StarModuleCache>,
+    /// (dirty file ordinal, kind family) → callee → the named-import tier's
+    /// answer: a file calls one imported name at many sites, and each probe
+    /// walks the specifier's candidate files.
+    named_imports: RefCell<NamedImportCache>,
+}
+
+impl<'a> OverlayFacts<'a> {
+    fn new(
+        graph: &'a ArchivedZeroCopyGraph,
+        files: &'a [OverlayFileInput],
+        nodes: &'a [ViewNode],
+        dirty_base: &'a FxHashSet<u32>,
+    ) -> Self {
+        let base_len = graph.nodes.len() as u32;
+        let mut declared: FxHashMap<(usize, &'a str), Vec<u32>> = FxHashMap::default();
+        let mut exported = Vec::with_capacity(nodes.len());
+        let mut es_modules = Vec::with_capacity(files.len());
+        let mut dirty_aliases = Vec::with_capacity(files.len());
+        let mut seen_uids: FxHashSet<u64> = FxHashSet::default();
+        let mut offset = 0usize;
+        for (file_ord, file) in files.iter().enumerate() {
+            let mut exports_any = false;
+            for symbol in &file.symbols {
+                let node = &nodes[offset];
+                if seen_uids.insert(node.uid) {
+                    declared
+                        .entry((file_ord, node.name.as_str()))
+                        .or_default()
+                        .push(base_len + offset as u32);
+                    exports_any |= symbol.is_exported;
+                }
+                exported.push(symbol.is_exported);
+                offset += 1;
+            }
+            let aliases = ExportAliasTable::build(alias_pairs(file));
+            es_modules.push(reexport::is_es_module(
+                Language::from_normalized_path(&file.rel_path),
+                &file.rel_path,
+                exports_any,
+                aliases.is_some(),
+            ));
+            dirty_aliases.push(aliases);
+        }
+        Self {
+            graph,
+            scope: ImportScope::new(graph, files, dirty_base),
+            nodes,
+            dirty: files
+                .iter()
+                .enumerate()
+                .map(|(file_ord, file)| (file.rel_path.as_str(), file_ord))
+                .collect(),
+            declared,
+            exported,
+            es_modules,
+            dirty_aliases,
+            clean_aliases: RefCell::default(),
+            star_modules: RefCell::default(),
+            named_imports: RefCell::default(),
+        }
+    }
+
+    fn base_len(&self) -> u32 {
+        self.graph.nodes.len() as u32
+    }
+
+    /// [`reexport::named_import`] for `callee` of the dirty file `file_ord`,
+    /// memoized per file and kind family.
+    fn named_import(
+        &self,
+        file_ord: usize,
+        imports: &[RawImport],
+        callee: &str,
+        target: ResolveTarget,
+    ) -> Option<u32> {
+        if let Some(&hit) = self
+            .named_imports
+            .borrow()
+            .get(&(file_ord, target))
+            .and_then(|hits| hits.get(callee))
+        {
+            return hit;
+        }
+        let importer = self.scope.dirty()[file_ord].rel_path.as_str();
+        // The index's `may_reach` gate only skips a name that no declaration
+        // and no alias carries, which no re-export can bind: a pre-filter,
+        // not a rule, so following every miss here gives the same answer.
+        let hit = reexport::named_import(
+            self,
+            importer,
+            imports.iter().map(ImportRef::from),
+            callee,
+            target,
+            |_| true,
+        )
+        .map(|hit| hit.decl);
+        self.named_imports
+            .borrow_mut()
+            .entry((file_ord, target))
+            .or_default()
+            .insert(callee.into(), hit);
+        hit
+    }
+}
+
+fn alias_pairs<'f>(
+    file: &'f OverlayFileInput,
+) -> impl Iterator<Item = (&'f str, &'f str)> + Clone + 'f {
+    file.export_aliases
+        .iter()
+        .map(|alias| (&*alias.exported, &*alias.local))
+}
+
+impl<'a> ModuleFacts for OverlayFacts<'a> {
+    type Path = &'a str;
+
+    fn has_file(&self, file: &str) -> bool {
+        self.dirty.contains_key(file) || self.graph.file_idx_of(file).is_some()
+    }
+
+    fn has_module_name(&self, language: Language, name: &str) -> bool {
+        self.scope.has_module_name(language, name)
+    }
+
+    fn declares(&self, file: &str, name: &str) -> bool {
+        !self.decls_in_file(file, name).is_empty()
+    }
+
+    fn decls_in_file(&self, file: &str, name: &str) -> Vec<(u32, NodeKind)> {
+        if let Some(&file_ord) = self.dirty.get(file) {
+            let base_len = self.base_len();
+            return self
+                .declared
+                .get(&(file_ord, name))
+                .map_or_else(Vec::new, |virts| {
+                    virts
+                        .iter()
+                        .map(|&virt| (virt, self.nodes[(virt - base_len) as usize].kind))
+                        .collect()
+                });
+        }
+        let Some(file_idx) = self.graph.file_idx_of(file) else {
+            return Vec::new();
+        };
+        // Only parser-made kinds: the index's file lookups never see the
+        // builder's File, Route or EntryPoint nodes.
+        let mut decls: Vec<(u32, NodeKind)> = self
+            .graph
+            .nodes_by_name(name)
+            .filter(|&idx| self.graph.nodes[idx as usize].file_idx.to_native() == file_idx)
+            .map(|idx| (idx, NodeKind::from(&self.graph.nodes[idx as usize].kind)))
+            .filter(|&(_, kind)| fragment_emits(kind))
+            .collect();
+        // The name index is hash-sorted; the index's file lookups keep source
+        // order, which node order is within one file.
+        decls.sort_unstable_by_key(|&(idx, _)| idx);
+        decls
+    }
+
+    fn is_exported(&self, decl: u32) -> bool {
+        match decl.checked_sub(self.base_len()) {
+            Some(offset) => self.exported[offset as usize],
+            None => self.graph.is_exported_node(decl),
+        }
+    }
+
+    fn is_es_module(&self, file: &str) -> bool {
+        match self.dirty.get(file) {
+            Some(&file_ord) => self.es_modules[file_ord],
+            None => self
+                .graph
+                .file_idx_of(file)
+                .is_some_and(|file_idx| self.graph.is_es_module_file(file_idx)),
+        }
+    }
+
+    fn export_aliases(&self, file: &str) -> Option<Fact<'_, ExportAliasTable>> {
+        if !export_filter_applies(file) {
+            return None;
+        }
+        if let Some(&file_ord) = self.dirty.get(file) {
+            return self.dirty_aliases[file_ord].as_ref().map(Fact::Borrowed);
+        }
+        let file_idx = self.graph.file_idx_of(file)?;
+        if let Some(table) = self.clean_aliases.borrow().get(&file_idx) {
+            return table.clone().map(Fact::Shared);
+        }
+        let pool = self.graph.string_pool.as_slice();
+        let table = self
+            .graph
+            .file_export_aliases(file_idx)
+            .and_then(|rows| {
+                ExportAliasTable::build(
+                    rows.iter()
+                        .map(|row| (row.exported.resolve(pool), row.local.resolve(pool))),
+                )
+            })
+            .map(Rc::new);
+        self.clean_aliases
+            .borrow_mut()
+            .insert(file_idx, table.clone());
+        table.map(Fact::Shared)
+    }
+
+    fn imports(&self, file: &str) -> Option<FileImports<'_>> {
+        if let Some(&file_ord) = self.dirty.get(file) {
+            return Some(FileImports::Parsed(&self.scope.dirty()[file_ord].imports));
+        }
+        let rows = self.graph.file_imports(self.graph.file_idx_of(file)?)?;
+        Some(FileImports::Archived {
+            rows,
+            pool: self.graph.string_pool.as_slice(),
+            files: self.graph.files.as_slice(),
+        })
+    }
+
+    fn star_modules(&self, module: &str) -> Fact<'_, [Box<str>]> {
+        if let Some(stars) = self.star_modules.borrow().get(module) {
+            return Fact::Shared(Rc::clone(stars));
+        }
+        let stars: Rc<[Box<str>]> = match self.imports(module) {
+            Some(imports) => reexport::resolve_star_modules(self, module, imports.iter()).into(),
+            None => Rc::from(Vec::new()),
+        };
+        self.star_modules
+            .borrow_mut()
+            .insert(module.into(), Rc::clone(&stars));
+        Fact::Shared(stars)
+    }
+
+    fn python_module(&self, importer: &str, specifier: &str) -> PyModule<&'a str> {
+        match self.scope.module(importer, specifier, Language::Python) {
+            Module::Unique(file) => PyModule::Unique(file),
+            Module::Ambiguous => PyModule::Ambiguous,
+            Module::Missing | Module::Namespace(_) => PyModule::Missing,
+        }
+    }
+
+    fn for_each_candidate(
+        &self,
+        importer: &str,
+        specifier: &str,
+        visit: &mut dyn FnMut(&str) -> bool,
+    ) {
+        // `graph.bin` keeps no tsconfig path aliases: an aliased specifier
+        // probes only its literal candidates here.
+        reexport::for_each_specifier_candidate(
+            std::path::Path::new(importer),
+            specifier,
+            |_| {},
+            visit,
+        );
+    }
+}
+
 /// Mirror of index-time Pass-2 `Calls` resolution, narrowed to the inputs
 /// available at query time, over the kind family of `names`. Returns the
 /// merged-space target index.
@@ -793,10 +1132,16 @@ impl<'a> OverlayNames<'a> {
 /// Method eligibility is a post-filter, like index-time `lookup_call_in_file`:
 /// removing free functions before uniqueness checks would invent a winner.
 ///
+/// A Python call on a from-imported submodule binds first, as in the index
+/// ([`reexport::python_submodule_member`]).
 /// Tier 1 — same file: the dirty file was FULLY re-parsed, so its own
 /// callable set is authoritative. Unique match → confidence 1.0.
 /// Tier 2 — import-scoped. In an [`import_member_fallback`] language,
-/// [`bind_import`] replays the index's import-member tier; elsewhere
+/// [`bind_import`] replays the index's import-member tier, a Python package
+/// re-export included. A TS / JS caller takes the index's named-import tier
+/// itself ([`reexport::named_import`]: export eligibility, export aliases,
+/// default imports and the one-hop barrel re-export); a non-relative
+/// specifier it misses keeps the segment match below. Elsewhere
 /// [`import_binding`] maps the callee to the name the import declares, as the
 /// index's named-import tier does. A relative source (`./`, `../`) probes the
 /// index's candidate files in its order ([`relative_module_rank`]) and the
@@ -807,7 +1152,9 @@ impl<'a> OverlayNames<'a> {
 /// plus all overlay callables, through the index-time candidate filter
 /// [`pick_global`] (language and vendor barriers, unique only). ≥2
 /// remaining → suppressed, matching `DecisionTier::AmbiguousGlobal` (an
-/// invented edge is worse than a missing one). Unique → 0.7.
+/// invented edge is worse than a missing one). A TS / JS import naming the
+/// ES module of a private pick hides it ([`reexport::import_hides`]).
+/// Unique → 0.7.
 #[allow(clippy::too_many_arguments)]
 fn resolve_callee<'s>(
     graph: &ArchivedZeroCopyGraph,
@@ -817,10 +1164,11 @@ fn resolve_callee<'s>(
     caller: FileMeta,
     base_metas: &mut FxHashMap<usize, FileMeta>,
     names: &OverlayNames<'_>,
+    types: &OverlayNames<'_>,
     nodes: &[ViewNode],
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
-    scope: &mut ImportScope<'s>,
+    facts: &OverlayFacts<'_>,
 ) -> Option<(u32, f32)> {
     let callee = site.name();
     let accepts = |idx: u32| {
@@ -830,6 +1178,20 @@ fn resolve_callee<'s>(
                 None => NodeKind::from(&graph.nodes[idx as usize].kind) == NodeKind::Method,
             }
     };
+    let importer = facts.scope.dirty()[file_ord].rel_path.as_str();
+    if let CallSite::FromReceiver { receiver, member } = site {
+        if caller.language == Language::Python {
+            if let Some((target, _)) = reexport::python_submodule_member(
+                facts,
+                importer,
+                (receiver, member),
+                imports.iter().map(ImportRef::from),
+                names.target,
+            ) {
+                return accepts(target).then_some((target, CONF_IMPORT_SCOPED));
+            }
+        }
+    }
     // Tier 1: same-file.
     if let Some(virts) = names.same_file.get(&(file_ord, callee)) {
         if virts.len() == 1 {
@@ -843,7 +1205,8 @@ fn resolve_callee<'s>(
     // The index binds no import for an untyped member call, and in these
     // languages has no path-segment import tier either.
     let member_policy = import_member_fallback(caller.language);
-    if member_policy && !imports.is_empty() && !matches!(site, CallSite::UntypedMember(_)) {
+    let binds_imports = !imports.is_empty() && !matches!(site, CallSite::UntypedMember(_));
+    if member_policy && binds_imports {
         match bind_import(
             graph,
             callee,
@@ -851,9 +1214,10 @@ fn resolve_callee<'s>(
             imports,
             caller.language,
             names,
+            types,
             nodes,
             dirty_base,
-            scope,
+            facts,
         ) {
             Some(ImportBinding::Resolved(hit)) => return hit,
             Some(ImportBinding::Fallback(name)) => {
@@ -865,10 +1229,11 @@ fn resolve_callee<'s>(
                     caller,
                     base_metas,
                     names,
+                    types,
                     nodes,
                     replaced,
                     dirty_base,
-                    scope,
+                    facts,
                 );
             }
             Some(ImportBinding::Extension(member)) => {
@@ -880,14 +1245,22 @@ fn resolve_callee<'s>(
                     caller,
                     base_metas,
                     names,
+                    types,
                     nodes,
                     replaced,
                     dirty_base,
-                    scope,
+                    facts,
                 );
                 return hit.filter(|&(idx, _)| is_top_level(graph, nodes, idx));
             }
             None => {}
+        }
+    }
+    let ecmascript = is_ecmascript(caller.language);
+    if ecmascript && binds_imports {
+        if let Some(decl) = facts.named_import(file_ord, imports, callee, names.target) {
+            debug_assert!(!replaced.contains_key(&decl));
+            return accepts(decl).then_some((decl, CONF_IMPORT_SCOPED));
         }
     }
 
@@ -898,7 +1271,7 @@ fn resolve_callee<'s>(
         graph
             .nodes_by_name(name)
             .filter(|&idx| {
-                (names.kind)(NodeKind::from(&graph.nodes[idx as usize].kind))
+                names.target.kind_predicate()(NodeKind::from(&graph.nodes[idx as usize].kind))
                     && !dirty_base.contains(&idx)
             })
             .collect()
@@ -910,7 +1283,6 @@ fn resolve_callee<'s>(
     // Tier 2: import-scoped, the index's named-import tier: every import
     // binding the callee, in order, until one's module declares the name.
     let segment_imports: &[RawImport] = if member_policy { &[] } else { imports };
-    let importer = scope.dirty()[file_ord].rel_path.as_str();
     let base_len = graph.nodes.len() as u32;
     let base_path = |idx: u32| {
         graph
@@ -920,6 +1292,10 @@ fn resolve_callee<'s>(
     };
     for (import, declared) in segment_imports
         .iter()
+        // A TS / JS relative import was probed exactly above. `graph.bin`
+        // keeps no tsconfig paths, so an aliased or package specifier keeps
+        // the segment approximation.
+        .filter(|i| !ecmascript || !is_relative_specifier(&i.source))
         .filter_map(|i| Some((i, import_binding(i, callee, caller.language)?.name)))
     {
         let base_declared;
@@ -944,18 +1320,20 @@ fn resolve_callee<'s>(
                 .iter()
                 .map(|&(virt, _)| (virt, Some(&*nodes[(virt - base_len) as usize].rel_path))),
         );
-        let hit = match relative_module_base(importer, &import.source) {
+        let hit = match is_relative_specifier(&import.source) {
             // The first probed file declaring the name, then its first
             // declaration: base and virtual indices both follow source order
             // within a file, and one file is either clean or dirty.
-            Some(module) => scoped
-                .filter_map(|(idx, path)| Some((relative_module_rank(&module, path?)?, idx)))
+            true => scoped
+                .filter_map(|(idx, path)| {
+                    Some((relative_module_rank(importer, &import.source, path?)?, idx))
+                })
                 .min()
                 .map(|(_, idx)| idx),
             // A namespace import of a package path names a module the
             // segment match can only guess; the index probes it as written.
-            None if import.imported_name == "*" => None,
-            None => {
+            false if import.imported_name == "*" => None,
+            false => {
                 let segment = import_last_segment(&import.source);
                 let mut matching = scoped.filter(|&(_, path)| {
                     !segment.is_empty() && path.is_some_and(|p| path_matches_segment(p, segment))
@@ -993,6 +1371,21 @@ fn resolve_callee<'s>(
         return None;
     };
     debug_assert!(!replaced.contains_key(&target));
+    let decl_file = match target.checked_sub(base_len) {
+        Some(offset) => Some(&*nodes[offset as usize].rel_path),
+        None => base_path(target),
+    };
+    if decl_file.is_some_and(|file| {
+        reexport::import_hides(
+            facts,
+            importer,
+            callee,
+            imports.iter().map(ImportRef::from),
+            file,
+        )
+    }) {
+        return None;
+    }
     accepts(target).then_some((target, CONF_GLOBAL_UNIQUE))
 }
 
@@ -1226,7 +1619,7 @@ fn resolve_rust_module_callee(
     let base = graph.nodes_by_name(member).filter(|&idx| {
         let node = &graph.nodes[idx as usize];
         !dirty_base.contains(&idx)
-            && (names.kind)(NodeKind::from(&node.kind))
+            && names.target.kind_predicate()(NodeKind::from(&node.kind))
             && NodeKind::from(&node.kind) != NodeKind::Method
             && graph.files[node.file_idx.to_native() as usize]
                 .path
@@ -1276,7 +1669,7 @@ fn resolve_constructed_type<'s>(
     nodes: &[ViewNode],
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
-    scope: &mut ImportScope<'s>,
+    facts: &OverlayFacts<'_>,
 ) -> Option<(u32, f32)> {
     let (type_path, last_segment_fallback) = site.constructed_type(caller.language)?;
     let type_name = type_path
@@ -1315,10 +1708,11 @@ fn resolve_constructed_type<'s>(
             caller,
             base_metas,
             types,
+            types,
             nodes,
             replaced,
             dirty_base,
-            scope,
+            facts,
         )
     };
     let (ty, confidence) = if whole_path {
@@ -1387,12 +1781,13 @@ fn bind_import<'s>(
     imports: &'s [RawImport],
     language: Language,
     names: &OverlayNames<'_>,
+    types: &OverlayNames<'_>,
     nodes: &[ViewNode],
     dirty_base: &FxHashSet<u32>,
-    scope: &mut ImportScope<'s>,
+    facts: &OverlayFacts<'_>,
 ) -> Option<ImportBinding<'s>> {
-    let source_file = scope.dirty()[file_ord].rel_path.as_str();
-    let pass = |wildcard: bool, scope: &mut ImportScope<'s>| {
+    let source_file = facts.scope.dirty()[file_ord].rel_path.as_str();
+    let pass = |wildcard: bool| {
         import_member_hit(
             graph,
             callee,
@@ -1400,13 +1795,14 @@ fn bind_import<'s>(
             imports,
             language,
             names,
+            types,
             nodes,
             dirty_base,
-            scope,
+            facts,
             wildcard,
         )
     };
-    let explicit = pass(false, scope);
+    let explicit = pass(false);
     if let MemberHit::Bound(target) = explicit {
         return Some(ImportBinding::Resolved(Some((target, CONF_IMPORT_SCOPED))));
     }
@@ -1421,7 +1817,7 @@ fn bind_import<'s>(
         bound = true;
         retry = retry_name(import, binding.name, callee, language);
         extension = extension.or(extension_retry(&binding, language));
-        external = external && scope.is_external(source_file, import, language);
+        external = external && facts.scope.is_external(source_file, import, language);
     }
     if !bound {
         return None;
@@ -1430,7 +1826,7 @@ fn bind_import<'s>(
         return Some(extension.map_or(ImportBinding::Resolved(None), ImportBinding::Extension));
     }
     if matches!(explicit, MemberHit::Unbound { bound: false }) && fqn_language(language) {
-        if let MemberHit::Bound(target) = pass(true, scope) {
+        if let MemberHit::Bound(target) = pass(true) {
             return Some(ImportBinding::Resolved(Some((target, CONF_IMPORT_SCOPED))));
         }
     }
@@ -1447,16 +1843,17 @@ fn bind_import<'s>(
 /// first hit in source order; in a fully qualified language two different
 /// hits are no hit.
 #[allow(clippy::too_many_arguments)]
-fn import_member_hit<'s>(
+fn import_member_hit(
     graph: &ArchivedZeroCopyGraph,
-    callee: &'s str,
-    source_file: &'s str,
-    imports: &'s [RawImport],
+    callee: &str,
+    source_file: &str,
+    imports: &[RawImport],
     language: Language,
     names: &OverlayNames<'_>,
+    types: &OverlayNames<'_>,
     nodes: &[ViewNode],
     dirty_base: &FxHashSet<u32>,
-    scope: &mut ImportScope<'s>,
+    facts: &OverlayFacts<'_>,
     wildcard: bool,
 ) -> MemberHit {
     let mut found = None;
@@ -1469,6 +1866,15 @@ fn import_member_hit<'s>(
         };
         bound = true;
         let in_file = |file: &str| {
+            let owner_agrees = match binding.owner {
+                MemberOwner::Type(path) => {
+                    owner_path_agrees_in_file(graph, types, nodes, dirty_base, file, path)
+                }
+                MemberOwner::Any | MemberOwner::TopLevel => true,
+            };
+            if !owner_agrees {
+                return None;
+            }
             member_in_file(
                 graph,
                 names,
@@ -1479,8 +1885,10 @@ fn import_member_hit<'s>(
                 binding.owner,
             )
         };
-        let hit = match scope.module(source_file, &import.source, language) {
-            Module::Unique(file) => in_file(file),
+        let hit = match facts.scope.module(source_file, &import.source, language) {
+            Module::Unique(file) => in_file(file).or_else(|| {
+                reexport::python_import_reexport(facts, language, file, binding.name, names.target)
+            }),
             Module::Namespace(files) => {
                 let mut hits = files.iter().filter_map(|&file| in_file(file));
                 hits.next().filter(|_| hits.next().is_none())
@@ -1515,6 +1923,58 @@ fn is_top_level(graph: &ArchivedZeroCopyGraph, nodes: &[ViewNode], idx: u32) -> 
     owner.and_then(owner_key).is_none()
 }
 
+/// The index's `SymbolTable::owner_path_agrees`: [`owner_path_agrees`] over
+/// the types `file` declares. A dirty file answers from its fresh parse only,
+/// first declaration of each uid, as the index tombstones the rest.
+fn owner_path_agrees_in_file(
+    graph: &ArchivedZeroCopyGraph,
+    types: &OverlayNames<'_>,
+    nodes: &[ViewNode],
+    dirty_base: &FxHashSet<u32>,
+    file: &str,
+    path: &str,
+) -> bool {
+    let base_len = graph.nodes.len() as u32;
+    owner_path_agrees(
+        path,
+        |name| {
+            let base = graph
+                .nodes_by_name(name)
+                .filter(|&idx| {
+                    let node = &graph.nodes[idx as usize];
+                    NodeKind::from(&node.kind).is_type()
+                        && !dirty_base.contains(&idx)
+                        && graph
+                            .files
+                            .get(node.file_idx.to_native() as usize)
+                            .is_some_and(|f| f.path.resolve(&graph.string_pool) == file)
+                })
+                .map(|idx| {
+                    owner_key(
+                        graph.nodes[idx as usize]
+                            .owner_class
+                            .resolve(&graph.string_pool),
+                    )
+                });
+            let fresh = types
+                .anywhere
+                .get(name)
+                .into_iter()
+                .flatten()
+                .map(|&(virt, _)| &nodes[(virt - base_len) as usize])
+                .filter(|node| node.rel_path.as_ref() == file)
+                .map(|node| node.owner_class.as_deref().and_then(owner_key));
+            let mut owners = base.chain(fresh);
+            match (owners.next(), owners.next()) {
+                (None, _) => DeclaredType::Undeclared,
+                (Some(_), Some(_)) => DeclaredType::Ambiguous,
+                (Some(owner), None) => DeclaredType::Unique(owner),
+            }
+        },
+        owner_key,
+    )
+}
+
 /// The index's `lookup_member_in_file` over the kind family of `names`: the
 /// first `member` declared in `file` whose owner satisfies `owner`. A dirty
 /// file answers from its fresh parse only.
@@ -1539,7 +1999,7 @@ fn member_in_file(
         .nodes_by_name(member)
         .filter(|&idx| {
             let node = &graph.nodes[idx as usize];
-            (names.kind)(NodeKind::from(&node.kind))
+            names.target.kind_predicate()(NodeKind::from(&node.kind))
                 && !dirty_base.contains(&idx)
                 && graph
                     .files
@@ -1561,79 +2021,32 @@ fn member_in_file(
         })
 }
 
-/// The resolver's `EXT_CANDIDATES` and `INDEX_SUFFIXES`, in its probe order.
-/// A copy: ecp-analyzer depends on this crate, not the reverse. Keep in sync.
-const MODULE_EXTENSIONS: &[&str] = &[
-    ".ts", ".tsx", ".jsx", ".js", ".mjs", ".cjs", ".py", ".pyi", ".rs", ".go", ".java", ".kt",
-    ".rb", ".php", ".cs", ".swift", ".dart", ".sol", ".sql",
-];
-const MODULE_INDEX_SUFFIXES: &[&str] = &[
-    "/index.ts",
-    "/index.tsx",
-    "/index.js",
-    "/index.jsx",
-    "/__init__.py",
-    "/mod.rs",
-    "/lib.rs",
-    "/main.rs",
-];
-
-/// The repo-relative module path a `./` or `../` import `specifier` names
-/// from `importer`, built as the resolver's `for_each_specifier_candidate`
-/// builds it (no `..` collapsing inside the rest). `None` for any other
-/// specifier. The resolver's verbatim first probe is skipped: no
-/// repo-relative path starts with `./` or `../`.
-fn relative_module_base(importer: &str, specifier: &str) -> Option<String> {
-    let dir = std::path::Path::new(importer)
-        .parent()
-        .unwrap_or(std::path::Path::new(""));
-    let base = if let Some(rest) = specifier.strip_prefix("./") {
-        dir.join(rest)
-    } else if specifier.starts_with("../") {
-        let mut parent = dir;
-        let mut rest = specifier;
-        while let Some(tail) = rest.strip_prefix("../") {
-            parent = parent.parent().unwrap_or(std::path::Path::new(""));
-            rest = tail;
-        }
-        parent.join(rest)
-    } else {
-        return None;
-    };
-    let base = base.to_string_lossy().replace('\\', "/");
-    Some(
-        base.trim_start_matches("./")
-            .trim_end_matches('/')
-            .to_string(),
-    )
+/// Whether `specifier` is a `./` or `../` import: the overlay probes the
+/// index's candidate files only for these.
+fn is_relative_specifier(specifier: &str) -> bool {
+    specifier.starts_with("./") || specifier.starts_with("../")
 }
 
-/// Where `path` falls in the resolver's probe order for `module`: the bare
-/// path, then each extension, then each index suffix. `None` when the
-/// resolver never probes it. Ranking a candidate's own path avoids building
-/// the probe list.
-fn relative_module_rank(module: &str, path: &str) -> Option<usize> {
-    let rest = path.strip_prefix(module)?;
-    if rest.is_empty() {
-        return Some(0);
-    }
-    let index_suffix = |suffix: &&str| {
-        if module.is_empty() {
-            suffix.trim_start_matches('/') == rest
-        } else {
-            *suffix == rest
-        }
-    };
-    MODULE_EXTENSIONS
-        .iter()
-        .position(|ext| *ext == rest)
-        .or_else(|| {
-            MODULE_INDEX_SUFFIXES
-                .iter()
-                .position(index_suffix)
-                .map(|i| MODULE_EXTENSIONS.len() + i)
-        })
-        .map(|i| i + 1)
+/// Where `path` falls in the index's probe order for `specifier` of
+/// `importer` ([`reexport::for_each_specifier_candidate`], no path aliases).
+/// `None` when the index never probes it.
+fn relative_module_rank(importer: &str, specifier: &str, path: &str) -> Option<usize> {
+    let mut rank = 0;
+    let mut found = None;
+    reexport::for_each_specifier_candidate(
+        std::path::Path::new(importer),
+        specifier,
+        |_| {},
+        |candidate| {
+            if candidate == path {
+                found = Some(rank);
+                return false;
+            }
+            rank += 1;
+            true
+        },
+    );
+    found
 }
 
 /// Last path-ish segment of an import source across language conventions:
@@ -1705,6 +2118,7 @@ mod tests {
 
     fn sym(name: &str, calls: &[&str]) -> OverlaySymbol {
         OverlaySymbol {
+            is_exported: false,
             name: name.to_string(),
             kind: NodeKind::Function,
             owner_class: None,
@@ -1729,6 +2143,7 @@ mod tests {
         closure.start_line = 6;
         closure.end_line = 7;
         let file = OverlayFileInput {
+            export_aliases: Vec::new(),
             rel_path: "App.java".into(),
             symbols: vec![parent, overload, closure.clone(), closure],
             imports: vec![],
@@ -1757,6 +2172,7 @@ mod tests {
         closure.start_line = 6;
         closure.end_line = 7;
         let file = OverlayFileInput {
+            export_aliases: Vec::new(),
             rel_path: "App.java".into(),
             symbols: vec![parent, overload, closure],
             imports: vec![],
@@ -1773,6 +2189,7 @@ mod tests {
 
     fn dirty_input() -> OverlayFileInput {
         OverlayFileInput {
+            export_aliases: Vec::new(),
             rel_path: "src/dirty.rs".to_string(),
             symbols: vec![
                 sym(
@@ -1913,6 +2330,7 @@ mod tests {
         // once dirty-base copies are excluded; target must be keep_fn's
         // VIRTUAL index, never the stale base node.
         let other_dirty = OverlayFileInput {
+            export_aliases: Vec::new(),
             rel_path: "src/clean.rs".to_string(),
             symbols: vec![sym("caller_two", &["keep_fn"])],
             imports: vec![],
@@ -1944,6 +2362,7 @@ mod tests {
 
     fn search_input(rel_path: &str) -> OverlayFileInput {
         OverlayFileInput {
+            export_aliases: Vec::new(),
             rel_path: rel_path.to_string(),
             symbols: vec![sym("search", &["scan_range", "go_only"])],
             imports: vec![],
@@ -1991,6 +2410,7 @@ mod tests {
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let untyped_member = CallSite::untyped_member("Widget");
         let app = OverlayFileInput {
+            export_aliases: Vec::new(),
             rel_path: "src/app.py".to_string(),
             symbols: vec![
                 sym("make", &["Widget", "Gadget"]),
@@ -2020,6 +2440,7 @@ mod tests {
         let bytes = construction_graph_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let ctor = |line: u32| OverlaySymbol {
+            is_exported: false,
             name: "Multi".to_string(),
             kind: NodeKind::Constructor,
             owner_class: Some("Multi".to_string()),
@@ -2030,9 +2451,11 @@ mod tests {
             calls: vec![],
         };
         let multi = OverlayFileInput {
+            export_aliases: Vec::new(),
             rel_path: "src/Multi.java".to_string(),
             symbols: vec![
                 OverlaySymbol {
+                    is_exported: false,
                     kind: NodeKind::Class,
                     owner_class: None,
                     end_line: 9,
@@ -2048,6 +2471,7 @@ mod tests {
         // The Java extractor encodes `new Multi(1)` as a construction.
         let new_multi = CallSite::construct("Multi");
         let app = OverlayFileInput {
+            export_aliases: Vec::new(),
             rel_path: "src/App.java".to_string(),
             symbols: vec![sym("makeMulti", &[new_multi.as_str()])],
             imports: vec![],
@@ -2087,6 +2511,7 @@ mod tests {
         let bytes = two_class_graph_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let app = OverlayFileInput {
+            export_aliases: Vec::new(),
             rel_path: "src/app.py".to_string(),
             symbols: vec![sym("make", &["Beta"])],
             imports: vec![],
@@ -2108,6 +2533,7 @@ mod tests {
         let bytes = construction_graph_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let symbol = |name: &str, kind, owner: &str, line: u32| OverlaySymbol {
+            is_exported: false,
             name: name.to_string(),
             kind,
             owner_class: Some(owner.to_string()),
@@ -2118,6 +2544,7 @@ mod tests {
             calls: vec![],
         };
         let outer = OverlayFileInput {
+            export_aliases: Vec::new(),
             rel_path: "src/outer.ts".to_string(),
             symbols: vec![
                 symbol("Inner", NodeKind::Class, "Outer<T>", 2),
@@ -2127,6 +2554,7 @@ mod tests {
         };
         let new_inner = CallSite::construct("Inner");
         let app = OverlayFileInput {
+            export_aliases: Vec::new(),
             rel_path: "src/app.ts".to_string(),
             symbols: vec![sym("makeInner", &[new_inner.as_str()])],
             imports: vec![],
@@ -2179,29 +2607,28 @@ mod tests {
         }
     }
 
-    /// The resolver's relative candidates: `./` and `../` from the
-    /// importer's directory, nothing for any other specifier.
+    /// The index's relative candidates: `./` and `../` from the importer's
+    /// directory, nothing for any other specifier.
     #[test]
-    fn test_relative_module_base_relative_specifiers_join_importer_dir() {
+    fn test_relative_module_rank_relative_specifiers_join_importer_dir() {
         let cases = [
-            ("src/b.ts", "./a", Some("src/a")),
-            ("src/b.ts", "./a.ts", Some("src/a.ts")),
-            ("src/b.ts", "./lib/", Some("src/lib")),
-            ("src/x/b.ts", "../a", Some("src/a")),
-            ("src/x/b.ts", "../../a", Some("a")),
-            ("b.ts", "../a", Some("a")),
-            ("b.ts", "./a", Some("a")),
-            ("src/b.ts", "a", None),
-            ("src/b.ts", "@/a", None),
-            ("src/b.rs", "crate::a", None),
-            ("src/b.py", ".a", None),
+            ("src/b.ts", "./a", "src/a.ts"),
+            ("src/b.ts", "./a.ts", "src/a.ts"),
+            ("src/b.ts", "./lib/", "src/lib/index.ts"),
+            ("src/x/b.ts", "../a", "src/a.ts"),
+            ("src/x/b.ts", "../../a", "a.ts"),
+            ("b.ts", "../a", "a.ts"),
+            ("b.ts", "./a", "a.ts"),
         ];
-        for (importer, specifier, expected) in cases {
-            assert_eq!(
-                relative_module_base(importer, specifier).as_deref(),
-                expected,
-                "{importer} {specifier}"
+        for (importer, specifier, path) in cases {
+            assert!(is_relative_specifier(specifier), "{specifier}");
+            assert!(
+                relative_module_rank(importer, specifier, path).is_some(),
+                "{importer} {specifier} {path}"
             );
+        }
+        for specifier in ["a", "@/a", "crate::a", ".a"] {
+            assert!(!is_relative_specifier(specifier), "{specifier}");
         }
     }
 
@@ -2209,8 +2636,9 @@ mod tests {
     /// the index suffixes; anything else is never probed.
     #[test]
     fn test_relative_module_rank_follows_resolver_probe_order() {
-        let rank = |path: &str| relative_module_rank("src/a", path);
-        assert_eq!(rank("src/a"), Some(0));
+        let rank = |path: &str| relative_module_rank("src/b.ts", "./a", path);
+        assert!(rank("src/a").is_some());
+        assert!(rank("src/a") < rank("src/a.ts"));
         assert!(rank("src/a.ts") < rank("src/a.js"));
         assert!(rank("src/a.js") < rank("src/a/index.ts"));
         assert!(rank("src/a/index.ts") < rank("src/a/index.js"));
@@ -2218,9 +2646,6 @@ mod tests {
         assert_eq!(rank("src/a/other.ts"), None);
         assert_eq!(rank("tests/a.ts"), None);
         assert_eq!(rank("src/__mocks__/a.ts"), None);
-        assert_eq!(
-            relative_module_rank("", "index.ts"),
-            Some(1 + MODULE_EXTENSIONS.len())
-        );
+        assert!(relative_module_rank("b.ts", "./", "index.ts").is_some());
     }
 }

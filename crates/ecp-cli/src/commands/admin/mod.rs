@@ -34,7 +34,7 @@ pub enum AdminCommands {
     Drop(drop::DropArgs),
     /// Remove orphan index dirs not in registry
     Prune(prune::PruneArgs),
-    /// Garbage-collect stale graph generations + retired repo/session dirs
+    /// Garbage-collect stale graph generations, retired dirs, other versions' parse caches idle 7 days, and commit graphs no ref, worktree HEAD or live session names (built 7+ days ago)
     Gc(gc::GcArgs),
     /// Interactive TOML config editor
     Config(config::ConfigArgs),

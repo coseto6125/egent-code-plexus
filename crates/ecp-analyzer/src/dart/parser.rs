@@ -512,6 +512,7 @@ impl LanguageProvider for DartProvider {
             sql_refs: (!raw_sql_refs.is_empty()).then(|| raw_sql_refs.into_boxed_slice()),
             call_metas: vec![],
             raw_function_metas,
+            export_aliases: None,
         })
     }
 }

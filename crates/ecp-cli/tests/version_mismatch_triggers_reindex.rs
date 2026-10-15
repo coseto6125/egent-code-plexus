@@ -124,3 +124,22 @@ fn header_compatible_rejects_wrong_magic() {
         "header_compatible must return false for wrong magic"
     );
 }
+
+/// The drift branch answers every query until a rebuild lands, and some
+/// callers never rebuild: a long-lived MCP process must start the upgrade gc
+/// once, not fork `sh` per query. Other tests here hit the same branch, so
+/// the process-wide count is 1 whatever order they run in.
+#[test]
+fn test_ensure_index_upgrade_gc_started_once_per_process() {
+    let dir = tempdir().unwrap();
+    let graph_path = dir.path().join("graph.bin");
+    fs::write(&graph_path, [0xFFu8; 64]).unwrap();
+    for _ in 0..2 {
+        ensure_index(&graph_path, dir.path()).unwrap();
+    }
+    assert_eq!(
+        ecp_cli::auto_ensure::test_counters::UPGRADE_GC_INTENT_COUNT
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+}

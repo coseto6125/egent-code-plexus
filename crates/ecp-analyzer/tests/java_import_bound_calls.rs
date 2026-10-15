@@ -8,6 +8,7 @@ use ecp_analyzer::kotlin::parser::KotlinProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::resolution::heuristics::ResolutionTier;
 use ecp_core::analyzer::provider::LanguageProvider;
+use ecp_core::graph::{RelType, ZeroCopyGraph};
 use instantiation_calls_support::{assert_call_targets, calls_from, graph_of};
 use std::path::Path;
 
@@ -198,5 +199,213 @@ fn test_resolve_call_import_of_kotlin_class_keeps_qualifier_edge() {
     assert!(
         hits.len() == 1 && hits[0].name == "foo" && hits[0].file == "pkg/KtThing.kt",
         "{hits:?}"
+    );
+}
+
+// ── Owner of a Java import's member (FU-2026-10-05-e838f64395a2) ──────────
+// A member records only its owner's last segment, so the import tier must
+// pin the owner from the import path: a static member import names its
+// class, and a nested class import names every enclosing class.
+
+/// The `Calls` edges from `caller`, each as (file, owner, name, 1-based
+/// line, confidence): the line tells two same-named members apart.
+fn assert_call_lines(
+    graph: &ZeroCopyGraph,
+    caller: &str,
+    expected: &[(&str, &str, &str, u32, f32)],
+) {
+    let pool = graph.string_pool.as_slice();
+    let actual: Vec<_> = graph
+        .edges
+        .iter()
+        .filter(|e| {
+            e.rel_type == RelType::Calls
+                && graph.nodes[e.source as usize].name.resolve(pool) == caller
+        })
+        .map(|e| {
+            let target = &graph.nodes[e.target as usize];
+            (
+                graph.files[target.file_idx as usize].path.resolve(pool),
+                target.owner_class.resolve(pool),
+                target.name.resolve(pool),
+                target.span.0 + 1,
+                e.confidence,
+            )
+        })
+        .collect();
+    assert_eq!(actual, expected, "`{caller}` Calls edges");
+}
+
+/// `Other.run` is declared first, so a lookup without an owner finds it.
+const UTIL_AFTER_OTHER: (&str, &str) = (
+    "r/Util.java",
+    "package r;\nclass Other { static void run(){} }\npublic class Util { public static void run(){} }\n",
+);
+
+#[test]
+fn test_resolve_call_static_import_owner_declared_second_binds_named_class() {
+    let graph = java_graph(&[
+        UTIL_AFTER_OTHER,
+        (
+            "q/C2.java",
+            "package q;\nimport static r.Util.run;\nclass C2 { void go() { run(); } }\n",
+        ),
+    ]);
+    assert_call_lines(
+        &graph,
+        "go",
+        &[("r/Util.java", "Util", "run", 3, import_scoped())],
+    );
+}
+
+/// Pass 1 keys a member by its owner's last segment, so `Outer1.Helper.run`
+/// collapses into `Outer2.Helper.run` (line 2) and has no node of its own.
+/// The import tier must not bind line 2, and the receiver ladder must not
+/// either: the file declares `Helper` twice, so no owner key pins the type.
+#[test]
+fn test_resolve_call_nested_class_import_same_named_owner_returns_no_edge() {
+    let graph = java_graph(&[
+        (
+            "h/Outer1.java",
+            "package h;\nclass Outer2 { static class Helper { static void run(){} } }\npublic class Outer1 { static class Helper { static void run(){} } }\n",
+        ),
+        (
+            "q/C3.java",
+            "package q;\nimport h.Outer1.Helper;\nclass C3 { void go3() { Helper.run(); } }\n",
+        ),
+    ]);
+    assert_call_lines(&graph, "go3", &[]);
+}
+
+#[test]
+fn test_resolve_call_static_wildcard_import_owner_declared_second_binds_named_class() {
+    let graph = java_graph(&[
+        UTIL_AFTER_OTHER,
+        (
+            "q/C4.java",
+            "package q;\nimport static r.Util.*;\nclass C4 { void go4() { run(); } }\n",
+        ),
+    ]);
+    assert_call_lines(
+        &graph,
+        "go4",
+        &[("r/Util.java", "Util", "run", 3, import_scoped())],
+    );
+}
+
+/// `Util` declares no `run`. Java allows a static import of an inherited
+/// static member, so the import tier leaves the call to the general tiers,
+/// which find the repo's only `run`; the import tier never binds `Other.run`.
+#[test]
+fn test_resolve_call_static_import_member_not_declared_by_class_keeps_global() {
+    let graph = java_graph(&[
+        (
+            "r/Util.java",
+            "package r;\nclass Other { static void run(){} }\npublic class Util {}\n",
+        ),
+        (
+            "q/C5.java",
+            "package q;\nimport static r.Util.run;\nclass C5 { void go5() { run(); } }\n",
+        ),
+    ]);
+    assert_call_lines(
+        &graph,
+        "go5",
+        &[("r/Util.java", "Other", "run", 2, global())],
+    );
+}
+
+/// Pass 1 collapses the overloads into one `Util.run` node.
+#[test]
+fn test_resolve_call_static_import_overloaded_member_binds_named_class() {
+    let graph = java_graph(&[
+        (
+            "r/Util.java",
+            "package r;\nclass Other { static void run(){} }\npublic class Util { static void run(){} static void run(int x){} }\n",
+        ),
+        (
+            "q/C7.java",
+            "package q;\nimport static r.Util.run;\nclass C7 { void go7() { run(); } }\n",
+        ),
+    ]);
+    assert_call_lines(
+        &graph,
+        "go7",
+        &[("r/Util.java", "Util", "run", 3, import_scoped())],
+    );
+}
+
+const NESTED_THREE_DEEP: (&str, &str) = (
+    "a/B.java",
+    "package a;\nclass Other { static void run(){} }\npublic class B { static class C { static class D { static void run(){} } } }\n",
+);
+
+#[test]
+fn test_resolve_call_static_import_three_level_nested_owner_binds_innermost_class() {
+    let graph = java_graph(&[
+        NESTED_THREE_DEEP,
+        (
+            "q/C6.java",
+            "package q;\nimport static a.B.C.D.run;\nclass C6 { void go6() { run(); } }\n",
+        ),
+    ]);
+    assert_call_lines(
+        &graph,
+        "go6",
+        &[("a/B.java", "D", "run", 3, import_scoped())],
+    );
+}
+
+#[test]
+fn test_resolve_call_three_level_nested_class_import_binds_innermost_class() {
+    let graph = java_graph(&[
+        NESTED_THREE_DEEP,
+        (
+            "q/C8.java",
+            "package q;\nimport a.B.C.D;\nclass C8 { void go8() { D.run(); } }\n",
+        ),
+    ]);
+    assert_call_lines(
+        &graph,
+        "go8",
+        &[("a/B.java", "D", "run", 3, import_scoped())],
+    );
+}
+
+#[test]
+fn test_resolve_call_class_import_owner_declared_second_binds_named_class() {
+    let graph = java_graph(&[
+        UTIL_AFTER_OTHER,
+        (
+            "q/C9.java",
+            "package q;\nimport r.Util;\nclass C9 { void go9() { Util.run(); } }\n",
+        ),
+    ]);
+    assert_call_lines(
+        &graph,
+        "go9",
+        &[("r/Util.java", "Util", "run", 3, import_scoped())],
+    );
+}
+
+/// A package-private `Util` declared in `r/Helpers.java`: the import path
+/// names no file, so the import tier binds nothing and the call keeps the
+/// general tiers. The import tier does not search the package for the owner.
+#[test]
+fn test_resolve_call_static_import_owner_in_unnamed_file_keeps_global() {
+    let graph = java_graph(&[
+        (
+            "r/Helpers.java",
+            "package r;\nclass Helpers {}\nclass Util { static void run(){} }\n",
+        ),
+        (
+            "r/App.java",
+            "package r;\nimport static r.Util.run;\nclass App { void go10() { run(); } }\n",
+        ),
+    ]);
+    assert_call_lines(
+        &graph,
+        "go10",
+        &[("r/Helpers.java", "Util", "run", 3, global())],
     );
 }
