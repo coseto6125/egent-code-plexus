@@ -695,7 +695,7 @@ impl<'a> Resolver<'a> {
             self.for_each_candidate(source_file, &import.source, |candidate| {
                 hit = self
                     .symbol_table
-                    .lookup_call_in_file(candidate, exported_name, target);
+                    .lookup_export_in_file(candidate, exported_name, target);
                 hit.is_none()
             });
             if let Some(node_id) = hit {
@@ -1727,7 +1727,7 @@ impl<'a> Resolver<'a> {
                 self.for_each_candidate(source_file, &import.source, |candidate| {
                     let defines_member = self
                         .symbol_table
-                        .lookup_in_file_with_kind(candidate, member, target)
+                        .lookup_export_in_file(candidate, member, target)
                         .is_some();
                     if defines_member {
                         hit = Some(candidate.to_string());

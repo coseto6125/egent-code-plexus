@@ -1033,6 +1033,9 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
                 raw_node.kind,
                 raw_node.owner_class.as_deref(),
             );
+            if raw_node.is_exported {
+                symbol_table.note_export(&path_str, file_meta.language, current_node_idx);
+            }
 
             let name_ref = string_pool.add(&raw_node.name);
             // Skip hash-lookup when there is no owner: `StrRef::default()`
