@@ -352,7 +352,7 @@ mod tests {
                 Some([owner]) => DeclaredType::Unique(*owner),
                 Some(_) => DeclaredType::Ambiguous,
             },
-            |segment| Some(segment),
+            Some,
         )
     }
 
