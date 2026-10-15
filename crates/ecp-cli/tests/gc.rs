@@ -222,7 +222,7 @@ fn sweep_stale_generations_skips_fresh() {
 }
 
 #[test]
-fn sweep_retired_repos_removes_dead() {
+fn test_sweep_retired_dirs_dead_repo_dirs_removed() {
     let tmp = tempfile::tempdir().unwrap();
     let home_ecp = tmp.path();
     std::fs::create_dir_all(home_ecp.join("myrepo__abc123")).unwrap();
@@ -442,15 +442,7 @@ impl CommitFixture {
             .repo_root
             .join("commits")
             .join(format!("commit__{sha}"));
-        // The stub graph.bin fails header validation; without a current-version
-        // sidecar `sweep_old_format_commits` would retire it as an old layout.
-        std::fs::write(
-            dir.join("graph.bin.compatible_version"),
-            ecp_core::graph::GRAPH_FORMAT_VERSION.to_string(),
-        )
-        .unwrap();
-        let then = std::time::SystemTime::now() - days(mtime_days_ago);
-        filetime::set_file_mtime(&dir, filetime::FileTime::from_system_time(then)).unwrap();
+        age_commit_dir(&dir, std::time::SystemTime::now() - days(mtime_days_ago));
         dir
     }
 
@@ -1052,9 +1044,19 @@ fn format_commit_dir(
         )
         .unwrap();
     }
-    let then = std::time::SystemTime::now() - std::time::Duration::from_secs(idle_days * 86_400);
-    filetime::set_file_mtime(&dir, filetime::FileTime::from_system_time(then)).unwrap();
+    age_commit_dir(
+        &dir,
+        std::time::SystemTime::now() - std::time::Duration::from_secs(idle_days * 86_400),
+    );
     dir
+}
+
+/// Sets the commit dir's mtime and its `graph.bin`'s atime to `then`: a
+/// fresh write leaves the atime at now, which reads as a query's use.
+fn age_commit_dir(dir: &std::path::Path, then: std::time::SystemTime) {
+    let then = filetime::FileTime::from_system_time(then);
+    filetime::set_file_atime(dir.join("graph.bin"), then).unwrap();
+    filetime::set_file_mtime(dir, then).unwrap();
 }
 
 fn current_format_graph() -> Vec<u8> {
@@ -1295,4 +1297,170 @@ fn test_sweep_stale_fragments_session_written_by_0_14_8_bin_removed_after_refres
     let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path()).unwrap();
     assert_eq!(stats.removed, 1);
     assert!(!overlay.join(old_bin).exists());
+}
+
+/// A writer holds the overlay lock while it re-publishes a content-addressed
+/// bin and commits the manifest naming it; a gc that judged the old copy
+/// orphan before that would delete the new one.
+#[test]
+fn test_sweep_stale_fragments_overlay_lock_held_session_skipped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let overlay = fragment_session(
+        tmp.path(),
+        Some(manifest_naming("aaaa").as_str()),
+        &[("bbbb.bin", 7200)],
+    );
+    let held = ecp_core::registry::FileLock::try_exclusive(
+        &ecp_cli::session::overlay_writer::overlay_lock_path(overlay.parent().unwrap()),
+    )
+    .unwrap();
+    let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 0);
+    assert!(
+        overlay.join("bbbb.bin").exists(),
+        "gc deleted a bin while a writer held the session"
+    );
+    drop(held);
+    let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 1, "a released session was not swept");
+    assert!(!overlay.join("bbbb.bin").exists());
+}
+
+fn graph_with_version(version: u32) -> Vec<u8> {
+    let mut fx = ecp_core::graph_fixture::GraphFixture::new();
+    fx.func("a.py", "f");
+    let mut graph = fx.build();
+    graph.version = version;
+    rkyv::to_bytes::<rkyv::rancor::Error>(&graph)
+        .unwrap()
+        .into_vec()
+}
+
+/// A newer ecp's graph fails this binary's header check exactly as an older
+/// one does; with no sidecar only the version its header records tells them
+/// apart, and the newer binary still reads it.
+#[test]
+fn test_sweep_old_format_commits_newer_format_graph_without_sidecar_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let newer = format_commit_dir(
+        tmp.path(),
+        "branch_main__8888",
+        &graph_with_version(ecp_core::graph::GRAPH_FORMAT_VERSION + 1),
+        None,
+        30,
+    );
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 0);
+    assert!(newer.exists(), "a newer version's graph was deleted as old");
+}
+
+/// A torn write is no proof of an older layout.
+#[test]
+fn test_sweep_old_format_commits_unreadable_graph_without_sidecar_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let torn = format_commit_dir(tmp.path(), "branch_main__9999", b"torn write", None, 30);
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 0);
+    assert!(torn.exists(), "an unreadable graph was deleted as old");
+}
+
+/// A query maps `graph.bin`, which refreshes its atime and leaves the dir's
+/// mtime alone: a second installed version that queries daily keeps its graph.
+#[test]
+fn test_sweep_old_format_commits_recently_read_graph_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let read = format_commit_dir(
+        tmp.path(),
+        "branch_main__1010",
+        GRAPH_WRITTEN_BY_0_14_8,
+        Some(12),
+        30,
+    );
+    filetime::set_file_atime(read.join("graph.bin"), filetime::FileTime::now()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 0);
+    assert!(read.exists(), "a graph read today was deleted as idle");
+}
+
+#[test]
+fn test_sweep_unreachable_commits_recently_read_graph_kept() {
+    let fx = CommitFixture::new();
+    let read = fx.graph(&"a".repeat(40), 30);
+    filetime::set_file_atime(read.join("graph.bin"), filetime::FileTime::now()).unwrap();
+    assert_eq!(fx.sweep().removed, 0);
+    assert!(read.exists(), "a graph read today was deleted as idle");
+}
+
+/// gc's own header read must not count as a use: it runs on every idle
+/// graph without a sidecar, and would keep each one alive for ever.
+#[test]
+fn test_sweep_old_format_commits_header_read_graph_atime_unchanged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let current = format_commit_dir(
+        tmp.path(),
+        "branch_main__1111",
+        &current_format_graph(),
+        None,
+        400,
+    );
+    let graph = current.join("graph.bin");
+    let before = filetime::FileTime::from_last_access_time(&std::fs::metadata(&graph).unwrap());
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 0);
+    assert_eq!(
+        filetime::FileTime::from_last_access_time(&std::fs::metadata(&graph).unwrap()),
+        before,
+        "gc's header read refreshed the graph's atime"
+    );
+}
+
+/// `fix/cache.stale-check` puts `.stale` before the `__`; only a suffix after
+/// it marks a recovery dir.
+#[test]
+fn test_sweep_unreachable_commits_branch_named_stale_removed() {
+    let fx = CommitFixture::new();
+    let sha = "a".repeat(40);
+    let graph = fx.graph(&sha, 30);
+    let named = fx
+        .repo_root
+        .join("commits")
+        .join(format!("branch_fix_cache.stale-check__{sha}"));
+    std::fs::rename(&graph, &named).unwrap();
+    age_commit_dir(
+        &named,
+        std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86_400),
+    );
+    assert_eq!(fx.sweep().removed, 1);
+    assert!(!named.exists(), "a branch named *.stale* was never swept");
+}
+
+#[test]
+fn test_sweep_old_format_commits_branch_named_building_removed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let named = format_commit_dir(
+        tmp.path(),
+        "branch_feat_x.building-y__1212",
+        GRAPH_WRITTEN_BY_0_14_8,
+        Some(12),
+        30,
+    );
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    assert_eq!(stats.removed, 1);
+    assert!(
+        !named.exists(),
+        "a branch named *.building* was never swept"
+    );
+}
+
+/// `.last-gc` was the throttle stamp of the background gc that `.gc-last`
+/// replaced; nothing writes or reads it any more.
+#[test]
+fn test_admin_gc_legacy_last_gc_stamp_removed_dry_run_kept() {
+    let home = tempfile::tempdir().unwrap();
+    let legacy = home.path().join(".last-gc");
+    std::fs::write(&legacy, b"").unwrap();
+    run_gc(home.path(), &["--dry-run"]);
+    assert!(legacy.exists(), "a dry run deleted the stamp");
+    run_gc(home.path(), &[]);
+    assert!(!legacy.exists(), "the retired stamp outlived gc");
 }

@@ -1072,10 +1072,11 @@ pub fn resolve_session_overlay_dir(worktree_root: &Path) -> Option<PathBuf> {
 /// current, keep the rest for re-parse.
 ///
 /// A fragment is current when its `dirty_files.json` entry is a v3 bin that
-/// parsed cleanly AND records exactly the file's present mtime_ns, in a
-/// manifest the running binary's parser wrote. Any doubt (no session dir /
-/// meta / manifest, HEAD drifted since the fragments were based, another
-/// builder fingerprint, older bin, parse_failed, stat error) keeps the file
+/// parsed cleanly, is on disk, AND records exactly the file's present
+/// mtime_ns, in a manifest the running binary's parser wrote. Any doubt (no
+/// session dir / meta / manifest, HEAD drifted since the fragments were
+/// based, another builder fingerprint, older bin, parse_failed, missing bin,
+/// stat error) keeps the file
 /// in the re-parse set — the gate may only ever skip work it can prove
 /// redundant.
 ///
@@ -1133,6 +1134,7 @@ fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1Fre
     if !manifest.from_current_builder() {
         return pass(rel_paths, Some(meta));
     }
+    let overlay_dir = session_dir.join("graph_overlay");
     let mut pre_mtimes = HashMap::new();
     let retained = rel_paths
         .into_iter()
@@ -1143,8 +1145,19 @@ fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1Fre
             if entry.format != FRAGMENT_FORMAT_V3 || entry.parse_failed {
                 return true;
             }
+            // A bin the manifest names can still be gone (a cleanup that
+            // raced its writer, a hand-deleted file); the reader skips a
+            // missing bin, so without the re-parse the file serves L2 until
+            // it changes again.
             match mtime_ns_of(&worktree_root.join(rel)) {
-                Some(ns) if ns == entry.mtime_ns => false,
+                Some(ns)
+                    if ns == entry.mtime_ns
+                        && overlay_dir
+                            .join(format!("{}.bin", entry.fragment_id))
+                            .is_file() =>
+                {
+                    false
+                }
                 Some(ns) => {
                     pre_mtimes.insert(rel.clone(), ns);
                     true

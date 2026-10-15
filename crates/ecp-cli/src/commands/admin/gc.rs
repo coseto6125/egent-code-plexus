@@ -1,4 +1,5 @@
 use clap::Args;
+use rayon::prelude::*;
 
 /// `ecp admin gc` — converge stale graph generations, sweep retired dirs,
 /// other versions' parse caches idle 7 days, and commit graphs no ref,
@@ -38,7 +39,7 @@ fn ran_recently(home_ecp: &std::path::Path) -> bool {
 
 /// Repos are swept in parallel, never one repo by two workers: each repo's
 /// dirs live under its own root, so the workers' unlinks never contend for
-/// one directory's lock, and each repo's two git calls overlap too. Kept
+/// one directory's lock, and each repo's git calls overlap too. Kept
 /// small because gc runs in the background beside a foreground index build.
 /// Measured 2026-10-15 on a copy of a 4.0 GB `~/.ecp` (126 repos, release):
 /// first sweep 0.88 s vs 2.33 s with one worker (993 dirs, 3.2 GB freed,
@@ -46,7 +47,6 @@ fn ran_recently(home_ecp: &std::path::Path) -> bool {
 const GC_REPO_WORKERS: usize = 4;
 
 fn sweep_repos(repo_roots: &[std::path::PathBuf]) -> usize {
-    use rayon::prelude::*;
     let sweep = |repo_root: &std::path::PathBuf| -> usize {
         [
             crate::admin::gc::sweep_retired_dirs(repo_root),
@@ -112,9 +112,11 @@ pub fn run(args: GcArgs) -> Result<(), ecp_core::EcpError> {
             Ok(removed) => total_removed += removed,
             Err(e) => eprintln!("gc: sweep_git_index: {e}"),
         }
+        // The throttle stamp of a binary before `.gc-last`; nothing reads it.
+        let _ = std::fs::remove_file(home_ecp.join(".last-gc"));
     }
 
-    // L2 + L3: per-repo generation convergence + session sweep.
+    // Per repo: every sweep in `sweep_repos`.
     let mut repo_roots = Vec::new();
     if let Ok(it) = std::fs::read_dir(&home_ecp) {
         for entry in it.flatten() {

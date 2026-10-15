@@ -10,6 +10,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::time::SystemTime;
 
 const SESSION_IDLE_HOURS: i64 = 24;
 /// A dir/file younger than this may belong to an in-flight build or a writer
@@ -25,6 +26,32 @@ fn is_in_flight(meta: &std::fs::Metadata, now: std::time::SystemTime) -> bool {
         .and_then(|m| now.duration_since(m).ok())
         .map(|age| age.as_secs() < IN_FLIGHT_SECS)
         .unwrap_or(false)
+}
+
+/// True when `last_use` lies at least `secs` before `now`. An unknown time or
+/// one in the future is not idle, so a stat quirk never deletes.
+fn idle_for(last_use: Option<SystemTime>, now: SystemTime, secs: u64) -> bool {
+    last_use
+        .and_then(|t| now.duration_since(t).ok())
+        .is_some_and(|age| age.as_secs() >= secs)
+}
+
+/// The grace before gc reclaims what another installed ecp version may still
+/// use (its parse cache, its older-format graphs) or what a short-lived use
+/// such as `impact --baseline <old ref>` built. A swept item is rebuilt on
+/// demand.
+const IDLE_GRACE_SECS: u64 = 7 * 86_400;
+
+/// When a commit dir was last used: the newer of the dir's mtime (a build or
+/// an attach wrote into it) and its `graph.bin`'s atime (a query mapped it).
+/// Linux `relatime` refreshes atime at most once a day, often enough for
+/// [`IDLE_GRACE_SECS`]; on a `noatime` mount the atime stays at the build, so
+/// there the dir's mtime alone counts.
+fn commit_dir_last_use(dir: &Path, dir_meta: &fs::Metadata) -> Option<SystemTime> {
+    let read = fs::metadata(dir.join("graph.bin"))
+        .and_then(|m| m.accessed())
+        .ok();
+    dir_meta.modified().ok().max(read)
 }
 
 pub struct SweepStats {
@@ -101,13 +128,6 @@ fn insert_active_session_bases(repo_root: &Path, set: &mut FxHashSet<String>) ->
     complete
 }
 
-/// A commit graph no ref, no worktree HEAD and no live session points at,
-/// built longer ago than this, is reclaimed. A merged branch or a deleted
-/// worktree otherwise leaves every graph it built behind. The grace covers
-/// short-lived use such as `impact --baseline <old ref>`; a swept graph is
-/// rebuilt on demand.
-const UNREACHABLE_COMMIT_IDLE_SECS: i64 = 7 * 86_400;
-
 /// Every SHA a ref or a worktree HEAD of the repo at `common_dir` names, or
 /// `None` when git cannot answer. Only a complete answer may justify a
 /// delete: an empty set from a failed git call would mark every graph dead.
@@ -173,9 +193,11 @@ fn live_commit_shas(repo_root: &Path, common_dir: &Path) -> Option<FxHashSet<Str
     insert_active_session_bases(repo_root, &mut set).then_some(set)
 }
 
-/// Retires commit graphs whose SHA is not live (see [`live_commit_shas`])
-/// and that were built more than [`UNREACHABLE_COMMIT_IDLE_SECS`] ago.
-/// Removes nothing when the repo's git dir is unknown or git fails.
+/// Retires commit graphs whose SHA is not live (see [`live_commit_shas`]),
+/// that were built more than [`IDLE_GRACE_SECS`] ago and that were not used
+/// within it (see [`commit_dir_last_use`]). A merged branch or a deleted
+/// worktree otherwise leaves every graph it built behind. Removes nothing
+/// when the repo's git dir is unknown or git fails.
 pub fn sweep_unreachable_commits(repo_root: &Path) -> io::Result<SweepStats> {
     let mut stats = SweepStats {
         marked: 0,
@@ -184,8 +206,8 @@ pub fn sweep_unreachable_commits(repo_root: &Path) -> io::Result<SweepStats> {
     let Ok(it) = fs::read_dir(repo_root.join("commits")) else {
         return Ok(stats);
     };
-    let now = std::time::SystemTime::now();
-    // Pass 1, stat only: a dir modified within the grace period is kept, so a
+    let now = SystemTime::now();
+    // Pass 1, stat only: a dir used within the grace period is kept, so a
     // repo with no older dir pays no git call. Not only an optimisation: an
     // attach back-fills sidecars into a dir built long ago, and that recent
     // write keeps the graph in use.
@@ -204,15 +226,9 @@ pub fn sweep_unreachable_commits(repo_root: &Path) -> io::Result<SweepStats> {
             stats.removed += usize::from(remove_retired(&dir));
             continue;
         }
-        let idle_by_mtime = meta
-            .modified()
-            .ok()
-            .and_then(|m| now.duration_since(m).ok())
-            .is_some_and(|age| age.as_secs() >= UNREACHABLE_COMMIT_IDLE_SECS as u64);
         if name.starts_with('.')
-            || name.contains(".building")
-            || name.contains(".stale")
-            || !idle_by_mtime
+            || crate::commit_lookup::is_recovery_dir_name(&name)
+            || !idle_for(commit_dir_last_use(&dir, &meta), now, IDLE_GRACE_SECS)
         {
             continue;
         }
@@ -238,10 +254,12 @@ pub fn sweep_unreachable_commits(repo_root: &Path) -> io::Result<SweepStats> {
             continue;
         };
         let old_enough = chrono::DateTime::parse_from_rfc3339(&cm.built_at).is_ok_and(|built| {
-            chrono::Utc::now()
-                .signed_duration_since(built.with_timezone(&chrono::Utc))
-                .num_seconds()
-                >= UNREACHABLE_COMMIT_IDLE_SECS
+            u64::try_from(
+                chrono::Utc::now()
+                    .signed_duration_since(built.with_timezone(&chrono::Utc))
+                    .num_seconds(),
+            )
+            .is_ok_and(|age| age >= IDLE_GRACE_SECS)
         });
         if !old_enough {
             continue;
@@ -312,7 +330,7 @@ pub fn sweep_subtree_builds(repo_root: &Path) -> io::Result<SweepStats> {
         let name = entry.file_name().to_string_lossy().to_string();
         if !dir.is_dir()
             || name.starts_with('.')
-            || name.contains(".building")
+            || crate::commit_lookup::is_recovery_dir_name(&name)
             || is_retired_dir(&name)
         {
             continue;
@@ -336,15 +354,13 @@ pub fn sweep_subtree_builds(repo_root: &Path) -> io::Result<SweepStats> {
     Ok(stats)
 }
 
-/// Every release and every `BUILDER_FINGERPRINT` bump opens a new
-/// `parse_cache/<fp>/` dir and never reads the old one again. The grace
-/// period keeps a second installed ecp version's live cache from being
-/// evicted on each gc, which would make the two binaries re-parse in turn.
-const PARSE_CACHE_IDLE_SECS: u64 = 7 * 86_400;
-
 /// Removes `parse_cache/<fp>/` dirs of other fingerprints that no writer
-/// touched for [`PARSE_CACHE_IDLE_SECS`], plus `.dead.*` leftovers of an
-/// earlier retire whose background delete did not finish.
+/// touched for [`IDLE_GRACE_SECS`], plus `.dead.*` leftovers of an earlier
+/// retire whose background delete did not finish. Every release and every
+/// `BUILDER_FINGERPRINT` bump opens a new dir and never reads the old one
+/// again; the grace keeps a second installed ecp version's live cache from
+/// being evicted on each gc, which would make the two binaries re-parse in
+/// turn.
 pub fn sweep_stale_parse_caches(repo_root: &Path) -> io::Result<SweepStats> {
     let mut stats = SweepStats {
         marked: 0,
@@ -354,7 +370,7 @@ pub fn sweep_stale_parse_caches(repo_root: &Path) -> io::Result<SweepStats> {
         return Ok(stats);
     };
     let current = crate::parse_cache::ParseCache::current_dir_name();
-    let now = std::time::SystemTime::now();
+    let now = SystemTime::now();
     for entry in it.flatten() {
         let Ok(meta) = entry.metadata() else {
             continue;
@@ -376,10 +392,7 @@ pub fn sweep_stale_parse_caches(repo_root: &Path) -> io::Result<SweepStats> {
             .and_then(|m| m.modified())
             .ok();
         let last_use = meta.modified().ok().max(stamp);
-        let idle = last_use
-            .and_then(|m| now.duration_since(m).ok())
-            .is_some_and(|age| age.as_secs() >= PARSE_CACHE_IDLE_SECS);
-        if name == current || !idle {
+        if name == current || !idle_for(last_use, now, IDLE_GRACE_SECS) {
             continue;
         }
         stats.marked += 1;
@@ -390,8 +403,9 @@ pub fn sweep_stale_parse_caches(repo_root: &Path) -> io::Result<SweepStats> {
 
 /// Removes commit dirs whose `graph.bin` is in an older
 /// `GRAPH_FORMAT_VERSION` layout, which this binary never reads again: it
-/// rebuilds such a slot. The same grace as [`sweep_stale_parse_caches`]
-/// applies, because a second installed ecp version may still read them.
+/// rebuilds such a slot. Kept while used within [`IDLE_GRACE_SECS`] (see
+/// [`commit_dir_last_use`]), because a second installed ecp version may still
+/// read them.
 pub fn sweep_old_format_commits(repo_root: &Path) -> io::Result<SweepStats> {
     let mut stats = SweepStats {
         marked: 0,
@@ -400,7 +414,7 @@ pub fn sweep_old_format_commits(repo_root: &Path) -> io::Result<SweepStats> {
     let Ok(it) = fs::read_dir(repo_root.join("commits")) else {
         return Ok(stats);
     };
-    let now = std::time::SystemTime::now();
+    let now = SystemTime::now();
     for entry in it.flatten() {
         let Ok(meta) = entry.metadata() else {
             continue;
@@ -408,35 +422,63 @@ pub fn sweep_old_format_commits(repo_root: &Path) -> io::Result<SweepStats> {
         let name = entry.file_name().to_string_lossy().to_string();
         if !meta.is_dir()
             || name.starts_with('.')
-            || name.contains(".building")
-            || name.contains(".stale")
+            || crate::commit_lookup::is_recovery_dir_name(&name)
             || is_retired_dir(&name)
         {
             continue;
         }
-        let idle = meta
-            .modified()
-            .ok()
-            .and_then(|m| now.duration_since(m).ok())
-            .is_some_and(|age| age.as_secs() >= PARSE_CACHE_IDLE_SECS);
-        let graph = entry.path().join("graph.bin");
-        if !idle || !graph.is_file() || !older_graph_format(&graph) {
+        let dir = entry.path();
+        let graph = dir.join("graph.bin");
+        if !idle_for(commit_dir_last_use(&dir, &meta), now, IDLE_GRACE_SECS)
+            || !graph.is_file()
+            || !older_graph_format(&graph)
+        {
             continue;
         }
         stats.marked += 1;
-        stats.removed += usize::from(retire_and_remove(&entry.path()));
+        stats.removed += usize::from(retire_and_remove(&dir));
     }
     Ok(stats)
 }
 
-/// Whether `graph` is in an older layout than this binary reads: its
-/// version sidecar says so, or, with no sidecar (a binary before the
-/// sidecar, or a lost detached write), its header fails validation.
+/// Whether `graph` is proven to be in an older layout than this binary
+/// reads: its version sidecar says so, or, with no sidecar (a binary before
+/// the sidecar, or a lost detached write), its header records an older
+/// version. A newer version, or a header that cannot be read, is kept: a
+/// failed check is not proof of age.
 fn older_graph_format(graph: &Path) -> bool {
-    match crate::auto_ensure::read_compatible_version_sidecar(graph) {
-        Some(version) => version < ecp_core::graph::GRAPH_FORMAT_VERSION,
-        None => !crate::engine::header_compatible(graph),
+    crate::auto_ensure::read_compatible_version_sidecar(graph)
+        .or_else(|| graph_format_version(graph))
+        .is_some_and(|version| version < ecp_core::graph::GRAPH_FORMAT_VERSION)
+}
+
+/// How many bytes at the end of a `graph.bin` hold its root object. The v13
+/// root is 240 bytes; a root that outgrows this reads as unknown, so kept.
+const GRAPH_ROOT_TAIL_BYTES: u64 = 4096;
+
+/// The format version a `graph.bin` header records, or `None` when no header
+/// is found. Validation through this binary's archived type cannot tell an
+/// older layout from a newer or a corrupt one; but every version leads its
+/// root with `magic` then `version`, and rkyv writes the root last, so the
+/// last magic in the file's tail is the root's.
+fn graph_format_version(graph: &Path) -> Option<u32> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(graph).ok()?;
+    let meta = file.metadata().ok()?;
+    file.seek(SeekFrom::Start(
+        meta.len().saturating_sub(GRAPH_ROOT_TAIL_BYTES),
+    ))
+    .ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    // This read would refresh the atime that `commit_dir_last_use` reads as
+    // a query's use, and keep an idle graph alive for ever.
+    if let Ok(accessed) = meta.accessed() {
+        let _ = file.set_times(fs::FileTimes::new().set_accessed(accessed));
     }
+    let magic = ecp_core::graph::GRAPH_MAGIC;
+    let at = tail.windows(magic.len()).rposition(|w| w == magic)? + magic.len();
+    Some(u32::from_le_bytes(tail.get(at..at + 4)?.try_into().ok()?))
 }
 
 /// A fragment bin younger than this may belong to a writer that renamed it
@@ -447,7 +489,7 @@ const ORPHAN_FRAGMENT_IDLE_SECS: u64 = 3600;
 /// no longer names: bins are content-addressed, so every save of a dirty
 /// file writes a new one, and a manifest another builder wrote is replaced
 /// whole. Leftover `.tmp` writes go too. A session whose manifest cannot be
-/// read keeps its bins.
+/// read keeps its bins, and so does one whose writer holds its overlay lock.
 pub fn sweep_stale_fragments(repo_root: &Path) -> io::Result<SweepStats> {
     let mut stats = SweepStats {
         marked: 0,
@@ -456,14 +498,26 @@ pub fn sweep_stale_fragments(repo_root: &Path) -> io::Result<SweepStats> {
     let Ok(sessions) = fs::read_dir(repo_root.join("sessions")) else {
         return Ok(stats);
     };
-    let now = std::time::SystemTime::now();
+    let now = SystemTime::now();
     for session in sessions.flatten() {
         let name = session.file_name().to_string_lossy().to_string();
         if is_retired_dir(&name) || name.contains(".stale-") {
             continue;
         }
         let dir = session.path();
-        let Ok(bins) = fs::read_dir(dir.join("graph_overlay")) else {
+        let overlay = dir.join("graph_overlay");
+        if !overlay.is_dir() {
+            continue;
+        }
+        // Held from the manifest read to the last unlink: a bin's name is its
+        // content hash, so a writer can re-publish a bin judged orphan here
+        // under the same name, and the unlink would then delete the new one.
+        let Ok(_publish) = ecp_core::registry::FileLock::try_exclusive(
+            &crate::session::overlay_writer::overlay_lock_path(&dir),
+        ) else {
+            continue;
+        };
+        let Ok(bins) = fs::read_dir(&overlay) else {
             continue;
         };
         let referenced: FxHashSet<String> = match DirtyFiles::read(&dir.join("dirty_files.json")) {
@@ -484,12 +538,10 @@ pub fn sweep_stale_fragments(repo_root: &Path) -> io::Result<SweepStats> {
             let Ok(meta) = bin.metadata() else {
                 continue;
             };
-            let settled = meta
-                .modified()
-                .ok()
-                .and_then(|m| now.duration_since(m).ok())
-                .is_some_and(|age| age.as_secs() >= ORPHAN_FRAGMENT_IDLE_SECS);
-            if !orphan || !meta.is_file() || !settled {
+            if !orphan
+                || !meta.is_file()
+                || !idle_for(meta.modified().ok(), now, ORPHAN_FRAGMENT_IDLE_SECS)
+            {
                 continue;
             }
             stats.marked += 1;
@@ -816,5 +868,29 @@ mod subtree_build_tests {
             from_non_git.exists(),
             "a non-git source tree keyed by its path stays"
         );
+    }
+
+    /// A branch such as `feat/x.building-y` puts `.building` before the `__`;
+    /// only a suffix after it marks an in-progress build.
+    #[test]
+    fn test_sweep_subtree_builds_branch_named_building_retired() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree = tmp.path().join("repo");
+        let subtree = worktree.join("crates").join("cli");
+        fs::create_dir_all(&subtree).unwrap();
+        fs::write(worktree.join(".git"), "gitdir: elsewhere\n").unwrap();
+        let repo_root = tmp.path().join("index");
+        let commits = repo_root.join("commits");
+        let named = publish(&commits, "branch_feat_x.building-y__6666", &subtree);
+        let building = publish(&commits, "branch_feat_z__7777.building", &subtree);
+
+        let stats = sweep_subtree_builds(&repo_root).unwrap();
+
+        assert_eq!((stats.marked, stats.removed), (1, 1));
+        assert!(
+            !named.exists(),
+            "a branch named *.building* was never swept"
+        );
+        assert!(building.exists(), "an in-progress build was swept");
     }
 }

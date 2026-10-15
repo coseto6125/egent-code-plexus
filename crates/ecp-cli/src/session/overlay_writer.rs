@@ -22,7 +22,7 @@ use ecp_core::analyzer::types::{
     LocalGraph, RawEventTopic, RawExportAlias, RawImport, RawSchemaField, RawTxScope,
 };
 use ecp_core::graph::NodeKind;
-use ecp_core::registry::{atomic_write_json, replace_file};
+use ecp_core::registry::{atomic_write_json, replace_file, FileLock};
 use ecp_core::session::overlay::{SymbolKind, SymbolRef};
 use ecp_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
 use rayon::prelude::*;
@@ -161,7 +161,8 @@ pub fn write_dirty_fragment(
 /// and coalesces the manifest + overlay-version updates into one each.
 ///
 /// Per-file fragment writes still go through atomic tmp → fsync → rename
-/// against unique `<content_hash>.bin` paths (no inter-input collision).
+/// against unique `<content_hash>.bin` paths (no inter-input collision); the
+/// renames run under the session's overlay lock (see [`overlay_lock_path`]).
 /// The single trailing manifest + version write replaces N read-modify-write
 /// cycles in the L1 refresh path — the dominant cost on small dirty sets
 /// (each `atomic_write_json` is a write + fsync + rename).
@@ -187,13 +188,13 @@ pub fn write_dirty_fragments_batch(
 
     // Parallelise fragment writes: hashing and parsing (CPU) + atomic file write (IO).
     // Coalesces the per-file IO while keeping the final manifest commit atomic.
-    let results: Vec<io::Result<(String, DirtyEntry, FragmentOutcome)>> = inputs
+    let results: Vec<io::Result<StagedFragment>> = inputs
         .par_iter()
         .enumerate()
         .map(|(idx, input)| write_fragment_file(&overlay_dir, batch_seq, idx as u64, input))
         .collect();
 
-    commit_fragment_results(session_dir, results, inputs.len())
+    commit_fragment_results(session_dir, &overlay_dir, results)
 }
 
 /// Write fragments from already-parsed `LocalGraph`s — the incremental path's
@@ -226,7 +227,7 @@ pub fn write_dirty_fragments_from_graphs(
     fs::create_dir_all(&overlay_dir)?;
     let batch_seq = WRITE_BATCH_SEQ.fetch_add(1, Ordering::Relaxed);
 
-    let results: Vec<io::Result<(String, DirtyEntry, FragmentOutcome)>> = graphs
+    let results: Vec<io::Result<StagedFragment>> = graphs
         .par_iter()
         .zip(mtimes.par_iter())
         .enumerate()
@@ -235,45 +236,82 @@ pub fn write_dirty_fragments_from_graphs(
         })
         .collect();
 
-    commit_fragment_results(session_dir, results, graphs.len())
+    commit_fragment_results(session_dir, &overlay_dir, results)
 }
 
-/// Shared tail for both write paths: collect per-file results, then commit the
-/// manifest + `overlay_version` bump in one atomic write each (coalesces N
-/// read-modify-write cycles down to 2).
+/// The lock a writer holds while it publishes fragment bins and commits the
+/// manifest that names them, and `admin gc` holds while it judges a bin
+/// orphan and deletes it. A bin's name is its content hash, so without the
+/// lock gc could delete a bin a writer had just re-published under the name
+/// gc judged orphan.
+pub fn overlay_lock_path(session_dir: &Path) -> PathBuf {
+    session_dir.join("overlay.lock")
+}
+
+/// One dirty file's fragment before publish: its manifest entry and, when
+/// the archive was written, the fsynced tmp that becomes `<fragment_id>.bin`.
+struct StagedFragment {
+    rel_path: String,
+    entry: DirtyEntry,
+    outcome: FragmentOutcome,
+    tmp: Option<PathBuf>,
+}
+
+/// Write `bytes` to a tmp beside the bin it will replace and fsync it. The
+/// tmp name is keyed by `(batch_seq, input_idx)` so two inputs with the same
+/// content never share one.
+fn stage_archive(
+    overlay_dir: &Path,
+    fragment_id: &str,
+    batch_seq: u64,
+    input_idx: u64,
+    bytes: &[u8],
+) -> io::Result<PathBuf> {
+    let tmp = overlay_dir.join(format!("{fragment_id}.{batch_seq}.{input_idx}.tmp"));
+    fs::write(&tmp, bytes)?;
+    fs::OpenOptions::new().write(true).open(&tmp)?.sync_all()?;
+    Ok(tmp)
+}
+
+/// Shared tail for both write paths: collect per-file results, publish their
+/// bins, then commit the manifest + `overlay_version` bump in one atomic
+/// write each (coalesces N read-modify-write cycles down to 2).
 fn commit_fragment_results(
     session_dir: &Path,
-    results: Vec<io::Result<(String, DirtyEntry, FragmentOutcome)>>,
-    n_inputs: usize,
+    overlay_dir: &Path,
+    results: Vec<io::Result<StagedFragment>>,
 ) -> io::Result<Vec<FragmentOutcome>> {
-    let mut outcomes = Vec::with_capacity(n_inputs);
-    let mut pending = Vec::with_capacity(n_inputs);
-
-    for res in results {
-        let (rel, entry, outcome) = res?;
-        pending.push((rel, entry));
-        outcomes.push(outcome);
+    let staged = results.into_iter().collect::<io::Result<Vec<_>>>()?;
+    let mut outcomes = Vec::with_capacity(staged.len());
+    {
+        let _publish = FileLock::acquire_exclusive(&overlay_lock_path(session_dir))?;
+        for fragment in &staged {
+            if let Some(tmp) = &fragment.tmp {
+                let bin = overlay_dir.join(format!("{}.bin", fragment.entry.fragment_id));
+                replace_file(tmp, &bin)?;
+            }
+        }
+        let manifest_path = session_dir.join("dirty_files.json");
+        let mut df = if manifest_path.exists() {
+            DirtyFiles::read(&manifest_path)?
+        } else {
+            DirtyFiles::empty()
+        };
+        // Another binary's entries parse by other rules. The freshness gate
+        // re-parses every dirty file of such a manifest, so none is kept.
+        if !df.from_current_builder() {
+            df = DirtyFiles::empty();
+        }
+        for fragment in staged {
+            df.entries.insert(fragment.rel_path, fragment.entry);
+            outcomes.push(fragment.outcome);
+        }
+        atomic_write_json(&manifest_path, &df)?;
     }
-
-    let manifest_path = session_dir.join("dirty_files.json");
-    let mut df = if manifest_path.exists() {
-        DirtyFiles::read(&manifest_path)?
-    } else {
-        DirtyFiles::empty()
-    };
-    // Another binary's entries parse by other rules. The freshness gate
-    // re-parses every dirty file of such a manifest, so none is kept.
-    if !df.from_current_builder() {
-        df = DirtyFiles::empty();
-    }
-    for (rel, entry) in pending {
-        df.entries.insert(rel, entry);
-    }
-    atomic_write_json(&manifest_path, &df)?;
 
     let sm_path = session_dir.join("session_meta.json");
     let mut sm = SessionMeta::read(&sm_path)?;
-    sm.overlay_version += n_inputs as u32;
+    sm.overlay_version += outcomes.len() as u32;
     sm.last_touched = chrono::Utc::now().to_rfc3339();
     atomic_write_json(&sm_path, &sm)?;
 
@@ -285,10 +323,9 @@ fn write_fragment_file(
     batch_seq: u64,
     input_idx: u64,
     input: &FragmentInput,
-) -> io::Result<(String, DirtyEntry, FragmentOutcome)> {
+) -> io::Result<StagedFragment> {
     let content_hash = content_hash_hex(&input.content);
     let fragment_id = content_hash.clone();
-    let fragment_path = overlay_dir.join(format!("{fragment_id}.bin"));
 
     // Same forward-slash invariant as `write_fragment_from_graph`.
     let rel_path = input.rel_path.replace('\\', "/");
@@ -298,18 +335,20 @@ fn write_fragment_file(
     // batch write.
     let parsed = parse_graph(&input.rel_path, &input.content)
         .and_then(|graph| archive_fragments(&graph).map(|bytes| (graph, bytes)));
-    let (parse_failed, dirty_symbols) = match parsed {
-        Ok((graph, archive_bytes)) => {
-            let tmp = overlay_dir.join(format!("{fragment_id}.{batch_seq}.{input_idx}.tmp"));
-            fs::write(&tmp, &archive_bytes)?;
-            let f = fs::OpenOptions::new().write(true).open(&tmp)?;
-            f.sync_all()?;
-            drop(f);
-            replace_file(&tmp, &fragment_path)?;
-            (false, symbols_from_graph(&graph, &rel_path))
-        }
-        Err(_) => (true, Vec::new()),
+    let (tmp, dirty_symbols) = match parsed {
+        Ok((graph, archive_bytes)) => (
+            Some(stage_archive(
+                overlay_dir,
+                &fragment_id,
+                batch_seq,
+                input_idx,
+                &archive_bytes,
+            )?),
+            symbols_from_graph(&graph, &rel_path),
+        ),
+        Err(_) => (None, Vec::new()),
     };
+    let parse_failed = tmp.is_none();
 
     let entry = DirtyEntry {
         mtime_ns: input.mtime_ns,
@@ -326,7 +365,12 @@ fn write_fragment_file(
         parse_failed,
     };
 
-    Ok((rel_path, entry, outcome))
+    Ok(StagedFragment {
+        rel_path,
+        entry,
+        outcome,
+        tmp,
+    })
 }
 
 fn parse_graph(rel_path: &str, content: &[u8]) -> io::Result<LocalGraph> {
@@ -336,7 +380,7 @@ fn parse_graph(rel_path: &str, content: &[u8]) -> io::Result<LocalGraph> {
         .map_err(io::Error::other)
 }
 
-/// rkyv-serialise a graph's v2 fragment file. Shared by the re-parse route
+/// rkyv-serialise a graph's v3 fragment file. Shared by the re-parse route
 /// (`parse_to_fragment`) and the pre-parsed route (`write_fragment_from_graph`)
 /// so both emit byte-identical fragment archives.
 fn archive_fragments(graph: &LocalGraph) -> io::Result<Vec<u8>> {
@@ -356,23 +400,21 @@ fn write_fragment_from_graph(
     input_idx: u64,
     graph: &LocalGraph,
     mtime_ns: u64,
-) -> io::Result<(String, DirtyEntry, FragmentOutcome)> {
+) -> io::Result<StagedFragment> {
     let content_hash = format!("{:016x}", u64::from_le_bytes(graph.content_hash));
     let fragment_id = content_hash.clone();
-    let fragment_path = overlay_dir.join(format!("{fragment_id}.bin"));
 
-    let parse_failed = match archive_fragments(graph) {
-        Ok(archive_bytes) => {
-            let tmp = overlay_dir.join(format!("{fragment_id}.{batch_seq}.{input_idx}.tmp"));
-            fs::write(&tmp, &archive_bytes)?;
-            let f = fs::OpenOptions::new().write(true).open(&tmp)?;
-            f.sync_all()?;
-            drop(f);
-            replace_file(&tmp, &fragment_path)?;
-            false
-        }
-        Err(_) => true,
+    let tmp = match archive_fragments(graph) {
+        Ok(archive_bytes) => Some(stage_archive(
+            overlay_dir,
+            &fragment_id,
+            batch_seq,
+            input_idx,
+            &archive_bytes,
+        )?),
+        Err(_) => None,
     };
+    let parse_failed = tmp.is_none();
 
     // Manifest keys feed uid streams and graph-file matching, which both use
     // forward slashes (the graph builder normalizes `File.path` that way) —
@@ -392,7 +434,12 @@ fn write_fragment_from_graph(
         fragment_id,
         parse_failed,
     };
-    Ok((rel_path, entry, outcome))
+    Ok(StagedFragment {
+        rel_path,
+        entry,
+        outcome,
+        tmp,
+    })
 }
 
 fn content_hash_hex(bytes: &[u8]) -> String {

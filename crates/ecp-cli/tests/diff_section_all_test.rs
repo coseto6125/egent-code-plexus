@@ -19,6 +19,7 @@ fn head_sha() -> String {
 fn run_diff_json(sections: &str) -> serde_json::Value {
     let sha = head_sha();
     let out = Command::new(ecp_bin())
+        .env("ECP_SKIP_BG_REBUILD", "1")
         .args([
             "diff",
             "--section",

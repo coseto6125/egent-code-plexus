@@ -173,7 +173,7 @@ fn commit_dir_mtime(path: &Path) -> SystemTime {
         .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
-fn is_recovery_dir_name(name: &str) -> bool {
+pub(crate) fn is_recovery_dir_name(name: &str) -> bool {
     let Some((_prefix, suffix)) = name.rsplit_once("__") else {
         return false;
     };
