@@ -455,7 +455,9 @@ pub fn stamp_js_ts_exports(
     nodes: &mut [RawNode],
 ) -> Option<Box<[RawExportAlias]>> {
     let mut exported: Vec<(&str, Span)> = Vec::new();
-    let mut locals: Vec<&str> = Vec::new();
+    // A set: every top-level declaration is checked against it below, and a
+    // barrel file can export hundreds of names.
+    let mut locals: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
     // `(export name, local name)` of every export of the file.
     let mut names: Vec<(&str, &str)> = Vec::new();
     let mut cursor = root.walk();
@@ -483,7 +485,7 @@ pub fn stamp_js_ts_exports(
             .child_by_field_name("value")
             .and_then(|value| js_ts_identifier(value, source))
         {
-            locals.push(local);
+            locals.insert(local);
             names.push(("default", local));
         }
         let mut clauses = statement.walk();
@@ -499,7 +501,7 @@ pub fn stamp_js_ts_exports(
                 else {
                     continue;
                 };
-                locals.push(local);
+                locals.insert(local);
                 let export = match specifier.child_by_field_name("alias") {
                     Some(alias) => js_ts_export_name(alias, source),
                     None => Some(local),
