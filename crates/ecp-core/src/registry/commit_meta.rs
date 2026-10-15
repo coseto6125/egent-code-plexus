@@ -28,7 +28,9 @@ use std::path::Path;
 /// import tier reads it. schema7: Python calls on a `from`-bound receiver are
 /// `CallSite::FromReceiver`, Python `from x import *` emits an unaliased `*`
 /// import, and Kotlin class bodies closed on the last member's line reparse.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema7");
+/// schema8: `LocalGraph.export_aliases` and `BindingKind::EsDefault` (TS / JS
+/// export aliases and default imports).
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema8");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
