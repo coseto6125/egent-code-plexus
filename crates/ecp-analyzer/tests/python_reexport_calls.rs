@@ -1,13 +1,15 @@
 //! FU-2026-10-05-0ee319339782: a Python call through a package re-export
-//! (`pkg/__init__.py`: `from .core import compute`) or through a submodule
-//! from-import (`from pkg.sub import mod; mod.compute()`) binds through the
-//! import tier (0.95), following the re-export one hop. Before the fix these
-//! calls kept the global tier: 0.7 for a unique name, no edge for an
-//! ambiguous one.
+//! (`pkg/__init__.py`: `from .core import compute`) binds through the import
+//! tier (0.95), following the re-export one hop. Before the fix these calls
+//! kept the global tier: 0.7 for a unique name, no edge for an ambiguous one.
+//!
+//! A submodule from-import (`from pkg.sub import mod; mod.compute()`) is not
+//! covered: the Python parser emits a `from`-bound receiver's call as the bare
+//! member name, so the resolver never sees `mod`.
 //!
 //! The guard tests pin what must not change: a second hop is not followed,
-//! a cycle ends, a missing re-exported name keeps the global tier, a module
-//! attribute shadows a submodule, and Kotlin's same shape resolves as before.
+//! a cycle ends, a missing re-exported name keeps the global tier, and
+//! Kotlin's same shape resolves as before.
 //! Their expected values are what ecp 0.14.8 produced on the same fixtures.
 mod instantiation_calls_support;
 
@@ -90,60 +92,6 @@ fn test_python_reexport_module_import_ambiguous_name_binds_import_tier() {
             &[("pkg/core.py", "", "compute", import_tier())],
         );
     }
-}
-
-/// `from pkg.sub import mod`: `pkg/sub/__init__.py` declares no `mod`, so the
-/// import binds the submodule, as a namespace import of `pkg.sub.mod` would.
-#[test]
-fn test_python_submodule_from_import_ambiguous_name_binds_submodule() {
-    for (caller, import, call, target) in [
-        (
-            "app.py",
-            "from pkg.sub import mod",
-            "mod.compute()",
-            "pkg/sub/mod.py",
-        ),
-        (
-            "app.py",
-            "from pkg.sub import mod as m",
-            "m.compute()",
-            "pkg/sub/mod.py",
-        ),
-        (
-            "pkg/app.py",
-            "from .sub import mod",
-            "mod.compute()",
-            "pkg/sub/mod.py",
-        ),
-        (
-            "pkg/app.py",
-            "from . import other",
-            "other.compute()",
-            "pkg/other.py",
-        ),
-    ] {
-        let app = go(import, call);
-        let graph = python(&[PACKAGE, NAMESAKES], (caller, &app));
-        assert_call_targets(&graph, "go", &[(target, "", "compute", import_tier())]);
-    }
-}
-
-/// A package attribute named like the submodule shadows it, as in Python:
-/// the call keeps its previous path (no edge on ecp 0.14.8).
-#[test]
-fn test_python_submodule_from_import_module_attribute_keeps_previous_path() {
-    let graph = python(
-        &[&[
-            ("pkg/__init__.py", ""),
-            (
-                "pkg/sub/__init__.py",
-                "class mod:\n    @staticmethod\n    def compute():\n        return 4\n",
-            ),
-            ("pkg/sub/mod.py", "def compute():\n    return 3\n"),
-        ]],
-        ("app.py", &go("from pkg.sub import mod", "mod.compute()")),
-    );
-    assert_call_targets(&graph, "go", &[]);
 }
 
 #[test]

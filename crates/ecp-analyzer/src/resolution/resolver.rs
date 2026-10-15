@@ -836,13 +836,6 @@ impl<'a> Resolver<'a> {
             let Some(binding) = import_binding(import, symbol_name, language)
                 .filter(|binding| binding.wildcard == wildcard)
             else {
-                if !wildcard && language == Language::Python {
-                    if let Some(node_id) =
-                        self.python_submodule_member(source_file, import, symbol_name, target)
-                    {
-                        return MemberHit::Bound(node_id, import);
-                    }
-                }
                 continue;
             };
             bound = true;
@@ -907,68 +900,6 @@ impl<'a> Resolver<'a> {
                 }
             }
         })
-    }
-
-    /// `from pkg.sub import mod; mod.compute()`: a from-import of a name its
-    /// module does not declare imports the submodule `pkg.sub.mod`, so the
-    /// call binds as through `import pkg.sub.mod as mod`. A miss leaves the
-    /// import unbound, so the call keeps its previous resolution path.
-    fn python_submodule_member(
-        &self,
-        source_file: &Path,
-        import: &RawImport,
-        symbol_name: &str,
-        target: ResolveTarget,
-    ) -> Option<NodeId> {
-        if import.imported_name == "*" {
-            return None;
-        }
-        let local = import.alias.as_deref().unwrap_or(&import.imported_name);
-        let member = symbol_name.strip_prefix(local)?.strip_prefix('.')?;
-        // The cheap gate: most `obj.method()` receivers are not module names.
-        if member.is_empty()
-            || !self
-                .symbol_table
-                .has_module_name(Language::Python, &import.imported_name)
-        {
-            return None;
-        }
-        match self.import_module_file(source_file, &import.source, Language::Python) {
-            // The module's own `mod` is an attribute, which shadows the
-            // submodule.
-            IndexedModule::Unique(module)
-                if self
-                    .symbol_table
-                    .lookup_in_file(&module, &import.imported_name)
-                    .is_some() =>
-            {
-                return None;
-            }
-            IndexedModule::Ambiguous => return None,
-            // A namespace package (no `__init__.py`) is Missing yet holds
-            // submodules.
-            IndexedModule::Unique(_) | IndexedModule::Missing | IndexedModule::Namespace(_) => {}
-        }
-        let separator = if import.source.bytes().all(|b| b == b'.') {
-            ""
-        } else if import.source.starts_with('.') {
-            "."
-        } else {
-            "/"
-        };
-        let submodule = [
-            import.source.as_str(),
-            separator,
-            import.imported_name.as_str(),
-        ]
-        .concat();
-        match self.import_module_file(source_file, &submodule, Language::Python) {
-            IndexedModule::Unique(module) => self
-                .symbol_table
-                .lookup_call_in_file(&module, member, target)
-                .or_else(|| self.python_reexport(&module, member, target)),
-            IndexedModule::Missing | IndexedModule::Ambiguous | IndexedModule::Namespace(_) => None,
-        }
     }
 
     /// The first TS / JS file `specifier` names from `importer`: the file
