@@ -493,27 +493,10 @@ pub fn stamp_js_ts_exports(
                 None => names.push(("default", "")),
             }
         }
-        let mut clauses = statement.walk();
-        for clause in statement
-            .named_children(&mut clauses)
-            .filter(|child| child.kind() == "export_clause")
-        {
-            let mut specifiers = clause.walk();
-            for specifier in clause.named_children(&mut specifiers) {
-                let Some(local) = specifier
-                    .child_by_field_name("name")
-                    .and_then(|name| js_ts_identifier(name, source))
-                else {
-                    continue;
-                };
-                locals.insert(local);
-                let export = match specifier.child_by_field_name("alias") {
-                    Some(alias) => js_ts_export_name(alias, source),
-                    None => Some(local),
-                };
-                names.extend(export.map(|export| (export, local)));
-            }
-        }
+        js_ts_clause_exports(statement, source, |export, local| {
+            locals.insert(local);
+            names.extend(export.map(|export| (export, local)));
+        });
     }
     let aliases = js_ts_export_aliases(names);
     if !locals.is_empty() {
@@ -563,6 +546,36 @@ fn js_ts_export_aliases(mut names: Vec<(&str, &str)>) -> Option<Box<[RawExportAl
             })
             .collect(),
     )
+}
+
+/// Each `(export name, local name)` of the `export { }` clauses of the
+/// export statement `statement`, in source order. The export name is
+/// `None` when it is no name [`js_ts_export_name`] reads.
+fn js_ts_clause_exports<'s>(
+    statement: tree_sitter::Node<'_>,
+    source: &'s [u8],
+    mut visit: impl FnMut(Option<&'s str>, &'s str),
+) {
+    let mut clauses = statement.walk();
+    for clause in statement
+        .named_children(&mut clauses)
+        .filter(|child| child.kind() == "export_clause")
+    {
+        let mut specifiers = clause.walk();
+        for specifier in clause.named_children(&mut specifiers) {
+            let Some(local) = specifier
+                .child_by_field_name("name")
+                .and_then(|name| js_ts_identifier(name, source))
+            else {
+                continue;
+            };
+            let export = match specifier.child_by_field_name("alias") {
+                Some(alias) => js_ts_export_name(alias, source),
+                None => Some(local),
+            };
+            visit(export, local);
+        }
+    }
 }
 
 /// The name an `export { x as name }` gives: an identifier, `default`, or a
@@ -630,28 +643,11 @@ pub fn mark_js_ts_import_bindings(
                 }
             }
             "export_statement" if statement.child_by_field_name("source").is_none() => {
-                let mut clauses = statement.walk();
-                for clause in statement
-                    .named_children(&mut clauses)
-                    .filter(|child| child.kind() == "export_clause")
-                {
-                    let mut specifiers = clause.walk();
-                    for specifier in clause.named_children(&mut specifiers) {
-                        let Some(local) = specifier
-                            .child_by_field_name("name")
-                            .and_then(|name| js_ts_identifier(name, source))
-                        else {
-                            continue;
-                        };
-                        let export = match specifier.child_by_field_name("alias") {
-                            Some(alias) => js_ts_export_name(alias, source),
-                            None => Some(local),
-                        };
-                        if export == Some(local) {
-                            exported.insert(local);
-                        }
+                js_ts_clause_exports(statement, source, |export, local| {
+                    if export == Some(local) {
+                        exported.insert(local);
                     }
-                }
+                });
             }
             _ => {}
         }

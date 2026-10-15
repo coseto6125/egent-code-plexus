@@ -19,7 +19,9 @@
 //! - **Step 1**: `Resolver::resolve_symbol` with both `Callable` + `Type`
 //!   kinds against `RawImport.imported_name` (a PHP import: its alias, when
 //!   it has one). Covers TS/JS/Python/Java/PHP where `imported_name` IS the
-//!   symbol (`from a import foo`).
+//!   symbol (`from a import foo`). A TS / JS / Python import with an alias
+//!   (`import { render as paint }`) first takes the import tiers under its
+//!   local name, which is what they bind, so a barrel hop is found.
 //!   Confidence = tier-determined: `SameFile=1.0`, `ImportScoped=0.95`,
 //!   `QualifierScoped=0.85`, `HeritageScoped=0.85`, `Global=0.7`. A hit
 //!   through a re-export (a TS / JS barrel, a Python package's
@@ -57,12 +59,13 @@
 //!   containing the implementation file. Uses `dir_component_idx`.
 
 use crate::resolution::index::{Language, ResolveTarget};
-use crate::resolution::resolver::Resolver;
+use crate::resolution::resolver::{NodeId, Resolver};
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::{Edge, RelType};
 use ecp_core::pool::StringPool;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::sync::Arc;
 
 /// Emit `Imports` edges from each `File` node to the resolved targets of
@@ -146,23 +149,54 @@ pub fn emit_edges(
             // A PHP import binds its alias (`use A\B as C`, and every group
             // member `use A\{B}`), not the declared name, which may be a
             // same-file declaration's name.
-            let php = Language::from_normalized_path(&path_str) == Language::Php;
-            for import in &local_graph.imports {
+            let language = Language::from_normalized_path(&path_str);
+            let php = language == Language::Php;
+            // The import tiers of these languages bind an import by its
+            // local name. The general tiers keep the declared name: an alias
+            // names no declaration.
+            let binds_local = matches!(
+                language,
+                Language::TypeScript | Language::JavaScript | Language::Python
+            );
+            let file_path = &local_graph.file_path;
+            let imports = &local_graph.imports;
+            for import in imports {
                 let before = *emitted;
                 let local_name = match &import.alias {
                     Some(alias) if php => alias,
                     _ => &import.imported_name,
                 };
                 // Step 1: named-symbol lookup.
-                let (named, barrel) = try_named(
-                    resolver,
-                    local_graph,
-                    local_name,
-                    source_file_idx,
-                    reason_named,
-                    &mut dedupe,
-                    edges_out,
-                );
+                let aliased = import.alias.as_deref().filter(|alias| {
+                    binds_local && import.imported_name != "*" && *alias != import.imported_name
+                });
+                // Whether the local name bound at all: an edge the dedupe
+                // drops is still that import's answer.
+                let bound = Cell::new(false);
+                let mut found = aliased.map_or((0, None), |alias| {
+                    try_named(
+                        |target| {
+                            let hit =
+                                resolver.resolve_import_binding(file_path, alias, imports, target);
+                            bound.set(bound.get() || !hit.0.is_empty());
+                            hit
+                        },
+                        source_file_idx,
+                        reason_named,
+                        &mut dedupe,
+                        edges_out,
+                    )
+                });
+                if !bound.get() {
+                    found = try_named(
+                        |target| resolver.resolve_import(file_path, local_name, imports, target),
+                        source_file_idx,
+                        reason_named,
+                        &mut dedupe,
+                        edges_out,
+                    );
+                }
+                let (named, barrel) = found;
                 *emitted += named;
                 // A hit through a re-export lands outside the module the
                 // import names. The importer still depends on that barrel,
@@ -190,9 +224,7 @@ pub fn emit_edges(
                     if let Some(last) = import.imported_name.rsplit('.').next() {
                         if !last.is_empty() && last != import.imported_name {
                             *emitted += try_named(
-                                resolver,
-                                local_graph,
-                                last,
+                                |target| resolver.resolve_import(file_path, last, imports, target),
                                 source_file_idx,
                                 reason_named,
                                 &mut dedupe,
@@ -408,12 +440,11 @@ fn suffix_match_single(
     hit
 }
 
-/// Step 1 for `name`: the edges it emitted, and the barrel a re-export hop
-/// of the import tier went through ([`Resolver::resolve_import`]).
+/// Step 1 through `resolve` ([`Resolver::resolve_import`] or
+/// [`Resolver::resolve_import_binding`]): the edges it emitted, and the
+/// barrel a re-export hop of the import tier went through.
 fn try_named(
-    resolver: &Resolver<'_>,
-    local_graph: &LocalGraph,
-    name: &str,
+    resolve: impl Fn(ResolveTarget) -> (Vec<(NodeId, f32)>, Option<Arc<str>>),
     source_file_idx: u32,
     reason: ecp_core::pool::StrRef,
     dedupe: &mut FxHashSet<(u32, u32)>,
@@ -422,12 +453,7 @@ fn try_named(
     let mut emitted = 0usize;
     let mut barrel = None;
     for target_kind in [ResolveTarget::Callable, ResolveTarget::Type] {
-        let (targets, via) = resolver.resolve_import(
-            &local_graph.file_path,
-            name,
-            &local_graph.imports,
-            target_kind,
-        );
+        let (targets, via) = resolve(target_kind);
         barrel = barrel.or(via);
         for (target_id, confidence) in targets {
             if !dedupe.insert((source_file_idx, target_id)) {

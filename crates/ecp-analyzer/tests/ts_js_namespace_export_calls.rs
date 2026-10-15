@@ -535,6 +535,62 @@ fn test_resolve_call_default_import_of_expression_default_binds_local_name() {
     }
 }
 
+/// codex C3: a module whose only export is `export default wrap(f)` is an
+/// ES module, so `f` stays private: a named import or a namespace member
+/// call binds no edge, and the global tier does not bind it either. Before
+/// the fix the expression default alone built no alias table, the module
+/// counted as a script, and both bound the private `f` (0.95).
+#[test]
+fn test_resolve_call_expression_default_only_module_keeps_private_name_hidden() {
+    let module_src = "function f() {}\nexport default wrap(f);\n";
+    for ext in TS_JS {
+        assert_eq!(
+            named_import_calls(ext, module_src, "f"),
+            Vec::<Call>::new(),
+            "{ext}: f"
+        );
+        assert_eq!(
+            namespace_calls(ext, module_src),
+            Vec::<Call>::new(),
+            "{ext}: ns.f"
+        );
+    }
+}
+
+/// Q13: a class exported under another name (`export { Impl as Widget }`)
+/// is the qualifier of `Widget.create()`: the qualifier tier finds `a`
+/// through the module's exports (0.85). `c`'s namesake makes the global tier
+/// ambiguous. Before the fix the qualifier was looked up by the name
+/// `Widget`, which `a` does not declare, and the call bound nothing.
+#[test]
+fn test_resolve_call_aliased_class_export_qualifier_binds_qualifier_tier() {
+    for ext in TS_JS {
+        let (module, importer, other) =
+            (format!("a.{ext}"), format!("b.{ext}"), format!("c.{ext}"));
+        assert_eq!(
+            calls_from(
+                &[
+                    (
+                        &module,
+                        "class Impl { static create() { return 1; } }\nexport { Impl as Widget };\n",
+                    ),
+                    (
+                        &importer,
+                        "import { Widget } from './a';\nfunction use() { Widget.create(); }\n",
+                    ),
+                    (
+                        &other,
+                        "export class Other { static create() { return 2; } }\n",
+                    ),
+                ],
+                "use",
+            ),
+            vec![call("create", &module, 1, 85)],
+            "{ext}"
+        );
+    }
+}
+
 /// `export { missing as f }` names no declaration of `a`: no edge through the
 /// namespace or the named import, no crash, and the private `f` stays out of
 /// reach of the global tier too. Before the fix `a` counted as no ES module

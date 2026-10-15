@@ -1,7 +1,7 @@
 use ecp_core::analyzer::import_binding::{
     fqn_language, owner_path_agrees, DeclaredType, MemberOwner,
 };
-use ecp_core::analyzer::reexport::{pick_call, ExportAliasTable};
+use ecp_core::analyzer::reexport::{is_es_module, pick_call, ExportAliasTable};
 use ecp_core::analyzer::types::{owner_key, RawExportAlias};
 use ecp_core::file_category::pick_global;
 pub use ecp_core::file_category::{FileMeta, GlobalPick, Language};
@@ -565,9 +565,7 @@ impl SymbolTable {
     /// `.d.ts`, whose declarations TS may export implicitly, prove nothing,
     /// and other languages bind imports by their own rules.
     pub(crate) fn note_export(&mut self, file_path: &str, language: Language, node_id: u32) {
-        if !matches!(language, Language::TypeScript | Language::JavaScript)
-            || file_path.ends_with(".d.ts")
-        {
+        if !is_es_module(language, file_path, true, false) {
             return;
         }
         self.exported_ids.insert(node_id);
@@ -585,16 +583,12 @@ impl SymbolTable {
         language: Language,
         aliases: &[RawExportAlias],
     ) {
-        if !matches!(language, Language::TypeScript | Language::JavaScript)
-            || file_path.ends_with(".d.ts")
-        {
-            return;
-        }
         let Some(table) = ExportAliasTable::build(
             aliases
                 .iter()
                 .map(|alias| (&*alias.exported, &*alias.local)),
-        ) else {
+        )
+        .filter(|_| is_es_module(language, file_path, false, true)) else {
             return;
         };
         if !self.es_modules.contains(file_path) {

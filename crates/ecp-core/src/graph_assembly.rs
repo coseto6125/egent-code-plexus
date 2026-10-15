@@ -605,7 +605,8 @@ mod tests {
 
     /// The facts round-trip per file, and a file with no recorded import
     /// reads as an empty slice, not as missing. An alias of `""` stays
-    /// distinct from no alias.
+    /// distinct from no alias, and a row's target file index reads back as
+    /// that file's path.
     #[test]
     fn test_finish_module_facts_roundtrip_per_file_keeps_none_and_empty_alias() {
         use crate::analyzer::reexport::ImportRef;
@@ -622,12 +623,14 @@ mod tests {
                 imported_name: pool.add("d"),
                 alias: None,
                 binding_kind: Some(BindingKind::EsDefault),
+                target_file: Some(1),
             },
             ImportFact {
                 source: pool.add("./m"),
                 imported_name: pool.add("e"),
                 alias: Some(pool.add("")),
                 binding_kind: None,
+                target_file: None,
             },
         ];
         let export_aliases = vec![ExportAliasFact {
@@ -659,7 +662,7 @@ mod tests {
             .file_imports(0)
             .unwrap()
             .iter()
-            .map(|row| row.to_ref(pool))
+            .map(|row| ImportRef::from_archived(row, pool, &archived.files))
             .collect();
         assert_eq!(
             a,
@@ -669,12 +672,14 @@ mod tests {
                     imported_name: "d",
                     alias: None,
                     binding_kind: Some(BindingKind::EsDefault),
+                    target: Some("b.ts"),
                 },
                 ImportRef {
                     source: "./m",
                     imported_name: "e",
                     alias: Some(""),
                     binding_kind: None,
+                    target: None,
                 },
             ]
         );
@@ -775,6 +780,7 @@ mod tests {
                     imported_name: source,
                     alias: None,
                     binding_kind: None,
+                    target_file: None,
                 }],
                 ..ModuleFactTables::default()
             },

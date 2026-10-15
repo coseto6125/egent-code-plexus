@@ -5,6 +5,7 @@
 
 use ecp_analyzer::python::PythonProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
+use ecp_analyzer::resolution::path_aliases::PathAliases;
 use ecp_analyzer::typescript::TypeScriptProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::reexport::ImportRef;
@@ -65,11 +66,16 @@ fn test_build_module_facts_mirror_each_files_parse() {
     for local in &locals {
         let path = local.file_path.to_string_lossy();
         let file = graph.file_idx_of(&path).expect("every file is indexed");
+        // The archive adds what the parse cannot know, the target file of a
+        // re-export row (asserted below); the rest mirrors the parse.
         let archived: Vec<ImportRef<'_>> = graph
             .file_imports(file)
             .expect("facts are present")
             .iter()
-            .map(|row| row.to_ref(pool))
+            .map(|row| ImportRef {
+                target: None,
+                ..ImportRef::from_archived(row, pool, &graph.files)
+            })
             .collect();
         let parsed: Vec<ImportRef<'_>> = local.imports.iter().map(ImportRef::from).collect();
         assert_eq!(archived, parsed, "{path}");
@@ -79,7 +85,7 @@ fn test_build_module_facts_mirror_each_files_parse() {
         .file_imports(init)
         .unwrap()
         .iter()
-        .map(|row| row.to_ref(pool).alias)
+        .map(|row| ImportRef::from_archived(row, pool, &graph.files).alias)
         .collect();
     assert_eq!(aliases, [Some("c"), None], "order and alias-vs-none kept");
 
@@ -117,7 +123,7 @@ fn test_build_module_facts_mirror_each_files_parse() {
         .unwrap()
         .iter()
         .map(|row| {
-            let import = row.to_ref(pool);
+            let import = ImportRef::from_archived(row, pool, &graph.files);
             (import.imported_name, import.binding_kind)
         })
         .collect();
@@ -137,4 +143,72 @@ fn test_build_module_facts_mirror_each_files_parse() {
         .map(|row| (row.exported.resolve(pool), row.local.resolve(pool)))
         .collect();
     assert_eq!(page_aliases, [("config", "config"), ("default", "")]);
+}
+
+/// P1: a TS / JS re-export row keeps the file the index resolved its
+/// specifier to, a tsconfig path alias included, which `graph.bin` does not
+/// keep; the overlay follows a clean barrel through it. A plain import, a
+/// specifier naming no indexed file, and a Python row keep none.
+#[test]
+fn test_build_module_facts_reexport_rows_keep_resolved_target_file() {
+    let typescript = TypeScriptProvider::new().unwrap();
+    let python = PythonProvider::new().unwrap();
+    let files: &[(&str, &str)] = &[
+        (
+            "src/index.ts",
+            "export * from '@/ui/button';\nexport { x } from './b';\nimport { p } from './b';\nexport * from 'react';\n",
+        ),
+        ("src/ui/button.ts", "export function render() {}\n"),
+        ("src/b.ts", "export function x() {}\nexport function p() {}\n"),
+        ("pkg/__init__.py", "from .core import compute\n"),
+        ("pkg/core.py", "def compute():\n    pass\n"),
+    ];
+    let mut aliases = PathAliases::new();
+    aliases.add("@/*", vec!["src/*".to_string()]);
+    let mut builder = GraphBuilder::new().with_path_aliases(aliases);
+    for (path, source) in files {
+        let provider: &dyn LanguageProvider = if path.ends_with(".py") {
+            &python
+        } else {
+            &typescript
+        };
+        builder.add_graph(
+            provider
+                .parse_file(Path::new(path), source.as_bytes())
+                .unwrap(),
+        );
+    }
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&builder.build()).unwrap();
+    let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    let pool = graph.string_pool.as_slice();
+    let targets = |path: &str| -> Vec<(String, Option<String>)> {
+        graph
+            .file_imports(graph.file_idx_of(path).unwrap())
+            .unwrap()
+            .iter()
+            .map(|row| {
+                let import = ImportRef::from_archived(row, pool, &graph.files);
+                (
+                    format!("{}:{}", import.source, import.imported_name),
+                    import.target.map(str::to_string),
+                )
+            })
+            .collect()
+    };
+    let index = targets("src/index.ts");
+    for (row, expected) in [
+        ("@/ui/button:*", Some("src/ui/button.ts")),
+        ("./b:x", Some("src/b.ts")),
+        ("./b:p", None),
+        ("react:*", None),
+    ] {
+        let found: Vec<_> = index.iter().filter(|(r, _)| r == row).collect();
+        assert_eq!(found.len(), 1, "{row} in {index:?}");
+        assert_eq!(found[0].1.as_deref(), expected, "{row}");
+    }
+    let python = targets("pkg/__init__.py");
+    assert!(
+        !python.is_empty() && python.iter().all(|(_, target)| target.is_none()),
+        "{python:?}"
+    );
 }

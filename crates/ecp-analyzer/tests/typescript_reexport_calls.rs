@@ -312,21 +312,29 @@ fn at(ext: &str, name: &str) -> String {
 /// re-exported declaration and keeps its File → barrel File edge (0.9),
 /// which ecp 0.14.8 emitted and the edit hook's `importers()` reads. Before
 /// this fix only the symbol edge was left, so the barrel had no importer.
-/// An import of the module that declares the name gets no File edge.
+/// An import of the module that declares the name gets no File edge. An
+/// aliased import (`render as paint`, codex C1) binds its local name the
+/// same way; before that fix it took the global tier (0.7) and lost the
+/// barrel edge.
 #[test]
 fn test_emit_edges_named_import_through_barrel_keeps_barrel_file_edge() {
+    let aliased =
+        "import { render as paint } from './index';\nexport function go() { return paint(); }\n";
     for ext in ["ts", "js"] {
-        for barrel in [
+        for (barrel, app_source) in [
             "export * from './impl';\n",
             "export { render } from './impl';\n",
             "import { render } from './impl';\nexport { render };\n",
-        ] {
+        ]
+        .into_iter()
+        .flat_map(|barrel| [(barrel, APP), (barrel, aliased)])
+        {
             let (index, implementation) = (at(ext, "index"), at(ext, "impl"));
             let (app, direct) = (at(ext, "app"), at(ext, "direct"));
             let graph = graph(&[
                 (index.as_str(), barrel),
                 (implementation.as_str(), IMPL.1),
-                (app.as_str(), APP),
+                (app.as_str(), app_source),
                 (
                     direct.as_str(),
                     "import { render } from './impl';\nexport function go2() { return render(); }\n",
@@ -338,7 +346,7 @@ fn test_emit_edges_named_import_through_barrel_keeps_barrel_file_edge() {
                     (implementation.clone(), "render".to_string(), "Function", 95),
                     (index.clone(), format!("index.{ext}"), "File", 90),
                 ],
-                "{ext}: {barrel}"
+                "{ext}: {barrel} {app_source}"
             );
             assert_eq!(
                 imports_edges_of(&graph, &format!("direct.{ext}")),
@@ -445,6 +453,16 @@ fn test_ts_reexport_default_export_barrel_forms_bind_default_declaration() {
                 "export { default } from './impl';\n",
                 "import Button from './index';\nexport function go() { return Button(); }\n",
             ),
+            // C2: a default import the barrel exports as its default, or
+            // under another name, binds through that import.
+            (
+                "import Button from './impl';\nexport default Button;\n",
+                "import Button from './index';\nexport function go() { return Button(); }\n",
+            ),
+            (
+                "import Button from './impl';\nexport { Button as Widget };\n",
+                "import { Widget } from './index';\nexport function go() { return Widget(); }\n",
+            ),
         ] {
             let graph = graph(&[
                 (index.as_str(), barrel),
@@ -467,12 +485,57 @@ fn test_ts_reexport_default_export_barrel_forms_bind_default_declaration() {
     }
 }
 
+/// C4: JS parses `default` as a token, so its queries missed `export {
+/// render as default } from` (recorded as `export { render } from`) and
+/// dropped `import { default as B }`. Both bind `impl`'s declaration in JS
+/// and TS (`other`'s namesakes make the global tier ambiguous); before the
+/// fix neither bound in JS.
+#[test]
+fn test_ts_js_default_keyword_specifiers_bind_declaration() {
+    for ext in ["ts", "js"] {
+        let [index, implementation, other, app, app2] =
+            ["index", "impl", "other", "app", "app2"].map(|name| at(ext, name));
+        let graph = graph(&[
+            (index.as_str(), "export { render as default } from './impl';\n"),
+            (
+                implementation.as_str(),
+                "export function render() { return 1; }\nexport default function Button() { return 1; }\n",
+            ),
+            (
+                other.as_str(),
+                "export function render() { return 2; }\nexport default function Button() { return 2; }\n",
+            ),
+            (
+                app.as_str(),
+                "import r from './index';\nexport function go() { return r(); }\n",
+            ),
+            (
+                app2.as_str(),
+                "import { default as B } from './impl';\nexport function go2() { return B(); }\n",
+            ),
+        ]);
+        assert_call_targets(
+            &graph,
+            "go",
+            &[(implementation.as_str(), "", "render", import_tier())],
+        );
+        assert_call_targets(
+            &graph,
+            "go2",
+            &[(implementation.as_str(), "", "Button", import_tier())],
+        );
+    }
+}
+
 /// The parsers mark what the barrel exports: a re-export (`export { x }
 /// from`, `export { default as X } from`) and an import its own `export { }`
 /// clause exports under its local name are [`BindingKind::EsReexport`],
 /// [`BindingKind::EsDefaultReexport`] for a default import. An import
 /// exported only under another name (`z as w`) and a plain import stay
-/// unmarked.
+/// unmarked: the mark means "exported under its local name". The re-export
+/// hop follows `z` through the file's export alias table (`w` → `z`, C2),
+/// which `test_ts_reexport_default_export_barrel_forms_bind_default_declaration`
+/// covers; a mark on `z` would wrongly export it as `z`.
 #[test]
 fn test_parse_file_reexport_marks_exported_bindings() {
     let ts = TypeScriptProvider::new().unwrap();

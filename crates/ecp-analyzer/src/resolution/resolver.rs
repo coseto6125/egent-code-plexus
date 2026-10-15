@@ -42,8 +42,8 @@ use ecp_core::analyzer::import_binding::{
     import_family, import_member_fallback, may_suppress, module_head, retry_name,
 };
 use ecp_core::analyzer::reexport::{
-    self, is_ecmascript, probe_rust_module, ExportAliasTable, FileImports, ImportRef, ModuleFacts,
-    PyModule,
+    self, is_ecmascript, probe_rust_module, ExportAliasTable, Fact, FileImports, ImportRef,
+    ModuleFacts, PyModule,
 };
 use ecp_core::analyzer::rust_paths::{is_rust_source, rust_module_path_base};
 use ecp_core::analyzer::types::{CallSite, LocalGraph, RawImport};
@@ -197,8 +197,8 @@ impl ModuleFacts for IndexFacts<'_, '_> {
         self.0.symbol_table.is_es_module(file)
     }
 
-    fn export_aliases(&self, file: &str) -> Option<Cow<'_, ExportAliasTable>> {
-        self.0.symbol_table.export_aliases(file).map(Cow::Borrowed)
+    fn export_aliases(&self, file: &str) -> Option<Fact<'_, ExportAliasTable>> {
+        self.0.symbol_table.export_aliases(file).map(Fact::Borrowed)
     }
 
     fn imports(&self, file: &str) -> Option<FileImports<'_>> {
@@ -206,10 +206,10 @@ impl ModuleFacts for IndexFacts<'_, '_> {
         Some(FileImports::Parsed(exports.imports))
     }
 
-    fn star_modules(&self, module: &str) -> Cow<'_, [Box<str>]> {
+    fn star_modules(&self, module: &str) -> Fact<'_, [Box<str>]> {
         match self.0.reexports.and_then(|index| index.modules.get(module)) {
-            Some(exports) => Cow::Borrowed(&exports.star_modules[..]),
-            None => Cow::Borrowed(&[]),
+            Some(exports) => Fact::Borrowed(&exports.star_modules[..]),
+            None => Fact::Borrowed(&[]),
         }
     }
 
@@ -713,7 +713,14 @@ impl<'a> Resolver<'a> {
             return self.import_scoped(source_file, site.name(), import, node_id);
         }
         let resolve = |name: &str, target, bind: bool| {
-            self.resolve_import_tiers(source_file, language, name, raw_imports, target, bind)
+            self.resolve_import_tiers(
+                source_file,
+                language,
+                name,
+                (raw_imports, bind),
+                target,
+                &mut None,
+            )
         };
         let mut targets = resolve(site.name(), call_target(source_file, site), true);
         if targets.is_empty() {
@@ -790,31 +797,64 @@ impl<'a> Resolver<'a> {
             source_file,
             language,
             symbol_name,
-            raw_imports,
+            (raw_imports, true),
             target,
-            true,
+            &mut None,
         )
+    }
+
+    /// The import tiers alone for the local name `local_name` an import
+    /// binds, and the barrel a re-export hop went through
+    /// ([`Self::resolve_import`]). Empty when no import tier binds it: an
+    /// aliased local name (`import { render as paint }`) names no
+    /// declaration, so the general tiers have nothing to look up under it.
+    pub fn resolve_import_binding(
+        &self,
+        source_file: &Path,
+        local_name: &str,
+        raw_imports: &[RawImport],
+        target: ResolveTarget,
+    ) -> (Vec<(NodeId, f32)>, Option<Arc<str>>) {
+        let language = Language::from_normalized_path(&normalize_source_path(source_file));
+        let mut barrel = None;
+        let targets = self.resolve_import_tiers(
+            source_file,
+            language,
+            local_name,
+            (raw_imports, true),
+            target,
+            &mut barrel,
+        );
+        (targets, barrel)
+    }
+
+    /// The TS / JS file `import` of `importer` names
+    /// ([`reexport::ecmascript_module`]), tsconfig path aliases included.
+    pub(crate) fn ecmascript_module(&self, importer: &str, import: &RawImport) -> Option<Box<str>> {
+        reexport::ecmascript_module(&IndexFacts(self), importer, &ImportRef::from(import))
     }
 
     /// The import tiers alone: the import-member tier (explicit imports, then
     /// wildcards when no explicit import binds the name) where the language
     /// binds through imports and `bind_import` holds, else the name match.
+    /// `barrel` receives the barrel a re-export hop went through.
     fn resolve_import_tiers(
         &self,
         source_file: &Path,
         language: Language,
         symbol_name: &str,
-        raw_imports: &[RawImport],
+        (raw_imports, bind_import): (&[RawImport], bool),
         target: ResolveTarget,
-        bind_import: bool,
+        barrel: &mut Option<Arc<str>>,
     ) -> Vec<(NodeId, f32)> {
         if raw_imports.is_empty() || target == ResolveTarget::Field {
             return Vec::new();
         }
         if !(bind_import && import_member_fallback(language)) {
-            return self
-                .resolve_named_import(source_file, symbol_name, raw_imports, target)
-                .0;
+            let (targets, via) =
+                self.resolve_named_import(source_file, symbol_name, raw_imports, target);
+            *barrel = via;
+            return targets;
         }
         let hit = match self.import_member_hit(
             source_file,
@@ -835,7 +875,8 @@ impl<'a> Resolver<'a> {
             explicit => explicit,
         };
         match hit {
-            MemberHit::Bound(node_id, import, _) => {
+            MemberHit::Bound(node_id, import, via) => {
+                *barrel = via;
                 self.import_scoped(source_file, symbol_name, import, node_id)
             }
             MemberHit::Unbound { .. } => Vec::new(),
@@ -912,17 +953,14 @@ impl<'a> Resolver<'a> {
             let hit = match self.import_module_file(source_file, &import.source, language) {
                 IndexedModule::Unique(module) => match in_file(&module) {
                     Some(node_id) => Some((node_id, None)),
-                    None => (language == Language::Python)
-                        .then(|| {
-                            reexport::python_reexport(
-                                &IndexFacts(self),
-                                &module,
-                                binding.name,
-                                target,
-                            )
-                        })
-                        .flatten()
-                        .map(|node_id| (node_id, Some(module))),
+                    None => reexport::python_import_reexport(
+                        &IndexFacts(self),
+                        language,
+                        &module,
+                        binding.name,
+                        target,
+                    )
+                    .map(|node_id| (node_id, Some(module))),
                 },
                 IndexedModule::Namespace(files) => {
                     let mut hits = files.iter().filter_map(|file| in_file(file));
@@ -1895,11 +1933,18 @@ impl<'a> Resolver<'a> {
                     .map(|resolved| resolved.file);
             }
             let mut hit: Option<String> = None;
+            let default_import = ImportRef::from(import).is_es_default();
             self.for_each_candidate(source_file, &import.source, |candidate| {
-                let qualifier_present = self
-                    .symbol_table
-                    .lookup_in_file_with_kind(candidate, exported, ResolveTarget::Qualifier)
-                    .is_some();
+                // Through the module's exports: an ES module may export the
+                // qualifier under another name (`export { Impl as Widget }`).
+                let qualifier_present = reexport::imported_in_file(
+                    &IndexFacts(self),
+                    candidate,
+                    exported,
+                    default_import,
+                    ResolveTarget::Qualifier,
+                )
+                .is_some();
                 let member_present = self
                     .symbol_table
                     .lookup_in_file_with_kind(candidate, member, target)
@@ -2293,6 +2338,9 @@ impl<'a> Resolver<'a> {
                     return true;
                 }
                 in_project = true;
+                // By declared name: the ladder looks the type's members up
+                // under the name this returns, so an aliased export (`export
+                // { Impl as Widget }`) would need the local name carried out.
                 hit = st.lookup_in_file_with_kind(cand, exported, ResolveTarget::Type);
                 hit.is_none()
             });

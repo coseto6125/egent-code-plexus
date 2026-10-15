@@ -27,7 +27,10 @@ use std::path::Path;
 /// through a local `export { … }` clause or `export default <name>`, and the
 /// import tier reads it. schema7: Python calls on a `from`-bound receiver are
 /// `CallSite::FromReceiver`, Python `from x import *` emits an unaliased `*`
-/// import, and Kotlin class bodies closed on the last member's line reparse.
+/// import, Kotlin class bodies closed on the last member's line reparse, the
+/// tree-sitter-kotlin pin moved to 1852ea17 (a declaration with two or more
+/// modifiers parses as a class), and a one-line `object O { … }` that the
+/// grammar misparses with no ERROR node is recovered.
 /// schema8: `LocalGraph.export_aliases` and `BindingKind::EsDefault` (TS / JS
 /// export aliases and default imports). schema9: `graph.bin` v13 carries the
 /// import / export facts of each file, and session fragments (format v3)
@@ -36,7 +39,12 @@ use std::path::Path;
 /// (`BindingKind::EsReexport` / `EsDefaultReexport`), `export default
 /// <expression>` records a `default` export alias with an empty local, and
 /// the JS re-export query captures `export { default as X } from`.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema10");
+/// schema11: the JS queries capture `default` in `import { default as d }`
+/// and `export { x as default } from`, a file whose only export is `export
+/// default <expression>` is an ES module, and each `graph.bin` TS / JS
+/// re-export import row keeps the file its specifier resolved to
+/// (`ImportFact::target_file`).
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema11");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

@@ -7,8 +7,8 @@ use crate::resolution::path_aliases::PathAliases;
 use crate::resolution::resolver::{ReexportIndex, Resolver};
 use crate::rust::module_tree::RustWorkspaceModTree;
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
-use ecp_core::analyzer::reexport::export_filter_applies;
-use ecp_core::analyzer::types::{CallSite, LocalGraph, RawNode};
+use ecp_core::analyzer::reexport::{export_filter_applies, is_ecmascript, ImportRef};
+use ecp_core::analyzer::types::{CallSite, LocalGraph, RawImport, RawNode};
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::{
     BlindSpotRecord, CallMeta, Edge, ExportAliasFact, File, FileCategory, FunctionMeta, ImportFact,
@@ -272,6 +272,7 @@ impl GraphBuilder {
         let module_facts = record_module_facts(
             &self.local_graphs,
             &symbol_table,
+            &self.path_aliases,
             nodes.len(),
             &mut string_pool,
         );
@@ -858,13 +859,19 @@ impl GraphBuilder {
 /// (the v13 fields of `ZeroCopyGraph`): each Python / TS / JS file's
 /// imports in source order, each TS / JS file's export alias pairs and
 /// ES-module flag, and the exported declarations, as Pass 1 recorded them
-/// in `symbol_table`. `raw_nodes` is the node count after Pass 1.
+/// in `symbol_table`. `raw_nodes` is the node count after Pass 1. A TS / JS
+/// row the re-export hop follows keeps the file its specifier resolves to,
+/// through `path_aliases` as the resolver probes it.
 fn record_module_facts(
     local_graphs: &[LocalGraph],
     symbol_table: &SymbolTable,
+    path_aliases: &PathAliases,
     raw_nodes: usize,
     string_pool: &mut StringPool,
 ) -> ModuleFactTables {
+    let resolver = Resolver::new(symbol_table).with_path_aliases(path_aliases.clone());
+    // Built on the first re-export row: most files re-export nothing.
+    let mut file_idx: Option<FxHashMap<String, u32>> = None;
     let mut facts = ModuleFactTables {
         file_imports: Vec::with_capacity(local_graphs.len() + 1),
         file_export_aliases: Vec::with_capacity(local_graphs.len() + 1),
@@ -876,18 +883,33 @@ fn record_module_facts(
     facts.file_export_aliases.push(0);
     for local_graph in local_graphs {
         let path = local_graph.file_path.to_string_lossy().replace('\\', "/");
+        let language = Language::from_normalized_path(&path);
         if matches!(
-            Language::from_normalized_path(&path),
+            language,
             Language::Python | Language::TypeScript | Language::JavaScript
         ) {
-            facts
-                .imports
-                .extend(local_graph.imports.iter().map(|import| ImportFact {
+            let ecmascript = is_ecmascript(language);
+            for import in &local_graph.imports {
+                let target_file = if ecmascript && followed_by_reexport(local_graph, import) {
+                    resolver
+                        .ecmascript_module(&path, import)
+                        .and_then(|module| {
+                            file_idx
+                                .get_or_insert_with(|| file_indices(local_graphs))
+                                .get(&*module)
+                                .copied()
+                        })
+                } else {
+                    None
+                };
+                facts.imports.push(ImportFact {
                     source: string_pool.add(&import.source),
                     imported_name: string_pool.add(&import.imported_name),
                     alias: import.alias.as_deref().map(|alias| string_pool.add(alias)),
                     binding_kind: import.binding_kind,
-                }));
+                    target_file,
+                });
+            }
         }
         facts.file_imports.push(facts.imports.len() as u32);
         if export_filter_applies(&path) {
@@ -912,6 +934,35 @@ fn record_module_facts(
         facts.exported_nodes[id as usize / 8] |= 1 << (id % 8);
     }
     facts
+}
+
+/// Whether the TS / JS re-export hop may follow `import` of `local_graph`
+/// (`reexport::ecmascript_reexport`): an `export *`, a binding the file
+/// exports under its own name, or the local of an export alias.
+fn followed_by_reexport(local_graph: &LocalGraph, import: &RawImport) -> bool {
+    let import = ImportRef::from(import);
+    import.is_star_export()
+        || import.is_es_reexport()
+        || local_graph
+            .export_aliases
+            .as_deref()
+            .into_iter()
+            .flatten()
+            .any(|alias| &*alias.local == import.local_name())
+}
+
+/// Forward-slash path → file index, as Pass 1 numbers the files.
+fn file_indices(local_graphs: &[LocalGraph]) -> FxHashMap<String, u32> {
+    local_graphs
+        .iter()
+        .enumerate()
+        .map(|(idx, graph)| {
+            (
+                graph.file_path.to_string_lossy().replace('\\', "/"),
+                idx as u32,
+            )
+        })
+        .collect()
 }
 
 /// Pass 1: register every `LocalGraph`'s File + symbol nodes into the

@@ -419,29 +419,31 @@ fn test_python_submodule_from_import_init_importing_the_submodule_binds_it() {
 /// binds `pkg/core.py`'s `compute` and keeps the importer's File → package
 /// File edge (0.9), which ecp 0.14.8 emitted and the edit hook's
 /// `importers()` reads. Before this fix only the symbol edge was left.
+/// Aliased (`as c`, codex C1), the import tier binds the local name; before
+/// that fix only the File edge was left.
 #[test]
 fn test_emit_edges_from_import_through_package_keeps_init_file_edge() {
-    let graph = python(
-        &[PACKAGE, NAMESAKES],
-        ("app.py", &go("from pkg import compute", "compute()")),
-    );
-    assert_eq!(
-        imports_edges_of(&graph, "app.py"),
-        [
-            (
-                "pkg/__init__.py".to_string(),
-                "__init__.py".to_string(),
-                "File",
-                90
-            ),
-            (
-                "pkg/core.py".to_string(),
-                "compute".to_string(),
-                "Function",
-                95
-            ),
-        ]
-    );
+    for import in ["from pkg import compute", "from pkg import compute as c"] {
+        let graph = python(&[PACKAGE, NAMESAKES], ("app.py", &go(import, "0")));
+        assert_eq!(
+            imports_edges_of(&graph, "app.py"),
+            [
+                (
+                    "pkg/__init__.py".to_string(),
+                    "__init__.py".to_string(),
+                    "File",
+                    90
+                ),
+                (
+                    "pkg/core.py".to_string(),
+                    "compute".to_string(),
+                    "Function",
+                    95
+                ),
+            ],
+            "{import}"
+        );
+    }
 }
 
 /// `from m import obj` binds an instance: the method call resolves as on

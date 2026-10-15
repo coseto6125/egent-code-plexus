@@ -15,11 +15,12 @@ use crate::analyzer::import_binding::plain_binding;
 use crate::analyzer::rust_paths::{is_rust_module_root, is_rust_source, rust_module_path_base};
 use crate::analyzer::types::{BindingKind, RawImport};
 use crate::file_category::Language;
-use crate::graph::{ArchivedImportFact, NodeKind};
+use crate::graph::{ArchivedFile, ArchivedImportFact, NodeKind};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::borrow::Cow;
 use std::collections::hash_map::Entry;
+use std::ops::Deref;
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// Edge kinds the resolver resolves towards. Constrains Tier-3 fallback so a
@@ -33,7 +34,7 @@ use std::sync::Arc;
 /// struct / enum / typedef / trait / interface drops at Tier 2.5 since
 /// the qualifier kind doesn't pass `is_type` — falling to the bare-name
 /// Tier 3 which rejects ultra-common member names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResolveTarget {
     Callable,
     /// A Rust method-syntax call (`x.f()`): only a `Method` can answer it,
@@ -89,6 +90,10 @@ pub struct ImportRef<'a> {
     pub imported_name: &'a str,
     pub alias: Option<&'a str>,
     pub binding_kind: Option<BindingKind>,
+    /// The file the index resolved `source` to, archived for a re-export row
+    /// ([`crate::graph::ImportFact::target_file`]). `None` from a parse:
+    /// the specifier is probed then.
+    pub target: Option<&'a str>,
 }
 
 impl<'a> From<&'a RawImport> for ImportRef<'a> {
@@ -98,11 +103,31 @@ impl<'a> From<&'a RawImport> for ImportRef<'a> {
             imported_name: &import.imported_name,
             alias: import.alias.as_deref(),
             binding_kind: import.binding_kind,
+            target: None,
         }
     }
 }
 
 impl<'a> ImportRef<'a> {
+    /// An archived import row; `files` resolves its target file index.
+    pub fn from_archived(
+        row: &'a ArchivedImportFact,
+        pool: &'a [u8],
+        files: &'a [ArchivedFile],
+    ) -> Self {
+        Self {
+            source: row.source.resolve(pool),
+            imported_name: row.imported_name.resolve(pool),
+            alias: row.alias.as_ref().map(|alias| alias.resolve(pool)),
+            binding_kind: row.binding_kind.as_ref().map(BindingKind::from),
+            target: row
+                .target_file
+                .as_ref()
+                .and_then(|file| files.get(file.to_native() as usize))
+                .map(|file| file.path.resolve(pool)),
+        }
+    }
+
     /// The name the import binds in its file.
     pub fn local_name(&self) -> &'a str {
         self.alias.unwrap_or(self.imported_name)
@@ -140,6 +165,7 @@ pub enum FileImports<'a> {
     Archived {
         rows: &'a [ArchivedImportFact],
         pool: &'a [u8],
+        files: &'a [ArchivedFile],
     },
 }
 
@@ -151,7 +177,7 @@ impl<'a> FileImports<'a> {
         };
         (0..len).map(move |i| match self {
             Self::Parsed(imports) => ImportRef::from(&imports[i]),
-            Self::Archived { rows, pool } => rows[i].to_ref(pool),
+            Self::Archived { rows, pool, files } => ImportRef::from_archived(&rows[i], pool, files),
         })
     }
 }
@@ -165,6 +191,13 @@ pub fn export_filter_applies(file: &str) -> bool {
 
 pub fn is_ecmascript(language: Language) -> bool {
     matches!(language, Language::TypeScript | Language::JavaScript)
+}
+
+/// The ES-module rule ([`ModuleFacts::is_es_module`]) for `file`, of
+/// `language`: [`export_filter_applies`], and the file exports a
+/// declaration or has an [`ExportAliasTable`].
+pub fn is_es_module(language: Language, file: &str, exports_any: bool, alias_table: bool) -> bool {
+    is_ecmascript(language) && !file.ends_with(".d.ts") && (exports_any || alias_table)
 }
 
 /// The export names of one ES module, recorded because one of them differs
@@ -183,9 +216,10 @@ pub struct ExportAliasTable {
 
 impl ExportAliasTable {
     /// The table of a file's `(exported, local)` pairs ([`RawExportAlias`]).
-    /// `None` when no pair names both sides: the file then exports every
-    /// declaration under its own name. `default` with an empty local is an
-    /// expression default.
+    /// `None` when no pair names both sides and no default is an expression:
+    /// the file then exports every declaration under its own name. `default`
+    /// with an empty local is an expression default, which alone still makes
+    /// the file an ES module.
     ///
     /// [`RawExportAlias`]: crate::analyzer::types::RawExportAlias
     pub fn build<'p, I>(pairs: I) -> Option<Self>
@@ -215,7 +249,7 @@ impl ExportAliasTable {
                 }
             }
         }
-        if table.locals.is_empty() {
+        if table.locals.is_empty() && !table.expression_default {
             return None;
         }
         table.hidden = pairs
@@ -259,6 +293,24 @@ pub enum PyModule<P> {
     Ambiguous,
 }
 
+/// A fact a [`ModuleFacts`] side hands out: borrowed from the store it
+/// keeps for the whole build, or shared from a memo it fills on demand.
+pub enum Fact<'a, T: ?Sized> {
+    Borrowed(&'a T),
+    Shared(Rc<T>),
+}
+
+impl<T: ?Sized> Deref for Fact<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        match self {
+            Self::Borrowed(fact) => fact,
+            Self::Shared(fact) => fact,
+        }
+    }
+}
+
 /// What the shared rules read about the repo. Declarations are `u32` node
 /// handles in the caller's id space. A file path is repo-relative with
 /// forward slashes.
@@ -281,14 +333,14 @@ pub trait ModuleFacts {
     /// exports a declaration or has an [`ExportAliasTable`].
     fn is_es_module(&self, file: &str) -> bool;
     /// `file`'s [`ExportAliasTable`], `None` when it has none.
-    fn export_aliases(&self, file: &str) -> Option<Cow<'_, ExportAliasTable>>;
+    fn export_aliases(&self, file: &str) -> Option<Fact<'_, ExportAliasTable>>;
     /// The ordered imports of a Python / TS / JS `file`, with the binding
     /// kinds the parsers marked. `None` when there is no record of them,
     /// which no rule reads as "no imports".
     fn imports(&self, file: &str) -> Option<FileImports<'_>>;
     /// The resolved `export *` modules of the TS / JS `module`
     /// ([`resolve_star_modules`]).
-    fn star_modules(&self, module: &str) -> Cow<'_, [Box<str>]>;
+    fn star_modules(&self, module: &str) -> Fact<'_, [Box<str>]>;
     /// The resolver's `import_module_file` for a Python specifier.
     fn python_module(&self, importer: &str, specifier: &str) -> PyModule<Self::Path>;
     /// Every file `specifier` may name from `importer`, in probe order,
@@ -339,15 +391,30 @@ pub fn lookup_export_in_file<F: ModuleFacts + ?Sized>(
         .map(|(decl, _)| decl)
 }
 
-/// The first TS / JS file `specifier` names from `importer`: the file
-/// module resolution picks, whether or not it declares a given name.
+/// Every file `import` of `importer` may name, in probe order, until `visit`
+/// returns `false`: the file the index resolved it to, when the archive
+/// keeps one ([`ImportRef::target`]), then the specifier's candidates.
+pub fn for_each_import_candidate<F: ModuleFacts + ?Sized>(
+    facts: &F,
+    importer: &str,
+    import: &ImportRef<'_>,
+    visit: &mut dyn FnMut(&str) -> bool,
+) {
+    if import.target.is_some_and(|target| !visit(target)) {
+        return;
+    }
+    facts.for_each_candidate(importer, import.source, visit);
+}
+
+/// The first TS / JS file `import` names from `importer`: the file module
+/// resolution picks, whether or not it declares a given name.
 pub fn ecmascript_module<F: ModuleFacts + ?Sized>(
     facts: &F,
     importer: &str,
-    specifier: &str,
+    import: &ImportRef<'_>,
 ) -> Option<Box<str>> {
     let mut found = None;
-    facts.for_each_candidate(importer, specifier, &mut |candidate| {
+    for_each_import_candidate(facts, importer, import, &mut |candidate| {
         if is_ecmascript(Language::from_normalized_path(candidate)) && facts.has_file(candidate) {
             found = Some(Box::from(candidate));
             false
@@ -374,7 +441,7 @@ pub fn resolve_star_modules<'i, F: ModuleFacts + ?Sized>(
     imports
         .into_iter()
         .filter(ImportRef::is_star_export)
-        .filter_map(|import| ecmascript_module(facts, module, import.source))
+        .filter_map(|import| ecmascript_module(facts, module, &import))
         .collect()
 }
 
@@ -405,7 +472,7 @@ pub fn default_import_in_file<F: ModuleFacts + ?Sized>(
 /// The declaration an import of `imported` binds in module `file`: a
 /// default import binds the default export ([`default_import_in_file`]),
 /// any other its export of that name ([`lookup_export_in_file`]).
-fn imported_in_file<F: ModuleFacts + ?Sized>(
+pub fn imported_in_file<F: ModuleFacts + ?Sized>(
     facts: &F,
     file: &str,
     imported: &str,
@@ -499,23 +566,35 @@ pub fn named_import<'i, F: ModuleFacts + ?Sized>(
 /// explicit binding shadows every star export, as in ES modules. Two star
 /// modules declaring different targets leave the name unexported in ES
 /// modules, so neither binds. A module that re-exports the name again is
-/// not followed: one hop, so a cycle ends here. A module whose own export
-/// clause gives the name (`export { g as name }`) re-exports nothing under
-/// it, and the target module binds only what it exports.
+/// not followed: one hop, so a cycle ends here.
+///
+/// A module whose own export clause gives the name under another local
+/// (`export { original as name }`, `export default Button`) re-exports
+/// nothing from a star module under it: the name binds that local. When the
+/// local is an import of the module and no declaration, the import is
+/// followed (`import { original } from './impl'; export { original as
+/// publicFn }`); otherwise the target module binds only what it exports.
 pub fn ecmascript_reexport<F: ModuleFacts + ?Sized>(
     facts: &F,
     module: &str,
     name: &str,
     target: ResolveTarget,
 ) -> Option<u32> {
-    if facts
-        .export_aliases(module)
-        .is_some_and(|table| table.exports(name))
-    {
-        return None;
-    }
     if !is_ecmascript(Language::from_normalized_path(module)) {
         return None;
+    }
+    if let Some(table) = facts
+        .export_aliases(module)
+        .filter(|table| table.exports(name))
+    {
+        let local = table.local(name)?;
+        if facts.declares(module, local) {
+            return None;
+        }
+        let import = facts.imports(module)?.iter().find(|import| {
+            import.imported_name != "*" && !import.source.is_empty() && import.local_name() == local
+        })?;
+        return follow_import(facts, module, &import, target);
     }
     let imports = facts.imports(module)?;
     if let Some(import) = imports.iter().find(|import| {
@@ -524,18 +603,7 @@ pub fn ecmascript_reexport<F: ModuleFacts + ?Sized>(
             && !import.source.is_empty()
             && import.local_name() == name
     }) {
-        let mut hit = None;
-        facts.for_each_candidate(module, import.source, &mut |candidate| {
-            hit = imported_in_file(
-                facts,
-                candidate,
-                import.imported_name,
-                import.is_es_default(),
-                target,
-            );
-            hit.is_none()
-        });
-        return hit;
+        return follow_import(facts, module, &import, target);
     }
     // `export *` never re-exports a module's default export.
     if name == "default" {
@@ -547,6 +615,28 @@ pub fn ecmascript_reexport<F: ModuleFacts + ?Sized>(
         .filter_map(|file| lookup_export_in_file(facts, file, name, target));
     let first = hits.next()?;
     hits.all(|other| other == first).then_some(first)
+}
+
+/// The declaration the import `import` of `module` binds in the first
+/// candidate file that exports it.
+fn follow_import<F: ModuleFacts + ?Sized>(
+    facts: &F,
+    module: &str,
+    import: &ImportRef<'_>,
+    target: ResolveTarget,
+) -> Option<u32> {
+    let mut hit = None;
+    for_each_import_candidate(facts, module, import, &mut |candidate| {
+        hit = imported_in_file(
+            facts,
+            candidate,
+            import.imported_name,
+            import.is_es_default(),
+            target,
+        );
+        hit.is_none()
+    });
+    hit
 }
 
 /// `name` re-exported by the Python module `module`: an import of
@@ -594,6 +684,20 @@ pub fn python_reexport<F: ModuleFacts + ?Sized>(
         bound = Some((!star || !facts.declares(file.as_ref(), "__all__")).then_some(hit));
     }
     bound.flatten()
+}
+
+/// [`python_reexport`] for an import of a `language` file: only a Python
+/// import binds a name through its package's re-export.
+pub fn python_import_reexport<F: ModuleFacts + ?Sized>(
+    facts: &F,
+    language: Language,
+    module: &str,
+    name: &str,
+    target: ResolveTarget,
+) -> Option<u32> {
+    (language == Language::Python)
+        .then(|| python_reexport(facts, module, name, target))
+        .flatten()
 }
 
 /// `from pkg.sub import mod; mod.compute()`: a from-import of a name its
@@ -715,7 +819,7 @@ pub fn import_hides<'i, F: ModuleFacts + ?Sized>(
     imports.into_iter().any(|import| {
         import.imported_name != "*"
             && import.local_name() == name
-            && ecmascript_module(facts, importer, import.source).as_deref() == Some(decl_file)
+            && ecmascript_module(facts, importer, &import).as_deref() == Some(decl_file)
     })
 }
 
@@ -961,9 +1065,14 @@ mod tests {
         assert!(table.exports("default"), "no `export *` supplies it");
         assert_eq!(table.local("default"), None);
         assert_eq!(table.local("config"), Some("config"));
-        assert!(
-            ExportAliasTable::build([("default", "")]).is_none(),
-            "an expression default alone names no pair"
+        let alone = ExportAliasTable::build([("default", "")])
+            .expect("an expression default alone makes an ES module's table");
+        assert!(alone.exports("default") && alone.exports_expression_default());
+        assert_eq!(alone.local("default"), None);
+        assert_eq!(
+            alone.local("hidden"),
+            Some("hidden"),
+            "a private declaration keeps its own name; the export filter decides"
         );
     }
 

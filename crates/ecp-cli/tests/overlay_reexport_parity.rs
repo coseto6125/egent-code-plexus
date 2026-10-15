@@ -198,8 +198,10 @@ fn ecmascript_case(ext: &str, barrel_line: &str, local: &str) -> [String; 10] {
     ]
 }
 
-/// TS and JS barrels: `export *`, a named `export { render } from`, and an
-/// aliased `export { draw as render } from`.
+/// TS and JS barrels: `export *`, a named `export { render } from`, an
+/// aliased `export { draw as render } from`, and an import the barrel's own
+/// clause exports under another name (`export { draw as render }`, C2).
+/// Before C2 neither side followed that import: no edge.
 #[test]
 fn test_overlay_ecmascript_barrel_reexports_match_reindex() {
     let ts = TypeScriptProvider::new().unwrap();
@@ -212,6 +214,10 @@ fn test_overlay_ecmascript_barrel_reexports_match_reindex() {
             ("export * from './impl';", "render"),
             ("export { render } from './impl';", "render"),
             ("export { draw as render } from './impl';", "draw"),
+            (
+                "import { draw } from './impl';\nexport { draw as render };",
+                "draw",
+            ),
         ] {
             let [index, index_src, imp, imp_src, other, other_src, app, app_src, app_calls, index_comment] =
                 ecmascript_case(ext, barrel_line, local);

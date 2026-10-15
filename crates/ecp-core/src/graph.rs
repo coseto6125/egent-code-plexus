@@ -1,4 +1,3 @@
-use crate::analyzer::reexport::ImportRef;
 use crate::analyzer::types::BindingKind;
 use crate::pool::StrRef;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -27,7 +26,8 @@ pub const GRAPH_MAGIC: [u8; 8] = *b"ECP-RS\0\0";
 ///     `file_export_aliases`, `export_aliases`, `file_flags`,
 ///     `exported_nodes`) and `file_path_order`, so the overlay replays the
 ///     import tier's re-export hop and ES-module export rule over a clean
-///     module.
+///     module; `ImportFact::target_file` keeps the module a TS / JS
+///     re-export row resolved to, tsconfig path aliases included.
 pub const GRAPH_FORMAT_VERSION: u32 = 13;
 
 impl std::str::FromStr for NodeKind {
@@ -810,17 +810,11 @@ pub struct ImportFact {
     pub imported_name: StrRef,
     pub alias: Option<StrRef>,
     pub binding_kind: Option<BindingKind>,
-}
-
-impl ArchivedImportFact {
-    pub fn to_ref<'a>(&self, pool: &'a [u8]) -> ImportRef<'a> {
-        ImportRef {
-            source: self.source.resolve(pool),
-            imported_name: self.imported_name.resolve(pool),
-            alias: self.alias.as_ref().map(|alias| alias.resolve(pool)),
-            binding_kind: self.binding_kind.as_ref().map(BindingKind::from),
-        }
-    }
+    /// The index of the file the index resolved `source` to, for a TS / JS
+    /// row the re-export hop follows: `graph.bin` keeps no tsconfig path
+    /// aliases, so the overlay cannot resolve an aliased specifier itself.
+    /// `None` for every other row and for a specifier naming no indexed file.
+    pub target_file: Option<u32>,
 }
 
 /// One `(exported, local)` pair of a TS / JS file's
