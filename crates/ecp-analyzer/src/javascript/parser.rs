@@ -190,6 +190,7 @@ impl LanguageProvider for JavaScriptProvider {
         let idx_import_source = self.query.capture_index_for_name("import.source");
         let idx_import_alias = self.query.capture_index_for_name("import.alias");
         let idx_import_namespace = self.query.capture_index_for_name("import.namespace");
+        let idx_import_star = self.query.capture_index_for_name("import.star");
 
         let idx_function = self.query.capture_index_for_name("function");
         let idx_class = self.query.capture_index_for_name("class");
@@ -239,6 +240,7 @@ impl LanguageProvider for JavaScriptProvider {
             let mut import_src = None;
             let mut import_alias = None;
             let mut is_import_namespace = false;
+            let mut is_import_star = false;
 
             let mut variable_name_node: Option<tree_sitter::Node> = None;
             let mut variable_root_node: Option<tree_sitter::Node> = None;
@@ -295,6 +297,8 @@ impl LanguageProvider for JavaScriptProvider {
                     import_alias = Some(cap.node);
                 } else if Some(cap_idx) == idx_import_namespace {
                     is_import_namespace = true;
+                } else if Some(cap_idx) == idx_import_star {
+                    is_import_star = true;
                 } else if Some(cap_idx) == idx_route_method {
                     route_method = Some(cap.node);
                 } else if Some(cap_idx) == idx_route_path {
@@ -599,6 +603,20 @@ impl LanguageProvider for JavaScriptProvider {
                             binding_kind: None,
                         });
                     }
+                }
+            }
+
+            // Star re-export `export * from 'lib'` — no name and no alias.
+            if is_import_star {
+                if let Some(src_str) = import_src
+                    .and_then(|s| std::str::from_utf8(&source[s.start_byte()..s.end_byte()]).ok())
+                {
+                    imports.push(RawImport {
+                        alias: None,
+                        imported_name: "*".to_string(),
+                        source: src_str.to_string(),
+                        binding_kind: None,
+                    });
                 }
             }
 

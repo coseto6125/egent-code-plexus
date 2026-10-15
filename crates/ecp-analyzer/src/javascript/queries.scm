@@ -130,6 +130,13 @@
       alias: (identifier)? @import.alias))
   source: (string (string_fragment) @import.source)) @import
 
+;; Star re-export — `export * from 'lib'`. It binds no local name, so the
+;; parser emits `imported_name` "*" with no alias; the resolver follows it
+;; when an importer of this file names a member the file does not declare.
+(export_statement
+  "*"
+  source: (string (string_fragment) @import.source)) @import.star
+
 ;; Namespace re-export — `export * as ns from 'lib'`.
 ;; `imported_name` is the "*" sentinel; `alias` holds the namespace binding.
 (export_statement

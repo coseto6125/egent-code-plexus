@@ -42,7 +42,7 @@ use ecp_core::analyzer::import_binding::{
     import_member_fallback, may_suppress, module_head, namespace_member, retry_name,
 };
 use ecp_core::analyzer::rust_paths::{is_rust_module_root, is_rust_source, rust_module_path_base};
-use ecp_core::analyzer::types::{CallSite, RawImport};
+use ecp_core::analyzer::types::{CallSite, LocalGraph, RawImport};
 use serde::Serialize;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -55,7 +55,7 @@ use crate::resolution::index::{
 };
 use crate::resolution::path_aliases::PathAliases;
 use crate::rust::module_tree::RustWorkspaceModTree;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 pub type NodeId = u32;
 
@@ -82,6 +82,92 @@ type ModuleCache = FxHashMap<
     std::mem::Discriminant<Language>,
     FxHashMap<PathBuf, FxHashMap<String, IndexedModule>>,
 >;
+
+/// What the import tier reads to follow a module's re-export one hop: the
+/// imports of each Python / TypeScript / JavaScript file, and the modules
+/// each TS / JS file's `export * from` names. Built once per index build,
+/// after Pass 1, and shared by every resolver of that build.
+#[derive(Default)]
+pub struct ReexportIndex<'g> {
+    modules: FxHashMap<Cow<'g, str>, ModuleExports<'g>>,
+    /// Local names that a TS / JS import or `export { x as y } from` gives
+    /// to a declaration of another name. A TS / JS re-export reaches a name
+    /// only when the symbol table declares it or this set holds it.
+    ecmascript_aliases: FxHashSet<&'g str>,
+}
+
+struct ModuleExports<'g> {
+    language: Language,
+    imports: &'g [RawImport],
+    /// Resolved once here: a barrel can hold dozens of `export *` lines,
+    /// and each call through it would otherwise re-probe every specifier.
+    star_modules: Box<[Box<str>]>,
+}
+
+impl<'g> ReexportIndex<'g> {
+    pub fn build(
+        local_graphs: &'g [LocalGraph],
+        symbol_table: &SymbolTable,
+        path_aliases: &PathAliases,
+    ) -> Self {
+        let resolver = Resolver::new(symbol_table).with_path_aliases(path_aliases.clone());
+        let mut ecmascript_aliases = FxHashSet::default();
+        let modules = local_graphs
+            .iter()
+            .filter(|graph| !graph.imports.is_empty())
+            .filter_map(|graph| {
+                let path = normalize_source_path(&graph.file_path);
+                let language = Language::from_normalized_path(&path);
+                let star_modules: Box<[Box<str>]> = if ecmascript(language) {
+                    ecmascript_aliases.extend(graph.imports.iter().filter_map(|import| {
+                        import
+                            .alias
+                            .as_deref()
+                            .filter(|_| import.imported_name != "*")
+                    }));
+                    let importer = Path::new(&*path);
+                    graph
+                        .imports
+                        .iter()
+                        .filter(|import| is_star_export(import))
+                        .filter_map(|import| resolver.ecmascript_module(importer, &import.source))
+                        .collect()
+                } else if language == Language::Python {
+                    Box::default()
+                } else {
+                    return None;
+                };
+                Some((
+                    path,
+                    ModuleExports {
+                        language,
+                        imports: &graph.imports,
+                        star_modules,
+                    },
+                ))
+            })
+            .collect();
+        Self {
+            modules,
+            ecmascript_aliases,
+        }
+    }
+
+    /// Whether a TS / JS re-export can reach a declaration under `name`.
+    fn may_reach(&self, symbol_table: &SymbolTable, name: &str) -> bool {
+        symbol_table.global_match_count(name) > 0 || self.ecmascript_aliases.contains(name)
+    }
+}
+
+fn ecmascript(language: Language) -> bool {
+    matches!(language, Language::TypeScript | Language::JavaScript)
+}
+
+/// `export * from 'lib'`: the TS / JS parsers emit it as a `*` import with no
+/// local binding, which no import of the file itself resolves through.
+fn is_star_export(import: &RawImport) -> bool {
+    import.imported_name == "*" && import.alias.is_none()
+}
 
 #[cfg(not(windows))]
 #[inline]
@@ -176,6 +262,9 @@ pub struct Resolver<'a> {
     /// Workspace root path, used by Tier 3.5 to make absolute paths
     /// repo-relative. `None` when `mod_tree` is `None`.
     workspace_root: Option<std::path::PathBuf>,
+    /// `None` follows no re-export: the import tier then binds only a
+    /// member the imported module declares itself.
+    reexports: Option<&'a ReexportIndex<'a>>,
 }
 
 impl<'a> Resolver<'a> {
@@ -188,7 +277,15 @@ impl<'a> Resolver<'a> {
             path_aliases: PathAliases::new(),
             mod_tree: None,
             workspace_root: None,
+            reexports: None,
         }
+    }
+
+    /// Let the import tier follow Python package and TS / JS re-exports one
+    /// hop through `reexports`.
+    pub fn with_reexports(mut self, reexports: &'a ReexportIndex<'a>) -> Self {
+        self.reexports = Some(reexports);
+        self
     }
 
     /// Replace the resolver's empty default alias set. Used by the builder
@@ -681,6 +778,12 @@ impl<'a> Resolver<'a> {
         // `src/bar/foo.ts`. We expand each specifier into a small set of
         // candidate keys (relative-resolution + extension/index/__init__
         // guesses) and probe them in order.
+        // Only a TS / JS caller follows a TS / JS re-export.
+        let reexports = self.reexports.filter(|_| {
+            ecmascript(Language::from_normalized_path(&normalize_source_path(
+                source_file,
+            )))
+        });
         for import in raw_imports {
             let exported_name = if import.imported_name == "*" {
                 namespace_member(import, symbol_name)
@@ -698,6 +801,13 @@ impl<'a> Resolver<'a> {
                     .lookup_call_in_file(candidate, exported_name, target);
                 hit.is_none()
             });
+            // An npm package's export reaches nothing through an in-repo
+            // re-export, so it skips the second probe.
+            if hit.is_none()
+                && reexports.is_some_and(|index| index.may_reach(self.symbol_table, exported_name))
+            {
+                hit = self.ecmascript_hop(source_file, &import.source, exported_name, target);
+            }
             if let Some(node_id) = hit {
                 return self.import_scoped(source_file, symbol_name, import, node_id);
             }
@@ -726,6 +836,13 @@ impl<'a> Resolver<'a> {
             let Some(binding) = import_binding(import, symbol_name, language)
                 .filter(|binding| binding.wildcard == wildcard)
             else {
+                if !wildcard && language == Language::Python {
+                    if let Some(node_id) =
+                        self.python_submodule_member(source_file, import, symbol_name, target)
+                    {
+                        return MemberHit::Bound(node_id, import);
+                    }
+                }
                 continue;
             };
             bound = true;
@@ -734,7 +851,11 @@ impl<'a> Resolver<'a> {
                     .lookup_member_in_file(file, binding.name, target, binding.owner)
             };
             let hit = match self.import_module_file(source_file, &import.source, language) {
-                IndexedModule::Unique(module) => in_file(&module),
+                IndexedModule::Unique(module) => in_file(&module).or_else(|| {
+                    (language == Language::Python)
+                        .then(|| self.python_reexport(&module, binding.name, target))
+                        .flatten()
+                }),
                 IndexedModule::Namespace(files) => {
                     let mut hits = files.iter().filter_map(|file| in_file(file));
                     hits.next().filter(|_| hits.next().is_none())
@@ -758,6 +879,175 @@ impl<'a> Resolver<'a> {
         found.map_or(MemberHit::Unbound { bound }, |(node_id, import)| {
             MemberHit::Bound(node_id, import)
         })
+    }
+
+    /// `name` re-exported by the Python module `module`: an import of
+    /// `module` binding `name` makes it an attribute of the module, so
+    /// `from .core import compute` in `pkg/__init__.py` is `pkg.compute`.
+    /// The first such import whose module declares it wins, which keeps a
+    /// `try:` / `except ImportError:` pair on the module that exists. One
+    /// hop: a module that re-exports the name again is not followed, so a
+    /// longer chain keeps the general tiers instead of a guessed target, and
+    /// a cycle ends here.
+    fn python_reexport(&self, module: &str, name: &str, target: ResolveTarget) -> Option<NodeId> {
+        let exports = self
+            .reexports?
+            .modules
+            .get(module)
+            .filter(|exports| exports.language == Language::Python)?;
+        let hub = Path::new(module);
+        exports.imports.iter().find_map(|import| {
+            let member = import_binding(import, name, Language::Python)?.name;
+            match self.import_module_file(hub, &import.source, Language::Python) {
+                IndexedModule::Unique(file) => {
+                    self.symbol_table.lookup_call_in_file(&file, member, target)
+                }
+                IndexedModule::Missing | IndexedModule::Ambiguous | IndexedModule::Namespace(_) => {
+                    None
+                }
+            }
+        })
+    }
+
+    /// `from pkg.sub import mod; mod.compute()`: a from-import of a name its
+    /// module does not declare imports the submodule `pkg.sub.mod`, so the
+    /// call binds as through `import pkg.sub.mod as mod`. A miss leaves the
+    /// import unbound, so the call keeps its previous resolution path.
+    fn python_submodule_member(
+        &self,
+        source_file: &Path,
+        import: &RawImport,
+        symbol_name: &str,
+        target: ResolveTarget,
+    ) -> Option<NodeId> {
+        if import.imported_name == "*" {
+            return None;
+        }
+        let local = import.alias.as_deref().unwrap_or(&import.imported_name);
+        let member = symbol_name.strip_prefix(local)?.strip_prefix('.')?;
+        // The cheap gate: most `obj.method()` receivers are not module names.
+        if member.is_empty()
+            || !self
+                .symbol_table
+                .has_module_name(Language::Python, &import.imported_name)
+        {
+            return None;
+        }
+        match self.import_module_file(source_file, &import.source, Language::Python) {
+            // The module's own `mod` is an attribute, which shadows the
+            // submodule.
+            IndexedModule::Unique(module)
+                if self
+                    .symbol_table
+                    .lookup_in_file(&module, &import.imported_name)
+                    .is_some() =>
+            {
+                return None;
+            }
+            IndexedModule::Ambiguous => return None,
+            // A namespace package (no `__init__.py`) is Missing yet holds
+            // submodules.
+            IndexedModule::Unique(_) | IndexedModule::Missing | IndexedModule::Namespace(_) => {}
+        }
+        let separator = if import.source.bytes().all(|b| b == b'.') {
+            ""
+        } else if import.source.starts_with('.') {
+            "."
+        } else {
+            "/"
+        };
+        let submodule = [
+            import.source.as_str(),
+            separator,
+            import.imported_name.as_str(),
+        ]
+        .concat();
+        match self.import_module_file(source_file, &submodule, Language::Python) {
+            IndexedModule::Unique(module) => self
+                .symbol_table
+                .lookup_call_in_file(&module, member, target)
+                .or_else(|| self.python_reexport(&module, member, target)),
+            IndexedModule::Missing | IndexedModule::Ambiguous | IndexedModule::Namespace(_) => None,
+        }
+    }
+
+    /// The first TS / JS file `specifier` names from `importer`: the file
+    /// module resolution picks, whether or not it declares a given name.
+    fn ecmascript_module(&self, importer: &Path, specifier: &str) -> Option<Box<str>> {
+        let mut found = None;
+        self.for_each_candidate(importer, specifier, |candidate| {
+            if ecmascript(Language::from_normalized_path(candidate))
+                && self.symbol_table.has_indexed_file(candidate)
+            {
+                found = Some(Box::from(candidate));
+                false
+            } else {
+                true
+            }
+        });
+        found
+    }
+
+    /// `name` through the TS / JS module `specifier` names from `importer`
+    /// when that module does not declare it: the re-export of the first
+    /// indexed candidate file ([`Self::ecmascript_reexport`]).
+    fn ecmascript_hop(
+        &self,
+        importer: &Path,
+        specifier: &str,
+        name: &str,
+        target: ResolveTarget,
+    ) -> Option<NodeId> {
+        let mut hit = None;
+        self.for_each_candidate(importer, specifier, |candidate| {
+            if !self.symbol_table.has_indexed_file(candidate) {
+                return true;
+            }
+            hit = self.ecmascript_reexport(candidate, name, target);
+            false
+        });
+        hit
+    }
+
+    /// `name` re-exported one hop by the TS / JS module `module`: an
+    /// `export { x } from` (or an import, which the parsers emit alike)
+    /// binding the name, else the one `export * from` module declaring it.
+    /// An explicit binding shadows every star export, as in ES modules. Two
+    /// star modules declaring different targets leave the name unexported
+    /// in ES modules, so neither binds. A module that re-exports the name
+    /// again is not followed: one hop, so a cycle ends here.
+    fn ecmascript_reexport(
+        &self,
+        module: &str,
+        name: &str,
+        target: ResolveTarget,
+    ) -> Option<NodeId> {
+        let exports = self
+            .reexports?
+            .modules
+            .get(module)
+            .filter(|exports| ecmascript(exports.language))?;
+        let hub = Path::new(module);
+        if let Some(import) = exports.imports.iter().find(|import| {
+            import.imported_name != "*"
+                && !import.source.is_empty()
+                && import.alias.as_deref().unwrap_or(&import.imported_name) == name
+        }) {
+            let mut hit = None;
+            self.for_each_candidate(hub, &import.source, |candidate| {
+                hit =
+                    self.symbol_table
+                        .lookup_call_in_file(candidate, &import.imported_name, target);
+                hit.is_none()
+            });
+            return hit;
+        }
+        let mut hits = exports
+            .star_modules
+            .iter()
+            .filter_map(|file| self.symbol_table.lookup_call_in_file(file, name, target));
+        let first = hits.next()?;
+        hits.all(|other| other == first).then_some(first)
     }
 
     /// Whether `import` proves its callee external: [`may_suppress`] allows

@@ -4,7 +4,7 @@ use crate::fetch_shape::{
 use crate::framework_helpers::Span;
 use crate::resolution::index::{Language, ResolveTarget, SymbolTable};
 use crate::resolution::path_aliases::PathAliases;
-use crate::resolution::resolver::Resolver;
+use crate::resolution::resolver::{ReexportIndex, Resolver};
 use crate::rust::module_tree::RustWorkspaceModTree;
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::analyzer::types::{CallSite, LocalGraph, RawNode};
@@ -338,6 +338,7 @@ impl GraphBuilder {
         let mod_tree: Option<RustWorkspaceModTree> =
             self.repo_root.as_deref().map(RustWorkspaceModTree::build);
         let mod_tree_ctx = mod_tree.as_ref().zip(self.repo_root.as_deref());
+        let reexports = ReexportIndex::build(&self.local_graphs, &symbol_table, &self.path_aliases);
 
         let _t_pass19 = std::time::Instant::now();
         let declared_supertypes = pass1_9_supertypes(
@@ -345,6 +346,7 @@ impl GraphBuilder {
             &symbol_table,
             &self.path_aliases,
             mod_tree_ctx,
+            &reexports,
         );
         symbol_table.build_supertypes(declared_supertypes);
         if prof {
@@ -364,6 +366,7 @@ impl GraphBuilder {
             &mut string_pool,
             &self.path_aliases,
             mod_tree_ctx,
+            &reexports,
             self.resolver_dump_path.as_deref(),
             self.symbol_skip_set.as_ref(),
         );
@@ -664,8 +667,9 @@ impl GraphBuilder {
         // `Decorates` edges from decorated symbols to `Annotation` nodes (resolved
         // or synthetic). Runs before File-node loop so synthetic Annotation nodes
         // land in the raw-symbol index range, consistent with EventTopic / SchemaField.
-        let decorates_resolver =
-            Resolver::new(&symbol_table).with_path_aliases(self.path_aliases.clone());
+        let decorates_resolver = Resolver::new(&symbol_table)
+            .with_path_aliases(self.path_aliases.clone())
+            .with_reexports(&reexports);
         crate::post_process::decorates_edges::emit_edges(
             &self.local_graphs,
             &decorates_resolver,
@@ -751,8 +755,9 @@ impl GraphBuilder {
         // emit — refuse gitnexus-style cross-language false positives
         // (`.mjs → Path.java`). Must run BEFORE CSR construction below so
         // new edges land in `out_offsets` / `in_offsets`.
-        let imports_resolver =
-            Resolver::new(&symbol_table).with_path_aliases(self.path_aliases.clone());
+        let imports_resolver = Resolver::new(&symbol_table)
+            .with_path_aliases(self.path_aliases.clone())
+            .with_reexports(&reexports);
         if prof {
             eprintln!(
                 "prof build.class_membership: {:.3}s",
@@ -1787,6 +1792,7 @@ fn pass1_9_supertypes(
     symbol_table: &SymbolTable,
     path_aliases: &PathAliases,
     mod_tree_ctx: Option<(&RustWorkspaceModTree, &std::path::Path)>,
+    reexports: &ReexportIndex<'_>,
 ) -> Vec<(u32, Option<u32>)> {
     let mut next_start = 0u32;
     let starts: Vec<u32> = local_graphs
@@ -1805,7 +1811,9 @@ fn pass1_9_supertypes(
             if lg.nodes.iter().all(|n| n.heritage.is_empty()) {
                 return Vec::new();
             }
-            let mut resolver = Resolver::new(symbol_table).with_path_aliases(path_aliases.clone());
+            let mut resolver = Resolver::new(symbol_table)
+                .with_path_aliases(path_aliases.clone())
+                .with_reexports(reexports);
             if let Some((mt, root)) = mod_tree_ctx {
                 resolver = resolver.with_mod_tree(mt, root.to_path_buf());
             }
@@ -2087,12 +2095,14 @@ fn pass2_emit_framework_and_fanout(
 ///      `fanout_refs.reason` interned into `string_pool` up front.
 ///      `string_pool.add` is `&mut self` so the inner loop can't
 ///      touch it; pre-interning + lookup-by-cache is `&StrRef`-only.
+#[allow(clippy::too_many_arguments)]
 fn pass2_resolve_edges(
     local_graphs: &[LocalGraph],
     symbol_table: &SymbolTable,
     string_pool: &mut StringPool,
     path_aliases: &PathAliases,
     mod_tree_ctx: Option<(&RustWorkspaceModTree, &std::path::Path)>,
+    reexports: &ReexportIndex<'_>,
     resolver_dump_path: Option<&std::path::Path>,
     symbol_skip_set: Option<&FxHashMap<String, FxHashSet<u64>>>,
 ) -> Pass2Output {
@@ -2143,7 +2153,9 @@ fn pass2_resolve_edges(
     // create a fresh `Resolver` *inside* each par_iter worker so each
     // thread owns its own state.
     let mut resolver_for_dump = if dump_enabled {
-        let mut r = Resolver::new(symbol_table).with_path_aliases(path_aliases.clone());
+        let mut r = Resolver::new(symbol_table)
+            .with_path_aliases(path_aliases.clone())
+            .with_reexports(reexports);
         if let Some((mt, root)) = mod_tree_ctx {
             r = r.with_mod_tree(mt, root.to_path_buf());
         }
@@ -2274,8 +2286,9 @@ fn pass2_resolve_edges(
             .par_iter()
             .enumerate()
             .map(|(graph_idx, local_graph)| {
-                let mut resolver =
-                    Resolver::new(symbol_table_ref).with_path_aliases(path_aliases.clone());
+                let mut resolver = Resolver::new(symbol_table_ref)
+                    .with_path_aliases(path_aliases.clone())
+                    .with_reexports(reexports);
                 if let Some((mt, root)) = mod_tree_ctx {
                     resolver = resolver.with_mod_tree(mt, root.to_path_buf());
                 }
@@ -2782,7 +2795,13 @@ mod tests {
     /// by path, as `build()` sorts them before Pass 1.
     fn table_with_supertypes(graphs: &[LocalGraph]) -> SymbolTable {
         let mut st = pass1_register_nodes(graphs).symbol_table;
-        let declared = pass1_9_supertypes(graphs, &st, &PathAliases::default(), None);
+        let declared = pass1_9_supertypes(
+            graphs,
+            &st,
+            &PathAliases::default(),
+            None,
+            &ReexportIndex::default(),
+        );
         st.build_supertypes(declared);
         st
     }
