@@ -436,6 +436,121 @@ pub fn stamp_owner_fn_by_span(nodes: &mut [RawNode]) {
     }
 }
 
+/// Mark the top-level declarations a JS / TS module exports in the forms the
+/// declaration queries do not see: a local `export { f }` clause,
+/// `export default f`, and an exported `declare` declaration. A declaration
+/// exported under another name (`export { g as f }`) is marked as well:
+/// `is_exported` means "reachable from another module", which is what the
+/// resolver's import tier reads. A re-export (`export … from`) names another
+/// module's declarations and marks nothing here.
+pub fn stamp_js_ts_exports(root: tree_sitter::Node<'_>, source: &[u8], nodes: &mut [RawNode]) {
+    let mut exported: Vec<(&str, Span)> = Vec::new();
+    let mut locals: Vec<&str> = Vec::new();
+    let mut cursor = root.walk();
+    for statement in root.named_children(&mut cursor) {
+        if statement.kind() != "export_statement"
+            || statement.child_by_field_name("source").is_some()
+        {
+            continue;
+        }
+        if let Some(declaration) = statement.child_by_field_name("declaration") {
+            js_ts_declared_names(declaration, source, &mut exported);
+            continue;
+        }
+        if let Some(value) = statement.child_by_field_name("value") {
+            locals.extend(js_ts_identifier(value, source));
+        }
+        let mut clauses = statement.walk();
+        for clause in statement
+            .named_children(&mut clauses)
+            .filter(|child| child.kind() == "export_clause")
+        {
+            let mut specifiers = clause.walk();
+            for specifier in clause.named_children(&mut specifiers) {
+                locals.extend(
+                    specifier
+                        .child_by_field_name("name")
+                        .and_then(|name| js_ts_identifier(name, source)),
+                );
+            }
+        }
+    }
+    if !locals.is_empty() {
+        let mut declarations = Vec::new();
+        let mut cursor = root.walk();
+        for declaration in root.named_children(&mut cursor) {
+            js_ts_declared_names(declaration, source, &mut declarations);
+        }
+        exported.extend(
+            declarations
+                .into_iter()
+                .filter(|(name, _)| locals.contains(name)),
+        );
+    }
+    if exported.is_empty() {
+        return;
+    }
+    let mut by_span: rustc_hash::FxHashMap<Span, Vec<&str>> = rustc_hash::FxHashMap::default();
+    for (name, span) in exported {
+        by_span.entry(span).or_default().push(name);
+    }
+    for node in nodes.iter_mut() {
+        if by_span
+            .get(&node.span)
+            .is_some_and(|names| names.iter().any(|name| *name == node.name))
+        {
+            node.is_exported = true;
+        }
+    }
+}
+
+/// The text of `node` when it is a plain identifier.
+fn js_ts_identifier<'s>(node: tree_sitter::Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    if node.kind() != "identifier" {
+        return None;
+    }
+    std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).ok()
+}
+
+/// `(name, span)` of every binding `declaration` introduces, with the spans
+/// the parsers give its nodes.
+fn js_ts_declared_names<'s>(
+    declaration: tree_sitter::Node<'_>,
+    source: &'s [u8],
+    out: &mut Vec<(&'s str, Span)>,
+) {
+    let mut cursor = declaration.walk();
+    match declaration.kind() {
+        "lexical_declaration" | "variable_declaration" => {
+            let span = node_span(&declaration);
+            for declarator in declaration.named_children(&mut cursor) {
+                let Some(name) = declarator
+                    .child_by_field_name("name")
+                    .and_then(|name| js_ts_identifier(name, source))
+                else {
+                    continue;
+                };
+                // A Const / Variable spans its declaration, a function-valued
+                // binding its declarator.
+                out.push((name, span));
+                out.push((name, node_span(&declarator)));
+            }
+        }
+        "ambient_declaration" => {
+            for inner in declaration.named_children(&mut cursor) {
+                js_ts_declared_names(inner, source, out);
+            }
+        }
+        _ => {
+            if let Some(name) = declaration.child_by_field_name("name").and_then(|name| {
+                std::str::from_utf8(&source[name.start_byte()..name.end_byte()]).ok()
+            }) {
+                out.push((name, node_span(&declaration)));
+            }
+        }
+    }
+}
+
 /// Preserve the full lexical function path for JS/TS closure identities.
 pub fn stamp_js_function_owners(nodes: &mut [RawNode]) {
     stamp_owner_fn_by_span(nodes);

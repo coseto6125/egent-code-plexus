@@ -194,6 +194,15 @@ pub struct SymbolTable {
     /// Names some Class / Struct is registered under: the first gate of the
     /// constructor fallback, which runs on every unresolved call.
     constructible_names: FxHashSet<Box<str>>,
+
+    /// Exported declarations of the files in `es_modules`, see
+    /// [`SymbolTable::lookup_export_in_file`]. Sparse: only TS / JS nodes the
+    /// parser marks `is_exported` are listed.
+    exported_ids: FxHashSet<u32>,
+
+    /// TS / JS files that export at least one declaration, see
+    /// [`SymbolTable::note_export`].
+    es_modules: FxHashSet<Box<str>>,
 }
 
 impl SymbolTable {
@@ -572,6 +581,46 @@ impl SymbolTable {
             }
         }
         self.lookup_in_file_with_kind(file_path, node_name, target)
+    }
+
+    /// Record that `node_id`, declared in `file_path`, is exported. A TS / JS
+    /// file with an exported declaration is an ES module: another file
+    /// reaches only its exports. A file with none (CommonJS, a script) and a
+    /// `.d.ts`, whose declarations TS may export implicitly, prove nothing,
+    /// and other languages bind imports by their own rules.
+    pub(crate) fn note_export(&mut self, file_path: &str, language: Language, node_id: u32) {
+        if !matches!(language, Language::TypeScript | Language::JavaScript)
+            || file_path.ends_with(".d.ts")
+        {
+            return;
+        }
+        self.exported_ids.insert(node_id);
+        if !self.es_modules.contains(file_path) {
+            self.es_modules.insert(file_path.into());
+        }
+    }
+
+    /// The declaration an import of `node_name` from module `file_path`
+    /// binds. In an ES module that is an exported one: a module-private or
+    /// nested namesake is out of the importer's reach, so a module that does
+    /// not export the name answers `None`. Any other module keeps
+    /// [`Self::lookup_call_in_file`].
+    pub(crate) fn lookup_export_in_file(
+        &self,
+        file_path: &str,
+        node_name: &str,
+        target: ResolveTarget,
+    ) -> Option<u32> {
+        if !self.es_modules.contains(file_path) {
+            return self.lookup_call_in_file(file_path, node_name, target);
+        }
+        let predicate = target.kind_predicate();
+        self.file_scoped
+            .get(file_path)?
+            .get(node_name)?
+            .iter()
+            .copied()
+            .find(|id| self.exported_ids.contains(id) && predicate(self.node_kinds[*id as usize]))
     }
 
     /// Whether `id` is declared outside any owning type.

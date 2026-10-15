@@ -23,7 +23,10 @@ use std::path::Path;
 /// Kotlin and PHP `RawImport.imported_name` is the short name (PHP group
 /// members are `*` imports), Kotlin `package` headers emit Namespace nodes,
 /// and PHP `$obj->m()` / Java computed-receiver callees are untyped members.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema5");
+/// schema6: TS / JS `RawNode.is_exported` also marks declarations exported
+/// through a local `export { … }` clause or `export default <name>`, and the
+/// import tier reads it.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema6");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

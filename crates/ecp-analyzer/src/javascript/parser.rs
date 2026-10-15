@@ -731,6 +731,7 @@ impl LanguageProvider for JavaScriptProvider {
             file_category,
         );
 
+        crate::framework_helpers::stamp_js_ts_exports(tree.root_node(), source, &mut nodes);
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         crate::framework_helpers::stamp_js_function_owners(&mut nodes);
 
