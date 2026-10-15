@@ -841,6 +841,9 @@ impl<'a> OverlayNames<'a> {
     }
 }
 
+type StarModuleCache = FxHashMap<Box<str>, Rc<[Box<str>]>>;
+type NamedImportCache = FxHashMap<(usize, ResolveTarget), FxHashMap<Box<str>, Option<u32>>>;
+
 /// The facts the shared import rules ([`reexport`]) read over the overlay:
 /// the base graph, with each dirty file's fresh parse in place of its
 /// archived facts, empty imports and exports included. Lookups touch only
@@ -866,11 +869,11 @@ struct OverlayFacts<'a> {
     clean_aliases: RefCell<FxHashMap<u32, Option<Rc<ExportAliasTable>>>>,
     /// Module → its resolved `export *` modules, as the index resolves them
     /// once per module.
-    star_modules: RefCell<FxHashMap<Box<str>, Rc<[Box<str>]>>>,
+    star_modules: RefCell<StarModuleCache>,
     /// (dirty file ordinal, kind family) → callee → the named-import tier's
     /// answer: a file calls one imported name at many sites, and each probe
     /// walks the specifier's candidate files.
-    named_imports: RefCell<FxHashMap<(usize, ResolveTarget), FxHashMap<Box<str>, Option<u32>>>>,
+    named_imports: RefCell<NamedImportCache>,
 }
 
 impl<'a> OverlayFacts<'a> {
