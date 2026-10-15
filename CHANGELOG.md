@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.15.0 - 2026-10-15
+
+### Bug Fixes
+
+- bind imports through re-exports the same way in index and overlay; graph v13; self-cleaning ~/.ecp (#845)
+- no "ECP.md differs" note when it already matches the new release (#834)
+
 ## v0.14.8 - 2026-10-08
 
 ### Documentation
