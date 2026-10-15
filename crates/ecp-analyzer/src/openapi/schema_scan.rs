@@ -137,7 +137,7 @@ pub fn extract_fields(
         _ => {
             let text = std::str::from_utf8(source)
                 .map_err(|e| anyhow::anyhow!("openapi: UTF-8 decode error in {:?}: {}", path, e))?;
-            serde_yaml::from_str(text)
+            serde_norway::from_str(text)
                 .map_err(|e| anyhow::anyhow!("openapi: YAML parse error in {:?}: {}", path, e))?
         }
     };
@@ -158,7 +158,7 @@ pub fn extract_fields(
         }
         for (field_name, field_def) in props {
             let type_class = classify_openapi_type(field_def);
-            // Span (0,0,0,0) — serde_json/serde_yaml Values carry no byte
+            // Span (0,0,0,0) — serde_json/serde_norway Values carry no byte
             // offsets; sentinel consistent with SQL and other non-tree-sitter
             // extractors.
             out.push(RawSchemaField {
