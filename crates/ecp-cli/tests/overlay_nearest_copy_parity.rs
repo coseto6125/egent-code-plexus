@@ -14,24 +14,26 @@
 //! The index binds a bare name to the nearest copy at its global tier, and a
 //! qualified call (`Maps.make()`) at its receiver-typing ladder. The overlay
 //! replays the global tier, also where an import tier falls back to it
-//! (Python and Java imports), and not the ladder:
+//! (Python and Java imports), and not the ladder. Where the parser records a
+//! qualified call by its bare member name, the call reaches the global tier
+//! and the overlay matches:
 //!
 //! | language   | bare name (global tier)          | qualified call (ladder)        |
 //! |------------|----------------------------------|--------------------------------|
 //! | TypeScript | tested: package import           | N/A: package import is bare    |
 //! | JavaScript | tested: package import           | N/A: package import is bare    |
-//! | Python     | tested: `from` import of a fn    | known divergence               |
+//! | Python     | tested: `from` import of a fn    | tested: the retry drops `PyMaps.` |
 //! | Java       | tested: static import            | known divergence               |
-//! | Kotlin     | tested: top-level fn             | known divergence               |
-//! | C#         | tested: bare member call         | known divergence               |
-//! | Go         | tested: same package             | known divergence               |
+//! | Kotlin     | tested: top-level fn             | tested: parser keeps it bare   |
+//! | C#         | tested: bare member call         | tested: parser keeps it bare   |
+//! | Go         | tested: same package             | tested: parser keeps it bare   |
 //! | Rust       | tested: crate import             | N/A: crate import is bare      |
 //! | PHP        | tested: namespaced fn            | known divergence               |
 //! | Ruby       | tested: top-level method         | known divergence               |
-//! | Swift      | tested: top-level fn             | known divergence               |
+//! | Swift      | tested: top-level fn             | tested: parser keeps it bare   |
 //! | C          | tested: bare call                | N/A: C has no qualified calls  |
 //! | C++        | tested: free fn                  | known divergence               |
-//! | Dart       | tested: top-level fn             | known divergence               |
+//! | Dart       | tested: top-level fn             | tested: parser keeps it bare   |
 //!
 //! The C# bare call has no `using static`, which C# needs to compile it: the
 //! resolver sees the same bare name either way.
@@ -67,17 +69,8 @@ const LADDER: &str = "a qualified call into duplicated trees binds at the index'
                       receiver-typing ladder, which the overlay does not replay";
 const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
     ("Java/qualified static call", LADDER),
-    ("Kotlin/object call", LADDER),
-    ("C#/static class call", LADDER),
     ("PHP/static call", LADDER),
-    (
-        "Python/class through a from import",
-        "the import's retry keeps `PyMaps.make` qualified, so it reaches the ladder",
-    ),
     ("Ruby/constant call", LADDER),
-    ("Swift/qualified call", LADDER),
-    ("Dart/qualified call", LADDER),
-    ("Go/package call", LADDER),
     ("C++/static member call", LADDER),
 ];
 
