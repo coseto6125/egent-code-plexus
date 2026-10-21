@@ -13,6 +13,15 @@ pub const CLOSURE_REFERENCE_REASON: &str = "closure:lexical_reference";
 /// ([`crate::uid::keeps_overloads`]): a call binds the first by name only.
 pub const OVERLOAD_SET_REASON: &str = "overload_set";
 
+/// The confidence of a call edge bound to the nearest copy of a declaration
+/// that duplicated source trees repeat. No other call tier yields this
+/// value, so the index and the session overlay tell the edge apart by it.
+pub const NEAREST_COPY_CONFIDENCE: f32 = 0.6;
+
+/// The `reason` of a call edge at [`NEAREST_COPY_CONFIDENCE`]: path
+/// proximity is a heuristic, so the edge stays tagged.
+pub const NEAREST_COPY_REASON: &str = "call:nearest-copy";
+
 /// True iff `outer` fully contains `inner` in the same coordinate system.
 #[inline]
 pub fn span_contains(outer: Span, inner: Span) -> bool {

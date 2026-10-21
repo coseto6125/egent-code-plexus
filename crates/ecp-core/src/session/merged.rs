@@ -87,8 +87,9 @@ impl<'a> MergedEdge<'a> {
         matches!(self.origin, EdgeOrigin::Overlay(_))
     }
 
-    /// Why the edge exists. Rebuilt lexical references retain their semantic
-    /// reason; other overlay edges carry the uncommitted-edit marker.
+    /// Why the edge exists. Rebuilt lexical references and nearest-copy calls
+    /// retain their semantic reason; other overlay edges carry the
+    /// uncommitted-edit marker.
     #[inline]
     pub fn reason(&self, graph: &'a ArchivedZeroCopyGraph) -> &'a str {
         match self.origin {

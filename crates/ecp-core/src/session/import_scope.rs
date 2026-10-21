@@ -152,6 +152,17 @@ impl<'a> ImportScope<'a> {
         f(files)
     }
 
+    /// Whether the `language` files `a` and `b` declare the same namespaces,
+    /// as the resolver's `SymbolTable::is_copy` compares them. The resolver
+    /// records namespaces for fully qualified languages only, so any other
+    /// language agrees without building its file index.
+    pub(crate) fn same_namespaces(&self, language: Language, a: &str, b: &str) -> bool {
+        fqn_extension(language).is_none()
+            || self.with_files(language, |files| {
+                files.namespaces.get(a) == files.namespaces.get(b)
+            })
+    }
+
     pub(crate) fn has_module_name(&self, language: Language, name: &str) -> bool {
         self.with_files(language, |files| files.module_names.contains(name))
     }

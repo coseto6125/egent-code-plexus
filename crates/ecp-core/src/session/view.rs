@@ -23,11 +23,15 @@
 //!   stay visible as indexed, and their edges into dirty symbols redirect
 //!   or drop like any other base edge.
 //! - **overlay edges** — `Calls` edges re-resolved from each dirty symbol's
-//!   [`CallSite`]s, mirroring index-time Pass-2 tier semantics (same-file →
-//!   import-scoped → unique-global with `AmbiguousGlobal` suppression, then
-//!   the constructor fallback onto a Class / Struct's one constructor or the
-//!   type) against the archived `name_index` (O(log N) per lookup, no
-//!   allocation proportional to the graph).
+//!   [`CallSite`]s, mirroring index-time Pass-2 tier semantics (same-file
+//!   with the caller's own member first → import-scoped → unique-global with
+//!   `AmbiguousGlobal` suppression unless every candidate is a copy of one
+//!   declaration in duplicated source trees, then the constructor fallback
+//!   onto a Class / Struct's one constructor or the type) against the
+//!   archived `name_index` (O(log N) per lookup, no allocation proportional
+//!   to the graph). A nearest-copy edge keeps the index's
+//!   [`NEAREST_COPY_REASON`]; every other overlay call carries the
+//!   uncommitted-edit marker.
 //! - **closure references** — lexical `References` from each enclosing
 //!   callable to its anonymous closures, using the full index's span rule.
 //!   The merge replaces only base references with `closure:lexical_reference`
@@ -77,7 +81,13 @@
 //!   the receiver-typing ladder are not replayed: a qualified callee whose
 //!   member the qualifier's file lacks (inherited, `super.setup`) stays
 //!   unresolved, and a wildcard import binds a name that the index resolves
-//!   on the caller's base class.
+//!   on the caller's base class. The ladder is also where the index binds a
+//!   qualified call into duplicated trees (`Maps.make()` with two copies of
+//!   `Maps`) to the nearest copy; the overlay leaves that call unresolved.
+//! - Within one file, the index binds the first of several same-name
+//!   callables (a call from a member of `K` takes `K`'s own one). The overlay
+//!   binds only `K`'s own one and leaves any other same-file ambiguity
+//!   unresolved.
 //! - Rust paths resolve by conventional file layout and module declarations.
 //!   `pub use` chains, `#[path]`, inline modules, and workspace crate-name
 //!   heads stay unresolved when that layout cannot establish the target.
@@ -96,7 +106,7 @@ use crate::analyzer::rust_paths::{
 };
 use crate::analyzer::types::{
     innermost_enclosing, owner_key, CallSite, LocalGraph, RawExportAlias, RawImport,
-    CLOSURE_REFERENCE_REASON,
+    CLOSURE_REFERENCE_REASON, NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON,
 };
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
@@ -236,7 +246,10 @@ impl OverlayView {
     /// - a dirty Rust file with a `::` call makes one more pass over
     ///   `graph.files` for crate roots, plus one per distinct resolved
     ///   qualified callee of each dirty file for the qualifier-scope
-    ///   confidence.
+    ///   confidence;
+    /// - an ambiguous Tier-3 call whose first two candidates are copies of
+    ///   one Java / Kotlin / PHP declaration builds that language's file
+    ///   index too, to compare their files' namespaces.
     ///
     /// The shared import rules scan nothing: a TS / JS import probes its
     /// candidate paths by binary search over `graph.files`, reads one
@@ -431,6 +444,9 @@ impl OverlayView {
                 for sym in &file.symbols {
                     let source = virt_cursor;
                     virt_cursor += 1;
+                    let call = Some(CallScope {
+                        owner: sym.owner_class.as_deref().and_then(owner_key),
+                    });
                     for raw_callee in &sym.calls {
                         let caller = file_metas[file_ord];
                         let site = CallSite::parse(raw_callee);
@@ -486,6 +502,7 @@ impl OverlayView {
                                     &replaced,
                                     &dirty_base,
                                     &facts,
+                                    call,
                                 )
                             }
                             .or_else(|| {
@@ -502,6 +519,7 @@ impl OverlayView {
                                     &replaced,
                                     &dirty_base,
                                     &facts,
+                                    call,
                                 )?;
                                 let target = *construction_targets.entry(ty).or_insert_with(|| {
                                     construction_target(graph, &nodes, &type_ctors, ty)
@@ -511,12 +529,19 @@ impl OverlayView {
                         // The index drops self-recursion Calls (builder's
                         // `target_id == current_node_idx` skip).
                         if let Some((target, confidence)) = hit.filter(|&(t, _)| t != source) {
+                            // The index's Pass 2 names the reason by the same
+                            // confidence (`CallReasons::of`).
+                            let reason = if confidence == NEAREST_COPY_CONFIDENCE {
+                                NEAREST_COPY_REASON
+                            } else {
+                                super::merged::OVERLAY_EDGE_REASON
+                            };
                             push_edge(ViewEdge {
                                 source,
                                 target,
                                 rel_type: RelType::Calls,
                                 confidence,
-                                reason: super::merged::OVERLAY_EDGE_REASON,
+                                reason,
                             });
                         }
                     }
@@ -1133,6 +1158,80 @@ impl<'a> OverlayFacts<'a> {
         }
     }
 
+    fn kind_of(&self, idx: u32) -> NodeKind {
+        match idx.checked_sub(self.base_len()) {
+            Some(offset) => self.nodes[offset as usize].kind,
+            None => NodeKind::from(&self.graph.nodes[idx as usize].kind),
+        }
+    }
+
+    /// The index's `SymbolTable::is_copy`: `b` repeats declaration `a` in
+    /// another tree, with the same kind and owner, in a file of the same name
+    /// in a directory of the same name, declaring the same namespaces.
+    fn is_copy(&self, a: u32, b: u32) -> bool {
+        let (Some(a_file), Some(b_file)) = (self.node_file(a), self.node_file(b)) else {
+            return false;
+        };
+        a_file != b_file
+            && self.kind_of(a) == self.kind_of(b)
+            && self.owner_of(a) == self.owner_of(b)
+            && leaf_path(a_file) == leaf_path(b_file)
+            && self
+                .scope
+                .same_namespaces(Language::from_normalized_path(a_file), a_file, b_file)
+    }
+
+    /// The index's `SymbolTable::nearest_global_copy` over the Tier-3
+    /// `candidates` that `caller` admits: when all of them are copies of the
+    /// first ([`Self::is_copy`]), the copy whose file shares the deepest
+    /// directory with `caller_file`, fewer directory steps breaking an equal
+    /// depth. `None` for a tie, for fewer than two copies, or at the first
+    /// candidate that is no copy, so a common name costs two comparisons.
+    fn nearest_copy(
+        &self,
+        caller: FileMeta,
+        caller_file: &str,
+        candidates: impl Iterator<Item = (u32, FileMeta)>,
+    ) -> Option<u32> {
+        let mut copies: Vec<u32> = Vec::new();
+        for (idx, meta) in candidates {
+            if !caller.admits(meta) {
+                continue;
+            }
+            if copies
+                .first()
+                .is_some_and(|&first| !self.is_copy(first, idx))
+            {
+                return None;
+            }
+            copies.push(idx);
+        }
+        if copies.len() < 2 {
+            return None;
+        }
+        let caller_dirs = || path_dirs(caller_file);
+        let mut best: Option<((usize, std::cmp::Reverse<usize>), u32)> = None;
+        let mut tie = false;
+        for idx in copies {
+            let file = self.node_file(idx)?;
+            let shared = caller_dirs()
+                .zip(path_dirs(file))
+                .take_while(|(a, b)| a == b)
+                .count();
+            let steps = caller_dirs().count() + path_dirs(file).count() - 2 * shared;
+            let key = (shared, std::cmp::Reverse(steps));
+            match best {
+                Some((best_key, _)) if key < best_key => {}
+                Some((best_key, _)) if key == best_key => tie = true,
+                _ => {
+                    best = Some((key, idx));
+                    tie = false;
+                }
+            }
+        }
+        best.filter(|_| !tie).map(|(_, idx)| idx)
+    }
+
     /// The index's `SymbolTable::files_by_stem`. The index leaves out a file
     /// that declares nothing, which the base graph does not record per file:
     /// such a file here can make a stem ambiguous, never add a target.
@@ -1517,7 +1616,9 @@ impl<'a> ModuleFacts for OverlayFacts<'a> {
 /// A Python call on a from-imported submodule binds first, as in the index
 /// ([`reexport::python_submodule_member`]).
 /// Tier 1 — same file: the dirty file was FULLY re-parsed, so its own
-/// callable set is authoritative. Unique match → confidence 1.0.
+/// callable set is authoritative. Unique match → confidence 1.0. Among
+/// several, a call from a member of `K` takes `K`'s own one when the first
+/// belongs to a type, as the index's `SymbolTable::prefer_owned` does.
 /// Tier 2 — import-scoped. In an [`import_member_fallback`] language,
 /// [`bind_import`] replays the index's import-member tier, a Python package
 /// re-export included. A TS / JS caller takes the index's named-import tier
@@ -1538,9 +1639,11 @@ impl<'a> ModuleFacts for OverlayFacts<'a> {
 /// plus all overlay callables, through the index-time candidate filter
 /// [`pick_global`] (language and vendor barriers, unique only). ≥2
 /// remaining → suppressed, matching `DecisionTier::AmbiguousGlobal` (an
-/// invented edge is worse than a missing one). A TS / JS import naming the
-/// ES module of a private pick hides it ([`reexport::import_hides`]).
-/// Unique → 0.7.
+/// invented edge is worse than a missing one), unless `call` is given and
+/// every candidate is a copy of one declaration: then the copy nearest the
+/// caller binds ([`OverlayFacts::nearest_copy`]) at
+/// [`NEAREST_COPY_CONFIDENCE`]. A TS / JS import naming the ES module of a
+/// private pick hides it ([`reexport::import_hides`]). Unique → 0.7.
 #[allow(clippy::too_many_arguments)]
 fn resolve_callee<'s>(
     graph: &ArchivedZeroCopyGraph,
@@ -1556,6 +1659,7 @@ fn resolve_callee<'s>(
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
     facts: &OverlayFacts<'_>,
+    call: Option<CallScope<'_>>,
 ) -> Option<(u32, f32)> {
     let callee = site.name();
     let accepts = |idx: u32| {
@@ -1581,12 +1685,26 @@ fn resolve_callee<'s>(
     }
     // Tier 1: same-file.
     if let Some(virts) = names.same_file.get(&(file_ord, callee)) {
-        if virts.len() == 1 {
-            return accepts(virts[0]).then_some((virts[0], CONF_SAME_FILE));
-        }
-        // Ambiguous within one file (same-name members of several types,
-        // same-uid twins included): suppress, like index time.
-        return None;
+        let pick = match virts.as_slice() {
+            &[only] => Some(only),
+            // The index takes the first, then the caller's owner's own member
+            // when the first belongs to another type. A first at top level,
+            // or no own member, binds the first there; the overlay leaves
+            // that ambiguity (same-name free functions, same-uid twins)
+            // unresolved. A same-file free function keeps a Rust method call
+            // unresolved, as `pick_call` does.
+            &[first, ..] => call
+                .and_then(|scope| scope.owner)
+                .filter(|_| facts.owner_of(first).is_some() && virts.iter().all(|&v| accepts(v)))
+                .and_then(|owner| {
+                    virts
+                        .iter()
+                        .copied()
+                        .find(|&v| facts.owner_of(v) == Some(owner))
+                }),
+            &[] => None,
+        };
+        return pick.filter(|&v| accepts(v)).map(|v| (v, CONF_SAME_FILE));
     }
 
     // The index binds no import for an untyped member call, and in these
@@ -1622,8 +1740,10 @@ fn resolve_callee<'s>(
                     replaced,
                     dirty_base,
                     facts,
+                    call,
                 );
             }
+            // The index's `extension_fallback` resolves outside a call scope.
             Some(ImportBinding::Extension(member)) => {
                 let hit = resolve_callee(
                     graph,
@@ -1639,6 +1759,7 @@ fn resolve_callee<'s>(
                     replaced,
                     dirty_base,
                     facts,
+                    None,
                 );
                 return hit.filter(|&(idx, _)| is_top_level(graph, nodes, idx));
             }
@@ -1766,22 +1887,39 @@ fn resolve_callee<'s>(
     // Tier 3: the shared candidate filter over clean base + overlay. Same
     // invariant as Tier 2: a base candidate is clean by construction, never
     // redirected; overlay candidates are virtual indices.
-    let base = base_candidates.iter().map(|&idx| {
+    let mut base_meta = |idx: u32| {
         let file_idx = graph.nodes[idx as usize].file_idx.to_native() as usize;
-        let meta = *base_metas.entry(file_idx).or_insert_with(|| {
+        *base_metas.entry(file_idx).or_insert_with(|| {
             graph
                 .files
                 .get(file_idx)
                 .map_or_else(FileMeta::default, |f| {
                     FileMeta::from_path(f.path.resolve(&graph.string_pool))
                 })
-        });
-        (idx, meta)
-    });
-    let GlobalPick::Unique(target) =
-        pick_global(caller, base.chain(overlay_candidates.iter().copied()))
-    else {
-        return None;
+        })
+    };
+    let pick = pick_global(
+        caller,
+        base_candidates
+            .iter()
+            .map(|&idx| (idx, base_meta(idx)))
+            .chain(overlay_candidates.iter().copied()),
+    );
+    let (target, confidence) = match pick {
+        GlobalPick::Unique(target) => (target, CONF_GLOBAL_UNIQUE),
+        // The index's `DecisionTier::NearestCopy`, for call sites only.
+        GlobalPick::Ambiguous if call.is_some() => (
+            facts.nearest_copy(
+                caller,
+                importer,
+                base_candidates
+                    .iter()
+                    .map(|&idx| (idx, base_meta(idx)))
+                    .chain(overlay_candidates.iter().copied()),
+            )?,
+            NEAREST_COPY_CONFIDENCE,
+        ),
+        GlobalPick::Ambiguous | GlobalPick::NoMatch => return None,
     };
     debug_assert!(!replaced.contains_key(&target));
     let decl_file = match target.checked_sub(base_len) {
@@ -1799,7 +1937,16 @@ fn resolve_callee<'s>(
     }) {
         return None;
     }
-    accepts(target).then_some((target, CONF_GLOBAL_UNIQUE))
+    accepts(target).then_some((target, confidence))
+}
+
+/// What a call site adds to a name lookup, as the index's `CallScope`
+/// (`Resolver::resolve_call`). Its presence also admits the nearest-copy
+/// rule of Tier 3.
+#[derive(Clone, Copy)]
+struct CallScope<'c> {
+    /// The [`owner_key`] of the type the calling member belongs to.
+    owner: Option<&'c str>,
 }
 
 /// File-backed Rust modules use the same crate/self/super layout as Pass 2.
@@ -2084,6 +2231,7 @@ fn resolve_constructed_type<'s>(
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
     facts: &OverlayFacts<'_>,
+    call: Option<CallScope<'_>>,
 ) -> Option<(u32, f32)> {
     let (type_path, last_segment_fallback) = site.constructed_type(caller.language)?;
     let type_name = type_path
@@ -2124,6 +2272,7 @@ fn resolve_constructed_type<'s>(
             replaced,
             dirty_base,
             facts,
+            call,
         )
     };
     // A qualified type path (`new \App\User()`) never names its type
@@ -2541,6 +2690,23 @@ fn rust_path_binds(
         }
     };
     kind != NodeKind::Method || owner.and_then(owner_key) == Some(qualifier)
+}
+
+/// The index's `leaf_path`: the last two components of `path`, its
+/// directory's name and its file name (`collect/Maps.java`), or the whole
+/// path at the root.
+fn leaf_path(path: &str) -> &str {
+    let Some((dir, _)) = path.rsplit_once('/') else {
+        return path;
+    };
+    dir.rfind('/').map_or(path, |slash| &path[slash + 1..])
+}
+
+/// The index's `path_dirs`: the directories of `path`, root first.
+fn path_dirs(path: &str) -> impl Iterator<Item = &str> {
+    path.rsplit_once('/')
+        .into_iter()
+        .flat_map(|(dir, _)| dir.split('/'))
 }
 
 /// Last path-ish segment of an import source across language conventions:
@@ -3210,5 +3376,109 @@ mod tests {
             calls,
             vec![(1, CONF_QUALIFIER_SCOPED), (2, CONF_QUALIFIER_SCOPED)]
         );
+    }
+
+    /// A bare `save()` in `K.run` binds `K.save`, not the interface's
+    /// `A.save` that precedes it in the file (`SymbolTable::prefer_owned`).
+    #[test]
+    fn test_build_same_file_call_from_owner_binds_own_member() {
+        let bytes = GraphFixture::new().into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let owned = |kind, name: &str, owner: Option<&str>, calls: &[&str]| OverlaySymbol {
+            kind,
+            owner_class: owner.map(str::to_string),
+            ..sym(name, calls)
+        };
+        let file = OverlayFileInput {
+            export_aliases: Vec::new(),
+            rel_path: "K.java".into(),
+            symbols: vec![
+                owned(NodeKind::Interface, "A", None, &[]),
+                owned(NodeKind::Method, "save", Some("A"), &[]),
+                owned(NodeKind::Class, "K", None, &[]),
+                owned(NodeKind::Method, "save", Some("K"), &[]),
+                owned(NodeKind::Method, "run", Some("K"), &["save"]),
+            ],
+            imports: vec![],
+        };
+        let view = OverlayView::build(graph, &[file]).unwrap();
+        let base = view.base_len();
+        let calls: Vec<_> = view
+            .overlay_out(base + 4)
+            .filter(|(_, e)| e.rel_type == RelType::Calls)
+            .map(|(_, e)| (e.target - base, e.confidence, e.reason))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![(
+                3,
+                CONF_SAME_FILE,
+                crate::session::merged::OVERLAY_EDGE_REASON
+            )]
+        );
+    }
+
+    /// Base copies of one C file under `core/` and `android/core/`, and a
+    /// dirty caller of `c_make` at `caller`: the `Calls` edges of its `t`.
+    fn nearest_copy_calls(copies: [&str; 2], caller: &str) -> (Vec<u32>, Vec<ViewEdge>) {
+        let mut fx = GraphFixture::new();
+        let ids = copies.map(|path| fx.func(path, "c_make")).to_vec();
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let file = OverlayFileInput {
+            export_aliases: Vec::new(),
+            rel_path: caller.into(),
+            symbols: vec![sym("t", &["c_make"])],
+            imports: vec![],
+        };
+        let view = OverlayView::build(graph, &[file]).unwrap();
+        let edges = view
+            .overlay_out(view.base_len())
+            .map(|(_, e)| *e)
+            .filter(|e| e.rel_type == RelType::Calls)
+            .collect();
+        (ids, edges)
+    }
+
+    #[test]
+    fn test_build_ambiguous_copies_bind_copy_in_callers_tree() {
+        let copies = ["core/c/src/cm.c", "android/core/c/src/cm.c"];
+        for (caller, nearest) in [("core/c/test/t.c", 0), ("android/core/c/test/t.c", 1)] {
+            let (ids, edges) = nearest_copy_calls(copies, caller);
+            let calls: Vec<_> = edges
+                .iter()
+                .map(|e| (e.target, e.confidence, e.reason))
+                .collect();
+            assert_eq!(
+                calls,
+                vec![(ids[nearest], NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON)],
+                "{caller}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_equidistant_copies_bind_nothing() {
+        let (_, edges) =
+            nearest_copy_calls(["left/c/src/cm.c", "right/c/src/cm.c"], "mid/c/test/t.c");
+        assert!(edges.is_empty(), "{edges:?}");
+    }
+
+    #[test]
+    fn test_build_same_name_in_differently_named_files_binds_nothing() {
+        let (_, edges) = nearest_copy_calls(
+            ["core/c/src/a.c", "android/core/c/src/b.c"],
+            "core/c/test/t.c",
+        );
+        assert!(edges.is_empty(), "{edges:?}");
+    }
+
+    #[test]
+    fn test_path_dirs_and_leaf_path_match_index_helpers() {
+        assert_eq!(path_dirs("a/b/c.rs").collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(path_dirs("c.rs").count(), 0);
+        assert_eq!(leaf_path("a/b/c.rs"), "b/c.rs");
+        assert_eq!(leaf_path("b/c.rs"), "b/c.rs");
+        assert_eq!(leaf_path("c.rs"), "c.rs");
     }
 }
