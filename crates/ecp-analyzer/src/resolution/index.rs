@@ -850,9 +850,10 @@ impl SymbolTable {
         self.exported_ids.iter().copied()
     }
 
-    /// Whether `id` is declared outside any owning type.
+    /// Whether `id` is declared outside any owning type. A method of a Rust
+    /// `impl` block the parser gave no owner is not: `use m::f` never names it.
     pub(crate) fn is_top_level(&self, id: NodeId) -> bool {
-        self.node_owner[id as usize] == NO_OWNER
+        self.is_free(id)
     }
 
     /// [`Self::lookup_call_in_file`] narrowed by the owner an import binding
@@ -1939,6 +1940,17 @@ mod tests {
             Some(1),
             "an ownerless impl member is no free function"
         );
+    }
+
+    #[test]
+    fn test_is_top_level_ownerless_impl_member_returns_false() {
+        let mut st = st_owned(&[
+            ("lib.rs", "f", NodeKind::Function, None),
+            ("lib.rs", "m", NodeKind::Method, None),
+        ]);
+        st.note_impl_member(1, 1, Some("T"));
+        assert!(st.is_top_level(0));
+        assert!(!st.is_top_level(1));
     }
 
     #[test]
