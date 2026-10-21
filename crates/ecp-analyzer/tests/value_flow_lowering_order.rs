@@ -148,3 +148,66 @@ fn test_analyze_missing_import_target_keeps_import_boundary() {
         );
     }
 }
+
+#[test]
+fn test_analyze_queried_module_initialised_before_corpus_locates_value() {
+    for (main, main_text, heavy, heavy_text) in [
+        (
+            "main.js",
+            "const value = 101;\nconsume(value);\n".to_string(),
+            "heavy.js",
+            (0..100)
+                .map(|i| format!("x{i} = {i};\n"))
+                .collect::<String>(),
+        ),
+        (
+            "main.py",
+            "value = 101\nconsume(value)\n".to_string(),
+            "heavy.py",
+            (0..100)
+                .map(|i| format!("x{i} = {i}\n"))
+                .collect::<String>(),
+        ),
+        (
+            "main.php",
+            "<?php\n$value = 101;\nconsume($value);\n".to_string(),
+            "heavy.php",
+            format!(
+                "<?php\n{}",
+                (0..100)
+                    .map(|i| format!("$x{i} = {i};\n"))
+                    .collect::<String>()
+            ),
+        ),
+    ] {
+        // Corpus order initialises the heavy module first, and its top-level
+        // assignments alone exceed the node budget.
+        let files = [source(heavy, &heavy_text), source(main, &main_text)];
+        let text = &files[1].source;
+        let offset = text.find("101").unwrap();
+        let prefix = &text[..offset];
+        let report = analyze(
+            &files,
+            &FlowRequest {
+                file: main.into(),
+                line: prefix.matches('\n').count() + 1,
+                column: prefix.rsplit('\n').next().unwrap().len() + 1,
+                subject: Subject::Value,
+                direction: Direction::Forward,
+                budgets: Budgets {
+                    max_nodes: 60,
+                    ..Budgets::default()
+                },
+            },
+        )
+        .unwrap_or_else(|error| panic!("{main}: {error}"));
+        assert!(
+            report
+                .nodes
+                .iter()
+                .any(|n| n.file == main && n.kind == "argument"),
+            "{main}: the consumer must be reached: {report:#?}"
+        );
+        assert!(report.truncated, "{main}: {heavy} must still be cut");
+    }
+}

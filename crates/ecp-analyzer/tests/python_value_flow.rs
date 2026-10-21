@@ -112,3 +112,119 @@ fn test_analyze_python_class_attribute_call_reaches_method() {
     assert!(binding(&report, "value"), "{report:#?}");
     assert!(argument(&report, "Box.get(None, 303)"), "{report:#?}");
 }
+
+fn boundary_at(report: &FlowReport, kind: &str, line: usize) -> bool {
+    report
+        .boundaries
+        .iter()
+        .any(|b| b.kind == kind && b.line == line)
+}
+
+#[test]
+fn test_analyze_python_staticmethod_first_parameter_is_not_self() {
+    let report = forward(
+        "class A:\n    @staticmethod\n    def make(cfg):\n        return cfg.build()\n\n    def build(self):\n        secret = 101\n        return secret\n",
+        "101",
+    );
+    assert!(
+        !report
+            .nodes
+            .iter()
+            .any(|node| node.kind == "return" && node.label == "return cfg.build()"),
+        "a static method's parameter is not the instance: {report:#?}"
+    );
+    assert!(
+        boundary_at(&report, "external_call", 4),
+        "{:?}",
+        report.boundaries
+    );
+}
+
+#[test]
+fn test_analyze_python_self_call_to_staticmethod_passes_no_receiver() {
+    let report = forward(
+        "class A:\n    @staticmethod\n    def stat(y, z):\n        return z\n\n    def run(self):\n        return self.stat(101, 1)\n",
+        "101",
+    );
+    assert!(binding(&report, "y"), "{report:#?}");
+    assert!(
+        !binding(&report, "z"),
+        "the first argument binds the first parameter: {report:#?}"
+    );
+}
+
+#[test]
+fn test_analyze_python_classmethod_call_binds_class_to_cls() {
+    let report = forward(
+        "class Box:\n    @classmethod\n    def create(cls, size):\n        return size\n\nconsume(Box.create(101))\n",
+        "101",
+    );
+    assert!(binding(&report, "size"), "{report:#?}");
+    assert!(!binding(&report, "cls"), "{report:#?}");
+    assert!(argument(&report, "Box.create(101)"), "{report:#?}");
+}
+
+#[test]
+fn test_analyze_python_unknown_decorator_call_keeps_external_call() {
+    let report = forward(
+        "class Box:\n    @property\n    def get(self, value):\n        return value\n\nconsume(Box.get(None, 101))\n",
+        "101",
+    );
+    assert!(
+        !binding(&report, "value"),
+        "a property is not called like its getter: {report:#?}"
+    );
+    assert!(
+        boundary_at(&report, "external_call", 6),
+        "{:?}",
+        report.boundaries
+    );
+}
+
+#[test]
+fn test_analyze_python_inherited_class_attribute_read_reaches_consumer() {
+    let report = forward(
+        "class Base:\n    LIMIT = 101\n\nclass Sub(Base):\n    pass\n\nconsume(Sub.LIMIT)\n",
+        "101",
+    );
+    assert!(argument(&report, "Sub.LIMIT"), "{report:#?}");
+}
+
+#[test]
+fn test_analyze_python_multiple_inheritance_follows_mro_first_base() {
+    let report = forward(
+        "class A:\n    def m(self, in_a):\n        return in_a\n\nclass B:\n    def m(self, in_b):\n        return in_b\n\nclass C(A, B):\n    def run(self):\n        return self.m(101)\n",
+        "101",
+    );
+    assert!(binding(&report, "in_a"), "{report:#?}");
+    assert!(
+        !binding(&report, "in_b"),
+        "the MRO picks A.m, not both: {report:#?}"
+    );
+}
+
+#[test]
+fn test_analyze_python_diamond_inheritance_follows_c3_order() {
+    let report = forward(
+        "class Base:\n    def m(self, in_base):\n        return in_base\n\nclass Left(Base):\n    pass\n\nclass Right(Base):\n    def m(self, in_right):\n        return in_right\n\nclass D(Left, Right):\n    def run(self):\n        return self.m(101)\n",
+        "101",
+    );
+    assert!(
+        binding(&report, "in_right"),
+        "C3 puts Right before Base: {report:#?}"
+    );
+    assert!(!binding(&report, "in_base"), "{report:#?}");
+}
+
+#[test]
+fn test_analyze_python_pass_statement_raises_no_boundary() {
+    let report = forward("def f():\n    pass\n\nx = 101\nconsume(x)\n", "101");
+    assert!(
+        !report
+            .boundaries
+            .iter()
+            .any(|b| b.message.starts_with("pass_statement")),
+        "{:?}",
+        report.boundaries
+    );
+}

@@ -1,4 +1,5 @@
 use super::engine::Engine;
+use super::python::is_python;
 use super::{Boundary, Direction, FlowNode, FlowReport, SourceFile};
 use std::collections::{BTreeMap, BTreeSet};
 use tree_sitter::Node;
@@ -21,7 +22,7 @@ pub(super) fn resolve(files: &[SourceFile], importer: usize, module: &str) -> Op
     let module = module.trim_matches(['\'', '"']);
     let importer = &files[importer].path;
     let parent = importer.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
-    let module = if importer.ends_with(".py") {
+    let module = if is_python(importer) {
         module.replace('.', "/")
     } else {
         module.into()
@@ -152,7 +153,7 @@ impl Engine<'_> {
                             self.boundary(c, "import", "The imported binding is unresolved.");
                         }
                     }
-                } else if self.files[file].path.ends_with(".py")
+                } else if is_python(&self.files[file].path)
                     && a.kind == "dotted_name"
                     && c != source
                 {

@@ -109,7 +109,8 @@ fn language(path: &str) -> Option<tree_sitter::Language> {
     })
 }
 
-/// `first` names the file whose entry points run before the rest of the corpus.
+/// `first` names the file that is lowered, initialised and swept before the
+/// rest of the corpus.
 fn build<'a>(
     files: &'a [SourceFile],
     budgets: &Budgets,
@@ -149,75 +150,43 @@ fn build<'a>(
         classes: BTreeMap::new(),
         declarations: BTreeMap::new(),
         class_scopes: BTreeSet::new(),
+        bases: BTreeMap::new(),
+        php_aliases: BTreeMap::new(),
     };
     for _ in files {
         engine.scopes.push(Scope::new());
     }
     let mut paths = BTreeSet::new();
-    let mut trees = Vec::with_capacity(files.len());
     for f in files {
         if !paths.insert(&f.path) {
             return Err(format!("Duplicate source path: {}", f.path));
         }
-        let lang =
-            language(&f.path).ok_or_else(|| format!("Unsupported source language: {}", f.path))?;
-        let mut parser = Parser::new();
-        parser.set_language(&lang).map_err(|e| e.to_string())?;
-        let started = std::time::Instant::now();
-        let mut progress = |_: &tree_sitter::ParseState| {
-            if started.elapsed() > std::time::Duration::from_secs(2) {
-                std::ops::ControlFlow::Break(())
-            } else {
-                std::ops::ControlFlow::Continue(())
-            }
-        };
-        let bytes = f.source.as_bytes();
-        let tree = parser.parse_with_options(
-            &mut |offset, _| &bytes[offset..],
-            None,
-            Some(tree_sitter::ParseOptions::new().progress_callback(&mut progress)),
-        );
-        if tree.is_none() {
-            // One pathological file must not take the whole corpus down with it.
-            engine.boundaries.insert(Boundary {
-                file: f.path.clone(),
-                line: 1,
-                column: 1,
-                kind: "parse_timeout".into(),
-                message: "Parsing exceeded its time budget; the file is excluded from analysis."
-                    .into(),
-            });
+        if language(&f.path).is_none() {
+            return Err(format!("Unsupported source language: {}", f.path));
         }
-        trees.push(tree);
     }
+    // Each tree is dropped once lowered: holding every tree until the last
+    // file is lowered costs several times the memory of the lowered ASTs.
     let first = first.and_then(|path| files.iter().position(|f| f.path == path));
-    for i in lowering_order(files, &trees, first) {
-        let Some(tree) = trees[i].take() else {
-            continue;
-        };
-        let (root, truncated) = lower(
-            tree.root_node(),
-            i,
-            &files[i].source,
-            &mut engine.ast,
-            budgets.max_steps,
-        );
-        engine.roots[i] = Some(root);
-        if truncated {
-            engine.truncated = true;
-            engine.boundary(
-                root,
-                "ast_budget",
-                "AST lowering reached the node or nesting budget.",
-            );
+    let mut queued = vec![false; files.len()];
+    if let Some(first) = first {
+        let mut classes = None;
+        queued[first] = true;
+        let mut pending = VecDeque::from([first]);
+        while let Some(i) = pending.pop_front() {
+            let Some(tree) = load(&mut engine, i)? else {
+                continue;
+            };
+            for target in imported_files(files, i, &tree, &mut classes)? {
+                if !queued[target] {
+                    queued[target] = true;
+                    pending.push_back(target);
+                }
+            }
         }
-        if tree.root_node().has_error() {
-            engine.boundary(
-                root,
-                "parse_error",
-                "Syntax errors limit analysis coverage.",
-            );
-        }
+    }
+    for i in (0..files.len()).filter(|i| !queued[*i]) {
+        load(&mut engine, i)?;
     }
     // PHP classes are autoloaded rather than initialised in file order: every
     // class exists and every `use` is bound before any method is created.
@@ -241,6 +210,11 @@ fn build<'a>(
     }
     let mut visiting = BTreeSet::new();
     let mut done = BTreeSet::new();
+    // The queried file and the modules it imports initialise first, so the
+    // rest of the snapshot cannot spend the budget before the query exists.
+    if let Some(first) = first {
+        engine.module(first, &mut visiting, &mut done);
+    }
     for i in 0..files.len() {
         engine.module(i, &mut visiting, &mut done);
     }
@@ -264,56 +238,107 @@ fn build<'a>(
     }
     Ok(engine)
 }
-/// Lowering order: `first`, then the files its imports name, breadth-first,
-/// then the rest in corpus order. The AST budget is global, so the files a
-/// query can reach are lowered before unrelated files spend it.
-fn lowering_order(
-    files: &[SourceFile],
-    trees: &[Option<Tree>],
-    first: Option<usize>,
-) -> Vec<usize> {
-    let mut queued = vec![false; files.len()];
-    let mut order = Vec::with_capacity(files.len());
-    if let Some(first) = first {
-        let mut classes: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        for (i, tree) in trees.iter().enumerate() {
-            if let Some(tree) = tree.as_ref().filter(|_| php::is_php(&files[i].path)) {
-                for name in php::declared_names(tree.root_node(), &files[i].source) {
-                    classes.entry(name).or_default().push(i);
-                }
-            }
+/// Parse one file under a time budget; `None` when the budget ran out.
+fn parse(file: &SourceFile) -> Result<Option<Tree>, String> {
+    let lang = language(&file.path)
+        .ok_or_else(|| format!("Unsupported source language: {}", file.path))?;
+    let mut parser = Parser::new();
+    parser.set_language(&lang).map_err(|e| e.to_string())?;
+    let started = std::time::Instant::now();
+    let mut progress = |_: &tree_sitter::ParseState| {
+        if started.elapsed() > std::time::Duration::from_secs(2) {
+            std::ops::ControlFlow::Break(())
+        } else {
+            std::ops::ControlFlow::Continue(())
         }
-        queued[first] = true;
-        let mut pending = VecDeque::from([first]);
-        while let Some(i) = pending.pop_front() {
-            order.push(i);
-            let Some(tree) = &trees[i] else {
-                continue;
-            };
-            let (root, source) = (tree.root_node(), files[i].source.as_str());
-            let targets: Vec<usize> = if php::is_php(&files[i].path) {
-                php::used_names(root, source)
-                    .iter()
-                    .filter_map(|name| classes.get(name))
-                    .flatten()
-                    .copied()
-                    .collect()
-            } else {
-                module::imported_modules(root, source)
-                    .iter()
-                    .filter_map(|specifier| module::resolve(files, i, specifier))
-                    .collect()
-            };
-            for target in targets {
-                if !queued[target] {
-                    queued[target] = true;
-                    pending.push_back(target);
-                }
-            }
-        }
+    };
+    let bytes = file.source.as_bytes();
+    Ok(parser.parse_with_options(
+        &mut |offset, _| &bytes[offset..],
+        None,
+        Some(tree_sitter::ParseOptions::new().progress_callback(&mut progress)),
+    ))
+}
+/// Parse and lower file `i`. The tree is returned so the caller can read its
+/// imports before it drops it.
+fn load(engine: &mut Engine<'_>, i: usize) -> Result<Option<Tree>, String> {
+    let files = engine.files;
+    let Some(tree) = parse(&files[i])? else {
+        // One pathological file must not take the whole corpus down with it.
+        engine.boundaries.insert(Boundary {
+            file: files[i].path.clone(),
+            line: 1,
+            column: 1,
+            kind: "parse_timeout".into(),
+            message: "Parsing exceeded its time budget; the file is excluded from analysis.".into(),
+        });
+        return Ok(None);
+    };
+    let (root, truncated) = lower(
+        tree.root_node(),
+        i,
+        &files[i].source,
+        &mut engine.ast,
+        engine.budgets.max_steps,
+    );
+    engine.roots[i] = Some(root);
+    if truncated {
+        engine.truncated = true;
+        engine.boundary(
+            root,
+            "ast_budget",
+            "AST lowering reached the node or nesting budget.",
+        );
     }
-    order.extend((0..files.len()).filter(|i| !queued[*i]));
-    order
+    if tree.root_node().has_error() {
+        engine.boundary(
+            root,
+            "parse_error",
+            "Syntax errors limit analysis coverage.",
+        );
+    }
+    Ok(Some(tree))
+}
+/// The files the imports of file `i` name. The AST budget is global, so the
+/// caller lowers `first`, then these, breadth-first, before unrelated files
+/// spend it. PHP `use` names a class, not a file: `classes` maps declared
+/// class names to files, built on first need by a pass that keeps no tree.
+fn imported_files(
+    files: &[SourceFile],
+    i: usize,
+    tree: &Tree,
+    classes: &mut Option<BTreeMap<String, Vec<usize>>>,
+) -> Result<Vec<usize>, String> {
+    let (root, source) = (tree.root_node(), files[i].source.as_str());
+    if !php::is_php(&files[i].path) {
+        return Ok(module::imported_modules(root, source)
+            .iter()
+            .filter_map(|specifier| module::resolve(files, i, specifier))
+            .collect());
+    }
+    if classes.is_none() {
+        let mut declared: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (j, f) in files.iter().enumerate() {
+            if !php::is_php(&f.path) {
+                continue;
+            }
+            if let Some(tree) = parse(f)? {
+                for name in php::declared_names(tree.root_node(), &f.source) {
+                    declared.entry(name).or_default().push(j);
+                }
+            }
+        }
+        *classes = Some(declared);
+    }
+    let Some(classes) = classes.as_ref() else {
+        return Ok(vec![]);
+    };
+    Ok(php::used_names(root, source)
+        .iter()
+        .filter_map(|name| classes.get(name))
+        .flatten()
+        .copied()
+        .collect())
 }
 /// Invoke each uncalled function (of `file` only, when given) as an entry
 /// point; returns where the budget stopped the sweep.

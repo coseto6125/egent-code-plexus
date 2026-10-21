@@ -25,20 +25,91 @@ impl Engine<'_> {
         }
         callees
     }
-    /// The method `key` of a class: its own, else the nearest ancestor's.
-    fn inherited(&self, class: usize, key: &str, callees: &mut Value) {
+    /// The member `key` of a class: the first class in its method resolution
+    /// order that defines it. When the order is unknown (a base that resolves
+    /// to several classes, or an inconsistent hierarchy), every nearest
+    /// definition along each base path is a possible member.
+    pub(super) fn inherited(&self, class: usize, key: &str, members: &mut Value) {
+        // A class's own member comes first in every resolution order, and an
+        // object without bases (most field reads) needs no order at all.
+        if let Some(member) = self.objects[class].get(key) {
+            members.merge(member);
+            return;
+        }
+        if !self.bases.contains_key(&class) && !self.objects[class].contains_key(PARENT) {
+            return;
+        }
+        if let Some(order) = self.linearize(class, &mut Vec::new()) {
+            if let Some(member) = order.iter().skip(1).find_map(|c| self.objects[*c].get(key)) {
+                members.merge(member);
+            }
+            return;
+        }
         let mut seen = BTreeSet::new();
         let mut pending = vec![class];
         while let Some(c) = pending.pop() {
             if !seen.insert(c) {
                 continue;
             }
-            if let Some(method) = self.objects[c].get(key) {
-                callees.merge(method);
+            if let Some(member) = self.objects[c].get(key) {
+                members.merge(member);
             } else if let Some(parent) = self.objects[c].get(PARENT) {
                 pending.extend(&parent.objects);
             }
         }
+    }
+    /// The bases of a class in declared order, one set of possible classes
+    /// per base. A PHP class has at most one.
+    fn base_slots(&self, class: usize) -> Vec<BTreeSet<usize>> {
+        match self.bases.get(&class) {
+            Some(slots) => slots.clone(),
+            None => self.objects[class]
+                .get(PARENT)
+                .map(|parent| vec![parent.objects.clone()])
+                .unwrap_or_default(),
+        }
+    }
+    /// C3 linearization (Python's MRO; the ancestor chain for single
+    /// inheritance). `None` when a base is not exactly one class, the
+    /// hierarchy is cyclic, or no consistent order exists.
+    fn linearize(&self, class: usize, visiting: &mut Vec<usize>) -> Option<Vec<usize>> {
+        if visiting.contains(&class) {
+            return None;
+        }
+        visiting.push(class);
+        let bases = self
+            .base_slots(class)
+            .into_iter()
+            .map(|slot| match slot.len() {
+                1 => slot.first().copied(),
+                _ => None,
+            })
+            .collect::<Option<Vec<usize>>>()?;
+        let mut sequences = bases
+            .iter()
+            .map(|base| self.linearize(*base, visiting))
+            .collect::<Option<Vec<Vec<usize>>>>()?;
+        visiting.pop();
+        sequences.push(bases);
+        let mut order = vec![class];
+        while sequences.iter().any(|s| !s.is_empty()) {
+            let head = sequences
+                .iter()
+                .filter_map(|s| s.first())
+                .find(|head| {
+                    sequences
+                        .iter()
+                        .all(|s| !s.iter().skip(1).any(|c| c == *head))
+                })
+                .copied()?;
+            order.push(head);
+            for s in &mut sequences {
+                if s.first() == Some(&head) {
+                    s.remove(0);
+                }
+            }
+        }
+        Some(order)
     }
     fn extends(&self, class: usize, ancestor: usize) -> bool {
         let mut seen = BTreeSet::new();

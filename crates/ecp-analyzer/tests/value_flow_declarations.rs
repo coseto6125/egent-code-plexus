@@ -229,3 +229,21 @@ fn test_analyze_queried_file_entry_points_run_before_budget_spent_elsewhere() {
         assert!(report.truncated, "{heavy_path} must still be cut");
     }
 }
+
+#[test]
+fn test_analyze_pyi_stub_uses_python_semantics() {
+    let files = [source("main.pyi", "x = abs(101)\nconsume(x)\n")];
+    let report = forward(&files, "main.pyi", "101", Budgets::default());
+    assert!(
+        report.boundaries.iter().any(|b| b.kind == "builtin_model"),
+        "a .pyi file is Python: {:?}",
+        report.boundaries
+    );
+    assert!(
+        report
+            .nodes
+            .iter()
+            .any(|n| n.kind == "argument" && n.label == "x"),
+        "{report:#?}"
+    );
+}

@@ -149,19 +149,25 @@ impl Engine<'_> {
         self.classes.insert(n, object);
         if let Some(name) = self.field(n, "name") {
             let name = self.ast[name].text.clone();
-            if let Some(namespace) = namespace {
-                self.declarations
-                    .entry(qualify(namespace, &name).to_lowercase())
-                    .or_default()
-                    .insert(n);
+            match namespace {
+                // Not a scope name: a file can hold several namespace blocks,
+                // and each reference resolves against its own.
+                Some(namespace) => {
+                    self.declarations
+                        .entry(qualify(namespace, &name).to_lowercase())
+                        .or_default()
+                        .insert(n);
+                }
+                None => {
+                    self.scopes[scope].insert(
+                        name,
+                        Value {
+                            objects: BTreeSet::from([object]),
+                            ..Value::default()
+                        },
+                    );
+                }
             }
-            self.scopes[scope].insert(
-                name,
-                Value {
-                    objects: BTreeSet::from([object]),
-                    ..Value::default()
-                },
-            );
         }
         object
     }
@@ -193,6 +199,7 @@ impl Engine<'_> {
                 );
                 continue;
             }
+            let namespace = self.php_namespace(n).to_lowercase();
             let prefix = self.ast[n]
                 .children
                 .iter()
@@ -222,8 +229,8 @@ impl Engine<'_> {
                 };
                 let path = qualify(&prefix, &self.ast[target].text);
                 let alias = match self.field(c, "alias") {
-                    Some(alias) => self.ast[alias].text.clone(),
-                    None => path.rsplit('\\').next().unwrap_or(&path).to_string(),
+                    Some(alias) => self.ast[alias].text.to_lowercase(),
+                    None => path.rsplit('\\').next().unwrap_or(&path).to_lowercase(),
                 };
                 let value = self.php_declared(&path);
                 if value.objects.is_empty() {
@@ -236,7 +243,10 @@ impl Engine<'_> {
                         self.links.insert((file, target));
                     }
                 }
-                self.scopes[file].insert(alias, value);
+                self.php_aliases
+                    .entry((file, namespace.clone()))
+                    .or_default()
+                    .insert(alias, value);
             }
         }
     }
@@ -280,17 +290,26 @@ impl Engine<'_> {
         if let Some(qualified) = text.strip_prefix('\\') {
             return self.php_declared(qualified);
         }
+        let namespace = self.php_namespace(n);
         if self.ast[n].kind == "name" {
+            // A class declared inside a function body is bound where it runs.
             let bound = self.lookup(text, scopes);
             if !bound.objects.is_empty() {
                 return bound;
             }
+            if let Some(imported) = self
+                .php_aliases
+                .get(&(self.ast[n].file, namespace.to_lowercase()))
+                .and_then(|aliases| aliases.get(&text.to_lowercase()))
+            {
+                return imported.clone();
+            }
         }
         // A name no `use` binds resolves against the enclosing namespace.
-        self.php_declared(&qualify(&self.php_namespace(n), text))
+        self.php_declared(&qualify(&namespace, text))
     }
-    /// Create the methods of a class declaration once, after the file's `use`
-    /// clauses are bound, so each method captures the imported classes.
+    /// Create the methods of a class declaration once, after the functions of
+    /// its file are bound, so each method captures them.
     pub(super) fn php_class(&mut self, n: usize, scopes: &[usize]) {
         let object = match self.classes.get(&n).copied() {
             Some(object) => object,

@@ -780,3 +780,59 @@ fn test_invoke_forks_in_one_function_leave_other_state_shared() {
         assert_eq!(copied, 0, "{path}: a fork copied state it never wrote");
     }
 }
+#[test]
+fn test_build_query_file_lowers_imports_first_and_keeps_each_file_ast() {
+    for (main, lib, filler) in [
+        (
+            ("main.js", "import { identity } from './lib.js';\nconsume(identity(101));\n"),
+            ("lib.js", "export function identity(value) { return value; }\n"),
+            ("filler.js", "0;\n"),
+        ),
+        (
+            ("main.py", "from .lib import identity\nconsume(identity(101))\n"),
+            ("lib.py", "def identity(value):\n    return value\n"),
+            ("filler.py", "0\n"),
+        ),
+        (
+            ("main.php", "<?php\nuse App\\Lib;\nconsume(Lib::id(101));\n"),
+            (
+                "lib.php",
+                "<?php\nnamespace App;\nclass Lib\n{\n    public static function id($value) { return $value; }\n}\n",
+            ),
+            ("filler.php", "<?php\n0;\n"),
+        ),
+    ] {
+        let files: Vec<SourceFile> = [main, filler, lib]
+            .into_iter()
+            .map(|(path, source)| SourceFile {
+                path: path.into(),
+                source: source.into(),
+            })
+            .collect();
+        let by_corpus = build(&files, &Budgets::default(), None).unwrap();
+        let by_query = build(&files, &Budgets::default(), Some(main.0)).unwrap();
+        let [corpus_order, query_order] = [&by_corpus, &by_query].map(|engine| {
+            let mut roots: Vec<(usize, usize)> = engine
+                .roots
+                .iter()
+                .enumerate()
+                .map(|(file, root)| (root.expect("every file lowers"), file))
+                .collect();
+            roots.sort();
+            roots.into_iter().map(|(_, file)| file).collect::<Vec<_>>()
+        });
+        assert_eq!(corpus_order, [0, 1, 2], "{}: corpus order", main.0);
+        assert_eq!(query_order, [0, 2, 1], "{}: the import goes first", main.0);
+        for file in 0..files.len() {
+            let [corpus_ast, query_ast] = [&by_corpus, &by_query].map(|engine| {
+                engine
+                    .ast
+                    .iter()
+                    .filter(|a| a.file == file)
+                    .map(|a| (a.kind.clone(), a.text.clone(), a.line, a.column))
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(corpus_ast, query_ast, "{}: file {file}", main.0);
+        }
+    }
+}

@@ -452,3 +452,99 @@ fn test_analyze_php_backward_boundaries_skip_structural_nodes() {
         "exception paths keep their boundary: {unsupported:?}"
     );
 }
+
+#[test]
+fn test_analyze_php_anonymous_class_method_is_not_a_free_function() {
+    let files = [source(
+        "anon.php",
+        "<?php\n$o = new class {\n    public function fmt($s) { return $s; }\n};\n$r = fmt(101);\nconsume($r);\n",
+    )];
+    let report = forward(&files, "anon.php", "101");
+    assert!(
+        !binding(&report, "anon.php", "$s"),
+        "a method name is not bound in the enclosing scope: {report:#?}"
+    );
+    let call = line_of(&files[0], "fmt(101)");
+    assert!(
+        report
+            .boundaries
+            .iter()
+            .any(|b| b.kind == "external_call" && b.line == call),
+        "{:?}",
+        report.boundaries
+    );
+}
+
+const PAIR: &str = r#"<?php
+namespace P;
+class One
+{
+    public static function id($one) { return $one; }
+}
+class Two
+{
+    public static function id($two) { return $two; }
+}
+"#;
+
+#[test]
+fn test_analyze_php_alias_resolves_per_namespace_block() {
+    let files = [
+        source("pair.php", PAIR),
+        source(
+            "main.php",
+            "<?php\nnamespace A;\nuse P\\One as X;\nconsume(X::id(101));\nnamespace B;\nuse P\\Two as X;\nconsume(X::id(202));\n",
+        ),
+    ];
+    let first = forward(&files, "main.php", "101");
+    assert!(binding(&first, "pair.php", "$one"), "{first:#?}");
+    assert!(
+        !binding(&first, "pair.php", "$two"),
+        "namespace B's alias must not leak into A: {first:#?}"
+    );
+    let second = forward(&files, "main.php", "202");
+    assert!(binding(&second, "pair.php", "$two"), "{second:#?}");
+    assert!(!binding(&second, "pair.php", "$one"), "{second:#?}");
+}
+
+#[test]
+fn test_analyze_php_same_named_classes_resolve_per_namespace_block() {
+    let files = [source(
+        "twins.php",
+        "<?php\nnamespace A;\nclass Foo\n{\n    public static function id($inA) { return $inA; }\n}\nconsume(Foo::id(101));\nnamespace B;\nclass Foo\n{\n    public static function id($inB) { return $inB; }\n}\n",
+    )];
+    let report = forward(&files, "twins.php", "101");
+    assert!(binding(&report, "twins.php", "$inA"), "{report:#?}");
+    assert!(!binding(&report, "twins.php", "$inB"), "{report:#?}");
+}
+
+#[test]
+fn test_analyze_php_alias_lookup_ignores_case() {
+    let files = [
+        source(
+            "app/Models/User.php",
+            "<?php\nnamespace App\\Models;\nclass User\n{\n    public static function make($m) { return $m; }\n}\n",
+        ),
+        source(
+            "main.php",
+            "<?php\nnamespace App;\nuse App\\Models\\User as Member;\nconsume(member::make(101));\n",
+        ),
+    ];
+    let report = forward(&files, "main.php", "101");
+    assert!(
+        binding(&report, "app/Models/User.php", "$m"),
+        "PHP class names and aliases are case-insensitive: {report:#?}"
+    );
+    assert!(argument(&report, "member::make(101)"), "{report:#?}");
+}
+
+#[test]
+fn test_analyze_php_method_sees_function_declared_after_class() {
+    let files = [source(
+        "later.php",
+        "<?php\nclass Svc\n{\n    public static function run($v) { return later($v); }\n}\nfunction later($x) { return $x; }\nconsume(Svc::run(101));\n",
+    )];
+    let report = forward(&files, "later.php", "101");
+    assert!(binding(&report, "later.php", "$x"), "{report:#?}");
+    assert!(argument(&report, "Svc::run(101)"), "{report:#?}");
+}

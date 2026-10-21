@@ -50,6 +50,9 @@ PHP `use` clauses resolve the classes that the analyzed sources declare.
 Static, `self::`, `parent::`, `static::` and `$this->` method calls reach the declared method.
 `$this->` and `static::` calls also reach subclass overrides.
 Python class attribute calls and `self.` calls reach the class's methods, and `self.` calls also reach subclass overrides.
+Inherited members and class attributes follow the Python method resolution order.
+`@staticmethod` receives no receiver and `@classmethod` receives the class. A call to a method with another decorator stays an `external_call` boundary.
+PHP `use` aliases apply to their namespace block and match class names without regard to case.
 PHP includes, `use function`, `use const`, trait methods and undeclared classes remain explicit boundaries.
 Selected numeric builtins have explicit models. Their assumptions appear as `builtin_model` boundaries.
 Destructuring, asynchronous scheduling, exception paths, iterator protocols, and unresolved external effects retain explicit boundaries.
