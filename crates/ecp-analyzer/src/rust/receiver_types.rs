@@ -59,11 +59,27 @@ pub fn build_impl_map(root: Node<'_>, source: &[u8]) -> ImplMap {
 /// Extract the self-type name from an `impl_item`.
 /// - `impl Dog { ... }` → "Dog"
 /// - `impl Trait for Dog { ... }` → "Dog"  (the concrete type)
+/// - `impl<P> Trait for Pin<P>`, `impl Trait for io::Cursor<u8>`,
+///   `impl<'a> Trait for &'a mut Dog` → "Pin", "Cursor", "Dog": the last
+///   path segment without generic arguments, as `owner_key` reduces owners.
 fn impl_self_type(impl_node: &Node<'_>, source: &[u8]) -> Option<String> {
     // `type` field: the concrete type being implemented (present for both
     // inherent impls and trait impls).
     let ty_node = impl_node.child_by_field_name("type")?;
-    bare_type_name(ty_node, source)
+    self_type_name(ty_node, source)
+}
+
+/// [`bare_type_name`] widened to the generic and path-qualified types an
+/// `impl` names. Local bindings keep `bare_type_name`: a `let v: Vec<u8>`
+/// receiver stays untyped.
+fn self_type_name(ty_node: Node<'_>, source: &[u8]) -> Option<String> {
+    match ty_node.kind() {
+        "generic_type" | "reference_type" => {
+            self_type_name(ty_node.child_by_field_name("type")?, source)
+        }
+        "scoped_type_identifier" => node_text(ty_node.child_by_field_name("name")?, source),
+        _ => bare_type_name(ty_node, source),
+    }
 }
 
 /// Register every `function_item` directly inside the `impl_item`'s body.

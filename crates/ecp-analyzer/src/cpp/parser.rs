@@ -85,6 +85,24 @@ fn cpp_heritage(root: tree_sitter::Node<'_>, source: &[u8]) -> Vec<String> {
     bases
 }
 
+/// The whole qualifier before the innermost `name` of a qualified
+/// declarator: `a::b` for `a::b::h`.
+fn qualified_scope_text(name: tree_sitter::Node<'_>, source: &[u8]) -> String {
+    let mut outer = name;
+    while let Some(p) = outer
+        .parent()
+        .filter(|p| p.kind() == "qualified_identifier")
+    {
+        outer = p;
+    }
+    std::str::from_utf8(&source[outer.start_byte()..name.start_byte()])
+        .unwrap_or_default()
+        .trim_end()
+        .trim_end_matches("::")
+        .trim()
+        .to_string()
+}
+
 /// The innermost name of a qualified method name (`Foo::bar` → `bar`); any
 /// other node as it is.
 fn innermost_name(mut n: tree_sitter::Node<'_>) -> tree_sitter::Node<'_> {
@@ -376,8 +394,8 @@ impl LanguageProvider for CppProvider {
         let mut anon_emitted_spans: rustc_hash::FxHashSet<(u32, u32, u32, u32)> =
             rustc_hash::FxHashSet::default();
         // Out-of-class definitions whose qualifier may name a namespace:
-        // `(node index, qualifier)`.
-        let mut qualified_owners: Vec<(usize, String)> = Vec::new();
+        // `(node index, innermost qualifier, whole qualifier)`.
+        let mut qualified_owners: Vec<(usize, String, String)> = Vec::new();
         // Functions declared or defined as `friend` in a class body: members
         // of the enclosing namespace, not of the class.
         let mut friend_spans: rustc_hash::FxHashSet<(u32, u32, u32, u32)> =
@@ -520,7 +538,8 @@ impl LanguageProvider for CppProvider {
                     let owner_class = match qualifier {
                         Some((owner, true)) => Some(owner),
                         Some((owner, false)) => {
-                            qualified_owners.push((nodes.len(), owner));
+                            let scope = qualified_scope_text(n, source);
+                            qualified_owners.push((nodes.len(), owner, scope));
                             None
                         }
                         None => None,
@@ -730,9 +749,31 @@ impl LanguageProvider for CppProvider {
                 node.kind = NodeKind::Constructor;
             }
         }
-        for (idx, owner) in qualified_owners {
+        // A qualifier this file declares only as a namespace makes the
+        // definition a free function of that namespace (`void ns::f() {}`),
+        // owned like a `void f() {}` written inside `namespace ns { }`.
+        let namespace_names: std::collections::HashSet<String> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Namespace)
+            .map(|n| n.name.clone())
+            .collect();
+        for (idx, owner, scope) in qualified_owners {
+            let node = &mut nodes[idx];
             if class_names.contains(&owner) {
-                nodes[idx].owner_class = Some(owner);
+                node.owner_class = Some(owner);
+                continue;
+            }
+            if node.kind != NodeKind::Method || node.owner_class.is_some() {
+                continue;
+            }
+            // `namespace a::b { }` names its node `a::b`, nested blocks name
+            // the inner one `b`: try the whole qualifier, then its last part.
+            if let Some(namespace) = [scope, owner]
+                .into_iter()
+                .find(|q| namespace_names.contains(q))
+            {
+                node.kind = NodeKind::Function;
+                node.owner_class = Some(namespace);
             }
         }
 

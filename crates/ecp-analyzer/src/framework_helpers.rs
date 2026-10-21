@@ -264,6 +264,10 @@ pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
     // PR #359's `scope_defines::Pass2` then emits `Namespace → child` only for
     // nodes whose owner_class matches a Namespace/Module name in the same file
     // — class members fall through cleanly because their owner is a class.
+    // An enum owns the methods, constructors and fields its body declares
+    // (Java, Kotlin, Dart, PHP, Swift), exactly as a class does; without it
+    // they read as free functions, and a type nested in an enum took the
+    // enum's enclosing class as owner.
     let owner_spans: Vec<(String, Span)> = nodes
         .iter()
         .filter(|n| {
@@ -273,6 +277,7 @@ pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
                     | NodeKind::Struct
                     | NodeKind::Trait
                     | NodeKind::Interface
+                    | NodeKind::Enum
                     | NodeKind::Namespace
                     | NodeKind::Module
             )

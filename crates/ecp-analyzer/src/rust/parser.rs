@@ -57,6 +57,24 @@ fn body_has_call(node: tree_sitter::Node) -> bool {
     false
 }
 
+/// The trait an `impl Trait for T` names, as other languages store a base:
+/// the path kept, generic arguments dropped (`fmt::Display`,
+/// `From<u8>` → `From`, `Iterator<Item = u8>` → `Iterator`). The resolver
+/// looks a base up as a type name, which carries no arguments.
+fn trait_path(text: &str) -> String {
+    let mut depth = 0u32;
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out.trim().to_string()
+}
+
 pub struct RustProvider {
     query: Query,
     indices: RustCaptureIndices,
@@ -267,7 +285,7 @@ impl LanguageProvider for RustProvider {
                     if let Ok(h_str) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
-                        heritage.push(h_str.to_string());
+                        heritage.push(trait_path(h_str));
                     }
                 } else if cap_idx == idx.type_ann {
                     if let Ok(t_str) =

@@ -167,6 +167,12 @@ fn is_class_method(func: tree_sitter::Node) -> bool {
     let Some(parent) = func.parent() else {
         return false;
     };
+    // An `enum class` declares its members in `enum_class_body`, after the
+    // entries; an entry with a body (`RED { override fun f() }`) overrides
+    // them in its own `class_body`.
+    if parent.kind() == "enum_class_body" {
+        return true;
+    }
     if parent.kind() != "class_body" {
         return false;
     }
@@ -177,7 +183,7 @@ fn is_class_method(func: tree_sitter::Node) -> bool {
     parent.parent().is_some_and(|p| {
         matches!(
             p.kind(),
-            "class_declaration" | "companion_object" | "object_declaration"
+            "class_declaration" | "companion_object" | "object_declaration" | "enum_entry"
         )
     })
 }
