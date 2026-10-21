@@ -5,6 +5,9 @@
 //! - `base.Foo()` → first base type from the enclosing class's `heritage`
 //! - `obj.Foo()` where `obj` has a known type from local variable declarations
 //!   or typed method parameters
+//! - `Name.Foo()` where `Name` is no local, parameter, field or property in
+//!   scope → [`CallSite::from_receiver`]: the resolver tries `Name` as a type
+//!   (`StringAssert.AreEqual()`) and else resolves the bare member
 //!
 //! Falls back to bare method name when the receiver type cannot be resolved.
 //!
@@ -26,7 +29,7 @@ use crate::calls::{
     attach_to_enclosing, construction_call, node_range, range_width, span_holds, span_width,
     start_pos, Pos, PosRange,
 };
-use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -97,16 +100,34 @@ fn collect_params(params: Node<'_>, source: &[u8], out: &mut HashMap<String, Str
         let Some(nm) = p.child_by_field_name("name") else {
             continue;
         };
-        let Some(ty) = p.child_by_field_name("type") else {
-            continue;
-        };
-        if let Some((var, ty_s)) = simple_id_and_type(nm, ty, source) {
-            out.insert(var, ty_s);
+        let typed = p
+            .child_by_field_name("type")
+            .and_then(|ty| simple_id_and_type(nm, ty, source));
+        match typed {
+            Some((var, ty_s)) => {
+                out.insert(var, ty_s);
+            }
+            None => declare_untyped(nm, source, out),
         }
     }
 }
 
-/// Walk a block, collecting `local_declaration_statement` → `variable_declaration`.
+/// Record a declared name whose type is not a plain class name as `""`: it
+/// still shadows a type of the same name, so a call on it keeps the bare
+/// member instead of resolving through that type.
+fn declare_untyped(name_node: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
+    // `implicit_parameter` is the grammar's alias of the identifier in `x => ..`.
+    if !matches!(name_node.kind(), "identifier" | "implicit_parameter") {
+        return;
+    }
+    if let Ok(name) = name_node.utf8_text(source) {
+        out.entry(name.to_string()).or_default();
+    }
+}
+
+/// Walk a block, collecting `local_declaration_statement` → `variable_declaration`,
+/// and every other declared name (`var x`, `for` / `using` / `foreach` / `catch`
+/// variables, lambda parameters) as untyped.
 /// Does NOT descend into nested method/constructor/local-function bodies.
 fn collect_local_vars(body: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
     let mut stack: Vec<Node<'_>> = vec![body];
@@ -114,6 +135,21 @@ fn collect_local_vars(body: Node<'_>, source: &[u8], out: &mut HashMap<String, S
         match n.kind() {
             "method_declaration" | "constructor_declaration" | "local_function_statement" => {
                 continue;
+            }
+            "variable_declarator" | "parameter" | "catch_declaration" => {
+                if let Some(nm) = n.child_by_field_name("name") {
+                    declare_untyped(nm, source, out);
+                }
+            }
+            "foreach_statement" => {
+                if let Some(left) = n.child_by_field_name("left") {
+                    declare_untyped(left, source, out);
+                }
+            }
+            "lambda_expression" => {
+                if let Some(param) = n.child_by_field_name("parameters") {
+                    declare_untyped(param, source, out);
+                }
             }
             "local_declaration_statement" => {
                 if let Some(var_decl) = n.named_child(0) {
@@ -212,7 +248,16 @@ fn csharp_callee(
                     let var =
                         std::str::from_utf8(&source[receiver.start_byte()..receiver.end_byte()])
                             .ok()?;
-                    locals.lookup(pos, var).map(|t| t.to_string())
+                    // C# looks a simple name up as a local, then as a member
+                    // of the enclosing types, then as a type. Only a name
+                    // that is neither may be a type, which the resolver
+                    // decides (`StringAssert.AreEqual()`).
+                    match locals.lookup(pos, var) {
+                        Some("") => None,
+                        Some(t) => Some(t.to_string()),
+                        None if declares_member(nodes, pos, var) => None,
+                        None => return Some(CallSite::from_receiver(var, method)),
+                    }
                 }
                 _ => None,
             };
@@ -295,6 +340,27 @@ pub fn extract_csharp_calls_and_path_literals(
         }
     }
     (path_literals, sql_refs)
+}
+
+/// Whether a type enclosing `pos` declares a field or property named `name`
+/// (both are `Property` nodes). A nested type's members count for the whole
+/// outer type: that only keeps more calls on the bare member.
+fn declares_member(nodes: &[RawNode], pos: Pos, name: &str) -> bool {
+    let is_type = |n: &RawNode| {
+        matches!(
+            n.kind,
+            NodeKind::Class | NodeKind::Struct | NodeKind::Interface
+        )
+    };
+    nodes
+        .iter()
+        .filter(|m| m.kind == NodeKind::Property && m.name == name)
+        .any(|m| {
+            let at = (m.span.0, m.span.1);
+            nodes
+                .iter()
+                .any(|t| is_type(t) && span_holds(t.span, pos) && span_holds(t.span, at))
+        })
 }
 
 fn enclosing_class_name(nodes: &[RawNode], pos: Pos) -> Option<String> {
@@ -443,6 +509,43 @@ class App {
             use_fn.calls
         );
         // bare `Add` is acceptable fallback (no type info)
+    }
+
+    /// An identifier receiver that is no local, parameter or member reaches
+    /// the resolver as a `from` receiver; a declared name of any type, and a
+    /// property, keep the bare member.
+    #[test]
+    fn test_csharp_callee_undeclared_identifier_receiver_emits_from_receiver() {
+        let src = r#"
+class App {
+    Helper Tool { get; }
+    void Use(List<int> items) {
+        var local = Make();
+        StringAssert.AreEqual("a", "b");
+        local.Run();
+        items.Add(1);
+        Tool.Go();
+        foreach (var each in items) { each.Stop(); }
+        items.ForEach(x => x.Halt());
+    }
+}
+"#;
+        let graph = parse(src);
+        // The lambda body's call attaches to an anonymous node.
+        let mut got: Vec<String> = graph.nodes.iter().flat_map(|n| n.calls.clone()).collect();
+        let mut want: Vec<String> = vec![
+            "Make".into(),
+            ecp_core::analyzer::types::CallSite::from_receiver("StringAssert", "AreEqual"),
+            "Run".into(),
+            "Add".into(),
+            "Go".into(),
+            "Stop".into(),
+            "ForEach".into(),
+            "Halt".into(),
+        ];
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
     }
 
     /// Regression: `base.Foo()` in a class WITHOUT base must emit bare `"Foo"`,

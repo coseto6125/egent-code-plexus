@@ -696,11 +696,47 @@ impl<'a> Resolver<'a> {
                 &mut None,
             )
         };
-        let mut targets = resolve(site.name(), call_target(source_file, site), true);
+        let type_member = self.csharp_type_receiver(source_file, language, site, raw_imports);
+        let mut targets = resolve(
+            type_member.as_deref().unwrap_or(site.name()),
+            call_target(source_file, site),
+            true,
+        );
         if targets.is_empty() {
             targets.extend(self.resolve_instantiation(language, site, raw_imports, resolve));
         }
         targets
+    }
+
+    /// The callee of a C# member call on an identifier receiver that is no
+    /// local, parameter, field or property in scope
+    /// ([`CallSite::FromReceiver`]). A receiver that names a project type, a
+    /// `using` alias of one, or a library type resolves as
+    /// `Receiver.member` through the qualifier tiers and the receiver-typing
+    /// ladder, and never by the bare member: `StringAssert.AreEqual()` must
+    /// not land on `XUnitAssert.AreEqual`. A receiver that names no type is a
+    /// member the parser cannot see (an inherited property): `None`, and the
+    /// call resolves by its bare member, as before.
+    fn csharp_type_receiver(
+        &self,
+        source_file: &Path,
+        language: Language,
+        site: CallSite<'_>,
+        raw_imports: &[RawImport],
+    ) -> Option<String> {
+        let CallSite::FromReceiver { receiver, member } = site else {
+            return None;
+        };
+        if language != Language::CSharp {
+            return None;
+        }
+        let source_file_str = normalize_source_path(source_file);
+        match self.type_candidates(source_file, &source_file_str, receiver, raw_imports) {
+            TypeCandidates::None => None,
+            TypeCandidates::Unique(..) | TypeCandidates::Set(..) | TypeCandidates::External => {
+                Some(format!("{receiver}.{member}"))
+            }
+        }
     }
 
     /// [`Self::resolve_call`] for a name a lexical scope of the file binds,
@@ -1833,7 +1869,8 @@ enum TypeCandidates<'q> {
     /// One type, with the name it is declared under (an import alias names
     /// the type differently from the qualifier).
     Unique(NodeId, &'q str),
-    Set(Vec<NodeId>),
+    /// Several types, all declared under the one name carried.
+    Set(Vec<NodeId>, &'q str),
     /// An import binds the qualifier to a file outside the project.
     External,
     None,
@@ -2239,7 +2276,7 @@ impl<'a> Resolver<'a> {
                     Ownership::Unknown => true,
                 }
             }
-            TypeCandidates::Set(_) => true,
+            TypeCandidates::Set(..) => true,
             TypeCandidates::External | TypeCandidates::None => false,
         }
     }
@@ -2333,10 +2370,10 @@ impl<'a> Resolver<'a> {
                     Ownership::NotOwned | Ownership::Unknown => TypeMember::NoEdge,
                 }
             }
-            TypeCandidates::Set(types) => {
+            TypeCandidates::Set(types, ty_name) => {
                 let mut owner_members: Vec<NodeId> = Vec::new();
                 for ty in types {
-                    match self.member_ownership(ty, qualifier, member, target) {
+                    match self.member_ownership(ty, ty_name, member, target) {
                         Ownership::Owned { id, .. } => match owner_members.first() {
                             Some(_) if owner_members.contains(&id) => {}
                             Some(&first) if !call || !self.symbol_table.is_copy(first, id) => {
@@ -2392,6 +2429,17 @@ impl<'a> Resolver<'a> {
             return TypeCandidates::Unique(id, qualifier);
         }
         let language = Language::from_normalized_path(source_file_str);
+        // A C# `using A = Ns.Type;` binds `A` to that type path. Its parse
+        // also records `A` as an unaliased import, so it is read here, before
+        // the import loop takes that record for a library name.
+        if language == Language::CSharp {
+            if let Some(path) = raw_imports.iter().find_map(|import| {
+                (import.alias.as_deref() == Some(qualifier))
+                    .then_some(import.imported_name.as_str())
+            }) {
+                return self.csharp_alias_type(source_file_str, path);
+            }
+        }
         let mut imported_in_project = false;
         for import in raw_imports {
             if import
@@ -2473,7 +2521,36 @@ impl<'a> Resolver<'a> {
         match ids.len() {
             0 => TypeCandidates::None,
             1 => TypeCandidates::Unique(ids[0], qualifier),
-            _ => TypeCandidates::Set(ids),
+            _ => TypeCandidates::Set(ids, qualifier),
+        }
+    }
+
+    /// The project types a C# `using Alias = Ns.Type;` directive names: the
+    /// types declared as the path's last segment whose file agrees with the
+    /// whole path ([`SymbolTable::owner_path_agrees`]). A path that no
+    /// project type agrees with names a library type
+    /// (`using XAssert = Xunit.Assert;`), so a project `Assert` is not it.
+    fn csharp_alias_type<'q>(&self, source_file_str: &str, path: &'q str) -> TypeCandidates<'q> {
+        let st = self.symbol_table;
+        let Some(name) = owner_key(path) else {
+            return TypeCandidates::External;
+        };
+        let ids: Vec<NodeId> = st
+            .global_candidates(
+                name,
+                ResolveTarget::Type,
+                FileMeta::from_path(source_file_str),
+            )
+            .into_iter()
+            .filter(|&id| {
+                st.file_of(id)
+                    .is_some_and(|file| st.owner_path_agrees(file, path))
+            })
+            .collect();
+        match ids.len() {
+            0 => TypeCandidates::External,
+            1 => TypeCandidates::Unique(ids[0], name),
+            _ => TypeCandidates::Set(ids, name),
         }
     }
 
