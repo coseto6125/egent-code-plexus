@@ -228,7 +228,7 @@ fn shell_segments(cmd: &str) -> Option<Vec<(&str, Option<Sep>)>> {
 #[derive(Debug, PartialEq)]
 enum CdTarget {
     /// No cd changes the search's shell: none at all, or one in a pipeline,
-    /// a subshell or a background job, or one to a missing directory.
+    /// a subshell or a background job.
     Unchanged,
     Dir(String),
     /// A cd may or may not run (`make || cd x`, `make && cd x; rg`), or its
@@ -537,10 +537,11 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
                             skipping = Some(0);
                         }
                     }
-                    // The cd fails; `cd x || …` then runs its operand,
-                    // whose effect the hook does not model.
-                    Some(None) if after == Some(Sep::Or) => return CdTarget::Unknown,
-                    Some(None) => {}
+                    // A directory missing now may be made before the cd
+                    // runs (`mkdir x && cd x`, `git worktree add x`); if it
+                    // is not, `cd x || …` runs an operand the hook does not
+                    // model.
+                    Some(None) => return CdTarget::Unknown,
                 }
             }
             _ => {}
@@ -1111,11 +1112,11 @@ mod tests {
     }
 
     #[test]
-    fn test_cd_target_nonexistent_dir_returns_unchanged() {
+    fn test_cd_target_nonexistent_dir_returns_unknown() {
         let t = tempfile::tempdir().unwrap();
         assert_eq!(
             target("cd /no/such/dir_zz && grep Foo .", t.path()),
-            Unchanged
+            Unknown
         );
     }
 
@@ -1326,7 +1327,7 @@ mod tests {
         assert_eq!(target("cd link; cd ..; rg Foo", t.path()), dir(t.path()));
         assert_eq!(target("cd link/..; rg Foo", t.path()), dir(t.path()));
         assert_eq!(target("cd missing/..; rg Foo", t.path()), Unknown);
-        assert_eq!(target("cd link/../missing; rg Foo", t.path()), Unchanged);
+        assert_eq!(target("cd link/../missing; rg Foo", t.path()), Unknown);
         // Physical `real/inner/../other` exists, logical `other` does not.
         std::fs::create_dir(t.path().join("real/other")).unwrap();
         assert_eq!(target("cd link/../other; rg Foo", t.path()), Unknown);
@@ -1345,17 +1346,20 @@ mod tests {
     fn test_cd_target_line_continuation_and_prefixed_dot_argument_resolve() {
         let t = tempfile::tempdir().unwrap();
         std::fs::create_dir(t.path().join("x")).unwrap();
+        std::fs::create_dir(t.path().join("y")).unwrap();
         let want = dir(&t.path().join("x"));
         for cmd in [
             "cd x && \\\nrg Foo",
             "cd \\\nx; rg Foo",
             "cd x && time git diff -- .; rg Foo",
-            "cd y\n# cd z && \\\ncd x\nrg Foo",
-            // Single quotes keep the backslash-newline: the cd fails.
-            "cd x; cd 'x\\\ny'; rg Foo",
+            "cd y\n# cd z && \\\ncd ../x\nrg Foo",
         ] {
             assert_eq!(target(cmd, t.path()), want, "{cmd:?}");
         }
+        // Single quotes keep the backslash-newline: the cd names `x\<nl>y`,
+        // which does not exist, not `xy`, which does.
+        std::fs::create_dir(t.path().join("x/xy")).unwrap();
+        assert_eq!(target("cd x; cd 'x\\\ny'; rg Foo", t.path()), Unknown);
     }
 
     #[test]
@@ -1388,6 +1392,8 @@ mod tests {
             "if false; then true; cd x; fi; rg Foo",
             "while true; do true; cd x; rg Foo; done",
             "for d in a b; do rg Foo; cd x; done",
+            "mkdir -p new && cd new && rg -n Foo src",
+            "git worktree add ../wt && cd ../wt && rg Foo",
             "cd x &&\nuntil grep -q '^w' Cargo.toml 2>&1; do\n  cd .. || exit 1\ndone",
             "if test -f /dev/null; then\n  cd x\nelse rg Foo .\nfi",
             "if false; then\n  cd x\nelse\n  true; rg Foo .\nfi",
