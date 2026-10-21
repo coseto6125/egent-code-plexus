@@ -7,7 +7,7 @@ use super::common::{emit_additional_context, lookup_index_dir, HookInput};
 use crate::commands::find::{compute_hits, FindArgs, FindMode, Hit};
 use crate::engine::Engine;
 use ecp_core::EcpError;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const MAX_HITS: usize = 5;
 const MAX_BYTES: usize = 2048;
@@ -123,7 +123,8 @@ enum Sep {
 /// each segment paired with the operator that ends it (`None` for the last).
 /// A segment stops before an unquoted `#` that starts a word: the comment's
 /// text runs to the newline and holds no operator, quote or group. A
-/// `${...}` expansion with no quote or escape inside is one opaque run.
+/// `${...}` expansion with no brace, quote or escape inside is one opaque
+/// run.
 /// `None` when a quote or `${` is left open, since bash rejects the whole
 /// command, and for a heredoc, whose body the split does not model. Every
 /// separator is ASCII, so the byte offsets stay on char boundaries for CJK
@@ -146,14 +147,12 @@ fn shell_segments(cmd: &str) -> Option<Vec<(&str, Option<Sep>)>> {
         prev = c;
         let sep = match (quote, c) {
             (None, '$') if chars.next_if(|&(_, n)| n == '{').is_some() => {
-                let mut depth = 1;
-                while depth > 0 {
+                loop {
                     match chars.next()?.1 {
-                        '{' => depth += 1,
-                        '}' => depth -= 1,
-                        // A quote or escape inside the expansion moves its
-                        // end; the split does not model that.
-                        '\'' | '"' | '\\' | '`' => return None,
+                        '}' => break,
+                        // A brace, quote or escape inside the expansion may
+                        // move its end; the split does not model that.
+                        '{' | '\'' | '"' | '\\' | '`' => return None,
                         _ => {}
                     }
                 }
@@ -223,10 +222,18 @@ const CWD_BUILTINS: [&str; 8] = [
 ];
 
 fn cd_target(cmd: &str, cwd: &str) -> CdTarget {
-    cd_target_with_home(cmd, cwd, std::env::var_os("HOME").as_deref().map(Path::new))
+    let cdpath = std::env::var_os("CDPATH").is_some_and(|v| !v.is_empty());
+    cd_target_with_home(
+        cmd,
+        cwd,
+        std::env::var_os("HOME").as_deref().map(Path::new),
+        cdpath,
+    )
 }
 
-fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>) -> CdTarget {
+/// `cdpath`: the shell inherits a non-empty `CDPATH`, which may redirect a
+/// relative `cd` to another directory.
+fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) -> CdTarget {
     // One substring scan per name keeps a command that moves no directory
     // off the segment parser.
     if !cmd.contains("cd") && !CWD_BUILTINS.iter().any(|b| cmd.contains(b)) {
@@ -235,6 +242,7 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>) -> CdTarget {
     let Some(segments) = shell_segments(cmd) else {
         return CdTarget::Unknown;
     };
+    let cdpath = cdpath || cmd.contains("CDPATH");
     let words: Vec<Vec<String>> = segments.iter().map(|&(s, _)| shell_words(s)).collect();
     // `extract_from_shell` takes the first `rg` / `grep` word anywhere
     // (`rtk proxy rg`, `git grep`), so the scan stops at the same word.
@@ -286,6 +294,17 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>) -> CdTarget {
             segments[list_end[i]].1 == Some(Sep::Background) && Some(list_end[i]) != search_list;
         let own_shell =
             !in_subshell && !other_job && before != Some(Sep::Pipe) && after != Some(Sep::Pipe);
+        // `! cd x`, `time cd x`, `then cd x`: a prefix the split does not
+        // model may still run the cd in this shell. `.` is left out: it is
+        // mostly a path argument (`git add .`).
+        if own_shell
+            && cmd_words
+                .iter()
+                .skip(1)
+                .any(|w| *w != "." && CWD_BUILTINS.contains(w) || *w == "cd")
+        {
+            return CdTarget::Unknown;
+        }
         match cmd_words.first().copied() {
             Some(builtin) if own_shell && CWD_BUILTINS.contains(&builtin) => {
                 return CdTarget::Unknown
@@ -302,8 +321,14 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>) -> CdTarget {
                 if !surely_runs {
                     return CdTarget::Unknown;
                 }
+                let tilde = unquoted_tilde_arg(segment);
+                // Bash searches `CDPATH` for a relative directory that does
+                // not start with `.` or `..`.
+                if cdpath && !arg.starts_with(['/', '.']) && !(tilde && arg.starts_with('~')) {
+                    return CdTarget::Unknown;
+                }
                 let base = current.as_deref().unwrap_or(Path::new(cwd));
-                match resolve_cd_arg(arg, base, home, unquoted_tilde_arg(segment)) {
+                match resolve_cd_arg(arg, base, home, tilde) {
                     None => return CdTarget::Unknown,
                     Some(Some(dir)) => {
                         current = Some(dir);
@@ -321,9 +346,13 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>) -> CdTarget {
         }
         before = after;
     }
-    match current.map(PathBuf::into_os_string) {
+    match current {
         None => CdTarget::Unchanged,
-        Some(dir) => dir.into_string().map_or(CdTarget::Unknown, CdTarget::Dir),
+        Some(dir) => dir
+            .canonicalize()
+            .ok()
+            .and_then(|dir| dir.into_os_string().into_string().ok())
+            .map_or(CdTarget::Unknown, CdTarget::Dir),
     }
 }
 
@@ -398,7 +427,20 @@ fn resolve_cd_arg(
         None if base.is_absolute() => base.join(arg),
         None => return None,
     };
-    Some(path.canonicalize().ok().filter(|dir| dir.is_dir()))
+    // Bash's default `cd -L` drops `..` against the logical path, so
+    // `cd /bin; cd ..` lands in `/` even where `/bin` links to `/usr/bin`.
+    // The physical walk must still succeed, as bash checks it too.
+    let mut logical = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::ParentDir => {
+                logical.pop();
+            }
+            Component::CurDir => {}
+            part => logical.push(part),
+        }
+    }
+    Some((path.is_dir() && logical.is_dir()).then_some(logical))
 }
 
 fn extract_pattern(tool: &str, tool_input: &serde_json::Value) -> Option<String> {
@@ -582,7 +624,7 @@ mod tests {
     }
 
     fn target(cmd: &str, cwd: &Path) -> CdTarget {
-        cd_target_with_home(cmd, cwd.to_str().unwrap(), None)
+        cd_target_with_home(cmd, cwd.to_str().unwrap(), None, false)
     }
 
     fn dir(p: &Path) -> CdTarget {
@@ -628,7 +670,8 @@ mod tests {
         let h = tempfile::tempdir().unwrap();
         std::fs::create_dir(h.path().join("x")).unwrap();
         let cwd = tempfile::tempdir().unwrap();
-        let go = |cmd: &str, home| cd_target_with_home(cmd, cwd.path().to_str().unwrap(), home);
+        let go =
+            |cmd: &str, home| cd_target_with_home(cmd, cwd.path().to_str().unwrap(), home, false);
         assert_eq!(go("cd ~ && grep Foo", Some(h.path())), dir(h.path()));
         assert_eq!(
             go("cd ~/x && grep Foo", Some(h.path())),
@@ -752,7 +795,9 @@ mod tests {
         std::fs::create_dir(h.path().join("repo")).unwrap();
         let cwd = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(cwd.path().join("~/repo")).unwrap();
-        let go = |cmd: &str| cd_target_with_home(cmd, cwd.path().to_str().unwrap(), Some(h.path()));
+        let go = |cmd: &str| {
+            cd_target_with_home(cmd, cwd.path().to_str().unwrap(), Some(h.path()), false)
+        };
         let literal = dir(&cwd.path().join("~/repo"));
         assert_eq!(go("cd '~/repo'; rg Foo"), literal);
         assert_eq!(go("cd \"~/repo\" && rg Foo"), literal);
@@ -828,7 +873,6 @@ mod tests {
         let want = dir(&t.path().join("x"));
         for cmd in [
             "echo ${v:- #}; cd x; rg Foo",
-            "echo ${v:-{a}}; cd x; rg Foo",
             "echo ${#PATH}; cd x; rg Foo",
             "echo foo\r#; cd x; rg Foo",
             "cat <<< '#('; cd x; rg Foo",
@@ -845,9 +889,32 @@ mod tests {
             "cat <<EOF\n( # )\nEOF\ncd x; rg Foo",
             "echo ${v:-a; cd x; rg Foo",
             "echo ${v:-'}; cd x; #'}; rg Foo",
+            "cd x; echo ${v:-{}; cd /; # }\nrg Foo",
+            "cd x; ! cd /; rg Foo",
+            "cd x; time cd /; rg Foo",
+            "cd x; CDPATH=/var; cd tmp; rg Foo",
         ] {
             assert_eq!(target(cmd, t.path()), Unknown, "{cmd:?}");
         }
+    }
+
+    #[test]
+    fn test_cd_target_parent_of_symlink_is_logical() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(t.path().join("real/inner")).unwrap();
+        std::os::unix::fs::symlink(t.path().join("real/inner"), t.path().join("link")).unwrap();
+        assert_eq!(target("cd link; cd ..; rg Foo", t.path()), dir(t.path()));
+        assert_eq!(target("cd link/..; rg Foo", t.path()), dir(t.path()));
+        assert_eq!(target("cd missing/..; rg Foo", t.path()), Unchanged);
+    }
+
+    #[test]
+    fn test_cd_target_inherited_cdpath_makes_relative_cd_unknown() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir(t.path().join("x")).unwrap();
+        let go = |cmd: &str| cd_target_with_home(cmd, t.path().to_str().unwrap(), None, true);
+        assert_eq!(go("cd x; rg Foo"), Unknown);
+        assert_eq!(go("cd ./x; rg Foo"), dir(&t.path().join("x")));
     }
 
     #[test]
@@ -886,7 +953,8 @@ mod tests {
             cd_target_with_home(
                 "cd ~ && grep 'cd \"~\"' Foo .",
                 cwd.path().to_str().unwrap(),
-                Some(h.path())
+                Some(h.path()),
+                false
             ),
             dir(h.path())
         );
