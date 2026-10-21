@@ -399,7 +399,7 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
     let mut groups: Vec<bool> = Vec::new();
     let mut cd_depth = 0;
     // After `cd x ||` succeeds, its `||` operand does not run. The operand
-    // ends at the next `;`, `&&` or `&` outside any `{ }` / `( )` it opens
+    // ends at the next `;`, `&&` or `&` outside any group or compound it opens
     // (`a || b && c` is `(a || b) && c`).
     let mut skipping: Option<usize> = None;
     for (i, (&(segment, after), words)) in segments.iter().zip(&words).enumerate() {
@@ -414,8 +414,9 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
         }
         let ((paren_opens, paren_closes), (brace_opens, brace_closes)) = marks[i];
         if let Some(depth) = skipping.as_mut() {
-            *depth =
-                (*depth + paren_opens + brace_opens).saturating_sub(paren_closes + brace_closes);
+            let (compound_opens, compound_closes) = &compounds[i];
+            *depth = (*depth + paren_opens + brace_opens + compound_opens.len())
+                .saturating_sub(paren_closes + brace_closes + compound_closes);
             if *depth == 0 && !matches!(after, Some(Sep::Or | Sep::Pipe)) {
                 skipping = None;
             }
@@ -1382,6 +1383,7 @@ mod tests {
             "rg --version &&\ncd x &&\nrg -n Foo src",
             "cd x>/dev/null &&\nrg -n Foo src",
             "cd x 2>/dev/null && rg Foo",
+            "cd x || if test -d y; then\n  cd y\nfi\nrg -n Foo src",
             "cd x && rg -n 'fn main()' src",
             "cd 2>/dev/null x && rg Foo",
             "cd x &>/dev/null; rg Foo",
