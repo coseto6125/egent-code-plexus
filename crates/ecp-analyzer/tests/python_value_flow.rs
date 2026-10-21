@@ -266,6 +266,25 @@ fn test_analyze_python_stacked_diamonds_resolve_root_member() {
     assert!(binding(&report, "in_o"), "{report:#?}");
 }
 
+/// A string's quote tokens carry no semantics, and an f-string's value
+/// carries the provenance of its interpolated parts.
+#[test]
+fn test_analyze_python_fstring_interpolation_reaches_consumer_without_token_boundaries() {
+    let report = forward("x = \"abc\"\ny = f\"v{x}\"\nprint(y)\n", "x = ");
+    assert!(binding(&report, "y"), "{report:#?}");
+    assert!(argument(&report, "y"), "{report:#?}");
+    let noise: Vec<_> = report
+        .boundaries
+        .iter()
+        .filter(|b| {
+            ["string_start", "string_end", "interpolation"]
+                .iter()
+                .any(|token| b.message.contains(token))
+        })
+        .collect();
+    assert!(noise.is_empty(), "{noise:?}");
+}
+
 #[test]
 fn test_analyze_python_pass_statement_raises_no_boundary() {
     let report = forward("def f():\n    pass\n\nx = 101\nconsume(x)\n", "101");

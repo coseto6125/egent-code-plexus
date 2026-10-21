@@ -113,6 +113,59 @@ fn test_analyze_unknown_call_reports_boundary() {
         .any(|n| n.kind == "argument" && n.label == "dynamic(x)"));
 }
 #[test]
+fn test_analyze_template_and_heredoc_interpolation_reaches_consumer_without_token_boundaries() {
+    for (path, source, line, column, argument) in [
+        (
+            "test.js",
+            "let x = 10;\nlet y = `v${x}`;\nconsume(y);\n",
+            1,
+            5,
+            "y",
+        ),
+        (
+            "test.php",
+            "<?php\n$x = 10;\n$y = <<<EOT\nv{$x}\nEOT;\nconsume($y);\n",
+            2,
+            1,
+            "$y",
+        ),
+    ] {
+        let report = analyze(
+            &[SourceFile {
+                path: path.into(),
+                source: source.into(),
+            }],
+            &FlowRequest {
+                file: path.into(),
+                line,
+                column,
+                subject: Subject::Value,
+                direction: Direction::Forward,
+                budgets: Budgets::default(),
+            },
+        )
+        .unwrap();
+        assert!(
+            report
+                .nodes
+                .iter()
+                .any(|n| n.kind == "argument" && n.label == argument),
+            "{path}: {report:#?}"
+        );
+        let noise: Vec<_> = report
+            .boundaries
+            .iter()
+            .filter(|b| {
+                b.kind == "unsupported_semantics"
+                    && ["template_", "heredoc", "string"]
+                        .iter()
+                        .any(|token| b.message.starts_with(token))
+            })
+            .collect();
+        assert!(noise.is_empty(), "{path}: {noise:?}");
+    }
+}
+#[test]
 fn test_analyze_python_and_php_returns_propagate() {
     for (path, source, line, column) in [
         (

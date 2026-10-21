@@ -819,6 +819,26 @@ impl Engine<'_> {
                         | "string_value"
                         | "else_clause"
                         | "else"
+                        // String literals and their token children: an
+                        // interpolated part is evaluated as a child, so the
+                        // string's value carries its provenance.
+                        | "string_start"
+                        | "string_end"
+                        | "concatenated_string"
+                        | "interpolation"
+                        | "format_specifier"
+                        | "format_expression"
+                        | "type_conversion"
+                        | "template_string"
+                        | "template_substitution"
+                        | "html_character_reference"
+                        | "heredoc"
+                        | "heredoc_start"
+                        | "heredoc_body"
+                        | "heredoc_end"
+                        | "nowdoc"
+                        | "nowdoc_body"
+                        | "nowdoc_string"
                 ) {
                     self.boundary(
                         n,
