@@ -7,6 +7,7 @@ use super::common::{emit_additional_context, lookup_index_dir, HookInput};
 use crate::commands::find::{compute_hits, FindArgs, FindMode, Hit};
 use crate::engine::Engine;
 use ecp_core::EcpError;
+use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
 
 const MAX_HITS: usize = 5;
@@ -254,13 +255,8 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
     if !cmd.contains("cd") && !CWD_BUILTINS.iter().any(|b| cmd.contains(b)) {
         return CdTarget::Unchanged;
     }
-    let joined;
-    let cmd = if cmd.contains("\\\n") {
-        joined = join_continuations(cmd);
-        joined.as_str()
-    } else {
-        cmd
-    };
+    let joined = join_continuations(cmd);
+    let cmd = joined.as_ref();
     let Some(segments) = shell_segments(cmd) else {
         return CdTarget::Unknown;
     };
@@ -398,7 +394,10 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
 
 /// `cmd` with every backslash-newline outside single quotes removed, as
 /// bash joins a continued line before it splits words.
-fn join_continuations(cmd: &str) -> String {
+fn join_continuations(cmd: &str) -> Cow<'_, str> {
+    if !cmd.contains("\\\n") {
+        return Cow::Borrowed(cmd);
+    }
     let mut out = String::with_capacity(cmd.len());
     let mut chars = cmd.chars().peekable();
     let mut quote = None;
@@ -420,7 +419,7 @@ fn join_continuations(cmd: &str) -> String {
         }
         out.push(c);
     }
-    out
+    Cow::Owned(out)
 }
 
 /// Unquoted `(` / `)` and word `{` / `}` in one segment, as
@@ -639,6 +638,8 @@ fn shell_words(cmd: &str) -> Vec<String> {
 /// `rg` / `grep` is absent or every word after it is a flag / flag
 /// value / too short.
 fn extract_from_shell(cmd: &str) -> Option<String> {
+    let joined = join_continuations(cmd);
+    let cmd = joined.as_ref();
     let flags_with_values = [
         "-f",
         "-m",

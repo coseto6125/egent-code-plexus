@@ -563,13 +563,18 @@ fn test_bash_cd_into_indexed_repo_names_the_repo_in_the_header() {
     let elsewhere = tmp.path().join("elsewhere");
     fs::create_dir(&elsewhere).unwrap();
     let repo_dir = repo.canonicalize().unwrap();
-    let cmd = format!("cd '{}' && grep -rn CacheKeyQueue .", repo.display());
-    let out = bash_hook_stdout(&home, &elsewhere, &cmd);
-    assert!(
-        out.contains(&format!("ecp graph hits in {}:", repo_dir.display())),
-        "{out}"
-    );
-    assert!(out.contains("CacheKeyQueue (lib.js:1)"), "{out}");
+    // The second command continues its line, as agents lay out long ones.
+    for cmd in [
+        format!("cd '{}' && grep -rn CacheKeyQueue .", repo.display()),
+        format!("cd '{}' && \\\ngrep -rn CacheKeyQueue .", repo.display()),
+    ] {
+        let out = bash_hook_stdout(&home, &elsewhere, &cmd);
+        assert!(
+            out.contains(&format!("ecp graph hits in {}:", repo_dir.display())),
+            "{cmd:?}: {out}"
+        );
+        assert!(out.contains("CacheKeyQueue (lib.js:1)"), "{cmd:?}: {out}");
+    }
 }
 
 /// No cd keeps the plain header; a cd the hook cannot place prints no hits
