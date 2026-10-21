@@ -160,6 +160,9 @@ pub struct SymbolTable {
     /// per-node cost is the 4-byte `node_owner` slot.
     owner_ids: FxHashMap<Box<str>, u32>,
 
+    /// The inverse of `owner_ids`: owner id → owner key.
+    owner_keys: Vec<Box<str>>,
+
     /// First declaration → its later overloads, in source order (see
     /// [`SymbolTable::register_overload`]). Sparse: most ids have none.
     overloads: FxHashMap<u32, Vec<u32>>,
@@ -405,6 +408,7 @@ impl SymbolTable {
         }
         let id = self.owner_ids.len() as u32;
         self.owner_ids.insert(key.into(), id);
+        self.owner_keys.push(key.into());
         id
     }
 
@@ -612,7 +616,8 @@ impl SymbolTable {
     }
 
     /// [`Self::lookup_in_file_with_kind`] for the bare name of a call site,
-    /// through the shared [`pick_call`] rule.
+    /// through the shared [`pick_call`] rule. The pick is by source order
+    /// only; a call site narrows it by owner through [`Self::prefer_owned`].
     pub fn lookup_call_in_file(
         &self,
         file_path: &str,
@@ -705,9 +710,10 @@ impl SymbolTable {
     }
 
     /// [`Self::lookup_call_in_file`] narrowed by the owner an import binding
-    /// requires: [`MemberOwner::Any`] keeps the first match, `TopLevel` takes
-    /// a declaration with no owning type, `Type` a member of the type its path
-    /// names, when the file's types agree with that path.
+    /// requires: [`MemberOwner::Any`] takes the match [`Self::prefer_owned`]
+    /// picks with no owner (a free function, else one type's member),
+    /// `TopLevel` a declaration with no owning type, `Type` a member of the
+    /// type its path names, when the file's types agree with that path.
     pub(crate) fn lookup_member_in_file(
         &self,
         file_path: &str,
@@ -716,7 +722,13 @@ impl SymbolTable {
         owner: MemberOwner<'_>,
     ) -> Option<u32> {
         let owner_id = match owner {
-            MemberOwner::Any => return self.lookup_call_in_file(file_path, node_name, target),
+            MemberOwner::Any => {
+                return self
+                    .lookup_call_in_file(file_path, node_name, target)
+                    .and_then(|pick| {
+                        self.prefer_owned(file_path, pick, node_name, None, &[], target)
+                    })
+            }
             MemberOwner::TopLevel => NO_OWNER,
             MemberOwner::Type(path) if !self.owner_path_agrees(file_path, path) => return None,
             MemberOwner::Type(path) => self.owner_id(path)?,
@@ -838,31 +850,102 @@ impl SymbolTable {
             .collect()
     }
 
-    /// `pick`, or `owner`'s own member named `member` in `file_path` when
-    /// `pick` belongs to another type. A call through `owner` (`self.m()`,
-    /// `K.m()`, an implicit-`this` `m()`) reaches `owner`'s member before any
-    /// interface, trait or base declaration that precedes it in the file:
-    /// Rust inherent methods beat trait methods, and an override hides the
-    /// declaration it implements. A free function `pick` stays.
+    /// The declaration a call of `member` reaches among `file_path`'s
+    /// same-named declarations of `target`'s kinds, given `pick`, the first
+    /// of them in source order. `owner` is the type the call goes through
+    /// (the caller's type for an implicit-`this` `m()`, `K` for `K.m()`),
+    /// `heritage` that type's bases in declared order. The rule:
+    ///
+    /// 1. `pick` stays when it is a free function or `owner`'s own member.
+    /// 2. Else `owner`'s own member: Rust inherent methods beat trait
+    ///    methods, and an override hides the declaration it implements.
+    /// 3. Else the member of the first base in `heritage` that has one.
+    /// 4. Else the first free function: a member of an unrelated type never
+    ///    beats it.
+    /// 5. Else `pick` when every candidate has one owner (the same type
+    ///    declared in several blocks counts once).
+    /// 6. Else the member of the owner that every other candidate's owner
+    ///    inherits from ([`Self::hierarchy_root`]).
+    /// 7. Else `None`: two or more unrelated owners, and the file alone
+    ///    cannot tell which one the call reaches.
+    ///
+    /// Owners and bases compare through [`owner_key`], so `pkg.B` and
+    /// `B<T>` name the owner `B`.
     pub(crate) fn prefer_owned(
         &self,
         file_path: &str,
         pick: u32,
         member: &str,
-        owner: &str,
+        owner: Option<&str>,
+        heritage: &[String],
         target: ResolveTarget,
-    ) -> u32 {
+    ) -> Option<u32> {
         let picked_owner = self.node_owner[pick as usize];
-        let Some(owner_id) = self.owner_id(owner) else {
-            return pick;
-        };
-        if picked_owner == NO_OWNER || picked_owner == owner_id {
-            return pick;
+        let owner_id = owner.and_then(|owner| self.owner_id(owner));
+        if picked_owner == NO_OWNER || owner_id == Some(picked_owner) {
+            return Some(pick);
         }
-        self.owned_in_file(file_path, member, owner, target)
-            .first()
+        let ids = self.file_scoped.get(file_path)?.get(member)?;
+        let predicate = target.kind_predicate();
+        let owner_of = |id: u32| self.node_owner[id as usize];
+        let candidates = move || {
+            ids.iter()
+                .copied()
+                .filter(move |&id| predicate(self.node_kinds[id as usize]))
+        };
+        owner_id
+            .into_iter()
+            .chain(heritage.iter().filter_map(|base| self.owner_id(base)))
+            .chain([NO_OWNER])
+            .find_map(|wanted| candidates().find(|&id| owner_of(id) == wanted))
+            .or_else(|| {
+                candidates()
+                    .all(|id| owner_of(id) == picked_owner)
+                    .then_some(pick)
+            })
+            .or_else(|| self.hierarchy_root(&candidates().collect::<Vec<_>>()))
+    }
+
+    /// The first of `candidates` whose owner every other candidate's owner
+    /// inherits from, through the declared supertypes: one declaration and
+    /// its overrides or implementations (`trait T { fn m(&self); }` beside
+    /// `impl T for S`), so a call through any of them reaches that
+    /// declaration. Types match an owner by its key across the index, as
+    /// owned lookups do. `None` when no owner is such a root, or when a
+    /// candidate has no owner.
+    fn hierarchy_root(&self, candidates: &[u32]) -> Option<u32> {
+        let owner_of = |id: u32| self.node_owner[id as usize];
+        let types_of = move |owner: u32| {
+            self.owner_keys
+                .get(owner as usize)
+                .and_then(|key| self.global_scoped.get(&**key))
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(move |&id| self.node_kinds[id as usize].is_type())
+        };
+        let mut owners: Vec<u32> = Vec::new();
+        for &id in candidates {
+            if !owners.contains(&owner_of(id)) {
+                owners.push(owner_of(id));
+            }
+        }
+        let lineages: Vec<Vec<u32>> = owners
+            .iter()
+            .map(|&owner| types_of(owner).flat_map(|ty| self.ancestors(ty)).collect())
+            .collect();
+        let root = (0..owners.len()).find(|&i| {
+            let roots: Vec<u32> = types_of(owners[i]).collect();
+            !roots.is_empty()
+                && lineages
+                    .iter()
+                    .enumerate()
+                    .all(|(j, lineage)| j == i || lineage.iter().any(|ty| roots.contains(ty)))
+        })?;
+        candidates
+            .iter()
             .copied()
-            .unwrap_or(pick)
+            .find(|&id| owner_of(id) == owners[root])
     }
 
     /// The candidate nearest `caller_file` when `candidates` are copies of
@@ -1367,6 +1450,101 @@ mod tests {
         ]);
         assert_eq!(st.owned_in_file("box.hpp", "get", "Box", CALL), vec![1]);
         assert_eq!(st.owned_in_file("box.hpp", "get", "Box<U>", CALL), vec![1]);
+    }
+
+    #[test]
+    fn test_prefer_owned_unrelated_first_pick_returns_own_base_or_none() {
+        let st = st_owned(&[
+            ("a.java", "save", NodeKind::Method, Some("A")),
+            ("a.java", "save", NodeKind::Method, Some("B<T>")),
+            ("a.java", "save", NodeKind::Method, Some("K")),
+            ("a.java", "run", NodeKind::Method, Some("C")),
+        ]);
+        let pick = |owner, heritage: &[String]| {
+            st.prefer_owned("a.java", 0, "save", owner, heritage, CALL)
+        };
+        assert_eq!(pick(Some("K"), &[]), Some(2), "the owner's own member");
+        assert_eq!(
+            pick(Some("C"), &["pkg.B<String>".to_string()]),
+            Some(1),
+            "a base named by a qualified, generic path"
+        );
+        assert_eq!(
+            pick(Some("C"), &["Missing".to_string(), "B".to_string()]),
+            Some(1),
+            "the first base that owns a member"
+        );
+        assert_eq!(pick(Some("C"), &[]), None, "three unrelated owners");
+        assert_eq!(pick(None, &[]), None, "a caller with no owner");
+    }
+
+    #[test]
+    fn test_prefer_owned_free_function_or_one_owner_returns_it() {
+        let st = st_owned(&[
+            ("a.rs", "save", NodeKind::Method, Some("A")),
+            ("a.rs", "save", NodeKind::Function, None),
+            ("b.rs", "save", NodeKind::Method, Some("A")),
+            ("b.rs", "save", NodeKind::Method, Some("A<T>")),
+        ]);
+        assert_eq!(
+            st.prefer_owned("a.rs", 0, "save", Some("D"), &[], CALL),
+            Some(1),
+            "a member of an unrelated type never beats a free function"
+        );
+        assert_eq!(
+            st.prefer_owned("a.rs", 1, "save", Some("A"), &[], CALL),
+            Some(1),
+            "a free function pick stays"
+        );
+        assert_eq!(
+            st.prefer_owned("b.rs", 2, "save", None, &[], CALL),
+            Some(2),
+            "one owner declared in two blocks counts once"
+        );
+    }
+
+    #[test]
+    fn test_prefer_owned_trait_and_its_impls_returns_trait_declaration() {
+        let rows = [
+            ("lib.rs", "Foo", NodeKind::Struct, None),
+            ("lib.rs", "handle", NodeKind::Method, Some("Foo")),
+            ("lib.rs", "Handler", NodeKind::Trait, None),
+            ("lib.rs", "handle", NodeKind::Method, Some("Handler")),
+            ("lib.rs", "Bar", NodeKind::Struct, None),
+            ("lib.rs", "handle", NodeKind::Method, Some("Bar")),
+        ];
+        let mut st = st_owned(&rows);
+        assert_eq!(
+            st.prefer_owned("lib.rs", 1, "handle", None, &[], CALL),
+            None,
+            "unrelated owners before the supertypes pre-pass"
+        );
+        st.build_supertypes([(0, Some(2)), (4, Some(2))]);
+        assert_eq!(
+            st.prefer_owned("lib.rs", 1, "handle", None, &[], CALL),
+            Some(3),
+            "every impl inherits from `Handler`, declared after the first impl"
+        );
+        assert_eq!(
+            st.prefer_owned("lib.rs", 1, "handle", Some("Bar"), &[], CALL),
+            Some(5),
+            "the caller's own member still comes first"
+        );
+    }
+
+    #[test]
+    fn test_lookup_member_in_file_any_owner_prefers_free_function_else_one_owner() {
+        let st = st_owned(&[
+            ("m.py", "save", NodeKind::Method, Some("A")),
+            ("m.py", "save", NodeKind::Function, None),
+            ("n.py", "save", NodeKind::Method, Some("A")),
+            ("n.py", "save", NodeKind::Method, Some("B")),
+            ("o.py", "save", NodeKind::Method, Some("A")),
+        ]);
+        let any = |file| st.lookup_member_in_file(file, "save", CALL, MemberOwner::Any);
+        assert_eq!(any("m.py"), Some(1));
+        assert_eq!(any("n.py"), None, "two unrelated owners");
+        assert_eq!(any("o.py"), Some(4));
     }
 
     #[test]

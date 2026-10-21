@@ -46,7 +46,7 @@ use ecp_core::analyzer::reexport::{
     ModuleFacts, PyModule,
 };
 use ecp_core::analyzer::rust_paths::{is_rust_source, rust_module_path_base};
-use ecp_core::analyzer::types::{CallSite, LocalGraph, RawImport};
+use ecp_core::analyzer::types::{owner_key, CallSite, LocalGraph, RawImport};
 use ecp_core::graph::NodeKind;
 use serde::Serialize;
 use std::borrow::Cow;
@@ -1183,19 +1183,22 @@ impl<'a> Resolver<'a> {
 
         // Tier 1: Try SameFile (kind-aware so a property named `Foo` doesn't
         // win the lookup for a constructor call `Foo()` in the same file —
-        // see `SymbolTable::file_scoped` doc).
+        // see `SymbolTable::file_scoped` doc). A call site narrows the pick
+        // by owner; when the file holds several unrelated owners of the
+        // name, Tier 1 binds nothing and the later tiers decide.
         if let Some(node_id) = self
             .symbol_table
             .lookup_call_in_file(&source_file_str, symbol_name, target)
-            .map(|pick| match call.and_then(|scope| scope.owner) {
-                Some(owner) => self.symbol_table.prefer_owned(
+            .and_then(|pick| match call {
+                Some(scope) => self.symbol_table.prefer_owned(
                     &source_file_str,
                     pick,
                     symbol_name,
-                    owner,
+                    scope.owner,
+                    caller_heritage,
                     target,
                 ),
-                None => pick,
+                None => Some(pick),
             })
         {
             results.push((node_id, ResolutionTier::SameFile.base_confidence()));
@@ -1348,11 +1351,24 @@ impl<'a> Resolver<'a> {
                     Some(symbol_name),
                 )
                 .and_then(|qf| {
+                    // `this.m()` reaches here typed as the caller's own type
+                    // (`C.m`), whose bases are the caller's heritage.
+                    let caller_type = call
+                        .and_then(|scope| scope.owner)
+                        .and_then(owner_key)
+                        .is_some_and(|owner| owner_key(qualifier) == Some(owner));
+                    let heritage: &[String] = if caller_type { caller_heritage } else { &[] };
                     self.symbol_table
                         .lookup_in_file_with_kind(&qf, member, target)
-                        .map(|pick| {
-                            self.symbol_table
-                                .prefer_owned(&qf, pick, member, qualifier, target)
+                        .and_then(|pick| {
+                            self.symbol_table.prefer_owned(
+                                &qf,
+                                pick,
+                                member,
+                                Some(qualifier),
+                                heritage,
+                                target,
+                            )
                         })
                 });
             if let Some(node_id) = hit {
@@ -1479,9 +1495,19 @@ impl<'a> Resolver<'a> {
                     raw_imports,
                     None,
                 ) {
-                    if let Some(node_id) =
-                        self.symbol_table
-                            .lookup_in_file_with_kind(&qf, symbol_name, target)
+                    if let Some(node_id) = self
+                        .symbol_table
+                        .lookup_in_file_with_kind(&qf, symbol_name, target)
+                        .and_then(|pick| {
+                            self.symbol_table.prefer_owned(
+                                &qf,
+                                pick,
+                                symbol_name,
+                                Some(base.as_str()),
+                                &[],
+                                target,
+                            )
+                        })
                     {
                         let conf = ResolutionTier::HeritageScoped.base_confidence();
                         results.push((node_id, conf));
