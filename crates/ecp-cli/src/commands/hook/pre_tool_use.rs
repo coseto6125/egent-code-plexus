@@ -190,6 +190,17 @@ fn shell_segments(cmd: &str) -> Option<Vec<(&str, Option<Sep>)>> {
                 quote = Some(c);
                 continue;
             }
+            // A newline after `&&`, `||` or `|` continues that list.
+            (None, '\n')
+                if matches!(
+                    segments.last(),
+                    Some((_, Some(Sep::And | Sep::Or | Sep::Pipe)))
+                ) && cmd[start..comment_at.unwrap_or(i)].trim().is_empty() =>
+            {
+                start = i + 1;
+                comment_at = None;
+                continue;
+            }
             (None, ';' | '\n') => Sep::Seq,
             // `2>&1`, `<&0`, `>|file` and `&>file` are redirects, not operators.
             (None, '&' | '|') if after_redirect => continue,
@@ -222,6 +233,8 @@ enum CdTarget {
     /// target cannot be known without expanding it (`cd -`, `$VAR`,
     /// backticks, `~user`, options, a bare `cd`), or a builtin other than cd
     /// moves the shell (`pushd`, `source`, ...), or a quote is left open.
+    /// So does a cd in a `{ }` group or compound command that closes before
+    /// the search, a cd in a loop, and a cd in the search's own subshell.
     Unknown,
 }
 
@@ -278,15 +291,36 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
         list_end[i] = end;
     }
     let search_list = search.map(|k| list_end[k]);
+    let moves = |w: &&str| *w == "cd" || CWD_BUILTINS.contains(w);
+    // A later `.` alone is mostly a path argument (`git add .`).
+    let moves_shell = |cmd_words: &[&str]| {
+        cmd_words
+            .first()
+            .is_some_and(|w| moves(&w.trim_start_matches('(')))
+            || cmd_words.iter().skip(1).any(|w| *w != "." && moves(w))
+    };
+    // A loop around the search runs a later cd before its next pass.
+    let moves_after_search =
+        search.is_some_and(|k| words[k + 1..].iter().flatten().any(|w| moves(&w.as_str())));
     let mut current: Option<PathBuf> = None;
     let mut before = Some(Sep::Seq);
     let mut subshell = 0usize;
+    // A cd inside a subshell that is still open moves a search in it.
+    let mut subshell_moves = false;
+    // Open `{ }` groups and compound commands, `true` for a loop. A group may
+    // be a function body, a skipped operand or a pipeline's subshell, so a
+    // cd inside one holds only until it closes; a loop runs its cd again.
+    let mut groups: Vec<bool> = Vec::new();
+    let mut cd_depth = 0;
     // After `cd x ||` succeeds, its `||` operand does not run. The operand
     // ends at the next `;`, `&&` or `&` outside any `{ }` / `( )` it opens
     // (`a || b && c` is `(a || b) && c`).
     let mut skipping: Option<usize> = None;
     for (i, (&(segment, after), words)) in segments.iter().zip(&words).enumerate() {
         if Some(i) == search {
+            if subshell > 0 && subshell_moves || groups.contains(&true) && moves_after_search {
+                return CdTarget::Unknown;
+            }
             break;
         }
         let ((paren_opens, paren_closes), (brace_opens, brace_closes)) = group_marks(segment);
@@ -307,15 +341,24 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
             .collect();
         let starts_subshell = cmd_words.first().is_some_and(|w| w.starts_with('('));
         let in_subshell = subshell > 0 || starts_subshell;
+        subshell_moves |= in_subshell && moves_shell(&cmd_words);
         subshell = (subshell + paren_opens).saturating_sub(paren_closes);
+        if subshell == 0 {
+            subshell_moves = false;
+        }
+        // `cat | { cd x; rg; }`: the pipe runs the group, and the cd starts
+        // the group's own list.
+        let opens_group = words
+            .iter()
+            .find(|w| !is_assignment(w))
+            .is_some_and(|w| w == "{");
+        let before_cmd = if opens_group { Some(Sep::Seq) } else { before };
         let other_job =
             segments[list_end[i]].1 == Some(Sep::Background) && Some(list_end[i]) != search_list;
         let own_shell =
-            !in_subshell && !other_job && before != Some(Sep::Pipe) && after != Some(Sep::Pipe);
+            !in_subshell && !other_job && before_cmd != Some(Sep::Pipe) && after != Some(Sep::Pipe);
         // `! cd x`, `time . env.sh`, `then cd x`: a prefix the split does
-        // not model may still run the command in this shell. A later `.`
-        // alone is mostly a path argument (`git add .`).
-        let moves = |w: &&str| *w == "cd" || CWD_BUILTINS.contains(w);
+        // not model may still run the command in this shell.
         // `time -p` takes options before its command word.
         let mut after_prefix = 0;
         let mut time_options = false;
@@ -327,6 +370,23 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
             }
             after_prefix += 1;
         }
+        let closes = brace_closes
+            + usize::from(matches!(cmd_words.first(), Some(&("fi" | "done" | "esac"))));
+        groups.truncate(groups.len().saturating_sub(closes));
+        if groups.len() < cd_depth {
+            return CdTarget::Unknown;
+        }
+        for &word in &cmd_words[..after_prefix] {
+            if matches!(word, "if" | "while" | "until") {
+                groups.push(word != "if");
+            }
+        }
+        match cmd_words.get(after_prefix) {
+            Some(&("for" | "select")) => groups.push(true),
+            Some(&"case") => groups.push(false),
+            _ => {}
+        }
+        groups.extend(std::iter::repeat_n(false, brace_opens));
         if own_shell
             && (after_prefix > 0 && cmd_words.get(after_prefix).is_some_and(moves)
                 || cmd_words.iter().skip(1).any(|w| *w != "." && moves(w)))
@@ -347,15 +407,21 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
                 return CdTarget::Unknown
             }
             Some("cd") if own_shell => {
-                let surely_runs = match before {
+                // `make && cd x && rg` searches only where the cd ran, but
+                // `false && cd x && true; rg` searches the old directory.
+                let surely_runs = match before_cmd {
                     Some(Sep::Seq | Sep::Background) | None => true,
-                    Some(Sep::And) => after == Some(Sep::And),
+                    Some(Sep::And) => search.is_some_and(|k| {
+                        segments[i..k]
+                            .iter()
+                            .all(|&(_, s)| matches!(s, Some(Sep::And | Sep::Pipe)))
+                    }),
                     _ => false,
                 };
                 let [_, arg] = cmd_words[..] else {
                     return CdTarget::Unknown;
                 };
-                if !surely_runs {
+                if !surely_runs || groups.contains(&true) {
                     return CdTarget::Unknown;
                 }
                 let tilde = unquoted_tilde_arg(segment);
@@ -375,6 +441,7 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
                     None => return CdTarget::Unknown,
                     Some(Some(dir)) => {
                         current = Some(dir);
+                        cd_depth = groups.len();
                         if after == Some(Sep::Or) {
                             skipping = Some(0);
                         }
@@ -1047,6 +1114,44 @@ mod tests {
         ] {
             assert_eq!(target(cmd, t.path()), want, "{cmd}");
         }
+    }
+
+    #[test]
+    fn test_cd_target_cd_that_may_not_reach_the_search_is_unknown() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir(t.path().join("x")).unwrap();
+        for cmd in [
+            "(cd x && rg Foo) | head",
+            "false && cd x && true; rg Foo",
+            "false &&\ncd x; rg Foo",
+            "false && # note\n\ncd x; rg Foo",
+            "false || \ncd x; rg Foo",
+            "false && { cd x; }; rg Foo",
+            "{ cd x; } | cat; rg Foo",
+            "f() {\ncd x\n}\nrg Foo",
+            "if false; then true; cd x; fi; rg Foo",
+            "while true; do true; cd x; rg Foo; done",
+            "for d in a b; do rg Foo; cd x; done",
+        ] {
+            assert_eq!(target(cmd, t.path()), Unknown, "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn test_cd_target_cd_every_path_to_the_search_runs_keeps_cd() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir(t.path().join("x")).unwrap();
+        let want = dir(&t.path().join("x"));
+        for cmd in [
+            "make && cd x && rg Foo",
+            "make && cd x && cat f | rg Foo",
+            "cd x &&\nrg Foo",
+            "cat f | { cd x; rg Foo; }",
+            "if true; then true; cd x; rg Foo; fi",
+        ] {
+            assert_eq!(target(cmd, t.path()), want, "{cmd:?}");
+        }
+        assert_eq!(target("make &&\nrg Foo", t.path()), Unchanged);
     }
 
     #[test]
