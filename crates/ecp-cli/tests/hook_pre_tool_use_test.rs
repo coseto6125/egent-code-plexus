@@ -511,3 +511,32 @@ fn test_edit_hook_symlinked_subdirectory_cwd_finds_importers() {
     assert!(context.contains("sub/real.js:2"), "{context}");
     assert!(context.contains("1 direct importers"), "{context}");
 }
+
+#[test]
+fn test_bash_cd_prefix_unindexed_repo_no_op() {
+    // cd resolves to a real but unregistered dir: still a clean no-op,
+    // never a failure or a stray payload.
+    let tmp = tempdir().unwrap();
+    let cmd = format!(
+        "cd '{}' && grep -rn CacheKeyQueue app",
+        tmp.path().display()
+    );
+    let env = serde_json::json!({
+        "cwd": "/tmp",
+        "tool_name": "Bash",
+        "tool_input": {"command": cmd},
+    })
+    .to_string();
+    let out = run(&env);
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty(), "unindexed cd target → no-op");
+}
+
+#[test]
+fn test_bash_cd_nonexistent_dir_no_op() {
+    let out = run(
+        r#"{"cwd":"/tmp","tool_name":"Bash","tool_input":{"command":"cd /no/such/dir_zz && grep -rn CacheKeyQueue app"}}"#,
+    );
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty());
+}
