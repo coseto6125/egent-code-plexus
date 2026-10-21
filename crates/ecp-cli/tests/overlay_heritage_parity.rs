@@ -10,8 +10,13 @@
 //! |----------------|------------------|-------------------------------------------|
 //! | caller         | caller           | the expected edge, and parity             |
 //! | caller+base    | caller and base  | the expected edge, and parity             |
-//! | base renamed   | base             | parity (the heritage name no longer binds)|
-//! | base emptied   | base             | parity (the stale base edge must go)      |
+//! | base renamed   | base             | overlay ⊆ reindex (the stale edge goes)   |
+//! | base emptied   | base             | overlay ⊆ reindex (the stale edge goes)   |
+//!
+//! When only the base is dirty, the caller is clean: the overlay never
+//! re-resolves a clean file, so it only drops the edge into the removed
+//! member, while a reindex may rebind the caller to another tier's target
+//! (the renamed class's member at 0.7, a wildcard import at 0.95).
 //!
 //! Left out, because the language has no class heritage for this tier:
 //!
@@ -231,7 +236,12 @@ fn mismatches(fixtures: &[Fixture]) -> Vec<String> {
                 ));
                 continue;
             }
-            if overlay != reindex {
+            let diverges = if *proves {
+                overlay != reindex
+            } else {
+                overlay.iter().any(|edge| !reindex.contains(edge))
+            };
+            if diverges {
                 failures.push(format!(
                     "{label}: overlay {overlay:#?}\nreindex {reindex:#?}"
                 ));

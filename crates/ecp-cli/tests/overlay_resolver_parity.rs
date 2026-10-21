@@ -434,7 +434,9 @@ fn test_overlay_python_untyped_member_collision_matches_reindex() {
             ("other.py", "class Foo:\n    def foo(self): pass\n"),
         ],
         &[("app.py", "def foo(): pass\ndef run(x): x.foo()\n")],
-        &[("app.py".into(), "foo".into(), "".into(), 100)],
+        // An untyped receiver never reaches the caller's own module's free
+        // function, and two owners elsewhere leave the global tier empty.
+        &[],
     );
 }
 
@@ -1322,9 +1324,8 @@ fn test_overlay_php_external_vendor_use_matches_reindex() {
 }
 
 // `super.setup()` names the imported base, whose file lacks `setup`: the
-// index keeps the receiver ladder (Root.setup, inherited). The overlay has
-// no ladder, so it leaves the call unresolved. Was: both retried the bare
-// name and bound the caller to itself.
+// receiver ladder binds the inherited Root.setup on both sides. Was: both
+// retried the bare name and bound the caller to itself.
 #[test]
 fn test_overlay_kotlin_super_member_outside_imported_file_matches_reindex() {
     let screen = |body: &str| {
@@ -1333,7 +1334,7 @@ fn test_overlay_kotlin_super_member_outside_imported_file_matches_reindex() {
         )
     };
     let (clean, dirty) = (screen(""), screen("super.setup()"));
-    check_parity_from(
+    parity_from(
         "setup",
         &kotlin(),
         &[
@@ -1354,7 +1355,6 @@ fn test_overlay_kotlin_super_member_outside_imported_file_matches_reindex() {
             "Root".into(),
             80,
         )],
-        &[],
     );
 }
 
@@ -1411,18 +1411,17 @@ fn test_overlay_php_single_segment_use_function_matches_reindex() {
 }
 
 // A member the caller's class inherits beats a star import, and a package
-// wildcard imports no class member: the index resolves `refresh` on Base
-// (0.8). The overlay has no heritage tier and two `refresh` methods, so it
-// leaves no edge. Was: both bound the wildcard's `Adapter.refresh` at 0.95.
+// wildcard imports no class member: both resolve `refresh` on Base (0.8).
+// Was: both bound the wildcard's `Adapter.refresh` at 0.95.
 #[test]
-fn test_overlay_kotlin_wildcard_below_heritage_documents_heritage_divergence() {
+fn test_overlay_kotlin_wildcard_below_heritage_matches_reindex() {
     let screen = |body: &str| {
         format!(
             "package app\nimport lib.Base\nimport util.*\nclass Screen : Base() {{\n fun run() {{ {body} }}\n}}\n"
         )
     };
     let (clean, dirty) = (screen(""), screen("refresh()"));
-    check_parity(
+    parity(
         &kotlin(),
         &[
             (
@@ -1442,7 +1441,6 @@ fn test_overlay_kotlin_wildcard_below_heritage_documents_heritage_divergence() {
             "Base".into(),
             80,
         )],
-        &[],
     );
 }
 

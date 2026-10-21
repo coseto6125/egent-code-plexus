@@ -2,20 +2,23 @@ use ecp_core::analyzer::import_binding::{
     fqn_language, owner_path_agrees, DeclaredType, MemberOwner,
 };
 use ecp_core::analyzer::reexport::{is_es_module, pick_call, ExportAliasTable};
+use ecp_core::analyzer::same_file_pick::{self, ImplMember as PickImplMember, PickFacts};
+use ecp_core::analyzer::type_ladder::TypeFacts;
 use ecp_core::analyzer::types::{owner_key, RawExportAlias};
 use ecp_core::file_category::pick_global;
 pub use ecp_core::file_category::{FileMeta, GlobalPick, Language};
 use ecp_core::graph::NodeKind;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::borrow::Cow;
 
 pub type NodeId = u32;
 
 /// `node_owner` slot for a node with no owning type.
 const NO_OWNER: u32 = u32::MAX;
 
-/// Depth cap for [`SymbolTable::ancestors`]. Declared heritage deeper than
-/// this is rare, and the cap bounds the walk on a corrupt or cyclic chain.
-pub const MAX_HERITAGE_DEPTH: usize = 8;
+/// Depth cap for [`SymbolTable::ancestors`], shared with the
+/// receiver-typing ladder.
+pub use ecp_core::analyzer::type_ladder::MAX_HERITAGE_DEPTH;
 
 /// Declared supertypes of one type node, resolved to type ids.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -45,32 +48,7 @@ struct ImplMember {
     trait_owner: u32,
 }
 
-/// The owner a same-file pick rule sees for one declaration
-/// ([`SymbolTable::prefer_owned`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PickOwner {
-    /// A free function, or a member of a namespace or module.
-    Free,
-    /// A member of the type with this owner id.
-    Type(u32),
-    /// A member of the Rust `impl` block with this id whose self type
-    /// the parser could not name (`impl Trait for Cursor<T>`).
-    Block(u32),
-}
-
-/// How a call site reaches the declarations [`SymbolTable::prefer_owned`]
-/// weighs.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct PickScope {
-    /// The calling declaration.
-    pub caller: Option<u32>,
-    /// The owner is the receiver's type (`K.m()`, `this->m()`, a base the
-    /// caller inherits), not the caller's type through an implicit `this`.
-    pub typed_receiver: bool,
-    /// `o.m()` on a receiver the parser could not type
-    /// ([`CallSite::UntypedMember`](ecp_core::analyzer::types::CallSite)).
-    pub untyped_receiver: bool,
-}
+pub(crate) use ecp_core::analyzer::same_file_pick::PickScope;
 
 /// Crate-root prefix of a normalized repo-relative path. The "crate root"
 /// here is the substring preceding the first `/src/` or `/tests/` segment,
@@ -619,29 +597,7 @@ impl SymbolTable {
             .insert(member, ImplMember { block, trait_owner });
     }
 
-    /// The owner the pick rules see for `id`, `namespaces` being the
-    /// file's namespace owners ([`Self::build_owner_kinds`]).
-    fn pick_owner(&self, id: u32, namespaces: &[u32]) -> PickOwner {
-        let owner = self.node_owner[id as usize];
-        if owner != NO_OWNER && !namespaces.contains(&owner) {
-            return PickOwner::Type(owner);
-        }
-        match self.impl_members.get(&id) {
-            Some(member) if owner == NO_OWNER => PickOwner::Block(member.block),
-            _ => PickOwner::Free,
-        }
-    }
-
-    /// Owner id of the trait whose `impl` block declares `id`.
-    fn implemented_trait(&self, id: u32) -> Option<u32> {
-        self.impl_members
-            .get(&id)
-            .map(|member| member.trait_owner)
-            .filter(|&owner| owner != NO_OWNER)
-    }
-
-    /// Whether `id` is free for the fast path of [`Self::prefer_owned`]:
-    /// no owner, and no `impl` block either.
+    /// Whether `id` has no owner and no `impl` block either.
     fn is_free(&self, id: u32) -> bool {
         self.node_owner[id as usize] == NO_OWNER && !self.impl_members.contains_key(&id)
     }
@@ -1007,47 +963,9 @@ impl SymbolTable {
 
     /// The declaration a call of `member` reaches among `file_path`'s
     /// same-named declarations of `target`'s kinds, given `pick`, the first
-    /// of them in source order. `owner` is the type the call goes through
-    /// (the caller's type for an implicit-`this` `m()`, `K` for `K.m()`),
-    /// `heritage` that type's bases in declared order, `scope` how the call
-    /// site reaches them. The rule:
-    ///
-    /// 1. For a Rust method call (`ResolveTarget::Method`) from a member of
-    ///    an `impl` block the parser gave no owner (`impl T for Cursor<A>`,
-    ///    where `self.m()` has no receiver type), that block's own member,
-    ///    the caller excepted: a call of its own name goes through another
-    ///    receiver (`Pin::new(&mut **self).m()`).
-    /// 2. Else `pick` stays when it is `owner`'s own member, or a free
-    ///    function reached without a receiver.
-    /// 3. Else `owner`'s own member: Rust inherent methods beat trait
-    ///    methods, and an override hides the declaration it implements.
-    /// 4. Else the member of the first base in `heritage` that has one.
-    /// 5. Else `pick` when it is free: a receiver-typed `K.m()` whose
-    ///    qualifier owns no `m` names a module (`mod.f()`).
-    /// 6. Else the first free function: a member of an unrelated type never
-    ///    beats it. A member of a namespace or module counts as free
-    ///    ([`Self::build_owner_kinds`]); a member of a Rust `impl` block the
-    ///    parser gave no owner does not.
-    /// 7. Else `pick` when every candidate has one owner (the same type
-    ///    declared in several blocks counts once).
-    /// 8. Else the member of the owner that every other candidate's owner
-    ///    inherits from or implements ([`Self::hierarchy_root`]).
-    /// 9. Else `None`: two or more unrelated owners, and the file alone
-    ///    cannot tell which one the call reaches.
-    ///
-    /// An untyped receiver (`scope.untyped_receiver`) is no `this`: `owner`,
-    /// the caller's type, and `heritage` do not narrow the pick, and it
-    /// never reaches a free function. Rules 3 to 8 weigh the members of
-    /// every type, the first of them standing in for `pick`; a result that
-    /// `owner` declares is `None`, since the name alone cannot tell the
-    /// receiver from the caller's own type. Rule 1 still holds: there the
-    /// parser could not type `self` either.
-    ///
-    /// Owners and bases compare through [`owner_key`], so `pkg.B` and
-    /// `B<T>` name the owner `B`. The candidates include the later
-    /// "overloads" of a Rust `impl` member: members of several ownerless
-    /// `impl` blocks share one uid, so Pass 1 files all but the first as
-    /// overloads ([`Self::note_impl_member`]).
+    /// of them in source order: the shared rule
+    /// [`same_file_pick::prefer_owned`], over this table.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn prefer_owned(
         &self,
         file_path: &str,
@@ -1058,147 +976,15 @@ impl SymbolTable {
         target: ResolveTarget,
         scope: PickScope,
     ) -> Option<u32> {
-        let caller = scope.caller;
-        let untyped = scope.untyped_receiver;
-        let picked_owner = self.node_owner[pick as usize];
-        let owner_id = owner.and_then(|owner| self.owner_id(owner));
-        // `self.m()` from an `impl` block reaches that block's `m` first:
-        // two blocks for one type (`impl W for Cursor<A>`, `.. Cursor<B>`)
-        // share the owner, so the owner alone cannot pick the block.
-        let caller_block = caller
-            .filter(|&caller| {
-                let caller_owner = self.node_owner[caller as usize];
-                target == ResolveTarget::Method
-                    && (caller_owner == NO_OWNER || owner_id == Some(caller_owner))
-            })
-            .and_then(|caller| self.impl_members.get(&caller))
-            .map(|member| member.block);
-        let pick_stays = !untyped
-            && (owner_id == Some(picked_owner) || (self.is_free(pick) && !scope.typed_receiver));
-        if pick_stays && caller_block.is_none() {
-            return Some(pick);
-        }
-        let ids = self.file_scoped.get(file_path)?.get(member)?;
-        let predicate = target.kind_predicate();
-        let namespaces = self
-            .namespace_owners
-            .get(file_path)
-            .map_or(&[][..], Vec::as_slice);
-        let owner_of = move |id: u32| self.pick_owner(id, namespaces);
-        let admitted = move |id: u32| !untyped || owner_of(id) != PickOwner::Free;
-        let all = move || {
-            ids.iter()
-                .copied()
-                .flat_map(move |id| {
-                    std::iter::once(id).chain(
-                        self.later_overloads(id)
-                            .iter()
-                            .copied()
-                            .filter(move |later| self.impl_members.contains_key(later)),
-                    )
-                })
-                .filter(move |&id| predicate(self.node_kinds[id as usize]))
-        };
-        let own_block = caller_block.and_then(|block| {
-            all().find(|&id| {
-                Some(id) != caller && self.impl_members.get(&id).is_some_and(|m| m.block == block)
-            })
-        });
-        if own_block.is_some() {
-            return own_block;
-        }
-        if pick_stays {
-            return Some(pick);
-        }
-        let candidates = move || all().filter(move |&id| admitted(id));
-        let pick = if admitted(pick) {
-            pick
-        } else {
-            candidates().next()?
-        };
-        owner_id
-            .filter(|_| !untyped)
-            .into_iter()
-            .chain(heritage.iter().filter_map(|base| self.owner_id(base)))
-            .find_map(|wanted| candidates().find(|&id| self.node_owner[id as usize] == wanted))
-            .or_else(|| self.is_free(pick).then_some(pick))
-            .or_else(|| candidates().find(|&id| owner_of(id) == PickOwner::Free))
-            .or_else(|| {
-                let picked = owner_of(pick);
-                candidates()
-                    .all(|id| owner_of(id) == picked)
-                    .then_some(pick)
-            })
-            .or_else(|| self.hierarchy_root(&candidates().collect::<Vec<_>>(), owner_of))
-            .filter(|&id| !untyped || owner_id != Some(self.node_owner[id as usize]))
+        same_file_pick::prefer_owned(
+            self, file_path, pick, member, owner, heritage, target, scope,
+        )
     }
 
-    /// Whether an untyped member call (`o.m()`, [`PickScope::untyped_receiver`])
-    /// may bind `id`: a method or a type's function, never a free function,
-    /// a namespace or module member, a constructor, or a member of
-    /// `caller_owner`, the caller's own type, by the name alone.
+    /// Whether an untyped member call may bind `id`
+    /// ([`same_file_pick::member_call_admits`]).
     pub(crate) fn member_call_admits(&self, id: u32, caller_owner: Option<&str>) -> bool {
-        if !matches!(
-            self.node_kinds.get(id as usize),
-            Some(NodeKind::Function | NodeKind::Method)
-        ) {
-            return false;
-        }
-        let namespaces = self
-            .id_to_file
-            .get(&id)
-            .and_then(|file| self.namespace_owners.get(file.as_str()))
-            .map_or(&[][..], Vec::as_slice);
-        let own = caller_owner.and_then(|owner| self.owner_id(owner));
-        self.pick_owner(id, namespaces) != PickOwner::Free
-            && own != Some(self.node_owner[id as usize])
-    }
-
-    /// The first of `candidates` whose owner is a type every other
-    /// candidate's owner inherits from or implements: one declaration and
-    /// its overrides or implementations (`trait T { fn m(&self); }` beside
-    /// `impl T for S`), so a call through any of them reaches that
-    /// declaration. A candidate inherits through the declared supertypes of
-    /// its owner, found by the owner's key across the index as owned lookups
-    /// do; a Rust `impl` member implements the trait of its block whatever
-    /// the block's self type (`impl T for Vec<u8>`, `impl<X> T for X`,
-    /// a struct of another crate). `owner_of` is [`Self::pick_owner`] for
-    /// the candidates' file. `None` when no candidate is such a root, or
-    /// when a candidate is free.
-    fn hierarchy_root(
-        &self,
-        candidates: &[u32],
-        owner_of: impl Fn(u32) -> PickOwner,
-    ) -> Option<u32> {
-        let types_of = move |owner: PickOwner| {
-            let key = match owner {
-                PickOwner::Type(owner) => self.owner_keys.get(owner as usize),
-                PickOwner::Free | PickOwner::Block(_) => None,
-            };
-            key.and_then(|key| self.global_scoped.get(&**key))
-                .into_iter()
-                .flatten()
-                .copied()
-                .filter(move |&id| self.node_kinds[id as usize].is_type())
-        };
-        let owners: Vec<PickOwner> = candidates.iter().map(|&id| owner_of(id)).collect();
-        let lineages: Vec<Vec<u32>> = owners
-            .iter()
-            .map(|&owner| types_of(owner).flat_map(|ty| self.ancestors(ty)).collect())
-            .collect();
-        let root = (0..candidates.len()).find(|&i| {
-            let PickOwner::Type(root_owner) = owners[i] else {
-                return false;
-            };
-            let roots: Vec<u32> = types_of(owners[i]).collect();
-            !roots.is_empty()
-                && (0..candidates.len()).all(|j| {
-                    owners[j] == owners[i]
-                        || self.implemented_trait(candidates[j]) == Some(root_owner)
-                        || lineages[j].iter().any(|ty| roots.contains(ty))
-                })
-        })?;
-        Some(candidates[root])
+        same_file_pick::member_call_admits(self, id, caller_owner)
     }
 
     /// The candidate nearest `caller_file` when `candidates` are copies of
@@ -1538,6 +1324,123 @@ impl SymbolTable {
             .get(node_id as usize)
             .copied()
             .unwrap_or_default()
+    }
+}
+
+impl PickFacts for SymbolTable {
+    fn pick_candidates(&self, file: &str, name: &str) -> Cow<'_, [u32]> {
+        let Some(ids) = self.file_scoped.get(file).and_then(|names| names.get(name)) else {
+            return Cow::Borrowed(&[]);
+        };
+        let impl_overloads = |id: u32| {
+            self.later_overloads(id)
+                .iter()
+                .copied()
+                .filter(|later| self.impl_members.contains_key(later))
+        };
+        if ids.iter().all(|&id| impl_overloads(id).next().is_none()) {
+            return Cow::Borrowed(ids);
+        }
+        Cow::Owned(
+            ids.iter()
+                .flat_map(|&id| std::iter::once(id).chain(impl_overloads(id)))
+                .collect(),
+        )
+    }
+
+    fn kind(&self, id: u32) -> NodeKind {
+        self.node_kind(id)
+    }
+
+    fn owner(&self, id: u32) -> Option<&str> {
+        let owner = *self.node_owner.get(id as usize)?;
+        (owner != NO_OWNER).then(|| &*self.owner_keys[owner as usize])
+    }
+
+    fn impl_member(&self, id: u32) -> Option<PickImplMember<'_>> {
+        self.impl_members.get(&id).map(|member| PickImplMember {
+            block: member.block,
+            trait_owner: (member.trait_owner != NO_OWNER)
+                .then(|| &*self.owner_keys[member.trait_owner as usize]),
+        })
+    }
+
+    fn is_namespace_owner(&self, file: &str, owner: &str) -> bool {
+        self.namespace_owners.get(file).is_some_and(|owners| {
+            self.owner_ids
+                .get(owner)
+                .is_some_and(|id| owners.contains(id))
+        })
+    }
+
+    fn file_of(&self, id: u32) -> Option<&str> {
+        self.id_to_file.get(&id).map(String::as_str)
+    }
+
+    fn types_named(&self, owner: &str) -> Vec<u32> {
+        self.global_scoped
+            .get(owner)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|&id| self.node_kinds[id as usize].is_type())
+            .collect()
+    }
+
+    fn ancestors(&self, ty: u32) -> Vec<u32> {
+        SymbolTable::ancestors(self, ty)
+    }
+}
+
+impl TypeFacts for SymbolTable {
+    fn supertypes(&self, ty: u32) -> Option<(Cow<'_, [u32]>, Option<u32>)> {
+        self.supertypes
+            .get(&ty)
+            .map(|st| (Cow::Borrowed(&*st.bases), st.first_unresolved))
+    }
+
+    fn name_of(&self, id: u32) -> Option<&str> {
+        self.name_in_file(id)
+    }
+
+    fn owned_in_file(
+        &self,
+        file: &str,
+        member: &str,
+        owner: &str,
+        target: ResolveTarget,
+    ) -> Vec<u32> {
+        SymbolTable::owned_in_file(self, file, member, owner, target)
+    }
+
+    fn owned_global(
+        &self,
+        member: &str,
+        owner: &str,
+        target: ResolveTarget,
+        scope_file: &str,
+    ) -> Vec<u32> {
+        SymbolTable::owned_global(self, member, owner, target, scope_file)
+    }
+
+    fn count_in_file(&self, file: &str, name: &str, target: ResolveTarget) -> usize {
+        self.count_in_file_with_kind(file, name, target)
+    }
+
+    fn global_candidates(&self, name: &str, target: ResolveTarget, caller: FileMeta) -> Vec<u32> {
+        SymbolTable::global_candidates(self, name, target, caller)
+    }
+
+    fn is_copy(&self, a: u32, b: u32) -> bool {
+        SymbolTable::is_copy(self, a, b)
+    }
+
+    fn nearest_copy(&self, caller_file: &str, candidates: &[u32]) -> Option<u32> {
+        SymbolTable::nearest_copy(self, caller_file, candidates)
+    }
+
+    fn crate_root<'p>(&self, path: &'p str) -> &'p str {
+        crate_root_prefix(path)
     }
 }
 

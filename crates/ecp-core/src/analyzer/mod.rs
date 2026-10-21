@@ -6,5 +6,7 @@ pub mod pipeline;
 pub mod provider;
 pub mod reexport;
 pub mod rust_paths;
+pub mod same_file_pick;
+pub mod type_ladder;
 pub mod types;
 pub mod typescript;

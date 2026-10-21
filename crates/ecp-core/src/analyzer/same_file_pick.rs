@@ -1,0 +1,577 @@
+//! The rule that picks one of a file's same-named declarations for a call
+//! site, given the type the call goes through. Index-time resolution
+//! (`SymbolTable`) and the session overlay read the same rule from here,
+//! each through its own [`PickFacts`], so the two cannot drift.
+
+use crate::analyzer::heritage::HeritageNode;
+use crate::analyzer::reexport::ResolveTarget;
+use crate::analyzer::types::{owner_key, RawNode};
+use crate::graph::NodeKind;
+use std::borrow::Cow;
+
+/// How a call site reaches the declarations [`prefer_owned`] weighs.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PickScope {
+    /// The calling declaration.
+    pub caller: Option<u32>,
+    /// The owner is the receiver's type (`K.m()`, `this->m()`, a base the
+    /// caller inherits), not the caller's type through an implicit `this`.
+    pub typed_receiver: bool,
+    /// `o.m()` on a receiver the parser could not type
+    /// ([`CallSite::UntypedMember`](crate::analyzer::types::CallSite)).
+    pub untyped_receiver: bool,
+}
+
+/// The owner the pick rules see for one declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickOwner<'a> {
+    /// A free function, or a member of a namespace or module.
+    Free,
+    /// A member of the type with this owner key.
+    Type(&'a str),
+    /// A member of the Rust `impl` block with this id whose self type the
+    /// parser could not name (`impl Trait for &mut Cursor<T>`).
+    Block(u32),
+}
+
+/// A Rust callable declared in an `impl` block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImplMember<'a> {
+    /// Identifies the block: no two members of one block share a name.
+    pub block: u32,
+    /// The owner key of the trait the block implements; `None` for an
+    /// inherent `impl`.
+    pub trait_owner: Option<&'a str>,
+}
+
+/// What the pick rules read about the declarations. Ids are `u32` node
+/// handles in the caller's id space; owners compare by [`owner_key`].
+pub trait PickFacts {
+    /// `file`'s declarations of `name` as a name lookup sees them (the
+    /// first of each uid, no later overload), in source order, any kind.
+    /// Each is followed by its later overloads that a Rust `impl` block
+    /// declares: members of several ownerless blocks share one uid, so all
+    /// but the first are overloads.
+    fn pick_candidates(&self, file: &str, name: &str) -> Cow<'_, [u32]>;
+    fn kind(&self, id: u32) -> NodeKind;
+    /// The [`owner_key`] of the type declaring `id`; `None` at top level.
+    fn owner(&self, id: u32) -> Option<&str>;
+    /// The `impl` block that declares the Rust callable `id`.
+    fn impl_member(&self, id: u32) -> Option<ImplMember<'_>>;
+    /// Whether the owner key `owner` names a namespace or module that
+    /// `file` declares, and no type of `file`: C++ `detail::to_json`, a C#
+    /// namespace's classes, a Rust inline `mod m`'s functions.
+    fn is_namespace_owner(&self, file: &str, owner: &str) -> bool;
+    /// The file `id` is declared in.
+    fn file_of(&self, id: u32) -> Option<&str>;
+    /// Every type declaration named `owner` across the project.
+    fn types_named(&self, owner: &str) -> Vec<u32>;
+    /// The transitive resolved supertypes of the type `ty`, breadth-first,
+    /// each type once, `ty` excluded.
+    fn ancestors(&self, ty: u32) -> Vec<u32>;
+}
+
+/// Whether `id` has no owner and no `impl` block either.
+pub fn is_free<F: PickFacts + ?Sized>(facts: &F, id: u32) -> bool {
+    facts.owner(id).is_none() && facts.impl_member(id).is_none()
+}
+
+/// The owner the pick rules see for `id`, declared in `file`.
+pub fn pick_owner<'f, F: PickFacts + ?Sized>(facts: &'f F, id: u32, file: &str) -> PickOwner<'f> {
+    let owner = facts.owner(id);
+    if let Some(owner) = owner.filter(|&owner| !facts.is_namespace_owner(file, owner)) {
+        return PickOwner::Type(owner);
+    }
+    match facts.impl_member(id) {
+        Some(member) if owner.is_none() => PickOwner::Block(member.block),
+        _ => PickOwner::Free,
+    }
+}
+
+/// The declaration a call of `member` reaches among `file`'s same-named
+/// declarations of `target`'s kinds, given `pick`, the first of them in
+/// source order. `owner` is the type the call goes through (the caller's
+/// type for an implicit-`this` `m()`, `K` for `K.m()`), `heritage` that
+/// type's bases in declared order, `scope` how the call site reaches them.
+/// The rule:
+///
+/// 1. For a Rust method call (`ResolveTarget::Method`) from a member of an
+///    `impl` block the caller's type or no type owns, that block's own
+///    member, the caller excepted: a call of its own name goes through
+///    another receiver (`Pin::new(&mut **self).m()`).
+/// 2. Else `pick` stays when it is `owner`'s own member, or a free function
+///    reached without a receiver.
+/// 3. Else `owner`'s own member: Rust inherent methods beat trait methods,
+///    and an override hides the declaration it implements.
+/// 4. Else the member of the first base in `heritage` that has one.
+/// 5. Else `pick` when it is free: a receiver-typed `K.m()` whose qualifier
+///    owns no `m` names a module (`mod.f()`).
+/// 6. Else the first free function: a member of an unrelated type never
+///    beats it. A member of a namespace or module counts as free
+///    ([`PickFacts::is_namespace_owner`]); a member of a Rust `impl` block
+///    the parser gave no owner does not.
+/// 7. Else `pick` when every candidate has one owner (the same type
+///    declared in several blocks counts once).
+/// 8. Else the member of the owner that every other candidate's owner
+///    inherits from or implements ([`hierarchy_root`]).
+/// 9. Else `None`: two or more unrelated owners, and the file alone cannot
+///    tell which one the call reaches.
+///
+/// An untyped receiver (`scope.untyped_receiver`) is no `this`: `owner`,
+/// the caller's type, and `heritage` do not narrow the pick, and it never
+/// reaches a free function. Rules 3 to 8 weigh the members of every type,
+/// the first of them standing in for `pick`; a result that `owner`
+/// declares is `None`, since the name alone cannot tell the receiver from
+/// the caller's own type. Rule 1 still holds: there the parser could not
+/// type `self` either.
+///
+/// Owners and bases compare through [`owner_key`], so `pkg.B` and `B<T>`
+/// name the owner `B`.
+#[allow(clippy::too_many_arguments)]
+pub fn prefer_owned<F: PickFacts + ?Sized>(
+    facts: &F,
+    file: &str,
+    pick: u32,
+    member: &str,
+    owner: Option<&str>,
+    heritage: &[String],
+    target: ResolveTarget,
+    scope: PickScope,
+) -> Option<u32> {
+    let caller = scope.caller;
+    let untyped = scope.untyped_receiver;
+    let owner = owner.and_then(owner_key);
+    // `self.m()` from an `impl` block reaches that block's `m` first: two
+    // blocks for one type (`impl W for Cursor<A>`, `.. Cursor<B>`) share
+    // the owner, so the owner alone cannot pick the block.
+    let caller_block = caller
+        .filter(|&caller| {
+            let caller_owner = facts.owner(caller);
+            target == ResolveTarget::Method && (caller_owner.is_none() || owner == caller_owner)
+        })
+        .and_then(|caller| facts.impl_member(caller))
+        .map(|member| member.block);
+    let pick_stays = !untyped
+        && ((owner.is_some() && owner == facts.owner(pick))
+            || (is_free(facts, pick) && !scope.typed_receiver));
+    if pick_stays && caller_block.is_none() {
+        return Some(pick);
+    }
+    let ids = facts.pick_candidates(file, member);
+    let predicate = target.kind_predicate();
+    let owner_of = |id: u32| pick_owner(facts, id, file);
+    let admitted = |id: u32| !untyped || owner_of(id) != PickOwner::Free;
+    let all = || ids.iter().copied().filter(|&id| predicate(facts.kind(id)));
+    let own_block = caller_block.and_then(|block| {
+        all().find(|&id| {
+            Some(id) != caller && facts.impl_member(id).is_some_and(|m| m.block == block)
+        })
+    });
+    if own_block.is_some() {
+        return own_block;
+    }
+    if pick_stays {
+        return Some(pick);
+    }
+    let candidates = || all().filter(|&id| admitted(id));
+    let pick = if admitted(pick) {
+        pick
+    } else {
+        candidates().next()?
+    };
+    owner
+        .filter(|_| !untyped)
+        .into_iter()
+        .chain(heritage.iter().filter_map(|base| owner_key(base)))
+        .find_map(|wanted| candidates().find(|&id| facts.owner(id) == Some(wanted)))
+        .or_else(|| is_free(facts, pick).then_some(pick))
+        .or_else(|| candidates().find(|&id| owner_of(id) == PickOwner::Free))
+        .or_else(|| {
+            let picked = owner_of(pick);
+            candidates()
+                .all(|id| owner_of(id) == picked)
+                .then_some(pick)
+        })
+        .or_else(|| hierarchy_root(facts, &candidates().collect::<Vec<_>>(), owner_of))
+        .filter(|&id| !untyped || owner.is_none() || owner != facts.owner(id))
+}
+
+/// Whether an untyped member call (`o.m()`, [`PickScope::untyped_receiver`])
+/// may bind `id`: a method or a type's function, never a free function, a
+/// namespace or module member, a constructor, or a member of
+/// `caller_owner`, the caller's own type, by the name alone.
+pub fn member_call_admits<F: PickFacts + ?Sized>(
+    facts: &F,
+    id: u32,
+    caller_owner: Option<&str>,
+) -> bool {
+    if !matches!(facts.kind(id), NodeKind::Function | NodeKind::Method) {
+        return false;
+    }
+    let file = facts.file_of(id).unwrap_or_default();
+    let own = caller_owner.and_then(owner_key);
+    pick_owner(facts, id, file) != PickOwner::Free && (own.is_none() || own != facts.owner(id))
+}
+
+/// The first of `candidates` whose owner is a type every other candidate's
+/// owner inherits from or implements: one declaration and its overrides or
+/// implementations (`trait T { fn m(&self); }` beside `impl T for S`), so a
+/// call through any of them reaches that declaration. A candidate inherits
+/// through the declared supertypes of its owner, found by the owner's key
+/// across the project as owned lookups do; a Rust `impl` member implements
+/// the trait of its block whatever the block's self type (`impl T for
+/// Vec<u8>`, `impl<X> T for X`, a struct of another crate). `owner_of` is
+/// [`pick_owner`] for the candidates' file. `None` when no candidate is
+/// such a root, or when a candidate is free.
+pub fn hierarchy_root<'f, F: PickFacts + ?Sized>(
+    facts: &'f F,
+    candidates: &[u32],
+    owner_of: impl Fn(u32) -> PickOwner<'f>,
+) -> Option<u32> {
+    let types_of = |owner: PickOwner<'_>| match owner {
+        PickOwner::Type(owner) => facts.types_named(owner),
+        PickOwner::Free | PickOwner::Block(_) => Vec::new(),
+    };
+    let owners: Vec<PickOwner<'f>> = candidates.iter().map(|&id| owner_of(id)).collect();
+    let lineages: Vec<Vec<u32>> = owners
+        .iter()
+        .map(|&owner| {
+            types_of(owner)
+                .into_iter()
+                .flat_map(|ty| facts.ancestors(ty))
+                .collect()
+        })
+        .collect();
+    let root = (0..candidates.len()).find(|&i| {
+        let PickOwner::Type(root_owner) = owners[i] else {
+            return false;
+        };
+        let roots = types_of(owners[i]);
+        !roots.is_empty()
+            && (0..candidates.len()).all(|j| {
+                owners[j] == owners[i]
+                    || facts
+                        .impl_member(candidates[j])
+                        .and_then(|member| member.trait_owner)
+                        == Some(root_owner)
+                    || lineages[j].iter().any(|ty| roots.contains(ty))
+            })
+    })?;
+    Some(candidates[root])
+}
+
+/// A parsed declaration, as [`rust_impl_members`] reads it.
+pub trait ImplNode: HeritageNode {
+    fn name(&self) -> &str;
+    fn owner_class(&self) -> Option<&str>;
+}
+
+impl ImplNode for RawNode {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn owner_class(&self) -> Option<&str> {
+        self.owner_class.as_deref()
+    }
+}
+
+/// The `impl` block of every Rust method in `nodes`, the declarations of
+/// one file in source order: `note(member, block, implemented)` with
+/// `member` and `block` offsets into `nodes` (the block by the offset of
+/// any one of its nodes) and `implemented` the trait the block implements
+/// as written (`None` for an inherent `impl`).
+///
+/// A method inside an `Impl` node's span belongs to the innermost such
+/// block, which implements the trait the `Impl` node's owner names. The
+/// parser emits no `Impl` node for a self type that is no plain or generic
+/// type name (`impl T for &mut X`); a trait-impl method there still carries
+/// the trait as its heritage. Such methods form one block per run in
+/// source order of the same trait and owner, and a name the run already
+/// holds starts the next block: one `impl` block never declares a name
+/// twice. Two adjacent blocks of one trait with no shared name read as one
+/// block.
+pub fn rust_impl_members<'n, N: ImplNode>(
+    nodes: &'n [N],
+    mut note: impl FnMut(usize, usize, Option<&'n str>),
+) {
+    let contains = |outer: (u32, u32, u32, u32), inner: (u32, u32, u32, u32)| {
+        (outer.0, outer.1) <= (inner.0, inner.1) && (outer.2, outer.3) >= (inner.2, inner.3)
+    };
+    let impls: Vec<usize> = (0..nodes.len())
+        .filter(|&i| nodes[i].kind() == NodeKind::Impl)
+        .collect();
+    let mut orphans: Vec<usize> = Vec::new();
+    for (offset, node) in nodes.iter().enumerate() {
+        if !matches!(node.kind(), NodeKind::Method | NodeKind::Constructor) {
+            continue;
+        }
+        let block = impls
+            .iter()
+            .copied()
+            .filter(|&i| contains(nodes[i].span(), node.span()))
+            .min_by_key(|&i| {
+                let span = nodes[i].span();
+                (span.2.saturating_sub(span.0), span.3.saturating_sub(span.1))
+            });
+        match block {
+            Some(i) => note(offset, i, nodes[i].owner_class()),
+            None if !node.heritage().is_empty() => orphans.push(offset),
+            None => {}
+        }
+    }
+    orphans.sort_by_key(|&i| (nodes[i].span().0, nodes[i].span().1));
+    let mut run: Vec<&str> = Vec::new();
+    let mut block = 0usize;
+    let mut previous: Option<usize> = None;
+    for offset in orphans {
+        let node = &nodes[offset];
+        let same_run = previous.is_some_and(|p| {
+            nodes[p].heritage().first() == node.heritage().first()
+                && nodes[p].owner_class() == node.owner_class()
+        });
+        if !same_run || run.contains(&node.name()) {
+            run.clear();
+            block = offset;
+        }
+        run.push(node.name());
+        previous = Some(offset);
+        note(offset, block, node.heritage().first().map(String::as_str));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file of declarations: `(name, kind, owner, impl member)`, id = index.
+    #[derive(Default)]
+    struct Decls {
+        decls: Vec<(
+            &'static str,
+            NodeKind,
+            Option<&'static str>,
+            Option<ImplMember<'static>>,
+        )>,
+        namespaces: Vec<&'static str>,
+        /// `(type id, ancestors)`.
+        ancestors: Vec<(u32, Vec<u32>)>,
+    }
+
+    impl PickFacts for Decls {
+        fn pick_candidates(&self, _file: &str, name: &str) -> Cow<'_, [u32]> {
+            Cow::Owned(
+                (0..self.decls.len() as u32)
+                    .filter(|&id| self.decls[id as usize].0 == name)
+                    .collect(),
+            )
+        }
+        fn kind(&self, id: u32) -> NodeKind {
+            self.decls[id as usize].1
+        }
+        fn owner(&self, id: u32) -> Option<&str> {
+            self.decls[id as usize].2
+        }
+        fn impl_member(&self, id: u32) -> Option<ImplMember<'_>> {
+            self.decls[id as usize].3
+        }
+        fn is_namespace_owner(&self, _file: &str, owner: &str) -> bool {
+            self.namespaces.contains(&owner)
+        }
+        fn file_of(&self, _id: u32) -> Option<&str> {
+            Some("f")
+        }
+        fn types_named(&self, owner: &str) -> Vec<u32> {
+            (0..self.decls.len() as u32)
+                .filter(|&id| self.decls[id as usize].0 == owner && self.kind(id).is_type())
+                .collect()
+        }
+        fn ancestors(&self, ty: u32) -> Vec<u32> {
+            self.ancestors
+                .iter()
+                .find(|(t, _)| *t == ty)
+                .map_or_else(Vec::new, |(_, a)| a.clone())
+        }
+    }
+
+    const M: NodeKind = NodeKind::Method;
+    const CALLABLE: ResolveTarget = ResolveTarget::Callable;
+
+    fn untyped() -> PickScope {
+        PickScope {
+            untyped_receiver: true,
+            ..PickScope::default()
+        }
+    }
+
+    #[test]
+    fn test_prefer_owned_two_unrelated_owners_returns_none() {
+        let facts = Decls {
+            decls: vec![("m", M, Some("A"), None), ("m", M, Some("B"), None)],
+            ..Decls::default()
+        };
+        let pick = prefer_owned(
+            &facts,
+            "f",
+            0,
+            "m",
+            None,
+            &[],
+            CALLABLE,
+            PickScope::default(),
+        );
+        assert_eq!(pick, None);
+    }
+
+    #[test]
+    fn test_prefer_owned_caller_owner_member_returns_own() {
+        let facts = Decls {
+            decls: vec![("m", M, Some("A"), None), ("m", M, Some("B"), None)],
+            ..Decls::default()
+        };
+        let pick = prefer_owned(
+            &facts,
+            "f",
+            0,
+            "m",
+            Some("B"),
+            &[],
+            CALLABLE,
+            PickScope::default(),
+        );
+        assert_eq!(pick, Some(1));
+    }
+
+    #[test]
+    fn test_prefer_owned_free_function_beats_unrelated_member_returns_free() {
+        let facts = Decls {
+            decls: vec![
+                ("m", M, Some("A"), None),
+                ("m", NodeKind::Function, None, None),
+            ],
+            ..Decls::default()
+        };
+        let pick = prefer_owned(
+            &facts,
+            "f",
+            0,
+            "m",
+            Some("C"),
+            &[],
+            CALLABLE,
+            PickScope::default(),
+        );
+        assert_eq!(pick, Some(1));
+    }
+
+    #[test]
+    fn test_prefer_owned_namespace_owner_counts_as_free_returns_it() {
+        let facts = Decls {
+            decls: vec![
+                ("m", M, Some("A"), None),
+                ("m", NodeKind::Function, Some("ns"), None),
+            ],
+            namespaces: vec!["ns"],
+            ..Decls::default()
+        };
+        let pick = prefer_owned(
+            &facts,
+            "f",
+            0,
+            "m",
+            None,
+            &[],
+            CALLABLE,
+            PickScope::default(),
+        );
+        assert_eq!(pick, Some(1));
+    }
+
+    #[test]
+    fn test_prefer_owned_untyped_receiver_skips_free_and_own_type_returns_none() {
+        let facts = Decls {
+            decls: vec![
+                ("m", NodeKind::Function, None, None),
+                ("m", M, Some("A"), None),
+            ],
+            ..Decls::default()
+        };
+        assert_eq!(
+            prefer_owned(&facts, "f", 0, "m", None, &[], CALLABLE, untyped()),
+            Some(1)
+        );
+        assert_eq!(
+            prefer_owned(&facts, "f", 0, "m", Some("A"), &[], CALLABLE, untyped()),
+            None
+        );
+    }
+
+    #[test]
+    fn test_prefer_owned_impl_blocks_caller_block_returns_own_block_member() {
+        let block = |block| {
+            Some(ImplMember {
+                block,
+                trait_owner: Some("W"),
+            })
+        };
+        let facts = Decls {
+            decls: vec![
+                ("m", M, Some("Cursor"), block(10)),
+                ("run", M, Some("Cursor"), block(20)),
+                ("m", M, Some("Cursor"), block(20)),
+            ],
+            ..Decls::default()
+        };
+        let scope = PickScope {
+            caller: Some(1),
+            typed_receiver: true,
+            ..PickScope::default()
+        };
+        let pick = prefer_owned(
+            &facts,
+            "f",
+            0,
+            "m",
+            Some("Cursor"),
+            &[],
+            ResolveTarget::Method,
+            scope,
+        );
+        assert_eq!(pick, Some(2));
+    }
+
+    #[test]
+    fn test_prefer_owned_base_and_derived_returns_hierarchy_root() {
+        let facts = Decls {
+            decls: vec![
+                ("Base", NodeKind::Class, None, None),
+                ("Derived", NodeKind::Class, None, None),
+                ("m", M, Some("Derived"), None),
+                ("m", M, Some("Base"), None),
+            ],
+            ancestors: vec![(1, vec![0])],
+            ..Decls::default()
+        };
+        let pick = prefer_owned(&facts, "f", 2, "m", None, &[], CALLABLE, untyped());
+        assert_eq!(pick, Some(3));
+    }
+
+    #[test]
+    fn test_member_call_admits_free_namespace_own_or_constructor_returns_false() {
+        let facts = Decls {
+            decls: vec![
+                ("f", NodeKind::Function, None, None),
+                ("g", NodeKind::Function, Some("ns"), None),
+                ("m", M, Some("A"), None),
+                ("A", NodeKind::Constructor, Some("A"), None),
+            ],
+            namespaces: vec!["ns"],
+            ..Decls::default()
+        };
+        assert!(!member_call_admits(&facts, 0, None));
+        assert!(!member_call_admits(&facts, 1, None));
+        assert!(member_call_admits(&facts, 2, None));
+        assert!(!member_call_admits(&facts, 2, Some("A")));
+        assert!(!member_call_admits(&facts, 3, None));
+    }
+}

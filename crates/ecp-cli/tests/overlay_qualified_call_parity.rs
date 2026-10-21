@@ -19,11 +19,10 @@
 //! | JavaScript | typed receiver       | no parameter types; same-file `k.save()` stays unbound   |
 //! | Go         | static call          | Go has no static methods                                 |
 //! | C          | both                 | C has no methods                                         |
-//! | C++        | typed receiver, ref  | `K& k` is not typed; the bare name binds same-file (1.0) |
 //! | C++        | cross-file receiver  | `save` is declared in `k.h` and defined in `k.cpp`: ambiguous |
 //!
 //! Pairs the index already bound by name before this tier (PHP `$k->save()`,
-//! Ruby `k.save`, a Kotlin companion call, ...) stay in the fixtures as
+//! Ruby `k.save`, ...) stay in the fixtures as
 //! regression guards with their own confidence.
 
 #[path = "common/parity.rs"]
@@ -89,7 +88,7 @@ const FIXTURES: &[Fixture] = &[
         files: &[("app.py", "class K:\n    def save(self, id): pass\n    @staticmethod\n    def st(id): pass\n\nclass App:\n    def run(self, k: K):\n        k.save(1)\n        K.st(2)\n")],
         caller: "app.py",
         callee: None,
-        expected: &[("save", 0.85), ("st", 1.0)],
+        expected: &[("save", 0.85), ("st", 0.85)],
     },
     Fixture {
         label: "Python/cross-file",
@@ -99,7 +98,7 @@ const FIXTURES: &[Fixture] = &[
         ],
         caller: "app.py",
         callee: Some("k.py"),
-        expected: &[("save", 0.85), ("st", 0.7)],
+        expected: &[("save", 0.85), ("st", 0.85)],
     },
     // The reported repro: both calls dropped while `K.java` was dirty.
     Fixture {
@@ -124,7 +123,7 @@ const FIXTURES: &[Fixture] = &[
         files: &[("app.kt", "class K {\n fun save(id: Int) {}\n companion object {\n  fun st(id: Int) {}\n }\n}\nclass App {\n fun run(k: K) { k.save(1); K.st(2) }\n}\n")],
         caller: "app.kt",
         callee: None,
-        expected: &[("save", 0.85), ("st", 1.0)],
+        expected: &[("save", 0.85), ("st", 0.85)],
     },
     Fixture {
         label: "Kotlin/cross-file",
@@ -134,14 +133,14 @@ const FIXTURES: &[Fixture] = &[
         ],
         caller: "src/p/App.kt",
         callee: Some("src/p/K.kt"),
-        expected: &[("save", 0.85), ("st", 0.7)],
+        expected: &[("save", 0.85), ("st", 0.85)],
     },
     Fixture {
         label: "C#/same-file",
         files: &[("App.cs", "class K {\n public void save(int id) {}\n public static void st(int id) {}\n}\nclass App {\n void run(K k) { k.save(1); K.st(2); }\n}\n")],
         caller: "App.cs",
         callee: None,
-        expected: &[("save", 0.85), ("st", 1.0)],
+        expected: &[("save", 0.85), ("st", 0.85)],
     },
     Fixture {
         label: "C#/cross-file",
@@ -151,7 +150,7 @@ const FIXTURES: &[Fixture] = &[
         ],
         caller: "App.cs",
         callee: Some("K.cs"),
-        expected: &[("save", 0.85), ("st", 0.7)],
+        expected: &[("save", 0.85), ("st", 0.85)],
     },
     Fixture {
         label: "Go/same-file",
@@ -261,7 +260,7 @@ const FIXTURES: &[Fixture] = &[
         files: &[("app.swift", "class K {\n func save(id: Int) {}\n static func st(id: Int) {}\n}\nclass App {\n func run(k: K) { k.save(id: 1); K.st(id: 2) }\n}\n")],
         caller: "app.swift",
         callee: None,
-        expected: &[("save", 0.85), ("st", 1.0)],
+        expected: &[("save", 0.85), ("st", 0.85)],
     },
     Fixture {
         label: "Swift/cross-file",
@@ -271,14 +270,14 @@ const FIXTURES: &[Fixture] = &[
         ],
         caller: "App.swift",
         callee: Some("K.swift"),
-        expected: &[("save", 0.85), ("st", 0.7)],
+        expected: &[("save", 0.85), ("st", 0.85)],
     },
     Fixture {
         label: "C++/same-file",
         files: &[("app.cpp", "class K {\npublic:\n void save(int id) {}\n static void st(int id) {}\n};\nclass App {\n void run(K& k) { k.save(1); K::st(2); }\n};\n")],
         caller: "app.cpp",
         callee: None,
-        expected: &[("save", 1.0), ("st", 0.85)],
+        expected: &[("save", 0.85), ("st", 0.85)],
     },
     Fixture {
         label: "C++/pointer receiver",
@@ -303,7 +302,7 @@ const FIXTURES: &[Fixture] = &[
         files: &[("app.dart", "class K {\n void save(int id) {}\n static void st(int id) {}\n}\nclass App {\n void run(K k) { k.save(1); K.st(2); }\n}\n")],
         caller: "app.dart",
         callee: None,
-        expected: &[("save", 0.85), ("st", 1.0)],
+        expected: &[("save", 0.85), ("st", 0.85)],
     },
     Fixture {
         label: "Dart/cross-file",
@@ -313,7 +312,7 @@ const FIXTURES: &[Fixture] = &[
         ],
         caller: "lib/app.dart",
         callee: Some("lib/k.dart"),
-        expected: &[("save", 0.85), ("st", 0.7)],
+        expected: &[("save", 0.85), ("st", 0.85)],
     },
 ];
 

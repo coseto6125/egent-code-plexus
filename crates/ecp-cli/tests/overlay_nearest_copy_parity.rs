@@ -65,14 +65,7 @@ struct Copies {
 
 /// Fixtures whose overlay still differs from the reindex, with the reason.
 /// Asserted to differ, so closing one turns the test red until it goes.
-const LADDER: &str = "a qualified call into duplicated trees binds at the index's \
-                      receiver-typing ladder, which the overlay does not replay";
-const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
-    ("Java/qualified static call", LADDER),
-    ("PHP/static call", LADDER),
-    ("Ruby/constant call", LADDER),
-    ("C++/static member call", LADDER),
-];
+const KNOWN_DIVERGENCES: &[(&str, &str)] = &[];
 
 const COPIES: &[Copies] = &[
     Copies {

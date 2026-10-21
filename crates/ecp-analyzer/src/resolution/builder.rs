@@ -1297,70 +1297,12 @@ fn is_consumer_extension(path: &str) -> bool {
 
 /// Record the `impl` block of every Rust method in `nodes`, the raw nodes
 /// of one file whose ids start at `start`
-/// ([`SymbolTable::note_impl_member`]).
-///
-/// A method inside an `Impl` node's span belongs to the innermost such
-/// block, which implements the trait the `Impl` node's owner names (empty
-/// for an inherent `impl`). The parser emits no `Impl` node for a self type
-/// that is no plain or generic type name (`impl AsyncWrite for
-/// io::Cursor<Vec<u8>>`, `impl T for &mut X`); a trait-impl method there
-/// still carries the trait as its heritage. Such methods form one block
-/// per run in source order of the same trait and owner, and a name the run
-/// already holds starts the next block: one `impl` block never declares a
-/// name twice. Two adjacent blocks of one trait with no shared name read as
-/// one block.
+/// ([`SymbolTable::note_impl_member`]), by the rule the session overlay
+/// shares ([`ecp_core::analyzer::same_file_pick::rust_impl_members`]).
 fn note_rust_impl_members(symbol_table: &mut SymbolTable, nodes: &[RawNode], start: u32) {
-    let contains = |outer: (u32, u32, u32, u32), inner: (u32, u32, u32, u32)| {
-        (outer.0, outer.1) <= (inner.0, inner.1) && (outer.2, outer.3) >= (inner.2, inner.3)
-    };
-    let impls: Vec<usize> = (0..nodes.len())
-        .filter(|&i| nodes[i].kind == NodeKind::Impl)
-        .collect();
-    let mut orphans: Vec<usize> = Vec::new();
-    for (offset, node) in nodes.iter().enumerate() {
-        if !matches!(node.kind, NodeKind::Method | NodeKind::Constructor) {
-            continue;
-        }
-        let block = impls
-            .iter()
-            .copied()
-            .filter(|&i| contains(nodes[i].span, node.span))
-            .min_by_key(|&i| {
-                let span = nodes[i].span;
-                (span.2.saturating_sub(span.0), span.3.saturating_sub(span.1))
-            });
-        match block {
-            Some(i) => symbol_table.note_impl_member(
-                start + offset as u32,
-                start + i as u32,
-                nodes[i].owner_class.as_deref(),
-            ),
-            None if !node.heritage.is_empty() => orphans.push(offset),
-            None => {}
-        }
-    }
-    orphans.sort_by_key(|&i| (nodes[i].span.0, nodes[i].span.1));
-    let mut run: Vec<&str> = Vec::new();
-    let mut block = 0u32;
-    let mut previous: Option<usize> = None;
-    for offset in orphans {
-        let node = &nodes[offset];
-        let same_run = previous.is_some_and(|p| {
-            nodes[p].heritage.first() == node.heritage.first()
-                && nodes[p].owner_class == node.owner_class
-        });
-        if !same_run || run.contains(&node.name.as_str()) {
-            run.clear();
-            block = start + offset as u32;
-        }
-        run.push(&node.name);
-        previous = Some(offset);
-        symbol_table.note_impl_member(
-            start + offset as u32,
-            block,
-            node.heritage.first().map(String::as_str),
-        );
-    }
+    ecp_core::analyzer::same_file_pick::rust_impl_members(nodes, |member, block, implemented| {
+        symbol_table.note_impl_member(start + member as u32, start + block as u32, implemented)
+    });
 }
 
 /// Pass 1.5: Extract Routes.
