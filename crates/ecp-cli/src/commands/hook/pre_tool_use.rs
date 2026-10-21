@@ -114,9 +114,10 @@ enum Sep {
 
 /// Split a shell command at unquoted `;`, `&&`, `||`, `|`, `&` and newlines,
 /// each segment paired with the operator that ends it (`None` for the last).
-/// Every separator is ASCII, so the byte offsets stay on char boundaries for
-/// CJK paths.
-fn shell_segments(cmd: &str) -> Vec<(&str, Option<Sep>)> {
+/// `None` when a quote is left open: bash rejects the whole command. Every
+/// separator is ASCII, so the byte offsets stay on char boundaries for CJK
+/// paths.
+fn shell_segments(cmd: &str) -> Option<Vec<(&str, Option<Sep>)>> {
     let mut segments = Vec::new();
     let mut start = 0;
     let mut quote: Option<char> = None;
@@ -155,15 +156,18 @@ fn shell_segments(cmd: &str) -> Vec<(&str, Option<Sep>)> {
         start = chars.peek().map_or(cmd.len(), |&(next, _)| next);
     }
     segments.push((&cmd[start..], None));
-    segments
+    quote.is_none().then_some(segments)
 }
 
 /// Directory a Bash search runs in when a literal `cd <dir>` precedes the
 /// `rg` / `grep` segment: sessions working across repos keep the envelope cwd
-/// on another repo, so resolving from it finds no graph. The last valid `cd`
-/// wins; `cd -`, `$VAR` / `$(..)` / backtick paths, `~user`, a missing
-/// directory and a bare `cd` are ignored (no expansion, no shell spawn). The
-/// `contains("cd")` check keeps a command without `cd` at one substring scan.
+/// on another repo, so resolving from it finds no graph. `None` (the envelope
+/// cwd) whenever the directory is not certain: a cd that may not run in the
+/// search's shell, a target the hook cannot know without expanding it (`cd -`,
+/// `$VAR`, backticks, `~user`, options, a bare `cd`), a cwd-changing builtin
+/// other than cd, or an unbalanced quote. A cd to a missing directory fails
+/// and leaves the directory as it was. The `contains("cd")` check keeps a
+/// command without `cd` at one substring scan.
 fn cd_target(cmd: &str, cwd: &str) -> Option<String> {
     cd_target_with_home(cmd, cwd, std::env::var_os("HOME").as_deref().map(Path::new))
 }
@@ -174,30 +178,61 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>) -> Option<Stri
     }
     let mut current: Option<PathBuf> = None;
     let mut before = Some(Sep::Seq);
-    for (segment, after) in shell_segments(cmd) {
+    let mut depth = 0usize;
+    // After `cd x ||` succeeds, the `||` operand does not run; it ends at the
+    // next `;` or `&&` (`a || b && c` is `(a || b) && c`).
+    let mut skipping = false;
+    for (segment, after) in shell_segments(cmd)? {
         let words = shell_words(segment);
-        // `extract_from_shell` takes the first `rg` / `grep` word anywhere
-        // (`rtk proxy rg`, `git grep`), so the scan stops at the same word.
         if words.iter().any(|w| w == "rg" || w == "grep") {
+            // `extract_from_shell` takes the first `rg` / `grep` word anywhere
+            // (`rtk proxy rg`, `git grep`), so the scan stops at the same word.
             break;
         }
-        // A cd moves the search only when it surely runs in the search's
-        // shell: not in a pipeline or a background job, not after `||`, and
-        // after `&&` only inside an `&&` chain that the search belongs to.
-        let runs_here = match before {
-            Some(Sep::Seq) => matches!(after, None | Some(Sep::Seq | Sep::And)),
-            Some(Sep::And) => after == Some(Sep::And),
-            _ => false,
-        };
-        if runs_here && words.len() == 2 && words[0] == "cd" {
-            // A quoted `'~/x'` names a directory called `~`.
-            let tilde = segment
-                .trim_start()
-                .strip_prefix("cd")
-                .is_some_and(|rest| rest.trim_start().starts_with('~'));
-            let base = current.as_deref().unwrap_or(Path::new(cwd));
-            if let Some(dir) = resolve_cd_arg(&words[1], base, home, tilde) {
-                current = Some(dir);
+        let cmd_words: Vec<&str> = words
+            .iter()
+            .map(String::as_str)
+            .skip_while(|w| is_assignment(w))
+            .skip_while(|w| *w == "{")
+            .collect();
+        let opens = cmd_words.first().is_some_and(|w| w.starts_with('('));
+        let in_subshell = depth > 0 || opens;
+        depth += usize::from(opens);
+        depth = depth.saturating_sub(words.iter().filter(|w| w.ends_with(')')).count());
+        if skipping {
+            match after {
+                Some(Sep::Background) => return None,
+                None | Some(Sep::Seq | Sep::And) => skipping = false,
+                _ => {}
+            }
+        } else if !in_subshell {
+            match cmd_words.first().copied() {
+                Some(
+                    "pushd" | "popd" | "source" | "." | "eval" | "builtin" | "command" | "exec",
+                ) => return None,
+                Some("cd") => {
+                    let runs_here = match before {
+                        Some(Sep::Seq) => !matches!(after, Some(Sep::Pipe | Sep::Background)),
+                        Some(Sep::And) => after == Some(Sep::And),
+                        _ => false,
+                    };
+                    let [_, arg] = cmd_words[..] else { return None };
+                    if !runs_here {
+                        return None;
+                    }
+                    let base = current.as_deref().unwrap_or(Path::new(cwd));
+                    match resolve_cd_arg(arg, base, home, unquoted_tilde_arg(segment))? {
+                        Some(dir) => {
+                            current = Some(dir);
+                            skipping = after == Some(Sep::Or);
+                        }
+                        // The cd fails; `cd x || …` then runs its operand,
+                        // whose effect the hook does not model.
+                        None if after == Some(Sep::Or) => return None,
+                        None => {}
+                    }
+                }
+                _ => {}
             }
         }
         before = after;
@@ -205,8 +240,34 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>) -> Option<Stri
     current?.into_os_string().into_string().ok()
 }
 
-fn resolve_cd_arg(arg: &str, base: &Path, home: Option<&Path>, tilde: bool) -> Option<PathBuf> {
-    if arg.is_empty() || arg == "-" || arg.contains(['$', '`']) {
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        let mut chars = name.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// Whether the raw `cd` argument starts with an unquoted `~`: `'~/x'` and
+/// `"~"` name a directory called `~`.
+fn unquoted_tilde_arg(segment: &str) -> bool {
+    let mut raw = segment
+        .split_whitespace()
+        .skip_while(|w| is_assignment(w) || *w == "{");
+    raw.next() == Some("cd") && raw.next().is_some_and(|arg| arg.starts_with('~'))
+}
+
+/// `None` when the target cannot be known without expanding it, `Some(None)`
+/// when it names no directory (the cd fails), `Some(Some(dir))` otherwise.
+fn resolve_cd_arg(
+    arg: &str,
+    base: &Path,
+    home: Option<&Path>,
+    tilde: bool,
+) -> Option<Option<PathBuf>> {
+    if arg.is_empty() || arg.starts_with('-') || arg.contains(['$', '`']) {
         return None;
     }
     let path = match arg.strip_prefix('~').filter(|_| tilde) {
@@ -217,8 +278,7 @@ fn resolve_cd_arg(arg: &str, base: &Path, home: Option<&Path>, tilde: bool) -> O
         None if base.is_absolute() => base.join(arg),
         None => return None,
     };
-    let canonical = path.canonicalize().ok()?;
-    canonical.is_dir().then_some(canonical)
+    Some(path.canonicalize().ok().filter(|dir| dir.is_dir()))
 }
 
 fn extract_pattern(tool: &str, tool_input: &serde_json::Value) -> Option<String> {
@@ -463,6 +523,8 @@ mod tests {
             "cd $HOME && grep Foo .",
             "cd \"$(pwd)/x\" && grep Foo .",
             "cd `pwd` && grep Foo .",
+            "cd -P . && grep Foo .",
+            "cd . extra; grep Foo .",
         ] {
             assert_eq!(target(cmd, t.path()), None, "{cmd}");
         }
@@ -552,6 +614,69 @@ mod tests {
     }
 
     #[test]
+    fn test_cd_target_unknowable_cwd_change_falls_back() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir(t.path().join("x")).unwrap();
+        for cmd in [
+            "cd x; cd -; rg Foo",
+            "cd x; cd $D; rg Foo",
+            "pushd x; rg Foo",
+            "cd x; popd; rg Foo",
+            "cd x; source env.sh; rg Foo",
+            "cd x && grep \"Foo .",
+            "cd missing || cd x; rg Foo",
+            "cd x || true & rg Foo",
+        ] {
+            assert_eq!(target(cmd, t.path()), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_cd_target_or_operand_skipped_after_successful_cd() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir(t.path().join("x")).unwrap();
+        let want = Some(canon(&t.path().join("x")));
+        for cmd in [
+            "cd x || exit 1; rg Foo",
+            "cd x || false && rg Foo",
+            "cd x || { echo no; exit 1; }; rg Foo",
+        ] {
+            assert_eq!(target(cmd, t.path()), want, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_cd_target_assignments_and_groups_keep_cd() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir(t.path().join("x")).unwrap();
+        let want = Some(canon(&t.path().join("x")));
+        for cmd in [
+            "X=1; cd x && rg Foo",
+            "X=1 cd x && rg Foo",
+            "{ cd x; rg Foo; }",
+        ] {
+            assert_eq!(target(cmd, t.path()), want, "{cmd}");
+        }
+        for cmd in ["(cd x && make); rg Foo", "(make; cd x); rg Foo"] {
+            assert_eq!(target(cmd, t.path()), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_cd_target_quoted_tilde_in_search_does_not_block_leading_tilde() {
+        let h = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        assert_eq!(
+            cd_target_with_home(
+                "cd ~ && grep 'cd \"~\"' Foo .",
+                cwd.path().to_str().unwrap(),
+                Some(h.path())
+            ),
+            Some(canon(h.path()))
+        );
+    }
+
+    #[test]
     fn test_cd_target_cd_inside_quotes_is_not_a_segment() {
         let t = tempfile::tempdir().unwrap();
         let d = t.path().to_str().unwrap();
@@ -564,6 +689,7 @@ mod tests {
     #[test]
     fn test_shell_segments_splits_only_unquoted_separators() {
         let segs: Vec<(&str, Option<Sep>)> = shell_segments("cd 'a;b' && grep \"x|y\" . | head")
+            .unwrap()
             .into_iter()
             .map(|(s, sep)| (s.trim(), sep))
             .collect();
@@ -576,7 +702,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            shell_segments("make 2>&1 <&0 &>log >|f; x"),
+            shell_segments("make 2>&1 <&0 &>log >|f; x").unwrap(),
             [("make 2>&1 <&0 &>log >|f", Some(Sep::Seq)), (" x", None)]
         );
     }
