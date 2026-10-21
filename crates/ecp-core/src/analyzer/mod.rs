@@ -1,6 +1,7 @@
 pub mod heritage;
 pub mod import_binding;
 pub mod lang_spec;
+pub mod lexical;
 pub mod path_aliases;
 pub mod pipeline;
 pub mod provider;

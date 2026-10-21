@@ -6,6 +6,7 @@ use crate::resolution::heuristics::{ResolutionTier, NEAREST_COPY_CONFIDENCE, NEA
 use crate::resolution::index::{FileMeta, Language, ResolveTarget, SymbolTable};
 use crate::resolution::resolver::{ReexportIndex, Resolver};
 use crate::rust::module_tree::RustWorkspaceModTree;
+use ecp_core::analyzer::lexical::LexicalFunctions;
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::analyzer::reexport::{export_filter_applies, is_ecmascript, ImportRef};
@@ -1870,71 +1871,23 @@ fn emit_file_closure_references(
     }
 }
 
-/// Per-file lexical candidates. Parent discovery runs once, not once per call.
-#[derive(Default)]
-struct LexicalFunctionIndex {
-    by_name: FxHashMap<String, Vec<(Option<Span>, u32)>>,
-}
-
-impl LexicalFunctionIndex {
-    fn new(graph: &LocalGraph, start_index: u32) -> Self {
-        let mut index = Self::default();
-        if !matches!(
-            graph.file_path.extension().and_then(|ext| ext.to_str()),
-            Some("js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts")
-        ) {
-            return index;
-        }
-        if graph.nodes.iter().all(|node| node.calls.is_empty()) {
-            return index;
-        }
-        let (functions, parents) = callable_parents(graph);
-        for (k, &(offset, node)) in functions.iter().enumerate() {
-            if node.kind != NodeKind::Function {
-                continue;
-            }
-            let candidates = index.by_name.entry(node.name.clone()).or_default();
-            let parent = parents[k].map(|parent| functions[parent].1.span);
-            if parent.is_some() || node.owner_class.is_none() {
-                candidates.push((parent, start_index + offset as u32));
-            }
-        }
-        index
+/// The file's [`LexicalFunctions`]; a file without calls needs none.
+fn lexical_functions(graph: &LocalGraph, start_index: u32) -> LexicalFunctions {
+    if graph.nodes.iter().all(|node| node.calls.is_empty()) {
+        return LexicalFunctions::default();
     }
-
-    fn scope_size(scope: Option<Span>) -> (u32, i64) {
-        scope
-            .map(|span| (span.2 - span.0, span.3 as i64 - span.1 as i64))
-            .unwrap_or((u32::MAX, i64::MAX))
-    }
-
-    /// An empty result prevents fallback to an inaccessible or ambiguous closure.
-    fn targets(&self, caller: Span, callee: &str) -> Option<Vec<(u32, f32)>> {
-        if callee.contains(['.', ':']) {
-            return None;
-        }
-        let candidates = self.by_name.get(callee)?;
-        let mut best = None;
-        let mut ambiguous = false;
-        for &(scope, target) in candidates {
-            if scope.is_some_and(|span| !crate::framework_helpers::span_contains(span, caller)) {
-                continue;
-            }
-            let size = Self::scope_size(scope);
-            match best {
-                Some((best_size, _)) if size > best_size => {}
-                Some((best_size, _)) if size == best_size => ambiguous = true,
-                _ => {
-                    best = Some((size, target));
-                    ambiguous = false;
-                }
-            }
-        }
-        Some(match best {
-            Some((_, target)) if !ambiguous => vec![(target, 1.0)],
-            _ => Vec::new(),
-        })
-    }
+    LexicalFunctions::new(
+        &graph.file_path,
+        graph.nodes.iter().map(|node| {
+            (
+                node.kind,
+                node.name.as_str(),
+                node.owner_class.is_some(),
+                node.span,
+            )
+        }),
+        start_index,
+    )
 }
 
 /// Pass 1.9: declared supertypes, as `(type_id, base)` pairs in declared
@@ -2143,7 +2096,7 @@ fn pass2_emit_node_edges(
     symbol_table: &SymbolTable,
     edges: &mut Vec<Edge>,
     indirect_lookup: &FxHashMap<CallMetaKey, (u8, String)>,
-    lexical_lookup: &LexicalFunctionIndex,
+    lexical_lookup: &LexicalFunctions,
     pending_call_metas: &mut Vec<(usize, u8, String)>,
 ) {
     for base in &raw_node.heritage {
@@ -2486,7 +2439,7 @@ fn pass2_resolve_edges(
         let mut current_node_idx = 0u32;
         for (graph_idx, local_graph) in local_graphs.iter().enumerate() {
             let lookup = &indirect_lookups[graph_idx];
-            let lexical_lookup = LexicalFunctionIndex::new(local_graph, start_indices[graph_idx]);
+            let lexical_lookup = lexical_functions(local_graph, start_indices[graph_idx]);
             // T7-6: per-file skip set. `None` = no diff data → resolve all.
             let file_skip = symbol_skip_ref.and_then(|m| {
                 let raw = local_graph.file_path.to_string_lossy();
@@ -2581,7 +2534,7 @@ fn pass2_resolve_edges(
                 }
                 let start_idx = start_indices[graph_idx];
                 let lookup = &indirect_lookups[graph_idx];
-                let lexical_lookup = LexicalFunctionIndex::new(local_graph, start_idx);
+                let lexical_lookup = lexical_functions(local_graph, start_idx);
                 let mut local_edges: Vec<Edge> = Vec::new();
                 let mut local_pending: Vec<(usize, u8, String)> = Vec::new();
                 // T7-6: per-file skip set lookup (parallel path).

@@ -1059,6 +1059,22 @@ fn test_build_typescript_duplicate_uid_same_file_call_stays_unresolved() {
 }
 
 #[test]
+fn test_build_typescript_nested_namesake_out_of_scope_binds_import() {
+    // The nested `helper` is out of `useIt`'s scope: the index's lexical
+    // tier leaves only the import, never the file's own declaration.
+    assert_calls(
+        &ecp_analyzer::typescript::TypeScriptProvider::new().unwrap(),
+        &[TS_HELPER, ("src/b.ts", TS_IMPORTER)],
+        &[(
+            "src/b.ts",
+            "import { helper } from './a';\nexport function outer() { function helper() {} }\nexport function useIt() { return helper(); }\n",
+        )],
+        "useIt",
+        &[("src/a.ts", "helper", "", 95)],
+    );
+}
+
+#[test]
 fn test_build_typescript_duplicate_uid_import_scoped_binds_first() {
     assert_calls(
         &ecp_analyzer::typescript::TypeScriptProvider::new().unwrap(),
