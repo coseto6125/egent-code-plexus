@@ -10,7 +10,12 @@
 //!   the query. The call site `receiver.name()` uses the same `obj.foo()`
 //!   lookup path.
 //!
-//! Falls back to the bare method name for unresolved receivers.
+//! - `Name.foo()` where `Name` is no local, parameter, import or property
+//!   of an enclosing type → [`CallSite::from_receiver`]: the resolver binds
+//!   `Name.foo` when `Name` names a type (a same-package `object` or class,
+//!   a companion's owner), else resolves the bare member
+//!
+//! Falls back to the bare method name for other unresolved receivers.
 
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_kotlin_string_value,
@@ -18,7 +23,7 @@ use super::path_literals::{
 use crate::calls::{
     attach_to_enclosing, node_range, range_width, span_holds, span_width, start_pos, Pos, PosRange,
 };
-use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -51,10 +56,21 @@ impl LocalTypes {
         best.or_else(|| self.imports.get(var).map(String::as_str))
             .filter(|ty| !ty.is_empty())
     }
+
+    /// Whether a function or class scope holding `pos` declares `var`,
+    /// typed or not, or an import binds it.
+    fn binds(&self, pos: Pos, var: &str) -> bool {
+        self.imports.contains_key(var)
+            || self
+                .scopes
+                .iter()
+                .any(|((start, end), map)| *start <= pos && pos <= *end && map.contains_key(var))
+    }
 }
 
 /// Walk every `function_declaration`, collecting typed parameters and local
-/// `property_declaration` nodes (which represent `val`/`var` declarations).
+/// `property_declaration` nodes (which represent `val`/`var` declarations),
+/// and every class's primary-constructor parameters.
 fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
     let mut scopes: Vec<(PosRange, HashMap<String, String>)> = Vec::new();
     let mut imports = HashMap::new();
@@ -86,6 +102,31 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
                 imports.insert(binding.to_string(), binding.to_string());
             }
             continue;
+        }
+        if n.kind() == "class_declaration" {
+            // Primary-constructor parameters are in scope for the whole
+            // class body; a `val` / `var` one is also a property, which no
+            // Property node records.
+            let mut map: HashMap<String, String> = HashMap::new();
+            let mut c = n.walk();
+            for ctor in n.children(&mut c) {
+                if ctor.kind() != "primary_constructor" {
+                    continue;
+                }
+                let mut pc = ctor.walk();
+                for param in ctor.children(&mut pc) {
+                    let mut ic = param.walk();
+                    let name = param
+                        .children(&mut ic)
+                        .find(|child| child.kind() == "simple_identifier");
+                    if let Some(name) = name.and_then(|name| name.utf8_text(source).ok()) {
+                        map.insert(name.to_string(), String::new());
+                    }
+                }
+            }
+            if !map.is_empty() {
+                scopes.push((node_range(n), map));
+            }
         }
         if n.kind() == "function_declaration" {
             let scope = node_range(n);
@@ -248,6 +289,11 @@ fn kotlin_callee(
                     let var =
                         std::str::from_utf8(&source[receiver.start_byte()..receiver.end_byte()])
                             .ok()?;
+                    // Only a name no scope, import or enclosing type binds
+                    // may be a type, which the resolver decides.
+                    if !locals.binds(pos, var) && !declares_member(nodes, pos, var) {
+                        return Some(CallSite::from_receiver(var, method));
+                    }
                     locals.lookup(pos, var).map(str::to_string)
                 }
                 _ => None,
@@ -317,6 +363,27 @@ pub fn extract_kotlin_calls_and_path_literals(
         }
     }
     (path_literals, sql_refs)
+}
+
+/// Whether a type enclosing `pos` declares a property `name`. A nested
+/// type's members count for the whole outer type: that only keeps more
+/// calls on the bare member.
+fn declares_member(nodes: &[RawNode], pos: Pos, name: &str) -> bool {
+    let is_type = |n: &RawNode| {
+        matches!(
+            n.kind,
+            NodeKind::Class | NodeKind::Interface | NodeKind::Enum
+        )
+    };
+    nodes
+        .iter()
+        .filter(|m| m.kind == NodeKind::Property && m.name == name)
+        .any(|m| {
+            let at = (m.span.0, m.span.1);
+            nodes
+                .iter()
+                .any(|t| is_type(t) && span_holds(t.span, pos) && span_holds(t.span, at))
+        })
 }
 
 fn enclosing_class_name(nodes: &[RawNode], pos: Pos) -> Option<String> {

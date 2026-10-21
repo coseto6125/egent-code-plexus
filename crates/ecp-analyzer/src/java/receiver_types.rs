@@ -6,6 +6,9 @@
 //!   class's `heritage` list (if present), otherwise `"super"`
 //! - `obj.foo()` → receiver is the declared type of `obj`, collected from
 //!   local variable declarations and typed method parameters in scope
+//! - `new T(..).foo()`, `new T<X>(){..}.foo()`, `outer.new Inner().foo()`,
+//!   `((T) o).foo()` → receiver is the created or cast type `T`, written as
+//!   a simple (possibly generic) class name
 //!
 //! Falls back to the bare method name for unresolved receivers, matching
 //! the prior behavior of the generic `extract_calls` helper.
@@ -214,8 +217,12 @@ fn java_callee(
                 )
             }
             // A computed receiver (`a.b().m()`, `this.f.m()`): the member is
-            // never a static import's name.
-            _ => return Some(CallSite::untyped_member(method_name)),
+            // never a static import's name. Its type is known only when a
+            // `new` or a cast spells it.
+            _ => match expression_type(obj, source) {
+                Some(ty) => Some(ty.to_string()),
+                None => return Some(CallSite::untyped_member(method_name)),
+            },
         }
     } else {
         None
@@ -225,6 +232,29 @@ fn java_callee(
         Some(ty) => format!("{ty}.{method_name}"),
         None => method_name.to_string(),
     })
+}
+
+/// The type an expression receiver has by its syntax alone: the type a
+/// `new` creates (`new T<X>(){..}` → `T`; `outer.new Inner()` → `Inner`) or
+/// a cast names, through parentheses. Only a simple class name, generic
+/// arguments cut: a qualified `new a.b.T()` names a package path, which
+/// must not land on a project `T`, so it stays untyped.
+fn expression_type<'s>(expr: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    match expr.kind() {
+        "parenthesized_expression" => expression_type(expr.named_child(0)?, source),
+        "object_creation_expression" | "cast_expression" => {
+            let ty = expr.child_by_field_name("type")?;
+            let name = match ty.kind() {
+                "type_identifier" => ty,
+                "generic_type" => ty
+                    .named_child(0)
+                    .filter(|n| n.kind() == "type_identifier")?,
+                _ => return None,
+            };
+            name.utf8_text(source).ok()
+        }
+        _ => None,
+    }
 }
 
 /// Walk the AST once, extracting `method_invocation` /

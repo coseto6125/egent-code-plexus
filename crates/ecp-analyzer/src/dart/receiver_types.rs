@@ -11,15 +11,24 @@
 //!   `initialized_variable_definition` with a single `type_identifier`
 //!   annotation → `Type.method`.
 //!
-//! Scope: P0 simple identifier types only. Generic / function / nullable
-//! types fall back to the bare member name.
+//! - `Name.method()` where `Name` is no local, parameter, import prefix or
+//!   field of an enclosing type → [`CallSite::from_receiver`]: the resolver
+//!   binds `Name.method` when `Name` names a type (`Util.make()`), else
+//!   resolves the bare member.
+//!
+//! `obj?.method()` reads its receiver as `obj.method()` does. Scope: P0
+//! simple identifier types only. Generic / function / nullable types fall
+//! back to the bare member name.
 
 use super::path_literals::{
     build_raw_path_literal, has_template_substitution, strip_dart_string_value,
 };
-use crate::calls::{attach_to_enclosing, node_range, range_width, start_pos, Pos, PosRange};
-use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
-use std::collections::HashMap;
+use crate::calls::{
+    attach_to_enclosing, node_range, range_width, span_holds, start_pos, Pos, PosRange,
+};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::graph::NodeKind;
+use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
 // `(start_line, end_line)` half-open span keyed scope tables. The tuple-of-
@@ -28,10 +37,13 @@ use tree_sitter::Node;
 type FnScope = (PosRange, HashMap<String, String>);
 type ClassScope = (PosRange, (String, Option<String>));
 
+/// A declared name whose type is unknown maps to `""` in its scope.
 #[derive(Debug, Default)]
 pub struct DartBindings {
     fn_scopes: Vec<FnScope>,
     class_scopes: Vec<ClassScope>,
+    /// `import '..' as p;` prefixes: `p.f()` names a library member.
+    prefixes: HashSet<String>,
 }
 
 impl DartBindings {
@@ -71,10 +83,20 @@ impl DartBindings {
 pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> DartBindings {
     let mut fn_scopes: Vec<FnScope> = Vec::new();
     let mut class_scopes: Vec<ClassScope> = Vec::new();
+    let mut prefixes: HashSet<String> = HashSet::new();
 
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
+            "import_specification" => {
+                if let Some(alias) = n
+                    .child_by_field_name("alias")
+                    .and_then(|alias| alias.utf8_text(source).ok())
+                {
+                    prefixes.insert(alias.to_string());
+                }
+                continue;
+            }
             "class_declaration" | "mixin_declaration" => {
                 if let Some((name, sup)) = dart_class_name_and_super(n, source) {
                     let span = node_range(n);
@@ -101,6 +123,7 @@ pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> DartBindings {
     DartBindings {
         fn_scopes,
         class_scopes,
+        prefixes,
     }
 }
 
@@ -169,8 +192,14 @@ fn collect_typed_dart_params(fn_node: Node<'_>, source: &[u8], out: &mut HashMap
                     }
                 }
             }
-            if let (Some(n), Some(t)) = (name, ty) {
-                out.insert(n, t);
+            match (name, ty) {
+                (Some(n), Some(t)) => {
+                    out.insert(n, t);
+                }
+                (Some(n), None) => {
+                    out.entry(n).or_default();
+                }
+                _ => {}
             }
             continue;
         }
@@ -212,8 +241,14 @@ fn collect_typed_dart_locals(fn_node: Node<'_>, source: &[u8], out: &mut HashMap
                     }
                 }
             }
-            if let (Some(n), Some(t)) = (name, ty) {
-                out.insert(n, t);
+            match (name, ty) {
+                (Some(n), Some(t)) => {
+                    out.insert(n, t);
+                }
+                (Some(n), None) => {
+                    out.entry(n).or_default();
+                }
+                _ => {}
             }
         }
         let mut c = n.walk();
@@ -237,7 +272,7 @@ pub fn extract_dart_calls_and_path_literals(
     while let Some(n) = stack.pop() {
         match n.kind() {
             "call_expression" => {
-                if let Some(callee) = dart_callee_name(n, source, bindings) {
+                if let Some(callee) = dart_callee_name(n, source, bindings, nodes) {
                     attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
@@ -273,7 +308,12 @@ pub fn extract_dart_calls_and_path_literals(
     (path_literals, sql_refs)
 }
 
-fn dart_callee_name(call: Node<'_>, source: &[u8], bindings: &DartBindings) -> Option<String> {
+fn dart_callee_name(
+    call: Node<'_>,
+    source: &[u8],
+    bindings: &DartBindings,
+    nodes: &[RawNode],
+) -> Option<String> {
     let function = call.child_by_field_name("function")?;
     let pos = start_pos(call);
 
@@ -281,7 +321,7 @@ fn dart_callee_name(call: Node<'_>, source: &[u8], bindings: &DartBindings) -> O
         "identifier" => std::str::from_utf8(&source[function.start_byte()..function.end_byte()])
             .ok()
             .map(str::to_string),
-        "member_expression" => {
+        "member_expression" | "null_aware_member_expression" => {
             let prop = function.child_by_field_name("property")?;
             let method = std::str::from_utf8(&source[prop.start_byte()..prop.end_byte()]).ok()?;
             let obj = function.child_by_field_name("object")?;
@@ -297,11 +337,15 @@ fn dart_callee_name(call: Node<'_>, source: &[u8], bindings: &DartBindings) -> O
                     }
                 }
                 "identifier" => {
-                    if let Ok(var) = std::str::from_utf8(&source[obj.start_byte()..obj.end_byte()])
-                    {
-                        if let Some(ty) = bindings.lookup_local(pos, var) {
-                            return Some(format!("{ty}.{method}"));
-                        }
+                    let var = obj.utf8_text(source).ok()?;
+                    match bindings.lookup_local(pos, var) {
+                        Some("") => {}
+                        Some(ty) => return Some(format!("{ty}.{method}")),
+                        None if bindings.prefixes.contains(var)
+                            || declares_member(nodes, pos, var) => {}
+                        // Only a name no scope, prefix or enclosing type
+                        // binds may be a type, which the resolver decides.
+                        None => return Some(CallSite::from_receiver(var, method)),
                     }
                 }
                 _ => {}
@@ -312,4 +356,25 @@ fn dart_callee_name(call: Node<'_>, source: &[u8], bindings: &DartBindings) -> O
             .ok()
             .map(str::to_string),
     }
+}
+
+/// Whether a type enclosing `pos` declares a field `name`. A nested type's
+/// members count for the whole outer type: that only keeps more calls on
+/// the bare member.
+fn declares_member(nodes: &[RawNode], pos: Pos, name: &str) -> bool {
+    let is_type = |n: &RawNode| {
+        matches!(
+            n.kind,
+            NodeKind::Class | NodeKind::Trait | NodeKind::Enum | NodeKind::Interface
+        )
+    };
+    nodes
+        .iter()
+        .filter(|m| m.kind == NodeKind::Property && m.name == name)
+        .any(|m| {
+            let at = (m.span.0, m.span.1);
+            nodes
+                .iter()
+                .any(|t| is_type(t) && span_holds(t.span, pos) && span_holds(t.span, at))
+        })
 }

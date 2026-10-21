@@ -10,6 +10,12 @@
 //! single-identifier type annotations (`Apple`, not `dict[str, Apple]`).
 //! Generic / subscripted / forward-reference types are skipped — the
 //! call falls back to the bare member name as before.
+//!
+//! A receiver that names a class of the same file and no import or local
+//! binds (`Util.make()`) emits `Util.make`, as a typed receiver does. It
+//! cannot reuse [`CallSite::from_receiver`]: for Python that site means a
+//! `from`-imported name, which the resolver binds by its bare member when
+//! the name is no submodule, through the caller's own type and bases.
 
 use super::path_literals::build_raw_path_literal;
 use crate::calls::{
@@ -17,7 +23,8 @@ use crate::calls::{
 };
 use crate::framework_helpers::strip_python_string_quotes;
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
-use std::collections::HashMap;
+use ecp_core::graph::NodeKind;
+use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
 /// Map of nested function scopes (by position range) to their var→type bindings.
@@ -65,16 +72,22 @@ impl LocalTypes {
             return None;
         }
         let name = root.utf8_text(source).ok()?;
-        if self.shadows.iter().any(|((start, end), names)| {
+        if self.shadowed(receiver, name) {
+            return None;
+        }
+        self.imported.get(name).copied()
+    }
+
+    /// Whether a function scope enclosing `receiver` binds `name` (a
+    /// parameter, or an assignment before `receiver`).
+    fn shadowed(&self, receiver: Node<'_>, name: &str) -> bool {
+        self.shadows.iter().any(|((start, end), names)| {
             *start <= receiver.start_byte()
                 && receiver.end_byte() <= *end
                 && names
                     .get(name)
                     .is_some_and(|assigned| *assigned <= receiver.start_byte())
-        }) {
-            return None;
-        }
-        self.imported.get(name).copied()
+        })
     }
 }
 
@@ -302,11 +315,16 @@ pub fn extract_python_calls_and_path_literals(
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
+    let classes: HashSet<String> = nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Enum))
+        .map(|n| n.name.clone())
+        .collect();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
             "call" => {
-                if let Some(callee) = python_callee_name(n, source, locals) {
+                if let Some(callee) = python_callee_name(n, source, locals, &classes) {
                     if let Some(site) = attach_to_enclosing(start_pos(n), callee, nodes) {
                         call_sites.insert(n.id(), site);
                     }
@@ -384,7 +402,13 @@ fn enclosing_symbol_and_owner(
     (function_name, owner)
 }
 
-fn python_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Option<String> {
+/// `classes`: the names of the classes this file declares.
+fn python_callee_name(
+    call: Node<'_>,
+    source: &[u8],
+    locals: &LocalTypes,
+    classes: &HashSet<String>,
+) -> Option<String> {
     let function = call.child_by_field_name("function")?;
     match function.kind() {
         "identifier" => std::str::from_utf8(&source[function.start_byte()..function.end_byte()])
@@ -434,7 +458,17 @@ fn python_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Opt
                         ));
                     }
                     Some(ImportedBinding::Symbol) => {}
-                    None => return Some(CallSite::untyped_member(attr_name)),
+                    None => {
+                        let class = (obj.kind() == "identifier")
+                            .then(|| obj.utf8_text(source).ok())
+                            .flatten()
+                            .filter(|name| classes.contains(*name))
+                            .filter(|name| !locals.shadowed(obj, name));
+                        return Some(match class {
+                            Some(class) => format!("{class}.{attr_name}"),
+                            None => CallSite::untyped_member(attr_name),
+                        });
+                    }
                 }
             }
             Some(attr_name.to_string())

@@ -1,8 +1,11 @@
-use super::receiver_types::{collect_bindings, extract_swift_calls_and_path_literals};
+use super::receiver_types::{
+    collect_bindings, extended_type_name, extract_swift_calls_and_path_literals,
+};
 use super::spec::SwiftSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    detect_ast_framework_patterns, node_span, push_blind_spot, FrameworkPatternSpec,
+    detect_ast_framework_patterns, node_span, push_blind_spot, span_area, span_contains,
+    FrameworkPatternSpec, Span,
 };
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
@@ -631,6 +634,7 @@ impl LanguageProvider for SwiftProvider {
         let raw_function_metas =
             crate::function_meta::swift::extract(tree.root_node(), source, &nodes, file_category);
 
+        stamp_member_owners(tree.root_node(), source, &mut nodes);
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         Ok(LocalGraph {
             content_hash: [0; 8],
@@ -652,6 +656,62 @@ impl LanguageProvider for SwiftProvider {
             raw_function_metas,
             export_aliases: None,
         })
+    }
+}
+
+/// Stamp every member with the type whose body declares it, before the
+/// shared span stamp runs. That stamp sees neither an `extension` (it emits
+/// no type node) nor an `enum` (its span stamps only variants), so their
+/// members came out ownerless and every same-file pick took them for free
+/// functions. The tightest enclosing type or extension wins: a type nested
+/// in an extension keeps its own members.
+fn stamp_member_owners(root: tree_sitter::Node<'_>, source: &[u8], nodes: &mut [RawNode]) {
+    let mut containers: Vec<(Span, String)> = nodes
+        .iter()
+        .filter(|n| {
+            matches!(
+                n.kind,
+                NodeKind::Class
+                    | NodeKind::Struct
+                    | NodeKind::Enum
+                    | NodeKind::Interface
+                    | NodeKind::Trait
+            )
+        })
+        .map(|n| (n.span, n.name.clone()))
+        .collect();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "function_body" | "lambda_literal" => continue,
+            "class_declaration" if swift_decl_keyword(n) == "extension" => {
+                let extended = n
+                    .child_by_field_name("name")
+                    .and_then(|name| extended_type_name(name, source));
+                if let Some(extended) = extended {
+                    containers.push((node_span(&n), extended.to_string()));
+                }
+            }
+            _ => {}
+        }
+        let mut c = n.walk();
+        stack.extend(n.named_children(&mut c));
+    }
+    if containers.is_empty() {
+        return;
+    }
+    for node in nodes.iter_mut().filter(|n| {
+        n.owner_class.is_none()
+            && matches!(
+                n.kind,
+                NodeKind::Method | NodeKind::Function | NodeKind::Constructor | NodeKind::Property
+            )
+    }) {
+        node.owner_class = containers
+            .iter()
+            .filter(|(span, _)| *span != node.span && span_contains(*span, node.span))
+            .min_by_key(|(span, _)| span_area(*span))
+            .map(|(_, name)| name.clone());
     }
 }
 

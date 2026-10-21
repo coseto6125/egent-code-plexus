@@ -11,21 +11,33 @@
 //!   `property_declaration` with `type_annotation` whose annotation is a
 //!   single `type_identifier`.
 //!
+//! Any other member call keeps its receiver kind for the resolver, so an
+//! `x.m()` never binds the caller's own `m` the way an implicit-self `m()`
+//! does:
+//!
+//! - an untyped local, parameter, closure parameter or property of the
+//!   enclosing type, and any computed receiver (`a.b().m()`, `self.x.m()`)
+//!   → [`CallSite::untyped_member`];
+//! - an identifier that is none of these (`Util.make()`) →
+//!   [`CallSite::from_receiver`]: the resolver binds `Util.make` when
+//!   `Util` names a type, else resolves the bare member.
+//!
 //! Scope: P0 only handles simple-identifier types. Generic / optional /
-//! tuple / function types are skipped — the call falls back to the bare
-//! member name as before.
+//! tuple / function types are skipped — such a receiver is untyped.
 
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_swift_string_value,
 };
 use crate::calls::{attach_to_enclosing, node_range, range_width, start_pos, Pos, PosRange};
-use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
 use tree_sitter::Node;
 
 /// Per-function-scope local var → type map, plus the enclosing class /
 /// super-class lookup for `self` / `super`. Scope is keyed by row-span so
 /// nested closures inherit outer-scope types via smallest-containing-scope.
+/// A declared name whose type is unknown maps to `""`.
 // `(start_line, end_line)` half-open span keyed scope tables.
 type FnScope = (PosRange, HashMap<String, String>);
 type ClassScope = (PosRange, (String, Option<String>));
@@ -54,6 +66,23 @@ impl SwiftBindings {
             }
         }
         best
+    }
+
+    /// Whether the type enclosing `pos` declares a property `name` in this
+    /// file, in its own body or in any extension of it.
+    fn declares_member(&self, nodes: &[RawNode], pos: Pos, name: &str) -> bool {
+        let Some((owner, _)) = self.enclosing_class(pos) else {
+            return false;
+        };
+        nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Property && n.name == name)
+            .any(|n| {
+                let at = (n.span.0, n.span.1);
+                self.class_scopes
+                    .iter()
+                    .any(|((start, end), (ty, _))| ty == owner && *start <= at && at <= *end)
+            })
     }
 
     fn enclosing_class(&self, pos: Pos) -> Option<&(String, Option<String>)> {
@@ -94,6 +123,7 @@ pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> SwiftBindings {
                 if let Some(body) = n.child_by_field_name("body") {
                     collect_typed_swift_properties(body, source, &mut map);
                 }
+                collect_declared_swift_names(n, source, &mut map);
                 if !map.is_empty() {
                     fn_scopes.push((span, map));
                 }
@@ -127,14 +157,7 @@ fn swift_class_name_and_super(node: Node<'_>, source: &[u8]) -> Option<(String, 
             }
             "user_type" if name.is_none() => {
                 // Extension: `extension Apple { ... }` puts name inside user_type.
-                if let Some(ti) = child.named_child(0) {
-                    if ti.kind() == "type_identifier" {
-                        if let Ok(s) = std::str::from_utf8(&source[ti.start_byte()..ti.end_byte()])
-                        {
-                            name = Some(s.to_string());
-                        }
-                    }
-                }
+                name = extended_type_name(child, source).map(str::to_string);
             }
             "inheritance_specifier" if sup.is_none() => {
                 // First named child is the parent type. Extract a type_identifier
@@ -168,8 +191,66 @@ fn swift_class_name_and_super(node: Node<'_>, source: &[u8]) -> Option<(String, 
     name.map(|n| (n, sup))
 }
 
+/// The type an `extension` names: the last segment of its `user_type`
+/// (`extension Outer.Keyed` → `Keyed`, `extension Array<Int>` → `Array`),
+/// matching the simple name its nested declaration owns members under.
+pub(super) fn extended_type_name<'s>(user_type: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    if user_type.kind() == "type_identifier" {
+        return user_type.utf8_text(source).ok();
+    }
+    let mut last = None;
+    let mut c = user_type.walk();
+    for child in user_type.named_children(&mut c) {
+        if child.kind() == "type_identifier" {
+            last = Some(child);
+        }
+    }
+    last?.utf8_text(source).ok()
+}
+
+/// Every name `fn_node` declares, typed or not, mapped to `""` unless a
+/// typed collector already recorded its type: parameters (the internal
+/// name, not the argument label), closure parameters, `let` / `var` and
+/// `if let` / `guard let` / `for` / `catch` / `case let` bindings. Nested
+/// functions keep their own scope; closures share the enclosing one.
+fn collect_declared_swift_names(
+    fn_node: Node<'_>,
+    source: &[u8],
+    out: &mut HashMap<String, String>,
+) {
+    let mut stack: Vec<Node<'_>> = vec![fn_node];
+    while let Some(n) = stack.pop() {
+        let mut c = n.walk();
+        if !c.goto_first_child() {
+            continue;
+        }
+        loop {
+            let child = c.node();
+            let binds = child.kind() == "simple_identifier"
+                && match (n.kind(), c.field_name()) {
+                    ("parameter" | "lambda_parameter", Some("name")) => true,
+                    (_, Some("bound_identifier")) => true,
+                    ("pattern", None) => true,
+                    _ => false,
+                };
+            if binds {
+                if let Ok(name) = child.utf8_text(source) {
+                    out.entry(name.to_string()).or_default();
+                }
+            }
+            if !matches!(child.kind(), "function_declaration" | "init_declaration") {
+                stack.push(child);
+            }
+            if !c.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+}
+
 /// Walk the function's children for `parameter` nodes. Swift `parameter`
-/// shape: `simple_identifier (name) : user_type/type_identifier (type)`.
+/// shape: `simple_identifier (external_name)? simple_identifier (name) :
+/// user_type/type_identifier (type)`; the binding is the `name` one.
 fn collect_typed_swift_params(fn_node: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
     let mut stack: Vec<Node<'_>> = vec![fn_node];
     while let Some(n) = stack.pop() {
@@ -181,7 +262,7 @@ fn collect_typed_swift_params(fn_node: Node<'_>, source: &[u8], out: &mut HashMa
             let mut id: Option<&str> = None;
             let mut ty: Option<&str> = None;
             let mut c = n.walk();
-            for child in n.children(&mut c) {
+            for child in n.children_by_field_name("name", &mut c) {
                 match child.kind() {
                     "simple_identifier" if id.is_none() => {
                         id =
@@ -324,7 +405,7 @@ pub fn extract_swift_calls_and_path_literals(
     while let Some(n) = stack.pop() {
         match n.kind() {
             "call_expression" => {
-                if let Some(callee) = swift_callee_name(n, source, bindings) {
+                if let Some(callee) = swift_callee_name(n, source, bindings, nodes) {
                     attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
@@ -353,7 +434,12 @@ pub fn extract_swift_calls_and_path_literals(
     (path_literals, sql_refs)
 }
 
-fn swift_callee_name(call: Node<'_>, source: &[u8], bindings: &SwiftBindings) -> Option<String> {
+fn swift_callee_name(
+    call: Node<'_>,
+    source: &[u8],
+    bindings: &SwiftBindings,
+    nodes: &[RawNode],
+) -> Option<String> {
     // The callee is the first non-call-suffix named child of `call_expression`.
     let target = first_named_where(call, |ch| ch.kind() != "call_suffix")?;
     let pos = start_pos(call);
@@ -372,34 +458,42 @@ fn swift_callee_name(call: Node<'_>, source: &[u8], bindings: &SwiftBindings) ->
                 std::str::from_utf8(&source[suffix_id.start_byte()..suffix_id.end_byte()]).ok()?;
 
             // Determine the receiver: the first named target child of nav_expr
-            // (everything before the navigation_suffix).
-            let receiver = first_named_where(target, |ch| ch.kind() != "navigation_suffix");
-
-            if let Some(recv) = receiver {
-                match recv.kind() {
-                    "self_expression" => {
-                        if let Some((cls, _)) = bindings.enclosing_class(pos) {
-                            return Some(format!("{cls}.{method}"));
+            // (everything before the navigation_suffix). `o?.m()` keeps `o`.
+            let Some(recv) = first_named_where(target, |ch| ch.kind() != "navigation_suffix")
+            else {
+                return Some(method.to_string());
+            };
+            let enclosing = || bindings.enclosing_class(pos);
+            Some(match recv.kind() {
+                // `self.m()` / `super.m()` reach the caller's own type, like
+                // an implicit-self `m()`.
+                "self_expression" => match enclosing() {
+                    Some((cls, _)) => format!("{cls}.{method}"),
+                    None => method.to_string(),
+                },
+                "super_expression" => match enclosing() {
+                    Some((_, Some(sup))) => format!("{sup}.{method}"),
+                    _ => method.to_string(),
+                },
+                "simple_identifier" => {
+                    let var = recv.utf8_text(source).ok()?;
+                    match (var, bindings.lookup_local(pos, var)) {
+                        ("Self", None) => match enclosing() {
+                            Some((cls, _)) => format!("{cls}.{method}"),
+                            None => method.to_string(),
+                        },
+                        (_, Some("")) => CallSite::untyped_member(method),
+                        (_, Some(ty)) => format!("{ty}.{method}"),
+                        // `$0`: a closure's implicit parameter.
+                        (_, None) if var.starts_with('$') => CallSite::untyped_member(method),
+                        (_, None) if bindings.declares_member(nodes, pos, var) => {
+                            CallSite::untyped_member(method)
                         }
+                        (_, None) => CallSite::from_receiver(var, method),
                     }
-                    "super_expression" => {
-                        if let Some((_, Some(sup))) = bindings.enclosing_class(pos) {
-                            return Some(format!("{sup}.{method}"));
-                        }
-                    }
-                    "simple_identifier" => {
-                        if let Ok(var) =
-                            std::str::from_utf8(&source[recv.start_byte()..recv.end_byte()])
-                        {
-                            if let Some(ty) = bindings.lookup_local(pos, var) {
-                                return Some(format!("{ty}.{method}"));
-                            }
-                        }
-                    }
-                    _ => {}
                 }
-            }
-            Some(method.to_string())
+                _ => CallSite::untyped_member(method),
+            })
         }
         _ => None,
     }

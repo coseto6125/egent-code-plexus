@@ -9,14 +9,17 @@
 //! - `Constant.method` — a constant-named receiver (singleton method on a
 //!   known class) → receiver = `Constant.method`
 //!
-//! All other `expr.method` calls fall back to the bare method name (existing
-//! behaviour via `extract_calls`).
+//! A receiver rooted in a constant (`Shop::Item.save`, `Shop::Item.new.save`)
+//! or a top-level `self` keeps the bare method name. Any other receiver
+//! (`obj.method`, `obj&.method`, `a.b.method`) is untyped and emits
+//! [`CallSite::untyped_member`], so the call never binds the caller's own
+//! or inherited `method` the way an implicit-self `method` does.
 
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, extract_ruby_string_value,
 };
 use crate::calls::{attach_to_enclosing, range_width, start_pos, Pos, PosRange};
-use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use tree_sitter::Node;
 
@@ -123,15 +126,39 @@ fn ruby_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Option<Stri
                     .map(|s| s.trim_start_matches("::").to_string()),
                 _ => infer_receiver_type(receiver, source, ctx, pos),
             };
-            if let Some(inferred_type) = receiver_type {
-                Some(format!("{inferred_type}.{method_name}"))
-            } else {
-                // Bare name fallback.
-                Some(method_name.to_string())
-            }
+            Some(match receiver_type {
+                Some(inferred_type) => format!("{inferred_type}.{method_name}"),
+                None if is_type_rooted(receiver, source) => method_name.to_string(),
+                None => CallSite::untyped_member(method_name),
+            })
         }
     }
 }
+
+/// Whether `node` is `self`, a constant, or a chain of the constructor-like
+/// calls [`infer_receiver_type`] follows on one (`Shop::Item.new`): a
+/// receiver whose method the bare name resolves as before.
+fn is_type_rooted(node: Node<'_>, source: &[u8]) -> bool {
+    match node.kind() {
+        "self" | "constant" | "scope_resolution" => true,
+        "call" => {
+            node.child_by_field_name("method")
+                .and_then(|m| m.utf8_text(source).ok())
+                .is_some_and(|m| TYPE_PRESERVING_METHODS.contains(&m))
+                && node
+                    .child_by_field_name("receiver")
+                    .is_some_and(|receiver| is_type_rooted(receiver, source))
+        }
+        _ => false,
+    }
+}
+
+/// Calls whose result [`infer_receiver_type`] takes to be an instance or
+/// relation of their receiver's type (`Item.new`, `Item.where(..)`).
+const TYPE_PRESERVING_METHODS: &[&str] = &[
+    "new", "create", "create!", "find", "find_by", "find_by!", "where", "includes", "joins",
+    "first", "last", "order", "limit", "offset",
+];
 
 fn infer_receiver_type(
     node: Node<'_>,
@@ -146,17 +173,10 @@ fn infer_receiver_type(
             let method_node = node.child_by_field_name("method")?;
             let method_name = method_node.utf8_text(source).ok()?;
 
-            match method_name {
-                "new" | "create" | "create!" | "find" | "find_by" | "find_by!" | "where"
-                | "includes" | "joins" | "first" | "last" | "order" | "limit" | "offset" => {
-                    if let Some(inner) = node.child_by_field_name("receiver") {
-                        infer_receiver_type(inner, source, ctx, pos)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
+            if !TYPE_PRESERVING_METHODS.contains(&method_name) {
+                return None;
             }
+            infer_receiver_type(node.child_by_field_name("receiver")?, source, ctx, pos)
         }
         _ => None,
     }
