@@ -405,7 +405,8 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
     for (i, (&(segment, after), words)) in segments.iter().zip(&words).enumerate() {
         if Some(i) == search {
             if subshell > 0 && subshell_moves
-                || groups.contains(&true) && moves_after_search
+                // `until grep -q x f; do cd ..; done` searches in its condition.
+                || (groups.contains(&true) || compounds[i].0.contains(&true)) && moves_after_search
                 || cd_depth > 0 && cd_depth >= groups.len() && switches_branch(words)
             {
                 return CdTarget::Unknown;
@@ -1365,6 +1366,7 @@ mod tests {
             "if false; then true; cd x; fi; rg Foo",
             "while true; do true; cd x; rg Foo; done",
             "for d in a b; do rg Foo; cd x; done",
+            "cd x &&\nuntil grep -q '^w' Cargo.toml 2>&1; do\n  cd .. || exit 1\ndone",
             "if test -f /dev/null; then\n  cd x\nelse rg Foo .\nfi",
             "if false; then\n  cd x\nelse\n  true; rg Foo .\nfi",
             "case a in\nb)\n  cd x;;\na) rg Foo;;\nesac",
