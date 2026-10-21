@@ -1942,7 +1942,7 @@ class PostController
 fn test_build_fetch_reaches_any_route_for_laravel_verb_only() {
     let tmp = tempfile::tempdir().unwrap();
     let client = "async function load() {\n  await fetch('/ping', { method: 'POST' });\n  await fetch('/pong', { method: 'TRACE' });\n}\n";
-    std::fs::write(tmp.path().join("client.ts"), &client).unwrap();
+    std::fs::write(tmp.path().join("client.ts"), client).unwrap();
     let routes = routes_file("Route::any('/ping', 'C@m');\nRoute::any('/pong', 'C@m');");
     let php = PhpProvider::new().unwrap();
     let ts = ecp_analyzer::typescript::parser::TypeScriptProvider::new().unwrap();

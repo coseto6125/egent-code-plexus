@@ -123,7 +123,7 @@ enum Sep {
 /// each segment paired with the operator that ends it (`None` for the last).
 /// A segment stops before an unquoted `#` that starts a word: the comment's
 /// text runs to the newline and holds no operator, quote or group. A
-/// `${...}` expansion is one opaque run.
+/// `${...}` expansion with no quote or escape inside is one opaque run.
 /// `None` when a quote or `${` is left open, since bash rejects the whole
 /// command, and for a heredoc, whose body the split does not model. Every
 /// separator is ASCII, so the byte offsets stay on char boundaries for CJK
@@ -151,6 +151,9 @@ fn shell_segments(cmd: &str) -> Option<Vec<(&str, Option<Sep>)>> {
                     match chars.next()?.1 {
                         '{' => depth += 1,
                         '}' => depth -= 1,
+                        // A quote or escape inside the expansion moves its
+                        // end; the split does not model that.
+                        '\'' | '"' | '\\' | '`' => return None,
                         _ => {}
                     }
                 }
@@ -841,6 +844,7 @@ mod tests {
         for cmd in [
             "cat <<EOF\n( # )\nEOF\ncd x; rg Foo",
             "echo ${v:-a; cd x; rg Foo",
+            "echo ${v:-'}; cd x; #'}; rg Foo",
         ] {
             assert_eq!(target(cmd, t.path()), Unknown, "{cmd:?}");
         }
