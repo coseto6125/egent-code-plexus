@@ -44,7 +44,10 @@ use std::path::Path;
 /// default <expression>` is an ES module, and each `graph.bin` TS / JS
 /// re-export import row keeps the file its specifier resolved to
 /// (`ImportFact::target_file`).
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema11");
+/// schema12: tree-sitter 0.27 recovers some files with syntax errors into
+/// different trees than 0.26 did, so a parse of the same source can yield
+/// different symbols (nlohmann `json.hpp` gains a friend `operator<`).
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema12");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
