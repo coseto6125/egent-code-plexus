@@ -71,7 +71,17 @@ fn compute_search_hits(input: &HookInput) -> Option<String> {
         return None;
     }
     let lines = format_hits(&hits);
-    (!lines.is_empty()).then_some(lines)
+    if lines.is_empty() {
+        return None;
+    }
+    // Hits from the repo a leading `cd` names: the agent's own cwd is
+    // another repo, and its paths are relative to this one.
+    Some(match &cd {
+        CdTarget::Dir(dir) => {
+            lines.replacen(HITS_HEADER, &format!("ecp graph hits in {dir}:\n"), 1)
+        }
+        _ => lines,
+    })
 }
 
 /// Render hits as a legacy-style multi-line block. Each symbol gets a
@@ -126,8 +136,7 @@ enum Sep {
 /// `${...}` expansion with no brace, quote or escape inside is one opaque
 /// run.
 /// `None` when a quote or `${` is left open, since bash rejects the whole
-/// command, and for a heredoc or a line continuation, which the split does
-/// not model. Every
+/// command, and for a heredoc, whose body the split does not model. Every
 /// separator is ASCII, so the byte offsets stay on char boundaries for CJK
 /// paths.
 fn shell_segments(cmd: &str) -> Option<Vec<(&str, Option<Sep>)>> {
@@ -175,11 +184,7 @@ fn shell_segments(cmd: &str) -> Option<Vec<(&str, Option<Sep>)>> {
                 continue;
             }
             (Some('"'), '\\') | (None, '\\') => {
-                // A line continuation joins two words; the split does not
-                // model the join.
-                if chars.next().is_some_and(|(_, n)| n == '\n') {
-                    return None;
-                }
+                chars.next();
                 continue;
             }
             (Some(_), _) => continue,
@@ -249,6 +254,13 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
     if !cmd.contains("cd") && !CWD_BUILTINS.iter().any(|b| cmd.contains(b)) {
         return CdTarget::Unchanged;
     }
+    let joined;
+    let cmd = if cmd.contains("\\\n") {
+        joined = join_continuations(cmd);
+        joined.as_str()
+    } else {
+        cmd
+    };
     let Some(segments) = shell_segments(cmd) else {
         return CdTarget::Unknown;
     };
@@ -308,9 +320,12 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
         // not model may still run the command in this shell. A later `.`
         // alone is mostly a path argument (`git add .`).
         let moves = |w: &&str| *w == "cd" || CWD_BUILTINS.contains(w);
-        let prefixed = cmd_words.first().is_some_and(|w| PREFIX_WORDS.contains(w));
+        let after_prefix = cmd_words
+            .iter()
+            .position(|w| !PREFIX_WORDS.contains(w))
+            .unwrap_or(cmd_words.len());
         if own_shell
-            && (prefixed && cmd_words.iter().any(moves)
+            && (after_prefix > 0 && cmd_words.get(after_prefix).is_some_and(moves)
                 || cmd_words.iter().skip(1).any(|w| *w != "." && moves(w)))
         {
             return CdTarget::Unknown;
@@ -379,6 +394,33 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
             .and_then(|dir| dir.into_os_string().into_string().ok())
             .map_or(CdTarget::Unknown, CdTarget::Dir),
     }
+}
+
+/// `cmd` with every backslash-newline outside single quotes removed, as
+/// bash joins a continued line before it splits words.
+fn join_continuations(cmd: &str) -> String {
+    let mut out = String::with_capacity(cmd.len());
+    let mut chars = cmd.chars().peekable();
+    let mut quote = None;
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some('\''), '\'') | (Some('"'), '"') => quote = None,
+            (None, '\'' | '"') => quote = Some(c),
+            (None | Some('"'), '\\') => {
+                if chars.next_if_eq(&'\n').is_some() {
+                    continue;
+                }
+                out.push(c);
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Unquoted `(` / `)` and word `{` / `}` in one segment, as
@@ -928,7 +970,6 @@ mod tests {
             "cd x; ! . /dev/stdin <<< \"cd /\"; rg Foo",
             "cd x; time . env.sh; rg Foo",
             "cd x; cd /u?r; rg Foo",
-            "cd x; cd /u\\\nsr; rg Foo",
             "cd x; set -P; cd ..; rg Foo",
             "cd x; set -o physical; cd ..; rg Foo",
         ] {
@@ -957,6 +998,22 @@ mod tests {
         let go = |cmd: &str| cd_target_with_home(cmd, t.path().to_str().unwrap(), None, true);
         assert_eq!(go("cd x; rg Foo"), Unknown);
         assert_eq!(go("cd ./x; rg Foo"), dir(&t.path().join("x")));
+    }
+
+    #[test]
+    fn test_cd_target_line_continuation_and_prefixed_dot_argument_resolve() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir(t.path().join("x")).unwrap();
+        let want = dir(&t.path().join("x"));
+        for cmd in [
+            "cd x && \\\nrg Foo",
+            "cd \\\nx; rg Foo",
+            "cd x && time git diff -- .; rg Foo",
+            // Single quotes keep the backslash-newline: the cd fails.
+            "cd x; cd 'x\\\ny'; rg Foo",
+        ] {
+            assert_eq!(target(cmd, t.path()), want, "{cmd:?}");
+        }
     }
 
     #[test]
