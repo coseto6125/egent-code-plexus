@@ -6,7 +6,7 @@
 
 use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{CallSite, RawNode};
 use ecp_core::graph::NodeKind;
 
 fn parse(src: &str) -> Vec<RawNode> {
@@ -95,13 +95,14 @@ fn typed_local_binds_receiver_type() {
 }
 
 #[test]
-fn unannotated_var_falls_back_to_bare_name() {
+fn unannotated_var_falls_back_to_untyped_member() {
     let src = include_str!("fixtures/receiver_types.swift");
     let nodes = parse(src);
     let calls = calls_of(&nodes, "useNoAnnotation");
+    let untyped = CallSite::untyped_member("peel");
     assert!(
-        calls.iter().any(|c| c == "peel"),
-        "without annotation must keep bare `peel`; got {:?}",
+        calls.iter().any(|c| *c == untyped),
+        "without annotation must keep an untyped `peel`; got {:?}",
         calls,
     );
     assert!(

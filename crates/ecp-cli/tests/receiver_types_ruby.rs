@@ -7,7 +7,7 @@
 
 use ecp_analyzer::ruby::parser::RubyProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{CallSite, RawNode};
 use ecp_core::graph::NodeKind;
 
 fn parse(src: &str) -> Vec<RawNode> {
@@ -63,13 +63,14 @@ fn self_in_different_class_binds_correctly() {
 #[test]
 fn self_does_not_bind_in_module_singleton_method() {
     // `Trainer.train` is a singleton method — the receiver `animal` is not `self`,
-    // so it falls back to the bare method name `speak`.
+    // so it falls back to an untyped member call `speak`.
     let src = include_str!("fixtures/receiver_types.rb");
     let nodes = parse(src);
     let calls = calls_of(&nodes, "train");
+    let untyped = CallSite::untyped_member("speak");
     assert!(
-        calls.iter().any(|c| c == "speak"),
-        "animal.speak in Trainer.train must fall back to bare `speak`; got {:?}",
+        calls.iter().any(|c| *c == untyped),
+        "animal.speak in Trainer.train must fall back to an untyped `speak`; got {:?}",
         calls,
     );
     assert!(
