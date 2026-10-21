@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.16.0 - 2026-10-21
+
+### Bug Fixes
+
+- Laravel handlers/prefixes/middleware, PHP/Python flow, overlay parity, hook cd target (#853)
+
 ## v0.15.0 - 2026-10-15
 
 ### Bug Fixes
