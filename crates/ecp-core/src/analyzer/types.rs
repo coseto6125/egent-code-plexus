@@ -385,8 +385,11 @@ impl RawRoute {
     /// class registers it: `__construct` (`$this->middleware('auth')`),
     /// `middleware` (an entry of the static `HasMiddleware::middleware()`),
     /// or `parent::__construct` for a constructor that runs its parent's,
-    /// which carries no middleware. `scope.only` / `scope.except` hold the
-    /// method filter.
+    /// which carries no middleware. `__construct?` and `middleware?` mark a
+    /// registration the parser cannot read (reason after a space), and
+    /// `extends` / `implements` / `use` carry the class's parent, interfaces
+    /// and traits (fully qualified name after a space).
+    /// `scope.only` / `scope.except` hold the method filter.
     pub const CONTROLLER_MIDDLEWARE: &'static str = "CONTROLLER_MIDDLEWARE";
 }
 

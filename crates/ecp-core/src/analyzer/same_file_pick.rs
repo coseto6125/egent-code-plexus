@@ -214,12 +214,39 @@ pub fn prefer_owned<F: PickFacts + ?Sized>(
     } else {
         candidates().next()?
     };
-    owner
+    let owned_by = |wanted: &str| candidates().find(|&id| facts.owner(id) == Some(wanted));
+    // A base's own member stands only when no base declared before it
+    // reaches the member through its ancestors: `D(B, C)` with `B(A)`
+    // resolves to `A.m`, not `C.m`, in Python's method resolution order.
+    let inherits_member = |base: &str| {
+        let above: Vec<u32> = facts
+            .types_named(base)
+            .into_iter()
+            .flat_map(|ty| facts.ancestors(ty))
+            .collect();
+        candidates().any(|id| {
+            facts
+                .owner(id)
+                .is_some_and(|o| facts.types_named(o).iter().any(|t| above.contains(t)))
+        })
+    };
+    let bases: Vec<&str> = heritage.iter().filter_map(|base| owner_key(base)).collect();
+    // `Some(None)`: a base owns the member but an earlier base may shadow it.
+    let lineage = owner
         .filter(|_| !untyped)
-        .into_iter()
-        .chain(heritage.iter().filter_map(|base| owner_key(base)))
-        .find_map(|wanted| candidates().find(|&id| facts.owner(id) == Some(wanted)))
-        .or_else(|| match owner.filter(|_| scope.qualifier_is_type) {
+        .and_then(owned_by)
+        .map(Some)
+        .or_else(|| {
+            bases.iter().enumerate().find_map(|(at, &base)| {
+                owned_by(base).map(|id| {
+                    (!bases[..at].iter().any(|&earlier| inherits_member(earlier))).then_some(id)
+                })
+            })
+        });
+    let found = if let Some(found) = lineage {
+        found
+    } else {
+        match owner.filter(|_| scope.qualifier_is_type) {
             Some(owner) => {
                 let ownerless = |id: u32| facts.kind(id) == NodeKind::Method && is_free(facts, id);
                 Some(pick)
@@ -237,8 +264,9 @@ pub fn prefer_owned<F: PickFacts + ?Sized>(
                         .then_some(pick)
                 })
                 .or_else(|| hierarchy_root(facts, &candidates().collect::<Vec<_>>(), owner_of)),
-        })
-        .filter(|&id| !untyped || owner.is_none() || owner != facts.owner(id))
+        }
+    };
+    found.filter(|&id| !untyped || owner.is_none() || owner != facts.owner(id))
 }
 
 /// The one of `candidates` that a supertype of the type `owner` declares,
