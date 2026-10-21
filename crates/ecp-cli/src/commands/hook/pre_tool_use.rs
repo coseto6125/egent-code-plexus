@@ -247,6 +247,9 @@ const CWD_BUILTINS: [&str; 8] = [
 /// Git options that move the directory `git grep` searches.
 const GIT_DIR_OPTIONS: [&str; 3] = ["-C", "--git-dir", "--work-tree"];
 
+/// Environment variables that move the directory `git grep` searches.
+const GIT_DIR_ENV: [&str; 2] = ["GIT_DIR=", "GIT_WORK_TREE="];
+
 /// The characters after which a `#` starts a comment.
 const METACHARS: [char; 10] = [' ', '\t', '\n', ';', '&', '|', '(', ')', '<', '>'];
 
@@ -272,7 +275,10 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
     // off the segment parser.
     if !cmd.contains("cd")
         && !CWD_BUILTINS.iter().any(|b| cmd.contains(b))
-        && !GIT_DIR_OPTIONS.iter().any(|o| cmd.contains(o))
+        && !GIT_DIR_OPTIONS
+            .iter()
+            .chain(&GIT_DIR_ENV)
+            .any(|o| cmd.contains(o))
     {
         return CdTarget::Unchanged;
     }
@@ -288,21 +294,27 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
     let search = words
         .iter()
         .position(|w| (0..w.len()).any(|j| runs_search(w, j)));
-    // `git -C dir grep` searches `dir`, which the cd walk does not track.
-    let git_moves_grep = |words: &[String]| {
-        let Some(j) = (0..words.len()).find(|&j| runs_search(words, j)) else {
+    // `git -C dir grep` and `GIT_WORK_TREE=dir git grep` search `dir`, which
+    // the cd walk does not track.
+    let git_moves_grep = |k: usize| {
+        let segment = &words[k];
+        let Some(j) = (0..segment.len()).find(|&j| runs_search(segment, j)) else {
             return false;
         };
-        words[..j]
+        segment[..j]
             .iter()
             .rposition(|w| w == "git")
             .is_some_and(|g| {
-                words[g + 1..j]
+                segment[g + 1..j]
                     .iter()
                     .any(|w| GIT_DIR_OPTIONS.iter().any(|o| w.starts_with(o)))
+                    || words[..=k]
+                        .iter()
+                        .flatten()
+                        .any(|w| GIT_DIR_ENV.iter().any(|e| w.starts_with(e)))
             })
     };
-    if search.is_some_and(|k| git_moves_grep(&words[k])) {
+    if search.is_some_and(git_moves_grep) {
         return CdTarget::Unknown;
     }
     let marks: Vec<_> = segments.iter().map(|&(s, _)| group_marks(s)).collect();
@@ -978,6 +990,16 @@ fn extract_from_shell(cmd: &str) -> Option<String> {
             found_cmd = runs_search(&words, i);
             continue;
         }
+        // `--regexp=PATTERN` and `-ePATTERN` carry the pattern in the word.
+        let glued = word
+            .strip_prefix("--regexp=")
+            .or_else(|| word.strip_prefix("-e").filter(|p| !p.is_empty()));
+        if let Some(pattern) = glued.filter(|_| !next_is_pattern) {
+            if pattern.len() >= 3 {
+                return Some(pattern.to_string());
+            }
+            continue;
+        }
         if word.starts_with('-') && !next_is_pattern {
             if word == "-e" || word == "--regexp" {
                 next_is_pattern = true;
@@ -1373,6 +1395,8 @@ mod tests {
             "m=$(cd x && rg -l Foo .)",
             "m=`cd x && rg -l Foo .`",
             "git -C x grep -n Foo",
+            "GIT_WORK_TREE=/x git grep -n Foo",
+            "export GIT_DIR=/x/.git; git grep Foo",
             "scan() {\n  rg -n Foo src | head\n}\ncd x && scan",
             "function scan { rg -n Foo src; }; cd x && scan",
             "scan () { rg Foo; }; cd x; scan",
@@ -1436,6 +1460,8 @@ mod tests {
             "cd grep && rg -n HookInput src",
             "rg --version && cd /tmp && rg -n HookInput src",
             "rg 2>/dev/null HookInput src",
+            "rg -n --regexp=HookInput src/a.rs",
+            "grep -rn -eHookInput src",
             "grep -rn HookInput>/tmp/out .",
             "cd /a\nrg -n -m 1 HookInput src\ncd /b\nrg --files -g x.rs | xargs grep -n other_name",
             "grep -V; grep -rn HookInput .",
