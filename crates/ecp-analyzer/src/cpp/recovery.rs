@@ -17,6 +17,7 @@
 
 use ecp_core::analyzer::types::RawNode;
 use ecp_core::graph::NodeKind;
+use rustc_hash::FxHashMap;
 
 /// Keywords an attribute-like macro line can precede.
 const DECL_KEYWORDS: &[&[u8]] = &[
@@ -117,20 +118,29 @@ fn skip_directive(s: &[u8], mut i: usize) -> usize {
 }
 
 /// Whether the first word after `i`, past comments and other macro names,
-/// is one of [`DECL_KEYWORDS`].
-fn next_word_is_decl_keyword(s: &[u8], mut i: usize) -> bool {
-    loop {
+/// is one of [`DECL_KEYWORDS`]. `memo` holds the answer at each position a
+/// previous walk started from or passed a macro name at: a run of macro
+/// lines shares one walk, so the scan of a file stays linear.
+fn next_word_is_decl_keyword(s: &[u8], mut i: usize, memo: &mut FxHashMap<usize, bool>) -> bool {
+    let mut passed: Vec<usize> = Vec::new();
+    let answer = loop {
+        if let Some(&known) = memo.get(&i) {
+            break known;
+        }
+        passed.push(i);
         i = skip_trivia(s, i);
         let j = ident_end(s, i);
         if j == i {
-            return false;
+            break false;
         }
         let word = &s[i..j];
         if !is_macro_name(word) {
-            return DECL_KEYWORDS.contains(&word);
+            break DECL_KEYWORDS.contains(&word);
         }
         i = j;
-    }
+    };
+    memo.extend(passed.into_iter().map(|at| (at, answer)));
+    answer
 }
 
 /// `source` with every macro name that opens a line and precedes a
@@ -138,6 +148,7 @@ fn next_word_is_decl_keyword(s: &[u8], mut i: usize) -> bool {
 /// The `#define` line itself and its continuation lines never qualify.
 pub fn blank_decl_prefix_macros(source: &[u8]) -> Option<Vec<u8>> {
     let mut patched: Option<Vec<u8>> = None;
+    let mut memo: FxHashMap<usize, bool> = FxHashMap::default();
     let mut line_start = 0;
     while line_start < source.len() {
         let end = line_end(source, line_start);
@@ -158,7 +169,7 @@ pub fn blank_decl_prefix_macros(source: &[u8]) -> Option<Vec<u8>> {
             && source
                 .get(j)
                 .is_some_and(|&b| b.is_ascii_whitespace() || b == b'/')
-            && next_word_is_decl_keyword(source, j);
+            && next_word_is_decl_keyword(source, j, &mut memo);
         if qualifies {
             patched.get_or_insert_with(|| source.to_vec())[i..j].fill(b' ');
         }
@@ -656,4 +667,28 @@ pub fn stamp_lexical_owners(
         node.owner_class = Some(class.name.clone());
     }
     added
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_blank_decl_prefix_macros_macro_before_class_blanks_macro() {
+        let patched = blank_decl_prefix_macros(b"JSON_API\nclass X {};\n").unwrap();
+        assert_eq!(patched, b"        \nclass X {};\n");
+    }
+
+    /// 50k macro lines: each line's lookahead walks the rest of the run,
+    /// which a walk per line made quadratic.
+    #[test]
+    fn test_blank_decl_prefix_macros_long_macro_run_blanks_every_line() {
+        let run = "FOO_BAR\n".repeat(50_000);
+        let class = format!("{run}class X {{}};\n");
+        let patched = blank_decl_prefix_macros(class.as_bytes()).unwrap();
+        assert!(!patched.windows(7).any(|w| w == b"FOO_BAR"));
+        assert_eq!(patched.len(), class.len());
+        let other = format!("{run}int x;\n");
+        assert_eq!(blank_decl_prefix_macros(other.as_bytes()), None);
+    }
 }

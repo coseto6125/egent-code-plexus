@@ -38,9 +38,11 @@ pub struct CppBindings {
     /// `std::string s`): it still hides a same-name field.
     fn_scopes: Vec<(PosRange, FxHashMap<String, String>)>,
     /// Class bodies, and out-of-class member definitions under their
-    /// qualifier (`void Foo::bar() {}` → `Foo`).
+    /// qualifier (`void Foo::bar() {}` → `Foo`), each by its path of
+    /// enclosing namespaces and classes (`a::Foo`).
     class_scopes: Vec<(PosRange, String)>,
-    /// Typed data members per class name, wherever the class declares them.
+    /// Typed data members per class path (`a::Foo`), wherever the class
+    /// declares them: two namespaces' `Foo` keep their own fields.
     class_fields: FxHashMap<String, FxHashMap<String, String>>,
 }
 
@@ -76,8 +78,20 @@ impl CppBindings {
     }
 
     fn field_type(&self, pos: Pos, field: &str) -> Option<&str> {
-        let class = self.enclosing_class(pos)?;
-        self.class_fields.get(class)?.get(field).map(String::as_str)
+        let path = self.enclosing_class_path(pos)?;
+        let fields = self.class_fields.get(path).or_else(|| {
+            // A definition that names its class by less of the path
+            // (`using namespace a; void Foo::bar() {}`) reads the fields of
+            // the one class of that name, if the file declares only one.
+            let name = last_segment(path);
+            let mut same = self
+                .class_fields
+                .iter()
+                .filter(|(key, _)| last_segment(key) == name);
+            let (_, fields) = same.next()?;
+            same.next().is_none().then_some(fields)
+        })?;
+        fields.get(field).map(String::as_str)
     }
 
     fn lookup_local(&self, pos: Pos, var: &str) -> Option<&str> {
@@ -98,6 +112,10 @@ impl CppBindings {
     }
 
     fn enclosing_class(&self, pos: Pos) -> Option<&str> {
+        self.enclosing_class_path(pos).map(last_segment)
+    }
+
+    fn enclosing_class_path(&self, pos: Pos) -> Option<&str> {
         let mut best: Option<&str> = None;
         let mut best_width = (u32::MAX, i64::MAX);
         for ((start, end), name) in &self.class_scopes {
@@ -117,36 +135,52 @@ pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> CppBindings {
     let mut fn_scopes: Vec<(PosRange, FxHashMap<String, String>)> = Vec::new();
     let mut class_scopes: Vec<(PosRange, String)> = Vec::new();
     let mut class_fields: FxHashMap<String, FxHashMap<String, String>> = FxHashMap::default();
+    // The namespace and class paths the walk has entered, by index; each
+    // stack entry carries the index of the path around it.
+    let mut paths: Vec<String> = vec![String::new()];
 
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
+    let mut stack: Vec<(Node<'_>, usize)> = vec![(root, 0)];
+    while let Some((n, outer)) = stack.pop() {
+        let mut inner = outer;
         match n.kind() {
+            "namespace_definition" => {
+                if let Some(name) = n
+                    .child_by_field_name("name")
+                    .and_then(|name| name.utf8_text(source).ok())
+                {
+                    inner = paths.len();
+                    paths.push(join_path(&paths[outer], name));
+                }
+            }
             "class_specifier" | "struct_specifier" | "union_specifier" => {
                 if let Some(name) = n
                     .child_by_field_name("name")
                     .and_then(|name_node| scope_type_name(name_node, source))
                 {
+                    let path = join_path(&paths[outer], name);
                     if let Some(body) = n.child_by_field_name("body") {
-                        let fields = class_fields.entry(name.to_string()).or_default();
+                        let fields = class_fields.entry(path.clone()).or_default();
                         collect_typed_fields(body, source, fields);
                     }
-                    class_scopes.push((node_range(n), name.to_string()));
+                    class_scopes.push((node_range(n), path.clone()));
+                    inner = paths.len();
+                    paths.push(path);
                 }
             }
             "function_definition" => {
                 let span = node_range(n);
-                if let Some(owner) = n
+                if let Some(qualifier) = n
                     .child_by_field_name("declarator")
                     .and_then(find_function_declarator)
                     .and_then(|d| d.child_by_field_name("declarator"))
-                    .and_then(|d| qualified_owner(d, source))
+                    .and_then(|d| qualifier_path(d, source))
                 {
-                    class_scopes.push((span, owner.to_string()));
+                    class_scopes.push((span, join_path(&paths[outer], &qualifier)));
                 }
                 let mut map: FxHashMap<String, String> = FxHashMap::default();
                 collect_typed_cpp_params(n, source, &mut map);
                 if let Some(body) = n.child_by_field_name("body") {
-                    collect_typed_cpp_decls(body, source, &mut map);
+                    collect_typed_cpp_decls(body, source, &mut map, &mut fn_scopes);
                 }
                 if !map.is_empty() {
                     fn_scopes.push((span, map));
@@ -156,7 +190,7 @@ pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> CppBindings {
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
-            stack.push(child);
+            stack.push((child, inner));
         }
     }
 
@@ -178,18 +212,37 @@ pub(crate) fn scope_type_name<'s>(node: Node<'_>, source: &'s [u8]) -> Option<&'
     }
 }
 
-/// The innermost qualifier of the qualified declarator `decl`: `Foo` for
-/// `ns::Foo::bar`, `basic_json` for `basic_json<T>::size`. `None` when
-/// `decl` is not a `qualified_identifier`.
-pub(crate) fn qualified_owner<'s>(mut decl: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
-    let mut owner = None;
+/// The qualifier of the qualified declarator `decl` as a path: `ns::Foo`
+/// for `ns::Foo::bar`, `basic_json` for `basic_json<T>::size`. `None` when
+/// `decl` is not a `qualified_identifier`, or its innermost scope names no
+/// type or namespace.
+fn qualifier_path(mut decl: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut path = String::new();
+    let mut named = false;
     while decl.kind() == "qualified_identifier" {
-        owner = decl
+        let scope = decl
             .child_by_field_name("scope")
             .and_then(|scope| scope_type_name(scope, source));
+        named = scope.is_some();
+        if let Some(scope) = scope {
+            path = join_path(&path, scope);
+        }
         decl = decl.child_by_field_name("name")?;
     }
-    owner
+    named.then_some(path)
+}
+
+fn join_path(outer: &str, name: &str) -> String {
+    if outer.is_empty() {
+        name.to_string()
+    } else {
+        format!("{outer}::{name}")
+    }
+}
+
+/// The class name a path ends in: `Foo` for `a::Foo`.
+fn last_segment(path: &str) -> &str {
+    path.rsplit("::").next().unwrap_or(path)
 }
 
 /// The inner declarator of a pointer / reference / init / array
@@ -255,13 +308,31 @@ fn collect_typed_cpp_params(fn_def: Node<'_>, source: &[u8], out: &mut FxHashMap
     }
 }
 
-/// Walk the function body for local declarations: `declaration` nodes, the
-/// range-`for` variable, and lambda / `catch` parameters.
-fn collect_typed_cpp_decls(body: Node<'_>, source: &[u8], out: &mut FxHashMap<String, String>) {
+/// Walk the function body for local declarations: `declaration` nodes and
+/// the range-`for` variable. A lambda's or a `catch` handler's parameters
+/// and locals go to a scope of their own in `scopes`, so a name they share
+/// with the enclosing function keeps its outer type outside them.
+fn collect_typed_cpp_decls(
+    body: Node<'_>,
+    source: &[u8],
+    out: &mut FxHashMap<String, String>,
+    scopes: &mut Vec<(PosRange, FxHashMap<String, String>)>,
+) {
     let mut stack: Vec<Node<'_>> = vec![body];
     while let Some(n) = stack.pop() {
         match n.kind() {
             "function_definition" => continue,
+            "lambda_expression" | "catch_clause" => {
+                let mut own: FxHashMap<String, String> = FxHashMap::default();
+                let mut c = n.walk();
+                for child in n.children(&mut c) {
+                    collect_typed_cpp_decls(child, source, &mut own, scopes);
+                }
+                if !own.is_empty() {
+                    scopes.push((node_range(n), own));
+                }
+                continue;
+            }
             "declaration" => {
                 // `T a, *b = x;` has one `declarator` per name; the
                 // initializer of a condition declaration (`if (T* p = q)`)

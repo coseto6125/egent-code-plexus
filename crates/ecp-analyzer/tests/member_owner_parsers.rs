@@ -610,9 +610,10 @@ fn test_parse_file_cpp_class_qualified_definition_stays_method_of_class() {
 }
 
 /// A qualifier the file declares neither as a class nor as a namespace
-/// (a class from a header) stays an ownerless `Method`.
+/// (a class from a header) owns the `Method`, so two header classes'
+/// definitions of one name keep distinct uids.
 #[test]
-fn test_parse_file_cpp_unknown_qualifier_definition_stays_ownerless_method() {
+fn test_parse_file_cpp_unknown_qualifier_definition_is_method_of_qualifier() {
     let lg = parse(&cpp(), "src/ns.cpp", CPP_QUALIFIED);
-    assert_at(&lg, "u", 8, NodeKind::Method, None);
+    assert_at(&lg, "u", 8, NodeKind::Method, Some("Unknown"));
 }

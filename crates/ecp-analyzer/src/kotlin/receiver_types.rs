@@ -15,7 +15,12 @@
 //!   `Name.foo` when `Name` names a type (a same-package `object` or class,
 //!   a companion's owner), else resolves the bare member
 //!
-//! Falls back to the bare method name for other unresolved receivers.
+//! - `Other().m()` where this file declares `class Other` → `Other.m`
+//!
+//! Falls back to the bare method name for other unresolved receivers, but
+//! a computed receiver (`other().m()`) whose `m` an enclosing type declares
+//! emits [`CallSite::untyped_member`], so it never binds the caller's own
+//! `m` the way an implicit-`this` `m()` does.
 
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_kotlin_string_value,
@@ -296,10 +301,23 @@ fn kotlin_callee(
                     }
                     locals.lookup(pos, var).map(str::to_string)
                 }
+                "call_expression" => constructed_class(receiver, source, nodes),
                 _ => None,
             };
+            let computed = !matches!(
+                receiver.kind(),
+                "this_expression" | "super_expression" | "simple_identifier"
+            );
             Some(match ty {
                 Some(t) => format!("{t}.{method}"),
+                // A computed receiver (`other().m()`) is no `this`: where an
+                // enclosing type declares `m`, the bare name would bind that
+                // member. Elsewhere the bare name still reaches an extension
+                // function, which Kotlin declares free and an untyped member
+                // call never binds.
+                None if computed && declares(nodes, pos, method, NodeKind::is_callable) => {
+                    CallSite::untyped_member(method)
+                }
                 None => method.to_string(),
             })
         }
@@ -369,6 +387,12 @@ pub fn extract_kotlin_calls_and_path_literals(
 /// type's members count for the whole outer type: that only keeps more
 /// calls on the bare member.
 fn declares_member(nodes: &[RawNode], pos: Pos, name: &str) -> bool {
+    declares(nodes, pos, name, |kind| kind == NodeKind::Property)
+}
+
+/// Whether a type enclosing `pos` declares a member `name` of a kind
+/// `member` accepts.
+fn declares(nodes: &[RawNode], pos: Pos, name: &str, member: fn(NodeKind) -> bool) -> bool {
     let is_type = |n: &RawNode| {
         matches!(
             n.kind,
@@ -377,13 +401,26 @@ fn declares_member(nodes: &[RawNode], pos: Pos, name: &str) -> bool {
     };
     nodes
         .iter()
-        .filter(|m| m.kind == NodeKind::Property && m.name == name)
+        .filter(|m| member(m.kind) && m.name == name)
         .any(|m| {
             let at = (m.span.0, m.span.1);
             nodes
                 .iter()
                 .any(|t| is_type(t) && span_holds(t.span, pos) && span_holds(t.span, at))
         })
+}
+
+/// The class a constructor call receiver (`Other()`) builds, when this
+/// file declares a class of that name.
+fn constructed_class(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<String> {
+    let callee = call
+        .named_child(0)
+        .filter(|n| n.kind() == "simple_identifier")?;
+    let name = callee.utf8_text(source).ok()?;
+    nodes
+        .iter()
+        .any(|n| n.kind == NodeKind::Class && n.name == name)
+        .then(|| name.to_string())
 }
 
 fn enclosing_class_name(nodes: &[RawNode], pos: Pos) -> Option<String> {

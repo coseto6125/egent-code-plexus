@@ -1536,6 +1536,7 @@ mod tests {
         caller: None,
         typed_receiver: false,
         untyped_receiver: true,
+        qualifier_is_type: false,
     };
 
     /// A pick for a receiver-typed `K.m()`.
@@ -1543,6 +1544,7 @@ mod tests {
         caller: None,
         typed_receiver: true,
         untyped_receiver: false,
+        qualifier_is_type: false,
     };
 
     #[test]

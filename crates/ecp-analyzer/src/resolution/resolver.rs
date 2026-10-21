@@ -47,6 +47,7 @@ use ecp_core::analyzer::reexport::{
     ModuleFacts, PyModule,
 };
 use ecp_core::analyzer::rust_paths::{is_rust_source, rust_module_path_base};
+use ecp_core::analyzer::same_file_pick::type_receiver_is_closed;
 use ecp_core::analyzer::type_ladder::{
     self, Ownership, TypeCandidates, TypeMember as LadderMember,
 };
@@ -1319,6 +1320,7 @@ impl<'a> Resolver<'a> {
                         caller: scope.caller,
                         typed_receiver: false,
                         untyped_receiver: scope.untyped_receiver,
+                        qualifier_is_type: false,
                     },
                 ),
                 None => Some(pick),
@@ -1484,6 +1486,15 @@ impl<'a> Resolver<'a> {
                 .or_else(|| caller_type.then(|| source_file_str.to_string()))
                 .and_then(|qf| {
                     let heritage: &[String] = if caller_type { caller_heritage } else { &[] };
+                    // A module or namespace qualifier (`mod.f()`) may reach a
+                    // free function; a type reaches only its own lineage.
+                    let qualifier_is_type = type_receiver_is_closed(language)
+                        && (caller_type
+                            || owner_key(qualifier).is_some_and(|key| {
+                                self.symbol_table
+                                    .lookup_in_file_with_kind(&qf, key, ResolveTarget::Type)
+                                    .is_some()
+                            }));
                     self.symbol_table
                         .lookup_in_file_with_kind(&qf, member, target)
                         .and_then(|pick| {
@@ -1497,6 +1508,7 @@ impl<'a> Resolver<'a> {
                                 PickScope {
                                     caller: call.and_then(|scope| scope.caller),
                                     typed_receiver: true,
+                                    qualifier_is_type,
                                     ..PickScope::default()
                                 },
                             )

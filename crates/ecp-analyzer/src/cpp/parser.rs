@@ -520,7 +520,7 @@ impl LanguageProvider for CppProvider {
                     // the namespace around the definition. The grammar
                     // cannot tell `Foo::bar` from `ns::bar`: a template
                     // qualifier or a constructor / destructor name proves a
-                    // type, any other qualifier waits for a class of that
+                    // type, any other qualifier waits for a namespace of that
                     // name in this file (`qualified_owners` below).
                     let qualifier = match k {
                         NodeKind::Method => n
@@ -768,12 +768,21 @@ impl LanguageProvider for CppProvider {
             }
             // `namespace a::b { }` names its node `a::b`, nested blocks name
             // the inner one `b`: try the whole qualifier, then its last part.
-            if let Some(namespace) = [scope, owner]
+            let namespace = [&scope, &owner]
                 .into_iter()
-                .find(|q| namespace_names.contains(q))
-            {
-                node.kind = NodeKind::Function;
-                node.owner_class = Some(namespace);
+                .find(|q| namespace_names.contains(*q))
+                .cloned();
+            match namespace {
+                Some(namespace) => {
+                    node.kind = NodeKind::Function;
+                    node.owner_class = Some(namespace);
+                }
+                // A qualifier this file declares as neither is most often a
+                // class of a header (`void A::reset() {}` in `a.cpp`). It
+                // owns the definition ahead of any namespace around it, so
+                // `A::reset` and `B::reset` stay two declarations, never
+                // overloads of one.
+                None => node.owner_class = Some(owner),
             }
         }
 

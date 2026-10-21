@@ -170,9 +170,10 @@ fn later_overload_ids(
 }
 
 /// The node of `member` (raw index `i`) for an edge from `class_idx`, or
-/// `None` to emit none. The name lookup returns the file's first
-/// declaration of the name, whichever type owns it: the member itself is the
-/// declaration its owner matches, or its own later overload.
+/// `None` to emit none: its own later overload, else the declaration its
+/// kind and owner match, else the file's first declaration of the name.
+/// Only that last lookup can return the class itself, for a member named
+/// like it, which would be a self-loop.
 fn member_node(
     i: usize,
     member: &RawNode,
@@ -181,29 +182,19 @@ fn member_node(
     later: &FxHashMap<usize, u32>,
     class_idx: u32,
 ) -> Option<u32> {
-    let by_name = symbol_table.lookup_in_file(path_str, &member.name)?;
-    // When a member has the same name as its enclosing class — Java/C#
-    // `class Foo { public Foo() {} }` constructors are the canonical case —
-    // the name lookup returns the class. Emitting would create a self-loop.
-    // Skip; documented limitation pending a future SymbolTable change that
-    // handles multi-id-per-name.
-    if class_idx == by_name {
-        return None;
-    }
-    Some(
-        later
-            .get(&i)
-            .copied()
-            .or_else(|| {
-                symbol_table.first_declaration(
-                    path_str,
-                    &member.name,
-                    member.kind,
-                    member.owner_class.as_deref(),
-                )
-            })
-            .unwrap_or(by_name),
-    )
+    let id = later
+        .get(&i)
+        .copied()
+        .or_else(|| {
+            symbol_table.first_declaration(
+                path_str,
+                &member.name,
+                member.kind,
+                member.owner_class.as_deref(),
+            )
+        })
+        .or_else(|| symbol_table.lookup_in_file(path_str, &member.name))?;
+    (id != class_idx).then_some(id)
 }
 
 /// Pass 1 — cross-language span containment.

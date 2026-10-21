@@ -6,6 +6,7 @@
 use crate::analyzer::heritage::HeritageNode;
 use crate::analyzer::reexport::ResolveTarget;
 use crate::analyzer::types::{owner_key, RawNode};
+use crate::file_category::Language;
 use crate::graph::NodeKind;
 use std::borrow::Cow;
 
@@ -20,6 +21,10 @@ pub struct PickScope {
     /// `o.m()` on a receiver the parser could not type
     /// ([`CallSite::UntypedMember`](crate::analyzer::types::CallSite)).
     pub untyped_receiver: bool,
+    /// The owner is a type the index declares (`self.m()` typed `C.m`, a
+    /// class receiver `K.m()`), not a module or namespace: a call through
+    /// it reaches only that type's members and its supertypes'.
+    pub qualifier_is_type: bool,
 }
 
 /// The owner the pick rules see for one declaration.
@@ -71,6 +76,28 @@ pub trait PickFacts {
     fn ancestors(&self, ty: u32) -> Vec<u32>;
 }
 
+/// Whether a call through a type receiver in `language` reaches only that
+/// type's members and its supertypes' ([`PickScope::qualifier_is_type`]).
+/// A Kotlin extension function (free), a C# extension method or a Dart
+/// `extension on` member (another type's), a Rust blanket `impl<X> T for X`,
+/// and the UFCS or `using for` of other languages reach past that lineage,
+/// so those languages keep the by-name rules.
+pub fn type_receiver_is_closed(language: Language) -> bool {
+    matches!(
+        language,
+        Language::Python
+            | Language::Java
+            | Language::JavaScript
+            | Language::TypeScript
+            | Language::Php
+            | Language::Ruby
+            | Language::Go
+            | Language::Swift
+            | Language::C
+            | Language::Cpp
+    )
+}
+
 /// Whether `id` has no owner and no `impl` block either.
 pub fn is_free<F: PickFacts + ?Sized>(facts: &F, id: u32) -> bool {
     facts.owner(id).is_none() && facts.impl_member(id).is_none()
@@ -116,6 +143,13 @@ pub fn pick_owner<'f, F: PickFacts + ?Sized>(facts: &'f F, id: u32, file: &str) 
 ///    inherits from or implements ([`hierarchy_root`]).
 /// 9. Else `None`: two or more unrelated owners, and the file alone cannot
 ///    tell which one the call reaches.
+///
+/// A receiver of a declared type (`scope.qualifier_is_type`) reaches no
+/// free function and no member of an unrelated type. Rules 5 to 8 give way
+/// to `pick`, else the first candidate, when it is a method the parser gave
+/// no owner (its type may be `owner`, as before); else to the member of
+/// the nearest supertype of `owner` that has one ([`ancestor_member`]);
+/// else `None`, which leaves the call to the receiver-typing ladder.
 ///
 /// An untyped receiver (`scope.untyped_receiver`) is no `this`: `owner`,
 /// the caller's type, and `heritage` do not narrow the pick, and it never
@@ -184,16 +218,62 @@ pub fn prefer_owned<F: PickFacts + ?Sized>(
         .into_iter()
         .chain(heritage.iter().filter_map(|base| owner_key(base)))
         .find_map(|wanted| candidates().find(|&id| facts.owner(id) == Some(wanted)))
-        .or_else(|| is_free(facts, pick).then_some(pick))
-        .or_else(|| candidates().find(|&id| owner_of(id) == PickOwner::Free))
-        .or_else(|| {
-            let picked = owner_of(pick);
-            candidates()
-                .all(|id| owner_of(id) == picked)
+        .or_else(|| match owner.filter(|_| scope.qualifier_is_type) {
+            Some(owner) => {
+                let ownerless = |id: u32| facts.kind(id) == NodeKind::Method && is_free(facts, id);
+                Some(pick)
+                    .filter(|&id| ownerless(id))
+                    .or_else(|| candidates().find(|&id| ownerless(id)))
+                    .or_else(|| ancestor_member(facts, file, owner, candidates()))
+            }
+            None => is_free(facts, pick)
                 .then_some(pick)
+                .or_else(|| candidates().find(|&id| owner_of(id) == PickOwner::Free))
+                .or_else(|| {
+                    let picked = owner_of(pick);
+                    candidates()
+                        .all(|id| owner_of(id) == picked)
+                        .then_some(pick)
+                })
+                .or_else(|| hierarchy_root(facts, &candidates().collect::<Vec<_>>(), owner_of)),
         })
-        .or_else(|| hierarchy_root(facts, &candidates().collect::<Vec<_>>(), owner_of))
         .filter(|&id| !untyped || owner.is_none() || owner != facts.owner(id))
+}
+
+/// The first of `candidates` that a supertype of the type `owner` declares,
+/// nearest supertype first. `owner` is the type `file` declares under that
+/// key, else the one type of that key across the project; `None` when
+/// neither names exactly the type, since the bases of a namesake would
+/// stand in for the receiver's.
+pub fn ancestor_member<F: PickFacts + ?Sized>(
+    facts: &F,
+    file: &str,
+    owner: &str,
+    candidates: impl Iterator<Item = u32>,
+) -> Option<u32> {
+    let named = facts.types_named(owner);
+    let local: Vec<u32> = named
+        .iter()
+        .copied()
+        .filter(|&ty| facts.file_of(ty) == Some(file))
+        .collect();
+    let types = match (local.is_empty(), named.len()) {
+        (false, _) => local,
+        (true, 1) => named,
+        _ => return None,
+    };
+    let owned: Vec<(u32, Vec<u32>)> = candidates
+        .filter_map(|id| Some((id, facts.types_named(facts.owner(id)?))))
+        .collect();
+    types
+        .iter()
+        .flat_map(|&ty| facts.ancestors(ty))
+        .find_map(|ancestor| {
+            owned
+                .iter()
+                .find(|(_, types)| types.contains(&ancestor))
+                .map(|&(id, _)| id)
+        })
 }
 
 /// Whether an untyped member call (`o.m()`, [`PickScope::untyped_receiver`])
@@ -504,6 +584,72 @@ mod tests {
             prefer_owned(&facts, "f", 0, "m", Some("A"), &[], CALLABLE, untyped()),
             None
         );
+    }
+
+    fn typed_type() -> PickScope {
+        PickScope {
+            typed_receiver: true,
+            qualifier_is_type: true,
+            ..PickScope::default()
+        }
+    }
+
+    #[test]
+    fn test_prefer_owned_type_receiver_unrelated_owner_or_free_returns_none() {
+        let facts = Decls {
+            decls: vec![
+                ("Comment", NodeKind::Class, None, None),
+                ("Article", NodeKind::Class, None, None),
+                ("save", M, Some("Comment"), None),
+                ("save", NodeKind::Function, None, None),
+            ],
+            ..Decls::default()
+        };
+        let pick = |scope| {
+            prefer_owned(
+                &facts,
+                "f",
+                2,
+                "save",
+                Some("Article"),
+                &[],
+                CALLABLE,
+                scope,
+            )
+        };
+        assert_eq!(pick(typed_type()), None);
+        let module = PickScope {
+            typed_receiver: true,
+            ..PickScope::default()
+        };
+        assert_eq!(pick(module), Some(3));
+    }
+
+    #[test]
+    fn test_prefer_owned_type_receiver_grandparent_member_returns_nearest_ancestor() {
+        let facts = Decls {
+            decls: vec![
+                ("Base", NodeKind::Class, None, None),
+                ("Mid", NodeKind::Class, None, None),
+                ("Leaf", NodeKind::Class, None, None),
+                ("Other", NodeKind::Class, None, None),
+                ("m", M, Some("Other"), None),
+                ("m", M, Some("Base"), None),
+            ],
+            ancestors: vec![(2, vec![1, 0])],
+            ..Decls::default()
+        };
+        let pick = prefer_owned(
+            &facts,
+            "f",
+            4,
+            "m",
+            Some("Leaf"),
+            &[],
+            CALLABLE,
+            typed_type(),
+        );
+        assert_eq!(pick, Some(5));
     }
 
     #[test]

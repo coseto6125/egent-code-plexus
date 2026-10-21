@@ -16,6 +16,11 @@
 //!   binds `Name.method` when `Name` names a type (`Util.make()`), else
 //!   resolves the bare member.
 //!
+//! - `Other().method()` where this file declares `class Other` →
+//!   `Other.method`; any other computed receiver (`a.b.method()`) →
+//!   [`CallSite::untyped_member`], which never binds the caller's own
+//!   `method`.
+//!
 //! `obj?.method()` reads its receiver as `obj.method()` does. Scope: P0
 //! simple identifier types only. Generic / function / nullable types fall
 //! back to the bare member name.
@@ -348,7 +353,16 @@ fn dart_callee_name(
                         None => return Some(CallSite::from_receiver(var, method)),
                     }
                 }
-                _ => {}
+                // A computed receiver (`a.b.m()`, `(x as T).m()`) is no
+                // `this`: the bare name would bind the caller's own `m`.
+                // Dart reaches no free function through a receiver, and an
+                // `extension` member is its extension's.
+                _ => {
+                    return Some(match constructed_class(obj, source, nodes) {
+                        Some(cls) => format!("{cls}.{method}"),
+                        None => CallSite::untyped_member(method),
+                    });
+                }
             }
             Some(method.to_string())
         }
@@ -356,6 +370,20 @@ fn dart_callee_name(
             .ok()
             .map(str::to_string),
     }
+}
+
+/// The class a constructor call receiver (`Other()`) builds, when this
+/// file declares a class of that name.
+fn constructed_class(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<String> {
+    let callee = Some(call)
+        .filter(|call| call.kind() == "call_expression")?
+        .child_by_field_name("function")
+        .filter(|n| n.kind() == "identifier")?;
+    let name = callee.utf8_text(source).ok()?;
+    nodes
+        .iter()
+        .any(|n| n.kind == NodeKind::Class && n.name == name)
+        .then(|| name.to_string())
 }
 
 /// Whether a type enclosing `pos` declares a field `name`. A nested type's

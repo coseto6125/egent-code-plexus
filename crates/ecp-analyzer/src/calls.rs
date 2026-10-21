@@ -363,19 +363,25 @@ pub fn extract_variant_refs(
             name: VariantRef::encode(path, pattern),
         });
     };
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
+    // Each node travels with its parent: `Node::parent` walks down from the
+    // root, which every identifier of the file would pay.
+    let mut stack: Vec<(Node<'_>, Option<Node<'_>>)> = vec![(root, None)];
+    while let Some((n, parent)) = stack.pop() {
         let kind = n.kind();
-        if spec.path_kinds.contains(&kind) && !is_path_suffix(n) {
+        if spec.path_kinds.contains(&kind) && !is_path_suffix(n, parent) {
             if let Some(path) = n.utf8_text(source).ok().and_then(variant_path) {
-                push(n, &path, in_label(n, spec.label_parents));
+                push(n, &path, in_label(n, parent, spec.label_parents));
             }
         } else if kind == "identifier" {
-            if let Some(parent) = n.parent() {
+            if let Some(parent) = parent {
                 let label = spec.bare_label_parents.contains(&parent.kind());
                 if label || (spec.bare_expressions && is_bare_value(n, parent)) {
                     if let Some(name) = n.utf8_text(source).ok().filter(|t| starts_upper(t)) {
-                        push(n, name, label || in_label(n, spec.label_parents));
+                        push(
+                            n,
+                            name,
+                            label || in_label(n, Some(parent), spec.label_parents),
+                        );
                     }
                 }
             }
@@ -386,7 +392,7 @@ pub fn extract_variant_refs(
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
-            stack.push(child);
+            stack.push((child, Some(n)));
         }
     }
     if refs.is_empty() {
@@ -404,19 +410,20 @@ pub fn extract_variant_refs(
 
 /// C++ nests `ns::Color::Blue` as `ns` + `Color::Blue`; the outer node
 /// already holds the whole path.
-fn is_path_suffix(node: Node<'_>) -> bool {
-    node.parent().is_some_and(|parent| {
+fn is_path_suffix(node: Node<'_>, parent: Option<Node<'_>>) -> bool {
+    parent.is_some_and(|parent| {
         parent.kind() == node.kind()
             && parent.child_by_field_name("name").map(|n| n.id()) == Some(node.id())
     })
 }
 
-/// Whether `node` is a case label or sits in a pattern.
-fn in_label(node: Node<'_>, label_parents: &[&str]) -> bool {
+/// Whether `node`, a child of `parent`, is a case label or sits in a
+/// pattern.
+fn in_label(node: Node<'_>, parent: Option<Node<'_>>, label_parents: &[&str]) -> bool {
     if node.kind().ends_with("pattern") {
         return true;
     }
-    let Some(parent) = node.parent() else {
+    let Some(parent) = parent else {
         return false;
     };
     let is_field =

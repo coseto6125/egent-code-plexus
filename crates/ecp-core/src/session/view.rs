@@ -114,8 +114,8 @@ use crate::analyzer::rust_paths::{
     rust_module_path_base, rust_path_prefix_agrees_with_import, rust_type_path_prefix,
 };
 use crate::analyzer::same_file_pick::{
-    is_free, member_call_admits, prefer_owned, rust_impl_members, ImplMember, ImplNode, PickFacts,
-    PickScope,
+    is_free, member_call_admits, prefer_owned, rust_impl_members, type_receiver_is_closed,
+    ImplMember, ImplNode, PickFacts, PickScope,
 };
 use crate::analyzer::type_ladder::{
     self, TypeCandidates, TypeFacts, TypeMember as LadderMember, MAX_HERITAGE_DEPTH,
@@ -1793,6 +1793,12 @@ impl<'a> OverlayFacts<'a> {
             .or_else(|| caller_type.then_some(source))?;
         let heritage: &[String] = if caller_type { heritage } else { &[] };
         let pick = self.first_in_file(file, member, target, None)?;
+        let qualifier_is_type = type_receiver_is_closed(caller.language)
+            && (caller_type
+                || owner_key(qualifier).is_some_and(|key| {
+                    self.first_in_file(file, key, ResolveTarget::Type, None)
+                        .is_some()
+                }));
         prefer_owned(
             self,
             file,
@@ -1805,6 +1811,7 @@ impl<'a> OverlayFacts<'a> {
                 caller: call.and_then(|call| call.caller),
                 typed_receiver: true,
                 untyped_receiver: false,
+                qualifier_is_type,
             },
         )
         .map(|id| (id, CONF_QUALIFIER_SCOPED))
@@ -2883,6 +2890,7 @@ fn resolve_callee<'s>(
                     caller: call.caller,
                     typed_receiver: false,
                     untyped_receiver: call.untyped,
+                    qualifier_is_type: false,
                 },
             ),
             None => Some(pick),

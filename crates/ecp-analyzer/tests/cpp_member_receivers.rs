@@ -536,3 +536,46 @@ fn test_resolve_call_field_receiver_binds_field_type_member() {
         vec![("string".to_string(), "other_t".to_string())]
     );
 }
+
+// ---- G: scopes a receiver's type does not leak out of ----
+
+/// A lambda's and a `catch` handler's parameter hold only in their own
+/// body: the enclosing function's `x` keeps its type around them.
+const SHADOWING_PARAMS: &str = "\
+struct A { void m() {} };
+struct B { void m() {} };
+void f(A x) {
+    auto l = [](B x) { x.m(); };
+    x.m();
+}
+void g(A e) {
+    try { e.m(); } catch (B& e) { e.m(); }
+}
+";
+
+#[test]
+fn test_cpp_callee_name_lambda_param_shadows_only_inside_lambda() {
+    let g = parse("s.cpp", SHADOWING_PARAMS);
+    assert_eq!(calls_of(&g, "f"), ["A.m", "B.m"]);
+}
+
+#[test]
+fn test_cpp_callee_name_catch_param_shadows_only_inside_handler() {
+    let g = parse("s.cpp", SHADOWING_PARAMS);
+    assert_eq!(calls_of(&g, "g"), ["A.m", "B.m"]);
+}
+
+/// Two namespaces' `Foo` each type their own field `x`.
+const SAME_NAME_CLASSES: &str = "\
+struct A { void m() {} };
+struct B { void m() {} };
+namespace a { struct Foo { A* x; void run_a() { x->m(); } }; }
+namespace b { struct Foo { B* x; void run_b() { x->m(); } }; }
+";
+
+#[test]
+fn test_cpp_callee_name_same_name_classes_in_two_namespaces_keep_own_fields() {
+    let g = parse("f.cpp", SAME_NAME_CLASSES);
+    assert_eq!(calls_of(&g, "run_a"), ["A.m"]);
+    assert_eq!(calls_of(&g, "run_b"), ["B.m"]);
+}
