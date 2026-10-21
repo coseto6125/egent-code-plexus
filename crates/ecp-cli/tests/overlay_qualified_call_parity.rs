@@ -45,11 +45,7 @@ struct Fixture {
 
 /// Fixtures whose overlay still differs from the reindex, with the reason.
 /// Asserted to differ, so closing one turns the test red until it goes.
-const KNOWN_DIVERGENCES: &[(&str, &str)] = &[(
-    "Rust/cross-file",
-    "`use crate::k::K` names the qualifier: the index places it through the \
-     Rust module tree, which the overlay does not replay",
-)];
+const KNOWN_DIVERGENCES: &[(&str, &str)] = &[];
 
 const FIXTURES: &[Fixture] = &[
     Fixture {
@@ -190,6 +186,41 @@ const FIXTURES: &[Fixture] = &[
         caller: "src/lib.rs",
         callee: Some("src/k.rs"),
         expected: &[("save", 0.85), ("st", 0.85)],
+    },
+    // A method called through its type path: the `use` import names the
+    // qualifier's file.
+    Fixture {
+        label: "Rust/use-imported type path",
+        files: &[
+            ("src/lib.rs", "mod k;\nuse crate::k::K;\nfn run(k: &K) { K::save(k, 1); }\n"),
+            ("src/k.rs", "pub struct K;\nimpl K {\n pub fn save(&self, id: i32) {}\n}\n"),
+        ],
+        caller: "src/lib.rs",
+        callee: Some("src/k.rs"),
+        expected: &[("save", 0.85)],
+    },
+    // Parity only (`expected` is empty): the `as` alias and the glob each
+    // reach the qualifier through a different import shape, and the overlay
+    // must bind whatever the index binds, an empty set included.
+    Fixture {
+        label: "Rust/use as alias",
+        files: &[
+            ("src/lib.rs", "mod k;\nuse crate::k::K as Q;\nfn run() { Q::st(2); }\n"),
+            ("src/k.rs", "pub struct K;\nimpl K {\n pub fn st(id: i32) {}\n}\n"),
+        ],
+        caller: "src/lib.rs",
+        callee: Some("src/k.rs"),
+        expected: &[],
+    },
+    Fixture {
+        label: "Rust/use glob",
+        files: &[
+            ("src/lib.rs", "mod k;\nuse crate::k::*;\nfn run() { K::st(2); }\n"),
+            ("src/k.rs", "pub struct K;\nimpl K {\n pub fn st(id: i32) {}\n}\n"),
+        ],
+        caller: "src/lib.rs",
+        callee: Some("src/k.rs"),
+        expected: &[],
     },
     Fixture {
         label: "PHP/same-file",

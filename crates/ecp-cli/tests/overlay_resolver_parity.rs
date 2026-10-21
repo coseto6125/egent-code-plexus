@@ -385,6 +385,46 @@ fn test_overlay_rust_module_path_selects_named_module_like_reindex() {
     }
 }
 
+/// The index tries the qualifier tier before the module tree: `util` names
+/// the `mod util;` declaration in `lib.rs`, so the qualifier tier binds the
+/// `foo` that `lib.rs` declares (0.85) before the module tree reaches
+/// `util.rs` (1.0). The overlay must keep that order, not the better answer.
+#[test]
+fn test_overlay_rust_qualifier_tier_before_module_tree_matches_reindex() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "mod util;\npub fn foo() {}\nfn run() {}"),
+            ("src/util.rs", "pub fn foo() {}"),
+        ],
+        &[(
+            "src/lib.rs",
+            "mod util;\npub fn foo() {}\nfn run() { crate::util::foo(); }",
+        )],
+        &[("src/lib.rs".into(), "foo".into(), "".into(), 85)],
+    );
+}
+
+/// `use crate::k::K` names the qualifier's file, with the module tree on.
+#[test]
+fn test_overlay_rust_use_imported_qualifier_matches_reindex() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "mod k;\nuse crate::k::K;\nfn run() {}"),
+            (
+                "src/k.rs",
+                "pub struct K;\nimpl K {\n pub fn st(id: i32) {}\n}\n",
+            ),
+        ],
+        &[(
+            "src/lib.rs",
+            "mod k;\nuse crate::k::K;\nfn run() { K::st(2); }",
+        )],
+        &[("src/k.rs".into(), "st".into(), "K".into(), 85)],
+    );
+}
+
 #[test]
 fn test_overlay_python_untyped_member_collision_matches_reindex() {
     parity(

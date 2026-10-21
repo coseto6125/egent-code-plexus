@@ -276,12 +276,7 @@ fn merge_base_edge<'a>(
     // Rebuild only these reasons, never all References from a dirty file.
     // Replacing even UID-stable references avoids duplicates and stale parents.
     if RelType::from(&edge.rel_type) == RelType::References
-        && view.rebuilds_closure_references(source)
-        && matches!(
-            edge.reason.resolve(&graph.string_pool),
-            crate::analyzer::types::CLOSURE_REFERENCE_REASON
-                | crate::analyzer::types::OVERLOAD_SET_REASON
-        )
+        && view.rebuilds_reference(source, edge.reason.resolve(&graph.string_pool))
     {
         return None;
     }
@@ -403,6 +398,8 @@ mod tests {
                 start_column: 0,
                 end_column: 0,
                 calls: vec!["target_fn".to_string()],
+                heritage: Vec::new(),
+                variant_refs: Vec::new(),
             }],
             imports: vec![],
         }
