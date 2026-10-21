@@ -32,7 +32,13 @@ impl ClassContext {
     pub fn from_nodes(nodes: &[RawNode]) -> Self {
         let entries = nodes
             .iter()
-            .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Interface))
+            // `$this` / `self::` in a trait or an enum names it as in a class.
+            .filter(|n| {
+                matches!(
+                    n.kind,
+                    NodeKind::Class | NodeKind::Interface | NodeKind::Trait | NodeKind::Enum
+                )
+            })
             .map(|n| {
                 let span = ((n.span.0, n.span.1), (n.span.2, n.span.3));
                 let parent = n.heritage.first().cloned();
