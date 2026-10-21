@@ -414,6 +414,57 @@ fn impact_ambiguous_symbol_exits_nonzero() {
     );
 }
 
+/// An overload set is one target: `--file` / `--kind` cannot split two
+/// same-file methods, so naming the set must not fail as ambiguous. The first
+/// overload is the only seed: calls bind to it, and it references each later
+/// overload, so both directions still cover the whole set. Holds for a dirty
+/// file too, where the overlay rebuilds the set.
+#[test]
+fn test_impact_overloaded_name_seeds_the_set_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_with(
+        tmp.path(),
+        &[(
+            "K.java",
+            "class K {\n void audit() {}\n void save(int id) {}\n void save(String name) { audit(); }\n void run() { save(1); }\n}\n",
+        )],
+    );
+    for state in ["clean", "dirty"] {
+        if state == "dirty" {
+            let path = tmp.path().join("K.java");
+            let src = std::fs::read_to_string(&path).unwrap();
+            std::fs::write(&path, format!("{src}// edited\n")).unwrap();
+        }
+        let up = run_impact(tmp.path(), &["save", "--direction", "upstream"]);
+        let rows: Vec<(u64, &str, u64)> = up["impact"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    e["depth"].as_u64().unwrap(),
+                    e["name"].as_str().unwrap(),
+                    e["line"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(rows, [(0, "save", 3), (1, "run", 5)], "{state}: {up}");
+        assert!(
+            up.get("result").is_none(),
+            "{state}: one overload set is no same-name collision: {up}"
+        );
+
+        let down = run_impact(tmp.path(), &["save", "--direction", "downstream"]);
+        let names: Vec<&str> = down["impact"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"audit"), "{state}: {down}");
+    }
+}
+
 #[test]
 fn impact_empty_callers_includes_explanation() {
     let tmp = tempfile::tempdir().unwrap();
