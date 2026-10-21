@@ -744,6 +744,19 @@ impl LanguageProvider for CProvider {
             &mut nodes,
             &["field_expression"],
         );
+        crate::calls::extract_variant_refs(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &crate::calls::VariantRefSpec {
+                // C names enumerators bare: `return RED;`, `case GREEN:`.
+                path_kinds: &[],
+                label_parents: &["case_statement"],
+                bare_label_parents: &[],
+                bare_expressions: true,
+                token_trees: false,
+            },
+        );
 
         let fn_ptr_vars = collect_c_cpp_fn_ptr_vars(tree.root_node(), source);
         let call_metas = detect_c_cpp_indirect(

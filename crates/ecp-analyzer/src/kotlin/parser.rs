@@ -616,6 +616,18 @@ impl LanguageProvider for KotlinProvider {
             &mut nodes,
             &["navigation_expression"],
         );
+        crate::calls::extract_variant_refs(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &crate::calls::VariantRefSpec {
+                path_kinds: &["navigation_expression"],
+                label_parents: &["when_condition"],
+                bare_label_parents: &[],
+                bare_expressions: false,
+                token_trees: false,
+            },
+        );
 
         // Ktor framework-presence gate: only emit refs when the file
         // imports `io.ktor.*`. The route DSL verbs (`get`/`post`/...) are

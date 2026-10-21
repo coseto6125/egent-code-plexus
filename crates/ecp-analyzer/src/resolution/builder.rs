@@ -1,15 +1,16 @@
+use crate::calls::VariantRef;
 use crate::fetch_shape::{
     consumer_keys, fetch_urls, format_reason, normalize_route_path, response_shapes,
 };
 use crate::framework_helpers::Span;
-use crate::resolution::heuristics::{NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON};
-use crate::resolution::index::{Language, ResolveTarget, SymbolTable};
+use crate::resolution::heuristics::{ResolutionTier, NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON};
+use crate::resolution::index::{FileMeta, Language, ResolveTarget, SymbolTable};
 use crate::resolution::path_aliases::PathAliases;
 use crate::resolution::resolver::{ReexportIndex, Resolver};
 use crate::rust::module_tree::RustWorkspaceModTree;
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::analyzer::reexport::{export_filter_applies, is_ecmascript, ImportRef};
-use ecp_core::analyzer::types::{CallSite, LocalGraph, RawImport, RawNode};
+use ecp_core::analyzer::types::{owner_key, CallSite, LocalGraph, RawImport, RawNode};
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::{
     BlindSpotRecord, CallMeta, Edge, ExportAliasFact, File, FileCategory, FunctionMeta, ImportFact,
@@ -2047,6 +2048,75 @@ impl CallReasons {
     }
 }
 
+/// The `reason` of an enum-variant `References` edge. Data-carrying variants
+/// (Rust, Swift) change shape for producers and destructuring matches in
+/// different ways, and "who sets state X" differs from "who handles state
+/// X", so a pattern or case label keeps its own reason.
+#[derive(Clone, Copy)]
+struct VariantReasons {
+    used: StrRef,
+    matched: StrRef,
+}
+
+/// The `References` reason of a variant used as a value: constructed, read,
+/// compared.
+pub const VARIANT_USE_REASON: &str = "enum_variant:use";
+/// The `References` reason of a variant in a pattern or case label.
+pub const VARIANT_PATTERN_REASON: &str = "enum_variant:pattern";
+
+/// The `EnumVariant` a [`VariantRef`] names, with the edge confidence.
+///
+/// A qualified reference resolves its qualifier as a type through the
+/// ordinary tiers, then takes that type's variant, so `A` of two enums never
+/// mixes. Rust `Self::A` names the caller's own impl type. A bare name (C
+/// enumerators, Java case labels) binds a variant declared in the file, else
+/// the one project-wide variant of that name.
+fn resolve_variant_ref(
+    resolver: &Resolver<'_>,
+    symbol_table: &SymbolTable,
+    local_graph: &LocalGraph,
+    raw_node: &RawNode,
+    variant_ref: VariantRef<'_>,
+) -> Option<(u32, f32)> {
+    let split = variant_ref.split();
+    if !symbol_table.has_enum_variant(split.map_or(variant_ref.path, |(_, variant)| variant)) {
+        return None;
+    }
+    let file = local_graph.file_path.to_string_lossy().replace('\\', "/");
+    let Some((qualifier, variant)) = split else {
+        return symbol_table
+            .bare_enum_variant(
+                &file,
+                variant_ref.path,
+                FileMeta::from_normalized_path(&file),
+            )
+            .map(|(id, same_file)| {
+                let tier = if same_file {
+                    ResolutionTier::SameFile
+                } else {
+                    ResolutionTier::Global
+                };
+                (id, tier.base_confidence())
+            });
+    };
+    let qualifier = match (Language::from_normalized_path(&file), qualifier) {
+        (Language::Rust, "Self") => raw_node.owner_class.as_deref().and_then(owner_key)?,
+        _ => qualifier,
+    };
+    let types = resolver.resolve_symbol(
+        &local_graph.file_path,
+        qualifier,
+        &local_graph.imports,
+        ResolveTarget::Type,
+    );
+    let &[(type_id, confidence)] = types.as_slice() else {
+        return None;
+    };
+    symbol_table
+        .enum_variant_of(type_id, qualifier, variant)
+        .map(|id| (id, confidence))
+}
+
 /// Emit Pass-2 edges for a single `raw_node`'s heritage / calls / type
 /// annotation. Factored out so the serial dump path and the parallel
 /// hot path can share the same per-node logic.
@@ -2068,6 +2138,7 @@ fn pass2_emit_node_edges(
     reason_type: StrRef,
     reason_call: CallReasons,
     reason_reads_field: StrRef,
+    reason_variant: VariantReasons,
     symbol_table: &SymbolTable,
     edges: &mut Vec<Edge>,
     indirect_lookup: &FxHashMap<CallMetaKey, (u8, String)>,
@@ -2160,7 +2231,34 @@ fn pass2_emit_node_edges(
     // `ResolveTarget::Field` predicate (is_property) admits only Property
     // nodes, so locals / Variables never match — the read edge stays on the
     // cross-function field contract without reintroducing local fan-out.
+    let mut variant_edges: Vec<(u32, bool)> = Vec::new();
     for field_name in &raw_node.field_reads {
+        if let Some(variant_ref) = VariantRef::parse(field_name) {
+            let Some((target_id, confidence)) =
+                resolve_variant_ref(resolver, symbol_table, local_graph, raw_node, variant_ref)
+            else {
+                continue;
+            };
+            // `E::A` and `crate::m::E::A` in one body are one dependency.
+            if target_id == current_node_idx
+                || variant_edges.contains(&(target_id, variant_ref.pattern))
+            {
+                continue;
+            }
+            variant_edges.push((target_id, variant_ref.pattern));
+            edges.push(Edge {
+                source: current_node_idx,
+                target: target_id,
+                rel_type: RelType::References,
+                confidence,
+                reason: if variant_ref.pattern {
+                    reason_variant.matched
+                } else {
+                    reason_variant.used
+                },
+            });
+            continue;
+        }
         let targets = resolver.resolve_symbol(
             &local_graph.file_path,
             field_name,
@@ -2311,6 +2409,10 @@ fn pass2_resolve_edges(
         nearest_copy: string_pool.add(NEAREST_COPY_REASON),
     };
     let reason_reads_field = string_pool.add("field_read");
+    let reason_variant = VariantReasons {
+        used: string_pool.add(VARIANT_USE_REASON),
+        matched: string_pool.add(VARIANT_PATTERN_REASON),
+    };
 
     let mut reason_cache: FxHashMap<String, StrRef> = FxHashMap::default();
     for lg in local_graphs {
@@ -2420,6 +2522,7 @@ fn pass2_resolve_edges(
                     reason_type,
                     reason_call,
                     reason_reads_field,
+                    reason_variant,
                     symbol_table,
                     &mut edges,
                     lookup,
@@ -2514,6 +2617,7 @@ fn pass2_resolve_edges(
                         reason_type,
                         reason_call,
                         reason_reads_field,
+                        reason_variant,
                         symbol_table_ref,
                         &mut local_edges,
                         lookup,

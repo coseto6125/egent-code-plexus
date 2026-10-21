@@ -613,6 +613,18 @@ impl LanguageProvider for SwiftProvider {
             &mut nodes,
             &["navigation_expression"],
         );
+        crate::calls::extract_variant_refs(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &crate::calls::VariantRefSpec {
+                path_kinds: &["navigation_expression"],
+                label_parents: &[],
+                bare_label_parents: &[],
+                bare_expressions: false,
+                token_trees: false,
+            },
+        );
 
         let framework_refs = detect_ast_framework_patterns(source, SWIFT_FRAMEWORKS);
 

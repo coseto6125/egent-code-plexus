@@ -1303,6 +1303,19 @@ impl LanguageProvider for PythonProvider {
             &mut call_sites,
         );
         crate::calls::extract_field_reads(tree.root_node(), source, &mut nodes, &["attribute"]);
+        crate::calls::extract_variant_refs(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &crate::calls::VariantRefSpec {
+                // A `case Color.RED:` pattern holds a `dotted_name`.
+                path_kinds: &["attribute", "dotted_name"],
+                label_parents: &[],
+                bare_label_parents: &[],
+                bare_expressions: false,
+                token_trees: false,
+            },
+        );
 
         let param_names = collect_python_param_names(tree.root_node(), source);
         let call_metas =

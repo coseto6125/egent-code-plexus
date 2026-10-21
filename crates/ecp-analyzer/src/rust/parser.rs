@@ -535,6 +535,20 @@ impl LanguageProvider for RustProvider {
             &mut nodes,
             &["field_expression"],
         );
+        crate::calls::extract_variant_refs(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &crate::calls::VariantRefSpec {
+                // `E::B(..)` / `E::C` / tuple patterns, and the name of a
+                // struct-like `E::A { .. }` expression or pattern.
+                path_kinds: &["scoped_identifier", "scoped_type_identifier"],
+                label_parents: &[],
+                bare_label_parents: &[],
+                bare_expressions: false,
+                token_trees: true,
+            },
+        );
 
         // Build param type map for indirect-call detection.
         // `collect_rust_indirect_param_types` captures fn(...)  and &dyn Trait

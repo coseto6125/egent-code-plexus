@@ -817,6 +817,18 @@ impl LanguageProvider for PhpProvider {
             &mut nodes,
             &["member_access_expression"],
         );
+        crate::calls::extract_variant_refs(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &crate::calls::VariantRefSpec {
+                path_kinds: &["class_constant_access_expression"],
+                label_parents: &["case_statement", "match_condition_list"],
+                bare_label_parents: &[],
+                bare_expressions: false,
+                token_trees: false,
+            },
+        );
 
         // Gate Laravel framework_refs by the `Illuminate` import — without
         // that, bare `Route::` is just an unrelated class name.

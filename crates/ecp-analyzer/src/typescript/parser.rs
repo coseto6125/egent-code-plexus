@@ -758,6 +758,18 @@ impl LanguageProvider for TypeScriptProvider {
             &mut nodes,
             &["member_expression"],
         );
+        crate::calls::extract_variant_refs(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &crate::calls::VariantRefSpec {
+                path_kinds: &["member_expression"],
+                label_parents: &["switch_case"],
+                bare_label_parents: &[],
+                bare_expressions: false,
+                token_trees: false,
+            },
+        );
 
         // Framework-presence gates: only emit Express/NestJS refs when the file
         // actually imports the matching package.

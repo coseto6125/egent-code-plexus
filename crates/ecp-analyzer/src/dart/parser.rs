@@ -486,6 +486,20 @@ impl LanguageProvider for DartProvider {
             &mut nodes,
             &["member_expression"],
         );
+        crate::calls::extract_variant_refs(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &crate::calls::VariantRefSpec {
+                // A `case Phase.run:` pattern holds the path without a
+                // `member_expression`.
+                path_kinds: &["member_expression", "constant_pattern"],
+                label_parents: &[],
+                bare_label_parents: &[],
+                bare_expressions: false,
+                token_trees: false,
+            },
+        );
 
         let framework_refs = detect_ast_framework_patterns(source, DART_FRAMEWORKS);
 

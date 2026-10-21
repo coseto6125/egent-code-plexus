@@ -182,6 +182,10 @@ pub struct SymbolTable {
     /// constructor fallback, which runs on every unresolved call.
     constructible_names: FxHashSet<Box<str>>,
 
+    /// Names some `EnumVariant` is registered under: the first gate of
+    /// every enum-variant reference, most of which name no variant.
+    enum_variant_names: FxHashSet<Box<str>>,
+
     /// Exported declarations of the files in `es_modules`, see
     /// [`ecp_core::analyzer::reexport::lookup_export_in_file`]. Sparse: only
     /// TS / JS nodes the parser marks `is_exported` are listed.
@@ -345,6 +349,9 @@ impl SymbolTable {
     fn note_constructible(&mut self, node_name: &str, kind: NodeKind) {
         if kind.is_constructible() && !self.constructible_names.contains(node_name) {
             self.constructible_names.insert(node_name.into());
+        }
+        if kind == NodeKind::EnumVariant && !self.enum_variant_names.contains(node_name) {
+            self.enum_variant_names.insert(node_name.into());
         }
     }
 
@@ -987,6 +994,62 @@ impl SymbolTable {
     /// fallback runs on every unresolved call, so this is its first gate.
     pub fn has_constructible_type(&self, name: &str) -> bool {
         self.constructible_names.contains(name)
+    }
+
+    /// True when some `EnumVariant` is named `name`.
+    pub fn has_enum_variant(&self, name: &str) -> bool {
+        self.enum_variant_names.contains(name)
+    }
+
+    /// The variant `variant` of the type `type_id`: the `EnumVariant` in the
+    /// type's file whose owner is the type. `type_name` is the name the
+    /// reference used for the type; an import alias (`use E as F`) differs
+    /// from the declared name, which is then looked up.
+    pub fn enum_variant_of(&self, type_id: u32, type_name: &str, variant: &str) -> Option<u32> {
+        let file = self.id_to_file.get(&type_id)?;
+        let candidates = self.file_scoped.get(file)?.get(variant)?;
+        let owned_by = |owner: &str| {
+            let owner = self.owner_id(owner)?;
+            candidates.iter().copied().find(|&id| {
+                self.node_kinds[id as usize] == NodeKind::EnumVariant
+                    && self.node_owner[id as usize] == owner
+            })
+        };
+        owned_by(type_name).or_else(|| owned_by(self.name_in_file(type_id)?))
+    }
+
+    /// The variant a bare name (`RED`, a Java `case MONDAY:`) denotes: the
+    /// one `file` declares, else the one value of that name the caller's
+    /// barrier admits project-wide when that value is a variant, and whether
+    /// it is in `file`. `None` when `file` declares something else of that
+    /// name (a local `#define` shadows the enumerator), or another value
+    /// (a macro or constant in some header) shares the name.
+    pub fn bare_enum_variant(
+        &self,
+        file: &str,
+        name: &str,
+        caller: FileMeta,
+    ) -> Option<(u32, bool)> {
+        let is_variant = |id: u32| self.node_kinds[id as usize] == NodeKind::EnumVariant;
+        if let Some(ids) = self.file_scoped.get(file).and_then(|names| names.get(name)) {
+            return match ids.as_slice() {
+                [id] if is_variant(*id) => Some((*id, true)),
+                _ => None,
+            };
+        }
+        let values = self.global_scoped.get(name)?.iter().copied().filter(|&id| {
+            matches!(
+                self.node_kinds[id as usize],
+                NodeKind::EnumVariant | NodeKind::Macro | NodeKind::Const | NodeKind::Variable
+            )
+        });
+        match pick_global(
+            caller,
+            values.map(|id| (id, self.node_file_meta[id as usize])),
+        ) {
+            GlobalPick::Unique(id) if is_variant(id) => Some((id, false)),
+            _ => None,
+        }
     }
 
     /// The one constructor a construction of type `type_id` calls; `None`

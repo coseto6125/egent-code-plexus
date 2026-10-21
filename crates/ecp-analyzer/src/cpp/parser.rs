@@ -655,6 +655,19 @@ impl LanguageProvider for CppProvider {
             &mut nodes,
             &["field_expression"],
         );
+        crate::calls::extract_variant_refs(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &crate::calls::VariantRefSpec {
+                // `Color::Red` for scoped enums; unscoped enumerators are bare.
+                path_kinds: &["qualified_identifier"],
+                label_parents: &["case_statement"],
+                bare_label_parents: &[],
+                bare_expressions: true,
+                token_trees: false,
+            },
+        );
 
         // Merge bindings-derived types with declaration-level fn-pointer vars.
         let mut fn_ptr_vars = bindings.flat_bindings();

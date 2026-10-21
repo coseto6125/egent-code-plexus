@@ -643,6 +643,18 @@ impl LanguageProvider for CSharpProvider {
             &mut nodes,
             &["member_access_expression"],
         );
+        crate::calls::extract_variant_refs(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &crate::calls::VariantRefSpec {
+                path_kinds: &["member_access_expression"],
+                label_parents: &[],
+                bare_label_parents: &[],
+                bare_expressions: false,
+                token_trees: false,
+            },
+        );
 
         let framework_refs = detect_ast_framework_patterns(source, CSHARP_FRAMEWORKS);
 

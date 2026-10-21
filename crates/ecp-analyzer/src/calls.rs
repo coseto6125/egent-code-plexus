@@ -299,15 +299,29 @@ fn attach_pending_field_reads(
     if reads.is_empty() {
         return;
     }
-    let mut order: Vec<usize> = (0..reads.len()).collect();
-    order.sort_unstable_by_key(|&idx| reads[idx].line);
+    let targets = enclosing_targets(containers, &reads);
+    for (read, target) in reads.into_iter().zip(targets) {
+        if let Some(node_idx) = target {
+            nodes[node_idx].field_reads.push(read.name);
+        }
+    }
+}
+
+/// For each pending entry, the node index of the smallest container whose
+/// line range holds its line.
+fn enclosing_targets(
+    containers: &[EnclosingContainer],
+    pending: &[PendingCall],
+) -> Vec<Option<usize>> {
+    let mut order: Vec<usize> = (0..pending.len()).collect();
+    order.sort_unstable_by_key(|&idx| pending[idx].line);
 
     let mut active: BinaryHeap<Reverse<(u32, usize)>> = BinaryHeap::new();
     let mut next_container = 0usize;
-    let mut targets: Vec<Option<usize>> = vec![None; reads.len()];
+    let mut targets: Vec<Option<usize>> = vec![None; pending.len()];
 
     for &idx in &order {
-        let line = reads[idx].line;
+        let line = pending[idx].line;
         while next_container < containers.len() && containers[next_container].start <= line {
             active.push(Reverse((containers[next_container].width, next_container)));
             next_container += 1;
@@ -320,12 +334,278 @@ fn attach_pending_field_reads(
             active.pop();
         }
     }
+    targets
+}
 
-    for (read, target) in reads.into_iter().zip(targets) {
-        if let Some(node_idx) = target {
-            nodes[node_idx].field_reads.push(read.name);
+/// One enum-variant reference a parser recorded in [`RawNode::field_reads`]:
+/// `E::A { .. }`, `E::B(..)`, `Day.MONDAY`, a `case Color::Red:` label, or a
+/// bare enumerator (`RED`) where the language names variants unqualified.
+///
+/// The entry rides in `field_reads` behind a U+0001 marker, like the
+/// [`CallSite`] markers in `calls`: no field name holds a control
+/// character, so the `ReadsField` tier never sees one. Pass 2 resolves the
+/// path's qualifier as a type and the last segment as one of that type's
+/// variants (`References` edge); a bare name resolves only to a variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VariantRef<'a> {
+    /// `Q::V`, `pkg.Q.V`, `\App\Q::V`, or a bare `V`, whitespace removed.
+    pub path: &'a str,
+    /// The reference sits in a pattern or case label, so it tests for the
+    /// variant rather than producing or reading it.
+    pub pattern: bool,
+}
+
+impl<'a> VariantRef<'a> {
+    const USE_PREFIX: &'static str = "\u{1}variant ";
+    const PATTERN_PREFIX: &'static str = "\u{1}variant-pattern ";
+
+    pub fn encode(path: &str, pattern: bool) -> String {
+        let prefix = if pattern {
+            Self::PATTERN_PREFIX
+        } else {
+            Self::USE_PREFIX
+        };
+        [prefix, path].concat()
+    }
+
+    /// `None` for an ordinary field-read entry.
+    pub fn parse(raw: &'a str) -> Option<Self> {
+        if let Some(path) = raw.strip_prefix(Self::PATTERN_PREFIX) {
+            Some(Self {
+                path,
+                pattern: true,
+            })
+        } else {
+            raw.strip_prefix(Self::USE_PREFIX).map(|path| Self {
+                path,
+                pattern: false,
+            })
         }
     }
+
+    /// `(qualifier path, variant)` split at the last `::` / `.` / `\`;
+    /// `None` for a bare name.
+    pub fn split(self) -> Option<(&'a str, &'a str)> {
+        let path = self.path;
+        let idx = [
+            path.rfind("::").map(|i| (i, 2)),
+            path.rfind('.').map(|i| (i, 1)),
+        ]
+        .into_iter()
+        .flatten()
+        .max_by_key(|&(i, _)| i)?;
+        let (qualifier, variant) = (&path[..idx.0], &path[idx.0 + idx.1..]);
+        (!qualifier.is_empty() && !variant.is_empty()).then_some((qualifier, variant))
+    }
+}
+
+/// Where a language's grammar names enum variants, for
+/// [`extract_variant_refs`].
+pub struct VariantRefSpec {
+    /// Nodes whose whole text is a qualified path that may end in a variant:
+    /// Rust `scoped_identifier`, Java `field_access`, TS `member_expression`.
+    pub path_kinds: &'static [&'static str],
+    /// Parent kinds that make their child a case label or pattern
+    /// (`switch_case`, `when_condition`). Any kind ending in `pattern` does
+    /// too, except through its `condition` (a Rust match guard).
+    pub label_parents: &'static [&'static str],
+    /// Parent kinds whose `identifier` child is a bare variant name: Java
+    /// `case MONDAY:`.
+    pub bare_label_parents: &'static [&'static str],
+    /// C / C++: enumerators are named bare in any expression.
+    pub bare_expressions: bool,
+    /// Rust: `Q::V` token runs inside macro token trees (`matches!(x, E::A)`).
+    pub token_trees: bool,
+}
+
+/// Walk the AST and record each enum-variant reference as a [`VariantRef`]
+/// in the `field_reads` of the smallest enclosing function / method /
+/// constructor, once per distinct entry.
+///
+/// Capture is a cheap syntactic filter; Pass 2 keeps only references that
+/// resolve to an `EnumVariant`. A `.`-qualified path is kept only when its
+/// qualifier starts upper-case (`Day.MONDAY`, not `obj.field`), and a bare C
+/// / C++ name only when it does (`RED`, not a local): member accesses and
+/// locals outnumber variant references by far, and enum names follow that
+/// case in every grammar here.
+pub fn extract_variant_refs(
+    root: Node<'_>,
+    source: &[u8],
+    nodes: &mut [RawNode],
+    spec: &VariantRefSpec,
+) {
+    let containers = enclosing_containers(nodes);
+    if containers.is_empty() {
+        return;
+    }
+    let mut refs: Vec<PendingCall> = Vec::new();
+    let mut push = |node: Node<'_>, path: &str, pattern: bool| {
+        refs.push(PendingCall {
+            line: safe_row(node.start_position().row),
+            name: VariantRef::encode(path, pattern),
+        });
+    };
+    let mut stack: Vec<Node<'_>> = vec![root];
+    while let Some(n) = stack.pop() {
+        let kind = n.kind();
+        if spec.path_kinds.contains(&kind) && !is_path_suffix(n) {
+            if let Some(path) = n.utf8_text(source).ok().and_then(variant_path) {
+                push(n, &path, in_label(n, spec.label_parents));
+            }
+        } else if kind == "identifier" {
+            if let Some(parent) = n.parent() {
+                let label = spec.bare_label_parents.contains(&parent.kind());
+                if label || (spec.bare_expressions && is_bare_value(n, parent)) {
+                    if let Some(name) = n.utf8_text(source).ok().filter(|t| starts_upper(t)) {
+                        push(n, name, label || in_label(n, spec.label_parents));
+                    }
+                }
+            }
+        } else if spec.token_trees && kind == "token_tree" {
+            for path in token_tree_paths(n, source) {
+                push(n, &path, false);
+            }
+        }
+        let mut c = n.walk();
+        for child in n.children(&mut c) {
+            stack.push(child);
+        }
+    }
+    if refs.is_empty() {
+        return;
+    }
+    let targets = enclosing_targets(&containers, &refs);
+    let mut seen: rustc_hash::FxHashSet<(usize, String)> = rustc_hash::FxHashSet::default();
+    for (entry, target) in refs.into_iter().zip(targets) {
+        let Some(node_idx) = target else { continue };
+        if seen.insert((node_idx, entry.name.clone())) {
+            nodes[node_idx].field_reads.push(entry.name);
+        }
+    }
+}
+
+/// C++ nests `ns::Color::Blue` as `ns` + `Color::Blue`; the outer node
+/// already holds the whole path.
+fn is_path_suffix(node: Node<'_>) -> bool {
+    node.parent().is_some_and(|parent| {
+        parent.kind() == node.kind()
+            && parent.child_by_field_name("name").map(|n| n.id()) == Some(node.id())
+    })
+}
+
+/// Whether `node` is a case label or sits in a pattern.
+fn in_label(node: Node<'_>, label_parents: &[&str]) -> bool {
+    if node.kind().ends_with("pattern") {
+        return true;
+    }
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    let is_field =
+        |field: &str| parent.child_by_field_name(field).map(|n| n.id()) == Some(node.id());
+    if is_field("pattern") {
+        return true;
+    }
+    !is_field("condition")
+        && (parent.kind().ends_with("pattern") || label_parents.contains(&parent.kind()))
+}
+
+/// A C / C++ `identifier` in value position: not a declared name, a callee,
+/// or the member of a qualified name.
+fn is_bare_value(node: Node<'_>, parent: Node<'_>) -> bool {
+    let is_field =
+        |field: &str| parent.child_by_field_name(field).map(|n| n.id()) == Some(node.id());
+    !parent.kind().ends_with("declarator")
+        && !matches!(
+            parent.kind(),
+            "parameter_declaration" | "enumerator" | "preproc_def" | "preproc_function_def"
+        )
+        && !is_field("declarator")
+        && !is_field("name")
+        && !(parent.kind() == "call_expression" && is_field("function"))
+}
+
+fn starts_upper(text: &str) -> bool {
+    text.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
+}
+
+/// The text of a qualified path with whitespace removed, when every segment
+/// is an identifier and the path could end in a variant; else `None`.
+fn variant_path(text: &str) -> Option<String> {
+    let path: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let body = path.strip_prefix('\\').unwrap_or(&path);
+    let mut segments: Vec<&str> = Vec::new();
+    let mut dotted = false;
+    let mut rest = body;
+    loop {
+        let end = rest
+            .find(|c: char| matches!(c, ':' | '.' | '\\'))
+            .unwrap_or(rest.len());
+        segments.push(&rest[..end]);
+        let tail = &rest[end..];
+        rest = if let Some(next) = tail.strip_prefix("::") {
+            next
+        } else if let Some(next) = tail.strip_prefix('.') {
+            dotted = true;
+            next
+        } else if let Some(next) = tail.strip_prefix('\\') {
+            next
+        } else if tail.is_empty() {
+            break;
+        } else {
+            return None;
+        };
+    }
+    let is_ident = |s: &&str| {
+        s.chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+            && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+    };
+    if segments.len() < 2 || !segments.iter().all(is_ident) {
+        return None;
+    }
+    let qualifier = segments[segments.len() - 2];
+    if dotted && !starts_upper(qualifier) {
+        return None;
+    }
+    Some(path)
+}
+
+/// Rust `Q::V` runs among a macro token tree's direct tokens: `matches!`
+/// patterns, `assert_eq!` arguments. Nested trees are walked on their own.
+fn token_tree_paths(tree: Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut run: Vec<&str> = Vec::new();
+    let mut after_sep = false;
+    let mut flush = |run: &mut Vec<&str>| {
+        if run.len() >= 2 {
+            if let Some(path) = variant_path(&run.join("::")) {
+                paths.push(path);
+            }
+        }
+        run.clear();
+    };
+    let mut c = tree.walk();
+    for token in tree.children(&mut c) {
+        match token.kind() {
+            "identifier" | "crate" | "self" | "super" => {
+                let text = token.utf8_text(source).unwrap_or("");
+                if !after_sep {
+                    flush(&mut run);
+                }
+                run.push(text);
+                after_sep = false;
+            }
+            "::" if !run.is_empty() && !after_sep => after_sep = true,
+            _ => {
+                flush(&mut run);
+                after_sep = false;
+            }
+        }
+    }
+    flush(&mut run);
+    paths
 }
 
 #[derive(Clone, Copy)]
@@ -490,5 +770,63 @@ mod tests {
         }
         assert_eq!(construction_call(""), None);
         assert_eq!(construction_call("<T>"), None);
+    }
+
+    #[test]
+    fn test_variant_ref_encode_parse_round_trips_and_ignores_field_names() {
+        for (path, pattern) in [("E::A", false), ("Day.MONDAY", true), ("RED", false)] {
+            let entry = VariantRef::encode(path, pattern);
+            assert_eq!(
+                VariantRef::parse(&entry),
+                Some(VariantRef { path, pattern }),
+                "{entry:?}"
+            );
+        }
+        assert_eq!(VariantRef::parse("timeout"), None);
+        assert_eq!(VariantRef::parse("variant E::A"), None);
+    }
+
+    #[test]
+    fn test_variant_ref_split_last_separator_returns_qualifier_path_and_variant() {
+        fn split(path: &str) -> Option<(&str, &str)> {
+            VariantRef {
+                path,
+                pattern: false,
+            }
+            .split()
+        }
+        assert_eq!(split("E::A"), Some(("E", "A")));
+        assert_eq!(split("crate::m::E::A"), Some(("crate::m::E", "A")));
+        assert_eq!(split("pkg.Color.RED"), Some(("pkg.Color", "RED")));
+        assert_eq!(
+            split("\\App\\Status::Active"),
+            Some(("\\App\\Status", "Active"))
+        );
+        assert_eq!(split("RED"), None);
+    }
+
+    #[test]
+    fn test_variant_path_shapes_keep_qualified_identifiers_only() {
+        for (text, want) in [
+            ("E::A", Some("E::A")),
+            (
+                "crate::error::EcpError::AmbiguousSymbol",
+                Some("crate::error::EcpError::AmbiguousSymbol"),
+            ),
+            ("std::fs::read", Some("std::fs::read")),
+            ("Day.MONDAY", Some("Day.MONDAY")),
+            ("Suit\n  .clubs", Some("Suit.clubs")),
+            ("\\App\\Status::Active", Some("\\App\\Status::Active")),
+            // A lower-case `.` qualifier is a value, not a type.
+            ("obj.field", None),
+            ("self.count", None),
+            ("a?.b", None),
+            ("f().B", None),
+            ("Vec::<u8>::new", None),
+            ("A", None),
+            ("A::", None),
+        ] {
+            assert_eq!(variant_path(text).as_deref(), want, "{text:?}");
+        }
     }
 }
