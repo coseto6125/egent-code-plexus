@@ -768,9 +768,18 @@ fn shell_words(cmd: &str) -> Vec<String> {
 }
 
 /// Whether `words[i]` runs `rg` / `grep`, rather than naming it to a
-/// lookup (`command -v rg`, `which grep`, `type -p rg`).
+/// lookup (`command -v rg`, `which grep`, `type -p rg`) or listing files
+/// (`rg --files | xargs grep …`).
 fn runs_search(words: &[String], i: usize) -> bool {
     if !matches!(words[i].as_str(), "rg" | "grep") {
+        return false;
+    }
+    let lists_files = words[i] == "rg"
+        && words[i + 1..]
+            .iter()
+            .take_while(|w| !w.chars().all(|c| matches!(c, '|' | '&' | ';')))
+            .any(|w| w == "--files");
+    if lists_files {
         return false;
     }
     let flags = words[..i]
@@ -804,6 +813,17 @@ fn extract_from_shell(cmd: &str) -> Option<String> {
         "--type",
         "--include",
         "--exclude",
+        "--color",
+        "--colour",
+        "--max-count",
+        "--context",
+        "--after-context",
+        "--before-context",
+        "-j",
+        "--threads",
+        "--max-depth",
+        "-T",
+        "--type-not",
     ];
     let mut found_cmd = false;
     let mut skip_next = false;
@@ -1243,6 +1263,8 @@ mod tests {
     #[test]
     fn test_extract_from_shell_lookup_of_rg_is_not_the_search() {
         for cmd in [
+            "rg --color never -n -m 2 HookInput src",
+            "rg --files -g '**/x.rs' | xargs grep -n -m 2 HookInput",
             "command -v rg && cd /tmp && rg HookInput .",
             "which grep; grep -rn HookInput .",
             "type -p rg >/dev/null && rg HookInput",
