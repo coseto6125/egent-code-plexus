@@ -61,10 +61,10 @@ class Decoy
     assert_single_call_into_base(graphs, "run", "Derived.greet", "greet", "src/Base.php");
 }
 
-/// `$this` and `self::` in a trait or an enum name it as in a class: the
-/// trait's own members, a member of the class that uses the trait, and an
-/// enum's own method all bind. Untyped, the caller's own members were
-/// unreachable by name.
+/// `$this` and `self::` in a trait or an enum name it for the members it
+/// declares, which bind as a class's do; untyped, the caller's own members
+/// were unreachable by name. A member the trait does not declare belongs to
+/// the class that uses it and keeps the by-name route.
 #[test]
 fn test_this_receiver_in_trait_and_enum_binds_member() {
     let source = r#"<?php
@@ -103,4 +103,29 @@ class H {
         vec![pair("H", "host"), pair("T", "b"), pair("T", "st")]
     );
     assert_eq!(bound("label"), vec![pair("E", "upper")]);
+}
+
+/// Laravel's `HasUniqueStringIds::getIncrementing` calls `$this->getKeyName()`,
+/// which the model class declares in another file: the trait does not
+/// declare it, so the call keeps binding by name.
+#[test]
+fn test_this_receiver_in_trait_host_member_in_other_file_binds_by_name() {
+    let graph = graph_of(
+        &PhpProvider::new().unwrap(),
+        &[
+            (
+                "src/Model.php",
+                "<?php\nnamespace App;\nclass Model {\n    use HasIds;\n    public function getKeyName() { return 'id'; }\n}\n",
+            ),
+            (
+                "src/HasIds.php",
+                "<?php\nnamespace App;\ntrait HasIds {\n    public function getIncrementing() {\n        return $this->getKeyName();\n    }\n}\n",
+            ),
+        ],
+    );
+    let hits: Vec<_> = calls_from(&graph, "getIncrementing")
+        .into_iter()
+        .map(|hit| (hit.owner, hit.name))
+        .collect();
+    assert_eq!(hits, vec![("Model".to_string(), "getKeyName".to_string())]);
 }

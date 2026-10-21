@@ -23,16 +23,17 @@ use ecp_core::graph::NodeKind;
 use tree_sitter::Node;
 
 /// Enclosing-class context built by a pre-walk over the node list.
-/// Maps the `(start, end)` position range → `(class_name, Option<parent_name>)`.
+/// Maps the `(start, end)` position range → `(class_name, Option<parent_name>,
+/// declared members)`. Members are listed for a trait or an enum only.
 pub struct ClassContext {
-    entries: Vec<(PosRange, String, Option<String>)>,
+    entries: Vec<(PosRange, String, Option<String>, Option<Vec<String>>)>,
 }
 
 impl ClassContext {
     pub fn from_nodes(nodes: &[RawNode]) -> Self {
+        let range = |n: &RawNode| ((n.span.0, n.span.1), (n.span.2, n.span.3));
         let entries = nodes
             .iter()
-            // `$this` / `self::` in a trait or an enum names it as in a class.
             .filter(|n| {
                 matches!(
                     n.kind,
@@ -40,32 +41,49 @@ impl ClassContext {
                 )
             })
             .map(|n| {
-                let span = ((n.span.0, n.span.1), (n.span.2, n.span.3));
+                let span = range(n);
                 let parent = n.heritage.first().cloned();
-                (span, n.name.clone(), parent)
+                // `$this` in a trait is the class that uses it: only the
+                // trait's own members are reachable through its name, and a
+                // host class's member keeps the by-name route.
+                let members = matches!(n.kind, NodeKind::Trait | NodeKind::Enum).then(|| {
+                    nodes
+                        .iter()
+                        .filter(|m| {
+                            matches!(m.kind, NodeKind::Method | NodeKind::Function) && {
+                                let (start, end) = range(m);
+                                span.0 <= start && end <= span.1
+                            }
+                        })
+                        .map(|m| m.name.clone())
+                        .collect()
+                });
+                (span, n.name.clone(), parent, members)
             })
             .collect();
         Self { entries }
     }
 
-    /// Return the name of the innermost class enclosing `pos`.
-    fn enclosing_class_name(&self, pos: Pos) -> Option<&str> {
-        let mut best: Option<(&str, (u32, i64))> = None;
-        for ((start, end), name, _) in &self.entries {
+    /// The name of the innermost class enclosing `pos`, when `member` is
+    /// reachable through it.
+    fn enclosing_class_name(&self, pos: Pos, member: &str) -> Option<&str> {
+        let mut best: Option<(&str, Option<&[String]>, (u32, i64))> = None;
+        for ((start, end), name, _, members) in &self.entries {
             if *start <= pos && pos <= *end {
                 let width = range_width((*start, *end));
-                if best.is_none_or(|(_, w)| width < w) {
-                    best = Some((name.as_str(), width));
+                if best.is_none_or(|(_, _, w)| width < w) {
+                    best = Some((name.as_str(), members.as_deref(), width));
                 }
             }
         }
-        best.map(|(n, _)| n)
+        best.filter(|(_, members, _)| members.is_none_or(|m| m.iter().any(|n| n == member)))
+            .map(|(n, _, _)| n)
     }
 
     /// Return the first heritage (parent) class of the class enclosing `pos`.
     fn enclosing_parent_name(&self, pos: Pos) -> Option<&str> {
         let mut best: Option<(Option<&str>, (u32, i64))> = None;
-        for ((start, end), _, parent) in &self.entries {
+        for ((start, end), _, parent, _) in &self.entries {
             if *start <= pos && pos <= *end {
                 let width = range_width((*start, *end));
                 if best.is_none_or(|(_, w)| width < w) {
@@ -162,7 +180,7 @@ fn php_member_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Optio
     if obj_node.kind() == "variable_name" {
         if let Ok(var_text) = obj_node.utf8_text(source) {
             if var_text == "$this" {
-                if let Some(class_name) = ctx.enclosing_class_name(pos) {
+                if let Some(class_name) = ctx.enclosing_class_name(pos, method_name) {
                     return Some(format!("{class_name}.{method_name}"));
                 }
             }
@@ -196,7 +214,7 @@ fn php_scoped_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Optio
                     Some(method_name.to_string())
                 }
                 "self" | "static" => {
-                    if let Some(class_name) = ctx.enclosing_class_name(pos) {
+                    if let Some(class_name) = ctx.enclosing_class_name(pos, method_name) {
                         return Some(format!("{class_name}.{method_name}"));
                     }
                     Some(method_name.to_string())
