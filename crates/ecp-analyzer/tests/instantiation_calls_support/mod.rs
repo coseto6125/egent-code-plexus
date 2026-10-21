@@ -138,28 +138,6 @@ pub fn assert_calls_constructor(graph: &ZeroCopyGraph, caller: &str, ty: &str, f
     );
 }
 
-/// A construction of a type with `count` overloaded constructors reaches
-/// each of them once: the call's argument types, which pick one, are not
-/// parsed. `Hit` cannot tell overloads apart, so the count stands for "each".
-pub fn assert_calls_each_overload(
-    graph: &ZeroCopyGraph,
-    caller: &str,
-    ty: &str,
-    file: &str,
-    count: usize,
-) {
-    let hits = instantiation_calls(graph, caller, ty);
-    assert!(
-        hits.len() == count
-            && hits
-                .iter()
-                .all(|h| h.kind == NodeKind::Constructor && h.file == file),
-        "`{caller}` must call each of the {count} constructors of `{ty}` in {file} once; \
-         instantiation calls: {hits:?}; all calls: {:?}",
-        calls_from(graph, caller)
-    );
-}
-
 /// `kind` is the type node's kind: `Class`, or `Struct` for a value type.
 pub fn assert_calls_type(
     graph: &ZeroCopyGraph,

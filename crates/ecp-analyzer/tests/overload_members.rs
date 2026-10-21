@@ -1,9 +1,9 @@
 //! Same-name members of one type (overloads, accessor pairs, redefinitions)
 //! across the 14 mainstream languages. The uid `(kind, path, owner, name)`
 //! has no parameter signature, so every such member shares one identity.
-//! Each must still be a named node of its type, and a call bound to the
-//! first must reach all of them: `impact` from a later overload's callee
-//! must find the callers of the overload set.
+//! Each must still be a named node of its type. A call binds the first by
+//! name, and the first references every later one, so upstream `impact`
+//! from a later overload's callee reaches the callers of the set.
 //!
 //! Each fixture declares type `K` with `audit`, two `save` members, and
 //! `run`, which calls `save`; only the later `save` calls `audit`.
@@ -76,20 +76,27 @@ fn assert_overload_set(provider: &dyn LanguageProvider, path: &str, source: &str
         );
     }
 
-    let run = named(&graph, "run")[0];
-    for &save in &saves {
-        assert_eq!(
-            edges(&graph, RelType::Calls, run, save),
-            ["call:overload_set"],
-            "{path}: `run` reaches every `save`"
-        );
-    }
+    // The upstream path of `audit`: later `save` ← first `save` ← `run`.
     let audit = named(&graph, "audit")[0];
     assert_eq!(
         edges(&graph, RelType::Calls, later, audit).len(),
         1,
-        "{path}: the later `save` calls `audit`, so upstream impact of `audit` \
-         reaches `run` through it"
+        "{path}: the later `save` calls `audit`"
+    );
+    assert_eq!(
+        edges(&graph, RelType::References, first, later),
+        ["overload_set"],
+        "{path}: the first `save` references the later one"
+    );
+    let run = named(&graph, "run")[0];
+    assert_eq!(
+        edges(&graph, RelType::Calls, run, first),
+        ["call"],
+        "{path}: `run` binds the first `save`"
+    );
+    assert!(
+        edges(&graph, RelType::Calls, run, later).is_empty(),
+        "{path}: one Calls edge per call site"
     );
 }
 

@@ -7,8 +7,8 @@ mod instantiation_calls_support;
 use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_core::graph::NodeKind;
 use instantiation_calls_support::{
-    assert_calls_constructor, assert_calls_each_overload, assert_calls_type,
-    assert_no_instantiation_call, assert_only_call, graph_of,
+    assert_calls_constructor, assert_calls_type, assert_no_instantiation_call, assert_only_call,
+    graph_of,
 };
 
 const WIDGET: (&str, &str) = (
@@ -57,8 +57,9 @@ fn test_swift_same_file_call_calls_constructor() {
     assert_calls_constructor(&graph, "makeLocal", "Local", "Sources/Local.swift");
 }
 
-/// Overloads are separate Constructor nodes, and the argument types that
-/// pick one are not parsed: the construction reaches both.
+/// Overloads are separate Constructor nodes; the construction binds the
+/// first, as "a constructor of `Multi`", since the argument types that pick
+/// one are not parsed.
 #[test]
 fn test_swift_overloaded_inits_call_calls_constructor() {
     let multi = (
@@ -70,7 +71,7 @@ fn test_swift_overloaded_inits_call_calls_constructor() {
         "func makeMulti() -> Multi {\n    return Multi(x: 1)\n}\n",
     );
     let graph = graph_of(&provider(), &[multi, app]);
-    assert_calls_each_overload(&graph, "makeMulti", "Multi", "Sources/Multi.swift", 2);
+    assert_calls_constructor(&graph, "makeMulti", "Multi", "Sources/Multi.swift");
 }
 
 /// A struct with no declared `init` gets the memberwise initializer, which

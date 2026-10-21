@@ -505,8 +505,8 @@ impl SymbolTable {
     /// Register the next id as a later overload of `first`
     /// ([`ecp_core::uid::keeps_overloads`]): same kind and owner, but in no
     /// name table, so every name lookup still returns `first`. Which overload
-    /// a call means needs argument types the parse does not carry, so a call
-    /// bound to `first` reaches the whole set ([`Self::later_overloads`]).
+    /// a call means needs argument types the parse does not carry; the
+    /// builder links `first` to the rest instead ([`Self::overload_sets`]).
     /// Returns the overload's 1-based ordinal.
     pub fn register_overload(&mut self, first: u32, file_meta: FileMeta) -> u32 {
         let id = self.node_kinds.len() as u32;
@@ -521,6 +521,15 @@ impl SymbolTable {
     /// The later overloads of `first`, in source order.
     pub fn later_overloads(&self, first: u32) -> &[u32] {
         self.overloads.get(&first).map_or(&[], Vec::as_slice)
+    }
+
+    /// Every overload set as (first, later overloads), by first id.
+    pub fn overload_sets(&self) -> impl Iterator<Item = (u32, &[u32])> {
+        let mut firsts: Vec<u32> = self.overloads.keys().copied().collect();
+        firsts.sort_unstable();
+        firsts
+            .into_iter()
+            .map(|first| (first, self.later_overloads(first)))
     }
 
     /// The first declaration in `file_path` named `node_name` with `kind` and

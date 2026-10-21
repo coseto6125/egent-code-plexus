@@ -378,6 +378,7 @@ impl GraphBuilder {
         edges.extend(fetches_edges);
 
         emit_closure_references(&self.local_graphs, &nodes, &mut string_pool, &mut edges);
+        emit_overload_references(&symbol_table, &mut string_pool, &mut edges);
 
         if prof {
             eprintln!(
@@ -1771,6 +1772,28 @@ fn is_anonymous_closure(node: &RawNode) -> bool {
     node.kind == NodeKind::Function && node.name.starts_with("<anonymous:")
 }
 
+/// `References` from the first of each overload set to every later one. A
+/// call binds the first by name: the argument types that pick an overload
+/// are not parsed. These edges let upstream impact of a later overload reach
+/// the set's callers through the first one, at k - 1 edges per set instead
+/// of one per call site and overload.
+fn emit_overload_references(
+    symbol_table: &SymbolTable,
+    string_pool: &mut StringPool,
+    edges: &mut Vec<Edge>,
+) {
+    let reason = string_pool.add(ecp_core::analyzer::types::OVERLOAD_SET_REASON);
+    for (first, later) in symbol_table.overload_sets() {
+        edges.extend(later.iter().map(|&target| Edge {
+            source: first,
+            target,
+            rel_type: RelType::References,
+            confidence: 1.0,
+            reason,
+        }));
+    }
+}
+
 fn emit_closure_references(
     local_graphs: &[LocalGraph],
     nodes: &[Node],
@@ -2026,7 +2049,6 @@ fn pass2_emit_node_edges(
     reason_implements: StrRef,
     reason_type: StrRef,
     reason_call: StrRef,
-    reason_overload_set: StrRef,
     reason_reads_field: StrRef,
     symbol_table: &SymbolTable,
     edges: &mut Vec<Edge>,
@@ -2079,33 +2101,20 @@ fn pass2_emit_node_edges(
                 call_heritage,
             ),
         };
-        for (first, confidence) in targets {
-            // The name binds the first overload; the argument types that
-            // pick one are not parsed, so the call reaches every overload.
-            // An overload calling its sibling (`save(int)` delegating to
-            // `save(int, String)`) binds itself here, so the sibling edge
-            // survives the self-recursion skip.
-            let later = symbol_table.later_overloads(first);
-            let reason = if later.is_empty() {
-                reason_call
-            } else {
-                reason_overload_set
-            };
-            for target_id in std::iter::once(first).chain(later.iter().copied()) {
-                if target_id == current_node_idx {
-                    continue; // self-recursion edges are Louvain / process noise
-                }
-                let edge_pre_sort_idx = edges.len();
-                edges.push(Edge {
-                    source: current_node_idx,
-                    target: target_id,
-                    rel_type: RelType::Calls,
-                    confidence,
-                    reason,
-                });
-                if let Some((flags, dispatch_type)) = meta {
-                    pending_call_metas.push((edge_pre_sort_idx, *flags, dispatch_type.clone()));
-                }
+        for (target_id, confidence) in targets {
+            if target_id == current_node_idx {
+                continue; // self-recursion edges are Louvain / process noise
+            }
+            let edge_pre_sort_idx = edges.len();
+            edges.push(Edge {
+                source: current_node_idx,
+                target: target_id,
+                rel_type: RelType::Calls,
+                confidence,
+                reason: reason_call,
+            });
+            if let Some((flags, dispatch_type)) = meta {
+                pending_call_metas.push((edge_pre_sort_idx, *flags, dispatch_type.clone()));
             }
         }
     }
@@ -2279,7 +2288,6 @@ fn pass2_resolve_edges(
     let reason_implements = string_pool.add("pass2:implements");
     let reason_type = string_pool.add("type_annotation");
     let reason_call = string_pool.add("call");
-    let reason_overload_set = string_pool.add("call:overload_set");
     let reason_reads_field = string_pool.add("field_read");
 
     let mut reason_cache: FxHashMap<String, StrRef> = FxHashMap::default();
@@ -2389,7 +2397,6 @@ fn pass2_resolve_edges(
                     reason_implements,
                     reason_type,
                     reason_call,
-                    reason_overload_set,
                     reason_reads_field,
                     symbol_table,
                     &mut edges,
@@ -2484,7 +2491,6 @@ fn pass2_resolve_edges(
                         reason_implements,
                         reason_type,
                         reason_call,
-                        reason_overload_set,
                         reason_reads_field,
                         symbol_table_ref,
                         &mut local_edges,

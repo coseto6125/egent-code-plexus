@@ -49,8 +49,8 @@ use std::path::Path;
 /// different symbols (nlohmann `json.hpp` gains a friend `operator<`).
 /// schema13: a later same-name Method / Constructor overload keeps its name
 /// and owner under its own uid instead of an empty-name tombstone, gets its
-/// `HasMethod` edge, and a call bound to the first overload reaches all of
-/// them (`call:overload_set`).
+/// `HasMethod` edge, and the first overload `References` each later one
+/// (`overload_set`).
 pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema13");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

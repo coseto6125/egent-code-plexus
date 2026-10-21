@@ -1406,16 +1406,17 @@ fn test_overlay_kotlin_wildcard_below_heritage_documents_heritage_divergence() {
     );
 }
 
-/// Calls from `caller` as sorted (target uid, confidence %) pairs: from a
-/// full reindex of `files` with `dirty` applied, then from the overlay of
-/// `dirty` over the index of `files`. Uids tell overloads apart, which share
-/// file, name and owner.
-fn overload_calls(
+/// Sorted (source uid, target uid, rel, confidence %) of the Calls edges
+/// from `caller` and of every overload-set References edge: from a full
+/// reindex of `files` with `dirty` applied, then from the overlay of `dirty`
+/// over the index of `files`. Uids tell overloads apart, which share file,
+/// name and owner.
+fn overload_edges(
     provider: &dyn LanguageProvider,
     files: &[(&str, &str)],
     dirty: &[(&str, &str)],
     caller: &str,
-) -> (Vec<(u64, u32)>, Vec<(u64, u32)>) {
+) -> (Vec<OverloadEdge>, Vec<OverloadEdge>) {
     let parse = |path: &str, source: &str| {
         provider
             .parse_file(Path::new(path), source.as_bytes())
@@ -1432,6 +1433,10 @@ fn overload_calls(
         }
         builder.build()
     };
+    let wanted = |rel: RelType, source_name: &str, reason: &str| {
+        (rel == RelType::Calls && source_name == caller)
+            || (rel == RelType::References && reason == "overload_set")
+    };
     let base = build(&[]);
     let full = build(dirty);
     let pool = &full.string_pool;
@@ -1439,12 +1444,17 @@ fn overload_calls(
         .edges
         .iter()
         .filter(|e| {
-            e.rel_type == RelType::Calls
-                && full.nodes[e.source as usize].name.resolve(pool) == caller
+            wanted(
+                e.rel_type,
+                full.nodes[e.source as usize].name.resolve(pool),
+                e.reason.resolve(pool),
+            )
         })
         .map(|e| {
             (
+                full.nodes[e.source as usize].uid,
                 full.nodes[e.target as usize].uid,
+                e.rel_type == RelType::Calls,
                 (e.confidence * 100.0).round() as u32,
             )
         })
@@ -1460,11 +1470,17 @@ fn overload_calls(
     let mut actual: Vec<_> = merged
         .all_edges()
         .filter(|e| {
-            e.rel_type() == RelType::Calls && merged.node(e.source).unwrap().name(&merged) == caller
+            wanted(
+                e.rel_type(),
+                merged.node(e.source).unwrap().name(&merged),
+                e.reason(archived),
+            )
         })
         .map(|e| {
             (
+                merged.node(e.source).unwrap().uid(),
                 merged.node(e.target).unwrap().uid(),
+                e.rel_type() == RelType::Calls,
                 (e.confidence() * 100.0).round() as u32,
             )
         })
@@ -1474,27 +1490,30 @@ fn overload_calls(
     (expected, actual)
 }
 
+/// (source uid, target uid, is Calls, confidence %).
+type OverloadEdge = (u64, u64, bool, u32);
+
 #[test]
 fn test_overlay_overload_set_in_dirty_file_matches_reindex() {
     let k = "class K {\n void audit() {}\n void save(int id) {}\n void save(String name) { audit(); }\n void run() { save(1); }\n}\n";
     let shifted = format!("\n{k}");
-    let (full, overlay) = overload_calls(
+    let (full, overlay) = overload_edges(
         &ecp_analyzer::java::parser::JavaProvider::new().unwrap(),
         &[("K.java", k)],
         &[("K.java", &shifted)],
         "run",
     );
-    assert_eq!(full.len(), 2, "the reindex reaches both overloads");
+    assert_eq!(full.len(), 2, "one call, one overload link");
     assert_eq!(overlay, full);
 }
 
 /// The dirty caller binds the first overloaded constructor in a clean file,
-/// so the overlay finds the later one in the base graph.
+/// whose overload link stays the base edge.
 #[test]
 fn test_overlay_overload_set_in_clean_file_matches_reindex() {
     let app = "public class App {\n    public Multi makeMulti() {\n        return new Multi(1);\n    }\n}\n";
     let shifted = format!("\n{app}");
-    let (full, overlay) = overload_calls(
+    let (full, overlay) = overload_edges(
         &ecp_analyzer::java::parser::JavaProvider::new().unwrap(),
         &[
             ("src/App.java", app),
@@ -1506,22 +1525,22 @@ fn test_overlay_overload_set_in_clean_file_matches_reindex() {
         &[("src/App.java", &shifted)],
         "makeMulti",
     );
-    assert_eq!(full.len(), 2, "the reindex reaches both constructors");
+    assert_eq!(full.len(), 2, "one call, one overload link");
     assert_eq!(overlay, full);
 }
 
 /// `save(int)` delegates to `save(String)`: the name binds the caller
-/// itself, and the edge to its sibling must survive the self-recursion skip.
+/// itself, so the overload link alone connects the two.
 #[test]
 fn test_overlay_overload_delegating_to_sibling_matches_reindex() {
     let k = "class K {\n void save(int id) { save(\"x\"); }\n void save(String name) {}\n}\n";
     let shifted = format!("\n{k}");
-    let (full, overlay) = overload_calls(
+    let (full, overlay) = overload_edges(
         &ecp_analyzer::java::parser::JavaProvider::new().unwrap(),
         &[("K.java", k)],
         &[("K.java", &shifted)],
         "save",
     );
-    assert_eq!(full.len(), 1, "the reindex keeps the sibling edge");
+    assert_eq!(full.len(), 1, "only the overload link");
     assert_eq!(overlay, full);
 }

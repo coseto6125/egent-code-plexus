@@ -9,6 +9,10 @@ pub type Span = (u32, u32, u32, u32);
 /// The lexical link from a callable to an anonymous closure it contains.
 pub const CLOSURE_REFERENCE_REASON: &str = "closure:lexical_reference";
 
+/// The link from the first of a same-name overload set to each later one
+/// ([`crate::uid::keeps_overloads`]): a call binds the first by name only.
+pub const OVERLOAD_SET_REASON: &str = "overload_set";
+
 /// True iff `outer` fully contains `inner` in the same coordinate system.
 #[inline]
 pub fn span_contains(outer: Span, inner: Span) -> bool {

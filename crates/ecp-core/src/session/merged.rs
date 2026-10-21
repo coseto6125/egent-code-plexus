@@ -272,12 +272,15 @@ fn merge_base_edge<'a>(
     if view.masks_base_edge(source, RelType::from(&edge.rel_type)) {
         return None;
     }
-    // Rebuild only this reason, never all References from a dirty file.
+    // Rebuild only these reasons, never all References from a dirty file.
     // Replacing even UID-stable references avoids duplicates and stale parents.
     if RelType::from(&edge.rel_type) == RelType::References
         && view.rebuilds_closure_references(source)
-        && edge.reason.resolve(&graph.string_pool)
-            == crate::analyzer::types::CLOSURE_REFERENCE_REASON
+        && matches!(
+            edge.reason.resolve(&graph.string_pool),
+            crate::analyzer::types::CLOSURE_REFERENCE_REASON
+                | crate::analyzer::types::OVERLOAD_SET_REASON
+        )
     {
         return None;
     }

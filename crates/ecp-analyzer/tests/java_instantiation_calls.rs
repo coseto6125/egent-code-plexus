@@ -8,8 +8,8 @@ mod instantiation_calls_support;
 use ecp_analyzer::java::parser::JavaProvider;
 use ecp_core::graph::NodeKind;
 use instantiation_calls_support::{
-    assert_calls_constructor, assert_calls_each_overload, assert_calls_type,
-    assert_no_instantiation_call, assert_only_call, graph_of,
+    assert_calls_constructor, assert_calls_type, assert_no_instantiation_call, assert_only_call,
+    graph_of,
 };
 
 const WIDGET: (&str, &str) = (
@@ -58,8 +58,9 @@ fn test_java_same_file_new_calls_constructor() {
     assert_calls_constructor(&graph, "makeLocal", "Local", "src/Local.java");
 }
 
-/// Overloads are separate Constructor nodes, and the argument types that
-/// pick one are not parsed: the construction reaches both.
+/// Overloads are separate Constructor nodes; the construction binds the
+/// first, as "a constructor of `Multi`", since the argument types that pick
+/// one are not parsed.
 #[test]
 fn test_java_overloaded_constructors_new_calls_constructor() {
     let multi = (
@@ -71,7 +72,7 @@ fn test_java_overloaded_constructors_new_calls_constructor() {
         "public class App {\n    public Multi makeMulti() {\n        return new Multi(1);\n    }\n}\n",
     );
     let graph = graph_of(&provider(), &[multi, app]);
-    assert_calls_each_overload(&graph, "makeMulti", "Multi", "src/Multi.java", 2);
+    assert_calls_constructor(&graph, "makeMulti", "Multi", "src/Multi.java");
 }
 
 #[test]
