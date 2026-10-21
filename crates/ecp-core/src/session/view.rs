@@ -1267,9 +1267,9 @@ struct OverlayFacts<'a> {
     /// supertypes pre-pass does (`(bases, first_unresolved)`), set once by
     /// [`OverlayView::build`] before any call resolves.
     dirty_supertypes: OnceCell<FxHashMap<u32, Supertypes>>,
-    /// Rust self-type key → the trait keys of the dirty files' archived
+    /// Rust self-type key → the trait keys of the dirty Rust files' archived
     /// `impl Trait for Type` blocks: the files' old content, whose bases the
-    /// archived supertypes of a clean type still carry.
+    /// archived supertypes of a clean Rust type still carry.
     dirty_impl_traits: FxHashMap<&'a str, Vec<&'a str>>,
 }
 
@@ -1344,7 +1344,13 @@ impl<'a> OverlayFacts<'a> {
         let mut dirty_impl_traits: FxHashMap<&'a str, Vec<&'a str>> = FxHashMap::default();
         for &idx in dirty_base {
             let block = &graph.nodes[idx as usize];
-            if NodeKind::from(&block.kind) != NodeKind::Impl {
+            let rust_file = graph
+                .files
+                .get(block.file_idx.to_native() as usize)
+                .is_some_and(|f| {
+                    Language::from_normalized_path(f.path.resolve(pool)) == Language::Rust
+                });
+            if NodeKind::from(&block.kind) != NodeKind::Impl || !rust_file {
                 continue;
             }
             let (Some(ty), Some(implemented)) = (
@@ -2292,7 +2298,13 @@ impl<'a> OverlayFacts<'a> {
     /// back what the file's fresh parse still implements.
     fn base_supertypes(&self, ty: u32) -> Option<Supertypes> {
         let (bases, archived_unresolved) = self.graph.supertypes_of(ty)?;
-        let stale = owner_key(self.name_of(ty)).and_then(|key| self.dirty_impl_traits.get(key));
+        // The table keys Rust types by name alone, so a Python or Java
+        // namesake of a Rust self type keeps every base its own file gave.
+        let stale = self
+            .node_file(ty)
+            .filter(|&file| Language::from_normalized_path(file) == Language::Rust)
+            .and_then(|_| owner_key(self.name_of(ty)))
+            .and_then(|key| self.dirty_impl_traits.get(key));
         let mut first_unresolved = None;
         let mut kept = Vec::with_capacity(bases.len());
         for (at, base) in bases.into_iter().enumerate() {

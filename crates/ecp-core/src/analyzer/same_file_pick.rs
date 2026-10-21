@@ -148,8 +148,9 @@ pub fn pick_owner<'f, F: PickFacts + ?Sized>(facts: &'f F, id: u32, file: &str) 
 /// free function and no member of an unrelated type. Rules 5 to 8 give way
 /// to `pick`, else the first candidate, when it is a method the parser gave
 /// no owner (its type may be `owner`, as before); else to the member of
-/// the nearest supertype of `owner` that has one ([`ancestor_member`]);
-/// else `None`, which leaves the call to the receiver-typing ladder.
+/// the supertype of `owner` that overrides every other supertype's one
+/// ([`ancestor_member`]); else `None`, which leaves the call to the
+/// receiver-typing ladder.
 ///
 /// An untyped receiver (`scope.untyped_receiver`) is no `this`: `owner`,
 /// the caller's type, and `heritage` do not narrow the pick, and it never
@@ -240,11 +241,13 @@ pub fn prefer_owned<F: PickFacts + ?Sized>(
         .filter(|&id| !untyped || owner.is_none() || owner != facts.owner(id))
 }
 
-/// The first of `candidates` that a supertype of the type `owner` declares,
-/// nearest supertype first. `owner` is the type `file` declares under that
-/// key, else the one type of that key across the project; `None` when
-/// neither names exactly the type, since the bases of a namesake would
-/// stand in for the receiver's.
+/// The one of `candidates` that a supertype of the type `owner` declares,
+/// when that supertype inherits from every other supertype declaring one
+/// of them; `None` when two declaring supertypes sit on separate branches
+/// (`D(B, C)` with `B(A)`, `A.m` and `C.m`). `owner` is the type `file`
+/// declares under that key, else the one type of that key across the
+/// project; `None` when neither names exactly the type, since the bases of
+/// a namesake would stand in for the receiver's.
 pub fn ancestor_member<F: PickFacts + ?Sized>(
     facts: &F,
     file: &str,
@@ -265,15 +268,28 @@ pub fn ancestor_member<F: PickFacts + ?Sized>(
     let owned: Vec<(u32, Vec<u32>)> = candidates
         .filter_map(|id| Some((id, facts.types_named(facts.owner(id)?))))
         .collect();
-    types
+    let mut declaring: Vec<(u32, u32)> = Vec::new();
+    for ancestor in types.iter().flat_map(|&ty| facts.ancestors(ty)) {
+        if declaring.iter().any(|&(seen, _)| seen == ancestor) {
+            continue;
+        }
+        if let Some(&(id, _)) = owned.iter().find(|(_, types)| types.contains(&ancestor)) {
+            declaring.push((ancestor, id));
+        }
+    }
+    // Breadth-first order is not the method resolution order: `D(B, C)`
+    // with `B(A)` reaches `A.m` before `C.m` at runtime. Only the declaring
+    // ancestor that inherits every other declaring one is the member the
+    // call reaches in every language; with none, the type ladder decides.
+    declaring
         .iter()
-        .flat_map(|&ty| facts.ancestors(ty))
-        .find_map(|ancestor| {
-            owned
+        .find(|&&(ancestor, _)| {
+            let above = facts.ancestors(ancestor);
+            declaring
                 .iter()
-                .find(|(_, types)| types.contains(&ancestor))
-                .map(|&(id, _)| id)
+                .all(|&(other, _)| other == ancestor || above.contains(&other))
         })
+        .map(|&(_, id)| id)
 }
 
 /// Whether an untyped member call (`o.m()`, [`PickScope::untyped_receiver`])
@@ -650,6 +666,45 @@ mod tests {
             typed_type(),
         );
         assert_eq!(pick, Some(5));
+    }
+
+    /// `class D(B, C)`, `class B(A)`: Python's MRO is D, B, A, C, so `D.m`
+    /// is `A.m`, while a breadth-first walk meets `C.m` first.
+    #[test]
+    fn test_prefer_owned_type_receiver_members_on_two_branches_returns_none() {
+        let facts = Decls {
+            decls: vec![
+                ("A", NodeKind::Class, None, None),
+                ("B", NodeKind::Class, None, None),
+                ("C", NodeKind::Class, None, None),
+                ("D", NodeKind::Class, None, None),
+                ("m", M, Some("A"), None),
+                ("m", M, Some("C"), None),
+            ],
+            ancestors: vec![(3, vec![1, 2, 0]), (1, vec![0])],
+            ..Decls::default()
+        };
+        let pick = prefer_owned(&facts, "f", 5, "m", Some("D"), &[], CALLABLE, typed_type());
+        assert_eq!(pick, None);
+    }
+
+    /// `class D(X, Y)`, `class Y(X)`: `Y.m` overrides `X.m` although the
+    /// breadth-first walk meets `X` first.
+    #[test]
+    fn test_prefer_owned_type_receiver_override_on_one_chain_returns_overriding_member() {
+        let facts = Decls {
+            decls: vec![
+                ("X", NodeKind::Class, None, None),
+                ("Y", NodeKind::Class, None, None),
+                ("D", NodeKind::Class, None, None),
+                ("m", M, Some("X"), None),
+                ("m", M, Some("Y"), None),
+            ],
+            ancestors: vec![(2, vec![0, 1]), (1, vec![0])],
+            ..Decls::default()
+        };
+        let pick = prefer_owned(&facts, "f", 3, "m", Some("D"), &[], CALLABLE, typed_type());
+        assert_eq!(pick, Some(4));
     }
 
     #[test]

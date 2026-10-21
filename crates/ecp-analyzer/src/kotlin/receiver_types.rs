@@ -301,7 +301,8 @@ fn kotlin_callee(
                     }
                     locals.lookup(pos, var).map(str::to_string)
                 }
-                "call_expression" => constructed_class(receiver, source, nodes),
+                "call_expression" => constructed_class(receiver, source, nodes)
+                    .filter(|name| !locals.binds(pos, name) && !declares_member(nodes, pos, name)),
                 _ => None,
             };
             let computed = !matches!(
@@ -411,7 +412,9 @@ fn declares(nodes: &[RawNode], pos: Pos, name: &str, member: fn(NodeKind) -> boo
 }
 
 /// The class a constructor call receiver (`Other()`) builds, when this
-/// file declares a class of that name.
+/// file declares a class of that name. A local, parameter or property of
+/// that name shadows the class (`val Other = { Actual() }`); the caller
+/// checks those.
 fn constructed_class(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<String> {
     let callee = call
         .named_child(0)

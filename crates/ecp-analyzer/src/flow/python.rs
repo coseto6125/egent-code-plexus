@@ -114,10 +114,18 @@ impl Engine<'_> {
         }
         Some((receiver, class))
     }
+    /// Whether every object `value` may hold is a class object, and it holds one.
+    pub(super) fn only_classes(&self, value: &Value) -> bool {
+        !value.objects.is_empty()
+            && value
+                .objects
+                .iter()
+                .all(|o| self.classes.values().any(|c| c == o))
+    }
     /// Callees of `self.name(...)` where `self` is the first parameter of the
-    /// enclosing plain method, plus that receiver and the method's class: a
-    /// bound method receives the instance, a class method the class.
-    pub(super) fn python_self_call(&self, target: usize) -> Option<(Value, usize, usize)> {
+    /// enclosing plain method, plus that receiver: a bound method receives
+    /// the instance, a class method the instance's class.
+    pub(super) fn python_self_call(&self, target: usize) -> Option<(Value, usize)> {
         let a = &self.ast[target];
         if a.kind != "attribute" || !is_python(&self.files[a.file].path) {
             return None;
@@ -142,6 +150,6 @@ impl Engine<'_> {
         let object = *self.classes.get(&class)?;
         let callees =
             self.class_callees(&BTreeSet::from([object]), &self.ast[attribute].text, true);
-        (!callees.functions.is_empty()).then_some((callees, receiver, object))
+        (!callees.functions.is_empty()).then_some((callees, receiver))
     }
 }

@@ -8,6 +8,9 @@
 //! - no lineage member: `Other` declares `m`, `C` calls `this.m()` → no edge.
 //! - inherited member: `C` extends `Mid` extends `Base`, `Other` and `Base`
 //!   declare `m`, `C` calls `this.m()` → `Base.m`, the nearest supertype's.
+//! - members on two branches: Python `D(B, C)`, `B(A)`, `A` and `C` declare
+//!   `m` → never `C.m`, which breadth-first order meets first but the MRO
+//!   (D, B, A, C) does not reach.
 //!
 //! Skipped languages: C has no members. Kotlin extension functions, C#
 //! extension methods, Dart `extension on` members and Rust blanket impls
@@ -222,6 +225,17 @@ fn test_resolve_call_python_self_member_of_grandparent_binds_grandparent() {
         "class Other:\n    def save(self):\n        pass\nclass Base:\n    def save(self):\n        pass\nclass Mid(Base):\n    pass\nclass Leaf(Mid):\n    def run(self):\n        self.save()\n",
     );
     assert_eq!(owners_called(&graph, "run", "save"), ["Base"]);
+}
+
+#[test]
+fn test_resolve_call_python_self_member_on_two_base_branches_binds_no_second_branch() {
+    let graph = build(
+        &python(),
+        "u.py",
+        "class A:\n    def m(self):\n        pass\nclass B(A):\n    pass\nclass C:\n    def m(self):\n        pass\nclass D(B, C):\n    def run(self):\n        self.m()\n",
+    );
+    let owners = owners_called(&graph, "run", "m");
+    assert!(!owners.contains(&"C".to_string()), "{owners:?}");
 }
 
 #[test]

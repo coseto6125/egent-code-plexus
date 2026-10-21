@@ -164,6 +164,37 @@ fn test_analyze_python_classmethod_call_binds_class_to_cls() {
     assert!(argument(&report, "Box.create(101)"), "{report:#?}");
 }
 
+/// `self.cm()` passes `type(self)`: `A.run(B)` runs `cm` with `cls` bound to
+/// B, so `cls.value` reads B's value and never A's.
+#[test]
+fn test_analyze_python_self_call_to_classmethod_binds_receiver_class_to_cls() {
+    let source = "class A:\n    value = 404\n\n    @classmethod\n    def cm(cls):\n        return cls.value\n\n    def run(self):\n        return self.cm()\n\nclass B(A):\n    value = 101\n\nconsume(A.run(B))\n";
+    let report = forward(source, "101");
+    assert!(argument(&report, "A.run(B)"), "{report:#?}");
+    let report = forward(source, "404");
+    assert!(
+        !argument(&report, "A.run(B)"),
+        "cls is B, whose value shadows A's: {report:#?}"
+    );
+}
+
+#[test]
+fn test_analyze_python_self_call_to_classmethod_unknown_receiver_keeps_external_call() {
+    let report = forward(
+        "class A:\n    @classmethod\n    def cm(cls, size):\n        return size\n\n    def run(self):\n        return self.cm(101)\n",
+        "101",
+    );
+    assert!(
+        !binding(&report, "size"),
+        "the class of an unknown `self` is unknown: {report:#?}"
+    );
+    assert!(
+        boundary_at(&report, "external_call", 7),
+        "{:?}",
+        report.boundaries
+    );
+}
+
 #[test]
 fn test_analyze_python_unknown_decorator_call_keeps_external_call() {
     let report = forward(
@@ -214,6 +245,25 @@ fn test_analyze_python_diamond_inheritance_follows_c3_order() {
         "C3 puts Right before Base: {report:#?}"
     );
     assert!(!binding(&report, "in_base"), "{report:#?}");
+}
+
+/// 25 stacked diamonds reach `O` along 2^25 paths; the resolution order
+/// must still come out in time. The test's runtime is the guard.
+#[test]
+fn test_analyze_python_stacked_diamonds_resolve_root_member() {
+    let mut source = String::from("class O:\n    def m(self, in_o):\n        return in_o\n\n");
+    let mut below = String::from("O");
+    for level in 0..25 {
+        source.push_str(&format!(
+            "class L{level}({below}):\n    pass\n\nclass R{level}({below}):\n    pass\n\nclass J{level}(L{level}, R{level}):\n    pass\n\n"
+        ));
+        below = format!("J{level}");
+    }
+    source.push_str(&format!(
+        "class Top({below}):\n    def run(self):\n        return self.m(101)\n"
+    ));
+    let report = forward(&source, "101");
+    assert!(binding(&report, "in_o"), "{report:#?}");
 }
 
 #[test]

@@ -1094,19 +1094,14 @@ impl Engine<'_> {
             Value::default()
         } else if method {
             self.php_method_target(n, scopes)
-        } else if let Some((callees, _, _)) = &bound {
+        } else if let Some((callees, _)) = &bound {
             callees.clone()
         } else {
             match target {
                 Some(t) if python && self.ast[t].kind == "attribute" && self.step() => {
                     let (base, read) = self.field_read(t, scopes);
                     // Only a class object is known to pass itself to a class method.
-                    if !base.objects.is_empty()
-                        && base
-                            .objects
-                            .iter()
-                            .all(|o| self.classes.values().any(|c| c == o))
-                    {
+                    if self.only_classes(&base) {
                         class_receiver = Some(base);
                     }
                     read
@@ -1136,7 +1131,7 @@ impl Engine<'_> {
                 names.push(name);
             }
         }
-        let instance = bound.map(|(_, receiver, class)| (self.eval(receiver, scopes), class));
+        let instance = bound.map(|(_, receiver)| self.eval(receiver, scopes));
         // What each Python callee receives ahead of the arguments, as its
         // decorators decide. A callee whose binding is unknown is not run.
         let mut callees = Vec::with_capacity(fun.functions.len());
@@ -1149,14 +1144,20 @@ impl Engine<'_> {
             };
             let prefix = match (receiver, &instance) {
                 (Some(Receiver::Static), _) => Some(None),
-                (Some(Receiver::Class), Some((value, class))) => Some(Some(Value {
-                    ids: value.ids.clone(),
-                    objects: BTreeSet::from([*class]),
-                    ..Value::default()
-                })),
+                // `self.cm()` passes `type(self)`, not the class that lexically
+                // encloses the caller: `A.run(B)` runs `cm` with `cls` bound to B.
+                // The engine models no instance-to-class link, so only a
+                // receiver that is itself a class object names that class.
+                (Some(Receiver::Class), Some(value)) => self.only_classes(value).then(|| {
+                    Some(Value {
+                        ids: value.ids.clone(),
+                        objects: value.objects.clone(),
+                        ..Value::default()
+                    })
+                }),
                 (Some(Receiver::Class), None) => class_receiver.clone().map(Some),
                 (Some(Receiver::Unknown), _) => None,
-                (None | Some(Receiver::Instance), Some((value, _))) => Some(Some(value.clone())),
+                (None | Some(Receiver::Instance), Some(value)) => Some(Some(value.clone())),
                 (None | Some(Receiver::Instance), None) => Some(None),
             };
             match prefix {

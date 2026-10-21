@@ -476,7 +476,7 @@ const IMPL_A: &str = "use crate::s::S;\nuse crate::a::A;\nimpl A for S {\n    fn
 const IMPL_B: &str = "use crate::s::S;\nuse crate::b::B;\nimpl B for S {\n    fn b(&self) {}\n}\n";
 const RUN: &str = "pub fn run(s: &S) {\n    s.m();\n}\n";
 
-fn rust_parse(path: &str, source: &str) -> LocalGraph {
+fn pipeline_parse(path: &str, source: &str) -> LocalGraph {
     ecp_cli::reanalyze::pipeline()
         .parse_file_raw(Path::new(path), source.as_bytes())
         .unwrap_or_else(|e| panic!("{path}: {e}"))
@@ -495,7 +495,7 @@ fn test_build_dirty_impl_switches_trait_binds_new_trait_member_like_reindex() {
         .chain([("src/imp.rs", old.as_str())])
         .collect();
     let Parity { reindex, overlay } = calls_after_edit(
-        &rust_parse,
+        &pipeline_parse,
         &files,
         &[("src/imp.rs", new.as_str())],
         &|file, name| file == "src/imp.rs" && name == "run",
@@ -521,11 +521,46 @@ fn test_build_dirty_impl_beside_clean_impl_keeps_both_traits_like_reindex() {
         .chain([("src/ia.rs", IMPL_A), ("src/imp.rs", old.as_str())])
         .collect();
     let Parity { reindex, overlay } = calls_after_edit(
-        &rust_parse,
+        &pipeline_parse,
         &files,
         &[("src/imp.rs", new.as_str())],
         &|file, name| file == "src/imp.rs" && name == "run",
     );
     assert!(reindex.is_empty(), "two traits declare `m`: {reindex:#?}");
+    assert_eq!(overlay, reindex);
+}
+
+/// Contract: the dirty-impl drop reaches Rust types only. Clean `s.py`
+/// declares `class S(A)` beside the Rust `struct S` and `trait A`; the
+/// dirty `src/imp.rs` removes `impl A for S`, and the dirty `run.py` calls
+/// `self.m()` from `T(S)`. A reindex binds the Python `A.m`. Fail: no
+/// overlay edge, which means the Rust removal dropped the Python heritage.
+#[test]
+fn test_build_dirty_impl_removed_keeps_python_namesake_heritage_like_reindex() {
+    const PY_S: &str = "class A:\n    def m(self):\n        pass\nclass S(A):\n    pass\n";
+    const PY_RUN_OLD: &str = "from s import S\n\nclass T(S):\n    def run(self):\n        pass\n";
+    const PY_RUN_NEW: &str =
+        "from s import S\n\nclass T(S):\n    def run(self):\n        self.m()\n";
+    let files: Vec<(&str, &str)> = RUST_TRAITS
+        .iter()
+        .copied()
+        .chain([
+            ("src/imp.rs", IMPL_A),
+            ("s.py", PY_S),
+            ("run.py", PY_RUN_OLD),
+        ])
+        .collect();
+    let Parity { reindex, overlay } = calls_after_edit(
+        &pipeline_parse,
+        &files,
+        &[("src/imp.rs", "use crate::s::S;\n"), ("run.py", PY_RUN_NEW)],
+        &|file, name| file == "run.py" && name == "run",
+    );
+    assert!(
+        reindex
+            .iter()
+            .any(|edge| edge.callee_file == "s.py" && edge.callee == "m"),
+        "the reindex must bind the Python `A.m`, or the fixture proves nothing: {reindex:#?}"
+    );
     assert_eq!(overlay, reindex);
 }

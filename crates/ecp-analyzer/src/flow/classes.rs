@@ -1,5 +1,5 @@
 use super::engine::{Engine, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Class-object key of the base classes. `::` never occurs in a PHP or Python
 /// member name, so the key cannot shadow a method.
@@ -39,7 +39,7 @@ impl Engine<'_> {
         if !self.bases.contains_key(&class) && !self.objects[class].contains_key(PARENT) {
             return;
         }
-        if let Some(order) = self.linearize(class, &mut Vec::new()) {
+        if let Some(order) = self.linearize(class, &mut Vec::new(), &mut BTreeMap::new()) {
             if let Some(member) = order.iter().skip(1).find_map(|c| self.objects[*c].get(key)) {
                 members.merge(member);
             }
@@ -71,12 +71,33 @@ impl Engine<'_> {
     }
     /// C3 linearization (Python's MRO; the ancestor chain for single
     /// inheritance). `None` when a base is not exactly one class, the
-    /// hierarchy is cyclic, or no consistent order exists.
-    fn linearize(&self, class: usize, visiting: &mut Vec<usize>) -> Option<Vec<usize>> {
+    /// hierarchy is cyclic, or no consistent order exists. `done` holds the
+    /// orders this lookup already computed: stacked diamonds reach each
+    /// ancestor along exponentially many paths.
+    fn linearize(
+        &self,
+        class: usize,
+        visiting: &mut Vec<usize>,
+        done: &mut BTreeMap<usize, Option<Vec<usize>>>,
+    ) -> Option<Vec<usize>> {
+        if let Some(order) = done.get(&class) {
+            return order.clone();
+        }
         if visiting.contains(&class) {
             return None;
         }
         visiting.push(class);
+        let order = self.c3(class, visiting, done);
+        visiting.pop();
+        done.insert(class, order.clone());
+        order
+    }
+    fn c3(
+        &self,
+        class: usize,
+        visiting: &mut Vec<usize>,
+        done: &mut BTreeMap<usize, Option<Vec<usize>>>,
+    ) -> Option<Vec<usize>> {
         let bases = self
             .base_slots(class)
             .into_iter()
@@ -87,9 +108,8 @@ impl Engine<'_> {
             .collect::<Option<Vec<usize>>>()?;
         let mut sequences = bases
             .iter()
-            .map(|base| self.linearize(*base, visiting))
+            .map(|base| self.linearize(*base, visiting, done))
             .collect::<Option<Vec<Vec<usize>>>>()?;
-        visiting.pop();
         sequences.push(bases);
         let mut order = vec![class];
         while sequences.iter().any(|s| !s.is_empty()) {

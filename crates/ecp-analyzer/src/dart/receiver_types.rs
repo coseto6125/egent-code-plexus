@@ -358,10 +358,15 @@ fn dart_callee_name(
                 // Dart reaches no free function through a receiver, and an
                 // `extension` member is its extension's.
                 _ => {
-                    return Some(match constructed_class(obj, source, nodes) {
-                        Some(cls) => format!("{cls}.{method}"),
-                        None => CallSite::untyped_member(method),
-                    });
+                    return Some(
+                        match constructed_class(obj, source, nodes).filter(|cls| {
+                            bindings.lookup_local(pos, cls).is_none()
+                                && !declares_member(nodes, pos, cls)
+                        }) {
+                            Some(cls) => format!("{cls}.{method}"),
+                            None => CallSite::untyped_member(method),
+                        },
+                    );
                 }
             }
             Some(method.to_string())
@@ -373,7 +378,9 @@ fn dart_callee_name(
 }
 
 /// The class a constructor call receiver (`Other()`) builds, when this
-/// file declares a class of that name.
+/// file declares a class of that name. A local, parameter or field of that
+/// name shadows the class (`final Other = () => Actual();`); the caller
+/// checks those.
 fn constructed_class(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<String> {
     let callee = Some(call)
         .filter(|call| call.kind() == "call_expression")?

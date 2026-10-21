@@ -43,9 +43,13 @@ fn build() -> ZeroCopyGraph {
 }
 
 fn raw_calls(caller: &str) -> Vec<String> {
+    raw_calls_in(SOURCE, caller)
+}
+
+fn raw_calls_in(source: &str, caller: &str) -> Vec<String> {
     let local = KotlinProvider::new()
         .unwrap()
-        .parse_file(Path::new("C.kt"), SOURCE.as_bytes())
+        .parse_file(Path::new("C.kt"), source.as_bytes())
         .unwrap();
     let node = local.nodes.iter().find(|n| n.name == caller).unwrap();
     node.calls.clone()
@@ -101,4 +105,14 @@ fn test_resolve_call_kotlin_computed_receiver_binds_no_own_member() {
 #[test]
 fn test_resolve_call_kotlin_computed_receiver_extension_binds_top_level_function() {
     assert_eq!(owners_called(&build(), "viaExtension", "ext"), [""]);
+}
+
+/// A local named like a class shadows it: `Other()` calls the local, whose
+/// result type the parser does not know, so the call is an untyped member
+/// call and never `Other.m`.
+#[test]
+fn test_kotlin_callee_constructor_receiver_shadowed_by_local_emits_untyped_member() {
+    let calls = raw_calls_in("class Actual {\n    fun m() {}\n}\nclass Other {\n    fun m() {}\n}\nclass C {\n    fun m() {}\n    fun viaShadow() {\n        val Other = { Actual() }\n        Other().m()\n    }\n}\n", "viaShadow");
+    assert!(!calls.contains(&"Other.m".to_string()), "{calls:?}");
+    assert!(calls.contains(&CallSite::untyped_member("m")), "{calls:?}");
 }
