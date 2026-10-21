@@ -391,6 +391,10 @@ pub struct RawRouteScope {
     pub namespace: Option<String>,
     /// The included route file of a [`RawRoute::INCLUDE`] record.
     pub include: Option<RouteInclude>,
+    /// The file imports no HTTP framework, as a route file that calls the
+    /// global `Route` facade alias does. Its records count only when a file
+    /// that imports one loads it, directly or through other route files.
+    pub needs_include: bool,
 }
 
 /// The route file a Laravel route group loads.

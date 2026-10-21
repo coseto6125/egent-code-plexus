@@ -2,6 +2,7 @@ use crate::fetch_shape::{
     consumer_keys, fetch_urls, format_reason, normalize_route_path, response_shapes,
 };
 use crate::framework_helpers::Span;
+use crate::php::laravel_routes::LaravelRoutes;
 use crate::resolution::heuristics::{ResolutionTier, NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON};
 use crate::resolution::index::{FileMeta, Language, ResolveTarget, SymbolTable};
 use crate::resolution::resolver::{ReexportIndex, Resolver};
@@ -284,7 +285,13 @@ impl GraphBuilder {
         }
         let _t_pass15 = std::time::Instant::now();
         // Pass 1.5: Extract Routes
-        let (route_edges, emitted_routes, route_middleware) = pass1_5_extract_routes(
+        let ExtractedRoutes {
+            edges: route_edges,
+            emitted: emitted_routes,
+            middleware: route_middleware,
+            actions: controller_actions,
+            laravel,
+        } = pass1_5_extract_routes(
             &self.local_graphs,
             &files,
             &symbol_table,
@@ -358,6 +365,15 @@ impl GraphBuilder {
         );
         symbol_table.build_supertypes(declared_supertypes);
         let supertype_table = record_supertypes(&symbol_table);
+        let action_edges = pass1_95_controller_actions(
+            &laravel,
+            &controller_actions,
+            &self.local_graphs,
+            &symbol_table,
+            &entry_edges,
+            &mut string_pool,
+            &mut nodes,
+        );
         let alias_table = record_path_aliases(&self.path_aliases, &mut string_pool);
         if prof {
             eprintln!(
@@ -383,6 +399,7 @@ impl GraphBuilder {
 
         edges.extend(route_edges);
         edges.extend(entry_edges);
+        edges.extend(action_edges);
         edges.extend(fetches_edges);
 
         emit_closure_references(&self.local_graphs, &nodes, &mut string_pool, &mut edges);
@@ -1309,26 +1326,43 @@ fn note_rust_impl_members(symbol_table: &mut SymbolTable, nodes: &[RawNode], sta
     });
 }
 
+/// A Laravel route that names a controller action (`'C@m'`).
+struct PendingAction {
+    route: u32,
+    /// `METHOD path`, the Route node's name.
+    route_name: String,
+    action: String,
+    namespace: Option<String>,
+}
+
+/// What Pass 1.5 hands on.
+struct ExtractedRoutes {
+    edges: Vec<Edge>,
+    /// Consumed by Pass 1.6 to build the fetch-shape route index.
+    emitted: Vec<EmittedRoute>,
+    middleware: Vec<RouteMiddleware>,
+    /// Bound after Pass 1.9 by [`pass1_95_controller_actions`].
+    actions: Vec<PendingAction>,
+    laravel: LaravelRoutes,
+}
+
 /// Pass 1.5: Extract Routes.
-///
-/// Returns `(route_edges, emitted_routes, route_middleware)` where
-/// `emitted_routes` is `(route_node_idx, file_idx, route_method,
-/// route_path)` — consumed by Pass 1.6 to build the fetch-shape route index.
 fn pass1_5_extract_routes(
     local_graphs: &[LocalGraph],
     files: &[File],
     symbol_table: &SymbolTable,
     string_pool: &mut StringPool,
     nodes: &mut Vec<Node>,
-) -> (Vec<Edge>, Vec<EmittedRoute>, Vec<RouteMiddleware>) {
+) -> ExtractedRoutes {
     let mut route_edges = Vec::new();
     let mut current_handler_idx = 0;
     let mut emitted_routes: Vec<EmittedRoute> = Vec::new();
     let mut route_middleware: Vec<RouteMiddleware> = Vec::new();
+    let mut actions: Vec<PendingAction> = Vec::new();
     // Route groups reach across files (a provider's `->group(base_path(
     // 'routes/admin.php'))` prefixes every route of `admin.php`), so the
     // per-file view alone cannot name a Laravel route's path or handler.
-    let laravel = crate::php::laravel_routes::LaravelRoutes::build(local_graphs);
+    let laravel = LaravelRoutes::build(local_graphs);
     for (file_idx, local_graph) in local_graphs.iter().enumerate() {
         let file_idx = file_idx as u32;
         let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
@@ -1426,38 +1460,35 @@ fn pass1_5_extract_routes(
                     owner_class: StrRef::default(),
                     content_hash: 0,
                 });
-                names.push(route_name);
 
                 // Resolve the imperative-route handler, if the parser captured
                 // a named handler (e.g. `app.get("/x", loginHandler)`). The
                 // handler must be a function/method registered in the same
                 // file; inline arrow functions are not captured. A route with
                 // a group scope names a controller action (`Ctrl@method`) in
-                // any file instead.
-                let handler = match (raw_route.handler.as_deref(), raw_route.scope.is_some()) {
-                    (None, _) => None,
-                    (Some(action), true) => laravel
-                        .controller_action(action, route.namespace.as_deref())
-                        .map(|(node, by_namespace)| {
-                            if by_namespace {
-                                (node, 1.0, "controller-action")
-                            } else {
-                                (node, 0.9, "controller-action:unique-name")
-                            }
-                        }),
-                    (Some(handler_name), false) => symbol_table
-                        .lookup_in_file(&path_str, handler_name)
-                        .map(|node| (node, 1.0, "call-arg")),
-                };
-                if let Some((handler_node_id, confidence, reason)) = handler {
-                    route_edges.push(Edge {
-                        source: handler_node_id,
-                        target: route_idx,
-                        rel_type: RelType::HandlesRoute,
-                        confidence,
-                        reason: string_pool.add(reason),
-                    });
+                // any file instead, bound once heritage is resolved.
+                match (raw_route.handler.as_deref(), raw_route.scope.is_some()) {
+                    (None, _) => {}
+                    (Some(action), true) => actions.push(PendingAction {
+                        route: route_idx,
+                        route_name: route_name.clone(),
+                        action: action.to_string(),
+                        namespace: route.namespace.clone(),
+                    }),
+                    (Some(handler_name), false) => {
+                        if let Some(handler) = symbol_table.lookup_in_file(&path_str, handler_name)
+                        {
+                            route_edges.push(Edge {
+                                source: handler,
+                                target: route_idx,
+                                rel_type: RelType::HandlesRoute,
+                                confidence: 1.0,
+                                reason: string_pool.add("call-arg"),
+                            });
+                        }
+                    }
                 }
+                names.push(route_name);
 
                 if !route.middleware.is_empty() {
                     route_middleware.push(RouteMiddleware {
@@ -1474,7 +1505,135 @@ fn pass1_5_extract_routes(
             }
         }
     }
-    (route_edges, emitted_routes, route_middleware)
+    ExtractedRoutes {
+        edges: route_edges,
+        emitted: emitted_routes,
+        middleware: route_middleware,
+        actions,
+        laravel,
+    }
+}
+
+/// Reason strings an `EntryPoint` folds in before it counts the rest: a
+/// base-controller method can handle every route of an application.
+const MAX_ENTRY_REASONS: usize = 8;
+
+/// Pass 1.95: Laravel controller actions.
+///
+/// Binds each [`PendingAction`] to its controller method with a
+/// `HandlesRoute` edge. It runs after Pass 1.9 because a controller can
+/// inherit the action from a used trait or a parent class, and only the
+/// resolved supertypes say which one.
+///
+/// Each bound method also gets the `EntryPoint` marker Pass 1.7 gives a
+/// same-file route handler, in the method's own file. Pass 1.7 cannot see
+/// it: the route and the method are in different files.
+fn pass1_95_controller_actions(
+    laravel: &LaravelRoutes,
+    actions: &[PendingAction],
+    local_graphs: &[LocalGraph],
+    symbol_table: &SymbolTable,
+    entry_edges: &[Edge],
+    string_pool: &mut StringPool,
+    nodes: &mut Vec<Node>,
+) -> Vec<Edge> {
+    let mut edges = Vec::new();
+    // Handler → (best confidence, reasons), in first-bound order.
+    let mut entries: Vec<(u32, f32, Vec<&str>)> = Vec::new();
+    let mut entry_of: FxHashMap<u32, usize> = FxHashMap::default();
+    for pending in actions {
+        let Some(found) =
+            laravel.controller_action(&pending.action, pending.namespace.as_deref(), symbol_table)
+        else {
+            continue;
+        };
+        let confidence = if found.by_namespace { 1.0 } else { 0.9 };
+        let reason = match (found.by_namespace, found.inherited) {
+            (true, false) => "controller-action",
+            (true, true) => "controller-action:inherited",
+            (false, false) => "controller-action:unique-name",
+            (false, true) => "controller-action:unique-name:inherited",
+        };
+        edges.push(Edge {
+            source: found.node,
+            target: pending.route,
+            rel_type: RelType::HandlesRoute,
+            confidence,
+            reason: string_pool.add(reason),
+        });
+        match entry_of.get(&found.node) {
+            Some(&slot) => {
+                let (_, best, reasons) = &mut entries[slot];
+                *best = best.max(confidence);
+                reasons.push(pending.route_name.as_str());
+            }
+            None => {
+                entry_of.insert(found.node, entries.len());
+                entries.push((found.node, confidence, vec![pending.route_name.as_str()]));
+            }
+        }
+    }
+    if entries.is_empty() {
+        return edges;
+    }
+    let marked: FxHashSet<u32> = entry_edges.iter().map(|edge| edge.target).collect();
+    let mut next_start = 0u32;
+    let starts: Vec<u32> = local_graphs
+        .iter()
+        .map(|graph| {
+            let start = next_start;
+            next_start += graph.nodes.len() as u32;
+            start
+        })
+        .collect();
+    let kind = crate::entry_points::EntryKind::HttpRoute;
+    for (handler, score, routes) in entries {
+        if marked.contains(&handler) {
+            continue;
+        }
+        let file_idx = nodes[handler as usize].file_idx;
+        let graph = &local_graphs[file_idx as usize];
+        let raw = &graph.nodes[(handler - starts[file_idx as usize]) as usize];
+        let path_str = graph.file_path.to_string_lossy().replace('\\', "/");
+        let mut reason = routes
+            .iter()
+            .take(MAX_ENTRY_REASONS)
+            .map(|route| format!("{}:{route}", kind.tag()))
+            .collect::<Vec<_>>()
+            .join("; also: ");
+        if routes.len() > MAX_ENTRY_REASONS {
+            reason.push_str(&format!(
+                "; also: {} more routes",
+                routes.len() - MAX_ENTRY_REASONS
+            ));
+        }
+        // The owner keeps two classes' same-named actions in one file apart.
+        let entry_uid_name = format!("{}:{}", kind.tag(), raw.name);
+        let entry_idx = nodes.len() as u32;
+        nodes.push(Node {
+            uid: ecp_core::uid::compute(
+                NodeKind::EntryPoint,
+                &path_str,
+                raw.owner_class.as_deref(),
+                &entry_uid_name,
+            ),
+            name: string_pool.add(&format!("{}@{}", kind.tag(), raw.name)),
+            file_idx,
+            kind: NodeKind::EntryPoint,
+            span: (0, 0, 0, 0),
+            community_id: 0,
+            owner_class: StrRef::default(),
+            content_hash: 0,
+        });
+        edges.push(Edge {
+            source: entry_idx,
+            target: handler,
+            rel_type: RelType::References,
+            confidence: score,
+            reason: string_pool.add(&format!("{}:{score:.2}:{reason}", kind.tag())),
+        });
+    }
+    edges
 }
 
 /// Pass 1.6: Fetch-shape extraction.

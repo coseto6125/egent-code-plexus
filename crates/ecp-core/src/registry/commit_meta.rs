@@ -64,7 +64,10 @@ use std::path::Path;
 /// namespace of its route groups, a group that loads a route file applies
 /// them to that file's routes, and a `'Ctrl@method'` / `[Ctrl::class, 'm']`
 /// handler gets a `HandlesRoute` edge from the controller method.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema17");
+/// schema18: Laravel `resource` / `apiResource` / `match` / `any` routes, a
+/// route file without a framework import that a provider loads, actions a
+/// controller inherits, and an `EntryPoint` on each controller action.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema18");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

@@ -736,6 +736,15 @@ class AwardController extends Controller
 }
 "#,
     ),
+    (
+        "routes/web.php",
+        r#"<?php
+
+use Illuminate\Support\Facades\Route;
+
+Route::any('/ping', function () { return 'pong'; });
+"#,
+    ),
 ];
 
 fn setup_laravel_repo(repo: &Path, home: &Path) {
@@ -846,7 +855,7 @@ fn test_routes_laravel_string_action_resolves_namespaced_controller_method() {
     );
 }
 
-/// A route no group gives middleware carries no `middleware` field.
+/// When no route has middleware, no row carries the `middleware` field.
 #[test]
 fn test_routes_route_without_middleware_omits_middleware_field() {
     let repo = tempfile::tempdir().unwrap();
@@ -857,4 +866,58 @@ fn test_routes_route_without_middleware_omits_middleware_field() {
     for row in json["results"].as_array().unwrap() {
         assert!(row.get("middleware").is_none(), "{row}");
     }
+}
+
+/// When one route has middleware, every row carries the field, an empty
+/// array for a route without any, so TOON keeps the rows one table.
+#[test]
+fn test_routes_list_mixed_middleware_gives_every_row_middleware_key() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup_laravel_repo(repo.path(), home.path());
+
+    let json = run_routes_json(repo.path(), home.path(), &[]);
+    let rows = json["results"].as_array().expect("results array missing");
+    for row in rows {
+        assert!(row.get("middleware").is_some(), "{row}");
+    }
+    let ping = rows
+        .iter()
+        .find(|row| row["path"] == "/ping")
+        .unwrap_or_else(|| panic!("no /ping in {json}"));
+    assert_eq!(ping["middleware"], serde_json::json!([]), "{json}");
+
+    let toon = run_routes_stdout(repo.path(), home.path(), &[]);
+    let header = toon
+        .lines()
+        .find(|line| line.trim_start().starts_with("results["))
+        .unwrap_or_else(|| panic!("no results header in {toon}"));
+    assert!(
+        header.contains('{') && header.contains("middleware"),
+        "results is not one table: {toon}"
+    );
+}
+
+/// A Laravel `Route::any` route is one `ANY` row, and a `--method` filter
+/// for any verb keeps it.
+#[test]
+fn test_routes_method_filter_get_keeps_any_route() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup_laravel_repo(repo.path(), home.path());
+
+    let json = run_routes_json(repo.path(), home.path(), &["--method", "GET"]);
+    let mut rows: Vec<(&str, &str)> = json["results"]
+        .as_array()
+        .expect("results array missing")
+        .iter()
+        .map(|r| {
+            (
+                r["method"].as_str().unwrap_or(""),
+                r["path"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    rows.sort_unstable();
+    assert_eq!(rows, [("ANY", "/ping"), ("GET", "/admin/health")], "{json}");
 }

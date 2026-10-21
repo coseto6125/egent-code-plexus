@@ -83,10 +83,8 @@ fn list_routes(
         let name = node.name.resolve(&graph.string_pool);
         let (method, path) = split_route_name(name);
 
-        if let Some(ref want) = wanted_method {
-            if method != want {
-                continue;
-            }
+        if !method_matches(method, wanted_method.as_deref()) {
+            continue;
         }
 
         let file_node = &graph.files[node.file_idx.to_native() as usize];
@@ -111,6 +109,8 @@ fn list_routes(
             (true, false) => {} // silently dropped — that's the default
         }
     }
+    fill_middleware(&mut results, fmt);
+    fill_middleware(&mut test_results, fmt);
 
     if results.is_empty() && test_results.is_empty() {
         eprintln!(
@@ -147,8 +147,40 @@ fn list_routes(
     emit(&result, fmt)
 }
 
+/// Whether a route of `method` answers a `--method` filter. An `ANY` route
+/// (Laravel `Route::any`) answers every verb.
+fn method_matches(method: &str, wanted: Option<&str>) -> bool {
+    wanted.is_none_or(|want| method == want || method == "ANY")
+}
+
+/// When one row has a `middleware` array, give every other row an empty
+/// one; when none has, every row stays without the field. TOON makes a
+/// table only of scalar columns, so for TOON each array becomes one
+/// space-separated string (`"api auth:admin"`, `""` for none); a Laravel
+/// middleware name holds no space.
+fn fill_middleware(rows: &mut [serde_json::Value], fmt: OutputFormat) {
+    if !rows.iter().any(|row| row.get("middleware").is_some()) {
+        return;
+    }
+    let joined = matches!(fmt, OutputFormat::Toon | OutputFormat::Llm);
+    for row in rows {
+        let names: Vec<&str> = row
+            .get("middleware")
+            .and_then(serde_json::Value::as_array)
+            .map(|names| names.iter().filter_map(serde_json::Value::as_str).collect())
+            .unwrap_or_default();
+        let middleware = if joined {
+            serde_json::json!(names.join(" "))
+        } else {
+            serde_json::json!(names)
+        };
+        row["middleware"] = middleware;
+    }
+}
+
 /// Add the route's `middleware` array, outermost first, when it has any. A
-/// route without the field passes through no middleware the index saw.
+/// route without the field, or with an empty one from [`fill_middleware`],
+/// passes through no middleware the index saw.
 fn add_middleware(
     row: &mut serde_json::Value,
     graph: &ecp_core::graph::ArchivedZeroCopyGraph,
@@ -283,10 +315,8 @@ fn inspect_route(
         if path != wanted_path {
             continue;
         }
-        if let Some(ref want) = wanted_method {
-            if method != want {
-                continue;
-            }
+        if !method_matches(method, wanted_method.as_deref()) {
+            continue;
         }
         matched.push(i);
     }
@@ -438,6 +468,7 @@ fn inspect_route(
             );
         }
     }
+    fill_middleware(&mut routes_out, fmt);
 
     let result = serde_json::json!({
         "status": "found",

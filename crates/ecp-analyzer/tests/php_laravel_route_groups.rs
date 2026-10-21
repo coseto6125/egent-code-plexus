@@ -4,7 +4,12 @@
 //! first; and a controller action (`'C@m'`, `[C::class, 'm']`, `C::class`)
 //! binds a `HandlesRoute` edge from the controller method the namespace in
 //! scope names, or from the one class of that name when no namespace is in
-//! scope, and from nothing when neither picks exactly one class.
+//! scope, and from nothing when neither picks exactly one class. A class
+//! that inherits the action binds the trait's or parent's method through
+//! resolved heritage, and each bound method gets an `EntryPoint`.
+//! `Route::resource` / `apiResource` / `match` / `any` register their
+//! routes, and a route file without a framework import counts only when an
+//! importing file loads it.
 
 use ecp_analyzer::php::parser::PhpProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
@@ -272,10 +277,37 @@ fn test_parse_file_require_dir_relative_emits_file_dir_include() {
     assert_eq!(includes, ["../extra/more.php", "auth.php"], "{routes:?}");
 }
 
+/// A route file that calls the global `Route` alias keeps its records,
+/// marked: the builder keeps them only when an importing file loads it.
 #[test]
-fn test_parse_file_include_without_framework_import_emits_nothing() {
-    let src = "<?php\nRoute::prefix('admin')->group(base_path('routes/admin.php'));\nrequire __DIR__.'/x.php';\n";
-    assert!(parse("routes/web.php", src).is_empty());
+fn test_parse_file_without_framework_import_marks_records_needs_include() {
+    let src = "<?php\nRoute::prefix('admin')->group(base_path('routes/admin.php'));\nRoute::get('/x', 'C@m');\n";
+    let routes = parse("routes/web.php", src);
+    assert_eq!(routes.len(), 2, "{routes:?}");
+    assert!(
+        routes
+            .iter()
+            .all(|r| r.scope.as_deref().is_some_and(|scope| scope.needs_include)),
+        "{routes:?}"
+    );
+}
+
+#[test]
+fn test_parse_file_with_framework_import_does_not_mark_needs_include() {
+    let routes = parse("routes/web.php", &routes_file("Route::get('/x', 'C@m');"));
+    assert!(!routes[0].scope.as_deref().unwrap().needs_include);
+}
+
+/// `Route` bound to the file's own class is that class, not the router.
+#[test]
+fn test_parse_file_own_route_class_without_framework_import_emits_nothing() {
+    let imported = "<?php\nuse App\\Support\\Route;\nRoute::get('/x', 'C@m');\n";
+    let aliased = "<?php\nuse App\\Support\\Cache as Route;\nRoute::get('/x', 'C@m');\n";
+    let declared =
+        "<?php\nclass Route { public static function get($k) {} }\nRoute::get('/x', 'C@m');\n";
+    for src in [imported, aliased, declared] {
+        assert!(parse("routes/web.php", src).is_empty(), "{src}");
+    }
 }
 
 #[test]
@@ -372,6 +404,275 @@ Route::controller(OrderController::class)->group(function () {
     ]
     .map(|(path, handler)| (path.to_string(), handler.map(str::to_string)));
     assert_eq!(handlers, expected);
+}
+
+/// `(method, path, handler)` of each route `body` registers, sorted.
+fn sites(body: &str) -> Vec<(String, String, Option<String>)> {
+    let mut sites: Vec<_> = parse("routes/web.php", &routes_file(body))
+        .into_iter()
+        .map(|r| (r.method, r.path, r.handler))
+        .collect();
+    sites.sort();
+    sites
+}
+
+/// `(method, path)` of each route `body` registers, sorted.
+fn site_paths(body: &str) -> Vec<(String, String)> {
+    sites(body)
+        .into_iter()
+        .map(|(method, path, _)| (method, path))
+        .collect()
+}
+
+fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = expected
+        .iter()
+        .map(|(method, path)| (method.to_string(), path.to_string()))
+        .collect();
+    pairs.sort();
+    pairs
+}
+
+#[test]
+fn test_parse_file_resource_emits_every_action_with_conventional_paths() {
+    let mut expected = vec![
+        ("GET", "/photos", "index"),
+        ("GET", "/photos/create", "create"),
+        ("POST", "/photos", "store"),
+        ("GET", "/photos/{photo}", "show"),
+        ("GET", "/photos/{photo}/edit", "edit"),
+        ("PUT", "/photos/{photo}", "update"),
+        ("PATCH", "/photos/{photo}", "update"),
+        ("DELETE", "/photos/{photo}", "destroy"),
+    ]
+    .into_iter()
+    .map(|(method, path, action)| {
+        (
+            method.to_string(),
+            path.to_string(),
+            Some(format!("PhotoController@{action}")),
+        )
+    })
+    .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(
+        sites("Route::resource('photos', 'PhotoController');"),
+        expected
+    );
+}
+
+#[test]
+fn test_parse_file_api_resource_omits_create_and_edit() {
+    assert_eq!(
+        site_paths("Route::apiResource('photos', PhotoController::class);"),
+        pairs(&[
+            ("GET", "/photos"),
+            ("POST", "/photos"),
+            ("GET", "/photos/{photo}"),
+            ("PUT", "/photos/{photo}"),
+            ("PATCH", "/photos/{photo}"),
+            ("DELETE", "/photos/{photo}"),
+        ])
+    );
+}
+
+#[test]
+fn test_parse_file_resource_class_constant_resolves_through_import() {
+    let src = "use App\\Http\\Controllers\\PhotoController;\nRoute::resource('photos', PhotoController::class)->only('index');";
+    assert_eq!(
+        sites(src),
+        [(
+            "GET".to_string(),
+            "/photos".to_string(),
+            Some("\\App\\Http\\Controllers\\PhotoController@index".to_string())
+        )]
+    );
+}
+
+#[test]
+fn test_parse_file_resource_only_keeps_listed_actions() {
+    assert_eq!(
+        site_paths("Route::resource('photos', 'C')->only(['index', 'show']);"),
+        pairs(&[("GET", "/photos"), ("GET", "/photos/{photo}")])
+    );
+    assert_eq!(
+        site_paths("Route::resource('photos', 'C')->only('index', 'store');"),
+        pairs(&[("GET", "/photos"), ("POST", "/photos")])
+    );
+}
+
+#[test]
+fn test_parse_file_resource_except_drops_listed_actions() {
+    assert_eq!(
+        site_paths("Route::apiResource('photos', 'C')->except(['update', 'destroy']);"),
+        pairs(&[
+            ("GET", "/photos"),
+            ("POST", "/photos"),
+            ("GET", "/photos/{photo}")
+        ])
+    );
+}
+
+/// Laravel applies `only`, then `except`; both in the options array work
+/// the same as both chained.
+#[test]
+fn test_parse_file_resource_only_and_except_together_apply_only_then_except() {
+    let expected = pairs(&[("GET", "/photos"), ("DELETE", "/photos/{photo}")]);
+    assert_eq!(
+        site_paths(
+            "Route::resource('photos', 'C')->only(['index', 'show', 'destroy'])->except('show');"
+        ),
+        expected
+    );
+    assert_eq!(
+        site_paths("Route::resource('photos', 'C', ['only' => ['index', 'show', 'destroy'], 'except' => ['show']]);"),
+        expected
+    );
+}
+
+/// A later `only` replaces an earlier one, as the pending registration's
+/// option array does.
+#[test]
+fn test_parse_file_resource_second_only_replaces_first() {
+    assert_eq!(
+        site_paths("Route::resource('photos', 'C')->only(['index'])->only(['store']);"),
+        pairs(&[("POST", "/photos")])
+    );
+}
+
+#[test]
+fn test_parse_file_nested_resource_nests_under_parent_wildcard() {
+    let paths = site_paths("Route::resource('photos.comments', 'PhotoCommentController');");
+    assert_eq!(paths.len(), 8, "{paths:?}");
+    for expected in [
+        ("GET", "/photos/{photo}/comments"),
+        ("GET", "/photos/{photo}/comments/create"),
+        ("GET", "/photos/{photo}/comments/{comment}"),
+        ("GET", "/photos/{photo}/comments/{comment}/edit"),
+    ] {
+        assert!(
+            paths.contains(&(expected.0.into(), expected.1.into())),
+            "{paths:?}"
+        );
+    }
+}
+
+#[test]
+fn test_parse_file_shallow_nested_resource_drops_parent_from_member_routes() {
+    assert_eq!(
+        site_paths("Route::resource('photos.comments', 'C')->only(['index', 'show'])->shallow();"),
+        pairs(&[
+            ("GET", "/photos/{photo}/comments"),
+            ("GET", "/comments/{comment}")
+        ])
+    );
+}
+
+#[test]
+fn test_parse_file_resource_parameters_rename_wildcard() {
+    assert_eq!(
+        site_paths(
+            "Route::resource('photos', 'C')->only('show')->parameters(['photos' => 'pic']);"
+        ),
+        pairs(&[("GET", "/photos/{pic}")])
+    );
+}
+
+/// Wildcards are Laravel's `Str::singular` of the segment: `-` becomes
+/// `_`, an uncountable word stays, and a leading `/` or a `prefix/`
+/// segment of the name is a prefix, not part of the wildcard.
+#[test]
+fn test_parse_file_resource_wildcard_singularizes_segment() {
+    let cases = [
+        (
+            "product_categories",
+            "/product_categories/{product_category}",
+        ),
+        ("/bus", "/bus/{bus}"),
+        ("buses", "/buses/{bus}"),
+        ("news", "/news/{news}"),
+        ("boxes", "/boxes/{box}"),
+        ("addresses", "/addresses/{address}"),
+        ("people", "/people/{person}"),
+        ("support-tickets", "/support-tickets/{support_ticket}"),
+        ("admin/photos", "/admin/photos/{photo}"),
+    ];
+    for (resource, path) in cases {
+        let body = format!("Route::resource('{resource}', 'C')->only('show');");
+        assert_eq!(site_paths(&body), pairs(&[("GET", path)]), "{resource}");
+    }
+}
+
+#[test]
+fn test_parse_file_resource_in_group_carries_prefix_namespace_and_middleware() {
+    let src = routes_file(
+        "Route::prefix('admin')->middleware('auth')->namespace('Admin')->group(function () {
+            Route::resource('photos', 'PhotoController')->only('index')->middleware('can:list');
+        });",
+    );
+    let routes = parse("routes/web.php", &src);
+    assert_eq!(routes.len(), 1, "{routes:?}");
+    assert_eq!(routes[0].path, "/admin/photos");
+    let scope = routes[0].scope.as_deref().unwrap();
+    assert_eq!(scope.middleware, ["auth", "can:list"]);
+    assert_eq!(scope.namespace.as_deref(), Some("Admin"));
+}
+
+#[test]
+fn test_parse_file_resources_registers_each_resource() {
+    assert_eq!(
+        site_paths("Route::resources(['photos' => 'PhotoController', 'posts' => 'PostController'], ['only' => ['index']]);"),
+        pairs(&[("GET", "/photos"), ("GET", "/posts")])
+    );
+    assert_eq!(
+        site_paths("Route::apiResources(['photos' => 'PhotoController']);").len(),
+        6
+    );
+}
+
+#[test]
+fn test_parse_file_resource_on_non_router_emits_nothing() {
+    assert!(
+        sites("Cache::resource('photos', 'C');\n$registrar->resource('photos', 'C');").is_empty()
+    );
+}
+
+#[test]
+fn test_parse_file_resource_with_non_literal_name_emits_nothing() {
+    assert!(sites("Route::resource($name, 'C');").is_empty());
+}
+
+#[test]
+fn test_parse_file_match_emits_one_route_per_verb() {
+    let handler = Some("FormController@handle".to_string());
+    assert_eq!(
+        sites("Route::match(['get', 'POST', 'get'], '/form', 'FormController@handle');"),
+        [
+            ("GET".to_string(), "/form".to_string(), handler.clone()),
+            ("POST".to_string(), "/form".to_string(), handler),
+        ]
+    );
+    assert_eq!(
+        site_paths("Route::match('put', '/one', 'C@m');"),
+        pairs(&[("PUT", "/one")])
+    );
+}
+
+#[test]
+fn test_parse_file_match_with_empty_verb_list_emits_nothing() {
+    assert!(sites("Route::match([], '/form', 'C@m');").is_empty());
+}
+
+#[test]
+fn test_parse_file_any_emits_one_any_route() {
+    assert_eq!(
+        sites("Route::prefix('hooks')->group(function () { Route::any('/stripe', 'HookController@stripe'); });"),
+        [(
+            "ANY".to_string(),
+            "/hooks/stripe".to_string(),
+            Some("HookController@stripe".to_string())
+        )]
+    );
 }
 
 // ── Builder: across files ───────────────────────────────────────────────
@@ -705,4 +1006,334 @@ fn test_build_base_path_resolves_to_the_providers_own_app() {
         ),
     ]);
     assert_eq!(route_names(&graph), ["GET /api/cart", "GET /posts"]);
+}
+
+const PHOTO_CONTROLLER: (&str, &str) = (
+    "app/Http/Controllers/PhotoController.php",
+    r#"<?php
+namespace App\Http\Controllers;
+
+class PhotoController extends Controller
+{
+    public function index() {}
+    public function show() {}
+    public function update() {}
+}
+"#,
+);
+
+/// A base controller the other controllers of the namespace extend.
+const BASE_CONTROLLER: (&str, &str) = (
+    "app/Http/Controllers/Controller.php",
+    r#"<?php
+namespace App\Http\Controllers;
+
+class Controller
+{
+    public function upload() {}
+    public function destroy() {}
+}
+"#,
+);
+
+/// `(file, owner, method, reason)` of each `EntryPoint` marker's target.
+fn entry_points(graph: &ZeroCopyGraph) -> Vec<(String, String, String, String)> {
+    let mut out: Vec<_> = graph
+        .edges
+        .iter()
+        .filter(|edge| {
+            edge.rel_type == RelType::References
+                && graph.nodes[edge.source as usize].kind == NodeKind::EntryPoint
+        })
+        .map(|edge| {
+            let marker = &graph.nodes[edge.source as usize];
+            let target = &graph.nodes[edge.target as usize];
+            (
+                graph.files[marker.file_idx as usize]
+                    .path
+                    .resolve(&graph.string_pool)
+                    .to_string(),
+                target.owner_class.resolve(&graph.string_pool).to_string(),
+                target.name.resolve(&graph.string_pool).to_string(),
+                edge.reason.resolve(&graph.string_pool).to_string(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn test_build_resource_binds_only_the_actions_the_controller_declares() {
+    let graph = graph(&[
+        (
+            "routes/web.php",
+            routes_file("Route::resource('photos', 'PhotoController');").as_str(),
+        ),
+        PHOTO_CONTROLLER,
+    ]);
+    assert_eq!(route_names(&graph).len(), 8, "{:?}", route_names(&graph));
+    assert_eq!(
+        handlers(&graph, "GET /photos/{photo}"),
+        [handler(
+            PHOTO_CONTROLLER.0,
+            "PhotoController",
+            "show",
+            "controller-action:unique-name"
+        )]
+    );
+    for route in ["PUT /photos/{photo}", "PATCH /photos/{photo}"] {
+        assert_eq!(handlers(&graph, route).len(), 1, "{route}");
+    }
+    for route in [
+        "POST /photos",
+        "GET /photos/create",
+        "DELETE /photos/{photo}",
+    ] {
+        assert!(handlers(&graph, route).is_empty(), "{route}");
+    }
+}
+
+#[test]
+fn test_build_resource_on_unknown_controller_emits_routes_without_edges() {
+    let graph = graph(&[(
+        "routes/web.php",
+        routes_file("Route::apiResource('photos', 'MissingController');").as_str(),
+    )]);
+    let routes = route_names(&graph);
+    assert_eq!(routes.len(), 6, "{routes:?}");
+    for route in routes {
+        assert!(handlers(&graph, route).is_empty(), "{route}");
+    }
+}
+
+#[test]
+fn test_build_resource_in_included_file_carries_include_prefix_and_namespace() {
+    let routes = r#"<?php
+use Illuminate\Support\Facades\Route;
+
+Route::resource('photos', 'PhotoController')->only(['index']);
+"#;
+    let graph = graph(&[PROVIDER, ("routes/admin.php", routes), PHOTO_CONTROLLER]);
+    assert_eq!(route_names(&graph), ["GET /admin/photos"]);
+    assert_eq!(middleware(&graph, "GET /admin/photos"), ["api"]);
+    assert_eq!(
+        handlers(&graph, "GET /admin/photos"),
+        [handler(
+            PHOTO_CONTROLLER.0,
+            "PhotoController",
+            "index",
+            "controller-action"
+        )]
+    );
+}
+
+#[test]
+fn test_build_any_route_binds_handler() {
+    let controller = (
+        "app/Http/Controllers/HookController.php",
+        "<?php\nnamespace App\\Http\\Controllers;\nclass HookController { public function stripe() {} }\n",
+    );
+    let graph = graph(&[
+        (
+            "routes/web.php",
+            routes_file("Route::any('/stripe', 'HookController@stripe');").as_str(),
+        ),
+        controller,
+    ]);
+    assert_eq!(route_names(&graph), ["ANY /stripe"]);
+    assert_eq!(handlers(&graph, "ANY /stripe").len(), 1);
+}
+
+/// The client layout: the provider imports Illuminate, the route file it
+/// loads calls the global `Route` alias without a `use` line.
+#[test]
+fn test_build_included_route_file_without_import_emits_scoped_routes() {
+    let admin = "<?php\nRoute::post('/upload', 'FileController@upload');\n";
+    let graph = graph(&[PROVIDER, ("routes/admin.php", admin), FILE_CONTROLLER]);
+    assert_eq!(route_names(&graph), ["POST /admin/upload"]);
+    assert_eq!(middleware(&graph, "POST /admin/upload"), ["api"]);
+    assert_eq!(
+        handlers(&graph, "POST /admin/upload"),
+        [handler(
+            FILE_CONTROLLER.0,
+            "FileController",
+            "upload",
+            "controller-action"
+        )]
+    );
+}
+
+/// Admission passes through a chain of files without an import.
+#[test]
+fn test_build_require_chain_without_imports_from_admitted_provider_emits_routes() {
+    let admin = "<?php\nRoute::prefix('users')->group(function () { require __DIR__.'/admin/users.php'; });\n";
+    let users = "<?php\nRoute::get('/list', 'C@m');\n";
+    let graph = graph(&[
+        PROVIDER,
+        ("routes/admin.php", admin),
+        ("routes/admin/users.php", users),
+    ]);
+    assert_eq!(route_names(&graph), ["GET /admin/users/list"]);
+}
+
+#[test]
+fn test_build_route_file_without_import_nothing_loads_emits_nothing() {
+    let graph = graph(&[(
+        "routes/admin.php",
+        "<?php\nRoute::post('/upload', 'FileController@upload');\n",
+    )]);
+    assert!(route_names(&graph).is_empty());
+}
+
+/// A `require` in plain PHP code admits nothing: the file that requires is
+/// not a framework file either.
+#[test]
+fn test_build_route_file_required_only_by_files_without_import_emits_nothing() {
+    let graph = graph(&[
+        ("index.php", "<?php\nrequire __DIR__.'/lib/routes.php';\n"),
+        ("lib/routes.php", "<?php\nRoute::get('/x', 'C@m');\n"),
+    ]);
+    assert!(route_names(&graph).is_empty());
+}
+
+#[test]
+fn test_build_action_inherited_from_parent_class_binds_parent_method() {
+    let routes = r#"<?php
+use Illuminate\Support\Facades\Route;
+
+Route::delete('/files/{id}', 'FileController@destroy');
+"#;
+    let graph = graph(&[
+        PROVIDER,
+        ("routes/admin.php", routes),
+        FILE_CONTROLLER,
+        BASE_CONTROLLER,
+    ]);
+    assert_eq!(
+        handlers(&graph, "DELETE /admin/files/{id}"),
+        [handler(
+            BASE_CONTROLLER.0,
+            "Controller",
+            "destroy",
+            "controller-action:inherited"
+        )]
+    );
+}
+
+/// The class's own method wins over the parent's of the same name.
+#[test]
+fn test_build_action_declared_by_class_and_parent_binds_own_method() {
+    let graph = graph(&[PROVIDER, ADMIN_ROUTES, FILE_CONTROLLER, BASE_CONTROLLER]);
+    assert_eq!(
+        handlers(&graph, "POST /admin/upload"),
+        [handler(
+            FILE_CONTROLLER.0,
+            "FileController",
+            "upload",
+            "controller-action"
+        )]
+    );
+}
+
+#[test]
+fn test_build_action_from_used_trait_binds_trait_method() {
+    let trait_file = (
+        "app/Http/Controllers/Exports.php",
+        "<?php\nnamespace App\\Http\\Controllers;\ntrait Exports { public function export() {} }\n",
+    );
+    let controller = (
+        "app/Http/Controllers/ReportController.php",
+        "<?php\nnamespace App\\Http\\Controllers;\nclass ReportController { use Exports; }\n",
+    );
+    let graph = graph(&[
+        (
+            "routes/web.php",
+            routes_file("Route::get('/export', 'ReportController@export');").as_str(),
+        ),
+        trait_file,
+        controller,
+    ]);
+    assert_eq!(
+        handlers(&graph, "GET /export"),
+        [handler(
+            trait_file.0,
+            "Exports",
+            "export",
+            "controller-action:unique-name:inherited"
+        )]
+    );
+}
+
+/// The parent is outside the graph (`Illuminate\Routing\Controller`), so
+/// nothing says which class declares the method.
+#[test]
+fn test_build_action_missing_with_unresolved_parent_binds_nothing() {
+    let controller = (
+        "app/Http/Controllers/Controller.php",
+        "<?php\nnamespace App\\Http\\Controllers;\nuse Illuminate\\Routing\\Controller as BaseController;\nclass Controller extends BaseController {}\n",
+    );
+    let graph = graph(&[
+        (
+            "routes/web.php",
+            routes_file("Route::get('/x', 'Controller@middleware');").as_str(),
+        ),
+        controller,
+    ]);
+    assert!(handlers(&graph, "GET /x").is_empty());
+}
+
+#[test]
+fn test_build_cross_file_action_marks_controller_method_entry_point() {
+    let graph = graph(&[PROVIDER, ADMIN_ROUTES, FILE_CONTROLLER, AWARD_CONTROLLER]);
+    assert_eq!(
+        entry_points(&graph),
+        [
+            (
+                AWARD_CONTROLLER.0.to_string(),
+                "AwardController".to_string(),
+                "import".to_string(),
+                "route:1.00:route:POST /admin/import/award".to_string()
+            ),
+            (
+                FILE_CONTROLLER.0.to_string(),
+                "FileController".to_string(),
+                "upload".to_string(),
+                "route:1.00:route:POST /admin/upload".to_string()
+            ),
+        ]
+    );
+}
+
+/// `update` handles PUT and PATCH: one marker carries both routes.
+#[test]
+fn test_build_method_handling_two_routes_gets_one_entry_point() {
+    let graph = graph(&[
+        (
+            "routes/web.php",
+            routes_file("Route::resource('photos', 'PhotoController')->only('update');").as_str(),
+        ),
+        PHOTO_CONTROLLER,
+    ]);
+    assert_eq!(
+        entry_points(&graph),
+        [(
+            PHOTO_CONTROLLER.0.to_string(),
+            "PhotoController".to_string(),
+            "update".to_string(),
+            "route:0.90:route:PUT /photos/{photo}; also: route:PATCH /photos/{photo}".to_string()
+        )]
+    );
+}
+
+#[test]
+fn test_build_unbound_action_marks_no_entry_point() {
+    let graph = graph(&[
+        (
+            "routes/web.php",
+            routes_file("Route::get('/x', 'FileController@missing');").as_str(),
+        ),
+        FILE_CONTROLLER,
+    ]);
+    assert!(entry_points(&graph).is_empty());
 }

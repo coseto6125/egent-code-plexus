@@ -92,6 +92,16 @@ pub fn detect_from_call(raw: &RawRoute) -> Option<DetectedRoute> {
         });
     }
 
+    // `ANY` fast path, same shape as mount: Laravel `Route::any('/x', ...)`
+    // answers every verb, and the PHP parser emits it as one normalized
+    // record that the allowlist below would reject.
+    if lower == "any" && raw.path.starts_with('/') {
+        return Some(DetectedRoute {
+            method: "ANY".to_string(),
+            path: raw.path.clone(),
+        });
+    }
+
     let method = HTTP_METHODS.iter().find(|&&m| lower.contains(m))?;
 
     // Raw path may arrive wrapped in `"…"` / `'…'` because Python / TS
@@ -227,6 +237,20 @@ mod tests {
     #[test]
     fn detect_from_call_rejects_non_path_string() {
         assert!(detect_from_call(&raw("get", "not_a_path!")).is_none());
+    }
+
+    #[test]
+    fn test_detect_from_call_any_with_path_keeps_any_method() {
+        let detected = detect_from_call(&raw("ANY", "/webhook")).unwrap();
+        assert_eq!(
+            (detected.method.as_str(), detected.path.as_str()),
+            ("ANY", "/webhook")
+        );
+    }
+
+    #[test]
+    fn test_detect_from_call_any_without_leading_slash_returns_none() {
+        assert!(detect_from_call(&raw("ANY", "webhook")).is_none());
     }
 
     #[test]

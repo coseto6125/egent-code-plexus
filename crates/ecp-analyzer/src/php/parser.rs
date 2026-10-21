@@ -166,6 +166,21 @@ const PHP_HTTP_FRAMEWORK_NAMESPACES: &[&str] = &[
 /// static calls).
 pub(super) const PHP_ROUTER_SCOPES: &[&str] = &["Route", "Router", "Slim", "Symfony"];
 
+/// Whether the file declares or imports a class named like a router scope
+/// (`class Route`, `use App\Support\Route`): its `Route::get(...)` is that
+/// class's method, not the framework's router.
+fn binds_own_router(imports: &[RawImport], nodes: &[RawNode]) -> bool {
+    imports.iter().any(|import| {
+        let local = import
+            .alias
+            .as_deref()
+            .unwrap_or_else(|| import.imported_name.rsplit('\\').next().unwrap_or_default());
+        PHP_ROUTER_SCOPES.contains(&local)
+    }) || nodes
+        .iter()
+        .any(|node| node.kind.is_type() && PHP_ROUTER_SCOPES.contains(&node.name.as_str()))
+}
+
 /// Walk a chained member-call expression inward through any depth of
 /// `member_call_expression` until it reaches a `scoped_call_expression` root.
 /// Returns the scope name (`Route`, `Router`, etc.) when the chain terminates
@@ -290,6 +305,7 @@ struct PhpCaptureIndices {
     laravel_call: Option<u32>,
     laravel_args: Option<u32>,
     laravel_include_call: Option<u32>,
+    laravel_route_set: Option<u32>,
     // BlindSpot captures (FU-001 P5a).
     blind_eval: Option<u32>,
     blind_call_user_func: Option<u32>,
@@ -342,6 +358,7 @@ impl PhpProvider {
             laravel_call: query.capture_index_for_name("laravel.route.call"),
             laravel_args: query.capture_index_for_name("laravel.route.args"),
             laravel_include_call: query.capture_index_for_name("laravel.include.call"),
+            laravel_route_set: query.capture_index_for_name("laravel.route.set"),
             blind_eval: query.capture_index_for_name("blind.eval"),
             blind_call_user_func: query.capture_index_for_name("blind.call_user_func"),
             blind_variable_call: query.capture_index_for_name("blind.variable_call"),
@@ -381,6 +398,9 @@ impl LanguageProvider for PhpProvider {
         // file's `use` imports, which an `X::class` action resolves through.
         let mut route_calls: Vec<(String, &str, tree_sitter::Node)> = Vec::new();
         let mut route_includes: Vec<RawRoute> = Vec::new();
+        // `Route::resource` / `match` / `any` calls, each registering
+        // several routes or a method set.
+        let mut route_sets: Vec<tree_sitter::Node> = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
         let file_category =
             ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
@@ -418,6 +438,7 @@ impl LanguageProvider for PhpProvider {
         let idx_laravel_call = idx.laravel_call;
         let idx_laravel_args = idx.laravel_args;
         let idx_laravel_include_call = idx.laravel_include_call;
+        let idx_laravel_route_set = idx.laravel_route_set;
 
         let idx_blind_eval = idx.blind_eval;
         let idx_blind_call_user_func = idx.blind_call_user_func;
@@ -552,6 +573,10 @@ impl LanguageProvider for PhpProvider {
                     laravel_args_node = Some(cap.node);
                 } else if Some(cap_idx) == idx_laravel_include_call {
                     super::laravel_routes::push_includes(cap.node, source, &mut route_includes);
+                } else if Some(cap_idx) == idx_laravel_route_set {
+                    if !route_sets.iter().any(|call| call.id() == cap.node.id()) {
+                        route_sets.push(cap.node);
+                    }
                 } else if Some(cap_idx) == idx_function_anonymous {
                     // Anonymous callback (arg-position anonymous function or arrow function).
                     // Emit an `<anonymous>` Function node only when the body holds a
@@ -788,16 +813,22 @@ impl LanguageProvider for PhpProvider {
             .iter()
             .find(|node| node.kind == NodeKind::Namespace)
             .map(|node| node.name.clone());
-        for (method, raw_path, call) in route_calls {
-            let Some(site) = super::laravel_routes::route_site(
-                call,
-                raw_path,
-                source,
-                &imports,
-                file_namespace.as_deref(),
-            ) else {
-                continue;
-            };
+        let names = super::laravel_routes::FileNames {
+            imports: &imports,
+            namespace: file_namespace.as_deref(),
+        };
+        let route_sites = route_calls
+            .into_iter()
+            .filter_map(|(method, raw_path, call)| {
+                let site = super::laravel_routes::route_site(call, raw_path, source, names)?;
+                Some((method, site, call))
+            })
+            .chain(route_sets.into_iter().flat_map(|call| {
+                super::laravel_routes::route_set_sites(call, source, names)
+                    .into_iter()
+                    .map(move |(method, site)| (method, site, call))
+            }));
+        for (method, site, call) in route_sites {
             routes.push(RawRoute {
                 method,
                 path: site.path,
@@ -863,8 +894,21 @@ impl LanguageProvider for PhpProvider {
         // import from a known PHP web-framework namespace before any Route
         // is emitted. No path-shape filter (Laravel uses bare paths like
         // `'register'`). Spec: 2026-05-17-route-precision-design.md.
+        //
+        // A route file a provider loads often calls the global `Route`
+        // facade alias with no `use` line. Its records stay, marked, and the
+        // builder keeps them only when a file that passes this gate loads
+        // the file. A file that binds `Route` to a class of its own keeps
+        // nothing.
         if !has_import_from(&imports, PHP_HTTP_FRAMEWORK_NAMESPACES) {
-            routes.clear();
+            let own_router = binds_own_router(&imports, &nodes);
+            routes.retain_mut(|route| match route.scope.as_deref_mut() {
+                Some(scope) if !own_router => {
+                    scope.needs_include = true;
+                    true
+                }
+                _ => false,
+            });
         }
 
         let raw_function_metas =
