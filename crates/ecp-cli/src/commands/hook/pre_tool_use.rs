@@ -121,6 +121,8 @@ enum Sep {
 
 /// Split a shell command at unquoted `;`, `&&`, `||`, `|`, `&` and newlines,
 /// each segment paired with the operator that ends it (`None` for the last).
+/// A segment stops before an unquoted `#` that starts a word: the comment's
+/// text runs to the newline and holds no operator, quote or group.
 /// `None` when a quote is left open: bash rejects the whole command. Every
 /// separator is ASCII, so the byte offsets stay on char boundaries for CJK
 /// paths.
@@ -130,10 +132,17 @@ fn shell_segments(cmd: &str) -> Option<Vec<(&str, Option<Sep>)>> {
     let mut quote: Option<char> = None;
     let mut chars = cmd.char_indices().peekable();
     let mut prev = ' ';
+    let mut comment_at = None;
     while let Some((i, c)) = chars.next() {
         let after_redirect = matches!(prev, '>' | '<');
+        let word_start = prev.is_whitespace() || matches!(prev, ';' | '&' | '|' | '(' | ')');
         prev = c;
         let sep = match (quote, c) {
+            (None, '#') if word_start => {
+                comment_at = Some(i);
+                while chars.next_if(|&(_, n)| n != '\n').is_some() {}
+                continue;
+            }
             (Some('\''), '\'') | (Some('"'), '"') => {
                 quote = None;
                 continue;
@@ -159,10 +168,10 @@ fn shell_segments(cmd: &str) -> Option<Vec<(&str, Option<Sep>)>> {
             },
             _ => continue,
         };
-        segments.push((&cmd[start..i], Some(sep)));
+        segments.push((&cmd[start..comment_at.take().unwrap_or(i)], Some(sep)));
         start = chars.peek().map_or(cmd.len(), |&(next, _)| next);
     }
-    segments.push((&cmd[start..], None));
+    segments.push((&cmd[start..comment_at.unwrap_or(cmd.len())], None));
     quote.is_none().then_some(segments)
 }
 
@@ -767,6 +776,21 @@ mod tests {
             "cd x || echo \\{; cd y; rg Foo",
         ] {
             assert_eq!(target(cmd, t.path()), want, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_cd_target_comment_text_does_not_hide_a_later_cd() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir(t.path().join("x")).unwrap();
+        let want = dir(&t.path().join("x"));
+        for cmd in [
+            "echo ready # call foo(\ncd x; rg Foo",
+            "echo ready # don't { \ncd x; rg Foo",
+            "echo ready #; cd /\ncd x; rg Foo",
+            "echo a#b; cd x; rg Foo",
+        ] {
+            assert_eq!(target(cmd, t.path()), want, "{cmd:?}");
         }
     }
 
