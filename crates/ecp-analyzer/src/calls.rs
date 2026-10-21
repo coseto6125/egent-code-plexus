@@ -538,9 +538,7 @@ fn variant_path(text: &str) -> Option<String> {
     let mut dotted = false;
     let mut rest = body;
     loop {
-        let end = rest
-            .find(|c: char| matches!(c, ':' | '.' | '\\'))
-            .unwrap_or(rest.len());
+        let end = rest.find([':', '.', '\\']).unwrap_or(rest.len());
         segments.push(&rest[..end]);
         let tail = &rest[end..];
         rest = if let Some(next) = tail.strip_prefix("::") {

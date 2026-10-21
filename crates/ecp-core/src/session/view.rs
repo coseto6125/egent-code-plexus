@@ -1437,7 +1437,7 @@ impl<'a> OverlayFacts<'a> {
             || graph.nodes_by_name(member).any(|idx| {
                 wanted(NodeKind::from(&graph.nodes[idx as usize].kind))
                     && !self.dirty_base.contains(&idx)
-                    && self.node_file(idx).is_some_and(&named_file)
+                    && self.node_file(idx).is_some_and(named_file)
             });
         if !declared_in_named_file {
             return None;
@@ -1685,15 +1685,15 @@ fn resolve_callee<'s>(
     }
     // Tier 1: same-file.
     if let Some(virts) = names.same_file.get(&(file_ord, callee)) {
-        let pick = match virts.as_slice() {
-            &[only] => Some(only),
+        let pick = match *virts.as_slice() {
+            [only] => Some(only),
             // The index takes the first, then the caller's owner's own member
             // when the first belongs to another type. A first at top level,
             // or no own member, binds the first there; the overlay leaves
             // that ambiguity (same-name free functions, same-uid twins)
             // unresolved. A same-file free function keeps a Rust method call
             // unresolved, as `pick_call` does.
-            &[first, ..] => call
+            [first, ..] => call
                 .and_then(|scope| scope.owner)
                 .filter(|_| facts.owner_of(first).is_some() && virts.iter().all(|&v| accepts(v)))
                 .and_then(|owner| {
@@ -1702,7 +1702,7 @@ fn resolve_callee<'s>(
                         .copied()
                         .find(|&v| facts.owner_of(v) == Some(owner))
                 }),
-            &[] => None,
+            [] => None,
         };
         return pick.filter(|&v| accepts(v)).map(|v| (v, CONF_SAME_FILE));
     }

@@ -36,12 +36,7 @@ pub enum ResolutionTier {
     Fallback(FallbackReason),
 }
 
-/// The confidence of a [`ResolutionTier::NearestCopy`] call edge. No other
-/// tier yields this value, so Pass 2 tells the edge apart by it.
-pub const NEAREST_COPY_CONFIDENCE: f32 = 0.6;
-
-/// The `reason` of a [`ResolutionTier::NearestCopy`] call edge.
-pub const NEAREST_COPY_REASON: &str = "call:nearest-copy";
+pub use ecp_core::analyzer::types::{NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON};
 
 impl ResolutionTier {
     /// Returns the base confidence score for the resolution tier.
