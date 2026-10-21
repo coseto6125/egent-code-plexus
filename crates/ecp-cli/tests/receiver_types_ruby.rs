@@ -69,7 +69,7 @@ fn self_does_not_bind_in_module_singleton_method() {
     let calls = calls_of(&nodes, "train");
     let untyped = CallSite::untyped_member("speak");
     assert!(
-        calls.iter().any(|c| *c == untyped),
+        calls.contains(&untyped),
         "animal.speak in Trainer.train must fall back to an untyped `speak`; got {:?}",
         calls,
     );

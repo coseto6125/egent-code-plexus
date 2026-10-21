@@ -190,6 +190,10 @@ fn base_renamed(source: &str) -> String {
     source.replacen(declared, "class Renamed ", 1)
 }
 
+/// A dirty-set label, its dirty files, and whether it proves parity: the
+/// reindex holds the expected edges and the overlay equals it.
+type DirtySet<'a> = (&'a str, Vec<(&'a str, String)>, bool);
+
 fn mismatches(fixtures: &[Fixture]) -> Vec<String> {
     let mut failures = Vec::new();
     for fixture in fixtures {
@@ -197,7 +201,7 @@ fn mismatches(fixtures: &[Fixture]) -> Vec<String> {
         let (caller_path, caller_src) = fixture.caller;
         let mut files = vec![fixture.base, fixture.caller];
         files.extend_from_slice(fixture.rest);
-        let dirty_sets: [(&str, Vec<(&str, String)>, bool); 4] = [
+        let dirty_sets: [DirtySet<'_>; 4] = [
             ("caller", vec![(caller_path, shifted(caller_src))], true),
             (
                 "caller+base",

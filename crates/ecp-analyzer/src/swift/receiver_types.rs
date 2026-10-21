@@ -227,12 +227,12 @@ fn collect_declared_swift_names(
         loop {
             let child = c.node();
             let binds = child.kind() == "simple_identifier"
-                && match (n.kind(), c.field_name()) {
-                    ("parameter" | "lambda_parameter", Some("name")) => true,
-                    (_, Some("bound_identifier")) => true,
-                    ("pattern", None) => true,
-                    _ => false,
-                };
+                && matches!(
+                    (n.kind(), c.field_name()),
+                    ("parameter" | "lambda_parameter", Some("name"))
+                        | (_, Some("bound_identifier"))
+                        | ("pattern", None)
+                );
             if binds {
                 if let Ok(name) = child.utf8_text(source) {
                     out.entry(name.to_string()).or_default();

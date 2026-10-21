@@ -1236,11 +1236,13 @@ struct OverlayFacts<'a> {
     /// Virtual type → its declared supertypes resolved as the index's
     /// supertypes pre-pass does (`(bases, first_unresolved)`), set once by
     /// [`OverlayView::build`] before any call resolves.
-    dirty_supertypes: OnceCell<FxHashMap<u32, (Vec<u32>, Option<u32>)>>,
+    dirty_supertypes: OnceCell<FxHashMap<u32, Supertypes>>,
 }
 
 /// A base Rust `Impl` node: its span, its idx and the [`owner_key`] of the
 /// trait it implements.
+/// A type's resolved bases in declared order, and its first unresolved one.
+type Supertypes = (Vec<u32>, Option<u32>);
 type ImplSpan<'a> = ((u32, u32, u32, u32), u32, Option<&'a str>);
 
 impl<'a> OverlayFacts<'a> {
@@ -2186,7 +2188,7 @@ impl<'a> OverlayFacts<'a> {
     /// The index's resolved supertypes of a base type, with a base the edit
     /// replaced read as its virtual node, and one the edit deleted or
     /// renamed read as unresolved where it stood.
-    fn base_supertypes(&self, ty: u32) -> Option<(Vec<u32>, Option<u32>)> {
+    fn base_supertypes(&self, ty: u32) -> Option<Supertypes> {
         let (bases, mut first_unresolved) = self.graph.supertypes_of(ty)?;
         let mut kept = Vec::with_capacity(bases.len());
         for base in bases {
@@ -2463,9 +2465,7 @@ impl PickFacts for OverlayFacts<'_> {
 
     fn is_namespace_owner(&self, file: &str, owner: &str) -> bool {
         if let Some(&file_ord) = self.dirty.get(file) {
-            return self.dirty_namespaces[file_ord]
-                .iter()
-                .any(|&key| key == owner);
+            return self.dirty_namespaces[file_ord].contains(&owner);
         }
         let graph = self.graph;
         let Some(file_idx) = graph.file_idx_of(file) else {
@@ -2491,7 +2491,7 @@ impl PickFacts for OverlayFacts<'_> {
         });
         namespaces
             .get(&file_idx)
-            .is_some_and(|keys| keys.iter().any(|&key| key == owner))
+            .is_some_and(|keys| keys.contains(&owner))
             && !graph.nodes_by_name(owner).any(|idx| {
                 let node = &graph.nodes[idx as usize];
                 let kind = NodeKind::from(&node.kind);
@@ -3642,9 +3642,9 @@ fn dirty_supertypes(
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
     rust_modules: Option<&RustModules<'_>>,
-) -> FxHashMap<u32, (Vec<u32>, Option<u32>)> {
+) -> FxHashMap<u32, Supertypes> {
     let base_len = graph.nodes.len() as u32;
-    let mut acc: FxHashMap<u32, (Vec<u32>, Option<u32>)> = FxHashMap::default();
+    let mut acc: FxHashMap<u32, Supertypes> = FxHashMap::default();
     let mut start = 0usize;
     for (file_ord, file) in files.iter().enumerate() {
         let first = start;
@@ -4021,6 +4021,7 @@ fn owner_path_agrees_in_file(
 /// The index's `lookup_member_in_file` over the kind family of `names`: the
 /// first `member` declared in `file` whose owner satisfies `owner`. A dirty
 /// file answers from its fresh parse only.
+#[allow(clippy::too_many_arguments)]
 fn member_in_file(
     graph: &ArchivedZeroCopyGraph,
     names: &OverlayNames<'_>,

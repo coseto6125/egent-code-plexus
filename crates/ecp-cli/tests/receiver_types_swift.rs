@@ -101,7 +101,7 @@ fn unannotated_var_falls_back_to_untyped_member() {
     let calls = calls_of(&nodes, "useNoAnnotation");
     let untyped = CallSite::untyped_member("peel");
     assert!(
-        calls.iter().any(|c| *c == untyped),
+        calls.contains(&untyped),
         "without annotation must keep an untyped `peel`; got {:?}",
         calls,
     );

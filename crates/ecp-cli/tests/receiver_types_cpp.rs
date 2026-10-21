@@ -93,7 +93,7 @@ fn auto_typed_local_falls_back_to_untyped_member() {
     let calls = calls_of(&nodes, "useNoAnnotation");
     let untyped = CallSite::untyped_member("eat");
     assert!(
-        calls.iter().any(|c| *c == untyped),
+        calls.contains(&untyped),
         "auto-typed local must fall back to an untyped member `eat`; got {:?}",
         calls,
     );
