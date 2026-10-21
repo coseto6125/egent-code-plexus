@@ -1982,30 +1982,15 @@ impl<'a> OverlayFacts<'a> {
                 == Some(qualifier)
                 && crate_root_prefix(file) == root
         };
-        // Most qualifiers (`list.add`) name no file that declares the member:
-        // settle that from the member's declarations before the one pass
-        // over every file path that uniqueness needs.
-        let wanted = target.kind_predicate();
-        let declared_in_named_file = self
-            .scope
-            .dirty()
-            .iter()
-            .map(|file| file.rel_path.as_str())
-            .any(|file| named_file(file) && declares_member(file))
-            || graph.nodes_by_name(member).any(|idx| {
-                wanted(NodeKind::from(&graph.nodes[idx as usize].kind))
-                    && !self.dirty_base.contains(&idx)
-                    && self.node_file(idx).is_some_and(named_file)
-            });
-        if !declared_in_named_file {
-            return None;
-        }
+        // The stem index costs one pass over the file paths per build; a
+        // scan of the member's declarations per call cost more on a common
+        // member name (`add`, `get`) with hundreds of declarations.
         let mut stems = self
             .files_by_stem(qualifier)
             .iter()
             .filter(|&&file| named_file(file));
         match (stems.next(), stems.next()) {
-            (Some(&file), None) => Some(file),
+            (Some(&file), None) => declares_member(file).then_some(file),
             _ => None,
         }
     }
