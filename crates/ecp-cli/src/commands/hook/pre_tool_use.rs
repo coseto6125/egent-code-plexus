@@ -151,10 +151,7 @@ fn shell_segments(cmd: &str) -> Option<Vec<(&str, Option<Sep>)>> {
         let after_redirect = matches!(prev, '>' | '<');
         // Bash's metacharacters, not Unicode whitespace: a `#` after a CR
         // is a literal.
-        let word_start = matches!(
-            prev,
-            ' ' | '\t' | '\n' | ';' | '&' | '|' | '(' | ')' | '<' | '>'
-        );
+        let word_start = METACHARS.contains(&prev);
         prev = c;
         let sep = match (quote, c) {
             (None, '$') if chars.next_if(|&(_, n)| n == '{').is_some() => {
@@ -231,6 +228,9 @@ enum CdTarget {
 const CWD_BUILTINS: [&str; 8] = [
     "pushd", "popd", "source", ".", "eval", "builtin", "command", "exec",
 ];
+
+/// The characters after which a `#` starts a comment.
+const METACHARS: [char; 10] = [' ', '\t', '\n', ';', '&', '|', '(', ')', '<', '>'];
 
 /// Reserved words and `time` that run the command after them in this shell.
 const PREFIX_WORDS: [&str; 9] = [
@@ -316,10 +316,17 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
         // not model may still run the command in this shell. A later `.`
         // alone is mostly a path argument (`git add .`).
         let moves = |w: &&str| *w == "cd" || CWD_BUILTINS.contains(w);
-        let after_prefix = cmd_words
-            .iter()
-            .position(|w| !PREFIX_WORDS.contains(w))
-            .unwrap_or(cmd_words.len());
+        // `time -p` takes options before its command word.
+        let mut after_prefix = 0;
+        let mut time_options = false;
+        for &word in &cmd_words {
+            if PREFIX_WORDS.contains(&word) {
+                time_options = word == "time";
+            } else if !(time_options && word.starts_with('-')) {
+                break;
+            }
+            after_prefix += 1;
+        }
         if own_shell
             && (after_prefix > 0 && cmd_words.get(after_prefix).is_some_and(moves)
                 || cmd_words.iter().skip(1).any(|w| *w != "." && moves(w)))
@@ -402,9 +409,18 @@ fn join_continuations(cmd: &str) -> Cow<'_, str> {
     let mut chars = cmd.chars().peekable();
     let mut quote = None;
     while let Some(c) = chars.next() {
+        let word_start = out.is_empty() || out.ends_with(METACHARS);
         match (quote, c) {
             (Some('\''), '\'') | (Some('"'), '"') => quote = None,
             (None, '\'' | '"') => quote = Some(c),
+            // A comment's trailing backslash continues nothing.
+            (None, '#') if word_start => {
+                out.push(c);
+                while let Some(next) = chars.next_if(|&n| n != '\n') {
+                    out.push(next);
+                }
+                continue;
+            }
             (None | Some('"'), '\\') => {
                 if chars.next_if_eq(&'\n').is_some() {
                     continue;
@@ -970,6 +986,7 @@ mod tests {
             "cd x; CDPATH=/var; cd .hidden; rg Foo",
             "cd x; ! . /dev/stdin <<< \"cd /\"; rg Foo",
             "cd x; time . env.sh; rg Foo",
+            "cd x; time -p . env.sh; rg Foo",
             "cd x; cd /u?r; rg Foo",
             "cd x; set -P; cd ..; rg Foo",
             "cd x; set -o physical; cd ..; rg Foo",
@@ -1010,6 +1027,7 @@ mod tests {
             "cd x && \\\nrg Foo",
             "cd \\\nx; rg Foo",
             "cd x && time git diff -- .; rg Foo",
+            "cd y\n# cd z && \\\ncd x\nrg Foo",
             // Single quotes keep the backslash-newline: the cd fails.
             "cd x; cd 'x\\\ny'; rg Foo",
         ] {
