@@ -422,8 +422,8 @@ impl OverlayView {
             // Full indexing tombstones a later same-uid declaration (a
             // half-finished edit) or keeps it as a later overload, and never
             // registers either in the global name table, so only the first
-            // one of each uid is a cross-file candidate. The same-file tier still sees both: the
-            // index's own-file lookup treats them as ambiguous and binds none.
+            // one of each uid is a cross-file candidate. The same-file tier
+            // reads `OverlayFacts::declared`, which drops the later twin too.
             let mut named_uids: FxHashSet<u64> = FxHashSet::default();
             let mut variants = VariantTables::default();
             let mut virt_off = 0usize;
@@ -504,6 +504,10 @@ impl OverlayView {
                 &dirty_base,
                 rust_modules.as_ref(),
             ));
+            // The pre-pass's own qualified lookups ran before the dirty bases
+            // existed, and the same-file pick's hierarchy rule walks them.
+            // Tier 3's memo reads no bases and stays.
+            facts.qualified.borrow_mut().clear();
             for (file_ord, file) in files.iter().enumerate() {
                 let first = (virt_cursor - base_len) as usize;
                 emit_closure_references(
@@ -1126,13 +1130,15 @@ fn emit_closure_references(
     }
 }
 
-/// Overlay symbols of one kind family (`kind`), by name: the Tier-1
-/// same-file and Tier-3 overlay-wide candidates of [`resolve_callee`].
+/// Overlay symbols of one kind family (`kind`), by name: the Tier-3
+/// overlay-wide candidates of [`resolve_callee`], and the names each dirty
+/// file declares.
 struct OverlayNames<'a> {
     /// The kind family, as the index's lookups name it.
     target: ResolveTarget,
-    /// (file ordinal, name) → virtual idxs.
-    same_file: FxHashMap<(usize, &'a str), Vec<u32>>,
+    /// (file ordinal, name) the file declares. Tier 1 picks through
+    /// [`OverlayFacts::decls_in_file`]; only the qualifier tier asks here.
+    same_file: FxHashSet<(usize, &'a str)>,
     /// name → (virtual idx, file meta), anywhere in the overlay.
     anywhere: FxHashMap<&'a str, Vec<(u32, FileMeta)>>,
 }
@@ -1141,7 +1147,7 @@ impl<'a> OverlayNames<'a> {
     fn new(target: ResolveTarget) -> Self {
         Self {
             target,
-            same_file: FxHashMap::default(),
+            same_file: FxHashSet::default(),
             anywhere: FxHashMap::default(),
         }
     }
@@ -1159,10 +1165,7 @@ impl<'a> OverlayNames<'a> {
         if node.later_overload || !self.target.kind_predicate()(node.kind) {
             return;
         }
-        self.same_file
-            .entry((file_ord, node.name.as_str()))
-            .or_default()
-            .push(virt);
+        self.same_file.insert((file_ord, node.name.as_str()));
         if first_of_uid {
             self.anywhere
                 .entry(node.name.as_str())
@@ -1264,6 +1267,10 @@ struct OverlayFacts<'a> {
     /// supertypes pre-pass does (`(bases, first_unresolved)`), set once by
     /// [`OverlayView::build`] before any call resolves.
     dirty_supertypes: OnceCell<FxHashMap<u32, Supertypes>>,
+    /// Rust self-type key → the trait keys of the dirty files' archived
+    /// `impl Trait for Type` blocks: the files' old content, whose bases the
+    /// archived supertypes of a clean type still carry.
+    dirty_impl_traits: FxHashMap<&'a str, Vec<&'a str>>,
 }
 
 /// A base Rust `Impl` node: its span, its idx and the [`owner_key`] of the
@@ -1333,6 +1340,21 @@ impl<'a> OverlayFacts<'a> {
             ));
             dirty_aliases.push(aliases);
         }
+        let pool = &graph.string_pool;
+        let mut dirty_impl_traits: FxHashMap<&'a str, Vec<&'a str>> = FxHashMap::default();
+        for &idx in dirty_base {
+            let block = &graph.nodes[idx as usize];
+            if NodeKind::from(&block.kind) != NodeKind::Impl {
+                continue;
+            }
+            let (Some(ty), Some(implemented)) = (
+                owner_key(block.name.resolve(pool)),
+                owner_key(block.owner_class.resolve(pool)),
+            ) else {
+                continue;
+            };
+            dirty_impl_traits.entry(ty).or_default().push(implemented);
+        }
         Self {
             graph,
             scope: ImportScope::new(graph, files, dirty_base),
@@ -1362,6 +1384,7 @@ impl<'a> OverlayFacts<'a> {
             base_impls: OnceCell::new(),
             base_namespaces: OnceCell::new(),
             dirty_supertypes: OnceCell::new(),
+            dirty_impl_traits,
         }
     }
 
@@ -1435,7 +1458,7 @@ impl<'a> OverlayFacts<'a> {
             return Some(true);
         }
         let named = rust_expand_path_head(prefix, imports);
-        let declared_here = |module: &str| qualifiers.same_file.contains_key(&(file_ord, module));
+        let declared_here = |module: &str| qualifiers.same_file.contains(&(file_ord, module));
         let module_path = match named[0] {
             "crate" | "self" | "super" => named.join("::"),
             head if declared_here(head) => format!("self::{}", named.join("::")),
@@ -1821,7 +1844,7 @@ impl<'a> OverlayFacts<'a> {
                 qualifiers,
             )
         };
-        if qualifiers.same_file.contains_key(&(file_ord, qualifier)) && declares_member(source) {
+        if qualifiers.same_file.contains(&(file_ord, qualifier)) && declares_member(source) {
             match agrees(source) {
                 Some(true) => return Some(source),
                 Some(false) => {}
@@ -1876,7 +1899,7 @@ impl<'a> OverlayFacts<'a> {
                 // places through its module tree.
                 let head = module_path.split("::").next().unwrap_or_default();
                 if !matches!(head, "crate" | "self" | "super")
-                    && !qualifiers.same_file.contains_key(&(file_ord, head))
+                    && !qualifiers.same_file.contains(&(file_ord, head))
                 {
                     return None;
                 }
@@ -2257,21 +2280,50 @@ impl<'a> OverlayFacts<'a> {
 
     /// The index's resolved supertypes of a base type, with a base the edit
     /// replaced read as its virtual node, and one the edit deleted or
-    /// renamed read as unresolved where it stood.
+    /// renamed read as unresolved where it stood. A trait only a dirty
+    /// file's archived `impl` block gave the type is gone: the pre-pass adds
+    /// back what the file's fresh parse still implements.
     fn base_supertypes(&self, ty: u32) -> Option<Supertypes> {
-        let (bases, mut first_unresolved) = self.graph.supertypes_of(ty)?;
+        let (bases, archived_unresolved) = self.graph.supertypes_of(ty)?;
+        let stale = owner_key(self.name_of(ty)).and_then(|key| self.dirty_impl_traits.get(key));
+        let mut first_unresolved = None;
         let mut kept = Vec::with_capacity(bases.len());
-        for base in bases {
+        for (at, base) in bases.into_iter().enumerate() {
+            if archived_unresolved == Some(at as u32) {
+                first_unresolved.get_or_insert(kept.len() as u32);
+            }
+            if stale.is_some_and(|traits| self.only_dirty_impl_gives(ty, base, traits)) {
+                continue;
+            }
             if let Some(&virt) = self.replaced.get(&base) {
                 kept.push(virt);
             } else if self.dirty_base.contains(&base) {
-                let at = kept.len() as u32;
-                first_unresolved = Some(first_unresolved.map_or(at, |old| old.min(at)));
+                first_unresolved.get_or_insert(kept.len() as u32);
             } else {
                 kept.push(base);
             }
         }
+        if archived_unresolved.is_some() {
+            first_unresolved.get_or_insert(kept.len() as u32);
+        }
         Some((kept, first_unresolved))
+    }
+
+    /// Whether the base `base` of the clean type `ty` names one of `traits`,
+    /// the dirty files' archived trait impls for `ty`, and no clean file's
+    /// `impl` block implements it for `ty`.
+    fn only_dirty_impl_gives(&self, ty: u32, base: u32, traits: &[&str]) -> bool {
+        let Some(base_key) = owner_key(self.name_of(base)) else {
+            return false;
+        };
+        let pool = &self.graph.string_pool;
+        traits.iter().any(|&implemented| implemented == base_key)
+            && !self.graph.nodes_by_name(self.name_of(ty)).any(|idx| {
+                let block = &self.graph.nodes[idx as usize];
+                NodeKind::from(&block.kind) == NodeKind::Impl
+                    && !self.dirty_base.contains(&idx)
+                    && owner_key(block.owner_class.resolve(pool)) == Some(base_key)
+            })
     }
 
     /// The index's `SymbolTable::owner_path_agrees`: [`owner_path_agrees`]
@@ -3721,8 +3773,10 @@ fn bare_enum_variant(
 /// `SymbolTable::build_supertypes`) over the dirty files: each heritage
 /// subject (a type, the type an `Impl` names, the owner of a Rust trait-impl
 /// method) with its bases resolved as types from the declaring file. A
-/// subject that is a clean type keeps its archived bases too: `graph.bin`
-/// cannot tell which file declared them.
+/// subject that is a clean type keeps its archived bases too, less the
+/// traits of the dirty files' archived `impl` blocks
+/// ([`OverlayFacts::base_supertypes`]): `graph.bin` records no declaring
+/// file per base, only those blocks.
 #[allow(clippy::too_many_arguments)]
 fn dirty_supertypes(
     graph: &ArchivedZeroCopyGraph,

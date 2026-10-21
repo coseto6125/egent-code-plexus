@@ -3,6 +3,9 @@
 //! must persist owner_class / calls / imports, and `load_view_inputs` must
 //! refuse entries that would serve stale overlay data (reverted files, v1 bins).
 
+#[path = "common/parity.rs"]
+mod parity;
+
 use ecp_cli::session::overlay_reader::{load_overlay_hits, load_view_inputs};
 use ecp_cli::session::overlay_writer::{
     write_dirty_fragments_from_graphs, FragmentFileV3, FragmentSymbolV3,
@@ -10,6 +13,7 @@ use ecp_cli::session::overlay_writer::{
 use ecp_core::analyzer::types::{LocalGraph, RawImport, RawNode, VariantRef};
 use ecp_core::graph::NodeKind;
 use ecp_core::session::{DirtyEntry, DirtyFiles, SessionMeta, FRAGMENT_FORMAT_V3};
+use parity::{callees, calls_after_edit, Parity};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -375,28 +379,153 @@ fn test_load_view_inputs_v3_entry_under_current_fingerprint_returns_no_input() {
     assert!(inputs.is_empty(), "a v3 fragment was served: {inputs:?}");
 }
 
-/// Contract: a manifest the previous release (0.15.0, `+schema15`) wrote is
-/// another builder's, so the view serves the base graph until a refresh
-/// replaces the manifest whole.
+/// The session ecp 0.15.0 left for a dirty `app.py`
+/// (`tests/fixtures/overlay-written-by-0.15.0`, see its README.txt): a v3 bin
+/// in a `v0.15.0+schema11` manifest. Only the recorded mtime is moved to the
+/// copied file's, so the mtime check alone would accept it. Returns
+/// `(session_dir, worktree)`.
+fn session_written_by_0_15_0(tmp: &Path) -> (PathBuf, PathBuf) {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/overlay-written-by-0.15.0");
+    let worktree = tmp.join("wt");
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::copy(fixture.join("app.py"), worktree.join("app.py")).unwrap();
+    let mtime = std::fs::metadata(worktree.join("app.py"))
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    let session_dir = make_session_dir(tmp, "sid-0-15-0");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture.join("dirty_files.json")).unwrap())
+            .unwrap();
+    manifest["entries"]["app.py"]["mtime_ns"] = mtime.into();
+    std::fs::write(
+        session_dir.join("dirty_files.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    std::fs::create_dir_all(session_dir.join("graph_overlay")).unwrap();
+    std::fs::copy(
+        fixture.join("graph_overlay/e4bdd84a3e2d78f5.bin"),
+        session_dir.join("graph_overlay/e4bdd84a3e2d78f5.bin"),
+    )
+    .unwrap();
+    (session_dir, worktree)
+}
+
+/// Contract: a manifest the previous release wrote is another builder's, so
+/// the view serves the base graph until a refresh replaces the manifest
+/// whole. Pass: no input, though the mtime matches. Fail: any input, which
+/// would bind calls from a parse without heritage.
 #[test]
-fn test_load_view_inputs_manifest_of_0_15_0_returns_no_input() {
+fn test_load_view_inputs_session_written_by_0_15_0_returns_no_input() {
     let tmp = tempfile::tempdir().unwrap();
-    let (session_dir, worktree) = session_with_v3_bin(tmp.path(), "v0.15.0+schema15");
+    let (session_dir, worktree) = session_written_by_0_15_0(tmp.path());
+    let old = DirtyFiles::read(&session_dir.join("dirty_files.json")).unwrap();
+    assert_eq!(old.builder_fingerprint.as_deref(), Some("v0.15.0+schema11"));
+    assert_eq!(old.entries["app.py"].format, FRAGMENT_FORMAT_V3);
+    assert!(!old.from_current_builder());
 
     let inputs = load_view_inputs(&session_dir, &worktree).unwrap();
     assert!(inputs.is_empty(), "another builder's fragment: {inputs:?}");
 }
 
-/// Contract: `find` keeps listing the overlay-only symbols of a bin an older
-/// binary wrote. The v3 bin must decode as the v3 shape, not the v4 one.
+/// Contract: `find` keeps listing the symbols of the dirty file from a bin
+/// the previous release wrote, at their lines, until a refresh rewrites it.
+/// Pass: the three functions of `app.py`, `added` among them, which only the
+/// overlay knows. Fail: no hits, which means the v3 bin no longer decodes.
 #[test]
-fn test_load_overlay_hits_v3_bin_decodes_symbols_with_v3_shape() {
+fn test_load_overlay_hits_bin_written_by_0_15_0_lists_its_symbols() {
     let tmp = tempfile::tempdir().unwrap();
-    let (session_dir, _worktree) = session_with_v3_bin(tmp.path(), "v0.15.0+schema15");
+    let (session_dir, _worktree) = session_written_by_0_15_0(tmp.path());
 
-    let hits = load_overlay_hits(&session_dir).unwrap();
-    assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].name, "old_fn");
-    assert_eq!(hits[0].rel_path, "src/a.rs");
-    assert_eq!(hits[0].line, 2, "span row 1 is line 2");
+    let mut hits: Vec<(String, NodeKind, String, u32)> = load_overlay_hits(&session_dir)
+        .unwrap()
+        .into_iter()
+        .map(|hit| (hit.name, hit.kind, hit.rel_path, hit.line))
+        .collect();
+    hits.sort_by_key(|hit| hit.3);
+    let app = |name: &str, line: u32| {
+        (
+            name.to_string(),
+            NodeKind::Function,
+            "app.py".to_string(),
+            line,
+        )
+    };
+    assert_eq!(hits, [app("helper", 1), app("go", 5), app("added", 9)]);
+}
+
+/// The `m` of two traits `A` and `B` (`src/a.rs`, `src/b.rs`), both
+/// default methods, and a clean `struct S`.
+const RUST_TRAITS: &[(&str, &str)] = &[
+    ("src/s.rs", "pub struct S;\n"),
+    (
+        "src/a.rs",
+        "pub trait A {\n    fn m(&self) {}\n    fn a(&self);\n}\n",
+    ),
+    (
+        "src/b.rs",
+        "pub trait B {\n    fn m(&self) {}\n    fn b(&self);\n}\n",
+    ),
+];
+const IMPL_A: &str = "use crate::s::S;\nuse crate::a::A;\nimpl A for S {\n    fn a(&self) {}\n}\n";
+const IMPL_B: &str = "use crate::s::S;\nuse crate::b::B;\nimpl B for S {\n    fn b(&self) {}\n}\n";
+const RUN: &str = "pub fn run(s: &S) {\n    s.m();\n}\n";
+
+fn rust_parse(path: &str, source: &str) -> LocalGraph {
+    ecp_cli::reanalyze::pipeline()
+        .parse_file_raw(Path::new(path), source.as_bytes())
+        .unwrap_or_else(|e| panic!("{path}: {e}"))
+}
+
+/// Contract: the supertypes of a clean type drop what a dirty file's old
+/// content gave it. `src/imp.rs` switches `impl A for S` to `impl B for S`,
+/// so a reindex sees `S: B` alone and binds `s.m()` to `B::m`. Fail: the
+/// archived `A` beside the fresh `B` leaves two `m` and no edge.
+#[test]
+fn test_build_dirty_impl_switches_trait_binds_new_trait_member_like_reindex() {
+    let (old, new) = (format!("{IMPL_A}{RUN}"), format!("{IMPL_B}{RUN}"));
+    let files: Vec<(&str, &str)> = RUST_TRAITS
+        .iter()
+        .copied()
+        .chain([("src/imp.rs", old.as_str())])
+        .collect();
+    let Parity { reindex, overlay } = calls_after_edit(
+        &rust_parse,
+        &files,
+        &[("src/imp.rs", new.as_str())],
+        &|file, name| file == "src/imp.rs" && name == "run",
+    );
+    assert_eq!(
+        callees(&reindex),
+        [("src/b.rs", "m", 2, 0.8)],
+        "the reindex must bind B's `m`, or the fixture proves nothing"
+    );
+    assert_eq!(overlay, reindex);
+}
+
+/// Contract: a trait a clean file implements stays. `impl A for S` lives in
+/// clean `src/ia.rs`, and the dirty `src/imp.rs` adds `impl B for S`: `S`
+/// has `[A, B]`, two `m`, and the reindex binds none. Fail: an overlay edge
+/// to `B::m`, which means the clean `A` was dropped.
+#[test]
+fn test_build_dirty_impl_beside_clean_impl_keeps_both_traits_like_reindex() {
+    let (old, new) = (format!("use crate::s::S;\n{RUN}"), format!("{IMPL_B}{RUN}"));
+    let files: Vec<(&str, &str)> = RUST_TRAITS
+        .iter()
+        .copied()
+        .chain([("src/ia.rs", IMPL_A), ("src/imp.rs", old.as_str())])
+        .collect();
+    let Parity { reindex, overlay } = calls_after_edit(
+        &rust_parse,
+        &files,
+        &[("src/imp.rs", new.as_str())],
+        &|file, name| file == "src/imp.rs" && name == "run",
+    );
+    assert!(reindex.is_empty(), "two traits declare `m`: {reindex:#?}");
+    assert_eq!(overlay, reindex);
 }
