@@ -320,6 +320,16 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
         })
         .collect();
     let moves = |w: &&str| *w == "cd" || CWD_BUILTINS.contains(w);
+    // A search in a function body runs wherever the function is called,
+    // which the walk does not follow (`f() { rg …; }; cd x && f`).
+    let defines_function = |(c, _): &(Vec<&str>, usize)| match c[..] {
+        ["function", ..] | [_, "()", ..] => true,
+        [first, ..] => first.len() > 2 && first.ends_with("()"),
+        [] => false,
+    };
+    if search.is_some_and(|k| commands[..=k].iter().any(defines_function)) {
+        return CdTarget::Unknown;
+    }
     // A `case` pattern's `)` reads as a subshell close, so the depth below
     // is wrong inside one.
     let has_case = commands.iter().any(|(c, p)| c.get(*p) == Some(&"case"));
@@ -1317,6 +1327,9 @@ mod tests {
             "m=$(cd x && rg -l Foo .)",
             "m=`cd x && rg -l Foo .`",
             "git -C x grep -n Foo",
+            "scan() {\n  rg -n Foo src | head\n}\ncd x && scan",
+            "function scan { rg -n Foo src; }; cd x && scan",
+            "scan () { rg Foo; }; cd x; scan",
             "cd x && case a in\n  a) make ;;\n  b) make test ;;\nesac &\nrg -n Foo src\nwait",
             "cd x && git --work-tree=y grep Foo",
         ] {
@@ -1342,6 +1355,7 @@ mod tests {
             "rg --version &&\ncd x &&\nrg -n Foo src",
             "cd x>/dev/null &&\nrg -n Foo src",
             "cd x 2>/dev/null && rg Foo",
+            "cd x && rg -n 'fn main()' src",
             "cd x &>/dev/null; rg Foo",
             "cd x &&\n  (git status >/dev/null &\n   git diff --stat >/dev/null & wait)\nrg -n Foo src",
             "cd x && {\n  rg -n -m 1 Foo a\n  rg -n -m 1 Bar a\n} & wait",
