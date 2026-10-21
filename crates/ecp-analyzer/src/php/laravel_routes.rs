@@ -885,7 +885,7 @@ fn class_constant_class<'s>(node: Node, source: &'s [u8]) -> Option<&'s str> {
     if node.kind() != "class_constant_access_expression" {
         return None;
     }
-    let constant = node.named_child(node.named_child_count().checked_sub(1)?)?;
+    let constant = node.named_child(node.named_child_count().checked_sub(1)? as u32)?;
     if constant.utf8_text(source).ok()? != "class" {
         return None;
     }
@@ -925,7 +925,7 @@ fn arguments<'t>(call: Node<'t>) -> Vec<Node<'t>> {
 
 /// The expression of an `argument`, past a PHP 8 `name:` label.
 fn argument_value(argument: Node) -> Option<Node> {
-    argument.named_child(argument.named_child_count().checked_sub(1)?)
+    argument.named_child(argument.named_child_count().checked_sub(1)? as u32)
 }
 
 fn nth_argument(call: Node, n: usize) -> Option<Node> {
