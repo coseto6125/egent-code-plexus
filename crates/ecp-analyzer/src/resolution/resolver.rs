@@ -41,6 +41,7 @@ use ecp_core::analyzer::import_binding::{
     extension_retry, fqn_extension, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
     import_family, import_member_fallback, may_suppress, module_head, retry_name,
 };
+use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::reexport::{
     self, is_ecmascript, probe_rust_module, ExportAliasTable, Fact, FileImports, ImportRef,
     ModuleFacts, PyModule,
@@ -58,7 +59,6 @@ use crate::resolution::index::{
     crate_root_prefix, FileMeta, GlobalPick, Language, ResolveTarget, SymbolTable,
     MAX_HERITAGE_DEPTH,
 };
-use crate::resolution::path_aliases::PathAliases;
 use crate::rust::module_tree::RustWorkspaceModTree;
 use rustc_hash::{FxHashMap, FxHashSet};
 

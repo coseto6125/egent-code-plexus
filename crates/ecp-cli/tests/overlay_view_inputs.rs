@@ -3,11 +3,13 @@
 //! must persist owner_class / calls / imports, and `load_view_inputs` must
 //! refuse entries that would serve stale overlay data (reverted files, v1 bins).
 
-use ecp_cli::session::overlay_reader::load_view_inputs;
-use ecp_cli::session::overlay_writer::write_dirty_fragments_from_graphs;
-use ecp_core::analyzer::types::{LocalGraph, RawImport, RawNode};
+use ecp_cli::session::overlay_reader::{load_overlay_hits, load_view_inputs};
+use ecp_cli::session::overlay_writer::{
+    write_dirty_fragments_from_graphs, FragmentFileV3, FragmentSymbolV3,
+};
+use ecp_core::analyzer::types::{LocalGraph, RawImport, RawNode, VariantRef};
 use ecp_core::graph::NodeKind;
-use ecp_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
+use ecp_core::session::{DirtyEntry, DirtyFiles, SessionMeta, FRAGMENT_FORMAT_V3};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -241,4 +243,160 @@ fn test_load_view_inputs_export_flag_and_aliases_roundtrip() {
         .collect();
     assert_eq!(exported, [("f", false), ("g", true)]);
     assert_eq!(inputs[0].export_aliases, aliases);
+}
+
+fn type_node(name: &str, heritage: &[&str], field_reads: &[String]) -> RawNode {
+    RawNode {
+        kind: NodeKind::Class,
+        heritage: heritage.iter().map(|h| h.to_string()).collect(),
+        field_reads: field_reads.to_vec(),
+        ..rn(name, None, &[])
+    }
+}
+
+/// The fragment carries what the overlay's heritage tier and variant pass
+/// read: each type's declared bases in order, and only the enum-variant
+/// entries of `field_reads`, still encoded.
+#[test]
+fn test_load_view_inputs_heritage_and_variant_refs_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let worktree = tmp.path().join("wt");
+    let session_dir = make_session_dir(tmp.path(), "her-sid");
+    let mtime = write_worktree_file(&worktree, "src/a.rs");
+    let used = VariantRef::encode("Color::Red", false);
+    let matched = VariantRef::encode("Color::Blue", true);
+    let reads = vec![used.clone(), "plain_field".to_string(), matched.clone()];
+    let graph = graph_for(
+        "src/a.rs",
+        vec![
+            type_node("Child", &["Base", "Iface"], &[]),
+            type_node("Lone", &[], &[]),
+            rn("paint", None, &[]),
+            RawNode {
+                field_reads: reads,
+                ..rn("uses", None, &[])
+            },
+        ],
+        vec![],
+    );
+    write_dirty_fragments_from_graphs(&session_dir, &[graph], &[mtime]).unwrap();
+
+    let inputs = load_view_inputs(&session_dir, &worktree).unwrap();
+    assert_eq!(inputs.len(), 1);
+    let sym = |name: &str| inputs[0].symbols.iter().find(|s| s.name == name).unwrap();
+    assert_eq!(sym("Child").heritage, ["Base", "Iface"], "declared order");
+    assert!(sym("Lone").heritage.is_empty(), "a type with no bases");
+    assert!(sym("paint").variant_refs.is_empty());
+    assert_eq!(
+        sym("uses").variant_refs,
+        [used, matched],
+        "variant entries stay raw and in order; the plain field read is dropped"
+    );
+}
+
+/// Two writes for one file leave one manifest entry, the later one: the
+/// reader serves that fragment's heritage, never the first write's.
+#[test]
+fn test_load_view_inputs_two_fragments_for_one_file_serves_the_later() {
+    let tmp = tempfile::tempdir().unwrap();
+    let worktree = tmp.path().join("wt");
+    let session_dir = make_session_dir(tmp.path(), "two-sid");
+    let mtime = write_worktree_file(&worktree, "src/a.rs");
+    let mut first = graph_for("src/a.rs", vec![type_node("T", &["Old"], &[])], vec![]);
+    first.content_hash = [1; 8];
+    let mut second = graph_for("src/a.rs", vec![type_node("T", &["New"], &[])], vec![]);
+    second.content_hash = [2; 8];
+    write_dirty_fragments_from_graphs(&session_dir, &[first], &[mtime]).unwrap();
+    write_dirty_fragments_from_graphs(&session_dir, &[second], &[mtime]).unwrap();
+
+    let inputs = load_view_inputs(&session_dir, &worktree).unwrap();
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].symbols[0].heritage, ["New"]);
+}
+
+/// A session whose `dirty_files.json` is stamped with `fingerprint` and names
+/// one v3 bin (`old_fn`, written with the v3 shape: no heritage, no variant
+/// refs) for `src/a.rs`. Returns `(session_dir, worktree)`.
+fn session_with_v3_bin(tmp: &Path, fingerprint: &str) -> (PathBuf, PathBuf) {
+    let worktree = tmp.join("wt");
+    let mtime = write_worktree_file(&worktree, "src/a.rs");
+    let session_dir = make_session_dir(tmp, "v3-sid");
+    let file = FragmentFileV3 {
+        symbols: vec![FragmentSymbolV3 {
+            name: "old_fn".into(),
+            kind: NodeKind::Function,
+            span: (1, 0, 5, 0),
+            owner_class: None,
+            is_exported: true,
+            calls: vec![],
+        }],
+        imports: vec![],
+        export_aliases: vec![],
+    };
+    let overlay_dir = session_dir.join("graph_overlay");
+    std::fs::create_dir_all(&overlay_dir).unwrap();
+    std::fs::write(
+        overlay_dir.join("v3frag.bin"),
+        rkyv::to_bytes::<rkyv::rancor::Error>(&file).unwrap(),
+    )
+    .unwrap();
+    let manifest = session_dir.join("dirty_files.json");
+    let mut df = DirtyFiles::read(&manifest).unwrap();
+    df.builder_fingerprint = Some(fingerprint.to_string());
+    df.entries.insert(
+        "src/a.rs".into(),
+        DirtyEntry {
+            mtime_ns: mtime,
+            content_hash: "h".into(),
+            fragment_id: "v3frag".into(),
+            tantivy_delta_segment: None,
+            parse_failed: false,
+            dirty_symbols: vec![],
+            format: FRAGMENT_FORMAT_V3,
+        },
+    );
+    DirtyFiles::write_atomic(&manifest, &df).unwrap();
+    (session_dir, worktree)
+}
+
+/// Contract: the view serves only fragments of the running format. A v3 bin
+/// has no heritage, so a view built from it would show a class with no bases
+/// and bind its members as if the class were unrelated to its parents.
+#[test]
+fn test_load_view_inputs_v3_entry_under_current_fingerprint_returns_no_input() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (session_dir, worktree) =
+        session_with_v3_bin(tmp.path(), ecp_core::registry::BUILDER_FINGERPRINT);
+    assert!(DirtyFiles::read(&session_dir.join("dirty_files.json"))
+        .unwrap()
+        .from_current_builder());
+
+    let inputs = load_view_inputs(&session_dir, &worktree).unwrap();
+    assert!(inputs.is_empty(), "a v3 fragment was served: {inputs:?}");
+}
+
+/// Contract: a manifest the previous release (0.15.0, `+schema15`) wrote is
+/// another builder's, so the view serves the base graph until a refresh
+/// replaces the manifest whole.
+#[test]
+fn test_load_view_inputs_manifest_of_0_15_0_returns_no_input() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (session_dir, worktree) = session_with_v3_bin(tmp.path(), "v0.15.0+schema15");
+
+    let inputs = load_view_inputs(&session_dir, &worktree).unwrap();
+    assert!(inputs.is_empty(), "another builder's fragment: {inputs:?}");
+}
+
+/// Contract: `find` keeps listing the overlay-only symbols of a bin an older
+/// binary wrote. The v3 bin must decode as the v3 shape, not the v4 one.
+#[test]
+fn test_load_overlay_hits_v3_bin_decodes_symbols_with_v3_shape() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (session_dir, _worktree) = session_with_v3_bin(tmp.path(), "v0.15.0+schema15");
+
+    let hits = load_overlay_hits(&session_dir).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].name, "old_fn");
+    assert_eq!(hits[0].rel_path, "src/a.rs");
+    assert_eq!(hits[0].line, 2, "span row 1 is line 2");
 }

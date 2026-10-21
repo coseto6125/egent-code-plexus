@@ -1,3 +1,4 @@
+pub use ecp_core::analyzer::types::VariantRef;
 use ecp_core::analyzer::types::{CallSite, RawNode};
 use ecp_core::graph::NodeKind;
 use std::cmp::Reverse;
@@ -313,68 +314,6 @@ fn attach_pending_field_reads(
         if let Some(node_idx) = target {
             nodes[node_idx].field_reads.push(read.name);
         }
-    }
-}
-
-/// One enum-variant reference a parser recorded in [`RawNode::field_reads`]:
-/// `E::A { .. }`, `E::B(..)`, `Day.MONDAY`, a `case Color::Red:` label, or a
-/// bare enumerator (`RED`) where the language names variants unqualified.
-///
-/// The entry rides in `field_reads` behind a U+0001 marker, like the
-/// [`CallSite`] markers in `calls`: no field name holds a control
-/// character, so the `ReadsField` tier never sees one. Pass 2 resolves the
-/// path's qualifier as a type and the last segment as one of that type's
-/// variants (`References` edge); a bare name resolves only to a variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VariantRef<'a> {
-    /// `Q::V`, `pkg.Q.V`, `\App\Q::V`, or a bare `V`, whitespace removed.
-    pub path: &'a str,
-    /// The reference sits in a pattern or case label, so it tests for the
-    /// variant rather than producing or reading it.
-    pub pattern: bool,
-}
-
-impl<'a> VariantRef<'a> {
-    const USE_PREFIX: &'static str = "\u{1}variant ";
-    const PATTERN_PREFIX: &'static str = "\u{1}variant-pattern ";
-
-    pub fn encode(path: &str, pattern: bool) -> String {
-        let prefix = if pattern {
-            Self::PATTERN_PREFIX
-        } else {
-            Self::USE_PREFIX
-        };
-        [prefix, path].concat()
-    }
-
-    /// `None` for an ordinary field-read entry.
-    pub fn parse(raw: &'a str) -> Option<Self> {
-        if let Some(path) = raw.strip_prefix(Self::PATTERN_PREFIX) {
-            Some(Self {
-                path,
-                pattern: true,
-            })
-        } else {
-            raw.strip_prefix(Self::USE_PREFIX).map(|path| Self {
-                path,
-                pattern: false,
-            })
-        }
-    }
-
-    /// `(qualifier path, variant)` split at the last `::` / `.` / `\`;
-    /// `None` for a bare name.
-    pub fn split(self) -> Option<(&'a str, &'a str)> {
-        let path = self.path;
-        let idx = [
-            path.rfind("::").map(|i| (i, 2)),
-            path.rfind('.').map(|i| (i, 1)),
-        ]
-        .into_iter()
-        .flatten()
-        .max_by_key(|&(i, _)| i)?;
-        let (qualifier, variant) = (&path[..idx.0], &path[idx.0 + idx.1..]);
-        (!qualifier.is_empty() && !variant.is_empty()).then_some((qualifier, variant))
     }
 }
 

@@ -143,3 +143,43 @@ fn test_ensure_index_upgrade_gc_started_once_per_process() {
         1
     );
 }
+
+// ── v13→v14 migration tests ───────────────────────────────────────────────
+
+/// The `graph.bin` ecp 0.15.0 (format v13, no `alias_table` / `supertype_table`)
+/// wrote for a two-class Python file, copied into a fresh directory.
+fn graph_written_by_0_15_0(dir: &std::path::Path) -> std::path::PathBuf {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/graph-written-by-0.15.0/graph.bin");
+    let path = dir.join("graph.bin");
+    fs::copy(fixture, &path).unwrap();
+    path
+}
+
+/// Contract: a cache the previous release built is never read as the current
+/// layout. The v13 root is shorter than the v14 one, so the same bytes would
+/// otherwise decode with the alias / supertype tables misplaced.
+#[test]
+fn header_compatible_rejects_graph_written_by_0_15_0() {
+    let dir = tempdir().unwrap();
+    let path = graph_written_by_0_15_0(dir.path());
+
+    assert!(
+        !header_compatible(&path),
+        "a v13 graph.bin must be rejected by the v{GRAPH_FORMAT_VERSION} reader"
+    );
+}
+
+/// Contract: `ensure_fresh` rebuilds from a v13 cache instead of surfacing an
+/// InvalidData error to the agent command.
+#[test]
+fn ensure_index_returns_stale_for_graph_written_by_0_15_0() {
+    let dir = tempdir().unwrap();
+    let path = graph_written_by_0_15_0(dir.path());
+
+    let result = ensure_index(&path, dir.path()).unwrap();
+    assert!(
+        matches!(result, EnsureResult::Stale { .. }),
+        "a v13 graph.bin must be reported Stale so ensure_fresh triggers rebuild, got {result:?}"
+    );
+}

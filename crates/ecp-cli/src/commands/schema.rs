@@ -424,6 +424,7 @@ const VERSION_HISTORY: &[VersionBumpEntry] = &[
     VersionBumpEntry { version: 11, reason: "Dense node_flags side table for O(1) FunctionMeta boolean flag filters." },
     VersionBumpEntry { version: 12, reason: "RawNode.field_reads + ReadsField RelType: function/method → field-read edges for impact across 14 languages." },
     VersionBumpEntry { version: 13, reason: "Per-file import / export facts (imports, export aliases, ES-module flag, exported-node bitmap) so the session overlay resolves re-exports and ES-module exports like a full reindex." },
+    VersionBumpEntry { version: 14, reason: "Path-alias table and per-type resolved supertypes (alias_table, supertype_table) so the session overlay resolves aliased specifiers and walks heritage like a full reindex." },
     // Future bumps append here. The is_test field on BlindSpotRecord
     // (FU-001) was added without a discriminant bump — rkyv tolerates the
     // trailing-field addition as long as nothing earlier shifts.

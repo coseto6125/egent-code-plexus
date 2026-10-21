@@ -1107,7 +1107,7 @@ struct L1FreshnessGate {
 }
 
 fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1FreshnessGate {
-    use ecp_core::session::{DirtyFiles, FRAGMENT_FORMAT_V3};
+    use ecp_core::session::{DirtyFiles, FRAGMENT_FORMAT_V4};
 
     let pass = |rel_paths, session_meta| L1FreshnessGate {
         rel_paths,
@@ -1142,7 +1142,7 @@ fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1Fre
             let Some(entry) = manifest.entries.get(rel) else {
                 return true;
             };
-            if entry.format != FRAGMENT_FORMAT_V3 || entry.parse_failed {
+            if entry.format != FRAGMENT_FORMAT_V4 || entry.parse_failed {
                 return true;
             }
             // A bin the manifest names can still be gone (a cleanup that

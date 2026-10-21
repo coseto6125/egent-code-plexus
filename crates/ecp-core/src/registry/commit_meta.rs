@@ -57,7 +57,10 @@ use std::path::Path;
 /// (`call:nearest-copy`, confidence 0.6).
 /// schema15: a function `References` each enum variant it uses
 /// (`enum_variant:use` / `enum_variant:pattern`).
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema15");
+/// schema16: `graph.bin` keeps the repo's path aliases and each type's
+/// resolved supertypes (`alias_table`, `supertype_table`), so the session
+/// overlay resolves aliased specifiers and walks heritage like the index.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema16");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

@@ -1222,6 +1222,12 @@ impl SymbolTable {
         self.supertypes.get(&type_id)
     }
 
+    /// Every type with declared heritage and its supertypes, in unspecified
+    /// order.
+    pub fn all_supertypes(&self) -> impl Iterator<Item = (u32, &Supertypes)> {
+        self.supertypes.iter().map(|(&ty, st)| (ty, st))
+    }
+
     /// Transitive resolved supertypes of `type_id` in breadth-first order,
     /// each declared level in declared order. Every type appears once, a
     /// heritage cycle ends at the first revisit, and the walk stops after

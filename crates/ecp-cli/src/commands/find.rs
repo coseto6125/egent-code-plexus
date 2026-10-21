@@ -1981,6 +1981,8 @@ mod tests {
                     start_column: 0,
                     end_column: 0,
                     calls: vec![],
+                    heritage: Vec::new(),
+                    variant_refs: Vec::new(),
                 }],
                 imports: vec![],
             };

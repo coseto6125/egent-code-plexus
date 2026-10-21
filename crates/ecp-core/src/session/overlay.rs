@@ -34,8 +34,9 @@ pub struct DirtyEntry {
     /// Fragment bin encoding version. `1` (the serde default, so pre-field
     /// manifests parse unchanged) = `Vec<Fragment>` symbol list; `2` =
     /// `FragmentFile` (symbols + imports + per-symbol calls) consumed by the
-    /// query-time `OverlayView`; `3` adds the file's export aliases. Readers
-    /// MUST dispatch on this — decoding a bin as another version is
+    /// query-time `OverlayView`; `3` adds the file's export aliases; `4` adds
+    /// each symbol's heritage and enum-variant references. Readers MUST
+    /// dispatch on this — decoding a bin as another version is
     /// undefined under rkyv.
     #[serde(default = "default_fragment_format")]
     pub format: u32,
@@ -49,8 +50,10 @@ fn default_fragment_format() -> u32 {
 
 /// Fragment bins with symbols, imports and calls, without export aliases.
 pub const FRAGMENT_FORMAT_V2: u32 = 2;
-/// Current fragment bin encoding version written by `overlay_writer`.
+/// Fragment bins with export aliases, without heritage and variant refs.
 pub const FRAGMENT_FORMAT_V3: u32 = 3;
+/// Current fragment bin encoding version written by `overlay_writer`.
+pub const FRAGMENT_FORMAT_V4: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolRef {

@@ -453,7 +453,7 @@ fn older_graph_format(graph: &Path) -> bool {
 }
 
 /// How many bytes at the end of a `graph.bin` hold its root object. The v13
-/// root is 240 bytes; a root that outgrows this reads as unknown, so kept.
+/// root is 240 bytes and v14 adds two vectors to it; a root that outgrows this reads as unknown, so kept.
 const GRAPH_ROOT_TAIL_BYTES: u64 = 4096;
 
 /// The format version a `graph.bin` header records, or `None` when no header

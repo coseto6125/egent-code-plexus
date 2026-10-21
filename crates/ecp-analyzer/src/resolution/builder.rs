@@ -1,20 +1,21 @@
-use crate::calls::VariantRef;
 use crate::fetch_shape::{
     consumer_keys, fetch_urls, format_reason, normalize_route_path, response_shapes,
 };
 use crate::framework_helpers::Span;
 use crate::resolution::heuristics::{ResolutionTier, NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON};
 use crate::resolution::index::{FileMeta, Language, ResolveTarget, SymbolTable};
-use crate::resolution::path_aliases::PathAliases;
 use crate::resolution::resolver::{ReexportIndex, Resolver};
 use crate::rust::module_tree::RustWorkspaceModTree;
+use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::analyzer::reexport::{export_filter_applies, is_ecmascript, ImportRef};
-use ecp_core::analyzer::types::{owner_key, CallSite, LocalGraph, RawImport, RawNode};
+use ecp_core::analyzer::types::{owner_key, CallSite, LocalGraph, RawImport, RawNode, VariantRef};
+pub use ecp_core::analyzer::types::{VARIANT_PATTERN_REASON, VARIANT_USE_REASON};
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::{
     BlindSpotRecord, CallMeta, Edge, ExportAliasFact, File, FileCategory, FunctionMeta, ImportFact,
-    Node, NodeKind, RelType, RouteShape, ZeroCopyGraph, FILE_FLAG_ES_MODULE,
+    Node, NodeKind, PathAliasFact, RelType, RouteShape, SupertypeFact, ZeroCopyGraph,
+    FILE_FLAG_ES_MODULE,
 };
 use ecp_core::graph_assembly::{GraphAssembly, ModuleFactTables};
 use ecp_core::pool::{StrRef, StringPool};
@@ -353,6 +354,8 @@ impl GraphBuilder {
             &reexports,
         );
         symbol_table.build_supertypes(declared_supertypes);
+        let supertype_table = record_supertypes(&symbol_table);
+        let alias_table = record_path_aliases(&self.path_aliases, &mut string_pool);
         if prof {
             eprintln!(
                 "prof build.pass19_supertypes: {:.3}s",
@@ -836,6 +839,8 @@ impl GraphBuilder {
             traces_data,
             fingerprint: [0; 32],
             module_facts,
+            alias_table,
+            supertype_table,
         }
         .finish();
 
@@ -849,6 +854,36 @@ impl GraphBuilder {
 
         graph
     }
+}
+
+/// The heritage the overlay walks (the v14 `supertype_table`): each type's
+/// resolved bases and first-unresolved position, as the pre-pass left them in
+/// `symbol_table`. SymbolTable ids are node indices: Pass 1 registers raw
+/// nodes densely from 0 and later passes only append.
+fn record_supertypes(symbol_table: &SymbolTable) -> Vec<SupertypeFact> {
+    symbol_table
+        .all_supertypes()
+        .map(|(type_idx, supertypes)| SupertypeFact {
+            type_idx,
+            bases: supertypes.bases.to_vec(),
+            first_unresolved: supertypes.first_unresolved,
+        })
+        .collect()
+}
+
+/// The path aliases the resolver ran with (the v14 `alias_table`), in
+/// declaration order.
+fn record_path_aliases(
+    path_aliases: &PathAliases,
+    string_pool: &mut StringPool,
+) -> Vec<PathAliasFact> {
+    path_aliases
+        .entries()
+        .map(|(pattern, replacements)| PathAliasFact {
+            pattern: string_pool.add(pattern),
+            replacements: replacements.iter().map(|r| string_pool.add(r)).collect(),
+        })
+        .collect()
 }
 
 /// The import / export facts the overlay replays the import tier from
@@ -2057,12 +2092,6 @@ struct VariantReasons {
     used: StrRef,
     matched: StrRef,
 }
-
-/// The `References` reason of a variant used as a value: constructed, read,
-/// compared.
-pub const VARIANT_USE_REASON: &str = "enum_variant:use";
-/// The `References` reason of a variant in a pattern or case label.
-pub const VARIANT_PATTERN_REASON: &str = "enum_variant:pattern";
 
 /// The `EnumVariant` a [`VariantRef`] names, with the edge confidence.
 ///
