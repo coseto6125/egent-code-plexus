@@ -202,9 +202,11 @@ fn diff(
         match t {
             "SameFile" => 0,
             "ImportScoped" => 1,
-            "Global" => 2,
             "AmbiguousGlobal" => 3,
-            _ => 4,
+            "Unresolved" | "External" => 4,
+            // Global and every other resolving tier (QualifierScoped,
+            // TypeOwned, ModuleTree, NearestCopy, ...).
+            _ => 2,
         }
     };
     for r in ecp {
@@ -562,6 +564,19 @@ mod tests {
         ];
         let (c, _, _) = diff(&oracle, &ecp, normalize_ts);
         assert_eq!(c.tp, 1, "should pick the Global resolution, not Unresolved");
+    }
+
+    #[test]
+    fn test_diff_resolved_tier_after_unresolved_attempt_wins() {
+        let oracle = vec![mk("s.ts", "X", None, "ImportScoped", Some("y.ts"), 0)];
+        for tier in ["QualifierScoped", "TypeOwned", "ModuleTree", "NearestCopy"] {
+            let ecp = vec![
+                mk("s.ts", "X", None, "Unresolved", None, 0),
+                mk("s.ts", "X", None, tier, Some("y.ts"), 0),
+            ];
+            let (c, _, _) = diff(&oracle, &ecp, normalize_ts);
+            assert_eq!(c.tp, 1, "{tier} resolved the key; Unresolved must not win");
+        }
     }
 
     #[test]
