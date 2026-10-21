@@ -550,8 +550,8 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
     }
     match current {
         None => CdTarget::Unchanged,
-        Some(dir) => dir
-            .canonicalize()
+        // `dunce` keeps a Windows path plain, without the `\\?\` prefix.
+        Some(dir) => dunce::canonicalize(dir)
             .ok()
             .and_then(|dir| dir.into_os_string().into_string().ok())
             .map_or(CdTarget::Unknown, CdTarget::Dir),
@@ -1026,7 +1026,11 @@ mod tests {
     use std::path::Path;
 
     fn canon(p: &Path) -> String {
-        p.canonicalize().unwrap().to_str().unwrap().to_string()
+        dunce::canonicalize(p)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string()
     }
 
     fn target(cmd: &str, cwd: &Path) -> CdTarget {
@@ -1319,6 +1323,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_cd_target_parent_of_symlink_is_logical() {
         let t = tempfile::tempdir().unwrap();

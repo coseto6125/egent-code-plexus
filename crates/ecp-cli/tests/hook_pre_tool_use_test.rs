@@ -562,18 +562,25 @@ fn test_bash_cd_into_indexed_repo_names_the_repo_in_the_header() {
     );
     let elsewhere = tmp.path().join("elsewhere");
     fs::create_dir(&elsewhere).unwrap();
-    let repo_dir = repo.canonicalize().unwrap();
+    let repo_dir = dunce::canonicalize(&repo).unwrap();
     // The second command continues its line, as agents lay out long ones.
     for cmd in [
         format!("cd '{}' && grep -rn CacheKeyQueue .", repo.display()),
         format!("cd '{}' && \\\ngrep -rn CacheKeyQueue .", repo.display()),
     ] {
-        let out = bash_hook_stdout(&home, &elsewhere, &cmd);
+        let out: serde_json::Value =
+            serde_json::from_str(&bash_hook_stdout(&home, &elsewhere, &cmd)).unwrap();
+        let context = out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default();
         assert!(
-            out.contains(&format!("ecp graph hits in {}:", repo_dir.display())),
-            "{cmd:?}: {out}"
+            context.starts_with(&format!("ecp graph hits in {}:\n", repo_dir.display())),
+            "{cmd:?}: {context}"
         );
-        assert!(out.contains("CacheKeyQueue (lib.js:1)"), "{cmd:?}: {out}");
+        assert!(
+            context.contains("CacheKeyQueue (lib.js:1)"),
+            "{cmd:?}: {context}"
+        );
     }
 }
 
