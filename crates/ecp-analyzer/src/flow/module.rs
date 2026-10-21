@@ -1,6 +1,7 @@
 use super::engine::Engine;
-use super::{Boundary, Direction, FlowNode, FlowReport};
+use super::{Boundary, Direction, FlowNode, FlowReport, SourceFile};
 use std::collections::{BTreeMap, BTreeSet};
+use tree_sitter::Node;
 
 pub(super) fn normalize(path: &str) -> String {
     let mut parts = Vec::new();
@@ -15,33 +16,56 @@ pub(super) fn normalize(path: &str) -> String {
     }
     parts.join("/")
 }
+/// The file a module specifier written in `importer` names.
+pub(super) fn resolve(files: &[SourceFile], importer: usize, module: &str) -> Option<usize> {
+    let module = module.trim_matches(['\'', '"']);
+    let importer = &files[importer].path;
+    let parent = importer.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+    let module = if importer.ends_with(".py") {
+        module.replace('.', "/")
+    } else {
+        module.into()
+    };
+    let path = normalize(&format!("{parent}/{module}"));
+    files.iter().position(|f| {
+        let p = normalize(&f.path);
+        p == path
+            || ["js", "mjs", "ts", "tsx", "py", "php"].iter().any(|ext| {
+                p == format!("{path}.{ext}")
+                    || p == format!("{path}/index.{ext}")
+                    || p == format!("{path}/__init__.{ext}")
+            })
+    })
+}
+/// Module specifiers of a parse tree's imports and reexports, read before
+/// lowering so the files they name can be lowered first.
+pub(super) fn imported_modules(root: Node<'_>, source: &str) -> Vec<String> {
+    let mut modules = Vec::new();
+    let mut pending = vec![root];
+    while let Some(n) = pending.pop() {
+        if matches!(
+            n.kind(),
+            "import_statement" | "import_from_statement" | "export_statement"
+        ) {
+            if let Some(module) = n
+                .child_by_field_name("source")
+                .or_else(|| n.child_by_field_name("module_name"))
+            {
+                modules.push(source[module.byte_range()].to_string());
+            }
+            continue;
+        }
+        let mut cursor = n.walk();
+        pending.extend(n.named_children(&mut cursor));
+    }
+    modules
+}
 impl Engine<'_> {
     pub(super) fn import_target(&self, n: usize) -> Option<(usize, usize)> {
         let source = self
             .field(n, "source")
             .or_else(|| self.field(n, "module_name"))?;
-        let file = self.ast[n].file;
-        let module = self.ast[source].text.trim_matches(['\'', '"']);
-        let parent = self.files[file]
-            .path
-            .rsplit_once('/')
-            .map(|(p, _)| p)
-            .unwrap_or("");
-        let module = if self.files[file].path.ends_with(".py") {
-            module.replace('.', "/")
-        } else {
-            module.into()
-        };
-        let path = normalize(&format!("{parent}/{module}"));
-        let target = self.files.iter().position(|f| {
-            let p = normalize(&f.path);
-            p == path
-                || ["js", "mjs", "ts", "tsx", "py", "php"].iter().any(|ext| {
-                    p == format!("{path}.{ext}")
-                        || p == format!("{path}/index.{ext}")
-                        || p == format!("{path}/__init__.{ext}")
-                })
-        })?;
+        let target = resolve(self.files, self.ast[n].file, &self.ast[source].text)?;
         Some((source, target))
     }
     pub(super) fn module(

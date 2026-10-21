@@ -1,23 +1,119 @@
+use super::classes::PARENT;
 use super::engine::{Engine, Scope, Value};
 use std::collections::BTreeSet;
+use tree_sitter::Node;
 
-/// Class-object key of the parent class. `::` never occurs in a PHP method
-/// name, so the key cannot shadow a method.
-const PARENT: &str = "::parent";
+const CLASS_KINDS: [&str; 4] = [
+    "class_declaration",
+    "interface_declaration",
+    "trait_declaration",
+    "enum_declaration",
+];
 
 pub(super) fn is_php(path: &str) -> bool {
     path.ends_with(".php") || path.ends_with(".phtml")
 }
+fn qualify(namespace: &str, name: &str) -> String {
+    let namespace = namespace.trim_start_matches('\\');
+    let name = name.trim_start_matches('\\');
+    if namespace.is_empty() {
+        name.to_string()
+    } else {
+        format!("{namespace}\\{name}")
+    }
+}
+/// `use function` / `use const`: the keyword is anonymous, so only the text shows it.
+fn imports_member(declaration: &str) -> bool {
+    declaration
+        .split_whitespace()
+        .nth(1)
+        .is_some_and(|keyword| matches!(keyword.to_lowercase().as_str(), "function" | "const"))
+}
+/// Lowercased qualified names of the classes a parse tree declares at its top
+/// level or in a braced namespace. Read before lowering, like
+/// [`used_names`], so the files a query imports are lowered first.
+pub(super) fn declared_names(root: Node<'_>, source: &str) -> Vec<String> {
+    let text = |n: Node<'_>| &source[n.byte_range()];
+    let mut names = Vec::new();
+    let mut namespace = "";
+    let mut cursor = root.walk();
+    for c in root.named_children(&mut cursor) {
+        let name = c.child_by_field_name("name").map(text).unwrap_or_default();
+        if c.kind() == "namespace_definition" {
+            match c.child_by_field_name("body") {
+                Some(body) => {
+                    let mut inner = body.walk();
+                    for d in body.named_children(&mut inner) {
+                        if let Some(class) = d
+                            .child_by_field_name("name")
+                            .filter(|_| CLASS_KINDS.contains(&d.kind()))
+                        {
+                            names.push(qualify(name, text(class)).to_lowercase());
+                        }
+                    }
+                }
+                None => namespace = name,
+            }
+        } else if CLASS_KINDS.contains(&c.kind()) && !name.is_empty() {
+            names.push(qualify(namespace, name).to_lowercase());
+        }
+    }
+    names
+}
+/// Lowercased qualified names the `use` clauses of a parse tree import.
+pub(super) fn used_names(root: Node<'_>, source: &str) -> Vec<String> {
+    let text = |n: Node<'_>| &source[n.byte_range()];
+    let mut statements = Vec::new();
+    let mut cursor = root.walk();
+    for c in root.named_children(&mut cursor) {
+        match c.child_by_field_name("body") {
+            Some(body) if c.kind() == "namespace_definition" => {
+                let mut inner = body.walk();
+                statements.extend(body.named_children(&mut inner));
+            }
+            _ => statements.push(c),
+        }
+    }
+    let mut names = Vec::new();
+    for n in statements {
+        if n.kind() != "namespace_use_declaration" || imports_member(text(n)) {
+            continue;
+        }
+        let mut inner = n.walk();
+        let children: Vec<Node<'_>> = n.named_children(&mut inner).collect();
+        let prefix = children
+            .iter()
+            .find(|c| c.kind() == "namespace_name")
+            .map(|c| text(*c))
+            .unwrap_or_default();
+        for c in &children {
+            let mut group = c.walk();
+            let clauses: Vec<Node<'_>> = if c.kind() == "namespace_use_group" {
+                c.named_children(&mut group).collect()
+            } else {
+                vec![*c]
+            };
+            for clause in clauses
+                .iter()
+                .filter(|c| c.kind() == "namespace_use_clause")
+            {
+                let mut parts = clause.walk();
+                let target = clause
+                    .named_children(&mut parts)
+                    .find(|t| matches!(t.kind(), "name" | "qualified_name"));
+                if let Some(target) = target {
+                    names.push(qualify(prefix, text(target)).to_lowercase());
+                }
+            }
+        }
+    }
+    names
+}
 
 impl Engine<'_> {
     pub(super) fn is_class(&self, n: usize) -> bool {
-        matches!(
-            self.ast[n].kind.as_str(),
-            "class_declaration"
-                | "interface_declaration"
-                | "trait_declaration"
-                | "enum_declaration"
-        ) && is_php(&self.files[self.ast[n].file].path)
+        CLASS_KINDS.contains(&self.ast[n].kind.as_str())
+            && is_php(&self.files[self.ast[n].file].path)
     }
     /// Allocate every class a file declares at its top level and register its
     /// fully qualified name. Classes are autoloaded, not initialised in file
@@ -54,13 +150,8 @@ impl Engine<'_> {
         if let Some(name) = self.field(n, "name") {
             let name = self.ast[name].text.clone();
             if let Some(namespace) = namespace {
-                let qualified = if namespace.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{namespace}\\{name}")
-                };
                 self.declarations
-                    .entry(qualified.to_lowercase())
+                    .entry(qualify(namespace, &name).to_lowercase())
                     .or_default()
                     .insert(n);
             }
@@ -94,13 +185,7 @@ impl Engine<'_> {
             "The imported class is not declared in the analyzed sources."
         };
         for n in uses {
-            // `use function` / `use const`: the keyword is anonymous, so only the text shows it.
-            let keyword = self.ast[n]
-                .text
-                .split_whitespace()
-                .nth(1)
-                .map(str::to_lowercase);
-            if matches!(keyword.as_deref(), Some("function" | "const")) {
+            if imports_member(&self.ast[n].text) {
                 self.boundary(
                     n,
                     "import",
@@ -112,7 +197,8 @@ impl Engine<'_> {
                 .children
                 .iter()
                 .find(|c| self.ast[**c].kind == "namespace_name")
-                .map(|c| self.ast[*c].text.clone());
+                .map(|c| self.ast[*c].text.clone())
+                .unwrap_or_default();
             let clauses: Vec<usize> = self.ast[n]
                 .children
                 .iter()
@@ -134,11 +220,7 @@ impl Engine<'_> {
                 else {
                     continue;
                 };
-                let path = self.ast[target].text.trim_start_matches('\\');
-                let path = match &prefix {
-                    Some(prefix) => format!("{}\\{path}", prefix.trim_start_matches('\\')),
-                    None => path.to_string(),
-                };
+                let path = qualify(&prefix, &self.ast[target].text);
                 let alias = match self.field(c, "alias") {
                     Some(alias) => self.ast[alias].text.clone(),
                     None => path.rsplit('\\').next().unwrap_or(&path).to_string(),
@@ -205,12 +287,7 @@ impl Engine<'_> {
             }
         }
         // A name no `use` binds resolves against the enclosing namespace.
-        let namespace = self.php_namespace(n);
-        if namespace.is_empty() {
-            self.php_declared(text)
-        } else {
-            self.php_declared(&format!("{namespace}\\{text}"))
-        }
+        self.php_declared(&qualify(&self.php_namespace(n), text))
     }
     /// Create the methods of a class declaration once, after the file's `use`
     /// clauses are bound, so each method captures the imported classes.
@@ -313,52 +390,6 @@ impl Engine<'_> {
             return Value::default();
         };
         let key = self.ast[name].text.to_lowercase();
-        let mut callees = Value::default();
-        for class in classes.objects {
-            self.php_inherited(class, &key, &mut callees);
-            if late {
-                // `$this` and `static::` dispatch on the runtime class, so an
-                // override in any subclass is a possible callee too.
-                for &sub in self.classes.values() {
-                    if let Some(method) = self.objects[sub].get(&key) {
-                        if sub != class && self.php_extends(sub, class) {
-                            callees.merge(method);
-                        }
-                    }
-                }
-            }
-        }
-        callees
-    }
-    /// The method `key` of a class: its own, else the nearest ancestor's.
-    fn php_inherited(&self, class: usize, key: &str, callees: &mut Value) {
-        let mut seen = BTreeSet::new();
-        let mut pending = vec![class];
-        while let Some(c) = pending.pop() {
-            if !seen.insert(c) {
-                continue;
-            }
-            if let Some(method) = self.objects[c].get(key) {
-                callees.merge(method);
-            } else if let Some(parent) = self.objects[c].get(PARENT) {
-                pending.extend(&parent.objects);
-            }
-        }
-    }
-    fn php_extends(&self, class: usize, ancestor: usize) -> bool {
-        let mut seen = BTreeSet::new();
-        let mut pending = vec![class];
-        while let Some(c) = pending.pop() {
-            if !seen.insert(c) {
-                continue;
-            }
-            if let Some(parent) = self.objects[c].get(PARENT) {
-                if parent.objects.contains(&ancestor) {
-                    return true;
-                }
-                pending.extend(&parent.objects);
-            }
-        }
-        false
+        self.class_callees(&classes.objects, &key, late)
     }
 }

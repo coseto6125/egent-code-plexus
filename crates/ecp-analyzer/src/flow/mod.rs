@@ -2,13 +2,15 @@
 use ast::{lower, Ast};
 use engine::{Engine, Scope};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
-use tree_sitter::Parser;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use tree_sitter::{Parser, Tree};
 
 mod ast;
+mod classes;
 mod engine;
 mod module;
 mod php;
+mod python;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SourceFile {
@@ -118,7 +120,7 @@ fn build<'a>(
     let mut engine = Engine {
         files,
         ast: vec![],
-        roots: vec![],
+        roots: vec![None; files.len()],
         scopes: vec![Scope::new(); files.len()],
         function_scopes: (0..files.len()).collect(),
         references: BTreeMap::new(),
@@ -145,9 +147,11 @@ fn build<'a>(
         links: BTreeSet::new(),
         classes: BTreeMap::new(),
         declarations: BTreeMap::new(),
+        class_scopes: BTreeSet::new(),
     };
     let mut paths = BTreeSet::new();
-    for (i, f) in files.iter().enumerate() {
+    let mut trees = Vec::with_capacity(files.len());
+    for f in files {
         if !paths.insert(&f.path) {
             return Err(format!("Duplicate source path: {}", f.path));
         }
@@ -164,13 +168,13 @@ fn build<'a>(
             }
         };
         let bytes = f.source.as_bytes();
-        let Some(tree) = parser.parse_with_options(
+        let tree = parser.parse_with_options(
             &mut |offset, _| &bytes[offset..],
             None,
             Some(tree_sitter::ParseOptions::new().progress_callback(&mut progress)),
-        ) else {
+        );
+        if tree.is_none() {
             // One pathological file must not take the whole corpus down with it.
-            engine.roots.push(None);
             engine.boundaries.insert(Boundary {
                 file: f.path.clone(),
                 line: 1,
@@ -179,16 +183,22 @@ fn build<'a>(
                 message: "Parsing exceeded its time budget; the file is excluded from analysis."
                     .into(),
             });
+        }
+        trees.push(tree);
+    }
+    let first = first.and_then(|path| files.iter().position(|f| f.path == path));
+    for i in lowering_order(files, &trees, first) {
+        let Some(tree) = trees[i].take() else {
             continue;
         };
         let (root, truncated) = lower(
             tree.root_node(),
             i,
-            &f.source,
+            &files[i].source,
             &mut engine.ast,
             budgets.max_steps,
         );
-        engine.roots.push(Some(root));
+        engine.roots[i] = Some(root);
         if truncated {
             engine.truncated = true;
             engine.boundary(
@@ -239,8 +249,8 @@ fn build<'a>(
     // makes every further `invoke` return at once, so the loop stays bounded.
     // The queried file goes first: budget spent on the rest of the corpus
     // must not keep the queried value from being created at all.
-    if let Some(first) = first.and_then(|path| files.iter().position(|f| f.path == path)) {
-        sweep(&mut engine, Some(first));
+    if first.is_some() {
+        sweep(&mut engine, first);
     }
     let f = sweep(&mut engine, None);
     // An entry point the budget kept the sweep from reaching is a truncation
@@ -249,6 +259,57 @@ fn build<'a>(
         engine.truncated = true;
     }
     Ok(engine)
+}
+/// Lowering order: `first`, then the files its imports name, breadth-first,
+/// then the rest in corpus order. The AST budget is global, so the files a
+/// query can reach are lowered before unrelated files spend it.
+fn lowering_order(
+    files: &[SourceFile],
+    trees: &[Option<Tree>],
+    first: Option<usize>,
+) -> Vec<usize> {
+    let mut queued = vec![false; files.len()];
+    let mut order = Vec::with_capacity(files.len());
+    if let Some(first) = first {
+        let mut classes: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (i, tree) in trees.iter().enumerate() {
+            if let Some(tree) = tree.as_ref().filter(|_| php::is_php(&files[i].path)) {
+                for name in php::declared_names(tree.root_node(), &files[i].source) {
+                    classes.entry(name).or_default().push(i);
+                }
+            }
+        }
+        queued[first] = true;
+        let mut pending = VecDeque::from([first]);
+        while let Some(i) = pending.pop_front() {
+            order.push(i);
+            let Some(tree) = &trees[i] else {
+                continue;
+            };
+            let (root, source) = (tree.root_node(), files[i].source.as_str());
+            let targets: Vec<usize> = if php::is_php(&files[i].path) {
+                php::used_names(root, source)
+                    .iter()
+                    .filter_map(|name| classes.get(name))
+                    .flatten()
+                    .copied()
+                    .collect()
+            } else {
+                module::imported_modules(root, source)
+                    .iter()
+                    .filter_map(|specifier| module::resolve(files, i, specifier))
+                    .collect()
+            };
+            for target in targets {
+                if !queued[target] {
+                    queued[target] = true;
+                    pending.push_back(target);
+                }
+            }
+        }
+    }
+    order.extend((0..files.len()).filter(|i| !queued[*i]));
+    order
 }
 /// Invoke each uncalled function (of `file` only, when given) as an entry
 /// point; returns where the budget stopped the sweep.

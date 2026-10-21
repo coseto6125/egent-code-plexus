@@ -49,12 +49,14 @@ Closure captures and tracked object aliases connect values across functions.
 PHP `use` clauses resolve the classes that the analyzed sources declare.
 Static, `self::`, `parent::`, `static::` and `$this->` method calls reach the declared method.
 `$this->` and `static::` calls also reach subclass overrides.
+Python class attribute calls and `self.` calls reach the class's methods, and `self.` calls also reach subclass overrides.
 PHP includes, `use function`, `use const`, trait methods and undeclared classes remain explicit boundaries.
 Selected numeric builtins have explicit models. Their assumptions appear as `builtin_model` boundaries.
 Destructuring, asynchronous scheduling, exception paths, iterator protocols, and unresolved external effects retain explicit boundaries.
 Recursive heap and callable identities remain approximate. These limits apply even when `truncated` is false.
 
 Use `--max-nodes`, `--max-call-depth`, and `--max-steps` to bound analysis.
+The queried file, then the files its imports name, get the budget before the rest of the snapshot.
 When a budget stops analysis, inspect the boundary and truncation fields before making a claim.
 An empty consumer list establishes no broader conclusion than the reported coverage permits.
 

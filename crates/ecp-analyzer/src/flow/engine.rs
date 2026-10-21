@@ -58,10 +58,13 @@ pub(super) struct Engine<'a> {
     pub(super) loop_ctx: Vec<usize>,
     /// (importer, dependency) file pairs resolved during module initialisation.
     pub(super) links: BTreeSet<(usize, usize)>,
-    /// PHP class-like declaration (AST node) to the object holding its methods.
+    /// PHP or Python class declaration (AST node) to the object holding its methods.
     pub(super) classes: BTreeMap<usize, usize>,
     /// Lowercased fully qualified PHP class name to its declarations.
     pub(super) declarations: BTreeMap<String, BTreeSet<usize>>,
+    /// Python class-body scopes: visible to the class body, not to the
+    /// functions defined in it.
+    pub(super) class_scopes: BTreeSet<usize>,
 }
 impl Engine<'_> {
     pub(super) fn field(&self, n: usize, key: &str) -> Option<usize> {
@@ -293,6 +296,9 @@ impl Engine<'_> {
         let python = path.ends_with(".py") || path.ends_with(".pyi");
         let php = path.ends_with(".php") || path.ends_with(".phtml");
         let mut capture_scopes = scopes.to_vec();
+        if python {
+            capture_scopes.retain(|scope| !self.class_scopes.contains(scope));
+        }
         if php {
             let mut captured = Scope::new();
             let mut references = Vec::new();
@@ -708,7 +714,6 @@ impl Engine<'_> {
             | "class_body"
             | "class_heritage"
             | "extends_clause"
-            | "class_definition"
             | "namespace_definition" => {
                 let name = self.field(n, "name");
                 for c in a.children {
@@ -716,6 +721,10 @@ impl Engine<'_> {
                         self.eval(c, scopes);
                     }
                 }
+                Value::default()
+            }
+            "class_definition" => {
+                self.python_class(n, scopes);
                 Value::default()
             }
             "method_definition" => {
@@ -949,7 +958,8 @@ impl Engine<'_> {
     pub(super) fn hoist_locals(&mut self, n: usize, scope: usize, python: bool) {
         let mut pending = vec![n];
         while let Some(n) = pending.pop() {
-            if self.is_function(n) {
+            // A class body binds its own names, not the enclosing function's.
+            if self.is_function(n) || self.ast[n].kind == "class_definition" {
                 continue;
             }
             let a = &self.ast[n];
@@ -1062,11 +1072,16 @@ impl Engine<'_> {
             a.kind.as_str(),
             "member_call_expression" | "nullsafe_member_call_expression" | "scoped_call_expression"
         );
-        let builtin = !method && target.is_some_and(|t| self.builtin(t, scopes));
+        let bound = target
+            .filter(|_| !method)
+            .and_then(|t| self.python_self_call(t));
+        let builtin = !method && bound.is_none() && target.is_some_and(|t| self.builtin(t, scopes));
         let fun = if builtin {
             Value::default()
         } else if method {
             self.php_method_target(n, scopes)
+        } else if let Some((callees, _)) = &bound {
+            callees.clone()
         } else {
             target.map(|t| self.eval(t, scopes)).unwrap_or_default()
         };
@@ -1090,6 +1105,11 @@ impl Engine<'_> {
                 values.push(self.node(arg, "argument", &v));
                 names.push(name);
             }
+        }
+        if let Some((_, receiver)) = bound {
+            let receiver = self.eval(receiver, scopes);
+            values.insert(0, receiver);
+            names.insert(0, None);
         }
         self.node(n, "call", &fun);
         let mut result = Value::default();
