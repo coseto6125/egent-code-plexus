@@ -1,442 +1,442 @@
 {
   "https://coseto6125.github.io/egent-code-plexus/": {
-    "hash": "87678d66e6ac2cf8",
-    "date": "2026-10-15"
+    "hash": "7bfdd0d188f873eb",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/compare/": {
-    "hash": "2c57e9af09f15eeb",
-    "date": "2026-10-15"
+    "hash": "77af5817e94e907a",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/compare/codegraph/": {
-    "hash": "96e30f5fc393bcfc",
-    "date": "2026-10-15"
+    "hash": "fd5d24beb4fed1f8",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/compare/gitnexus/": {
-    "hash": "d5c9382011ec4c8d",
-    "date": "2026-10-15"
+    "hash": "857a63f8aba39ac1",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/integrations/": {
-    "hash": "7c26dfd929b392bc",
-    "date": "2026-10-15"
+    "hash": "15bf968e9c0feb64",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/integrations/claude-code/": {
-    "hash": "b16db021ed8c24a0",
-    "date": "2026-10-15"
+    "hash": "bbac4b5534da01e7",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/integrations/codex/": {
-    "hash": "41f1aad34ffc42a9",
-    "date": "2026-10-15"
+    "hash": "9e05b449ebd15aab",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/integrations/gemini-cli/": {
-    "hash": "035416e9f444ad7d",
-    "date": "2026-10-15"
+    "hash": "ace0c7152e78ef28",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/integrations/mcp/": {
-    "hash": "9c13178a984f1561",
-    "date": "2026-10-15"
+    "hash": "f02cdb926c00308f",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/integrations/orca/": {
-    "hash": "3531cfb9b7a837df",
-    "date": "2026-10-15"
+    "hash": "0a66ca97e42538d5",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/zh-TW/": {
-    "hash": "cd6d165fde33be56",
-    "date": "2026-10-15"
+    "hash": "b1e4ffad6eca3b17",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/zh-TW/compare/": {
-    "hash": "4ae6cd87f2852ee2",
-    "date": "2026-10-15"
+    "hash": "836d013e01ac262a",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/zh-TW/compare/codegraph/": {
-    "hash": "2eb7f5517b6a019b",
-    "date": "2026-10-15"
+    "hash": "a470df2f196476be",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/zh-TW/compare/gitnexus/": {
-    "hash": "8243290d53e1c079",
-    "date": "2026-10-15"
+    "hash": "703d1e1a7be07b9e",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/": {
-    "hash": "e67f76d53aa26050",
-    "date": "2026-10-15"
+    "hash": "09f3726ee38a6bc6",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/claude-code/": {
-    "hash": "7537cc38f0db3f79",
-    "date": "2026-10-15"
+    "hash": "59d2a0675b0859fa",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/codex/": {
-    "hash": "862091dcd4866368",
-    "date": "2026-10-15"
+    "hash": "5e128f0c6cb3f430",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/gemini-cli/": {
-    "hash": "6e02675ee36c2d40",
-    "date": "2026-10-15"
+    "hash": "200c841ac8625046",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/mcp/": {
-    "hash": "fb8021c0fa5127ed",
-    "date": "2026-10-15"
+    "hash": "1e948f02e130b072",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/zh-TW/integrations/orca/": {
-    "hash": "7b895e06aa465bdb",
-    "date": "2026-10-15"
+    "hash": "bee5a9073fbcbe53",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/zh-CN/": {
-    "hash": "fa08288ff5531fad",
-    "date": "2026-10-15"
+    "hash": "b61e6bb85297549d",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/zh-CN/compare/": {
-    "hash": "4636bb87c565ee77",
-    "date": "2026-10-15"
+    "hash": "93b93a5c35f8c919",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/zh-CN/compare/codegraph/": {
-    "hash": "b124a936262b076a",
-    "date": "2026-10-15"
+    "hash": "567f37222ba1db79",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/zh-CN/compare/gitnexus/": {
-    "hash": "59975cbd09ea1622",
-    "date": "2026-10-15"
+    "hash": "8351aca9e2844e50",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/": {
-    "hash": "f8021efee8aa42b5",
-    "date": "2026-10-15"
+    "hash": "7750993cef6ebc7e",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/claude-code/": {
-    "hash": "31c3885e7cf1cdb6",
-    "date": "2026-10-15"
+    "hash": "41586be1f880e140",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/codex/": {
-    "hash": "fce6956ba5242714",
-    "date": "2026-10-15"
+    "hash": "102e832cceb3a677",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/gemini-cli/": {
-    "hash": "1ef33354d446113e",
-    "date": "2026-10-15"
+    "hash": "d9a5e760a6078d3b",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/mcp/": {
-    "hash": "b1d6432373ef0ea1",
-    "date": "2026-10-15"
+    "hash": "68494b90f4585c85",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/zh-CN/integrations/orca/": {
-    "hash": "991d45cbf89fb69f",
-    "date": "2026-10-15"
+    "hash": "ded0e9da73a74957",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ja/": {
-    "hash": "0d410eae2fe7698f",
-    "date": "2026-10-15"
+    "hash": "506643848da38a99",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ja/compare/": {
-    "hash": "7dd515fb545b66bc",
-    "date": "2026-10-15"
+    "hash": "9fa589261ffd0100",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ja/compare/codegraph/": {
-    "hash": "3b904db871fc9168",
-    "date": "2026-10-15"
+    "hash": "e0da4cb88b1c0409",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ja/compare/gitnexus/": {
-    "hash": "2c4e188526f07497",
-    "date": "2026-10-15"
+    "hash": "8188247755c7827f",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ja/integrations/": {
-    "hash": "2b20bb7fabfff8f1",
-    "date": "2026-10-15"
+    "hash": "6cde053132e9096d",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ja/integrations/claude-code/": {
-    "hash": "5e97c147d9693108",
-    "date": "2026-10-15"
+    "hash": "e46c1c2a7a22a5ee",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ja/integrations/codex/": {
-    "hash": "65f887defe261f27",
-    "date": "2026-10-15"
+    "hash": "8733188e247689a7",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ja/integrations/gemini-cli/": {
-    "hash": "a51cb72f9959de25",
-    "date": "2026-10-15"
+    "hash": "7c85345dace45227",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ja/integrations/mcp/": {
-    "hash": "65fd6f7e55796a56",
-    "date": "2026-10-15"
+    "hash": "f7bf92e7dcd9b3ad",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ja/integrations/orca/": {
-    "hash": "3ba938a6e0594bd6",
-    "date": "2026-10-15"
+    "hash": "349eaa677c335651",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ko/": {
-    "hash": "d2ab35579fc251ba",
-    "date": "2026-10-15"
+    "hash": "626867678b2408ad",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ko/compare/": {
-    "hash": "6711d8d6e6a68016",
-    "date": "2026-10-15"
+    "hash": "bb615251751dfc1d",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ko/compare/codegraph/": {
-    "hash": "074f89c595c8ab5d",
-    "date": "2026-10-15"
+    "hash": "5f9f8187dfd48f0e",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ko/compare/gitnexus/": {
-    "hash": "cd2edff2ecd64d29",
-    "date": "2026-10-15"
+    "hash": "fecb2b77c06fb0b4",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ko/integrations/": {
-    "hash": "ff8981b7a704f8b5",
-    "date": "2026-10-15"
+    "hash": "88519b39aaa1b1f3",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ko/integrations/claude-code/": {
-    "hash": "1c452f4095bda642",
-    "date": "2026-10-15"
+    "hash": "d07d79285611d2d8",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ko/integrations/codex/": {
-    "hash": "200be1ee79b08306",
-    "date": "2026-10-15"
+    "hash": "486589b89e179c66",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ko/integrations/gemini-cli/": {
-    "hash": "cdf4fa375bff3e48",
-    "date": "2026-10-15"
+    "hash": "7eaae2ba024fd16d",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ko/integrations/mcp/": {
-    "hash": "9a01701133ad37c3",
-    "date": "2026-10-15"
+    "hash": "9a1084c646e37ec6",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ko/integrations/orca/": {
-    "hash": "e2b090ac7767b3dc",
-    "date": "2026-10-15"
+    "hash": "e4755bd00ebcb109",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/es/": {
-    "hash": "1666c952afe71bd3",
-    "date": "2026-10-15"
+    "hash": "33c4a738d8a649c4",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/es/compare/": {
-    "hash": "4bb5acf01cfdb01b",
-    "date": "2026-10-15"
+    "hash": "b5a7eed0c5065a07",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/es/compare/codegraph/": {
-    "hash": "f7da2425e2a86608",
-    "date": "2026-10-15"
+    "hash": "b37d77b57385510f",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/es/compare/gitnexus/": {
-    "hash": "94f1eefa78676ac7",
-    "date": "2026-10-15"
+    "hash": "2f37a24dce30cb6e",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/es/integrations/": {
-    "hash": "c2da8efa8af30fae",
-    "date": "2026-10-15"
+    "hash": "5a7122acc8cf9ab7",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/es/integrations/claude-code/": {
-    "hash": "8263ed83494acace",
-    "date": "2026-10-15"
+    "hash": "16297f848758330a",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/es/integrations/codex/": {
-    "hash": "c9b0b898c0665219",
-    "date": "2026-10-15"
+    "hash": "ed8f28fb52c69034",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/es/integrations/gemini-cli/": {
-    "hash": "ca950fcc02509887",
-    "date": "2026-10-15"
+    "hash": "57ac09337d33f5f0",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/es/integrations/mcp/": {
-    "hash": "6af5fda7c2249725",
-    "date": "2026-10-15"
+    "hash": "e55dd752eab717b4",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/es/integrations/orca/": {
-    "hash": "130b4b23bdf61db6",
-    "date": "2026-10-15"
+    "hash": "fbc6bfa70d8b8be1",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/pt-BR/": {
-    "hash": "9d26b055e4f5ee6a",
-    "date": "2026-10-15"
+    "hash": "a1947295eab09d6d",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/pt-BR/compare/": {
-    "hash": "1263b6caeb69397f",
-    "date": "2026-10-15"
+    "hash": "485b9c76da52619a",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/pt-BR/compare/codegraph/": {
-    "hash": "6b41e107e773309d",
-    "date": "2026-10-15"
+    "hash": "29b94ecdf56bab33",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/pt-BR/compare/gitnexus/": {
-    "hash": "07ed58b31e60fbf7",
-    "date": "2026-10-15"
+    "hash": "1e688502549c3b6f",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/pt-BR/integrations/": {
-    "hash": "9697e583c4a60ee6",
-    "date": "2026-10-15"
+    "hash": "464f3098750d1a14",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/pt-BR/integrations/claude-code/": {
-    "hash": "0ddcdb2d47c66447",
-    "date": "2026-10-15"
+    "hash": "d521e817528ea094",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/pt-BR/integrations/codex/": {
-    "hash": "ec1f1a1ac3a84ea7",
-    "date": "2026-10-15"
+    "hash": "52fe007dfb7930a1",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/pt-BR/integrations/gemini-cli/": {
-    "hash": "b28f19debcb04f56",
-    "date": "2026-10-15"
+    "hash": "2c1470b338c2af0d",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/pt-BR/integrations/mcp/": {
-    "hash": "fc53e3e9bec46862",
-    "date": "2026-10-15"
+    "hash": "9546b2e9e0549480",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/pt-BR/integrations/orca/": {
-    "hash": "562bc35d2f91f6f9",
-    "date": "2026-10-15"
+    "hash": "a8c034f77255c263",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ru/": {
-    "hash": "dc2cd3baf5335533",
-    "date": "2026-10-15"
+    "hash": "22ab97da7254edf0",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ru/compare/": {
-    "hash": "8b436e08a60b5072",
-    "date": "2026-10-15"
+    "hash": "89ef8d269d31ad4f",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ru/compare/codegraph/": {
-    "hash": "77c5e647a520e570",
-    "date": "2026-10-15"
+    "hash": "5fdb199ec12bcc17",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ru/compare/gitnexus/": {
-    "hash": "409d3cea1aff5fea",
-    "date": "2026-10-15"
+    "hash": "0c156d5735b0413d",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ru/integrations/": {
-    "hash": "8122ffa90399bf29",
-    "date": "2026-10-15"
+    "hash": "9507f2a1a0b65692",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ru/integrations/claude-code/": {
-    "hash": "27a43e5fbe40ee6c",
-    "date": "2026-10-15"
+    "hash": "a89d8d466193a566",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ru/integrations/codex/": {
-    "hash": "5d14ba4a25be9431",
-    "date": "2026-10-15"
+    "hash": "ab5bbee992d70d96",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ru/integrations/gemini-cli/": {
-    "hash": "b5100dd5a83c98b6",
-    "date": "2026-10-15"
+    "hash": "b329c0139e6b9c2e",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ru/integrations/mcp/": {
-    "hash": "f3499e976ad654fc",
-    "date": "2026-10-15"
+    "hash": "6c6e981504eac134",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/ru/integrations/orca/": {
-    "hash": "e079f9b276ac5ee7",
-    "date": "2026-10-15"
+    "hash": "84356601cb0b31f0",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/hi/": {
-    "hash": "ea3a1357b0978c8d",
-    "date": "2026-10-15"
+    "hash": "d239fe1859efe5a6",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/hi/compare/": {
-    "hash": "1bbac70881e3f93f",
-    "date": "2026-10-15"
+    "hash": "0cc377d025d1df6a",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/hi/compare/codegraph/": {
-    "hash": "5e3d6c8031eb46b9",
-    "date": "2026-10-15"
+    "hash": "7ab95ad543a228fd",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/hi/compare/gitnexus/": {
-    "hash": "9e8a67ee3cb34c9a",
-    "date": "2026-10-15"
+    "hash": "a2ceb57877e803d6",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/hi/integrations/": {
-    "hash": "6e54ce88a91f1294",
-    "date": "2026-10-15"
+    "hash": "f96bc1ff6dbd9009",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/hi/integrations/claude-code/": {
-    "hash": "ee256d78a33c3e38",
-    "date": "2026-10-15"
+    "hash": "b07b35bec1670af6",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/hi/integrations/codex/": {
-    "hash": "78d88a9c1402b002",
-    "date": "2026-10-15"
+    "hash": "445688ca5a06ed3f",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/hi/integrations/gemini-cli/": {
-    "hash": "4213f11b4ca6702e",
-    "date": "2026-10-15"
+    "hash": "62889296e87a8efa",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/hi/integrations/mcp/": {
-    "hash": "7d9763cfd809165c",
-    "date": "2026-10-15"
+    "hash": "730033c48c493854",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/hi/integrations/orca/": {
-    "hash": "9926335999a39aba",
-    "date": "2026-10-15"
+    "hash": "49ed117045fb0d66",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/fr/": {
-    "hash": "7b5790c8b780b720",
-    "date": "2026-10-15"
+    "hash": "a87b00abcea80a95",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/fr/compare/": {
-    "hash": "353c0f1e4d9d3230",
-    "date": "2026-10-15"
+    "hash": "95058605e6185907",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/fr/compare/codegraph/": {
-    "hash": "a4f0016e09cd491d",
-    "date": "2026-10-15"
+    "hash": "2814182ca7d9a23f",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/fr/compare/gitnexus/": {
-    "hash": "7f70ff3447b99fa9",
-    "date": "2026-10-15"
+    "hash": "580957bd40a2922f",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/fr/integrations/": {
-    "hash": "92102eca40eb26f0",
-    "date": "2026-10-15"
+    "hash": "54d175c5d9f1edcc",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/fr/integrations/claude-code/": {
-    "hash": "f3fd2c33dd8e7b2c",
-    "date": "2026-10-15"
+    "hash": "5cabb2ff58d638ec",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/fr/integrations/codex/": {
-    "hash": "25d364c31f140bd1",
-    "date": "2026-10-15"
+    "hash": "da7fd56a4f728a09",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/fr/integrations/gemini-cli/": {
-    "hash": "b28211e10af47ab2",
-    "date": "2026-10-15"
+    "hash": "b886800795e1991c",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/fr/integrations/mcp/": {
-    "hash": "9e38a3947a44b8b6",
-    "date": "2026-10-15"
+    "hash": "077feae4985eb292",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/fr/integrations/orca/": {
-    "hash": "44c316b05d272ae3",
-    "date": "2026-10-15"
+    "hash": "39188ab46c31f650",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/de/": {
-    "hash": "0aeab7a30b121fc4",
-    "date": "2026-10-15"
+    "hash": "12f16dfa9f053932",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/de/compare/": {
-    "hash": "d6ac2a3238469da5",
-    "date": "2026-10-15"
+    "hash": "8e4b609243c97c35",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/de/compare/codegraph/": {
-    "hash": "a907874321c1c2d6",
-    "date": "2026-10-15"
+    "hash": "3749920d044c80d7",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/de/compare/gitnexus/": {
-    "hash": "7e35dddefdebda01",
-    "date": "2026-10-15"
+    "hash": "7fff48e71959aee1",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/de/integrations/": {
-    "hash": "06979ec6737dab27",
-    "date": "2026-10-15"
+    "hash": "b0b5d88ae50c69b0",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/de/integrations/claude-code/": {
-    "hash": "eb2bd402e73f5fdb",
-    "date": "2026-10-15"
+    "hash": "ff3269c33b6a4d60",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/de/integrations/codex/": {
-    "hash": "2414f9e2e49314c8",
-    "date": "2026-10-15"
+    "hash": "5ff449ca5b578386",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/de/integrations/gemini-cli/": {
-    "hash": "e529a3f62b24eea6",
-    "date": "2026-10-15"
+    "hash": "b8b0055b4f1a5b69",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/de/integrations/mcp/": {
-    "hash": "49eee858132db751",
-    "date": "2026-10-15"
+    "hash": "b70d35d599752d92",
+    "date": "2026-10-21"
   },
   "https://coseto6125.github.io/egent-code-plexus/de/integrations/orca/": {
-    "hash": "4a71b09431b01cd3",
-    "date": "2026-10-15"
+    "hash": "403844fb4ecb566d",
+    "date": "2026-10-21"
   }
 }
