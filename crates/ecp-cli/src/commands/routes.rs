@@ -190,7 +190,7 @@ fn find_enclosing_scope(
             continue;
         }
         let start_line = node.start_line();
-        let end_line = node.span.2.to_native();
+        let end_line = node.end_line();
         // Strict containment: a route registered at the same line as the
         // function's signature shouldn't be claimed by an unrelated sibling.
         // Inclusive bounds are correct because the function's span covers
