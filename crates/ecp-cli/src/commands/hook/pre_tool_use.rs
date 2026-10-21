@@ -424,7 +424,12 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
         }
         let (cmd_words, after_prefix) = (&commands[i].0, commands[i].1);
         let starts_subshell = cmd_words.first().is_some_and(|w| w.starts_with('('));
-        let in_subshell = subshell > 0 || starts_subshell;
+        // `x=$( cd y && pwd )` runs the cd in the substitution.
+        let opens_in_assignment = words
+            .iter()
+            .take_while(|w| is_assignment(w))
+            .any(|w| w.contains('('));
+        let in_subshell = subshell > 0 || starts_subshell || opens_in_assignment;
         // Backticks hold a command the split does not see.
         if words
             .iter()
@@ -671,7 +676,21 @@ fn unquoted_tilde_arg(segment: &str) -> bool {
     let mut raw = segment
         .split_whitespace()
         .skip_while(|w| is_assignment(w) || *w == "{");
-    raw.next() == Some("cd") && raw.next().is_some_and(|arg| arg.starts_with('~'))
+    if raw.next() != Some("cd") {
+        return false;
+    }
+    // `cd 2>/dev/null ~/x`: a redirection before the argument is no argument.
+    while let Some(word) = raw.next() {
+        let op = word.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&');
+        if !op.starts_with(['<', '>']) {
+            return word.starts_with('~');
+        }
+        // `2> log` puts the target in the next word.
+        if op.trim_start_matches(['<', '>', '&', '|']).is_empty() {
+            raw.next();
+        }
+    }
+    false
 }
 
 /// `None` when the target cannot be known without expanding it, `Some(None)`
@@ -1023,6 +1042,14 @@ mod tests {
             go("cd ~/x && grep Foo", Some(h.path())),
             dir(&h.path().join("x"))
         );
+        assert_eq!(
+            go("cd 2>/dev/null ~/x && grep Foo", Some(h.path())),
+            dir(&h.path().join("x"))
+        );
+        assert_eq!(
+            go("cd 2> /dev/null ~/x && grep Foo", Some(h.path())),
+            dir(&h.path().join("x"))
+        );
         assert_eq!(go("cd ~/x && grep Foo", None), Unknown);
         assert_eq!(go("cd ~bob && grep Foo", Some(h.path())), Unknown);
     }
@@ -1356,6 +1383,7 @@ mod tests {
             "cd x>/dev/null &&\nrg -n Foo src",
             "cd x 2>/dev/null && rg Foo",
             "cd x && rg -n 'fn main()' src",
+            "cd 2>/dev/null x && rg Foo",
             "cd x &>/dev/null; rg Foo",
             "cd x &&\n  (git status >/dev/null &\n   git diff --stat >/dev/null & wait)\nrg -n Foo src",
             "cd x && {\n  rg -n -m 1 Foo a\n  rg -n -m 1 Bar a\n} & wait",
@@ -1371,6 +1399,7 @@ mod tests {
             "make &&\nrg Foo",
             "m=$(cd x && pwd); rg Foo .",
             "git grep -n Foo",
+            "root=$( cd x && pwd -P )\nrg -n Foo src",
             "rg -C 3 Foo",
             "git -C x status; rg Foo",
         ] {
