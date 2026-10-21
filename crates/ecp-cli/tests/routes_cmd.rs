@@ -415,6 +415,10 @@ export function register_routes() {
         res.json({ status: "ok" });
     });
 }
+
+// The registration shares the enclosing function's last line.
+export function register_tail() {
+    app.get("/api/tail", list_users); }
 "#;
 
 fn setup_inline_repo(repo: &Path, home: &Path) {
@@ -520,6 +524,23 @@ fn routes_inline_route_has_enclosing_scope() {
         scope_names.contains(&"register_routes"),
         "expected enclosingScope.name=register_routes for /api/health, got: {scope_names:?}\nfull json: {json}"
     );
+}
+
+/// The scope's end line is inclusive and 1-based like the route's line, so a
+/// registration on the scope's last line is still inside it.
+#[test]
+fn test_routes_route_on_scope_last_line_has_enclosing_scope() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup_inline_repo(repo.path(), home.path());
+
+    let json = run_routes_json(repo.path(), home.path(), &["/api/tail"]);
+    let routes = json["routes"].as_array().expect("routes array missing");
+    let scope_names: Vec<&str> = routes
+        .iter()
+        .filter_map(|r| r["enclosingScope"]["name"].as_str())
+        .collect();
+    assert_eq!(scope_names, ["register_tail"], "full json: {json}");
 }
 
 // ── Python decorator-route handler resolution ──────────────────────────────
