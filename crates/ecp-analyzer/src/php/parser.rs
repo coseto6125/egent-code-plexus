@@ -168,14 +168,18 @@ pub(super) const PHP_ROUTER_SCOPES: &[&str] = &["Route", "Router", "Slim", "Symf
 
 /// Whether the file declares or imports a class named like a router scope
 /// (`class Route`, `use App\Support\Route`): its `Route::get(...)` is that
-/// class's method, not the framework's router.
+/// class's method, not the framework's router. `use Route;` imports the
+/// global `Route` facade alias, the router itself, so a global import binds
+/// the name only when it renames another class (`use Foo as Route;`).
 fn binds_own_router(imports: &[RawImport], nodes: &[RawNode]) -> bool {
     imports.iter().any(|import| {
         let local = import
             .alias
             .as_deref()
             .unwrap_or_else(|| import.imported_name.rsplit('\\').next().unwrap_or_default());
-        PHP_ROUTER_SCOPES.contains(&local)
+        let source = import.source.trim_start_matches('\\');
+        let facade_alias = !source.contains('\\') && source.eq_ignore_ascii_case(local);
+        !facade_alias && PHP_ROUTER_SCOPES.contains(&local)
     }) || nodes
         .iter()
         .any(|node| node.kind.is_type() && PHP_ROUTER_SCOPES.contains(&node.name.as_str()))
@@ -837,6 +841,7 @@ impl LanguageProvider for PhpProvider {
                 scope: Some(Box::new(site.scope)),
             });
         }
+        super::laravel_routes::resolve_include_controllers(&mut route_includes, names);
         routes.append(&mut route_includes);
 
         // Extract call sites with receiver-type binding.
@@ -910,6 +915,9 @@ impl LanguageProvider for PhpProvider {
                 _ => false,
             });
         }
+        // A controller imports no router; its middleware records count only
+        // for the routes whose actions bind its methods.
+        super::laravel_routes::push_controller_middleware(tree.root_node(), source, &mut routes);
 
         let raw_function_metas =
             crate::function_meta::php::extract(tree.root_node(), source, &nodes, file_category);

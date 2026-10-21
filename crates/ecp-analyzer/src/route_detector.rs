@@ -12,6 +12,16 @@ const HTTP_METHODS: &[&str] = &[
     "use",
 ];
 
+/// The verbs a Laravel `Route::any` route answers: `Router::$verbs`.
+const ANY_ROUTE_VERBS: &[&str] = &["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+
+/// Whether an `ANY` route answers a request of `method`, in any case.
+pub fn any_route_answers(method: &str) -> bool {
+    ANY_ROUTE_VERBS
+        .iter()
+        .any(|verb| verb.eq_ignore_ascii_case(method))
+}
+
 #[derive(Debug, Clone)]
 pub struct DetectedRoute {
     pub method: String,
@@ -211,6 +221,19 @@ mod tests {
             span: (0, 0, 0, 0),
             scope: None,
         }
+    }
+
+    #[test]
+    fn test_any_route_answers_laravel_verb_any_case_true() {
+        assert!(any_route_answers("get"));
+        assert!(any_route_answers("OPTIONS"));
+    }
+
+    #[test]
+    fn test_any_route_answers_verb_any_never_registers_false() {
+        assert!(!any_route_answers("TRACE"));
+        assert!(!any_route_answers("CONNECT"));
+        assert!(!any_route_answers(""));
     }
 
     #[test]

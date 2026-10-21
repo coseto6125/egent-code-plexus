@@ -67,7 +67,11 @@ use std::path::Path;
 /// schema18: Laravel `resource` / `apiResource` / `match` / `any` routes, a
 /// route file without a framework import that a provider loads, actions a
 /// controller inherits, and an `EntryPoint` on each controller action.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema18");
+/// schema19: Laravel `withoutMiddleware` / `excluded_middleware` remove
+/// middleware from a route, a controller's own middleware (`$this->middleware`
+/// with `only` / `except`, static `HasMiddleware::middleware()`) joins its
+/// routes' list, and a group's controller reaches an included route file.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema19");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

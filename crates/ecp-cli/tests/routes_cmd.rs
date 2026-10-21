@@ -898,26 +898,48 @@ fn test_routes_list_mixed_middleware_gives_every_row_middleware_key() {
     );
 }
 
+/// `(method, path)` of each row, sorted.
+fn method_rows(json: &Value) -> Vec<(String, String)> {
+    let mut rows: Vec<(String, String)> = json["results"]
+        .as_array()
+        .expect("results array missing")
+        .iter()
+        .map(|r| {
+            (
+                r["method"].as_str().unwrap_or("").to_string(),
+                r["path"].as_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+    rows.sort_unstable();
+    rows
+}
+
 /// A Laravel `Route::any` route is one `ANY` row, and a `--method` filter
-/// for any verb keeps it.
+/// for any verb Laravel registers it for keeps it, in any case.
 #[test]
 fn test_routes_method_filter_get_keeps_any_route() {
     let repo = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     setup_laravel_repo(repo.path(), home.path());
 
-    let json = run_routes_json(repo.path(), home.path(), &["--method", "GET"]);
-    let mut rows: Vec<(&str, &str)> = json["results"]
-        .as_array()
-        .expect("results array missing")
-        .iter()
-        .map(|r| {
-            (
-                r["method"].as_str().unwrap_or(""),
-                r["path"].as_str().unwrap_or(""),
-            )
-        })
-        .collect();
-    rows.sort_unstable();
-    assert_eq!(rows, [("ANY", "/ping"), ("GET", "/admin/health")], "{json}");
+    for verb in ["GET", "get"] {
+        let json = run_routes_json(repo.path(), home.path(), &["--method", verb]);
+        let rows = method_rows(&json);
+        let expected = [("ANY", "/ping"), ("GET", "/admin/health")]
+            .map(|(m, p)| (m.to_string(), p.to_string()));
+        assert_eq!(rows, expected, "{json}");
+    }
+}
+
+/// `Route::any` registers GET HEAD POST PUT PATCH DELETE OPTIONS
+/// (`Router::$verbs`), so a `TRACE` filter drops the `ANY` row.
+#[test]
+fn test_routes_method_filter_verb_any_never_registers_drops_any_route() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup_laravel_repo(repo.path(), home.path());
+
+    let json = run_routes_json(repo.path(), home.path(), &["--method", "TRACE"]);
+    assert!(method_rows(&json).is_empty(), "{json}");
 }

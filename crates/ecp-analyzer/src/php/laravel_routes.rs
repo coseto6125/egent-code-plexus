@@ -1,8 +1,10 @@
 //! Laravel route groups: the prefix, middleware, controller namespace and
 //! controller class that enclosing `Route::group([...], fn)` /
-//! `Route::prefix('p')->group(fn)` calls apply to a route, the controller
-//! action a route names, the routes a `Route::resource` / `match` / `any`
-//! call registers, and the route files a group loads.
+//! `Route::prefix('p')->group(fn)` calls apply to a route, the middleware
+//! they remove, the controller action a route names, the middleware a
+//! controller registers for its own actions, the routes a
+//! `Route::resource` / `match` / `any` call registers, and the route files
+//! a group loads.
 //!
 //! A file shows only its own groups. A group that loads another route file
 //! (`->group(base_path('routes/admin.php'))`, `require __DIR__.'/auth.php'`)
@@ -23,13 +25,20 @@ use tree_sitter::Node;
 
 /// Include scopes a file can reach through chains of includes. Past this, a
 /// file's routes stop multiplying: each scope is one more Route node per route.
+/// A file past it gets a [`BS_KIND_INCLUDE_SCOPE_CAP`] BlindSpot.
 const MAX_INCLUDE_SCOPES: usize = 16;
+
+/// BlindSpot `kind` of a route file whose routes lost include scopes to
+/// [`MAX_INCLUDE_SCOPES`].
+pub const BS_KIND_INCLUDE_SCOPE_CAP: &str = "laravel-include-scope-cap";
 
 /// What one group level, or a route's own call chain, sets.
 #[derive(Default)]
 struct GroupAttrs {
     prefix: Option<String>,
     middleware: Vec<String>,
+    /// `withoutMiddleware` / `excluded_middleware`.
+    excluded: Vec<String>,
     namespace: Option<String>,
     controller: Option<String>,
 }
@@ -101,17 +110,30 @@ fn chain_attrs(mut node: Node, source: &[u8], attrs: &mut GroupAttrs) {
         }
     }
     for call in calls.into_iter().rev() {
-        let (Some(name), Some(value)) = (call_name(call, source), nth_argument(call, 0)) else {
-            continue;
-        };
-        set_attr(attrs, name, value, source);
+        match call_name(call, source) {
+            Some("middleware") => attrs.middleware = variadic_list(call, source),
+            // `RouteRegistrar` adds each `withoutMiddleware` to the earlier ones.
+            Some("withoutMiddleware") => attrs.excluded.extend(first_list(call, source)),
+            Some(name) => {
+                if let Some(value) = nth_argument(call, 0) {
+                    set_attr(attrs, name, value, source);
+                }
+            }
+            None => {}
+        }
     }
 }
 
 /// `Route::group(['prefix' => 'p', 'middleware' => [...]], ...)`.
+/// `Router::group` merges the array as written, so `excluded_middleware`
+/// removes middleware and a `withoutMiddleware` key, the registrar method's
+/// name, does nothing.
 fn option_attrs(options: Node, source: &[u8], attrs: &mut GroupAttrs) {
     for (key, value) in array_pairs(options, source) {
-        set_attr(attrs, &key, value, source);
+        match key.as_str() {
+            "excluded_middleware" => attrs.excluded.extend(string_list(value, source)),
+            _ => set_attr(attrs, &key, value, source),
+        }
     }
 }
 
@@ -125,24 +147,41 @@ fn set_attr(attrs: &mut GroupAttrs, name: &str, value: Node, source: &[u8]) {
     }
 }
 
-/// `->middleware('auth')` calls chained after the verb call:
-/// `Route::get('/x', ...)->middleware('auth')`.
-fn trailing_middleware(call: Node, source: &[u8]) -> Vec<String> {
-    let mut middleware = Vec::new();
+/// `->middleware('auth')` / `->withoutMiddleware('auth')` calls chained
+/// after the verb call: `Route::get('/x', ...)->middleware('auth')`.
+fn trailing_attrs(call: Node, source: &[u8], own: &mut GroupAttrs) {
     let mut cur = call;
     while let Some(parent) = cur
         .parent()
         .filter(|p| p.kind() == "member_call_expression")
         .filter(|p| p.child_by_field_name("object") == Some(cur))
     {
-        if call_name(parent, source) == Some("middleware") {
-            if let Some(value) = nth_argument(parent, 0) {
-                middleware.extend(string_list(value, source));
-            }
+        match call_name(parent, source) {
+            Some("middleware") => own.middleware.extend(variadic_list(parent, source)),
+            Some("withoutMiddleware") => own.excluded.extend(first_list(parent, source)),
+            _ => {}
         }
         cur = parent;
     }
-    middleware
+}
+
+/// The names of a variadic call, as `Route::middleware`, `RouteRegistrar`
+/// and `ControllerMiddlewareOptions::only` read them: an array first
+/// argument is the list, else each argument is one name.
+fn variadic_list(call: Node, source: &[u8]) -> Vec<String> {
+    let values: Vec<Node> = arguments(call)
+        .into_iter()
+        .filter_map(argument_value)
+        .collect();
+    match values.as_slice() {
+        [first, ..] if first.kind() == "array_creation_expression" => string_list(*first, source),
+        many => many.iter().filter_map(|v| class_name(*v, source)).collect(),
+    }
+}
+
+/// The names of the first argument: `'auth'` or `['auth', 'verified']`.
+fn first_list(call: Node, source: &[u8]) -> Vec<String> {
+    nth_argument(call, 0).map_or_else(Vec::new, |value| string_list(value, source))
 }
 
 /// The scope of a route or include site: each enclosing group, then `own`.
@@ -163,6 +202,7 @@ fn site_scope(node: Node, own: GroupAttrs, source: &[u8]) -> SiteScope {
     for level in levels {
         site.prefixes.extend(level.prefix);
         site.scope.middleware.extend(level.middleware);
+        site.scope.excluded_middleware.extend(level.excluded);
         site.scope.namespace =
             compose_namespace(site.scope.namespace.as_deref(), level.namespace.as_deref());
         if level.controller.is_some() {
@@ -179,7 +219,7 @@ fn call_scope(call: Node, source: &[u8]) -> SiteScope {
     if let Some(object) = call.child_by_field_name("object") {
         chain_attrs(object, source, &mut own);
     }
-    own.middleware.extend(trailing_middleware(call, source));
+    trailing_attrs(call, source, &mut own);
     site_scope(call, own, source)
 }
 
@@ -645,27 +685,19 @@ fn singular(segment: &str) -> String {
 /// The `Class@method` the action argument `action` names. A class name
 /// with a leading `\` is fully qualified; any other is relative to the
 /// group namespace. Closures and anything else name no action.
+///
+/// An action without `@` (`'list'`, `Invokable::class`) stays as written
+/// when no group in the file sets a controller: a group in an including
+/// file may set one, so [`LaravelRoutes::promote`] completes it.
 fn route_action(
     action: Node,
     controller: Option<&str>,
     source: &[u8],
     names: FileNames,
 ) -> Option<String> {
-    match action.kind() {
-        "string" | "encapsed_string" => {
-            let text = string_value(action, source)?;
-            Some(match (text.contains('@'), controller) {
-                (true, _) => text,
-                // Inside `Route::controller(C::class)->group(...)` a bare
-                // string names a method of `C`.
-                (false, Some(class)) => format!("{class}@{text}"),
-                (false, None) => format!("{text}@__invoke"),
-            })
-        }
-        "class_constant_access_expression" => Some(format!(
-            "{}@__invoke",
-            names.resolve(class_constant_class(action, source)?)
-        )),
+    let text = match action.kind() {
+        "string" | "encapsed_string" => string_value(action, source)?,
+        "class_constant_access_expression" => names.resolve(class_constant_class(action, source)?),
         "array_creation_expression" => {
             let mut values = array_values(action);
             let class = values.next()?;
@@ -674,9 +706,25 @@ fn route_action(
                 Some(class) => names.resolve(class),
                 None => string_value(class, source)?,
             };
-            Some(format!("{class}@{method}"))
+            return Some(format!("{class}@{method}"));
         }
-        _ => None,
+        _ => return None,
+    };
+    Some(match controller {
+        Some(class) => complete_action(&text, Some(class)),
+        None => text,
+    })
+}
+
+/// Laravel's `prependGroupController`, then `RouteAction::makeInvokable`:
+/// an action without `@` names a method of the group controller, else the
+/// invokable class it names. Laravel keeps a name of an existing class as
+/// a class; a method name never holds a `\`, so a name with one is a class.
+fn complete_action(action: &str, controller: Option<&str>) -> String {
+    match controller {
+        _ if action.contains('@') => action.to_string(),
+        Some(class) if !action.contains('\\') => format!("{class}@{action}"),
+        _ => format!("{action}@__invoke"),
     }
 }
 
@@ -764,7 +812,9 @@ fn push_include(
     out.push(RawRoute {
         method: RawRoute::INCLUDE.to_string(),
         path: join_prefix(site.prefixes.iter().map(String::as_str)),
-        handler: None,
+        // As written; [`resolve_include_controllers`] qualifies it once the
+        // file's imports are known.
+        handler: site.controller,
         span: node_span(&node),
         scope: Some(Box::new(scope)),
     });
@@ -803,6 +853,9 @@ fn include_target(expr: Node, source: &[u8]) -> Option<RouteInclude> {
     }
 }
 
+/// The most directories a `dirname(__DIR__, n)` include climbs.
+const MAX_DIR_LEVELS: usize = 64;
+
 /// How many directories above the current file's `expr` names: 0 for
 /// `__DIR__`, `n` for `dirname(__DIR__, n)`.
 fn dir_levels(expr: Node, source: &[u8]) -> Option<usize> {
@@ -817,11 +870,20 @@ fn dir_levels(expr: Node, source: &[u8]) -> Option<usize> {
                 return None;
             }
             let inner = dir_levels(nth_argument(expr, 0)?, source)?;
+            // PHP rejects 0 levels; past `MAX_DIR_LEVELS` no route file
+            // lies, and an unchecked count overflows the path built from it.
             let levels = match nth_argument(expr, 1) {
-                Some(n) => n.utf8_text(source).ok()?.parse().ok()?,
+                Some(n) => n
+                    .utf8_text(source)
+                    .ok()?
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| (1..=MAX_DIR_LEVELS).contains(n))?,
                 None => 1,
             };
-            Some(inner + levels)
+            inner
+                .checked_add(levels)
+                .filter(|total| *total <= MAX_DIR_LEVELS)
         }
         _ => None,
     }
@@ -996,7 +1058,11 @@ struct IncludeScope {
     /// `/admin`, or empty for none.
     prefix: String,
     middleware: Vec<String>,
+    excluded: Vec<String>,
     namespace: Option<String>,
+    /// `Route::controller(C::class)->group(<file>)`: a bare action of the
+    /// file names a method of `C`.
+    controller: Option<String>,
 }
 
 impl IncludeScope {
@@ -1009,7 +1075,40 @@ impl IncludeScope {
                 .chain(&inner.middleware)
                 .cloned()
                 .collect(),
+            excluded: self
+                .excluded
+                .iter()
+                .chain(&inner.excluded)
+                .cloned()
+                .collect(),
             namespace: compose_namespace(self.namespace.as_deref(), inner.namespace.as_deref()),
+            // `RouteGroup::merge`: an inner group's controller replaces the
+            // outer one.
+            controller: inner.controller.clone().or_else(|| self.controller.clone()),
+        }
+    }
+
+    /// The Route node a route with `scope`, checked `path` and action
+    /// `handler` becomes under this scope.
+    fn promote(&self, scope: &RawRouteScope, path: String, handler: Option<&str>) -> PromotedRoute {
+        let excluded: Vec<String> = self
+            .excluded
+            .iter()
+            .chain(&scope.excluded_middleware)
+            .cloned()
+            .collect();
+        let mut middleware: Vec<String> = Vec::new();
+        for name in self.middleware.iter().chain(&scope.middleware) {
+            if !middleware.contains(name) && !excluded.contains(name) {
+                middleware.push(name.clone());
+            }
+        }
+        PromotedRoute {
+            path,
+            middleware,
+            excluded,
+            namespace: compose_namespace(self.namespace.as_deref(), scope.namespace.as_deref()),
+            action: handler.map(|action| complete_action(action, self.controller.as_deref())),
         }
     }
 }
@@ -1017,19 +1116,32 @@ impl IncludeScope {
 /// One Route node a Laravel route becomes under one include scope.
 pub struct PromotedRoute {
     pub path: String,
+    /// Including groups' middleware, then the file's groups', then the
+    /// route's own: each name once, at its first place, and none that
+    /// `excluded` names. Laravel's `uniqueMiddleware`, then the exact-name
+    /// match of `resolveMiddleware`, before it expands middleware groups.
     pub middleware: Vec<String>,
+    /// Middleware the route's groups remove, controller middleware too.
+    pub excluded: Vec<String>,
     pub namespace: Option<String>,
+    /// The `Class@method` action, a bare one completed with an including
+    /// group's controller.
+    pub action: Option<String>,
 }
 
 /// The controller method a route action binds.
 #[derive(Debug, PartialEq)]
 pub struct ControllerAction {
     pub node: u32,
-    /// A namespace pinned the class; else the class name matched one class.
+    /// A namespace, or the class name written fully qualified, pinned the
+    /// class; else the class name matched one class.
     pub by_namespace: bool,
     /// The class does not declare the method: a used trait or a parent
     /// class, reached through resolved heritage, does.
     pub inherited: bool,
+    /// The middleware the controller registers for the action's method, in
+    /// registration order; a parent's constructor middleware first.
+    pub middleware: Vec<String>,
 }
 
 /// The cross-file half of Laravel routing: the include scopes of each
@@ -1039,20 +1151,59 @@ pub struct LaravelRoutes {
     /// Keyed by the included file's index; a file nothing includes has no
     /// entry and keeps the paths its own file shows.
     include_scopes: FxHashMap<u32, Vec<IncludeScope>>,
+    /// Files whose routes lost include scopes to [`MAX_INCLUDE_SCOPES`].
+    capped: Vec<CappedIncludes>,
     controllers: ControllerIndex,
+}
+
+/// A route file that more include scopes reach than [`MAX_INCLUDE_SCOPES`].
+pub struct CappedIncludes {
+    pub file_idx: u32,
+    /// The scopes this file dropped itself.
+    pub dropped: usize,
+    /// A file that includes it dropped scopes too, so more are missing.
+    pub upstream: bool,
+}
+
+impl CappedIncludes {
+    pub fn hint(&self) -> String {
+        let mut hint = if self.dropped > 0 {
+            format!(
+                "{} more include scopes reach this route file than the {MAX_INCLUDE_SCOPES} \
+                 expanded; its routes under them have no Route node",
+                self.dropped
+            )
+        } else {
+            format!(
+                "a file that includes this route file passed the {MAX_INCLUDE_SCOPES} \
+                 include-scope cap; its routes under the dropped scopes have no Route node"
+            )
+        };
+        if self.dropped > 0 && self.upstream {
+            hint.push_str("; a file that includes it was capped too, so more are missing");
+        }
+        hint
+    }
 }
 
 impl LaravelRoutes {
     pub fn build(local_graphs: &[LocalGraph]) -> Self {
         let routes = || local_graphs.iter().flat_map(|graph| &graph.routes);
         let has_includes = routes().any(|route| route.method == RawRoute::INCLUDE);
-        let has_actions = routes().any(|route| route.scope.is_some() && route.handler.is_some());
+        let has_actions = routes().any(|route| {
+            route.scope.is_some()
+                && route.handler.is_some()
+                && route.method != RawRoute::INCLUDE
+                && route.method != RawRoute::CONTROLLER_MIDDLEWARE
+        });
+        let (include_scopes, capped) = if has_includes {
+            include_scopes(local_graphs)
+        } else {
+            Default::default()
+        };
         Self {
-            include_scopes: if has_includes {
-                include_scopes(local_graphs)
-            } else {
-                FxHashMap::default()
-            },
+            include_scopes,
+            capped,
             controllers: if has_actions {
                 ControllerIndex::build(local_graphs)
             } else {
@@ -1061,37 +1212,36 @@ impl LaravelRoutes {
         }
     }
 
-    /// The Route nodes a route of file `file_idx` with `scope` and checked
-    /// `path` becomes, one per include scope that reaches the file. A route
-    /// of a file without a framework import becomes none unless a file
-    /// with one loads its file.
-    pub fn promote(&self, file_idx: u32, scope: &RawRouteScope, path: &str) -> Vec<PromotedRoute> {
+    /// The Route nodes a route of file `file_idx` with `scope`, checked
+    /// `path` and action `handler` becomes, one per include scope that
+    /// reaches the file. A route of a file without a framework import
+    /// becomes none unless a file with one loads its file.
+    pub fn promote(
+        &self,
+        file_idx: u32,
+        scope: &RawRouteScope,
+        path: &str,
+        handler: Option<&str>,
+    ) -> Vec<PromotedRoute> {
         let Some(includes) = self.include_scopes.get(&file_idx) else {
             if scope.needs_include {
                 return Vec::new();
             }
-            return vec![PromotedRoute {
-                path: path.to_string(),
-                middleware: scope.middleware.clone(),
-                namespace: scope.namespace.clone(),
-            }];
+            return vec![IncludeScope::default().promote(scope, path.to_string(), handler)];
         };
         includes
             .iter()
-            .map(|include| PromotedRoute {
-                path: join_route_path([include.prefix.as_str(), path]),
-                middleware: include
-                    .middleware
-                    .iter()
-                    .chain(&scope.middleware)
-                    .cloned()
-                    .collect(),
-                namespace: compose_namespace(
-                    include.namespace.as_deref(),
-                    scope.namespace.as_deref(),
-                ),
+            .map(|include| {
+                let path = join_route_path([include.prefix.as_str(), path]);
+                include.promote(scope, path, handler)
             })
             .collect()
+    }
+
+    /// The route files whose routes lost include scopes to the cap, by
+    /// file index.
+    pub fn capped_includes(&self) -> &[CappedIncludes] {
+        &self.capped
     }
 
     /// The controller method a `Class@method` action names. `symbol_table`
@@ -1108,12 +1258,15 @@ impl LaravelRoutes {
 }
 
 /// Each included file's scopes, composed through every chain of includes
-/// that reaches it from a file nothing includes.
+/// that reaches it from a file nothing includes, and the files past
+/// [`MAX_INCLUDE_SCOPES`].
 ///
 /// Only an admitted file's includes count. A file is admitted when it
 /// imports an HTTP framework, or when an admitted file includes it: a
 /// `require` in plain PHP code loads no route file.
-fn include_scopes(local_graphs: &[LocalGraph]) -> FxHashMap<u32, Vec<IncludeScope>> {
+fn include_scopes(
+    local_graphs: &[LocalGraph],
+) -> (FxHashMap<u32, Vec<IncludeScope>>, Vec<CappedIncludes>) {
     let paths: Vec<String> = local_graphs
         .iter()
         .map(|graph| graph.file_path.to_string_lossy().replace('\\', "/"))
@@ -1128,10 +1281,11 @@ fn include_scopes(local_graphs: &[LocalGraph]) -> FxHashMap<u32, Vec<IncludeScop
     for (from, graph) in local_graphs.iter().enumerate() {
         let from = from as u32;
         if graph.routes.iter().any(|route| {
-            route
-                .scope
-                .as_deref()
-                .is_some_and(|scope| !scope.needs_include)
+            route.method != RawRoute::CONTROLLER_MIDDLEWARE
+                && route
+                    .scope
+                    .as_deref()
+                    .is_some_and(|scope| !scope.needs_include)
         }) {
             admitted.push(from);
         }
@@ -1156,7 +1310,9 @@ fn include_scopes(local_graphs: &[LocalGraph]) -> FxHashMap<u32, Vec<IncludeScop
             let include = IncludeScope {
                 prefix: record.path.clone(),
                 middleware: scope.middleware.clone(),
+                excluded: scope.excluded_middleware.clone(),
                 namespace: scope.namespace.clone(),
+                controller: record.handler.clone(),
             };
             includes.push((from, target, include));
         }
@@ -1175,46 +1331,77 @@ fn include_scopes(local_graphs: &[LocalGraph]) -> FxHashMap<u32, Vec<IncludeScop
             into.entry(target).or_default().push((from, include));
         }
     }
-    let mut memo = FxHashMap::default();
+    let mut walk = ScopeWalk {
+        into: &into,
+        memo: FxHashMap::default(),
+        lossy: FxHashMap::default(),
+        stack: Vec::new(),
+    };
     let targets: Vec<u32> = into.keys().copied().collect();
     for target in targets {
-        scopes_of(target, &into, &mut memo, &mut Vec::new());
+        walk.scopes_of(target);
     }
-    memo
+    let mut capped: Vec<CappedIncludes> = walk
+        .lossy
+        .into_iter()
+        .map(|(file_idx, (dropped, upstream))| CappedIncludes {
+            file_idx,
+            dropped,
+            upstream,
+        })
+        .collect();
+    capped.sort_unstable_by_key(|cap| cap.file_idx);
+    (walk.memo, capped)
 }
-fn scopes_of(
-    file: u32,
-    into: &FxHashMap<u32, Vec<(u32, IncludeScope)>>,
-    memo: &mut FxHashMap<u32, Vec<IncludeScope>>,
-    stack: &mut Vec<u32>,
-) -> Vec<IncludeScope> {
-    if let Some(scopes) = memo.get(&file) {
-        return scopes.clone();
-    }
-    let Some(edges) = into.get(&file) else {
-        return vec![IncludeScope::default()];
-    };
-    if stack.contains(&file) {
-        return Vec::new();
-    }
-    stack.push(file);
-    let mut scopes: Vec<IncludeScope> = Vec::new();
-    for (from, inner) in edges {
-        for outer in scopes_of(*from, into, memo, stack) {
-            let scope = outer.then(inner);
-            if scopes.len() < MAX_INCLUDE_SCOPES && !scopes.contains(&scope) {
-                scopes.push(scope);
-            }
+
+struct ScopeWalk<'a> {
+    into: &'a FxHashMap<u32, Vec<(u32, IncludeScope)>>,
+    memo: FxHashMap<u32, Vec<IncludeScope>>,
+    /// File → (scopes it dropped itself, an including file dropped some).
+    lossy: FxHashMap<u32, (usize, bool)>,
+    stack: Vec<u32>,
+}
+
+impl ScopeWalk<'_> {
+    fn scopes_of(&mut self, file: u32) -> Vec<IncludeScope> {
+        if let Some(scopes) = self.memo.get(&file) {
+            return scopes.clone();
         }
+        let into = self.into;
+        let Some(edges) = into.get(&file) else {
+            return vec![IncludeScope::default()];
+        };
+        if self.stack.contains(&file) {
+            return Vec::new();
+        }
+        self.stack.push(file);
+        // Each including file contributes at most MAX_INCLUDE_SCOPES, so
+        // the list stays bounded before the cut below.
+        let mut scopes: Vec<IncludeScope> = Vec::new();
+        let mut upstream = false;
+        for (from, inner) in edges {
+            for outer in self.scopes_of(*from) {
+                let scope = outer.then(inner);
+                if !scopes.contains(&scope) {
+                    scopes.push(scope);
+                }
+            }
+            upstream |= self.lossy.contains_key(from);
+        }
+        self.stack.pop();
+        let dropped = scopes.len().saturating_sub(MAX_INCLUDE_SCOPES);
+        scopes.truncate(MAX_INCLUDE_SCOPES);
+        if dropped > 0 || upstream {
+            self.lossy.insert(file, (dropped, upstream));
+        }
+        // Every include of the file came back round a cycle: nothing outside
+        // the cycle loads it, so its own paths are all there is.
+        if scopes.is_empty() {
+            scopes.push(IncludeScope::default());
+        }
+        self.memo.insert(file, scopes.clone());
+        scopes
     }
-    stack.pop();
-    // Every include of the file came back round a cycle: nothing outside
-    // the cycle loads it, so its own paths are all there is.
-    if scopes.is_empty() {
-        scopes.push(IncludeScope::default());
-    }
-    memo.insert(file, scopes.clone());
-    scopes
 }
 
 /// The file index an include names, seen from the including file `from`.
@@ -1280,6 +1467,49 @@ struct ControllerType {
     fqn: String,
     /// Lower-cased method name → node index; the first declaration wins.
     methods: FxHashMap<String, u32>,
+    has_constructor: bool,
+    /// The constructor runs `parent::__construct()`.
+    constructor_calls_parent: bool,
+    /// `$this->middleware(...)` in the constructor, in source order.
+    constructor_middleware: Vec<MiddlewareRule>,
+    /// The entries of a static `middleware()`; `Some` when the class
+    /// declares one, even with no entry this reads.
+    static_middleware: Option<Vec<MiddlewareRule>>,
+}
+
+/// One controller-middleware registration and the methods it covers.
+struct MiddlewareRule {
+    names: Vec<String>,
+    only: Option<Vec<String>>,
+    except: Option<Vec<String>>,
+}
+
+impl MiddlewareRule {
+    fn none() -> Self {
+        MiddlewareRule {
+            names: Vec::new(),
+            only: None,
+            except: None,
+        }
+    }
+
+    /// The negation of Laravel's `methodExcludedByOptions`: an `only` list
+    /// names the method, and no non-empty `except` list does. The names
+    /// compare as written, as `in_array` does.
+    fn covers(&self, method: &str) -> bool {
+        self.only
+            .as_ref()
+            .is_none_or(|only| only.iter().any(|m| m == method))
+            && !self
+                .except
+                .as_ref()
+                .is_some_and(|except| except.iter().any(|m| m == method))
+    }
+}
+
+/// Whether span `inner` lies within span `outer`.
+fn span_within(inner: Span, outer: Span) -> bool {
+    (outer.0, outer.1) <= (inner.0, inner.1) && (inner.2, inner.3) <= (outer.2, outer.3)
 }
 
 impl ControllerIndex {
@@ -1335,11 +1565,15 @@ impl ControllerIndex {
                     is_trait,
                     fqn: fqn.to_ascii_lowercase(),
                     methods: FxHashMap::default(),
+                    has_constructor: false,
+                    constructor_calls_parent: false,
+                    constructor_middleware: Vec::new(),
+                    static_middleware: None,
                 });
                 spans.push((node.name.as_str(), node.span));
             }
             for (local_idx, node) in graph.nodes.iter().enumerate() {
-                if node.kind != NodeKind::Method {
+                if !matches!(node.kind, NodeKind::Method | NodeKind::Constructor) {
                     continue;
                 }
                 let Some(owner) = node.owner_class.as_deref() else {
@@ -1350,19 +1584,64 @@ impl ControllerIndex {
                 }) else {
                     continue;
                 };
-                index.types[first + offset]
+                let owner = &mut index.types[first + offset];
+                if node.kind == NodeKind::Constructor {
+                    owner.has_constructor = true;
+                    continue;
+                }
+                owner
                     .methods
                     .entry(node.name.to_ascii_lowercase())
                     .or_insert(base + local_idx as u32);
+            }
+            for record in graph
+                .routes
+                .iter()
+                .filter(|route| route.method == RawRoute::CONTROLLER_MIDDLEWARE)
+            {
+                let (Some(scope), Some(offset)) = (
+                    record.scope.as_deref(),
+                    spans
+                        .iter()
+                        .position(|(_, span)| span_within(record.span, *span)),
+                ) else {
+                    continue;
+                };
+                let owner = &mut index.types[first + offset];
+                let rule = MiddlewareRule {
+                    names: scope.middleware.clone(),
+                    only: scope.only.clone(),
+                    except: scope.except.clone(),
+                };
+                match record.path.as_str() {
+                    FROM_CONSTRUCTOR => {
+                        owner.has_constructor = true;
+                        owner.constructor_middleware.push(rule);
+                    }
+                    CALLS_PARENT_CONSTRUCTOR => {
+                        owner.has_constructor = true;
+                        owner.constructor_calls_parent = true;
+                    }
+                    FROM_STATIC => {
+                        let rules = owner.static_middleware.get_or_insert_with(Vec::new);
+                        if !rule.names.is_empty() {
+                            rules.push(rule);
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
         index
     }
 
-    /// A namespace in scope, or a leading `\`, pins the class to one fully
-    /// qualified name. Without either, the class name must match exactly one
-    /// class. No class, two classes, or a class that neither declares nor
-    /// inherits the method: `None`.
+    /// Laravel's `prependGroupNamespace` decides the class: a leading `\`,
+    /// or a name that already starts with the namespace in scope, is taken
+    /// as written; any other name gets the namespace. Without a namespace,
+    /// a name equal to one class's fully qualified name pins that class;
+    /// else the class name must match exactly one class. No class, two
+    /// classes, or a class that neither declares nor inherits the method:
+    /// `None`.
     fn resolve(
         &self,
         action: &str,
@@ -1372,32 +1651,35 @@ impl ControllerIndex {
         let (class, method) = action.rsplit_once('@')?;
         let short = class.rsplit('\\').next()?.to_ascii_lowercase();
         let candidates = self.by_name.get(&short)?;
+        let namespace = namespace.map(|ns| ns.trim_start_matches('\\').trim_end_matches('\\'));
         let qualified = match (class.strip_prefix('\\'), namespace) {
             (Some(absolute), _) => Some(absolute.to_string()),
-            (None, Some(namespace)) => Some(format!(
-                "{}\\{class}",
-                namespace.trim_start_matches('\\').trim_end_matches('\\')
-            )),
+            (None, Some(namespace)) if class.starts_with(namespace) => Some(class.to_string()),
+            (None, Some(namespace)) => Some(format!("{namespace}\\{class}")),
             (None, None) => None,
         };
-        let matches: Vec<usize> = match &qualified {
-            Some(fqn) => {
-                let fqn = fqn.to_ascii_lowercase();
-                candidates
-                    .iter()
-                    .copied()
-                    .filter(|&c| self.types[c].fqn == fqn)
-                    .collect()
-            }
-            None => {
-                let class = class.to_ascii_lowercase();
-                let suffix = format!("\\{class}");
-                candidates
-                    .iter()
-                    .copied()
-                    .filter(|&c| self.types[c].fqn == class || self.types[c].fqn.ends_with(&suffix))
-                    .collect()
-            }
+        let with_fqn = |fqn: &str| -> Vec<usize> {
+            let fqn = fqn.to_ascii_lowercase();
+            candidates
+                .iter()
+                .copied()
+                .filter(|&c| self.types[c].fqn == fqn)
+                .collect()
+        };
+        let (matches, by_namespace) = match &qualified {
+            Some(fqn) => (with_fqn(fqn), true),
+            None => match with_fqn(class).as_slice() {
+                [exact] => (vec![*exact], true),
+                _ => {
+                    let suffix = format!("\\{}", class.to_ascii_lowercase());
+                    let by_suffix: Vec<usize> = candidates
+                        .iter()
+                        .copied()
+                        .filter(|&c| self.types[c].fqn.ends_with(&suffix))
+                        .collect();
+                    (by_suffix, false)
+                }
+            },
         };
         let [class] = matches.as_slice() else {
             return None;
@@ -1406,9 +1688,23 @@ impl ControllerIndex {
             self.method_of(*class, &method.to_ascii_lowercase(), symbol_table)?;
         Some(ControllerAction {
             node,
-            by_namespace: qualified.is_some(),
+            by_namespace,
             inherited,
+            middleware: self.controller_middleware(*class, method, symbol_table),
         })
+    }
+
+    /// The resolved supertypes of `class` that the index holds.
+    fn bases(&self, class: usize, symbol_table: &SymbolTable) -> Vec<usize> {
+        symbol_table
+            .supertypes(self.types[class].node)
+            .map(|st| {
+                st.bases
+                    .iter()
+                    .filter_map(|base| self.by_node.get(base).copied())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The method `method` of class `class` as PHP looks it up: the class's
@@ -1426,16 +1722,8 @@ impl ControllerIndex {
             if let Some(&node) = self.types[class].methods.get(method) {
                 return Some((node, depth > 0));
             }
-            let bases: Vec<usize> = symbol_table
-                .supertypes(self.types[class].node)
-                .map(|st| {
-                    st.bases
-                        .iter()
-                        .filter_map(|base| self.by_node.get(base).copied())
-                        .collect()
-                })
-                .unwrap_or_default();
-            let (traits, parents): (Vec<usize>, Vec<usize>) = bases
+            let (traits, parents): (Vec<usize>, Vec<usize>) = self
+                .bases(class, symbol_table)
                 .into_iter()
                 .partition(|&base| self.types[base].is_trait);
             let from_traits: Vec<u32> = traits
@@ -1453,5 +1741,312 @@ impl ControllerIndex {
             class = *parent;
         }
         None
+    }
+
+    /// `class`, then its parent class, and on up while each parent
+    /// resolves to exactly one class of the graph.
+    fn class_chain(&self, class: usize, symbol_table: &SymbolTable) -> Vec<usize> {
+        let mut chain = vec![class];
+        while chain.len() < MAX_HERITAGE_DEPTH {
+            let parents: Vec<usize> = self
+                .bases(chain[chain.len() - 1], symbol_table)
+                .into_iter()
+                .filter(|&base| !self.types[base].is_trait)
+                .collect();
+            match parents.as_slice() {
+                [parent] if !chain.contains(parent) => chain.push(*parent),
+                _ => break,
+            }
+        }
+        chain
+    }
+
+    /// Laravel's `Route::controllerMiddleware` for an action of method
+    /// `method` on `class`: a `HasMiddleware` class's static entries, else
+    /// what its constructor registers. A parent outside the graph adds
+    /// nothing.
+    fn controller_middleware(
+        &self,
+        class: usize,
+        method: &str,
+        symbol_table: &SymbolTable,
+    ) -> Vec<String> {
+        let chain = self.class_chain(class, symbol_table);
+        // Laravel calls the static `middleware()` the nearest class declares
+        // and then reads no constructor middleware.
+        let rules: Vec<&MiddlewareRule> = match chain
+            .iter()
+            .find_map(|&c| self.types[c].static_middleware.as_ref())
+        {
+            Some(rules) => rules.iter().collect(),
+            None => {
+                // PHP runs the nearest declared constructor, and a parent's
+                // only through `parent::__construct()`, usually called first.
+                let mut ran: Vec<usize> = Vec::new();
+                for &c in &chain {
+                    let ty = &self.types[c];
+                    if !ty.has_constructor {
+                        continue;
+                    }
+                    ran.push(c);
+                    if !ty.constructor_calls_parent {
+                        break;
+                    }
+                }
+                ran.iter()
+                    .rev()
+                    .flat_map(|&c| &self.types[c].constructor_middleware)
+                    .collect()
+            }
+        };
+        let mut middleware: Vec<String> = Vec::new();
+        for name in rules
+            .into_iter()
+            .filter(|rule| rule.covers(method))
+            .flat_map(|rule| &rule.names)
+        {
+            if !middleware.contains(name) {
+                middleware.push(name.clone());
+            }
+        }
+        middleware
+    }
+}
+
+/// [`RawRoute::CONTROLLER_MIDDLEWARE`] `path` of a `$this->middleware(...)`
+/// call in a constructor.
+const FROM_CONSTRUCTOR: &str = "__construct";
+/// ... of an entry of a static `middleware()`.
+const FROM_STATIC: &str = "middleware";
+/// ... of a constructor that calls `parent::__construct()`.
+const CALLS_PARENT_CONSTRUCTOR: &str = "parent::__construct";
+
+/// Qualify each include record's group controller, as written, through the
+/// file's imports and namespace.
+pub(super) fn resolve_include_controllers(records: &mut [RawRoute], names: FileNames) {
+    for record in records {
+        if let Some(class) = record.handler.as_mut() {
+            *class = names.resolve(class);
+        }
+    }
+}
+
+/// Append a [`RawRoute::CONTROLLER_MIDDLEWARE`] record for the middleware
+/// each class of the file registers for its own actions:
+/// `$this->middleware(...)` in its constructor, and each entry of a static
+/// `middleware()`, the `HasMiddleware` contract. A middleware closure has
+/// no name and makes no record.
+pub(super) fn push_controller_middleware(root: Node, source: &[u8], out: &mut Vec<RawRoute>) {
+    let mut containers = vec![root];
+    while let Some(container) = containers.pop() {
+        let mut cursor = container.walk();
+        let children: Vec<Node> = container.named_children(&mut cursor).collect();
+        for child in children {
+            match child.kind() {
+                "namespace_definition" | "compound_statement" => containers.push(child),
+                "class_declaration" => class_middleware(child, source, out),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn class_middleware(class: Node, source: &[u8], out: &mut Vec<RawRoute>) {
+    let Some(body) = class.child_by_field_name("body") else {
+        return;
+    };
+    let mut cursor = body.walk();
+    let methods: Vec<Node> = body
+        .named_children(&mut cursor)
+        .filter(|n| n.kind() == "method_declaration")
+        .collect();
+    for method in methods {
+        let (Some(name), Some(block)) = (
+            method
+                .child_by_field_name("name")
+                .and_then(|n| n.utf8_text(source).ok()),
+            method.child_by_field_name("body"),
+        ) else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("__construct") {
+            constructor_middleware(block, source, out);
+        } else if name.eq_ignore_ascii_case("middleware") && is_static(method) {
+            push_middleware_record(out, FROM_STATIC, method, MiddlewareRule::none());
+            for entry in returned_entries(block) {
+                if let Some(rule) = middleware_entry(entry, source) {
+                    push_middleware_record(out, FROM_STATIC, entry, rule);
+                }
+            }
+        }
+    }
+}
+
+fn is_static(method: Node) -> bool {
+    let mut cursor = method.walk();
+    let is_static = method
+        .children(&mut cursor)
+        .any(|child| child.kind() == "static_modifier");
+    is_static
+}
+
+fn push_middleware_record(out: &mut Vec<RawRoute>, from: &str, node: Node, rule: MiddlewareRule) {
+    out.push(RawRoute {
+        method: RawRoute::CONTROLLER_MIDDLEWARE.to_string(),
+        path: from.to_string(),
+        handler: None,
+        span: node_span(&node),
+        scope: Some(Box::new(RawRouteScope {
+            middleware: rule.names,
+            only: rule.only,
+            except: rule.except,
+            ..RawRouteScope::default()
+        })),
+    });
+}
+
+/// `$this->middleware('auth', ['except' => [...]])`, with `->only(...)` /
+/// `->except(...)` chained on the options it returns, and
+/// `parent::__construct()`, anywhere in the constructor body.
+fn constructor_middleware(block: Node, source: &[u8], out: &mut Vec<RawRoute>) {
+    let mut stack = vec![block];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "member_call_expression"
+                if call_name(node, source) == Some("middleware")
+                    && node
+                        .child_by_field_name("object")
+                        .and_then(|object| object.utf8_text(source).ok())
+                        == Some("$this") =>
+            {
+                let mut rule = MiddlewareRule {
+                    names: first_list(node, source),
+                    ..MiddlewareRule::none()
+                };
+                for (key, value) in nth_argument(node, 1)
+                    .map(|options| array_pairs(options, source))
+                    .unwrap_or_default()
+                {
+                    match key.as_str() {
+                        "only" => rule.only = Some(string_list(value, source)),
+                        "except" => rule.except = Some(string_list(value, source)),
+                        _ => {}
+                    }
+                }
+                // `ControllerMiddlewareOptions` writes through to the same
+                // options array, so a chained call replaces the option.
+                let mut cur = node;
+                while let Some(parent) = cur
+                    .parent()
+                    .filter(|p| p.kind() == "member_call_expression")
+                    .filter(|p| p.child_by_field_name("object") == Some(cur))
+                {
+                    match call_name(parent, source) {
+                        Some("only") => rule.only = Some(variadic_list(parent, source)),
+                        Some("except") => rule.except = Some(variadic_list(parent, source)),
+                        _ => {}
+                    }
+                    cur = parent;
+                }
+                if !rule.names.is_empty() {
+                    push_middleware_record(out, FROM_CONSTRUCTOR, node, rule);
+                }
+            }
+            "scoped_call_expression"
+                if call_name(node, source)
+                    .is_some_and(|name| name.eq_ignore_ascii_case("__construct"))
+                    && node
+                        .child_by_field_name("scope")
+                        .and_then(|scope| scope.utf8_text(source).ok())
+                        .is_some_and(|scope| scope.eq_ignore_ascii_case("parent")) =>
+            {
+                push_middleware_record(out, CALLS_PARENT_CONSTRUCTOR, node, MiddlewareRule::none());
+            }
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+}
+
+/// The entries of each array a `return` statement of `block` returns, past
+/// nested functions, whose returns are not the method's.
+fn returned_entries(block: Node) -> Vec<Node> {
+    let mut entries = Vec::new();
+    let mut stack = vec![block];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "anonymous_function" | "arrow_function" | "function_definition" => continue,
+            "return_statement" => {
+                if let Some(array) = node
+                    .named_child(0)
+                    .filter(|n| n.kind() == "array_creation_expression")
+                {
+                    entries.extend(array_values(array));
+                }
+                continue;
+            }
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.named_children(&mut cursor));
+    }
+    entries
+}
+
+/// One entry of a static `middleware()` array: `'auth'`, `Ensure::class`,
+/// or `new Middleware('auth', only: [...], except: [...])` with
+/// `->only(...)` / `->except(...)` chained on it.
+fn middleware_entry(entry: Node, source: &[u8]) -> Option<MiddlewareRule> {
+    match entry.kind() {
+        "parenthesized_expression" => middleware_entry(entry.named_child(0)?, source),
+        "member_call_expression" => {
+            let mut rule = middleware_entry(entry.child_by_field_name("object")?, source)?;
+            match call_name(entry, source) {
+                Some("only") => rule.only = Some(first_list(entry, source)),
+                Some("except") => rule.except = Some(first_list(entry, source)),
+                _ => {}
+            }
+            Some(rule)
+        }
+        "object_creation_expression" => {
+            let mut cursor = entry.walk();
+            let children: Vec<Node> = entry.named_children(&mut cursor).collect();
+            let class = children.first()?.utf8_text(source).ok()?;
+            if class.rsplit('\\').next() != Some("Middleware") {
+                return None;
+            }
+            let list = children.iter().find(|n| n.kind() == "arguments")?;
+            let mut cursor = list.walk();
+            let arguments: Vec<Node> = list
+                .named_children(&mut cursor)
+                .filter(|n| n.kind() == "argument")
+                .collect();
+            let mut rule = MiddlewareRule::none();
+            for (position, argument) in arguments.into_iter().enumerate() {
+                let label = argument
+                    .child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source).ok());
+                let Some(value) = argument_value(argument) else {
+                    continue;
+                };
+                // `null` leaves the filter unset: `?array $only = null`.
+                let methods = || (value.kind() != "null").then(|| string_list(value, source));
+                match (label, position) {
+                    (Some("middleware"), _) | (None, 0) => rule.names = string_list(value, source),
+                    (Some("only"), _) | (None, 1) => rule.only = methods(),
+                    (Some("except"), _) | (None, 2) => rule.except = methods(),
+                    _ => {}
+                }
+            }
+            (!rule.names.is_empty()).then_some(rule)
+        }
+        _ => {
+            let names = string_list(entry, source);
+            (!names.is_empty()).then(|| MiddlewareRule {
+                names,
+                ..MiddlewareRule::none()
+            })
+        }
     }
 }

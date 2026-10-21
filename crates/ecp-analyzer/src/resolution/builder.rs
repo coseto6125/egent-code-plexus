@@ -288,9 +288,10 @@ impl GraphBuilder {
         let ExtractedRoutes {
             edges: route_edges,
             emitted: emitted_routes,
-            middleware: route_middleware,
+            middleware: mut route_middleware,
             actions: controller_actions,
             laravel,
+            blind_spots: route_blind_spots,
         } = pass1_5_extract_routes(
             &self.local_graphs,
             &files,
@@ -373,6 +374,7 @@ impl GraphBuilder {
             &entry_edges,
             &mut string_pool,
             &mut nodes,
+            &mut route_middleware,
         );
         let alias_table = record_path_aliases(&self.path_aliases, &mut string_pool);
         if prof {
@@ -435,6 +437,7 @@ impl GraphBuilder {
         // was moved into ZeroCopyGraph). BlindSpotRecord StrRefs are already valid
         // because `string_pool` was borrowed mutably in Pass 1 when they were pushed.
         all_blind_spots.extend(collision_blind_spots);
+        all_blind_spots.extend(route_blind_spots);
 
         if prof {
             eprintln!(
@@ -1333,6 +1336,10 @@ struct PendingAction {
     route_name: String,
     action: String,
     namespace: Option<String>,
+    /// The route-file middleware the Route node carries, and the names its
+    /// groups remove, which the controller's middleware joins.
+    middleware: Vec<String>,
+    excluded: Vec<String>,
 }
 
 /// What Pass 1.5 hands on.
@@ -1344,6 +1351,8 @@ struct ExtractedRoutes {
     /// Bound after Pass 1.9 by [`pass1_95_controller_actions`].
     actions: Vec<PendingAction>,
     laravel: LaravelRoutes,
+    /// Route files whose routes lost Laravel include scopes to the cap.
+    blind_spots: Vec<BlindSpotRecord>,
 }
 
 /// Pass 1.5: Extract Routes.
@@ -1426,28 +1435,43 @@ fn pass1_5_extract_routes(
         }
 
         for raw_route in &local_graph.routes {
-            if raw_route.method == RawRoute::INCLUDE {
+            if raw_route.method == RawRoute::INCLUDE
+                || raw_route.method == RawRoute::CONTROLLER_MIDDLEWARE
+            {
                 continue;
             }
             let Some(detected) = crate::route_detector::detect_from_call(raw_route) else {
                 continue;
             };
             let promoted = match raw_route.scope.as_deref() {
-                Some(scope) => laravel.promote(file_idx, scope, &detected.path),
+                Some(scope) => laravel.promote(
+                    file_idx,
+                    scope,
+                    &detected.path,
+                    raw_route.handler.as_deref(),
+                ),
                 None => vec![crate::php::laravel_routes::PromotedRoute {
                     path: detected.path.clone(),
                     middleware: Vec::new(),
+                    excluded: Vec::new(),
                     namespace: None,
+                    action: raw_route.handler.clone(),
                 }],
             };
-            // Two including groups can give one route the same path; one
-            // Route node stands for both, the first group's middleware kept.
-            let mut names: Vec<String> = Vec::with_capacity(promoted.len());
-            for route in promoted {
-                let route_name = format!("{} {}", detected.method, route.path);
-                if names.contains(&route_name) {
+            // Two including groups can give one route the same path. Laravel's
+            // `RouteCollection` keeps the route registered last for a method
+            // and URI, so one Route node stands for both with the last
+            // group's middleware. Include scopes come in the source order of
+            // the including calls, which is the registration order within one
+            // provider file only.
+            let last_of_path: Vec<bool> = (0..promoted.len())
+                .map(|i| promoted[i + 1..].iter().all(|r| r.path != promoted[i].path))
+                .collect();
+            for (route, last) in promoted.into_iter().zip(last_of_path) {
+                if !last {
                     continue;
                 }
+                let route_name = format!("{} {}", detected.method, route.path);
 
                 let route_idx = nodes.len() as u32;
                 nodes.push(Node {
@@ -1467,13 +1491,15 @@ fn pass1_5_extract_routes(
                 // file; inline arrow functions are not captured. A route with
                 // a group scope names a controller action (`Ctrl@method`) in
                 // any file instead, bound once heritage is resolved.
-                match (raw_route.handler.as_deref(), raw_route.scope.is_some()) {
+                match (route.action.as_deref(), raw_route.scope.is_some()) {
                     (None, _) => {}
                     (Some(action), true) => actions.push(PendingAction {
                         route: route_idx,
                         route_name: route_name.clone(),
                         action: action.to_string(),
                         namespace: route.namespace.clone(),
+                        middleware: route.middleware.clone(),
+                        excluded: route.excluded.clone(),
                     }),
                     (Some(handler_name), false) => {
                         if let Some(handler) = symbol_table.lookup_in_file(&path_str, handler_name)
@@ -1488,7 +1514,6 @@ fn pass1_5_extract_routes(
                         }
                     }
                 }
-                names.push(route_name);
 
                 if !route.middleware.is_empty() {
                     route_middleware.push(RouteMiddleware {
@@ -1505,12 +1530,30 @@ fn pass1_5_extract_routes(
             }
         }
     }
+    let blind_spots: Vec<BlindSpotRecord> = laravel
+        .capped_includes()
+        .iter()
+        .map(|capped| {
+            let graph = &local_graphs[capped.file_idx as usize];
+            BlindSpotRecord {
+                kind: string_pool.add(crate::php::laravel_routes::BS_KIND_INCLUDE_SCOPE_CAP),
+                file_path: string_pool.add(&graph.file_path.to_string_lossy().replace('\\', "/")),
+                start_row: 0,
+                start_col: 0,
+                end_row: 0,
+                end_col: 0,
+                hint: string_pool.add(&capped.hint()),
+                is_test: matches!(files[capped.file_idx as usize].category, FileCategory::Test),
+            }
+        })
+        .collect();
     ExtractedRoutes {
         edges: route_edges,
         emitted: emitted_routes,
         middleware: route_middleware,
         actions,
         laravel,
+        blind_spots,
     }
 }
 
@@ -1528,6 +1571,12 @@ const MAX_ENTRY_REASONS: usize = 8;
 /// Each bound method also gets the `EntryPoint` marker Pass 1.7 gives a
 /// same-file route handler, in the method's own file. Pass 1.7 cannot see
 /// it: the route and the method are in different files.
+///
+/// The middleware the controller registers for the bound method joins the
+/// route's `route_middleware` after the route-file middleware, each name
+/// once and none the route's groups remove, as Laravel's
+/// `Route::gatherMiddleware` and `Router::resolveMiddleware` compose them.
+#[allow(clippy::too_many_arguments)]
 fn pass1_95_controller_actions(
     laravel: &LaravelRoutes,
     actions: &[PendingAction],
@@ -1536,6 +1585,7 @@ fn pass1_95_controller_actions(
     entry_edges: &[Edge],
     string_pool: &mut StringPool,
     nodes: &mut Vec<Node>,
+    route_middleware: &mut Vec<RouteMiddleware>,
 ) -> Vec<Edge> {
     let mut edges = Vec::new();
     // Handler → (best confidence, reasons), in first-bound order.
@@ -1561,6 +1611,26 @@ fn pass1_95_controller_actions(
             confidence,
             reason: string_pool.add(reason),
         });
+        let mut middleware = pending.middleware.clone();
+        for name in &found.middleware {
+            if !middleware.contains(name) && !pending.excluded.contains(name) {
+                middleware.push(name.clone());
+            }
+        }
+        if middleware.len() > pending.middleware.len() {
+            let entry = RouteMiddleware {
+                node_idx: pending.route,
+                middleware: middleware
+                    .iter()
+                    .map(|name| string_pool.add(name))
+                    .collect(),
+            };
+            // Sorted by node index: `route_middleware_of` binary-searches it.
+            match route_middleware.binary_search_by_key(&pending.route, |e| e.node_idx) {
+                Ok(at) => route_middleware[at] = entry,
+                Err(at) => route_middleware.insert(at, entry),
+            }
+        }
         match entry_of.get(&found.node) {
             Some(&slot) => {
                 let (_, best, reasons) = &mut entries[slot];
@@ -1798,8 +1868,12 @@ fn pass1_6_fetch_shapes(
                     // Route side also normalized via `:*`; the index key carries
                     // `:*` segments whenever the route had a param placeholder.
                     let route_templated = norm_url.contains(":*");
-                    if let Some(targets) = route_index.get(&(client_method.clone(), norm_url)) {
-                        for &route_idx in targets {
+                    // A Laravel `ANY` route answers each verb `Route::any` registers.
+                    let any = (client_method != "ANY"
+                        && crate::route_detector::any_route_answers(client_method))
+                    .then(|| ("ANY".to_string(), norm_url.clone()));
+                    for key in std::iter::once((client_method.clone(), norm_url)).chain(any) {
+                        for &route_idx in route_index.get(&key).into_iter().flatten() {
                             matched.push((route_idx, client_templated || route_templated));
                         }
                     }

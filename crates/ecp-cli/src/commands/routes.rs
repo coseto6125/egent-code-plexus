@@ -148,9 +148,11 @@ fn list_routes(
 }
 
 /// Whether a route of `method` answers a `--method` filter. An `ANY` route
-/// (Laravel `Route::any`) answers every verb.
+/// (Laravel `Route::any`) answers each verb Laravel registers it for.
 fn method_matches(method: &str, wanted: Option<&str>) -> bool {
-    wanted.is_none_or(|want| method == want || method == "ANY")
+    wanted.is_none_or(|want| {
+        method == want || (method == "ANY" && ecp_analyzer::route_detector::any_route_answers(want))
+    })
 }
 
 /// When one row has a `middleware` array, give every other row an empty

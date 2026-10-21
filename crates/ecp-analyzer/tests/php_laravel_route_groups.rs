@@ -9,7 +9,11 @@
 //! resolved heritage, and each bound method gets an `EntryPoint`.
 //! `Route::resource` / `apiResource` / `match` / `any` register their
 //! routes, and a route file without a framework import counts only when an
-//! importing file loads it.
+//! importing file loads it. `withoutMiddleware` / `excluded_middleware`
+//! remove middleware by exact name, a controller's own middleware
+//! (`$this->middleware` with `only` / `except`, static `HasMiddleware`)
+//! joins the routes its actions handle, and a group's controller reaches an
+//! included file's bare actions.
 
 use ecp_analyzer::php::parser::PhpProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
@@ -397,7 +401,9 @@ Route::controller(OrderController::class)->group(function () {
     let expected = [
         ("/a", Some("UserController@index")),
         ("/b", Some("\\App\\Http\\Controllers\\UserController@show")),
-        ("/c", Some("ShowDashboard@__invoke")),
+        // No group in the file sets a controller, so an including group's
+        // controller may still name a method: the builder completes it.
+        ("/c", Some("ShowDashboard")),
         ("/d", Some("\\App\\Http\\Controllers\\UserController@edit")),
         ("/e", None),
         ("/f", Some("OrderController@list")),
@@ -922,7 +928,9 @@ fn test_build_route_file_included_by_two_groups_emits_route_under_each() {
 }
 
 /// Two groups with the same prefix give one path; one Route node stands
-/// for both, carrying the first group's middleware.
+/// for both. Laravel's `RouteCollection::addToCollections` keys routes by
+/// method and URI, so the route registered last replaces the first: the
+/// node carries the last group's middleware.
 #[test]
 fn test_build_two_includes_with_same_prefix_emit_one_route() {
     let provider = routes_file(
@@ -937,7 +945,7 @@ fn test_build_two_includes_with_same_prefix_emit_one_route() {
         ),
     ]);
     assert_eq!(route_names(&graph), ["GET /v1/items"]);
-    assert_eq!(middleware(&graph, "GET /v1/items"), ["api"]);
+    assert_eq!(middleware(&graph, "GET /v1/items"), ["web"]);
 }
 
 #[test]
@@ -1336,4 +1344,616 @@ fn test_build_unbound_action_marks_no_entry_point() {
         FILE_CONTROLLER,
     ]);
     assert!(entry_points(&graph).is_empty());
+}
+
+// ── Review fixes: include depth, removed middleware, controller middleware ─
+
+/// `dirname(__DIR__, n)` outside PHP's 1.. range, or past 64 levels in all,
+/// names no route file; an unchecked count overflowed the path built from
+/// it (`capacity overflow`) or allocated gigabytes. Any PHP file reaches it.
+#[test]
+fn test_parse_file_dirname_levels_outside_1_to_64_emits_no_include() {
+    let src = r#"<?php
+require dirname(__DIR__, 18446744073709551615) . "/x.php";
+require dirname(__DIR__, 1000000000) . "/x.php";
+require dirname(__DIR__, 0) . "/x.php";
+require dirname(dirname(__DIR__, 64), 1) . "/x.php";
+require dirname(__DIR__, 2) . "/ok.php";
+"#;
+    let includes: Vec<RouteInclude> = parse("app/boom.php", src)
+        .into_iter()
+        .filter_map(|r| r.scope?.include)
+        .collect();
+    assert_eq!(includes, [RouteInclude::FileDir("../../ok.php".into())]);
+}
+
+#[test]
+fn test_parse_file_without_middleware_calls_record_excluded_middleware() {
+    let src = routes_file(
+        "Route::withoutMiddleware('a')->withoutMiddleware(['b'])->group(function () {
+            Route::get('/x', 'C@m')->withoutMiddleware('c');
+        });
+        Route::group(['excluded_middleware' => ['d'], 'withoutMiddleware' => 'e'], function () {
+            Route::get('/y', 'C@m');
+        });",
+    );
+    let excluded: Vec<(String, Vec<String>)> = parse("routes/web.php", &src)
+        .into_iter()
+        .map(|r| (r.path, r.scope.unwrap().excluded_middleware))
+        .collect();
+    // `Router::group` reads only `excluded_middleware` from an option
+    // array; `withoutMiddleware` is a `RouteRegistrar` method name.
+    assert_eq!(
+        excluded,
+        [
+            ("/x".to_string(), vec!["a".into(), "b".into(), "c".into()]),
+            ("/y".to_string(), vec!["d".into()]),
+        ]
+    );
+}
+
+#[test]
+fn test_parse_file_variadic_middleware_call_records_every_argument() {
+    let src = routes_file(
+        "Route::middleware('a', 'b')->group(function () {
+            Route::get('/x', 'C@m')->middleware('c', 'd');
+        });",
+    );
+    let routes = parse("routes/web.php", &src);
+    assert_eq!(
+        routes[0].scope.as_deref().unwrap().middleware,
+        ["a", "b", "c", "d"]
+    );
+}
+
+const HOOK_PROVIDER: (&str, &str) = (
+    "app/Providers/RouteServiceProvider.php",
+    r#"<?php
+namespace App\Providers;
+use Illuminate\Support\Facades\Route;
+class RouteServiceProvider {
+    protected $namespace = 'App\Http\Controllers';
+    public function map() {
+        Route::prefix('api')->middleware('api')->namespace($this->namespace)->group(base_path('routes/api.php'));
+        Route::middleware('web')->namespace($this->namespace)->group(base_path('routes/legacy.php'));
+    }
+}
+"#,
+);
+
+const HOOK_CONTROLLER: (&str, &str) = (
+    "app/Http/Controllers/HookController.php",
+    r#"<?php
+namespace App\Http\Controllers;
+class HookController {
+    public function handle() {}
+    public function me() {}
+}
+"#,
+);
+
+/// A route's `->withoutMiddleware('auth')` removes the group's `auth`:
+/// Laravel runs `/api/hook` with `api` only.
+#[test]
+fn test_build_route_without_middleware_drops_group_middleware() {
+    let api = routes_file(
+        "Route::middleware('auth')->group(function () {
+            Route::post('/hook', 'HookController@handle')->withoutMiddleware('auth');
+            Route::get('/me', 'HookController@me');
+        });",
+    );
+    let graph = graph(&[
+        HOOK_PROVIDER,
+        ("routes/api.php", api.as_str()),
+        HOOK_CONTROLLER,
+    ]);
+    assert_eq!(middleware(&graph, "POST /api/hook"), ["api"]);
+    assert_eq!(middleware(&graph, "GET /api/me"), ["api", "auth"]);
+}
+
+/// A group in the included file removes the including group's middleware;
+/// a `withoutMiddleware` option key removes nothing.
+#[test]
+fn test_build_group_excluded_middleware_drops_include_middleware() {
+    let api = routes_file(
+        "Route::withoutMiddleware('api')->group(function () {
+            Route::get('/open', 'HookController@me');
+        });
+        Route::group(['excluded_middleware' => ['api']], function () {
+            Route::get('/also-open', 'HookController@me');
+        });
+        Route::group(['withoutMiddleware' => 'api'], function () {
+            Route::get('/closed', 'HookController@me');
+        });",
+    );
+    let graph = graph(&[
+        HOOK_PROVIDER,
+        ("routes/api.php", api.as_str()),
+        HOOK_CONTROLLER,
+    ]);
+    assert!(middleware(&graph, "GET /api/open").is_empty());
+    assert!(middleware(&graph, "GET /api/also-open").is_empty());
+    assert_eq!(middleware(&graph, "GET /api/closed"), ["api"]);
+}
+
+/// Laravel matches a removed name exactly once both resolve to classes:
+/// `auth:admin` resolves to `Authenticate:admin`, `auth` to
+/// `Authenticate`, so `withoutMiddleware('auth')` keeps `auth:admin`.
+#[test]
+fn test_build_without_middleware_bare_name_keeps_parameterized_middleware() {
+    let src = routes_file(
+        "Route::middleware(['auth:admin', 'auth'])->group(function () {
+            Route::get('/x', 'C@m')->withoutMiddleware('auth');
+        });",
+    );
+    let graph = graph(&[("routes/web.php", src.as_str())]);
+    assert_eq!(middleware(&graph, "GET /x"), ["auth:admin"]);
+}
+
+#[test]
+fn test_build_middleware_named_twice_listed_once() {
+    let src = routes_file(
+        "Route::middleware('auth')->group(function () {
+            Route::get('/x', 'C@m')->middleware('auth');
+        });",
+    );
+    let graph = graph(&[("routes/web.php", src.as_str())]);
+    assert_eq!(middleware(&graph, "GET /x"), ["auth"]);
+}
+
+/// A route file that imports the global `Route` facade alias (`use Route;`)
+/// calls the router itself, so a loading provider keeps its routes.
+#[test]
+fn test_build_global_route_alias_import_keeps_loaded_routes() {
+    let legacy = "<?php\nuse Route;\nRoute::get('/legacy', 'HookController@me');\n";
+    let graph = graph(&[
+        HOOK_PROVIDER,
+        ("routes/legacy.php", legacy),
+        HOOK_CONTROLLER,
+    ]);
+    assert_eq!(route_names(&graph), ["GET /legacy"]);
+    assert_eq!(middleware(&graph, "GET /legacy"), ["web"]);
+}
+
+/// `use App\Support\Route;` binds `Route` to the app's own class.
+#[test]
+fn test_parse_file_namespaced_route_import_emits_no_route() {
+    let src = "<?php\nuse App\\Support\\Route;\nRoute::get('/x', 'C@m');\n";
+    assert!(parse("routes/web.php", src).is_empty());
+}
+
+/// `use Foo as Route;` binds `Route` to another class: no router call.
+#[test]
+fn test_parse_file_global_class_renamed_route_emits_no_route() {
+    let src = "<?php\nuse Foo as Route;\nRoute::get('/x', 'C@m');\n";
+    assert!(parse("routes/web.php", src).is_empty());
+}
+
+/// `Route::controller(C::class)->group(<file>)`: a bare action of the
+/// included file names a method of `C`.
+#[test]
+fn test_build_group_controller_reaches_included_file_bare_action() {
+    let provider = r#"<?php
+namespace App\Providers;
+use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\HookController;
+class RouteServiceProvider {
+    public function map() {
+        Route::controller(HookController::class)->prefix('hooks')->group(base_path('routes/hooks.php'));
+    }
+}
+"#;
+    let hooks = routes_file("Route::post('/run', 'handle');");
+    let graph = graph(&[
+        ("app/Providers/RouteServiceProvider.php", provider),
+        ("routes/hooks.php", hooks.as_str()),
+        HOOK_CONTROLLER,
+    ]);
+    assert_eq!(
+        handlers(&graph, "POST /hooks/run"),
+        [handler(
+            HOOK_CONTROLLER.0,
+            "HookController",
+            "handle",
+            "controller-action"
+        )]
+    );
+}
+
+/// Laravel's `prependGroupNamespace` leaves an action that already starts
+/// with the group namespace as written.
+#[test]
+fn test_build_qualified_action_under_group_namespace_binds_without_second_prefix() {
+    let src = routes_file(
+        "Route::namespace('App\\Http\\Controllers')->group(function () {
+            Route::get('/u', 'App\\Http\\Controllers\\UserController@index');
+        });",
+    );
+    let graph = graph(&[
+        ("routes/web.php", src.as_str()),
+        USER_CONTROLLER,
+        ADMIN_USER_CONTROLLER,
+    ]);
+    assert_eq!(
+        handlers(&graph, "GET /u"),
+        [handler(
+            USER_CONTROLLER.0,
+            "UserController",
+            "index",
+            "controller-action"
+        )]
+    );
+}
+
+/// With no namespace in scope, a class name equal to one class's fully
+/// qualified name pins that class at full confidence.
+#[test]
+fn test_build_qualified_action_without_namespace_binds_exact_class() {
+    let src = routes_file("Route::get('/u', 'App\\Http\\Controllers\\UserController@index');");
+    let graph = graph(&[
+        ("routes/web.php", src.as_str()),
+        USER_CONTROLLER,
+        ADMIN_USER_CONTROLLER,
+    ]);
+    assert_eq!(
+        handlers(&graph, "GET /u"),
+        [handler(
+            USER_CONTROLLER.0,
+            "UserController",
+            "index",
+            "controller-action"
+        )]
+    );
+    let target = route_idx(&graph, "GET /u") as u32;
+    let edge = graph
+        .edges
+        .iter()
+        .find(|e| e.rel_type == RelType::HandlesRoute && e.target == target)
+        .unwrap();
+    assert_eq!(edge.confidence, 1.0);
+}
+
+/// More include scopes than the cap reach a file: the routes under the
+/// dropped scopes have no Route node, and a BlindSpot says so.
+#[test]
+fn test_build_include_scopes_past_cap_record_blind_spot() {
+    let provider = routes_file(
+        &(1..=17)
+            .map(|n| format!("Route::prefix('p{n}')->group(base_path('routes/api.php'));"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let graph = graph(&[
+        ("app/Providers/RouteServiceProvider.php", provider.as_str()),
+        (
+            "routes/api.php",
+            routes_file("Route::get('/x', 'C@m');").as_str(),
+        ),
+    ]);
+    assert_eq!(route_names(&graph).len(), 16);
+    let spots: Vec<(&str, &str)> = graph
+        .blind_spots
+        .iter()
+        .map(|bs| {
+            (
+                bs.kind.resolve(&graph.string_pool),
+                bs.file_path.resolve(&graph.string_pool),
+            )
+        })
+        .filter(|(kind, _)| *kind == "laravel-include-scope-cap")
+        .collect();
+    assert_eq!(spots, [("laravel-include-scope-cap", "routes/api.php")]);
+    let hint = graph
+        .blind_spots
+        .iter()
+        .find(|bs| bs.kind.resolve(&graph.string_pool) == "laravel-include-scope-cap")
+        .map(|bs| bs.hint.resolve(&graph.string_pool))
+        .unwrap();
+    assert!(hint.starts_with("1 more include scopes"), "{hint}");
+}
+
+#[test]
+fn test_build_include_scopes_within_cap_record_no_blind_spot() {
+    let graph = graph(&[PROVIDER, ADMIN_ROUTES]);
+    assert!(graph
+        .blind_spots
+        .iter()
+        .all(|bs| bs.kind.resolve(&graph.string_pool) != "laravel-include-scope-cap"));
+}
+
+const ADMIN_PROVIDER: (&str, &str) = (
+    "app/Providers/RouteServiceProvider.php",
+    r#"<?php
+namespace App\Providers;
+use Illuminate\Support\Facades\Route;
+class RouteServiceProvider {
+    protected $namespace = 'App\Http\Controllers';
+    public function map() {
+        Route::prefix('admin')->middleware('api')->namespace($this->namespace)->group(base_path('routes/admin.php'));
+    }
+}
+"#,
+);
+
+/// The client case: `AuthController`'s constructor guards every action but
+/// the `except` list with `auth:admin`.
+#[test]
+fn test_build_constructor_middleware_except_skips_listed_actions() {
+    let controller = r#"<?php
+namespace App\Http\Controllers;
+class AuthController extends Controller
+{
+    public function __construct()
+    {
+        $this->middleware('auth:admin', ['except' => ['login', 'login2', 'logintest']]);
+    }
+    public function login2() {}
+    public function getSidebarMenus() {}
+}
+"#;
+    let routes = routes_file(
+        "Route::post('/login', 'AuthController@login2');
+        Route::get('/user-menus', 'AuthController@getSidebarMenus');",
+    );
+    let graph = graph(&[
+        ADMIN_PROVIDER,
+        ("routes/admin.php", routes.as_str()),
+        ("app/Http/Controllers/AuthController.php", controller),
+    ]);
+    assert_eq!(middleware(&graph, "POST /admin/login"), ["api"]);
+    assert_eq!(
+        middleware(&graph, "GET /admin/user-menus"),
+        ["api", "auth:admin"]
+    );
+}
+
+#[test]
+fn test_build_constructor_middleware_chained_only_except_select_actions() {
+    let controller = r#"<?php
+namespace App\Http\Controllers;
+class PostController
+{
+    public function __construct()
+    {
+        $this->middleware('log')->only('index');
+        $this->middleware(['throttle', 'verified'])->except(['index']);
+    }
+    public function index() {}
+    public function show() {}
+}
+"#;
+    let routes = routes_file(
+        "Route::get('/posts', 'PostController@index');
+        Route::get('/posts/{post}', 'PostController@show');",
+    );
+    let graph = graph(&[
+        ADMIN_PROVIDER,
+        ("routes/admin.php", routes.as_str()),
+        ("app/Http/Controllers/PostController.php", controller),
+    ]);
+    assert_eq!(middleware(&graph, "GET /admin/posts"), ["api", "log"]);
+    assert_eq!(
+        middleware(&graph, "GET /admin/posts/{post}"),
+        ["api", "throttle", "verified"]
+    );
+}
+
+/// A `HasMiddleware` controller's static `middleware()` decides; Laravel
+/// then reads no constructor middleware.
+#[test]
+fn test_build_has_middleware_static_entries_follow_only_and_except() {
+    let controller = r#"<?php
+namespace App\Http\Controllers;
+use Illuminate\Routing\Controllers\HasMiddleware;
+use Illuminate\Routing\Controllers\Middleware;
+class PostController implements HasMiddleware
+{
+    public function __construct()
+    {
+        $this->middleware('ignored');
+    }
+    public static function middleware(): array
+    {
+        return [
+            'auth',
+            new Middleware('log', only: ['index']),
+            (new Middleware('subscribed'))->except('index'),
+            new Middleware(['a', 'b'], null, ['index']),
+        ];
+    }
+    public function index() {}
+    public function show() {}
+}
+"#;
+    let routes = routes_file(
+        "Route::get('/posts', 'PostController@index');
+        Route::get('/posts/{post}', 'PostController@show');",
+    );
+    let graph = graph(&[
+        ADMIN_PROVIDER,
+        ("routes/admin.php", routes.as_str()),
+        ("app/Http/Controllers/PostController.php", controller),
+    ]);
+    assert_eq!(
+        middleware(&graph, "GET /admin/posts"),
+        ["api", "auth", "log"]
+    );
+    assert_eq!(
+        middleware(&graph, "GET /admin/posts/{post}"),
+        ["api", "auth", "subscribed", "a", "b"]
+    );
+}
+
+const BASE_ADMIN_CONTROLLER: (&str, &str) = (
+    "app/Http/Controllers/AdminController.php",
+    r#"<?php
+namespace App\Http\Controllers;
+class AdminController
+{
+    public function __construct()
+    {
+        $this->middleware('auth:admin');
+    }
+}
+"#,
+);
+
+/// PHP runs the nearest declared constructor; a parent's runs only when the
+/// child has none or calls `parent::__construct()`.
+#[test]
+fn test_build_parent_constructor_middleware_follows_php_constructor_rules() {
+    let inherits = r#"<?php
+namespace App\Http\Controllers;
+class ReportController extends AdminController
+{
+    public function index() {}
+}
+"#;
+    let calls_parent = r#"<?php
+namespace App\Http\Controllers;
+class ExportController extends AdminController
+{
+    public function __construct()
+    {
+        parent::__construct();
+        $this->middleware('log');
+    }
+    public function index() {}
+}
+"#;
+    let skips_parent = r#"<?php
+namespace App\Http\Controllers;
+class OpenController extends AdminController
+{
+    public function __construct()
+    {
+        $this->middleware('log');
+    }
+    public function index() {}
+}
+"#;
+    let routes = routes_file(
+        "Route::get('/reports', 'ReportController@index');
+        Route::get('/exports', 'ExportController@index');
+        Route::get('/open', 'OpenController@index');",
+    );
+    let graph = graph(&[
+        ADMIN_PROVIDER,
+        ("routes/admin.php", routes.as_str()),
+        BASE_ADMIN_CONTROLLER,
+        ("app/Http/Controllers/ReportController.php", inherits),
+        ("app/Http/Controllers/ExportController.php", calls_parent),
+        ("app/Http/Controllers/OpenController.php", skips_parent),
+    ]);
+    assert_eq!(
+        middleware(&graph, "GET /admin/reports"),
+        ["api", "auth:admin"]
+    );
+    assert_eq!(
+        middleware(&graph, "GET /admin/exports"),
+        ["api", "auth:admin", "log"]
+    );
+    assert_eq!(middleware(&graph, "GET /admin/open"), ["api", "log"]);
+}
+
+/// Laravel removes excluded middleware after it adds the controller's, and
+/// lists a name the route already has once.
+#[test]
+fn test_build_controller_middleware_respects_route_exclusion_and_duplicates() {
+    let controller = r#"<?php
+namespace App\Http\Controllers;
+class PostController
+{
+    public function __construct()
+    {
+        $this->middleware(['api', 'auth', 'log']);
+    }
+    public function index() {}
+}
+"#;
+    let routes =
+        routes_file("Route::get('/posts', 'PostController@index')->withoutMiddleware('auth');");
+    let graph = graph(&[
+        ADMIN_PROVIDER,
+        ("routes/admin.php", routes.as_str()),
+        ("app/Http/Controllers/PostController.php", controller),
+    ]);
+    assert_eq!(middleware(&graph, "GET /admin/posts"), ["api", "log"]);
+}
+
+/// A controller middleware closure has no name and adds nothing; a route
+/// whose action binds nothing gets no controller middleware.
+#[test]
+fn test_build_controller_middleware_closure_or_unbound_action_adds_nothing() {
+    let controller = r#"<?php
+namespace App\Http\Controllers;
+class PostController
+{
+    public function __construct()
+    {
+        $this->middleware(function ($request, $next) { return $next($request); });
+    }
+    public function index() {}
+}
+"#;
+    let routes = routes_file(
+        "Route::get('/posts', 'PostController@index');
+        Route::get('/missing', 'PostController@missing');",
+    );
+    let graph = graph(&[
+        ADMIN_PROVIDER,
+        ("routes/admin.php", routes.as_str()),
+        ("app/Http/Controllers/PostController.php", controller),
+    ]);
+    assert_eq!(middleware(&graph, "GET /admin/posts"), ["api"]);
+    assert_eq!(middleware(&graph, "GET /admin/missing"), ["api"]);
+}
+
+/// A controller-middleware record is no endpoint and no entry point.
+#[test]
+fn test_build_controller_middleware_record_emits_no_route_or_entry_point() {
+    let controller = r#"<?php
+namespace App\Http\Controllers;
+use Illuminate\Support\Facades\Route;
+class PostController
+{
+    public function __construct()
+    {
+        $this->middleware('auth');
+    }
+    public function index() {}
+}
+"#;
+    let graph = graph(&[("app/Http/Controllers/PostController.php", controller)]);
+    assert!(route_names(&graph).is_empty());
+    assert!(entry_points(&graph).is_empty());
+}
+
+/// A client `fetch` of any verb `Route::any` registers reaches the `ANY`
+/// route; a verb it does not register does not.
+#[test]
+fn test_build_fetch_reaches_any_route_for_laravel_verb_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let client = "async function load() {\n  await fetch('/ping', { method: 'POST' });\n  await fetch('/pong', { method: 'TRACE' });\n}\n";
+    std::fs::write(tmp.path().join("client.ts"), client).unwrap();
+    let routes = routes_file("Route::any('/ping', 'C@m');\nRoute::any('/pong', 'C@m');");
+    let php = PhpProvider::new().unwrap();
+    let ts = ecp_analyzer::typescript::parser::TypeScriptProvider::new().unwrap();
+    let mut builder = GraphBuilder::new().with_repo_root(tmp.path().to_path_buf());
+    builder.add_graph(
+        php.parse_file(Path::new("routes/web.php"), routes.as_bytes())
+            .unwrap(),
+    );
+    builder.add_graph(
+        ts.parse_file(Path::new("client.ts"), client.as_bytes())
+            .unwrap(),
+    );
+    let graph = builder.build();
+    let fetched: Vec<&str> = graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::Fetches)
+        .map(|e| name(&graph, e.target as usize))
+        .collect();
+    assert_eq!(fetched, ["ANY /ping"]);
 }

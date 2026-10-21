@@ -374,8 +374,20 @@ impl RawRoute {
     /// `Route::prefix('admin')->group(base_path('routes/admin.php'))`. It is
     /// not an endpoint: `path` holds the group prefix (empty for none), and
     /// the builder applies the record's prefix, middleware and namespace to
-    /// every route of the included file.
+    /// every route of the included file. `handler` holds the group's
+    /// controller (`Route::controller(C::class)->group(...)`), whose method a
+    /// bare action string in the included file names.
     pub const INCLUDE: &'static str = "INCLUDE";
+
+    /// `method` of a Laravel controller-middleware record. It is not an
+    /// endpoint: the builder adds its middleware to each route whose action
+    /// binds a method of the class that declares it. `path` says where the
+    /// class registers it: `__construct` (`$this->middleware('auth')`),
+    /// `middleware` (an entry of the static `HasMiddleware::middleware()`),
+    /// or `parent::__construct` for a constructor that runs its parent's,
+    /// which carries no middleware. `scope.only` / `scope.except` hold the
+    /// method filter.
+    pub const CONTROLLER_MIDDLEWARE: &'static str = "CONTROLLER_MIDDLEWARE";
 }
 
 /// The group scope of one [`RawRoute`], as far as its own file shows it.
@@ -395,6 +407,18 @@ pub struct RawRouteScope {
     /// global `Route` facade alias does. Its records count only when a file
     /// that imports one loads it, directly or through other route files.
     pub needs_include: bool,
+    /// Middleware removed again: the route's `->withoutMiddleware('auth')`,
+    /// a group's `Route::withoutMiddleware(...)` or `'excluded_middleware'`
+    /// option. Laravel drops each name from the composed list, controller
+    /// middleware included, by exact string match.
+    pub excluded_middleware: Vec<String>,
+    /// The controller methods a [`RawRoute::CONTROLLER_MIDDLEWARE`] record
+    /// applies to (`['only' => [...]]`, `->only(...)`); `None` for every
+    /// method.
+    pub only: Option<Vec<String>>,
+    /// The controller methods a [`RawRoute::CONTROLLER_MIDDLEWARE`] record
+    /// skips (`['except' => [...]]`, `->except(...)`).
+    pub except: Option<Vec<String>>,
 }
 
 /// The route file a Laravel route group loads.

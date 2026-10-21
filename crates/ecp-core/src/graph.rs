@@ -884,10 +884,16 @@ pub struct RouteShape {
     pub error_keys: Vec<StrRef>,
 }
 
-/// The middleware a Route passes through, outermost group first and the
-/// route's own last (Laravel `->middleware('auth')`, group `middleware`
-/// option). `node_idx` points into `ZeroCopyGraph.nodes`. Answers "which
-/// routes are reachable without `auth`" without re-parsing route files.
+/// The middleware a Route passes through, outermost group first, then the
+/// route's own (Laravel `->middleware('auth')`, group `middleware` option),
+/// then what the bound controller registers for the action's method
+/// (`$this->middleware(...)` with `only` / `except`, static
+/// `HasMiddleware::middleware()`). Each name appears once, as written, and
+/// none that a `withoutMiddleware` / `excluded_middleware` removes. Not
+/// included: the Kernel's global `$middleware`, and the members of a
+/// middleware group (`api` stays `api`). `node_idx` points into
+/// `ZeroCopyGraph.nodes`. Answers "which routes are reachable without
+/// `auth`" without re-parsing route files.
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct RouteMiddleware {
