@@ -8,11 +8,17 @@
 //! - `Base::method()` → `Base.method` (the shared `calls.rs` already
 //!   captures the full qualifier; we preserve and normalize to `.` form).
 //! - `obj.method()` / `obj->method()` → `Type.method` when `obj` is a
-//!   parameter or local variable with a single-identifier declared type.
+//!   parameter, a local variable, or a field of the enclosing class
+//!   (`sax->m()`, `this->sax->m()`) with a single-identifier declared type.
+//!   A local of any type hides a same-name field.
 //!
-//! Scope: P0 simple identifier types only. Templates, references, pointer
-//! depth, namespace-qualified types, `auto`, and operator-overloaded calls
-//! fall back to the bare member name.
+//! Scope: P0 simple identifier types only. Templates, namespace-qualified
+//! types, `auto`, and computed receivers (`a.b().m()`) are untyped: the
+//! call is recorded as [`CallSite::untyped_member`], so it never binds a
+//! free function or an implicit-`this` member of the same name.
+//!
+//! The enclosing class of an out-of-class definition (`void Foo::bar()`) is
+//! its qualifier, so `this` and fields type there too.
 
 use super::path_literals::{
     build_concatenated, build_raw_path_literal, enclosing_symbol_and_owner, strip_quotes,
@@ -21,14 +27,21 @@ use crate::calls::{
     attach_to_enclosing, construction_call, node_range, range_width, start_pos, CallSiteIndex, Pos,
     PosRange,
 };
-use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use rustc_hash::FxHashMap;
 use tree_sitter::Node;
 
 #[derive(Debug, Default)]
 pub struct CppBindings {
+    /// Locals and parameters per function. An empty type marks a name
+    /// declared with a type the binder does not read (`auto x`,
+    /// `std::string s`): it still hides a same-name field.
     fn_scopes: Vec<(PosRange, FxHashMap<String, String>)>,
+    /// Class bodies, and out-of-class member definitions under their
+    /// qualifier (`void Foo::bar() {}` → `Foo`).
     class_scopes: Vec<(PosRange, String)>,
+    /// Typed data members per class name, wherever the class declares them.
+    class_fields: FxHashMap<String, FxHashMap<String, String>>,
 }
 
 impl CppBindings {
@@ -39,10 +52,32 @@ impl CppBindings {
         let mut out = FxHashMap::default();
         for (_, map) in &self.fn_scopes {
             for (k, v) in map {
-                out.insert(k.clone(), v.clone());
+                if !v.is_empty() {
+                    out.insert(k.clone(), v.clone());
+                }
             }
         }
         out
+    }
+
+    /// A class body the tree lost and the lexical recovery found.
+    pub fn push_class_scope(&mut self, span: (u32, u32, u32, u32), name: String) {
+        self.class_scopes
+            .push((((span.0, span.1), (span.2, span.3)), name));
+    }
+
+    /// The declared type of the receiver variable `var` at `pos`: a local
+    /// or parameter first, then a field of the enclosing class.
+    fn receiver_type(&self, pos: Pos, var: &str) -> Option<&str> {
+        match self.lookup_local(pos, var) {
+            Some(ty) => (!ty.is_empty()).then_some(ty),
+            None => self.field_type(pos, var),
+        }
+    }
+
+    fn field_type(&self, pos: Pos, field: &str) -> Option<&str> {
+        let class = self.enclosing_class(pos)?;
+        self.class_fields.get(class)?.get(field).map(String::as_str)
     }
 
     fn lookup_local(&self, pos: Pos, var: &str) -> Option<&str> {
@@ -81,24 +116,33 @@ impl CppBindings {
 pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> CppBindings {
     let mut fn_scopes: Vec<(PosRange, FxHashMap<String, String>)> = Vec::new();
     let mut class_scopes: Vec<(PosRange, String)> = Vec::new();
+    let mut class_fields: FxHashMap<String, FxHashMap<String, String>> = FxHashMap::default();
 
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
-            "class_specifier" | "struct_specifier" => {
-                if let Some(name_node) = n.child_by_field_name("name") {
-                    if name_node.kind() == "type_identifier" {
-                        if let Ok(s) = std::str::from_utf8(
-                            &source[name_node.start_byte()..name_node.end_byte()],
-                        ) {
-                            let span = node_range(n);
-                            class_scopes.push((span, s.to_string()));
-                        }
+            "class_specifier" | "struct_specifier" | "union_specifier" => {
+                if let Some(name) = n
+                    .child_by_field_name("name")
+                    .and_then(|name_node| scope_type_name(name_node, source))
+                {
+                    if let Some(body) = n.child_by_field_name("body") {
+                        let fields = class_fields.entry(name.to_string()).or_default();
+                        collect_typed_fields(body, source, fields);
                     }
+                    class_scopes.push((node_range(n), name.to_string()));
                 }
             }
             "function_definition" => {
                 let span = node_range(n);
+                if let Some(owner) = n
+                    .child_by_field_name("declarator")
+                    .and_then(find_function_declarator)
+                    .and_then(|d| d.child_by_field_name("declarator"))
+                    .and_then(|d| qualified_owner(d, source))
+                {
+                    class_scopes.push((span, owner.to_string()));
+                }
                 let mut map: FxHashMap<String, String> = FxHashMap::default();
                 collect_typed_cpp_params(n, source, &mut map);
                 if let Some(body) = n.child_by_field_name("body") {
@@ -119,12 +163,82 @@ pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> CppBindings {
     CppBindings {
         fn_scopes,
         class_scopes,
+        class_fields,
     }
 }
 
-/// Scan the function's declarator for `parameter_declaration` nodes.
-/// A simple type_identifier + identifier (possibly wrapped in
-/// reference_declarator / pointer_declarator) is recognized.
+/// The type a class name or a qualifier scope names: `Foo` for
+/// `type_identifier` / `namespace_identifier` `Foo`, `basic_json` for the
+/// `template_type` `basic_json<T>`. `None` for any other node.
+pub(crate) fn scope_type_name<'s>(node: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    match node.kind() {
+        "type_identifier" | "namespace_identifier" => node.utf8_text(source).ok(),
+        "template_type" => node.child_by_field_name("name")?.utf8_text(source).ok(),
+        _ => None,
+    }
+}
+
+/// The innermost qualifier of the qualified declarator `decl`: `Foo` for
+/// `ns::Foo::bar`, `basic_json` for `basic_json<T>::size`. `None` when
+/// `decl` is not a `qualified_identifier`.
+pub(crate) fn qualified_owner<'s>(mut decl: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    let mut owner = None;
+    while decl.kind() == "qualified_identifier" {
+        owner = decl
+            .child_by_field_name("scope")
+            .and_then(|scope| scope_type_name(scope, source));
+        decl = decl.child_by_field_name("name")?;
+    }
+    owner
+}
+
+/// The inner declarator of a pointer / reference / init / array
+/// declarator. `reference_declarator` has no `declarator` field.
+fn inner_declarator(node: Node<'_>) -> Option<Node<'_>> {
+    node.child_by_field_name("declarator")
+        .or_else(|| node.named_child(0))
+}
+
+/// Record `name` with its declared type when the binder reads that type
+/// (a single `type_identifier`), and as declared-untyped otherwise. A typed
+/// declaration wins over an untyped one of the same name.
+fn bind_local(
+    ty_node: Option<Node<'_>>,
+    name: String,
+    source: &[u8],
+    out: &mut FxHashMap<String, String>,
+) {
+    match ty_node
+        .filter(|t| t.kind() == "type_identifier")
+        .and_then(|t| t.utf8_text(source).ok())
+    {
+        Some(ty) => {
+            out.insert(name, ty.to_string());
+        }
+        None => {
+            out.entry(name).or_default();
+        }
+    }
+}
+
+/// Bind one `parameter_declaration` / `optional_parameter_declaration`.
+fn bind_param(p: Node<'_>, source: &[u8], out: &mut FxHashMap<String, String>) {
+    if !matches!(
+        p.kind(),
+        "parameter_declaration" | "optional_parameter_declaration"
+    ) {
+        return;
+    }
+    let Some(name) = p
+        .child_by_field_name("declarator")
+        .and_then(|d| unwrap_declarator_identifier(d, source))
+    else {
+        return;
+    };
+    bind_local(p.child_by_field_name("type"), name, source, out);
+}
+
+/// Scan the function's declarator for parameter declarations.
 fn collect_typed_cpp_params(fn_def: Node<'_>, source: &[u8], out: &mut FxHashMap<String, String>) {
     let Some(declarator) = fn_def.child_by_field_name("declarator") else {
         return;
@@ -137,57 +251,86 @@ fn collect_typed_cpp_params(fn_def: Node<'_>, source: &[u8], out: &mut FxHashMap
     };
     let mut c = params.walk();
     for p in params.children(&mut c) {
-        if p.kind() != "parameter_declaration" {
-            continue;
-        }
-        let Some(ty_node) = p.child_by_field_name("type") else {
-            continue;
-        };
-        if ty_node.kind() != "type_identifier" {
-            continue;
-        }
-        let Ok(ty) = std::str::from_utf8(&source[ty_node.start_byte()..ty_node.end_byte()]) else {
-            continue;
-        };
-        let Some(param_decl) = p.child_by_field_name("declarator") else {
-            continue;
-        };
-        if let Some(name) = unwrap_declarator_identifier(param_decl, source) {
-            out.insert(name, ty.to_string());
-        }
+        bind_param(p, source, out);
     }
 }
 
-/// Walk the function body for `declaration` nodes with a single
-/// `type_identifier` type and an `init_declarator`/declarator name.
+/// Walk the function body for local declarations: `declaration` nodes, the
+/// range-`for` variable, and lambda / `catch` parameters.
 fn collect_typed_cpp_decls(body: Node<'_>, source: &[u8], out: &mut FxHashMap<String, String>) {
     let mut stack: Vec<Node<'_>> = vec![body];
     while let Some(n) = stack.pop() {
-        if n.kind() == "function_definition" {
-            continue;
-        }
-        if n.kind() == "declaration" {
-            if let Some(ty_node) = n.child_by_field_name("type") {
-                if ty_node.kind() == "type_identifier" {
-                    if let Ok(ty) =
-                        std::str::from_utf8(&source[ty_node.start_byte()..ty_node.end_byte()])
-                    {
-                        // declarator field can be multiple init_declarator /
-                        // pointer_declarator / identifier — walk siblings.
-                        let mut c = n.walk();
-                        for child in n.children(&mut c) {
-                            if let Some(name) = unwrap_declarator_identifier(child, source) {
-                                out.insert(name, ty.to_string());
-                            }
-                        }
+        match n.kind() {
+            "function_definition" => continue,
+            "declaration" => {
+                // `T a, *b = x;` has one `declarator` per name; the
+                // initializer of a condition declaration (`if (T* p = q)`)
+                // is a sibling `value`, never a declared name.
+                let mut c = n.walk();
+                for decl in n.children_by_field_name("declarator", &mut c) {
+                    if let Some(name) = unwrap_declarator_identifier(decl, source) {
+                        bind_local(n.child_by_field_name("type"), name, source, out);
                     }
                 }
             }
+            "for_range_loop" => {
+                if let Some(name) = n
+                    .child_by_field_name("declarator")
+                    .and_then(|d| unwrap_declarator_identifier(d, source))
+                {
+                    bind_local(n.child_by_field_name("type"), name, source, out);
+                }
+            }
+            "parameter_declaration" | "optional_parameter_declaration" => {
+                bind_param(n, source, out)
+            }
+            _ => {}
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
             stack.push(child);
         }
+    }
+}
+
+/// Typed data members of a class body: `T* sax;`, `T a, *b;`, `static T s;`,
+/// including members inside a preprocessor conditional. A member function
+/// declaration has a `function_declarator` and binds nothing.
+fn collect_typed_fields(body: Node<'_>, source: &[u8], out: &mut FxHashMap<String, String>) {
+    let mut c = body.walk();
+    for member in body.children(&mut c) {
+        match member.kind() {
+            "field_declaration" => {
+                let Some(ty) = member
+                    .child_by_field_name("type")
+                    .filter(|t| t.kind() == "type_identifier")
+                    .and_then(|t| t.utf8_text(source).ok())
+                else {
+                    continue;
+                };
+                let mut dc = member.walk();
+                for decl in member.children_by_field_name("declarator", &mut dc) {
+                    if let Some(name) = unwrap_field_identifier(decl, source) {
+                        out.entry(name.to_string())
+                            .or_insert_with(|| ty.to_string());
+                    }
+                }
+            }
+            "preproc_if" | "preproc_ifdef" | "preproc_else" | "preproc_elif" => {
+                collect_typed_fields(member, source, out)
+            }
+            _ => {}
+        }
+    }
+}
+
+fn unwrap_field_identifier<'s>(node: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    match node.kind() {
+        "field_identifier" => node.utf8_text(source).ok(),
+        "pointer_declarator" | "reference_declarator" | "array_declarator" => {
+            unwrap_field_identifier(inner_declarator(node)?, source)
+        }
+        _ => None,
     }
 }
 
@@ -200,8 +343,7 @@ fn unwrap_declarator_identifier(node: Node<'_>, source: &[u8]) -> Option<String>
             .ok()
             .map(str::to_string),
         "init_declarator" | "pointer_declarator" | "reference_declarator" => {
-            let inner = node.child_by_field_name("declarator")?;
-            unwrap_declarator_identifier(inner, source)
+            unwrap_declarator_identifier(inner_declarator(node)?, source)
         }
         _ => None,
     }
@@ -212,7 +354,7 @@ fn find_function_declarator<'a>(mut node: Node<'a>) -> Option<Node<'a>> {
         match node.kind() {
             "function_declarator" => return Some(node),
             "pointer_declarator" | "reference_declarator" => {
-                node = node.child_by_field_name("declarator")?;
+                node = inner_declarator(node)?;
             }
             _ => return None,
         }
@@ -298,6 +440,28 @@ fn cpp_new_expression_call(new_expr: Node<'_>, source: &[u8]) -> Option<String> 
     }
 }
 
+/// The declared type of a member call's receiver: a typed local, parameter
+/// or field (`sax`), or a field through `this` (`this->sax`).
+fn member_receiver_type<'b>(
+    receiver: Node<'_>,
+    source: &[u8],
+    bindings: &'b CppBindings,
+    pos: Pos,
+) -> Option<&'b str> {
+    match receiver.kind() {
+        "identifier" => bindings.receiver_type(pos, receiver.utf8_text(source).ok()?),
+        "field_expression" => {
+            let this = receiver.child_by_field_name("argument")?;
+            let field = receiver.child_by_field_name("field")?;
+            if this.kind() != "this" {
+                return None;
+            }
+            bindings.field_type(pos, field.utf8_text(source).ok()?)
+        }
+        _ => None,
+    }
+}
+
 fn cpp_callee_name(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> Option<String> {
     let function = call.child_by_field_name("function")?;
     let pos = start_pos(call);
@@ -310,35 +474,25 @@ fn cpp_callee_name(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> Opt
             let field = function.child_by_field_name("field")?;
             let method = std::str::from_utf8(&source[field.start_byte()..field.end_byte()]).ok()?;
             let arg = function.child_by_field_name("argument")?;
-            // `this->method()` / `this.method()`
-            if arg.kind() == "this" {
-                if let Some(cls) = bindings.enclosing_class(pos) {
-                    return Some(format!("{cls}.{method}"));
-                }
+            // `(*p).method()` / `(&x).method()` / `(*this).method()` type as
+            // the operand.
+            let receiver = match arg.kind() {
+                "pointer_expression" => arg.named_child(0)?,
+                _ => arg,
+            };
+            if receiver.kind() == "this" {
+                // `this->method()`; bare when no class encloses the call.
+                return Some(match bindings.enclosing_class(pos) {
+                    Some(cls) => format!("{cls}.{method}"),
+                    None => method.to_string(),
+                });
             }
-            // `obj.method()` — typed var lookup
-            if arg.kind() == "identifier" {
-                if let Ok(var) = std::str::from_utf8(&source[arg.start_byte()..arg.end_byte()]) {
-                    if let Some(ty) = bindings.lookup_local(pos, var) {
-                        return Some(format!("{ty}.{method}"));
-                    }
-                }
-            }
-            // `(*p).method()` / `(&x).method()` — extract underlying identifier.
-            if arg.kind() == "pointer_expression" {
-                if let Some(inner) = arg.named_child(0) {
-                    if inner.kind() == "identifier" {
-                        if let Ok(var) =
-                            std::str::from_utf8(&source[inner.start_byte()..inner.end_byte()])
-                        {
-                            if let Some(ty) = bindings.lookup_local(pos, var) {
-                                return Some(format!("{ty}.{method}"));
-                            }
-                        }
-                    }
-                }
-            }
-            Some(method.to_string())
+            Some(
+                match member_receiver_type(receiver, source, bindings, pos) {
+                    Some(ty) => format!("{ty}.{method}"),
+                    None => CallSite::untyped_member(method),
+                },
+            )
         }
         "qualified_identifier" => {
             // `Base::method`. Pull the namespace_identifier + final name and

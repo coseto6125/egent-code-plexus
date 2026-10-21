@@ -1,14 +1,13 @@
 ;; Classes
-;; Heritage: `class B : public A` — tree-sitter-cpp puts `(type_identifier "A")`
-;; as a direct child of `base_class_clause` (not wrapped in an intermediate node),
-;; so we match it directly. `(_ ...)` was incorrect for access-specifier forms.
+;; Heritage is read in parser.rs (`cpp_heritage`) from the `base_class_clause`,
+;; not captured here: a quantified child capture yields one match per base,
+;; which emitted the class once per base, and it saw only `type_identifier`
+;; bases, not `Base<T>` / `ns::Base`.
 (class_specifier
   name: [
     (type_identifier)
     (template_type)
   ] @name.class
-  (base_class_clause
-    (type_identifier) @heritage)?
   body: (field_declaration_list)
 ) @class
 
@@ -20,8 +19,6 @@
     (type_identifier)
     (template_type)
   ] @name.struct
-  (base_class_clause
-    (type_identifier) @heritage)?
   body: (field_declaration_list)
 ) @struct
 
@@ -128,8 +125,27 @@
             ;; (`~ClassName`), not the inner identifier. parser.rs emits the
             ;; tilde-prefixed name verbatim — same shape ref-gitnexus uses.
             (destructor_name)
+            ;; `bool Foo::operator==(..) const { .. }`
+            (operator_name)
           ] @name.method
         )
+        ;; `void ns::Foo::bar() {}` / `void A::B<int>::c() {}`: the outer
+        ;; qualified_identifier's name is itself qualified.
+        (qualified_identifier
+          name: (qualified_identifier
+            name: [
+              (identifier)
+              (destructor_name)
+              (operator_name)
+            ] @name.method))
+        (qualified_identifier
+          name: (qualified_identifier
+            name: (qualified_identifier
+              name: [
+                (identifier)
+                (destructor_name)
+                (operator_name)
+              ] @name.method)))
         (reference_declarator (qualified_identifier name: (_) @name.method))
         (pointer_declarator (qualified_identifier name: (_) @name.method))
       ])
@@ -157,13 +173,15 @@
 
 ;; Member function declarations inside a class / struct body — `int sum();`.
 ;; Distinct from `function_definition` (no body) so a separate match emits a
-;; Method node with the return-type capture.
+;; Method node with the return-type capture. `operator_name` covers an
+;; operator declared in the body (`bool operator==(const P&) const;`).
 (field_declaration
   type: (_) @type
   declarator: [
     (function_declarator
       declarator: [
         (field_identifier) @name.method
+        (operator_name) @name.method
         (pointer_declarator (field_identifier) @name.method)
         (reference_declarator (field_identifier) @name.method)
       ])
@@ -172,7 +190,10 @@
         declarator: (field_identifier) @name.method))
     (reference_declarator
       (function_declarator
-        declarator: (field_identifier) @name.method))
+        declarator: [
+          (field_identifier)
+          (operator_name)
+        ] @name.method))
     (pointer_declarator
       (pointer_declarator
         (function_declarator
