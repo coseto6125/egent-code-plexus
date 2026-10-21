@@ -547,23 +547,19 @@ mod tests {
     }
 
     #[test]
-    fn java_style_same_named_constructor_is_skipped() {
+    fn java_style_same_named_constructor_gets_has_method_without_self_loop() {
         // Java emits `class Foo { public Foo() {} }` as Class "Foo" containing
-        // Method "Foo". SymbolTable file_scoped is name→single-id; the
-        // later-registered Method overwrites the Class, so lookup_in_file
-        // returns the same idx for both. Skip to avoid emitting a self-loop.
-        // Pin current behaviour so a future SymbolTable change that handles
-        // multi-id-per-name flips this expectation deliberately, not silently.
+        // Method "Foo". lookup_in_file returns the class for both names, so
+        // member_node resolves the member through first_declaration (kind +
+        // owner) and skips only a true self-loop.
         let nodes = vec![
             raw("Foo", NodeKind::Class, (1, 0, 10, 0)),
             raw("Foo", NodeKind::Method, (2, 4, 4, 4)),
         ];
         let edges = run(vec![lg("Foo.java", nodes)]);
-        assert_eq!(
-            edges.len(),
-            0,
-            "same-name collision must NOT emit a self-loop edge"
-        );
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        assert!(matches!(edges[0].rel_type, RelType::HasMethod));
+        assert_eq!(edges[0].target, 1, "constructor, not the class itself");
     }
 
     #[test]
