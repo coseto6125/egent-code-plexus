@@ -306,27 +306,41 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
         return CdTarget::Unknown;
     }
     let marks: Vec<_> = segments.iter().map(|&(s, _)| group_marks(s)).collect();
+    let commands: Vec<(Vec<&str>, usize)> = words.iter().map(|w| command_words(w)).collect();
+    let compounds: Vec<(Vec<bool>, usize)> = commands
+        .iter()
+        .map(|(cmd_words, after_prefix)| compound_marks(cmd_words, *after_prefix))
+        .collect();
     let depth_after: Vec<usize> = marks
         .iter()
-        .scan(0usize, |depth, &((po, pc), (bo, bc))| {
-            *depth = (*depth + po + bo).saturating_sub(pc + bc);
+        .zip(&compounds)
+        .scan(0usize, |depth, (&((po, pc), (bo, bc)), (opens, closes))| {
+            *depth = (*depth + po + bo + opens.len()).saturating_sub(pc + bc + closes);
             Some(*depth)
         })
         .collect();
-    // An and-or list ending in `&` runs as a background job: its cd reaches
-    // the search only when the search runs in that same job. A `;` or `&`
-    // inside a group it opens (`cd x && (a & b & wait)`) does not end it.
-    let list_end: Vec<usize> = (0..segments.len())
-        .map(|i| {
-            (i..segments.len())
-                .find(|&j| {
-                    matches!(segments[j].1, None | Some(Sep::Seq | Sep::Background))
-                        && depth_after[j] <= depth_after[i]
-                })
-                .unwrap_or(segments.len() - 1)
-        })
-        .collect();
-    let search_list = search.map(|k| list_end[k]);
+    // An and-or list ending in `&` runs as a background job: a cd reaches the
+    // search only when every list around the cd that ends before the search
+    // ends in `;`. A `;` or `&` deeper than the cd (`cd x && (a & wait)`)
+    // ends no list around it.
+    let other_job = |i: usize| {
+        let mut level = Some(depth_after[i]);
+        for (j, &(_, sep)) in segments
+            .iter()
+            .enumerate()
+            .take(search.unwrap_or(0))
+            .skip(i)
+        {
+            let Some(l) = level else { break };
+            if matches!(sep, None | Some(Sep::Seq | Sep::Background)) && depth_after[j] <= l {
+                if sep == Some(Sep::Background) {
+                    return true;
+                }
+                level = depth_after[j].checked_sub(1);
+            }
+        }
+        false
+    };
     let moves = |w: &&str| *w == "cd" || CWD_BUILTINS.contains(w);
     // A later `.` alone is mostly a path argument (`git add .`).
     let moves_shell = |cmd_words: &[&str]| {
@@ -386,12 +400,7 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
             before = after;
             continue;
         }
-        let cmd_words: Vec<&str> = words
-            .iter()
-            .map(String::as_str)
-            .skip_while(|w| is_assignment(w))
-            .skip_while(|w| *w == "{")
-            .collect();
+        let (cmd_words, after_prefix) = (&commands[i].0, commands[i].1);
         let starts_subshell = cmd_words.first().is_some_and(|w| w.starts_with('('));
         let in_subshell = subshell > 0 || starts_subshell;
         // Backticks hold a command the split does not see.
@@ -401,7 +410,7 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
         {
             return CdTarget::Unknown;
         }
-        subshell_moves |= in_subshell && moves_shell(&cmd_words) || opens_moving_subshell(words);
+        subshell_moves |= in_subshell && moves_shell(cmd_words) || opens_moving_subshell(words);
         subshell = (subshell + paren_opens).saturating_sub(paren_closes);
         if subshell == 0 {
             subshell_moves = false;
@@ -413,39 +422,18 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
             .find(|w| !is_assignment(w))
             .is_some_and(|w| w == "{");
         let before_cmd = if opens_group { Some(Sep::Seq) } else { before };
-        let other_job =
-            segments[list_end[i]].1 == Some(Sep::Background) && Some(list_end[i]) != search_list;
-        let own_shell =
-            !in_subshell && !other_job && before_cmd != Some(Sep::Pipe) && after != Some(Sep::Pipe);
-        // `! cd x`, `time . env.sh`, `then cd x`: a prefix the split does
-        // not model may still run the command in this shell.
-        // `time -p` takes options before its command word.
-        let mut after_prefix = 0;
-        let mut time_options = false;
-        for &word in &cmd_words {
-            if PREFIX_WORDS.contains(&word) {
-                time_options = word == "time";
-            } else if !(time_options && word.starts_with('-')) {
-                break;
-            }
-            after_prefix += 1;
-        }
-        let closes = brace_closes
-            + usize::from(matches!(cmd_words.first(), Some(&("fi" | "done" | "esac"))));
-        groups.truncate(groups.len().saturating_sub(closes));
+        let own_shell = !in_subshell
+            && !other_job(i)
+            && before_cmd != Some(Sep::Pipe)
+            && after != Some(Sep::Pipe);
+        let (compound_opens, compound_closes) = &compounds[i];
+        groups.truncate(groups.len().saturating_sub(brace_closes + compound_closes));
         if groups.len() < cd_depth
             || cd_depth > 0 && cd_depth >= groups.len() && switches_branch(words)
         {
             return CdTarget::Unknown;
         }
-        for &word in &cmd_words[..after_prefix] {
-            if matches!(word, "if" | "while" | "until") {
-                groups.push(word != "if");
-            }
-        }
-        if let Some(&("for" | "select" | "case")) = cmd_words.get(after_prefix) {
-            groups.push(true);
-        }
+        groups.extend(compound_opens);
         groups.extend(std::iter::repeat_n(false, brace_opens));
         if own_shell
             && (after_prefix > 0 && cmd_words.get(after_prefix).is_some_and(moves)
@@ -526,6 +514,46 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
             .and_then(|dir| dir.into_os_string().into_string().ok())
             .map_or(CdTarget::Unknown, CdTarget::Dir),
     }
+}
+
+/// A segment's words after its assignments and an opening `{`, with the
+/// count of leading prefix words (`!`, `then`, `time -p`). A prefix the
+/// split does not model may still run the command in this shell
+/// (`! cd x`, `time . env.sh`, `then cd x`).
+fn command_words(words: &[String]) -> (Vec<&str>, usize) {
+    let cmd_words: Vec<&str> = words
+        .iter()
+        .map(String::as_str)
+        .skip_while(|w| is_assignment(w))
+        .skip_while(|w| *w == "{")
+        .collect();
+    let mut after_prefix = 0;
+    // `time -p` takes options before its command word.
+    let mut time_options = false;
+    for &word in &cmd_words {
+        if PREFIX_WORDS.contains(&word) {
+            time_options = word == "time";
+        } else if !(time_options && word.starts_with('-')) {
+            break;
+        }
+        after_prefix += 1;
+    }
+    (cmd_words, after_prefix)
+}
+
+/// The compound commands a segment opens, `true` for a loop or a `case`,
+/// and how many it closes (`fi`, `done`, `esac`).
+fn compound_marks(cmd_words: &[&str], after_prefix: usize) -> (Vec<bool>, usize) {
+    let mut opens: Vec<bool> = cmd_words[..after_prefix]
+        .iter()
+        .filter(|w| matches!(**w, "if" | "while" | "until"))
+        .map(|w| *w != "if")
+        .collect();
+    if let Some(&("for" | "select" | "case")) = cmd_words.get(after_prefix) {
+        opens.push(true);
+    }
+    let closes = usize::from(matches!(cmd_words.first(), Some(&("fi" | "done" | "esac"))));
+    (opens, closes)
 }
 
 /// `cmd` with every backslash-newline outside single quotes removed, as
@@ -1260,11 +1288,13 @@ mod tests {
             "which grep >/dev/null; cd x; grep -rn Foo .",
             "cd grep && cd ../x && rg -n main src",
             "cd x &&\n  (git status >/dev/null &\n   git diff --stat >/dev/null & wait)\nrg -n Foo src",
+            "cd x && {\n  rg -n -m 1 Foo a\n  rg -n -m 1 Bar a\n} & wait",
             "cd x && git status --short |& head\nrg -n Foo src",
         ] {
             assert_eq!(target(cmd, t.path()), want, "{cmd:?}");
         }
         for cmd in [
+            "cd x &&\nif test -f a; then\n  git diff --stat\nfi &\nrg -n Foo a\nwait",
             "make &&\nrg Foo",
             "m=$(cd x && pwd); rg Foo .",
             "git grep -n Foo",
