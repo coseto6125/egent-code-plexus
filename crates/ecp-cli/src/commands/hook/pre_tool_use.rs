@@ -126,7 +126,8 @@ enum Sep {
 /// `${...}` expansion with no brace, quote or escape inside is one opaque
 /// run.
 /// `None` when a quote or `${` is left open, since bash rejects the whole
-/// command, and for a heredoc, whose body the split does not model. Every
+/// command, and for a heredoc or a line continuation, which the split does
+/// not model. Every
 /// separator is ASCII, so the byte offsets stay on char boundaries for CJK
 /// paths.
 fn shell_segments(cmd: &str) -> Option<Vec<(&str, Option<Sep>)>> {
@@ -174,7 +175,11 @@ fn shell_segments(cmd: &str) -> Option<Vec<(&str, Option<Sep>)>> {
                 continue;
             }
             (Some('"'), '\\') | (None, '\\') => {
-                chars.next();
+                // A line continuation joins two words; the split does not
+                // model the join.
+                if chars.next().is_some_and(|(_, n)| n == '\n') {
+                    return None;
+                }
                 continue;
             }
             (Some(_), _) => continue,
@@ -219,6 +224,11 @@ enum CdTarget {
 
 const CWD_BUILTINS: [&str; 8] = [
     "pushd", "popd", "source", ".", "eval", "builtin", "command", "exec",
+];
+
+/// Reserved words and `time` that run the command after them in this shell.
+const PREFIX_WORDS: [&str; 9] = [
+    "!", "time", "if", "then", "elif", "else", "do", "while", "until",
 ];
 
 fn cd_target(cmd: &str, cwd: &str) -> CdTarget {
@@ -294,19 +304,28 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
             segments[list_end[i]].1 == Some(Sep::Background) && Some(list_end[i]) != search_list;
         let own_shell =
             !in_subshell && !other_job && before != Some(Sep::Pipe) && after != Some(Sep::Pipe);
-        // `! cd x`, `time cd x`, `then cd x`: a prefix the split does not
-        // model may still run the cd in this shell. `.` is left out: it is
-        // mostly a path argument (`git add .`).
+        // `! cd x`, `time . env.sh`, `then cd x`: a prefix the split does
+        // not model may still run the command in this shell. A later `.`
+        // alone is mostly a path argument (`git add .`).
+        let moves = |w: &&str| *w == "cd" || CWD_BUILTINS.contains(w);
+        let prefixed = cmd_words.first().is_some_and(|w| PREFIX_WORDS.contains(w));
         if own_shell
-            && cmd_words
-                .iter()
-                .skip(1)
-                .any(|w| *w != "." && CWD_BUILTINS.contains(w) || *w == "cd")
+            && (prefixed && cmd_words.iter().any(moves)
+                || cmd_words.iter().skip(1).any(|w| *w != "." && moves(w)))
         {
             return CdTarget::Unknown;
         }
         match cmd_words.first().copied() {
             Some(builtin) if own_shell && CWD_BUILTINS.contains(&builtin) => {
+                return CdTarget::Unknown
+            }
+            // `set -P` makes a later `cd ..` physical.
+            Some("set")
+                if own_shell
+                    && cmd_words[1..]
+                        .iter()
+                        .any(|w| w.starts_with('-') && w.contains('P') || *w == "physical") =>
+            {
                 return CdTarget::Unknown
             }
             Some("cd") if own_shell => {
@@ -322,9 +341,15 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
                     return CdTarget::Unknown;
                 }
                 let tilde = unquoted_tilde_arg(segment);
-                // Bash searches `CDPATH` for a relative directory that does
-                // not start with `.` or `..`.
-                if cdpath && !arg.starts_with(['/', '.']) && !(tilde && arg.starts_with('~')) {
+                // Bash searches `CDPATH` for a relative directory whose first
+                // component is not `.` or `..` (`.codex` is searched).
+                let dot_relative =
+                    matches!(arg, "." | "..") || arg.starts_with("./") || arg.starts_with("../");
+                if cdpath
+                    && !arg.starts_with('/')
+                    && !dot_relative
+                    && !(tilde && arg.starts_with('~'))
+                {
                     return CdTarget::Unknown;
                 }
                 let base = current.as_deref().unwrap_or(Path::new(cwd));
@@ -416,7 +441,8 @@ fn resolve_cd_arg(
     home: Option<&Path>,
     tilde: bool,
 ) -> Option<Option<PathBuf>> {
-    if arg.is_empty() || arg.starts_with('-') || arg.contains(['$', '`']) {
+    // A glob expands to a directory the hook does not list.
+    if arg.is_empty() || arg.starts_with('-') || arg.contains(['$', '`', '*', '?', '[']) {
         return None;
     }
     let path = match arg.strip_prefix('~').filter(|_| tilde) {
@@ -429,7 +455,8 @@ fn resolve_cd_arg(
     };
     // Bash's default `cd -L` drops `..` against the logical path, so
     // `cd /bin; cd ..` lands in `/` even where `/bin` links to `/usr/bin`.
-    // The physical walk must still succeed, as bash checks it too.
+    // Where the logical and the physical walk disagree, bash may fall back
+    // from one to the other: unknown.
     let mut logical = PathBuf::new();
     for part in path.components() {
         match part {
@@ -440,7 +467,11 @@ fn resolve_cd_arg(
             part => logical.push(part),
         }
     }
-    Some((path.is_dir() && logical.is_dir()).then_some(logical))
+    match (path.is_dir(), logical.is_dir()) {
+        (true, true) => Some(Some(logical)),
+        (false, false) => Some(None),
+        _ => None,
+    }
 }
 
 fn extract_pattern(tool: &str, tool_input: &serde_json::Value) -> Option<String> {
@@ -893,6 +924,13 @@ mod tests {
             "cd x; ! cd /; rg Foo",
             "cd x; time cd /; rg Foo",
             "cd x; CDPATH=/var; cd tmp; rg Foo",
+            "cd x; CDPATH=/var; cd .hidden; rg Foo",
+            "cd x; ! . /dev/stdin <<< \"cd /\"; rg Foo",
+            "cd x; time . env.sh; rg Foo",
+            "cd x; cd /u?r; rg Foo",
+            "cd x; cd /u\\\nsr; rg Foo",
+            "cd x; set -P; cd ..; rg Foo",
+            "cd x; set -o physical; cd ..; rg Foo",
         ] {
             assert_eq!(target(cmd, t.path()), Unknown, "{cmd:?}");
         }
@@ -905,7 +943,11 @@ mod tests {
         std::os::unix::fs::symlink(t.path().join("real/inner"), t.path().join("link")).unwrap();
         assert_eq!(target("cd link; cd ..; rg Foo", t.path()), dir(t.path()));
         assert_eq!(target("cd link/..; rg Foo", t.path()), dir(t.path()));
-        assert_eq!(target("cd missing/..; rg Foo", t.path()), Unchanged);
+        assert_eq!(target("cd missing/..; rg Foo", t.path()), Unknown);
+        assert_eq!(target("cd link/../missing; rg Foo", t.path()), Unchanged);
+        // Physical `real/inner/../other` exists, logical `other` does not.
+        std::fs::create_dir(t.path().join("real/other")).unwrap();
+        assert_eq!(target("cd link/../other; rg Foo", t.path()), Unknown);
     }
 
     #[test]
