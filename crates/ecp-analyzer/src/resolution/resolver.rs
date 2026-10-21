@@ -285,6 +285,10 @@ pub enum DecisionTier {
     /// Receiver-typing ladder: the qualifier names several project types;
     /// exactly one owns the member and every other provably does not.
     TypeCandidates,
+    /// A call whose candidates are copies of one declaration in duplicated
+    /// source trees took the copy nearest the caller by path (see
+    /// [`ResolutionTier::NearestCopy`]), at the ladder or at Tier 3.
+    NearestCopy,
 }
 
 /// One resolver attempt, captured when the dump buffer is enabled. The
@@ -660,13 +664,15 @@ impl<'a> Resolver<'a> {
     /// ([`Self::resolve_instantiation`]). The fallback lives here, not in
     /// [`Self::resolve_symbol_with_heritage`], because that method also
     /// serves References / Decorates / Imports edges, which must never land
-    /// on a type through a construction rule.
+    /// on a type through a construction rule. `caller_owner` is the type the
+    /// calling member belongs to (`SymbolTable::prefer_owned`).
     pub fn resolve_call(
         &self,
         source_file: &Path,
         site: CallSite<'_>,
         raw_imports: &[RawImport],
         caller_heritage: &[String],
+        caller_owner: Option<&str>,
     ) -> Vec<(NodeId, f32)> {
         let language = Language::from_normalized_path(&normalize_source_path(source_file));
         if let Some((node_id, import)) =
@@ -683,6 +689,9 @@ impl<'a> Resolver<'a> {
                 (raw_imports, bind && bind_import),
                 target,
                 caller_heritage,
+                Some(CallScope {
+                    owner: caller_owner,
+                }),
                 &mut None,
             )
         };
@@ -1151,6 +1160,7 @@ impl<'a> Resolver<'a> {
             (raw_imports, bind_import),
             target,
             caller_heritage,
+            None,
             barrel,
         )
     }
@@ -1164,6 +1174,7 @@ impl<'a> Resolver<'a> {
         (raw_imports, bind_import): (&[RawImport], bool),
         target: ResolveTarget,
         caller_heritage: &[String],
+        call: Option<CallScope<'_>>,
         barrel: &mut Option<Arc<str>>,
     ) -> Vec<(NodeId, f32)> {
         let mut results = Vec::new();
@@ -1173,9 +1184,19 @@ impl<'a> Resolver<'a> {
         // Tier 1: Try SameFile (kind-aware so a property named `Foo` doesn't
         // win the lookup for a constructor call `Foo()` in the same file —
         // see `SymbolTable::file_scoped` doc).
-        if let Some(node_id) =
-            self.symbol_table
-                .lookup_call_in_file(&source_file_str, symbol_name, target)
+        if let Some(node_id) = self
+            .symbol_table
+            .lookup_call_in_file(&source_file_str, symbol_name, target)
+            .map(|pick| match call.and_then(|scope| scope.owner) {
+                Some(owner) => self.symbol_table.prefer_owned(
+                    &source_file_str,
+                    pick,
+                    symbol_name,
+                    owner,
+                    target,
+                ),
+                None => pick,
+            })
         {
             results.push((node_id, ResolutionTier::SameFile.base_confidence()));
             self.record(
@@ -1257,12 +1278,18 @@ impl<'a> Resolver<'a> {
                 // path: Python under the member's short name, a fully
                 // qualified language under the callee as written.
                 if let Some(retry) = retry {
-                    return self.resolve_symbol_with_heritage(
+                    return self.resolve_symbol_with_import_binding(
                         source_file,
                         retry,
-                        &[],
+                        language,
+                        (
+                            &[],
+                            target != ResolveTarget::Type || !fqn_language(language),
+                        ),
                         target,
                         caller_heritage,
+                        call,
+                        &mut None,
                     );
                 }
             }
@@ -1323,6 +1350,10 @@ impl<'a> Resolver<'a> {
                 .and_then(|qf| {
                     self.symbol_table
                         .lookup_in_file_with_kind(&qf, member, target)
+                        .map(|pick| {
+                            self.symbol_table
+                                .prefer_owned(&qf, pick, member, qualifier, target)
+                        })
                 });
             if let Some(node_id) = hit {
                 let conf = ResolutionTier::QualifierScoped.base_confidence();
@@ -1378,6 +1409,7 @@ impl<'a> Resolver<'a> {
                 member,
                 target,
                 raw_imports,
+                call.is_some(),
             ) {
                 TypeMember::Edge(node_id, tier, conf) => {
                     results.push((node_id, conf));
@@ -1498,22 +1530,23 @@ impl<'a> Resolver<'a> {
         let raw_count = self.symbol_table.global_match_count(symbol_name);
         let caller_meta = FileMeta::from_path(&source_file_str);
 
+        let hidden = |node_id: NodeId| {
+            self.symbol_table.file_of(node_id).is_some_and(|module| {
+                reexport::import_hides(
+                    &IndexFacts(self),
+                    &source_file_str,
+                    symbol_name,
+                    raw_imports.iter().map(ImportRef::from),
+                    module,
+                )
+            })
+        };
         let (tier, target_id, confidence, alt_count) =
             match self
                 .symbol_table
                 .lookup_global(symbol_name, target, caller_meta)
             {
-                GlobalPick::Unique(node_id)
-                    if self.symbol_table.file_of(node_id).is_some_and(|module| {
-                        reexport::import_hides(
-                            &IndexFacts(self),
-                            &source_file_str,
-                            symbol_name,
-                            raw_imports.iter().map(ImportRef::from),
-                            module,
-                        )
-                    }) =>
-                {
+                GlobalPick::Unique(node_id) if hidden(node_id) => {
                     (DecisionTier::Unresolved, None, None, raw_count)
                 }
                 GlobalPick::Unique(node_id) => {
@@ -1526,7 +1559,29 @@ impl<'a> Resolver<'a> {
                         raw_count.saturating_sub(1),
                     )
                 }
-                GlobalPick::Ambiguous => (DecisionTier::AmbiguousGlobal, None, None, raw_count),
+                GlobalPick::Ambiguous => match call
+                    .and_then(|_| {
+                        self.symbol_table.nearest_global_copy(
+                            &source_file_str,
+                            caller_meta,
+                            symbol_name,
+                            target,
+                        )
+                    })
+                    .filter(|&node_id| !hidden(node_id))
+                {
+                    Some(node_id) => {
+                        let conf = ResolutionTier::NearestCopy.base_confidence();
+                        results.push((node_id, conf));
+                        (
+                            DecisionTier::NearestCopy,
+                            Some(node_id),
+                            Some(conf),
+                            raw_count.saturating_sub(1),
+                        )
+                    }
+                    None => (DecisionTier::AmbiguousGlobal, None, None, raw_count),
+                },
                 GlobalPick::NoMatch => (DecisionTier::Unresolved, None, None, raw_count),
             };
         self.record(
@@ -1718,6 +1773,15 @@ fn for_each_specifier_candidate<F>(
         },
         visit,
     );
+}
+
+/// What a call site adds to a name lookup ([`Resolver::resolve_call`]).
+/// Its presence also admits [`ResolutionTier::NearestCopy`], whose
+/// confidence Pass 2 maps to the call edge's reason.
+#[derive(Clone, Copy)]
+struct CallScope<'c> {
+    /// The type the calling member belongs to.
+    owner: Option<&'c str>,
 }
 
 /// Outcome of the receiver-typing ladder for one qualified callee.
@@ -2199,6 +2263,7 @@ impl<'a> Resolver<'a> {
         member: &str,
         target: ResolveTarget,
         raw_imports: &[RawImport],
+        call: bool,
     ) -> TypeMember {
         // Call targets only: the supertypes pre-pass resolves heritage with this
         // resolver before the supertypes exist, so a Type-target ladder would
@@ -2234,25 +2299,36 @@ impl<'a> Resolver<'a> {
                 }
             }
             TypeCandidates::Set(types) => {
-                let mut owner_member: Option<NodeId> = None;
+                let mut owner_members: Vec<NodeId> = Vec::new();
                 for ty in types {
                     match self.member_ownership(ty, qualifier, member, target) {
-                        Ownership::Owned { id, .. } if owner_member.is_none_or(|m| m == id) => {
-                            owner_member = Some(id);
-                        }
+                        Ownership::Owned { id, .. } => match owner_members.first() {
+                            Some(_) if owner_members.contains(&id) => {}
+                            Some(&first) if !call || !self.symbol_table.is_copy(first, id) => {
+                                return TypeMember::Ambiguous;
+                            }
+                            _ => owner_members.push(id),
+                        },
                         Ownership::NotOwned => {}
-                        Ownership::Owned { .. } | Ownership::Unknown => {
-                            return TypeMember::Ambiguous;
-                        }
+                        Ownership::Unknown => return TypeMember::Ambiguous,
                     }
                 }
-                owner_member.map_or(TypeMember::NoEdge, |id| {
-                    TypeMember::Edge(
+                match owner_members.as_slice() {
+                    [] => TypeMember::NoEdge,
+                    &[id] => TypeMember::Edge(
                         id,
                         DecisionTier::TypeCandidates,
                         confidence(ResolutionTier::Global),
-                    )
-                })
+                    ),
+                    owners => match self.symbol_table.nearest_copy(source_file_str, owners) {
+                        Some(id) => TypeMember::Edge(
+                            id,
+                            DecisionTier::NearestCopy,
+                            confidence(ResolutionTier::NearestCopy),
+                        ),
+                        None => TypeMember::Ambiguous,
+                    },
+                }
             }
             TypeCandidates::External | TypeCandidates::None => TypeMember::NoEdge,
         }

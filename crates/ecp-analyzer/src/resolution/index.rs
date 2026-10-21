@@ -66,6 +66,22 @@ pub(crate) fn crate_root_prefix(path: &str) -> &str {
 
 pub use ecp_core::analyzer::reexport::ResolveTarget;
 
+/// The last two components of `path`: its directory's name and its file
+/// name (`collect/Maps.java`), or the whole path at the root.
+fn leaf_path(path: &str) -> &str {
+    let Some((dir, _)) = path.rsplit_once('/') else {
+        return path;
+    };
+    dir.rfind('/').map_or(path, |slash| &path[slash + 1..])
+}
+
+/// The directories of `path`, root first.
+fn path_dirs(path: &str) -> Vec<&str> {
+    let mut parts: Vec<&str> = path.split('/').collect();
+    parts.pop();
+    parts
+}
+
 /// A high-performance global symbol index mapping node names and file locations
 /// to their corresponding globally unique node IDs.
 #[derive(Debug, Default)]
@@ -813,6 +829,121 @@ impl SymbolTable {
                 self.node_owner[id as usize] == owner_id && predicate(self.node_kinds[id as usize])
             })
             .collect()
+    }
+
+    /// `pick`, or `owner`'s own member named `member` in `file_path` when
+    /// `pick` belongs to another type. A call through `owner` (`self.m()`,
+    /// `K.m()`, an implicit-`this` `m()`) reaches `owner`'s member before any
+    /// interface, trait or base declaration that precedes it in the file:
+    /// Rust inherent methods beat trait methods, and an override hides the
+    /// declaration it implements. A free function `pick` stays.
+    pub(crate) fn prefer_owned(
+        &self,
+        file_path: &str,
+        pick: u32,
+        member: &str,
+        owner: &str,
+        target: ResolveTarget,
+    ) -> u32 {
+        let picked_owner = self.node_owner[pick as usize];
+        let Some(owner_id) = self.owner_id(owner) else {
+            return pick;
+        };
+        if picked_owner == NO_OWNER || picked_owner == owner_id {
+            return pick;
+        }
+        self.owned_in_file(file_path, member, owner, target)
+            .first()
+            .copied()
+            .unwrap_or(pick)
+    }
+
+    /// The candidate nearest `caller_file` when `candidates` are copies of
+    /// one declaration ([`Self::is_copy`]). Duplicated source trees
+    /// (`android/` beside the main tree, vendored copies, two packages
+    /// publishing one module) hold such copies; a build compiles the caller
+    /// against one of them, and the copy that shares the deepest directory
+    /// with the caller is the one its own tree holds. Fewer directory steps
+    /// between the two break an equal depth. `None` for a tie, for fewer
+    /// than two candidates, or when any candidate is a different declaration.
+    pub(crate) fn nearest_copy(&self, caller_file: &str, candidates: &[u32]) -> Option<u32> {
+        let (&first, rest) = candidates.split_first()?;
+        if rest.is_empty() || !rest.iter().all(|&id| self.is_copy(first, id)) {
+            return None;
+        }
+        let caller_dirs = path_dirs(caller_file);
+        let mut best: Option<((usize, std::cmp::Reverse<usize>), u32)> = None;
+        let mut tie = false;
+        for &id in candidates {
+            let candidate_dirs = path_dirs(self.file_of(id)?);
+            let shared = caller_dirs
+                .iter()
+                .zip(&candidate_dirs)
+                .take_while(|(a, b)| a == b)
+                .count();
+            let steps = caller_dirs.len() + candidate_dirs.len() - 2 * shared;
+            let key = (shared, std::cmp::Reverse(steps));
+            match best {
+                Some((best_key, _)) if key < best_key => {}
+                Some((best_key, _)) if key == best_key => tie = true,
+                _ => {
+                    best = Some((key, id));
+                    tie = false;
+                }
+            }
+        }
+        best.filter(|_| !tie).map(|(_, id)| id)
+    }
+
+    /// [`Self::nearest_copy`] over the set [`Self::lookup_global`] found
+    /// ambiguous: the same kind filter and [`FileMeta::admits`] barrier. The
+    /// walk stops at the first candidate that is not a copy, so a common
+    /// name with many unrelated declarations costs two comparisons.
+    pub(crate) fn nearest_global_copy(
+        &self,
+        caller_file: &str,
+        caller: FileMeta,
+        node_name: &str,
+        target: ResolveTarget,
+    ) -> Option<u32> {
+        let field = match target {
+            ResolveTarget::Method => ResolveTarget::Callable,
+            other => other,
+        }
+        .kind_predicate();
+        let mut copies: Vec<u32> = Vec::new();
+        for &id in self.global_scoped.get(node_name)? {
+            if !field(self.node_kinds[id as usize])
+                || !caller.admits(self.node_file_meta[id as usize])
+            {
+                continue;
+            }
+            if copies
+                .first()
+                .is_some_and(|&first| !self.is_copy(first, id))
+            {
+                return None;
+            }
+            copies.push(id);
+        }
+        self.nearest_copy(caller_file, &copies)
+            .filter(|&id| target.kind_predicate()(self.node_kinds[id as usize]))
+    }
+
+    /// Whether `b` repeats declaration `a` in another tree: the same kind
+    /// and owner, in a file of the same name in a directory of the same name
+    /// (Java's package directory, a Python package), declaring the same
+    /// namespaces (a Kotlin `package`, a C# / PHP `namespace`). Two
+    /// `utils.py` files of unrelated packages `a/` and `b/` are not copies.
+    pub(crate) fn is_copy(&self, a: u32, b: u32) -> bool {
+        let (Some(a_file), Some(b_file)) = (self.file_of(a), self.file_of(b)) else {
+            return false;
+        };
+        a_file != b_file
+            && self.node_kinds[a as usize] == self.node_kinds[b as usize]
+            && self.node_owner[a as usize] == self.node_owner[b as usize]
+            && leaf_path(a_file) == leaf_path(b_file)
+            && self.file_namespaces.get(a_file) == self.file_namespaces.get(b_file)
     }
 
     /// Members named `member` owned by `owner` anywhere in the scope of

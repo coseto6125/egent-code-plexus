@@ -27,8 +27,21 @@ pub enum ResolutionTier {
     /// unqualified callsites).
     HeritageScoped,
     Global,
+    /// Every candidate is one declaration repeated in duplicated source
+    /// trees (`android/` beside the main tree, a vendored copy, two packages
+    /// publishing one module), and the copy nearest the caller by path is
+    /// taken. Path proximity is a heuristic, so the edge stays below the
+    /// Global tier and carries its own reason ([`NEAREST_COPY_REASON`]).
+    NearestCopy,
     Fallback(FallbackReason),
 }
+
+/// The confidence of a [`ResolutionTier::NearestCopy`] call edge. No other
+/// tier yields this value, so Pass 2 tells the edge apart by it.
+pub const NEAREST_COPY_CONFIDENCE: f32 = 0.6;
+
+/// The `reason` of a [`ResolutionTier::NearestCopy`] call edge.
+pub const NEAREST_COPY_REASON: &str = "call:nearest-copy";
 
 impl ResolutionTier {
     /// Returns the base confidence score for the resolution tier.
@@ -39,6 +52,7 @@ impl ResolutionTier {
             ResolutionTier::QualifierScoped => 0.85,
             ResolutionTier::HeritageScoped => 0.8,
             ResolutionTier::Global => 0.7,
+            ResolutionTier::NearestCopy => NEAREST_COPY_CONFIDENCE,
             ResolutionTier::Fallback(reason) => match reason {
                 FallbackReason::ImplicitSelf => 0.8,
                 FallbackReason::VueComponent => 0.8,

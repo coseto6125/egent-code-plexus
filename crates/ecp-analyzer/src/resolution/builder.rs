@@ -2,6 +2,7 @@ use crate::fetch_shape::{
     consumer_keys, fetch_urls, format_reason, normalize_route_path, response_shapes,
 };
 use crate::framework_helpers::Span;
+use crate::resolution::heuristics::{NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON};
 use crate::resolution::index::{Language, ResolveTarget, SymbolTable};
 use crate::resolution::path_aliases::PathAliases;
 use crate::resolution::resolver::{ReexportIndex, Resolver};
@@ -2029,6 +2030,23 @@ fn pass1_9_supertypes(
     per_graph.into_iter().flatten().collect()
 }
 
+/// The `reason` of a resolved `Calls` edge, by the tier that resolved it.
+#[derive(Clone, Copy)]
+struct CallReasons {
+    call: StrRef,
+    nearest_copy: StrRef,
+}
+
+impl CallReasons {
+    fn of(self, confidence: f32) -> StrRef {
+        if confidence == NEAREST_COPY_CONFIDENCE {
+            self.nearest_copy
+        } else {
+            self.call
+        }
+    }
+}
+
 /// Emit Pass-2 edges for a single `raw_node`'s heritage / calls / type
 /// annotation. Factored out so the serial dump path and the parallel
 /// hot path can share the same per-node logic.
@@ -2048,7 +2066,7 @@ fn pass2_emit_node_edges(
     reason_heritage: StrRef,
     reason_implements: StrRef,
     reason_type: StrRef,
-    reason_call: StrRef,
+    reason_call: CallReasons,
     reason_reads_field: StrRef,
     symbol_table: &SymbolTable,
     edges: &mut Vec<Edge>,
@@ -2099,6 +2117,7 @@ fn pass2_emit_node_edges(
                 site,
                 &local_graph.imports,
                 call_heritage,
+                raw_node.owner_class.as_deref(),
             ),
         };
         for (target_id, confidence) in targets {
@@ -2111,7 +2130,7 @@ fn pass2_emit_node_edges(
                 target: target_id,
                 rel_type: RelType::Calls,
                 confidence,
-                reason: reason_call,
+                reason: reason_call.of(confidence),
             });
             if let Some((flags, dispatch_type)) = meta {
                 pending_call_metas.push((edge_pre_sort_idx, *flags, dispatch_type.clone()));
@@ -2287,7 +2306,10 @@ fn pass2_resolve_edges(
     let reason_heritage = string_pool.add("heritage");
     let reason_implements = string_pool.add("pass2:implements");
     let reason_type = string_pool.add("type_annotation");
-    let reason_call = string_pool.add("call");
+    let reason_call = CallReasons {
+        call: string_pool.add("call"),
+        nearest_copy: string_pool.add(NEAREST_COPY_REASON),
+    };
     let reason_reads_field = string_pool.add("field_read");
 
     let mut reason_cache: FxHashMap<String, StrRef> = FxHashMap::default();
@@ -2831,7 +2853,8 @@ mod tests {
                 | DecisionTier::ModuleTree
                 | DecisionTier::TypeOwned
                 | DecisionTier::TypeHeritage
-                | DecisionTier::TypeCandidates => {
+                | DecisionTier::TypeCandidates
+                | DecisionTier::NearestCopy => {
                     panic!(
                         "fixture should only produce ImportScoped/Unresolved, got {:?}",
                         original.tier

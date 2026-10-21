@@ -51,7 +51,11 @@ use std::path::Path;
 /// and owner under its own uid instead of an empty-name tombstone, gets its
 /// `HasMethod` edge, and the first overload `References` each later one
 /// (`overload_set`).
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema13");
+/// schema14: a call through a type binds that type's own member before a
+/// same-file interface / trait / base declaration, and a call whose
+/// candidates are copies in duplicated source trees binds the nearest copy
+/// (`call:nearest-copy`, confidence 0.6).
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema14");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
