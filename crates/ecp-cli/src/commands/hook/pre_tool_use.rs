@@ -275,11 +275,11 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
     };
     let cdpath = cdpath || cmd.contains("CDPATH");
     let words: Vec<Vec<String>> = segments.iter().map(|&(s, _)| shell_words(s)).collect();
-    // `extract_from_shell` takes the first `rg` / `grep` word anywhere
-    // (`rtk proxy rg`, `git grep`), so the scan stops at the same word.
+    // `extract_from_shell` takes the first `rg` / `grep` word that
+    // `runs_search` accepts, so the scan stops at the same word.
     let search = words
         .iter()
-        .position(|w| w.iter().any(|w| w == "rg" || w == "grep"));
+        .position(|w| (0..w.len()).any(|j| runs_search(w, j)));
     // An and-or list ending in `&` runs as a background job: its cd reaches
     // the search only when the search runs in that same job.
     let mut list_end = vec![0; segments.len()];
@@ -299,6 +299,19 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
             .is_some_and(|w| moves(&w.trim_start_matches('(')))
             || cmd_words.iter().skip(1).any(|w| *w != "." && moves(w))
     };
+    // `x=$(cd y && rg …)` opens a subshell on the word that holds the cd.
+    let opens_moving_subshell = |words: &[String]| {
+        words
+            .iter()
+            .any(|w| w.rsplit_once('(').is_some_and(|(_, c)| moves(&c)))
+    };
+    // A cd before `else` / `elif` belongs to the branch that is not taken.
+    let switches_branch = |words: &[String]| {
+        words
+            .iter()
+            .take_while(|w| PREFIX_WORDS.contains(&w.as_str()))
+            .any(|w| w == "else" || w == "elif")
+    };
     // A loop around the search runs a later cd before its next pass.
     let moves_after_search =
         search.is_some_and(|k| words[k + 1..].iter().flatten().any(|w| moves(&w.as_str())));
@@ -307,9 +320,10 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
     let mut subshell = 0usize;
     // A cd inside a subshell that is still open moves a search in it.
     let mut subshell_moves = false;
-    // Open `{ }` groups and compound commands, `true` for a loop. A group may
-    // be a function body, a skipped operand or a pipeline's subshell, so a
-    // cd inside one holds only until it closes; a loop runs its cd again.
+    // Open `{ }` groups and compound commands, `true` for a loop or a `case`.
+    // A group may be a function body, a skipped operand or a pipeline's
+    // subshell, so a cd inside one holds only until it closes; a loop runs
+    // its cd again, and a `case` arm may not be the search's arm.
     let mut groups: Vec<bool> = Vec::new();
     let mut cd_depth = 0;
     // After `cd x ||` succeeds, its `||` operand does not run. The operand
@@ -318,7 +332,10 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
     let mut skipping: Option<usize> = None;
     for (i, (&(segment, after), words)) in segments.iter().zip(&words).enumerate() {
         if Some(i) == search {
-            if subshell > 0 && subshell_moves || groups.contains(&true) && moves_after_search {
+            if subshell > 0 && subshell_moves
+                || groups.contains(&true) && moves_after_search
+                || cd_depth > 0 && cd_depth >= groups.len() && switches_branch(words)
+            {
                 return CdTarget::Unknown;
             }
             break;
@@ -341,7 +358,14 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
             .collect();
         let starts_subshell = cmd_words.first().is_some_and(|w| w.starts_with('('));
         let in_subshell = subshell > 0 || starts_subshell;
-        subshell_moves |= in_subshell && moves_shell(&cmd_words);
+        // Backticks hold a command the split does not see.
+        if words
+            .iter()
+            .any(|w| w.rsplit_once('`').is_some_and(|(_, c)| moves(&c)))
+        {
+            return CdTarget::Unknown;
+        }
+        subshell_moves |= in_subshell && moves_shell(&cmd_words) || opens_moving_subshell(words);
         subshell = (subshell + paren_opens).saturating_sub(paren_closes);
         if subshell == 0 {
             subshell_moves = false;
@@ -373,7 +397,9 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
         let closes = brace_closes
             + usize::from(matches!(cmd_words.first(), Some(&("fi" | "done" | "esac"))));
         groups.truncate(groups.len().saturating_sub(closes));
-        if groups.len() < cd_depth {
+        if groups.len() < cd_depth
+            || cd_depth > 0 && cd_depth >= groups.len() && switches_branch(words)
+        {
             return CdTarget::Unknown;
         }
         for &word in &cmd_words[..after_prefix] {
@@ -382,8 +408,7 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
             }
         }
         match cmd_words.get(after_prefix) {
-            Some(&("for" | "select")) => groups.push(true),
-            Some(&"case") => groups.push(false),
+            Some(&("for" | "select" | "case")) => groups.push(true),
             _ => {}
         }
         groups.extend(std::iter::repeat_n(false, brace_opens));
@@ -394,6 +419,8 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
             return CdTarget::Unknown;
         }
         match cmd_words.first().copied() {
+            // `command -v rg` looks a name up and runs nothing.
+            Some("command") if matches!(cmd_words.get(1), Some(&("-v" | "-V"))) => {}
             Some(builtin) if own_shell && CWD_BUILTINS.contains(&builtin) => {
                 return CdTarget::Unknown
             }
@@ -716,6 +743,24 @@ fn shell_words(cmd: &str) -> Vec<String> {
     words
 }
 
+/// Whether `words[i]` runs `rg` / `grep`, rather than naming it to a
+/// lookup (`command -v rg`, `which grep`, `type -p rg`).
+fn runs_search(words: &[String], i: usize) -> bool {
+    if !matches!(words[i].as_str(), "rg" | "grep") {
+        return false;
+    }
+    let flags = words[..i]
+        .iter()
+        .rev()
+        .take_while(|w| w.starts_with('-'))
+        .count();
+    match words[..i - flags].last().map(String::as_str) {
+        Some("which" | "type" | "hash" | "whereis") => false,
+        Some("command") => flags == 0,
+        _ => true,
+    }
+}
+
 /// Single-pass scan: locate `rg` / `grep`, then walk subsequent words
 /// to find the first ≥3-char non-flag positional. Returns `None` if
 /// `rg` / `grep` is absent or every word after it is a flag / flag
@@ -741,15 +786,14 @@ fn extract_from_shell(cmd: &str) -> Option<String> {
     // `-e PATTERN` names the pattern explicitly for both grep and rg; the
     // word after it is the answer, not a flag value to step over.
     let mut next_is_pattern = false;
-    for word in shell_words(cmd) {
+    let words = shell_words(cmd);
+    for (i, word) in words.iter().enumerate() {
         if skip_next {
             skip_next = false;
             continue;
         }
         if !found_cmd {
-            if word == "rg" || word == "grep" {
-                found_cmd = true;
-            }
+            found_cmd = runs_search(&words, i);
             continue;
         }
         if word.starts_with('-') && !next_is_pattern {
@@ -761,7 +805,7 @@ fn extract_from_shell(cmd: &str) -> Option<String> {
             continue;
         }
         if word.len() >= 3 {
-            return Some(word);
+            return Some(word.clone());
         }
         next_is_pattern = false;
     }
@@ -1132,6 +1176,11 @@ mod tests {
             "if false; then true; cd x; fi; rg Foo",
             "while true; do true; cd x; rg Foo; done",
             "for d in a b; do rg Foo; cd x; done",
+            "if test -f /dev/null; then\n  cd x\nelse rg Foo .\nfi",
+            "if false; then\n  cd x\nelse\n  true; rg Foo .\nfi",
+            "case a in\nb)\n  cd x;;\na) rg Foo;;\nesac",
+            "m=$(cd x && rg -l Foo .)",
+            "m=`cd x && rg -l Foo .`",
         ] {
             assert_eq!(target(cmd, t.path()), Unknown, "{cmd:?}");
         }
@@ -1148,10 +1197,33 @@ mod tests {
             "cd x &&\nrg Foo",
             "cat f | { cd x; rg Foo; }",
             "if true; then true; cd x; rg Foo; fi",
+            "command -v rg && cd x && rg Foo .",
+            "which grep >/dev/null; cd x; grep -rn Foo .",
         ] {
             assert_eq!(target(cmd, t.path()), want, "{cmd:?}");
         }
-        assert_eq!(target("make &&\nrg Foo", t.path()), Unchanged);
+        for cmd in ["make &&\nrg Foo", "m=$(cd x && pwd); rg Foo ."] {
+            assert_eq!(target(cmd, t.path()), Unchanged, "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn test_extract_from_shell_lookup_of_rg_is_not_the_search() {
+        for cmd in [
+            "command -v rg && cd /tmp && rg HookInput .",
+            "which grep; grep -rn HookInput .",
+            "type -p rg >/dev/null && rg HookInput",
+        ] {
+            assert_eq!(
+                extract_from_shell(cmd).as_deref(),
+                Some("HookInput"),
+                "{cmd}"
+            );
+        }
+        assert_eq!(
+            extract_from_shell("command rg HookInput").as_deref(),
+            Some("HookInput")
+        );
     }
 
     #[test]
