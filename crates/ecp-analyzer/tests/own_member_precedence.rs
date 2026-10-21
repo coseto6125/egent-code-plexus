@@ -62,7 +62,7 @@ fn test_resolve_call_rust_trait_declared_first_binds_inherent_method() {
     let graph = build(
         &ecp_analyzer::rust::parser::RustProvider::new().unwrap(),
         "k.rs",
-        "struct K;\ntrait A { fn save(&self); }\nimpl K { fn audit(&self) {} fn save(&self) {} fn run(&self) { self.save(); } }\nimpl A for K { fn save(&self) { self.audit(); } }\n",
+        "struct K;\ntrait A { fn save(&self); }\nimpl K {\n fn audit(&self) {}\n fn save(&self) {}\n fn run(&self) { self.save(); }\n}\nimpl A for K { fn save(&self) { self.audit(); } }\n",
     );
     let pool = &graph.string_pool;
     let audit = named(&graph, "audit")[0];

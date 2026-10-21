@@ -163,8 +163,6 @@ fn test_overload_set_go_duplicate_methods_both_named_and_called() {
     );
 }
 
-/// The trait is declared last: a same-file trait declaration ahead of the
-/// impls wins the name lookup for `self.save()`, a separate resolver choice.
 #[test]
 fn test_overload_set_rust_inherent_and_trait_impl_both_named_and_called() {
     assert_overload_set(
