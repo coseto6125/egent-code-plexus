@@ -788,7 +788,8 @@ fn runs_search(words: &[String], i: usize) -> bool {
         .take_while(|w| w.starts_with('-'))
         .count();
     match words[..i - flags].last().map(String::as_str) {
-        Some("which" | "type" | "hash" | "whereis") => false,
+        // `cd grep` names a directory.
+        Some("which" | "type" | "hash" | "whereis" | "cd" | "pushd") => false,
         Some("command") => flags == 0,
         _ => true,
     }
@@ -1236,6 +1237,7 @@ mod tests {
     fn test_cd_target_cd_every_path_to_the_search_runs_keeps_cd() {
         let t = tempfile::tempdir().unwrap();
         std::fs::create_dir(t.path().join("x")).unwrap();
+        std::fs::create_dir(t.path().join("grep")).unwrap();
         let want = dir(&t.path().join("x"));
         for cmd in [
             "make && cd x && rg Foo",
@@ -1245,6 +1247,7 @@ mod tests {
             "if true; then true; cd x; rg Foo; fi",
             "command -v rg && cd x && rg Foo .",
             "which grep >/dev/null; cd x; grep -rn Foo .",
+            "cd grep && cd ../x && rg -n main src",
             "cd x && git status --short |& head\nrg -n Foo src",
         ] {
             assert_eq!(target(cmd, t.path()), want, "{cmd:?}");
@@ -1264,6 +1267,7 @@ mod tests {
     fn test_extract_from_shell_lookup_of_rg_is_not_the_search() {
         for cmd in [
             "rg --color never -n -m 2 HookInput src",
+            "cd grep && rg -n HookInput src",
             "rg --files -g '**/x.rs' | xargs grep -n -m 2 HookInput",
             "command -v rg && cd /tmp && rg HookInput .",
             "which grep; grep -rn HookInput .",
