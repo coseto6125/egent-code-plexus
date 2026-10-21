@@ -14,7 +14,9 @@ use super::parser::{walk_to_scoped_root_scope, PHP_ROUTER_SCOPES};
 use crate::framework_helpers::node_span;
 use crate::resolution::index::{SymbolTable, MAX_HERITAGE_DEPTH};
 use crate::route_detector::{clean_route_path_lax, join_route_path};
-use ecp_core::analyzer::types::{LocalGraph, RawImport, RawRoute, RawRouteScope, RouteInclude};
+use ecp_core::analyzer::types::{
+    LocalGraph, RawImport, RawRoute, RawRouteScope, RouteInclude, Span,
+};
 use ecp_core::graph::NodeKind;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tree_sitter::Node;
@@ -1302,7 +1304,7 @@ impl ControllerIndex {
                 .map(|node| (node.span.0, node.name.as_str()))
                 .collect();
             let first = index.types.len();
-            let mut spans: Vec<(&str, (u32, u32, u32, u32))> = Vec::new();
+            let mut spans: Vec<(&str, Span)> = Vec::new();
             for (local_idx, node) in graph.nodes.iter().enumerate() {
                 let is_trait = match node.kind {
                     NodeKind::Class => false,

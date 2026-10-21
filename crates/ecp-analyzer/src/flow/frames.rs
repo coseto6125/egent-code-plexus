@@ -19,12 +19,13 @@ impl Frames {
         self.len
     }
     pub(super) fn push(&mut self, scope: Scope) {
-        if self.len % CHUNK == 0 {
+        if self.len.is_multiple_of(CHUNK) {
             self.chunks.push(Rc::new(Vec::with_capacity(CHUNK)));
         }
         Rc::make_mut(self.chunks.last_mut().unwrap()).push(Rc::new(scope));
         self.len += 1;
     }
+    #[cfg(test)]
     pub(super) fn iter(&self) -> impl Iterator<Item = &Rc<Scope>> {
         self.chunks.iter().flat_map(|chunk| chunk.iter())
     }

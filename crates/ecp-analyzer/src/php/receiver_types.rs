@@ -26,8 +26,13 @@ use tree_sitter::Node;
 /// Maps the `(start, end)` position range → `(class_name, Option<parent_name>,
 /// declared members)`. Members are listed for a trait or an enum only.
 pub struct ClassContext {
-    entries: Vec<(PosRange, String, Option<String>, Option<Vec<String>>)>,
+    entries: Vec<ClassEntry>,
 }
+
+/// `(span, class_name, parent_name, declared members)`.
+type ClassEntry = (PosRange, String, Option<String>, Option<Vec<String>>);
+/// [`range_width`]'s `(lines, columns)`.
+type Width = (u32, i64);
 
 impl ClassContext {
     pub fn from_nodes(nodes: &[RawNode]) -> Self {
@@ -67,7 +72,7 @@ impl ClassContext {
     /// The name of the innermost class enclosing `pos`, when `member` is
     /// reachable through it.
     fn enclosing_class_name(&self, pos: Pos, member: &str) -> Option<&str> {
-        let mut best: Option<(&str, Option<&[String]>, (u32, i64))> = None;
+        let mut best: Option<(&str, Option<&[String]>, Width)> = None;
         for ((start, end), name, _, members) in &self.entries {
             if *start <= pos && pos <= *end {
                 let width = range_width((*start, *end));
