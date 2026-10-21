@@ -55,7 +55,9 @@ use std::path::Path;
 /// same-file interface / trait / base declaration, and a call whose
 /// candidates are copies in duplicated source trees binds the nearest copy
 /// (`call:nearest-copy`, confidence 0.6).
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema14");
+/// schema15: a function `References` each enum variant it uses
+/// (`enum_variant:use` / `enum_variant:pattern`).
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema15");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
