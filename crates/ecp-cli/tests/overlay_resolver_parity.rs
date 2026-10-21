@@ -1405,3 +1405,123 @@ fn test_overlay_kotlin_wildcard_below_heritage_documents_heritage_divergence() {
         &[],
     );
 }
+
+/// Calls from `caller` as sorted (target uid, confidence %) pairs: from a
+/// full reindex of `files` with `dirty` applied, then from the overlay of
+/// `dirty` over the index of `files`. Uids tell overloads apart, which share
+/// file, name and owner.
+fn overload_calls(
+    provider: &dyn LanguageProvider,
+    files: &[(&str, &str)],
+    dirty: &[(&str, &str)],
+    caller: &str,
+) -> (Vec<(u64, u32)>, Vec<(u64, u32)>) {
+    let parse = |path: &str, source: &str| {
+        provider
+            .parse_file(Path::new(path), source.as_bytes())
+            .unwrap()
+    };
+    let build = |edits: &[(&str, &str)]| {
+        let mut builder = GraphBuilder::new();
+        for &(path, original) in files {
+            let source = edits
+                .iter()
+                .find(|(p, _)| *p == path)
+                .map_or(original, |(_, s)| *s);
+            builder.add_graph(parse(path, source));
+        }
+        builder.build()
+    };
+    let base = build(&[]);
+    let full = build(dirty);
+    let pool = &full.string_pool;
+    let mut expected: Vec<_> = full
+        .edges
+        .iter()
+        .filter(|e| {
+            e.rel_type == RelType::Calls
+                && full.nodes[e.source as usize].name.resolve(pool) == caller
+        })
+        .map(|e| {
+            (
+                full.nodes[e.target as usize].uid,
+                (e.confidence * 100.0).round() as u32,
+            )
+        })
+        .collect();
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&base).unwrap();
+    let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    let inputs: Vec<_> = dirty
+        .iter()
+        .map(|&(path, source)| input(parse(path, source)))
+        .collect();
+    let view = OverlayView::build(archived, &inputs).unwrap();
+    let merged = MergedGraph::new(archived, Some(&view));
+    let mut actual: Vec<_> = merged
+        .all_edges()
+        .filter(|e| {
+            e.rel_type() == RelType::Calls && merged.node(e.source).unwrap().name(&merged) == caller
+        })
+        .map(|e| {
+            (
+                merged.node(e.target).unwrap().uid(),
+                (e.confidence() * 100.0).round() as u32,
+            )
+        })
+        .collect();
+    expected.sort();
+    actual.sort();
+    (expected, actual)
+}
+
+#[test]
+fn test_overlay_overload_set_in_dirty_file_matches_reindex() {
+    let k = "class K {\n void audit() {}\n void save(int id) {}\n void save(String name) { audit(); }\n void run() { save(1); }\n}\n";
+    let shifted = format!("\n{k}");
+    let (full, overlay) = overload_calls(
+        &ecp_analyzer::java::parser::JavaProvider::new().unwrap(),
+        &[("K.java", k)],
+        &[("K.java", &shifted)],
+        "run",
+    );
+    assert_eq!(full.len(), 2, "the reindex reaches both overloads");
+    assert_eq!(overlay, full);
+}
+
+/// The dirty caller binds the first overloaded constructor in a clean file,
+/// so the overlay finds the later one in the base graph.
+#[test]
+fn test_overlay_overload_set_in_clean_file_matches_reindex() {
+    let app = "public class App {\n    public Multi makeMulti() {\n        return new Multi(1);\n    }\n}\n";
+    let shifted = format!("\n{app}");
+    let (full, overlay) = overload_calls(
+        &ecp_analyzer::java::parser::JavaProvider::new().unwrap(),
+        &[
+            ("src/App.java", app),
+            (
+                "src/Multi.java",
+                "public class Multi {\n    public Multi(int x) {\n    }\n\n    public Multi(String s) {\n    }\n}\n",
+            ),
+        ],
+        &[("src/App.java", &shifted)],
+        "makeMulti",
+    );
+    assert_eq!(full.len(), 2, "the reindex reaches both constructors");
+    assert_eq!(overlay, full);
+}
+
+/// `save(int)` delegates to `save(String)`: the name binds the caller
+/// itself, and the edge to its sibling must survive the self-recursion skip.
+#[test]
+fn test_overlay_overload_delegating_to_sibling_matches_reindex() {
+    let k = "class K {\n void save(int id) { save(\"x\"); }\n void save(String name) {}\n}\n";
+    let shifted = format!("\n{k}");
+    let (full, overlay) = overload_calls(
+        &ecp_analyzer::java::parser::JavaProvider::new().unwrap(),
+        &[("K.java", k)],
+        &[("K.java", &shifted)],
+        "save",
+    );
+    assert_eq!(full.len(), 1, "the reindex keeps the sibling edge");
+    assert_eq!(overlay, full);
+}

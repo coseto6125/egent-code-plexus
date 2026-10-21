@@ -8,7 +8,8 @@ mod instantiation_calls_support;
 use ecp_analyzer::cpp::parser::CppProvider;
 use ecp_core::graph::NodeKind;
 use instantiation_calls_support::{
-    assert_calls_constructor, assert_calls_type, assert_only_call, graph_of,
+    assert_calls_constructor, assert_calls_each_overload, assert_calls_type, assert_only_call,
+    graph_of,
 };
 
 const WIDGET: (&str, &str) = (
@@ -83,8 +84,8 @@ fn test_cpp_same_file_new_calls_constructor() {
     assert_calls_constructor(&graph, "make_local", "Local", "src/local.cpp");
 }
 
-/// Overloads share one uid, so Pass 1 collapses them into one Constructor
-/// node: an edge to it means "a constructor of `Multi`", not a guess.
+/// Overloads are separate Constructor nodes, and the argument types that
+/// pick one are not parsed: the construction reaches both.
 #[test]
 fn test_cpp_overloaded_constructors_new_calls_constructor() {
     let multi = (
@@ -96,7 +97,7 @@ fn test_cpp_overloaded_constructors_new_calls_constructor() {
         "#include \"multi.hpp\"\n\nMulti* make_multi() {\n    return new Multi(1);\n}\n",
     );
     let graph = graph_of(&provider(), &[multi, app]);
-    assert_calls_constructor(&graph, "make_multi", "Multi", "src/multi.hpp");
+    assert_calls_each_overload(&graph, "make_multi", "Multi", "src/multi.hpp", 2);
 }
 
 #[test]

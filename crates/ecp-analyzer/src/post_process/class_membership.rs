@@ -105,6 +105,7 @@ pub fn emit_edges(
                 return (0, Vec::new());
             }
 
+            let later = later_overload_ids(raws, path_str, symbol_table);
             let mut local_edges: Vec<Edge> = Vec::new();
             let mut local_emitted = 0usize;
             local_emitted += emit_pass1_span(
@@ -112,6 +113,7 @@ pub fn emit_edges(
                 &classes,
                 path_str,
                 symbol_table,
+                &later,
                 reason,
                 &mut local_edges,
             );
@@ -120,6 +122,7 @@ pub fn emit_edges(
                 &classes_by_name,
                 path_str,
                 symbol_table,
+                &later,
                 reason_impl,
                 &mut local_edges,
             );
@@ -135,6 +138,74 @@ pub fn emit_edges(
     emitted
 }
 
+/// Raw index → node id of each later overload in the file
+/// ([`ecp_core::uid::keeps_overloads`]). A name lookup returns the first
+/// declaration, so without this map every overload's edge would land on it.
+fn later_overload_ids(
+    raws: &[RawNode],
+    path_str: &str,
+    symbol_table: &SymbolTable,
+) -> FxHashMap<usize, u32> {
+    let mut seen: FxHashMap<(u8, Option<&str>, &str), usize> = FxHashMap::default();
+    let mut ids = FxHashMap::default();
+    for (i, raw) in raws.iter().enumerate() {
+        if !ecp_core::uid::keeps_overloads(raw.kind) {
+            continue;
+        }
+        let owner = raw.owner_class.as_deref();
+        let ordinal = seen
+            .entry((raw.kind as u8, owner, raw.name.as_str()))
+            .or_insert(0);
+        if *ordinal > 0 {
+            if let Some(&id) = symbol_table
+                .first_declaration(path_str, &raw.name, raw.kind, owner)
+                .and_then(|first| symbol_table.later_overloads(first).get(*ordinal - 1))
+            {
+                ids.insert(i, id);
+            }
+        }
+        *ordinal += 1;
+    }
+    ids
+}
+
+/// The node of `member` (raw index `i`) for an edge from `class_idx`, or
+/// `None` to emit none. The name lookup returns the file's first
+/// declaration of the name, whichever type owns it: the member itself is the
+/// declaration its owner matches, or its own later overload.
+fn member_node(
+    i: usize,
+    member: &RawNode,
+    path_str: &str,
+    symbol_table: &SymbolTable,
+    later: &FxHashMap<usize, u32>,
+    class_idx: u32,
+) -> Option<u32> {
+    let by_name = symbol_table.lookup_in_file(path_str, &member.name)?;
+    // When a member has the same name as its enclosing class — Java/C#
+    // `class Foo { public Foo() {} }` constructors are the canonical case —
+    // the name lookup returns the class. Emitting would create a self-loop.
+    // Skip; documented limitation pending a future SymbolTable change that
+    // handles multi-id-per-name.
+    if class_idx == by_name {
+        return None;
+    }
+    Some(
+        later
+            .get(&i)
+            .copied()
+            .or_else(|| {
+                symbol_table.first_declaration(
+                    path_str,
+                    &member.name,
+                    member.kind,
+                    member.owner_class.as_deref(),
+                )
+            })
+            .unwrap_or(by_name),
+    )
+}
+
 /// Pass 1 — cross-language span containment.
 ///
 /// For each Class node `c` in the file, find the innermost-enclosing Class for
@@ -146,12 +217,13 @@ fn emit_pass1_span(
     classes: &[(&str, Span)],
     path_str: &str,
     symbol_table: &SymbolTable,
+    later: &FxHashMap<usize, u32>,
     reason: ecp_core::pool::StrRef,
     edges_out: &mut Vec<Edge>,
 ) -> usize {
     let mut emitted = 0usize;
 
-    for member in raws {
+    for (i, member) in raws.iter().enumerate() {
         let rel_type = match member.kind {
             NodeKind::Function | NodeKind::Method | NodeKind::Constructor => RelType::HasMethod,
             NodeKind::Property => RelType::HasProperty,
@@ -172,20 +244,10 @@ fn emit_pass1_span(
         let Some(class_idx) = symbol_table.lookup_in_file(path_str, class_name) else {
             continue;
         };
-        let Some(member_idx) = symbol_table.lookup_in_file(path_str, &member.name) else {
+        let Some(member_idx) = member_node(i, member, path_str, symbol_table, later, class_idx)
+        else {
             continue;
         };
-
-        // SymbolTable `file_scoped` maps (file, name) → single node_id with
-        // last-write-wins. When a member has the same name as its enclosing
-        // class — Java/C# `class Foo { public Foo() {} }` constructors are
-        // the canonical case — both lookups resolve to the same idx (the
-        // later-registered Method overwrites the Class). Emitting would
-        // create a self-loop. Skip; documented limitation pending a
-        // future SymbolTable change that handles multi-id-per-name.
-        if class_idx == member_idx {
-            continue;
-        }
 
         edges_out.push(Edge {
             source: class_idx,
@@ -216,12 +278,13 @@ fn emit_pass2_rust_impl(
     classes_by_name: &FxHashMap<&str, Vec<Span>>,
     path_str: &str,
     symbol_table: &SymbolTable,
+    later: &FxHashMap<usize, u32>,
     reason: ecp_core::pool::StrRef,
     edges_out: &mut Vec<Edge>,
 ) -> usize {
     let mut emitted = 0usize;
 
-    for member in raws {
+    for (i, member) in raws.iter().enumerate() {
         if !matches!(
             member.kind,
             NodeKind::Function | NodeKind::Method | NodeKind::Constructor | NodeKind::Property
@@ -245,12 +308,10 @@ fn emit_pass2_rust_impl(
         let Some(class_idx) = symbol_table.lookup_in_file(path_str, class_name) else {
             continue;
         };
-        let Some(member_idx) = symbol_table.lookup_in_file(path_str, &member.name) else {
+        let Some(member_idx) = member_node(i, member, path_str, symbol_table, later, class_idx)
+        else {
             continue;
         };
-        if class_idx == member_idx {
-            continue;
-        }
 
         let rel_type = if matches!(member.kind, NodeKind::Property) {
             RelType::HasProperty

@@ -171,6 +171,9 @@ pub struct ViewNode {
     /// traversal reads the base CSR IN-edges of `base_idx` (clean callers)
     /// in addition to [`OverlayView::overlay_in`].
     pub replaced_base: Option<u32>,
+    /// A later overload ([`crate::uid::keeps_overloads`]): the index keeps
+    /// it as a node under its own uid but never binds it by name.
+    pub later_overload: bool,
 }
 
 /// An overlay-resolved edge. Indices are merged-space: `< base_len` = base
@@ -271,20 +274,35 @@ impl OverlayView {
         // ── virtual nodes + replaced mapping ──────────────────────────────
         let mut nodes: Vec<ViewNode> = Vec::new();
         let mut replaced: FxHashMap<u32, u32> = FxHashMap::default();
+        // Identity uid → first virtual idx and its later overloads, as the
+        // index's `SymbolTable::register_overload` numbers them.
+        let mut first_of: FxHashMap<u64, u32> = FxHashMap::default();
+        let mut later_overloads: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
 
         for file in files {
             let rel: Arc<str> = Arc::from(file.rel_path.as_str());
             for sym in &file.symbols {
-                let uid = crate::uid::compute(
+                let identity = crate::uid::compute(
                     sym.kind,
                     &file.rel_path,
                     sym.owner_class.as_deref(),
                     &sym.name,
                 );
                 let virt = base_len + nodes.len() as u32;
+                let first = *first_of.entry(identity).or_insert(virt);
+                let later_overload = first != virt && crate::uid::keeps_overloads(sym.kind);
+                let uid = if later_overload {
+                    let later = later_overloads.entry(first).or_default();
+                    later.push(virt);
+                    crate::uid::overload(identity, later.len() as u32)
+                } else {
+                    identity
+                };
                 let replaced_base = dirty_base_by_uid.get(&uid).copied();
                 // First UID wins, as in full indexing: later twins are
                 // tombstones there, so base edges must reach the first one.
+                // A later overload has a uid of its own and maps to its own
+                // base node.
                 if let Some(base_idx) = replaced_base {
                     replaced.entry(base_idx).or_insert(virt);
                 }
@@ -297,6 +315,7 @@ impl OverlayView {
                     start_line: sym.start_line,
                     end_line: sym.end_line,
                     replaced_base,
+                    later_overload,
                 });
             }
         }
@@ -324,15 +343,18 @@ impl OverlayView {
             // constructed at several sites, and a clean one costs name-index
             // probes.
             let mut construction_targets: FxHashMap<u32, u32> = FxHashMap::default();
+            // Clean call target → its later overloads, found by a name-index
+            // probe: one target is called at many sites.
+            let mut base_later: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
             let file_metas: Vec<FileMeta> = files
                 .iter()
                 .map(|f| FileMeta::from_path(&f.rel_path))
                 .collect();
 
             // Full indexing tombstones a later same-uid declaration (a
-            // half-finished edit, an overload) and never registers it in the
-            // global name table, so only the first one of each uid is a
-            // cross-file candidate. The same-file tier still sees both: the
+            // half-finished edit) or keeps it as a later overload, and never
+            // registers either in the global name table, so only the first
+            // one of each uid is a cross-file candidate. The same-file tier still sees both: the
             // index's own-file lookup treats them as ambiguous and binds none.
             let mut named_uids: FxHashSet<u64> = FxHashSet::default();
             let mut virt_off = 0usize;
@@ -442,16 +464,29 @@ impl OverlayView {
                                 });
                                 Some((target, confidence))
                             });
-                        // The index drops self-recursion Calls (builder's
-                        // `target_id == current_node_idx` skip).
-                        if let Some((target, confidence)) = hit.filter(|&(t, _)| t != source) {
-                            push_edge(ViewEdge {
-                                source,
-                                target,
-                                rel_type: RelType::Calls,
-                                confidence,
-                                reason: super::merged::OVERLAY_EDGE_REASON,
-                            });
+                        let Some((first, confidence)) = hit else {
+                            continue;
+                        };
+                        // As the index: the call reaches every overload of
+                        // its target, and self-recursion Calls are dropped
+                        // (builder's `target_id == current_node_idx` skip).
+                        let later: &[u32] = if first >= base_len {
+                            later_overloads.get(&first).map_or(&[], Vec::as_slice)
+                        } else {
+                            base_later
+                                .entry(first)
+                                .or_insert_with(|| base_later_overloads(graph, first))
+                        };
+                        for &target in std::iter::once(&first).chain(later) {
+                            if target != source {
+                                push_edge(ViewEdge {
+                                    source,
+                                    target,
+                                    rel_type: RelType::Calls,
+                                    confidence,
+                                    reason: super::merged::OVERLAY_EDGE_REASON,
+                                });
+                            }
                         }
                     }
                 }
@@ -721,10 +756,6 @@ fn construction_target(
     ty: u32,
 ) -> u32 {
     let base_len = graph.nodes.len() as u32;
-    let uid = |idx: u32| match idx.checked_sub(base_len) {
-        Some(virt_off) => nodes[virt_off as usize].uid,
-        None => graph.nodes[idx as usize].uid.to_native(),
-    };
     let base;
     let ctors: &[u32] = if ty >= base_len {
         type_ctors.get(&ty).map(Vec::as_slice).unwrap_or(&[])
@@ -732,17 +763,47 @@ fn construction_target(
         base = base_constructors(graph, ty);
         &base
     };
-    sole_constructor(ctors, uid).unwrap_or(ty)
+    sole_constructor(ctors, |idx| is_later_overload(graph, nodes, idx)).unwrap_or(ty)
 }
 
-/// The one constructor among `ctors`, or `None`. A dirty file's overloads
-/// are separate virtual nodes sharing one uid, which the index collapses
-/// into the first: constructors that all share the first one's uid count as
-/// that one, whatever their order.
-fn sole_constructor(ctors: &[u32], uid: impl Fn(u32) -> u64) -> Option<u32> {
-    let (&first, rest) = ctors.split_first()?;
-    let first_uid = uid(first);
-    rest.iter().all(|&c| uid(c) == first_uid).then_some(first)
+/// The later overloads of the clean base node `first`, in node order: the
+/// index's `SymbolTable::later_overloads`, read back from the graph.
+fn base_later_overloads(graph: &ArchivedZeroCopyGraph, first: u32) -> Vec<u32> {
+    let node = &graph.nodes[first as usize];
+    if !crate::uid::keeps_overloads(NodeKind::from(&node.kind)) {
+        return Vec::new();
+    }
+    let pool = &graph.string_pool;
+    let mut later: Vec<u32> = graph
+        .nodes_by_name(node.name.resolve(pool))
+        .filter(|&idx| {
+            let other = &graph.nodes[idx as usize];
+            idx != first
+                && other.file_idx == node.file_idx
+                && NodeKind::from(&other.kind) == NodeKind::from(&node.kind)
+                && other.owner_class.resolve(pool) == node.owner_class.resolve(pool)
+                && graph.is_later_overload(idx)
+        })
+        .collect();
+    later.sort_unstable();
+    later
+}
+
+/// The one constructor among `ctors`, or `None`. Later overloads do not
+/// count: the index registers only the first of them, which then stands for
+/// the type's constructor.
+fn sole_constructor(ctors: &[u32], is_later: impl Fn(u32) -> bool) -> Option<u32> {
+    let mut firsts = ctors.iter().copied().filter(|&c| !is_later(c));
+    let first = firsts.next()?;
+    firsts.next().is_none().then_some(first)
+}
+
+/// [`ViewNode::later_overload`] in merged space.
+fn is_later_overload(graph: &ArchivedZeroCopyGraph, nodes: &[ViewNode], idx: u32) -> bool {
+    match idx.checked_sub(graph.nodes.len() as u32) {
+        Some(virt_off) => nodes[virt_off as usize].later_overload,
+        None => graph.is_later_overload(idx),
+    }
 }
 
 /// Mirror full indexing's lexical references and first-UID survivor rule.
@@ -773,8 +834,9 @@ fn emit_closure_references(
         .map(|(_, s)| (s.start_line, s.start_column, s.end_line, s.end_column))
         .collect();
     let parents = innermost_enclosing(&spans);
-    // Raw overlay nodes retain overloads. Full indexing tombstones later
-    // identical UIDs, skips closure tombstones, and redirects parent tombstones.
+    // Overloads carry their own uids, as in full indexing. Full indexing
+    // tombstones other later identical UIDs, skips closure tombstones, and
+    // redirects parent tombstones.
     let mut live_by_uid = FxHashMap::default();
     for (offset, node) in nodes.iter().enumerate() {
         live_by_uid.entry(node.uid).or_insert(offset);
@@ -825,7 +887,9 @@ impl<'a> OverlayNames<'a> {
         meta: FileMeta,
         first_of_uid: bool,
     ) {
-        if !self.target.kind_predicate()(node.kind) {
+        // The index registers a later overload by id only: no name tier,
+        // same-file included, can bind it.
+        if node.later_overload || !self.target.kind_predicate()(node.kind) {
             return;
         }
         self.same_file
@@ -894,7 +958,7 @@ impl<'a> OverlayFacts<'a> {
             let mut exports_any = false;
             for symbol in &file.symbols {
                 let node = &nodes[offset];
-                if seen_uids.insert(node.uid) {
+                if !node.later_overload && seen_uids.insert(node.uid) {
                     declared
                         .entry((file_ord, node.name.as_str()))
                         .or_default()
@@ -1015,11 +1079,14 @@ impl<'a> ModuleFacts for OverlayFacts<'a> {
             return Vec::new();
         };
         // Only parser-made kinds: the index's file lookups never see the
-        // builder's File, Route or EntryPoint nodes.
+        // builder's File, Route or EntryPoint nodes, nor a later overload.
         let mut decls: Vec<(u32, NodeKind)> = self
             .graph
             .nodes_by_name(name)
-            .filter(|&idx| self.graph.nodes[idx as usize].file_idx.to_native() == file_idx)
+            .filter(|&idx| {
+                self.graph.nodes[idx as usize].file_idx.to_native() == file_idx
+                    && !self.graph.is_later_overload(idx)
+            })
             .map(|idx| (idx, NodeKind::from(&self.graph.nodes[idx as usize].kind)))
             .filter(|&(_, kind)| fragment_emits(kind))
             .collect();
@@ -1197,8 +1264,8 @@ fn resolve_callee<'s>(
         if virts.len() == 1 {
             return accepts(virts[0]).then_some((virts[0], CONF_SAME_FILE));
         }
-        // Ambiguous within one file (overloads, same-uid twins included):
-        // suppress, like index time.
+        // Ambiguous within one file (same-name members of several types,
+        // same-uid twins included): suppress, like index time.
         return None;
     }
 
@@ -1266,13 +1333,15 @@ fn resolve_callee<'s>(
 
     // Clean-base candidates via the name index. Dirty-file base nodes are
     // excluded here: replaced ones already participate as overlay callables
-    // (same name), suppressed ones no longer exist.
+    // (same name), suppressed ones no longer exist. A later overload is in
+    // no name table of the index.
     let clean_base = |name: &str| -> Vec<u32> {
         graph
             .nodes_by_name(name)
             .filter(|&idx| {
                 names.target.kind_predicate()(NodeKind::from(&graph.nodes[idx as usize].kind))
                     && !dirty_base.contains(&idx)
+                    && !graph.is_later_overload(idx)
             })
             .collect()
     };
@@ -1621,6 +1690,7 @@ fn resolve_rust_module_callee(
         !dirty_base.contains(&idx)
             && names.target.kind_predicate()(NodeKind::from(&node.kind))
             && NodeKind::from(&node.kind) != NodeKind::Method
+            && !graph.is_later_overload(idx)
             && graph.files[node.file_idx.to_native() as usize]
                 .path
                 .resolve(&graph.string_pool)
@@ -2432,11 +2502,11 @@ mod tests {
         assert_eq!(view.overlay_out(use_factory).count(), 0);
     }
 
-    /// The index collapses same-uid constructor overloads into the first
-    /// one and lands there; a dirty file's overloads stay separate virtual
-    /// nodes, so the overlay must count them as that one constructor too.
+    /// The index binds a construction to the first constructor overload and
+    /// reaches the later one too; the overlay must count the overloads as
+    /// one constructor, not several, and fan out the same way.
     #[test]
-    fn test_build_construction_of_overloaded_dirty_type_calls_first_constructor_like_index() {
+    fn test_build_construction_of_overloaded_dirty_type_calls_each_constructor_like_index() {
         let bytes = construction_graph_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let ctor = |line: u32| OverlaySymbol {
@@ -2484,7 +2554,11 @@ mod tests {
             edge_to(&view, make, first_ctor).is_some(),
             "makeMulti → the first Multi overload"
         );
-        assert_eq!(view.overlay_out(make).count(), 1, "one edge per call site");
+        assert!(
+            edge_to(&view, make, first_ctor + 1).is_some(),
+            "makeMulti → the later Multi overload"
+        );
+        assert_eq!(view.overlay_out(make).count(), 2, "one edge per overload");
     }
 
     /// files: 0 = src/models.py
@@ -2571,15 +2645,16 @@ mod tests {
         assert_eq!(view.constructors_of(view.base_len()), [ctor]);
     }
 
-    /// Contract: overloads (one uid) count as their first node in any
-    /// order; two distinct constructors are several.
+    /// Contract: later overloads count as their first node in any order;
+    /// two distinct constructors are several.
     #[test]
     fn test_sole_constructor_overloads_and_distinct_returns_first_or_none() {
-        let uid = |idx: u32| if idx == 7 { 2 } else { 1 };
-        assert_eq!(sole_constructor(&[3, 5], uid), Some(3));
-        assert_eq!(sole_constructor(&[3, 7, 5], uid), None);
-        assert_eq!(sole_constructor(&[7], uid), Some(7));
-        assert_eq!(sole_constructor(&[], uid), None);
+        let later = |idx: u32| idx == 5;
+        assert_eq!(sole_constructor(&[3, 5], later), Some(3));
+        assert_eq!(sole_constructor(&[5, 3], later), Some(3));
+        assert_eq!(sole_constructor(&[3, 7, 5], later), None);
+        assert_eq!(sole_constructor(&[7], later), Some(7));
+        assert_eq!(sole_constructor(&[], later), None);
     }
 
     /// Contract: builder-made kinds are never in a fragment, so a dirty file

@@ -8,8 +8,8 @@ mod instantiation_calls_support;
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_core::graph::NodeKind;
 use instantiation_calls_support::{
-    assert_calls_constructor, assert_calls_type, assert_no_instantiation_call, assert_only_call,
-    graph_of,
+    assert_calls_constructor, assert_calls_each_overload, assert_calls_type,
+    assert_no_instantiation_call, assert_only_call, graph_of,
 };
 
 const WIDGET: (&str, &str) = (
@@ -58,8 +58,8 @@ fn test_csharp_same_file_new_calls_constructor() {
     assert_calls_constructor(&graph, "MakeLocal", "Local", "src/Local.cs");
 }
 
-/// Overloads share one uid, so Pass 1 collapses them into one Constructor
-/// node: an edge to it means "a constructor of `Multi`", not a guess.
+/// Overloads are separate Constructor nodes, and the argument types that
+/// pick one are not parsed: the construction reaches both.
 #[test]
 fn test_csharp_overloaded_constructors_new_calls_constructor() {
     let multi = (
@@ -71,7 +71,7 @@ fn test_csharp_overloaded_constructors_new_calls_constructor() {
         "public class App\n{\n    public Multi MakeMulti()\n    {\n        return new Multi(1);\n    }\n}\n",
     );
     let graph = graph_of(&provider(), &[multi, app]);
-    assert_calls_constructor(&graph, "MakeMulti", "Multi", "src/Multi.cs");
+    assert_calls_each_overload(&graph, "MakeMulti", "Multi", "src/Multi.cs", 2);
 }
 
 #[test]

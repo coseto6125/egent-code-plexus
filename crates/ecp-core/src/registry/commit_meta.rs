@@ -47,7 +47,11 @@ use std::path::Path;
 /// schema12: tree-sitter 0.27 recovers some files with syntax errors into
 /// different trees than 0.26 did, so a parse of the same source can yield
 /// different symbols (nlohmann `json.hpp` gains a friend `operator<`).
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema12");
+/// schema13: a later same-name Method / Constructor overload keeps its name
+/// and owner under its own uid instead of an empty-name tombstone, gets its
+/// `HasMethod` edge, and a call bound to the first overload reaches all of
+/// them (`call:overload_set`).
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema13");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

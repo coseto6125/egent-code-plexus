@@ -8,7 +8,8 @@ mod instantiation_calls_support;
 use ecp_analyzer::kotlin::parser::KotlinProvider;
 use ecp_core::graph::NodeKind;
 use instantiation_calls_support::{
-    assert_calls_constructor, assert_calls_type, assert_only_call, graph_of,
+    assert_calls_constructor, assert_calls_each_overload, assert_calls_type, assert_only_call,
+    graph_of,
 };
 
 const WIDGET: (&str, &str) = ("src/Widget.kt", "class Widget(val x: Int)\n");
@@ -54,8 +55,8 @@ fn test_kotlin_same_file_call_calls_constructor() {
     assert_calls_constructor(&graph, "makeLocal", "Local", "src/Local.kt");
 }
 
-/// Overloads share one uid, so Pass 1 collapses them into one Constructor
-/// node: an edge to it means "a constructor of `Multi`", not a guess.
+/// Overloads are separate Constructor nodes, and the argument types that
+/// pick one are not parsed: the construction reaches both.
 #[test]
 fn test_kotlin_overloaded_constructors_call_calls_constructor() {
     let multi = (
@@ -67,7 +68,7 @@ fn test_kotlin_overloaded_constructors_call_calls_constructor() {
         "fun makeMulti(): Multi {\n    return Multi(1)\n}\n",
     );
     let graph = graph_of(&provider(), &[multi, app]);
-    assert_calls_constructor(&graph, "makeMulti", "Multi", "src/Multi.kt");
+    assert_calls_each_overload(&graph, "makeMulti", "Multi", "src/Multi.kt", 2);
 }
 
 #[test]

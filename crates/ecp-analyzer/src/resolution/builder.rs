@@ -21,12 +21,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Classify a uid-hash collision based on `(kind, path)`. Returns the
 /// BlindSpot `kind` string. See builder.rs near `uid_seen.get` for context.
-///
-///   `method-overload` — Method/Constructor collisions are almost always
-///       overload variants (same name, different parameter types) in Java,
-///       Swift, Kotlin, TypeScript, PHP, etc. The uid composition
-///       `(kind, path, owner_class, name)` lacks the parameter signature
-///       so overloads inherently collide.
+/// Method / Constructor collisions never reach it: Pass 1 keeps them as
+/// overloads ([`ecp_core::uid::keeps_overloads`]).
 ///
 ///   `ifdef-redef`    — Macro/Function/Struct/Enum/Typedef/Variable/Const
 ///       in C/C++ files. Headers commonly `#define X` or `static int foo()`
@@ -48,9 +44,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 ///       drops from ~25K to <1K on .sample_repo, making the residual
 ///       set tractable.
 pub(crate) fn classify_collision(kind: NodeKind, path: &str) -> &'static str {
-    if matches!(kind, NodeKind::Method | NodeKind::Constructor) {
-        return "method-overload";
-    }
     let is_c_family = path.ends_with(".c")
         || path.ends_with(".h")
         || path.ends_with(".cc")
@@ -966,9 +959,9 @@ fn file_indices(local_graphs: &[LocalGraph]) -> FxHashMap<String, u32> {
 }
 
 /// Pass 1: register every `LocalGraph`'s File + symbol nodes into the
-/// SymbolTable/StringPool, assigning canonical UIDs and tombstoning D1
-/// hash collisions (see BlindSpotRecord `uid-collision`/`method-overload`/
-/// `ifdef-redef` kinds).
+/// SymbolTable/StringPool, assigning canonical UIDs, keeping overloads under
+/// their own UIDs and tombstoning other D1 hash collisions (see
+/// BlindSpotRecord `uid-collision`/`ifdef-redef` kinds).
 fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
     // Pre-size accumulators from known input cardinalities. Each
     // LocalGraph contributes 1 File node + N symbol nodes. Plus a
@@ -1059,15 +1052,31 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
             // from any query) to occupy the position, keeping nodes.len() ≡
             // current_node_idx throughout Pass 1.
             if let Some(&prev_idx) = uid_seen.get(&uid_u64) {
+                // An overload is a real declaration: it keeps its name and
+                // owner (shared with the first, so already pooled) under a
+                // uid of its own, and loses nothing a BlindSpot would report.
+                if ecp_core::uid::keeps_overloads(raw_node.kind) {
+                    let ordinal = symbol_table.register_overload(prev_idx, file_meta);
+                    let first: &Node = &nodes[prev_idx as usize];
+                    nodes.push(Node {
+                        uid: ecp_core::uid::overload(uid_u64, ordinal),
+                        name: first.name,
+                        file_idx,
+                        kind: raw_node.kind,
+                        span: raw_node.span,
+                        community_id: 0,
+                        owner_class: first.owner_class,
+                        content_hash: raw_node.content_hash,
+                    });
+                    current_node_idx += 1;
+                    continue;
+                }
                 // Reclassify the collision based on (kind, lang) — most
                 // collisions are not parser bugs but legitimate semantic
                 // ambiguities the indexer can't resolve without semantic
                 // analysis. Triaging them up front lets `uid-collision`
                 // mean "true parser ambiguity worth investigating".
                 //
-                //   - method-overload : Method/Constructor with same
-                //     (kind, path, owner, name) but distinct param-types
-                //     (Java/Swift/Kotlin/TS/PHP overloads, C++ `operator new`).
                 //   - ifdef-redef     : C/C++ Macro/Function/Struct/Enum/
                 //     Typedef/Variable redefined under `#ifdef` branches
                 //     (`#define X` for 32/64-bit, `static int foo() { ... }`
@@ -1800,8 +1809,9 @@ fn emit_file_closure_references(
         if nodes[target as usize].name.len == 0 {
             continue;
         }
-        // Overloads share an identity; collision tombstones clear the
-        // name and invert the survivor's UID. Preserve both callbacks.
+        // A redefined function (an `#ifdef` twin) shares the first one's
+        // identity; its tombstone clears the name and inverts the
+        // survivor's UID. Preserve both callbacks.
         if nodes[source as usize].name.len == 0 {
             let live_by_uid = live_by_uid.get_or_insert_with(|| {
                 nodes[start_index as usize..start_index as usize + graph.nodes.len()]
@@ -2016,6 +2026,7 @@ fn pass2_emit_node_edges(
     reason_implements: StrRef,
     reason_type: StrRef,
     reason_call: StrRef,
+    reason_overload_set: StrRef,
     reason_reads_field: StrRef,
     symbol_table: &SymbolTable,
     edges: &mut Vec<Edge>,
@@ -2068,20 +2079,33 @@ fn pass2_emit_node_edges(
                 call_heritage,
             ),
         };
-        for (target_id, confidence) in targets {
-            if target_id == current_node_idx {
-                continue; // self-recursion edges are Louvain / process noise
-            }
-            let edge_pre_sort_idx = edges.len();
-            edges.push(Edge {
-                source: current_node_idx,
-                target: target_id,
-                rel_type: RelType::Calls,
-                confidence,
-                reason: reason_call,
-            });
-            if let Some((flags, dispatch_type)) = meta {
-                pending_call_metas.push((edge_pre_sort_idx, *flags, dispatch_type.clone()));
+        for (first, confidence) in targets {
+            // The name binds the first overload; the argument types that
+            // pick one are not parsed, so the call reaches every overload.
+            // An overload calling its sibling (`save(int)` delegating to
+            // `save(int, String)`) binds itself here, so the sibling edge
+            // survives the self-recursion skip.
+            let later = symbol_table.later_overloads(first);
+            let reason = if later.is_empty() {
+                reason_call
+            } else {
+                reason_overload_set
+            };
+            for target_id in std::iter::once(first).chain(later.iter().copied()) {
+                if target_id == current_node_idx {
+                    continue; // self-recursion edges are Louvain / process noise
+                }
+                let edge_pre_sort_idx = edges.len();
+                edges.push(Edge {
+                    source: current_node_idx,
+                    target: target_id,
+                    rel_type: RelType::Calls,
+                    confidence,
+                    reason,
+                });
+                if let Some((flags, dispatch_type)) = meta {
+                    pending_call_metas.push((edge_pre_sort_idx, *flags, dispatch_type.clone()));
+                }
             }
         }
     }
@@ -2255,6 +2279,7 @@ fn pass2_resolve_edges(
     let reason_implements = string_pool.add("pass2:implements");
     let reason_type = string_pool.add("type_annotation");
     let reason_call = string_pool.add("call");
+    let reason_overload_set = string_pool.add("call:overload_set");
     let reason_reads_field = string_pool.add("field_read");
 
     let mut reason_cache: FxHashMap<String, StrRef> = FxHashMap::default();
@@ -2364,6 +2389,7 @@ fn pass2_resolve_edges(
                     reason_implements,
                     reason_type,
                     reason_call,
+                    reason_overload_set,
                     reason_reads_field,
                     symbol_table,
                     &mut edges,
@@ -2458,6 +2484,7 @@ fn pass2_resolve_edges(
                         reason_implements,
                         reason_type,
                         reason_call,
+                        reason_overload_set,
                         reason_reads_field,
                         symbol_table_ref,
                         &mut local_edges,
@@ -2575,22 +2602,6 @@ mod tests {
     use ecp_core::graph::NodeKind;
 
     // ---- classify_collision (uid-collision reclassification) ----
-
-    #[test]
-    fn classify_method_in_any_file_is_overload() {
-        assert_eq!(
-            classify_collision(NodeKind::Method, "Java/foo/Bar.java"),
-            "method-overload"
-        );
-        assert_eq!(
-            classify_collision(NodeKind::Constructor, "Swift/Source/Foo.swift"),
-            "method-overload"
-        );
-        assert_eq!(
-            classify_collision(NodeKind::Method, "C/deps/jemalloc/src/jemalloc_cpp.cpp"),
-            "method-overload"
-        );
-    }
 
     #[test]
     fn classify_c_macro_function_struct_is_ifdef_redef() {

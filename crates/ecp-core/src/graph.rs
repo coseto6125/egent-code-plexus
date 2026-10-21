@@ -888,14 +888,14 @@ pub struct BlindSpotRecord {
 pub const BS_KIND_UID_COLLISION: &str = "uid-collision";
 
 /// Type-2 "parser-metric" BlindSpot kinds — emitted by the resolver's
-/// `classify_collision` for uid hash collisions, overloaded methods, and
-/// `#ifdef` redefinitions. These are parser-maintainer signal, NOT
+/// `classify_collision` for uid hash collisions and `#ifdef`
+/// redefinitions. These are parser-maintainer signal, NOT
 /// LLM-actionable source-code opacity (which is Type-1: `python-eval`,
 /// `python-exec`, `dynamic-import`, etc.).
 ///
 /// `ecp summary.blind_spots` filters these out so its LLM-facing surface
 /// stays focused; `ecp dev uid-audit` inspects them.
-pub const DEV_METRIC_BS_KINDS: &[&str] = &[BS_KIND_UID_COLLISION, "method-overload", "ifdef-redef"];
+pub const DEV_METRIC_BS_KINDS: &[&str] = &[BS_KIND_UID_COLLISION, "ifdef-redef"];
 
 /// True iff `kind` is one of [`DEV_METRIC_BS_KINDS`].
 pub fn is_dev_metric_bs_kind(kind: &str) -> bool {
@@ -1317,6 +1317,28 @@ impl ArchivedZeroCopyGraph {
         self.file_flags
             .get(file_idx as usize)
             .is_some_and(|flags| *flags & FILE_FLAG_ES_MODULE != 0)
+    }
+
+    /// Whether `node_idx` is a later overload ([`crate::uid::keeps_overloads`]):
+    /// a node the index keeps but never binds by name, so a name lookup that
+    /// mirrors the index's resolver must skip it. Its uid is the only mark.
+    pub fn is_later_overload(&self, node_idx: u32) -> bool {
+        let pool = &self.string_pool;
+        let node = &self.nodes[node_idx as usize];
+        let kind = NodeKind::from(&node.kind);
+        crate::uid::keeps_overloads(kind)
+            && self
+                .files
+                .get(node.file_idx.to_native() as usize)
+                .is_some_and(|file| {
+                    node.uid.to_native()
+                        != crate::uid::compute(
+                            kind,
+                            file.path.resolve(pool),
+                            Some(node.owner_class.resolve(pool)),
+                            node.name.resolve(pool),
+                        )
+                })
     }
 
     pub fn is_exported_node(&self, node_idx: u32) -> bool {

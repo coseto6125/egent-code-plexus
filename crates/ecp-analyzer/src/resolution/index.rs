@@ -144,6 +144,10 @@ pub struct SymbolTable {
     /// per-node cost is the 4-byte `node_owner` slot.
     owner_ids: FxHashMap<Box<str>, u32>,
 
+    /// First declaration → its later overloads, in source order (see
+    /// [`SymbolTable::register_overload`]). Sparse: most ids have none.
+    overloads: FxHashMap<u32, Vec<u32>>,
+
     /// Declared supertypes per type id. Filled once by the builder's
     /// supertypes pre-pass, after Pass 1 and before Pass 2. Types with no
     /// declared heritage have no entry.
@@ -447,9 +451,10 @@ impl SymbolTable {
     /// the type's own file whose owner key is the type's name. A type whose
     /// file holds several (two same-named types, each with a constructor)
     /// maps to none, and its constructions land on the type. Overloads are
-    /// not several: Pass 1 collapses them into one node per (kind, path,
-    /// owner, name) uid, which then stands for "a constructor of the type".
-    /// The query-time overlay applies the same rule. Call once after Pass 1.
+    /// not several: Pass 1 registers only the first of them by name
+    /// ([`Self::register_overload`]), which then stands for "a constructor of
+    /// the type". The query-time overlay applies the same rule. Call once
+    /// after Pass 1.
     pub fn build_constructor_index(&mut self) {
         let mut owner_names: Vec<&str> = vec![""; self.owner_ids.len()];
         for (key, &id) in &self.owner_ids {
@@ -495,6 +500,50 @@ impl SymbolTable {
         self.node_kinds.push(kind);
         self.node_file_meta.push(file_meta);
         self.node_owner.push(NO_OWNER);
+    }
+
+    /// Register the next id as a later overload of `first`
+    /// ([`ecp_core::uid::keeps_overloads`]): same kind and owner, but in no
+    /// name table, so every name lookup still returns `first`. Which overload
+    /// a call means needs argument types the parse does not carry, so a call
+    /// bound to `first` reaches the whole set ([`Self::later_overloads`]).
+    /// Returns the overload's 1-based ordinal.
+    pub fn register_overload(&mut self, first: u32, file_meta: FileMeta) -> u32 {
+        let id = self.node_kinds.len() as u32;
+        self.node_kinds.push(self.node_kinds[first as usize]);
+        self.node_file_meta.push(file_meta);
+        self.node_owner.push(self.node_owner[first as usize]);
+        let later = self.overloads.entry(first).or_default();
+        later.push(id);
+        later.len() as u32
+    }
+
+    /// The later overloads of `first`, in source order.
+    pub fn later_overloads(&self, first: u32) -> &[u32] {
+        self.overloads.get(&first).map_or(&[], Vec::as_slice)
+    }
+
+    /// The first declaration in `file_path` named `node_name` with `kind` and
+    /// `owner`: the id its later overloads hang off.
+    pub fn first_declaration(
+        &self,
+        file_path: &str,
+        node_name: &str,
+        kind: NodeKind,
+        owner: Option<&str>,
+    ) -> Option<u32> {
+        let owner = match owner.and_then(owner_key) {
+            None => NO_OWNER,
+            Some(key) => *self.owner_ids.get(key)?,
+        };
+        self.file_scoped
+            .get(file_path)?
+            .get(node_name)?
+            .iter()
+            .copied()
+            .find(|&id| {
+                self.node_kinds[id as usize] == kind && self.node_owner[id as usize] == owner
+            })
     }
 
     /// Looks up a node ID by its file path and node name.

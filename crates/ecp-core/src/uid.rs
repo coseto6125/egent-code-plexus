@@ -26,6 +26,23 @@ pub fn compute(kind: NodeKind, path: &str, owner_class: Option<&str>, name: &str
     h.digest()
 }
 
+/// Whether a later declaration that repeats an earlier one's identity
+/// fields is an overload the index keeps as its own node (uid from
+/// [`overload`]), rather than a duplicate it tombstones. The uid has no
+/// parameter signature, so `save(int)` and `save(String)` share one.
+pub fn keeps_overloads(kind: NodeKind) -> bool {
+    matches!(kind, NodeKind::Method | NodeKind::Constructor)
+}
+
+/// UID of the `ordinal`-th (1-based) later overload of the declaration whose
+/// uid is `first`: deterministic for a given declaration order in the file.
+pub fn overload(first: u64, ordinal: u32) -> u64 {
+    let mut h = Xxh3::new();
+    h.update(&first.to_le_bytes());
+    h.update(&ordinal.to_le_bytes());
+    h.digest()
+}
+
 /// One-shot xxh3-64 hash of raw bytes. Used for per-symbol content hashing
 /// (T7-2): `content_hash = xxh3_64_bytes(&source[start_byte..end_byte])`.
 ///
