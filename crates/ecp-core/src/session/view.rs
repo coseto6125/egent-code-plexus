@@ -1173,6 +1173,21 @@ impl<'a> OverlayNames<'a> {
 }
 
 type StarModuleCache = FxHashMap<Box<str>, Rc<[Box<str>]>>;
+/// Every input [`OverlayFacts::qualified_callee`] reads that varies within one
+/// view: (dirty file ordinal, its imports slice, callee, kind family, whether
+/// the qualifier is the caller's own type and then its heritage slice, and a
+/// Rust caller, whose `impl` block the same-file pick prefers).
+type QualifiedCache = FxHashMap<
+    (
+        usize,
+        (usize, usize),
+        Box<str>,
+        ResolveTarget,
+        Option<(usize, usize)>,
+        Option<u32>,
+    ),
+    Option<(u32, f32)>,
+>;
 type NamedImportCache = FxHashMap<(usize, ResolveTarget), FxHashMap<Box<str>, Option<u32>>>;
 
 /// The facts the shared import rules ([`reexport`]) read over the overlay:
@@ -1206,6 +1221,10 @@ struct OverlayFacts<'a> {
     /// answer: a file calls one imported name at many sites, and each probe
     /// walks the specifier's candidate files.
     named_imports: RefCell<NamedImportCache>,
+    /// [`Self::qualified_callee`]'s answers: a file types one receiver at
+    /// many sites (`segment.get()`, `K.m()`), and each probe walks the
+    /// qualifier's files and the same-file pick.
+    qualified: RefCell<QualifiedCache>,
     /// File stem → files, the index's `SymbolTable::files_by_stem`. Built on
     /// the first module-file probe of the qualifier tier: one pass over
     /// `graph.files`, which most builds never pay.
@@ -1323,6 +1342,7 @@ impl<'a> OverlayFacts<'a> {
             clean_aliases: RefCell::default(),
             star_modules: RefCell::default(),
             named_imports: RefCell::default(),
+            qualified: RefCell::default(),
             stems: OnceCell::new(),
             aliases: graph.path_aliases(),
             replaced,
@@ -1671,6 +1691,47 @@ impl<'a> OverlayFacts<'a> {
     /// overlay does not replay.
     #[allow(clippy::too_many_arguments)]
     fn qualified_callee(
+        &self,
+        file_ord: usize,
+        imports: &[RawImport],
+        caller: FileMeta,
+        (callee, qualifier, member): (&str, &str, &str),
+        target: ResolveTarget,
+        qualifiers: &OverlayNames<'_>,
+        call: Option<CallScope<'_>>,
+        heritage: &[String],
+    ) -> Option<(u32, f32)> {
+        let caller_type = call
+            .and_then(|call| call.owner)
+            .is_some_and(|owner| owner_key(qualifier) == Some(owner));
+        let key = (
+            file_ord,
+            (imports.as_ptr() as usize, imports.len()),
+            Box::<str>::from(callee),
+            target,
+            caller_type.then_some((heritage.as_ptr() as usize, heritage.len())),
+            call.and_then(|call| call.caller)
+                .filter(|_| caller.language == Language::Rust),
+        );
+        if let Some(&hit) = self.qualified.borrow().get(&key) {
+            return hit;
+        }
+        let hit = self.qualified_callee_uncached(
+            file_ord,
+            imports,
+            caller,
+            (callee, qualifier, member),
+            target,
+            qualifiers,
+            call,
+            heritage,
+        );
+        self.qualified.borrow_mut().insert(key, hit);
+        hit
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn qualified_callee_uncached(
         &self,
         file_ord: usize,
         imports: &[RawImport],
@@ -2863,7 +2924,14 @@ fn resolve_callee<'s>(
             })
             .collect()
     };
-    let base_candidates = clean_base(callee);
+    // Built on first use: most calls bind at the qualifier, ladder or
+    // heritage tier, which never read the bare name's candidates.
+    let base_candidates = OnceCell::new();
+    let base = || {
+        base_candidates
+            .get_or_init(|| clean_base(callee))
+            .as_slice()
+    };
     let overlay_candidates: &[(u32, FileMeta)] =
         names.anywhere.get(callee).map(Vec::as_slice).unwrap_or(&[]);
 
@@ -2888,7 +2956,7 @@ fn resolve_callee<'s>(
     {
         let base_declared;
         let (base_scoped, overlay_scoped): (&[u32], &[(u32, FileMeta)]) = if declared == callee {
-            (base_candidates.as_slice(), overlay_candidates)
+            (base(), overlay_candidates)
         } else {
             base_declared = clean_base(declared);
             (
@@ -3093,7 +3161,7 @@ fn resolve_callee<'s>(
     };
     let pick = pick_global(
         caller,
-        base_candidates
+        base()
             .iter()
             .map(|&idx| (idx, base_meta(idx)))
             .chain(overlay_candidates.iter().copied()),
@@ -3105,7 +3173,7 @@ fn resolve_callee<'s>(
             facts.nearest_copy(
                 caller,
                 importer,
-                base_candidates
+                base()
                     .iter()
                     .map(|&idx| (idx, base_meta(idx)))
                     .chain(overlay_candidates.iter().copied()),
