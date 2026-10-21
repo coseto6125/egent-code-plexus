@@ -1189,6 +1189,11 @@ type QualifiedCache = FxHashMap<
     Option<(u32, f32)>,
 >;
 type NamedImportCache = FxHashMap<(usize, ResolveTarget), FxHashMap<Box<str>, Option<u32>>>;
+/// Every input of [`resolve_callee`]'s Tier 3 that varies within one view:
+/// (dirty file ordinal, its imports slice, callee, kind family, whether a
+/// call site admits the nearest copy, and Rust method syntax).
+type GlobalCache =
+    FxHashMap<(usize, (usize, usize), Box<str>, ResolveTarget, bool, bool), Option<(u32, f32)>>;
 
 /// The facts the shared import rules ([`reexport`]) read over the overlay:
 /// the base graph, with each dirty file's fresh parse in place of its
@@ -1225,6 +1230,9 @@ struct OverlayFacts<'a> {
     /// many sites (`segment.get()`, `K.m()`), and each probe walks the
     /// qualifier's files and the same-file pick.
     qualified: RefCell<QualifiedCache>,
+    /// Tier 3's answers: a file calls one common name (`get`, `checkNotNull`)
+    /// at many sites, and each probe filters every base node of that name.
+    global: RefCell<GlobalCache>,
     /// File stem → files, the index's `SymbolTable::files_by_stem`. Built on
     /// the first module-file probe of the qualifier tier: one pass over
     /// `graph.files`, which most builds never pay.
@@ -1343,6 +1351,7 @@ impl<'a> OverlayFacts<'a> {
             star_modules: RefCell::default(),
             named_imports: RefCell::default(),
             qualified: RefCell::default(),
+            global: RefCell::default(),
             stems: OnceCell::new(),
             aliases: graph.path_aliases(),
             replaced,
@@ -3148,6 +3157,17 @@ fn resolve_callee<'s>(
     // Tier 3: the shared candidate filter over clean base + overlay. Same
     // invariant as Tier 2: a base candidate is clean by construction, never
     // redirected; overlay candidates are virtual indices.
+    let key = (
+        file_ord,
+        (imports.as_ptr() as usize, imports.len()),
+        Box::<str>::from(callee),
+        names.target,
+        call.is_some(),
+        rust_method,
+    );
+    if let Some(&hit) = facts.global.borrow().get(&key) {
+        return hit;
+    }
     let mut base_meta = |idx: u32| {
         let file_idx = graph.nodes[idx as usize].file_idx.to_native() as usize;
         *base_metas.entry(file_idx).or_insert_with(|| {
@@ -3159,46 +3179,50 @@ fn resolve_callee<'s>(
                 })
         })
     };
-    let pick = pick_global(
-        caller,
-        base()
-            .iter()
-            .map(|&idx| (idx, base_meta(idx)))
-            .chain(overlay_candidates.iter().copied()),
-    );
-    let (target, confidence) = match pick {
-        GlobalPick::Unique(target) => (target, CONF_GLOBAL_UNIQUE),
-        // The index's `DecisionTier::NearestCopy`, for call sites only.
-        GlobalPick::Ambiguous if call.is_some() => (
-            facts.nearest_copy(
-                caller,
+    let hit = (|| {
+        let pick = pick_global(
+            caller,
+            base()
+                .iter()
+                .map(|&idx| (idx, base_meta(idx)))
+                .chain(overlay_candidates.iter().copied()),
+        );
+        let (target, confidence) = match pick {
+            GlobalPick::Unique(target) => (target, CONF_GLOBAL_UNIQUE),
+            // The index's `DecisionTier::NearestCopy`, for call sites only.
+            GlobalPick::Ambiguous if call.is_some() => (
+                facts.nearest_copy(
+                    caller,
+                    importer,
+                    base()
+                        .iter()
+                        .map(|&idx| (idx, base_meta(idx)))
+                        .chain(overlay_candidates.iter().copied()),
+                )?,
+                NEAREST_COPY_CONFIDENCE,
+            ),
+            GlobalPick::Ambiguous | GlobalPick::NoMatch => return None,
+        };
+        debug_assert!(!replaced.contains_key(&target));
+        let decl_file = match target.checked_sub(base_len) {
+            Some(offset) => Some(&*nodes[offset as usize].rel_path),
+            None => base_path(target),
+        };
+        if decl_file.is_some_and(|file| {
+            reexport::import_hides(
+                facts,
                 importer,
-                base()
-                    .iter()
-                    .map(|&idx| (idx, base_meta(idx)))
-                    .chain(overlay_candidates.iter().copied()),
-            )?,
-            NEAREST_COPY_CONFIDENCE,
-        ),
-        GlobalPick::Ambiguous | GlobalPick::NoMatch => return None,
-    };
-    debug_assert!(!replaced.contains_key(&target));
-    let decl_file = match target.checked_sub(base_len) {
-        Some(offset) => Some(&*nodes[offset as usize].rel_path),
-        None => base_path(target),
-    };
-    if decl_file.is_some_and(|file| {
-        reexport::import_hides(
-            facts,
-            importer,
-            callee,
-            imports.iter().map(ImportRef::from),
-            file,
-        )
-    }) {
-        return None;
-    }
-    accepts(target).then_some((target, confidence))
+                callee,
+                imports.iter().map(ImportRef::from),
+                file,
+            )
+        }) {
+            return None;
+        }
+        accepts(target).then_some((target, confidence))
+    })();
+    facts.global.borrow_mut().insert(key, hit);
+    hit
 }
 
 /// What a call site adds to a name lookup, as the index's `CallScope`
