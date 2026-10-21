@@ -124,6 +124,17 @@
     (#match? @laravel.route.method "^(get|post|put|patch|delete|options|any)$")
   arguments: (arguments) @laravel.route.args) @laravel.route.call
 
+;; Laravel route-file includes: `Route::prefix('admin')->group(base_path(
+;; 'routes/admin.php'))`, `Route::group([...], __DIR__.'/x.php')`, the
+;; Laravel 11 `->withRouting(web: ..., api: ...)` builder, and `require`.
+;; The parser keeps the ones whose argument names a file, not a closure.
+(member_call_expression
+  name: (name) @_laravel_include_name
+    (#match? @_laravel_include_name "^(group|withRouting)$")) @laravel.include.call
+(scoped_call_expression
+  name: (name) @_laravel_include_group (#eq? @_laravel_include_group "group")) @laravel.include.call
+[(require_expression) (require_once_expression) (include_expression) (include_once_expression)] @laravel.include.call
+
 ;; Anonymous callbacks passed as call arguments (array_map, usort, array_filter,
 ;; custom higher-order fns). Without a node here their body's calls are dropped
 ;; by attach_to_enclosing when no named enclosing scope exists — filter

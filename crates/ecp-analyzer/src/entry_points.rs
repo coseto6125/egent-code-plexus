@@ -399,6 +399,7 @@ mod tests {
             path: "/items".into(),
             handler: Some("read_items".into()),
             span: (0, 0, 0, 0),
+            scope: None,
         }];
         let nodes = vec![mk_node("read_items", NodeKind::Function)];
         let eps = score_entry_points(&routes, &[], &nodes);
@@ -500,12 +501,14 @@ mod tests {
                 path: "/a".into(),
                 handler: Some("zzz_handler".into()),
                 span: (0, 0, 0, 0),
+                scope: None,
             },
             RawRoute {
                 method: "GET".into(),
                 path: "/b".into(),
                 handler: Some("aaa_handler".into()),
                 span: (0, 0, 0, 0),
+                scope: None,
             },
         ];
         let nodes = vec![
@@ -532,6 +535,7 @@ mod tests {
             path: "/".into(),
             handler: None,
             span: (0, 0, 0, 0),
+            scope: None,
         }];
         let eps = score_entry_points(&routes, &[], &[]);
         assert!(eps.is_empty());
@@ -561,6 +565,7 @@ mod tests {
             path: "/items".into(),
             handler: Some("list_items".into()),
             span: (0, 0, 0, 0),
+            scope: None,
         }];
 
         let eps = score_entry_points(&routes, &[], &[handler]);

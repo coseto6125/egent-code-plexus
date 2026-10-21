@@ -614,6 +614,7 @@ impl<'s, 't> Walk<'s, 't> {
             path,
             handler,
             span: span(call),
+            scope: None,
         });
     }
 }

@@ -666,6 +666,7 @@ impl LanguageProvider for RubyProvider {
                             end.row as u32,
                             end.column as u32,
                         ),
+                        scope: None,
                     });
                 }
             }

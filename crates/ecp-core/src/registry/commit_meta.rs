@@ -60,7 +60,11 @@ use std::path::Path;
 /// schema16: `graph.bin` keeps the repo's path aliases and each type's
 /// resolved supertypes (`alias_table`, `supertype_table`), so the session
 /// overlay resolves aliased specifiers and walks heritage like the index.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema16");
+/// schema17: a Laravel route carries the prefix, middleware and controller
+/// namespace of its route groups, a group that loads a route file applies
+/// them to that file's routes, and a `'Ctrl@method'` / `[Ctrl::class, 'm']`
+/// handler gets a `HandlesRoute` edge from the controller method.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema17");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

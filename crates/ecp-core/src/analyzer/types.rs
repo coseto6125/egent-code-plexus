@@ -363,6 +363,45 @@ pub struct RawRoute {
     pub path: String,
     pub handler: Option<String>,
     pub span: (u32, u32, u32, u32),
+    /// What the enclosing route groups apply (Laravel `Route::group`,
+    /// `->group(...)`), and, for a [`RawRoute::INCLUDE`] record, the route
+    /// file the group loads. `None` for a provider without route groups.
+    pub scope: Option<Box<RawRouteScope>>,
+}
+
+impl RawRoute {
+    /// `method` of a route-file include record, such as
+    /// `Route::prefix('admin')->group(base_path('routes/admin.php'))`. It is
+    /// not an endpoint: `path` holds the group prefix (empty for none), and
+    /// the builder applies the record's prefix, middleware and namespace to
+    /// every route of the included file.
+    pub const INCLUDE: &'static str = "INCLUDE";
+}
+
+/// The group scope of one [`RawRoute`], as far as its own file shows it.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Default, PartialEq)]
+#[rkyv(derive(Debug))]
+pub struct RawRouteScope {
+    /// Middleware in effect, the outermost group's first and the route's
+    /// own last.
+    pub middleware: Vec<String>,
+    /// Controller namespace in effect for a relative class name in
+    /// `handler`. A leading `\` marks a namespace that an including group's
+    /// namespace does not prefix. `None` when no group in the file sets one.
+    pub namespace: Option<String>,
+    /// The included route file of a [`RawRoute::INCLUDE`] record.
+    pub include: Option<RouteInclude>,
+}
+
+/// The route file a Laravel route group loads.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq)]
+#[rkyv(derive(Debug))]
+pub enum RouteInclude {
+    /// `base_path('routes/api.php')`: relative to the application root.
+    AppRoot(String),
+    /// `__DIR__ . '/api.php'`: relative to the including file's directory,
+    /// `..` segments kept.
+    FileDir(String),
 }
 
 /// Path-shaped string literal extracted by a per-language `path_literals`

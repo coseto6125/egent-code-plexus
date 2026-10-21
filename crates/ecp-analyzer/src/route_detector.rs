@@ -169,6 +169,26 @@ pub fn clean_route_path_lax(raw_with_quotes: &str) -> Option<String> {
     }
 }
 
+/// Route path segments joined the way a router with groups joins a group
+/// prefix to a route path (Laravel `prefix`): each segment trimmed of `/`,
+/// empty segments dropped, one leading `/`. `["admin/", "/users"]` gives
+/// `/admin/users`; no non-empty segment gives `/`.
+pub fn join_route_path<'a>(segments: impl IntoIterator<Item = &'a str>) -> String {
+    let mut path = String::new();
+    for part in segments
+        .into_iter()
+        .flat_map(|segment| segment.split('/'))
+        .filter(|part| !part.is_empty())
+    {
+        path.push('/');
+        path.push_str(part);
+    }
+    if path.is_empty() {
+        path.push('/');
+    }
+    path
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,6 +199,7 @@ mod tests {
             path: path.to_string(),
             handler: None,
             span: (0, 0, 0, 0),
+            scope: None,
         }
     }
 
@@ -396,5 +417,23 @@ mod tests {
     fn strip_quotes_unquoted_path_returns_original() {
         // Already-unquoted path passes through unchanged.
         assert_eq!(strip_string_quotes("/api/users"), "/api/users");
+    }
+
+    #[test]
+    fn test_join_route_path_stray_slashes_joins_with_single_slashes() {
+        assert_eq!(
+            join_route_path(["/admin/", "import", "/award/"]),
+            "/admin/import/award"
+        );
+    }
+
+    #[test]
+    fn test_join_route_path_empty_segments_returns_root() {
+        assert_eq!(join_route_path(["", "/", ""]), "/");
+    }
+
+    #[test]
+    fn test_join_route_path_empty_prefix_keeps_path() {
+        assert_eq!(join_route_path(["", "/users/{id}"]), "/users/{id}");
     }
 }

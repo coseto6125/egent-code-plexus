@@ -32,7 +32,8 @@ pub const GRAPH_MAGIC: [u8; 8] = *b"ECP-RS\0\0";
 ///     `supertype_table` (each type's resolved bases, in declared order, with
 ///     the position of the first unresolved one), so the overlay resolves an
 ///     aliased specifier and walks heritage like a full reindex.
-pub const GRAPH_FORMAT_VERSION: u32 = 14;
+/// v15: `route_middleware` (each Route's middleware, outermost group first).
+pub const GRAPH_FORMAT_VERSION: u32 = 15;
 
 impl std::str::FromStr for NodeKind {
     type Err = ();
@@ -883,6 +884,17 @@ pub struct RouteShape {
     pub error_keys: Vec<StrRef>,
 }
 
+/// The middleware a Route passes through, outermost group first and the
+/// route's own last (Laravel `->middleware('auth')`, group `middleware`
+/// option). `node_idx` points into `ZeroCopyGraph.nodes`. Answers "which
+/// routes are reachable without `auth`" without re-parsing route files.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
+pub struct RouteMiddleware {
+    pub node_idx: u32,
+    pub middleware: Vec<StrRef>,
+}
+
 /// File-level record of a truly unresolvable code pattern (eval/dynamic
 /// import/cross-object reflection/...). Persisted in the graph so that
 /// `ecp context` / `ecp analyze` can surface blind spots to the LLM,
@@ -1204,6 +1216,11 @@ pub struct ZeroCopyGraph {
     /// Sparse, sorted by `type_idx`: one entry per type that declares
     /// heritage. A type with no heritage has no entry.
     pub supertype_table: Vec<SupertypeFact>,
+
+    // ── Schema v15 additions ─────────────────────────────────────────
+    /// Sparse, sorted by `node_idx`: one entry per Route with at least one
+    /// middleware.
+    pub route_middleware: Vec<RouteMiddleware>,
 }
 
 impl ZeroCopyGraph {
@@ -1385,6 +1402,21 @@ impl ArchivedZeroCopyGraph {
         ))
     }
 
+    /// The middleware of the Route node `node_idx`, outermost first; empty
+    /// when it has none.
+    pub fn route_middleware_of(&self, node_idx: u32) -> Vec<&str> {
+        self.route_middleware
+            .binary_search_by_key(&node_idx, |entry| entry.node_idx.to_native())
+            .map(|at| {
+                self.route_middleware[at]
+                    .middleware
+                    .iter()
+                    .map(|name| name.resolve(&self.string_pool))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn is_es_module_file(&self, file_idx: u32) -> bool {
         self.file_flags
             .get(file_idx as usize)
@@ -1477,6 +1509,7 @@ impl Default for ZeroCopyGraph {
             file_path_order: Vec::new(),
             alias_table: Vec::new(),
             supertype_table: Vec::new(),
+            route_middleware: Vec::new(),
         }
     }
 }

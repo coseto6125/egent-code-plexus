@@ -662,3 +662,199 @@ fn routes_python_decorator_get_method_resolved() {
         "expected health_check as named handler for /health, got: {names:?}\nfull json: {json}"
     );
 }
+
+// ── Laravel route groups across files ───────────────────────────────────────
+//
+// The provider loads `routes/admin.php` under prefix `admin`, middleware
+// `api` and the controller namespace; the route file nests its own groups.
+// `ecp routes` must show the full path, the middleware outermost first, and
+// the controller method as the handler, not `<inline>`.
+
+const LARAVEL_FILES: &[(&str, &str)] = &[
+    (
+        "app/Providers/RouteServiceProvider.php",
+        r#"<?php
+namespace App\Providers;
+
+use Illuminate\Foundation\Support\Providers\RouteServiceProvider as ServiceProvider;
+use Illuminate\Support\Facades\Route;
+
+class RouteServiceProvider extends ServiceProvider
+{
+    protected $namespace = 'App\Http\Controllers';
+
+    protected function mapAdminRoutes()
+    {
+        Route::prefix('admin')
+            ->middleware('api')
+            ->namespace($this->namespace)
+            ->group(base_path('routes/admin.php'));
+    }
+}
+"#,
+    ),
+    (
+        "routes/admin.php",
+        r#"<?php
+
+use Illuminate\Support\Facades\Route;
+
+Route::get('/health', function () { return 'ok'; });
+
+Route::group(['middleware' => 'auth:admin'], function () {
+    Route::prefix('import')
+        ->group(function () {
+            Route::post('/award', 'AwardController@import');
+        });
+});
+"#,
+    ),
+    (
+        "app/Http/Controllers/AwardController.php",
+        r#"<?php
+namespace App\Http\Controllers;
+
+class AwardController extends Controller
+{
+    public function import()
+    {
+        return $this->parseSheet();
+    }
+
+    private function parseSheet() {}
+}
+"#,
+    ),
+    (
+        "app/Http/Controllers/Admin/AwardController.php",
+        r#"<?php
+namespace App\Http\Controllers\Admin;
+
+class AwardController extends Controller
+{
+    public function import() {}
+}
+"#,
+    ),
+];
+
+fn setup_laravel_repo(repo: &Path, home: &Path) {
+    for (path, src) in LARAVEL_FILES {
+        let file = repo.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, src).unwrap();
+    }
+    run_git(repo, &["init", "-q", "-b", "main"]);
+    run_git(
+        repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:E-NoR/routes-laravel-test.git",
+        ],
+    );
+    run_git(repo, &["add", "-A"]);
+    run_git(
+        repo,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ],
+    );
+    let out = Command::new(ecp_bin())
+        .args(["admin", "index", "--repo", "."])
+        .current_dir(repo)
+        .env("HOME", home)
+        .output()
+        .expect("admin index spawn failed");
+    assert!(
+        out.status.success(),
+        "admin index failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn test_routes_laravel_included_route_lists_prefixed_path_and_middleware() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup_laravel_repo(repo.path(), home.path());
+
+    let json = run_routes_json(repo.path(), home.path(), &[]);
+    let rows: Vec<(&str, Option<&Value>)> = json["results"]
+        .as_array()
+        .expect("results array missing")
+        .iter()
+        .map(|r| (r["path"].as_str().unwrap_or(""), r.get("middleware")))
+        .collect();
+    let award = rows
+        .iter()
+        .find(|(path, _)| *path == "/admin/import/award")
+        .unwrap_or_else(|| panic!("no /admin/import/award in {json}"));
+    assert_eq!(
+        award.1,
+        Some(&serde_json::json!(["api", "auth:admin"])),
+        "{json}"
+    );
+    let health = rows
+        .iter()
+        .find(|(path, _)| *path == "/admin/health")
+        .unwrap_or_else(|| panic!("no /admin/health in {json}"));
+    assert_eq!(health.1, Some(&serde_json::json!(["api"])), "{json}");
+}
+
+#[test]
+fn test_routes_laravel_string_action_resolves_namespaced_controller_method() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup_laravel_repo(repo.path(), home.path());
+
+    let json = run_routes_json(repo.path(), home.path(), &["/admin/import/award"]);
+    assert_eq!(json["status"], "found", "{json}");
+    assert_eq!(
+        json["routes"][0]["middleware"],
+        serde_json::json!(["api", "auth:admin"]),
+        "{json}"
+    );
+    let handlers: Vec<(&str, &str, &str)> = json["handlers"]
+        .as_array()
+        .expect("handlers array missing")
+        .iter()
+        .map(|h| {
+            (
+                h["handlerKind"].as_str().unwrap_or(""),
+                h["name"].as_str().unwrap_or(""),
+                h["filePath"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    assert_eq!(
+        handlers,
+        [(
+            "named",
+            "import",
+            "app/Http/Controllers/AwardController.php"
+        )],
+        "{json}"
+    );
+}
+
+/// A route no group gives middleware carries no `middleware` field.
+#[test]
+fn test_routes_route_without_middleware_omits_middleware_field() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup_repo(repo.path(), home.path());
+
+    let json = run_routes_json(repo.path(), home.path(), &[]);
+    for row in json["results"].as_array().unwrap() {
+        assert!(row.get("middleware").is_none(), "{row}");
+    }
+}

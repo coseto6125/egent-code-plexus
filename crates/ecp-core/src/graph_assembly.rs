@@ -15,8 +15,8 @@
 
 use crate::graph::{
     BlindSpotRecord, CallMeta, Edge, ExportAliasFact, File, FunctionMeta, ImportFact,
-    NameIndexEntry, Node, NodeKind, PathAliasFact, RouteShape, SupertypeFact, ZeroCopyGraph,
-    GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
+    NameIndexEntry, Node, NodeKind, PathAliasFact, RouteMiddleware, RouteShape, SupertypeFact,
+    ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
 };
 use crate::pool::StringPool;
 
@@ -64,6 +64,9 @@ pub struct GraphAssembly {
     /// Any order. Sorted by `type_idx` by `finish`, which keeps the first
     /// entry of a repeated type.
     pub supertype_table: Vec<SupertypeFact>,
+    /// Any order. Sorted by `node_idx` by `finish`, which keeps the first
+    /// entry of a repeated Route.
+    pub route_middleware: Vec<RouteMiddleware>,
 }
 
 /// The import / export facts of each file and node, as the builder records
@@ -103,6 +106,7 @@ impl Default for GraphAssembly {
             module_facts: ModuleFactTables::default(),
             alias_table: Vec::new(),
             supertype_table: Vec::new(),
+            route_middleware: Vec::new(),
         }
     }
 }
@@ -128,6 +132,7 @@ impl GraphAssembly {
             module_facts,
             alias_table,
             mut supertype_table,
+            mut route_middleware,
         } = self;
 
         assert!(
@@ -253,6 +258,9 @@ impl GraphAssembly {
         // `supertypes_of()` binary-searches by `type_idx`.
         supertype_table.sort_by_key(|fact| fact.type_idx);
         supertype_table.dedup_by_key(|fact| fact.type_idx);
+        // `route_middleware_of()` binary-searches by `node_idx`.
+        route_middleware.sort_by_key(|entry| entry.node_idx);
+        route_middleware.dedup_by_key(|entry| entry.node_idx);
 
         ZeroCopyGraph {
             magic: GRAPH_MAGIC,
@@ -285,6 +293,7 @@ impl GraphAssembly {
             file_path_order,
             alias_table,
             supertype_table,
+            route_middleware,
         }
     }
 }

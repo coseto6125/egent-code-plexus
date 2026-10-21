@@ -875,6 +875,7 @@ impl LanguageProvider for GoProvider {
                             end.row as u32,
                             end.column as u32,
                         ),
+                        scope: None,
                     });
 
                     // Stage a framework_ref for gin / echo. We can't tell

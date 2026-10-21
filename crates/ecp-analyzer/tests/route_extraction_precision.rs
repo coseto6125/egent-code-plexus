@@ -314,9 +314,11 @@ fn php_laravel_chain_with_router_dsl_intermediates_extracts() {
     "#;
     assert_routes(
         &php_routes(src),
+        // `prefix('api')` prefixes the route it chains into, as Laravel's
+        // `RouteRegistrar` does; the path is `/api/items`, not `/items`.
         &[
             ("GET", "/admin/users"),
-            ("POST", "/items"),
+            ("POST", "/api/items"),
             ("GET", "/dashboard"),
         ],
     );
@@ -862,7 +864,11 @@ fn php_laravel_chained_middleware_then_verb_extracts() {
 
         Route::middleware(['auth'])->prefix('admin')->post('/users', [AdminController::class, 'create']);
     "#;
-    assert_routes(&php_routes(src), &[("GET", "/user"), ("POST", "/users")]);
+    // `prefix('admin')` in the chain prefixes the route: `/admin/users`.
+    assert_routes(
+        &php_routes(src),
+        &[("GET", "/user"), ("POST", "/admin/users")],
+    );
 }
 
 // ─── PHP — chained .get() on non-router object NEGATIVE ──────────────

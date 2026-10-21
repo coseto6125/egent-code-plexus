@@ -10,13 +10,15 @@ use ecp_core::analyzer::lexical::LexicalFunctions;
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::analyzer::reexport::{export_filter_applies, is_ecmascript, ImportRef};
-use ecp_core::analyzer::types::{owner_key, CallSite, LocalGraph, RawImport, RawNode, VariantRef};
+use ecp_core::analyzer::types::{
+    owner_key, CallSite, LocalGraph, RawImport, RawNode, RawRoute, VariantRef,
+};
 pub use ecp_core::analyzer::types::{VARIANT_PATTERN_REASON, VARIANT_USE_REASON};
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::{
     BlindSpotRecord, CallMeta, Edge, ExportAliasFact, File, FileCategory, FunctionMeta, ImportFact,
-    Node, NodeKind, PathAliasFact, RelType, RouteShape, SupertypeFact, ZeroCopyGraph,
-    FILE_FLAG_ES_MODULE,
+    Node, NodeKind, PathAliasFact, RelType, RouteMiddleware, RouteShape, SupertypeFact,
+    ZeroCopyGraph, FILE_FLAG_ES_MODULE,
 };
 use ecp_core::graph_assembly::{GraphAssembly, ModuleFactTables};
 use ecp_core::pool::{StrRef, StringPool};
@@ -282,7 +284,7 @@ impl GraphBuilder {
         }
         let _t_pass15 = std::time::Instant::now();
         // Pass 1.5: Extract Routes
-        let (route_edges, emitted_routes) = pass1_5_extract_routes(
+        let (route_edges, emitted_routes, route_middleware) = pass1_5_extract_routes(
             &self.local_graphs,
             &files,
             &symbol_table,
@@ -835,6 +837,7 @@ impl GraphBuilder {
             function_metas,
             blind_spots: all_blind_spots,
             route_shapes: route_shapes_out,
+            route_middleware,
             process_start: process_start_idx,
             traces_offsets,
             traces_data,
@@ -1308,19 +1311,24 @@ fn note_rust_impl_members(symbol_table: &mut SymbolTable, nodes: &[RawNode], sta
 
 /// Pass 1.5: Extract Routes.
 ///
-/// Returns `(route_edges, emitted_routes)` where `emitted_routes` is
-/// `(route_node_idx, file_idx, route_method, route_path)` — consumed by
-/// Pass 1.6 to build the fetch-shape route index.
+/// Returns `(route_edges, emitted_routes, route_middleware)` where
+/// `emitted_routes` is `(route_node_idx, file_idx, route_method,
+/// route_path)` — consumed by Pass 1.6 to build the fetch-shape route index.
 fn pass1_5_extract_routes(
     local_graphs: &[LocalGraph],
     files: &[File],
     symbol_table: &SymbolTable,
     string_pool: &mut StringPool,
     nodes: &mut Vec<Node>,
-) -> (Vec<Edge>, Vec<EmittedRoute>) {
+) -> (Vec<Edge>, Vec<EmittedRoute>, Vec<RouteMiddleware>) {
     let mut route_edges = Vec::new();
     let mut current_handler_idx = 0;
     let mut emitted_routes: Vec<EmittedRoute> = Vec::new();
+    let mut route_middleware: Vec<RouteMiddleware> = Vec::new();
+    // Route groups reach across files (a provider's `->group(base_path(
+    // 'routes/admin.php'))` prefixes every route of `admin.php`), so the
+    // per-file view alone cannot name a Laravel route's path or handler.
+    let laravel = crate::php::laravel_routes::LaravelRoutes::build(local_graphs);
     for (file_idx, local_graph) in local_graphs.iter().enumerate() {
         let file_idx = file_idx as u32;
         let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
@@ -1384,8 +1392,28 @@ fn pass1_5_extract_routes(
         }
 
         for raw_route in &local_graph.routes {
-            if let Some(detected) = crate::route_detector::detect_from_call(raw_route) {
-                let route_name = format!("{} {}", detected.method, detected.path);
+            if raw_route.method == RawRoute::INCLUDE {
+                continue;
+            }
+            let Some(detected) = crate::route_detector::detect_from_call(raw_route) else {
+                continue;
+            };
+            let promoted = match raw_route.scope.as_deref() {
+                Some(scope) => laravel.promote(file_idx, scope, &detected.path),
+                None => vec![crate::php::laravel_routes::PromotedRoute {
+                    path: detected.path.clone(),
+                    middleware: Vec::new(),
+                    namespace: None,
+                }],
+            };
+            // Two including groups can give one route the same path; one
+            // Route node stands for both, the first group's middleware kept.
+            let mut names: Vec<String> = Vec::with_capacity(promoted.len());
+            for route in promoted {
+                let route_name = format!("{} {}", detected.method, route.path);
+                if names.contains(&route_name) {
+                    continue;
+                }
 
                 let route_idx = nodes.len() as u32;
                 nodes.push(Node {
@@ -1398,35 +1426,55 @@ fn pass1_5_extract_routes(
                     owner_class: StrRef::default(),
                     content_hash: 0,
                 });
+                names.push(route_name);
 
                 // Resolve the imperative-route handler, if the parser captured
                 // a named handler (e.g. `app.get("/x", loginHandler)`). The
                 // handler must be a function/method registered in the same
-                // file; inline arrow functions are not captured.
-                if let Some(handler_name) = raw_route.handler.as_deref() {
-                    if let Some(handler_node_id) =
-                        symbol_table.lookup_in_file(&path_str, handler_name)
-                    {
-                        route_edges.push(Edge {
-                            source: handler_node_id,
-                            target: route_idx,
-                            rel_type: RelType::HandlesRoute,
-                            confidence: 1.0,
-                            reason: string_pool.add("call-arg"),
-                        });
-                    }
+                // file; inline arrow functions are not captured. A route with
+                // a group scope names a controller action (`Ctrl@method`) in
+                // any file instead.
+                let handler = match (raw_route.handler.as_deref(), raw_route.scope.is_some()) {
+                    (None, _) => None,
+                    (Some(action), true) => laravel
+                        .controller_action(action, route.namespace.as_deref())
+                        .map(|(node, by_namespace)| {
+                            if by_namespace {
+                                (node, 1.0, "controller-action")
+                            } else {
+                                (node, 0.9, "controller-action:unique-name")
+                            }
+                        }),
+                    (Some(handler_name), false) => symbol_table
+                        .lookup_in_file(&path_str, handler_name)
+                        .map(|node| (node, 1.0, "call-arg")),
+                };
+                if let Some((handler_node_id, confidence, reason)) = handler {
+                    route_edges.push(Edge {
+                        source: handler_node_id,
+                        target: route_idx,
+                        rel_type: RelType::HandlesRoute,
+                        confidence,
+                        reason: string_pool.add(reason),
+                    });
                 }
 
-                emitted_routes.push((
-                    route_idx,
-                    file_idx,
-                    detected.method.clone(),
-                    detected.path.clone(),
-                ));
+                if !route.middleware.is_empty() {
+                    route_middleware.push(RouteMiddleware {
+                        node_idx: route_idx,
+                        middleware: route
+                            .middleware
+                            .iter()
+                            .map(|name| string_pool.add(name))
+                            .collect(),
+                    });
+                }
+
+                emitted_routes.push((route_idx, file_idx, detected.method.clone(), route.path));
             }
         }
     }
-    (route_edges, emitted_routes)
+    (route_edges, emitted_routes, route_middleware)
 }
 
 /// Pass 1.6: Fetch-shape extraction.
@@ -3861,6 +3909,7 @@ mod tests {
                         path: "/users".into(),
                         handler: Some("other_fn".into()),
                         span: (20, 0, 20, 30),
+                        scope: None,
                     }],
                     framework_refs: vec![],
                     fanout_refs: vec![],
@@ -4058,6 +4107,7 @@ mod tests {
                 path: route_path.into(),
                 handler: Some(handler.into()),
                 span: (0, 0, 0, 0),
+                scope: None,
             }],
             framework_refs: vec![],
             fanout_refs: vec![],

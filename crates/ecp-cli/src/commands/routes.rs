@@ -96,7 +96,7 @@ fn list_routes(
         // see. Only `Test` flips `is_test` here, matching the builder.rs
         // route-emission skip filter which gates on `Test | Reference`.
         let is_test = matches!(file_node.category, ArchivedFileCategory::Test);
-        let row = serde_json::json!({
+        let mut row = serde_json::json!({
             "uid": node.uid.to_native().to_string(),
             "method": method,
             "path": path,
@@ -104,6 +104,7 @@ fn list_routes(
             "filePath": file_node.path.resolve(&graph.string_pool),
             "line": node.start_line(),
         });
+        add_middleware(&mut row, graph, idx);
         match (is_test, include_tests) {
             (false, _) => results.push(row),
             (true, true) => test_results.push(row),
@@ -144,6 +145,19 @@ fn list_routes(
     }
 
     emit(&result, fmt)
+}
+
+/// Add the route's `middleware` array, outermost first, when it has any. A
+/// route without the field passes through no middleware the index saw.
+fn add_middleware(
+    row: &mut serde_json::Value,
+    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
+    route_idx: u32,
+) {
+    let middleware = graph.route_middleware_of(route_idx);
+    if !middleware.is_empty() {
+        row["middleware"] = serde_json::json!(middleware);
+    }
 }
 
 /// Split a Route node's `name` field — stored as `"<METHOD> <path>"` — into
@@ -342,14 +356,16 @@ fn inspect_route(
         // for inline-anonymous handlers (which have no node of their own).
         let enclosing_idx = find_enclosing_scope(graph, route_file_idx, route_line);
 
-        routes_out.push(serde_json::json!({
+        let mut route_row = serde_json::json!({
             "method": route_method,
             "path": route_path,
             "uid": route_node.uid.to_native().to_string(),
             "filePath": route_file_path,
             "line": route_line,
             "enclosingScope": enclosing_scope_json(graph, enclosing_idx),
-        }));
+        });
+        add_middleware(&mut route_row, graph, route_idx as u32);
+        routes_out.push(route_row);
 
         // Handler: incoming HandlesRoute edge on the Route node.
         let in_start = graph.in_offsets[route_idx].to_native() as usize;

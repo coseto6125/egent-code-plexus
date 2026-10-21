@@ -698,6 +698,7 @@ impl LanguageProvider for TypeScriptProvider {
                             path: path_str.to_string(),
                             handler: handler_name,
                             span: node_span(&root),
+                            scope: None,
                         });
                     }
                 }
@@ -808,6 +809,7 @@ impl LanguageProvider for TypeScriptProvider {
                         path: cleaned,
                         handler: None,
                         span,
+                        scope: None,
                     });
                 }
             }

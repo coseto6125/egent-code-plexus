@@ -640,6 +640,7 @@ impl LanguageProvider for JavaScriptProvider {
                                 end.row as u32,
                                 end.column as u32,
                             ),
+                            scope: None,
                         });
                     }
                 }

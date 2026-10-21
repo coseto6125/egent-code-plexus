@@ -1279,6 +1279,7 @@ impl LanguageProvider for PythonProvider {
                                     path: clean_path.clone(),
                                     handler: decorator_handler.clone(),
                                     span: node_span(&root),
+                                    scope: None,
                                 });
                             }
                         }
