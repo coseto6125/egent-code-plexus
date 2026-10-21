@@ -2080,7 +2080,7 @@ impl<'a> OverlayFacts<'a> {
                 let other = &graph.nodes[idx as usize];
                 idx != first
                     && other.file_idx == node.file_idx
-                    && other.kind == node.kind
+                    && NodeKind::from(&other.kind) == NodeKind::from(&node.kind)
                     && other.owner_class.resolve(&graph.string_pool) == owner
                     && graph.is_later_overload(idx)
             })
