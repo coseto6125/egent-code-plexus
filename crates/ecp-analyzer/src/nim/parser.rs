@@ -69,7 +69,7 @@ impl LanguageProvider for NimProvider {
             let mut import_src_node = None;
             let mut is_import = false;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = Some(cap.index);
                 if let Some(k_from_spec) = self
                     .capture_kind_by_idx

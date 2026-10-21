@@ -72,30 +72,30 @@ fn body_has_call(node: tree_sitter::Node) -> bool {
 fn check_object_freeze_enum(node: &tree_sitter::Node) -> Option<bool> {
     // Walk: declaration → variable_declarator → call_expression → arguments → object
     let declarator = (0..node.child_count())
-        .filter_map(|i| node.child(i as u32))
+        .filter_map(|i| node.child(i))
         .find(|c| c.kind() == "variable_declarator")?;
 
     let call = (0..declarator.child_count())
-        .filter_map(|i| declarator.child(i as u32))
+        .filter_map(|i| declarator.child(i))
         .find(|c| c.kind() == "call_expression")?;
 
     let args = (0..call.child_count())
-        .filter_map(|i| call.child(i as u32))
+        .filter_map(|i| call.child(i))
         .find(|c| c.kind() == "arguments")?;
 
     // Find the object literal inside arguments (skip `(` and `)`)
     let obj = (0..args.child_count())
-        .filter_map(|i| args.child(i as u32))
+        .filter_map(|i| args.child(i))
         .find(|c| c.kind() == "object")?;
 
     // Count pair nodes with scalar values only
     let scalar_pairs = (0..obj.child_count())
-        .filter_map(|i| obj.child(i as u32))
+        .filter_map(|i| obj.child(i))
         .filter(|c| c.kind() == "pair")
         .filter(|pair| {
             // value is the last named child of the pair
             let value = (0..pair.child_count())
-                .filter_map(|i| pair.child(i as u32))
+                .filter_map(|i| pair.child(i))
                 .next_back();
             value.is_some_and(|v| SCALAR_VALUE_KINDS.contains(&v.kind()))
         })
@@ -250,7 +250,7 @@ impl LanguageProvider for JavaScriptProvider {
             let mut route_path = None;
             let mut is_route = false;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = cap.index;
                 if Some(cap_idx) == idx_variable_name {
                     // Variable emission has dedicated post-processing (arrow

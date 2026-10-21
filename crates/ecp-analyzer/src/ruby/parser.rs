@@ -460,7 +460,7 @@ impl LanguageProvider for RubyProvider {
             let mut delegator_method_node: Option<tree_sitter::Node<'_>> = None;
             let mut delegator_args_node: Option<tree_sitter::Node<'_>> = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = Some(cap.index);
                 if cap_idx == idx_name {
                     node_name = Some(cap.node);

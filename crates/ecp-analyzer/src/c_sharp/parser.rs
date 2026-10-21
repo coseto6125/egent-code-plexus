@@ -271,7 +271,7 @@ impl LanguageProvider for CSharpProvider {
             let mut deferred_conv_operator: Option<tree_sitter::Node<'_>> = None;
             let mut deferred_indexer: Option<tree_sitter::Node<'_>> = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = cap.index;
                 if let Some(k_from_spec) = self
                     .capture_kind_by_idx

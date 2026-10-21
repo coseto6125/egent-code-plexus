@@ -268,7 +268,7 @@ impl LanguageProvider for CppProvider {
                 let mut pre_cursor = QueryCursor::new();
                 let mut pre_matches = pre_cursor.matches(&self.query, tree.root_node(), source);
                 while let Some(m) = pre_matches.next() {
-                    for cap in m.captures {
+                    for cap in m.captures() {
                         if cap.index == om_idx {
                             // Walk up to the enclosing function_definition.
                             let mut p = cap.node.parent();
@@ -350,7 +350,7 @@ impl LanguageProvider for CppProvider {
             let mut var_root: Option<tree_sitter::Node<'_>> = None;
             let mut var_name: Option<tree_sitter::Node<'_>> = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = Some(cap.index);
                 // Single spec-driven dispatch for name-node captures.
                 // Source of truth: CppSpec::CAPTURE_KIND in spec.rs.

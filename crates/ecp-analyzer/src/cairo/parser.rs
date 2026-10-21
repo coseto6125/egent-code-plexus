@@ -77,7 +77,7 @@ impl LanguageProvider for CairoProvider {
             let mut heritage = Vec::new();
             let mut import_src = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = cap.index;
                 if let Some(k_from_spec) = self
                     .capture_kind_by_idx

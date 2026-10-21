@@ -232,7 +232,7 @@ impl LanguageProvider for DartProvider {
             let mut var_name: Option<tree_sitter::Node<'_>> = None;
             let mut var_type: Option<tree_sitter::Node<'_>> = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = cap.index;
                 if let Some(k_from_spec) = self
                     .capture_kind_by_idx

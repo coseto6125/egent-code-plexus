@@ -514,7 +514,7 @@ impl LanguageProvider for CProvider {
             let mut var_root: Option<tree_sitter::Node<'_>> = None;
             let mut var_name: Option<tree_sitter::Node<'_>> = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = cap.index;
                 // Single spec-driven dispatch for name-node captures.
                 // Source of truth: CSpec::CAPTURE_KIND in spec.rs.

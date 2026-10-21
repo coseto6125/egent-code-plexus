@@ -747,7 +747,7 @@ impl LanguageProvider for PythonProvider {
                 let mut import_name_node = None;
                 let mut import_src_node = None;
                 let mut import_alias_node = None;
-                for cap in m.captures {
+                for cap in m.captures() {
                     let cap_idx = Some(cap.index);
                     if cap_idx == idx.import_name {
                         import_name_node = Some(cap.node);
@@ -847,7 +847,7 @@ impl LanguageProvider for PythonProvider {
             let mut dj_connect_name_node = None;
             let mut dj_connect_handler_node = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = Some(cap.index);
                 if let Some(k_from_spec) = self
                     .capture_kind_by_idx

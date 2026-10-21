@@ -391,7 +391,7 @@ impl LanguageProvider for TypeScriptProvider {
             let mut nestjs_decorator_verb_node: Option<tree_sitter::Node> = None;
             let mut nestjs_decorator_path_node: Option<tree_sitter::Node> = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = Some(cap.index);
 
                 if let Some(k_from_spec) = self

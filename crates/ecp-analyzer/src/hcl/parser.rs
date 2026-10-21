@@ -79,7 +79,7 @@ impl LanguageProvider for HclProvider {
             // Track whether this match came from an `output` block.
             let mut is_output_block = false;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = cap.index as usize;
                 if let Some(k) = self.capture_kind_by_idx.get(cap_idx).and_then(|opt| *opt) {
                     // This is a .name capture with a NodeKind

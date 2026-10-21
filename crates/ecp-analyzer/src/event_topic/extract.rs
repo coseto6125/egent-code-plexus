@@ -91,7 +91,7 @@ pub fn extract_event_topics(
         }
 
         // Single O(M) pass over captures; O(1) lookup per capture.
-        for cap in m.captures {
+        for cap in m.captures() {
             let cap_name = cap_names[cap.index as usize];
             if let Some(entries) = cap_map.get(cap_name) {
                 let node_text = cap.node.utf8_text(source).unwrap_or("");
@@ -122,8 +122,8 @@ pub fn extract_event_topics(
 
             let enclosing_fn: Box<str> = producer_opt.unwrap_or("").into();
 
-            let start = m.captures[0].node.start_position();
-            let end = m.captures[0].node.end_position();
+            let start = m.captures()[0].node.start_position();
+            let end = m.captures()[0].node.end_position();
             let span = (
                 start.row as u32,
                 start.column as u32,

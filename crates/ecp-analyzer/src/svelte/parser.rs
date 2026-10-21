@@ -136,7 +136,7 @@ impl LanguageProvider for SvelteProvider {
             let mut script_body: Option<tree_sitter::Node> = None;
             let mut style_elem: Option<tree_sitter::Node> = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let ci = Some(cap.index);
                 if ci == idx_script {
                     script_elem = Some(cap.node);

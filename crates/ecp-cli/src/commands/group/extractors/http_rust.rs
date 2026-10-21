@@ -180,7 +180,7 @@ fn actix_handler_name<'a>(
     source: &'a [u8],
 ) -> String {
     // Find the attribute_item node (parent of the attribute holding @method).
-    for c in m.captures {
+    for c in m.captures() {
         if c.index == method_idx {
             // c.node is the (identifier) for the method name inside (attribute ...)
             // Walk up: identifier → attribute → attribute_item

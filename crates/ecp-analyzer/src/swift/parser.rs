@@ -230,7 +230,7 @@ impl LanguageProvider for SwiftProvider {
             let mut enum_case_root: Option<tree_sitter::Node<'_>> = None;
             let mut enum_case_names: Vec<tree_sitter::Node<'_>> = Vec::new();
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = cap.index;
                 if let Some(k_from_spec) = self
                     .capture_kind_by_idx
@@ -665,7 +665,7 @@ fn body_has_call(node: tree_sitter::Node) -> bool {
 /// the `declaration_kind` field is the first non-modifier keyword child.
 fn swift_decl_keyword(class_decl: tree_sitter::Node<'_>) -> &'static str {
     for i in 0..class_decl.child_count() {
-        if let Some(c) = class_decl.child(i as u32) {
+        if let Some(c) = class_decl.child(i) {
             match c.kind() {
                 "class" => return "class",
                 "struct" => return "struct",

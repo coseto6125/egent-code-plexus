@@ -47,7 +47,7 @@ def _mint(_to: address, _value: uint256):
     let idx_import = query.capture_index_for_name("import.source");
 
     while let Some(m) = matches.next() {
-        for cap in m.captures {
+        for cap in m.captures() {
             let text =
                 std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()]).unwrap();
             if Some(cap.index) == idx_fn_name {

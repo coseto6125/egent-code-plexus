@@ -67,7 +67,7 @@ impl LanguageProvider for DockerfileProvider {
             let mut arg_name_node = None;
             let mut arg_root_node = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = cap.index;
                 if Some(cap_idx) == idx_import_source {
                     import_src_node = Some(cap.node);

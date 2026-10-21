@@ -448,7 +448,7 @@ impl LanguageProvider for PhpProvider {
             let mut laravel_call_span: Option<(u32, u32, u32, u32)> = None;
             let mut laravel_args_node: Option<tree_sitter::Node> = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = cap.index;
                 if let Some(k_from_spec) = self
                     .capture_kind_by_idx

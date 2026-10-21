@@ -213,7 +213,7 @@ pub fn extract_ts_calls_and_path_literals(
                         strip_ts_string_value(raw)
                     } else {
                         // template_string: skip if it has substitutions.
-                        let has_substitution = (0..n.child_count() as u32).any(|i| {
+                        let has_substitution = (0..n.child_count()).any(|i| {
                             n.child(i)
                                 .is_some_and(|ch| ch.kind() == "template_substitution")
                         });

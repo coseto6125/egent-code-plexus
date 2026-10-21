@@ -104,7 +104,7 @@ pub(super) fn capture_text<'a>(
     idx: u32,
     source: &'a [u8],
 ) -> &'a str {
-    for c in m.captures {
+    for c in m.captures() {
         if c.index == idx {
             return std::str::from_utf8(&source[c.node.byte_range()]).unwrap_or("");
         }
