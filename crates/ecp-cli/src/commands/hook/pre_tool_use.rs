@@ -625,8 +625,13 @@ fn group_marks(segment: &str) -> ((usize, usize), (usize, usize)) {
             (None, b'(') => parens.0 += 1,
             (None, b')') => parens.1 += 1,
             (None, b'{' | b'}') => {
+                // A metacharacter ends the word too: `{ a; }>log` closes.
+                let ends_word = |n: &u8| {
+                    n.is_ascii_whitespace()
+                        || c == b'}' && matches!(n, b'>' | b'<' | b'&' | b'|' | b';' | b')')
+                };
                 let word = (i == 0 || bytes[i - 1].is_ascii_whitespace())
-                    && bytes.get(i + 1).is_none_or(u8::is_ascii_whitespace);
+                    && bytes.get(i + 1).is_none_or(ends_word);
                 match (word, c) {
                     (true, b'{') => braces.0 += 1,
                     (true, _) => braces.1 += 1,
@@ -1313,6 +1318,8 @@ mod tests {
         }
         for cmd in [
             "cd x &&\nif test -f a; then\n  git diff --stat\nfi &\nrg -n Foo a\nwait",
+            "cd x && { git status --short; }>/dev/null 2>&1 &\nrg -n Foo src\nwait",
+            "cd x && { git status --short; } >/dev/null 2>&1 &\nrg -n Foo src\nwait",
             "make &&\nrg Foo",
             "m=$(cd x && pwd); rg Foo .",
             "git grep -n Foo",
