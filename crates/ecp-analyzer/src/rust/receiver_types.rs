@@ -18,7 +18,7 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_rust_string_value,
 };
-use crate::calls::{attach_to_enclosing, CallSiteIndex};
+use crate::calls::{attach_to_enclosing, start_pos, CallSiteIndex};
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -442,8 +442,7 @@ pub fn extract_rust_calls_and_path_literals(
             // `field_expression` children of `call_expression` represent `obj.method`.
             "call_expression" => {
                 if let Some(callee) = rust_callee_name(n, source, local_types) {
-                    let line = n.start_position().row as u32;
-                    if let Some(site) = attach_to_enclosing(line, callee, nodes) {
+                    if let Some(site) = attach_to_enclosing(start_pos(n), callee, nodes) {
                         call_sites.insert(n.id(), site);
                     }
                 }

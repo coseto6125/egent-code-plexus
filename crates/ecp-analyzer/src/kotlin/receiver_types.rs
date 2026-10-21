@@ -15,7 +15,7 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_kotlin_string_value,
 };
-use crate::calls::attach_to_enclosing;
+use crate::calls::{attach_to_enclosing, start_pos};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
@@ -276,8 +276,7 @@ pub fn extract_kotlin_calls_and_path_literals(
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = kotlin_callee(n, source, &local_types, nodes) {
-                    let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                    attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
             "string_literal" | "multiline_string_literal" => {

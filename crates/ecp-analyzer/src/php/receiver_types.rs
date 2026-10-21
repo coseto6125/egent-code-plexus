@@ -17,7 +17,7 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, extract_php_string_value,
 };
-use crate::calls::{attach_to_enclosing, construction_call};
+use crate::calls::{attach_to_enclosing, construction_call, start_pos};
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use tree_sitter::Node;
@@ -83,25 +83,23 @@ pub fn extract_php_calls_and_path_literals(
     let ctx = ClassContext::from_nodes(nodes);
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
-    let mut constructions: Vec<(u32, String)> = Vec::new();
+    let mut constructions: Vec<((u32, u32), String)> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
             "object_creation_expression" => {
                 if let Some(callee) = php_object_creation_call(n, source) {
-                    constructions.push((n.start_position().row as u32, callee));
+                    constructions.push((start_pos(n), callee));
                 }
             }
             "member_call_expression" => {
                 if let Some(callee) = php_member_callee(n, source, &ctx) {
-                    let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                    attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
             "scoped_call_expression" => {
                 if let Some(callee) = php_scoped_callee(n, source, &ctx) {
-                    let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                    attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
             "string" | "encapsed_string" => {
@@ -129,8 +127,8 @@ pub fn extract_php_calls_and_path_literals(
     }
     // After every call, so a `new` site never shifts the index of a call
     // recorded before it.
-    for (line, callee) in constructions {
-        attach_to_enclosing(line, callee, nodes);
+    for (pos, callee) in constructions {
+        attach_to_enclosing(pos, callee, nodes);
     }
     (path_literals, sql_refs)
 }

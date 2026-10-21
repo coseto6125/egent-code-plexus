@@ -18,7 +18,7 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_swift_string_value,
 };
-use crate::calls::attach_to_enclosing;
+use crate::calls::{attach_to_enclosing, start_pos};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -325,8 +325,7 @@ pub fn extract_swift_calls_and_path_literals(
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = swift_callee_name(n, source, bindings) {
-                    let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                    attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
             "line_string_literal" | "multi_line_string_literal" | "raw_string_literal" => {

@@ -13,7 +13,7 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_java_string_value,
 };
-use crate::calls::{attach_to_enclosing, construction_call};
+use crate::calls::{attach_to_enclosing, construction_call, start_pos};
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
@@ -242,8 +242,7 @@ pub fn extract_java_calls_and_path_literals(
         match n.kind() {
             "method_invocation" => {
                 if let Some(callee) = java_callee(n, source, &local_types, nodes) {
-                    let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                    attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
             "object_creation_expression" => {
@@ -252,8 +251,7 @@ pub fn extract_java_calls_and_path_literals(
                     .child_by_field_name("type")
                     .and_then(|t| construction_call(t.utf8_text(source).ok()?));
                 if let Some(callee) = callee {
-                    let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                    attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
             "string_literal" | "text_block" => {

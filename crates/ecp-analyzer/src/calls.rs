@@ -16,6 +16,13 @@ pub fn safe_row(row: usize) -> u32 {
     u32::try_from(row).unwrap_or(u32::MAX)
 }
 
+/// `(row, column)` of a node's start, the position call attribution compares.
+#[inline]
+pub fn start_pos(node: Node<'_>) -> Pos {
+    let point = node.start_position();
+    (safe_row(point.row), safe_row(point.column))
+}
+
 /// The `RawNode.calls` entry of a `new T(..)` site, generic arguments cut
 /// from every path segment: `Box<String>` → `Box`, `ns::Box<int>` →
 /// `ns::Box`, `Outer<int>.Inner` → `Outer.Inner`. `None` for an empty type.
@@ -57,8 +64,10 @@ pub fn extract_calls(root: Node<'_>, source: &[u8], nodes: &mut [RawNode], call_
         if call_kinds.contains(&n.kind()) {
             let callee_name = callee_name_from(n, source);
             if let Some(name) = callee_name {
-                let line = safe_row(n.start_position().row);
-                calls.push(PendingCall { line, name });
+                calls.push(PendingCall {
+                    pos: start_pos(n),
+                    name,
+                });
             }
         }
         let mut c = n.walk();
@@ -164,30 +173,28 @@ pub fn attach_to_enclosing_span(
     Some((i, idx))
 }
 
+/// Attach a call to the smallest function holding `pos`, by row and column so
+/// functions sharing a line stay apart.
 /// Returns the caller's node index and the call's index in its `calls`.
 pub fn attach_to_enclosing(
-    line: u32,
+    pos: Pos,
     callee: String,
     nodes: &mut [RawNode],
 ) -> Option<(usize, u32)> {
-    let mut best: Option<usize> = None;
-    let mut best_span: u32 = u32::MAX;
+    let mut best: Option<(usize, (u32, i64))> = None;
     for (i, n) in nodes.iter().enumerate() {
-        if !matches!(
-            n.kind,
-            NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-        ) {
+        if !is_container_kind(n.kind) {
             continue;
         }
-        if n.span.0 <= line && n.span.2 >= line {
-            let width = n.span.2 - n.span.0;
-            if width < best_span {
-                best_span = width;
-                best = Some(i);
+        let (start, end) = span_ends(n.span);
+        if start <= pos && pos <= end {
+            let width = span_width(n.span);
+            if best.is_none_or(|(_, w)| width < w) {
+                best = Some((i, width));
             }
         }
     }
-    let i = best?;
+    let (i, _) = best?;
     let idx = nodes[i].calls.len() as u32;
     nodes[i].calls.push(callee);
     Some((i, idx))
@@ -219,8 +226,10 @@ pub fn extract_field_reads(
     while let Some(n) = stack.pop() {
         if field_kinds.contains(&n.kind()) && !is_call_callee(n) {
             if let Some(name) = field_name_from(n, source) {
-                let line = safe_row(n.start_position().row);
-                reads.push(PendingCall { line, name });
+                reads.push(PendingCall {
+                    pos: start_pos(n),
+                    name,
+                });
             }
         }
         let mut c = n.walk();
@@ -305,36 +314,6 @@ fn attach_pending_field_reads(
             nodes[node_idx].field_reads.push(read.name);
         }
     }
-}
-
-/// For each pending entry, the node index of the smallest container whose
-/// line range holds its line.
-fn enclosing_targets(
-    containers: &[EnclosingContainer],
-    pending: &[PendingCall],
-) -> Vec<Option<usize>> {
-    let mut order: Vec<usize> = (0..pending.len()).collect();
-    order.sort_unstable_by_key(|&idx| pending[idx].line);
-
-    let mut active: BinaryHeap<Reverse<(u32, usize)>> = BinaryHeap::new();
-    let mut next_container = 0usize;
-    let mut targets: Vec<Option<usize>> = vec![None; pending.len()];
-
-    for &idx in &order {
-        let line = pending[idx].line;
-        while next_container < containers.len() && containers[next_container].start <= line {
-            active.push(Reverse((containers[next_container].width, next_container)));
-            next_container += 1;
-        }
-        while let Some(Reverse((_, container_idx))) = active.peek().copied() {
-            if containers[container_idx].end >= line {
-                targets[idx] = Some(containers[container_idx].node_idx);
-                break;
-            }
-            active.pop();
-        }
-    }
-    targets
 }
 
 /// One enum-variant reference a parser recorded in [`RawNode::field_reads`]:
@@ -441,7 +420,7 @@ pub fn extract_variant_refs(
     let mut refs: Vec<PendingCall> = Vec::new();
     let mut push = |node: Node<'_>, path: &str, pattern: bool| {
         refs.push(PendingCall {
-            line: safe_row(node.start_position().row),
+            pos: start_pos(node),
             name: VariantRef::encode(path, pattern),
         });
     };
@@ -606,42 +585,92 @@ fn token_tree_paths(tree: Node<'_>, source: &[u8]) -> Vec<String> {
     paths
 }
 
+/// `(row, column)`.
+pub type Pos = (u32, u32);
+
 #[derive(Clone, Copy)]
 struct EnclosingContainer {
-    start: u32,
-    end: u32,
-    width: u32,
+    start: Pos,
+    end: Pos,
+    width: (u32, i64),
     node_idx: usize,
 }
 
 struct PendingCall {
-    line: u32,
+    pos: Pos,
     name: String,
+}
+
+fn is_container_kind(kind: NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+    )
+}
+
+fn span_ends(span: (u32, u32, u32, u32)) -> (Pos, Pos) {
+    ((span.0, span.1), (span.2, span.3))
+}
+
+/// Rows first, then columns: a container nested on its parent's rows starts no
+/// earlier and ends no later, so it ranks narrower.
+fn span_width(span: (u32, u32, u32, u32)) -> (u32, i64) {
+    (
+        span.2.saturating_sub(span.0),
+        i64::from(span.3) - i64::from(span.1),
+    )
 }
 
 fn enclosing_containers(nodes: &[RawNode]) -> Vec<EnclosingContainer> {
     let mut containers: Vec<EnclosingContainer> = nodes
         .iter()
         .enumerate()
-        .filter_map(|(node_idx, node)| {
-            if !matches!(
-                node.kind,
-                NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-            ) {
-                return None;
-            }
-            let start = node.span.0;
-            let end = node.span.2;
-            Some(EnclosingContainer {
+        .filter(|(_, node)| is_container_kind(node.kind))
+        .map(|(node_idx, node)| {
+            let (start, end) = span_ends(node.span);
+            EnclosingContainer {
                 start,
                 end,
-                width: end.saturating_sub(start),
+                width: span_width(node.span),
                 node_idx,
-            })
+            }
         })
         .collect();
     containers.sort_unstable_by_key(|c| (c.start, c.width, c.node_idx));
     containers
+}
+
+/// For each pending entry, the node index of the smallest container whose
+/// span holds its position.
+fn enclosing_targets(
+    containers: &[EnclosingContainer],
+    pending: &[PendingCall],
+) -> Vec<Option<usize>> {
+    let mut targets: Vec<Option<usize>> = vec![None; pending.len()];
+    if containers.is_empty() {
+        return targets;
+    }
+    let mut order: Vec<usize> = (0..pending.len()).collect();
+    order.sort_unstable_by_key(|&idx| pending[idx].pos);
+
+    let mut active: BinaryHeap<Reverse<((u32, i64), usize)>> = BinaryHeap::new();
+    let mut next_container = 0usize;
+
+    for &idx in &order {
+        let pos = pending[idx].pos;
+        while next_container < containers.len() && containers[next_container].start <= pos {
+            active.push(Reverse((containers[next_container].width, next_container)));
+            next_container += 1;
+        }
+        while let Some(Reverse((_, container_idx))) = active.peek().copied() {
+            if containers[container_idx].end >= pos {
+                targets[idx] = Some(containers[container_idx].node_idx);
+                break;
+            }
+            active.pop();
+        }
+    }
+    targets
 }
 
 fn attach_pending_calls(
@@ -649,33 +678,7 @@ fn attach_pending_calls(
     calls: Vec<PendingCall>,
     nodes: &mut [RawNode],
 ) {
-    if containers.is_empty() || calls.is_empty() {
-        return;
-    }
-
-    let mut call_order: Vec<usize> = (0..calls.len()).collect();
-    call_order.sort_unstable_by_key(|&idx| calls[idx].line);
-
-    let mut active: BinaryHeap<Reverse<(u32, usize)>> = BinaryHeap::new();
-    let mut next_container = 0usize;
-    let mut targets: Vec<Option<usize>> = vec![None; calls.len()];
-
-    for &call_idx in &call_order {
-        let line = calls[call_idx].line;
-        while next_container < containers.len() && containers[next_container].start <= line {
-            let container = containers[next_container];
-            active.push(Reverse((container.width, next_container)));
-            next_container += 1;
-        }
-        while let Some(Reverse((_, container_idx))) = active.peek().copied() {
-            if containers[container_idx].end >= line {
-                targets[call_idx] = Some(containers[container_idx].node_idx);
-                break;
-            }
-            active.pop();
-        }
-    }
-
+    let targets = enclosing_targets(containers, &calls);
     for (call, target) in calls.into_iter().zip(targets) {
         if let Some(node_idx) = target {
             nodes[node_idx].calls.push(call.name);
@@ -715,7 +718,7 @@ mod tests {
         attach_pending_calls(
             &containers,
             vec![PendingCall {
-                line: 6,
+                pos: (6, 4),
                 name: "callee".to_string(),
             }],
             &mut nodes,
@@ -734,11 +737,11 @@ mod tests {
             &containers,
             vec![
                 PendingCall {
-                    line: 12,
+                    pos: (12, 0),
                     name: "later".to_string(),
                 },
                 PendingCall {
-                    line: 3,
+                    pos: (3, 0),
                     name: "earlier".to_string(),
                 },
             ],
@@ -746,6 +749,75 @@ mod tests {
         );
 
         assert_eq!(nodes[0].calls, ["later", "earlier"]);
+    }
+
+    #[test]
+    fn attach_pending_calls_same_line_containers_split_by_column() {
+        let mut nodes = vec![
+            raw_node("a", NodeKind::Function, (0, 0, 0, 20)),
+            raw_node("b", NodeKind::Function, (0, 21, 0, 40)),
+            raw_node("inner", NodeKind::Function, (0, 25, 0, 35)),
+        ];
+        let containers = enclosing_containers(&nodes);
+        let call = |col, name: &str| PendingCall {
+            pos: (0, col),
+            name: name.to_string(),
+        };
+
+        attach_pending_calls(
+            &containers,
+            vec![
+                call(5, "x"),
+                call(22, "y"),
+                call(30, "z"),
+                call(20, "at_end"),
+                call(21, "at_start"),
+                call(50, "outside"),
+            ],
+            &mut nodes,
+        );
+
+        assert_eq!(nodes[0].calls, ["x", "at_end"]);
+        assert_eq!(nodes[1].calls, ["y", "at_start"]);
+        assert_eq!(nodes[2].calls, ["z"]);
+    }
+
+    #[test]
+    fn attach_pending_calls_identical_spans_pick_first_node() {
+        let mut nodes = vec![
+            raw_node("first", NodeKind::Function, (0, 0, 3, 0)),
+            raw_node("second", NodeKind::Function, (0, 0, 3, 0)),
+        ];
+        let containers = enclosing_containers(&nodes);
+        attach_pending_calls(
+            &containers,
+            vec![PendingCall {
+                pos: (1, 0),
+                name: "c".to_string(),
+            }],
+            &mut nodes,
+        );
+        assert_eq!(nodes[0].calls, ["c"]);
+        assert!(nodes[1].calls.is_empty());
+    }
+
+    #[test]
+    fn attach_to_enclosing_same_line_functions_split_by_column() {
+        let mut nodes = vec![
+            raw_node("a", NodeKind::Function, (0, 0, 0, 20)),
+            raw_node("b", NodeKind::Function, (0, 21, 0, 40)),
+        ];
+        assert_eq!(
+            attach_to_enclosing((0, 25), "y".into(), &mut nodes),
+            Some((1, 0))
+        );
+        assert_eq!(
+            attach_to_enclosing((0, 5), "x".into(), &mut nodes),
+            Some((0, 0))
+        );
+        assert_eq!(attach_to_enclosing((1, 0), "m".into(), &mut nodes), None);
+        assert_eq!(nodes[0].calls, ["x"]);
+        assert_eq!(nodes[1].calls, ["y"]);
     }
 
     #[test]

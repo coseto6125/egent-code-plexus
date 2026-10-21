@@ -17,7 +17,7 @@
 use super::path_literals::{
     build_concatenated, build_raw_path_literal, enclosing_symbol_and_owner, strip_quotes,
 };
-use crate::calls::{attach_to_enclosing, construction_call, CallSiteIndex};
+use crate::calls::{attach_to_enclosing, construction_call, start_pos, CallSiteIndex};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use rustc_hash::FxHashMap;
 use tree_sitter::Node;
@@ -225,21 +225,20 @@ pub fn extract_cpp_calls_and_path_literals(
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
-    let mut constructions: Vec<(u32, String)> = Vec::new();
+    let mut constructions: Vec<((u32, u32), String)> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = cpp_callee_name(n, source, bindings) {
-                    let line = n.start_position().row as u32;
-                    if let Some(site) = attach_to_enclosing(line, callee, nodes) {
+                    if let Some(site) = attach_to_enclosing(start_pos(n), callee, nodes) {
                         call_sites.insert(n.id(), site);
                     }
                 }
             }
             "new_expression" => {
                 if let Some(callee) = cpp_new_expression_call(n, source) {
-                    constructions.push((n.start_position().row as u32, callee));
+                    constructions.push((start_pos(n), callee));
                 }
             }
             "string_literal" | "raw_string_literal" => {
@@ -278,8 +277,8 @@ pub fn extract_cpp_calls_and_path_literals(
     }
     // After every call: the call-meta detectors index `calls` in
     // `call_expression` order, which a `new` site must not shift.
-    for (line, callee) in constructions {
-        attach_to_enclosing(line, callee, nodes);
+    for (pos, callee) in constructions {
+        attach_to_enclosing(pos, callee, nodes);
     }
     (path_literals, sql_refs)
 }

@@ -17,7 +17,7 @@
 use super::path_literals::{
     build_raw_path_literal, has_template_substitution, strip_dart_string_value,
 };
-use crate::calls::attach_to_enclosing;
+use crate::calls::{attach_to_enclosing, start_pos};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -238,8 +238,7 @@ pub fn extract_dart_calls_and_path_literals(
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = dart_callee_name(n, source, bindings) {
-                    let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                    attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
             "string_literal" => {

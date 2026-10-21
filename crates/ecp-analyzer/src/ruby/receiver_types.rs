@@ -15,7 +15,7 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, extract_ruby_string_value,
 };
-use crate::calls::attach_to_enclosing;
+use crate::calls::{attach_to_enclosing, start_pos};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use tree_sitter::Node;
@@ -68,8 +68,7 @@ pub fn extract_ruby_calls_and_path_literals(
         match n.kind() {
             "call" => {
                 if let Some(callee) = ruby_callee(n, source, &ctx) {
-                    let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                    attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
             "string" => {

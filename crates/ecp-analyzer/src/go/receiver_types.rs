@@ -15,7 +15,7 @@
 //!    than just `"Bark"`, feeding the resolver's Tier 2.5 qualifier lookup.
 
 use super::path_literals::{build_raw_path_literal, strip_go_string_value};
-use crate::calls::attach_to_enclosing;
+use crate::calls::{attach_to_enclosing, start_pos};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -314,8 +314,7 @@ pub fn extract_go_calls_and_path_literals(
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = go_callee_name(n, source, local_types) {
-                    let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                    attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
             "interpreted_string_literal" | "raw_string_literal" => {
