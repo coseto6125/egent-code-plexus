@@ -902,12 +902,28 @@ fn runs_search(words: &[String], i: usize) -> bool {
         .rev()
         .take_while(|w| w.starts_with('-'))
         .count();
-    match words[..i - flags].last().map(String::as_str) {
-        // `cd grep` names a directory.
-        Some("which" | "type" | "hash" | "whereis" | "cd" | "pushd") => false,
-        Some("command") => flags == 0,
-        _ => true,
-    }
+    // `cd grep` names a directory; `command -v rg grep` names two tools.
+    let names = |w: Option<&str>| {
+        matches!(
+            w,
+            Some("which" | "type" | "hash" | "whereis" | "cd" | "pushd")
+        )
+    };
+    let mut head = words[..i]
+        .iter()
+        .map(String::as_str)
+        .skip_while(|w| is_assignment(w) || *w == "{" || PREFIX_WORDS.contains(w));
+    let looks_up = match head.next() {
+        Some("command") => head
+            .take_while(|w| w.starts_with('-'))
+            .any(|w| w.contains(['v', 'V'])),
+        first => names(first),
+    };
+    !looks_up
+        && match words[..i - flags].last().map(String::as_str) {
+            Some("command") => flags == 0,
+            last => !names(last),
+        }
 }
 
 /// Single-pass scan: locate `rg` / `grep`, then walk subsequent words
@@ -1379,6 +1395,8 @@ mod tests {
             "if true; then true; cd x; rg Foo; fi",
             "command -v rg && cd x && rg Foo .",
             "which grep >/dev/null; cd x; grep -rn Foo .",
+            "command -v rg grep git\ncd x && rg -n Foo src",
+            "which rg grep; cd x && rg -n Foo src",
             "cd grep && cd ../x && rg -n main src",
             "rg --version &&\ncd x &&\nrg -n Foo src",
             "cd x>/dev/null &&\nrg -n Foo src",
@@ -1419,6 +1437,7 @@ mod tests {
             "grep -rn HookInput>/tmp/out .",
             "cd /a\nrg -n -m 1 HookInput src\ncd /b\nrg --files -g x.rs | xargs grep -n other_name",
             "grep -V; grep -rn HookInput .",
+            "command -v rg grep git\ncd /tmp && rg -n -m 1 HookInput src",
             "rg --files -g '**/x.rs' | xargs grep -n -m 2 HookInput",
             "command -v rg && cd /tmp && rg HookInput .",
             "which grep; grep -rn HookInput .",
