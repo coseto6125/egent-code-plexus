@@ -1,4 +1,5 @@
 use super::ast::Ast;
+use super::frames::Frames;
 use super::{Boundary, Budgets, FlowEdge, FlowNode, SourceFile};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -22,18 +23,19 @@ pub(super) struct Function {
     pub(super) defaults: BTreeMap<String, Value>,
 }
 pub(super) type Scope = BTreeMap<String, Value>;
-pub(super) type State = (Vec<Scope>, Vec<Scope>);
+/// Scopes and objects; copying one shares every frame with the original.
+pub(super) type State = (Frames, Frames);
 /// One `(condition, body)` arm of an if / elif / ternary.
 pub(super) type Arm = (Option<usize>, Option<usize>);
 pub(super) struct Engine<'a> {
     pub(super) files: &'a [SourceFile],
     pub(super) ast: Vec<Ast>,
     pub(super) roots: Vec<Option<usize>>,
-    pub(super) scopes: Vec<Scope>,
+    pub(super) scopes: Frames,
     pub(super) function_scopes: BTreeSet<usize>,
     pub(super) references: BTreeMap<(usize, String), (usize, String)>,
     pub(super) functions: Vec<Function>,
-    pub(super) objects: Vec<Scope>,
+    pub(super) objects: Frames,
     pub(super) nodes: Vec<FlowNode>,
     pub(super) origins: Vec<usize>,
     pub(super) edges: BTreeSet<FlowEdge>,
@@ -44,7 +46,7 @@ pub(super) struct Engine<'a> {
     pub(super) active: Vec<usize>,
     pub(super) active_returns: Vec<Value>,
     pub(super) active_parameters: Vec<Vec<Value>>,
-    pub(super) exit_states: Vec<Vec<(Vec<Scope>, Vec<Scope>)>>,
+    pub(super) exit_states: Vec<Vec<State>>,
     pub(super) called: BTreeSet<usize>,
     pub(super) controls: Vec<Value>,
     /// Identity caches for the innermost loop, keyed by call context and AST
@@ -211,13 +213,11 @@ impl Engine<'_> {
                 let weak = base.objects.len() > 1
                     || base.objects.iter().any(|obj| self.is_loop_summary(*obj));
                 for obj in base.objects {
+                    let object = &mut self.objects[obj];
                     if weak {
-                        self.objects[obj]
-                            .entry(key.clone())
-                            .or_default()
-                            .merge(&result);
+                        object.entry(key.clone()).or_default().merge(&result);
                     } else {
-                        self.objects[obj].insert(key.clone(), result.clone());
+                        object.insert(key.clone(), result.clone());
                     }
                 }
             } else {
@@ -303,7 +303,7 @@ impl Engine<'_> {
             let mut captured = Scope::new();
             let mut references = Vec::new();
             for scope in scopes {
-                for (name, value) in &self.scopes[*scope] {
+                for (name, value) in self.scopes[*scope].iter() {
                     if !name.starts_with('$') {
                         captured.insert(name.clone(), value.clone());
                     }
@@ -349,7 +349,7 @@ impl Engine<'_> {
             }
             if self.ast[n].kind == "arrow_function" {
                 for scope in scopes {
-                    for (name, value) in &self.scopes[*scope] {
+                    for (name, value) in self.scopes[*scope].iter() {
                         captured.insert(name.clone(), value.clone());
                     }
                 }
@@ -586,10 +586,11 @@ impl Engine<'_> {
                         let key: String = self.ast[k].text.trim_matches(['\'', '"']).into();
                         // A reused allocation summarises every iteration: its fields
                         // accumulate instead of restarting from the literal.
+                        let object = &mut self.objects[obj];
                         if reused.is_some() {
-                            self.objects[obj].entry(key).or_default().merge(&v);
+                            object.entry(key).or_default().merge(&v);
                         } else {
-                            self.objects[obj].insert(key, v);
+                            object.insert(key, v);
                         }
                     } else {
                         self.boundary(
@@ -804,13 +805,6 @@ impl Engine<'_> {
             }
         }
     }
-    pub(super) fn merge_scopes(&mut self, other: &[Scope]) {
-        for (scope, old) in self.scopes.iter_mut().zip(other) {
-            for (name, v) in old {
-                scope.entry(name.clone()).or_default().merge(v);
-            }
-        }
-    }
     pub(super) fn loop_ctx(&self) -> usize {
         self.loop_ctx.last().copied().unwrap_or(0)
     }
@@ -825,25 +819,13 @@ impl Engine<'_> {
     /// Frames and allocations created after the snapshot stay: they belong to
     /// callables that may still be invoked from another path.
     pub(super) fn restore(&mut self, state: &State) {
-        for (dst, src) in self.scopes.iter_mut().zip(&state.0) {
-            if *dst != *src {
-                *dst = src.clone();
-            }
-        }
-        for (dst, src) in self.objects.iter_mut().zip(&state.1) {
-            if *dst != *src {
-                *dst = src.clone();
-            }
-        }
+        self.scopes.restore(&state.0);
+        self.objects.restore(&state.1);
     }
     /// Union another path's exit state into the current one.
     pub(super) fn join(&mut self, state: &State) {
-        self.merge_scopes(&state.0);
-        for (object, old) in self.objects.iter_mut().zip(&state.1) {
-            for (key, value) in old {
-                object.entry(key.clone()).or_default().merge(value);
-            }
-        }
+        self.scopes.merge(&state.0);
+        self.objects.merge(&state.1);
     }
     /// Continue from the union of every path that falls through. With no such
     /// path the code after the fork is unreachable and the state is left as is.
@@ -1015,17 +997,11 @@ impl Engine<'_> {
                 self.eval(increment, scopes);
             }
             self.controls.pop();
-            self.merge_scopes(&before);
-            for (object, old) in self.objects.iter_mut().zip(&objects_before) {
-                for (key, value) in old {
-                    object.entry(key.clone()).or_default().merge(value);
-                }
-            }
+            self.scopes.merge(&before);
+            self.objects.merge(&objects_before);
             // Block-local frames and allocations that first appear inside the body do not
             // escape unless captured; compare the incoming state and the incoming heap.
-            if self.scopes[..before.len()] == before
-                && self.objects[..objects_before.len()] == objects_before
-            {
+            if self.scopes.starts_with(&before) && self.objects.starts_with(&objects_before) {
                 converged = true;
                 break;
             }
@@ -1333,13 +1309,8 @@ impl Engine<'_> {
         self.active.pop();
         self.active_returns.pop();
         self.active_parameters.pop();
-        for (state, objects) in self.exit_states.pop().unwrap() {
-            self.merge_scopes(&state);
-            for (object, old) in self.objects.iter_mut().zip(objects) {
-                for (key, value) in old {
-                    object.entry(key).or_default().merge(&value);
-                }
-            }
+        for state in self.exit_states.pop().unwrap() {
+            self.join(&state);
         }
         for from in &result.ids {
             for to in &summary.ids {

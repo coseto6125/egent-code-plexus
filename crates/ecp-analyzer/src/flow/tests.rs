@@ -733,3 +733,50 @@ fn test_analyze_changes_node_budget_spent_before_sweep_reports_truncation() {
     assert!(report.consumers.is_empty(), "{:?}", report.nodes);
     assert!(report.truncated);
 }
+
+/// Contract: a fork costs what it changes, not the size of the program. With
+/// 300 functions analysed, invoking one more leaves every scope and object
+/// that existed before shared with the earlier snapshot.
+#[test]
+fn test_invoke_forks_in_one_function_leave_other_state_shared() {
+    let body = "if (x) { y = 1; } else { y = 2; } if (y) { return y; } return 0;";
+    for (path, source) in [
+        (
+            "many.js",
+            (0..300)
+                .map(|i| format!("function f{i}(x) {{ let y = 0; {body} }}\n"))
+                .collect::<String>(),
+        ),
+        (
+            "many.php",
+            format!(
+                "<?php\nclass Many\n{{\n{}}}\n",
+                (0..300)
+                    .map(|i| format!(
+                        "    public function f{i}($x) {{ $y = 0; {} }}\n",
+                        body.replace('x', "$x").replace('y', "$y")
+                    ))
+                    .collect::<String>()
+            ),
+        ),
+    ] {
+        let files = [SourceFile {
+            path: path.into(),
+            source,
+        }];
+        let mut engine = build(&files, &Budgets::default(), None).unwrap();
+        assert!(!engine.truncated, "{path}");
+        assert_eq!(engine.functions.len(), 300, "{path}");
+        assert_eq!(engine.called.len(), 300, "{path}: every entry point ran");
+        let base = engine.snapshot();
+        engine.invoke(0, &[]);
+        let copied = engine
+            .scopes
+            .iter()
+            .zip(base.0.iter())
+            .chain(engine.objects.iter().zip(base.1.iter()))
+            .filter(|(now, then)| !std::rc::Rc::ptr_eq(now, then))
+            .count();
+        assert_eq!(copied, 0, "{path}: a fork copied state it never wrote");
+    }
+}

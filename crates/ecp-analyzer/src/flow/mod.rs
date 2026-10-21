@@ -8,6 +8,7 @@ use tree_sitter::{Parser, Tree};
 mod ast;
 mod classes;
 mod engine;
+mod frames;
 mod module;
 mod php;
 mod python;
@@ -121,11 +122,11 @@ fn build<'a>(
         files,
         ast: vec![],
         roots: vec![None; files.len()],
-        scopes: vec![Scope::new(); files.len()],
+        scopes: frames::Frames::default(),
         function_scopes: (0..files.len()).collect(),
         references: BTreeMap::new(),
         functions: vec![],
-        objects: vec![],
+        objects: frames::Frames::default(),
         nodes: vec![],
         origins: vec![],
         edges: BTreeSet::new(),
@@ -149,6 +150,9 @@ fn build<'a>(
         declarations: BTreeMap::new(),
         class_scopes: BTreeSet::new(),
     };
+    for _ in files {
+        engine.scopes.push(Scope::new());
+    }
     let mut paths = BTreeSet::new();
     let mut trees = Vec::with_capacity(files.len());
     for f in files {
