@@ -122,8 +122,10 @@ enum Sep {
 /// Split a shell command at unquoted `;`, `&&`, `||`, `|`, `&` and newlines,
 /// each segment paired with the operator that ends it (`None` for the last).
 /// A segment stops before an unquoted `#` that starts a word: the comment's
-/// text runs to the newline and holds no operator, quote or group.
-/// `None` when a quote is left open: bash rejects the whole command. Every
+/// text runs to the newline and holds no operator, quote or group. A
+/// `${...}` expansion is one opaque run.
+/// `None` when a quote or `${` is left open, since bash rejects the whole
+/// command, and for a heredoc, whose body the split does not model. Every
 /// separator is ASCII, so the byte offsets stay on char boundaries for CJK
 /// paths.
 fn shell_segments(cmd: &str) -> Option<Vec<(&str, Option<Sep>)>> {
@@ -135,9 +137,31 @@ fn shell_segments(cmd: &str) -> Option<Vec<(&str, Option<Sep>)>> {
     let mut comment_at = None;
     while let Some((i, c)) = chars.next() {
         let after_redirect = matches!(prev, '>' | '<');
-        let word_start = prev.is_whitespace() || matches!(prev, ';' | '&' | '|' | '(' | ')');
+        // Bash's metacharacters, not Unicode whitespace: a `#` after a CR
+        // is a literal.
+        let word_start = matches!(
+            prev,
+            ' ' | '\t' | '\n' | ';' | '&' | '|' | '(' | ')' | '<' | '>'
+        );
         prev = c;
         let sep = match (quote, c) {
+            (None, '$') if chars.next_if(|&(_, n)| n == '{').is_some() => {
+                let mut depth = 1;
+                while depth > 0 {
+                    match chars.next()?.1 {
+                        '{' => depth += 1,
+                        '}' => depth -= 1,
+                        _ => {}
+                    }
+                }
+                prev = '}';
+                continue;
+            }
+            (None, '<') if cmd[i..].starts_with("<<<") => {
+                chars.nth(1);
+                continue;
+            }
+            (None, '<') if cmd[i..].starts_with("<<") => return None,
             (None, '#') if word_start => {
                 comment_at = Some(i);
                 while chars.next_if(|&(_, n)| n != '\n').is_some() {}
@@ -791,6 +815,34 @@ mod tests {
             "echo a#b; cd x; rg Foo",
         ] {
             assert_eq!(target(cmd, t.path()), want, "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn test_cd_target_hash_inside_expansion_or_after_cr_is_literal() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir(t.path().join("x")).unwrap();
+        let want = dir(&t.path().join("x"));
+        for cmd in [
+            "echo ${v:- #}; cd x; rg Foo",
+            "echo ${v:-{a}}; cd x; rg Foo",
+            "echo ${#PATH}; cd x; rg Foo",
+            "echo foo\r#; cd x; rg Foo",
+            "cat <<< '#('; cd x; rg Foo",
+        ] {
+            assert_eq!(target(cmd, t.path()), want, "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn test_cd_target_heredoc_or_open_expansion_returns_unknown() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir(t.path().join("x")).unwrap();
+        for cmd in [
+            "cat <<EOF\n( # )\nEOF\ncd x; rg Foo",
+            "echo ${v:-a; cd x; rg Foo",
+        ] {
+            assert_eq!(target(cmd, t.path()), Unknown, "{cmd:?}");
         }
     }
 
