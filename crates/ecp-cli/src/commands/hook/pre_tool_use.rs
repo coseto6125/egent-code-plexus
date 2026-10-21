@@ -41,10 +41,17 @@ pub fn handle(input: &HookInput) -> Result<(), EcpError> {
 
 fn compute_search_hits(input: &HookInput) -> Option<String> {
     let pattern = search_terms(&extract_pattern(&input.tool_name, &input.tool_input)?)?;
-    let cd_dir = (input.tool_name == "Bash")
-        .then(|| bash_command(&input.tool_input).and_then(|c| cd_target(c, &input.cwd)))
-        .flatten();
-    let index_dir = lookup_index_dir(cd_dir.as_deref().unwrap_or(&input.cwd))?;
+    let cd = match bash_command(&input.tool_input).filter(|_| input.tool_name == "Bash") {
+        Some(cmd) => cd_target(cmd, &input.cwd),
+        None => CdTarget::Unchanged,
+    };
+    let search_dir = match &cd {
+        CdTarget::Unchanged => input.cwd.as_str(),
+        CdTarget::Dir(dir) => dir.as_str(),
+        // Hits from a repo the search may not run in would mislead.
+        CdTarget::Unknown => return None,
+    };
+    let index_dir = lookup_index_dir(search_dir)?;
     let graph_path = index_dir.join("graph.bin");
     let engine = Engine::load(&graph_path).ok()?;
     let args = FindArgs {
@@ -159,35 +166,80 @@ fn shell_segments(cmd: &str) -> Option<Vec<(&str, Option<Sep>)>> {
     quote.is_none().then_some(segments)
 }
 
-/// Directory a Bash search runs in when a literal `cd <dir>` precedes the
-/// `rg` / `grep` segment: sessions working across repos keep the envelope cwd
-/// on another repo, so resolving from it finds no graph. `None` (the envelope
-/// cwd) whenever the directory is not certain: a cd that may not run in the
-/// search's shell, a target the hook cannot know without expanding it (`cd -`,
-/// `$VAR`, backticks, `~user`, options, a bare `cd`), a cwd-changing builtin
-/// other than cd, or an unbalanced quote. A cd to a missing directory fails
-/// and leaves the directory as it was. The `contains("cd")` check keeps a
-/// command without `cd` at one substring scan.
-fn cd_target(cmd: &str, cwd: &str) -> Option<String> {
+/// Directory a Bash search runs in, as far as a literal `cd <dir>` before
+/// the `rg` / `grep` segment decides it: sessions working across repos keep
+/// the envelope cwd on another repo, so resolving from it finds no graph.
+#[derive(Debug, PartialEq)]
+enum CdTarget {
+    /// No cd changes the search's shell: none at all, or one in a pipeline,
+    /// a subshell or a background job, or one to a missing directory.
+    Unchanged,
+    Dir(String),
+    /// A cd may or may not run (`make || cd x`, `make && cd x; rg`), or its
+    /// target cannot be known without expanding it (`cd -`, `$VAR`,
+    /// backticks, `~user`, options, a bare `cd`), or a builtin other than cd
+    /// moves the shell (`pushd`, `source`, ...), or a quote is left open.
+    Unknown,
+}
+
+const CWD_BUILTINS: [&str; 8] = [
+    "pushd", "popd", "source", ".", "eval", "builtin", "command", "exec",
+];
+
+fn cd_target(cmd: &str, cwd: &str) -> CdTarget {
     cd_target_with_home(cmd, cwd, std::env::var_os("HOME").as_deref().map(Path::new))
 }
 
-fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>) -> Option<String> {
-    if !cmd.contains("cd") {
-        return None;
+fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>) -> CdTarget {
+    // One substring scan per name keeps a command that moves no directory
+    // off the segment parser.
+    if !cmd.contains("cd") && !CWD_BUILTINS.iter().any(|b| cmd.contains(b)) {
+        return CdTarget::Unchanged;
+    }
+    let Some(segments) = shell_segments(cmd) else {
+        return CdTarget::Unknown;
+    };
+    // An and-or list ending in `&` runs as a background job, so its cd never
+    // reaches the search's shell.
+    let mut background = vec![false; segments.len()];
+    let mut in_background = false;
+    for (i, (_, after)) in segments.iter().enumerate().rev() {
+        match after {
+            None | Some(Sep::Seq) => in_background = false,
+            Some(Sep::Background) => in_background = true,
+            _ => {}
+        }
+        background[i] = in_background;
     }
     let mut current: Option<PathBuf> = None;
     let mut before = Some(Sep::Seq);
-    let mut depth = 0usize;
-    // After `cd x ||` succeeds, the `||` operand does not run; it ends at the
-    // next `;` or `&&` (`a || b && c` is `(a || b) && c`).
-    let mut skipping = false;
-    for (segment, after) in shell_segments(cmd)? {
+    let mut subshell = 0usize;
+    // After `cd x ||` succeeds, its `||` operand does not run. The operand
+    // ends at the next `;`, `&&` or `&` outside any `{ }` / `( )` it opens
+    // (`a || b && c` is `(a || b) && c`).
+    let mut skipping: Option<usize> = None;
+    for (i, &(segment, after)) in segments.iter().enumerate() {
         let words = shell_words(segment);
         if words.iter().any(|w| w == "rg" || w == "grep") {
             // `extract_from_shell` takes the first `rg` / `grep` word anywhere
             // (`rtk proxy rg`, `git grep`), so the scan stops at the same word.
             break;
+        }
+        let opens = words
+            .iter()
+            .filter(|w| *w == "{" || w.starts_with('('))
+            .count();
+        let closes = words
+            .iter()
+            .filter(|w| *w == "}" || w.ends_with(')'))
+            .count();
+        if let Some(depth) = skipping.as_mut() {
+            *depth = (*depth + opens).saturating_sub(closes);
+            if *depth == 0 && !matches!(after, Some(Sep::Or | Sep::Pipe)) {
+                skipping = None;
+            }
+            before = after;
+            continue;
         }
         let cmd_words: Vec<&str> = words
             .iter()
@@ -195,49 +247,51 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>) -> Option<Stri
             .skip_while(|w| is_assignment(w))
             .skip_while(|w| *w == "{")
             .collect();
-        let opens = cmd_words.first().is_some_and(|w| w.starts_with('('));
-        let in_subshell = depth > 0 || opens;
-        depth += usize::from(opens);
-        depth = depth.saturating_sub(words.iter().filter(|w| w.ends_with(')')).count());
-        if skipping {
-            match after {
-                Some(Sep::Background) => return None,
-                None | Some(Sep::Seq | Sep::And) => skipping = false,
-                _ => {}
+        let starts_subshell = cmd_words.first().is_some_and(|w| w.starts_with('('));
+        let in_subshell = subshell > 0 || starts_subshell;
+        subshell += usize::from(starts_subshell);
+        subshell = subshell.saturating_sub(words.iter().filter(|w| w.ends_with(')')).count());
+        let own_shell =
+            !in_subshell && !background[i] && before != Some(Sep::Pipe) && after != Some(Sep::Pipe);
+        match cmd_words.first().copied() {
+            Some(builtin) if own_shell && CWD_BUILTINS.contains(&builtin) => {
+                return CdTarget::Unknown
             }
-        } else if !in_subshell {
-            match cmd_words.first().copied() {
-                Some(
-                    "pushd" | "popd" | "source" | "." | "eval" | "builtin" | "command" | "exec",
-                ) => return None,
-                Some("cd") => {
-                    let runs_here = match before {
-                        Some(Sep::Seq) => !matches!(after, Some(Sep::Pipe | Sep::Background)),
-                        Some(Sep::And) => after == Some(Sep::And),
-                        _ => false,
-                    };
-                    let [_, arg] = cmd_words[..] else { return None };
-                    if !runs_here {
-                        return None;
-                    }
-                    let base = current.as_deref().unwrap_or(Path::new(cwd));
-                    match resolve_cd_arg(arg, base, home, unquoted_tilde_arg(segment))? {
-                        Some(dir) => {
-                            current = Some(dir);
-                            skipping = after == Some(Sep::Or);
-                        }
-                        // The cd fails; `cd x || …` then runs its operand,
-                        // whose effect the hook does not model.
-                        None if after == Some(Sep::Or) => return None,
-                        None => {}
-                    }
+            Some("cd") if own_shell => {
+                let surely_runs = match before {
+                    Some(Sep::Seq | Sep::Background) | None => true,
+                    Some(Sep::And) => after == Some(Sep::And),
+                    _ => false,
+                };
+                let [_, arg] = cmd_words[..] else {
+                    return CdTarget::Unknown;
+                };
+                if !surely_runs {
+                    return CdTarget::Unknown;
                 }
-                _ => {}
+                let base = current.as_deref().unwrap_or(Path::new(cwd));
+                match resolve_cd_arg(arg, base, home, unquoted_tilde_arg(segment)) {
+                    None => return CdTarget::Unknown,
+                    Some(Some(dir)) => {
+                        current = Some(dir);
+                        if after == Some(Sep::Or) {
+                            skipping = Some(0);
+                        }
+                    }
+                    // The cd fails; `cd x || …` then runs its operand,
+                    // whose effect the hook does not model.
+                    Some(None) if after == Some(Sep::Or) => return CdTarget::Unknown,
+                    Some(None) => {}
+                }
             }
+            _ => {}
         }
         before = after;
     }
-    current?.into_os_string().into_string().ok()
+    match current.map(PathBuf::into_os_string) {
+        None => CdTarget::Unchanged,
+        Some(dir) => dir.into_string().map_or(CdTarget::Unknown, CdTarget::Dir),
+    }
 }
 
 fn is_assignment(word: &str) -> bool {
@@ -451,38 +505,45 @@ fn extract_from_shell(cmd: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cd_target_with_home, extract_from_shell, search_terms, shell_segments, Sep};
+    use super::CdTarget::{Dir, Unchanged, Unknown};
+    use super::{
+        cd_target_with_home, extract_from_shell, search_terms, shell_segments, CdTarget, Sep,
+    };
     use std::path::Path;
 
     fn canon(p: &Path) -> String {
         p.canonicalize().unwrap().to_str().unwrap().to_string()
     }
 
-    fn target(cmd: &str, cwd: &Path) -> Option<String> {
+    fn target(cmd: &str, cwd: &Path) -> CdTarget {
         cd_target_with_home(cmd, cwd.to_str().unwrap(), None)
     }
 
+    fn dir(p: &Path) -> CdTarget {
+        Dir(canon(p))
+    }
+
     #[test]
-    fn test_cd_target_no_cd_returns_none() {
+    fn test_cd_target_no_cd_returns_unchanged() {
         let t = tempfile::tempdir().unwrap();
-        assert_eq!(target("grep -rn Foo app", t.path()), None);
-        assert_eq!(target("", t.path()), None);
-        assert_eq!(target("   ", t.path()), None);
+        for cmd in ["grep -rn Foo app", "", "   "] {
+            assert_eq!(target(cmd, t.path()), Unchanged, "{cmd:?}");
+        }
     }
 
     #[test]
     fn test_cd_target_quoted_cjk_path_with_spaces_resolves() {
         let t = tempfile::tempdir().unwrap();
-        let dir = t.path().join("業主 原始碼").join("outsourcing-backend-CN");
-        std::fs::create_dir_all(&dir).unwrap();
-        let d = dir.to_str().unwrap();
+        let path = t.path().join("業主 原始碼").join("outsourcing-backend-CN");
+        std::fs::create_dir_all(&path).unwrap();
+        let d = path.to_str().unwrap();
         let other = tempfile::tempdir().unwrap();
         for cmd in [
             format!("cd \"{d}\" && grep -rn CacheKeyQueue app"),
             format!("cd '{d}' && grep -rn CacheKeyQueue app"),
             format!("cd {} && rg Foo", d.replace(' ', "\\ ")),
         ] {
-            assert_eq!(target(&cmd, other.path()), Some(canon(&dir)), "{cmd}");
+            assert_eq!(target(&cmd, other.path()), dir(&path), "{cmd}");
         }
     }
 
@@ -492,7 +553,7 @@ mod tests {
         std::fs::create_dir(t.path().join("sub")).unwrap();
         assert_eq!(
             target("cd sub && grep -rn Foo .", t.path()),
-            Some(canon(&t.path().join("sub")))
+            dir(&t.path().join("sub"))
         );
     }
 
@@ -502,20 +563,17 @@ mod tests {
         std::fs::create_dir(h.path().join("x")).unwrap();
         let cwd = tempfile::tempdir().unwrap();
         let go = |cmd: &str, home| cd_target_with_home(cmd, cwd.path().to_str().unwrap(), home);
-        assert_eq!(
-            go("cd ~ && grep Foo", Some(h.path())),
-            Some(canon(h.path()))
-        );
+        assert_eq!(go("cd ~ && grep Foo", Some(h.path())), dir(h.path()));
         assert_eq!(
             go("cd ~/x && grep Foo", Some(h.path())),
-            Some(canon(&h.path().join("x")))
+            dir(&h.path().join("x"))
         );
-        assert_eq!(go("cd ~/x && grep Foo", None), None);
-        assert_eq!(go("cd ~bob && grep Foo", Some(h.path())), None);
+        assert_eq!(go("cd ~/x && grep Foo", None), Unknown);
+        assert_eq!(go("cd ~bob && grep Foo", Some(h.path())), Unknown);
     }
 
     #[test]
-    fn test_cd_target_dash_bare_var_and_subshell_ignored() {
+    fn test_cd_target_unknowable_target_returns_unknown() {
         let t = tempfile::tempdir().unwrap();
         for cmd in [
             "cd - && grep Foo .",
@@ -526,14 +584,17 @@ mod tests {
             "cd -P . && grep Foo .",
             "cd . extra; grep Foo .",
         ] {
-            assert_eq!(target(cmd, t.path()), None, "{cmd}");
+            assert_eq!(target(cmd, t.path()), Unknown, "{cmd}");
         }
     }
 
     #[test]
-    fn test_cd_target_nonexistent_dir_falls_back() {
+    fn test_cd_target_nonexistent_dir_returns_unchanged() {
         let t = tempfile::tempdir().unwrap();
-        assert_eq!(target("cd /no/such/dir_zz && grep Foo .", t.path()), None);
+        assert_eq!(
+            target("cd /no/such/dir_zz && grep Foo .", t.path()),
+            Unchanged
+        );
     }
 
     #[test]
@@ -543,45 +604,67 @@ mod tests {
         std::fs::create_dir(t.path().join("c")).unwrap();
         assert_eq!(
             target("cd a && cd b && grep Foo .", t.path()),
-            Some(canon(&t.path().join("a/b")))
+            dir(&t.path().join("a/b"))
         );
         assert_eq!(
             target("cd a && cd ../c && grep Foo .", t.path()),
-            Some(canon(&t.path().join("c")))
+            dir(&t.path().join("c"))
         );
         // A cd after the search segment does not move the search.
         assert_eq!(
             target("cd a && grep Foo . ; cd ../c", t.path()),
-            Some(canon(&t.path().join("a")))
+            dir(&t.path().join("a"))
         );
     }
 
     #[test]
-    fn test_cd_target_semicolon_and_or_separators_resolve() {
+    fn test_cd_target_semicolon_and_newline_separators_resolve() {
         let t = tempfile::tempdir().unwrap();
         std::fs::create_dir(t.path().join("x")).unwrap();
-        let want = Some(canon(&t.path().join("x")));
-        assert_eq!(target("cd x; grep Foo .", t.path()), want);
-        assert_eq!(target("cd x\ngrep Foo .", t.path()), want);
+        let want = dir(&t.path().join("x"));
+        for cmd in [
+            "cd x; grep Foo .",
+            "cd x\ngrep Foo .",
+            "make & cd x; rg Foo",
+        ] {
+            assert_eq!(target(cmd, t.path()), want, "{cmd}");
+        }
     }
 
     #[test]
-    fn test_cd_target_cd_that_may_not_run_in_search_shell_ignored() {
+    fn test_cd_target_cd_that_may_not_run_returns_unknown() {
         let t = tempfile::tempdir().unwrap();
         std::fs::create_dir(t.path().join("x")).unwrap();
         for cmd in [
             "true || cd x; rg Foo",
             "false || cd x && rg Foo",
-            "cd x | rg Foo",
-            "cd x & rg Foo",
             "make && cd x; rg Foo",
+            "cd x; cd \"$PWD\"; rg Foo",
         ] {
-            assert_eq!(target(cmd, t.path()), None, "{cmd}");
+            assert_eq!(target(cmd, t.path()), Unknown, "{cmd}");
         }
         assert_eq!(
             target("make && cd x && rg Foo", t.path()),
-            Some(canon(&t.path().join("x")))
+            dir(&t.path().join("x"))
         );
+    }
+
+    #[test]
+    fn test_cd_target_cd_outside_search_shell_returns_unchanged() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir(t.path().join("x")).unwrap();
+        for cmd in [
+            "cd x | rg Foo",
+            "cd x & rg Foo",
+            "cd x && make & rg Foo",
+            "make || cd x & rg Foo",
+            "cd x || true & rg Foo",
+            "(cd x && make); rg Foo",
+            "(make; cd x); rg Foo",
+            "echo | pushd x; rg Foo",
+        ] {
+            assert_eq!(target(cmd, t.path()), Unchanged, "{cmd}");
+        }
     }
 
     #[test]
@@ -593,7 +676,7 @@ mod tests {
             "git grep Foo; cd x",
             "find . | xargs grep Foo; cd x",
         ] {
-            assert_eq!(target(cmd, t.path()), None, "{cmd}");
+            assert_eq!(target(cmd, t.path()), Unchanged, "{cmd}");
         }
     }
 
@@ -604,17 +687,14 @@ mod tests {
         let cwd = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(cwd.path().join("~/repo")).unwrap();
         let go = |cmd: &str| cd_target_with_home(cmd, cwd.path().to_str().unwrap(), Some(h.path()));
-        let literal = Some(canon(&cwd.path().join("~/repo")));
+        let literal = dir(&cwd.path().join("~/repo"));
         assert_eq!(go("cd '~/repo'; rg Foo"), literal);
         assert_eq!(go("cd \"~/repo\" && rg Foo"), literal);
-        assert_eq!(
-            go("cd ~/repo && rg Foo"),
-            Some(canon(&h.path().join("repo")))
-        );
+        assert_eq!(go("cd ~/repo && rg Foo"), dir(&h.path().join("repo")));
     }
 
     #[test]
-    fn test_cd_target_unknowable_cwd_change_falls_back() {
+    fn test_cd_target_cwd_builtin_or_open_quote_returns_unknown() {
         let t = tempfile::tempdir().unwrap();
         std::fs::create_dir(t.path().join("x")).unwrap();
         for cmd in [
@@ -625,21 +705,22 @@ mod tests {
             "cd x; source env.sh; rg Foo",
             "cd x && grep \"Foo .",
             "cd missing || cd x; rg Foo",
-            "cd x || true & rg Foo",
         ] {
-            assert_eq!(target(cmd, t.path()), None, "{cmd}");
+            assert_eq!(target(cmd, t.path()), Unknown, "{cmd}");
         }
     }
 
     #[test]
     fn test_cd_target_or_operand_skipped_after_successful_cd() {
         let t = tempfile::tempdir().unwrap();
-        std::fs::create_dir(t.path().join("x")).unwrap();
-        let want = Some(canon(&t.path().join("x")));
+        std::fs::create_dir_all(t.path().join("x/y")).unwrap();
+        let want = dir(&t.path().join("x"));
         for cmd in [
             "cd x || exit 1; rg Foo",
             "cd x || false && rg Foo",
             "cd x || { echo no; exit 1; }; rg Foo",
+            "cd x || { echo failed; cd y; }; rg Foo",
+            "cd x || (cd y; exit); rg Foo",
         ] {
             assert_eq!(target(cmd, t.path()), want, "{cmd}");
         }
@@ -649,16 +730,13 @@ mod tests {
     fn test_cd_target_assignments_and_groups_keep_cd() {
         let t = tempfile::tempdir().unwrap();
         std::fs::create_dir(t.path().join("x")).unwrap();
-        let want = Some(canon(&t.path().join("x")));
+        let want = dir(&t.path().join("x"));
         for cmd in [
             "X=1; cd x && rg Foo",
             "X=1 cd x && rg Foo",
             "{ cd x; rg Foo; }",
         ] {
             assert_eq!(target(cmd, t.path()), want, "{cmd}");
-        }
-        for cmd in ["(cd x && make); rg Foo", "(make; cd x); rg Foo"] {
-            assert_eq!(target(cmd, t.path()), None, "{cmd}");
         }
     }
 
@@ -672,7 +750,7 @@ mod tests {
                 cwd.path().to_str().unwrap(),
                 Some(h.path())
             ),
-            Some(canon(h.path()))
+            dir(h.path())
         );
     }
 
@@ -681,9 +759,9 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let d = t.path().to_str().unwrap();
         let cmd = format!("echo \"cd {d}\" && grep -rn Foo app");
-        assert_eq!(target(&cmd, t.path()), None);
+        assert_eq!(target(&cmd, t.path()), Unchanged);
         let cmd = format!("echo 'a; cd {d}' && grep -rn Foo app");
-        assert_eq!(target(&cmd, t.path()), None);
+        assert_eq!(target(&cmd, t.path()), Unchanged);
     }
 
     #[test]
