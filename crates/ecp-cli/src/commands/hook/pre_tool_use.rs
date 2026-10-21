@@ -407,9 +407,8 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
                 groups.push(word != "if");
             }
         }
-        match cmd_words.get(after_prefix) {
-            Some(&("for" | "select" | "case")) => groups.push(true),
-            _ => {}
+        if let Some(&("for" | "select" | "case")) = cmd_words.get(after_prefix) {
+            groups.push(true);
         }
         groups.extend(std::iter::repeat_n(false, brace_opens));
         if own_shell
