@@ -916,7 +916,12 @@ fn extract_from_shell(cmd: &str) -> Option<String> {
     // `-e PATTERN` names the pattern explicitly for both grep and rg; the
     // word after it is the answer, not a flag value to step over.
     let mut next_is_pattern = false;
-    let words = shell_words(cmd);
+    // `cd_target_with_home` reads the same segment, so the term and the
+    // directory belong to one search.
+    let words = shell_segments(cmd)?
+        .into_iter()
+        .map(|(segment, _)| shell_words(segment))
+        .find(|w| (0..w.len()).any(|i| runs_search(w, i)))?;
     for (i, word) in words.iter().enumerate() {
         if skip_next {
             skip_next = false;
@@ -1367,6 +1372,7 @@ mod tests {
             "rg --version && cd /tmp && rg -n HookInput src",
             "rg 2>/dev/null HookInput src",
             "grep -rn HookInput>/tmp/out .",
+            "cd /a\nrg -n -m 1 HookInput src\ncd /b\nrg --files -g x.rs | xargs grep -n other_name",
             "grep -V; grep -rn HookInput .",
             "rg --files -g '**/x.rs' | xargs grep -n -m 2 HookInput",
             "command -v rg && cd /tmp && rg HookInput .",
