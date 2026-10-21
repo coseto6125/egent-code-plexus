@@ -2324,7 +2324,7 @@ impl<'a> OverlayFacts<'a> {
             return false;
         };
         let pool = &self.graph.string_pool;
-        traits.iter().any(|&implemented| implemented == base_key)
+        traits.contains(&base_key)
             && !self.graph.nodes_by_name(self.name_of(ty)).any(|idx| {
                 let block = &self.graph.nodes[idx as usize];
                 NodeKind::from(&block.kind) == NodeKind::Impl

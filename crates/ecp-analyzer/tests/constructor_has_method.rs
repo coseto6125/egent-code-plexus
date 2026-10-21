@@ -25,14 +25,14 @@ fn build(provider: &dyn LanguageProvider, path: &str, source: &str) -> ZeroCopyG
 fn assert_class_has_both_constructors(provider: &dyn LanguageProvider, path: &str, source: &str) {
     let graph = build(provider, path, source);
     let pool = &graph.string_pool;
-    let foo: Vec<u32> = (0..graph.nodes.len() as u32)
+    let named_foo: Vec<u32> = (0..graph.nodes.len() as u32)
         .filter(|&i| graph.nodes[i as usize].name.resolve(pool) == "Foo")
         .collect();
-    let class = *foo
+    let class = *named_foo
         .iter()
         .find(|&&i| graph.nodes[i as usize].kind == NodeKind::Class)
         .expect("class Foo");
-    let ctors: Vec<u32> = foo
+    let ctors: Vec<u32> = named_foo
         .iter()
         .copied()
         .filter(|&i| graph.nodes[i as usize].kind == NodeKind::Constructor)
