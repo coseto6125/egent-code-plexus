@@ -101,30 +101,60 @@ fn bash_command(tool_input: &serde_json::Value) -> Option<&str> {
     tool_input.get("command").and_then(|v| v.as_str())
 }
 
-/// Split a shell command at unquoted `;`, `|`, `&` and newlines, so `&&` and
-/// `||` yield an empty segment between their halves. Every separator is ASCII,
-/// so the byte offsets stay on char boundaries for CJK paths.
-fn shell_segments(cmd: &str) -> Vec<&str> {
+/// The control operator that ends a shell segment.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Sep {
+    /// `;` or a newline.
+    Seq,
+    And,
+    Or,
+    Pipe,
+    Background,
+}
+
+/// Split a shell command at unquoted `;`, `&&`, `||`, `|`, `&` and newlines,
+/// each segment paired with the operator that ends it (`None` for the last).
+/// Every separator is ASCII, so the byte offsets stay on char boundaries for
+/// CJK paths.
+fn shell_segments(cmd: &str) -> Vec<(&str, Option<Sep>)> {
     let mut segments = Vec::new();
     let mut start = 0;
     let mut quote: Option<char> = None;
-    let mut chars = cmd.char_indices();
+    let mut chars = cmd.char_indices().peekable();
+    let mut prev = ' ';
     while let Some((i, c)) = chars.next() {
-        match (quote, c) {
-            (Some('\''), '\'') | (Some('"'), '"') => quote = None,
+        let after_redirect = matches!(prev, '>' | '<');
+        prev = c;
+        let sep = match (quote, c) {
+            (Some('\''), '\'') | (Some('"'), '"') => {
+                quote = None;
+                continue;
+            }
             (Some('"'), '\\') | (None, '\\') => {
                 chars.next();
+                continue;
             }
-            (Some(_), _) => {}
-            (None, '\'' | '"') => quote = Some(c),
-            (None, ';' | '|' | '&' | '\n') => {
-                segments.push(&cmd[start..i]);
-                start = i + 1;
+            (Some(_), _) => continue,
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                continue;
             }
-            _ => {}
-        }
+            (None, ';' | '\n') => Sep::Seq,
+            // `2>&1`, `<&0`, `>|file` and `&>file` are redirects, not operators.
+            (None, '&' | '|') if after_redirect => continue,
+            (None, '&') if chars.peek().is_some_and(|&(_, n)| n == '>') => continue,
+            (None, '&' | '|') => match (c, chars.next_if(|&(_, n)| n == c)) {
+                ('&', Some(_)) => Sep::And,
+                ('&', None) => Sep::Background,
+                (_, Some(_)) => Sep::Or,
+                (_, None) => Sep::Pipe,
+            },
+            _ => continue,
+        };
+        segments.push((&cmd[start..i], Some(sep)));
+        start = chars.peek().map_or(cmd.len(), |&(next, _)| next);
     }
-    segments.push(&cmd[start..]);
+    segments.push((&cmd[start..], None));
     segments
 }
 
@@ -143,27 +173,43 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>) -> Option<Stri
         return None;
     }
     let mut current: Option<PathBuf> = None;
-    for segment in shell_segments(cmd) {
+    let mut before = Some(Sep::Seq);
+    for (segment, after) in shell_segments(cmd) {
         let words = shell_words(segment);
-        match words.first().map(String::as_str) {
-            Some("rg" | "grep") => break,
-            Some("cd") if words.len() == 2 => {
-                let base = current.as_deref().unwrap_or(Path::new(cwd));
-                if let Some(dir) = resolve_cd_arg(&words[1], base, home) {
-                    current = Some(dir);
-                }
-            }
-            _ => {}
+        // `extract_from_shell` takes the first `rg` / `grep` word anywhere
+        // (`rtk proxy rg`, `git grep`), so the scan stops at the same word.
+        if words.iter().any(|w| w == "rg" || w == "grep") {
+            break;
         }
+        // A cd moves the search only when it surely runs in the search's
+        // shell: not in a pipeline or a background job, not after `||`, and
+        // after `&&` only inside an `&&` chain that the search belongs to.
+        let runs_here = match before {
+            Some(Sep::Seq) => matches!(after, None | Some(Sep::Seq | Sep::And)),
+            Some(Sep::And) => after == Some(Sep::And),
+            _ => false,
+        };
+        if runs_here && words.len() == 2 && words[0] == "cd" {
+            // A quoted `'~/x'` names a directory called `~`.
+            let tilde = segment
+                .trim_start()
+                .strip_prefix("cd")
+                .is_some_and(|rest| rest.trim_start().starts_with('~'));
+            let base = current.as_deref().unwrap_or(Path::new(cwd));
+            if let Some(dir) = resolve_cd_arg(&words[1], base, home, tilde) {
+                current = Some(dir);
+            }
+        }
+        before = after;
     }
     current?.into_os_string().into_string().ok()
 }
 
-fn resolve_cd_arg(arg: &str, base: &Path, home: Option<&Path>) -> Option<PathBuf> {
+fn resolve_cd_arg(arg: &str, base: &Path, home: Option<&Path>, tilde: bool) -> Option<PathBuf> {
     if arg.is_empty() || arg == "-" || arg.contains(['$', '`']) {
         return None;
     }
-    let path = match arg.strip_prefix('~') {
+    let path = match arg.strip_prefix('~').filter(|_| tilde) {
         Some("") => home?.to_path_buf(),
         Some(rest) if rest.starts_with('/') => home?.join(rest.trim_start_matches('/')),
         Some(_) => return None,
@@ -345,7 +391,7 @@ fn extract_from_shell(cmd: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cd_target_with_home, extract_from_shell, search_terms, shell_segments};
+    use super::{cd_target_with_home, extract_from_shell, search_terms, shell_segments, Sep};
     use std::path::Path;
 
     fn canon(p: &Path) -> String {
@@ -454,7 +500,55 @@ mod tests {
         std::fs::create_dir(t.path().join("x")).unwrap();
         let want = Some(canon(&t.path().join("x")));
         assert_eq!(target("cd x; grep Foo .", t.path()), want);
-        assert_eq!(target("false || cd x && rg Foo", t.path()), want);
+        assert_eq!(target("cd x\ngrep Foo .", t.path()), want);
+    }
+
+    #[test]
+    fn test_cd_target_cd_that_may_not_run_in_search_shell_ignored() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir(t.path().join("x")).unwrap();
+        for cmd in [
+            "true || cd x; rg Foo",
+            "false || cd x && rg Foo",
+            "cd x | rg Foo",
+            "cd x & rg Foo",
+            "make && cd x; rg Foo",
+        ] {
+            assert_eq!(target(cmd, t.path()), None, "{cmd}");
+        }
+        assert_eq!(
+            target("make && cd x && rg Foo", t.path()),
+            Some(canon(&t.path().join("x")))
+        );
+    }
+
+    #[test]
+    fn test_cd_target_search_word_anywhere_stops_scan() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir(t.path().join("x")).unwrap();
+        for cmd in [
+            "rtk proxy rg Foo; cd x",
+            "git grep Foo; cd x",
+            "find . | xargs grep Foo; cd x",
+        ] {
+            assert_eq!(target(cmd, t.path()), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_cd_target_quoted_tilde_is_a_relative_dir() {
+        let h = tempfile::tempdir().unwrap();
+        std::fs::create_dir(h.path().join("repo")).unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(cwd.path().join("~/repo")).unwrap();
+        let go = |cmd: &str| cd_target_with_home(cmd, cwd.path().to_str().unwrap(), Some(h.path()));
+        let literal = Some(canon(&cwd.path().join("~/repo")));
+        assert_eq!(go("cd '~/repo'; rg Foo"), literal);
+        assert_eq!(go("cd \"~/repo\" && rg Foo"), literal);
+        assert_eq!(
+            go("cd ~/repo && rg Foo"),
+            Some(canon(&h.path().join("repo")))
+        );
     }
 
     #[test]
@@ -469,12 +563,22 @@ mod tests {
 
     #[test]
     fn test_shell_segments_splits_only_unquoted_separators() {
-        let segs: Vec<&str> = shell_segments("cd 'a;b' && grep \"x|y\" .")
+        let segs: Vec<(&str, Option<Sep>)> = shell_segments("cd 'a;b' && grep \"x|y\" . | head")
             .into_iter()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
+            .map(|(s, sep)| (s.trim(), sep))
             .collect();
-        assert_eq!(segs, ["cd 'a;b'", "grep \"x|y\" ."]);
+        assert_eq!(
+            segs,
+            [
+                ("cd 'a;b'", Some(Sep::And)),
+                ("grep \"x|y\" .", Some(Sep::Pipe)),
+                ("head", None)
+            ]
+        );
+        assert_eq!(
+            shell_segments("make 2>&1 <&0 &>log >|f; x"),
+            [("make 2>&1 <&0 &>log >|f", Some(Sep::Seq)), (" x", None)]
+        );
     }
 
     #[test]
