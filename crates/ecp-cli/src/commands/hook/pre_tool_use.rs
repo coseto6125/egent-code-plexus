@@ -767,14 +767,39 @@ fn search_terms(pattern: &str) -> Option<String> {
 /// Split a shell command into words the way the shell hands them to the
 /// program: quotes group, and are removed; a backslash outside single quotes
 /// escapes the next character. A quoted pattern such as
-/// `grep "pub struct HookInput"` is one word, not three.
+/// `grep "pub struct HookInput"` is one word, not three. An unquoted
+/// redirection (`2>&1`, `&>log`, `>/dev/null`, `< in`) is dropped with its
+/// target, as the command never sees it: `cd x>/dev/null` names `x`.
 fn shell_words(cmd: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();
     let mut in_word = false;
-    let mut chars = cmd.chars();
+    let mut drop_next = false;
+    let mut chars = cmd.chars().peekable();
+    let mut finish = |current: &mut String, drop_next: &mut bool| {
+        let word = std::mem::take(current);
+        if !std::mem::take(drop_next) {
+            words.push(word);
+        }
+    };
     while let Some(c) = chars.next() {
         match c {
+            // `<(cmd)` / `>(cmd)` is a process substitution, not a redirect.
+            '<' | '>' if chars.peek() != Some(&'(') => {
+                // `2>` and `&>` name the redirected stream.
+                let stream = current.chars().all(|d| d.is_ascii_digit()) || current == "&";
+                if in_word && stream {
+                    current.clear();
+                } else if in_word {
+                    finish(&mut current, &mut drop_next);
+                }
+                in_word = false;
+                while chars
+                    .next_if(|&n| matches!(n, '<' | '>' | '&' | '|'))
+                    .is_some()
+                {}
+                drop_next = true;
+            }
             '\'' => {
                 in_word = true;
                 current.extend(chars.by_ref().take_while(|&q| q != '\''));
@@ -807,7 +832,7 @@ fn shell_words(cmd: &str) -> Vec<String> {
             }
             c if c.is_whitespace() => {
                 if in_word {
-                    words.push(std::mem::take(&mut current));
+                    finish(&mut current, &mut drop_next);
                     in_word = false;
                 }
             }
@@ -818,7 +843,7 @@ fn shell_words(cmd: &str) -> Vec<String> {
         }
     }
     if in_word {
-        words.push(current);
+        finish(&mut current, &mut drop_next);
     }
     words
 }
@@ -1310,6 +1335,9 @@ mod tests {
             "which grep >/dev/null; cd x; grep -rn Foo .",
             "cd grep && cd ../x && rg -n main src",
             "rg --version &&\ncd x &&\nrg -n Foo src",
+            "cd x>/dev/null &&\nrg -n Foo src",
+            "cd x 2>/dev/null && rg Foo",
+            "cd x &>/dev/null; rg Foo",
             "cd x &&\n  (git status >/dev/null &\n   git diff --stat >/dev/null & wait)\nrg -n Foo src",
             "cd x && {\n  rg -n -m 1 Foo a\n  rg -n -m 1 Bar a\n} & wait",
             "cd x && git status --short |& head\nrg -n Foo src",
@@ -1319,6 +1347,7 @@ mod tests {
         for cmd in [
             "cd x &&\nif test -f a; then\n  git diff --stat\nfi &\nrg -n Foo a\nwait",
             "cd x && { git status --short; }>/dev/null 2>&1 &\nrg -n Foo src\nwait",
+            "cd x && if test -d .; then pwd; fi>/dev/null 2>&1 &\nrg -n Foo src\nwait",
             "cd x && { git status --short; } >/dev/null 2>&1 &\nrg -n Foo src\nwait",
             "make &&\nrg Foo",
             "m=$(cd x && pwd); rg Foo .",
@@ -1336,6 +1365,8 @@ mod tests {
             "rg --color never -n -m 2 HookInput src",
             "cd grep && rg -n HookInput src",
             "rg --version && cd /tmp && rg -n HookInput src",
+            "rg 2>/dev/null HookInput src",
+            "grep -rn HookInput>/tmp/out .",
             "grep -V; grep -rn HookInput .",
             "rg --files -g '**/x.rs' | xargs grep -n -m 2 HookInput",
             "command -v rg && cd /tmp && rg HookInput .",
