@@ -186,8 +186,10 @@ pub async fn serve_stdio(server: EcpMcpServer) -> anyhow::Result<()> {
     let handler = RmcpHandler(Arc::new(server));
     // rmcp 3.6.0 (modelcontextprotocol/rust-sdk#1049) drops an incoming line
     // over 16 MiB and keeps the session open; before, the buffer grew without
-    // bound. Kept: no ecp tool takes arguments near that size, and a peer that
-    // never sends a newline can no longer exhaust memory.
+    // bound. A request on a dropped line gets no reply, so its client waits
+    // until its own timeout. Left at the default: no ecp tool takes arguments
+    // near that size, and a peer that never sends a newline can no longer
+    // exhaust memory.
     let transport = rmcp::transport::stdio();
     let running = rmcp::serve_server(handler, transport).await?;
     running.waiting().await.ok();
@@ -264,10 +266,11 @@ mod tests {
         });
         let initialized =
             serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
-        let oversized = serde_json::json!({
-            "jsonrpc": "2.0", "id": 2, "method": "ping",
-            "params": {"_meta": {"pad": "x".repeat(16 * 1024 * 1024 + 1024)}},
-        });
+        // Built as text, not as a `json!` value, so the 16 MiB pad exists once.
+        let oversized = format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"ping","params":{{"_meta":{{"pad":"{}"}}}}}}"#,
+            "x".repeat(16 * 1024 * 1024 + 1024)
+        );
         let ping = serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "ping"});
 
         client_write
@@ -280,11 +283,9 @@ mod tests {
             .unwrap()
             .expect("initialize response");
         let _service = handshake.await.unwrap().expect("handshake");
-        for message in [initialized, oversized, ping] {
-            client_write
-                .write_all(format!("{message}\n").as_bytes())
-                .await
-                .unwrap();
+        for message in [initialized.to_string(), oversized, ping.to_string()] {
+            client_write.write_all(message.as_bytes()).await.unwrap();
+            client_write.write_all(b"\n").await.unwrap();
         }
 
         let line = lines.next_line().await.unwrap().expect("session closed");

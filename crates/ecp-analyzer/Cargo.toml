@@ -67,7 +67,7 @@ tree-sitter-vue = { path = "../vendor/tree-sitter-vue" }
 # SHA 213f6e6973d9b456c6e50e86f19f66877e7ef0ee (no tags). ABI 14, within [13,15].
 tree-sitter-astro = { path = "../vendor/tree-sitter-astro" }
 # tree-sitter-svelte v1.0.2 (tree-sitter-grammars/tree-sitter-svelte) — vendored;
-# ABI 14 (within tree-sitter 0.26 range [13, 15]); pure-C scanner (scanner.c).
+# ABI 14 (within the tree-sitter ABI range [13, 15]); pure-C scanner (scanner.c).
 tree-sitter-svelte = { path = "../vendor/tree-sitter-svelte" }
 rustc-hash = "2"
 
