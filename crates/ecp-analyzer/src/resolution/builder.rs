@@ -1059,6 +1059,7 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
             category,
         });
 
+        let graph_start = current_node_idx;
         for raw_node in &local_graph.nodes {
             // T1-5: canonical xxh3-64 UID — zero heap alloc, no string-pool entry.
             // Canonical stream: kind_as_str \0 path \0 owner_class_or_empty \0 name
@@ -1234,6 +1235,9 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
 
             current_node_idx += 1;
         }
+        if file_meta.language == Language::Rust {
+            note_rust_impl_members(&mut symbol_table, &local_graph.nodes, graph_start);
+        }
 
         // NOTE: documents (markdown/yaml section/doc nodes) are parsed into
         // `local_graph.documents` but the graph.bin DocumentBlock storage is
@@ -1248,6 +1252,7 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
     // O(N_files) scan per qualified call.
     symbol_table.build_stem_index();
     symbol_table.build_constructor_index();
+    symbol_table.build_owner_kinds();
 
     Pass1Registration {
         symbol_table,
@@ -1290,47 +1295,72 @@ fn is_consumer_extension(path: &str) -> bool {
     )
 }
 
-/// Serialize captured resolver decisions to a JSONL file. Schema matches
-/// the oracle harness contract: one decision per line, fields ordered for
-/// readable diffs. Each line is a flattened `ResolverDecision` plus the
-/// resolved `target_file` (looked up from `target_id` via the symbol
-/// table). Delegating to `serde_json` keeps escaping (Unicode controls,
-/// surrogates, line separators) compliant with RFC 8259.
-/// Locate the smallest `Class`-kind raw node whose span fully contains
-/// `raw_node`'s span, returning its heritage list. Used by Pass-2 call-edge
-/// emission to power Tier 2.75 (HeritageScoped) lookups: an unqualified
-/// method call inside `class Bar; include Foo; end` carries Bar's heritage
-/// (`["Foo"]`) so the resolver can probe Foo's file when Tier 1/2/2.5 miss.
-/// Returns an empty slice when the node has no enclosing class (top-level
-/// function, etc.). For Ruby `module Foo` and `class Foo` both emit as
-/// `NodeKind::Class`, so this single check covers Ruby module mixins too.
-fn enclosing_class_heritage<'a>(
-    raw_node: &'a RawNode,
-    local_graph: &'a LocalGraph,
-) -> &'a [String] {
-    if raw_node.kind == NodeKind::Class {
-        return &raw_node.heritage;
-    }
-    let (s_row, s_col, e_row, e_col) = raw_node.span;
-    let mut best: Option<&RawNode> = None;
-    let mut best_span: (u32, u32) = (u32::MAX, u32::MAX);
-    for candidate in &local_graph.nodes {
-        if candidate.kind != NodeKind::Class {
+/// Record the `impl` block of every Rust method in `nodes`, the raw nodes
+/// of one file whose ids start at `start`
+/// ([`SymbolTable::note_impl_member`]).
+///
+/// A method inside an `Impl` node's span belongs to the innermost such
+/// block, which implements the trait the `Impl` node's owner names (empty
+/// for an inherent `impl`). The parser emits no `Impl` node for a self type
+/// that is no plain or generic type name (`impl AsyncWrite for
+/// io::Cursor<Vec<u8>>`, `impl T for &mut X`); a trait-impl method there
+/// still carries the trait as its heritage. Such methods form one block
+/// per run in source order of the same trait and owner, and a name the run
+/// already holds starts the next block: one `impl` block never declares a
+/// name twice. Two adjacent blocks of one trait with no shared name read as
+/// one block.
+fn note_rust_impl_members(symbol_table: &mut SymbolTable, nodes: &[RawNode], start: u32) {
+    let contains = |outer: (u32, u32, u32, u32), inner: (u32, u32, u32, u32)| {
+        (outer.0, outer.1) <= (inner.0, inner.1) && (outer.2, outer.3) >= (inner.2, inner.3)
+    };
+    let impls: Vec<usize> = (0..nodes.len())
+        .filter(|&i| nodes[i].kind == NodeKind::Impl)
+        .collect();
+    let mut orphans: Vec<usize> = Vec::new();
+    for (offset, node) in nodes.iter().enumerate() {
+        if !matches!(node.kind, NodeKind::Method | NodeKind::Constructor) {
             continue;
         }
-        let (cs_row, cs_col, ce_row, ce_col) = candidate.span;
-        let starts_before_or_at = (cs_row, cs_col) <= (s_row, s_col);
-        let ends_after_or_at = (ce_row, ce_col) >= (e_row, e_col);
-        if !(starts_before_or_at && ends_after_or_at) {
-            continue;
-        }
-        let size = (ce_row.saturating_sub(cs_row), ce_col.saturating_sub(cs_col));
-        if size < best_span {
-            best_span = size;
-            best = Some(candidate);
+        let block = impls
+            .iter()
+            .copied()
+            .filter(|&i| contains(nodes[i].span, node.span))
+            .min_by_key(|&i| {
+                let span = nodes[i].span;
+                (span.2.saturating_sub(span.0), span.3.saturating_sub(span.1))
+            });
+        match block {
+            Some(i) => symbol_table.note_impl_member(
+                start + offset as u32,
+                start + i as u32,
+                nodes[i].owner_class.as_deref(),
+            ),
+            None if !node.heritage.is_empty() => orphans.push(offset),
+            None => {}
         }
     }
-    best.map(|n| n.heritage.as_slice()).unwrap_or(&[])
+    orphans.sort_by_key(|&i| (nodes[i].span.0, nodes[i].span.1));
+    let mut run: Vec<&str> = Vec::new();
+    let mut block = 0u32;
+    let mut previous: Option<usize> = None;
+    for offset in orphans {
+        let node = &nodes[offset];
+        let same_run = previous.is_some_and(|p| {
+            nodes[p].heritage.first() == node.heritage.first()
+                && nodes[p].owner_class == node.owner_class
+        });
+        if !same_run || run.contains(&node.name.as_str()) {
+            run.clear();
+            block = start + offset as u32;
+        }
+        run.push(&node.name);
+        previous = Some(offset);
+        symbol_table.note_impl_member(
+            start + offset as u32,
+            block,
+            node.heritage.first().map(String::as_str),
+        );
+    }
 }
 
 /// Pass 1.5: Extract Routes.
@@ -2201,7 +2231,8 @@ fn pass2_emit_node_edges(
         }
     }
 
-    let call_heritage = enclosing_class_heritage(raw_node, local_graph);
+    let call_heritage =
+        ecp_core::analyzer::heritage::enclosing_class_heritage(raw_node, &local_graph.nodes);
     for (call_idx, raw_callee) in raw_node.calls.iter().enumerate() {
         let lookup_key = CallMetaKey::new(raw_node.span, call_idx as u32);
         let meta = indirect_lookup.get(&lookup_key);
@@ -2218,6 +2249,7 @@ fn pass2_emit_node_edges(
                 &local_graph.imports,
                 call_heritage,
                 raw_node.owner_class.as_deref(),
+                Some(current_node_idx),
             ),
         };
         for (target_id, confidence) in targets {

@@ -30,22 +30,35 @@ impl HeritageNode for RawNode {
     }
 }
 
-/// The heritage of the smallest `Class` among `nodes` whose span contains
-/// `node`'s span, or `node`'s own heritage when it is a `Class`. Empty when
-/// no class encloses it (a top-level function). Ruby `module Foo` parses as a
-/// `Class` too, so this covers module mixins.
+/// Whether a declaration of `kind` encloses members and declares bases:
+/// a class, a struct (C++ `struct C : B`, Swift and C# conformances), an
+/// interface or protocol (Java default methods, Kotlin interfaces), a trait
+/// (Ruby `module`, Dart extension, Rust supertraits) or an enum (Java,
+/// Kotlin and Swift conformances). A Rust `impl` block is none: its trait
+/// rides on each method, and a bare call inside it never reaches a trait
+/// member.
+pub fn holds_heritage(kind: NodeKind) -> bool {
+    matches!(
+        kind,
+        NodeKind::Class | NodeKind::Struct | NodeKind::Interface | NodeKind::Trait | NodeKind::Enum
+    )
+}
+
+/// The heritage of the smallest type among `nodes` that [`holds_heritage`]
+/// and whose span contains `node`'s span, or `node`'s own heritage when it
+/// is such a type. Empty when no type encloses it (a top-level function).
 ///
 /// "Smallest" compares `(row difference, column difference)`, and the first
 /// of two equal sizes wins, as the index has always measured it.
 pub fn enclosing_class_heritage<'a, N: HeritageNode>(node: &'a N, nodes: &'a [N]) -> &'a [String] {
-    if node.kind() == NodeKind::Class {
+    if holds_heritage(node.kind()) {
         return node.heritage();
     }
     let (s_row, s_col, e_row, e_col) = node.span();
     let mut best: Option<&N> = None;
     let mut best_size: (u32, u32) = (u32::MAX, u32::MAX);
     for candidate in nodes {
-        if candidate.kind() != NodeKind::Class {
+        if !holds_heritage(candidate.kind()) {
             continue;
         }
         let (cs_row, cs_col, ce_row, ce_col) = candidate.span();
@@ -124,13 +137,43 @@ mod tests {
     }
 
     #[test]
-    fn test_enclosing_class_heritage_struct_or_interface_container_returns_empty() {
+    fn test_enclosing_class_heritage_member_of_each_heritage_kind_returns_its_bases() {
+        for kind in [
+            NodeKind::Class,
+            NodeKind::Struct,
+            NodeKind::Interface,
+            NodeKind::Trait,
+            NodeKind::Enum,
+        ] {
+            let nodes = [
+                decl(kind, (0, 0, 9, 1), &["Base"]),
+                decl(NodeKind::Method, (2, 0, 3, 1), &[]),
+            ];
+            assert_eq!(
+                enclosing_class_heritage(&nodes[1], &nodes),
+                ["Base"],
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_enclosing_class_heritage_rust_impl_block_returns_empty() {
         let nodes = [
-            decl(NodeKind::Interface, (0, 0, 9, 1), &["Base"]),
-            decl(NodeKind::Struct, (0, 0, 9, 1), &["Base"]),
+            decl(NodeKind::Impl, (0, 0, 9, 1), &["Trait"]),
             decl(NodeKind::Method, (2, 0, 3, 1), &[]),
         ];
-        assert!(enclosing_class_heritage(&nodes[2], &nodes).is_empty());
+        assert!(enclosing_class_heritage(&nodes[1], &nodes).is_empty());
+    }
+
+    #[test]
+    fn test_enclosing_class_heritage_method_in_class_nested_in_struct_returns_class_bases() {
+        let nodes = [
+            decl(NodeKind::Struct, (0, 0, 20, 1), &["Outer"]),
+            decl(NodeKind::Class, (2, 2, 10, 3), &["Inner"]),
+            decl(NodeKind::Method, (3, 4, 5, 5), &[]),
+        ];
+        assert_eq!(enclosing_class_heritage(&nodes[2], &nodes), ["Inner"]);
     }
 
     #[test]

@@ -35,6 +35,43 @@ impl Supertypes {
     }
 }
 
+/// A Rust callable declared in an `impl` block ([`SymbolTable::note_impl_member`]).
+#[derive(Debug, Clone, Copy)]
+struct ImplMember {
+    /// Identifies the block: no two members of one block share a name.
+    block: u32,
+    /// Owner id of the trait the block implements; `NO_OWNER` for an
+    /// inherent `impl`.
+    trait_owner: u32,
+}
+
+/// The owner a same-file pick rule sees for one declaration
+/// ([`SymbolTable::prefer_owned`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickOwner {
+    /// A free function, or a member of a namespace or module.
+    Free,
+    /// A member of the type with this owner id.
+    Type(u32),
+    /// A member of the Rust `impl` block with this id whose self type
+    /// the parser could not name (`impl Trait for Cursor<T>`).
+    Block(u32),
+}
+
+/// How a call site reaches the declarations [`SymbolTable::prefer_owned`]
+/// weighs.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PickScope {
+    /// The calling declaration.
+    pub caller: Option<u32>,
+    /// The owner is the receiver's type (`K.m()`, `this->m()`, a base the
+    /// caller inherits), not the caller's type through an implicit `this`.
+    pub typed_receiver: bool,
+    /// `o.m()` on a receiver the parser could not type
+    /// ([`CallSite::UntypedMember`](ecp_core::analyzer::types::CallSite)).
+    pub untyped_receiver: bool,
+}
+
 /// Crate-root prefix of a normalized repo-relative path. The "crate root"
 /// here is the substring preceding the first `/src/` or `/tests/` segment,
 /// which is enough to keep a workspace member's files together (every Rust
@@ -171,6 +208,21 @@ pub struct SymbolTable {
     /// supertypes pre-pass, after Pass 1 and before Pass 2. Types with no
     /// declared heritage have no entry.
     supertypes: FxHashMap<u32, Supertypes>,
+
+    /// The `impl` block and implemented trait of each Rust member, see
+    /// [`Self::note_impl_member`]. Sparse: only Rust callables declared in
+    /// an `impl` block have an entry.
+    impl_members: FxHashMap<u32, ImplMember>,
+
+    /// `(file, owner key)` of every Namespace / Module declaration, the
+    /// input of [`Self::build_owner_kinds`].
+    namespace_decls: Vec<(Box<str>, Box<str>)>,
+
+    /// File → the owner ids that name a namespace or module the file
+    /// declares, and no type the file declares. Filled once after Pass 1 by
+    /// [`Self::build_owner_kinds`]; the same-file pick rules
+    /// ([`Self::prefer_owned`]) read such an owner as no owner.
+    namespace_owners: FxHashMap<Box<str>, Vec<u32>>,
 
     /// Every Constructor registered with an owner, in id order: the input of
     /// [`SymbolTable::build_constructor_index`].
@@ -365,6 +417,11 @@ impl SymbolTable {
         node_name: &str,
         kind: NodeKind,
     ) {
+        if matches!(kind, NodeKind::Namespace | NodeKind::Module) {
+            if let Some(key) = owner_key(node_name) {
+                self.namespace_decls.push((file_path.into(), key.into()));
+            }
+        }
         if kind != NodeKind::Namespace || !fqn_language(language) {
             return;
         }
@@ -511,6 +568,95 @@ impl SymbolTable {
             .into_iter()
             .filter_map(|(ty, ctor)| Some((ty, ctor?)))
             .collect();
+    }
+
+    /// Mark the owners that name a namespace or module rather than a type:
+    /// per file, an owner key that a Namespace / Module declaration of the
+    /// file carries and no type declaration of the file does. C++ declares
+    /// `detail::to_json` with owner `detail`, C# a namespace's classes with
+    /// owner `N1.N2`, Rust an inline `mod m`'s functions with owner `m`; such
+    /// a declaration is free for the pick rules, not a member of a type named
+    /// `detail`. An owner the file declares no namespace for (an out-of-line
+    /// `K::m`, a foreign `impl T for Vec<u8>`) stays a type. Call once after
+    /// Pass 1.
+    pub fn build_owner_kinds(&mut self) {
+        let mut namespace_owners: FxHashMap<Box<str>, Vec<u32>> = FxHashMap::default();
+        for (file, key) in &self.namespace_decls {
+            let Some(&owner) = self.owner_ids.get(key) else {
+                continue;
+            };
+            let declares_type = self
+                .file_scoped
+                .get(&**file)
+                .and_then(|names| names.get(&**key))
+                .is_some_and(|ids| {
+                    ids.iter().any(|&id| {
+                        let kind = self.node_kinds[id as usize];
+                        kind.is_type() || kind == NodeKind::Impl
+                    })
+                });
+            if declares_type {
+                continue;
+            }
+            let owners = namespace_owners.entry(file.clone()).or_default();
+            if !owners.contains(&owner) {
+                owners.push(owner);
+            }
+        }
+        self.namespace_owners = namespace_owners;
+    }
+
+    /// Record that the Rust callable `member` is declared in the `impl`
+    /// block `block` (any id unique to the block), which implements
+    /// `implemented` (`None` for an inherent `impl`). The parser gives a
+    /// member of `impl Trait for Cursor<T>` no owner, and the uid of a
+    /// second such member then collides with the first, so Pass 1 files it
+    /// as an overload; this record is how the pick rules still tell the
+    /// blocks apart ([`Self::prefer_owned`]).
+    pub fn note_impl_member(&mut self, member: u32, block: u32, implemented: Option<&str>) {
+        let trait_owner = self.intern_owner(implemented);
+        self.impl_members
+            .insert(member, ImplMember { block, trait_owner });
+    }
+
+    /// The owner the pick rules see for `id`, `namespaces` being the
+    /// file's namespace owners ([`Self::build_owner_kinds`]).
+    fn pick_owner(&self, id: u32, namespaces: &[u32]) -> PickOwner {
+        let owner = self.node_owner[id as usize];
+        if owner != NO_OWNER && !namespaces.contains(&owner) {
+            return PickOwner::Type(owner);
+        }
+        match self.impl_members.get(&id) {
+            Some(member) if owner == NO_OWNER => PickOwner::Block(member.block),
+            _ => PickOwner::Free,
+        }
+    }
+
+    /// Owner id of the trait whose `impl` block declares `id`.
+    fn implemented_trait(&self, id: u32) -> Option<u32> {
+        self.impl_members
+            .get(&id)
+            .map(|member| member.trait_owner)
+            .filter(|&owner| owner != NO_OWNER)
+    }
+
+    /// Whether `id` is free for the fast path of [`Self::prefer_owned`]:
+    /// no owner, and no `impl` block either.
+    fn is_free(&self, id: u32) -> bool {
+        self.node_owner[id as usize] == NO_OWNER && !self.impl_members.contains_key(&id)
+    }
+
+    /// Whether some declaration named `name` that `caller` admits is a
+    /// `Method`: the name is a member of some type, so a call site that
+    /// writes it bare may be a member call whose receiver the parser
+    /// dropped (`Resolver::resolve_call`).
+    pub(crate) fn names_admitted_method(&self, name: &str, caller: FileMeta) -> bool {
+        self.global_scoped.get(name).is_some_and(|ids| {
+            ids.iter().any(|&id| {
+                self.node_kinds[id as usize] == NodeKind::Method
+                    && caller.admits(self.node_file_meta[id as usize])
+            })
+        })
     }
 
     /// Register a tombstone node: advances `node_kinds` / `node_file_meta`
@@ -726,7 +872,15 @@ impl SymbolTable {
                 return self
                     .lookup_call_in_file(file_path, node_name, target)
                     .and_then(|pick| {
-                        self.prefer_owned(file_path, pick, node_name, None, &[], target)
+                        self.prefer_owned(
+                            file_path,
+                            pick,
+                            node_name,
+                            None,
+                            &[],
+                            target,
+                            PickScope::default(),
+                        )
                     })
             }
             MemberOwner::TopLevel => NO_OWNER,
@@ -854,23 +1008,45 @@ impl SymbolTable {
     /// same-named declarations of `target`'s kinds, given `pick`, the first
     /// of them in source order. `owner` is the type the call goes through
     /// (the caller's type for an implicit-`this` `m()`, `K` for `K.m()`),
-    /// `heritage` that type's bases in declared order. The rule:
+    /// `heritage` that type's bases in declared order, `scope` how the call
+    /// site reaches them. The rule:
     ///
-    /// 1. `pick` stays when it is a free function or `owner`'s own member.
-    /// 2. Else `owner`'s own member: Rust inherent methods beat trait
+    /// 1. For a Rust method call (`ResolveTarget::Method`) from a member of
+    ///    an `impl` block the parser gave no owner (`impl T for Cursor<A>`,
+    ///    where `self.m()` has no receiver type), that block's own member,
+    ///    the caller excepted: a call of its own name goes through another
+    ///    receiver (`Pin::new(&mut **self).m()`).
+    /// 2. Else `pick` stays when it is `owner`'s own member, or a free
+    ///    function reached without a receiver.
+    /// 3. Else `owner`'s own member: Rust inherent methods beat trait
     ///    methods, and an override hides the declaration it implements.
-    /// 3. Else the member of the first base in `heritage` that has one.
-    /// 4. Else the first free function: a member of an unrelated type never
-    ///    beats it.
-    /// 5. Else `pick` when every candidate has one owner (the same type
+    /// 4. Else the member of the first base in `heritage` that has one.
+    /// 5. Else `pick` when it is free: a receiver-typed `K.m()` whose
+    ///    qualifier owns no `m` names a module (`mod.f()`).
+    /// 6. Else the first free function: a member of an unrelated type never
+    ///    beats it. A member of a namespace or module counts as free
+    ///    ([`Self::build_owner_kinds`]); a member of a Rust `impl` block the
+    ///    parser gave no owner does not.
+    /// 7. Else `pick` when every candidate has one owner (the same type
     ///    declared in several blocks counts once).
-    /// 6. Else the member of the owner that every other candidate's owner
-    ///    inherits from ([`Self::hierarchy_root`]).
-    /// 7. Else `None`: two or more unrelated owners, and the file alone
+    /// 8. Else the member of the owner that every other candidate's owner
+    ///    inherits from or implements ([`Self::hierarchy_root`]).
+    /// 9. Else `None`: two or more unrelated owners, and the file alone
     ///    cannot tell which one the call reaches.
     ///
+    /// An untyped receiver (`scope.untyped_receiver`) is no `this`: `owner`,
+    /// the caller's type, and `heritage` do not narrow the pick, and it
+    /// never reaches a free function. Rules 3 to 8 weigh the members of
+    /// every type, the first of them standing in for `pick`; a result that
+    /// `owner` declares is `None`, since the name alone cannot tell the
+    /// receiver from the caller's own type. Rule 1 still holds: there the
+    /// parser could not type `self` either.
+    ///
     /// Owners and bases compare through [`owner_key`], so `pkg.B` and
-    /// `B<T>` name the owner `B`.
+    /// `B<T>` name the owner `B`. The candidates include the later
+    /// "overloads" of a Rust `impl` member: members of several ownerless
+    /// `impl` blocks share one uid, so Pass 1 files all but the first as
+    /// overloads ([`Self::note_impl_member`]).
     pub(crate) fn prefer_owned(
         &self,
         file_path: &str,
@@ -879,73 +1055,144 @@ impl SymbolTable {
         owner: Option<&str>,
         heritage: &[String],
         target: ResolveTarget,
+        scope: PickScope,
     ) -> Option<u32> {
+        let caller = scope.caller;
+        let untyped = scope.untyped_receiver;
+        let caller_block = caller
+            .filter(|&caller| {
+                target == ResolveTarget::Method && self.node_owner[caller as usize] == NO_OWNER
+            })
+            .and_then(|caller| self.impl_members.get(&caller))
+            .map(|member| member.block);
         let picked_owner = self.node_owner[pick as usize];
         let owner_id = owner.and_then(|owner| self.owner_id(owner));
-        if picked_owner == NO_OWNER || owner_id == Some(picked_owner) {
+        let pick_stays = !untyped
+            && (owner_id == Some(picked_owner) || (self.is_free(pick) && !scope.typed_receiver));
+        if pick_stays && caller_block.is_none() {
             return Some(pick);
         }
         let ids = self.file_scoped.get(file_path)?.get(member)?;
         let predicate = target.kind_predicate();
-        let owner_of = |id: u32| self.node_owner[id as usize];
-        let candidates = move || {
+        let namespaces = self
+            .namespace_owners
+            .get(file_path)
+            .map_or(&[][..], Vec::as_slice);
+        let owner_of = move |id: u32| self.pick_owner(id, namespaces);
+        let admitted = move |id: u32| !untyped || owner_of(id) != PickOwner::Free;
+        let all = move || {
             ids.iter()
                 .copied()
+                .flat_map(move |id| {
+                    std::iter::once(id).chain(
+                        self.later_overloads(id)
+                            .iter()
+                            .copied()
+                            .filter(move |later| self.impl_members.contains_key(later)),
+                    )
+                })
                 .filter(move |&id| predicate(self.node_kinds[id as usize]))
         };
+        let own_block = caller_block.and_then(|block| {
+            all().find(|&id| {
+                Some(id) != caller && self.impl_members.get(&id).is_some_and(|m| m.block == block)
+            })
+        });
+        if own_block.is_some() {
+            return own_block;
+        }
+        if pick_stays {
+            return Some(pick);
+        }
+        let candidates = move || all().filter(move |&id| admitted(id));
+        let pick = if admitted(pick) {
+            pick
+        } else {
+            candidates().next()?
+        };
         owner_id
+            .filter(|_| !untyped)
             .into_iter()
             .chain(heritage.iter().filter_map(|base| self.owner_id(base)))
-            .chain([NO_OWNER])
-            .find_map(|wanted| candidates().find(|&id| owner_of(id) == wanted))
+            .find_map(|wanted| candidates().find(|&id| self.node_owner[id as usize] == wanted))
+            .or_else(|| self.is_free(pick).then_some(pick))
+            .or_else(|| candidates().find(|&id| owner_of(id) == PickOwner::Free))
             .or_else(|| {
+                let picked = owner_of(pick);
                 candidates()
-                    .all(|id| owner_of(id) == picked_owner)
+                    .all(|id| owner_of(id) == picked)
                     .then_some(pick)
             })
-            .or_else(|| self.hierarchy_root(&candidates().collect::<Vec<_>>()))
+            .or_else(|| self.hierarchy_root(&candidates().collect::<Vec<_>>(), owner_of))
+            .filter(|&id| !untyped || owner_id != Some(self.node_owner[id as usize]))
     }
 
-    /// The first of `candidates` whose owner every other candidate's owner
-    /// inherits from, through the declared supertypes: one declaration and
+    /// Whether an untyped member call (`o.m()`, [`PickScope::untyped_receiver`])
+    /// may bind `id`: a method or a type's function, never a free function,
+    /// a namespace or module member, a constructor, or a member of
+    /// `caller_owner`, the caller's own type, by the name alone.
+    pub(crate) fn member_call_admits(&self, id: u32, caller_owner: Option<&str>) -> bool {
+        if !matches!(
+            self.node_kinds.get(id as usize),
+            Some(NodeKind::Function | NodeKind::Method)
+        ) {
+            return false;
+        }
+        let namespaces = self
+            .id_to_file
+            .get(&id)
+            .and_then(|file| self.namespace_owners.get(file.as_str()))
+            .map_or(&[][..], Vec::as_slice);
+        let own = caller_owner.and_then(|owner| self.owner_id(owner));
+        self.pick_owner(id, namespaces) != PickOwner::Free
+            && own != Some(self.node_owner[id as usize])
+    }
+
+    /// The first of `candidates` whose owner is a type every other
+    /// candidate's owner inherits from or implements: one declaration and
     /// its overrides or implementations (`trait T { fn m(&self); }` beside
     /// `impl T for S`), so a call through any of them reaches that
-    /// declaration. Types match an owner by its key across the index, as
-    /// owned lookups do. `None` when no owner is such a root, or when a
-    /// candidate has no owner.
-    fn hierarchy_root(&self, candidates: &[u32]) -> Option<u32> {
-        let owner_of = |id: u32| self.node_owner[id as usize];
-        let types_of = move |owner: u32| {
-            self.owner_keys
-                .get(owner as usize)
-                .and_then(|key| self.global_scoped.get(&**key))
+    /// declaration. A candidate inherits through the declared supertypes of
+    /// its owner, found by the owner's key across the index as owned lookups
+    /// do; a Rust `impl` member implements the trait of its block whatever
+    /// the block's self type (`impl T for Vec<u8>`, `impl<X> T for X`,
+    /// a struct of another crate). `owner_of` is [`Self::pick_owner`] for
+    /// the candidates' file. `None` when no candidate is such a root, or
+    /// when a candidate is free.
+    fn hierarchy_root(
+        &self,
+        candidates: &[u32],
+        owner_of: impl Fn(u32) -> PickOwner,
+    ) -> Option<u32> {
+        let types_of = move |owner: PickOwner| {
+            let key = match owner {
+                PickOwner::Type(owner) => self.owner_keys.get(owner as usize),
+                PickOwner::Free | PickOwner::Block(_) => None,
+            };
+            key.and_then(|key| self.global_scoped.get(&**key))
                 .into_iter()
                 .flatten()
                 .copied()
                 .filter(move |&id| self.node_kinds[id as usize].is_type())
         };
-        let mut owners: Vec<u32> = Vec::new();
-        for &id in candidates {
-            if !owners.contains(&owner_of(id)) {
-                owners.push(owner_of(id));
-            }
-        }
+        let owners: Vec<PickOwner> = candidates.iter().map(|&id| owner_of(id)).collect();
         let lineages: Vec<Vec<u32>> = owners
             .iter()
             .map(|&owner| types_of(owner).flat_map(|ty| self.ancestors(ty)).collect())
             .collect();
-        let root = (0..owners.len()).find(|&i| {
+        let root = (0..candidates.len()).find(|&i| {
+            let PickOwner::Type(root_owner) = owners[i] else {
+                return false;
+            };
             let roots: Vec<u32> = types_of(owners[i]).collect();
             !roots.is_empty()
-                && lineages
-                    .iter()
-                    .enumerate()
-                    .all(|(j, lineage)| j == i || lineage.iter().any(|ty| roots.contains(ty)))
+                && (0..candidates.len()).all(|j| {
+                    owners[j] == owners[i]
+                        || self.implemented_trait(candidates[j]) == Some(root_owner)
+                        || lineages[j].iter().any(|ty| roots.contains(ty))
+                })
         })?;
-        candidates
-            .iter()
-            .copied()
-            .find(|&id| owner_of(id) == owners[root])
+        Some(candidates[root])
     }
 
     /// The candidate nearest `caller_file` when `candidates` are copies of
@@ -1367,6 +1614,28 @@ mod tests {
 
     const CALL: ResolveTarget = ResolveTarget::Callable;
 
+    /// A pick for a call from the declaration `caller`.
+    fn from(caller: u32) -> PickScope {
+        PickScope {
+            caller: Some(caller),
+            ..PickScope::default()
+        }
+    }
+
+    /// A pick for an untyped `o.m()` from a member of `owner`'s type.
+    const UNTYPED: PickScope = PickScope {
+        caller: None,
+        typed_receiver: false,
+        untyped_receiver: true,
+    };
+
+    /// A pick for a receiver-typed `K.m()`.
+    const TYPED: PickScope = PickScope {
+        caller: None,
+        typed_receiver: true,
+        untyped_receiver: false,
+    };
+
     #[test]
     fn test_owned_in_file_method_of_same_file_type_returns_member() {
         let st = st_owned(&[
@@ -1467,7 +1736,15 @@ mod tests {
             ("a.java", "run", NodeKind::Method, Some("C")),
         ]);
         let pick = |owner, heritage: &[String]| {
-            st.prefer_owned("a.java", 0, "save", owner, heritage, CALL)
+            st.prefer_owned(
+                "a.java",
+                0,
+                "save",
+                owner,
+                heritage,
+                CALL,
+                PickScope::default(),
+            )
         };
         assert_eq!(pick(Some("K"), &[]), Some(2), "the owner's own member");
         assert_eq!(
@@ -1493,17 +1770,33 @@ mod tests {
             ("b.rs", "save", NodeKind::Method, Some("A<T>")),
         ]);
         assert_eq!(
-            st.prefer_owned("a.rs", 0, "save", Some("D"), &[], CALL),
+            st.prefer_owned(
+                "a.rs",
+                0,
+                "save",
+                Some("D"),
+                &[],
+                CALL,
+                PickScope::default()
+            ),
             Some(1),
             "a member of an unrelated type never beats a free function"
         );
         assert_eq!(
-            st.prefer_owned("a.rs", 1, "save", Some("A"), &[], CALL),
+            st.prefer_owned(
+                "a.rs",
+                1,
+                "save",
+                Some("A"),
+                &[],
+                CALL,
+                PickScope::default()
+            ),
             Some(1),
             "a free function pick stays"
         );
         assert_eq!(
-            st.prefer_owned("b.rs", 2, "save", None, &[], CALL),
+            st.prefer_owned("b.rs", 2, "save", None, &[], CALL, PickScope::default()),
             Some(2),
             "one owner declared in two blocks counts once"
         );
@@ -1521,21 +1814,280 @@ mod tests {
         ];
         let mut st = st_owned(&rows);
         assert_eq!(
-            st.prefer_owned("lib.rs", 1, "handle", None, &[], CALL),
+            st.prefer_owned("lib.rs", 1, "handle", None, &[], CALL, PickScope::default()),
             None,
             "unrelated owners before the supertypes pre-pass"
         );
         st.build_supertypes([(0, Some(2)), (4, Some(2))]);
         assert_eq!(
-            st.prefer_owned("lib.rs", 1, "handle", None, &[], CALL),
+            st.prefer_owned("lib.rs", 1, "handle", None, &[], CALL, PickScope::default()),
             Some(3),
             "every impl inherits from `Handler`, declared after the first impl"
         );
         assert_eq!(
-            st.prefer_owned("lib.rs", 1, "handle", Some("Bar"), &[], CALL),
+            st.prefer_owned(
+                "lib.rs",
+                1,
+                "handle",
+                Some("Bar"),
+                &[],
+                CALL,
+                PickScope::default()
+            ),
             Some(5),
             "the caller's own member still comes first"
         );
+    }
+
+    #[test]
+    fn test_prefer_owned_namespace_member_counts_as_free_returns_it() {
+        let mut st = st_owned(&[
+            ("a.cpp", "A", NodeKind::Class, None),
+            ("a.cpp", "to_json", NodeKind::Method, Some("A")),
+            ("a.cpp", "detail", NodeKind::Namespace, None),
+            ("a.cpp", "to_json", NodeKind::Function, Some("detail")),
+        ]);
+        assert_eq!(
+            st.prefer_owned("a.cpp", 1, "to_json", None, &[], CALL, PickScope::default()),
+            None,
+            "before the owner kinds are built, `detail` reads as a type"
+        );
+        st.build_owner_kinds();
+        assert_eq!(
+            st.prefer_owned("a.cpp", 1, "to_json", None, &[], CALL, PickScope::default()),
+            Some(3)
+        );
+        assert_eq!(
+            st.prefer_owned(
+                "a.cpp",
+                1,
+                "to_json",
+                Some("A"),
+                &[],
+                CALL,
+                PickScope::default()
+            ),
+            Some(1),
+            "the caller's own member still comes first"
+        );
+    }
+
+    #[test]
+    fn test_build_owner_kinds_namespace_and_type_in_one_file_keeps_type() {
+        let mut st = st_owned(&[
+            ("a.cpp", "detail", NodeKind::Namespace, None),
+            ("a.cpp", "detail", NodeKind::Class, None),
+            ("a.cpp", "m", NodeKind::Method, Some("detail")),
+            ("a.cpp", "m", NodeKind::Method, Some("B")),
+            ("b.cpp", "detail", NodeKind::Namespace, None),
+            ("b.cpp", "m", NodeKind::Function, Some("detail")),
+            ("b.cpp", "m", NodeKind::Method, Some("B")),
+        ]);
+        st.build_owner_kinds();
+        assert_eq!(
+            st.prefer_owned("a.cpp", 2, "m", None, &[], CALL, PickScope::default()),
+            None,
+            "`a.cpp` declares a type `detail`: two unrelated types"
+        );
+        assert_eq!(
+            st.prefer_owned("b.cpp", 6, "m", None, &[], CALL, PickScope::default()),
+            Some(5),
+            "`b.cpp` declares only the namespace `detail`"
+        );
+    }
+
+    #[test]
+    fn test_prefer_owned_nested_namespace_path_owner_counts_as_free() {
+        let mut st = st_owned(&[
+            ("a.cpp", "m", NodeKind::Method, Some("K")),
+            ("a.cpp", "a::c", NodeKind::Namespace, None),
+            ("a.cpp", "m", NodeKind::Function, Some("a::c")),
+        ]);
+        st.build_owner_kinds();
+        assert_eq!(
+            st.prefer_owned("a.cpp", 0, "m", None, &[], CALL, PickScope::default()),
+            Some(2)
+        );
+    }
+
+    const METHOD: ResolveTarget = ResolveTarget::Method;
+
+    /// `trait T { fn m(&self); }`, then `impl T for Foreign` (an owner no
+    /// type of the index names) and `impl T for Vec<u8>` (no owner).
+    fn st_trait_with_foreign_impls() -> SymbolTable {
+        let mut st = st_owned(&[
+            ("lib.rs", "T", NodeKind::Trait, None),
+            ("lib.rs", "m", NodeKind::Method, Some("T")),
+            ("lib.rs", "m", NodeKind::Method, Some("Foreign")),
+            ("lib.rs", "m", NodeKind::Method, None),
+        ]);
+        st.note_impl_member(2, 2, Some("T"));
+        st.note_impl_member(3, 3, Some("T"));
+        st.build_owner_kinds();
+        st
+    }
+
+    #[test]
+    fn test_prefer_owned_trait_and_foreign_impls_returns_trait_declaration() {
+        let st = st_trait_with_foreign_impls();
+        assert_eq!(
+            st.prefer_owned("lib.rs", 1, "m", None, &[], METHOD, PickScope::default()),
+            Some(1)
+        );
+        assert_eq!(
+            st.prefer_owned("lib.rs", 3, "m", None, &[], METHOD, PickScope::default()),
+            Some(1),
+            "an ownerless impl member is no free function"
+        );
+    }
+
+    #[test]
+    fn test_prefer_owned_impl_of_other_trait_returns_none() {
+        let mut st = st_trait_with_foreign_impls();
+        st.note_impl_member(3, 3, Some("Other"));
+        assert_eq!(
+            st.prefer_owned("lib.rs", 1, "m", None, &[], METHOD, PickScope::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn test_prefer_owned_caller_in_impl_block_returns_own_block_member() {
+        let mut st = st_owned(&[
+            ("aw.rs", "AsyncWrite", NodeKind::Trait, None),
+            ("aw.rs", "flush", NodeKind::Method, Some("AsyncWrite")),
+            ("aw.rs", "flush", NodeKind::Method, None),
+            ("aw.rs", "shutdown", NodeKind::Method, None),
+        ]);
+        let meta = FileMeta::from_path("aw.rs");
+        // The second block's members collide with the first's uids.
+        let later_flush = st.register_overload(2, meta);
+        let later_shutdown = st.register_overload(3, meta);
+        assert_eq!((later_flush, later_shutdown), (1, 1));
+        for (member, block) in [(2, 2), (3, 2), (4, 4), (5, 4)] {
+            st.note_impl_member(member, block, Some("AsyncWrite"));
+        }
+        st.build_owner_kinds();
+        assert_eq!(
+            st.prefer_owned("aw.rs", 1, "flush", None, &[], METHOD, from(5)),
+            Some(4),
+            "the later block's own member, filed as an overload"
+        );
+        assert_eq!(
+            st.prefer_owned("aw.rs", 1, "flush", None, &[], METHOD, from(3)),
+            Some(2)
+        );
+        assert_eq!(
+            st.prefer_owned("aw.rs", 1, "flush", None, &[], METHOD, from(4)),
+            Some(1),
+            "the caller is never its own block's pick: the trait declaration"
+        );
+        assert_eq!(
+            st.prefer_owned("aw.rs", 1, "flush", None, &[], CALL, from(5)),
+            Some(1),
+            "a non-method call site ignores the block: the trait declaration"
+        );
+    }
+
+    /// `size` free first, then `lexer::size`, then `string::size`.
+    fn st_size() -> SymbolTable {
+        st_owned(&[
+            ("a.hpp", "size", NodeKind::Function, None),
+            ("a.hpp", "size", NodeKind::Method, Some("lexer")),
+            ("a.hpp", "size", NodeKind::Method, Some("string")),
+        ])
+    }
+
+    #[test]
+    fn test_prefer_owned_typed_receiver_with_free_function_first_returns_own_member() {
+        let st = st_size();
+        assert_eq!(
+            st.prefer_owned("a.hpp", 0, "size", Some("lexer"), &[], CALL, TYPED),
+            Some(1)
+        );
+        assert_eq!(
+            st.prefer_owned(
+                "a.hpp",
+                0,
+                "size",
+                Some("lexer"),
+                &[],
+                CALL,
+                PickScope::default()
+            ),
+            Some(0),
+            "an implicit-this bare call keeps the free pick"
+        );
+        assert_eq!(
+            st.prefer_owned("a.hpp", 0, "size", Some("mod"), &[], CALL, TYPED),
+            Some(0),
+            "a qualifier that owns no `size` names a module: the free function"
+        );
+    }
+
+    #[test]
+    fn test_prefer_owned_untyped_receiver_skips_free_and_own_type_returns_sole_other_member() {
+        let st = st_size();
+        assert_eq!(
+            st.prefer_owned("a.hpp", 0, "size", Some("lexer"), &[], CALL, UNTYPED),
+            None,
+            "the caller's own `lexer` and `string`: the receiver may be either"
+        );
+        assert_eq!(
+            st.prefer_owned("a.hpp", 1, "size", None, &[], CALL, UNTYPED),
+            None,
+            "two unrelated types, the free function never counts"
+        );
+        let other_only = st_owned(&[
+            ("a.hpp", "size", NodeKind::Function, None),
+            ("a.hpp", "size", NodeKind::Method, Some("string")),
+            ("a.hpp", "run", NodeKind::Method, Some("lexer")),
+        ]);
+        assert_eq!(
+            other_only.prefer_owned("a.hpp", 0, "size", Some("lexer"), &[], CALL, UNTYPED),
+            Some(1),
+            "one type declares `size`, and it is not the caller's"
+        );
+        let own_only = st_owned(&[
+            ("a.hpp", "size", NodeKind::Function, None),
+            ("a.hpp", "size", NodeKind::Method, Some("lexer")),
+        ]);
+        assert_eq!(
+            own_only.prefer_owned("a.hpp", 0, "size", Some("lexer"), &[], CALL, UNTYPED),
+            None,
+            "neither the free function nor the caller's own member"
+        );
+    }
+
+    #[test]
+    fn test_member_call_admits_free_namespace_own_or_constructor_returns_false() {
+        let mut st = st_owned(&[
+            ("a.cpp", "size", NodeKind::Function, None),
+            ("a.cpp", "size", NodeKind::Method, Some("lexer")),
+            ("a.cpp", "size", NodeKind::Method, Some("string")),
+            ("a.cpp", "detail", NodeKind::Namespace, None),
+            ("a.cpp", "size", NodeKind::Function, Some("detail")),
+            ("a.cpp", "size", NodeKind::Constructor, Some("size")),
+        ]);
+        st.build_owner_kinds();
+        let admits: Vec<bool> = (0..6)
+            .map(|id| st.member_call_admits(id, Some("lexer")))
+            .collect();
+        assert_eq!(admits, [false, false, true, false, false, false]);
+        assert!(st.member_call_admits(1, None), "a caller with no type");
+    }
+
+    #[test]
+    fn test_names_admitted_method_method_or_other_language_returns_flag() {
+        let st = st_owned(&[
+            ("a.hpp", "number_integer", NodeKind::Method, Some("sax")),
+            ("t.cpp", "number_integer", NodeKind::Class, None),
+            ("b.py", "widget", NodeKind::Method, Some("W")),
+        ]);
+        let cpp = FileMeta::from_path("p.hpp");
+        assert!(st.names_admitted_method("number_integer", cpp));
+        assert!(!st.names_admitted_method("widget", cpp));
+        assert!(!st.names_admitted_method("missing", cpp));
     }
 
     #[test]

@@ -56,7 +56,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::resolution::heuristics::ResolutionTier;
 use crate::resolution::index::{
-    crate_root_prefix, FileMeta, GlobalPick, Language, ResolveTarget, SymbolTable,
+    crate_root_prefix, FileMeta, GlobalPick, Language, PickScope, ResolveTarget, SymbolTable,
     MAX_HERITAGE_DEPTH,
 };
 use crate::rust::module_tree::RustWorkspaceModTree;
@@ -665,7 +665,18 @@ impl<'a> Resolver<'a> {
     /// [`Self::resolve_symbol_with_heritage`], because that method also
     /// serves References / Decorates / Imports edges, which must never land
     /// on a type through a construction rule. `caller_owner` is the type the
-    /// calling member belongs to (`SymbolTable::prefer_owned`).
+    /// calling member belongs to, `caller` the calling declaration
+    /// (`SymbolTable::prefer_owned`).
+    ///
+    /// A member call reaches a method or a type's function, never a type or
+    /// its constructor by the type's name: an untyped `o.m()`
+    /// ([`CallSite::UntypedMember`]) never takes the constructor fallback,
+    /// and every tier's target passes `SymbolTable::member_call_admits` (no
+    /// free function, no namespace member, no constructor, no member of the
+    /// caller's own type by the name alone). Neither does a bare `m()` that
+    /// may be a member call whose receiver the parser dropped take the
+    /// fallback ([`Self::may_be_receiverless_member_call`]).
+    #[allow(clippy::too_many_arguments)]
     pub fn resolve_call(
         &self,
         source_file: &Path,
@@ -673,6 +684,7 @@ impl<'a> Resolver<'a> {
         raw_imports: &[RawImport],
         caller_heritage: &[String],
         caller_owner: Option<&str>,
+        caller: Option<NodeId>,
     ) -> Vec<(NodeId, f32)> {
         let language = Language::from_normalized_path(&normalize_source_path(source_file));
         if let Some((node_id, import)) =
@@ -680,7 +692,19 @@ impl<'a> Resolver<'a> {
         {
             return self.import_scoped(source_file, site.name(), import, node_id);
         }
+        let type_member = self.type_receiver(source_file, language, site, raw_imports);
+        // A Swift receiver that names no type is a value the parser cannot
+        // see (a global, an inherited property): an untyped member call.
+        let site = match (site, &type_member) {
+            (CallSite::FromReceiver { member, .. }, None) if language == Language::Swift => {
+                CallSite::UntypedMember(member)
+            }
+            _ => site,
+        };
         let bind_import = !matches!(site, CallSite::UntypedMember(_));
+        // An untyped receiver is no `this`: no tier reaches the member
+        // through the caller's bases.
+        let heritage: &[String] = if bind_import { caller_heritage } else { &[] };
         let resolve = |name: &str, target, bind: bool| {
             self.resolve_symbol_with_import_binding(
                 source_file,
@@ -688,36 +712,66 @@ impl<'a> Resolver<'a> {
                 language,
                 (raw_imports, bind && bind_import),
                 target,
-                caller_heritage,
+                heritage,
                 Some(CallScope {
                     owner: caller_owner,
                     untyped_receiver: !bind_import,
+                    caller,
                 }),
                 &mut None,
             )
         };
-        let type_member = self.csharp_type_receiver(source_file, language, site, raw_imports);
-        let mut targets = resolve(
-            type_member.as_deref().unwrap_or(site.name()),
-            call_target(source_file, site),
-            true,
-        );
-        if targets.is_empty() {
+        let target = call_target(source_file, site);
+        let mut targets = resolve(type_member.as_deref().unwrap_or(site.name()), target, true);
+        if targets.is_empty() && type_member.is_some() && language == Language::Kotlin {
+            // `fun Reg.ext()` is a top-level function no member lookup on
+            // `Reg` finds.
+            targets =
+                self.extension_fallback(source_file, site.name(), raw_imports, target, heritage);
+        }
+        if !bind_import {
+            targets.retain(|&(id, _)| self.symbol_table.member_call_admits(id, caller_owner));
+        }
+        if targets.is_empty() && !self.may_be_receiverless_member_call(source_file, site) {
             targets.extend(self.resolve_instantiation(language, site, raw_imports, resolve));
         }
         targets
     }
 
-    /// The callee of a C# member call on an identifier receiver that is no
-    /// local, parameter, field or property in scope
-    /// ([`CallSite::FromReceiver`]). A receiver that names a project type, a
-    /// `using` alias of one, or a library type resolves as
+    /// Whether a bare `m()` that the constructor fallback would read as a
+    /// construction of a type `m` may instead be a member call whose
+    /// receiver the parser dropped. The C++, Swift and Ruby parsers now
+    /// write an untyped receiver as [`CallSite::UntypedMember`], which never
+    /// constructs; a parser that still drops one (Kotlin and Dart write a
+    /// receiver they bind to a field or local as the bare member) reaches
+    /// here. When an admitted `Method` is named `m`, the name is a member's,
+    /// and `m(x)` never binds a type `m` of another file (`template
+    /// <typename T> class number_integer` in a test file for nlohmann's
+    /// `sax->number_integer(v)`). A call written with a qualifier, a `new`,
+    /// or a Ruby `.new` is no such site.
+    fn may_be_receiverless_member_call(&self, source_file: &Path, site: CallSite<'_>) -> bool {
+        let CallSite::Plain(callee) = site else {
+            return false;
+        };
+        !callee.contains(&['.', ':'][..])
+            && self.symbol_table.has_constructible_type(callee)
+            && self.symbol_table.names_admitted_method(
+                callee,
+                FileMeta::from_normalized_path(&normalize_source_path(source_file)),
+            )
+    }
+
+    /// The callee of a C#, Swift, Kotlin or Dart member call on an
+    /// identifier receiver that is no local, parameter, field or property in
+    /// scope ([`CallSite::FromReceiver`]). A receiver that names a project
+    /// type, a `using` alias of one, or a library type resolves as
     /// `Receiver.member` through the qualifier tiers and the receiver-typing
     /// ladder, and never by the bare member: `StringAssert.AreEqual()` must
-    /// not land on `XUnitAssert.AreEqual`. A receiver that names no type is a
-    /// member the parser cannot see (an inherited property): `None`, and the
-    /// call resolves by its bare member, as before.
-    fn csharp_type_receiver(
+    /// not land on `XUnitAssert.AreEqual`, nor Swift `Util.make()` on the
+    /// caller's own `make`. A receiver that names no type is a member the
+    /// parser cannot see (an inherited property, a global): `None`. Python
+    /// resolves its `FromReceiver` through the import tier instead.
+    fn type_receiver(
         &self,
         source_file: &Path,
         language: Language,
@@ -727,7 +781,10 @@ impl<'a> Resolver<'a> {
         let CallSite::FromReceiver { receiver, member } = site else {
             return None;
         };
-        if language != Language::CSharp {
+        if !matches!(
+            language,
+            Language::CSharp | Language::Swift | Language::Kotlin | Language::Dart
+        ) {
             return None;
         }
         let source_file_str = normalize_source_path(source_file);
@@ -1238,6 +1295,11 @@ impl<'a> Resolver<'a> {
                         caller_heritage
                     },
                     target,
+                    PickScope {
+                        caller: scope.caller,
+                        typed_receiver: false,
+                        untyped_receiver: scope.untyped_receiver,
+                    },
                 ),
                 None => Some(pick),
             })
@@ -1409,6 +1471,10 @@ impl<'a> Resolver<'a> {
                                 Some(qualifier),
                                 heritage,
                                 target,
+                                PickScope {
+                                    typed_receiver: true,
+                                    ..PickScope::default()
+                                },
                             )
                         })
                 });
@@ -1526,7 +1592,9 @@ impl<'a> Resolver<'a> {
         // Java/Kotlin/C# subclasses calling inherited methods without `this.`.
         // Stops at the first hit (heritage order is the source-order list
         // recorded by the parser, mirroring MRO precedence).
-        if !caller_heritage.is_empty() {
+        // An untyped receiver is no `this`: the caller's bases do not own
+        // the member it reaches.
+        if !caller_heritage.is_empty() && !call.is_some_and(|scope| scope.untyped_receiver) {
             for base in caller_heritage {
                 if let Some(qf) = self.resolve_qualifier_file(
                     source_file,
@@ -1547,6 +1615,10 @@ impl<'a> Resolver<'a> {
                                 Some(base.as_str()),
                                 &[],
                                 target,
+                                PickScope {
+                                    typed_receiver: true,
+                                    ..PickScope::default()
+                                },
                             )
                         })
                     {
@@ -1853,6 +1925,9 @@ struct CallScope<'c> {
     /// reached through the caller's bases, so they do not narrow the pick
     /// (`super(E, self).m()` starts after `E`).
     untyped_receiver: bool,
+    /// The calling declaration: a Rust `self.m()` in an `impl` block the
+    /// parser gave no owner reaches that block's own `m`.
+    caller: Option<NodeId>,
 }
 
 /// Outcome of the receiver-typing ladder for one qualified callee.
