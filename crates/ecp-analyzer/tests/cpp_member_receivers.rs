@@ -84,7 +84,7 @@ fn at<'g>(g: &'g LocalGraph, name: &str, row: u32) -> &'g RawNode {
     hits[0]
 }
 
-fn owners(g: &LocalGraph, name: &str) -> Vec<Option<&str>> {
+fn owners<'g>(g: &'g LocalGraph, name: &str) -> Vec<Option<&'g str>> {
     named(g, name)
         .into_iter()
         .map(|n| n.owner_class.as_deref())

@@ -112,7 +112,8 @@ parity!(
     "App.cs",
     "using Lib; class App { void go() { Helper.helper(); } }",
     "helper",
-    Global
+    // `Helper` names a project type, so the call resolves through it.
+    QualifierScoped
 );
 parity!(
     test_go_import_target_and_tier,

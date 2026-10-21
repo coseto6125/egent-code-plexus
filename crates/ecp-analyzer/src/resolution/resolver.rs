@@ -730,7 +730,18 @@ impl<'a> Resolver<'a> {
                 self.extension_fallback(source_file, site.name(), raw_imports, target, heritage);
         }
         if !bind_import {
-            targets.retain(|&(id, _)| self.symbol_table.member_call_admits(id, caller_owner));
+            // A Python module is a value: `api.helper()` on a receiver the
+            // parser could not type may call another module's function. No
+            // value reaches the caller's own module that way.
+            let source_file_str = normalize_source_path(source_file);
+            let module_value = |id: NodeId| {
+                language == Language::Python
+                    && self.symbol_table.is_top_level(id)
+                    && self.symbol_table.file_of(id) != Some(source_file_str.as_ref())
+            };
+            targets.retain(|&(id, _)| {
+                self.symbol_table.member_call_admits(id, caller_owner) || module_value(id)
+            });
         }
         if targets.is_empty() && !self.may_be_receiverless_member_call(source_file, site) {
             targets.extend(self.resolve_instantiation(language, site, raw_imports, resolve));
@@ -1444,6 +1455,14 @@ impl<'a> Resolver<'a> {
                     caller_heritage,
                 );
             }
+            // `this.m()` reaches here typed as the caller's own type (`C.m`),
+            // whose bases are the caller's heritage. A type the index does
+            // not declare (Rust `impl W for Pin<P>`) is still the caller's,
+            // so its file is the caller's own.
+            let caller_type = call
+                .and_then(|scope| scope.owner)
+                .and_then(owner_key)
+                .is_some_and(|owner| owner_key(qualifier) == Some(owner));
             let hit = self
                 .resolve_qualifier_file(
                     source_file,
@@ -1453,13 +1472,8 @@ impl<'a> Resolver<'a> {
                     raw_imports,
                     Some(symbol_name),
                 )
+                .or_else(|| caller_type.then(|| source_file_str.to_string()))
                 .and_then(|qf| {
-                    // `this.m()` reaches here typed as the caller's own type
-                    // (`C.m`), whose bases are the caller's heritage.
-                    let caller_type = call
-                        .and_then(|scope| scope.owner)
-                        .and_then(owner_key)
-                        .is_some_and(|owner| owner_key(qualifier) == Some(owner));
                     let heritage: &[String] = if caller_type { caller_heritage } else { &[] };
                     self.symbol_table
                         .lookup_in_file_with_kind(&qf, member, target)
@@ -1472,6 +1486,7 @@ impl<'a> Resolver<'a> {
                                 heritage,
                                 target,
                                 PickScope {
+                                    caller: call.and_then(|scope| scope.caller),
                                     typed_receiver: true,
                                     ..PickScope::default()
                                 },

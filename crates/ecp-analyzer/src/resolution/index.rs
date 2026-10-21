@@ -1060,14 +1060,19 @@ impl SymbolTable {
     ) -> Option<u32> {
         let caller = scope.caller;
         let untyped = scope.untyped_receiver;
+        let picked_owner = self.node_owner[pick as usize];
+        let owner_id = owner.and_then(|owner| self.owner_id(owner));
+        // `self.m()` from an `impl` block reaches that block's `m` first:
+        // two blocks for one type (`impl W for Cursor<A>`, `.. Cursor<B>`)
+        // share the owner, so the owner alone cannot pick the block.
         let caller_block = caller
             .filter(|&caller| {
-                target == ResolveTarget::Method && self.node_owner[caller as usize] == NO_OWNER
+                let caller_owner = self.node_owner[caller as usize];
+                target == ResolveTarget::Method
+                    && (caller_owner == NO_OWNER || owner_id == Some(caller_owner))
             })
             .and_then(|caller| self.impl_members.get(&caller))
             .map(|member| member.block);
-        let picked_owner = self.node_owner[pick as usize];
-        let owner_id = owner.and_then(|owner| self.owner_id(owner));
         let pick_stays = !untyped
             && (owner_id == Some(picked_owner) || (self.is_free(pick) && !scope.typed_receiver));
         if pick_stays && caller_block.is_none() {

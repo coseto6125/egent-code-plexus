@@ -338,9 +338,9 @@ fn test_resolve_call_rust_trait_and_foreign_impls_untyped_receiver_binds_trait_d
 
 /// Every `poll_shutdown` calls `self.poll_flush()` on its own line, and
 /// each impl block sits on one line: the block's own `poll_flush` is the
-/// one on the caller's row. The owners are generic (`Pin<P>`,
-/// `Cursor<..>`) or scoped (`io::Cursor<..>`, which the parser emits no
-/// `Impl` node for), so the members have no owner and share uids.
+/// one on the caller's row. The self types are generic (`Pin<P>`,
+/// `Cursor<..>`) or scoped (`io::Cursor<..>`): four blocks share the owner
+/// `Cursor`, so only the caller's block tells their members apart.
 const ASYNC_WRITE: &str = "pub trait AsyncWrite {\n\
     fn poll_flush(&mut self) -> u32;\n\
     fn poll_shutdown(&mut self) -> u32;\n\
@@ -357,7 +357,7 @@ fn test_resolve_call_rust_self_call_in_generic_impl_binds_own_block_member() {
     let callers = nodes_named(&graph, "poll_shutdown");
     let impl_callers: Vec<u32> = callers
         .into_iter()
-        .filter(|&id| target(&graph, id).owner.is_empty())
+        .filter(|&id| target(&graph, id).owner != "AsyncWrite")
         .collect();
     assert_eq!(impl_callers.len(), 5, "five impl blocks");
     for caller in impl_callers {
@@ -585,7 +585,7 @@ fn test_resolve_call_kotlin_member_call_named_like_class_binds_no_type() {
         &kotlin(),
         "a.kt",
         "class Widget {}\n\
-         class User { fun run(x: Any) { x.Widget() } fun make() { Widget() } }\n",
+         class User {\n    fun run(x: Any) { x.Widget() }\n    fun make() { Widget() }\n}\n",
     )]);
     assert_binds_no_type(&graph, "run", "Widget");
     assert_binds_type(&graph, "make", "Widget");

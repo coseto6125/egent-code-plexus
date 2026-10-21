@@ -110,6 +110,10 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
 
             if let Some(params) = n.child_by_field_name("parameters") {
                 collect_typed_params(params, source, &mut map);
+                if let Some((receiver, class)) = method_receiver(n, params, source) {
+                    map.entry(receiver.to_string())
+                        .or_insert_with(|| class.to_string());
+                }
                 let mut cursor = params.walk();
                 for parameter in params.named_children(&mut cursor) {
                     let binding = match parameter.kind() {
@@ -475,6 +479,48 @@ fn python_callee_name(
         }
         _ => None,
     }
+}
+
+/// The first parameter of a method declared in a class body (`self`, or
+/// `cls` of a classmethod) and the class it stands for, so `self.m()` is
+/// typed as `C.m` the way Java types `this.m()`. A `@staticmethod` has no
+/// such parameter.
+fn method_receiver<'s>(
+    function: Node<'_>,
+    params: Node<'_>,
+    source: &'s [u8],
+) -> Option<(&'s str, &'s str)> {
+    let mut member = function;
+    if let Some(decorated) = function
+        .parent()
+        .filter(|p| p.kind() == "decorated_definition")
+    {
+        let mut cursor = decorated.walk();
+        let is_static = decorated.named_children(&mut cursor).any(|d| {
+            d.kind() == "decorator"
+                && d.utf8_text(source)
+                    .is_ok_and(|t| t.trim_start_matches('@').trim() == "staticmethod")
+        });
+        if is_static {
+            return None;
+        }
+        member = decorated;
+    }
+    let class = member
+        .parent()
+        .filter(|body| body.kind() == "block")?
+        .parent()
+        .filter(|class| class.kind() == "class_definition")?;
+    let first = params.named_child(0)?;
+    let receiver = match first.kind() {
+        "identifier" => first,
+        "typed_parameter" => first.named_child(0).filter(|n| n.kind() == "identifier")?,
+        _ => return None,
+    };
+    Some((
+        receiver.utf8_text(source).ok()?,
+        class.child_by_field_name("name")?.utf8_text(source).ok()?,
+    ))
 }
 
 /// Zero-argument `super()`: the receiver of a call through the caller
