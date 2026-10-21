@@ -205,6 +205,8 @@ fn shell_segments(cmd: &str) -> Option<Vec<(&str, Option<Sep>)>> {
             // `2>&1`, `<&0`, `>|file` and `&>file` are redirects, not operators.
             (None, '&' | '|') if after_redirect => continue,
             (None, '&') if chars.peek().is_some_and(|&(_, n)| n == '>') => continue,
+            // `|&` pipes stderr too.
+            (None, '|') if chars.next_if(|&(_, n)| n == '&').is_some() => Sep::Pipe,
             (None, '&' | '|') => match (c, chars.next_if(|&(_, n)| n == c)) {
                 ('&', Some(_)) => Sep::And,
                 ('&', None) => Sep::Background,
@@ -242,6 +244,9 @@ const CWD_BUILTINS: [&str; 8] = [
     "pushd", "popd", "source", ".", "eval", "builtin", "command", "exec",
 ];
 
+/// Git options that move the directory `git grep` searches.
+const GIT_DIR_OPTIONS: [&str; 3] = ["-C", "--git-dir", "--work-tree"];
+
 /// The characters after which a `#` starts a comment.
 const METACHARS: [char; 10] = [' ', '\t', '\n', ';', '&', '|', '(', ')', '<', '>'];
 
@@ -265,7 +270,10 @@ fn cd_target(cmd: &str, cwd: &str) -> CdTarget {
 fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) -> CdTarget {
     // One substring scan per name keeps a command that moves no directory
     // off the segment parser.
-    if !cmd.contains("cd") && !CWD_BUILTINS.iter().any(|b| cmd.contains(b)) {
+    if !cmd.contains("cd")
+        && !CWD_BUILTINS.iter().any(|b| cmd.contains(b))
+        && !GIT_DIR_OPTIONS.iter().any(|o| cmd.contains(o))
+    {
         return CdTarget::Unchanged;
     }
     let joined = join_continuations(cmd);
@@ -280,6 +288,23 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
     let search = words
         .iter()
         .position(|w| (0..w.len()).any(|j| runs_search(w, j)));
+    // `git -C dir grep` searches `dir`, which the cd walk does not track.
+    let git_moves_grep = |words: &[String]| {
+        let Some(j) = (0..words.len()).find(|&j| runs_search(words, j)) else {
+            return false;
+        };
+        words[..j]
+            .iter()
+            .rposition(|w| w == "git")
+            .is_some_and(|g| {
+                words[g + 1..j]
+                    .iter()
+                    .any(|w| GIT_DIR_OPTIONS.iter().any(|o| w.starts_with(o)))
+            })
+    };
+    if search.is_some_and(|k| git_moves_grep(&words[k])) {
+        return CdTarget::Unknown;
+    }
     // An and-or list ending in `&` runs as a background job: its cd reaches
     // the search only when the search runs in that same job.
     let mut list_end = vec![0; segments.len()];
@@ -1180,6 +1205,8 @@ mod tests {
             "case a in\nb)\n  cd x;;\na) rg Foo;;\nesac",
             "m=$(cd x && rg -l Foo .)",
             "m=`cd x && rg -l Foo .`",
+            "git -C x grep -n Foo",
+            "cd x && git --work-tree=y grep Foo",
         ] {
             assert_eq!(target(cmd, t.path()), Unknown, "{cmd:?}");
         }
@@ -1198,10 +1225,17 @@ mod tests {
             "if true; then true; cd x; rg Foo; fi",
             "command -v rg && cd x && rg Foo .",
             "which grep >/dev/null; cd x; grep -rn Foo .",
+            "cd x && git status --short |& head\nrg -n Foo src",
         ] {
             assert_eq!(target(cmd, t.path()), want, "{cmd:?}");
         }
-        for cmd in ["make &&\nrg Foo", "m=$(cd x && pwd); rg Foo ."] {
+        for cmd in [
+            "make &&\nrg Foo",
+            "m=$(cd x && pwd); rg Foo .",
+            "git grep -n Foo",
+            "rg -C 3 Foo",
+            "git -C x status; rg Foo",
+        ] {
             assert_eq!(target(cmd, t.path()), Unchanged, "{cmd:?}");
         }
     }
