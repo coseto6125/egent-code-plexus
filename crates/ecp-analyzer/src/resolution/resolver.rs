@@ -782,8 +782,13 @@ impl<'a> Resolver<'a> {
     /// ladder, and never by the bare member: `StringAssert.AreEqual()` must
     /// not land on `XUnitAssert.AreEqual`, nor Swift `Util.make()` on the
     /// caller's own `make`. A receiver that names no type is a member the
-    /// parser cannot see (an inherited property, a global): `None`. Python
-    /// resolves its `FromReceiver` through the import tier instead.
+    /// parser cannot see (an inherited property, a global): `None`.
+    ///
+    /// A Python `FromReceiver` that is no submodule
+    /// ([`Self::python_submodule_member`] runs first) names a type only when
+    /// its module file declares one ([`reexport::python_imported_type`]):
+    /// `from k import K; K.st()` with several project `st` would otherwise
+    /// bind none.
     fn type_receiver(
         &self,
         source_file: &Path,
@@ -794,19 +799,21 @@ impl<'a> Resolver<'a> {
         let CallSite::FromReceiver { receiver, member } = site else {
             return None;
         };
-        if !matches!(
-            language,
-            Language::CSharp | Language::Swift | Language::Kotlin | Language::Dart
-        ) {
-            return None;
-        }
         let source_file_str = normalize_source_path(source_file);
-        match self.type_candidates(source_file, &source_file_str, receiver, raw_imports) {
-            TypeCandidates::None => None,
-            TypeCandidates::Unique(..) | TypeCandidates::Set(..) | TypeCandidates::External => {
-                Some(format!("{receiver}.{member}"))
-            }
-        }
+        let typed = match language {
+            Language::Python => reexport::python_imported_type(
+                &IndexFacts(self),
+                &source_file_str,
+                receiver,
+                raw_imports.iter().map(ImportRef::from),
+            ),
+            Language::CSharp | Language::Swift | Language::Kotlin | Language::Dart => !matches!(
+                self.type_candidates(source_file, &source_file_str, receiver, raw_imports),
+                TypeCandidates::None
+            ),
+            _ => false,
+        };
+        typed.then(|| format!("{receiver}.{member}"))
     }
 
     /// [`Self::resolve_call`] for a name a lexical scope of the file binds,

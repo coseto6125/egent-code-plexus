@@ -325,9 +325,10 @@ fn test_python_submodule_from_import_unique_name_binds_import_tier() {
 }
 
 /// A package attribute named like the submodule shadows it, as in Python:
-/// the call keeps its previous path (no edge on ecp 0.14.8).
+/// the class `mod` the package declares is the receiver, so the call binds
+/// its `compute`, never the submodule's (no edge on ecp 0.14.8).
 #[test]
-fn test_python_submodule_from_import_module_attribute_keeps_previous_path() {
+fn test_python_submodule_from_import_module_attribute_binds_class_member() {
     let graph = python(
         &[&[
             ("pkg/__init__.py", ""),
@@ -339,7 +340,11 @@ fn test_python_submodule_from_import_module_attribute_keeps_previous_path() {
         ]],
         ("app.py", &go("from pkg.sub import mod", "mod.compute()")),
     );
-    assert_call_targets(&graph, "go", &[]);
+    assert_call_targets(
+        &graph,
+        "go",
+        &[("pkg/sub/__init__.py", "mod", "compute", 0.85)],
+    );
 }
 
 /// codex c9 / R1 F3: `pkg/__init__.py` binds `mod` by import, which makes

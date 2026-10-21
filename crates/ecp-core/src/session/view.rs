@@ -103,6 +103,7 @@ use crate::analyzer::import_binding::{
     extension_retry, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
     import_member_fallback, owner_path_agrees, retry_name, DeclaredType, MemberOwner,
 };
+use crate::analyzer::lexical::LexicalFunctions;
 use crate::analyzer::path_aliases::PathAliases;
 use crate::analyzer::reexport::{
     self, export_filter_applies, is_ecmascript, ExportAliasTable, Fact, FileImports, ImportRef,
@@ -120,9 +121,9 @@ use crate::analyzer::type_ladder::{
     self, TypeCandidates, TypeFacts, TypeMember as LadderMember, MAX_HERITAGE_DEPTH,
 };
 use crate::analyzer::types::{
-    innermost_enclosing, owner_key, CallSite, LocalGraph, RawExportAlias, RawImport, VariantRef,
-    CLOSURE_REFERENCE_REASON, NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON, OVERLOAD_SET_REASON,
-    VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
+    innermost_enclosing, owner_key, CallSite, LocalGraph, RawExportAlias, RawImport, Span,
+    VariantRef, CLOSURE_REFERENCE_REASON, NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON,
+    OVERLOAD_SET_REASON, VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
 };
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
@@ -526,6 +527,13 @@ impl OverlayView {
                     .symbols
                     .iter()
                     .any(|s| holds_heritage(s.kind) && !s.heritage.is_empty());
+                let lexical = LexicalFunctions::new(
+                    std::path::Path::new(&file.rel_path),
+                    file.symbols
+                        .iter()
+                        .map(|s| (s.kind, s.name.as_str(), s.owner_class.is_some(), span_of(s))),
+                    virt_cursor,
+                );
                 for sym in &file.symbols {
                     let source = virt_cursor;
                     virt_cursor += 1;
@@ -537,62 +545,83 @@ impl OverlayView {
                     let owner = sym.owner_class.as_deref().and_then(owner_key);
                     for raw_callee in &sym.calls {
                         let parsed = CallSite::parse(raw_callee);
-                        // The index's `Resolver::resolve_call`: a C#, Swift,
-                        // Kotlin or Dart receiver that names a type resolves
-                        // as `Receiver.member`; a Swift one that names none
-                        // is an untyped member call.
-                        let type_member = facts.type_receiver(
-                            &file.rel_path,
-                            caller.language,
-                            parsed,
-                            &file.imports,
-                        );
-                        let site = match (parsed, &type_member) {
-                            (CallSite::FromReceiver { member, .. }, None)
-                                if caller.language == Language::Swift =>
-                            {
-                                CallSite::UntypedMember(member)
+                        // The index's Pass 2 order in a JS / TS file: a bare
+                        // call binds the innermost named function in scope
+                        // first, and an ambiguous or unreachable one leaves
+                        // only the named-import tier.
+                        let hit = 'hit: {
+                            if let Some(targets) = lexical.targets(span_of(sym), parsed.name()) {
+                                break 'hit targets.first().copied().or_else(|| {
+                                    if matches!(parsed, CallSite::UntypedMember(_)) {
+                                        return None;
+                                    }
+                                    facts
+                                        .named_import(
+                                            file_ord,
+                                            &file.imports,
+                                            parsed.name(),
+                                            callables.target,
+                                        )
+                                        .map(|decl| (decl, CONF_IMPORT_SCOPED))
+                                });
                             }
-                            _ => parsed,
-                        };
-                        let untyped = matches!(site, CallSite::UntypedMember(_));
-                        // An untyped receiver is no `this`: no tier reaches
-                        // the member through the caller's bases.
-                        let scope = Scope {
-                            call: Some(CallScope {
-                                owner,
-                                caller: Some(source),
-                                untyped,
-                            }),
-                            heritage: if untyped { &[] } else { heritage },
-                            type_lookup: false,
-                        };
-                        let lookup = type_member.as_deref().map_or(site, CallSite::Plain);
-                        let mut resolve = |site: CallSite<'_>, imports: &[RawImport], scope| {
-                            resolve_callee(
-                                graph,
-                                site,
-                                file_ord,
-                                imports,
-                                caller,
-                                &mut base_metas,
-                                &callables,
-                                &types,
-                                &qualifiers,
-                                &nodes,
-                                &replaced,
-                                &dirty_base,
-                                &facts,
-                                scope,
-                            )
-                        };
-                        // The index's order for a Rust path: the qualifier
-                        // tier inside `resolve_callee`, then the module tree,
-                        // then the receiver-typing ladder.
-                        // No Rust receiver is typed by `type_receiver`, so
-                        // `site` is the lookup here.
-                        let mut hit =
-                            if caller.language == Language::Rust && site.name().contains("::") {
+                            // The index's `Resolver::resolve_call`: a C#, Swift,
+                            // Kotlin or Dart receiver that names a type resolves
+                            // as `Receiver.member`; a Swift one that names none
+                            // is an untyped member call.
+                            let type_member = facts.type_receiver(
+                                &file.rel_path,
+                                caller.language,
+                                parsed,
+                                &file.imports,
+                            );
+                            let site = match (parsed, &type_member) {
+                                (CallSite::FromReceiver { member, .. }, None)
+                                    if caller.language == Language::Swift =>
+                                {
+                                    CallSite::UntypedMember(member)
+                                }
+                                _ => parsed,
+                            };
+                            let untyped = matches!(site, CallSite::UntypedMember(_));
+                            // An untyped receiver is no `this`: no tier reaches
+                            // the member through the caller's bases.
+                            let scope = Scope {
+                                call: Some(CallScope {
+                                    owner,
+                                    caller: Some(source),
+                                    untyped,
+                                }),
+                                heritage: if untyped { &[] } else { heritage },
+                                type_lookup: false,
+                            };
+                            let lookup = type_member.as_deref().map_or(site, CallSite::Plain);
+                            let mut resolve = |site: CallSite<'_>, imports: &[RawImport], scope| {
+                                resolve_callee(
+                                    graph,
+                                    site,
+                                    file_ord,
+                                    imports,
+                                    caller,
+                                    &mut base_metas,
+                                    &callables,
+                                    &types,
+                                    &qualifiers,
+                                    &nodes,
+                                    &replaced,
+                                    &dirty_base,
+                                    &facts,
+                                    scope,
+                                )
+                            };
+                            // The index's order for a Rust path: the qualifier
+                            // tier inside `resolve_callee`, then the module tree,
+                            // then the receiver-typing ladder.
+                            // No Rust receiver is typed by `type_receiver`, so
+                            // `site` is the lookup here.
+                            let mut hit = if caller.language == Language::Rust
+                                && site.name().contains("::")
+                            {
                                 let name = site.name();
                                 *module_calls
                                     .entry((name, owner, heritage.as_ptr()))
@@ -624,58 +653,59 @@ impl OverlayView {
                             } else {
                                 resolve(lookup, &file.imports, scope)
                             };
-                        if hit.is_none()
-                            && type_member.is_some()
-                            && caller.language == Language::Kotlin
-                        {
-                            // `fun Reg.ext()` is a top-level function no
-                            // member lookup on `Reg` finds.
-                            hit = resolve(
-                                CallSite::Plain(site.name()),
-                                &file.imports,
-                                Scope {
-                                    call: None,
-                                    heritage: scope.heritage,
-                                    type_lookup: false,
-                                },
-                            )
-                            .filter(|&(idx, _)| is_free(&facts, idx));
-                        }
-                        if untyped {
-                            // A Python module is a value: `api.helper()` on
-                            // an untyped receiver may call another module's
-                            // function, never one of the caller's own module.
-                            hit = hit.filter(|&(idx, _)| {
-                                member_call_admits(&facts, idx, owner)
-                                    || (caller.language == Language::Python
-                                        && is_free(&facts, idx)
-                                        && facts.node_file(idx) != Some(file.rel_path.as_str()))
-                            });
-                        }
-                        let hit = hit.or_else(|| {
-                            if facts.may_be_receiverless_member_call(site, caller) {
-                                return None;
+                            if hit.is_none()
+                                && type_member.is_some()
+                                && caller.language == Language::Kotlin
+                            {
+                                // `fun Reg.ext()` is a top-level function no
+                                // member lookup on `Reg` finds.
+                                hit = resolve(
+                                    CallSite::Plain(site.name()),
+                                    &file.imports,
+                                    Scope {
+                                        call: None,
+                                        heritage: scope.heritage,
+                                        type_lookup: false,
+                                    },
+                                )
+                                .filter(|&(idx, _)| is_free(&facts, idx));
                             }
-                            let (ty, confidence) = resolve_constructed_type(
-                                graph,
-                                site,
-                                file_ord,
-                                &file.imports,
-                                caller,
-                                &mut base_metas,
-                                &types,
-                                &qualifiers,
-                                &nodes,
-                                &replaced,
-                                &dirty_base,
-                                &facts,
-                                scope,
-                            )?;
-                            let target = *construction_targets.entry(ty).or_insert_with(|| {
-                                construction_target(graph, &nodes, &type_ctors, ty)
-                            });
-                            Some((target, confidence))
-                        });
+                            if untyped {
+                                // A Python module is a value: `api.helper()` on
+                                // an untyped receiver may call another module's
+                                // function, never one of the caller's own module.
+                                hit = hit.filter(|&(idx, _)| {
+                                    member_call_admits(&facts, idx, owner)
+                                        || (caller.language == Language::Python
+                                            && is_free(&facts, idx)
+                                            && facts.node_file(idx) != Some(file.rel_path.as_str()))
+                                });
+                            }
+                            hit.or_else(|| {
+                                if facts.may_be_receiverless_member_call(site, caller) {
+                                    return None;
+                                }
+                                let (ty, confidence) = resolve_constructed_type(
+                                    graph,
+                                    site,
+                                    file_ord,
+                                    &file.imports,
+                                    caller,
+                                    &mut base_metas,
+                                    &types,
+                                    &qualifiers,
+                                    &nodes,
+                                    &replaced,
+                                    &dirty_base,
+                                    &facts,
+                                    scope,
+                                )?;
+                                let target = *construction_targets.entry(ty).or_insert_with(|| {
+                                    construction_target(graph, &nodes, &type_ctors, ty)
+                                });
+                                Some((target, confidence))
+                            })
+                        };
                         // The index drops self-recursion Calls (builder's
                         // `target_id == current_node_idx` skip).
                         if let Some((target, confidence)) = hit.filter(|&(t, _)| t != source) {
@@ -1041,6 +1071,11 @@ fn is_later_overload(graph: &ArchivedZeroCopyGraph, nodes: &[ViewNode], idx: u32
     }
 }
 
+/// `s`'s source range, in the coordinates of the parse's [`Span`].
+fn span_of(s: &OverlaySymbol) -> Span {
+    (s.start_line, s.start_column, s.end_line, s.end_column)
+}
+
 /// Mirror full indexing's lexical references and first-UID survivor rule.
 fn emit_closure_references(
     file: &OverlayFileInput,
@@ -1064,10 +1099,7 @@ fn emit_closure_references(
             )
         })
         .collect();
-    let spans: Vec<_> = functions
-        .iter()
-        .map(|(_, s)| (s.start_line, s.start_column, s.end_line, s.end_column))
-        .collect();
+    let spans: Vec<_> = functions.iter().map(|(_, s)| span_of(s)).collect();
     let parents = innermost_enclosing(&spans);
     // Overloads carry their own uids, as in full indexing. Full indexing
     // tombstones other later identical UIDs, skips closure tombstones, and
@@ -2308,7 +2340,8 @@ impl<'a> OverlayFacts<'a> {
 
     /// The index's `Resolver::type_receiver`: a C#, Swift, Kotlin or Dart
     /// member call on a receiver that names a type (project, alias or
-    /// library) resolves as `Receiver.member`.
+    /// library), or a Python one on a from-imported type, resolves as
+    /// `Receiver.member`.
     fn type_receiver(
         &self,
         source: &str,
@@ -2319,16 +2352,31 @@ impl<'a> OverlayFacts<'a> {
         let CallSite::FromReceiver { receiver, member } = site else {
             return None;
         };
-        if !matches!(
-            language,
-            Language::CSharp | Language::Swift | Language::Kotlin | Language::Dart
-        ) {
-            return None;
-        }
-        match self.type_candidates(source, receiver, imports) {
-            TypeCandidates::None => None,
-            _ => Some(format!("{receiver}.{member}")),
-        }
+        let typed = match language {
+            // The index binds a submodule receiver before it types one.
+            Language::Python => {
+                reexport::python_submodule_member(
+                    self,
+                    source,
+                    (receiver, member),
+                    imports.iter().map(ImportRef::from),
+                    ResolveTarget::Callable,
+                )
+                .is_none()
+                    && reexport::python_imported_type(
+                        self,
+                        source,
+                        receiver,
+                        imports.iter().map(ImportRef::from),
+                    )
+            }
+            Language::CSharp | Language::Swift | Language::Kotlin | Language::Dart => !matches!(
+                self.type_candidates(source, receiver, imports),
+                TypeCandidates::None
+            ),
+            _ => false,
+        };
+        typed.then(|| format!("{receiver}.{member}"))
     }
 
     /// The index's receiver-typing ladder (`Resolver::resolve_member_via_type`)

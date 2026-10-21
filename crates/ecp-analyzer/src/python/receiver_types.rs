@@ -14,8 +14,9 @@
 //! A receiver that names a class of the same file and no import or local
 //! binds (`Util.make()`) emits `Util.make`, as a typed receiver does. It
 //! cannot reuse [`CallSite::from_receiver`]: for Python that site means a
-//! `from`-imported name, which the resolver binds by its bare member when
-//! the name is no submodule, through the caller's own type and bases.
+//! `from`-imported name, which the resolver binds as a submodule, else as a
+//! type it names, else by its bare member through the caller's own type and
+//! bases.
 
 use super::path_literals::build_raw_path_literal;
 use crate::calls::{

@@ -319,6 +319,18 @@ const FIXTURES: &[Fixture] = &[
 /// Receiver forms other than a typed parameter that the parsers also record
 /// as `Type.member`, and a construction through a namespace import.
 const RECEIVER_FORMS: &[Fixture] = &[
+    // J's namesake leaves the bare `st` ambiguous: only the type K binds it.
+    Fixture {
+        label: "Python/from-imported class with a namesake",
+        files: &[
+            ("k.py", "class K:\n    @staticmethod\n    def st(id): pass\n"),
+            ("j.py", "class J:\n    @staticmethod\n    def st(id): pass\n"),
+            ("app.py", "from k import K\n\ndef run():\n    K.st(2)\n"),
+        ],
+        caller: "app.py",
+        callee: Some("k.py"),
+        expected: &[("st", 0.85)],
+    },
     Fixture {
         label: "TypeScript/this receiver",
         files: &[("app.ts", "class A {\n save() {}\n run() { this.save(); }\n}\n")],

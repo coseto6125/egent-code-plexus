@@ -77,18 +77,21 @@ pub enum CallSite<'a> {
     Plain(&'a str),
     /// `new T(..)`: the site constructs `T`.
     Construct(&'a str),
-    /// A Python member call whose receiver is neither typed nor rooted in an
-    /// imported name (`obj.widget()`): it resolves by the member name and
-    /// never constructs a type. A Rust method call on an untyped receiver
+    /// A member call whose receiver is neither typed nor rooted in an
+    /// imported name (Python `obj.widget()`): it resolves by the member name
+    /// and never constructs a type. A Rust method call on an untyped receiver
     /// (`n.name.resolve()`) uses it too, so it never reaches a free `fn`, and
     /// so does a PHP `$obj->m()` other than `$this`, which a `use function`
-    /// import never names, and a Java call on a computed receiver
-    /// (`a.b().m()`), which no static import names.
+    /// import never names, a Java call on a computed receiver (`a.b().m()`),
+    /// which no static import names, and an untyped Swift, Ruby or C++
+    /// receiver.
     UntypedMember(&'a str),
-    /// A Python member call whose receiver is a name a `from` import binds
-    /// (`from pkg import mod; mod.f()`). That name may be a submodule, which
-    /// the import tier binds as a module import; anywhere else the site
-    /// resolves as `Plain(member)`.
+    /// A member call whose receiver may name a type. In Python the receiver
+    /// is a name a `from` import binds (`from pkg import mod; mod.f()`): a
+    /// submodule binds as a module import. In C#, Swift, Kotlin and Dart it
+    /// is an identifier that is no local, parameter or field. A receiver that
+    /// names a type (or a library one) resolves as `Plain("Type.member")`;
+    /// anywhere else the site resolves as `Plain(member)`.
     FromReceiver { receiver: &'a str, member: &'a str },
 }
 

@@ -759,6 +759,29 @@ pub fn python_submodule_member<'i, F: ModuleFacts + ?Sized>(
         })
 }
 
+/// `from k import K; K.st()`: whether a from-import binds `receiver` to a
+/// type its module file declares, so the call names `K.st`. An object, a
+/// name the module only re-imports, or a library name keeps the bare member.
+pub fn python_imported_type<'i, F: ModuleFacts + ?Sized>(
+    facts: &F,
+    importer: &str,
+    receiver: &str,
+    imports: impl IntoIterator<Item = ImportRef<'i>>,
+) -> bool {
+    let is_type = ResolveTarget::Type.kind_predicate();
+    imports.into_iter().any(|import| {
+        import.imported_name != "*"
+            && import.local_name() == receiver
+            && match facts.python_module(importer, import.source) {
+                PyModule::Unique(module) => facts
+                    .decls_in_file(module.as_ref(), import.imported_name)
+                    .iter()
+                    .any(|&(_, kind)| is_type(kind)),
+                PyModule::Missing | PyModule::Ambiguous => false,
+            }
+    })
+}
+
 /// Whether the Python package module `package` binds `name` to something
 /// other than its submodule file `submodule`: that attribute shadows the
 /// submodule, as in Python. A declaration binds it, and so does an import:
