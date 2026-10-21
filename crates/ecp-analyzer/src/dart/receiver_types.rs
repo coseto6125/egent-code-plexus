@@ -112,10 +112,10 @@ pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> DartBindings {
                 let span = node_range(n);
                 let mut map: HashMap<String, String> = HashMap::new();
                 collect_typed_dart_params(n, source, &mut map);
-                collect_typed_dart_locals(n, source, &mut map);
                 if !map.is_empty() {
                     fn_scopes.push((span, map));
                 }
+                collect_typed_dart_locals(n, source, &mut fn_scopes);
             }
             _ => {}
         }
@@ -215,7 +215,9 @@ fn collect_typed_dart_params(fn_node: Node<'_>, source: &[u8], out: &mut HashMap
     }
 }
 
-fn collect_typed_dart_locals(fn_node: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
+/// Each local of `fn_node` in a scope of its own: a local binds from the
+/// end of its declaration to the end of the block or loop that declares it.
+fn collect_typed_dart_locals(fn_node: Node<'_>, source: &[u8], scopes: &mut Vec<FnScope>) {
     let mut stack: Vec<Node<'_>> = vec![fn_node];
     while let Some(n) = stack.pop() {
         if (n.kind() == "method_declaration" || n.kind() == "function_declaration")
@@ -246,14 +248,19 @@ fn collect_typed_dart_locals(fn_node: Node<'_>, source: &[u8], out: &mut HashMap
                     }
                 }
             }
-            match (name, ty) {
-                (Some(n), Some(t)) => {
-                    out.insert(n, t);
+            if let Some(name) = name {
+                let declared = node_range(n).1;
+                let mut block = n.parent();
+                while let Some(b) = block.filter(|b| {
+                    !matches!(b.kind(), "block" | "for_statement" | "for_element") && *b != fn_node
+                }) {
+                    block = b.parent();
                 }
-                (Some(n), None) => {
-                    out.entry(n).or_default();
-                }
-                _ => {}
+                let block_end = node_range(block.unwrap_or(fn_node)).1;
+                scopes.push((
+                    (declared, block_end),
+                    HashMap::from([(name, ty.unwrap_or_default())]),
+                ));
             }
         }
         let mut c = n.walk();

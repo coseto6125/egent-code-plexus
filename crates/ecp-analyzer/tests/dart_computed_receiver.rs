@@ -106,3 +106,25 @@ fn test_dart_callee_constructor_receiver_shadowed_by_local_emits_untyped_member(
     assert!(!calls.contains(&"Other.m".to_string()), "{calls:?}");
     assert!(calls.contains(&CallSite::untyped_member("m")), "{calls:?}");
 }
+
+const BLOCK_LOCAL: &str = "class Actual {\n  void m() {}\n}\nclass Other {\n  void m() {}\n}\nclass C {\n  void m() {}\n  void before(bool flag) {\n    Other().m();\n    if (flag) {\n      final Other = () => Actual();\n    }\n  }\n  void outside(bool flag) {\n    if (flag) {\n      final Other = () => Actual();\n    }\n    Other().m();\n  }\n  void inside(bool flag) {\n    if (flag) {\n      final Other = () => Actual();\n      Other().m();\n    }\n  }\n}\n";
+
+/// A local binds from its declaration to the end of its block: a call
+/// before the declaration or past the block still builds the class.
+#[test]
+fn test_dart_callee_constructor_receiver_outside_block_local_keeps_class_member() {
+    for caller in ["before", "outside"] {
+        let calls = raw_calls_in(BLOCK_LOCAL, caller);
+        assert!(
+            calls.contains(&"Other.m".to_string()),
+            "{caller}: {calls:?}"
+        );
+    }
+}
+
+#[test]
+fn test_dart_callee_constructor_receiver_inside_block_after_local_emits_untyped_member() {
+    let calls = raw_calls_in(BLOCK_LOCAL, "inside");
+    assert!(!calls.contains(&"Other.m".to_string()), "{calls:?}");
+    assert!(calls.contains(&CallSite::untyped_member("m")), "{calls:?}");
+}

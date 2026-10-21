@@ -750,7 +750,12 @@ Route::any('/ping', function () { return 'pong'; });
 ];
 
 fn setup_laravel_repo(repo: &Path, home: &Path) {
-    for (path, src) in LARAVEL_FILES {
+    setup_laravel_repo_with(repo, home, &[]);
+}
+
+/// [`setup_laravel_repo`] with `files` written over the fixture's.
+fn setup_laravel_repo_with(repo: &Path, home: &Path, files: &[(&str, &str)]) {
+    for (path, src) in LARAVEL_FILES.iter().chain(files) {
         let file = repo.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(file, src).unwrap();
@@ -985,5 +990,30 @@ fn test_routes_unbound_string_action_reports_unresolved_not_inline() {
     assert_eq!(
         handler_kinds(repo.path(), home.path(), "/admin/health"),
         [("inline_anonymous".to_string(), "<inline>".to_string(), None)]
+    );
+}
+
+/// Two registrations on one line: the BlindSpot of the string action that
+/// binds no method marks its own registration only, so the closure route
+/// beside it stays `inline_anonymous`.
+#[test]
+fn test_routes_unbound_action_and_closure_on_one_line_keep_their_kinds() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let admin = "<?php\n\nuse Illuminate\\Support\\Facades\\Route;\n\nRoute::get('/x', 'AwardController@missing'); Route::get('/x', function () { return 'ok'; });\n";
+    setup_laravel_repo_with(repo.path(), home.path(), &[("routes/admin.php", admin)]);
+
+    let mut kinds = handler_kinds(repo.path(), home.path(), "/admin/x");
+    kinds.sort_unstable();
+    assert_eq!(
+        kinds,
+        [
+            ("inline_anonymous".to_string(), "<inline>".to_string(), None),
+            (
+                "unresolved_action".to_string(),
+                "AwardController@missing".to_string(),
+                Some("AwardController@missing".to_string()),
+            ),
+        ]
     );
 }

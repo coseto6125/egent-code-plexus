@@ -513,9 +513,10 @@ fn unbound_action<'g>(
     route_node: &ecp_core::graph::ArchivedNode,
     route_name: &str,
 ) -> Option<&'g str> {
-    let row = route_node.span.0.to_native();
+    // Two registrations can share a line; the column tells them apart.
+    let start = (route_node.span.0.to_native(), route_node.span.1.to_native());
     graph.blind_spots.iter().find_map(|bs| {
-        if bs.start_row.to_native() != row
+        if (bs.start_row.to_native(), bs.start_col.to_native()) != start
             || bs.kind.resolve(&graph.string_pool)
                 != ecp_analyzer::php::laravel_routes::BS_KIND_UNBOUND_ACTION
             || bs.file_path.resolve(&graph.string_pool) != route_file_path

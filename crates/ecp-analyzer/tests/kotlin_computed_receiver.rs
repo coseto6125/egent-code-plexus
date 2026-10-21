@@ -116,3 +116,43 @@ fn test_kotlin_callee_constructor_receiver_shadowed_by_local_emits_untyped_membe
     assert!(!calls.contains(&"Other.m".to_string()), "{calls:?}");
     assert!(calls.contains(&CallSite::untyped_member("m")), "{calls:?}");
 }
+
+/// A property shadows a class of its name where it is a member of a type
+/// enclosing the call. A property of a nested type the call is not in
+/// binds nothing there, so `Other()` still builds the class.
+#[test]
+fn test_kotlin_callee_constructor_receiver_property_of_nested_type_keeps_class_member() {
+    let source = "class Actual {\n    fun m() {}\n}\nclass Other {\n    fun m() {}\n}\nclass Host {\n    fun m() {}\n    class Nested {\n        val Other = { Actual() }\n    }\n    fun go() {\n        Other().m()\n    }\n}\n";
+    let calls = raw_calls_in(source, "go");
+    assert!(calls.contains(&"Other.m".to_string()), "{calls:?}");
+}
+
+#[test]
+fn test_kotlin_callee_constructor_receiver_shadowed_by_own_property_emits_untyped_member() {
+    let source = "class Actual {\n    fun m() {}\n}\nclass Other {\n    fun m() {}\n}\nclass Host {\n    fun m() {}\n    val Other = { Actual() }\n    fun go() {\n        Other().m()\n    }\n}\n";
+    let calls = raw_calls_in(source, "go");
+    assert!(!calls.contains(&"Other.m".to_string()), "{calls:?}");
+    assert!(calls.contains(&CallSite::untyped_member("m")), "{calls:?}");
+}
+
+const BLOCK_LOCAL: &str = "class Actual {\n    fun m() {}\n}\nclass Other {\n    fun m() {}\n}\nclass C {\n    fun m() {}\n    fun before(flag: Boolean) {\n        Other().m()\n        if (flag) {\n            val Other = { Actual() }\n        }\n    }\n    fun outside(flag: Boolean) {\n        if (flag) {\n            val Other = { Actual() }\n        }\n        Other().m()\n    }\n    fun inside(flag: Boolean) {\n        if (flag) {\n            val Other = { Actual() }\n            Other().m()\n        }\n    }\n}\n";
+
+/// A local binds from its declaration to the end of its block: a call
+/// before the declaration or past the block still builds the class.
+#[test]
+fn test_kotlin_callee_constructor_receiver_outside_block_local_keeps_class_member() {
+    for caller in ["before", "outside"] {
+        let calls = raw_calls_in(BLOCK_LOCAL, caller);
+        assert!(
+            calls.contains(&"Other.m".to_string()),
+            "{caller}: {calls:?}"
+        );
+    }
+}
+
+#[test]
+fn test_kotlin_callee_constructor_receiver_inside_block_after_local_emits_untyped_member() {
+    let calls = raw_calls_in(BLOCK_LOCAL, "inside");
+    assert!(!calls.contains(&"Other.m".to_string()), "{calls:?}");
+    assert!(calls.contains(&CallSite::untyped_member("m")), "{calls:?}");
+}

@@ -1850,13 +1850,15 @@ fn pass1_6_fetch_shapes(
         // to `:*` so `app.get('/api/users/:id')` and
         // `fetch('/api/users/42')` both resolve to `("GET", "api/users/:*")`
         // and produce a Fetches edge.
-        let mut route_index: FxHashMap<(String, String), Vec<u32>> = FxHashMap::default();
+        // Each route keeps its path as registered: Laravel's overwrite rule
+        // compares URIs, which the normalized key no longer tells apart.
+        let mut route_index: FxHashMap<(String, String), Vec<(u32, &str)>> = FxHashMap::default();
         for (route_idx, _file_idx, route_method, route_path) in emitted_routes {
             let (norm_path, _) = normalize_route_path(route_path);
             route_index
                 .entry((route_method.to_uppercase(), norm_path))
                 .or_default()
-                .push(*route_idx);
+                .push((*route_idx, route_path.as_str()));
         }
 
         // File-node index lookup: the source of a Fetches edge is the
@@ -1977,34 +1979,50 @@ fn pass1_6_fetch_shapes(
 }
 
 /// The routes that answer a request when `exact` routes of its verb and
-/// `any` Laravel `ANY` routes share its path. Laravel's `RouteCollection`
-/// files an `ANY` route under every verb, so within one route file the
-/// route registered last replaces the others for that verb. Across files
-/// the registration order is unknown, and every route stays.
-fn answering_routes(exact: &[u32], any: &[u32], nodes: &[Node]) -> Vec<u32> {
+/// `any` Laravel `ANY` routes share its normalized path, each with its
+/// path as registered. Laravel's `RouteCollection` files an `ANY` route
+/// under every verb, keyed by URI, so within one route file the route
+/// registered last replaces the others of the same URI for that verb;
+/// `/items/{id}` and `/items/{slug}` are two URIs and both answer. The
+/// order of registrations across files is not modelled, so every route
+/// of another file stays.
+fn answering_routes<'p>(
+    exact: &[(u32, &'p str)],
+    any: &[(u32, &'p str)],
+    nodes: &[Node],
+) -> Vec<u32> {
     if any.is_empty() {
-        return exact.to_vec();
+        return exact.iter().map(|&(route, _)| route).collect();
     }
+    // Laravel trims the slashes around a route's URI.
+    let key = |(route, path): (u32, &'p str)| -> (u32, &'p str) {
+        (nodes[route as usize].file_idx, path.trim_matches('/'))
+    };
     let start = |route: u32| {
         let span = nodes[route as usize].span;
         (span.0, span.1)
     };
+    let any_uris: FxHashSet<(u32, &str)> = any.iter().map(|&r| key(r)).collect();
     let mut answering: Vec<u32> = Vec::new();
-    // Route file → the route it registers last.
-    let mut last: Vec<(u32, u32)> = Vec::new();
-    for &route in exact.iter().chain(any) {
-        let file = nodes[route as usize].file_idx;
-        if !any.iter().any(|&a| nodes[a as usize].file_idx == file) {
+    // (Route file, URI) → the route it registers last, in first-seen order.
+    let mut last: Vec<u32> = Vec::new();
+    let mut slot: FxHashMap<(u32, &str), usize> = FxHashMap::default();
+    for &(route, path) in exact.iter().chain(any) {
+        let uri = key((route, path));
+        if !any_uris.contains(&uri) {
             answering.push(route);
             continue;
         }
-        match last.iter_mut().find(|(f, _)| *f == file) {
-            Some((_, winner)) if start(route) >= start(*winner) => *winner = route,
+        match slot.get(&uri) {
+            Some(&i) if start(route) >= start(last[i]) => last[i] = route,
             Some(_) => {}
-            None => last.push((file, route)),
+            None => {
+                slot.insert(uri, last.len());
+                last.push(route);
+            }
         }
     }
-    answering.extend(last.into_iter().map(|(_, route)| route));
+    answering.extend(last);
     answering
 }
 

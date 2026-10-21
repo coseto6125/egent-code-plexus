@@ -2162,6 +2162,10 @@ const STRAIGHT_LINE: &[&str] = &[
 
 const CONDITIONAL_REGISTRATION: &str = "`$this->middleware()` runs under a branch, loop or `try`";
 const CONDITIONAL_PARENT: &str = "`parent::__construct()` runs under a branch, loop or `try`";
+const REGISTRATION_AFTER_EXIT: &str =
+    "`$this->middleware()` follows a `return`, `throw` or `exit` that may end the constructor";
+const PARENT_AFTER_EXIT: &str =
+    "`parent::__construct()` follows a `return`, `throw` or `exit` that may end the constructor";
 const UNREAD_NAMES: &str = "`$this->middleware()` names middleware only the runtime knows";
 const UNREAD_OPTIONS: &str =
     "`$this->middleware()` has `only` / `except` methods only the runtime knows";
@@ -2310,12 +2314,20 @@ fn push_marker(out: &mut Vec<RawRoute>, marker: &str, payload: &str, node: Node)
 /// `->except(...)` chained on the options it returns, and
 /// `parent::__construct()`, in the order the constructor body runs them.
 /// A nested function or class runs nothing here. A call that runs under a
-/// branch, loop or `try`, or whose names or methods only the runtime
-/// knows, becomes a [`CONSTRUCTOR_UNREAD`] record.
+/// branch, loop or `try`, after a statement that may end the constructor,
+/// or whose names or methods only the runtime knows, becomes a
+/// [`CONSTRUCTOR_UNREAD`] record.
 fn constructor_middleware(block: Node, source: &[u8], names: FileNames, out: &mut Vec<RawRoute>) {
-    // Each node with whether it runs whenever the constructor does.
-    let mut stack = vec![(block, true)];
-    while let Some((node, certain)) = stack.pop() {
+    // Each node with whether it runs whenever the constructor does, in
+    // source order; `None` marks the end of a node that may leave the
+    // constructor, so its own operand still runs before the exit.
+    let mut stack = vec![Some((block, true))];
+    let mut may_have_exited = false;
+    while let Some(entry) = stack.pop() {
+        let Some((node, certain)) = entry else {
+            may_have_exited = true;
+            continue;
+        };
         if NESTED_SCOPES.contains(&node.kind()) {
             continue;
         }
@@ -2324,6 +2336,9 @@ fn constructor_middleware(block: Node, source: &[u8], names: FileNames, out: &mu
                 _ if !certain => {
                     push_marker(out, CONSTRUCTOR_UNREAD, CONDITIONAL_REGISTRATION, node)
                 }
+                _ if may_have_exited => {
+                    push_marker(out, CONSTRUCTOR_UNREAD, REGISTRATION_AFTER_EXIT, node)
+                }
                 Err(why) => push_marker(out, CONSTRUCTOR_UNREAD, why, node),
                 Ok(Some(rule)) => push_middleware_record(out, FROM_CONSTRUCTOR, node, rule),
                 Ok(None) => {}
@@ -2331,17 +2346,54 @@ fn constructor_middleware(block: Node, source: &[u8], names: FileNames, out: &mu
             continue;
         }
         if is_parent_constructor_call(node, source) {
-            if certain {
-                push_middleware_record(out, CALLS_PARENT_CONSTRUCTOR, node, MiddlewareRule::none());
-            } else {
-                push_marker(out, CONSTRUCTOR_UNREAD, CONDITIONAL_PARENT, node);
+            match (certain, may_have_exited) {
+                (true, false) => push_middleware_record(
+                    out,
+                    CALLS_PARENT_CONSTRUCTOR,
+                    node,
+                    MiddlewareRule::none(),
+                ),
+                (false, _) => push_marker(out, CONSTRUCTOR_UNREAD, CONDITIONAL_PARENT, node),
+                (true, true) => push_marker(out, CONSTRUCTOR_UNREAD, PARENT_AFTER_EXIT, node),
             }
             continue;
+        }
+        if may_leave_constructor(node, source) {
+            stack.push(None);
         }
         let certain = certain && STRAIGHT_LINE.contains(&node.kind());
         let mut cursor = node.walk();
         let children: Vec<Node> = node.named_children(&mut cursor).collect();
-        stack.extend(children.into_iter().rev().map(|child| (child, certain)));
+        stack.extend(
+            children
+                .into_iter()
+                .rev()
+                .map(|child| Some((child, certain))),
+        );
+    }
+}
+
+/// A `return`, `throw`, `exit` / `die` or `goto`: once one has run, even
+/// under a branch, a later registration may not.
+fn may_leave_constructor(node: Node, source: &[u8]) -> bool {
+    let is_exit_name = |name: Node| {
+        name.utf8_text(source)
+            .is_ok_and(|text| text.eq_ignore_ascii_case("exit") || text.eq_ignore_ascii_case("die"))
+    };
+    match node.kind() {
+        "return_statement" | "throw_expression" | "exit_statement" | "goto_statement" => true,
+        "function_call_expression" => node
+            .child_by_field_name("function")
+            .is_some_and(is_exit_name),
+        // A bare `die;` or `$off or exit;` parses as a constant name; a
+        // method or property called `exit` is its parent's `name` field.
+        "name" => {
+            is_exit_name(node)
+                && node
+                    .parent()
+                    .is_some_and(|p| p.child_by_field_name("name") != Some(node))
+        }
+        _ => false,
     }
 }
 

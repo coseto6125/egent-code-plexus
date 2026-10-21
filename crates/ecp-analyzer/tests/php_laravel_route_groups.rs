@@ -1942,7 +1942,7 @@ class PostController
 fn test_build_fetch_reaches_any_route_for_laravel_verb_only() {
     let tmp = tempfile::tempdir().unwrap();
     let client = "async function load() {\n  await fetch('/ping', { method: 'POST' });\n  await fetch('/pong', { method: 'TRACE' });\n}\n";
-    std::fs::write(tmp.path().join("client.ts"), client).unwrap();
+    std::fs::write(tmp.path().join("client.ts"), &client).unwrap();
     let routes = routes_file("Route::any('/ping', 'C@m');\nRoute::any('/pong', 'C@m');");
     let php = PhpProvider::new().unwrap();
     let ts = ecp_analyzer::typescript::parser::TypeScriptProvider::new().unwrap();
@@ -2157,6 +2157,63 @@ class PostController
     assert_eq!(spots.len(), 1, "{spots:?}");
     assert_eq!(spots[0].0, "app/Http/Controllers/PostController.php");
     assert!(spots[0].1.contains("branch"), "{spots:?}");
+}
+
+/// Laravel registers nothing after a constructor that returned, threw or
+/// exited: a registration after a statement that may do so adds no
+/// middleware, and a BlindSpot says why.
+#[test]
+fn test_build_constructor_middleware_after_possible_exit_records_blind_spot() {
+    for exit in [
+        "if ($this->off) return;",
+        "if ($this->off) { throw new \\RuntimeException(); }",
+        "$this->off && die('off');",
+        "while (true) { exit; }",
+        "return;",
+    ] {
+        let controller = format!(
+            r#"<?php
+namespace App\Http\Controllers;
+class PostController
+{{
+    public function __construct()
+    {{
+        {exit}
+        $this->middleware('auth');
+    }}
+    public function index() {{}}
+}}
+"#
+        );
+        let (middleware, spots) = post_controller_middleware(&controller);
+        assert_eq!(middleware, ["api"], "{exit}");
+        assert_eq!(spots.len(), 1, "{exit}: {spots:?}");
+        assert!(spots[0].1.contains("may end the constructor"), "{spots:?}");
+    }
+}
+
+/// A registration before the early exit runs whenever the constructor
+/// does; an exit inside a closure leaves only the closure.
+#[test]
+fn test_build_constructor_middleware_before_exit_or_after_closure_return_counts() {
+    let (middleware, spots) = post_controller_middleware(
+        r#"<?php
+namespace App\Http\Controllers;
+class PostController
+{
+    public function __construct()
+    {
+        $this->middleware('auth');
+        $check = function () { return; };
+        $this->middleware('verified');
+        if ($this->off) return;
+    }
+    public function index() {}
+}
+"#,
+    );
+    assert_eq!(middleware, ["api", "auth", "verified"]);
+    assert!(spots.is_empty(), "{spots:?}");
 }
 
 /// A static `middleware()` with a return under a branch, or a second
@@ -2382,9 +2439,15 @@ fn test_build_same_include_scope_repeated_last_registration_wins() {
 
 /// The Route nodes a client's `fetch('/ping', { method: 'GET' })` reaches.
 fn fetched_ping(routes_body: &str) -> Vec<String> {
+    fetched(routes_body, "/ping")
+}
+
+/// The Route nodes a client's `fetch(url, { method: 'GET' })` reaches.
+fn fetched(routes_body: &str, url: &str) -> Vec<String> {
     let tmp = tempfile::tempdir().unwrap();
-    let client = "async function load() {\n  await fetch('/ping', { method: 'GET' });\n}\n";
-    std::fs::write(tmp.path().join("client.ts"), client).unwrap();
+    let client =
+        format!("async function load() {{\n  await fetch('{url}', {{ method: 'GET' }});\n}}\n");
+    std::fs::write(tmp.path().join("client.ts"), &client).unwrap();
     let routes = routes_file(routes_body);
     let php = PhpProvider::new().unwrap();
     let ts = ecp_analyzer::typescript::parser::TypeScriptProvider::new().unwrap();
@@ -2423,6 +2486,19 @@ fn test_build_fetch_any_registered_after_get_reaches_any_route_only() {
         fetched_ping("Route::get('/ping', 'Old@m');\nRoute::any('/ping', 'New@m');"),
         ["ANY /ping"]
     );
+}
+
+/// Laravel keys its routes by URI: `/items/{id}` and `/items/{slug}` are two
+/// URIs, so a later `Route::get` of the second leaves the `ANY` route of the
+/// first answering GET too.
+#[test]
+fn test_build_fetch_any_and_get_of_different_uris_reaches_both_routes() {
+    let mut reached = fetched(
+        "Route::any('/items/{id}', 'Old@m');\nRoute::get('/items/{slug}', 'New@m');",
+        "/items/:id",
+    );
+    reached.sort_unstable();
+    assert_eq!(reached, ["ANY /items/{id}", "GET /items/{slug}"]);
 }
 
 /// A parent class outside the graph may run its own constructor; Laravel's

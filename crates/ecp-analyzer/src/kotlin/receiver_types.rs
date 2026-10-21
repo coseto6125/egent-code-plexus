@@ -46,9 +46,6 @@ impl LocalTypes {
         for ((start, end), map) in &self.scopes {
             if *start <= pos && pos <= *end {
                 if let Some(t) = map.get(var) {
-                    if t.is_empty() && !self.imports.contains_key(var) {
-                        continue;
-                    }
                     let w = range_width((*start, *end));
                     if w < best_width {
                         best_width = w;
@@ -57,7 +54,8 @@ impl LocalTypes {
                 }
             }
         }
-        // An unknown local type still shadows an imported binding.
+        // An unknown local type still shadows an imported binding or a
+        // typed name of a wider scope.
         best.or_else(|| self.imports.get(var).map(String::as_str))
             .filter(|ty| !ty.is_empty())
     }
@@ -146,7 +144,7 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
                     collect_params(child, source, &mut map);
                 }
                 if child.kind() == "function_body" {
-                    collect_property_decls(child, source, &mut map);
+                    collect_property_decls(child, source, &mut scopes);
                 }
             }
             if !map.is_empty() {
@@ -192,15 +190,22 @@ fn collect_params(params: Node<'_>, source: &[u8], out: &mut HashMap<String, Str
     }
 }
 
-/// Walk a `function_body`, collecting `property_declaration` nodes.
+/// Walk a `function_body`, collecting `property_declaration` nodes, each
+/// in a scope of its own: a local is visible from the end of its
+/// declaration to the end of the block that declares it.
 /// Does NOT descend into nested `function_declaration` / lambdas.
-fn collect_property_decls(body: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
+fn collect_property_decls(
+    body: Node<'_>,
+    source: &[u8],
+    scopes: &mut Vec<(PosRange, HashMap<String, String>)>,
+) {
     let mut stack: Vec<Node<'_>> = vec![body];
     while let Some(n) = stack.pop() {
         if n.kind() == "function_declaration" || n.kind() == "lambda_literal" {
             continue;
         }
         if n.kind() == "property_declaration" {
+            let mut out: HashMap<String, String> = HashMap::new();
             // variable_declaration: first named child `simple_identifier`, second `user_type`
             let mut c = n.walk();
             for child in n.children(&mut c) {
@@ -224,6 +229,11 @@ fn collect_property_decls(body: Node<'_>, source: &[u8], out: &mut HashMap<Strin
                         }
                     }
                 }
+            }
+            if !out.is_empty() {
+                let declared = node_range(n).1;
+                let block_end = n.parent().map_or(declared, |block| node_range(block).1);
+                scopes.push(((declared, block_end), out));
             }
         }
         let mut c = n.walk();
@@ -384,22 +394,34 @@ pub fn extract_kotlin_calls_and_path_literals(
     (path_literals, sql_refs)
 }
 
-/// Whether a type enclosing `pos` declares a property `name`. A nested
-/// type's members count for the whole outer type: that only keeps more
-/// calls on the bare member.
+/// Whether a type enclosing `pos` declares a property `name` as its own
+/// member. A property of a nested type that does not enclose `pos` binds
+/// nothing there, so it shadows no class of that name.
 fn declares_member(nodes: &[RawNode], pos: Pos, name: &str) -> bool {
-    declares(nodes, pos, name, |kind| kind == NodeKind::Property)
+    nodes
+        .iter()
+        .filter(|m| m.kind == NodeKind::Property && m.name == name)
+        .any(|m| {
+            let at = (m.span.0, m.span.1);
+            nodes
+                .iter()
+                .filter(|t| is_type(t) && span_holds(t.span, at))
+                .min_by_key(|t| span_width(t.span))
+                .is_some_and(|owner| span_holds(owner.span, pos))
+        })
+}
+
+fn is_type(n: &RawNode) -> bool {
+    matches!(
+        n.kind,
+        NodeKind::Class | NodeKind::Interface | NodeKind::Enum
+    )
 }
 
 /// Whether a type enclosing `pos` declares a member `name` of a kind
-/// `member` accepts.
+/// `member` accepts. A nested type's members count for the whole outer
+/// type: that only keeps more calls on the bare member.
 fn declares(nodes: &[RawNode], pos: Pos, name: &str, member: fn(NodeKind) -> bool) -> bool {
-    let is_type = |n: &RawNode| {
-        matches!(
-            n.kind,
-            NodeKind::Class | NodeKind::Interface | NodeKind::Enum
-        )
-    };
     nodes
         .iter()
         .filter(|m| member(m.kind) && m.name == name)
