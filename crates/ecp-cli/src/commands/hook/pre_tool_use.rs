@@ -319,6 +319,19 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
             Some(*depth)
         })
         .collect();
+    let moves = |w: &&str| *w == "cd" || CWD_BUILTINS.contains(w);
+    // A `case` pattern's `)` reads as a subshell close, so the depth below
+    // is wrong inside one.
+    let has_case = commands.iter().any(|(c, p)| c.get(*p) == Some(&"case"));
+    if has_case
+        && search.is_some_and(|k| {
+            commands[..k]
+                .iter()
+                .any(|(c, _)| c.iter().any(|w| moves(&w.trim_start_matches('('))))
+        })
+    {
+        return CdTarget::Unknown;
+    }
     // An and-or list ending in `&` runs as a background job: a cd reaches the
     // search only when every list around the cd that ends before the search
     // ends in `;`. A `;` or `&` deeper than the cd (`cd x && (a & wait)`)
@@ -341,7 +354,6 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
         }
         false
     };
-    let moves = |w: &&str| *w == "cd" || CWD_BUILTINS.contains(w);
     // A later `.` alone is mostly a path argument (`git add .`).
     let moves_shell = |cmd_words: &[&str]| {
         cmd_words
@@ -807,19 +819,23 @@ fn shell_words(cmd: &str) -> Vec<String> {
 }
 
 /// Whether `words[i]` runs `rg` / `grep`, rather than naming it to a
-/// lookup (`command -v rg`, `which grep`, `type -p rg`) or listing files
-/// (`rg --files | xargs grep …`).
+/// lookup (`command -v rg`, `which grep`, `type -p rg`), listing files
+/// (`rg --files | xargs grep …`) or printing its version or help.
 fn runs_search(words: &[String], i: usize) -> bool {
     if !matches!(words[i].as_str(), "rg" | "grep") {
         return false;
     }
-    let lists_files = words[i] == "rg"
-        && words[i + 1..]
-            .iter()
-            .take_while(|w| !w.chars().all(|c| matches!(c, '|' | '&' | ';')))
-            .any(|w| w == "--files");
-    if lists_files {
-        return false;
+    // `shell_words` keeps a separator glued to its word (`grep -V;`).
+    for word in &words[i + 1..] {
+        let bare = word.trim_end_matches(['|', '&', ';']);
+        match bare {
+            "--version" | "-V" | "--help" => return false,
+            "--files" | "--type-list" if words[i] == "rg" => return false,
+            _ => {}
+        }
+        if bare.len() < word.len() {
+            break;
+        }
     }
     let flags = words[..i]
         .iter()
@@ -1266,6 +1282,7 @@ mod tests {
             "m=$(cd x && rg -l Foo .)",
             "m=`cd x && rg -l Foo .`",
             "git -C x grep -n Foo",
+            "cd x && case a in\n  a) make ;;\n  b) make test ;;\nesac &\nrg -n Foo src\nwait",
             "cd x && git --work-tree=y grep Foo",
         ] {
             assert_eq!(target(cmd, t.path()), Unknown, "{cmd:?}");
@@ -1287,6 +1304,7 @@ mod tests {
             "command -v rg && cd x && rg Foo .",
             "which grep >/dev/null; cd x; grep -rn Foo .",
             "cd grep && cd ../x && rg -n main src",
+            "rg --version &&\ncd x &&\nrg -n Foo src",
             "cd x &&\n  (git status >/dev/null &\n   git diff --stat >/dev/null & wait)\nrg -n Foo src",
             "cd x && {\n  rg -n -m 1 Foo a\n  rg -n -m 1 Bar a\n} & wait",
             "cd x && git status --short |& head\nrg -n Foo src",
@@ -1310,6 +1328,8 @@ mod tests {
         for cmd in [
             "rg --color never -n -m 2 HookInput src",
             "cd grep && rg -n HookInput src",
+            "rg --version && cd /tmp && rg -n HookInput src",
+            "grep -V; grep -rn HookInput .",
             "rg --files -g '**/x.rs' | xargs grep -n -m 2 HookInput",
             "command -v rg && cd /tmp && rg HookInput .",
             "which grep; grep -rn HookInput .",
