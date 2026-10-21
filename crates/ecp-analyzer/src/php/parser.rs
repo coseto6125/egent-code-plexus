@@ -168,17 +168,20 @@ pub(super) const PHP_ROUTER_SCOPES: &[&str] = &["Route", "Router", "Slim", "Symf
 
 /// Whether the file declares or imports a class named like a router scope
 /// (`class Route`, `use App\Support\Route`): its `Route::get(...)` is that
-/// class's method, not the framework's router. `use Route;` imports the
-/// global `Route` facade alias, the router itself, so a global import binds
-/// the name only when it renames another class (`use Foo as Route;`).
+/// class's method, not the framework's router. `use Route;` imports
+/// Laravel's global `Route` facade alias, the router itself; any other
+/// import binds the name, `use Router;` too: Laravel registers no global
+/// `Router` alias.
 fn binds_own_router(imports: &[RawImport], nodes: &[RawNode]) -> bool {
     imports.iter().any(|import| {
         let local = import
             .alias
             .as_deref()
             .unwrap_or_else(|| import.imported_name.rsplit('\\').next().unwrap_or_default());
-        let source = import.source.trim_start_matches('\\');
-        let facade_alias = !source.contains('\\') && source.eq_ignore_ascii_case(local);
+        let facade_alias = import
+            .source
+            .trim_start_matches('\\')
+            .eq_ignore_ascii_case("Route");
         !facade_alias && PHP_ROUTER_SCOPES.contains(&local)
     }) || nodes
         .iter()
@@ -401,7 +404,9 @@ impl LanguageProvider for PhpProvider {
         // literal, call)`. They become `routes` once the loop has seen the
         // file's `use` imports, which an `X::class` action resolves through.
         let mut route_calls: Vec<(String, &str, tree_sitter::Node)> = Vec::new();
-        let mut route_includes: Vec<RawRoute> = Vec::new();
+        // Calls and `require`s that may load a route file. A group's
+        // `X::class` middleware resolves through the imports too.
+        let mut include_calls: Vec<tree_sitter::Node> = Vec::new();
         // `Route::resource` / `match` / `any` calls, each registering
         // several routes or a method set.
         let mut route_sets: Vec<tree_sitter::Node> = Vec::new();
@@ -576,7 +581,7 @@ impl LanguageProvider for PhpProvider {
                 } else if Some(cap_idx) == idx_laravel_args {
                     laravel_args_node = Some(cap.node);
                 } else if Some(cap_idx) == idx_laravel_include_call {
-                    super::laravel_routes::push_includes(cap.node, source, &mut route_includes);
+                    include_calls.push(cap.node);
                 } else if Some(cap_idx) == idx_laravel_route_set {
                     if !route_sets.iter().any(|call| call.id() == cap.node.id()) {
                         route_sets.push(cap.node);
@@ -841,6 +846,10 @@ impl LanguageProvider for PhpProvider {
                 scope: Some(Box::new(site.scope)),
             });
         }
+        let mut route_includes: Vec<RawRoute> = Vec::new();
+        for call in include_calls {
+            super::laravel_routes::push_includes(call, source, names, &mut route_includes);
+        }
         super::laravel_routes::resolve_include_controllers(&mut route_includes, names);
         routes.append(&mut route_includes);
 
@@ -917,7 +926,12 @@ impl LanguageProvider for PhpProvider {
         }
         // A controller imports no router; its middleware records count only
         // for the routes whose actions bind its methods.
-        super::laravel_routes::push_controller_middleware(tree.root_node(), source, &mut routes);
+        super::laravel_routes::push_controller_middleware(
+            tree.root_node(),
+            source,
+            names,
+            &mut routes,
+        );
 
         let raw_function_metas =
             crate::function_meta::php::extract(tree.root_node(), source, &nodes, file_category);

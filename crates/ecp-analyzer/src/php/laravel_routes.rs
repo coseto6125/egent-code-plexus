@@ -45,13 +45,13 @@ struct GroupAttrs {
 
 /// The group levels around `node`, outermost first. A level is a `group`
 /// call on the router whose closure holds `node`.
-fn enclosing_groups(node: Node, source: &[u8]) -> Vec<GroupAttrs> {
+fn enclosing_groups(node: Node, source: &[u8], names: FileNames) -> Vec<GroupAttrs> {
     let mut levels = Vec::new();
     let mut cur = node;
     while let Some(parent) = cur.parent() {
         if matches!(parent.kind(), "anonymous_function" | "arrow_function") {
             if let Some(call) = closure_group_call(parent, source) {
-                levels.push(group_call_attrs(call, source));
+                levels.push(group_call_attrs(call, source, names));
             }
         }
         cur = parent;
@@ -76,14 +76,14 @@ fn is_router_call(call: Node, source: &[u8]) -> bool {
         .is_some_and(|scope| PHP_ROUTER_SCOPES.contains(&scope.as_str()))
 }
 
-fn group_call_attrs(call: Node, source: &[u8]) -> GroupAttrs {
+fn group_call_attrs(call: Node, source: &[u8], names: FileNames) -> GroupAttrs {
     let mut attrs = GroupAttrs::default();
     if let Some(object) = call.child_by_field_name("object") {
-        chain_attrs(object, source, &mut attrs);
+        chain_attrs(object, source, names, &mut attrs);
     }
     if let Some(options) = nth_argument(call, 0).filter(|n| n.kind() == "array_creation_expression")
     {
-        option_attrs(options, source, &mut attrs);
+        option_attrs(options, source, names, &mut attrs);
     }
     attrs
 }
@@ -91,7 +91,7 @@ fn group_call_attrs(call: Node, source: &[u8]) -> GroupAttrs {
 /// Read `Route::prefix('p')->middleware('m')->...` from the root call
 /// outward, so a later call of the same attribute replaces an earlier one,
 /// as Laravel's `RouteRegistrar` does.
-fn chain_attrs(mut node: Node, source: &[u8], attrs: &mut GroupAttrs) {
+fn chain_attrs(mut node: Node, source: &[u8], names: FileNames, attrs: &mut GroupAttrs) {
     let mut calls = Vec::new();
     loop {
         match node.kind() {
@@ -111,12 +111,14 @@ fn chain_attrs(mut node: Node, source: &[u8], attrs: &mut GroupAttrs) {
     }
     for call in calls.into_iter().rev() {
         match call_name(call, source) {
-            Some("middleware") => attrs.middleware = variadic_list(call, source),
+            Some("middleware") => attrs.middleware = variadic_middleware(call, source, names),
             // `RouteRegistrar` adds each `withoutMiddleware` to the earlier ones.
-            Some("withoutMiddleware") => attrs.excluded.extend(first_list(call, source)),
+            Some("withoutMiddleware") => {
+                attrs.excluded.extend(first_middleware(call, source, names))
+            }
             Some(name) => {
                 if let Some(value) = nth_argument(call, 0) {
-                    set_attr(attrs, name, value, source);
+                    set_attr(attrs, name, value, source, names);
                 }
             }
             None => {}
@@ -128,19 +130,19 @@ fn chain_attrs(mut node: Node, source: &[u8], attrs: &mut GroupAttrs) {
 /// `Router::group` merges the array as written, so `excluded_middleware`
 /// removes middleware and a `withoutMiddleware` key, the registrar method's
 /// name, does nothing.
-fn option_attrs(options: Node, source: &[u8], attrs: &mut GroupAttrs) {
+fn option_attrs(options: Node, source: &[u8], names: FileNames, attrs: &mut GroupAttrs) {
     for (key, value) in array_pairs(options, source) {
         match key.as_str() {
-            "excluded_middleware" => attrs.excluded.extend(string_list(value, source)),
-            _ => set_attr(attrs, &key, value, source),
+            "excluded_middleware" => attrs.excluded.extend(middleware_list(value, source, names)),
+            _ => set_attr(attrs, &key, value, source, names),
         }
     }
 }
 
-fn set_attr(attrs: &mut GroupAttrs, name: &str, value: Node, source: &[u8]) {
+fn set_attr(attrs: &mut GroupAttrs, name: &str, value: Node, source: &[u8], names: FileNames) {
     match name {
         "prefix" => attrs.prefix = string_value(value, source),
-        "middleware" => attrs.middleware = string_list(value, source),
+        "middleware" => attrs.middleware = middleware_list(value, source, names),
         "namespace" => attrs.namespace = namespace_value(value, source),
         "controller" => attrs.controller = class_name(value, source),
         _ => {}
@@ -149,7 +151,7 @@ fn set_attr(attrs: &mut GroupAttrs, name: &str, value: Node, source: &[u8]) {
 
 /// `->middleware('auth')` / `->withoutMiddleware('auth')` calls chained
 /// after the verb call: `Route::get('/x', ...)->middleware('auth')`.
-fn trailing_attrs(call: Node, source: &[u8], own: &mut GroupAttrs) {
+fn trailing_attrs(call: Node, source: &[u8], names: FileNames, own: &mut GroupAttrs) {
     let mut cur = call;
     while let Some(parent) = cur
         .parent()
@@ -157,31 +159,40 @@ fn trailing_attrs(call: Node, source: &[u8], own: &mut GroupAttrs) {
         .filter(|p| p.child_by_field_name("object") == Some(cur))
     {
         match call_name(parent, source) {
-            Some("middleware") => own.middleware.extend(variadic_list(parent, source)),
-            Some("withoutMiddleware") => own.excluded.extend(first_list(parent, source)),
+            Some("middleware") => own
+                .middleware
+                .extend(variadic_middleware(parent, source, names)),
+            Some("withoutMiddleware") => {
+                own.excluded.extend(first_middleware(parent, source, names))
+            }
             _ => {}
         }
         cur = parent;
     }
 }
 
-/// The names of a variadic call, as `Route::middleware`, `RouteRegistrar`
-/// and `ControllerMiddlewareOptions::only` read them: an array first
-/// argument is the list, else each argument is one name.
-fn variadic_list(call: Node, source: &[u8]) -> Vec<String> {
+/// The middleware of a variadic call, as `Route::middleware` and
+/// `RouteRegistrar` read them: an array first argument is the list, else
+/// each argument is one name.
+fn variadic_middleware(call: Node, source: &[u8], names: FileNames) -> Vec<String> {
     let values: Vec<Node> = arguments(call)
         .into_iter()
         .filter_map(argument_value)
         .collect();
     match values.as_slice() {
-        [first, ..] if first.kind() == "array_creation_expression" => string_list(*first, source),
-        many => many.iter().filter_map(|v| class_name(*v, source)).collect(),
+        [first, ..] if first.kind() == "array_creation_expression" => {
+            middleware_list(*first, source, names)
+        }
+        many => many
+            .iter()
+            .filter_map(|v| middleware_name(*v, source, names))
+            .collect(),
     }
 }
 
-/// The names of the first argument: `'auth'` or `['auth', 'verified']`.
-fn first_list(call: Node, source: &[u8]) -> Vec<String> {
-    nth_argument(call, 0).map_or_else(Vec::new, |value| string_list(value, source))
+/// The middleware of the first argument: `'auth'` or `['auth', 'verified']`.
+fn first_middleware(call: Node, source: &[u8], names: FileNames) -> Vec<String> {
+    nth_argument(call, 0).map_or_else(Vec::new, |value| middleware_list(value, source, names))
 }
 
 /// The scope of a route or include site: each enclosing group, then `own`.
@@ -191,8 +202,8 @@ struct SiteScope {
     controller: Option<String>,
 }
 
-fn site_scope(node: Node, own: GroupAttrs, source: &[u8]) -> SiteScope {
-    let mut levels = enclosing_groups(node, source);
+fn site_scope(node: Node, own: GroupAttrs, source: &[u8], names: FileNames) -> SiteScope {
+    let mut levels = enclosing_groups(node, source, names);
     levels.push(own);
     let mut site = SiteScope {
         prefixes: Vec::new(),
@@ -214,13 +225,13 @@ fn site_scope(node: Node, own: GroupAttrs, source: &[u8]) -> SiteScope {
 
 /// The scope of the router call `call` with what its own chain sets:
 /// `Route::middleware('m')->get(...)->middleware('n')`.
-fn call_scope(call: Node, source: &[u8]) -> SiteScope {
+fn call_scope(call: Node, source: &[u8], names: FileNames) -> SiteScope {
     let mut own = GroupAttrs::default();
     if let Some(object) = call.child_by_field_name("object") {
-        chain_attrs(object, source, &mut own);
+        chain_attrs(object, source, names, &mut own);
     }
-    trailing_attrs(call, source, &mut own);
-    site_scope(call, own, source)
+    trailing_attrs(call, source, names, &mut own);
+    site_scope(call, own, source, names)
 }
 
 impl SiteScope {
@@ -287,6 +298,19 @@ impl FileNames<'_> {
             (None, None) => name.to_string(),
         }
     }
+
+    /// The string `X::class` evaluates to: the class [`Self::resolve`]
+    /// names, without the leading `\`. `self`, `static` and `parent` name
+    /// a class only the enclosing class decides.
+    fn class_value(&self, name: &str) -> Option<String> {
+        if ["self", "static", "parent"]
+            .iter()
+            .any(|keyword| name.eq_ignore_ascii_case(keyword))
+        {
+            return None;
+        }
+        Some(self.resolve(name).trim_start_matches('\\').to_string())
+    }
 }
 
 /// The full in-file path, scope and controller action of the verb call
@@ -298,7 +322,7 @@ pub(super) fn route_site(
     source: &[u8],
     names: FileNames,
 ) -> Option<RouteSite> {
-    let site = call_scope(call, source);
+    let site = call_scope(call, source, names);
     let controller = site.controller.as_deref().map(|class| names.resolve(class));
     Some(RouteSite {
         path: site.route_path(raw_path)?,
@@ -388,7 +412,7 @@ pub(super) fn route_set_sites(
     if !is_router_call(call, source) {
         return Vec::new();
     }
-    let site = call_scope(call, source);
+    let site = call_scope(call, source, names);
     let controller = site.controller.as_deref().map(|class| names.resolve(class));
     // `path_arg` is the path argument's position; the action follows it.
     let verb_sites = |methods: Vec<String>, path_arg: usize| {
@@ -686,9 +710,11 @@ fn singular(segment: &str) -> String {
 /// with a leading `\` is fully qualified; any other is relative to the
 /// group namespace. Closures and anything else name no action.
 ///
-/// An action without `@` (`'list'`, `Invokable::class`) stays as written
-/// when no group in the file sets a controller: a group in an including
-/// file may set one, so [`LaravelRoutes::promote`] completes it.
+/// `Invokable::class` names the class's `__invoke`, never a method of the
+/// group controller: `prependGroupController` keeps a name `class_exists`
+/// finds. A string action without `@` (`'list'`) stays as written when no
+/// group in the file sets a controller: a group in an including file may
+/// set one, so [`LaravelRoutes::promote`] completes it.
 fn route_action(
     action: Node,
     controller: Option<&str>,
@@ -697,7 +723,10 @@ fn route_action(
 ) -> Option<String> {
     let text = match action.kind() {
         "string" | "encapsed_string" => string_value(action, source)?,
-        "class_constant_access_expression" => names.resolve(class_constant_class(action, source)?),
+        "class_constant_access_expression" => {
+            let class = names.resolve(class_constant_class(action, source)?);
+            return Some(format!("{class}@__invoke"));
+        }
         "array_creation_expression" => {
             let mut values = array_values(action);
             let class = values.next()?;
@@ -732,7 +761,7 @@ fn complete_action(action: &str, controller: Option<&str>) -> String {
 /// `->group(<file>)` or `Route::group([...], <file>)` on the router, the
 /// Laravel 11 `->withRouting(web: <file>, api: <file>)` builder, or a
 /// `require <file>`. A `group` whose argument is a closure loads no file.
-pub(super) fn push_includes(node: Node, source: &[u8], out: &mut Vec<RawRoute>) {
+pub(super) fn push_includes(node: Node, source: &[u8], names: FileNames, out: &mut Vec<RawRoute>) {
     match node.kind() {
         "member_call_expression" | "scoped_call_expression" => match call_name(node, source) {
             Some("group") if is_router_call(node, source) => {
@@ -740,9 +769,10 @@ pub(super) fn push_includes(node: Node, source: &[u8], out: &mut Vec<RawRoute>) 
                 else {
                     return;
                 };
-                push_include(node, target, group_call_attrs(node, source), source, out);
+                let attrs = group_call_attrs(node, source, names);
+                push_include(node, target, attrs, source, names, out);
             }
-            Some("withRouting") => push_with_routing(node, source, out),
+            Some("withRouting") => push_with_routing(node, source, names, out),
             _ => {}
         },
         _ => {
@@ -750,7 +780,7 @@ pub(super) fn push_includes(node: Node, source: &[u8], out: &mut Vec<RawRoute>) 
                 .named_child(0)
                 .and_then(|path| include_target(path, source))
             {
-                push_include(node, target, GroupAttrs::default(), source, out);
+                push_include(node, target, GroupAttrs::default(), source, names, out);
             }
         }
     }
@@ -759,7 +789,7 @@ pub(super) fn push_includes(node: Node, source: &[u8], out: &mut Vec<RawRoute>) 
 /// `->withRouting(web: ..., api: ..., apiPrefix: 'api')`: Laravel 11 loads
 /// `web` files under the `web` middleware group and `api` files under the
 /// `api` middleware group and prefix.
-fn push_with_routing(call: Node, source: &[u8], out: &mut Vec<RawRoute>) {
+fn push_with_routing(call: Node, source: &[u8], names: FileNames, out: &mut Vec<RawRoute>) {
     let named: Vec<(&str, Node)> = arguments(call)
         .into_iter()
         .filter_map(|argument| {
@@ -794,7 +824,7 @@ fn push_with_routing(call: Node, source: &[u8], out: &mut Vec<RawRoute>) {
                 middleware: vec![middleware.to_string()],
                 ..GroupAttrs::default()
             };
-            push_include(file, target, attrs, source, out);
+            push_include(file, target, attrs, source, names, out);
         }
     }
 }
@@ -804,9 +834,10 @@ fn push_include(
     target: RouteInclude,
     own: GroupAttrs,
     source: &[u8],
+    names: FileNames,
     out: &mut Vec<RawRoute>,
 ) {
-    let site = site_scope(node, own, source);
+    let site = site_scope(node, own, source, names);
     let mut scope = site.scope;
     scope.include = Some(target);
     out.push(RawRoute {
@@ -928,8 +959,28 @@ fn namespace_value(node: Node, source: &[u8]) -> Option<String> {
     })
 }
 
-/// A middleware value: `'auth'`, `['auth', 'verified']`, or class names
-/// (`[Ensure::class]`), kept as written; non-literal entries dropped.
+/// A middleware value: `'auth'`, `['auth', 'verified']`, or classes
+/// (`[Ensure::class]`); non-literal entries dropped.
+fn middleware_list(node: Node, source: &[u8], names: FileNames) -> Vec<String> {
+    match node.kind() {
+        "array_creation_expression" => array_values(node)
+            .filter_map(|value| middleware_name(value, source, names))
+            .collect(),
+        _ => middleware_name(node, source, names).into_iter().collect(),
+    }
+}
+
+/// `'auth'`, or the class `Ensure::class` names in its own file, the
+/// string Laravel compares: `withoutMiddleware(Guard::class)` in a route
+/// file and `Guard::class` in a controller name one class only when both
+/// files resolve `Guard` to it.
+fn middleware_name(node: Node, source: &[u8], names: FileNames) -> Option<String> {
+    string_value(node, source)
+        .or_else(|| class_constant_class(node, source).and_then(|class| names.class_value(class)))
+}
+
+/// A list value: `'a'`, `['a', 'b']`, or class names (`[C::class]`), kept
+/// as written; non-literal entries dropped.
 fn string_list(node: Node, source: &[u8]) -> Vec<String> {
     match node.kind() {
         "array_creation_expression" => array_values(node)
@@ -1140,9 +1191,25 @@ pub struct ControllerAction {
     /// class, reached through resolved heritage, does.
     pub inherited: bool,
     /// The middleware the controller registers for the action's method, in
-    /// registration order; a parent's constructor middleware first.
-    pub middleware: Vec<String>,
+    /// the order Laravel runs the registrations; `Err` with what kept it
+    /// from being statically certain.
+    pub middleware: Result<Vec<String>, Vec<UnreadMiddleware>>,
 }
+
+/// Controller middleware that only the runtime decides: a registration
+/// under a branch, a value only the runtime knows, or a parent, trait or
+/// interface outside the graph that could change which code runs. The
+/// routes the controller handles then carry none of its middleware.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnreadMiddleware {
+    /// The file and place of the code that decides.
+    pub file_idx: u32,
+    pub span: Span,
+    pub hint: String,
+}
+
+/// BlindSpot `kind` of an [`UnreadMiddleware`].
+pub const BS_KIND_CONTROLLER_MIDDLEWARE: &str = "laravel-controller-middleware-dynamic";
 
 /// The cross-file half of Laravel routing: the include scopes of each
 /// route file, and the controller classes route actions name.
@@ -1382,9 +1449,11 @@ impl ScopeWalk<'_> {
         for (from, inner) in edges {
             for outer in self.scopes_of(*from) {
                 let scope = outer.then(inner);
-                if !scopes.contains(&scope) {
-                    scopes.push(scope);
-                }
+                // A repeated scope keeps its last place: the builder lets the
+                // last registration of a path win, and `api, web, api`
+                // registers under `api` last.
+                scopes.retain(|seen| *seen != scope);
+                scopes.push(scope);
             }
             upstream |= self.lossy.contains_key(from);
         }
@@ -1455,6 +1524,9 @@ struct ControllerIndex {
     /// Short class name → indices into `types`. Traits are not listed: a
     /// route never names one.
     by_name: FxHashMap<String, Vec<usize>>,
+    /// Fully qualified class or trait name → indices into `types`, for the
+    /// `extends` and `use` a controller's middleware runs through.
+    by_fqn: FxHashMap<String, Vec<usize>>,
     /// Class or trait node index → index into `types`.
     by_node: FxHashMap<u32, usize>,
     types: Vec<ControllerType>,
@@ -1462,19 +1534,39 @@ struct ControllerIndex {
 
 struct ControllerType {
     node: u32,
+    file_idx: u32,
     is_trait: bool,
     /// Lower-cased, without a leading `\`.
     fqn: String,
     /// Lower-cased method name → node index; the first declaration wins.
     methods: FxHashMap<String, u32>,
     has_constructor: bool,
-    /// The constructor runs `parent::__construct()`.
-    constructor_calls_parent: bool,
-    /// `$this->middleware(...)` in the constructor, in source order.
-    constructor_middleware: Vec<MiddlewareRule>,
-    /// The entries of a static `middleware()`; `Some` when the class
+    /// What the constructor does with middleware, in the order it runs.
+    constructor: Vec<ConstructorStep>,
+    /// The entries of a static `middleware()`; `Some` when the type
     /// declares one, even with no entry this reads.
-    static_middleware: Option<Vec<MiddlewareRule>>,
+    static_middleware: Option<Vec<StaticEntry>>,
+    /// The `extends` class, fully qualified, and where the class names it.
+    parent: Option<(String, Span)>,
+    /// The `implements` interfaces, likewise.
+    interfaces: Vec<(String, Span)>,
+    /// The used traits, likewise.
+    traits: Vec<(String, Span)>,
+}
+
+/// One step of a constructor that bears on middleware.
+enum ConstructorStep {
+    Register(MiddlewareRule),
+    /// `parent::__construct()`: the parent's constructor runs here.
+    Parent,
+    /// A registration this cannot read, and why.
+    Unread(Span, String),
+}
+
+/// One entry of a static `middleware()`.
+enum StaticEntry {
+    Register(MiddlewareRule),
+    Unread(Span, String),
 }
 
 /// One controller-middleware registration and the methods it covers.
@@ -1507,9 +1599,28 @@ impl MiddlewareRule {
     }
 }
 
+/// The type whose constructor or static `middleware()` PHP runs.
+enum Supplier {
+    None,
+    /// The type `ty`, declared by or used in `chain[at]`.
+    Found {
+        ty: usize,
+        at: usize,
+    },
+    Unread(UnreadMiddleware),
+}
+
 /// Whether span `inner` lies within span `outer`.
 fn span_within(inner: Span, outer: Span) -> bool {
     (outer.0, outer.1) <= (inner.0, inner.1) && (inner.2, inner.3) <= (outer.2, outer.3)
+}
+
+/// Laravel's own types outside the graph register no controller middleware:
+/// `Illuminate\Routing\Controller` and the `AuthorizesRequests`-style
+/// traits declare neither a constructor nor a static `middleware()`.
+fn is_framework(fqn: &str) -> bool {
+    fqn.get(..11)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("illuminate\\"))
 }
 
 impl ControllerIndex {
@@ -1518,7 +1629,7 @@ impl ControllerIndex {
     fn build(local_graphs: &[LocalGraph]) -> Self {
         let mut index = Self::default();
         let mut start = 0u32;
-        for graph in local_graphs {
+        for (file_idx, graph) in local_graphs.iter().enumerate() {
             let base = start;
             start += graph.nodes.len() as u32;
             let is_php = ecp_core::analyzer::pipeline::AnalyzerPipeline::provider_name_for_path(
@@ -1549,7 +1660,8 @@ impl ControllerIndex {
                 let fqn = match namespace {
                     Some(namespace) => format!("{namespace}\\{}", node.name),
                     None => node.name.clone(),
-                };
+                }
+                .to_ascii_lowercase();
                 let slot = index.types.len();
                 let node_idx = base + local_idx as u32;
                 index.by_node.insert(node_idx, slot);
@@ -1560,15 +1672,19 @@ impl ControllerIndex {
                         .or_default()
                         .push(slot);
                 }
+                index.by_fqn.entry(fqn.clone()).or_default().push(slot);
                 index.types.push(ControllerType {
                     node: node_idx,
+                    file_idx: file_idx as u32,
                     is_trait,
-                    fqn: fqn.to_ascii_lowercase(),
+                    fqn,
                     methods: FxHashMap::default(),
                     has_constructor: false,
-                    constructor_calls_parent: false,
-                    constructor_middleware: Vec::new(),
+                    constructor: Vec::new(),
                     static_middleware: None,
+                    parent: None,
+                    interfaces: Vec::new(),
+                    traits: Vec::new(),
                 });
                 spans.push((node.name.as_str(), node.span));
             }
@@ -1599,35 +1715,57 @@ impl ControllerIndex {
                 .iter()
                 .filter(|route| route.method == RawRoute::CONTROLLER_MIDDLEWARE)
             {
-                let (Some(scope), Some(offset)) = (
-                    record.scope.as_deref(),
-                    spans
-                        .iter()
-                        .position(|(_, span)| span_within(record.span, *span)),
-                ) else {
+                let Some(offset) = spans
+                    .iter()
+                    .position(|(_, span)| span_within(record.span, *span))
+                else {
                     continue;
                 };
                 let owner = &mut index.types[first + offset];
-                let rule = MiddlewareRule {
-                    names: scope.middleware.clone(),
-                    only: scope.only.clone(),
-                    except: scope.except.clone(),
+                let (marker, payload) = record
+                    .path
+                    .split_once(' ')
+                    .unwrap_or((record.path.as_str(), ""));
+                let rule = || {
+                    record.scope.as_deref().map(|scope| MiddlewareRule {
+                        names: scope.middleware.clone(),
+                        only: scope.only.clone(),
+                        except: scope.except.clone(),
+                    })
                 };
-                match record.path.as_str() {
+                let named = || (payload.to_string(), record.span);
+                match marker {
                     FROM_CONSTRUCTOR => {
                         owner.has_constructor = true;
-                        owner.constructor_middleware.push(rule);
+                        owner
+                            .constructor
+                            .extend(rule().map(ConstructorStep::Register));
                     }
                     CALLS_PARENT_CONSTRUCTOR => {
                         owner.has_constructor = true;
-                        owner.constructor_calls_parent = true;
+                        owner.constructor.push(ConstructorStep::Parent);
+                    }
+                    CONSTRUCTOR_UNREAD => {
+                        owner.has_constructor = true;
+                        owner
+                            .constructor
+                            .push(ConstructorStep::Unread(record.span, payload.to_string()));
                     }
                     FROM_STATIC => {
-                        let rules = owner.static_middleware.get_or_insert_with(Vec::new);
-                        if !rule.names.is_empty() {
-                            rules.push(rule);
-                        }
+                        let entries = owner.static_middleware.get_or_insert_with(Vec::new);
+                        entries.extend(
+                            rule()
+                                .filter(|rule| !rule.names.is_empty())
+                                .map(StaticEntry::Register),
+                        );
                     }
+                    STATIC_UNREAD => owner
+                        .static_middleware
+                        .get_or_insert_with(Vec::new)
+                        .push(StaticEntry::Unread(record.span, payload.to_string())),
+                    EXTENDS => owner.parent = Some(named()),
+                    IMPLEMENTS => owner.interfaces.push(named()),
+                    USES => owner.traits.push(named()),
                     _ => {}
                 }
             }
@@ -1690,7 +1828,7 @@ impl ControllerIndex {
             node,
             by_namespace,
             inherited,
-            middleware: self.controller_middleware(*class, method, symbol_table),
+            middleware: self.controller_middleware(*class, method),
         })
     }
 
@@ -1743,62 +1881,181 @@ impl ControllerIndex {
         None
     }
 
-    /// `class`, then its parent class, and on up while each parent
-    /// resolves to exactly one class of the graph.
-    fn class_chain(&self, class: usize, symbol_table: &SymbolTable) -> Vec<usize> {
+    /// The one class or trait of the graph named `fqn`.
+    fn type_named(&self, fqn: &str, is_trait: bool) -> Option<usize> {
+        let found: Vec<usize> = self
+            .by_fqn
+            .get(&fqn.to_ascii_lowercase())?
+            .iter()
+            .copied()
+            .filter(|&t| self.types[t].is_trait == is_trait)
+            .collect();
+        match found.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        }
+    }
+
+    /// `class`, then the class its `extends` names, and on up while each
+    /// names exactly one class of the graph; and whether the last one's
+    /// `extends` names a class this cannot follow.
+    fn parent_chain(&self, class: usize) -> (Vec<usize>, bool) {
         let mut chain = vec![class];
         while chain.len() < MAX_HERITAGE_DEPTH {
-            let parents: Vec<usize> = self
-                .bases(chain[chain.len() - 1], symbol_table)
-                .into_iter()
-                .filter(|&base| !self.types[base].is_trait)
-                .collect();
-            match parents.as_slice() {
-                [parent] if !chain.contains(parent) => chain.push(*parent),
-                _ => break,
+            let Some((parent, _)) = &self.types[chain[chain.len() - 1]].parent else {
+                return (chain, false);
+            };
+            match self.type_named(parent, false) {
+                Some(parent) if !chain.contains(&parent) => chain.push(parent),
+                _ => return (chain, true),
             }
         }
-        chain
+        (chain, true)
+    }
+
+    fn unread(&self, ty: usize, span: Span, hint: String) -> UnreadMiddleware {
+        UnreadMiddleware {
+            file_idx: self.types[ty].file_idx,
+            span,
+            hint,
+        }
+    }
+
+    /// The parent `extends` names past the end of `chain`, when it may
+    /// declare `what`.
+    fn open_parent(&self, chain: &[usize], open: bool, what: &str) -> Option<UnreadMiddleware> {
+        let last = *chain.last()?;
+        let (parent, span) = self.types[last].parent.as_ref().filter(|_| open)?;
+        (!is_framework(parent)).then(|| {
+            self.unread(
+                last,
+                *span,
+                format!("parent class `{parent}` is outside the graph and may declare {what}"),
+            )
+        })
+    }
+
+    /// The type whose `what` PHP runs for an object of `chain[from]`: the
+    /// first class from there that declares it, else that class's used
+    /// trait that does, then on up the parents. A trait or parent outside
+    /// the graph may declare it, so the answer is unread.
+    fn supplier(
+        &self,
+        chain: &[usize],
+        open: bool,
+        from: usize,
+        declares: impl Fn(&ControllerType) -> bool,
+        what: &str,
+    ) -> Supplier {
+        for (at, &class) in chain.iter().enumerate().skip(from) {
+            let ty = &self.types[class];
+            if declares(ty) {
+                return Supplier::Found { ty: class, at };
+            }
+            let mut found: Vec<(usize, Span)> = Vec::new();
+            for (name, span) in &ty.traits {
+                match self.type_named(name, true) {
+                    Some(t) if declares(&self.types[t]) => found.push((t, *span)),
+                    Some(_) => {}
+                    None if is_framework(name) => {}
+                    None => {
+                        return Supplier::Unread(self.unread(
+                            class,
+                            *span,
+                            format!("trait `{name}` is outside the graph and may declare {what}"),
+                        ))
+                    }
+                }
+            }
+            match found.as_slice() {
+                [] => {}
+                [(t, _)] => return Supplier::Found { ty: *t, at },
+                [.., (_, span)] => {
+                    return Supplier::Unread(self.unread(
+                        class,
+                        *span,
+                        format!("two used traits declare {what}"),
+                    ))
+                }
+            }
+        }
+        match self.open_parent(chain, open, what) {
+            Some(unread) => Supplier::Unread(unread),
+            None => Supplier::None,
+        }
+    }
+
+    /// Whether `chain[0]` is a `HasMiddleware`, as `is_a` checks it: a class
+    /// of the chain implements the interface. `Err` when an interface, or a
+    /// parent outside the graph, may extend or implement it.
+    fn has_middleware(&self, chain: &[usize], open: bool) -> Result<bool, UnreadMiddleware> {
+        let mut doubt = None;
+        for &class in chain {
+            for (interface, span) in &self.types[class].interfaces {
+                if interface.eq_ignore_ascii_case(HAS_MIDDLEWARE) {
+                    return Ok(true);
+                }
+                if doubt.is_none() && !is_framework(interface) {
+                    doubt = Some(self.unread(
+                        class,
+                        *span,
+                        format!("interface `{interface}` may extend `HasMiddleware`"),
+                    ));
+                }
+            }
+        }
+        match doubt.or_else(|| self.open_parent(chain, open, "`HasMiddleware`")) {
+            Some(unread) => Err(unread),
+            None => Ok(false),
+        }
     }
 
     /// Laravel's `Route::controllerMiddleware` for an action of method
     /// `method` on `class`: a `HasMiddleware` class's static entries, else
-    /// what its constructor registers. A parent outside the graph adds
-    /// nothing.
+    /// what the constructor PHP runs registers. `Err` when a step that
+    /// decides it is not statically certain.
     fn controller_middleware(
         &self,
         class: usize,
         method: &str,
-        symbol_table: &SymbolTable,
-    ) -> Vec<String> {
-        let chain = self.class_chain(class, symbol_table);
-        // Laravel calls the static `middleware()` the nearest class declares
-        // and then reads no constructor middleware.
-        let rules: Vec<&MiddlewareRule> = match chain
-            .iter()
-            .find_map(|&c| self.types[c].static_middleware.as_ref())
-        {
-            Some(rules) => rules.iter().collect(),
-            None => {
-                // PHP runs the nearest declared constructor, and a parent's
-                // only through `parent::__construct()`, usually called first.
-                let mut ran: Vec<usize> = Vec::new();
-                for &c in &chain {
-                    let ty = &self.types[c];
-                    if !ty.has_constructor {
-                        continue;
-                    }
-                    ran.push(c);
-                    if !ty.constructor_calls_parent {
-                        break;
+    ) -> Result<Vec<String>, Vec<UnreadMiddleware>> {
+        let (chain, open) = self.parent_chain(class);
+        let static_supplier = self.supplier(
+            &chain,
+            open,
+            0,
+            |ty| ty.static_middleware.is_some(),
+            "a static `middleware()`",
+        );
+        let mut rules: Vec<&MiddlewareRule> = Vec::new();
+        let mut unread: Vec<UnreadMiddleware> = Vec::new();
+        match (self.has_middleware(&chain, open), static_supplier) {
+            (Ok(true), Supplier::Found { ty, .. }) => {
+                for entry in self.types[ty].static_middleware.iter().flatten() {
+                    match entry {
+                        StaticEntry::Register(rule) => rules.push(rule),
+                        StaticEntry::Unread(span, why) => {
+                            unread.push(self.unread(ty, *span, why.clone()))
+                        }
                     }
                 }
-                ran.iter()
-                    .rev()
-                    .flat_map(|&c| &self.types[c].constructor_middleware)
-                    .collect()
             }
-        };
+            // PHP refuses a concrete `HasMiddleware` class without one.
+            (Ok(true), Supplier::None) => {}
+            (Ok(true), Supplier::Unread(why)) => unread.push(why),
+            // The graph declares a static `middleware()`, and only what it
+            // cannot see decides whether Laravel calls it.
+            (Err(why), Supplier::Found { .. }) => unread.push(why),
+            // Without a static `middleware()` in the graph, an interface or
+            // parent outside it is taken for no `HasMiddleware`: a concrete
+            // implementer must declare the method.
+            (Ok(false) | Err(_), _) => {
+                self.constructor_rules(&chain, open, 0, &mut rules, &mut unread)
+            }
+        }
+        if !unread.is_empty() {
+            return Err(unread);
+        }
         let mut middleware: Vec<String> = Vec::new();
         for name in rules
             .into_iter()
@@ -1809,7 +2066,38 @@ impl ControllerIndex {
                 middleware.push(name.clone());
             }
         }
-        middleware
+        Ok(middleware)
+    }
+
+    /// The registrations of the constructor PHP runs for an object of
+    /// `chain[from]`, in the order they run: a parent's inlined where
+    /// `parent::__construct()` calls it.
+    fn constructor_rules<'a>(
+        &'a self,
+        chain: &[usize],
+        open: bool,
+        from: usize,
+        rules: &mut Vec<&'a MiddlewareRule>,
+        unread: &mut Vec<UnreadMiddleware>,
+    ) {
+        match self.supplier(chain, open, from, |ty| ty.has_constructor, "`__construct`") {
+            Supplier::None => {}
+            Supplier::Unread(why) => unread.push(why),
+            Supplier::Found { ty, at } => {
+                for step in &self.types[ty].constructor {
+                    match step {
+                        ConstructorStep::Register(rule) => rules.push(rule),
+                        // `parent` in a trait is the using class's parent.
+                        ConstructorStep::Parent => {
+                            self.constructor_rules(chain, open, at + 1, rules, unread)
+                        }
+                        ConstructorStep::Unread(span, why) => {
+                            unread.push(self.unread(ty, *span, why.clone()))
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1818,8 +2106,48 @@ impl ControllerIndex {
 const FROM_CONSTRUCTOR: &str = "__construct";
 /// ... of an entry of a static `middleware()`.
 const FROM_STATIC: &str = "middleware";
-/// ... of a constructor that calls `parent::__construct()`.
+/// ... of a constructor's `parent::__construct()` call, at its place among
+/// the constructor's registrations.
 const CALLS_PARENT_CONSTRUCTOR: &str = "parent::__construct";
+/// ... of a constructor registration this cannot read; the reason follows
+/// a space.
+const CONSTRUCTOR_UNREAD: &str = "__construct?";
+/// ... of a static `middleware()` entry, or a body, this cannot read; the
+/// reason follows a space.
+const STATIC_UNREAD: &str = "middleware?";
+/// ... of the class's `extends` class, an `implements` interface, and a
+/// used trait; the fully qualified name follows a space.
+const EXTENDS: &str = "extends";
+const IMPLEMENTS: &str = "implements";
+const USES: &str = "use";
+
+/// The interface whose implementers Laravel asks for static middleware.
+const HAS_MIDDLEWARE: &str = "Illuminate\\Routing\\Controllers\\HasMiddleware";
+
+/// Nodes whose body runs only when something calls it, not where it stands.
+const NESTED_SCOPES: &[&str] = &[
+    "anonymous_function",
+    "arrow_function",
+    "function_definition",
+    "anonymous_class",
+];
+
+/// Nodes that run every child whenever they run.
+const STRAIGHT_LINE: &[&str] = &[
+    "compound_statement",
+    "expression_statement",
+    "parenthesized_expression",
+    "assignment_expression",
+    "member_call_expression",
+];
+
+const CONDITIONAL_REGISTRATION: &str = "`$this->middleware()` runs under a branch, loop or `try`";
+const CONDITIONAL_PARENT: &str = "`parent::__construct()` runs under a branch, loop or `try`";
+const UNREAD_NAMES: &str = "`$this->middleware()` names middleware only the runtime knows";
+const UNREAD_OPTIONS: &str =
+    "`$this->middleware()` has `only` / `except` methods only the runtime knows";
+const UNREAD_STATIC_BODY: &str = "the static `middleware()` does not return one array literal";
+const UNREAD_STATIC_ENTRY: &str = "a static `middleware()` entry only the runtime knows";
 
 /// Qualify each include record's group controller, as written, through the
 /// file's imports and namespace.
@@ -1831,12 +2159,18 @@ pub(super) fn resolve_include_controllers(records: &mut [RawRoute], names: FileN
     }
 }
 
-/// Append a [`RawRoute::CONTROLLER_MIDDLEWARE`] record for the middleware
-/// each class of the file registers for its own actions:
+/// Append [`RawRoute::CONTROLLER_MIDDLEWARE`] records for the middleware
+/// each class and trait of the file registers for its own actions:
 /// `$this->middleware(...)` in its constructor, and each entry of a static
-/// `middleware()`, the `HasMiddleware` contract. A middleware closure has
-/// no name and makes no record.
-pub(super) fn push_controller_middleware(root: Node, source: &[u8], out: &mut Vec<RawRoute>) {
+/// `middleware()`, the `HasMiddleware` contract; and for the parent,
+/// interfaces and traits that decide which of them Laravel runs. A
+/// middleware closure has no name and makes no record.
+pub(super) fn push_controller_middleware(
+    root: Node,
+    source: &[u8],
+    names: FileNames,
+    out: &mut Vec<RawRoute>,
+) {
     let mut containers = vec![root];
     while let Some(container) = containers.pop() {
         let mut cursor = container.walk();
@@ -1844,41 +2178,77 @@ pub(super) fn push_controller_middleware(root: Node, source: &[u8], out: &mut Ve
         for child in children {
             match child.kind() {
                 "namespace_definition" | "compound_statement" => containers.push(child),
-                "class_declaration" => class_middleware(child, source, out),
+                "class_declaration" | "trait_declaration" => {
+                    type_middleware(child, source, names, out)
+                }
                 _ => {}
             }
         }
     }
 }
 
-fn class_middleware(class: Node, source: &[u8], out: &mut Vec<RawRoute>) {
-    let Some(body) = class.child_by_field_name("body") else {
+fn type_middleware(ty: Node, source: &[u8], names: FileNames, out: &mut Vec<RawRoute>) {
+    let mut cursor = ty.walk();
+    let clauses: Vec<Node> = ty.named_children(&mut cursor).collect();
+    for clause in clauses {
+        match clause.kind() {
+            "base_clause" => push_type_names(clause, EXTENDS, source, names, out),
+            "class_interface_clause" => push_type_names(clause, IMPLEMENTS, source, names, out),
+            _ => {}
+        }
+    }
+    let Some(body) = ty.child_by_field_name("body") else {
         return;
     };
     let mut cursor = body.walk();
-    let methods: Vec<Node> = body
-        .named_children(&mut cursor)
-        .filter(|n| n.kind() == "method_declaration")
-        .collect();
-    for method in methods {
-        let (Some(name), Some(block)) = (
-            method
-                .child_by_field_name("name")
-                .and_then(|n| n.utf8_text(source).ok()),
-            method.child_by_field_name("body"),
-        ) else {
-            continue;
-        };
-        if name.eq_ignore_ascii_case("__construct") {
-            constructor_middleware(block, source, out);
-        } else if name.eq_ignore_ascii_case("middleware") && is_static(method) {
-            push_middleware_record(out, FROM_STATIC, method, MiddlewareRule::none());
-            for entry in returned_entries(block) {
-                if let Some(rule) = middleware_entry(entry, source) {
-                    push_middleware_record(out, FROM_STATIC, entry, rule);
+    let members: Vec<Node> = body.named_children(&mut cursor).collect();
+    for member in members {
+        match member.kind() {
+            "use_declaration" => push_type_names(member, USES, source, names, out),
+            "method_declaration" => {
+                let (Some(name), Some(block)) = (
+                    member
+                        .child_by_field_name("name")
+                        .and_then(|n| n.utf8_text(source).ok()),
+                    member.child_by_field_name("body"),
+                ) else {
+                    continue;
+                };
+                if name.eq_ignore_ascii_case("__construct") {
+                    constructor_middleware(block, source, names, out);
+                } else if name.eq_ignore_ascii_case("middleware") && is_static(member) {
+                    static_middleware(member, block, source, names, out);
                 }
             }
+            _ => {}
         }
+    }
+}
+
+/// A record per class name of `clause` (`extends A`, `implements B, C`,
+/// `use T;`), fully qualified through the file's names. A `use` block's
+/// conflict rules name no further trait.
+fn push_type_names(
+    clause: Node,
+    marker: &str,
+    source: &[u8],
+    names: FileNames,
+    out: &mut Vec<RawRoute>,
+) {
+    let mut cursor = clause.walk();
+    let types: Vec<Node> = clause
+        .named_children(&mut cursor)
+        .filter(|n| matches!(n.kind(), "name" | "qualified_name" | "relative_name"))
+        .collect();
+    for ty in types {
+        let Some(fqn) = ty
+            .utf8_text(source)
+            .ok()
+            .and_then(|name| names.class_value(name))
+        else {
+            continue;
+        };
+        push_marker(out, marker, &fqn, ty);
     }
 }
 
@@ -1905,118 +2275,239 @@ fn push_middleware_record(out: &mut Vec<RawRoute>, from: &str, node: Node, rule:
     });
 }
 
+/// A record whose `path` carries `payload` after `marker`. The handler
+/// stays empty: a route record's handler names an entry point.
+fn push_marker(out: &mut Vec<RawRoute>, marker: &str, payload: &str, node: Node) {
+    out.push(RawRoute {
+        method: RawRoute::CONTROLLER_MIDDLEWARE.to_string(),
+        path: format!("{marker} {payload}"),
+        handler: None,
+        span: node_span(&node),
+        scope: None,
+    });
+}
+
 /// `$this->middleware('auth', ['except' => [...]])`, with `->only(...)` /
 /// `->except(...)` chained on the options it returns, and
-/// `parent::__construct()`, anywhere in the constructor body.
-fn constructor_middleware(block: Node, source: &[u8], out: &mut Vec<RawRoute>) {
-    let mut stack = vec![block];
-    while let Some(node) = stack.pop() {
-        match node.kind() {
-            "member_call_expression"
-                if call_name(node, source) == Some("middleware")
-                    && node
-                        .child_by_field_name("object")
-                        .and_then(|object| object.utf8_text(source).ok())
-                        == Some("$this") =>
-            {
-                let mut rule = MiddlewareRule {
-                    names: first_list(node, source),
-                    ..MiddlewareRule::none()
-                };
-                for (key, value) in nth_argument(node, 1)
-                    .map(|options| array_pairs(options, source))
-                    .unwrap_or_default()
-                {
-                    match key.as_str() {
-                        "only" => rule.only = Some(string_list(value, source)),
-                        "except" => rule.except = Some(string_list(value, source)),
-                        _ => {}
-                    }
-                }
-                // `ControllerMiddlewareOptions` writes through to the same
-                // options array, so a chained call replaces the option.
-                let mut cur = node;
-                while let Some(parent) = cur
-                    .parent()
-                    .filter(|p| p.kind() == "member_call_expression")
-                    .filter(|p| p.child_by_field_name("object") == Some(cur))
-                {
-                    match call_name(parent, source) {
-                        Some("only") => rule.only = Some(variadic_list(parent, source)),
-                        Some("except") => rule.except = Some(variadic_list(parent, source)),
-                        _ => {}
-                    }
-                    cur = parent;
-                }
-                if !rule.names.is_empty() {
-                    push_middleware_record(out, FROM_CONSTRUCTOR, node, rule);
-                }
-            }
-            "scoped_call_expression"
-                if call_name(node, source)
-                    .is_some_and(|name| name.eq_ignore_ascii_case("__construct"))
-                    && node
-                        .child_by_field_name("scope")
-                        .and_then(|scope| scope.utf8_text(source).ok())
-                        .is_some_and(|scope| scope.eq_ignore_ascii_case("parent")) =>
-            {
-                push_middleware_record(out, CALLS_PARENT_CONSTRUCTOR, node, MiddlewareRule::none());
-            }
-            _ => {}
+/// `parent::__construct()`, in the order the constructor body runs them.
+/// A nested function or class runs nothing here. A call that runs under a
+/// branch, loop or `try`, or whose names or methods only the runtime
+/// knows, becomes a [`CONSTRUCTOR_UNREAD`] record.
+fn constructor_middleware(block: Node, source: &[u8], names: FileNames, out: &mut Vec<RawRoute>) {
+    // Each node with whether it runs whenever the constructor does.
+    let mut stack = vec![(block, true)];
+    while let Some((node, certain)) = stack.pop() {
+        if NESTED_SCOPES.contains(&node.kind()) {
+            continue;
         }
+        if is_this_middleware_call(node, source) {
+            match constructor_rule(node, source, names) {
+                _ if !certain => {
+                    push_marker(out, CONSTRUCTOR_UNREAD, CONDITIONAL_REGISTRATION, node)
+                }
+                Err(why) => push_marker(out, CONSTRUCTOR_UNREAD, why, node),
+                Ok(Some(rule)) => push_middleware_record(out, FROM_CONSTRUCTOR, node, rule),
+                Ok(None) => {}
+            }
+            continue;
+        }
+        if is_parent_constructor_call(node, source) {
+            if certain {
+                push_middleware_record(out, CALLS_PARENT_CONSTRUCTOR, node, MiddlewareRule::none());
+            } else {
+                push_marker(out, CONSTRUCTOR_UNREAD, CONDITIONAL_PARENT, node);
+            }
+            continue;
+        }
+        let certain = certain && STRAIGHT_LINE.contains(&node.kind());
         let mut cursor = node.walk();
-        stack.extend(node.named_children(&mut cursor));
+        let children: Vec<Node> = node.named_children(&mut cursor).collect();
+        stack.extend(children.into_iter().rev().map(|child| (child, certain)));
     }
 }
 
-/// The entries of each array a `return` statement of `block` returns, past
-/// nested functions, whose returns are not the method's.
-fn returned_entries(block: Node) -> Vec<Node> {
-    let mut entries = Vec::new();
-    let mut stack = vec![block];
-    while let Some(node) = stack.pop() {
-        match node.kind() {
-            "anonymous_function" | "arrow_function" | "function_definition" => continue,
-            "return_statement" => {
-                if let Some(array) = node
-                    .named_child(0)
-                    .filter(|n| n.kind() == "array_creation_expression")
-                {
-                    entries.extend(array_values(array));
+fn is_this_middleware_call(node: Node, source: &[u8]) -> bool {
+    node.kind() == "member_call_expression"
+        && call_name(node, source) == Some("middleware")
+        && node
+            .child_by_field_name("object")
+            .and_then(|object| object.utf8_text(source).ok())
+            == Some("$this")
+}
+
+fn is_parent_constructor_call(node: Node, source: &[u8]) -> bool {
+    node.kind() == "scoped_call_expression"
+        && call_name(node, source).is_some_and(|name| name.eq_ignore_ascii_case("__construct"))
+        && node
+            .child_by_field_name("scope")
+            .and_then(|scope| scope.utf8_text(source).ok())
+            .is_some_and(|scope| scope.eq_ignore_ascii_case("parent"))
+}
+
+/// The rule one `$this->middleware(...)` call registers; `None` for a
+/// closure, which has no name.
+fn constructor_rule(
+    call: Node,
+    source: &[u8],
+    names: FileNames,
+) -> Result<Option<MiddlewareRule>, &'static str> {
+    let registered = nth_argument(call, 0)
+        .and_then(|value| literal_middleware(value, source, names))
+        .ok_or(UNREAD_NAMES)?;
+    let mut rule = MiddlewareRule {
+        names: registered,
+        ..MiddlewareRule::none()
+    };
+    match nth_argument(call, 1) {
+        None => {}
+        Some(options) if options.kind() == "array_creation_expression" => {
+            let mut cursor = options.walk();
+            let elements: Vec<Node> = options
+                .named_children(&mut cursor)
+                .filter(|n| n.kind() == "array_element_initializer")
+                .collect();
+            for element in elements {
+                // A positional value is no option; a key only the runtime
+                // knows may be `only` or `except`.
+                if element.named_child_count() != 2 {
+                    continue;
                 }
-                continue;
+                let key = element
+                    .named_child(0)
+                    .and_then(|key| string_value(key, source))
+                    .ok_or(UNREAD_OPTIONS)?;
+                let value = element.named_child(1).ok_or(UNREAD_OPTIONS)?;
+                match key.as_str() {
+                    "only" => {
+                        rule.only = Some(literal_methods(value, source).ok_or(UNREAD_OPTIONS)?)
+                    }
+                    "except" => {
+                        rule.except = Some(literal_methods(value, source).ok_or(UNREAD_OPTIONS)?)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Some(_) => return Err(UNREAD_OPTIONS),
+    }
+    // `ControllerMiddlewareOptions` writes through to the same options
+    // array, so a chained call replaces the option.
+    let mut cur = call;
+    while let Some(parent) = cur
+        .parent()
+        .filter(|p| p.kind() == "member_call_expression")
+        .filter(|p| p.child_by_field_name("object") == Some(cur))
+    {
+        match call_name(parent, source) {
+            Some("only") => {
+                rule.only = Some(variadic_methods(parent, source).ok_or(UNREAD_OPTIONS)?)
+            }
+            Some("except") => {
+                rule.except = Some(variadic_methods(parent, source).ok_or(UNREAD_OPTIONS)?)
             }
             _ => {}
+        }
+        cur = parent;
+    }
+    Ok((!rule.names.is_empty()).then_some(rule))
+}
+
+/// The entries of the one array a static `middleware()` returns. Any other
+/// body (several returns, a return under a branch, a value that is not an
+/// array literal) leaves every entry unread.
+fn static_middleware(
+    method: Node,
+    block: Node,
+    source: &[u8],
+    names: FileNames,
+    out: &mut Vec<RawRoute>,
+) {
+    push_middleware_record(out, FROM_STATIC, method, MiddlewareRule::none());
+    let returns = returns_of(block);
+    let array = match returns.as_slice() {
+        [ret] if ret.parent() == Some(block) => ret
+            .named_child(0)
+            .filter(|value| value.kind() == "array_creation_expression"),
+        _ => None,
+    };
+    let Some(entries) = array.and_then(array_entries) else {
+        push_marker(out, STATIC_UNREAD, UNREAD_STATIC_BODY, method);
+        return;
+    };
+    for entry in entries {
+        match static_entry(entry, source, names) {
+            Ok(Some(rule)) => push_middleware_record(out, FROM_STATIC, entry, rule),
+            Ok(None) => {}
+            Err(why) => push_marker(out, STATIC_UNREAD, why, entry),
+        }
+    }
+}
+
+/// The `return` statements of a method body, past nested functions and
+/// classes, whose returns are not the method's.
+fn returns_of(block: Node) -> Vec<Node> {
+    let mut returns = Vec::new();
+    let mut stack = vec![block];
+    while let Some(node) = stack.pop() {
+        if NESTED_SCOPES.contains(&node.kind()) {
+            continue;
+        }
+        if node.kind() == "return_statement" {
+            returns.push(node);
+            continue;
         }
         let mut cursor = node.walk();
         stack.extend(node.named_children(&mut cursor));
     }
-    entries
+    returns
 }
 
 /// One entry of a static `middleware()` array: `'auth'`, `Ensure::class`,
 /// or `new Middleware('auth', only: [...], except: [...])` with
-/// `->only(...)` / `->except(...)` chained on it.
-fn middleware_entry(entry: Node, source: &[u8]) -> Option<MiddlewareRule> {
+/// `->only(...)` / `->except(...)` chained on it; `None` for a closure.
+fn static_entry(
+    entry: Node,
+    source: &[u8],
+    names: FileNames,
+) -> Result<Option<MiddlewareRule>, &'static str> {
     match entry.kind() {
-        "parenthesized_expression" => middleware_entry(entry.named_child(0)?, source),
+        "parenthesized_expression" => static_entry(
+            entry.named_child(0).ok_or(UNREAD_STATIC_ENTRY)?,
+            source,
+            names,
+        ),
         "member_call_expression" => {
-            let mut rule = middleware_entry(entry.child_by_field_name("object")?, source)?;
+            let object = entry
+                .child_by_field_name("object")
+                .ok_or(UNREAD_STATIC_ENTRY)?;
+            let rule = static_entry(object, source, names)?;
+            let methods = nth_argument(entry, 0)
+                .and_then(|value| literal_methods(value, source))
+                .ok_or(UNREAD_STATIC_ENTRY)?;
+            let Some(mut rule) = rule else {
+                return Ok(None);
+            };
             match call_name(entry, source) {
-                Some("only") => rule.only = Some(first_list(entry, source)),
-                Some("except") => rule.except = Some(first_list(entry, source)),
-                _ => {}
+                Some("only") => rule.only = Some(methods),
+                Some("except") => rule.except = Some(methods),
+                _ => return Err(UNREAD_STATIC_ENTRY),
             }
-            Some(rule)
+            Ok(Some(rule))
         }
         "object_creation_expression" => {
             let mut cursor = entry.walk();
             let children: Vec<Node> = entry.named_children(&mut cursor).collect();
-            let class = children.first()?.utf8_text(source).ok()?;
+            let class = children
+                .first()
+                .and_then(|class| class.utf8_text(source).ok())
+                .ok_or(UNREAD_STATIC_ENTRY)?;
             if class.rsplit('\\').next() != Some("Middleware") {
-                return None;
+                return Err(UNREAD_STATIC_ENTRY);
             }
-            let list = children.iter().find(|n| n.kind() == "arguments")?;
+            let list = children
+                .iter()
+                .find(|n| n.kind() == "arguments")
+                .ok_or(UNREAD_STATIC_ENTRY)?;
             let mut cursor = list.walk();
             let arguments: Vec<Node> = list
                 .named_children(&mut cursor)
@@ -2027,26 +2518,96 @@ fn middleware_entry(entry: Node, source: &[u8]) -> Option<MiddlewareRule> {
                 let label = argument
                     .child_by_field_name("name")
                     .and_then(|n| n.utf8_text(source).ok());
-                let Some(value) = argument_value(argument) else {
-                    continue;
-                };
+                let value = argument_value(argument).ok_or(UNREAD_STATIC_ENTRY)?;
                 // `null` leaves the filter unset: `?array $only = null`.
-                let methods = || (value.kind() != "null").then(|| string_list(value, source));
+                let methods = || match value.kind() {
+                    "null" => Ok(None),
+                    _ => literal_methods(value, source)
+                        .map(Some)
+                        .ok_or(UNREAD_STATIC_ENTRY),
+                };
                 match (label, position) {
-                    (Some("middleware"), _) | (None, 0) => rule.names = string_list(value, source),
-                    (Some("only"), _) | (None, 1) => rule.only = methods(),
-                    (Some("except"), _) | (None, 2) => rule.except = methods(),
-                    _ => {}
+                    (Some("middleware"), _) | (None, 0) => {
+                        rule.names =
+                            literal_middleware(value, source, names).ok_or(UNREAD_STATIC_ENTRY)?
+                    }
+                    (Some("only"), _) | (None, 1) => rule.only = methods()?,
+                    (Some("except"), _) | (None, 2) => rule.except = methods()?,
+                    _ => return Err(UNREAD_STATIC_ENTRY),
                 }
             }
-            (!rule.names.is_empty()).then_some(rule)
+            Ok((!rule.names.is_empty()).then_some(rule))
         }
         _ => {
-            let names = string_list(entry, source);
-            (!names.is_empty()).then(|| MiddlewareRule {
+            let names = literal_middleware(entry, source, names).ok_or(UNREAD_STATIC_ENTRY)?;
+            Ok((!names.is_empty()).then(|| MiddlewareRule {
                 names,
                 ..MiddlewareRule::none()
-            })
+            }))
         }
     }
+}
+
+/// The middleware names `node` registers: `'auth'`, `Ensure::class`, a
+/// closure, which has no name, or an array of them. `None` when an entry is
+/// any other expression, whose value only the runtime knows.
+fn literal_middleware(node: Node, source: &[u8], names: FileNames) -> Option<Vec<String>> {
+    let values = match node.kind() {
+        "array_creation_expression" => array_entries(node)?,
+        _ => vec![node],
+    };
+    let mut out = Vec::new();
+    for value in values {
+        if matches!(value.kind(), "anonymous_function" | "arrow_function") {
+            continue;
+        }
+        out.push(middleware_name(value, source, names)?);
+    }
+    Some(out)
+}
+
+/// The method names `node` lists: `'index'` or `['index', 'show']`; `None`
+/// when one is not a literal.
+fn literal_methods(node: Node, source: &[u8]) -> Option<Vec<String>> {
+    match node.kind() {
+        "array_creation_expression" => array_entries(node)?
+            .into_iter()
+            .map(|value| string_value(value, source))
+            .collect(),
+        _ => string_value(node, source).map(|method| vec![method]),
+    }
+}
+
+/// The method names of `->only(...)` / `->except(...)`: an array first
+/// argument is the list, else each argument is one name, as
+/// `ControllerMiddlewareOptions` reads them.
+fn variadic_methods(call: Node, source: &[u8]) -> Option<Vec<String>> {
+    let values: Vec<Node> = arguments(call)
+        .into_iter()
+        .map(argument_value)
+        .collect::<Option<_>>()?;
+    match values.as_slice() {
+        [first, ..] if first.kind() == "array_creation_expression" => {
+            literal_methods(*first, source)
+        }
+        many => many.iter().map(|v| string_value(*v, source)).collect(),
+    }
+}
+
+/// The value of every element of an array literal, a keyed one's too.
+/// `None` for a spread, whose elements only the runtime knows.
+fn array_entries(array: Node) -> Option<Vec<Node>> {
+    let mut cursor = array.walk();
+    let elements: Vec<Node> = array
+        .named_children(&mut cursor)
+        .filter(|n| n.kind() == "array_element_initializer")
+        .collect();
+    elements
+        .into_iter()
+        .map(|element| {
+            element
+                .named_child(element.named_child_count().checked_sub(1)? as u32)
+                .filter(|value| !matches!(value.kind(), "variadic_unpacking" | "by_ref"))
+        })
+        .collect()
 }

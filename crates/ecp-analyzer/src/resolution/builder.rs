@@ -291,7 +291,7 @@ impl GraphBuilder {
             middleware: mut route_middleware,
             actions: controller_actions,
             laravel,
-            blind_spots: route_blind_spots,
+            blind_spots: mut route_blind_spots,
         } = pass1_5_extract_routes(
             &self.local_graphs,
             &files,
@@ -312,6 +312,7 @@ impl GraphBuilder {
             &self.local_graphs,
             self.repo_root.as_deref(),
             &emitted_routes,
+            &nodes,
             &mut string_pool,
         );
 
@@ -370,11 +371,13 @@ impl GraphBuilder {
             &laravel,
             &controller_actions,
             &self.local_graphs,
+            &files,
             &symbol_table,
             &entry_edges,
             &mut string_pool,
             &mut nodes,
             &mut route_middleware,
+            &mut route_blind_spots,
         );
         let alias_table = record_path_aliases(&self.path_aliases, &mut string_pool);
         if prof {
@@ -1576,18 +1579,24 @@ const MAX_ENTRY_REASONS: usize = 8;
 /// route's `route_middleware` after the route-file middleware, each name
 /// once and none the route's groups remove, as Laravel's
 /// `Route::gatherMiddleware` and `Router::resolveMiddleware` compose them.
+/// Controller middleware that is not statically certain joins nothing; a
+/// BlindSpot in the controller's file says why.
 #[allow(clippy::too_many_arguments)]
 fn pass1_95_controller_actions(
     laravel: &LaravelRoutes,
     actions: &[PendingAction],
     local_graphs: &[LocalGraph],
+    files: &[File],
     symbol_table: &SymbolTable,
     entry_edges: &[Edge],
     string_pool: &mut StringPool,
     nodes: &mut Vec<Node>,
     route_middleware: &mut Vec<RouteMiddleware>,
+    blind_spots: &mut Vec<BlindSpotRecord>,
 ) -> Vec<Edge> {
     let mut edges = Vec::new();
+    let mut joined: Vec<RouteMiddleware> = Vec::new();
+    let mut unread: Vec<crate::php::laravel_routes::UnreadMiddleware> = Vec::new();
     // Handler → (best confidence, reasons), in first-bound order.
     let mut entries: Vec<(u32, f32, Vec<&str>)> = Vec::new();
     let mut entry_of: FxHashMap<u32, usize> = FxHashMap::default();
@@ -1612,24 +1621,30 @@ fn pass1_95_controller_actions(
             reason: string_pool.add(reason),
         });
         let mut middleware = pending.middleware.clone();
-        for name in &found.middleware {
-            if !middleware.contains(name) && !pending.excluded.contains(name) {
-                middleware.push(name.clone());
+        match &found.middleware {
+            Ok(names) => {
+                for name in names {
+                    if !middleware.contains(name) && !pending.excluded.contains(name) {
+                        middleware.push(name.clone());
+                    }
+                }
+            }
+            Err(spots) => {
+                for spot in spots {
+                    if !unread.contains(spot) {
+                        unread.push(spot.clone());
+                    }
+                }
             }
         }
         if middleware.len() > pending.middleware.len() {
-            let entry = RouteMiddleware {
+            joined.push(RouteMiddleware {
                 node_idx: pending.route,
                 middleware: middleware
                     .iter()
                     .map(|name| string_pool.add(name))
                     .collect(),
-            };
-            // Sorted by node index: `route_middleware_of` binary-searches it.
-            match route_middleware.binary_search_by_key(&pending.route, |e| e.node_idx) {
-                Ok(at) => route_middleware[at] = entry,
-                Err(at) => route_middleware.insert(at, entry),
-            }
+            });
         }
         match entry_of.get(&found.node) {
             Some(&slot) => {
@@ -1642,6 +1657,30 @@ fn pass1_95_controller_actions(
                 entries.push((found.node, confidence, vec![pending.route_name.as_str()]));
             }
         }
+    }
+    if !joined.is_empty() {
+        // An entry replaces the route's route-file-only one. Sorted by node
+        // index once: `route_middleware_of` binary-searches it.
+        let replaced: FxHashSet<u32> = joined.iter().map(|entry| entry.node_idx).collect();
+        route_middleware.retain(|entry| !replaced.contains(&entry.node_idx));
+        route_middleware.append(&mut joined);
+        route_middleware.sort_unstable_by_key(|entry| entry.node_idx);
+    }
+    for spot in unread {
+        let graph = &local_graphs[spot.file_idx as usize];
+        blind_spots.push(BlindSpotRecord {
+            kind: string_pool.add(crate::php::laravel_routes::BS_KIND_CONTROLLER_MIDDLEWARE),
+            file_path: string_pool.add(&graph.file_path.to_string_lossy().replace('\\', "/")),
+            start_row: spot.span.0,
+            start_col: spot.span.1,
+            end_row: spot.span.2,
+            end_col: spot.span.3,
+            hint: string_pool.add(&format!(
+                "{}; routes this controller handles carry none of its middleware",
+                spot.hint
+            )),
+            is_test: matches!(files[spot.file_idx as usize].category, FileCategory::Test),
+        });
     }
     if entries.is_empty() {
         return edges;
@@ -1731,6 +1770,7 @@ fn pass1_6_fetch_shapes(
     local_graphs: &[LocalGraph],
     repo_root: Option<&std::path::Path>,
     emitted_routes: &[EmittedRoute],
+    nodes: &[Node],
     string_pool: &mut StringPool,
 ) -> (Vec<RouteShape>, Vec<Edge>) {
     let mut route_shapes_out: Vec<RouteShape> = Vec::new();
@@ -1869,13 +1909,20 @@ fn pass1_6_fetch_shapes(
                     // `:*` segments whenever the route had a param placeholder.
                     let route_templated = norm_url.contains(":*");
                     // A Laravel `ANY` route answers each verb `Route::any` registers.
-                    let any = (client_method != "ANY"
-                        && crate::route_detector::any_route_answers(client_method))
-                    .then(|| ("ANY".to_string(), norm_url.clone()));
-                    for key in std::iter::once((client_method.clone(), norm_url)).chain(any) {
-                        for &route_idx in route_index.get(&key).into_iter().flatten() {
-                            matched.push((route_idx, client_templated || route_templated));
-                        }
+                    let any = if client_method != "ANY"
+                        && crate::route_detector::any_route_answers(client_method)
+                    {
+                        route_index.get(&("ANY".to_string(), norm_url.clone()))
+                    } else {
+                        None
+                    };
+                    let exact = route_index.get(&(client_method.clone(), norm_url));
+                    for route_idx in answering_routes(
+                        exact.map_or(&[][..], Vec::as_slice),
+                        any.map_or(&[][..], Vec::as_slice),
+                        nodes,
+                    ) {
+                        matched.push((route_idx, client_templated || route_templated));
                     }
                 }
                 if matched.is_empty() {
@@ -1909,6 +1956,38 @@ fn pass1_6_fetch_shapes(
         }
     }
     (route_shapes_out, fetches_edges)
+}
+
+/// The routes that answer a request when `exact` routes of its verb and
+/// `any` Laravel `ANY` routes share its path. Laravel's `RouteCollection`
+/// files an `ANY` route under every verb, so within one route file the
+/// route registered last replaces the others for that verb. Across files
+/// the registration order is unknown, and every route stays.
+fn answering_routes(exact: &[u32], any: &[u32], nodes: &[Node]) -> Vec<u32> {
+    if any.is_empty() {
+        return exact.to_vec();
+    }
+    let start = |route: u32| {
+        let span = nodes[route as usize].span;
+        (span.0, span.1)
+    };
+    let mut answering: Vec<u32> = Vec::new();
+    // Route file → the route it registers last.
+    let mut last: Vec<(u32, u32)> = Vec::new();
+    for &route in exact.iter().chain(any) {
+        let file = nodes[route as usize].file_idx;
+        if !any.iter().any(|&a| nodes[a as usize].file_idx == file) {
+            answering.push(route);
+            continue;
+        }
+        match last.iter_mut().find(|(f, _)| *f == file) {
+            Some((_, winner)) if start(route) >= start(*winner) => *winner = route,
+            Some(_) => {}
+            None => last.push((file, route)),
+        }
+    }
+    answering.extend(last.into_iter().map(|(_, route)| route));
+    answering
 }
 
 /// Pass 1.7: Entry-point scoring (cross-language).

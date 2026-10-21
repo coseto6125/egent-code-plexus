@@ -13,7 +13,9 @@
 //! remove middleware by exact name, a controller's own middleware
 //! (`$this->middleware` with `only` / `except`, static `HasMiddleware`)
 //! joins the routes its actions handle, and a group's controller reaches an
-//! included file's bare actions.
+//! included file's bare actions. Controller middleware that only the
+//! runtime decides joins nothing and leaves a BlindSpot in the controller's
+//! file.
 
 use ecp_analyzer::php::parser::PhpProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
@@ -129,12 +131,17 @@ class UserController extends Controller
 "#,
 );
 
+/// The route and include records of a file. Its controller-middleware
+/// records feed the builder, and the graph tests below check them.
 fn parse(path: &str, src: &str) -> Vec<RawRoute> {
     PhpProvider::new()
         .unwrap()
         .parse_file(Path::new(path), src.as_bytes())
         .unwrap()
         .routes
+        .into_iter()
+        .filter(|route| route.method != RawRoute::CONTROLLER_MIDDLEWARE)
+        .collect()
 }
 
 fn graph(files: &[(&str, &str)]) -> ZeroCopyGraph {
@@ -401,9 +408,9 @@ Route::controller(OrderController::class)->group(function () {
     let expected = [
         ("/a", Some("UserController@index")),
         ("/b", Some("\\App\\Http\\Controllers\\UserController@show")),
-        // No group in the file sets a controller, so an including group's
-        // controller may still name a method: the builder completes it.
-        ("/c", Some("ShowDashboard")),
+        // A class constant names an invokable class, never a method of a
+        // group controller.
+        ("/c", Some("ShowDashboard@__invoke")),
         ("/d", Some("\\App\\Http\\Controllers\\UserController@edit")),
         ("/e", None),
         ("/f", Some("OrderController@list")),
@@ -1956,4 +1963,504 @@ fn test_build_fetch_reaches_any_route_for_laravel_verb_only() {
         .map(|e| name(&graph, e.target as usize))
         .collect();
     assert_eq!(fetched, ["ANY /ping"]);
+}
+
+const DYNAMIC: &str = "laravel-controller-middleware-dynamic";
+
+/// `(file, hint)` of each BlindSpot of `kind`, sorted.
+fn blind_spots<'g>(graph: &'g ZeroCopyGraph, kind: &str) -> Vec<(&'g str, &'g str)> {
+    let mut spots: Vec<(&str, &str)> = graph
+        .blind_spots
+        .iter()
+        .filter(|bs| bs.kind.resolve(&graph.string_pool) == kind)
+        .map(|bs| {
+            (
+                bs.file_path.resolve(&graph.string_pool),
+                bs.hint.resolve(&graph.string_pool),
+            )
+        })
+        .collect();
+    spots.sort_unstable();
+    spots
+}
+
+/// The middleware of `GET /admin/posts`, bound to `PostController@index`
+/// of `controller`, and the controller-middleware BlindSpots.
+fn post_controller_middleware(controller: &str) -> (Vec<String>, Vec<(String, String)>) {
+    let routes = routes_file("Route::get('/posts', 'PostController@index');");
+    let graph = graph(&[
+        ADMIN_PROVIDER,
+        ("routes/admin.php", routes.as_str()),
+        ("app/Http/Controllers/PostController.php", controller),
+    ]);
+    let spots = blind_spots(&graph, DYNAMIC)
+        .into_iter()
+        .map(|(file, hint)| (file.to_string(), hint.to_string()))
+        .collect();
+    (middleware(&graph, "GET /admin/posts"), spots)
+}
+
+/// `use Router;` imports a global class `Router`. Laravel registers no
+/// global `Router` alias, so `Router::get` is that class's method.
+#[test]
+fn test_parse_file_global_router_import_emits_no_route() {
+    let src = "<?php\nuse Router;\nRouter::get('/x', 'C@m');\n";
+    assert!(parse("routes/web.php", src).is_empty());
+}
+
+/// Laravel's `controllerMiddleware` calls the static `middleware()` only of
+/// a `HasMiddleware` class; without the interface the constructor decides.
+#[test]
+fn test_build_static_middleware_without_has_middleware_adds_nothing() {
+    let (middleware, spots) = post_controller_middleware(
+        r#"<?php
+namespace App\Http\Controllers;
+class PostController
+{
+    public static function middleware(): array
+    {
+        return ['auth'];
+    }
+    public function index() {}
+}
+"#,
+    );
+    assert_eq!(middleware, ["api"]);
+    assert!(spots.is_empty(), "{spots:?}");
+}
+
+/// The interface on a parent class of the graph makes the child a
+/// `HasMiddleware`, and the parent's static `middleware()` decides.
+#[test]
+fn test_build_has_middleware_on_parent_reads_inherited_static_middleware() {
+    let base = r#"<?php
+namespace App\Http\Controllers;
+use Illuminate\Routing\Controllers\HasMiddleware;
+class GuardedController implements HasMiddleware
+{
+    public static function middleware(): array
+    {
+        return ['auth'];
+    }
+}
+"#;
+    let child = "<?php\nnamespace App\\Http\\Controllers;\nclass PostController extends GuardedController { public function index() {} }\n";
+    let routes = routes_file("Route::get('/posts', 'PostController@index');");
+    let graph = graph(&[
+        ADMIN_PROVIDER,
+        ("routes/admin.php", routes.as_str()),
+        ("app/Http/Controllers/GuardedController.php", base),
+        ("app/Http/Controllers/PostController.php", child),
+    ]);
+    assert_eq!(middleware(&graph, "GET /admin/posts"), ["api", "auth"]);
+    assert!(blind_spots(&graph, DYNAMIC).is_empty());
+}
+
+/// `Controller::middleware` appends each registration, so they run in
+/// source order.
+#[test]
+fn test_build_constructor_middleware_keeps_source_order() {
+    let (middleware, _) = post_controller_middleware(
+        r#"<?php
+namespace App\Http\Controllers;
+class PostController
+{
+    public function __construct()
+    {
+        $this->middleware('first');
+        $this->middleware('second');
+    }
+    public function index() {}
+}
+"#,
+    );
+    assert_eq!(middleware, ["api", "first", "second"]);
+}
+
+/// The parent's registrations run where `parent::__construct()` stands: a
+/// child registration before the call comes first.
+#[test]
+fn test_build_parent_constructor_middleware_runs_at_parent_call() {
+    let late = r#"<?php
+namespace App\Http\Controllers;
+class LateController extends AdminController
+{
+    public function __construct()
+    {
+        $this->middleware('child');
+        parent::__construct();
+        $this->middleware('after');
+    }
+    public function index() {}
+}
+"#;
+    let routes = routes_file("Route::get('/late', 'LateController@index');");
+    let graph = graph(&[
+        ADMIN_PROVIDER,
+        ("routes/admin.php", routes.as_str()),
+        BASE_ADMIN_CONTROLLER,
+        ("app/Http/Controllers/LateController.php", late),
+    ]);
+    assert_eq!(
+        middleware(&graph, "GET /admin/late"),
+        ["api", "child", "auth:admin", "after"]
+    );
+    assert!(blind_spots(&graph, DYNAMIC).is_empty());
+}
+
+/// A closure, an arrow function, a nested function or an anonymous class
+/// in the constructor runs nothing when the constructor does.
+#[test]
+fn test_build_constructor_middleware_in_nested_scope_adds_nothing() {
+    let (middleware, spots) = post_controller_middleware(
+        r#"<?php
+namespace App\Http\Controllers;
+class PostController
+{
+    public function __construct()
+    {
+        $later = function () { $this->middleware('closure'); };
+        $arrow = fn () => $this->middleware('arrow');
+        function helper() { $this->middleware('nested'); }
+        $other = new class { public function __construct() { $this->middleware('anonymous'); } };
+        $this->middleware('auth');
+    }
+    public function index() {}
+}
+"#,
+    );
+    assert_eq!(middleware, ["api", "auth"]);
+    assert!(spots.is_empty(), "{spots:?}");
+}
+
+/// A registration under a branch may not run: the controller adds no
+/// middleware, and a BlindSpot in its file says why.
+#[test]
+fn test_build_conditional_constructor_middleware_records_blind_spot() {
+    let (middleware, spots) = post_controller_middleware(
+        r#"<?php
+namespace App\Http\Controllers;
+class PostController
+{
+    public function __construct()
+    {
+        $this->middleware('auth');
+        if (config('app.strict')) {
+            $this->middleware('strict');
+        }
+    }
+    public function index() {}
+}
+"#,
+    );
+    assert_eq!(middleware, ["api"]);
+    assert_eq!(spots.len(), 1, "{spots:?}");
+    assert_eq!(spots[0].0, "app/Http/Controllers/PostController.php");
+    assert!(spots[0].1.contains("branch"), "{spots:?}");
+}
+
+/// A static `middleware()` with a return under a branch, or a second
+/// return, is not one array literal: no middleware, a BlindSpot.
+#[test]
+fn test_build_static_middleware_not_one_array_records_blind_spot() {
+    for body in [
+        "if (app()->isLocal()) { return []; }\n        return ['auth'];",
+        "return ['auth'];\n        return ['admin'];",
+    ] {
+        let controller = format!(
+            r#"<?php
+namespace App\Http\Controllers;
+use Illuminate\Routing\Controllers\HasMiddleware;
+class PostController implements HasMiddleware
+{{
+    public static function middleware(): array
+    {{
+        {body}
+    }}
+    public function index() {{}}
+}}
+"#
+        );
+        let (middleware, spots) = post_controller_middleware(&controller);
+        assert_eq!(middleware, ["api"], "{body}");
+        assert_eq!(spots.len(), 1, "{spots:?}");
+        assert!(spots[0].1.contains("one array literal"), "{spots:?}");
+    }
+}
+
+const GUARDS_TRAIT: (&str, &str) = (
+    "app/Http/Controllers/GuardsAdmins.php",
+    r#"<?php
+namespace App\Http\Controllers;
+trait GuardsAdmins
+{
+    public function __construct()
+    {
+        $this->middleware('trait');
+    }
+}
+"#,
+);
+
+/// PHP runs a used trait's constructor before the parent's: the trait's
+/// registrations count, the parent's do not. A trait outside the graph may
+/// declare one, so its user adds nothing and gets a BlindSpot.
+#[test]
+fn test_build_trait_constructor_replaces_parent_constructor() {
+    let with_trait = r#"<?php
+namespace App\Http\Controllers;
+class TraitController extends AdminController
+{
+    use GuardsAdmins;
+    public function index() {}
+}
+"#;
+    let with_vendor_trait = r#"<?php
+namespace App\Http\Controllers;
+use Vendor\Package\SetsUp;
+class VendorTraitController extends AdminController
+{
+    use SetsUp;
+    public function index() {}
+}
+"#;
+    let routes = routes_file(
+        "Route::get('/trait', 'TraitController@index');
+        Route::get('/vendor', 'VendorTraitController@index');",
+    );
+    let graph = graph(&[
+        ADMIN_PROVIDER,
+        ("routes/admin.php", routes.as_str()),
+        BASE_ADMIN_CONTROLLER,
+        GUARDS_TRAIT,
+        ("app/Http/Controllers/TraitController.php", with_trait),
+        (
+            "app/Http/Controllers/VendorTraitController.php",
+            with_vendor_trait,
+        ),
+    ]);
+    assert_eq!(middleware(&graph, "GET /admin/trait"), ["api", "trait"]);
+    assert_eq!(middleware(&graph, "GET /admin/vendor"), ["api"]);
+    let spots = blind_spots(&graph, DYNAMIC);
+    assert_eq!(spots.len(), 1, "{spots:?}");
+    assert_eq!(spots[0].0, "app/Http/Controllers/VendorTraitController.php");
+    assert!(spots[0].1.contains("Vendor\\Package\\SetsUp"), "{spots:?}");
+}
+
+/// An `only` / `except` list only the runtime knows may cover any method:
+/// no middleware, a BlindSpot. The same holds for a static entry.
+#[test]
+fn test_build_non_literal_only_except_records_blind_spot() {
+    let constructor = r#"<?php
+namespace App\Http\Controllers;
+class PostController
+{
+    public function __construct()
+    {
+        $this->middleware('auth')->except($this->open);
+    }
+    public function index() {}
+}
+"#;
+    let (middleware, spots) = post_controller_middleware(constructor);
+    assert_eq!(middleware, ["api"]);
+    assert_eq!(spots.len(), 1, "{spots:?}");
+    assert!(spots[0].1.contains("only` / `except"), "{spots:?}");
+
+    let entry = r#"<?php
+namespace App\Http\Controllers;
+use Illuminate\Routing\Controllers\HasMiddleware;
+use Illuminate\Routing\Controllers\Middleware;
+class PostController implements HasMiddleware
+{
+    public static function middleware(): array
+    {
+        return ['log', new Middleware('auth', except: self::$skip)];
+    }
+    public function index() {}
+}
+"#;
+    let (middleware, spots) = post_controller_middleware(entry);
+    assert_eq!(middleware, ["api"]);
+    assert_eq!(spots.len(), 1, "{spots:?}");
+    assert!(spots[0].1.contains("entry"), "{spots:?}");
+}
+
+/// `X::class` names the class its own file resolves `X` to. A route-file
+/// `Guard` and a controller `Guard` that resolve to different classes do
+/// not cancel; the same class does.
+#[test]
+fn test_build_class_middleware_resolves_in_each_file_before_exclusion() {
+    let routes = r#"<?php
+use Illuminate\Support\Facades\Route;
+use App\Http\Middleware\Guard;
+Route::get('/posts', 'PostController@index')->withoutMiddleware(Guard::class);
+Route::get('/open', 'PostController@index')->withoutMiddleware(\Vendor\Auth\Guard::class);
+Route::get('/mine', 'PostController@index')->middleware(Guard::class);
+"#;
+    let controller = r#"<?php
+namespace App\Http\Controllers;
+use Vendor\Auth\Guard;
+class PostController
+{
+    public function __construct()
+    {
+        $this->middleware(Guard::class);
+    }
+    public function index() {}
+}
+"#;
+    let graph = graph(&[
+        ADMIN_PROVIDER,
+        ("routes/admin.php", routes),
+        ("app/Http/Controllers/PostController.php", controller),
+    ]);
+    assert_eq!(
+        middleware(&graph, "GET /admin/posts"),
+        ["api", "Vendor\\Auth\\Guard"]
+    );
+    assert_eq!(middleware(&graph, "GET /admin/open"), ["api"]);
+    assert_eq!(
+        middleware(&graph, "GET /admin/mine"),
+        ["api", "App\\Http\\Middleware\\Guard", "Vendor\\Auth\\Guard"]
+    );
+}
+
+/// In a `Route::controller(C::class)` group a class-constant action names
+/// an invokable class, not a method of `C`.
+#[test]
+fn test_build_class_constant_action_in_controller_group_binds_invoke() {
+    let page = (
+        "app/Http/Controllers/Page.php",
+        "<?php\nnamespace App\\Http\\Controllers;\nclass Page { public function __invoke() {} }\n",
+    );
+    let src = r#"<?php
+use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\FileController;
+use App\Http\Controllers\Page;
+
+Route::controller(FileController::class)->group(function () {
+    Route::get('/upload', 'upload');
+    Route::get('/page', Page::class);
+});
+"#;
+    let graph = graph(&[("routes/web.php", src), FILE_CONTROLLER, page]);
+    assert_eq!(
+        handlers(&graph, "GET /page"),
+        [handler(page.0, "Page", "__invoke", "controller-action")]
+    );
+    assert_eq!(
+        handlers(&graph, "GET /upload"),
+        [handler(
+            FILE_CONTROLLER.0,
+            "FileController",
+            "upload",
+            "controller-action"
+        )]
+    );
+}
+
+/// Including one file under `api`, `web`, then `api` again registers its
+/// routes under `api` last, so `api` wins.
+#[test]
+fn test_build_same_include_scope_repeated_last_registration_wins() {
+    let provider = routes_file(
+        "Route::prefix('v1')->middleware('api')->group(base_path('routes/api.php'));
+        Route::prefix('v1')->middleware('web')->group(base_path('routes/api.php'));
+        Route::prefix('v1')->middleware('api')->group(base_path('routes/api.php'));",
+    );
+    let graph = graph(&[
+        ("app/Providers/RouteServiceProvider.php", provider.as_str()),
+        (
+            "routes/api.php",
+            routes_file("Route::get('/items', 'C@m');").as_str(),
+        ),
+    ]);
+    assert_eq!(route_names(&graph), ["GET /v1/items"]);
+    assert_eq!(middleware(&graph, "GET /v1/items"), ["api"]);
+}
+
+/// The Route nodes a client's `fetch('/ping', { method: 'GET' })` reaches.
+fn fetched_ping(routes_body: &str) -> Vec<String> {
+    let tmp = tempfile::tempdir().unwrap();
+    let client = "async function load() {\n  await fetch('/ping', { method: 'GET' });\n}\n";
+    std::fs::write(tmp.path().join("client.ts"), client).unwrap();
+    let routes = routes_file(routes_body);
+    let php = PhpProvider::new().unwrap();
+    let ts = ecp_analyzer::typescript::parser::TypeScriptProvider::new().unwrap();
+    let mut builder = GraphBuilder::new().with_repo_root(tmp.path().to_path_buf());
+    builder.add_graph(
+        php.parse_file(Path::new("routes/web.php"), routes.as_bytes())
+            .unwrap(),
+    );
+    builder.add_graph(
+        ts.parse_file(Path::new("client.ts"), client.as_bytes())
+            .unwrap(),
+    );
+    let graph = builder.build();
+    graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::Fetches)
+        .map(|e| name(&graph, e.target as usize).to_string())
+        .collect()
+}
+
+/// `Route::any` files its route under every verb; a later `Route::get` of
+/// the same path replaces it for GET.
+#[test]
+fn test_build_fetch_get_registered_after_any_reaches_get_route_only() {
+    assert_eq!(
+        fetched_ping("Route::any('/ping', 'Old@m');\nRoute::get('/ping', 'New@m');"),
+        ["GET /ping"]
+    );
+}
+
+/// A later `Route::any` replaces an earlier `Route::get` for GET.
+#[test]
+fn test_build_fetch_any_registered_after_get_reaches_any_route_only() {
+    assert_eq!(
+        fetched_ping("Route::get('/ping', 'Old@m');\nRoute::any('/ping', 'New@m');"),
+        ["ANY /ping"]
+    );
+}
+
+/// A parent class outside the graph may run its own constructor; Laravel's
+/// `Illuminate\Routing\Controller` registers nothing.
+#[test]
+fn test_build_parent_outside_graph_records_blind_spot_unless_framework() {
+    let vendor = r#"<?php
+namespace App\Http\Controllers;
+class VendorController extends \Vendor\Admin\CrudController
+{
+    public function index() {}
+}
+"#;
+    let framework = r#"<?php
+namespace App\Http\Controllers;
+use Illuminate\Routing\Controller as BaseController;
+class PlainController extends BaseController
+{
+    public function index() {}
+}
+"#;
+    let routes = routes_file(
+        "Route::get('/vendor', 'VendorController@index');
+        Route::get('/plain', 'PlainController@index');",
+    );
+    let graph = graph(&[
+        ADMIN_PROVIDER,
+        ("routes/admin.php", routes.as_str()),
+        ("app/Http/Controllers/VendorController.php", vendor),
+        ("app/Http/Controllers/PlainController.php", framework),
+    ]);
+    assert_eq!(middleware(&graph, "GET /admin/vendor"), ["api"]);
+    assert_eq!(middleware(&graph, "GET /admin/plain"), ["api"]);
+    let spots = blind_spots(&graph, DYNAMIC);
+    assert_eq!(spots.len(), 1, "{spots:?}");
+    assert_eq!(spots[0].0, "app/Http/Controllers/VendorController.php");
+    assert!(
+        spots[0].1.contains("Vendor\\Admin\\CrudController"),
+        "{spots:?}"
+    );
 }
