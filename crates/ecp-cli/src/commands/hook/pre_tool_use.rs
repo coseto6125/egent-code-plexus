@@ -305,16 +305,27 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
     if search.is_some_and(|k| git_moves_grep(&words[k])) {
         return CdTarget::Unknown;
     }
+    let marks: Vec<_> = segments.iter().map(|&(s, _)| group_marks(s)).collect();
+    let depth_after: Vec<usize> = marks
+        .iter()
+        .scan(0usize, |depth, &((po, pc), (bo, bc))| {
+            *depth = (*depth + po + bo).saturating_sub(pc + bc);
+            Some(*depth)
+        })
+        .collect();
     // An and-or list ending in `&` runs as a background job: its cd reaches
-    // the search only when the search runs in that same job.
-    let mut list_end = vec![0; segments.len()];
-    let mut end = segments.len();
-    for (i, &(_, after)) in segments.iter().enumerate().rev() {
-        if matches!(after, None | Some(Sep::Seq | Sep::Background)) {
-            end = i;
-        }
-        list_end[i] = end;
-    }
+    // the search only when the search runs in that same job. A `;` or `&`
+    // inside a group it opens (`cd x && (a & b & wait)`) does not end it.
+    let list_end: Vec<usize> = (0..segments.len())
+        .map(|i| {
+            (i..segments.len())
+                .find(|&j| {
+                    matches!(segments[j].1, None | Some(Sep::Seq | Sep::Background))
+                        && depth_after[j] <= depth_after[i]
+                })
+                .unwrap_or(segments.len() - 1)
+        })
+        .collect();
     let search_list = search.map(|k| list_end[k]);
     let moves = |w: &&str| *w == "cd" || CWD_BUILTINS.contains(w);
     // A later `.` alone is mostly a path argument (`git add .`).
@@ -365,7 +376,7 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
             }
             break;
         }
-        let ((paren_opens, paren_closes), (brace_opens, brace_closes)) = group_marks(segment);
+        let ((paren_opens, paren_closes), (brace_opens, brace_closes)) = marks[i];
         if let Some(depth) = skipping.as_mut() {
             *depth =
                 (*depth + paren_opens + brace_opens).saturating_sub(paren_closes + brace_closes);
@@ -1248,6 +1259,7 @@ mod tests {
             "command -v rg && cd x && rg Foo .",
             "which grep >/dev/null; cd x; grep -rn Foo .",
             "cd grep && cd ../x && rg -n main src",
+            "cd x &&\n  (git status >/dev/null &\n   git diff --stat >/dev/null & wait)\nrg -n Foo src",
             "cd x && git status --short |& head\nrg -n Foo src",
         ] {
             assert_eq!(target(cmd, t.path()), want, "{cmd:?}");
