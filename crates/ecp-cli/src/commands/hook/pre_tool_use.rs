@@ -1056,11 +1056,15 @@ mod tests {
         std::fs::create_dir_all(&path).unwrap();
         let d = path.to_str().unwrap();
         let other = tempfile::tempdir().unwrap();
-        for cmd in [
+        let mut cmds = vec![
             format!("cd \"{d}\" && grep -rn CacheKeyQueue app"),
             format!("cd '{d}' && grep -rn CacheKeyQueue app"),
-            format!("cd {} && rg Foo", d.replace(' ', "\\ ")),
-        ] {
+        ];
+        // Unquoted, a Windows path's `\` separators are escapes to bash too.
+        if cfg!(unix) {
+            cmds.push(format!("cd {} && rg Foo", d.replace(' ', "\\ ")));
+        }
+        for cmd in cmds {
             assert_eq!(target(&cmd, other.path()), dir(&path), "{cmd}");
         }
     }
