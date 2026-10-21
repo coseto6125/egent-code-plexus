@@ -199,18 +199,23 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>) -> CdTarget {
     let Some(segments) = shell_segments(cmd) else {
         return CdTarget::Unknown;
     };
-    // An and-or list ending in `&` runs as a background job, so its cd never
-    // reaches the search's shell.
-    let mut background = vec![false; segments.len()];
-    let mut in_background = false;
-    for (i, (_, after)) in segments.iter().enumerate().rev() {
-        match after {
-            None | Some(Sep::Seq) => in_background = false,
-            Some(Sep::Background) => in_background = true,
-            _ => {}
+    let words: Vec<Vec<String>> = segments.iter().map(|&(s, _)| shell_words(s)).collect();
+    // `extract_from_shell` takes the first `rg` / `grep` word anywhere
+    // (`rtk proxy rg`, `git grep`), so the scan stops at the same word.
+    let search = words
+        .iter()
+        .position(|w| w.iter().any(|w| w == "rg" || w == "grep"));
+    // An and-or list ending in `&` runs as a background job: its cd reaches
+    // the search only when the search runs in that same job.
+    let mut list_end = vec![0; segments.len()];
+    let mut end = segments.len();
+    for (i, &(_, after)) in segments.iter().enumerate().rev() {
+        if matches!(after, None | Some(Sep::Seq | Sep::Background)) {
+            end = i;
         }
-        background[i] = in_background;
+        list_end[i] = end;
     }
+    let search_list = search.map(|k| list_end[k]);
     let mut current: Option<PathBuf> = None;
     let mut before = Some(Sep::Seq);
     let mut subshell = 0usize;
@@ -218,23 +223,14 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>) -> CdTarget {
     // ends at the next `;`, `&&` or `&` outside any `{ }` / `( )` it opens
     // (`a || b && c` is `(a || b) && c`).
     let mut skipping: Option<usize> = None;
-    for (i, &(segment, after)) in segments.iter().enumerate() {
-        let words = shell_words(segment);
-        if words.iter().any(|w| w == "rg" || w == "grep") {
-            // `extract_from_shell` takes the first `rg` / `grep` word anywhere
-            // (`rtk proxy rg`, `git grep`), so the scan stops at the same word.
+    for (i, (&(segment, after), words)) in segments.iter().zip(&words).enumerate() {
+        if Some(i) == search {
             break;
         }
-        let opens = words
-            .iter()
-            .filter(|w| *w == "{" || w.starts_with('('))
-            .count();
-        let closes = words
-            .iter()
-            .filter(|w| *w == "}" || w.ends_with(')'))
-            .count();
+        let ((paren_opens, paren_closes), (brace_opens, brace_closes)) = group_marks(segment);
         if let Some(depth) = skipping.as_mut() {
-            *depth = (*depth + opens).saturating_sub(closes);
+            *depth =
+                (*depth + paren_opens + brace_opens).saturating_sub(paren_closes + brace_closes);
             if *depth == 0 && !matches!(after, Some(Sep::Or | Sep::Pipe)) {
                 skipping = None;
             }
@@ -249,10 +245,11 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>) -> CdTarget {
             .collect();
         let starts_subshell = cmd_words.first().is_some_and(|w| w.starts_with('('));
         let in_subshell = subshell > 0 || starts_subshell;
-        subshell += usize::from(starts_subshell);
-        subshell = subshell.saturating_sub(words.iter().filter(|w| w.ends_with(')')).count());
+        subshell = (subshell + paren_opens).saturating_sub(paren_closes);
+        let other_job =
+            segments[list_end[i]].1 == Some(Sep::Background) && Some(list_end[i]) != search_list;
         let own_shell =
-            !in_subshell && !background[i] && before != Some(Sep::Pipe) && after != Some(Sep::Pipe);
+            !in_subshell && !other_job && before != Some(Sep::Pipe) && after != Some(Sep::Pipe);
         match cmd_words.first().copied() {
             Some(builtin) if own_shell && CWD_BUILTINS.contains(&builtin) => {
                 return CdTarget::Unknown
@@ -292,6 +289,39 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>) -> CdTarget {
         None => CdTarget::Unchanged,
         Some(dir) => dir.into_string().map_or(CdTarget::Unknown, CdTarget::Dir),
     }
+}
+
+/// Unquoted `(` / `)` and word `{` / `}` in one segment, as
+/// `((paren opens, paren closes), (brace opens, brace closes))`: a quoted
+/// `'{'` opens no group.
+fn group_marks(segment: &str) -> ((usize, usize), (usize, usize)) {
+    let bytes = segment.as_bytes();
+    let (mut parens, mut braces) = ((0, 0), (0, 0));
+    let mut quote = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match (quote, c) {
+            (Some(b'\''), b'\'') | (Some(b'"'), b'"') => quote = None,
+            (Some(b'"') | None, b'\\') => i += 1,
+            (Some(_), _) => {}
+            (None, b'\'' | b'"') => quote = Some(c),
+            (None, b'(') => parens.0 += 1,
+            (None, b')') => parens.1 += 1,
+            (None, b'{' | b'}') => {
+                let word = (i == 0 || bytes[i - 1].is_ascii_whitespace())
+                    && bytes.get(i + 1).is_none_or(u8::is_ascii_whitespace);
+                match (word, c) {
+                    (true, b'{') => braces.0 += 1,
+                    (true, _) => braces.1 += 1,
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    (parens, braces)
 }
 
 fn is_assignment(word: &str) -> bool {
@@ -721,6 +751,34 @@ mod tests {
             "cd x || { echo no; exit 1; }; rg Foo",
             "cd x || { echo failed; cd y; }; rg Foo",
             "cd x || (cd y; exit); rg Foo",
+        ] {
+            assert_eq!(target(cmd, t.path()), want, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_cd_target_quoted_group_mark_in_skipped_operand_opens_no_group() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(t.path().join("x/y")).unwrap();
+        let want = dir(&t.path().join("x/y"));
+        for cmd in [
+            "cd x || echo '{'; cd y; rg Foo",
+            "cd x || echo \"(\"; cd y; rg Foo",
+            "cd x || echo \\{; cd y; rg Foo",
+        ] {
+            assert_eq!(target(cmd, t.path()), want, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn test_cd_target_cd_in_the_search_background_job_resolves() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir(t.path().join("x")).unwrap();
+        let want = dir(&t.path().join("x"));
+        for cmd in [
+            "cd x && rg Foo & wait",
+            "cd x; rg Foo &",
+            "make & cd x && rg Foo &",
         ] {
             assert_eq!(target(cmd, t.path()), want, "{cmd}");
         }

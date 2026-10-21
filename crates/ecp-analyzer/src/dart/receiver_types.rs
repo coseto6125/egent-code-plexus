@@ -228,6 +228,7 @@ fn collect_typed_dart_locals(fn_node: Node<'_>, source: &[u8], scopes: &mut Vec<
         if n.kind() == "initialized_variable_definition" {
             let mut ty: Option<String> = None;
             let mut name: Option<String> = None;
+            let mut first_comma = None;
             let mut c = n.walk();
             for child in n.children(&mut c) {
                 if child.kind() == "type" && ty.is_none() {
@@ -240,6 +241,8 @@ fn collect_typed_dart_locals(fn_node: Node<'_>, source: &[u8], scopes: &mut Vec<
                             }
                         }
                     }
+                } else if child.kind() == "," && first_comma.is_none() {
+                    first_comma = Some(child);
                 } else if child.kind() == "identifier" && name.is_none() {
                     if let Ok(s) =
                         std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
@@ -249,7 +252,8 @@ fn collect_typed_dart_locals(fn_node: Node<'_>, source: &[u8], scopes: &mut Vec<
                 }
             }
             if let Some(name) = name {
-                let declared = node_range(n).1;
+                // `A a = A(), b = a.copy()` binds `a` before `b`'s initializer.
+                let declared = first_comma.map_or(node_range(n).1, |comma| node_range(comma).0);
                 let mut block = n.parent();
                 while let Some(b) = block.filter(|b| {
                     !matches!(b.kind(), "block" | "for_statement" | "for_element") && *b != fn_node

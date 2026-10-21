@@ -2192,6 +2192,31 @@ class PostController
     }
 }
 
+/// `$exit` and `static::exit` name no exit, so the
+/// registration after them counts.
+#[test]
+fn test_build_constructor_middleware_after_exit_named_variable_counts() {
+    for statement in ["$exit = false;", "$die = static::exit;"] {
+        let controller = format!(
+            r#"<?php
+namespace App\Http\Controllers;
+class PostController
+{{
+    public function __construct()
+    {{
+        {statement}
+        $this->middleware('auth');
+    }}
+    public function index() {{}}
+}}
+"#
+        );
+        let (middleware, spots) = post_controller_middleware(&controller);
+        assert_eq!(middleware, ["api", "auth"], "{statement}");
+        assert!(spots.is_empty(), "{statement}: {spots:?}");
+    }
+}
+
 /// A registration before the early exit runs whenever the constructor
 /// does; an exit inside a closure leaves only the closure.
 #[test]

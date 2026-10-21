@@ -2386,12 +2386,16 @@ fn may_leave_constructor(node: Node, source: &[u8]) -> bool {
             .child_by_field_name("function")
             .is_some_and(is_exit_name),
         // A bare `die;` or `$off or exit;` parses as a constant name; a
-        // method or property called `exit` is its parent's `name` field.
+        // method or property called `exit` is its parent's `name` field, and
+        // `$exit` and `static::exit` are not calls either.
         "name" => {
             is_exit_name(node)
-                && node
-                    .parent()
-                    .is_some_and(|p| p.child_by_field_name("name") != Some(node))
+                && node.parent().is_some_and(|p| {
+                    !matches!(
+                        p.kind(),
+                        "variable_name" | "class_constant_access_expression"
+                    ) && p.child_by_field_name("name") != Some(node)
+                })
         }
         _ => false,
     }

@@ -128,3 +128,12 @@ fn test_dart_callee_constructor_receiver_inside_block_after_local_emits_untyped_
     assert!(!calls.contains(&"Other.m".to_string()), "{calls:?}");
     assert!(calls.contains(&CallSite::untyped_member("m")), "{calls:?}");
 }
+
+/// Each declarator of `A a = A(), b = a.copy()` binds before the next
+/// one's initializer, so `a.copy()` types `a` as `A`.
+#[test]
+fn test_dart_multi_declarator_later_initializer_sees_earlier_local() {
+    let source = "class A {\n  A copy() => A();\n}\nclass C {\n  A copy() => A();\n  void f() {\n    A a = A(), b = a.copy();\n  }\n}\n";
+    let calls = raw_calls_in(source, "f");
+    assert!(calls.contains(&"A.copy".to_string()), "{calls:?}");
+}
