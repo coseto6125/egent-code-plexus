@@ -58,6 +58,10 @@ pub(super) struct Engine<'a> {
     pub(super) loop_ctx: Vec<usize>,
     /// (importer, dependency) file pairs resolved during module initialisation.
     pub(super) links: BTreeSet<(usize, usize)>,
+    /// PHP class-like declaration (AST node) to the object holding its methods.
+    pub(super) classes: BTreeMap<usize, usize>,
+    /// Lowercased fully qualified PHP class name to its declarations.
+    pub(super) declarations: BTreeMap<String, BTreeSet<usize>>,
 }
 impl Engine<'_> {
     pub(super) fn field(&self, n: usize, key: &str) -> Option<usize> {
@@ -387,6 +391,7 @@ impl Engine<'_> {
                 | "lambda"
                 | "anonymous_function"
                 | "anonymous_function_creation_expression"
+                | "method_declaration"
         )
     }
     pub(super) fn predeclare(&mut self, n: usize, scopes: &[usize]) {
@@ -401,6 +406,16 @@ impl Engine<'_> {
             } else {
                 c
             };
+            if self.is_class(c) {
+                self.php_class(c, scopes);
+                continue;
+            }
+            if self.ast[c].kind == "namespace_definition" {
+                if let Some(body) = self.field(c, "body") {
+                    self.predeclare(body, scopes);
+                }
+                continue;
+            }
             if self.is_function(c) {
                 if let Some(name) = self.field(c, "name") {
                     let key = self.ast[name].text.clone();
@@ -488,8 +503,24 @@ impl Engine<'_> {
                 left.map(|l| self.assign(l, value, target_scopes, declaration))
                     .unwrap_or_default()
             }
-            "call_expression" | "call" | "function_call_expression" | "member_call_expression" => {
-                self.call(n, scopes)
+            "call_expression"
+            | "call"
+            | "function_call_expression"
+            | "member_call_expression"
+            | "nullsafe_member_call_expression"
+            | "scoped_call_expression" => self.call(n, scopes),
+            "class_declaration"
+            | "interface_declaration"
+            | "trait_declaration"
+            | "enum_declaration"
+                if self.is_class(n) =>
+            {
+                self.php_class(n, scopes);
+                Value::default()
+            }
+            "qualified_name" => {
+                let value = self.php_class_ref(n, scopes);
+                self.node(n, "read", &value)
             }
             "member_expression"
             | "attribute"
@@ -603,11 +634,10 @@ impl Engine<'_> {
                 }
                 self.node(n, "value", &v)
             }
-            "namespace_use_declaration" => {
-                self.boundary(n,"import","PHP namespace imports and include execution are not resolved across snapshots.");
+            // PHP `use` clauses are bound, or reported, before any file is evaluated.
+            "import_statement" | "import_from_statement" | "namespace_use_declaration" => {
                 Value::default()
             }
-            "import_statement" | "import_from_statement" => Value::default(),
             "program" | "module" | "statement_block" | "block" | "compound_statement" => {
                 let mut block_scopes = scopes.to_vec();
                 if a.kind == "statement_block" {
@@ -661,14 +691,64 @@ impl Engine<'_> {
             | "variable_declaration"
             | "export_statement"
             | "parenthesized_expression"
-            | "argument" => {
+            | "argument"
+            | "arguments"
+            | "argument_list" => {
                 let mut v = Value::default();
                 for c in a.children {
                     v.merge(&self.eval(c, scopes));
                 }
                 v
             }
-            "comment" | "php_tag" | "string_content" => Value::default(),
+            // A declaration is not a value: it runs its nested statements, and
+            // its name, parameter list, modifiers and types have no runtime
+            // effect at the point of declaration.
+            "class_declaration"
+            | "abstract_class_declaration"
+            | "class_body"
+            | "class_heritage"
+            | "extends_clause"
+            | "class_definition"
+            | "namespace_definition" => {
+                let name = self.field(n, "name");
+                for c in a.children {
+                    if Some(c) != name {
+                        self.eval(c, scopes);
+                    }
+                }
+                Value::default()
+            }
+            "method_definition" => {
+                // The body runs in place with unbound parameters, and calls
+                // through the class or an instance never reach it.
+                self.boundary(
+                    n,
+                    "unsupported_semantics",
+                    "method_definition is traversed without its full execution semantics.",
+                );
+                if let Some(body) = self.field(n, "body") {
+                    self.eval(body, scopes);
+                }
+                Value::default()
+            }
+            "comment"
+            | "php_tag"
+            | "string_content"
+            | "formal_parameters"
+            | "type_annotation"
+            | "predefined_type"
+            | "type_identifier"
+            | "type_list"
+            | "named_type"
+            | "optional_type"
+            | "union_type"
+            | "primitive_type"
+            | "cast_type"
+            | "namespace_name"
+            | "relative_scope"
+            | "implements_clause"
+            | "interface_declaration"
+            | "type_alias_declaration" => Value::default(),
             _ => {
                 if !matches!(
                     a.kind.as_str(),
@@ -694,8 +774,6 @@ impl Engine<'_> {
                         | "string_value"
                         | "else_clause"
                         | "else"
-                        | "type_annotation"
-                        | "predefined_type"
                 ) {
                     self.boundary(
                         n,
@@ -979,9 +1057,16 @@ impl Engine<'_> {
             .field(n, "function")
             .or_else(|| self.field(n, "name"))
             .or_else(|| a.children.first().copied());
-        let builtin = target.is_some_and(|t| self.builtin(t, scopes));
+        // A PHP method named like a builtin (`$list->count()`) is not that builtin.
+        let method = matches!(
+            a.kind.as_str(),
+            "member_call_expression" | "nullsafe_member_call_expression" | "scoped_call_expression"
+        );
+        let builtin = !method && target.is_some_and(|t| self.builtin(t, scopes));
         let fun = if builtin {
             Value::default()
+        } else if method {
+            self.php_method_target(n, scopes)
         } else {
             target.map(|t| self.eval(t, scopes)).unwrap_or_default()
         };

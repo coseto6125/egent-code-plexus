@@ -8,6 +8,7 @@ use tree_sitter::Parser;
 mod ast;
 mod engine;
 mod module;
+mod php;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SourceFile {
@@ -105,7 +106,12 @@ fn language(path: &str) -> Option<tree_sitter::Language> {
     })
 }
 
-fn build<'a>(files: &'a [SourceFile], budgets: &Budgets) -> Result<Engine<'a>, String> {
+/// `first` names the file whose entry points run before the rest of the corpus.
+fn build<'a>(
+    files: &'a [SourceFile],
+    budgets: &Budgets,
+    first: Option<&str>,
+) -> Result<Engine<'a>, String> {
     if budgets.max_nodes == 0 || budgets.max_steps == 0 || budgets.max_call_depth == 0 {
         return Err("Analysis budgets must be positive".into());
     }
@@ -137,6 +143,8 @@ fn build<'a>(files: &'a [SourceFile], budgets: &Budgets) -> Result<Engine<'a>, S
         loop_call: 0,
         loop_ctx: vec![],
         links: BTreeSet::new(),
+        classes: BTreeMap::new(),
+        declarations: BTreeMap::new(),
     };
     let mut paths = BTreeSet::new();
     for (i, f) in files.iter().enumerate() {
@@ -197,6 +205,21 @@ fn build<'a>(files: &'a [SourceFile], budgets: &Budgets) -> Result<Engine<'a>, S
             );
         }
     }
+    // PHP classes are autoloaded rather than initialised in file order: every
+    // class exists and every `use` is bound before any method is created.
+    let php_files: Vec<usize> = (0..files.len())
+        .filter(|i| php::is_php(&files[*i].path))
+        .collect();
+    for &i in &php_files {
+        if let Some(root) = engine.roots[i] {
+            engine.php_declare(root, i);
+        }
+    }
+    for &i in &php_files {
+        if let Some(root) = engine.roots[i] {
+            engine.php_imports(root, i);
+        }
+    }
     for i in 0..files.len() {
         if let Some(root) = engine.roots[i] {
             engine.predeclare(root, &[i]);
@@ -214,12 +237,30 @@ fn build<'a>(files: &'a [SourceFile], budgets: &Budgets) -> Result<Engine<'a>, S
     // a recursion or loop boundary elsewhere in the corpus must not cost the
     // remaining entry points their analysis. An exhausted step or node budget
     // makes every further `invoke` return at once, so the loop stays bounded.
+    // The queried file goes first: budget spent on the rest of the corpus
+    // must not keep the queried value from being created at all.
+    if let Some(first) = first.and_then(|path| files.iter().position(|f| f.path == path)) {
+        sweep(&mut engine, Some(first));
+    }
+    let f = sweep(&mut engine, None);
+    // An entry point the budget kept the sweep from reaching is a truncation
+    // even when no evaluation step ever tripped a latch.
+    if (f..engine.functions.len()).any(|f| !engine.called.contains(&f)) {
+        engine.truncated = true;
+    }
+    Ok(engine)
+}
+/// Invoke each uncalled function (of `file` only, when given) as an entry
+/// point; returns where the budget stopped the sweep.
+fn sweep(engine: &mut Engine<'_>, file: Option<usize>) -> usize {
     let mut f = 0;
     while f < engine.functions.len()
-        && engine.steps <= budgets.max_steps
-        && engine.nodes.len() < budgets.max_nodes
+        && engine.steps <= engine.budgets.max_steps
+        && engine.nodes.len() < engine.budgets.max_nodes
     {
-        if !engine.called.contains(&f) {
+        if !engine.called.contains(&f)
+            && file.is_none_or(|file| engine.ast[engine.functions[f].ast].file == file)
+        {
             // Each entry point runs from the state it was discovered in (its
             // enclosing function's frame included) and leaves no effects behind.
             let base = engine.snapshot();
@@ -228,12 +269,7 @@ fn build<'a>(files: &'a [SourceFile], budgets: &Budgets) -> Result<Engine<'a>, S
         }
         f += 1;
     }
-    // An entry point the budget kept the sweep from reaching is a truncation
-    // even when no evaluation step ever tripped a latch.
-    if (f..engine.functions.len()).any(|f| !engine.called.contains(&f)) {
-        engine.truncated = true;
-    }
-    Ok(engine)
+    f
 }
 pub fn analyze(files: &[SourceFile], request: &FlowRequest) -> Result<FlowReport, String> {
     if request.line == 0 || request.column == 0 {
@@ -242,7 +278,7 @@ pub fn analyze(files: &[SourceFile], request: &FlowRequest) -> Result<FlowReport
     if !files.iter().any(|f| f.path == request.file) {
         return Err(format!("Source not provided: {}", request.file));
     }
-    let engine = build(files, &request.budgets)?;
+    let engine = build(files, &request.budgets, Some(request.file.as_str()))?;
     let contains = |a: &Ast| {
         (a.line, a.column) <= (request.line, request.column)
             && (request.line, request.column) < (a.end_line, a.end_column)
@@ -333,7 +369,7 @@ pub fn analyze_changes(
             return Err(format!("Source not provided: {file}"));
         }
     }
-    let engine = build(files, budgets)?;
+    let engine = build(files, budgets, None)?;
     let anchors = engine
         .nodes
         .iter()

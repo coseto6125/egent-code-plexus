@@ -46,7 +46,10 @@ The engine distinguishes lexical bindings and assignment versions, merges branch
 Loops use bounded fixed-point iteration. Recursive value dependencies use cyclic summaries.
 Named JS/TS imports and reexports, plus Python from-imports, connect supported values across files.
 Closure captures and tracked object aliases connect values across functions.
-PHP includes and namespace imports remain explicit boundaries.
+PHP `use` clauses resolve the classes that the analyzed sources declare.
+Static, `self::`, `parent::`, `static::` and `$this->` method calls reach the declared method.
+`$this->` and `static::` calls also reach subclass overrides.
+PHP includes, `use function`, `use const`, trait methods and undeclared classes remain explicit boundaries.
 Selected numeric builtins have explicit models. Their assumptions appear as `builtin_model` boundaries.
 Destructuring, asynchronous scheduling, exception paths, iterator protocols, and unresolved external effects retain explicit boundaries.
 Recursive heap and callable identities remain approximate. These limits apply even when `truncated` is false.
