@@ -3,9 +3,10 @@
 //! Every fixture puts `a` (calling `x`) and `b` (calling `y`) on one line.
 
 use ecp_analyzer::calls::VariantRef;
+use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
-use ecp_core::graph::NodeKind;
+use ecp_core::graph::{NodeKind, RelType, ZeroCopyGraph};
 use std::path::Path;
 
 fn parse(provider: &dyn LanguageProvider, path: &str, source: &str) -> LocalGraph {
@@ -217,4 +218,168 @@ fn test_extract_variant_refs_rust_same_line_functions_keep_own_variants() {
     };
     assert_eq!(paths("a"), ["E::A"]);
     assert_eq!(paths("b"), ["E::B"]);
+}
+
+// Receiver typing scopes locals by position: two functions on one line each
+// declare a local `k` of a different type, and `k.save()` binds the type of
+// the `k` in the caller's own function.
+
+fn build(provider: &dyn LanguageProvider, path: &str, source: &str) -> ZeroCopyGraph {
+    let mut builder = GraphBuilder::new();
+    builder.add_graph(parse(provider, path, source));
+    builder.build()
+}
+
+fn named(graph: &ZeroCopyGraph, name: &str) -> Vec<u32> {
+    (0..graph.nodes.len() as u32)
+        .filter(|&i| graph.nodes[i as usize].name.resolve(&graph.string_pool) == name)
+        .collect()
+}
+
+/// Owner classes of the `save` nodes `caller` calls.
+fn save_owners_called_by(graph: &ZeroCopyGraph, caller: u32) -> Vec<String> {
+    let pool = &graph.string_pool;
+    graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::Calls && e.source == caller)
+        .map(|e| &graph.nodes[e.target as usize])
+        .filter(|t| t.name.resolve(pool) == "save")
+        .map(|t| t.owner_class.resolve(pool).to_string())
+        .collect()
+}
+
+fn assert_local_scopes_split_by_column(provider: &dyn LanguageProvider, path: &str, source: &str) {
+    let graph = build(provider, path, source);
+    for (func, owner) in [("a", "A"), ("b", "B")] {
+        let caller = named(&graph, func)[0];
+        let owners = save_owners_called_by(&graph, caller);
+        assert!(
+            !owners.is_empty() && owners.iter().all(|o| o == owner),
+            "{path}: `{func}` binds {owner}'s `save`, got {owners:?}"
+        );
+    }
+}
+
+/// Two classes on one line, each with a `run` calling its own `save` through
+/// `self` / `$this`.
+fn assert_class_scopes_split_by_column(provider: &dyn LanguageProvider, path: &str, source: &str) {
+    let graph = build(provider, path, source);
+    let pool = &graph.string_pool;
+    for owner in ["A", "B"] {
+        let run = named(&graph, "run")
+            .into_iter()
+            .find(|&i| graph.nodes[i as usize].owner_class.resolve(pool) == owner)
+            .unwrap_or_else(|| panic!("{path}: no `run` owned by {owner}"));
+        let owners = save_owners_called_by(&graph, run);
+        assert!(
+            !owners.is_empty() && owners.iter().all(|o| o == owner),
+            "{path}: {owner}::run binds {owner}'s `save`, got {owners:?}"
+        );
+    }
+}
+
+// JavaScript has no type annotations and no local-type scopes, Python cannot
+// place two `def` headers on one line, and C has no methods: no case for them.
+
+#[test]
+fn test_resolve_receiver_typescript_same_line_locals_bind_own_type() {
+    assert_local_scopes_split_by_column(
+        &ecp_analyzer::typescript::TypeScriptProvider::new().unwrap(),
+        "m.ts",
+        "class A { save(){} }\nclass B { save(){} }\nfunction a(){ const k: A = new A(); k.save(); } function b(){ const k: B = new B(); k.save(); }\n",
+    );
+}
+
+#[test]
+fn test_resolve_receiver_java_same_line_locals_bind_own_type() {
+    assert_local_scopes_split_by_column(
+        &ecp_analyzer::java::parser::JavaProvider::new().unwrap(),
+        "K.java",
+        "class A { void save(){} }\nclass B { void save(){} }\nclass K { void a(){ A k = new A(); k.save(); } void b(){ B k = new B(); k.save(); } }\n",
+    );
+}
+
+#[test]
+fn test_resolve_receiver_kotlin_same_line_locals_bind_own_type() {
+    assert_local_scopes_split_by_column(
+        &ecp_analyzer::kotlin::parser::KotlinProvider::new().unwrap(),
+        "m.kt",
+        "class A { fun save() {} }\nclass B { fun save() {} }\nfun a() { val k: A = A(); k.save() }; fun b() { val k: B = B(); k.save() }\n",
+    );
+}
+
+#[test]
+fn test_resolve_receiver_csharp_same_line_locals_bind_own_type() {
+    assert_local_scopes_split_by_column(
+        &ecp_analyzer::c_sharp::parser::CSharpProvider::new().unwrap(),
+        "K.cs",
+        "class A { public void save(){} }\nclass B { public void save(){} }\nclass K { void a(){ A k = new A(); k.save(); } void b(){ B k = new B(); k.save(); } }\n",
+    );
+}
+
+#[test]
+fn test_resolve_receiver_go_same_line_locals_bind_own_type() {
+    assert_local_scopes_split_by_column(
+        &ecp_analyzer::go::parser::GoProvider::new().unwrap(),
+        "m.go",
+        "package p\ntype A struct{}\nfunc (A) save() {}\ntype B struct{}\nfunc (B) save() {}\nfunc a() { var k A; k.save() }; func b() { var k B; k.save() }\n",
+    );
+}
+
+#[test]
+fn test_resolve_receiver_rust_same_line_locals_bind_own_type() {
+    assert_local_scopes_split_by_column(
+        &ecp_analyzer::rust::parser::RustProvider::new().unwrap(),
+        "m.rs",
+        "struct A;\nimpl A { fn save(&self) {} }\nstruct B;\nimpl B { fn save(&self) {} }\nfn a(){ let k: A = A; k.save(); } fn b(){ let k: B = B; k.save(); }\n",
+    );
+}
+
+#[test]
+fn test_resolve_receiver_swift_same_line_locals_bind_own_type() {
+    assert_local_scopes_split_by_column(
+        &ecp_analyzer::swift::parser::SwiftProvider::new().unwrap(),
+        "m.swift",
+        "class A { func save() {} }\nclass B { func save() {} }\nfunc a() { let k: A = A(); k.save() }; func b() { let k: B = B(); k.save() }\n",
+    );
+}
+
+#[test]
+fn test_resolve_receiver_cpp_same_line_locals_bind_own_type() {
+    assert_local_scopes_split_by_column(
+        &ecp_analyzer::cpp::parser::CppProvider::new().unwrap(),
+        "m.cpp",
+        "struct A { void save() {} };\nstruct B { void save() {} };\nvoid a(){ A k; k.save(); } void b(){ B k; k.save(); }\n",
+    );
+}
+
+#[test]
+fn test_resolve_receiver_dart_same_line_locals_bind_own_type() {
+    assert_local_scopes_split_by_column(
+        &ecp_analyzer::dart::parser::DartProvider::new().unwrap(),
+        "m.dart",
+        "class A { void save() {} }\nclass B { void save() {} }\nvoid a() { A k = A(); k.save(); } void b() { B k = B(); k.save(); }\n",
+    );
+}
+
+// PHP and Ruby type no locals; their receiver typing reads the enclosing
+// class, so the same-line case is two classes on one line.
+
+#[test]
+fn test_resolve_receiver_php_same_line_classes_bind_own_this() {
+    assert_class_scopes_split_by_column(
+        &ecp_analyzer::php::parser::PhpProvider::new().unwrap(),
+        "m.php",
+        "<?php class A { function save(){} function run(){ $this->save(); } } class B { function save(){} function run(){ $this->save(); } }\n",
+    );
+}
+
+#[test]
+fn test_resolve_receiver_ruby_same_line_classes_bind_own_self() {
+    assert_class_scopes_split_by_column(
+        &ecp_analyzer::ruby::parser::RubyProvider::new().unwrap(),
+        "m.rb",
+        "class A; def save; end; def run; self.save; end; end; class B; def save; end; def run; self.save; end; end\n",
+    );
 }

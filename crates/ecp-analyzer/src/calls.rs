@@ -588,6 +588,29 @@ fn token_tree_paths(tree: Node<'_>, source: &[u8]) -> Vec<String> {
 /// `(row, column)`.
 pub type Pos = (u32, u32);
 
+/// Inclusive `(start, end)` positions of a scope.
+pub type PosRange = (Pos, Pos);
+
+/// The `(start, end)` positions of a node.
+#[inline]
+pub fn node_range(node: Node<'_>) -> PosRange {
+    let end = node.end_position();
+    (start_pos(node), (safe_row(end.row), safe_row(end.column)))
+}
+
+/// Whether the inclusive `span` holds `pos`.
+#[inline]
+pub fn span_holds(span: (u32, u32, u32, u32), pos: Pos) -> bool {
+    let (start, end) = span_ends(span);
+    start <= pos && pos <= end
+}
+
+/// Width of a `(start, end)` range, ordered like [`span_width`].
+#[inline]
+pub fn range_width((start, end): PosRange) -> (u32, i64) {
+    span_width((start.0, start.1, end.0, end.1))
+}
+
 #[derive(Clone, Copy)]
 struct EnclosingContainer {
     start: Pos,
@@ -614,7 +637,7 @@ fn span_ends(span: (u32, u32, u32, u32)) -> (Pos, Pos) {
 
 /// Rows first, then columns: a container nested on its parent's rows starts no
 /// earlier and ends no later, so it ranks narrower.
-fn span_width(span: (u32, u32, u32, u32)) -> (u32, i64) {
+pub fn span_width(span: (u32, u32, u32, u32)) -> (u32, i64) {
     (
         span.2.saturating_sub(span.0),
         i64::from(span.3) - i64::from(span.1),

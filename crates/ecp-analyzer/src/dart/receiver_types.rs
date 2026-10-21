@@ -17,7 +17,7 @@
 use super::path_literals::{
     build_raw_path_literal, has_template_substitution, strip_dart_string_value,
 };
-use crate::calls::{attach_to_enclosing, start_pos};
+use crate::calls::{attach_to_enclosing, node_range, range_width, start_pos, Pos, PosRange};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -25,8 +25,8 @@ use tree_sitter::Node;
 // `(start_line, end_line)` half-open span keyed scope tables. The tuple-of-
 // tuples shape mirrors the rest of the receiver_types modules; the type aliases
 // silence `clippy::type_complexity` without changing behaviour.
-type FnScope = ((u32, u32), HashMap<String, String>);
-type ClassScope = ((u32, u32), (String, Option<String>));
+type FnScope = (PosRange, HashMap<String, String>);
+type ClassScope = (PosRange, (String, Option<String>));
 
 #[derive(Debug, Default)]
 pub struct DartBindings {
@@ -35,13 +35,13 @@ pub struct DartBindings {
 }
 
 impl DartBindings {
-    fn lookup_local(&self, line: u32, var: &str) -> Option<&str> {
+    fn lookup_local(&self, pos: Pos, var: &str) -> Option<&str> {
         let mut best: Option<&str> = None;
-        let mut best_width = u32::MAX;
+        let mut best_width = (u32::MAX, i64::MAX);
         for ((start, end), map) in &self.fn_scopes {
-            if *start <= line && line <= *end {
+            if *start <= pos && pos <= *end {
                 if let Some(t) = map.get(var) {
-                    let w = end - start;
+                    let w = range_width((*start, *end));
                     if w < best_width {
                         best_width = w;
                         best = Some(t.as_str());
@@ -52,12 +52,12 @@ impl DartBindings {
         best
     }
 
-    fn enclosing_class(&self, line: u32) -> Option<&(String, Option<String>)> {
+    fn enclosing_class(&self, pos: Pos) -> Option<&(String, Option<String>)> {
         let mut best: Option<&(String, Option<String>)> = None;
-        let mut best_width = u32::MAX;
+        let mut best_width = (u32::MAX, i64::MAX);
         for ((start, end), info) in &self.class_scopes {
-            if *start <= line && line <= *end {
-                let w = end - start;
+            if *start <= pos && pos <= *end {
+                let w = range_width((*start, *end));
                 if w < best_width {
                     best_width = w;
                     best = Some(info);
@@ -77,12 +77,12 @@ pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> DartBindings {
         match n.kind() {
             "class_declaration" | "mixin_declaration" => {
                 if let Some((name, sup)) = dart_class_name_and_super(n, source) {
-                    let span = (n.start_position().row as u32, n.end_position().row as u32);
+                    let span = node_range(n);
                     class_scopes.push((span, (name, sup)));
                 }
             }
             "method_declaration" | "function_declaration" => {
-                let span = (n.start_position().row as u32, n.end_position().row as u32);
+                let span = node_range(n);
                 let mut map: HashMap<String, String> = HashMap::new();
                 collect_typed_dart_params(n, source, &mut map);
                 collect_typed_dart_locals(n, source, &mut map);
@@ -275,7 +275,7 @@ pub fn extract_dart_calls_and_path_literals(
 
 fn dart_callee_name(call: Node<'_>, source: &[u8], bindings: &DartBindings) -> Option<String> {
     let function = call.child_by_field_name("function")?;
-    let line = call.start_position().row as u32;
+    let pos = start_pos(call);
 
     match function.kind() {
         "identifier" => std::str::from_utf8(&source[function.start_byte()..function.end_byte()])
@@ -287,19 +287,19 @@ fn dart_callee_name(call: Node<'_>, source: &[u8], bindings: &DartBindings) -> O
             let obj = function.child_by_field_name("object")?;
             match obj.kind() {
                 "this" => {
-                    if let Some((cls, _)) = bindings.enclosing_class(line) {
+                    if let Some((cls, _)) = bindings.enclosing_class(pos) {
                         return Some(format!("{cls}.{method}"));
                     }
                 }
                 "super" => {
-                    if let Some((_, Some(sup))) = bindings.enclosing_class(line) {
+                    if let Some((_, Some(sup))) = bindings.enclosing_class(pos) {
                         return Some(format!("{sup}.{method}"));
                     }
                 }
                 "identifier" => {
                     if let Ok(var) = std::str::from_utf8(&source[obj.start_byte()..obj.end_byte()])
                     {
-                        if let Some(ty) = bindings.lookup_local(line, var) {
+                        if let Some(ty) = bindings.lookup_local(pos, var) {
                             return Some(format!("{ty}.{method}"));
                         }
                     }

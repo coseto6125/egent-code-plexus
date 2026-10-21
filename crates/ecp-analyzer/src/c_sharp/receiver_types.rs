@@ -22,7 +22,10 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_csharp_string_value,
 };
-use crate::calls::{attach_to_enclosing, construction_call, start_pos};
+use crate::calls::{
+    attach_to_enclosing, construction_call, node_range, range_width, span_holds, span_width,
+    start_pos, Pos, PosRange,
+};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
@@ -30,17 +33,17 @@ use tree_sitter::Node;
 
 #[derive(Debug, Default)]
 struct LocalTypes {
-    scopes: Vec<((u32, u32), HashMap<String, String>)>,
+    scopes: Vec<(PosRange, HashMap<String, String>)>,
 }
 
 impl LocalTypes {
-    fn lookup(&self, line: u32, var: &str) -> Option<&str> {
+    fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
         let mut best: Option<&str> = None;
-        let mut best_width = u32::MAX;
+        let mut best_width = (u32::MAX, i64::MAX);
         for ((start, end), map) in &self.scopes {
-            if *start <= line && line <= *end {
+            if *start <= pos && pos <= *end {
                 if let Some(t) = map.get(var) {
-                    let w = end - start;
+                    let w = range_width((*start, *end));
                     if w < best_width {
                         best_width = w;
                         best = Some(t.as_str());
@@ -55,12 +58,12 @@ impl LocalTypes {
 /// Walk every method/constructor/local-function declaration, collecting typed
 /// parameters and local variable declarations.
 fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
-    let mut scopes: Vec<((u32, u32), HashMap<String, String>)> = Vec::new();
+    let mut scopes: Vec<(PosRange, HashMap<String, String>)> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
             "method_declaration" | "constructor_declaration" | "local_function_statement" => {
-                let scope = (n.start_position().row as u32, n.end_position().row as u32);
+                let scope = node_range(n);
                 let mut map: HashMap<String, String> = HashMap::new();
                 if let Some(params) = n.child_by_field_name("parameters") {
                     collect_params(params, source, &mut map);
@@ -201,15 +204,15 @@ fn csharp_callee(
             // (can be `this`, `base`, or an `identifier`).
             let receiver = func.child_by_field_name("expression")?;
 
-            let line = inv.start_position().row as u32;
+            let pos = start_pos(inv);
             let ty: Option<String> = match receiver.kind() {
-                "this_expression" | "this" => enclosing_class_name(nodes, line),
-                "base_expression" | "base" => enclosing_base_name(nodes, line),
+                "this_expression" | "this" => enclosing_class_name(nodes, pos),
+                "base_expression" | "base" => enclosing_base_name(nodes, pos),
                 "identifier" => {
                     let var =
                         std::str::from_utf8(&source[receiver.start_byte()..receiver.end_byte()])
                             .ok()?;
-                    locals.lookup(line, var).map(|t| t.to_string())
+                    locals.lookup(pos, var).map(|t| t.to_string())
                 }
                 _ => None,
             };
@@ -294,14 +297,14 @@ pub fn extract_csharp_calls_and_path_literals(
     (path_literals, sql_refs)
 }
 
-fn enclosing_class_name(nodes: &[RawNode], line: u32) -> Option<String> {
-    let mut best: Option<(u32, &str)> = None;
+fn enclosing_class_name(nodes: &[RawNode], pos: Pos) -> Option<String> {
+    let mut best: Option<((u32, i64), &str)> = None;
     for n in nodes {
         if !matches!(n.kind, NodeKind::Class | NodeKind::Interface) {
             continue;
         }
-        if n.span.0 <= line && n.span.2 >= line {
-            let w = n.span.2 - n.span.0;
+        if span_holds(n.span, pos) {
+            let w = span_width(n.span);
             if best.is_none_or(|(bw, _)| w < bw) {
                 best = Some((w, &n.name));
             }
@@ -310,15 +313,15 @@ fn enclosing_class_name(nodes: &[RawNode], line: u32) -> Option<String> {
     best.map(|(_, name)| name.to_string())
 }
 
-fn enclosing_base_name(nodes: &[RawNode], line: u32) -> Option<String> {
-    let mut best_w = u32::MAX;
+fn enclosing_base_name(nodes: &[RawNode], pos: Pos) -> Option<String> {
+    let mut best_w = (u32::MAX, i64::MAX);
     let mut result = None;
     for n in nodes {
         if !matches!(n.kind, NodeKind::Class) {
             continue;
         }
-        if n.span.0 <= line && n.span.2 >= line {
-            let w = n.span.2 - n.span.0;
+        if span_holds(n.span, pos) {
+            let w = span_width(n.span);
             if w < best_w {
                 best_w = w;
                 result = n.heritage.first().cloned();

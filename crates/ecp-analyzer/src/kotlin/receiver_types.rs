@@ -15,7 +15,9 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_kotlin_string_value,
 };
-use crate::calls::{attach_to_enclosing, start_pos};
+use crate::calls::{
+    attach_to_enclosing, node_range, range_width, span_holds, span_width, start_pos, Pos, PosRange,
+};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
@@ -23,21 +25,21 @@ use tree_sitter::Node;
 
 #[derive(Debug, Default)]
 struct LocalTypes {
-    scopes: Vec<((u32, u32), HashMap<String, String>)>,
+    scopes: Vec<(PosRange, HashMap<String, String>)>,
     imports: HashMap<String, String>,
 }
 
 impl LocalTypes {
-    fn lookup(&self, line: u32, var: &str) -> Option<&str> {
+    fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
         let mut best: Option<&str> = None;
-        let mut best_width = u32::MAX;
+        let mut best_width = (u32::MAX, i64::MAX);
         for ((start, end), map) in &self.scopes {
-            if *start <= line && line <= *end {
+            if *start <= pos && pos <= *end {
                 if let Some(t) = map.get(var) {
                     if t.is_empty() && !self.imports.contains_key(var) {
                         continue;
                     }
-                    let w = end - start;
+                    let w = range_width((*start, *end));
                     if w < best_width {
                         best_width = w;
                         best = Some(t.as_str());
@@ -54,7 +56,7 @@ impl LocalTypes {
 /// Walk every `function_declaration`, collecting typed parameters and local
 /// `property_declaration` nodes (which represent `val`/`var` declarations).
 fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
-    let mut scopes: Vec<((u32, u32), HashMap<String, String>)> = Vec::new();
+    let mut scopes: Vec<(PosRange, HashMap<String, String>)> = Vec::new();
     let mut imports = HashMap::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
@@ -86,7 +88,7 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
             continue;
         }
         if n.kind() == "function_declaration" {
-            let scope = (n.start_position().row as u32, n.end_position().row as u32);
+            let scope = node_range(n);
             let mut map: HashMap<String, String> = HashMap::new();
             if let Some(params) = n.child_by_field_name("parameters") {
                 collect_params(params, source, &mut map);
@@ -238,15 +240,15 @@ fn kotlin_callee(
                 std::str::from_utf8(&source[method_node.start_byte()..method_node.end_byte()])
                     .ok()?;
 
-            let line = call.start_position().row as u32;
+            let pos = start_pos(call);
             let ty: Option<String> = match receiver.kind() {
-                "this_expression" => enclosing_class_name(nodes, line),
-                "super_expression" => enclosing_superclass(nodes, line),
+                "this_expression" => enclosing_class_name(nodes, pos),
+                "super_expression" => enclosing_superclass(nodes, pos),
                 "simple_identifier" => {
                     let var =
                         std::str::from_utf8(&source[receiver.start_byte()..receiver.end_byte()])
                             .ok()?;
-                    locals.lookup(line, var).map(str::to_string)
+                    locals.lookup(pos, var).map(str::to_string)
                 }
                 _ => None,
             };
@@ -317,14 +319,14 @@ pub fn extract_kotlin_calls_and_path_literals(
     (path_literals, sql_refs)
 }
 
-fn enclosing_class_name(nodes: &[RawNode], line: u32) -> Option<String> {
-    let mut best: Option<(u32, &str)> = None;
+fn enclosing_class_name(nodes: &[RawNode], pos: Pos) -> Option<String> {
+    let mut best: Option<((u32, i64), &str)> = None;
     for n in nodes {
         if !matches!(n.kind, NodeKind::Class) {
             continue;
         }
-        if n.span.0 <= line && n.span.2 >= line {
-            let w = n.span.2 - n.span.0;
+        if span_holds(n.span, pos) {
+            let w = span_width(n.span);
             if best.is_none_or(|(bw, _)| w < bw) {
                 best = Some((w, &n.name));
             }
@@ -333,15 +335,15 @@ fn enclosing_class_name(nodes: &[RawNode], line: u32) -> Option<String> {
     best.map(|(_, name)| name.to_string())
 }
 
-fn enclosing_superclass(nodes: &[RawNode], line: u32) -> Option<String> {
-    let mut best_w = u32::MAX;
+fn enclosing_superclass(nodes: &[RawNode], pos: Pos) -> Option<String> {
+    let mut best_w = (u32::MAX, i64::MAX);
     let mut result = None;
     for n in nodes {
         if !matches!(n.kind, NodeKind::Class) {
             continue;
         }
-        if n.span.0 <= line && n.span.2 >= line {
-            let w = n.span.2 - n.span.0;
+        if span_holds(n.span, pos) {
+            let w = span_width(n.span);
             if w < best_w {
                 best_w = w;
                 result = n.heritage.first().cloned();

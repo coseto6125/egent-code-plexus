@@ -17,15 +17,18 @@
 use super::path_literals::{
     build_concatenated, build_raw_path_literal, enclosing_symbol_and_owner, strip_quotes,
 };
-use crate::calls::{attach_to_enclosing, construction_call, start_pos, CallSiteIndex};
+use crate::calls::{
+    attach_to_enclosing, construction_call, node_range, range_width, start_pos, CallSiteIndex, Pos,
+    PosRange,
+};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use rustc_hash::FxHashMap;
 use tree_sitter::Node;
 
 #[derive(Debug, Default)]
 pub struct CppBindings {
-    fn_scopes: Vec<((u32, u32), FxHashMap<String, String>)>,
-    class_scopes: Vec<((u32, u32), String)>,
+    fn_scopes: Vec<(PosRange, FxHashMap<String, String>)>,
+    class_scopes: Vec<(PosRange, String)>,
 }
 
 impl CppBindings {
@@ -42,13 +45,13 @@ impl CppBindings {
         out
     }
 
-    fn lookup_local(&self, line: u32, var: &str) -> Option<&str> {
+    fn lookup_local(&self, pos: Pos, var: &str) -> Option<&str> {
         let mut best: Option<&str> = None;
-        let mut best_width = u32::MAX;
+        let mut best_width = (u32::MAX, i64::MAX);
         for ((start, end), map) in &self.fn_scopes {
-            if *start <= line && line <= *end {
+            if *start <= pos && pos <= *end {
                 if let Some(t) = map.get(var) {
-                    let w = end - start;
+                    let w = range_width((*start, *end));
                     if w < best_width {
                         best_width = w;
                         best = Some(t.as_str());
@@ -59,12 +62,12 @@ impl CppBindings {
         best
     }
 
-    fn enclosing_class(&self, line: u32) -> Option<&str> {
+    fn enclosing_class(&self, pos: Pos) -> Option<&str> {
         let mut best: Option<&str> = None;
-        let mut best_width = u32::MAX;
+        let mut best_width = (u32::MAX, i64::MAX);
         for ((start, end), name) in &self.class_scopes {
-            if *start <= line && line <= *end {
-                let w = end - start;
+            if *start <= pos && pos <= *end {
+                let w = range_width((*start, *end));
                 if w < best_width {
                     best_width = w;
                     best = Some(name.as_str());
@@ -76,8 +79,8 @@ impl CppBindings {
 }
 
 pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> CppBindings {
-    let mut fn_scopes: Vec<((u32, u32), FxHashMap<String, String>)> = Vec::new();
-    let mut class_scopes: Vec<((u32, u32), String)> = Vec::new();
+    let mut fn_scopes: Vec<(PosRange, FxHashMap<String, String>)> = Vec::new();
+    let mut class_scopes: Vec<(PosRange, String)> = Vec::new();
 
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
@@ -88,14 +91,14 @@ pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> CppBindings {
                         if let Ok(s) = std::str::from_utf8(
                             &source[name_node.start_byte()..name_node.end_byte()],
                         ) {
-                            let span = (n.start_position().row as u32, n.end_position().row as u32);
+                            let span = node_range(n);
                             class_scopes.push((span, s.to_string()));
                         }
                     }
                 }
             }
             "function_definition" => {
-                let span = (n.start_position().row as u32, n.end_position().row as u32);
+                let span = node_range(n);
                 let mut map: FxHashMap<String, String> = FxHashMap::default();
                 collect_typed_cpp_params(n, source, &mut map);
                 if let Some(body) = n.child_by_field_name("body") {
@@ -297,7 +300,7 @@ fn cpp_new_expression_call(new_expr: Node<'_>, source: &[u8]) -> Option<String> 
 
 fn cpp_callee_name(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> Option<String> {
     let function = call.child_by_field_name("function")?;
-    let line = call.start_position().row as u32;
+    let pos = start_pos(call);
 
     match function.kind() {
         "identifier" => std::str::from_utf8(&source[function.start_byte()..function.end_byte()])
@@ -309,14 +312,14 @@ fn cpp_callee_name(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> Opt
             let arg = function.child_by_field_name("argument")?;
             // `this->method()` / `this.method()`
             if arg.kind() == "this" {
-                if let Some(cls) = bindings.enclosing_class(line) {
+                if let Some(cls) = bindings.enclosing_class(pos) {
                     return Some(format!("{cls}.{method}"));
                 }
             }
             // `obj.method()` — typed var lookup
             if arg.kind() == "identifier" {
                 if let Ok(var) = std::str::from_utf8(&source[arg.start_byte()..arg.end_byte()]) {
-                    if let Some(ty) = bindings.lookup_local(line, var) {
+                    if let Some(ty) = bindings.lookup_local(pos, var) {
                         return Some(format!("{ty}.{method}"));
                     }
                 }
@@ -328,7 +331,7 @@ fn cpp_callee_name(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> Opt
                         if let Ok(var) =
                             std::str::from_utf8(&source[inner.start_byte()..inner.end_byte()])
                         {
-                            if let Some(ty) = bindings.lookup_local(line, var) {
+                            if let Some(ty) = bindings.lookup_local(pos, var) {
                                 return Some(format!("{ty}.{method}"));
                             }
                         }

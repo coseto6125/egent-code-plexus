@@ -15,15 +15,15 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, extract_ruby_string_value,
 };
-use crate::calls::{attach_to_enclosing, start_pos};
+use crate::calls::{attach_to_enclosing, range_width, start_pos, Pos, PosRange};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use tree_sitter::Node;
 
 /// Enclosing class/module context built from the parsed node list.
 struct ClassContext {
-    /// `(start_row, end_row, class_name)`
-    entries: Vec<(u32, u32, String)>,
+    /// `((start, end) positions, class_name)`
+    entries: Vec<(PosRange, String)>,
 }
 
 impl ClassContext {
@@ -31,17 +31,17 @@ impl ClassContext {
         let entries = nodes
             .iter()
             .filter(|n| matches!(n.kind, NodeKind::Class))
-            .map(|n| (n.span.0, n.span.2, n.name.clone()))
+            .map(|n| (((n.span.0, n.span.1), (n.span.2, n.span.3)), n.name.clone()))
             .collect();
         Self { entries }
     }
 
-    /// Return the name of the innermost class/module enclosing `line`.
-    fn enclosing_name(&self, line: u32) -> Option<&str> {
-        let mut best: Option<(&str, u32)> = None;
-        for (start, end, name) in &self.entries {
-            if *start <= line && line <= *end {
-                let width = end - start;
+    /// Return the name of the innermost class/module enclosing `pos`.
+    fn enclosing_name(&self, pos: Pos) -> Option<&str> {
+        let mut best: Option<(&str, (u32, i64))> = None;
+        for ((start, end), name) in &self.entries {
+            if *start <= pos && pos <= *end {
+                let width = range_width((*start, *end));
                 if best.is_none_or(|(_, w)| width < w) {
                     best = Some((name.as_str(), width));
                 }
@@ -105,7 +105,7 @@ fn ruby_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Option<Stri
     let method_node = call.child_by_field_name("method")?;
     let method_name = method_node.utf8_text(source).ok()?;
 
-    let line = call.start_position().row as u32;
+    let pos = start_pos(call);
 
     match call.child_by_field_name("receiver") {
         None => {
@@ -121,7 +121,7 @@ fn ruby_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Option<Stri
                     .utf8_text(source)
                     .ok()
                     .map(|s| s.trim_start_matches("::").to_string()),
-                _ => infer_receiver_type(receiver, source, ctx, line),
+                _ => infer_receiver_type(receiver, source, ctx, pos),
             };
             if let Some(inferred_type) = receiver_type {
                 Some(format!("{inferred_type}.{method_name}"))
@@ -137,10 +137,10 @@ fn infer_receiver_type(
     node: Node<'_>,
     source: &[u8],
     ctx: &ClassContext,
-    line: u32,
+    pos: Pos,
 ) -> Option<String> {
     match node.kind() {
-        "self" => ctx.enclosing_name(line).map(|s| s.to_string()),
+        "self" => ctx.enclosing_name(pos).map(|s| s.to_string()),
         "constant" => node.utf8_text(source).ok().map(|s| s.to_string()),
         "call" => {
             let method_node = node.child_by_field_name("method")?;
@@ -150,7 +150,7 @@ fn infer_receiver_type(
                 "new" | "create" | "create!" | "find" | "find_by" | "find_by!" | "where"
                 | "includes" | "joins" | "first" | "last" | "order" | "limit" | "offset" => {
                     if let Some(inner) = node.child_by_field_name("receiver") {
-                        infer_receiver_type(inner, source, ctx, line)
+                        infer_receiver_type(inner, source, ctx, pos)
                     } else {
                         None
                     }

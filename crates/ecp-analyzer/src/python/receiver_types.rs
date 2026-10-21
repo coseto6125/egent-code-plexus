@@ -12,18 +12,20 @@
 //! call falls back to the bare member name as before.
 
 use super::path_literals::build_raw_path_literal;
-use crate::calls::{attach_to_enclosing, start_pos, CallSiteIndex};
+use crate::calls::{
+    attach_to_enclosing, node_range, range_width, start_pos, CallSiteIndex, Pos, PosRange,
+};
 use crate::framework_helpers::strip_python_string_quotes;
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
-/// Map of nested function scopes (by row span) to their var→type bindings.
+/// Map of nested function scopes (by position range) to their var→type bindings.
 /// Lookup picks the smallest containing scope that has the variable, so
 /// closures correctly inherit outer-scope annotations.
 #[derive(Debug, Default)]
 pub struct LocalTypes {
-    scopes: Vec<((u32, u32), HashMap<String, String>)>,
+    scopes: Vec<(PosRange, HashMap<String, String>)>,
     /// A `from` binding may be an object; only a module import proves that
     /// its receiver names a namespace for import-scoped resolution.
     imported: HashMap<String, ImportedBinding>,
@@ -37,13 +39,13 @@ enum ImportedBinding {
 }
 
 impl LocalTypes {
-    fn lookup(&self, line: u32, var: &str) -> Option<&str> {
+    fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
         let mut best: Option<&str> = None;
-        let mut best_width = u32::MAX;
+        let mut best_width = (u32::MAX, i64::MAX);
         for ((start, end), map) in &self.scopes {
-            if *start <= line && line <= *end {
+            if *start <= pos && pos <= *end {
                 if let Some(t) = map.get(var) {
-                    let w = end - start;
+                    let w = range_width((*start, *end));
                     if w < best_width {
                         best_width = w;
                         best = Some(t.as_str());
@@ -80,7 +82,7 @@ impl LocalTypes {
 /// annotated assignments inside the function body, and every name an
 /// `import` statement binds.
 pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
-    let mut scopes: Vec<((u32, u32), HashMap<String, String>)> = Vec::new();
+    let mut scopes: Vec<(PosRange, HashMap<String, String>)> = Vec::new();
     let mut imported = HashMap::new();
     let mut shadows = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
@@ -89,7 +91,7 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
             collect_import_bindings(n, source, &mut imported);
         }
         if n.kind() == "function_definition" {
-            let fn_span = (n.start_position().row as u32, n.end_position().row as u32);
+            let fn_span = node_range(n);
             let mut map: HashMap<String, String> = HashMap::new();
             let mut names = HashMap::new();
 
@@ -396,8 +398,8 @@ fn python_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Opt
                 if obj.kind() == "identifier" {
                     let obj_name =
                         std::str::from_utf8(&source[obj.start_byte()..obj.end_byte()]).ok()?;
-                    let line = call.start_position().row as u32;
-                    if let Some(ty) = locals.lookup(line, obj_name) {
+                    let pos = start_pos(call);
+                    if let Some(ty) = locals.lookup(pos, obj_name) {
                         return Some(format!("{ty}.{attr_name}"));
                     }
                 }

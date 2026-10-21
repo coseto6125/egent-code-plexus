@@ -18,7 +18,7 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_swift_string_value,
 };
-use crate::calls::{attach_to_enclosing, start_pos};
+use crate::calls::{attach_to_enclosing, node_range, range_width, start_pos, Pos, PosRange};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -27,8 +27,8 @@ use tree_sitter::Node;
 /// super-class lookup for `self` / `super`. Scope is keyed by row-span so
 /// nested closures inherit outer-scope types via smallest-containing-scope.
 // `(start_line, end_line)` half-open span keyed scope tables.
-type FnScope = ((u32, u32), HashMap<String, String>);
-type ClassScope = ((u32, u32), (String, Option<String>));
+type FnScope = (PosRange, HashMap<String, String>);
+type ClassScope = (PosRange, (String, Option<String>));
 
 #[derive(Debug, Default)]
 pub struct SwiftBindings {
@@ -39,13 +39,13 @@ pub struct SwiftBindings {
 }
 
 impl SwiftBindings {
-    fn lookup_local(&self, line: u32, var: &str) -> Option<&str> {
+    fn lookup_local(&self, pos: Pos, var: &str) -> Option<&str> {
         let mut best: Option<&str> = None;
-        let mut best_width = u32::MAX;
+        let mut best_width = (u32::MAX, i64::MAX);
         for ((start, end), map) in &self.fn_scopes {
-            if *start <= line && line <= *end {
+            if *start <= pos && pos <= *end {
                 if let Some(t) = map.get(var) {
-                    let w = end - start;
+                    let w = range_width((*start, *end));
                     if w < best_width {
                         best_width = w;
                         best = Some(t.as_str());
@@ -56,12 +56,12 @@ impl SwiftBindings {
         best
     }
 
-    fn enclosing_class(&self, line: u32) -> Option<&(String, Option<String>)> {
+    fn enclosing_class(&self, pos: Pos) -> Option<&(String, Option<String>)> {
         let mut best: Option<&(String, Option<String>)> = None;
-        let mut best_width = u32::MAX;
+        let mut best_width = (u32::MAX, i64::MAX);
         for ((start, end), info) in &self.class_scopes {
-            if *start <= line && line <= *end {
-                let w = end - start;
+            if *start <= pos && pos <= *end {
+                let w = range_width((*start, *end));
                 if w < best_width {
                     best_width = w;
                     best = Some(info);
@@ -83,12 +83,12 @@ pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> SwiftBindings {
             "class_declaration" => {
                 // Covers class / struct / enum / actor / extension in tree-sitter-swift.
                 if let Some((name, sup)) = swift_class_name_and_super(n, source) {
-                    let span = (n.start_position().row as u32, n.end_position().row as u32);
+                    let span = node_range(n);
                     class_scopes.push((span, (name, sup)));
                 }
             }
             "function_declaration" | "init_declaration" => {
-                let span = (n.start_position().row as u32, n.end_position().row as u32);
+                let span = node_range(n);
                 let mut map: HashMap<String, String> = HashMap::new();
                 collect_typed_swift_params(n, source, &mut map);
                 if let Some(body) = n.child_by_field_name("body") {
@@ -356,7 +356,7 @@ pub fn extract_swift_calls_and_path_literals(
 fn swift_callee_name(call: Node<'_>, source: &[u8], bindings: &SwiftBindings) -> Option<String> {
     // The callee is the first non-call-suffix named child of `call_expression`.
     let target = first_named_where(call, |ch| ch.kind() != "call_suffix")?;
-    let line = call.start_position().row as u32;
+    let pos = start_pos(call);
 
     match target.kind() {
         "simple_identifier" => std::str::from_utf8(&source[target.start_byte()..target.end_byte()])
@@ -378,12 +378,12 @@ fn swift_callee_name(call: Node<'_>, source: &[u8], bindings: &SwiftBindings) ->
             if let Some(recv) = receiver {
                 match recv.kind() {
                     "self_expression" => {
-                        if let Some((cls, _)) = bindings.enclosing_class(line) {
+                        if let Some((cls, _)) = bindings.enclosing_class(pos) {
                             return Some(format!("{cls}.{method}"));
                         }
                     }
                     "super_expression" => {
-                        if let Some((_, Some(sup))) = bindings.enclosing_class(line) {
+                        if let Some((_, Some(sup))) = bindings.enclosing_class(pos) {
                             return Some(format!("{sup}.{method}"));
                         }
                     }
@@ -391,7 +391,7 @@ fn swift_callee_name(call: Node<'_>, source: &[u8], bindings: &SwiftBindings) ->
                         if let Ok(var) =
                             std::str::from_utf8(&source[recv.start_byte()..recv.end_byte()])
                         {
-                            if let Some(ty) = bindings.lookup_local(line, var) {
+                            if let Some(ty) = bindings.lookup_local(pos, var) {
                                 return Some(format!("{ty}.{method}"));
                             }
                         }
