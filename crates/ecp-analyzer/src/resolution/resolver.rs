@@ -691,6 +691,7 @@ impl<'a> Resolver<'a> {
                 caller_heritage,
                 Some(CallScope {
                     owner: caller_owner,
+                    untyped_receiver: !bind_import,
                 }),
                 &mut None,
             )
@@ -1195,7 +1196,11 @@ impl<'a> Resolver<'a> {
                     pick,
                     symbol_name,
                     scope.owner,
-                    caller_heritage,
+                    if scope.untyped_receiver {
+                        &[]
+                    } else {
+                        caller_heritage
+                    },
                     target,
                 ),
                 None => Some(pick),
@@ -1808,6 +1813,10 @@ fn for_each_specifier_candidate<F>(
 struct CallScope<'c> {
     /// The type the calling member belongs to.
     owner: Option<&'c str>,
+    /// `o.m()` on a receiver the parser could not type: the member is not
+    /// reached through the caller's bases, so they do not narrow the pick
+    /// (`super(E, self).m()` starts after `E`).
+    untyped_receiver: bool,
 }
 
 /// Outcome of the receiver-typing ladder for one qualified callee.
