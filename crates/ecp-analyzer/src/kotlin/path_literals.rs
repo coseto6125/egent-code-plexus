@@ -179,7 +179,7 @@ fn leading_callee_name(call: Node<'_>, source: &[u8]) -> Option<String> {
             if count == 0 {
                 return None;
             }
-            let member = callee_node.child(count as u32 - 1)?;
+            let member = callee_node.child(count - 1)?;
             std::str::from_utf8(&source[member.start_byte()..member.end_byte()])
                 .ok()
                 .map(str::to_string)

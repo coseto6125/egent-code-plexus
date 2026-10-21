@@ -1,4 +1,7 @@
 use super::ast::Ast;
+use super::frames::Frames;
+use super::php::is_php;
+use super::python::{is_python, Receiver};
 use super::{Boundary, Budgets, FlowEdge, FlowNode, SourceFile};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -22,18 +25,19 @@ pub(super) struct Function {
     pub(super) defaults: BTreeMap<String, Value>,
 }
 pub(super) type Scope = BTreeMap<String, Value>;
-pub(super) type State = (Vec<Scope>, Vec<Scope>);
+/// Scopes and objects; copying one shares every frame with the original.
+pub(super) type State = (Frames, Frames);
 /// One `(condition, body)` arm of an if / elif / ternary.
 pub(super) type Arm = (Option<usize>, Option<usize>);
 pub(super) struct Engine<'a> {
     pub(super) files: &'a [SourceFile],
     pub(super) ast: Vec<Ast>,
     pub(super) roots: Vec<Option<usize>>,
-    pub(super) scopes: Vec<Scope>,
+    pub(super) scopes: Frames,
     pub(super) function_scopes: BTreeSet<usize>,
     pub(super) references: BTreeMap<(usize, String), (usize, String)>,
     pub(super) functions: Vec<Function>,
-    pub(super) objects: Vec<Scope>,
+    pub(super) objects: Frames,
     pub(super) nodes: Vec<FlowNode>,
     pub(super) origins: Vec<usize>,
     pub(super) edges: BTreeSet<FlowEdge>,
@@ -44,7 +48,7 @@ pub(super) struct Engine<'a> {
     pub(super) active: Vec<usize>,
     pub(super) active_returns: Vec<Value>,
     pub(super) active_parameters: Vec<Vec<Value>>,
-    pub(super) exit_states: Vec<Vec<(Vec<Scope>, Vec<Scope>)>>,
+    pub(super) exit_states: Vec<Vec<State>>,
     pub(super) called: BTreeSet<usize>,
     pub(super) controls: Vec<Value>,
     /// Identity caches for the innermost loop, keyed by call context and AST
@@ -58,6 +62,20 @@ pub(super) struct Engine<'a> {
     pub(super) loop_ctx: Vec<usize>,
     /// (importer, dependency) file pairs resolved during module initialisation.
     pub(super) links: BTreeSet<(usize, usize)>,
+    /// PHP or Python class declaration (AST node) to the object holding its methods.
+    pub(super) classes: BTreeMap<usize, usize>,
+    /// Lowercased fully qualified PHP class name to its declarations.
+    pub(super) declarations: BTreeMap<String, BTreeSet<usize>>,
+    /// Python class-body scopes: visible to the class body, not to the
+    /// functions defined in it.
+    pub(super) class_scopes: BTreeSet<usize>,
+    /// Python class object to its bases in declared order, one set of
+    /// possible classes per base expression.
+    pub(super) bases: BTreeMap<usize, Vec<BTreeSet<usize>>>,
+    /// PHP `use` aliases per (file, lowercased namespace): PHP scopes them to
+    /// the namespace block, and class names are case-insensitive, so each
+    /// alias is keyed lowercased.
+    pub(super) php_aliases: BTreeMap<(usize, String), Scope>,
 }
 impl Engine<'_> {
     pub(super) fn field(&self, n: usize, key: &str) -> Option<usize> {
@@ -204,13 +222,11 @@ impl Engine<'_> {
                 let weak = base.objects.len() > 1
                     || base.objects.iter().any(|obj| self.is_loop_summary(*obj));
                 for obj in base.objects {
+                    let object = &mut self.objects[obj];
                     if weak {
-                        self.objects[obj]
-                            .entry(key.clone())
-                            .or_default()
-                            .merge(&result);
+                        object.entry(key.clone()).or_default().merge(&result);
                     } else {
-                        self.objects[obj].insert(key.clone(), result.clone());
+                        object.insert(key.clone(), result.clone());
                     }
                 }
             } else {
@@ -258,6 +274,33 @@ impl Engine<'_> {
         });
         (value, key)
     }
+    /// Read member `n`: the receiver's value and the value read. A class
+    /// receiver also yields what it inherits.
+    pub(super) fn field_read(&mut self, n: usize, scopes: &[usize]) -> (Value, Value) {
+        let (base, key) = self.member(n, scopes);
+        let mut value = Value::default();
+        if let Some(key) = key {
+            for obj in &base.objects {
+                self.inherited(*obj, &key, &mut value);
+            }
+            if base.objects.is_empty() {
+                self.boundary(
+                    n,
+                    "unknown_alias",
+                    "Field reads from an unresolved receiver have unknown provenance.",
+                );
+                value.merge(&base);
+            }
+        } else {
+            self.boundary(
+                n,
+                "dynamic_field",
+                "Computed field reads have unknown provenance.",
+            );
+        }
+        let read = self.node(n, "field_read", &value);
+        (base, read)
+    }
     pub(super) fn function(&mut self, n: usize, scopes: &[usize]) -> Value {
         // Loop iterations reuse the callable identity, like they reuse nodes, so a
         // closure created in a loop body does not defeat the fixed point. Arrow
@@ -286,14 +329,16 @@ impl Engine<'_> {
             );
         }
         let path = &self.files[self.ast[n].file].path;
-        let python = path.ends_with(".py") || path.ends_with(".pyi");
-        let php = path.ends_with(".php") || path.ends_with(".phtml");
+        let (python, php) = (is_python(path), is_php(path));
         let mut capture_scopes = scopes.to_vec();
+        if python {
+            capture_scopes.retain(|scope| !self.class_scopes.contains(scope));
+        }
         if php {
             let mut captured = Scope::new();
             let mut references = Vec::new();
             for scope in scopes {
-                for (name, value) in &self.scopes[*scope] {
+                for (name, value) in self.scopes[*scope].iter() {
                     if !name.starts_with('$') {
                         captured.insert(name.clone(), value.clone());
                     }
@@ -339,7 +384,7 @@ impl Engine<'_> {
             }
             if self.ast[n].kind == "arrow_function" {
                 for scope in scopes {
-                    for (name, value) in &self.scopes[*scope] {
+                    for (name, value) in self.scopes[*scope].iter() {
                         captured.insert(name.clone(), value.clone());
                     }
                 }
@@ -387,12 +432,23 @@ impl Engine<'_> {
                 | "lambda"
                 | "anonymous_function"
                 | "anonymous_function_creation_expression"
+                | "method_declaration"
         )
     }
     pub(super) fn predeclare(&mut self, n: usize, scopes: &[usize]) {
-        if self.files[self.ast[n].file].path.ends_with(".py") {
+        let path = &self.files[self.ast[n].file].path;
+        if is_python(path) {
             return;
         }
+        let php = is_php(path);
+        // PHP methods capture the enclosing scope by value when their class
+        // is created, so every function is bound before any class.
+        self.predeclare_pass(n, scopes, false);
+        if php {
+            self.predeclare_pass(n, scopes, true);
+        }
+    }
+    fn predeclare_pass(&mut self, n: usize, scopes: &[usize], classes: bool) {
         for c in self.ast[n].children.clone() {
             let c = if self.ast[c].kind == "export_statement" {
                 self.field(c, "declaration")
@@ -401,6 +457,18 @@ impl Engine<'_> {
             } else {
                 c
             };
+            if self.ast[c].kind == "namespace_definition" {
+                if let Some(body) = self.field(c, "body") {
+                    self.predeclare_pass(body, scopes, classes);
+                }
+                continue;
+            }
+            if classes {
+                if self.is_class(c) {
+                    self.php_class(c, scopes);
+                }
+                continue;
+            }
             if self.is_function(c) {
                 if let Some(name) = self.field(c, "name") {
                     let key = self.ast[name].text.clone();
@@ -412,15 +480,27 @@ impl Engine<'_> {
             }
         }
     }
-    pub(super) fn eval(&mut self, n: usize, scopes: &[usize]) -> Value {
+    /// Spend one evaluation step; false once the step budget is exhausted.
+    fn step(&mut self) -> bool {
         self.steps += 1;
         if self.steps > self.budgets.max_steps {
             self.truncated = true;
+            return false;
+        }
+        true
+    }
+    pub(super) fn eval(&mut self, n: usize, scopes: &[usize]) -> Value {
+        if !self.step() {
             return Value::default();
         }
         let a = self.ast[n].clone();
         if self.is_function(n) {
-            if let Some(name) = self.field(n, "name") {
+            // A method belongs to its class object, never to the enclosing
+            // scope (a PHP anonymous class body is evaluated in place).
+            if let Some(name) = self
+                .field(n, "name")
+                .filter(|_| a.kind != "method_declaration")
+            {
                 let prior = self.lookup(&self.ast[name].text, scopes);
                 if prior.functions.iter().any(|f| self.functions[*f].ast == n) {
                     return prior;
@@ -472,7 +552,7 @@ impl Engine<'_> {
                     }
                 }
                 let declaration =
-                    a.kind == "variable_declarator" || self.files[a.file].path.ends_with(".py");
+                    a.kind == "variable_declarator" || is_python(&self.files[a.file].path);
                 let target_scopes = if a
                     .parent
                     .is_some_and(|p| self.ast[p].kind == "variable_declaration")
@@ -488,38 +568,29 @@ impl Engine<'_> {
                 left.map(|l| self.assign(l, value, target_scopes, declaration))
                     .unwrap_or_default()
             }
-            "call_expression" | "call" | "function_call_expression" | "member_call_expression" => {
-                self.call(n, scopes)
+            "call_expression"
+            | "call"
+            | "function_call_expression"
+            | "member_call_expression"
+            | "nullsafe_member_call_expression"
+            | "scoped_call_expression" => self.call(n, scopes),
+            "class_declaration"
+            | "interface_declaration"
+            | "trait_declaration"
+            | "enum_declaration"
+                if self.is_class(n) =>
+            {
+                self.php_class(n, scopes);
+                Value::default()
+            }
+            "qualified_name" => {
+                let value = self.php_class_ref(n, scopes);
+                self.node(n, "read", &value)
             }
             "member_expression"
             | "attribute"
             | "member_access_expression"
-            | "subscript_expression" => {
-                let (base, key) = self.member(n, scopes);
-                let mut value = Value::default();
-                if let Some(key) = key {
-                    for obj in &base.objects {
-                        if let Some(v) = self.objects[*obj].get(&key) {
-                            value.merge(v);
-                        }
-                    }
-                    if base.objects.is_empty() {
-                        self.boundary(
-                            n,
-                            "unknown_alias",
-                            "Field reads from an unresolved receiver have unknown provenance.",
-                        );
-                        value.merge(&base);
-                    }
-                } else {
-                    self.boundary(
-                        n,
-                        "dynamic_field",
-                        "Computed field reads have unknown provenance.",
-                    );
-                }
-                self.node(n, "field_read", &value)
-            }
+            | "subscript_expression" => self.field_read(n, scopes).1,
             "object" | "dictionary" | "array_creation_expression" => {
                 // Loop iterations reuse the allocation, like they reuse nodes, so the heap converges.
                 let ctx = self.loop_ctx();
@@ -549,10 +620,11 @@ impl Engine<'_> {
                         let key: String = self.ast[k].text.trim_matches(['\'', '"']).into();
                         // A reused allocation summarises every iteration: its fields
                         // accumulate instead of restarting from the literal.
+                        let object = &mut self.objects[obj];
                         if reused.is_some() {
-                            self.objects[obj].entry(key).or_default().merge(&v);
+                            object.entry(key).or_default().merge(&v);
                         } else {
-                            self.objects[obj].insert(key, v);
+                            object.insert(key, v);
                         }
                     } else {
                         self.boundary(
@@ -603,11 +675,10 @@ impl Engine<'_> {
                 }
                 self.node(n, "value", &v)
             }
-            "namespace_use_declaration" => {
-                self.boundary(n,"import","PHP namespace imports and include execution are not resolved across snapshots.");
+            // PHP `use` clauses are bound, or reported, before any file is evaluated.
+            "import_statement" | "import_from_statement" | "namespace_use_declaration" => {
                 Value::default()
             }
-            "import_statement" | "import_from_statement" => Value::default(),
             "program" | "module" | "statement_block" | "block" | "compound_statement" => {
                 let mut block_scopes = scopes.to_vec();
                 if a.kind == "statement_block" {
@@ -661,14 +732,68 @@ impl Engine<'_> {
             | "variable_declaration"
             | "export_statement"
             | "parenthesized_expression"
-            | "argument" => {
+            | "argument"
+            | "arguments"
+            | "argument_list" => {
                 let mut v = Value::default();
                 for c in a.children {
                     v.merge(&self.eval(c, scopes));
                 }
                 v
             }
-            "comment" | "php_tag" | "string_content" => Value::default(),
+            // A declaration is not a value: it runs its nested statements, and
+            // its name, parameter list, modifiers and types have no runtime
+            // effect at the point of declaration.
+            "class_declaration"
+            | "abstract_class_declaration"
+            | "class_body"
+            | "class_heritage"
+            | "extends_clause"
+            | "namespace_definition" => {
+                let name = self.field(n, "name");
+                for c in a.children {
+                    if Some(c) != name {
+                        self.eval(c, scopes);
+                    }
+                }
+                Value::default()
+            }
+            "class_definition" => {
+                self.python_class(n, scopes);
+                Value::default()
+            }
+            "method_definition" => {
+                // The body runs in place with unbound parameters, and calls
+                // through the class or an instance never reach it.
+                self.boundary(
+                    n,
+                    "unsupported_semantics",
+                    "method_definition is traversed without its full execution semantics.",
+                );
+                if let Some(body) = self.field(n, "body") {
+                    self.eval(body, scopes);
+                }
+                Value::default()
+            }
+            "comment"
+            | "php_tag"
+            | "string_content"
+            | "formal_parameters"
+            | "type_annotation"
+            | "predefined_type"
+            | "type_identifier"
+            | "type_list"
+            | "named_type"
+            | "optional_type"
+            | "union_type"
+            | "primitive_type"
+            | "cast_type"
+            | "namespace_name"
+            | "relative_scope"
+            | "implements_clause"
+            | "interface_declaration"
+            | "type_alias_declaration"
+            | "pass_statement" => Value::default(),
             _ => {
                 if !matches!(
                     a.kind.as_str(),
@@ -694,8 +819,26 @@ impl Engine<'_> {
                         | "string_value"
                         | "else_clause"
                         | "else"
-                        | "type_annotation"
-                        | "predefined_type"
+                        // String literals and their token children: an
+                        // interpolated part is evaluated as a child, so the
+                        // string's value carries its provenance.
+                        | "string_start"
+                        | "string_end"
+                        | "concatenated_string"
+                        | "interpolation"
+                        | "format_specifier"
+                        | "format_expression"
+                        | "type_conversion"
+                        | "template_string"
+                        | "template_substitution"
+                        | "html_character_reference"
+                        | "heredoc"
+                        | "heredoc_start"
+                        | "heredoc_body"
+                        | "heredoc_end"
+                        | "nowdoc"
+                        | "nowdoc_body"
+                        | "nowdoc_string"
                 ) {
                     self.boundary(
                         n,
@@ -717,13 +860,6 @@ impl Engine<'_> {
             }
         }
     }
-    pub(super) fn merge_scopes(&mut self, other: &[Scope]) {
-        for (scope, old) in self.scopes.iter_mut().zip(other) {
-            for (name, v) in old {
-                scope.entry(name.clone()).or_default().merge(v);
-            }
-        }
-    }
     pub(super) fn loop_ctx(&self) -> usize {
         self.loop_ctx.last().copied().unwrap_or(0)
     }
@@ -738,25 +874,13 @@ impl Engine<'_> {
     /// Frames and allocations created after the snapshot stay: they belong to
     /// callables that may still be invoked from another path.
     pub(super) fn restore(&mut self, state: &State) {
-        for (dst, src) in self.scopes.iter_mut().zip(&state.0) {
-            if *dst != *src {
-                *dst = src.clone();
-            }
-        }
-        for (dst, src) in self.objects.iter_mut().zip(&state.1) {
-            if *dst != *src {
-                *dst = src.clone();
-            }
-        }
+        self.scopes.restore(&state.0);
+        self.objects.restore(&state.1);
     }
     /// Union another path's exit state into the current one.
     pub(super) fn join(&mut self, state: &State) {
-        self.merge_scopes(&state.0);
-        for (object, old) in self.objects.iter_mut().zip(&state.1) {
-            for (key, value) in old {
-                object.entry(key.clone()).or_default().merge(value);
-            }
-        }
+        self.scopes.merge(&state.0);
+        self.objects.merge(&state.1);
     }
     /// Continue from the union of every path that falls through. With no such
     /// path the code after the fork is unreachable and the state is left as is.
@@ -774,8 +898,7 @@ impl Engine<'_> {
     /// positionally instead of through the single-valued field map.
     pub(super) fn arms(&self, n: usize) -> (Vec<Arm>, Option<usize>) {
         let a = &self.ast[n];
-        let python =
-            self.files[a.file].path.ends_with(".py") || self.files[a.file].path.ends_with(".pyi");
+        let python = is_python(&self.files[a.file].path);
         if python && a.kind == "conditional_expression" {
             let c = &a.children;
             return (
@@ -871,7 +994,8 @@ impl Engine<'_> {
     pub(super) fn hoist_locals(&mut self, n: usize, scope: usize, python: bool) {
         let mut pending = vec![n];
         while let Some(n) = pending.pop() {
-            if self.is_function(n) {
+            // A class body binds its own names, not the enclosing function's.
+            if self.is_function(n) || self.ast[n].kind == "class_definition" {
                 continue;
             }
             let a = &self.ast[n];
@@ -927,17 +1051,11 @@ impl Engine<'_> {
                 self.eval(increment, scopes);
             }
             self.controls.pop();
-            self.merge_scopes(&before);
-            for (object, old) in self.objects.iter_mut().zip(&objects_before) {
-                for (key, value) in old {
-                    object.entry(key.clone()).or_default().merge(value);
-                }
-            }
+            self.scopes.merge(&before);
+            self.objects.merge(&objects_before);
             // Block-local frames and allocations that first appear inside the body do not
             // escape unless captured; compare the incoming state and the incoming heap.
-            if self.scopes[..before.len()] == before
-                && self.objects[..objects_before.len()] == objects_before
-            {
+            if self.scopes.starts_with(&before) && self.objects.starts_with(&objects_before) {
                 converged = true;
                 break;
             }
@@ -979,11 +1097,38 @@ impl Engine<'_> {
             .field(n, "function")
             .or_else(|| self.field(n, "name"))
             .or_else(|| a.children.first().copied());
-        let builtin = target.is_some_and(|t| self.builtin(t, scopes));
+        // A PHP method named like a builtin (`$list->count()`) is not that builtin.
+        let method = matches!(
+            a.kind.as_str(),
+            "member_call_expression" | "nullsafe_member_call_expression" | "scoped_call_expression"
+        );
+        let bound = target
+            .filter(|_| !method)
+            .and_then(|t| self.python_self_call(t));
+        let builtin = !method && bound.is_none() && target.is_some_and(|t| self.builtin(t, scopes));
+        let python = is_python(&self.files[a.file].path);
+        // The receiver of a Python `Cls.m(...)` call: what a class method's
+        // `cls` receives.
+        let mut class_receiver = None;
         let fun = if builtin {
             Value::default()
+        } else if method {
+            self.php_method_target(n, scopes)
+        } else if let Some((callees, _)) = &bound {
+            callees.clone()
         } else {
-            target.map(|t| self.eval(t, scopes)).unwrap_or_default()
+            match target {
+                Some(t) if python && self.ast[t].kind == "attribute" && self.step() => {
+                    let (base, read) = self.field_read(t, scopes);
+                    // Only a class object is known to pass itself to a class method.
+                    if self.only_classes(&base) {
+                        class_receiver = Some(base);
+                    }
+                    read
+                }
+                Some(t) => self.eval(t, scopes),
+                None => Value::default(),
+            }
         };
         let args = self.field(n, "arguments");
         let mut values = vec![];
@@ -1006,6 +1151,47 @@ impl Engine<'_> {
                 names.push(name);
             }
         }
+        let instance = bound.map(|(_, receiver)| self.eval(receiver, scopes));
+        // What each Python callee receives ahead of the arguments, as its
+        // decorators decide. A callee whose binding is unknown is not run.
+        let mut callees = Vec::with_capacity(fun.functions.len());
+        let mut unbound = false;
+        for &f in &fun.functions {
+            let receiver = if python {
+                self.python_method(self.functions[f].ast).map(|(r, _)| r)
+            } else {
+                None
+            };
+            let prefix = match (receiver, &instance) {
+                (Some(Receiver::Static), _) => Some(None),
+                // `self.cm()` passes `type(self)`, not the class that lexically
+                // encloses the caller: `A.run(B)` runs `cm` with `cls` bound to B.
+                // The engine models no instance-to-class link, so only a
+                // receiver that is itself a class object names that class.
+                (Some(Receiver::Class), Some(value)) => self.only_classes(value).then(|| {
+                    Some(Value {
+                        ids: value.ids.clone(),
+                        objects: value.objects.clone(),
+                        ..Value::default()
+                    })
+                }),
+                (Some(Receiver::Class), None) => class_receiver.clone().map(Some),
+                (Some(Receiver::Unknown), _) => None,
+                (None | Some(Receiver::Instance), Some(value)) => Some(Some(value.clone())),
+                (None | Some(Receiver::Instance), None) => Some(None),
+            };
+            match prefix {
+                Some(prefix) => callees.push((f, prefix)),
+                None => unbound = true,
+            }
+        }
+        if unbound {
+            self.boundary(
+                n,
+                "external_call",
+                "A decorator or class-method receiver of the callee is not modelled; argument-to-return and side effects are unknown.",
+            );
+        }
         self.node(n, "call", &fun);
         let mut result = Value::default();
         if builtin {
@@ -1015,7 +1201,7 @@ impl Engine<'_> {
             self.boundary(n,"builtin_model","Numeric builtin summary assumes the standard implementation; coercion and monkey-patching remain outside the model.");
             let result = self.node(n, "builtin_summary", &result);
             return self.node(n, "value", &result);
-        } else if fun.functions.is_empty() {
+        } else if callees.is_empty() {
             self.boundary(
                 n,
                 "external_call",
@@ -1034,19 +1220,34 @@ impl Engine<'_> {
         } else {
             // Every possible callee runs from the same call-site state; running them
             // back to back would let the last one overwrite the others' effects.
-            let fork = (fun.functions.len() > 1).then(|| self.snapshot());
+            let fork = (callees.len() > 1).then(|| self.snapshot());
             let mut exits: Vec<State> = Vec::new();
-            for f in fun.functions {
+            for (f, prefix) in callees {
                 if let Some(incoming) = &fork {
                     if !exits.is_empty() {
                         self.restore(incoming);
                     }
                 }
-                if names.iter().any(Option::is_some) {
+                let prefixed;
+                let (args, arg_names): (&[Value], &[Option<String>]) = match prefix {
+                    Some(prefix) => {
+                        prefixed = (
+                            std::iter::once(prefix)
+                                .chain(values.iter().cloned())
+                                .collect::<Vec<_>>(),
+                            std::iter::once(None)
+                                .chain(names.iter().cloned())
+                                .collect::<Vec<_>>(),
+                        );
+                        (&prefixed.0[..], &prefixed.1[..])
+                    }
+                    None => (&values[..], &names[..]),
+                };
+                if arg_names.iter().any(Option::is_some) {
                     let parameters = self.parameters(self.functions[f].ast);
                     let mut ordered = vec![Value::default(); parameters.len()];
                     let mut positional = 0;
-                    for (name, value) in names.iter().zip(&values) {
+                    for (name, value) in arg_names.iter().zip(args) {
                         let index = if let Some(name) = name {
                             parameters.iter().position(|p| self.ast[*p].text == *name)
                         } else {
@@ -1066,7 +1267,7 @@ impl Engine<'_> {
                     }
                     result.merge(&self.invoke(f, &ordered));
                 } else {
-                    result.merge(&self.invoke(f, &values));
+                    result.merge(&self.invoke(f, args));
                 }
                 if fork.is_some() {
                     exits.push(self.snapshot());
@@ -1100,13 +1301,13 @@ impl Engine<'_> {
     pub(super) fn builtin(&self, target: usize, scopes: &[usize]) -> bool {
         let a = &self.ast[target];
         let path = &self.files[a.file].path;
-        if path.ends_with(".py") {
+        if is_python(path) {
             return matches!(
                 a.text.as_str(),
                 "abs" | "round" | "min" | "max" | "len" | "int" | "float"
             ) && self.lookup(&a.text, scopes) == Value::default();
         }
-        if path.ends_with(".php") || path.ends_with(".phtml") {
+        if is_php(path) {
             return matches!(
                 a.text.as_str(),
                 "abs"
@@ -1209,7 +1410,7 @@ impl Engine<'_> {
             self.hoist_locals(
                 body,
                 local,
-                self.files[self.ast[body].file].path.ends_with(".py"),
+                is_python(&self.files[self.ast[body].file].path),
             );
         }
         let result = body
@@ -1228,13 +1429,8 @@ impl Engine<'_> {
         self.active.pop();
         self.active_returns.pop();
         self.active_parameters.pop();
-        for (state, objects) in self.exit_states.pop().unwrap() {
-            self.merge_scopes(&state);
-            for (object, old) in self.objects.iter_mut().zip(objects) {
-                for (key, value) in old {
-                    object.entry(key).or_default().merge(&value);
-                }
-            }
+        for state in self.exit_states.pop().unwrap() {
+            self.join(&state);
         }
         for from in &result.ids {
             for to in &summary.ids {

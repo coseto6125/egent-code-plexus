@@ -3,6 +3,7 @@ name = "ecp-analyzer"
 description = "EgentCodePlexus — multi-language tree-sitter parser and route detector (Rust, TypeScript, Python, Go, Java, Swift, etc.)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 # Not published to crates.io — distribution is GitHub Release binaries + npm + PyPI.
@@ -18,8 +19,8 @@ sha2 = "0.11.0"
 ecp-core = { workspace = true }
 phf = { version = "0.14", features = ["macros"] }
 toml = "1.1"
-ast-grep-core = "0.45.1"
-tree-sitter = "0.26"
+ast-grep-core = "0.51.0"
+tree-sitter = "0.27"
 tree-sitter-typescript = "*"
 rayon = "1.10.0"
 ignore = "0.4.26"
@@ -54,7 +55,7 @@ tree-sitter-containerfile = "0.9.2"
 tree-sitter-hcl = "1.1.0"
 tree-sitter-cairo = { path = "../vendor/tree-sitter-cairo" }
 # tree-sitter-nim is not published to crates.io; using vendored alaviss/tree-sitter-nim
-# (v0.6.2) which declares tree-sitter = "~0.25" — compatible with workspace "0.25".
+# (v0.6.2) which declares tree-sitter = "~0.27" — compatible with workspace "0.27".
 tree-sitter-nim = { path = "../vendor/tree-sitter-nim" }
 tree-sitter-verilog = "1.0.3"
 tree-sitter-vyper = { path = "../vendor/tree-sitter-vyper" }
@@ -67,7 +68,7 @@ tree-sitter-vue = { path = "../vendor/tree-sitter-vue" }
 # SHA 213f6e6973d9b456c6e50e86f19f66877e7ef0ee (no tags). ABI 14, within [13,15].
 tree-sitter-astro = { path = "../vendor/tree-sitter-astro" }
 # tree-sitter-svelte v1.0.2 (tree-sitter-grammars/tree-sitter-svelte) — vendored;
-# ABI 14 (within tree-sitter 0.26 range [13, 15]); pure-C scanner (scanner.c).
+# ABI 14 (within the tree-sitter ABI range [13, 15]); pure-C scanner (scanner.c).
 tree-sitter-svelte = { path = "../vendor/tree-sitter-svelte" }
 rustc-hash = "2"
 

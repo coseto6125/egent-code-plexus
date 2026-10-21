@@ -44,7 +44,7 @@ pub enum Commands {
     /// Use `--repo @all` for the registry overview explicitly.
     ///
     /// `blind_spots` lists only LLM-actionable opacity (dynamic-import / reflection / eval);
-    /// parser-metric buckets (uid-collision / overload / ifdef-redef) live under `ecp dev uid-audit`.
+    /// parser-metric buckets (uid-collision / ifdef-redef) live under `ecp dev uid-audit`.
     /// External-client (HTTP/DB/Redis/queue) usage detail: see `ecp tool-map`.
     Summary(commands::summary::SummaryArgs),
     /// List HTTP routes; with path, show handler + caller chain

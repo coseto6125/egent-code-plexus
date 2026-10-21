@@ -49,6 +49,7 @@ fn route_graph(rel_path: &str, method: &str, route_path: &str, handler: &str) ->
             path: route_path.into(),
             handler: Some(handler.into()),
             span: (0, 0, 0, 0),
+            scope: None,
         }],
         framework_refs: vec![],
         fanout_refs: vec![],

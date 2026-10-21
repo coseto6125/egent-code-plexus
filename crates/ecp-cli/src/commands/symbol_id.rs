@@ -92,7 +92,10 @@ pub fn resolve_candidates(
         // Synthetic nodes (e.g. resolver-miss `Annotation` from
         // `decorates_edges`) carry SYNTHETIC_FILE_IDX — they aren't
         // real symbols at any file:line. Drop them from impact targets.
-        if !node.has_owning_file() {
+        // A later overload is reached through the first one (calls bind to
+        // the first, which references it), and the resolver never sees it
+        // by name, so it is neither a target nor a collision.
+        if !node.has_owning_file() || graph.is_later_overload(idx as u32) {
             continue;
         }
         base_defs += 1;
@@ -135,7 +138,7 @@ pub fn resolve_candidates(
     // files) — base-replacing twins are excluded: they arrived via redirect.
     if let Some(v) = view {
         for (i, vn) in v.virtual_nodes().iter().enumerate() {
-            if vn.replaced_base.is_some() || vn.name != bare_name {
+            if vn.replaced_base.is_some() || vn.later_overload || vn.name != bare_name {
                 continue;
             }
             disk_defs += 1;
@@ -213,6 +216,8 @@ mod tests {
                         start_column: 0,
                         end_column: 0,
                         calls: vec![],
+                        heritage: Vec::new(),
+                        variant_refs: Vec::new(),
                     },
                     OverlaySymbol {
                         is_exported: false,
@@ -224,6 +229,8 @@ mod tests {
                         start_column: 0,
                         end_column: 0,
                         calls: vec![],
+                        heritage: Vec::new(),
+                        variant_refs: Vec::new(),
                     },
                 ],
                 imports: vec![],

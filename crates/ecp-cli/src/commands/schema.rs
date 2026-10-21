@@ -125,7 +125,14 @@ const LANGUAGES: &[LangEntry] = &[
         name: "php",
         blindspot_emitter: Status::Implemented,
         indirect_dispatch: Status::None,
-        blind_kinds: &["php-eval", "php-call-user-func", "php-variable-call"],
+        blind_kinds: &[
+            "php-eval",
+            "php-call-user-func",
+            "php-variable-call",
+            "laravel-include-scope-cap",
+            "laravel-controller-middleware-dynamic",
+            "laravel-unbound-action",
+        ],
     },
     LangEntry {
         name: "python",
@@ -363,7 +370,7 @@ const NODE_KINDS: &[NodeKindEntry] = &[
     NodeKindEntry { name: "Variable", category: "data", distinction: "Local / module-level binding. Not for in-class fields (that's Property)." },
     NodeKindEntry { name: "Const", category: "data", distinction: "Compile-time constant binding. Distinct from Variable (mutable) and EventTopic (routing semantics)." },
     NodeKindEntry { name: "Import", category: "structural", distinction: "Import statement / use binding. Drives Imports edges." },
-    NodeKindEntry { name: "Route", category: "framework", distinction: "HTTP-route declaration. Carries RouteShape (response keys) for shape-check verdicts." },
+    NodeKindEntry { name: "Route", category: "framework", distinction: "HTTP-route declaration. Carries RouteShape (response keys) for shape-check verdicts and RouteMiddleware (route-file and controller middleware, outermost first, removed ones dropped; Kernel globals and middleware-group members not included)." },
     NodeKindEntry { name: "Process", category: "framework", distinction: "Saga / workflow / orchestrator step container." },
     NodeKindEntry { name: "Document", category: "doc", distinction: "Markdown / RST document node — links to embedded code blocks." },
     NodeKindEntry { name: "Section", category: "doc", distinction: "Sub-region inside a Document (heading + body). Discounted in symbol density." },
@@ -424,6 +431,8 @@ const VERSION_HISTORY: &[VersionBumpEntry] = &[
     VersionBumpEntry { version: 11, reason: "Dense node_flags side table for O(1) FunctionMeta boolean flag filters." },
     VersionBumpEntry { version: 12, reason: "RawNode.field_reads + ReadsField RelType: function/method → field-read edges for impact across 14 languages." },
     VersionBumpEntry { version: 13, reason: "Per-file import / export facts (imports, export aliases, ES-module flag, exported-node bitmap) so the session overlay resolves re-exports and ES-module exports like a full reindex." },
+    VersionBumpEntry { version: 14, reason: "Path-alias table and per-type resolved supertypes (alias_table, supertype_table) so the session overlay resolves aliased specifiers and walks heritage like a full reindex." },
+    VersionBumpEntry { version: 15, reason: "Per-Route middleware side table (route_middleware) so agents see which routes pass through which middleware, such as auth." },
     // Future bumps append here. The is_test field on BlindSpotRecord
     // (FU-001) was added without a discriminant bump — rkyv tolerates the
     // trailing-field addition as long as nothing earlier shifts.

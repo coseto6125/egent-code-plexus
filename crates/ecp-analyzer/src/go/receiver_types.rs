@@ -15,7 +15,7 @@
 //!    than just `"Bark"`, feeding the resolver's Tier 2.5 qualifier lookup.
 
 use super::path_literals::{build_raw_path_literal, strip_go_string_value};
-use crate::calls::attach_to_enclosing;
+use crate::calls::{attach_to_enclosing, node_range, range_width, start_pos, Pos, PosRange};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -94,8 +94,7 @@ fn extract_method_receiver(node: &Node<'_>, source: &[u8]) -> Option<(String, St
 /// Per-function scope: `var_name → type_name`.
 #[derive(Debug, Default)]
 struct Scope {
-    start_row: u32,
-    end_row: u32,
+    range: PosRange,
     bindings: HashMap<String, String>,
 }
 
@@ -106,15 +105,15 @@ pub struct LocalTypes {
 }
 
 impl LocalTypes {
-    /// Find the type bound to `var` at `line`, picking the smallest enclosing
+    /// Find the type bound to `var` at `pos`, picking the smallest enclosing
     /// scope that defines it (innermost wins for closures / nested functions).
-    pub fn lookup(&self, line: u32, var: &str) -> Option<&str> {
+    pub fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
         let mut best: Option<&str> = None;
-        let mut best_width = u32::MAX;
+        let mut best_width = (u32::MAX, i64::MAX);
         for scope in &self.scopes {
-            if scope.start_row <= line && line <= scope.end_row {
+            if scope.range.0 <= pos && pos <= scope.range.1 {
                 if let Some(ty) = scope.bindings.get(var) {
-                    let w = scope.end_row - scope.start_row;
+                    let w = range_width(scope.range);
                     if w < best_width {
                         best_width = w;
                         best = Some(ty.as_str());
@@ -157,8 +156,7 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8], recv_map: &ReceiverMap
 
                 if !bindings.is_empty() {
                     scopes.push(Scope {
-                        start_row: n.start_position().row as u32,
-                        end_row: n.end_position().row as u32,
+                        range: node_range(n),
                         bindings,
                     });
                 }
@@ -314,8 +312,7 @@ pub fn extract_go_calls_and_path_literals(
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = go_callee_name(n, source, local_types) {
-                    let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                    attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
             "interpreted_string_literal" | "raw_string_literal" => {
@@ -362,8 +359,8 @@ fn go_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Option<
             if let Some(operand) = function.child_by_field_name("operand") {
                 if operand.kind() == "identifier" {
                     let var_name = node_text(operand, source)?;
-                    let line = call.start_position().row as u32;
-                    if let Some(ty) = locals.lookup(line, &var_name) {
+                    let pos = start_pos(call);
+                    if let Some(ty) = locals.lookup(pos, &var_name) {
                         return Some(format!("{ty}.{method_name}"));
                     }
                 }

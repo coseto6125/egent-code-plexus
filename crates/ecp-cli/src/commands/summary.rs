@@ -10,7 +10,7 @@
 //!
 //! `blind_spots` here lists only Type 1 (LLM-signal) buckets: source-code
 //! opacity sites such as dynamic-import / reflection / eval / exec. Type 2
-//! parser-metric buckets (uid-collision / method-overload / ifdef-redef) are
+//! parser-metric buckets (uid-collision / ifdef-redef) are
 //! exposed via the hidden `ecp dev uid-audit` instead — keeping this surface
 //! focused on what an LLM consumer can act on.
 //!
@@ -492,30 +492,24 @@ mod tests {
     }
 
     /// `summary.blind_spots` is the LLM-facing surface; Type 2 parser-metric
-    /// kinds (uid-collision / method-overload / ifdef-redef) must be excluded
+    /// kinds (uid-collision / ifdef-redef) must be excluded
     /// so the surface stays focused on source-code opacity an LLM can act on.
     /// Inspecting Type 2 buckets is `ecp dev uid-audit`'s job.
     #[test]
     fn count_blind_spots_excludes_dev_metric_kinds() {
         let mut fx = GraphFixture::new();
-        for kind in [
-            "dynamic-import",
-            "uid-collision",
-            "method-overload",
-            "ifdef-redef",
-        ] {
+        for kind in ["dynamic-import", "uid-collision", "ifdef-redef"] {
             fx.blind_spot(kind, "src/x.py", (1, 0, 1, 10), "");
         }
         let g = fx.build();
 
         with_archived(g, |archived| {
             let v = count_blind_spots(archived);
-            // Only Type 1 (`dynamic-import`) survives the filter; the three
+            // Only Type 1 (`dynamic-import`) survives the filter; the two
             // Type 2 kinds are stripped.
             assert_eq!(v["total"], json!(1));
             assert_eq!(v["by_kind"]["dynamic-import"], json!(1));
             assert!(v["by_kind"].get("uid-collision").is_none());
-            assert!(v["by_kind"].get("method-overload").is_none());
             assert!(v["by_kind"].get("ifdef-redef").is_none());
         });
     }

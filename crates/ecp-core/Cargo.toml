@@ -3,6 +3,7 @@ name = "ecp-core"
 description = "EgentCodePlexus — core graph storage and algorithms (zero-copy on-disk graph, registry, community detection)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 # Not published to crates.io — distribution is GitHub Release binaries + npm + PyPI.
@@ -12,7 +13,7 @@ publish = false
 
 [dependencies]
 rkyv = "0.8.16"
-tree-sitter = "0.26"
+tree-sitter = "0.27"
 rayon = "1.10.0"
 crossbeam-channel = "0.5.12"
 ignore = "0.4.26"

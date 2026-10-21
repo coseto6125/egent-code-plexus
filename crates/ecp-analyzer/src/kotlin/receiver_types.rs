@@ -10,34 +10,43 @@
 //!   the query. The call site `receiver.name()` uses the same `obj.foo()`
 //!   lookup path.
 //!
-//! Falls back to the bare method name for unresolved receivers.
+//! - `Name.foo()` where `Name` is no local, parameter, import or property
+//!   of an enclosing type → [`CallSite::from_receiver`]: the resolver binds
+//!   `Name.foo` when `Name` names a type (a same-package `object` or class,
+//!   a companion's owner), else resolves the bare member
+//!
+//! - `Other().m()` where this file declares `class Other` → `Other.m`
+//!
+//! Falls back to the bare method name for other unresolved receivers, but
+//! a computed receiver (`other().m()`) whose `m` an enclosing type declares
+//! emits [`CallSite::untyped_member`], so it never binds the caller's own
+//! `m` the way an implicit-`this` `m()` does.
 
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_kotlin_string_value,
 };
-use crate::calls::attach_to_enclosing;
-use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
+use crate::calls::{
+    attach_to_enclosing, node_range, range_width, span_holds, span_width, start_pos, Pos, PosRange,
+};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
 use tree_sitter::Node;
 
 #[derive(Debug, Default)]
 struct LocalTypes {
-    scopes: Vec<((u32, u32), HashMap<String, String>)>,
+    scopes: Vec<(PosRange, HashMap<String, String>)>,
     imports: HashMap<String, String>,
 }
 
 impl LocalTypes {
-    fn lookup(&self, line: u32, var: &str) -> Option<&str> {
+    fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
         let mut best: Option<&str> = None;
-        let mut best_width = u32::MAX;
+        let mut best_width = (u32::MAX, i64::MAX);
         for ((start, end), map) in &self.scopes {
-            if *start <= line && line <= *end {
+            if *start <= pos && pos <= *end {
                 if let Some(t) = map.get(var) {
-                    if t.is_empty() && !self.imports.contains_key(var) {
-                        continue;
-                    }
-                    let w = end - start;
+                    let w = range_width((*start, *end));
                     if w < best_width {
                         best_width = w;
                         best = Some(t.as_str());
@@ -45,16 +54,28 @@ impl LocalTypes {
                 }
             }
         }
-        // An unknown local type still shadows an imported binding.
+        // An unknown local type still shadows an imported binding or a
+        // typed name of a wider scope.
         best.or_else(|| self.imports.get(var).map(String::as_str))
             .filter(|ty| !ty.is_empty())
+    }
+
+    /// Whether a function or class scope holding `pos` declares `var`,
+    /// typed or not, or an import binds it.
+    fn binds(&self, pos: Pos, var: &str) -> bool {
+        self.imports.contains_key(var)
+            || self
+                .scopes
+                .iter()
+                .any(|((start, end), map)| *start <= pos && pos <= *end && map.contains_key(var))
     }
 }
 
 /// Walk every `function_declaration`, collecting typed parameters and local
-/// `property_declaration` nodes (which represent `val`/`var` declarations).
+/// `property_declaration` nodes (which represent `val`/`var` declarations),
+/// and every class's primary-constructor parameters.
 fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
-    let mut scopes: Vec<((u32, u32), HashMap<String, String>)> = Vec::new();
+    let mut scopes: Vec<(PosRange, HashMap<String, String>)> = Vec::new();
     let mut imports = HashMap::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
@@ -85,8 +106,33 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
             }
             continue;
         }
+        if n.kind() == "class_declaration" {
+            // Primary-constructor parameters are in scope for the whole
+            // class body; a `val` / `var` one is also a property, which no
+            // Property node records.
+            let mut map: HashMap<String, String> = HashMap::new();
+            let mut c = n.walk();
+            for ctor in n.children(&mut c) {
+                if ctor.kind() != "primary_constructor" {
+                    continue;
+                }
+                let mut pc = ctor.walk();
+                for param in ctor.children(&mut pc) {
+                    let mut ic = param.walk();
+                    let name = param
+                        .children(&mut ic)
+                        .find(|child| child.kind() == "simple_identifier");
+                    if let Some(name) = name.and_then(|name| name.utf8_text(source).ok()) {
+                        map.insert(name.to_string(), String::new());
+                    }
+                }
+            }
+            if !map.is_empty() {
+                scopes.push((node_range(n), map));
+            }
+        }
         if n.kind() == "function_declaration" {
-            let scope = (n.start_position().row as u32, n.end_position().row as u32);
+            let scope = node_range(n);
             let mut map: HashMap<String, String> = HashMap::new();
             if let Some(params) = n.child_by_field_name("parameters") {
                 collect_params(params, source, &mut map);
@@ -98,7 +144,7 @@ fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
                     collect_params(child, source, &mut map);
                 }
                 if child.kind() == "function_body" {
-                    collect_property_decls(child, source, &mut map);
+                    collect_property_decls(child, source, &mut scopes);
                 }
             }
             if !map.is_empty() {
@@ -144,15 +190,22 @@ fn collect_params(params: Node<'_>, source: &[u8], out: &mut HashMap<String, Str
     }
 }
 
-/// Walk a `function_body`, collecting `property_declaration` nodes.
+/// Walk a `function_body`, collecting `property_declaration` nodes, each
+/// in a scope of its own: a local is visible from the end of its
+/// declaration to the end of the block that declares it.
 /// Does NOT descend into nested `function_declaration` / lambdas.
-fn collect_property_decls(body: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
+fn collect_property_decls(
+    body: Node<'_>,
+    source: &[u8],
+    scopes: &mut Vec<(PosRange, HashMap<String, String>)>,
+) {
     let mut stack: Vec<Node<'_>> = vec![body];
     while let Some(n) = stack.pop() {
         if n.kind() == "function_declaration" || n.kind() == "lambda_literal" {
             continue;
         }
         if n.kind() == "property_declaration" {
+            let mut out: HashMap<String, String> = HashMap::new();
             // variable_declaration: first named child `simple_identifier`, second `user_type`
             let mut c = n.walk();
             for child in n.children(&mut c) {
@@ -176,6 +229,11 @@ fn collect_property_decls(body: Node<'_>, source: &[u8], out: &mut HashMap<Strin
                         }
                     }
                 }
+            }
+            if !out.is_empty() {
+                let declared = node_range(n).1;
+                let block_end = n.parent().map_or(declared, |block| node_range(block).1);
+                scopes.push(((declared, block_end), out));
             }
         }
         let mut c = n.walk();
@@ -238,20 +296,39 @@ fn kotlin_callee(
                 std::str::from_utf8(&source[method_node.start_byte()..method_node.end_byte()])
                     .ok()?;
 
-            let line = call.start_position().row as u32;
+            let pos = start_pos(call);
             let ty: Option<String> = match receiver.kind() {
-                "this_expression" => enclosing_class_name(nodes, line),
-                "super_expression" => enclosing_superclass(nodes, line),
+                "this_expression" => enclosing_class_name(nodes, pos),
+                "super_expression" => enclosing_superclass(nodes, pos),
                 "simple_identifier" => {
                     let var =
                         std::str::from_utf8(&source[receiver.start_byte()..receiver.end_byte()])
                             .ok()?;
-                    locals.lookup(line, var).map(str::to_string)
+                    // Only a name no scope, import or enclosing type binds
+                    // may be a type, which the resolver decides.
+                    if !locals.binds(pos, var) && !declares_member(nodes, pos, var) {
+                        return Some(CallSite::from_receiver(var, method));
+                    }
+                    locals.lookup(pos, var).map(str::to_string)
                 }
+                "call_expression" => constructed_class(receiver, source, nodes)
+                    .filter(|name| !locals.binds(pos, name) && !declares_member(nodes, pos, name)),
                 _ => None,
             };
+            let computed = !matches!(
+                receiver.kind(),
+                "this_expression" | "super_expression" | "simple_identifier"
+            );
             Some(match ty {
                 Some(t) => format!("{t}.{method}"),
+                // A computed receiver (`other().m()`) is no `this`: where an
+                // enclosing type declares `m`, the bare name would bind that
+                // member. Elsewhere the bare name still reaches an extension
+                // function, which Kotlin declares free and an untyped member
+                // call never binds.
+                None if computed && declares(nodes, pos, method, NodeKind::is_callable) => {
+                    CallSite::untyped_member(method)
+                }
                 None => method.to_string(),
             })
         }
@@ -276,8 +353,7 @@ pub fn extract_kotlin_calls_and_path_literals(
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = kotlin_callee(n, source, &local_types, nodes) {
-                    let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                    attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
             "string_literal" | "multiline_string_literal" => {
@@ -318,14 +394,68 @@ pub fn extract_kotlin_calls_and_path_literals(
     (path_literals, sql_refs)
 }
 
-fn enclosing_class_name(nodes: &[RawNode], line: u32) -> Option<String> {
-    let mut best: Option<(u32, &str)> = None;
+/// Whether a type enclosing `pos` declares a property `name` as its own
+/// member. A property of a nested type that does not enclose `pos` binds
+/// nothing there, so it shadows no class of that name.
+fn declares_member(nodes: &[RawNode], pos: Pos, name: &str) -> bool {
+    nodes
+        .iter()
+        .filter(|m| m.kind == NodeKind::Property && m.name == name)
+        .any(|m| {
+            let at = (m.span.0, m.span.1);
+            nodes
+                .iter()
+                .filter(|t| is_type(t) && span_holds(t.span, at))
+                .min_by_key(|t| span_width(t.span))
+                .is_some_and(|owner| span_holds(owner.span, pos))
+        })
+}
+
+fn is_type(n: &RawNode) -> bool {
+    matches!(
+        n.kind,
+        NodeKind::Class | NodeKind::Interface | NodeKind::Enum
+    )
+}
+
+/// Whether a type enclosing `pos` declares a member `name` of a kind
+/// `member` accepts. A nested type's members count for the whole outer
+/// type: that only keeps more calls on the bare member.
+fn declares(nodes: &[RawNode], pos: Pos, name: &str, member: fn(NodeKind) -> bool) -> bool {
+    nodes
+        .iter()
+        .filter(|m| member(m.kind) && m.name == name)
+        .any(|m| {
+            let at = (m.span.0, m.span.1);
+            nodes
+                .iter()
+                .any(|t| is_type(t) && span_holds(t.span, pos) && span_holds(t.span, at))
+        })
+}
+
+/// The class a constructor call receiver (`Other()`) builds, when this
+/// file declares a class of that name. A local, parameter or property of
+/// that name shadows the class (`val Other = { Actual() }`); the caller
+/// checks those.
+fn constructed_class(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<String> {
+    let callee = call
+        .named_child(0)
+        .filter(|n| n.kind() == "simple_identifier")?;
+    let name = callee.utf8_text(source).ok()?;
+    nodes
+        .iter()
+        .any(|n| n.kind == NodeKind::Class && n.name == name)
+        .then(|| name.to_string())
+}
+
+fn enclosing_class_name(nodes: &[RawNode], pos: Pos) -> Option<String> {
+    let mut best: Option<((u32, i64), &str)> = None;
     for n in nodes {
         if !matches!(n.kind, NodeKind::Class) {
             continue;
         }
-        if n.span.0 <= line && n.span.2 >= line {
-            let w = n.span.2 - n.span.0;
+        if span_holds(n.span, pos) {
+            let w = span_width(n.span);
             if best.is_none_or(|(bw, _)| w < bw) {
                 best = Some((w, &n.name));
             }
@@ -334,15 +464,15 @@ fn enclosing_class_name(nodes: &[RawNode], line: u32) -> Option<String> {
     best.map(|(_, name)| name.to_string())
 }
 
-fn enclosing_superclass(nodes: &[RawNode], line: u32) -> Option<String> {
-    let mut best_w = u32::MAX;
+fn enclosing_superclass(nodes: &[RawNode], pos: Pos) -> Option<String> {
+    let mut best_w = (u32::MAX, i64::MAX);
     let mut result = None;
     for n in nodes {
         if !matches!(n.kind, NodeKind::Class) {
             continue;
         }
-        if n.span.0 <= line && n.span.2 >= line {
-            let w = n.span.2 - n.span.0;
+        if span_holds(n.span, pos) {
+            let w = span_width(n.span);
             if w < best_w {
                 best_w = w;
                 result = n.heritage.first().cloned();

@@ -3,6 +3,7 @@ name = "ecp-mcp"
 description = "MCP server library backing `ecp mcp serve` — tools derived by clap::Command introspection"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 # Not published to crates.io — distribution is GitHub Release binaries + npm + PyPI.
@@ -17,12 +18,12 @@ ecp-core = { workspace = true }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "process"] }
-rmcp = { version = "3.4", features = ["server", "transport-io"] }
+rmcp = { version = "3.6", features = ["server", "transport-io"] }
 
 [dev-dependencies]
 clap = { version = "4.5", features = ["derive"] }
 tempfile = "3"
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["rt", "macros", "io-util"] }
 
 [lints]
 workspace = true

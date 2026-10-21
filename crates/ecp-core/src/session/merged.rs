@@ -87,8 +87,9 @@ impl<'a> MergedEdge<'a> {
         matches!(self.origin, EdgeOrigin::Overlay(_))
     }
 
-    /// Why the edge exists. Rebuilt lexical references retain their semantic
-    /// reason; other overlay edges carry the uncommitted-edit marker.
+    /// Why the edge exists. Rebuilt lexical references and nearest-copy calls
+    /// retain their semantic reason; other overlay edges carry the
+    /// uncommitted-edit marker.
     #[inline]
     pub fn reason(&self, graph: &'a ArchivedZeroCopyGraph) -> &'a str {
         match self.origin {
@@ -272,12 +273,10 @@ fn merge_base_edge<'a>(
     if view.masks_base_edge(source, RelType::from(&edge.rel_type)) {
         return None;
     }
-    // Rebuild only this reason, never all References from a dirty file.
+    // Rebuild only these reasons, never all References from a dirty file.
     // Replacing even UID-stable references avoids duplicates and stale parents.
     if RelType::from(&edge.rel_type) == RelType::References
-        && view.rebuilds_closure_references(source)
-        && edge.reason.resolve(&graph.string_pool)
-            == crate::analyzer::types::CLOSURE_REFERENCE_REASON
+        && view.rebuilds_reference(source, edge.reason.resolve(&graph.string_pool))
     {
         return None;
     }
@@ -399,6 +398,8 @@ mod tests {
                 start_column: 0,
                 end_column: 0,
                 calls: vec!["target_fn".to_string()],
+                heritage: Vec::new(),
+                variant_refs: Vec::new(),
             }],
             imports: vec![],
         }

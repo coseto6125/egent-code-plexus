@@ -27,8 +27,16 @@ pub enum ResolutionTier {
     /// unqualified callsites).
     HeritageScoped,
     Global,
+    /// Every candidate is one declaration repeated in duplicated source
+    /// trees (`android/` beside the main tree, a vendored copy, two packages
+    /// publishing one module), and the copy nearest the caller by path is
+    /// taken. Path proximity is a heuristic, so the edge stays below the
+    /// Global tier and carries its own reason ([`NEAREST_COPY_REASON`]).
+    NearestCopy,
     Fallback(FallbackReason),
 }
+
+pub use ecp_core::analyzer::types::{NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON};
 
 impl ResolutionTier {
     /// Returns the base confidence score for the resolution tier.
@@ -39,6 +47,7 @@ impl ResolutionTier {
             ResolutionTier::QualifierScoped => 0.85,
             ResolutionTier::HeritageScoped => 0.8,
             ResolutionTier::Global => 0.7,
+            ResolutionTier::NearestCopy => NEAREST_COPY_CONFIDENCE,
             ResolutionTier::Fallback(reason) => match reason {
                 FallbackReason::ImplicitSelf => 0.8,
                 FallbackReason::VueComponent => 0.8,

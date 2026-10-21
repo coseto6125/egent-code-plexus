@@ -58,8 +58,9 @@ fn test_java_same_file_new_calls_constructor() {
     assert_calls_constructor(&graph, "makeLocal", "Local", "src/Local.java");
 }
 
-/// Overloads share one uid, so Pass 1 collapses them into one Constructor
-/// node: an edge to it means "a constructor of `Multi`", not a guess.
+/// Overloads are separate Constructor nodes; the construction binds the
+/// first, as "a constructor of `Multi`", since the argument types that pick
+/// one are not parsed.
 #[test]
 fn test_java_overloaded_constructors_new_calls_constructor() {
     let multi = (

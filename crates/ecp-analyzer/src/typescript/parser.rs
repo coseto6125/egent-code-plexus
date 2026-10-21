@@ -391,7 +391,7 @@ impl LanguageProvider for TypeScriptProvider {
             let mut nestjs_decorator_verb_node: Option<tree_sitter::Node> = None;
             let mut nestjs_decorator_path_node: Option<tree_sitter::Node> = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = Some(cap.index);
 
                 if let Some(k_from_spec) = self
@@ -698,6 +698,7 @@ impl LanguageProvider for TypeScriptProvider {
                             path: path_str.to_string(),
                             handler: handler_name,
                             span: node_span(&root),
+                            scope: None,
                         });
                     }
                 }
@@ -758,6 +759,18 @@ impl LanguageProvider for TypeScriptProvider {
             &mut nodes,
             &["member_expression"],
         );
+        crate::calls::extract_variant_refs(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &crate::calls::VariantRefSpec {
+                path_kinds: &["member_expression"],
+                label_parents: &["switch_case"],
+                bare_label_parents: &[],
+                bare_expressions: false,
+                token_trees: false,
+            },
+        );
 
         // Framework-presence gates: only emit Express/NestJS refs when the file
         // actually imports the matching package.
@@ -796,6 +809,7 @@ impl LanguageProvider for TypeScriptProvider {
                         path: cleaned,
                         handler: None,
                         span,
+                        scope: None,
                     });
                 }
             }

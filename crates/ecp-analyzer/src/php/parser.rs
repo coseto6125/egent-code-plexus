@@ -164,7 +164,29 @@ const PHP_HTTP_FRAMEWORK_NAMESPACES: &[&str] = &[
 /// any user `class App` would FP) and `Lumen` was removed (Lumen routes
 /// flow through `$app->get(...)` instance calls, not `Lumen::get(...)`
 /// static calls).
-const PHP_ROUTER_SCOPES: &[&str] = &["Route", "Router", "Slim", "Symfony"];
+pub(super) const PHP_ROUTER_SCOPES: &[&str] = &["Route", "Router", "Slim", "Symfony"];
+
+/// Whether the file declares or imports a class named like a router scope
+/// (`class Route`, `use App\Support\Route`): its `Route::get(...)` is that
+/// class's method, not the framework's router. `use Route;` imports
+/// Laravel's global `Route` facade alias, the router itself; any other
+/// import binds the name, `use Router;` too: Laravel registers no global
+/// `Router` alias.
+fn binds_own_router(imports: &[RawImport], nodes: &[RawNode]) -> bool {
+    imports.iter().any(|import| {
+        let local = import
+            .alias
+            .as_deref()
+            .unwrap_or_else(|| import.imported_name.rsplit('\\').next().unwrap_or_default());
+        let facade_alias = import
+            .source
+            .trim_start_matches('\\')
+            .eq_ignore_ascii_case("Route");
+        !facade_alias && PHP_ROUTER_SCOPES.contains(&local)
+    }) || nodes
+        .iter()
+        .any(|node| node.kind.is_type() && PHP_ROUTER_SCOPES.contains(&node.name.as_str()))
+}
 
 /// Walk a chained member-call expression inward through any depth of
 /// `member_call_expression` until it reaches a `scoped_call_expression` root.
@@ -175,7 +197,7 @@ const PHP_ROUTER_SCOPES: &[&str] = &["Route", "Router", "Slim", "Symfony"];
 /// Powers chained-route detection like `Route::middleware(['auth'])->get(...)`
 /// or `Route::middleware(...)->prefix(...)->post(...)`. The query captures the
 /// outer member_call; this walks the object field inward to find the root.
-fn walk_to_scoped_root_scope(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+pub(super) fn walk_to_scoped_root_scope(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
     let mut cur = node;
     loop {
         match cur.kind() {
@@ -289,6 +311,8 @@ struct PhpCaptureIndices {
     route_chained_object: Option<u32>,
     laravel_call: Option<u32>,
     laravel_args: Option<u32>,
+    laravel_include_call: Option<u32>,
+    laravel_route_set: Option<u32>,
     // BlindSpot captures (FU-001 P5a).
     blind_eval: Option<u32>,
     blind_call_user_func: Option<u32>,
@@ -340,6 +364,8 @@ impl PhpProvider {
             route_chained_object: query.capture_index_for_name("route.chained.object"),
             laravel_call: query.capture_index_for_name("laravel.route.call"),
             laravel_args: query.capture_index_for_name("laravel.route.args"),
+            laravel_include_call: query.capture_index_for_name("laravel.include.call"),
+            laravel_route_set: query.capture_index_for_name("laravel.route.set"),
             blind_eval: query.capture_index_for_name("blind.eval"),
             blind_call_user_func: query.capture_index_for_name("blind.call_user_func"),
             blind_variable_call: query.capture_index_for_name("blind.variable_call"),
@@ -374,6 +400,16 @@ impl LanguageProvider for PhpProvider {
             rustc_hash::FxHashMap::default();
         let mut imports = Vec::new();
         let mut routes = Vec::new();
+        // Verb calls that passed the router gates, as `(method, path
+        // literal, call)`. They become `routes` once the loop has seen the
+        // file's `use` imports, which an `X::class` action resolves through.
+        let mut route_calls: Vec<(String, &str, tree_sitter::Node)> = Vec::new();
+        // Calls and `require`s that may load a route file. A group's
+        // `X::class` middleware resolves through the imports too.
+        let mut include_calls: Vec<tree_sitter::Node> = Vec::new();
+        // `Route::resource` / `match` / `any` calls, each registering
+        // several routes or a method set.
+        let mut route_sets: Vec<tree_sitter::Node> = Vec::new();
         let mut blind_spots: Vec<BlindSpot> = Vec::new();
         let file_category =
             ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
@@ -410,6 +446,8 @@ impl LanguageProvider for PhpProvider {
 
         let idx_laravel_call = idx.laravel_call;
         let idx_laravel_args = idx.laravel_args;
+        let idx_laravel_include_call = idx.laravel_include_call;
+        let idx_laravel_route_set = idx.laravel_route_set;
 
         let idx_blind_eval = idx.blind_eval;
         let idx_blind_call_user_func = idx.blind_call_user_func;
@@ -448,7 +486,7 @@ impl LanguageProvider for PhpProvider {
             let mut laravel_call_span: Option<(u32, u32, u32, u32)> = None;
             let mut laravel_args_node: Option<tree_sitter::Node> = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = cap.index;
                 if let Some(k_from_spec) = self
                     .capture_kind_by_idx
@@ -518,17 +556,12 @@ impl LanguageProvider for PhpProvider {
                         route_method = Some(m_str.to_uppercase());
                     }
                 } else if Some(cap_idx) == idx_route_path {
-                    if let Ok(p_str) =
+                    // Kept raw: `laravel_routes::route_site` joins it to the
+                    // group prefixes, then normalizes it like
+                    // `clean_route_path_lax` (`'register'` is `/register`).
+                    route_path =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
-                    {
-                        // Laravel allows leading-slash-optional routes:
-                        // `Route::get('register', ...)` is semantically `/register`.
-                        // `clean_route_path_lax` strips quotes and prepends `/`
-                        // when missing — same helper Python parser uses for
-                        // Sanic / Flask / FastAPI bare paths so the builder's
-                        // strict `looks_like_path` filter accepts both forms.
-                        route_path = crate::route_detector::clean_route_path_lax(p_str);
-                    }
+                            .ok();
                 } else if Some(cap_idx) == idx_route_call {
                     route_span_node = Some(cap.node);
                 } else if Some(cap_idx) == idx_route_chained_call {
@@ -547,6 +580,12 @@ impl LanguageProvider for PhpProvider {
                     laravel_call_span = Some(node_span(&cap.node));
                 } else if Some(cap_idx) == idx_laravel_args {
                     laravel_args_node = Some(cap.node);
+                } else if Some(cap_idx) == idx_laravel_include_call {
+                    include_calls.push(cap.node);
+                } else if Some(cap_idx) == idx_laravel_route_set {
+                    if !route_sets.iter().any(|call| call.id() == cap.node.id()) {
+                        route_sets.push(cap.node);
+                    }
                 } else if Some(cap_idx) == idx_function_anonymous {
                     // Anonymous callback (arg-position anonymous function or arrow function).
                     // Emit an `<anonymous>` Function node only when the body holds a
@@ -644,31 +683,11 @@ impl LanguageProvider for PhpProvider {
             if let (true, Some(rm), Some(rp), Some(rs_node)) =
                 (scope_ok, route_method, route_path, route_span_node)
             {
-                let start = rs_node.start_position();
-                let end = rs_node.end_position();
-                let exists = routes.iter().any(|r: &RawRoute| {
-                    r.method == rm
-                        && r.path == rp
-                        && r.span
-                            == (
-                                start.row as u32,
-                                start.column as u32,
-                                end.row as u32,
-                                end.column as u32,
-                            )
-                });
+                let exists = route_calls
+                    .iter()
+                    .any(|(method, _, call)| *method == rm && call.id() == rs_node.id());
                 if !exists {
-                    routes.push(RawRoute {
-                        method: rm,
-                        path: rp,
-                        handler: None,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
-                    });
+                    route_calls.push((rm, rp, rs_node));
                 }
             }
 
@@ -799,6 +818,41 @@ impl LanguageProvider for PhpProvider {
 
         // `nodes` already in source order — Vec + idx-map at parse-loop start.
 
+        let file_namespace = nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::Namespace)
+            .map(|node| node.name.clone());
+        let names = super::laravel_routes::FileNames {
+            imports: &imports,
+            namespace: file_namespace.as_deref(),
+        };
+        let route_sites = route_calls
+            .into_iter()
+            .filter_map(|(method, raw_path, call)| {
+                let site = super::laravel_routes::route_site(call, raw_path, source, names)?;
+                Some((method, site, call))
+            })
+            .chain(route_sets.into_iter().flat_map(|call| {
+                super::laravel_routes::route_set_sites(call, source, names)
+                    .into_iter()
+                    .map(move |(method, site)| (method, site, call))
+            }));
+        for (method, site, call) in route_sites {
+            routes.push(RawRoute {
+                method,
+                path: site.path,
+                handler: site.handler,
+                span: node_span(&call),
+                scope: Some(Box::new(site.scope)),
+            });
+        }
+        let mut route_includes: Vec<RawRoute> = Vec::new();
+        for call in include_calls {
+            super::laravel_routes::push_includes(call, source, names, &mut route_includes);
+        }
+        super::laravel_routes::resolve_include_controllers(&mut route_includes, names);
+        routes.append(&mut route_includes);
+
         // Extract call sites with receiver-type binding.
         // Handles $this->method(), parent::method(), self::method(), static::method().
         // function_call_expression (bare calls) still go through the shared helper.
@@ -816,6 +870,18 @@ impl LanguageProvider for PhpProvider {
             source,
             &mut nodes,
             &["member_access_expression"],
+        );
+        crate::calls::extract_variant_refs(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &crate::calls::VariantRefSpec {
+                path_kinds: &["class_constant_access_expression"],
+                label_parents: &["case_statement", "match_condition_list"],
+                bare_label_parents: &[],
+                bare_expressions: false,
+                token_trees: false,
+            },
         );
 
         // Gate Laravel framework_refs by the `Illuminate` import — without
@@ -842,9 +908,30 @@ impl LanguageProvider for PhpProvider {
         // import from a known PHP web-framework namespace before any Route
         // is emitted. No path-shape filter (Laravel uses bare paths like
         // `'register'`). Spec: 2026-05-17-route-precision-design.md.
+        //
+        // A route file a provider loads often calls the global `Route`
+        // facade alias with no `use` line. Its records stay, marked, and the
+        // builder keeps them only when a file that passes this gate loads
+        // the file. A file that binds `Route` to a class of its own keeps
+        // nothing.
         if !has_import_from(&imports, PHP_HTTP_FRAMEWORK_NAMESPACES) {
-            routes.clear();
+            let own_router = binds_own_router(&imports, &nodes);
+            routes.retain_mut(|route| match route.scope.as_deref_mut() {
+                Some(scope) if !own_router => {
+                    scope.needs_include = true;
+                    true
+                }
+                _ => false,
+            });
         }
+        // A controller imports no router; its middleware records count only
+        // for the routes whose actions bind its methods.
+        super::laravel_routes::push_controller_middleware(
+            tree.root_node(),
+            source,
+            names,
+            &mut routes,
+        );
 
         let raw_function_metas =
             crate::function_meta::php::extract(tree.root_node(), source, &nodes, file_category);

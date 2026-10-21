@@ -1,4 +1,7 @@
-use super::receiver_types::{collect_bindings, extract_cpp_calls_and_path_literals};
+use super::receiver_types::{
+    collect_bindings, extract_cpp_calls_and_path_literals, scope_type_name,
+};
+use super::recovery::{blank_decl_prefix_macros, reduce_type_name, stamp_lexical_owners};
 use super::spec::CppSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
@@ -55,6 +58,61 @@ fn is_inline_class_member(node: tree_sitter::Node<'_>) -> bool {
         }
     }
     false
+}
+
+/// The bases of a class / struct definition `root`, each as
+/// [`reduce_type_name`] names it: `Base`, `Proto<CharType>` → `Proto`,
+/// `detail::foo`. A dependent or `decltype` base names no project type.
+fn cpp_heritage(root: tree_sitter::Node<'_>, source: &[u8]) -> Vec<String> {
+    let mut c = root.walk();
+    let Some(clause) = root
+        .children(&mut c)
+        .find(|ch| ch.kind() == "base_class_clause")
+    else {
+        return Vec::new();
+    };
+    let mut bc = clause.walk();
+    let bases = clause
+        .named_children(&mut bc)
+        .filter(|b| {
+            matches!(
+                b.kind(),
+                "type_identifier" | "template_type" | "qualified_identifier"
+            )
+        })
+        .filter_map(|b| b.utf8_text(source).ok().and_then(reduce_type_name))
+        .collect();
+    bases
+}
+
+/// The whole qualifier before the innermost `name` of a qualified
+/// declarator: `a::b` for `a::b::h`.
+fn qualified_scope_text(name: tree_sitter::Node<'_>, source: &[u8]) -> String {
+    let mut outer = name;
+    while let Some(p) = outer
+        .parent()
+        .filter(|p| p.kind() == "qualified_identifier")
+    {
+        outer = p;
+    }
+    std::str::from_utf8(&source[outer.start_byte()..name.start_byte()])
+        .unwrap_or_default()
+        .trim_end()
+        .trim_end_matches("::")
+        .trim()
+        .to_string()
+}
+
+/// The innermost name of a qualified method name (`Foo::bar` → `bar`); any
+/// other node as it is.
+fn innermost_name(mut n: tree_sitter::Node<'_>) -> tree_sitter::Node<'_> {
+    while n.kind() == "qualified_identifier" {
+        match n.child_by_field_name("name") {
+            Some(inner) => n = inner,
+            None => break,
+        }
+    }
+    n
 }
 
 /// True if `name` is a C/C++ reserved keyword that tree-sitter sometimes
@@ -252,9 +310,19 @@ impl LanguageProvider for CppProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
+        // Node offsets index `source` unchanged: the patch only overwrites
+        // macro names with blanks, so every later step reads `source`.
+        let patched = blank_decl_prefix_macros(source);
         let tree = PARSER
-            .with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
+            .with(|p| {
+                parse_with_budget(
+                    &mut p.borrow_mut(),
+                    patched.as_deref().unwrap_or(source),
+                    ParseBudget::DEFAULT,
+                )
+            })
             .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
+        drop(patched);
 
         // Pre-pass: collect function_definition node IDs that carry an
         // `override` virtual_specifier. These are collected in a separate
@@ -268,7 +336,7 @@ impl LanguageProvider for CppProvider {
                 let mut pre_cursor = QueryCursor::new();
                 let mut pre_matches = pre_cursor.matches(&self.query, tree.root_node(), source);
                 while let Some(m) = pre_matches.next() {
-                    for cap in m.captures {
+                    for cap in m.captures() {
                         if cap.index == om_idx {
                             // Walk up to the enclosing function_definition.
                             let mut p = cap.node.parent();
@@ -295,7 +363,6 @@ impl LanguageProvider for CppProvider {
             ecp_core::file_category::determine_category(path.to_str().unwrap_or(""));
         let is_test_file = file_category == ecp_core::graph::FileCategory::Test;
 
-        let idx_heritage = self.query.capture_index_for_name("heritage");
         let idx_blind_dlsym = self.query.capture_index_for_name("blind.dlsym");
         let idx_type = self.query.capture_index_for_name("type");
         let idx_export = self.query.capture_index_for_name("export");
@@ -326,6 +393,13 @@ impl LanguageProvider for CppProvider {
         // the same byte range.
         let mut anon_emitted_spans: rustc_hash::FxHashSet<(u32, u32, u32, u32)> =
             rustc_hash::FxHashSet::default();
+        // Out-of-class definitions whose qualifier may name a namespace:
+        // `(node index, innermost qualifier, whole qualifier)`.
+        let mut qualified_owners: Vec<(usize, String, String)> = Vec::new();
+        // Functions declared or defined as `friend` in a class body: members
+        // of the enclosing namespace, not of the class.
+        let mut friend_spans: rustc_hash::FxHashSet<(u32, u32, u32, u32)> =
+            rustc_hash::FxHashSet::default();
 
         let is_header = path
             .extension()
@@ -337,7 +411,6 @@ impl LanguageProvider for CppProvider {
             let mut kind = None;
             let mut root_span_node = None;
             let mut type_node = None;
-            let mut heritage_nodes = Vec::new();
             let mut is_exported_by_query = false;
 
             let mut import_src_node = None;
@@ -350,7 +423,7 @@ impl LanguageProvider for CppProvider {
             let mut var_root: Option<tree_sitter::Node<'_>> = None;
             let mut var_name: Option<tree_sitter::Node<'_>> = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = Some(cap.index);
                 // Single spec-driven dispatch for name-node captures.
                 // Source of truth: CppSpec::CAPTURE_KIND in spec.rs.
@@ -362,8 +435,6 @@ impl LanguageProvider for CppProvider {
                 {
                     name_node = Some(cap.node);
                     kind = Some(k_from_spec);
-                } else if cap_idx == idx_heritage {
-                    heritage_nodes.push(cap.node);
                 } else if cap_idx == idx_type {
                     type_node = Some(cap.node);
                 } else if cap_idx == idx_export {
@@ -430,13 +501,48 @@ impl LanguageProvider for CppProvider {
             }
 
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
+                let n = innermost_name(n);
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
+                    let is_friend = matches!(k, NodeKind::Function | NodeKind::Method)
+                        && root
+                            .parent()
+                            .is_some_and(|p| p.kind() == "friend_declaration");
                     // Promote free-function to Method when the definition is
                     // lexically inside a class/struct body.
-                    let k = if k == NodeKind::Function && is_inline_class_member(root) {
+                    let k = if k == NodeKind::Function && !is_friend && is_inline_class_member(root)
+                    {
                         NodeKind::Method
                     } else {
                         k
+                    };
+                    // An out-of-class member definition belongs to its
+                    // qualifier (`void ns::Foo::bar() {}` → `Foo`), not to
+                    // the namespace around the definition. The grammar
+                    // cannot tell `Foo::bar` from `ns::bar`: a template
+                    // qualifier or a constructor / destructor name proves a
+                    // type, any other qualifier waits for a namespace of that
+                    // name in this file (`qualified_owners` below).
+                    let qualifier = match k {
+                        NodeKind::Method => n
+                            .parent()
+                            .filter(|p| p.kind() == "qualified_identifier")
+                            .and_then(|p| p.child_by_field_name("scope"))
+                            .and_then(|scope| {
+                                let name = scope_type_name(scope, source)?;
+                                let is_type = scope.kind() == "template_type"
+                                    || name_str.trim_start_matches('~') == name;
+                                Some((name.to_string(), is_type))
+                            }),
+                        _ => None,
+                    };
+                    let owner_class = match qualifier {
+                        Some((owner, true)) => Some(owner),
+                        Some((owner, false)) => {
+                            let scope = qualified_scope_text(n, source);
+                            qualified_owners.push((nodes.len(), owner, scope));
+                            None
+                        }
+                        None => None,
                     };
 
                     let start = root.start_position();
@@ -448,14 +554,10 @@ impl LanguageProvider for CppProvider {
                             .map(|s| s.trim().to_string())
                     });
 
-                    let heritage = heritage_nodes
-                        .iter()
-                        .filter_map(|h| {
-                            std::str::from_utf8(&source[h.start_byte()..h.end_byte()])
-                                .ok()
-                                .map(|s| s.to_string())
-                        })
-                        .collect();
+                    let heritage = match k {
+                        NodeKind::Class | NodeKind::Struct => cpp_heritage(root, source),
+                        _ => Vec::new(),
+                    };
 
                     let mut decorators = if override_func_ids.contains(&root.id()) {
                         vec!["__override__".to_string()]
@@ -467,6 +569,15 @@ impl LanguageProvider for CppProvider {
                             root, source,
                         ));
                     }
+                    let span = (
+                        start.row as u32,
+                        start.column as u32,
+                        end.row as u32,
+                        end.column as u32,
+                    );
+                    if is_friend {
+                        friend_spans.insert(span);
+                    }
                     nodes.push(RawNode {
                         decorators,
                         is_exported: is_header || is_exported_by_query,
@@ -474,15 +585,10 @@ impl LanguageProvider for CppProvider {
                         type_annotation,
                         name: name_str.to_string(),
                         kind: k,
-                        span: (
-                            start.row as u32,
-                            start.column as u32,
-                            end.row as u32,
-                            end.column as u32,
-                        ),
+                        span,
                         calls: Vec::new(),
                         field_reads: Vec::new(),
-                        owner_class: None,
+                        owner_class,
                         content_hash: ecp_core::uid::xxh3_64_bytes(
                             &source[root.start_byte()..root.end_byte()],
                         ),
@@ -613,6 +719,14 @@ impl LanguageProvider for CppProvider {
             a.imported_name == b.imported_name && a.source == b.source && a.alias == b.alias
         });
 
+        // tree-sitter lost a class or cut it short (a macro before `class`,
+        // an `#if` inside a declaration): owners come from matched braces.
+        let recovered_classes = if tree.root_node().has_error() {
+            stamp_lexical_owners(source, &mut nodes, is_header)
+        } else {
+            Vec::new()
+        };
+
         // C++ has no reserved constructor name; the convention is that a
         // method whose name equals its enclosing class name is a constructor.
         // Inline ctors are already Method (via `is_inline_class_member`);
@@ -635,12 +749,51 @@ impl LanguageProvider for CppProvider {
                 node.kind = NodeKind::Constructor;
             }
         }
+        // A qualifier this file declares only as a namespace makes the
+        // definition a free function of that namespace (`void ns::f() {}`),
+        // owned like a `void f() {}` written inside `namespace ns { }`.
+        let namespace_names: std::collections::HashSet<String> = nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Namespace)
+            .map(|n| n.name.clone())
+            .collect();
+        for (idx, owner, scope) in qualified_owners {
+            let node = &mut nodes[idx];
+            if class_names.contains(&owner) {
+                node.owner_class = Some(owner);
+                continue;
+            }
+            if node.kind != NodeKind::Method || node.owner_class.is_some() {
+                continue;
+            }
+            // `namespace a::b { }` names its node `a::b`, nested blocks name
+            // the inner one `b`: try the whole qualifier, then its last part.
+            let namespace = [&scope, &owner]
+                .into_iter()
+                .find(|q| namespace_names.contains(*q))
+                .cloned();
+            match namespace {
+                Some(namespace) => {
+                    node.kind = NodeKind::Function;
+                    node.owner_class = Some(namespace);
+                }
+                // A qualifier this file declares as neither is most often a
+                // class of a header (`void A::reset() {}` in `a.cpp`). It
+                // owns the definition ahead of any namespace around it, so
+                // `A::reset` and `B::reset` stay two declarations, never
+                // overloads of one.
+                None => node.owner_class = Some(owner),
+            }
+        }
 
         // Extract call sites with receiver-type binding: `this->method()` /
         // `this.method()` → `Class.method`, `Base::method()` → `Base.method`,
         // and typed-var `obj.method()` / `obj->method()` → `Type.method`.
         // Feeds the resolver's Tier 2.5 qualifier-scoped lookup.
-        let bindings = collect_bindings(tree.root_node(), source);
+        let mut bindings = collect_bindings(tree.root_node(), source);
+        for (span, name) in recovered_classes {
+            bindings.push_class_scope(span, name);
+        }
         let mut call_sites = crate::calls::CallSiteIndex::default();
         let (raw_path_literals, raw_sql_refs) = extract_cpp_calls_and_path_literals(
             tree.root_node(),
@@ -654,6 +807,19 @@ impl LanguageProvider for CppProvider {
             source,
             &mut nodes,
             &["field_expression"],
+        );
+        crate::calls::extract_variant_refs(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &crate::calls::VariantRefSpec {
+                // `Color::Red` for scoped enums; unscoped enumerators are bare.
+                path_kinds: &["qualified_identifier"],
+                label_parents: &["case_statement"],
+                bare_label_parents: &[],
+                bare_expressions: true,
+                token_trees: false,
+            },
         );
 
         // Merge bindings-derived types with declaration-level fn-pointer vars.
@@ -683,6 +849,9 @@ impl LanguageProvider for CppProvider {
             crate::function_meta::cpp::extract(tree.root_node(), source, &nodes, file_category);
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
+        if !friend_spans.is_empty() {
+            restamp_friend_owners(&mut nodes, &friend_spans);
+        }
         Ok(LocalGraph {
             content_hash: [0; 8],
             routes: vec![],
@@ -703,6 +872,32 @@ impl LanguageProvider for CppProvider {
             raw_function_metas,
             export_aliases: None,
         })
+    }
+}
+
+/// A `friend` function belongs to the namespace around its class, so its
+/// owner is the tightest enclosing `Namespace`, or none at file scope —
+/// never the class the span stamping found.
+fn restamp_friend_owners(
+    nodes: &mut [RawNode],
+    friend_spans: &rustc_hash::FxHashSet<(u32, u32, u32, u32)>,
+) {
+    let namespaces: Vec<(String, (u32, u32, u32, u32))> = nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Namespace)
+        .map(|n| (n.name.clone(), n.span))
+        .collect();
+    for node in nodes.iter_mut() {
+        if !friend_spans.contains(&node.span) {
+            continue;
+        }
+        node.owner_class = namespaces
+            .iter()
+            .filter(|(_, s)| {
+                (s.0, s.1) <= (node.span.0, node.span.1) && (node.span.2, node.span.3) <= (s.2, s.3)
+            })
+            .min_by_key(|(_, s)| crate::framework_helpers::span_area(*s))
+            .map(|(name, _)| name.clone());
     }
 }
 

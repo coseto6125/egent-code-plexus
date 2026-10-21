@@ -87,7 +87,7 @@ impl LanguageProvider for VyperProvider {
             let mut decorators: Vec<String> = Vec::new();
             let mut import_src: Option<tree_sitter::Node> = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let ci = cap.index;
                 if let Some(k_from_spec) =
                     self.capture_kind_by_idx.get(ci as usize).copied().flatten()

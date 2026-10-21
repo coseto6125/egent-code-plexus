@@ -167,6 +167,12 @@ fn is_class_method(func: tree_sitter::Node) -> bool {
     let Some(parent) = func.parent() else {
         return false;
     };
+    // An `enum class` declares its members in `enum_class_body`, after the
+    // entries; an entry with a body (`RED { override fun f() }`) overrides
+    // them in its own `class_body`.
+    if parent.kind() == "enum_class_body" {
+        return true;
+    }
     if parent.kind() != "class_body" {
         return false;
     }
@@ -177,7 +183,7 @@ fn is_class_method(func: tree_sitter::Node) -> bool {
     parent.parent().is_some_and(|p| {
         matches!(
             p.kind(),
-            "class_declaration" | "companion_object" | "object_declaration"
+            "class_declaration" | "companion_object" | "object_declaration" | "enum_entry"
         )
     })
 }
@@ -211,12 +217,12 @@ fn is_interface_class(class_decl: tree_sitter::Node) -> bool {
 /// `annotation class Foo`. Distinct from plain `class Foo`.
 fn is_annotation_class(class_decl: tree_sitter::Node, source: &[u8]) -> bool {
     for i in 0..class_decl.child_count() {
-        let Some(c) = class_decl.child(i as u32) else {
+        let Some(c) = class_decl.child(i) else {
             continue;
         };
         if c.kind() == "modifiers" {
             for j in 0..c.child_count() {
-                let Some(m) = c.child(j as u32) else { continue };
+                let Some(m) = c.child(j) else { continue };
                 if m.kind() == "class_modifier" || m.kind() == "modifier" {
                     if let Ok(t) = std::str::from_utf8(&source[m.start_byte()..m.end_byte()]) {
                         if t == "annotation" {
@@ -360,7 +366,7 @@ impl LanguageProvider for KotlinProvider {
             let mut ktor_route_span: Option<(u32, u32, u32, u32)> = None;
             let mut ktor_path_node: Option<tree_sitter::Node> = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = cap.index;
                 if Some(cap_idx) == self.ktor.get {
                     ktor_verb = Some("get");
@@ -615,6 +621,18 @@ impl LanguageProvider for KotlinProvider {
             source,
             &mut nodes,
             &["navigation_expression"],
+        );
+        crate::calls::extract_variant_refs(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &crate::calls::VariantRefSpec {
+                path_kinds: &["navigation_expression"],
+                label_parents: &["when_condition"],
+                bare_label_parents: &[],
+                bare_expressions: false,
+                token_trees: false,
+            },
         );
 
         // Ktor framework-presence gate: only emit refs when the file

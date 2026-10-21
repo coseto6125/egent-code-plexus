@@ -183,6 +183,7 @@ fn fastapi_route_emits_entrypoint_at_score_1_0() {
             path: "/items".into(),
             handler: Some("read_items".into()),
             span: (0, 0, 0, 0),
+            scope: None,
         }],
         vec![],
     );

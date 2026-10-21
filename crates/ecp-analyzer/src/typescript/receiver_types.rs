@@ -20,27 +20,30 @@ use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_ts_string_value,
     strip_ts_template_value,
 };
-use crate::calls::{attach_to_enclosing_span, new_expression_call, CallSiteIndex};
+use crate::calls::{
+    attach_to_enclosing_span, new_expression_call, node_range, range_width, start_pos,
+    CallSiteIndex, Pos, PosRange,
+};
 use crate::framework_helpers::{enclosing_class, node_span, Span};
 use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
-/// Map of function scopes (by row span) to their `var → type` bindings.
+/// Map of function scopes (by position range) to their `var → type` bindings.
 #[derive(Debug, Default)]
 pub struct LocalTypes {
-    scopes: Vec<((u32, u32), HashMap<String, String>)>,
+    scopes: Vec<(PosRange, HashMap<String, String>)>,
 }
 
 impl LocalTypes {
     /// Smallest enclosing scope that declares `var`.
-    fn lookup(&self, line: u32, var: &str) -> Option<&str> {
+    fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
         let mut best: Option<&str> = None;
-        let mut best_width = u32::MAX;
+        let mut best_width = (u32::MAX, i64::MAX);
         for ((start, end), map) in &self.scopes {
-            if *start <= line && line <= *end {
+            if *start <= pos && pos <= *end {
                 if let Some(t) = map.get(var) {
-                    let w = end - start;
+                    let w = range_width((*start, *end));
                     if w < best_width {
                         best_width = w;
                         best = Some(t.as_str());
@@ -55,7 +58,7 @@ impl LocalTypes {
 /// Walk every `function_declaration` / `method_definition` / `arrow_function` node
 /// and collect typed parameter and variable bindings.
 pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
-    let mut scopes: Vec<((u32, u32), HashMap<String, String>)> = Vec::new();
+    let mut scopes: Vec<(PosRange, HashMap<String, String>)> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         let is_fn = matches!(
@@ -67,7 +70,7 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
                 | "function_signature"
         );
         if is_fn {
-            let fn_span = (n.start_position().row as u32, n.end_position().row as u32);
+            let fn_span = node_range(n);
             let mut map: HashMap<String, String> = HashMap::new();
 
             if let Some(params) = n.child_by_field_name("parameters") {
@@ -213,7 +216,7 @@ pub fn extract_ts_calls_and_path_literals(
                         strip_ts_string_value(raw)
                     } else {
                         // template_string: skip if it has substitutions.
-                        let has_substitution = (0..n.child_count() as u32).any(|i| {
+                        let has_substitution = (0..n.child_count()).any(|i| {
                             n.child(i)
                                 .is_some_and(|ch| ch.kind() == "template_substitution")
                         });
@@ -262,7 +265,7 @@ fn ts_callee_name(
             let obj = function.child_by_field_name("object")?;
             let prop = function.child_by_field_name("property")?;
             let prop_name = prop.utf8_text(source).ok()?;
-            let line = call.start_position().row as u32;
+            let pos = start_pos(call);
 
             match obj.kind() {
                 "this" => {
@@ -276,7 +279,7 @@ fn ts_callee_name(
                 }
                 "identifier" => {
                     let obj_name = obj.utf8_text(source).ok()?;
-                    if let Some(ty) = locals.lookup(line, obj_name) {
+                    if let Some(ty) = locals.lookup(pos, obj_name) {
                         return Some(format!("{ty}.{prop_name}"));
                     }
                     // Unknown type — emit qualified name so the resolver can try.

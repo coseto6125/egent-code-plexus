@@ -57,6 +57,24 @@ fn body_has_call(node: tree_sitter::Node) -> bool {
     false
 }
 
+/// The trait an `impl Trait for T` names, as other languages store a base:
+/// the path kept, generic arguments dropped (`fmt::Display`,
+/// `From<u8>` → `From`, `Iterator<Item = u8>` → `Iterator`). The resolver
+/// looks a base up as a type name, which carries no arguments.
+fn trait_path(text: &str) -> String {
+    let mut depth = 0u32;
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out.trim().to_string()
+}
+
 pub struct RustProvider {
     query: Query,
     indices: RustCaptureIndices,
@@ -205,7 +223,7 @@ impl LanguageProvider for RustProvider {
             let mut actix_method: Option<tree_sitter::Node> = None;
             let mut actix_handler: Option<tree_sitter::Node> = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = Some(cap.index);
                 if let Some(k_from_spec) = self
                     .capture_kind_by_idx
@@ -267,7 +285,7 @@ impl LanguageProvider for RustProvider {
                     if let Ok(h_str) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {
-                        heritage.push(h_str.to_string());
+                        heritage.push(trait_path(h_str));
                     }
                 } else if cap_idx == idx.type_ann {
                     if let Ok(t_str) =
@@ -534,6 +552,20 @@ impl LanguageProvider for RustProvider {
             source,
             &mut nodes,
             &["field_expression"],
+        );
+        crate::calls::extract_variant_refs(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &crate::calls::VariantRefSpec {
+                // `E::B(..)` / `E::C` / tuple patterns, and the name of a
+                // struct-like `E::A { .. }` expression or pattern.
+                path_kinds: &["scoped_identifier", "scoped_type_identifier"],
+                label_parents: &[],
+                bare_label_parents: &[],
+                bare_expressions: false,
+                token_trees: true,
+            },
         );
 
         // Build param type map for indirect-call detection.

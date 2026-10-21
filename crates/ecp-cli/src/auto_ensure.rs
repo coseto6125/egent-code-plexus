@@ -1068,21 +1068,6 @@ pub fn resolve_session_overlay_dir(worktree_root: &Path) -> Option<PathBuf> {
     Some(home_ecp.join(&repo_dir).join("sessions").join(&session_id))
 }
 
-/// L1 freshness gate: drop dirty files whose overlay fragment is provably
-/// current, keep the rest for re-parse.
-///
-/// A fragment is current when its `dirty_files.json` entry is a v3 bin that
-/// parsed cleanly, is on disk, AND records exactly the file's present
-/// mtime_ns, in a manifest the running binary's parser wrote. Any doubt (no
-/// session dir / meta / manifest, HEAD drifted since the fragments were
-/// based, another builder fingerprint, older bin, parse_failed, missing bin,
-/// stat error) keeps the file
-/// in the re-parse set — the gate may only ever skip work it can prove
-/// redundant.
-///
-/// The HEAD-drift check matters: promotion (rebasing fragments onto the new
-/// base SHA) runs inside the full overlay path, so a drifted session must
-/// fall through to it rather than short-circuit here.
 /// Stat a file's mtime as nanoseconds since the epoch. The shared form of a
 /// chain that otherwise gets re-derived at every call site (gate, pre-parse
 /// stat, overlay reader).
@@ -1106,8 +1091,22 @@ struct L1FreshnessGate {
     session_meta: Option<SessionMeta>,
 }
 
+/// L1 freshness gate: drop dirty files whose overlay fragment is provably
+/// current, keep the rest for re-parse.
+///
+/// A fragment is current when its `dirty_files.json` entry is a v4 bin that
+/// parsed cleanly, is on disk, AND records exactly the file's present
+/// mtime_ns, in a manifest the running binary's parser wrote. Any doubt (no
+/// session dir / meta / manifest, HEAD drifted since the fragments were
+/// based, another builder fingerprint, older bin, parse_failed, missing bin,
+/// stat error) keeps the file in the re-parse set — the gate may only ever
+/// skip work it can prove redundant.
+///
+/// The HEAD-drift check matters: promotion (rebasing fragments onto the new
+/// base SHA) runs inside the full overlay path, so a drifted session must
+/// fall through to it rather than short-circuit here.
 fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1FreshnessGate {
-    use ecp_core::session::{DirtyFiles, FRAGMENT_FORMAT_V3};
+    use ecp_core::session::{DirtyFiles, FRAGMENT_FORMAT_V4};
 
     let pass = |rel_paths, session_meta| L1FreshnessGate {
         rel_paths,
@@ -1142,7 +1141,7 @@ fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1Fre
             let Some(entry) = manifest.entries.get(rel) else {
                 return true;
             };
-            if entry.format != FRAGMENT_FORMAT_V3 || entry.parse_failed {
+            if entry.format != FRAGMENT_FORMAT_V4 || entry.parse_failed {
                 return true;
             }
             // A bin the manifest names can still be gone (a cleanup that

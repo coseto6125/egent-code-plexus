@@ -1,12 +1,12 @@
 //! C++ receiver-type binding (Task A5):
 //! `this->method()` / `this.method()` → `Class.method`,
 //! `Base::method()` → `Base.method`, typed-var `obj.method()` /
-//! `obj->method()` → `Type.method`. Falls back to bare for `auto` /
-//! template / unannotated cases.
+//! `obj->method()` → `Type.method`. Falls back to an untyped member
+//! call for `auto` / template / unannotated cases.
 
 use ecp_analyzer::cpp::parser::CppProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{CallSite, RawNode};
 use ecp_core::graph::NodeKind;
 
 fn parse(src: &str) -> Vec<RawNode> {
@@ -87,13 +87,14 @@ fn typed_local_pointer_and_value_both_bind() {
 }
 
 #[test]
-fn auto_typed_local_falls_back_to_bare_name() {
+fn auto_typed_local_falls_back_to_untyped_member() {
     let src = include_str!("fixtures/receiver_types.cpp");
     let nodes = parse(src);
     let calls = calls_of(&nodes, "useNoAnnotation");
+    let untyped = CallSite::untyped_member("eat");
     assert!(
-        calls.iter().any(|c| c == "eat"),
-        "auto-typed local must fall back to bare `eat`; got {:?}",
+        calls.contains(&untyped),
+        "auto-typed local must fall back to an untyped member `eat`; got {:?}",
         calls,
     );
     assert!(

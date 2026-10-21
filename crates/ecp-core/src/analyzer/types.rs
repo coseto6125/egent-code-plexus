@@ -9,6 +9,19 @@ pub type Span = (u32, u32, u32, u32);
 /// The lexical link from a callable to an anonymous closure it contains.
 pub const CLOSURE_REFERENCE_REASON: &str = "closure:lexical_reference";
 
+/// The link from the first of a same-name overload set to each later one
+/// ([`crate::uid::keeps_overloads`]): a call binds the first by name only.
+pub const OVERLOAD_SET_REASON: &str = "overload_set";
+
+/// The confidence of a call edge bound to the nearest copy of a declaration
+/// that duplicated source trees repeat. No other call tier yields this
+/// value, so the index and the session overlay tell the edge apart by it.
+pub const NEAREST_COPY_CONFIDENCE: f32 = 0.6;
+
+/// The `reason` of a call edge at [`NEAREST_COPY_CONFIDENCE`]: path
+/// proximity is a heuristic, so the edge stays tagged.
+pub const NEAREST_COPY_REASON: &str = "call:nearest-copy";
+
 /// True iff `outer` fully contains `inner` in the same coordinate system.
 #[inline]
 pub fn span_contains(outer: Span, inner: Span) -> bool {
@@ -64,18 +77,21 @@ pub enum CallSite<'a> {
     Plain(&'a str),
     /// `new T(..)`: the site constructs `T`.
     Construct(&'a str),
-    /// A Python member call whose receiver is neither typed nor rooted in an
-    /// imported name (`obj.widget()`): it resolves by the member name and
-    /// never constructs a type. A Rust method call on an untyped receiver
+    /// A member call whose receiver is neither typed nor rooted in an
+    /// imported name (Python `obj.widget()`): it resolves by the member name
+    /// and never constructs a type. A Rust method call on an untyped receiver
     /// (`n.name.resolve()`) uses it too, so it never reaches a free `fn`, and
     /// so does a PHP `$obj->m()` other than `$this`, which a `use function`
-    /// import never names, and a Java call on a computed receiver
-    /// (`a.b().m()`), which no static import names.
+    /// import never names, a Java call on a computed receiver (`a.b().m()`),
+    /// which no static import names, and an untyped Swift, Ruby or C++
+    /// receiver.
     UntypedMember(&'a str),
-    /// A Python member call whose receiver is a name a `from` import binds
-    /// (`from pkg import mod; mod.f()`). That name may be a submodule, which
-    /// the import tier binds as a module import; anywhere else the site
-    /// resolves as `Plain(member)`.
+    /// A member call whose receiver may name a type. In Python the receiver
+    /// is a name a `from` import binds (`from pkg import mod; mod.f()`): a
+    /// submodule binds as a module import. In C#, Swift, Kotlin and Dart it
+    /// is an identifier that is no local, parameter or field. A receiver that
+    /// names a type (or a library one) resolves as `Plain("Type.member")`;
+    /// anywhere else the site resolves as `Plain(member)`.
     FromReceiver { receiver: &'a str, member: &'a str },
 }
 
@@ -347,6 +363,76 @@ pub struct RawRoute {
     pub path: String,
     pub handler: Option<String>,
     pub span: (u32, u32, u32, u32),
+    /// What the enclosing route groups apply (Laravel `Route::group`,
+    /// `->group(...)`), and, for a [`RawRoute::INCLUDE`] record, the route
+    /// file the group loads. `None` for a provider without route groups.
+    pub scope: Option<Box<RawRouteScope>>,
+}
+
+impl RawRoute {
+    /// `method` of a route-file include record, such as
+    /// `Route::prefix('admin')->group(base_path('routes/admin.php'))`. It is
+    /// not an endpoint: `path` holds the group prefix (empty for none), and
+    /// the builder applies the record's prefix, middleware and namespace to
+    /// every route of the included file. `handler` holds the group's
+    /// controller (`Route::controller(C::class)->group(...)`), whose method a
+    /// bare action string in the included file names.
+    pub const INCLUDE: &'static str = "INCLUDE";
+
+    /// `method` of a Laravel controller-middleware record. It is not an
+    /// endpoint: the builder adds its middleware to each route whose action
+    /// binds a method of the class that declares it. `path` says where the
+    /// class registers it: `__construct` (`$this->middleware('auth')`),
+    /// `middleware` (an entry of the static `HasMiddleware::middleware()`),
+    /// or `parent::__construct` for a constructor that runs its parent's,
+    /// which carries no middleware. `__construct?` and `middleware?` mark a
+    /// registration the parser cannot read (reason after a space), and
+    /// `extends` / `implements` / `use` carry the class's parent, interfaces
+    /// and traits (fully qualified name after a space).
+    /// `scope.only` / `scope.except` hold the method filter.
+    pub const CONTROLLER_MIDDLEWARE: &'static str = "CONTROLLER_MIDDLEWARE";
+}
+
+/// The group scope of one [`RawRoute`], as far as its own file shows it.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Default, PartialEq)]
+#[rkyv(derive(Debug))]
+pub struct RawRouteScope {
+    /// Middleware in effect, the outermost group's first and the route's
+    /// own last.
+    pub middleware: Vec<String>,
+    /// Controller namespace in effect for a relative class name in
+    /// `handler`. A leading `\` marks a namespace that an including group's
+    /// namespace does not prefix. `None` when no group in the file sets one.
+    pub namespace: Option<String>,
+    /// The included route file of a [`RawRoute::INCLUDE`] record.
+    pub include: Option<RouteInclude>,
+    /// The file imports no HTTP framework, as a route file that calls the
+    /// global `Route` facade alias does. Its records count only when a file
+    /// that imports one loads it, directly or through other route files.
+    pub needs_include: bool,
+    /// Middleware removed again: the route's `->withoutMiddleware('auth')`,
+    /// a group's `Route::withoutMiddleware(...)` or `'excluded_middleware'`
+    /// option. Laravel drops each name from the composed list, controller
+    /// middleware included, by exact string match.
+    pub excluded_middleware: Vec<String>,
+    /// The controller methods a [`RawRoute::CONTROLLER_MIDDLEWARE`] record
+    /// applies to (`['only' => [...]]`, `->only(...)`); `None` for every
+    /// method.
+    pub only: Option<Vec<String>>,
+    /// The controller methods a [`RawRoute::CONTROLLER_MIDDLEWARE`] record
+    /// skips (`['except' => [...]]`, `->except(...)`).
+    pub except: Option<Vec<String>>,
+}
+
+/// The route file a Laravel route group loads.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq)]
+#[rkyv(derive(Debug))]
+pub enum RouteInclude {
+    /// `base_path('routes/api.php')`: relative to the application root.
+    AppRoot(String),
+    /// `__DIR__ . '/api.php'`: relative to the including file's directory,
+    /// `..` segments kept.
+    FileDir(String),
 }
 
 /// Path-shaped string literal extracted by a per-language `path_literals`
@@ -953,6 +1039,74 @@ impl Default for LocalGraph {
         }
     }
 }
+
+/// One enum-variant reference a parser recorded in [`RawNode::field_reads`]:
+/// `E::A { .. }`, `E::B(..)`, `Day.MONDAY`, a `case Color::Red:` label, or a
+/// bare enumerator (`RED`) where the language names variants unqualified.
+///
+/// The entry rides in `field_reads` behind a U+0001 marker, like the
+/// [`CallSite`] markers in `calls`: no field name holds a control
+/// character, so the `ReadsField` tier never sees one. Pass 2 resolves the
+/// path's qualifier as a type and the last segment as one of that type's
+/// variants (`References` edge); a bare name resolves only to a variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VariantRef<'a> {
+    /// `Q::V`, `pkg.Q.V`, `\App\Q::V`, or a bare `V`, whitespace removed.
+    pub path: &'a str,
+    /// The reference sits in a pattern or case label, so it tests for the
+    /// variant rather than producing or reading it.
+    pub pattern: bool,
+}
+
+impl<'a> VariantRef<'a> {
+    const USE_PREFIX: &'static str = "\u{1}variant ";
+    const PATTERN_PREFIX: &'static str = "\u{1}variant-pattern ";
+
+    pub fn encode(path: &str, pattern: bool) -> String {
+        let prefix = if pattern {
+            Self::PATTERN_PREFIX
+        } else {
+            Self::USE_PREFIX
+        };
+        [prefix, path].concat()
+    }
+
+    /// `None` for an ordinary field-read entry.
+    pub fn parse(raw: &'a str) -> Option<Self> {
+        if let Some(path) = raw.strip_prefix(Self::PATTERN_PREFIX) {
+            Some(Self {
+                path,
+                pattern: true,
+            })
+        } else {
+            raw.strip_prefix(Self::USE_PREFIX).map(|path| Self {
+                path,
+                pattern: false,
+            })
+        }
+    }
+
+    /// `(qualifier path, variant)` split at the last `::` / `.` / `\`;
+    /// `None` for a bare name.
+    pub fn split(self) -> Option<(&'a str, &'a str)> {
+        let path = self.path;
+        let idx = [
+            path.rfind("::").map(|i| (i, 2)),
+            path.rfind('.').map(|i| (i, 1)),
+        ]
+        .into_iter()
+        .flatten()
+        .max_by_key(|&(i, _)| i)?;
+        let (qualifier, variant) = (&path[..idx.0], &path[idx.0 + idx.1..]);
+        (!qualifier.is_empty() && !variant.is_empty()).then_some((qualifier, variant))
+    }
+}
+
+/// The `References` reason of a variant used as a value: constructed, read,
+/// compared.
+pub const VARIANT_USE_REASON: &str = "enum_variant:use";
+/// The `References` reason of a variant in a pattern or case label.
+pub const VARIANT_PATTERN_REASON: &str = "enum_variant:pattern";
 
 #[cfg(test)]
 mod tests {

@@ -156,7 +156,7 @@ pub fn parse_embedded_script(
         let mut is_import = false;
         let mut is_import_ns = false;
 
-        for cap in m.captures {
+        for cap in m.captures() {
             let ci = cap.index;
             if let Some(Some(k)) = capture_kind_by_idx.get(ci as usize) {
                 name_node = Some(cap.node);

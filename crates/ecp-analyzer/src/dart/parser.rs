@@ -232,7 +232,7 @@ impl LanguageProvider for DartProvider {
             let mut var_name: Option<tree_sitter::Node<'_>> = None;
             let mut var_type: Option<tree_sitter::Node<'_>> = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = cap.index;
                 if let Some(k_from_spec) = self
                     .capture_kind_by_idx
@@ -485,6 +485,20 @@ impl LanguageProvider for DartProvider {
             source,
             &mut nodes,
             &["member_expression"],
+        );
+        crate::calls::extract_variant_refs(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &crate::calls::VariantRefSpec {
+                // A `case Phase.run:` pattern holds the path without a
+                // `member_expression`.
+                path_kinds: &["member_expression", "constant_pattern"],
+                label_parents: &[],
+                bare_label_parents: &[],
+                bare_expressions: false,
+                token_trees: false,
+            },
         );
 
         let framework_refs = detect_ast_framework_patterns(source, DART_FRAMEWORKS);

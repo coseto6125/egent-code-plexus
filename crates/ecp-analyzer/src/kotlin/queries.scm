@@ -69,6 +69,12 @@
     (variable_declaration
       (simple_identifier) @property.name)
   ) @property)
+; An `enum class` declares its members in `enum_class_body`.
+(enum_class_body
+  (property_declaration
+    (variable_declaration
+      (simple_identifier) @property.name)
+  ) @property)
 
 ; Variables — top-level val/var (direct child of source_file only).
 ; Anchored to source_file so class-body property_declarations don't produce

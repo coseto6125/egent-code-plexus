@@ -531,3 +531,66 @@ fn test_import_dotted_missing_module_with_indexed_root_keeps_global() {
         "{hits:?}"
     );
 }
+
+fn targets_of(files: &[(&str, &str)], caller: &str) -> Vec<(String, String, String)> {
+    let graph = graph_of(&PythonProvider::new().unwrap(), files);
+    calls_from(&graph, caller)
+        .into_iter()
+        .map(|hit| (hit.file, hit.owner, hit.name))
+        .collect()
+}
+
+fn target(file: &str, owner: &str, name: &str) -> (String, String, String) {
+    (file.into(), owner.into(), name.into())
+}
+
+#[test]
+fn test_resolve_call_from_imported_class_with_namesake_binds_class_member() {
+    // `K.st()` names K's `st`: J's namesake must not make the bare `st`
+    // ambiguous and drop the call.
+    let files = [
+        (
+            "k.py",
+            "class K:\n    @staticmethod\n    def st(id): pass\n",
+        ),
+        (
+            "j.py",
+            "class J:\n    @staticmethod\n    def st(id): pass\n",
+        ),
+        ("app.py", "from k import K\n\ndef run():\n    K.st(2)\n"),
+    ];
+    assert_eq!(targets_of(&files, "run"), vec![target("k.py", "K", "st")]);
+}
+
+#[test]
+fn test_resolve_call_from_imported_instance_keeps_bare_member_binding() {
+    // `settings` is an object, not a type: its member still binds by name.
+    let files = [
+        (
+            "cfg.py",
+            "class Settings:\n    def load(self): pass\n\nsettings = Settings()\n",
+        ),
+        (
+            "app.py",
+            "from cfg import settings\n\ndef run():\n    settings.load()\n",
+        ),
+    ];
+    assert_eq!(
+        targets_of(&files, "run"),
+        vec![target("cfg.py", "Settings", "load")]
+    );
+}
+
+#[test]
+fn test_resolve_call_from_imported_submodule_binds_module_function() {
+    let files = [
+        ("pkg/__init__.py", ""),
+        ("pkg/mod.py", "def f(): pass\n"),
+        ("other.py", "class mod:\n    def f(self): pass\n"),
+        ("app.py", "from pkg import mod\n\ndef run():\n    mod.f()\n"),
+    ];
+    assert_eq!(
+        targets_of(&files, "run"),
+        vec![target("pkg/mod.py", "", "f")]
+    );
+}

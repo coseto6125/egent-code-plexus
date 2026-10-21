@@ -18,7 +18,9 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_rust_string_value,
 };
-use crate::calls::{attach_to_enclosing, CallSiteIndex};
+use crate::calls::{
+    attach_to_enclosing, node_range, range_width, start_pos, CallSiteIndex, Pos, PosRange,
+};
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
 use tree_sitter::Node;
@@ -57,11 +59,27 @@ pub fn build_impl_map(root: Node<'_>, source: &[u8]) -> ImplMap {
 /// Extract the self-type name from an `impl_item`.
 /// - `impl Dog { ... }` → "Dog"
 /// - `impl Trait for Dog { ... }` → "Dog"  (the concrete type)
+/// - `impl<P> Trait for Pin<P>`, `impl Trait for io::Cursor<u8>`,
+///   `impl<'a> Trait for &'a mut Dog` → "Pin", "Cursor", "Dog": the last
+///   path segment without generic arguments, as `owner_key` reduces owners.
 fn impl_self_type(impl_node: &Node<'_>, source: &[u8]) -> Option<String> {
     // `type` field: the concrete type being implemented (present for both
     // inherent impls and trait impls).
     let ty_node = impl_node.child_by_field_name("type")?;
-    bare_type_name(ty_node, source)
+    self_type_name(ty_node, source)
+}
+
+/// [`bare_type_name`] widened to the generic and path-qualified types an
+/// `impl` names. Local bindings keep `bare_type_name`: a `let v: Vec<u8>`
+/// receiver stays untyped.
+fn self_type_name(ty_node: Node<'_>, source: &[u8]) -> Option<String> {
+    match ty_node.kind() {
+        "generic_type" | "reference_type" => {
+            self_type_name(ty_node.child_by_field_name("type")?, source)
+        }
+        "scoped_type_identifier" => node_text(ty_node.child_by_field_name("name")?, source),
+        _ => bare_type_name(ty_node, source),
+    }
 }
 
 /// Register every `function_item` directly inside the `impl_item`'s body.
@@ -218,8 +236,7 @@ pub fn enclosing_impl_type(node: Node<'_>, source: &[u8]) -> Option<String> {
 
 #[derive(Debug, Default)]
 pub struct Scope {
-    start_row: u32,
-    end_row: u32,
+    range: PosRange,
     /// var_name → bare type name (references/pointers stripped).
     pub bindings: HashMap<String, String>,
     /// The impl-type in scope when this fn is inside an `impl_item`
@@ -238,14 +255,14 @@ impl LocalTypes {
         &self.scopes
     }
 
-    /// Look up `var`'s type at `line`, preferring the innermost scope.
+    /// Look up `var`'s type at `pos`, preferring the innermost scope.
     /// Special case: `var == "self"` falls back to `self_type` of the scope.
-    pub fn lookup(&self, line: u32, var: &str) -> Option<&str> {
+    pub fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
         let mut best: Option<&str> = None;
-        let mut best_width = u32::MAX;
+        let mut best_width = (u32::MAX, i64::MAX);
         for scope in &self.scopes {
-            if scope.start_row <= line && line <= scope.end_row {
-                let w = scope.end_row - scope.start_row;
+            if scope.range.0 <= pos && pos <= scope.range.1 {
+                let w = range_width(scope.range);
                 // Try explicit binding first.
                 if let Some(ty) = scope.bindings.get(var) {
                     if w < best_width {
@@ -311,8 +328,7 @@ fn collect_scopes<'a>(
             }
 
             out.push(Scope {
-                start_row: child.start_position().row as u32,
-                end_row: child.end_position().row as u32,
+                range: node_range(child),
                 bindings,
                 self_type,
             });
@@ -442,8 +458,7 @@ pub fn extract_rust_calls_and_path_literals(
             // `field_expression` children of `call_expression` represent `obj.method`.
             "call_expression" => {
                 if let Some(callee) = rust_callee_name(n, source, local_types) {
-                    let line = n.start_position().row as u32;
-                    if let Some(site) = attach_to_enclosing(line, callee, nodes) {
+                    if let Some(site) = attach_to_enclosing(start_pos(n), callee, nodes) {
                         call_sites.insert(n.id(), site);
                     }
                 }
@@ -496,8 +511,8 @@ fn rust_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Optio
                 let obj_text = node_text(value, source)?;
                 // Strip leading `*` (deref) and `&` to get the plain var name.
                 let var_name = obj_text.trim_start_matches(['*', '&', ' ']);
-                let line = call.start_position().row as u32;
-                if let Some(ty) = locals.lookup(line, var_name) {
+                let pos = start_pos(call);
+                if let Some(ty) = locals.lookup(pos, var_name) {
                     return Some(format!("{ty}.{method_name}"));
                 }
             }

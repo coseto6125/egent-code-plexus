@@ -12,6 +12,16 @@ const HTTP_METHODS: &[&str] = &[
     "use",
 ];
 
+/// The verbs a Laravel `Route::any` route answers: `Router::$verbs`.
+const ANY_ROUTE_VERBS: &[&str] = &["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+
+/// Whether an `ANY` route answers a request of `method`, in any case.
+pub fn any_route_answers(method: &str) -> bool {
+    ANY_ROUTE_VERBS
+        .iter()
+        .any(|verb| verb.eq_ignore_ascii_case(method))
+}
+
 #[derive(Debug, Clone)]
 pub struct DetectedRoute {
     pub method: String,
@@ -88,6 +98,16 @@ pub fn detect_from_call(raw: &RawRoute) -> Option<DetectedRoute> {
     if lower == "mount" && raw.path.starts_with('/') {
         return Some(DetectedRoute {
             method: "MOUNT".to_string(),
+            path: raw.path.clone(),
+        });
+    }
+
+    // `ANY` fast path, same shape as mount: Laravel `Route::any('/x', ...)`
+    // answers every verb, and the PHP parser emits it as one normalized
+    // record that the allowlist below would reject.
+    if lower == "any" && raw.path.starts_with('/') {
+        return Some(DetectedRoute {
+            method: "ANY".to_string(),
             path: raw.path.clone(),
         });
     }
@@ -169,6 +189,26 @@ pub fn clean_route_path_lax(raw_with_quotes: &str) -> Option<String> {
     }
 }
 
+/// Route path segments joined the way a router with groups joins a group
+/// prefix to a route path (Laravel `prefix`): each segment trimmed of `/`,
+/// empty segments dropped, one leading `/`. `["admin/", "/users"]` gives
+/// `/admin/users`; no non-empty segment gives `/`.
+pub fn join_route_path<'a>(segments: impl IntoIterator<Item = &'a str>) -> String {
+    let mut path = String::new();
+    for part in segments
+        .into_iter()
+        .flat_map(|segment| segment.split('/'))
+        .filter(|part| !part.is_empty())
+    {
+        path.push('/');
+        path.push_str(part);
+    }
+    if path.is_empty() {
+        path.push('/');
+    }
+    path
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,7 +219,21 @@ mod tests {
             path: path.to_string(),
             handler: None,
             span: (0, 0, 0, 0),
+            scope: None,
         }
+    }
+
+    #[test]
+    fn test_any_route_answers_laravel_verb_any_case_true() {
+        assert!(any_route_answers("get"));
+        assert!(any_route_answers("OPTIONS"));
+    }
+
+    #[test]
+    fn test_any_route_answers_verb_any_never_registers_false() {
+        assert!(!any_route_answers("TRACE"));
+        assert!(!any_route_answers("CONNECT"));
+        assert!(!any_route_answers(""));
     }
 
     #[test]
@@ -206,6 +260,20 @@ mod tests {
     #[test]
     fn detect_from_call_rejects_non_path_string() {
         assert!(detect_from_call(&raw("get", "not_a_path!")).is_none());
+    }
+
+    #[test]
+    fn test_detect_from_call_any_with_path_keeps_any_method() {
+        let detected = detect_from_call(&raw("ANY", "/webhook")).unwrap();
+        assert_eq!(
+            (detected.method.as_str(), detected.path.as_str()),
+            ("ANY", "/webhook")
+        );
+    }
+
+    #[test]
+    fn test_detect_from_call_any_without_leading_slash_returns_none() {
+        assert!(detect_from_call(&raw("ANY", "webhook")).is_none());
     }
 
     #[test]
@@ -396,5 +464,23 @@ mod tests {
     fn strip_quotes_unquoted_path_returns_original() {
         // Already-unquoted path passes through unchanged.
         assert_eq!(strip_string_quotes("/api/users"), "/api/users");
+    }
+
+    #[test]
+    fn test_join_route_path_stray_slashes_joins_with_single_slashes() {
+        assert_eq!(
+            join_route_path(["/admin/", "import", "/award/"]),
+            "/admin/import/award"
+        );
+    }
+
+    #[test]
+    fn test_join_route_path_empty_segments_returns_root() {
+        assert_eq!(join_route_path(["", "/", ""]), "/");
+    }
+
+    #[test]
+    fn test_join_route_path_empty_prefix_keeps_path() {
+        assert_eq!(join_route_path(["", "/users/{id}"]), "/users/{id}");
     }
 }

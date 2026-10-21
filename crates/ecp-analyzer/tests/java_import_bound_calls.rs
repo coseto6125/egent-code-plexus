@@ -315,7 +315,8 @@ fn test_resolve_call_static_import_member_not_declared_by_class_keeps_global() {
     );
 }
 
-/// Pass 1 collapses the overloads into one `Util.run` node.
+/// Both `Util.run` overloads are nodes: the import binds the named class
+/// `Util`, and the call its first overload.
 #[test]
 fn test_resolve_call_static_import_overloaded_member_binds_named_class() {
     let graph = java_graph(&[

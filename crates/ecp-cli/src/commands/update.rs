@@ -1605,10 +1605,21 @@ mod tests {
 
     #[cfg(unix)]
     fn fake_exe(dir: &Path, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
+        use std::io::Write;
         let exe = dir.join("fake-ecp");
-        std::fs::write(&exe, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A child that another test thread forks while this process holds the
+        // script open for writing makes its exec fail with ETXTBSY, so a
+        // separate process writes it.
+        let mut writer = std::process::Command::new("sh")
+            .args(["-c", "cat > \"$0\" && chmod 755 \"$0\""])
+            .arg(&exe)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = writer.stdin.take().unwrap();
+        write!(stdin, "#!/bin/sh\n{body}\n").unwrap();
+        drop(stdin);
+        assert!(writer.wait().unwrap().success());
         exe
     }
 

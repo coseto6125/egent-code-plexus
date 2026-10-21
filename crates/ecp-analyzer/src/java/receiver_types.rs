@@ -6,6 +6,9 @@
 //!   class's `heritage` list (if present), otherwise `"super"`
 //! - `obj.foo()` → receiver is the declared type of `obj`, collected from
 //!   local variable declarations and typed method parameters in scope
+//! - `new T(..).foo()`, `new T<X>(){..}.foo()`, `outer.new Inner().foo()`,
+//!   `((T) o).foo()` → receiver is the created or cast type `T`, written as
+//!   a simple (possibly generic) class name
 //!
 //! Falls back to the bare method name for unresolved receivers, matching
 //! the prior behavior of the generic `extract_calls` helper.
@@ -13,7 +16,10 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_java_string_value,
 };
-use crate::calls::{attach_to_enclosing, construction_call};
+use crate::calls::{
+    attach_to_enclosing, construction_call, node_range, range_width, span_holds, span_width,
+    start_pos, Pos, PosRange,
+};
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use std::collections::HashMap;
@@ -23,18 +29,18 @@ use tree_sitter::Node;
 #[derive(Debug, Default)]
 struct LocalTypes {
     /// `(scope_start_row, scope_end_row)` → `{var_name → type_name}`
-    scopes: Vec<((u32, u32), HashMap<String, String>)>,
+    scopes: Vec<(PosRange, HashMap<String, String>)>,
 }
 
 impl LocalTypes {
-    /// Find the innermost scope containing `line` that has `var`.
-    fn lookup(&self, line: u32, var: &str) -> Option<&str> {
+    /// Find the innermost scope containing `pos` that has `var`.
+    fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
         let mut best: Option<&str> = None;
-        let mut best_width = u32::MAX;
+        let mut best_width = (u32::MAX, i64::MAX);
         for ((start, end), map) in &self.scopes {
-            if *start <= line && line <= *end {
+            if *start <= pos && pos <= *end {
                 if let Some(t) = map.get(var) {
-                    let w = end - start;
+                    let w = range_width((*start, *end));
                     if w < best_width {
                         best_width = w;
                         best = Some(t.as_str());
@@ -56,12 +62,12 @@ impl LocalTypes {
 /// Java typed param: `formal_parameters` → `formal_parameter` with `type` and
 /// `name` fields.
 fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
-    let mut scopes: Vec<((u32, u32), HashMap<String, String>)> = Vec::new();
+    let mut scopes: Vec<(PosRange, HashMap<String, String>)> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
             "method_declaration" | "constructor_declaration" => {
-                let scope_span = (n.start_position().row as u32, n.end_position().row as u32);
+                let scope_span = node_range(n);
                 let mut map: HashMap<String, String> = HashMap::new();
                 // Collect typed parameters.
                 if let Some(params) = n.child_by_field_name("parameters") {
@@ -193,10 +199,10 @@ fn java_callee(
         std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()]).ok()?;
 
     let receiver_str: Option<String> = if let Some(obj) = mi.child_by_field_name("object") {
-        let line = mi.start_position().row as u32;
+        let pos = start_pos(mi);
         match obj.kind() {
-            "this" => enclosing_class_name(nodes, line),
-            "super" => enclosing_superclass(nodes, line),
+            "this" => enclosing_class_name(nodes, pos),
+            "super" => enclosing_superclass(nodes, pos),
             "identifier" => {
                 let var = std::str::from_utf8(&source[obj.start_byte()..obj.end_byte()]).ok()?;
                 // When the local-type map has the variable, resolve to declared type.
@@ -205,14 +211,18 @@ fn java_callee(
                 // `Util.helper` against the definition node.
                 Some(
                     locals
-                        .lookup(line, var)
+                        .lookup(pos, var)
                         .map(|t| t.to_string())
                         .unwrap_or_else(|| var.to_string()),
                 )
             }
             // A computed receiver (`a.b().m()`, `this.f.m()`): the member is
-            // never a static import's name.
-            _ => return Some(CallSite::untyped_member(method_name)),
+            // never a static import's name. Its type is known only when a
+            // `new` or a cast spells it.
+            _ => match expression_type(obj, source) {
+                Some(ty) => Some(ty.to_string()),
+                None => return Some(CallSite::untyped_member(method_name)),
+            },
         }
     } else {
         None
@@ -222,6 +232,29 @@ fn java_callee(
         Some(ty) => format!("{ty}.{method_name}"),
         None => method_name.to_string(),
     })
+}
+
+/// The type an expression receiver has by its syntax alone: the type a
+/// `new` creates (`new T<X>(){..}` → `T`; `outer.new Inner()` → `Inner`) or
+/// a cast names, through parentheses. Only a simple class name, generic
+/// arguments cut: a qualified `new a.b.T()` names a package path, which
+/// must not land on a project `T`, so it stays untyped.
+fn expression_type<'s>(expr: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    match expr.kind() {
+        "parenthesized_expression" => expression_type(expr.named_child(0)?, source),
+        "object_creation_expression" | "cast_expression" => {
+            let ty = expr.child_by_field_name("type")?;
+            let name = match ty.kind() {
+                "type_identifier" => ty,
+                "generic_type" => ty
+                    .named_child(0)
+                    .filter(|n| n.kind() == "type_identifier")?,
+                _ => return None,
+            };
+            name.utf8_text(source).ok()
+        }
+        _ => None,
+    }
 }
 
 /// Walk the AST once, extracting `method_invocation` /
@@ -242,8 +275,7 @@ pub fn extract_java_calls_and_path_literals(
         match n.kind() {
             "method_invocation" => {
                 if let Some(callee) = java_callee(n, source, &local_types, nodes) {
-                    let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                    attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
             "object_creation_expression" => {
@@ -252,8 +284,7 @@ pub fn extract_java_calls_and_path_literals(
                     .child_by_field_name("type")
                     .and_then(|t| construction_call(t.utf8_text(source).ok()?));
                 if let Some(callee) = callee {
-                    let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                    attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
             "string_literal" | "text_block" => {
@@ -284,15 +315,15 @@ pub fn extract_java_calls_and_path_literals(
     (path_literals, sql_refs)
 }
 
-/// Name of the innermost enclosing Class/Interface node at `line`.
-fn enclosing_class_name(nodes: &[RawNode], line: u32) -> Option<String> {
-    let mut best: Option<(u32, &str)> = None;
+/// Name of the innermost enclosing Class/Interface node at `pos`.
+fn enclosing_class_name(nodes: &[RawNode], pos: Pos) -> Option<String> {
+    let mut best: Option<((u32, i64), &str)> = None;
     for n in nodes {
         if !matches!(n.kind, NodeKind::Class | NodeKind::Interface) {
             continue;
         }
-        if n.span.0 <= line && n.span.2 >= line {
-            let w = n.span.2 - n.span.0;
+        if span_holds(n.span, pos) {
+            let w = span_width(n.span);
             if best.is_none_or(|(bw, _)| w < bw) {
                 best = Some((w, &n.name));
             }
@@ -302,15 +333,15 @@ fn enclosing_class_name(nodes: &[RawNode], line: u32) -> Option<String> {
 }
 
 /// First superclass in the enclosing class's heritage list.
-fn enclosing_superclass(nodes: &[RawNode], line: u32) -> Option<String> {
-    let mut best_w = u32::MAX;
+fn enclosing_superclass(nodes: &[RawNode], pos: Pos) -> Option<String> {
+    let mut best_w = (u32::MAX, i64::MAX);
     let mut result = None;
     for n in nodes {
         if !matches!(n.kind, NodeKind::Class) {
             continue;
         }
-        if n.span.0 <= line && n.span.2 >= line {
-            let w = n.span.2 - n.span.0;
+        if span_holds(n.span, pos) {
+            let w = span_width(n.span);
             if w < best_w {
                 best_w = w;
                 result = n.heritage.first().cloned();

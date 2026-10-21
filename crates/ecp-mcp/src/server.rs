@@ -184,6 +184,12 @@ fn build_rmcp_tools(tools: &[DerivedTool]) -> Vec<rmcp::model::Tool> {
 
 pub async fn serve_stdio(server: EcpMcpServer) -> anyhow::Result<()> {
     let handler = RmcpHandler(Arc::new(server));
+    // rmcp 3.6.0 (modelcontextprotocol/rust-sdk#1049) drops an incoming line
+    // over 16 MiB and keeps the session open; before, the buffer grew without
+    // bound. A request on a dropped line gets no reply, so its client waits
+    // until its own timeout. Left at the default: no ecp tool takes arguments
+    // near that size, and a peer that never sends a newline can no longer
+    // exhaust memory.
     let transport = rmcp::transport::stdio();
     let running = rmcp::serve_server(handler, transport).await?;
     running.waiting().await.ok();
@@ -230,6 +236,61 @@ mod tests {
                 "cache hints leaked to legacy peer {version:?}: {json}"
             );
         }
+    }
+
+    /// Pins the stdio line cap that `serve_stdio` inherits from rmcp: an
+    /// `(AsyncRead, AsyncWrite)` pair goes through the same transport as
+    /// `rmcp::transport::stdio()`. Under an unbounded transport the server
+    /// answers id 2 before id 3, and the test fails.
+    #[tokio::test(flavor = "current_thread")]
+    async fn line_over_16_mib_is_dropped_and_session_keeps_serving() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let server = EcpMcpServer::new(&clap::Command::new("ecp")).expect("init");
+        let (client, server_io) = tokio::io::duplex(64 * 1024);
+        let (server_read, server_write) = tokio::io::split(server_io);
+        let handshake = tokio::spawn(rmcp::serve_server(
+            RmcpHandler(Arc::new(server)),
+            (server_read, server_write),
+        ));
+        let (client_read, mut client_write) = tokio::io::split(client);
+        let mut lines = BufReader::new(client_read).lines();
+
+        let initialize = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"},
+            },
+        });
+        let initialized =
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+        // Built as text, not as a `json!` value, so the 16 MiB pad exists once.
+        let oversized = format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"ping","params":{{"_meta":{{"pad":"{}"}}}}}}"#,
+            "x".repeat(16 * 1024 * 1024 + 1024)
+        );
+        let ping = serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "ping"});
+
+        client_write
+            .write_all(format!("{initialize}\n").as_bytes())
+            .await
+            .unwrap();
+        lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("initialize response");
+        let _service = handshake.await.unwrap().expect("handshake");
+        for message in [initialized.to_string(), oversized, ping.to_string()] {
+            client_write.write_all(message.as_bytes()).await.unwrap();
+            client_write.write_all(b"\n").await.unwrap();
+        }
+
+        let line = lines.next_line().await.unwrap().expect("session closed");
+        let reply: serde_json::Value = serde_json::from_str(&line).expect("json reply");
+        assert_eq!(reply["id"], 3, "oversized line was answered: {line}");
     }
 
     #[test]

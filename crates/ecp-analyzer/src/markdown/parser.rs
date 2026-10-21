@@ -63,7 +63,7 @@ impl LanguageProvider for MarkdownProvider {
             let mut section_name = None;
             let mut root_node: Option<tree_sitter::Node> = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = cap.index;
                 if cap_idx == idx_document {
                     is_document = true;

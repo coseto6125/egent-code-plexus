@@ -360,7 +360,7 @@ fn build_inspect_block(
             "kind": kind_to_str(&node.kind),
             "filePath": file_path_str,
             "startLine": node.start_line(),
-            "endLine": node.span.2.to_native(),
+            "endLine": node.end_line(),
             "decorators": decorators,
         },
         "incoming": incoming,

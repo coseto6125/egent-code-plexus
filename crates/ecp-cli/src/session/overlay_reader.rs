@@ -27,13 +27,16 @@ use ecp_core::graph::{Node, NodeKind};
 use ecp_core::pool::{StrRef, StringPool};
 use ecp_core::session::{
     DirtyFiles, Overlay, OverlayFileInput, OverlaySymbol, FRAGMENT_FORMAT_V2, FRAGMENT_FORMAT_V3,
+    FRAGMENT_FORMAT_V4,
 };
 use rkyv::rancor::Error as RkyvError;
 use std::fs;
 use std::io;
 use std::path::Path;
 
-use super::overlay_writer::{ArchivedFragment, ArchivedFragmentFile, ArchivedFragmentFileV2};
+use super::overlay_writer::{
+    ArchivedFragment, ArchivedFragmentFile, ArchivedFragmentFileV2, ArchivedFragmentFileV3,
+};
 
 /// A single overlay symbol with the source-relative path it came from.
 ///
@@ -106,31 +109,51 @@ fn for_each_fragment(session_dir: &Path, mut f: impl FnMut(&str, FragSym<'_>)) -
         let Ok(bytes) = fs::read(&bin_path) else {
             continue; // fragment not written yet or already promoted
         };
-        if entry.format >= FRAGMENT_FORMAT_V2 {
-            let symbols = if entry.format == FRAGMENT_FORMAT_V2 {
-                rkyv::access::<ArchivedFragmentFileV2, RkyvError>(&bytes).map(|file| &file.symbols)
-            } else {
-                rkyv::access::<ArchivedFragmentFile, RkyvError>(&bytes).map(|file| &file.symbols)
-            };
-            let Ok(symbols) = symbols else {
-                continue; // corrupt fragment — skip
-            };
-            for sym in symbols.iter() {
-                f(
-                    rel_path,
-                    FragSym::new(
+        // Every symbol-carrying encoding shares these fields; the macro keeps
+        // one visit body for the three archived symbol types.
+        macro_rules! visit_symbols {
+            ($symbols:expr) => {
+                for sym in $symbols.iter() {
+                    f(
                         rel_path,
-                        sym.name.as_str(),
-                        NodeKind::from(&sym.kind),
-                        (
-                            sym.span.0.to_native(),
-                            sym.span.1.to_native(),
-                            sym.span.2.to_native(),
-                            sym.span.3.to_native(),
+                        FragSym::new(
+                            rel_path,
+                            sym.name.as_str(),
+                            NodeKind::from(&sym.kind),
+                            (
+                                sym.span.0.to_native(),
+                                sym.span.1.to_native(),
+                                sym.span.2.to_native(),
+                                sym.span.3.to_native(),
+                            ),
+                            sym.owner_class.as_ref().map(|o| o.as_str()),
                         ),
-                        sym.owner_class.as_ref().map(|o| o.as_str()),
-                    ),
-                );
+                    );
+                }
+            };
+        }
+        if entry.format >= FRAGMENT_FORMAT_V2 {
+            // A corrupt fragment is skipped; so is a format from a newer
+            // binary, which this one cannot decode.
+            match entry.format {
+                FRAGMENT_FORMAT_V2 => {
+                    match rkyv::access::<ArchivedFragmentFileV2, RkyvError>(&bytes) {
+                        Ok(file) => visit_symbols!(file.symbols),
+                        Err(_) => continue,
+                    }
+                }
+                FRAGMENT_FORMAT_V3 => {
+                    match rkyv::access::<ArchivedFragmentFileV3, RkyvError>(&bytes) {
+                        Ok(file) => visit_symbols!(file.symbols),
+                        Err(_) => continue,
+                    }
+                }
+                FRAGMENT_FORMAT_V4 => match rkyv::access::<ArchivedFragmentFile, RkyvError>(&bytes)
+                {
+                    Ok(file) => visit_symbols!(file.symbols),
+                    Err(_) => continue,
+                },
+                _ => continue,
             }
         } else {
             let Ok(archived) =
@@ -205,7 +228,7 @@ pub fn load_overlay(session_dir: &Path) -> io::Result<Option<Overlay>> {
 }
 
 /// Read the dirty-file set as `OverlayView` inputs: one `OverlayFileInput`
-/// per VALID v3 manifest entry. Entry validation guards the staleness holes
+/// per VALID v4 manifest entry. Entry validation guards the staleness holes
 /// the manifest has by construction:
 ///
 /// - **another builder** — a manifest without the running binary's
@@ -237,7 +260,7 @@ pub fn load_view_inputs(
     let mut out = Vec::new();
 
     for (rel_path, entry) in &df.entries {
-        if entry.parse_failed || entry.format != FRAGMENT_FORMAT_V3 {
+        if entry.parse_failed || entry.format != FRAGMENT_FORMAT_V4 {
             continue;
         }
         let on_disk_mtime_ns = crate::auto_ensure::mtime_ns_of(&worktree_root.join(rel_path));
@@ -279,6 +302,12 @@ pub fn load_view_inputs(
                     end_column: s.span.3.to_native(),
                     calls: s.calls.iter().map(|c| c.as_str().to_owned()).collect(),
                     is_exported: s.is_exported,
+                    heritage: s.heritage.iter().map(|h| h.as_str().to_owned()).collect(),
+                    variant_refs: s
+                        .variant_refs
+                        .iter()
+                        .map(|v| v.as_str().to_owned())
+                        .collect(),
                 })
                 .collect(),
             imports,

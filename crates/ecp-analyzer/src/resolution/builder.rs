@@ -2,17 +2,24 @@ use crate::fetch_shape::{
     consumer_keys, fetch_urls, format_reason, normalize_route_path, response_shapes,
 };
 use crate::framework_helpers::Span;
-use crate::resolution::index::{Language, ResolveTarget, SymbolTable};
-use crate::resolution::path_aliases::PathAliases;
+use crate::php::laravel_routes::LaravelRoutes;
+use crate::resolution::heuristics::{ResolutionTier, NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON};
+use crate::resolution::index::{FileMeta, Language, ResolveTarget, SymbolTable};
 use crate::resolution::resolver::{ReexportIndex, Resolver};
 use crate::rust::module_tree::RustWorkspaceModTree;
+use ecp_core::analyzer::lexical::LexicalFunctions;
+use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::analyzer::reexport::{export_filter_applies, is_ecmascript, ImportRef};
-use ecp_core::analyzer::types::{CallSite, LocalGraph, RawImport, RawNode};
+use ecp_core::analyzer::types::{
+    owner_key, CallSite, LocalGraph, RawImport, RawNode, RawRoute, VariantRef,
+};
+pub use ecp_core::analyzer::types::{VARIANT_PATTERN_REASON, VARIANT_USE_REASON};
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::{
     BlindSpotRecord, CallMeta, Edge, ExportAliasFact, File, FileCategory, FunctionMeta, ImportFact,
-    Node, NodeKind, RelType, RouteShape, ZeroCopyGraph, FILE_FLAG_ES_MODULE,
+    Node, NodeKind, PathAliasFact, RelType, RouteMiddleware, RouteShape, SupertypeFact,
+    ZeroCopyGraph, FILE_FLAG_ES_MODULE,
 };
 use ecp_core::graph_assembly::{GraphAssembly, ModuleFactTables};
 use ecp_core::pool::{StrRef, StringPool};
@@ -21,12 +28,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Classify a uid-hash collision based on `(kind, path)`. Returns the
 /// BlindSpot `kind` string. See builder.rs near `uid_seen.get` for context.
-///
-///   `method-overload` — Method/Constructor collisions are almost always
-///       overload variants (same name, different parameter types) in Java,
-///       Swift, Kotlin, TypeScript, PHP, etc. The uid composition
-///       `(kind, path, owner_class, name)` lacks the parameter signature
-///       so overloads inherently collide.
+/// Method / Constructor collisions never reach it: Pass 1 keeps them as
+/// overloads ([`ecp_core::uid::keeps_overloads`]).
 ///
 ///   `ifdef-redef`    — Macro/Function/Struct/Enum/Typedef/Variable/Const
 ///       in C/C++ files. Headers commonly `#define X` or `static int foo()`
@@ -48,9 +51,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 ///       drops from ~25K to <1K on .sample_repo, making the residual
 ///       set tractable.
 pub(crate) fn classify_collision(kind: NodeKind, path: &str) -> &'static str {
-    if matches!(kind, NodeKind::Method | NodeKind::Constructor) {
-        return "method-overload";
-    }
     let is_c_family = path.ends_with(".c")
         || path.ends_with(".h")
         || path.ends_with(".cc")
@@ -285,7 +285,14 @@ impl GraphBuilder {
         }
         let _t_pass15 = std::time::Instant::now();
         // Pass 1.5: Extract Routes
-        let (route_edges, emitted_routes) = pass1_5_extract_routes(
+        let ExtractedRoutes {
+            edges: route_edges,
+            emitted: emitted_routes,
+            middleware: mut route_middleware,
+            actions: controller_actions,
+            laravel,
+            blind_spots: mut route_blind_spots,
+        } = pass1_5_extract_routes(
             &self.local_graphs,
             &files,
             &symbol_table,
@@ -305,6 +312,7 @@ impl GraphBuilder {
             &self.local_graphs,
             self.repo_root.as_deref(),
             &emitted_routes,
+            &nodes,
             &mut string_pool,
         );
 
@@ -358,6 +366,20 @@ impl GraphBuilder {
             &reexports,
         );
         symbol_table.build_supertypes(declared_supertypes);
+        let supertype_table = record_supertypes(&symbol_table);
+        let action_edges = pass1_95_controller_actions(
+            &laravel,
+            &controller_actions,
+            &self.local_graphs,
+            &files,
+            &symbol_table,
+            &entry_edges,
+            &mut string_pool,
+            &mut nodes,
+            &mut route_middleware,
+            &mut route_blind_spots,
+        );
+        let alias_table = record_path_aliases(&self.path_aliases, &mut string_pool);
         if prof {
             eprintln!(
                 "prof build.pass19_supertypes: {:.3}s",
@@ -382,9 +404,11 @@ impl GraphBuilder {
 
         edges.extend(route_edges);
         edges.extend(entry_edges);
+        edges.extend(action_edges);
         edges.extend(fetches_edges);
 
         emit_closure_references(&self.local_graphs, &nodes, &mut string_pool, &mut edges);
+        emit_overload_references(&symbol_table, &mut string_pool, &mut edges);
 
         if prof {
             eprintln!(
@@ -416,6 +440,7 @@ impl GraphBuilder {
         // was moved into ZeroCopyGraph). BlindSpotRecord StrRefs are already valid
         // because `string_pool` was borrowed mutably in Pass 1 when they were pushed.
         all_blind_spots.extend(collision_blind_spots);
+        all_blind_spots.extend(route_blind_spots);
 
         if prof {
             eprintln!(
@@ -835,11 +860,14 @@ impl GraphBuilder {
             function_metas,
             blind_spots: all_blind_spots,
             route_shapes: route_shapes_out,
+            route_middleware,
             process_start: process_start_idx,
             traces_offsets,
             traces_data,
             fingerprint: [0; 32],
             module_facts,
+            alias_table,
+            supertype_table,
         }
         .finish();
 
@@ -853,6 +881,36 @@ impl GraphBuilder {
 
         graph
     }
+}
+
+/// The heritage the overlay walks (the v14 `supertype_table`): each type's
+/// resolved bases and first-unresolved position, as the pre-pass left them in
+/// `symbol_table`. SymbolTable ids are node indices: Pass 1 registers raw
+/// nodes densely from 0 and later passes only append.
+fn record_supertypes(symbol_table: &SymbolTable) -> Vec<SupertypeFact> {
+    symbol_table
+        .all_supertypes()
+        .map(|(type_idx, supertypes)| SupertypeFact {
+            type_idx,
+            bases: supertypes.bases.to_vec(),
+            first_unresolved: supertypes.first_unresolved,
+        })
+        .collect()
+}
+
+/// The path aliases the resolver ran with (the v14 `alias_table`), in
+/// declaration order.
+fn record_path_aliases(
+    path_aliases: &PathAliases,
+    string_pool: &mut StringPool,
+) -> Vec<PathAliasFact> {
+    path_aliases
+        .entries()
+        .map(|(pattern, replacements)| PathAliasFact {
+            pattern: string_pool.add(pattern),
+            replacements: replacements.iter().map(|r| string_pool.add(r)).collect(),
+        })
+        .collect()
 }
 
 /// The import / export facts the overlay replays the import tier from
@@ -966,9 +1024,9 @@ fn file_indices(local_graphs: &[LocalGraph]) -> FxHashMap<String, u32> {
 }
 
 /// Pass 1: register every `LocalGraph`'s File + symbol nodes into the
-/// SymbolTable/StringPool, assigning canonical UIDs and tombstoning D1
-/// hash collisions (see BlindSpotRecord `uid-collision`/`method-overload`/
-/// `ifdef-redef` kinds).
+/// SymbolTable/StringPool, assigning canonical UIDs, keeping overloads under
+/// their own UIDs and tombstoning other D1 hash collisions (see
+/// BlindSpotRecord `uid-collision`/`ifdef-redef` kinds).
 fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
     // Pre-size accumulators from known input cardinalities. Each
     // LocalGraph contributes 1 File node + N symbol nodes. Plus a
@@ -1028,6 +1086,7 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
             category,
         });
 
+        let graph_start = current_node_idx;
         for raw_node in &local_graph.nodes {
             // T1-5: canonical xxh3-64 UID — zero heap alloc, no string-pool entry.
             // Canonical stream: kind_as_str \0 path \0 owner_class_or_empty \0 name
@@ -1059,15 +1118,31 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
             // from any query) to occupy the position, keeping nodes.len() ≡
             // current_node_idx throughout Pass 1.
             if let Some(&prev_idx) = uid_seen.get(&uid_u64) {
+                // An overload is a real declaration: it keeps its name and
+                // owner (shared with the first, so already pooled) under a
+                // uid of its own, and loses nothing a BlindSpot would report.
+                if ecp_core::uid::keeps_overloads(raw_node.kind) {
+                    let ordinal = symbol_table.register_overload(prev_idx, file_meta);
+                    let first: &Node = &nodes[prev_idx as usize];
+                    nodes.push(Node {
+                        uid: ecp_core::uid::overload(uid_u64, ordinal),
+                        name: first.name,
+                        file_idx,
+                        kind: raw_node.kind,
+                        span: raw_node.span,
+                        community_id: 0,
+                        owner_class: first.owner_class,
+                        content_hash: raw_node.content_hash,
+                    });
+                    current_node_idx += 1;
+                    continue;
+                }
                 // Reclassify the collision based on (kind, lang) — most
                 // collisions are not parser bugs but legitimate semantic
                 // ambiguities the indexer can't resolve without semantic
                 // analysis. Triaging them up front lets `uid-collision`
                 // mean "true parser ambiguity worth investigating".
                 //
-                //   - method-overload : Method/Constructor with same
-                //     (kind, path, owner, name) but distinct param-types
-                //     (Java/Swift/Kotlin/TS/PHP overloads, C++ `operator new`).
                 //   - ifdef-redef     : C/C++ Macro/Function/Struct/Enum/
                 //     Typedef/Variable redefined under `#ifdef` branches
                 //     (`#define X` for 32/64-bit, `static int foo() { ... }`
@@ -1187,6 +1262,9 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
 
             current_node_idx += 1;
         }
+        if file_meta.language == Language::Rust {
+            note_rust_impl_members(&mut symbol_table, &local_graph.nodes, graph_start);
+        }
 
         // NOTE: documents (markdown/yaml section/doc nodes) are parsed into
         // `local_graph.documents` but the graph.bin DocumentBlock storage is
@@ -1201,6 +1279,7 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
     // O(N_files) scan per qualified call.
     symbol_table.build_stem_index();
     symbol_table.build_constructor_index();
+    symbol_table.build_owner_kinds();
 
     Pass1Registration {
         symbol_table,
@@ -1243,64 +1322,59 @@ fn is_consumer_extension(path: &str) -> bool {
     )
 }
 
-/// Serialize captured resolver decisions to a JSONL file. Schema matches
-/// the oracle harness contract: one decision per line, fields ordered for
-/// readable diffs. Each line is a flattened `ResolverDecision` plus the
-/// resolved `target_file` (looked up from `target_id` via the symbol
-/// table). Delegating to `serde_json` keeps escaping (Unicode controls,
-/// surrogates, line separators) compliant with RFC 8259.
-/// Locate the smallest `Class`-kind raw node whose span fully contains
-/// `raw_node`'s span, returning its heritage list. Used by Pass-2 call-edge
-/// emission to power Tier 2.75 (HeritageScoped) lookups: an unqualified
-/// method call inside `class Bar; include Foo; end` carries Bar's heritage
-/// (`["Foo"]`) so the resolver can probe Foo's file when Tier 1/2/2.5 miss.
-/// Returns an empty slice when the node has no enclosing class (top-level
-/// function, etc.). For Ruby `module Foo` and `class Foo` both emit as
-/// `NodeKind::Class`, so this single check covers Ruby module mixins too.
-fn enclosing_class_heritage<'a>(
-    raw_node: &'a RawNode,
-    local_graph: &'a LocalGraph,
-) -> &'a [String] {
-    if raw_node.kind == NodeKind::Class {
-        return &raw_node.heritage;
-    }
-    let (s_row, s_col, e_row, e_col) = raw_node.span;
-    let mut best: Option<&RawNode> = None;
-    let mut best_span: (u32, u32) = (u32::MAX, u32::MAX);
-    for candidate in &local_graph.nodes {
-        if candidate.kind != NodeKind::Class {
-            continue;
-        }
-        let (cs_row, cs_col, ce_row, ce_col) = candidate.span;
-        let starts_before_or_at = (cs_row, cs_col) <= (s_row, s_col);
-        let ends_after_or_at = (ce_row, ce_col) >= (e_row, e_col);
-        if !(starts_before_or_at && ends_after_or_at) {
-            continue;
-        }
-        let size = (ce_row.saturating_sub(cs_row), ce_col.saturating_sub(cs_col));
-        if size < best_span {
-            best_span = size;
-            best = Some(candidate);
-        }
-    }
-    best.map(|n| n.heritage.as_slice()).unwrap_or(&[])
+/// Record the `impl` block of every Rust method in `nodes`, the raw nodes
+/// of one file whose ids start at `start`
+/// ([`SymbolTable::note_impl_member`]), by the rule the session overlay
+/// shares ([`ecp_core::analyzer::same_file_pick::rust_impl_members`]).
+fn note_rust_impl_members(symbol_table: &mut SymbolTable, nodes: &[RawNode], start: u32) {
+    ecp_core::analyzer::same_file_pick::rust_impl_members(nodes, |member, block, implemented| {
+        symbol_table.note_impl_member(start + member as u32, start + block as u32, implemented)
+    });
+}
+
+/// A Laravel route that names a controller action (`'C@m'`).
+struct PendingAction {
+    route: u32,
+    /// `METHOD path`, the Route node's name.
+    route_name: String,
+    action: String,
+    namespace: Option<String>,
+    /// The route-file middleware the Route node carries, and the names its
+    /// groups remove, which the controller's middleware joins.
+    middleware: Vec<String>,
+    excluded: Vec<String>,
+}
+
+/// What Pass 1.5 hands on.
+struct ExtractedRoutes {
+    edges: Vec<Edge>,
+    /// Consumed by Pass 1.6 to build the fetch-shape route index.
+    emitted: Vec<EmittedRoute>,
+    middleware: Vec<RouteMiddleware>,
+    /// Bound after Pass 1.9 by [`pass1_95_controller_actions`].
+    actions: Vec<PendingAction>,
+    laravel: LaravelRoutes,
+    /// Route files whose routes lost Laravel include scopes to the cap.
+    blind_spots: Vec<BlindSpotRecord>,
 }
 
 /// Pass 1.5: Extract Routes.
-///
-/// Returns `(route_edges, emitted_routes)` where `emitted_routes` is
-/// `(route_node_idx, file_idx, route_method, route_path)` — consumed by
-/// Pass 1.6 to build the fetch-shape route index.
 fn pass1_5_extract_routes(
     local_graphs: &[LocalGraph],
     files: &[File],
     symbol_table: &SymbolTable,
     string_pool: &mut StringPool,
     nodes: &mut Vec<Node>,
-) -> (Vec<Edge>, Vec<EmittedRoute>) {
+) -> ExtractedRoutes {
     let mut route_edges = Vec::new();
     let mut current_handler_idx = 0;
     let mut emitted_routes: Vec<EmittedRoute> = Vec::new();
+    let mut route_middleware: Vec<RouteMiddleware> = Vec::new();
+    let mut actions: Vec<PendingAction> = Vec::new();
+    // Route groups reach across files (a provider's `->group(base_path(
+    // 'routes/admin.php'))` prefixes every route of `admin.php`), so the
+    // per-file view alone cannot name a Laravel route's path or handler.
+    let laravel = LaravelRoutes::build(local_graphs);
     for (file_idx, local_graph) in local_graphs.iter().enumerate() {
         let file_idx = file_idx as u32;
         let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
@@ -1364,8 +1438,43 @@ fn pass1_5_extract_routes(
         }
 
         for raw_route in &local_graph.routes {
-            if let Some(detected) = crate::route_detector::detect_from_call(raw_route) {
-                let route_name = format!("{} {}", detected.method, detected.path);
+            if raw_route.method == RawRoute::INCLUDE
+                || raw_route.method == RawRoute::CONTROLLER_MIDDLEWARE
+            {
+                continue;
+            }
+            let Some(detected) = crate::route_detector::detect_from_call(raw_route) else {
+                continue;
+            };
+            let promoted = match raw_route.scope.as_deref() {
+                Some(scope) => laravel.promote(
+                    file_idx,
+                    scope,
+                    &detected.path,
+                    raw_route.handler.as_deref(),
+                ),
+                None => vec![crate::php::laravel_routes::PromotedRoute {
+                    path: detected.path.clone(),
+                    middleware: Vec::new(),
+                    excluded: Vec::new(),
+                    namespace: None,
+                    action: raw_route.handler.clone(),
+                }],
+            };
+            // Two including groups can give one route the same path. Laravel's
+            // `RouteCollection` keeps the route registered last for a method
+            // and URI, so one Route node stands for both with the last
+            // group's middleware. Include scopes come in the source order of
+            // the including calls, which is the registration order within one
+            // provider file only.
+            let last_of_path: Vec<bool> = (0..promoted.len())
+                .map(|i| promoted[i + 1..].iter().all(|r| r.path != promoted[i].path))
+                .collect();
+            for (route, last) in promoted.into_iter().zip(last_of_path) {
+                if !last {
+                    continue;
+                }
+                let route_name = format!("{} {}", detected.method, route.path);
 
                 let route_idx = nodes.len() as u32;
                 nodes.push(Node {
@@ -1382,31 +1491,276 @@ fn pass1_5_extract_routes(
                 // Resolve the imperative-route handler, if the parser captured
                 // a named handler (e.g. `app.get("/x", loginHandler)`). The
                 // handler must be a function/method registered in the same
-                // file; inline arrow functions are not captured.
-                if let Some(handler_name) = raw_route.handler.as_deref() {
-                    if let Some(handler_node_id) =
-                        symbol_table.lookup_in_file(&path_str, handler_name)
-                    {
-                        route_edges.push(Edge {
-                            source: handler_node_id,
-                            target: route_idx,
-                            rel_type: RelType::HandlesRoute,
-                            confidence: 1.0,
-                            reason: string_pool.add("call-arg"),
-                        });
+                // file; inline arrow functions are not captured. A route with
+                // a group scope names a controller action (`Ctrl@method`) in
+                // any file instead, bound once heritage is resolved.
+                match (route.action.as_deref(), raw_route.scope.is_some()) {
+                    (None, _) => {}
+                    (Some(action), true) => actions.push(PendingAction {
+                        route: route_idx,
+                        route_name: route_name.clone(),
+                        action: action.to_string(),
+                        namespace: route.namespace.clone(),
+                        middleware: route.middleware.clone(),
+                        excluded: route.excluded.clone(),
+                    }),
+                    (Some(handler_name), false) => {
+                        if let Some(handler) = symbol_table.lookup_in_file(&path_str, handler_name)
+                        {
+                            route_edges.push(Edge {
+                                source: handler,
+                                target: route_idx,
+                                rel_type: RelType::HandlesRoute,
+                                confidence: 1.0,
+                                reason: string_pool.add("call-arg"),
+                            });
+                        }
                     }
                 }
 
-                emitted_routes.push((
-                    route_idx,
-                    file_idx,
-                    detected.method.clone(),
-                    detected.path.clone(),
-                ));
+                if !route.middleware.is_empty() {
+                    route_middleware.push(RouteMiddleware {
+                        node_idx: route_idx,
+                        middleware: route
+                            .middleware
+                            .iter()
+                            .map(|name| string_pool.add(name))
+                            .collect(),
+                    });
+                }
+
+                emitted_routes.push((route_idx, file_idx, detected.method.clone(), route.path));
             }
         }
     }
-    (route_edges, emitted_routes)
+    let blind_spots: Vec<BlindSpotRecord> = laravel
+        .capped_includes()
+        .iter()
+        .map(|capped| {
+            let graph = &local_graphs[capped.file_idx as usize];
+            BlindSpotRecord {
+                kind: string_pool.add(crate::php::laravel_routes::BS_KIND_INCLUDE_SCOPE_CAP),
+                file_path: string_pool.add(&graph.file_path.to_string_lossy().replace('\\', "/")),
+                start_row: 0,
+                start_col: 0,
+                end_row: 0,
+                end_col: 0,
+                hint: string_pool.add(&capped.hint()),
+                is_test: matches!(files[capped.file_idx as usize].category, FileCategory::Test),
+            }
+        })
+        .collect();
+    ExtractedRoutes {
+        edges: route_edges,
+        emitted: emitted_routes,
+        middleware: route_middleware,
+        actions,
+        laravel,
+        blind_spots,
+    }
+}
+
+/// Reason strings an `EntryPoint` folds in before it counts the rest: a
+/// base-controller method can handle every route of an application.
+const MAX_ENTRY_REASONS: usize = 8;
+
+/// Pass 1.95: Laravel controller actions.
+///
+/// Binds each [`PendingAction`] to its controller method with a
+/// `HandlesRoute` edge. It runs after Pass 1.9 because a controller can
+/// inherit the action from a used trait or a parent class, and only the
+/// resolved supertypes say which one.
+///
+/// Each bound method also gets the `EntryPoint` marker Pass 1.7 gives a
+/// same-file route handler, in the method's own file. Pass 1.7 cannot see
+/// it: the route and the method are in different files.
+///
+/// The middleware the controller registers for the bound method joins the
+/// route's `route_middleware` after the route-file middleware, each name
+/// once and none the route's groups remove, as Laravel's
+/// `Route::gatherMiddleware` and `Router::resolveMiddleware` compose them.
+/// Controller middleware that is not statically certain joins nothing; a
+/// BlindSpot in the controller's file says why.
+#[allow(clippy::too_many_arguments)]
+fn pass1_95_controller_actions(
+    laravel: &LaravelRoutes,
+    actions: &[PendingAction],
+    local_graphs: &[LocalGraph],
+    files: &[File],
+    symbol_table: &SymbolTable,
+    entry_edges: &[Edge],
+    string_pool: &mut StringPool,
+    nodes: &mut Vec<Node>,
+    route_middleware: &mut Vec<RouteMiddleware>,
+    blind_spots: &mut Vec<BlindSpotRecord>,
+) -> Vec<Edge> {
+    let mut edges = Vec::new();
+    let mut joined: Vec<RouteMiddleware> = Vec::new();
+    let mut unread: Vec<crate::php::laravel_routes::UnreadMiddleware> = Vec::new();
+    // Handler → (best confidence, reasons), in first-bound order.
+    let mut entries: Vec<(u32, f32, Vec<&str>)> = Vec::new();
+    let mut entry_of: FxHashMap<u32, usize> = FxHashMap::default();
+    for pending in actions {
+        let Some(found) =
+            laravel.controller_action(&pending.action, pending.namespace.as_deref(), symbol_table)
+        else {
+            // The route names an action, not a closure: say so, so a reader
+            // of the edge-less Route node does not take it for an inline
+            // handler.
+            let route = &nodes[pending.route as usize];
+            let graph = &local_graphs[route.file_idx as usize];
+            blind_spots.push(BlindSpotRecord {
+                kind: string_pool.add(crate::php::laravel_routes::BS_KIND_UNBOUND_ACTION),
+                file_path: string_pool.add(&graph.file_path.to_string_lossy().replace('\\', "/")),
+                start_row: route.span.0,
+                start_col: route.span.1,
+                end_row: route.span.2,
+                end_col: route.span.3,
+                hint: string_pool.add(&crate::php::laravel_routes::unbound_action_hint(
+                    &pending.route_name,
+                    &pending.action,
+                )),
+                is_test: matches!(files[route.file_idx as usize].category, FileCategory::Test),
+            });
+            continue;
+        };
+        let confidence = if found.by_namespace { 1.0 } else { 0.9 };
+        let reason = match (found.by_namespace, found.inherited) {
+            (true, false) => "controller-action",
+            (true, true) => "controller-action:inherited",
+            (false, false) => "controller-action:unique-name",
+            (false, true) => "controller-action:unique-name:inherited",
+        };
+        edges.push(Edge {
+            source: found.node,
+            target: pending.route,
+            rel_type: RelType::HandlesRoute,
+            confidence,
+            reason: string_pool.add(reason),
+        });
+        let mut middleware = pending.middleware.clone();
+        match &found.middleware {
+            Ok(names) => {
+                for name in names {
+                    if !middleware.contains(name) && !pending.excluded.contains(name) {
+                        middleware.push(name.clone());
+                    }
+                }
+            }
+            Err(spots) => {
+                for spot in spots {
+                    if !unread.contains(spot) {
+                        unread.push(spot.clone());
+                    }
+                }
+            }
+        }
+        if middleware.len() > pending.middleware.len() {
+            joined.push(RouteMiddleware {
+                node_idx: pending.route,
+                middleware: middleware
+                    .iter()
+                    .map(|name| string_pool.add(name))
+                    .collect(),
+            });
+        }
+        match entry_of.get(&found.node) {
+            Some(&slot) => {
+                let (_, best, reasons) = &mut entries[slot];
+                *best = best.max(confidence);
+                reasons.push(pending.route_name.as_str());
+            }
+            None => {
+                entry_of.insert(found.node, entries.len());
+                entries.push((found.node, confidence, vec![pending.route_name.as_str()]));
+            }
+        }
+    }
+    if !joined.is_empty() {
+        // An entry replaces the route's route-file-only one. Sorted by node
+        // index once: `route_middleware_of` binary-searches it.
+        let replaced: FxHashSet<u32> = joined.iter().map(|entry| entry.node_idx).collect();
+        route_middleware.retain(|entry| !replaced.contains(&entry.node_idx));
+        route_middleware.append(&mut joined);
+        route_middleware.sort_unstable_by_key(|entry| entry.node_idx);
+    }
+    for spot in unread {
+        let graph = &local_graphs[spot.file_idx as usize];
+        blind_spots.push(BlindSpotRecord {
+            kind: string_pool.add(crate::php::laravel_routes::BS_KIND_CONTROLLER_MIDDLEWARE),
+            file_path: string_pool.add(&graph.file_path.to_string_lossy().replace('\\', "/")),
+            start_row: spot.span.0,
+            start_col: spot.span.1,
+            end_row: spot.span.2,
+            end_col: spot.span.3,
+            hint: string_pool.add(&format!(
+                "{}; routes this controller handles carry none of its middleware",
+                spot.hint
+            )),
+            is_test: matches!(files[spot.file_idx as usize].category, FileCategory::Test),
+        });
+    }
+    if entries.is_empty() {
+        return edges;
+    }
+    let marked: FxHashSet<u32> = entry_edges.iter().map(|edge| edge.target).collect();
+    let mut next_start = 0u32;
+    let starts: Vec<u32> = local_graphs
+        .iter()
+        .map(|graph| {
+            let start = next_start;
+            next_start += graph.nodes.len() as u32;
+            start
+        })
+        .collect();
+    let kind = crate::entry_points::EntryKind::HttpRoute;
+    for (handler, score, routes) in entries {
+        if marked.contains(&handler) {
+            continue;
+        }
+        let file_idx = nodes[handler as usize].file_idx;
+        let graph = &local_graphs[file_idx as usize];
+        let raw = &graph.nodes[(handler - starts[file_idx as usize]) as usize];
+        let path_str = graph.file_path.to_string_lossy().replace('\\', "/");
+        let mut reason = routes
+            .iter()
+            .take(MAX_ENTRY_REASONS)
+            .map(|route| format!("{}:{route}", kind.tag()))
+            .collect::<Vec<_>>()
+            .join("; also: ");
+        if routes.len() > MAX_ENTRY_REASONS {
+            reason.push_str(&format!(
+                "; also: {} more routes",
+                routes.len() - MAX_ENTRY_REASONS
+            ));
+        }
+        // The owner keeps two classes' same-named actions in one file apart.
+        let entry_uid_name = format!("{}:{}", kind.tag(), raw.name);
+        let entry_idx = nodes.len() as u32;
+        nodes.push(Node {
+            uid: ecp_core::uid::compute(
+                NodeKind::EntryPoint,
+                &path_str,
+                raw.owner_class.as_deref(),
+                &entry_uid_name,
+            ),
+            name: string_pool.add(&format!("{}@{}", kind.tag(), raw.name)),
+            file_idx,
+            kind: NodeKind::EntryPoint,
+            span: (0, 0, 0, 0),
+            community_id: 0,
+            owner_class: StrRef::default(),
+            content_hash: 0,
+        });
+        edges.push(Edge {
+            source: entry_idx,
+            target: handler,
+            rel_type: RelType::References,
+            confidence: score,
+            reason: string_pool.add(&format!("{}:{score:.2}:{reason}", kind.tag())),
+        });
+    }
+    edges
 }
 
 /// Pass 1.6: Fetch-shape extraction.
@@ -1434,6 +1788,7 @@ fn pass1_6_fetch_shapes(
     local_graphs: &[LocalGraph],
     repo_root: Option<&std::path::Path>,
     emitted_routes: &[EmittedRoute],
+    nodes: &[Node],
     string_pool: &mut StringPool,
 ) -> (Vec<RouteShape>, Vec<Edge>) {
     let mut route_shapes_out: Vec<RouteShape> = Vec::new();
@@ -1495,13 +1850,15 @@ fn pass1_6_fetch_shapes(
         // to `:*` so `app.get('/api/users/:id')` and
         // `fetch('/api/users/42')` both resolve to `("GET", "api/users/:*")`
         // and produce a Fetches edge.
-        let mut route_index: FxHashMap<(String, String), Vec<u32>> = FxHashMap::default();
+        // Each route keeps its path as registered: Laravel's overwrite rule
+        // compares URIs, which the normalized key no longer tells apart.
+        let mut route_index: FxHashMap<(String, String), Vec<(u32, &str)>> = FxHashMap::default();
         for (route_idx, _file_idx, route_method, route_path) in emitted_routes {
             let (norm_path, _) = normalize_route_path(route_path);
             route_index
                 .entry((route_method.to_uppercase(), norm_path))
                 .or_default()
-                .push(*route_idx);
+                .push((*route_idx, route_path.as_str()));
         }
 
         // File-node index lookup: the source of a Fetches edge is the
@@ -1571,10 +1928,21 @@ fn pass1_6_fetch_shapes(
                     // Route side also normalized via `:*`; the index key carries
                     // `:*` segments whenever the route had a param placeholder.
                     let route_templated = norm_url.contains(":*");
-                    if let Some(targets) = route_index.get(&(client_method.clone(), norm_url)) {
-                        for &route_idx in targets {
-                            matched.push((route_idx, client_templated || route_templated));
-                        }
+                    // A Laravel `ANY` route answers each verb `Route::any` registers.
+                    let any = if client_method != "ANY"
+                        && crate::route_detector::any_route_answers(client_method)
+                    {
+                        route_index.get(&("ANY".to_string(), norm_url.clone()))
+                    } else {
+                        None
+                    };
+                    let exact = route_index.get(&(client_method.clone(), norm_url));
+                    for route_idx in answering_routes(
+                        exact.map_or(&[][..], Vec::as_slice),
+                        any.map_or(&[][..], Vec::as_slice),
+                        nodes,
+                    ) {
+                        matched.push((route_idx, client_templated || route_templated));
                     }
                 }
                 if matched.is_empty() {
@@ -1608,6 +1976,54 @@ fn pass1_6_fetch_shapes(
         }
     }
     (route_shapes_out, fetches_edges)
+}
+
+/// The routes that answer a request when `exact` routes of its verb and
+/// `any` Laravel `ANY` routes share its normalized path, each with its
+/// path as registered. Laravel's `RouteCollection` files an `ANY` route
+/// under every verb, keyed by URI, so within one route file the route
+/// registered last replaces the others of the same URI for that verb;
+/// `/items/{id}` and `/items/{slug}` are two URIs and both answer. The
+/// order of registrations across files is not modelled, so every route
+/// of another file stays.
+fn answering_routes<'p>(
+    exact: &[(u32, &'p str)],
+    any: &[(u32, &'p str)],
+    nodes: &[Node],
+) -> Vec<u32> {
+    if any.is_empty() {
+        return exact.iter().map(|&(route, _)| route).collect();
+    }
+    // Laravel trims the slashes around a route's URI.
+    let key = |(route, path): (u32, &'p str)| -> (u32, &'p str) {
+        (nodes[route as usize].file_idx, path.trim_matches('/'))
+    };
+    let start = |route: u32| {
+        let span = nodes[route as usize].span;
+        (span.0, span.1)
+    };
+    let any_uris: FxHashSet<(u32, &str)> = any.iter().map(|&r| key(r)).collect();
+    let mut answering: Vec<u32> = Vec::new();
+    // (Route file, URI) → the route it registers last, in first-seen order.
+    let mut last: Vec<u32> = Vec::new();
+    let mut slot: FxHashMap<(u32, &str), usize> = FxHashMap::default();
+    for &(route, path) in exact.iter().chain(any) {
+        let uri = key((route, path));
+        if !any_uris.contains(&uri) {
+            answering.push(route);
+            continue;
+        }
+        match slot.get(&uri) {
+            Some(&i) if start(route) >= start(last[i]) => last[i] = route,
+            Some(_) => {}
+            None => {
+                slot.insert(uri, last.len());
+                last.push(route);
+            }
+        }
+    }
+    answering.extend(last);
+    answering
 }
 
 /// Pass 1.7: Entry-point scoring (cross-language).
@@ -1762,6 +2178,28 @@ fn is_anonymous_closure(node: &RawNode) -> bool {
     node.kind == NodeKind::Function && node.name.starts_with("<anonymous:")
 }
 
+/// `References` from the first of each overload set to every later one. A
+/// call binds the first by name: the argument types that pick an overload
+/// are not parsed. These edges let upstream impact of a later overload reach
+/// the set's callers through the first one, at k - 1 edges per set instead
+/// of one per call site and overload.
+fn emit_overload_references(
+    symbol_table: &SymbolTable,
+    string_pool: &mut StringPool,
+    edges: &mut Vec<Edge>,
+) {
+    let reason = string_pool.add(ecp_core::analyzer::types::OVERLOAD_SET_REASON);
+    for (first, later) in symbol_table.overload_sets() {
+        edges.extend(later.iter().map(|&target| Edge {
+            source: first,
+            target,
+            rel_type: RelType::References,
+            confidence: 1.0,
+            reason,
+        }));
+    }
+}
+
 fn emit_closure_references(
     local_graphs: &[LocalGraph],
     nodes: &[Node],
@@ -1800,8 +2238,9 @@ fn emit_file_closure_references(
         if nodes[target as usize].name.len == 0 {
             continue;
         }
-        // Overloads share an identity; collision tombstones clear the
-        // name and invert the survivor's UID. Preserve both callbacks.
+        // A redefined function (an `#ifdef` twin) shares the first one's
+        // identity; its tombstone clears the name and inverts the
+        // survivor's UID. Preserve both callbacks.
         if nodes[source as usize].name.len == 0 {
             let live_by_uid = live_by_uid.get_or_insert_with(|| {
                 nodes[start_index as usize..start_index as usize + graph.nodes.len()]
@@ -1828,71 +2267,23 @@ fn emit_file_closure_references(
     }
 }
 
-/// Per-file lexical candidates. Parent discovery runs once, not once per call.
-#[derive(Default)]
-struct LexicalFunctionIndex {
-    by_name: FxHashMap<String, Vec<(Option<Span>, u32)>>,
-}
-
-impl LexicalFunctionIndex {
-    fn new(graph: &LocalGraph, start_index: u32) -> Self {
-        let mut index = Self::default();
-        if !matches!(
-            graph.file_path.extension().and_then(|ext| ext.to_str()),
-            Some("js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts")
-        ) {
-            return index;
-        }
-        if graph.nodes.iter().all(|node| node.calls.is_empty()) {
-            return index;
-        }
-        let (functions, parents) = callable_parents(graph);
-        for (k, &(offset, node)) in functions.iter().enumerate() {
-            if node.kind != NodeKind::Function {
-                continue;
-            }
-            let candidates = index.by_name.entry(node.name.clone()).or_default();
-            let parent = parents[k].map(|parent| functions[parent].1.span);
-            if parent.is_some() || node.owner_class.is_none() {
-                candidates.push((parent, start_index + offset as u32));
-            }
-        }
-        index
+/// The file's [`LexicalFunctions`]; a file without calls needs none.
+fn lexical_functions(graph: &LocalGraph, start_index: u32) -> LexicalFunctions {
+    if graph.nodes.iter().all(|node| node.calls.is_empty()) {
+        return LexicalFunctions::default();
     }
-
-    fn scope_size(scope: Option<Span>) -> (u32, i64) {
-        scope
-            .map(|span| (span.2 - span.0, span.3 as i64 - span.1 as i64))
-            .unwrap_or((u32::MAX, i64::MAX))
-    }
-
-    /// An empty result prevents fallback to an inaccessible or ambiguous closure.
-    fn targets(&self, caller: Span, callee: &str) -> Option<Vec<(u32, f32)>> {
-        if callee.contains(['.', ':']) {
-            return None;
-        }
-        let candidates = self.by_name.get(callee)?;
-        let mut best = None;
-        let mut ambiguous = false;
-        for &(scope, target) in candidates {
-            if scope.is_some_and(|span| !crate::framework_helpers::span_contains(span, caller)) {
-                continue;
-            }
-            let size = Self::scope_size(scope);
-            match best {
-                Some((best_size, _)) if size > best_size => {}
-                Some((best_size, _)) if size == best_size => ambiguous = true,
-                _ => {
-                    best = Some((size, target));
-                    ambiguous = false;
-                }
-            }
-        }
-        Some(match best {
-            Some((_, target)) if !ambiguous => vec![(target, 1.0)],
-            _ => Vec::new(),
-        })
-    }
+    LexicalFunctions::new(
+        &graph.file_path,
+        graph.nodes.iter().map(|node| {
+            (
+                node.kind,
+                node.name.as_str(),
+                node.owner_class.is_some(),
+                node.span,
+            )
+        }),
+        start_index,
+    )
 }
 
 /// Pass 1.9: declared supertypes, as `(type_id, base)` pairs in declared
@@ -1996,6 +2387,86 @@ fn pass1_9_supertypes(
     per_graph.into_iter().flatten().collect()
 }
 
+/// The `reason` of a resolved `Calls` edge, by the tier that resolved it.
+#[derive(Clone, Copy)]
+struct CallReasons {
+    call: StrRef,
+    nearest_copy: StrRef,
+}
+
+impl CallReasons {
+    fn of(self, confidence: f32) -> StrRef {
+        if confidence == NEAREST_COPY_CONFIDENCE {
+            self.nearest_copy
+        } else {
+            self.call
+        }
+    }
+}
+
+/// The `reason` of an enum-variant `References` edge. Data-carrying variants
+/// (Rust, Swift) change shape for producers and destructuring matches in
+/// different ways, and "who sets state X" differs from "who handles state
+/// X", so a pattern or case label keeps its own reason.
+#[derive(Clone, Copy)]
+struct VariantReasons {
+    used: StrRef,
+    matched: StrRef,
+}
+
+/// The `EnumVariant` a [`VariantRef`] names, with the edge confidence.
+///
+/// A qualified reference resolves its qualifier as a type through the
+/// ordinary tiers, then takes that type's variant, so `A` of two enums never
+/// mixes. Rust `Self::A` names the caller's own impl type. A bare name (C
+/// enumerators, Java case labels) binds a variant declared in the file, else
+/// the one project-wide variant of that name.
+fn resolve_variant_ref(
+    resolver: &Resolver<'_>,
+    symbol_table: &SymbolTable,
+    local_graph: &LocalGraph,
+    raw_node: &RawNode,
+    variant_ref: VariantRef<'_>,
+) -> Option<(u32, f32)> {
+    let split = variant_ref.split();
+    if !symbol_table.has_enum_variant(split.map_or(variant_ref.path, |(_, variant)| variant)) {
+        return None;
+    }
+    let file = local_graph.file_path.to_string_lossy().replace('\\', "/");
+    let Some((qualifier, variant)) = split else {
+        return symbol_table
+            .bare_enum_variant(
+                &file,
+                variant_ref.path,
+                FileMeta::from_normalized_path(&file),
+            )
+            .map(|(id, same_file)| {
+                let tier = if same_file {
+                    ResolutionTier::SameFile
+                } else {
+                    ResolutionTier::Global
+                };
+                (id, tier.base_confidence())
+            });
+    };
+    let qualifier = match (Language::from_normalized_path(&file), qualifier) {
+        (Language::Rust, "Self") => raw_node.owner_class.as_deref().and_then(owner_key)?,
+        _ => qualifier,
+    };
+    let types = resolver.resolve_symbol(
+        &local_graph.file_path,
+        qualifier,
+        &local_graph.imports,
+        ResolveTarget::Type,
+    );
+    let &[(type_id, confidence)] = types.as_slice() else {
+        return None;
+    };
+    symbol_table
+        .enum_variant_of(type_id, qualifier, variant)
+        .map(|id| (id, confidence))
+}
+
 /// Emit Pass-2 edges for a single `raw_node`'s heritage / calls / type
 /// annotation. Factored out so the serial dump path and the parallel
 /// hot path can share the same per-node logic.
@@ -2015,12 +2486,13 @@ fn pass2_emit_node_edges(
     reason_heritage: StrRef,
     reason_implements: StrRef,
     reason_type: StrRef,
-    reason_call: StrRef,
+    reason_call: CallReasons,
     reason_reads_field: StrRef,
+    reason_variant: VariantReasons,
     symbol_table: &SymbolTable,
     edges: &mut Vec<Edge>,
     indirect_lookup: &FxHashMap<CallMetaKey, (u8, String)>,
-    lexical_lookup: &LexicalFunctionIndex,
+    lexical_lookup: &LexicalFunctions,
     pending_call_metas: &mut Vec<(usize, u8, String)>,
 ) {
     for base in &raw_node.heritage {
@@ -2050,7 +2522,8 @@ fn pass2_emit_node_edges(
         }
     }
 
-    let call_heritage = enclosing_class_heritage(raw_node, local_graph);
+    let call_heritage =
+        ecp_core::analyzer::heritage::enclosing_class_heritage(raw_node, &local_graph.nodes);
     for (call_idx, raw_callee) in raw_node.calls.iter().enumerate() {
         let lookup_key = CallMetaKey::new(raw_node.span, call_idx as u32);
         let meta = indirect_lookup.get(&lookup_key);
@@ -2066,6 +2539,8 @@ fn pass2_emit_node_edges(
                 site,
                 &local_graph.imports,
                 call_heritage,
+                raw_node.owner_class.as_deref(),
+                Some(current_node_idx),
             ),
         };
         for (target_id, confidence) in targets {
@@ -2078,7 +2553,7 @@ fn pass2_emit_node_edges(
                 target: target_id,
                 rel_type: RelType::Calls,
                 confidence,
-                reason: reason_call,
+                reason: reason_call.of(confidence),
             });
             if let Some((flags, dispatch_type)) = meta {
                 pending_call_metas.push((edge_pre_sort_idx, *flags, dispatch_type.clone()));
@@ -2108,7 +2583,34 @@ fn pass2_emit_node_edges(
     // `ResolveTarget::Field` predicate (is_property) admits only Property
     // nodes, so locals / Variables never match — the read edge stays on the
     // cross-function field contract without reintroducing local fan-out.
+    let mut variant_edges: Vec<(u32, bool)> = Vec::new();
     for field_name in &raw_node.field_reads {
+        if let Some(variant_ref) = VariantRef::parse(field_name) {
+            let Some((target_id, confidence)) =
+                resolve_variant_ref(resolver, symbol_table, local_graph, raw_node, variant_ref)
+            else {
+                continue;
+            };
+            // `E::A` and `crate::m::E::A` in one body are one dependency.
+            if target_id == current_node_idx
+                || variant_edges.contains(&(target_id, variant_ref.pattern))
+            {
+                continue;
+            }
+            variant_edges.push((target_id, variant_ref.pattern));
+            edges.push(Edge {
+                source: current_node_idx,
+                target: target_id,
+                rel_type: RelType::References,
+                confidence,
+                reason: if variant_ref.pattern {
+                    reason_variant.matched
+                } else {
+                    reason_variant.used
+                },
+            });
+            continue;
+        }
         let targets = resolver.resolve_symbol(
             &local_graph.file_path,
             field_name,
@@ -2254,8 +2756,15 @@ fn pass2_resolve_edges(
     let reason_heritage = string_pool.add("heritage");
     let reason_implements = string_pool.add("pass2:implements");
     let reason_type = string_pool.add("type_annotation");
-    let reason_call = string_pool.add("call");
+    let reason_call = CallReasons {
+        call: string_pool.add("call"),
+        nearest_copy: string_pool.add(NEAREST_COPY_REASON),
+    };
     let reason_reads_field = string_pool.add("field_read");
+    let reason_variant = VariantReasons {
+        used: string_pool.add(VARIANT_USE_REASON),
+        matched: string_pool.add(VARIANT_PATTERN_REASON),
+    };
 
     let mut reason_cache: FxHashMap<String, StrRef> = FxHashMap::default();
     for lg in local_graphs {
@@ -2326,7 +2835,7 @@ fn pass2_resolve_edges(
         let mut current_node_idx = 0u32;
         for (graph_idx, local_graph) in local_graphs.iter().enumerate() {
             let lookup = &indirect_lookups[graph_idx];
-            let lexical_lookup = LexicalFunctionIndex::new(local_graph, start_indices[graph_idx]);
+            let lexical_lookup = lexical_functions(local_graph, start_indices[graph_idx]);
             // T7-6: per-file skip set. `None` = no diff data → resolve all.
             let file_skip = symbol_skip_ref.and_then(|m| {
                 let raw = local_graph.file_path.to_string_lossy();
@@ -2365,6 +2874,7 @@ fn pass2_resolve_edges(
                     reason_type,
                     reason_call,
                     reason_reads_field,
+                    reason_variant,
                     symbol_table,
                     &mut edges,
                     lookup,
@@ -2420,7 +2930,7 @@ fn pass2_resolve_edges(
                 }
                 let start_idx = start_indices[graph_idx];
                 let lookup = &indirect_lookups[graph_idx];
-                let lexical_lookup = LexicalFunctionIndex::new(local_graph, start_idx);
+                let lexical_lookup = lexical_functions(local_graph, start_idx);
                 let mut local_edges: Vec<Edge> = Vec::new();
                 let mut local_pending: Vec<(usize, u8, String)> = Vec::new();
                 // T7-6: per-file skip set lookup (parallel path).
@@ -2459,6 +2969,7 @@ fn pass2_resolve_edges(
                         reason_type,
                         reason_call,
                         reason_reads_field,
+                        reason_variant,
                         symbol_table_ref,
                         &mut local_edges,
                         lookup,
@@ -2575,22 +3086,6 @@ mod tests {
     use ecp_core::graph::NodeKind;
 
     // ---- classify_collision (uid-collision reclassification) ----
-
-    #[test]
-    fn classify_method_in_any_file_is_overload() {
-        assert_eq!(
-            classify_collision(NodeKind::Method, "Java/foo/Bar.java"),
-            "method-overload"
-        );
-        assert_eq!(
-            classify_collision(NodeKind::Constructor, "Swift/Source/Foo.swift"),
-            "method-overload"
-        );
-        assert_eq!(
-            classify_collision(NodeKind::Method, "C/deps/jemalloc/src/jemalloc_cpp.cpp"),
-            "method-overload"
-        );
-    }
 
     #[test]
     fn classify_c_macro_function_struct_is_ifdef_redef() {
@@ -2814,7 +3309,8 @@ mod tests {
                 | DecisionTier::ModuleTree
                 | DecisionTier::TypeOwned
                 | DecisionTier::TypeHeritage
-                | DecisionTier::TypeCandidates => {
+                | DecisionTier::TypeCandidates
+                | DecisionTier::NearestCopy => {
                     panic!(
                         "fixture should only produce ImportScoped/Unresolved, got {:?}",
                         original.tier
@@ -3761,6 +4257,7 @@ mod tests {
                         path: "/users".into(),
                         handler: Some("other_fn".into()),
                         span: (20, 0, 20, 30),
+                        scope: None,
                     }],
                     framework_refs: vec![],
                     fanout_refs: vec![],
@@ -3958,6 +4455,7 @@ mod tests {
                 path: route_path.into(),
                 handler: Some(handler.into()),
                 span: (0, 0, 0, 0),
+                scope: None,
             }],
             framework_refs: vec![],
             fanout_refs: vec![],

@@ -28,7 +28,12 @@ pub const GRAPH_MAGIC: [u8; 8] = *b"ECP-RS\0\0";
 ///     import tier's re-export hop and ES-module export rule over a clean
 ///     module; `ImportFact::target_file` keeps the module a TS / JS
 ///     re-export row resolved to, tsconfig path aliases included.
-pub const GRAPH_FORMAT_VERSION: u32 = 13;
+/// v14: `alias_table` (the repo's path aliases, in declaration order) and
+///     `supertype_table` (each type's resolved bases, in declared order, with
+///     the position of the first unresolved one), so the overlay resolves an
+///     aliased specifier and walks heritage like a full reindex.
+/// v15: `route_middleware` (each Route's middleware, outermost group first).
+pub const GRAPH_FORMAT_VERSION: u32 = 15;
 
 impl std::str::FromStr for NodeKind {
     type Err = ();
@@ -826,6 +831,32 @@ pub struct ExportAliasFact {
     pub local: StrRef,
 }
 
+/// One entry of the repo's path-alias table
+/// ([`crate::analyzer::path_aliases::PathAliases`]): a pattern and its
+/// replacement candidates. The table keeps declaration order, because the
+/// resolver tries entries in that order; a repeated pattern stays repeated.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub struct PathAliasFact {
+    pub pattern: StrRef,
+    pub replacements: Vec<StrRef>,
+}
+
+/// The declared supertypes of one type node, as the index's heritage
+/// pre-pass resolved them. `bases` and `first_unresolved` carry the same
+/// data as the analyzer's `Supertypes`: node indices in declared order,
+/// deduplicated, never the type itself, and the number of resolved bases
+/// declared before the first unresolved one (`None` when all resolved).
+/// Extends / Implements edges lose that position, so the overlay cannot
+/// rebuild it from edges.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub struct SupertypeFact {
+    pub type_idx: u32,
+    pub bases: Vec<u32>,
+    pub first_unresolved: Option<u32>,
+}
+
 /// `ZeroCopyGraph.file_flags` bit: the file is an ES module, so another file
 /// imports only its exports ([`crate::analyzer::reexport::lookup_export_in_file`]).
 pub const FILE_FLAG_ES_MODULE: u8 = 1;
@@ -851,6 +882,23 @@ pub struct RouteShape {
     pub node_idx: u32,
     pub response_keys: Vec<StrRef>,
     pub error_keys: Vec<StrRef>,
+}
+
+/// The middleware a Route passes through, outermost group first, then the
+/// route's own (Laravel `->middleware('auth')`, group `middleware` option),
+/// then what the bound controller registers for the action's method
+/// (`$this->middleware(...)` with `only` / `except`, static
+/// `HasMiddleware::middleware()`). Each name appears once, as written, and
+/// none that a `withoutMiddleware` / `excluded_middleware` removes. Not
+/// included: the Kernel's global `$middleware`, and the members of a
+/// middleware group (`api` stays `api`). `node_idx` points into
+/// `ZeroCopyGraph.nodes`. Answers "which routes are reachable without
+/// `auth`" without re-parsing route files.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
+pub struct RouteMiddleware {
+    pub node_idx: u32,
+    pub middleware: Vec<StrRef>,
 }
 
 /// File-level record of a truly unresolvable code pattern (eval/dynamic
@@ -888,14 +936,14 @@ pub struct BlindSpotRecord {
 pub const BS_KIND_UID_COLLISION: &str = "uid-collision";
 
 /// Type-2 "parser-metric" BlindSpot kinds — emitted by the resolver's
-/// `classify_collision` for uid hash collisions, overloaded methods, and
-/// `#ifdef` redefinitions. These are parser-maintainer signal, NOT
+/// `classify_collision` for uid hash collisions and `#ifdef`
+/// redefinitions. These are parser-maintainer signal, NOT
 /// LLM-actionable source-code opacity (which is Type-1: `python-eval`,
 /// `python-exec`, `dynamic-import`, etc.).
 ///
 /// `ecp summary.blind_spots` filters these out so its LLM-facing surface
 /// stays focused; `ecp dev uid-audit` inspects them.
-pub const DEV_METRIC_BS_KINDS: &[&str] = &[BS_KIND_UID_COLLISION, "method-overload", "ifdef-redef"];
+pub const DEV_METRIC_BS_KINDS: &[&str] = &[BS_KIND_UID_COLLISION, "ifdef-redef"];
 
 /// True iff `kind` is one of [`DEV_METRIC_BS_KINDS`].
 pub fn is_dev_metric_bs_kind(kind: &str) -> bool {
@@ -1166,6 +1214,19 @@ pub struct ZeroCopyGraph {
     /// Empty when `files` already is in that order, as every graph the
     /// builder makes is.
     pub file_path_order: Vec<u32>,
+
+    // ── Schema v14 additions ─────────────────────────────────────────
+    /// The path aliases the index resolved with, in declaration order.
+    /// Empty when the repo has none.
+    pub alias_table: Vec<PathAliasFact>,
+    /// Sparse, sorted by `type_idx`: one entry per type that declares
+    /// heritage. A type with no heritage has no entry.
+    pub supertype_table: Vec<SupertypeFact>,
+
+    // ── Schema v15 additions ─────────────────────────────────────────
+    /// Sparse, sorted by `node_idx`: one entry per Route with at least one
+    /// middleware.
+    pub route_middleware: Vec<RouteMiddleware>,
 }
 
 impl ZeroCopyGraph {
@@ -1313,10 +1374,81 @@ impl ArchivedZeroCopyGraph {
         self.export_aliases.get(start..end)
     }
 
+    /// The path aliases the index resolved with, rebuilt in declaration
+    /// order; empty when the repo has none.
+    pub fn path_aliases(&self) -> crate::analyzer::path_aliases::PathAliases {
+        let pool = &self.string_pool;
+        let mut aliases = crate::analyzer::path_aliases::PathAliases::new();
+        for fact in self.alias_table.iter() {
+            aliases.add(
+                fact.pattern.resolve(pool),
+                fact.replacements
+                    .iter()
+                    .map(|replacement| replacement.resolve(pool).to_string())
+                    .collect(),
+            );
+        }
+        aliases
+    }
+
+    /// `(bases, first_unresolved)` of the type node `type_idx`: the bases in
+    /// declared order as node indices, and the number of resolved bases
+    /// declared before the first unresolved one (`Some(0)` when the first
+    /// declared base did not resolve; `None` when every base resolved).
+    /// `None` when the type has no entry, that is, declares no heritage.
+    pub fn supertypes_of(&self, type_idx: u32) -> Option<(Vec<u32>, Option<u32>)> {
+        let at = self
+            .supertype_table
+            .binary_search_by_key(&type_idx, |fact| fact.type_idx.to_native())
+            .ok()?;
+        let fact = &self.supertype_table[at];
+        Some((
+            fact.bases.iter().map(|base| base.to_native()).collect(),
+            fact.first_unresolved.as_ref().map(|n| n.to_native()),
+        ))
+    }
+
+    /// The middleware of the Route node `node_idx`, outermost first; empty
+    /// when it has none.
+    pub fn route_middleware_of(&self, node_idx: u32) -> Vec<&str> {
+        self.route_middleware
+            .binary_search_by_key(&node_idx, |entry| entry.node_idx.to_native())
+            .map(|at| {
+                self.route_middleware[at]
+                    .middleware
+                    .iter()
+                    .map(|name| name.resolve(&self.string_pool))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn is_es_module_file(&self, file_idx: u32) -> bool {
         self.file_flags
             .get(file_idx as usize)
             .is_some_and(|flags| *flags & FILE_FLAG_ES_MODULE != 0)
+    }
+
+    /// Whether `node_idx` is a later overload ([`crate::uid::keeps_overloads`]):
+    /// a node the index keeps but never binds by name, so a name lookup that
+    /// mirrors the index's resolver must skip it. Its uid is the only mark.
+    pub fn is_later_overload(&self, node_idx: u32) -> bool {
+        let pool = &self.string_pool;
+        let node = &self.nodes[node_idx as usize];
+        let kind = NodeKind::from(&node.kind);
+        crate::uid::keeps_overloads(kind)
+            && self
+                .files
+                .get(node.file_idx.to_native() as usize)
+                .is_some_and(|file| {
+                    node.uid.to_native()
+                        != crate::uid::compute(
+                            kind,
+                            file.path.resolve(pool),
+                            Some(node.owner_class.resolve(pool)),
+                            node.name.resolve(pool),
+                        )
+                })
     }
 
     pub fn is_exported_node(&self, node_idx: u32) -> bool {
@@ -1381,6 +1513,9 @@ impl Default for ZeroCopyGraph {
             file_flags: Vec::new(),
             exported_nodes: Vec::new(),
             file_path_order: Vec::new(),
+            alias_table: Vec::new(),
+            supertype_table: Vec::new(),
+            route_middleware: Vec::new(),
         }
     }
 }
@@ -1488,6 +1623,101 @@ mod tests {
         assert!(fm.flags.to_native() & FunctionMeta::FLAG_TEST != 0);
         assert_eq!(fm.params.len(), 1);
         assert_eq!(fm.decorators.len(), 1);
+    }
+
+    fn archive(graph: &ZeroCopyGraph) -> rkyv::util::AlignedVec {
+        rkyv::to_bytes::<Error>(graph).unwrap()
+    }
+
+    #[test]
+    fn test_path_aliases_roundtrip_keeps_order_duplicates_and_star_free_patterns() {
+        let (mut fx, ..) = make_base_fixture("src/main.ts", "main");
+        let facts: Vec<PathAliasFact> = [
+            ("@/*", vec!["src/*"]),
+            ("config", vec!["app/config.ts"]),
+            ("@/*", vec!["lib/*", "vendor/*"]),
+        ]
+        .into_iter()
+        .map(|(pattern, replacements)| PathAliasFact {
+            pattern: fx.intern(pattern),
+            replacements: replacements.into_iter().map(|r| fx.intern(r)).collect(),
+        })
+        .collect();
+        fx.assembly_mut().alias_table = facts;
+        let bytes = archive(&fx.build());
+        let archived = rkyv::access::<ArchivedZeroCopyGraph, Error>(&bytes).unwrap();
+
+        let aliases = archived.path_aliases();
+        let got: Vec<(String, Vec<String>)> = aliases
+            .entries()
+            .map(|(pattern, replacements)| (pattern.to_string(), replacements.to_vec()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("@/*".to_string(), vec!["src/*".to_string()]),
+                ("config".to_string(), vec!["app/config.ts".to_string()]),
+                (
+                    "@/*".to_string(),
+                    vec!["lib/*".to_string(), "vendor/*".to_string()]
+                ),
+            ]
+        );
+        let mut expanded = Vec::new();
+        aliases.expand("@/x", |candidate| {
+            expanded.push(candidate.to_string());
+            true
+        });
+        assert_eq!(expanded, ["src/x", "lib/x", "vendor/x"]);
+    }
+
+    #[test]
+    fn test_path_aliases_empty_table_returns_empty_aliases() {
+        let (fx, ..) = make_base_fixture("src/main.ts", "main");
+        let bytes = archive(&fx.build());
+        let archived = rkyv::access::<ArchivedZeroCopyGraph, Error>(&bytes).unwrap();
+        assert!(archived.path_aliases().is_empty());
+    }
+
+    #[test]
+    fn test_supertypes_of_roundtrip_returns_declared_order_and_first_unresolved() {
+        let (mut fx, ..) = make_base_fixture("src/main.ts", "main");
+        // Declared out of order: `finish` sorts by type_idx.
+        fx.assembly_mut().supertype_table = vec![
+            SupertypeFact {
+                type_idx: 9,
+                bases: vec![],
+                first_unresolved: Some(0),
+            },
+            SupertypeFact {
+                type_idx: 4,
+                bases: vec![7, 2, 5],
+                first_unresolved: None,
+            },
+            SupertypeFact {
+                type_idx: 6,
+                bases: vec![3],
+                first_unresolved: Some(1),
+            },
+        ];
+        let bytes = archive(&fx.build());
+        let archived = rkyv::access::<ArchivedZeroCopyGraph, Error>(&bytes).unwrap();
+
+        assert_eq!(archived.supertypes_of(4), Some((vec![7, 2, 5], None)));
+        assert_eq!(archived.supertypes_of(6), Some((vec![3], Some(1))));
+        // Every declared base failed to resolve: no bases, unresolved at position 0.
+        assert_eq!(archived.supertypes_of(9), Some((vec![], Some(0))));
+        // A type with no heritage has no entry.
+        assert_eq!(archived.supertypes_of(0), None);
+        assert_eq!(archived.supertypes_of(u32::MAX), None);
+    }
+
+    #[test]
+    fn test_supertypes_of_empty_table_returns_none() {
+        let (fx, ..) = make_base_fixture("src/main.ts", "main");
+        let bytes = archive(&fx.build());
+        let archived = rkyv::access::<ArchivedZeroCopyGraph, Error>(&bytes).unwrap();
+        assert_eq!(archived.supertypes_of(0), None);
     }
 
     #[test]

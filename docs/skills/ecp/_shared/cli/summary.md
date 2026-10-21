@@ -12,5 +12,5 @@ ecp summary [--repo @all] [--detailed]
 - **Frameworks**: Detected frameworks per repo.
 - **Blind spots**: Source-code opacity an LLM can act on (dynamic-import,
   reflection, eval/exec, fanout sites). Parser hash-collision counts
-  (uid-collision / method-overload / ifdef-redef) are NOT shown here —
+  (uid-collision / ifdef-redef) are NOT shown here —
   see `ecp dev uid-audit` for parser-maintainer audits.

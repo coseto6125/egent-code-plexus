@@ -385,6 +385,46 @@ fn test_overlay_rust_module_path_selects_named_module_like_reindex() {
     }
 }
 
+/// The index tries the qualifier tier before the module tree: `util` names
+/// the `mod util;` declaration in `lib.rs`, so the qualifier tier binds the
+/// `foo` that `lib.rs` declares (0.85) before the module tree reaches
+/// `util.rs` (1.0). The overlay must keep that order, not the better answer.
+#[test]
+fn test_overlay_rust_qualifier_tier_before_module_tree_matches_reindex() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "mod util;\npub fn foo() {}\nfn run() {}"),
+            ("src/util.rs", "pub fn foo() {}"),
+        ],
+        &[(
+            "src/lib.rs",
+            "mod util;\npub fn foo() {}\nfn run() { crate::util::foo(); }",
+        )],
+        &[("src/lib.rs".into(), "foo".into(), "".into(), 85)],
+    );
+}
+
+/// `use crate::k::K` names the qualifier's file, with the module tree on.
+#[test]
+fn test_overlay_rust_use_imported_qualifier_matches_reindex() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "mod k;\nuse crate::k::K;\nfn run() {}"),
+            (
+                "src/k.rs",
+                "pub struct K;\nimpl K {\n pub fn st(id: i32) {}\n}\n",
+            ),
+        ],
+        &[(
+            "src/lib.rs",
+            "mod k;\nuse crate::k::K;\nfn run() { K::st(2); }",
+        )],
+        &[("src/k.rs".into(), "st".into(), "K".into(), 85)],
+    );
+}
+
 #[test]
 fn test_overlay_python_untyped_member_collision_matches_reindex() {
     parity(
@@ -394,7 +434,9 @@ fn test_overlay_python_untyped_member_collision_matches_reindex() {
             ("other.py", "class Foo:\n    def foo(self): pass\n"),
         ],
         &[("app.py", "def foo(): pass\ndef run(x): x.foo()\n")],
-        &[("app.py".into(), "foo".into(), "".into(), 100)],
+        // An untyped receiver never reaches the caller's own module's free
+        // function, and two owners elsewhere leave the global tier empty.
+        &[],
     );
 }
 
@@ -1282,9 +1324,8 @@ fn test_overlay_php_external_vendor_use_matches_reindex() {
 }
 
 // `super.setup()` names the imported base, whose file lacks `setup`: the
-// index keeps the receiver ladder (Root.setup, inherited). The overlay has
-// no ladder, so it leaves the call unresolved. Was: both retried the bare
-// name and bound the caller to itself.
+// receiver ladder binds the inherited Root.setup on both sides. Was: both
+// retried the bare name and bound the caller to itself.
 #[test]
 fn test_overlay_kotlin_super_member_outside_imported_file_matches_reindex() {
     let screen = |body: &str| {
@@ -1293,7 +1334,7 @@ fn test_overlay_kotlin_super_member_outside_imported_file_matches_reindex() {
         )
     };
     let (clean, dirty) = (screen(""), screen("super.setup()"));
-    check_parity_from(
+    parity_from(
         "setup",
         &kotlin(),
         &[
@@ -1314,7 +1355,6 @@ fn test_overlay_kotlin_super_member_outside_imported_file_matches_reindex() {
             "Root".into(),
             80,
         )],
-        &[],
     );
 }
 
@@ -1371,18 +1411,17 @@ fn test_overlay_php_single_segment_use_function_matches_reindex() {
 }
 
 // A member the caller's class inherits beats a star import, and a package
-// wildcard imports no class member: the index resolves `refresh` on Base
-// (0.8). The overlay has no heritage tier and two `refresh` methods, so it
-// leaves no edge. Was: both bound the wildcard's `Adapter.refresh` at 0.95.
+// wildcard imports no class member: both resolve `refresh` on Base (0.8).
+// Was: both bound the wildcard's `Adapter.refresh` at 0.95.
 #[test]
-fn test_overlay_kotlin_wildcard_below_heritage_documents_heritage_divergence() {
+fn test_overlay_kotlin_wildcard_below_heritage_matches_reindex() {
     let screen = |body: &str| {
         format!(
             "package app\nimport lib.Base\nimport util.*\nclass Screen : Base() {{\n fun run() {{ {body} }}\n}}\n"
         )
     };
     let (clean, dirty) = (screen(""), screen("refresh()"));
-    check_parity(
+    parity(
         &kotlin(),
         &[
             (
@@ -1402,6 +1441,144 @@ fn test_overlay_kotlin_wildcard_below_heritage_documents_heritage_divergence() {
             "Base".into(),
             80,
         )],
-        &[],
     );
+}
+
+/// Sorted (source uid, target uid, rel, confidence %) of the Calls edges
+/// from `caller` and of every overload-set References edge: from a full
+/// reindex of `files` with `dirty` applied, then from the overlay of `dirty`
+/// over the index of `files`. Uids tell overloads apart, which share file,
+/// name and owner.
+fn overload_edges(
+    provider: &dyn LanguageProvider,
+    files: &[(&str, &str)],
+    dirty: &[(&str, &str)],
+    caller: &str,
+) -> (Vec<OverloadEdge>, Vec<OverloadEdge>) {
+    let parse = |path: &str, source: &str| {
+        provider
+            .parse_file(Path::new(path), source.as_bytes())
+            .unwrap()
+    };
+    let build = |edits: &[(&str, &str)]| {
+        let mut builder = GraphBuilder::new();
+        for &(path, original) in files {
+            let source = edits
+                .iter()
+                .find(|(p, _)| *p == path)
+                .map_or(original, |(_, s)| *s);
+            builder.add_graph(parse(path, source));
+        }
+        builder.build()
+    };
+    let wanted = |rel: RelType, source_name: &str, reason: &str| {
+        (rel == RelType::Calls && source_name == caller)
+            || (rel == RelType::References && reason == "overload_set")
+    };
+    let base = build(&[]);
+    let full = build(dirty);
+    let pool = &full.string_pool;
+    let mut expected: Vec<_> = full
+        .edges
+        .iter()
+        .filter(|e| {
+            wanted(
+                e.rel_type,
+                full.nodes[e.source as usize].name.resolve(pool),
+                e.reason.resolve(pool),
+            )
+        })
+        .map(|e| {
+            (
+                full.nodes[e.source as usize].uid,
+                full.nodes[e.target as usize].uid,
+                e.rel_type == RelType::Calls,
+                (e.confidence * 100.0).round() as u32,
+            )
+        })
+        .collect();
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&base).unwrap();
+    let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    let inputs: Vec<_> = dirty
+        .iter()
+        .map(|&(path, source)| input(parse(path, source)))
+        .collect();
+    let view = OverlayView::build(archived, &inputs).unwrap();
+    let merged = MergedGraph::new(archived, Some(&view));
+    let mut actual: Vec<_> = merged
+        .all_edges()
+        .filter(|e| {
+            wanted(
+                e.rel_type(),
+                merged.node(e.source).unwrap().name(&merged),
+                e.reason(archived),
+            )
+        })
+        .map(|e| {
+            (
+                merged.node(e.source).unwrap().uid(),
+                merged.node(e.target).unwrap().uid(),
+                e.rel_type() == RelType::Calls,
+                (e.confidence() * 100.0).round() as u32,
+            )
+        })
+        .collect();
+    expected.sort();
+    actual.sort();
+    (expected, actual)
+}
+
+/// (source uid, target uid, is Calls, confidence %).
+type OverloadEdge = (u64, u64, bool, u32);
+
+#[test]
+fn test_overlay_overload_set_in_dirty_file_matches_reindex() {
+    let k = "class K {\n void audit() {}\n void save(int id) {}\n void save(String name) { audit(); }\n void run() { save(1); }\n}\n";
+    let shifted = format!("\n{k}");
+    let (full, overlay) = overload_edges(
+        &ecp_analyzer::java::parser::JavaProvider::new().unwrap(),
+        &[("K.java", k)],
+        &[("K.java", &shifted)],
+        "run",
+    );
+    assert_eq!(full.len(), 2, "one call, one overload link");
+    assert_eq!(overlay, full);
+}
+
+/// The dirty caller binds the first overloaded constructor in a clean file,
+/// whose overload link stays the base edge.
+#[test]
+fn test_overlay_overload_set_in_clean_file_matches_reindex() {
+    let app = "public class App {\n    public Multi makeMulti() {\n        return new Multi(1);\n    }\n}\n";
+    let shifted = format!("\n{app}");
+    let (full, overlay) = overload_edges(
+        &ecp_analyzer::java::parser::JavaProvider::new().unwrap(),
+        &[
+            ("src/App.java", app),
+            (
+                "src/Multi.java",
+                "public class Multi {\n    public Multi(int x) {\n    }\n\n    public Multi(String s) {\n    }\n}\n",
+            ),
+        ],
+        &[("src/App.java", &shifted)],
+        "makeMulti",
+    );
+    assert_eq!(full.len(), 2, "one call, one overload link");
+    assert_eq!(overlay, full);
+}
+
+/// `save(int)` delegates to `save(String)`: the name binds the caller
+/// itself, so the overload link alone connects the two.
+#[test]
+fn test_overlay_overload_delegating_to_sibling_matches_reindex() {
+    let k = "class K {\n void save(int id) { save(\"x\"); }\n void save(String name) {}\n}\n";
+    let shifted = format!("\n{k}");
+    let (full, overlay) = overload_edges(
+        &ecp_analyzer::java::parser::JavaProvider::new().unwrap(),
+        &[("K.java", k)],
+        &[("K.java", &shifted)],
+        "save",
+    );
+    assert_eq!(full.len(), 1, "only the overload link");
+    assert_eq!(overlay, full);
 }

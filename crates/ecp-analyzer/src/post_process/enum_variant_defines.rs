@@ -55,13 +55,19 @@ pub fn emit_edges(
             };
             let path_str: &str = &path_str_cow;
 
-            // Index Enum nodes in this file by name for O(1) lookup.
+            // Index Enum nodes in this file by name for O(1) lookup. By kind:
+            // a C `typedef enum color color;` registers two `color`s.
             let enum_by_name: FxHashMap<&str, u32> = raws
                 .iter()
                 .filter(|n| n.kind == NodeKind::Enum)
                 .filter_map(|n| {
                     symbol_table
-                        .lookup_in_file(path_str, &n.name)
+                        .first_declaration(
+                            path_str,
+                            &n.name,
+                            NodeKind::Enum,
+                            n.owner_class.as_deref(),
+                        )
                         .map(|idx| (n.name.as_str(), idx))
                 })
                 .collect();
@@ -80,7 +86,14 @@ pub fn emit_edges(
                 let Some(&enum_idx) = enum_by_name.get(enum_name.as_str()) else {
                     continue;
                 };
-                let Some(variant_idx) = symbol_table.lookup_in_file(path_str, &variant.name) else {
+                // By owner: two enums of one file may share a variant name
+                // (`Shape::None`, `Fill::None`).
+                let Some(variant_idx) = symbol_table.first_declaration(
+                    path_str,
+                    &variant.name,
+                    NodeKind::EnumVariant,
+                    Some(enum_name.as_str()),
+                ) else {
                     continue;
                 };
                 // Self-loop guard: same-named enum and variant (extremely rare).
@@ -175,7 +188,11 @@ mod tests {
         for lg in &local_graphs {
             let path_str = lg.file_path.to_string_lossy().replace('\\', "/");
             for rn in &lg.nodes {
-                symbol_table.register_node(&path_str, &rn.name, current, rn.kind);
+                match rn.owner_class.as_deref() {
+                    Some(owner) => symbol_table
+                        .register_node_owned(&path_str, &rn.name, current, rn.kind, owner),
+                    None => symbol_table.register_node(&path_str, &rn.name, current, rn.kind),
+                }
                 current += 1;
             }
         }
@@ -221,6 +238,20 @@ mod tests {
         // Left has no owner_class — should produce 0 edges.
         let edges = run(vec![lg("dir.rs", nodes)]);
         assert_eq!(edges.len(), 0);
+    }
+
+    #[test]
+    fn test_emit_edges_shared_variant_name_binds_each_enums_own_variant() {
+        let nodes = vec![
+            raw("Shape", NodeKind::Enum, (1, 0, 3, 0)),
+            raw_variant("None", (2, 4, 2, 8), "Shape"),
+            raw("Fill", NodeKind::Enum, (5, 0, 7, 0)),
+            raw_variant("None", (6, 4, 6, 8), "Fill"),
+        ];
+        let edges = run(vec![lg("shared.rs", nodes)]);
+        let mut pairs: Vec<(u32, u32)> = edges.iter().map(|e| (e.source, e.target)).collect();
+        pairs.sort_unstable();
+        assert_eq!(pairs, vec![(0, 1), (2, 3)]);
     }
 
     #[test]

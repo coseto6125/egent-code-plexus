@@ -222,7 +222,7 @@ impl LanguageProvider for JavaProvider {
             let mut route_class_node: Option<tree_sitter::Node> = None;
             let mut route_handler_node: Option<tree_sitter::Node> = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = Some(cap.index);
                 if let Some(k_from_spec) = self
                     .capture_kind_by_idx
@@ -519,6 +519,19 @@ impl LanguageProvider for JavaProvider {
         let (raw_path_literals, raw_sql_refs) =
             extract_java_calls_and_path_literals(tree.root_node(), source, &mut nodes);
         crate::calls::extract_field_reads(tree.root_node(), source, &mut nodes, &["field_access"]);
+        crate::calls::extract_variant_refs(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &crate::calls::VariantRefSpec {
+                path_kinds: &["field_access"],
+                label_parents: &["switch_label"],
+                // `case MONDAY:` names the constant without its enum.
+                bare_label_parents: &["switch_label"],
+                bare_expressions: false,
+                token_trees: false,
+            },
+        );
 
         let raw_function_metas =
             crate::function_meta::java::extract(tree.root_node(), source, &nodes, file_category);

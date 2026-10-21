@@ -75,7 +75,7 @@ impl LanguageProvider for VerilogProvider {
             let mut class_prop_visibility: Option<&[u8]> = None;
             let mut is_class_prop = false;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = cap.index as usize;
                 if let Some(k) = self.capture_kind_by_idx.get(cap_idx).and_then(|opt| *opt) {
                     // This is a .name capture with a NodeKind

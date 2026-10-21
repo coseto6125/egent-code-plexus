@@ -103,7 +103,7 @@ impl LanguageProvider for AstroProvider {
         let mut frontmatter_node: Option<tree_sitter::Node> = None;
 
         while let Some(m) = matches.next() {
-            for cap in m.captures {
+            for cap in m.captures() {
                 let ci = Some(cap.index);
                 if ci == idx_frontmatter {
                     frontmatter_node = Some(cap.node);

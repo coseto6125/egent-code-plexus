@@ -450,7 +450,7 @@ impl LanguageProvider for GoProvider {
             let mut local_name_nodes: Vec<tree_sitter::Node> = Vec::new();
             let mut local_root_node = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = Some(cap.index);
                 if let Some(k_from_spec) = self
                     .capture_kind_by_idx
@@ -875,6 +875,7 @@ impl LanguageProvider for GoProvider {
                             end.row as u32,
                             end.column as u32,
                         ),
+                        scope: None,
                     });
 
                     // Stage a framework_ref for gin / echo. We can't tell

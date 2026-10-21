@@ -76,9 +76,9 @@ pub(super) fn lower(
             }
         }
         for i in (0..n.child_count()).rev() {
-            let child = n.child(i as u32).unwrap();
+            let child = n.child(i).unwrap();
             if child.is_named() {
-                pending.push((child, Some(id), n.field_name_for_child(i as u32), depth + 1));
+                pending.push((child, Some(id), n.field_name_for_child(i), depth + 1));
             }
         }
     }

@@ -23,6 +23,9 @@ resolver = "2"
 [workspace.package]
 version = "0.15.0"
 edition = "2021"
+# tree-sitter 0.27 and ast-grep-core 0.51 declare rust-version 1.90; ecp-mcp's
+# `const` use of `TypeId::of` needs 1.91.
+rust-version = "1.91"
 authors = ["E-NoR"]
 license = "MIT"
 readme = "README.md"

@@ -514,7 +514,7 @@ impl LanguageProvider for CProvider {
             let mut var_root: Option<tree_sitter::Node<'_>> = None;
             let mut var_name: Option<tree_sitter::Node<'_>> = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = cap.index;
                 // Single spec-driven dispatch for name-node captures.
                 // Source of truth: CSpec::CAPTURE_KIND in spec.rs.
@@ -743,6 +743,19 @@ impl LanguageProvider for CProvider {
             source,
             &mut nodes,
             &["field_expression"],
+        );
+        crate::calls::extract_variant_refs(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &crate::calls::VariantRefSpec {
+                // C names enumerators bare: `return RED;`, `case GREEN:`.
+                path_kinds: &[],
+                label_parents: &["case_statement"],
+                bare_label_parents: &[],
+                bare_expressions: true,
+                token_trees: false,
+            },
         );
 
         let fn_ptr_vars = collect_c_cpp_fn_ptr_vars(tree.root_node(), source);

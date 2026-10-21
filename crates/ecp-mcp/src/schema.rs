@@ -17,7 +17,7 @@ use std::any::TypeId;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-// `TypeId::of` is `const fn` since Rust 1.85; we lean on that to keep
+// `TypeId::of` is `const fn` since Rust 1.91; we lean on that to keep
 // the integer / float type sets in static arrays addressable by
 // `.contains()` rather than a long `||` chain.
 const INT_TIDS: [TypeId; 6] = [

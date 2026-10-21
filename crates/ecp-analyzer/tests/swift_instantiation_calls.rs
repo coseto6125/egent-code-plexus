@@ -57,8 +57,9 @@ fn test_swift_same_file_call_calls_constructor() {
     assert_calls_constructor(&graph, "makeLocal", "Local", "Sources/Local.swift");
 }
 
-/// Overloads share one uid, so Pass 1 collapses them into one Constructor
-/// node: an edge to it means "a constructor of `Multi`", not a guess.
+/// Overloads are separate Constructor nodes; the construction binds the
+/// first, as "a constructor of `Multi`", since the argument types that pick
+/// one are not parsed.
 #[test]
 fn test_swift_overloaded_inits_call_calls_constructor() {
     let multi = (

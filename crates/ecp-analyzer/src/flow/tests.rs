@@ -113,6 +113,59 @@ fn test_analyze_unknown_call_reports_boundary() {
         .any(|n| n.kind == "argument" && n.label == "dynamic(x)"));
 }
 #[test]
+fn test_analyze_template_and_heredoc_interpolation_reaches_consumer_without_token_boundaries() {
+    for (path, source, line, column, argument) in [
+        (
+            "test.js",
+            "let x = 10;\nlet y = `v${x}`;\nconsume(y);\n",
+            1,
+            5,
+            "y",
+        ),
+        (
+            "test.php",
+            "<?php\n$x = 10;\n$y = <<<EOT\nv{$x}\nEOT;\nconsume($y);\n",
+            2,
+            1,
+            "$y",
+        ),
+    ] {
+        let report = analyze(
+            &[SourceFile {
+                path: path.into(),
+                source: source.into(),
+            }],
+            &FlowRequest {
+                file: path.into(),
+                line,
+                column,
+                subject: Subject::Value,
+                direction: Direction::Forward,
+                budgets: Budgets::default(),
+            },
+        )
+        .unwrap();
+        assert!(
+            report
+                .nodes
+                .iter()
+                .any(|n| n.kind == "argument" && n.label == argument),
+            "{path}: {report:#?}"
+        );
+        let noise: Vec<_> = report
+            .boundaries
+            .iter()
+            .filter(|b| {
+                b.kind == "unsupported_semantics"
+                    && ["template_", "heredoc", "string"]
+                        .iter()
+                        .any(|token| b.message.starts_with(token))
+            })
+            .collect();
+        assert!(noise.is_empty(), "{path}: {noise:?}");
+    }
+}
+#[test]
 fn test_analyze_python_and_php_returns_propagate() {
     for (path, source, line, column) in [
         (
@@ -732,4 +785,107 @@ fn test_analyze_changes_node_budget_spent_before_sweep_reports_truncation() {
     .unwrap();
     assert!(report.consumers.is_empty(), "{:?}", report.nodes);
     assert!(report.truncated);
+}
+
+/// Contract: a fork costs what it changes, not the size of the program. With
+/// 300 functions analysed, invoking one more leaves every scope and object
+/// that existed before shared with the earlier snapshot.
+#[test]
+fn test_invoke_forks_in_one_function_leave_other_state_shared() {
+    let body = "if (x) { y = 1; } else { y = 2; } if (y) { return y; } return 0;";
+    for (path, source) in [
+        (
+            "many.js",
+            (0..300)
+                .map(|i| format!("function f{i}(x) {{ let y = 0; {body} }}\n"))
+                .collect::<String>(),
+        ),
+        (
+            "many.php",
+            format!(
+                "<?php\nclass Many\n{{\n{}}}\n",
+                (0..300)
+                    .map(|i| format!(
+                        "    public function f{i}($x) {{ $y = 0; {} }}\n",
+                        body.replace('x', "$x").replace('y', "$y")
+                    ))
+                    .collect::<String>()
+            ),
+        ),
+    ] {
+        let files = [SourceFile {
+            path: path.into(),
+            source,
+        }];
+        let mut engine = build(&files, &Budgets::default(), None).unwrap();
+        assert!(!engine.truncated, "{path}");
+        assert_eq!(engine.functions.len(), 300, "{path}");
+        assert_eq!(engine.called.len(), 300, "{path}: every entry point ran");
+        let base = engine.snapshot();
+        engine.invoke(0, &[]);
+        let copied = engine
+            .scopes
+            .iter()
+            .zip(base.0.iter())
+            .chain(engine.objects.iter().zip(base.1.iter()))
+            .filter(|(now, then)| !std::rc::Rc::ptr_eq(now, then))
+            .count();
+        assert_eq!(copied, 0, "{path}: a fork copied state it never wrote");
+    }
+}
+#[test]
+fn test_build_query_file_lowers_imports_first_and_keeps_each_file_ast() {
+    for (main, lib, filler) in [
+        (
+            ("main.js", "import { identity } from './lib.js';\nconsume(identity(101));\n"),
+            ("lib.js", "export function identity(value) { return value; }\n"),
+            ("filler.js", "0;\n"),
+        ),
+        (
+            ("main.py", "from .lib import identity\nconsume(identity(101))\n"),
+            ("lib.py", "def identity(value):\n    return value\n"),
+            ("filler.py", "0\n"),
+        ),
+        (
+            ("main.php", "<?php\nuse App\\Lib;\nconsume(Lib::id(101));\n"),
+            (
+                "lib.php",
+                "<?php\nnamespace App;\nclass Lib\n{\n    public static function id($value) { return $value; }\n}\n",
+            ),
+            ("filler.php", "<?php\n0;\n"),
+        ),
+    ] {
+        let files: Vec<SourceFile> = [main, filler, lib]
+            .into_iter()
+            .map(|(path, source)| SourceFile {
+                path: path.into(),
+                source: source.into(),
+            })
+            .collect();
+        let by_corpus = build(&files, &Budgets::default(), None).unwrap();
+        let by_query = build(&files, &Budgets::default(), Some(main.0)).unwrap();
+        let [corpus_order, query_order] = [&by_corpus, &by_query].map(|engine| {
+            let mut roots: Vec<(usize, usize)> = engine
+                .roots
+                .iter()
+                .enumerate()
+                .map(|(file, root)| (root.expect("every file lowers"), file))
+                .collect();
+            roots.sort();
+            roots.into_iter().map(|(_, file)| file).collect::<Vec<_>>()
+        });
+        assert_eq!(corpus_order, [0, 1, 2], "{}: corpus order", main.0);
+        assert_eq!(query_order, [0, 2, 1], "{}: the import goes first", main.0);
+        for file in 0..files.len() {
+            let [corpus_ast, query_ast] = [&by_corpus, &by_query].map(|engine| {
+                engine
+                    .ast
+                    .iter()
+                    .filter(|a| a.file == file)
+                    .map(|a| (a.kind.clone(), a.text.clone(), a.line, a.column))
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(corpus_ast, query_ast, "{}: file {file}", main.0);
+        }
+    }
 }

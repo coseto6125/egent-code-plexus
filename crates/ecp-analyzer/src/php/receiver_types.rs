@@ -17,51 +17,80 @@
 use super::path_literals::{
     build_raw_path_literal, enclosing_symbol_and_owner_pub, extract_php_string_value,
 };
-use crate::calls::{attach_to_enclosing, construction_call};
+use crate::calls::{attach_to_enclosing, construction_call, range_width, start_pos, Pos, PosRange};
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
 use tree_sitter::Node;
 
 /// Enclosing-class context built by a pre-walk over the node list.
-/// Maps `(start_row, end_row)` span → `(class_name, Option<parent_name>)`.
+/// Maps the `(start, end)` position range → `(class_name, Option<parent_name>,
+/// declared members)`. Members are listed for a trait or an enum only.
 pub struct ClassContext {
-    entries: Vec<((u32, u32), String, Option<String>)>,
+    entries: Vec<ClassEntry>,
 }
+
+/// `(span, class_name, parent_name, declared members)`.
+type ClassEntry = (PosRange, String, Option<String>, Option<Vec<String>>);
+/// [`range_width`]'s `(lines, columns)`.
+type Width = (u32, i64);
 
 impl ClassContext {
     pub fn from_nodes(nodes: &[RawNode]) -> Self {
+        let range = |n: &RawNode| ((n.span.0, n.span.1), (n.span.2, n.span.3));
         let entries = nodes
             .iter()
-            .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Interface))
+            .filter(|n| {
+                matches!(
+                    n.kind,
+                    NodeKind::Class | NodeKind::Interface | NodeKind::Trait | NodeKind::Enum
+                )
+            })
             .map(|n| {
-                let span = (n.span.0, n.span.2);
+                let span = range(n);
                 let parent = n.heritage.first().cloned();
-                (span, n.name.clone(), parent)
+                // `$this` in a trait is the class that uses it: only the
+                // trait's own members are reachable through its name, and a
+                // host class's member keeps the by-name route.
+                let members = matches!(n.kind, NodeKind::Trait | NodeKind::Enum).then(|| {
+                    nodes
+                        .iter()
+                        .filter(|m| {
+                            matches!(m.kind, NodeKind::Method | NodeKind::Function) && {
+                                let (start, end) = range(m);
+                                span.0 <= start && end <= span.1
+                            }
+                        })
+                        .map(|m| m.name.clone())
+                        .collect()
+                });
+                (span, n.name.clone(), parent, members)
             })
             .collect();
         Self { entries }
     }
 
-    /// Return the name of the innermost class enclosing `line`.
-    fn enclosing_class_name(&self, line: u32) -> Option<&str> {
-        let mut best: Option<(&str, u32)> = None;
-        for ((start, end), name, _) in &self.entries {
-            if *start <= line && line <= *end {
-                let width = end - start;
-                if best.is_none_or(|(_, w)| width < w) {
-                    best = Some((name.as_str(), width));
+    /// The name of the innermost class enclosing `pos`, when `member` is
+    /// reachable through it.
+    fn enclosing_class_name(&self, pos: Pos, member: &str) -> Option<&str> {
+        let mut best: Option<(&str, Option<&[String]>, Width)> = None;
+        for ((start, end), name, _, members) in &self.entries {
+            if *start <= pos && pos <= *end {
+                let width = range_width((*start, *end));
+                if best.is_none_or(|(_, _, w)| width < w) {
+                    best = Some((name.as_str(), members.as_deref(), width));
                 }
             }
         }
-        best.map(|(n, _)| n)
+        best.filter(|(_, members, _)| members.is_none_or(|m| m.iter().any(|n| n == member)))
+            .map(|(n, _, _)| n)
     }
 
-    /// Return the first heritage (parent) class of the class enclosing `line`.
-    fn enclosing_parent_name(&self, line: u32) -> Option<&str> {
-        let mut best: Option<(Option<&str>, u32)> = None;
-        for ((start, end), _, parent) in &self.entries {
-            if *start <= line && line <= *end {
-                let width = end - start;
+    /// Return the first heritage (parent) class of the class enclosing `pos`.
+    fn enclosing_parent_name(&self, pos: Pos) -> Option<&str> {
+        let mut best: Option<(Option<&str>, (u32, i64))> = None;
+        for ((start, end), _, parent, _) in &self.entries {
+            if *start <= pos && pos <= *end {
+                let width = range_width((*start, *end));
                 if best.is_none_or(|(_, w)| width < w) {
                     best = Some((parent.as_deref(), width));
                 }
@@ -83,25 +112,23 @@ pub fn extract_php_calls_and_path_literals(
     let ctx = ClassContext::from_nodes(nodes);
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
-    let mut constructions: Vec<(u32, String)> = Vec::new();
+    let mut constructions: Vec<((u32, u32), String)> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
             "object_creation_expression" => {
                 if let Some(callee) = php_object_creation_call(n, source) {
-                    constructions.push((n.start_position().row as u32, callee));
+                    constructions.push((start_pos(n), callee));
                 }
             }
             "member_call_expression" => {
                 if let Some(callee) = php_member_callee(n, source, &ctx) {
-                    let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                    attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
             "scoped_call_expression" => {
                 if let Some(callee) = php_scoped_callee(n, source, &ctx) {
-                    let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                    attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
             "string" | "encapsed_string" => {
@@ -129,8 +156,8 @@ pub fn extract_php_calls_and_path_literals(
     }
     // After every call, so a `new` site never shifts the index of a call
     // recorded before it.
-    for (line, callee) in constructions {
-        attach_to_enclosing(line, callee, nodes);
+    for (pos, callee) in constructions {
+        attach_to_enclosing(pos, callee, nodes);
     }
     (path_literals, sql_refs)
 }
@@ -153,12 +180,12 @@ fn php_member_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Optio
     let method_name = name_node.utf8_text(source).ok()?;
 
     let obj_node = call.child_by_field_name("object")?;
-    let line = call.start_position().row as u32;
+    let pos = start_pos(call);
 
     if obj_node.kind() == "variable_name" {
         if let Ok(var_text) = obj_node.utf8_text(source) {
             if var_text == "$this" {
-                if let Some(class_name) = ctx.enclosing_class_name(line) {
+                if let Some(class_name) = ctx.enclosing_class_name(pos, method_name) {
                     return Some(format!("{class_name}.{method_name}"));
                 }
             }
@@ -178,21 +205,21 @@ fn php_scoped_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Optio
     let method_name = name_node.utf8_text(source).ok()?;
 
     let scope_node = call.child_by_field_name("scope")?;
-    let line = call.start_position().row as u32;
+    let pos = start_pos(call);
 
     match scope_node.kind() {
         "relative_scope" => {
             let scope_text = scope_node.utf8_text(source).ok()?;
             match scope_text {
                 "parent" => {
-                    if let Some(parent_name) = ctx.enclosing_parent_name(line) {
+                    if let Some(parent_name) = ctx.enclosing_parent_name(pos) {
                         return Some(format!("{parent_name}.{method_name}"));
                     }
                     // parent:: with no known heritage — emit bare name
                     Some(method_name.to_string())
                 }
                 "self" | "static" => {
-                    if let Some(class_name) = ctx.enclosing_class_name(line) {
+                    if let Some(class_name) = ctx.enclosing_class_name(pos, method_name) {
                         return Some(format!("{class_name}.{method_name}"));
                     }
                     Some(method_name.to_string())

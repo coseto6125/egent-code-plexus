@@ -20,7 +20,7 @@ fn main() {
     let mut matches = cursor.matches(&query, tree.root_node(), source.as_slice());
 
     while let Some(m) = matches.next() {
-        for cap in m.captures {
+        for cap in m.captures() {
             if cap.index == query.capture_index_for_name("name.class").unwrap() {
                 println!(
                     "Matched class name: {:?}",

@@ -366,6 +366,7 @@ fn extract_proto_services(text: &str) -> Vec<RawRoute> {
                         path,
                         handler: None,
                         span: (row, 0u32, row, line.len() as u32),
+                        scope: None,
                     });
                 }
             }

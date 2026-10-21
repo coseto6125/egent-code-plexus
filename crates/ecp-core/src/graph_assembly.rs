@@ -15,7 +15,8 @@
 
 use crate::graph::{
     BlindSpotRecord, CallMeta, Edge, ExportAliasFact, File, FunctionMeta, ImportFact,
-    NameIndexEntry, Node, NodeKind, RouteShape, ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
+    NameIndexEntry, Node, NodeKind, PathAliasFact, RouteMiddleware, RouteShape, SupertypeFact,
+    ZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC,
 };
 use crate::pool::StringPool;
 
@@ -57,6 +58,15 @@ pub struct GraphAssembly {
     pub traces_data: Vec<u32>,
     pub fingerprint: [u8; 32],
     pub module_facts: ModuleFactTables,
+    /// The path aliases the index resolved with, in declaration order;
+    /// stored as given.
+    pub alias_table: Vec<PathAliasFact>,
+    /// Any order. Sorted by `type_idx` by `finish`, which keeps the first
+    /// entry of a repeated type.
+    pub supertype_table: Vec<SupertypeFact>,
+    /// Any order. Sorted by `node_idx` by `finish`, which keeps the first
+    /// entry of a repeated Route.
+    pub route_middleware: Vec<RouteMiddleware>,
 }
 
 /// The import / export facts of each file and node, as the builder records
@@ -94,6 +104,9 @@ impl Default for GraphAssembly {
             traces_data: Vec::new(),
             fingerprint: [0; 32],
             module_facts: ModuleFactTables::default(),
+            alias_table: Vec::new(),
+            supertype_table: Vec::new(),
+            route_middleware: Vec::new(),
         }
     }
 }
@@ -117,6 +130,9 @@ impl GraphAssembly {
             traces_data,
             fingerprint,
             module_facts,
+            alias_table,
+            mut supertype_table,
+            mut route_middleware,
         } = self;
 
         assert!(
@@ -239,6 +255,12 @@ impl GraphAssembly {
         file_flags.resize(files.len(), 0);
         exported_nodes.resize(num_nodes.div_ceil(8), 0);
         let file_path_order = file_path_order(&files, &string_pool);
+        // `supertypes_of()` binary-searches by `type_idx`.
+        supertype_table.sort_by_key(|fact| fact.type_idx);
+        supertype_table.dedup_by_key(|fact| fact.type_idx);
+        // `route_middleware_of()` binary-searches by `node_idx`.
+        route_middleware.sort_by_key(|entry| entry.node_idx);
+        route_middleware.dedup_by_key(|entry| entry.node_idx);
 
         ZeroCopyGraph {
             magic: GRAPH_MAGIC,
@@ -269,6 +291,9 @@ impl GraphAssembly {
             file_flags,
             exported_nodes,
             file_path_order,
+            alias_table,
+            supertype_table,
+            route_middleware,
         }
     }
 }
@@ -787,5 +812,44 @@ mod tests {
             ..Default::default()
         }
         .finish();
+    }
+
+    #[test]
+    fn test_finish_supertype_table_sorted_by_type_keeping_first_of_a_repeat() {
+        let fact = |type_idx, base| SupertypeFact {
+            type_idx,
+            bases: vec![base],
+            first_unresolved: None,
+        };
+        let g = GraphAssembly {
+            supertype_table: vec![fact(5, 1), fact(2, 9), fact(5, 7)],
+            ..Default::default()
+        }
+        .finish();
+        let got: Vec<(u32, Vec<u32>)> = g
+            .supertype_table
+            .iter()
+            .map(|f| (f.type_idx, f.bases.clone()))
+            .collect();
+        assert_eq!(got, vec![(2, vec![9]), (5, vec![1])]);
+    }
+
+    #[test]
+    fn test_finish_alias_table_kept_in_given_order() {
+        let mut pool = StringPool::new();
+        let facts: Vec<PathAliasFact> = ["b/*", "a/*", "b/*"]
+            .into_iter()
+            .map(|pattern| PathAliasFact {
+                pattern: pool.add(pattern),
+                replacements: vec![pool.add("src/*")],
+            })
+            .collect();
+        let g = GraphAssembly {
+            string_pool: pool,
+            alias_table: facts.clone(),
+            ..Default::default()
+        }
+        .finish();
+        assert_eq!(g.alias_table, facts);
     }
 }

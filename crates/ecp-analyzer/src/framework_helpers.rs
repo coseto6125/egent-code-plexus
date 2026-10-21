@@ -114,13 +114,15 @@ pub fn push_blind_spot(
     });
 }
 
-/// Area proxy (row-major byte count approximation) for picking the smallest enclosing span.
+/// Area proxy for picking the smallest enclosing span: rows first, then the
+/// column distance. The column term is offset by 2^32 so a span starting past
+/// column 10 000 (minified source) still ranks below one that contains it.
 #[inline]
 pub fn span_area(s: Span) -> u64 {
     let (r1, c1, r2, c2) = s;
     let dr = r2.saturating_sub(r1) as u64;
-    let dc = c2 as u64 + 10_000u64.saturating_sub(c1 as u64);
-    dr * 10_000 + dc
+    let dc = (c2 as u64 + (1 << 32)) - c1 as u64;
+    (dr.min(u32::MAX as u64 >> 1) << 33) + dc
 }
 
 /// True iff the raw source bytes at `node`'s start_byte begin with `prefix`.
@@ -262,6 +264,10 @@ pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
     // PR #359's `scope_defines::Pass2` then emits `Namespace → child` only for
     // nodes whose owner_class matches a Namespace/Module name in the same file
     // — class members fall through cleanly because their owner is a class.
+    // An enum owns the methods, constructors and fields its body declares
+    // (Java, Kotlin, Dart, PHP, Swift), exactly as a class does; without it
+    // they read as free functions, and a type nested in an enum took the
+    // enum's enclosing class as owner.
     let owner_spans: Vec<(String, Span)> = nodes
         .iter()
         .filter(|n| {
@@ -271,6 +277,7 @@ pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
                     | NodeKind::Struct
                     | NodeKind::Trait
                     | NodeKind::Interface
+                    | NodeKind::Enum
                     | NodeKind::Namespace
                     | NodeKind::Module
             )

@@ -44,7 +44,34 @@ use std::path::Path;
 /// default <expression>` is an ES module, and each `graph.bin` TS / JS
 /// re-export import row keeps the file its specifier resolved to
 /// (`ImportFact::target_file`).
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema11");
+/// schema12: tree-sitter 0.27 recovers some files with syntax errors into
+/// different trees than 0.26 did, so a parse of the same source can yield
+/// different symbols (nlohmann `json.hpp` gains a friend `operator<`).
+/// schema13: a later same-name Method / Constructor overload keeps its name
+/// and owner under its own uid instead of an empty-name tombstone, gets its
+/// `HasMethod` edge, and the first overload `References` each later one
+/// (`overload_set`).
+/// schema14: a call through a type binds that type's own member before a
+/// same-file interface / trait / base declaration, and a call whose
+/// candidates are copies in duplicated source trees binds the nearest copy
+/// (`call:nearest-copy`, confidence 0.6).
+/// schema15: a function `References` each enum variant it uses
+/// (`enum_variant:use` / `enum_variant:pattern`).
+/// schema16: `graph.bin` keeps the repo's path aliases and each type's
+/// resolved supertypes (`alias_table`, `supertype_table`), so the session
+/// overlay resolves aliased specifiers and walks heritage like the index.
+/// schema17: a Laravel route carries the prefix, middleware and controller
+/// namespace of its route groups, a group that loads a route file applies
+/// them to that file's routes, and a `'Ctrl@method'` / `[Ctrl::class, 'm']`
+/// handler gets a `HandlesRoute` edge from the controller method.
+/// schema18: Laravel `resource` / `apiResource` / `match` / `any` routes, a
+/// route file without a framework import that a provider loads, actions a
+/// controller inherits, and an `EntryPoint` on each controller action.
+/// schema19: Laravel `withoutMiddleware` / `excluded_middleware` remove
+/// middleware from a route, a controller's own middleware (`$this->middleware`
+/// with `only` / `except`, static `HasMiddleware::middleware()`) joins its
+/// routes' list, and a group's controller reaches an included route file.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema19");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

@@ -10,20 +10,30 @@
 //! single-identifier type annotations (`Apple`, not `dict[str, Apple]`).
 //! Generic / subscripted / forward-reference types are skipped — the
 //! call falls back to the bare member name as before.
+//!
+//! A receiver that names a class of the same file and no import or local
+//! binds (`Util.make()`) emits `Util.make`, as a typed receiver does. It
+//! cannot reuse [`CallSite::from_receiver`]: for Python that site means a
+//! `from`-imported name, which the resolver binds as a submodule, else as a
+//! type it names, else by its bare member through the caller's own type and
+//! bases.
 
 use super::path_literals::build_raw_path_literal;
-use crate::calls::{attach_to_enclosing, CallSiteIndex};
+use crate::calls::{
+    attach_to_enclosing, node_range, range_width, start_pos, CallSiteIndex, Pos, PosRange,
+};
 use crate::framework_helpers::strip_python_string_quotes;
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
-use std::collections::HashMap;
+use ecp_core::graph::NodeKind;
+use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
-/// Map of nested function scopes (by row span) to their var→type bindings.
+/// Map of nested function scopes (by position range) to their var→type bindings.
 /// Lookup picks the smallest containing scope that has the variable, so
 /// closures correctly inherit outer-scope annotations.
 #[derive(Debug, Default)]
 pub struct LocalTypes {
-    scopes: Vec<((u32, u32), HashMap<String, String>)>,
+    scopes: Vec<(PosRange, HashMap<String, String>)>,
     /// A `from` binding may be an object; only a module import proves that
     /// its receiver names a namespace for import-scoped resolution.
     imported: HashMap<String, ImportedBinding>,
@@ -37,13 +47,13 @@ enum ImportedBinding {
 }
 
 impl LocalTypes {
-    fn lookup(&self, line: u32, var: &str) -> Option<&str> {
+    fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
         let mut best: Option<&str> = None;
-        let mut best_width = u32::MAX;
+        let mut best_width = (u32::MAX, i64::MAX);
         for ((start, end), map) in &self.scopes {
-            if *start <= line && line <= *end {
+            if *start <= pos && pos <= *end {
                 if let Some(t) = map.get(var) {
-                    let w = end - start;
+                    let w = range_width((*start, *end));
                     if w < best_width {
                         best_width = w;
                         best = Some(t.as_str());
@@ -63,16 +73,22 @@ impl LocalTypes {
             return None;
         }
         let name = root.utf8_text(source).ok()?;
-        if self.shadows.iter().any(|((start, end), names)| {
+        if self.shadowed(receiver, name) {
+            return None;
+        }
+        self.imported.get(name).copied()
+    }
+
+    /// Whether a function scope enclosing `receiver` binds `name` (a
+    /// parameter, or an assignment before `receiver`).
+    fn shadowed(&self, receiver: Node<'_>, name: &str) -> bool {
+        self.shadows.iter().any(|((start, end), names)| {
             *start <= receiver.start_byte()
                 && receiver.end_byte() <= *end
                 && names
                     .get(name)
                     .is_some_and(|assigned| *assigned <= receiver.start_byte())
-        }) {
-            return None;
-        }
-        self.imported.get(name).copied()
+        })
     }
 }
 
@@ -80,7 +96,7 @@ impl LocalTypes {
 /// annotated assignments inside the function body, and every name an
 /// `import` statement binds.
 pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
-    let mut scopes: Vec<((u32, u32), HashMap<String, String>)> = Vec::new();
+    let mut scopes: Vec<(PosRange, HashMap<String, String>)> = Vec::new();
     let mut imported = HashMap::new();
     let mut shadows = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
@@ -89,12 +105,16 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
             collect_import_bindings(n, source, &mut imported);
         }
         if n.kind() == "function_definition" {
-            let fn_span = (n.start_position().row as u32, n.end_position().row as u32);
+            let fn_span = node_range(n);
             let mut map: HashMap<String, String> = HashMap::new();
             let mut names = HashMap::new();
 
             if let Some(params) = n.child_by_field_name("parameters") {
                 collect_typed_params(params, source, &mut map);
+                if let Some((receiver, class)) = method_receiver(n, params, source) {
+                    map.entry(receiver.to_string())
+                        .or_insert_with(|| class.to_string());
+                }
                 let mut cursor = params.walk();
                 for parameter in params.named_children(&mut cursor) {
                     let binding = match parameter.kind() {
@@ -300,13 +320,17 @@ pub fn extract_python_calls_and_path_literals(
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
+    let classes: HashSet<String> = nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Enum))
+        .map(|n| n.name.clone())
+        .collect();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
             "call" => {
-                if let Some(callee) = python_callee_name(n, source, locals) {
-                    let line = n.start_position().row as u32;
-                    if let Some(site) = attach_to_enclosing(line, callee, nodes) {
+                if let Some(callee) = python_callee_name(n, source, locals, &classes) {
+                    if let Some(site) = attach_to_enclosing(start_pos(n), callee, nodes) {
                         call_sites.insert(n.id(), site);
                     }
                 }
@@ -383,7 +407,13 @@ fn enclosing_symbol_and_owner(
     (function_name, owner)
 }
 
-fn python_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Option<String> {
+/// `classes`: the names of the classes this file declares.
+fn python_callee_name(
+    call: Node<'_>,
+    source: &[u8],
+    locals: &LocalTypes,
+    classes: &HashSet<String>,
+) -> Option<String> {
     let function = call.child_by_field_name("function")?;
     match function.kind() {
         "identifier" => std::str::from_utf8(&source[function.start_byte()..function.end_byte()])
@@ -397,8 +427,8 @@ fn python_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Opt
                 if obj.kind() == "identifier" {
                     let obj_name =
                         std::str::from_utf8(&source[obj.start_byte()..obj.end_byte()]).ok()?;
-                    let line = call.start_position().row as u32;
-                    if let Some(ty) = locals.lookup(line, obj_name) {
+                    let pos = start_pos(call);
+                    if let Some(ty) = locals.lookup(pos, obj_name) {
                         return Some(format!("{ty}.{attr_name}"));
                     }
                 }
@@ -433,13 +463,65 @@ fn python_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Opt
                         ));
                     }
                     Some(ImportedBinding::Symbol) => {}
-                    None => return Some(CallSite::untyped_member(attr_name)),
+                    None => {
+                        let class = (obj.kind() == "identifier")
+                            .then(|| obj.utf8_text(source).ok())
+                            .flatten()
+                            .filter(|name| classes.contains(*name))
+                            .filter(|name| !locals.shadowed(obj, name));
+                        return Some(match class {
+                            Some(class) => format!("{class}.{attr_name}"),
+                            None => CallSite::untyped_member(attr_name),
+                        });
+                    }
                 }
             }
             Some(attr_name.to_string())
         }
         _ => None,
     }
+}
+
+/// The first parameter of a method declared in a class body (`self`, or
+/// `cls` of a classmethod) and the class it stands for, so `self.m()` is
+/// typed as `C.m` the way Java types `this.m()`. A `@staticmethod` has no
+/// such parameter.
+fn method_receiver<'s>(
+    function: Node<'_>,
+    params: Node<'_>,
+    source: &'s [u8],
+) -> Option<(&'s str, &'s str)> {
+    let mut member = function;
+    if let Some(decorated) = function
+        .parent()
+        .filter(|p| p.kind() == "decorated_definition")
+    {
+        let mut cursor = decorated.walk();
+        let is_static = decorated.named_children(&mut cursor).any(|d| {
+            d.kind() == "decorator"
+                && d.utf8_text(source)
+                    .is_ok_and(|t| t.trim_start_matches('@').trim() == "staticmethod")
+        });
+        if is_static {
+            return None;
+        }
+        member = decorated;
+    }
+    let class = member
+        .parent()
+        .filter(|body| body.kind() == "block")?
+        .parent()
+        .filter(|class| class.kind() == "class_definition")?;
+    let first = params.named_child(0)?;
+    let receiver = match first.kind() {
+        "identifier" => first,
+        "typed_parameter" => first.named_child(0).filter(|n| n.kind() == "identifier")?,
+        _ => return None,
+    };
+    Some((
+        receiver.utf8_text(source).ok()?,
+        class.child_by_field_name("name")?.utf8_text(source).ok()?,
+    ))
 }
 
 /// Zero-argument `super()`: the receiver of a call through the caller

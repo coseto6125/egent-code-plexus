@@ -83,10 +83,8 @@ fn list_routes(
         let name = node.name.resolve(&graph.string_pool);
         let (method, path) = split_route_name(name);
 
-        if let Some(ref want) = wanted_method {
-            if method != want {
-                continue;
-            }
+        if !method_matches(method, wanted_method.as_deref()) {
+            continue;
         }
 
         let file_node = &graph.files[node.file_idx.to_native() as usize];
@@ -96,7 +94,7 @@ fn list_routes(
         // see. Only `Test` flips `is_test` here, matching the builder.rs
         // route-emission skip filter which gates on `Test | Reference`.
         let is_test = matches!(file_node.category, ArchivedFileCategory::Test);
-        let row = serde_json::json!({
+        let mut row = serde_json::json!({
             "uid": node.uid.to_native().to_string(),
             "method": method,
             "path": path,
@@ -104,12 +102,15 @@ fn list_routes(
             "filePath": file_node.path.resolve(&graph.string_pool),
             "line": node.start_line(),
         });
+        add_middleware(&mut row, graph, idx);
         match (is_test, include_tests) {
             (false, _) => results.push(row),
             (true, true) => test_results.push(row),
             (true, false) => {} // silently dropped — that's the default
         }
     }
+    fill_middleware(&mut results, fmt);
+    fill_middleware(&mut test_results, fmt);
 
     if results.is_empty() && test_results.is_empty() {
         eprintln!(
@@ -144,6 +145,53 @@ fn list_routes(
     }
 
     emit(&result, fmt)
+}
+
+/// Whether a route of `method` answers a `--method` filter. An `ANY` route
+/// (Laravel `Route::any`) answers each verb Laravel registers it for.
+fn method_matches(method: &str, wanted: Option<&str>) -> bool {
+    wanted.is_none_or(|want| {
+        method == want || (method == "ANY" && ecp_analyzer::route_detector::any_route_answers(want))
+    })
+}
+
+/// When one row has a `middleware` array, give every other row an empty
+/// one; when none has, every row stays without the field. TOON makes a
+/// table only of scalar columns, so for TOON each array becomes one
+/// space-separated string (`"api auth:admin"`, `""` for none); a Laravel
+/// middleware name holds no space.
+fn fill_middleware(rows: &mut [serde_json::Value], fmt: OutputFormat) {
+    if !rows.iter().any(|row| row.get("middleware").is_some()) {
+        return;
+    }
+    let joined = matches!(fmt, OutputFormat::Toon | OutputFormat::Llm);
+    for row in rows {
+        let names: Vec<&str> = row
+            .get("middleware")
+            .and_then(serde_json::Value::as_array)
+            .map(|names| names.iter().filter_map(serde_json::Value::as_str).collect())
+            .unwrap_or_default();
+        let middleware = if joined {
+            serde_json::json!(names.join(" "))
+        } else {
+            serde_json::json!(names)
+        };
+        row["middleware"] = middleware;
+    }
+}
+
+/// Add the route's `middleware` array, outermost first, when it has any. A
+/// route without the field, or with an empty one from [`fill_middleware`],
+/// passes through no middleware the index saw.
+fn add_middleware(
+    row: &mut serde_json::Value,
+    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
+    route_idx: u32,
+) {
+    let middleware = graph.route_middleware_of(route_idx);
+    if !middleware.is_empty() {
+        row["middleware"] = serde_json::json!(middleware);
+    }
 }
 
 /// Split a Route node's `name` field — stored as `"<METHOD> <path>"` — into
@@ -190,7 +238,7 @@ fn find_enclosing_scope(
             continue;
         }
         let start_line = node.start_line();
-        let end_line = node.span.2.to_native();
+        let end_line = node.end_line();
         // Strict containment: a route registered at the same line as the
         // function's signature shouldn't be claimed by an unrelated sibling.
         // Inclusive bounds are correct because the function's span covers
@@ -269,10 +317,8 @@ fn inspect_route(
         if path != wanted_path {
             continue;
         }
-        if let Some(ref want) = wanted_method {
-            if method != want {
-                continue;
-            }
+        if !method_matches(method, wanted_method.as_deref()) {
+            continue;
         }
         matched.push(i);
     }
@@ -342,14 +388,16 @@ fn inspect_route(
         // for inline-anonymous handlers (which have no node of their own).
         let enclosing_idx = find_enclosing_scope(graph, route_file_idx, route_line);
 
-        routes_out.push(serde_json::json!({
+        let mut route_row = serde_json::json!({
             "method": route_method,
             "path": route_path,
             "uid": route_node.uid.to_native().to_string(),
             "filePath": route_file_path,
             "line": route_line,
             "enclosingScope": enclosing_scope_json(graph, enclosing_idx),
-        }));
+        });
+        add_middleware(&mut route_row, graph, route_idx as u32);
+        routes_out.push(route_row);
 
         // Handler: incoming HandlesRoute edge on the Route node.
         let in_start = graph.in_offsets[route_idx].to_native() as usize;
@@ -360,6 +408,27 @@ fn inspect_route(
             let edge = &graph.edges[edge_idx];
             if matches!(&edge.rel_type, ArchivedRelType::HandlesRoute) {
                 handler_indices.push(edge.source.to_native() as usize);
+            }
+        }
+
+        // A Laravel route that names a controller action binding no method
+        // has no HandlesRoute edge either; the builder records the action
+        // in a BlindSpot. Its handler is unknown, not inline, and the
+        // registering scope's callers are not its callers.
+        if handler_indices.is_empty() {
+            if let Some(action) = unbound_action(graph, route_file_path, route_node, route_name) {
+                handlers_out.push(serde_json::json!({
+                    "uid": serde_json::Value::Null,
+                    "name": action,
+                    "kind": "UnresolvedAction",
+                    "handlerKind": "unresolved_action",
+                    "action": action,
+                    "filePath": route_file_path,
+                    "line": route_line,
+                    "route": route_name,
+                    "enclosingScope": enclosing_scope_json(graph, enclosing_idx),
+                }));
+                continue;
             }
         }
 
@@ -422,6 +491,7 @@ fn inspect_route(
             );
         }
     }
+    fill_middleware(&mut routes_out, fmt);
 
     let result = serde_json::json!({
         "status": "found",
@@ -432,6 +502,32 @@ fn inspect_route(
         "callers": callers_out,
     });
     emit(&result, fmt)
+}
+
+/// The controller action, as the route file writes it, of a Laravel Route
+/// node whose action binds no method: the builder's
+/// `laravel-unbound-action` BlindSpot at the registration names it.
+fn unbound_action<'g>(
+    graph: &'g ecp_core::graph::ArchivedZeroCopyGraph,
+    route_file_path: &str,
+    route_node: &ecp_core::graph::ArchivedNode,
+    route_name: &str,
+) -> Option<&'g str> {
+    // Two registrations can share a line; the column tells them apart.
+    let start = (route_node.span.0.to_native(), route_node.span.1.to_native());
+    graph.blind_spots.iter().find_map(|bs| {
+        if (bs.start_row.to_native(), bs.start_col.to_native()) != start
+            || bs.kind.resolve(&graph.string_pool)
+                != ecp_analyzer::php::laravel_routes::BS_KIND_UNBOUND_ACTION
+            || bs.file_path.resolve(&graph.string_pool) != route_file_path
+        {
+            return None;
+        }
+        ecp_analyzer::php::laravel_routes::unbound_action(
+            bs.hint.resolve(&graph.string_pool),
+            route_name,
+        )
+    })
 }
 
 /// BFS upstream over non-`HandlesRoute` incoming edges from `seed_idx`,

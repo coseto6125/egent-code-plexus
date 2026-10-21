@@ -11,37 +11,54 @@
 //!   `initialized_variable_definition` with a single `type_identifier`
 //!   annotation → `Type.method`.
 //!
-//! Scope: P0 simple identifier types only. Generic / function / nullable
-//! types fall back to the bare member name.
+//! - `Name.method()` where `Name` is no local, parameter, import prefix or
+//!   field of an enclosing type → [`CallSite::from_receiver`]: the resolver
+//!   binds `Name.method` when `Name` names a type (`Util.make()`), else
+//!   resolves the bare member.
+//!
+//! - `Other().method()` where this file declares `class Other` →
+//!   `Other.method`; any other computed receiver (`a.b.method()`) →
+//!   [`CallSite::untyped_member`], which never binds the caller's own
+//!   `method`.
+//!
+//! `obj?.method()` reads its receiver as `obj.method()` does. Scope: P0
+//! simple identifier types only. Generic / function / nullable types fall
+//! back to the bare member name.
 
 use super::path_literals::{
     build_raw_path_literal, has_template_substitution, strip_dart_string_value,
 };
-use crate::calls::attach_to_enclosing;
-use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
-use std::collections::HashMap;
+use crate::calls::{
+    attach_to_enclosing, node_range, range_width, span_holds, start_pos, Pos, PosRange,
+};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::graph::NodeKind;
+use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
 // `(start_line, end_line)` half-open span keyed scope tables. The tuple-of-
 // tuples shape mirrors the rest of the receiver_types modules; the type aliases
 // silence `clippy::type_complexity` without changing behaviour.
-type FnScope = ((u32, u32), HashMap<String, String>);
-type ClassScope = ((u32, u32), (String, Option<String>));
+type FnScope = (PosRange, HashMap<String, String>);
+type ClassScope = (PosRange, (String, Option<String>));
 
+/// A declared name whose type is unknown maps to `""` in its scope.
 #[derive(Debug, Default)]
 pub struct DartBindings {
     fn_scopes: Vec<FnScope>,
     class_scopes: Vec<ClassScope>,
+    /// `import '..' as p;` prefixes: `p.f()` names a library member.
+    prefixes: HashSet<String>,
 }
 
 impl DartBindings {
-    fn lookup_local(&self, line: u32, var: &str) -> Option<&str> {
+    fn lookup_local(&self, pos: Pos, var: &str) -> Option<&str> {
         let mut best: Option<&str> = None;
-        let mut best_width = u32::MAX;
+        let mut best_width = (u32::MAX, i64::MAX);
         for ((start, end), map) in &self.fn_scopes {
-            if *start <= line && line <= *end {
+            if *start <= pos && pos <= *end {
                 if let Some(t) = map.get(var) {
-                    let w = end - start;
+                    let w = range_width((*start, *end));
                     if w < best_width {
                         best_width = w;
                         best = Some(t.as_str());
@@ -52,12 +69,12 @@ impl DartBindings {
         best
     }
 
-    fn enclosing_class(&self, line: u32) -> Option<&(String, Option<String>)> {
+    fn enclosing_class(&self, pos: Pos) -> Option<&(String, Option<String>)> {
         let mut best: Option<&(String, Option<String>)> = None;
-        let mut best_width = u32::MAX;
+        let mut best_width = (u32::MAX, i64::MAX);
         for ((start, end), info) in &self.class_scopes {
-            if *start <= line && line <= *end {
-                let w = end - start;
+            if *start <= pos && pos <= *end {
+                let w = range_width((*start, *end));
                 if w < best_width {
                     best_width = w;
                     best = Some(info);
@@ -71,24 +88,34 @@ impl DartBindings {
 pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> DartBindings {
     let mut fn_scopes: Vec<FnScope> = Vec::new();
     let mut class_scopes: Vec<ClassScope> = Vec::new();
+    let mut prefixes: HashSet<String> = HashSet::new();
 
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
+            "import_specification" => {
+                if let Some(alias) = n
+                    .child_by_field_name("alias")
+                    .and_then(|alias| alias.utf8_text(source).ok())
+                {
+                    prefixes.insert(alias.to_string());
+                }
+                continue;
+            }
             "class_declaration" | "mixin_declaration" => {
                 if let Some((name, sup)) = dart_class_name_and_super(n, source) {
-                    let span = (n.start_position().row as u32, n.end_position().row as u32);
+                    let span = node_range(n);
                     class_scopes.push((span, (name, sup)));
                 }
             }
             "method_declaration" | "function_declaration" => {
-                let span = (n.start_position().row as u32, n.end_position().row as u32);
+                let span = node_range(n);
                 let mut map: HashMap<String, String> = HashMap::new();
                 collect_typed_dart_params(n, source, &mut map);
-                collect_typed_dart_locals(n, source, &mut map);
                 if !map.is_empty() {
                     fn_scopes.push((span, map));
                 }
+                collect_typed_dart_locals(n, source, &mut fn_scopes);
             }
             _ => {}
         }
@@ -101,6 +128,7 @@ pub fn collect_bindings(root: Node<'_>, source: &[u8]) -> DartBindings {
     DartBindings {
         fn_scopes,
         class_scopes,
+        prefixes,
     }
 }
 
@@ -169,8 +197,14 @@ fn collect_typed_dart_params(fn_node: Node<'_>, source: &[u8], out: &mut HashMap
                     }
                 }
             }
-            if let (Some(n), Some(t)) = (name, ty) {
-                out.insert(n, t);
+            match (name, ty) {
+                (Some(n), Some(t)) => {
+                    out.insert(n, t);
+                }
+                (Some(n), None) => {
+                    out.entry(n).or_default();
+                }
+                _ => {}
             }
             continue;
         }
@@ -181,7 +215,9 @@ fn collect_typed_dart_params(fn_node: Node<'_>, source: &[u8], out: &mut HashMap
     }
 }
 
-fn collect_typed_dart_locals(fn_node: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
+/// Each local of `fn_node` in a scope of its own: a local binds from the
+/// end of its declaration to the end of the block or loop that declares it.
+fn collect_typed_dart_locals(fn_node: Node<'_>, source: &[u8], scopes: &mut Vec<FnScope>) {
     let mut stack: Vec<Node<'_>> = vec![fn_node];
     while let Some(n) = stack.pop() {
         if (n.kind() == "method_declaration" || n.kind() == "function_declaration")
@@ -192,6 +228,7 @@ fn collect_typed_dart_locals(fn_node: Node<'_>, source: &[u8], out: &mut HashMap
         if n.kind() == "initialized_variable_definition" {
             let mut ty: Option<String> = None;
             let mut name: Option<String> = None;
+            let mut first_comma = None;
             let mut c = n.walk();
             for child in n.children(&mut c) {
                 if child.kind() == "type" && ty.is_none() {
@@ -204,6 +241,8 @@ fn collect_typed_dart_locals(fn_node: Node<'_>, source: &[u8], out: &mut HashMap
                             }
                         }
                     }
+                } else if child.kind() == "," && first_comma.is_none() {
+                    first_comma = Some(child);
                 } else if child.kind() == "identifier" && name.is_none() {
                     if let Ok(s) =
                         std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
@@ -212,8 +251,20 @@ fn collect_typed_dart_locals(fn_node: Node<'_>, source: &[u8], out: &mut HashMap
                     }
                 }
             }
-            if let (Some(n), Some(t)) = (name, ty) {
-                out.insert(n, t);
+            if let Some(name) = name {
+                // `A a = A(), b = a.copy()` binds `a` before `b`'s initializer.
+                let declared = first_comma.map_or(node_range(n).1, |comma| node_range(comma).0);
+                let mut block = n.parent();
+                while let Some(b) = block.filter(|b| {
+                    !matches!(b.kind(), "block" | "for_statement" | "for_element") && *b != fn_node
+                }) {
+                    block = b.parent();
+                }
+                let block_end = node_range(block.unwrap_or(fn_node)).1;
+                scopes.push((
+                    (declared, block_end),
+                    HashMap::from([(name, ty.unwrap_or_default())]),
+                ));
             }
         }
         let mut c = n.walk();
@@ -237,9 +288,8 @@ pub fn extract_dart_calls_and_path_literals(
     while let Some(n) = stack.pop() {
         match n.kind() {
             "call_expression" => {
-                if let Some(callee) = dart_callee_name(n, source, bindings) {
-                    let line = n.start_position().row as u32;
-                    attach_to_enclosing(line, callee, nodes);
+                if let Some(callee) = dart_callee_name(n, source, bindings, nodes) {
+                    attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
             "string_literal" => {
@@ -274,38 +324,61 @@ pub fn extract_dart_calls_and_path_literals(
     (path_literals, sql_refs)
 }
 
-fn dart_callee_name(call: Node<'_>, source: &[u8], bindings: &DartBindings) -> Option<String> {
+fn dart_callee_name(
+    call: Node<'_>,
+    source: &[u8],
+    bindings: &DartBindings,
+    nodes: &[RawNode],
+) -> Option<String> {
     let function = call.child_by_field_name("function")?;
-    let line = call.start_position().row as u32;
+    let pos = start_pos(call);
 
     match function.kind() {
         "identifier" => std::str::from_utf8(&source[function.start_byte()..function.end_byte()])
             .ok()
             .map(str::to_string),
-        "member_expression" => {
+        "member_expression" | "null_aware_member_expression" => {
             let prop = function.child_by_field_name("property")?;
             let method = std::str::from_utf8(&source[prop.start_byte()..prop.end_byte()]).ok()?;
             let obj = function.child_by_field_name("object")?;
             match obj.kind() {
                 "this" => {
-                    if let Some((cls, _)) = bindings.enclosing_class(line) {
+                    if let Some((cls, _)) = bindings.enclosing_class(pos) {
                         return Some(format!("{cls}.{method}"));
                     }
                 }
                 "super" => {
-                    if let Some((_, Some(sup))) = bindings.enclosing_class(line) {
+                    if let Some((_, Some(sup))) = bindings.enclosing_class(pos) {
                         return Some(format!("{sup}.{method}"));
                     }
                 }
                 "identifier" => {
-                    if let Ok(var) = std::str::from_utf8(&source[obj.start_byte()..obj.end_byte()])
-                    {
-                        if let Some(ty) = bindings.lookup_local(line, var) {
-                            return Some(format!("{ty}.{method}"));
-                        }
+                    let var = obj.utf8_text(source).ok()?;
+                    match bindings.lookup_local(pos, var) {
+                        Some("") => {}
+                        Some(ty) => return Some(format!("{ty}.{method}")),
+                        None if bindings.prefixes.contains(var)
+                            || declares_member(nodes, pos, var) => {}
+                        // Only a name no scope, prefix or enclosing type
+                        // binds may be a type, which the resolver decides.
+                        None => return Some(CallSite::from_receiver(var, method)),
                     }
                 }
-                _ => {}
+                // A computed receiver (`a.b.m()`, `(x as T).m()`) is no
+                // `this`: the bare name would bind the caller's own `m`.
+                // Dart reaches no free function through a receiver, and an
+                // `extension` member is its extension's.
+                _ => {
+                    return Some(
+                        match constructed_class(obj, source, nodes).filter(|cls| {
+                            bindings.lookup_local(pos, cls).is_none()
+                                && !declares_member(nodes, pos, cls)
+                        }) {
+                            Some(cls) => format!("{cls}.{method}"),
+                            None => CallSite::untyped_member(method),
+                        },
+                    );
+                }
             }
             Some(method.to_string())
         }
@@ -313,4 +386,41 @@ fn dart_callee_name(call: Node<'_>, source: &[u8], bindings: &DartBindings) -> O
             .ok()
             .map(str::to_string),
     }
+}
+
+/// The class a constructor call receiver (`Other()`) builds, when this
+/// file declares a class of that name. A local, parameter or field of that
+/// name shadows the class (`final Other = () => Actual();`); the caller
+/// checks those.
+fn constructed_class(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<String> {
+    let callee = Some(call)
+        .filter(|call| call.kind() == "call_expression")?
+        .child_by_field_name("function")
+        .filter(|n| n.kind() == "identifier")?;
+    let name = callee.utf8_text(source).ok()?;
+    nodes
+        .iter()
+        .any(|n| n.kind == NodeKind::Class && n.name == name)
+        .then(|| name.to_string())
+}
+
+/// Whether a type enclosing `pos` declares a field `name`. A nested type's
+/// members count for the whole outer type: that only keeps more calls on
+/// the bare member.
+fn declares_member(nodes: &[RawNode], pos: Pos, name: &str) -> bool {
+    let is_type = |n: &RawNode| {
+        matches!(
+            n.kind,
+            NodeKind::Class | NodeKind::Trait | NodeKind::Enum | NodeKind::Interface
+        )
+    };
+    nodes
+        .iter()
+        .filter(|m| m.kind == NodeKind::Property && m.name == name)
+        .any(|m| {
+            let at = (m.span.0, m.span.1);
+            nodes
+                .iter()
+                .any(|t| is_type(t) && span_holds(t.span, pos) && span_holds(t.span, at))
+        })
 }

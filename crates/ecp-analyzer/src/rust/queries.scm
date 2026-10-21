@@ -42,6 +42,7 @@
 (impl_item
   trait: [
     (type_identifier)
+    (scoped_type_identifier)
     (generic_type)
   ] @heritage
   body: (declaration_list
@@ -151,10 +152,14 @@
 ;; capture just the bare type_identifier — ref-gitnexus stores the type
 ;; name without generic parameters, so including `<'a>` here produces
 ;; spurious "Impl ref_only" parity drift on every generic impl block.
+;; A path-qualified self type (`impl W for io::Cursor<u8>`) keeps its last
+;; segment, the name its methods take as owner.
 (impl_item
   type: [
     (type_identifier) @impl_item.name
     (generic_type type: (type_identifier) @impl_item.name)
+    (scoped_type_identifier name: (type_identifier) @impl_item.name)
+    (generic_type type: (scoped_type_identifier name: (type_identifier) @impl_item.name))
   ]) @impl_block
 
 ;; Anonymous closures passed as call arguments (thread::spawn, iterator adapters,

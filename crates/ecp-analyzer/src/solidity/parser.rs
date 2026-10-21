@@ -84,7 +84,7 @@ impl LanguageProvider for SolidityProvider {
             let mut is_state_var = false;
             let mut state_var_visibility: Option<&[u8]> = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = cap.index;
                 if let Some(k_from_spec) = self
                     .capture_kind_by_idx

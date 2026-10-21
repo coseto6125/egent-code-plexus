@@ -511,3 +511,107 @@ fn test_edit_hook_symlinked_subdirectory_cwd_finds_importers() {
     assert!(context.contains("sub/real.js:2"), "{context}");
     assert!(context.contains("1 direct importers"), "{context}");
 }
+
+#[test]
+fn test_bash_cd_prefix_unindexed_repo_no_op() {
+    // cd resolves to a real but unregistered dir: still a clean no-op,
+    // never a failure or a stray payload.
+    let tmp = tempdir().unwrap();
+    let cmd = format!(
+        "cd '{}' && grep -rn CacheKeyQueue app",
+        tmp.path().display()
+    );
+    let env = serde_json::json!({
+        "cwd": "/tmp",
+        "tool_name": "Bash",
+        "tool_input": {"command": cmd},
+    })
+    .to_string();
+    let out = run(&env);
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty(), "unindexed cd target → no-op");
+}
+
+fn bash_hook_stdout(home: &std::path::Path, cwd: &std::path::Path, cmd: &str) -> String {
+    let env = serde_json::json!({
+        "cwd": cwd,
+        "tool_name": "Bash",
+        "tool_input": {"command": cmd},
+    })
+    .to_string();
+    let out = run_with_home(&env, Some(home));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// A leading `cd` into an indexed repo searches that repo, and the header
+/// names it: the agent's own cwd is elsewhere.
+#[test]
+fn test_bash_cd_into_indexed_repo_names_the_repo_in_the_header() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = indexed_repo(
+        tmp.path(),
+        &[(
+            "lib.js",
+            "export function CacheKeyQueue() { return 1; }\n".into(),
+        )],
+    );
+    let elsewhere = tmp.path().join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    let repo_dir = dunce::canonicalize(&repo).unwrap();
+    // The second command continues its line, as agents lay out long ones.
+    for cmd in [
+        format!("cd '{}' && grep -rn CacheKeyQueue .", repo.display()),
+        format!("cd '{}' && \\\ngrep -rn CacheKeyQueue .", repo.display()),
+    ] {
+        let out: serde_json::Value =
+            serde_json::from_str(&bash_hook_stdout(&home, &elsewhere, &cmd)).unwrap();
+        let context = out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            context.starts_with(&format!("ecp graph hits in {}:\n", repo_dir.display())),
+            "{cmd:?}: {context}"
+        );
+        assert!(
+            context.contains("CacheKeyQueue (lib.js:1)"),
+            "{cmd:?}: {context}"
+        );
+    }
+}
+
+/// No cd keeps the plain header; a cd the hook cannot place prints no hits
+/// rather than the envelope cwd's.
+#[test]
+fn test_bash_no_cd_plain_header_unknown_cd_no_hits() {
+    let tmp = tempdir().unwrap();
+    let (home, repo) = indexed_repo(
+        tmp.path(),
+        &[(
+            "lib.js",
+            "export function CacheKeyQueue() { return 1; }\n".into(),
+        )],
+    );
+    let out = bash_hook_stdout(&home, &repo, "grep -rn CacheKeyQueue .");
+    // The payload is JSON, so the header's newline is the escape `\n`.
+    assert!(out.contains(r"ecp graph hits:\n"), "{out}");
+    for cmd in [
+        "cd \"$OTHER\" && grep -rn CacheKeyQueue .",
+        "make || cd sub; grep -rn CacheKeyQueue .",
+    ] {
+        assert_eq!(bash_hook_stdout(&home, &repo, cmd), "", "{cmd}");
+    }
+}
+
+#[test]
+fn test_bash_cd_nonexistent_dir_no_op() {
+    let out = run(
+        r#"{"cwd":"/tmp","tool_name":"Bash","tool_input":{"command":"cd /no/such/dir_zz && grep -rn CacheKeyQueue app"}}"#,
+    );
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty());
+}

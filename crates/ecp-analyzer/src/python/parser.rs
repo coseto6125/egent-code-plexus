@@ -747,7 +747,7 @@ impl LanguageProvider for PythonProvider {
                 let mut import_name_node = None;
                 let mut import_src_node = None;
                 let mut import_alias_node = None;
-                for cap in m.captures {
+                for cap in m.captures() {
                     let cap_idx = Some(cap.index);
                     if cap_idx == idx.import_name {
                         import_name_node = Some(cap.node);
@@ -847,7 +847,7 @@ impl LanguageProvider for PythonProvider {
             let mut dj_connect_name_node = None;
             let mut dj_connect_handler_node = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = Some(cap.index);
                 if let Some(k_from_spec) = self
                     .capture_kind_by_idx
@@ -1279,6 +1279,7 @@ impl LanguageProvider for PythonProvider {
                                     path: clean_path.clone(),
                                     handler: decorator_handler.clone(),
                                     span: node_span(&root),
+                                    scope: None,
                                 });
                             }
                         }
@@ -1303,6 +1304,19 @@ impl LanguageProvider for PythonProvider {
             &mut call_sites,
         );
         crate::calls::extract_field_reads(tree.root_node(), source, &mut nodes, &["attribute"]);
+        crate::calls::extract_variant_refs(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &crate::calls::VariantRefSpec {
+                // A `case Color.RED:` pattern holds a `dotted_name`.
+                path_kinds: &["attribute", "dotted_name"],
+                label_parents: &[],
+                bare_label_parents: &[],
+                bare_expressions: false,
+                token_trees: false,
+            },
+        );
 
         let param_names = collect_python_param_names(tree.root_node(), source);
         let call_metas =

@@ -104,7 +104,7 @@ impl LanguageProvider for LuaProvider {
             let mut meta_child_node = None;
             let mut meta_parent_node = None;
 
-            for cap in m.captures {
+            for cap in m.captures() {
                 let cap_idx = cap.index;
                 if let Some(k_from_spec) = self
                     .capture_kind_by_idx

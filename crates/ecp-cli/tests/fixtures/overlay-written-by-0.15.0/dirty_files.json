@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "entries": {
+    "app.py": {
+      "mtime_ns": 1792601351370656653,
+      "content_hash": "e4bdd84a3e2d78f5",
+      "fragment_id": "e4bdd84a3e2d78f5",
+      "tantivy_delta_segment": null,
+      "parse_failed": false,
+      "dirty_symbols": [
+        {
+          "name": "helper",
+          "kind": "function",
+          "file": "app.py",
+          "line_start": 1,
+          "line_end": 2
+        },
+        {
+          "name": "go",
+          "kind": "function",
+          "file": "app.py",
+          "line_start": 5,
+          "line_end": 6
+        },
+        {
+          "name": "added",
+          "kind": "function",
+          "file": "app.py",
+          "line_start": 9,
+          "line_end": 10
+        }
+      ],
+      "format": 3
+    }
+  },
+  "builder_fingerprint": "v0.15.0+schema11"
+}

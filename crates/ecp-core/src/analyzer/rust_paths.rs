@@ -115,3 +115,140 @@ pub fn rust_module_path_base(
     };
     Some(rest.iter().fold(anchor, |p, seg| p.join(seg)))
 }
+
+/// For a Rust path call `a::b::Q::m`, does the module path `a::b` that the
+/// call names for `Q` agree with the import of `Q` from `import_source`?
+/// `de::Error::custom` with `use crate::error::Error` does not: `de::Error`
+/// is another item than the imported `Error`. A head segment that a `use`
+/// brings in (`use crate::error as err;`) expands to its full path first.
+/// A `crate::` path must equal the import source; a relative one, with its
+/// leading `self` / `super` dropped, must be a suffix of it. A call with no
+/// module path before `Q`, or one not written with `::`, always agrees.
+///
+/// A copy of the index resolver's rule, which phase 2 of the overlay parity
+/// work points at this one.
+pub fn rust_path_prefix_agrees_with_import(
+    full_callee: &str,
+    qualifier: &str,
+    import_source: &str,
+    imports: &[crate::analyzer::types::RawImport],
+) -> bool {
+    let Some(prefix) = rust_type_path_prefix(full_callee, qualifier) else {
+        return true;
+    };
+    let named = rust_expand_path_head(prefix, imports);
+    // `crate::a::Q` names one module from the crate root: the import must
+    // come from exactly that module. A relative path matches by suffix.
+    if named.first() == Some(&"crate") {
+        return import_source.split("::").eq(named);
+    }
+    let is_anchor = |s: &&str| matches!(*s, "" | "self" | "super");
+    let named: Vec<&str> = named.into_iter().skip_while(is_anchor).collect();
+    let source: Vec<&str> = import_source
+        .split("::")
+        .skip_while(|s| *s == "crate" || is_anchor(s))
+        .collect();
+    source.ends_with(&named)
+}
+
+/// The module path `a::b` that the Rust path call `a::b::Q::m` names before
+/// its qualifier `Q`; `None` when there is none.
+pub fn rust_type_path_prefix<'c>(full_callee: &'c str, qualifier: &str) -> Option<&'c str> {
+    let (before_member, _) = full_callee.rsplit_once("::")?;
+    let (prefix, q) = before_member.rsplit_once("::")?;
+    (q == qualifier).then_some(prefix)
+}
+
+/// The segments of the Rust module path `prefix`, with a head that a `use`
+/// brings in (`use crate::error as err;`) expanded to its full path.
+pub fn rust_expand_path_head<'s>(
+    prefix: &'s str,
+    imports: &'s [crate::analyzer::types::RawImport],
+) -> Vec<&'s str> {
+    let mut named: Vec<&str> = prefix.split("::").collect();
+    if let Some(module) = named.first().and_then(|&head| {
+        imports
+            .iter()
+            .find(|i| i.alias.as_deref().unwrap_or(&i.imported_name) == head)
+    }) {
+        // `use crate::error as err;` records the whole path as the imported
+        // name; `use crate::{error as err};` records source `crate`, name
+        // `error`.
+        let name = module.imported_name.as_str();
+        let (path, tail) = if name.contains("::") {
+            (name, None)
+        } else {
+            (module.source.as_str(), Some(name))
+        };
+        named.splice(..1, path.split("::").chain(tail));
+    }
+    named
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analyzer::types::RawImport;
+
+    fn import(source: &str, imported_name: &str, alias: Option<&str>) -> RawImport {
+        RawImport {
+            source: source.to_string(),
+            imported_name: imported_name.to_string(),
+            alias: alias.map(str::to_string),
+            binding_kind: None,
+        }
+    }
+
+    #[test]
+    fn test_rust_path_prefix_agrees_with_import_bare_qualifier_returns_true() {
+        let imports = [import("crate::k", "K", None)];
+        assert!(rust_path_prefix_agrees_with_import(
+            "K::st", "K", "crate::k", &imports
+        ));
+        assert!(rust_path_prefix_agrees_with_import(
+            "K.save", "K", "crate::k", &imports
+        ));
+    }
+
+    #[test]
+    fn test_rust_path_prefix_agrees_with_import_other_module_returns_false() {
+        let imports = [import("crate::error", "Error", None)];
+        assert!(!rust_path_prefix_agrees_with_import(
+            "de::Error::custom",
+            "Error",
+            "crate::error",
+            &imports
+        ));
+    }
+
+    #[test]
+    fn test_rust_path_prefix_agrees_with_import_crate_path_requires_equal_source() {
+        let imports = [import("crate::k", "K", None)];
+        assert!(rust_path_prefix_agrees_with_import(
+            "crate::k::K::st",
+            "K",
+            "crate::k",
+            &imports
+        ));
+        assert!(!rust_path_prefix_agrees_with_import(
+            "crate::j::K::st",
+            "K",
+            "crate::k",
+            &imports
+        ));
+    }
+
+    #[test]
+    fn test_rust_path_prefix_agrees_with_import_aliased_head_expands_first() {
+        let imports = [
+            import("crate", "crate::error", Some("err")),
+            import("crate::error", "Error", None),
+        ];
+        assert!(rust_path_prefix_agrees_with_import(
+            "err::Error::custom",
+            "Error",
+            "crate::error",
+            &imports
+        ));
+    }
+}
