@@ -3,6 +3,7 @@ name = "ecp-mcp"
 description = "MCP server library backing `ecp mcp serve` — tools derived by clap::Command introspection"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 # Not published to crates.io — distribution is GitHub Release binaries + npm + PyPI.

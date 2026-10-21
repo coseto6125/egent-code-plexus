@@ -3,6 +3,7 @@ name = "egent-code-plexus"
 description = "EgentCodePlexus — code intelligence graph for AI agents and LLMs (multi-language AST analysis)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 default-run = "ecp"
 license.workspace = true
 repository.workspace = true
