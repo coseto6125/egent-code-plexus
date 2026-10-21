@@ -131,6 +131,7 @@ const LANGUAGES: &[LangEntry] = &[
             "php-variable-call",
             "laravel-include-scope-cap",
             "laravel-controller-middleware-dynamic",
+            "laravel-unbound-action",
         ],
     },
     LangEntry {

@@ -1211,6 +1211,25 @@ pub struct UnreadMiddleware {
 /// BlindSpot `kind` of an [`UnreadMiddleware`].
 pub const BS_KIND_CONTROLLER_MIDDLEWARE: &str = "laravel-controller-middleware-dynamic";
 
+/// BlindSpot `kind` of a Laravel route whose controller action binds no
+/// method of the graph: the class or method is missing, outside the
+/// graph, or names two classes. Its Route node has no `HandlesRoute` edge,
+/// as a closure route has none.
+pub const BS_KIND_UNBOUND_ACTION: &str = "laravel-unbound-action";
+
+/// The hint of a [`BS_KIND_UNBOUND_ACTION`] BlindSpot of Route node
+/// `route` (`POST /admin/login`) and its `action` (`C@m`) as the route file
+/// writes it, completed with a group controller.
+pub fn unbound_action_hint(route: &str, action: &str) -> String {
+    format!("{route} names action `{action}`, which binds no single class method of the graph")
+}
+
+/// The action of an [`unbound_action_hint`] for Route node `route`.
+pub fn unbound_action<'h>(hint: &'h str, route: &str) -> Option<&'h str> {
+    let rest = hint.strip_prefix(route)?.strip_prefix(" names action `")?;
+    rest.split_once('`').map(|(action, _)| action)
+}
+
 /// The cross-file half of Laravel routing: the include scopes of each
 /// route file, and the controller classes route actions name.
 #[derive(Default)]

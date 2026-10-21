@@ -1604,6 +1604,24 @@ fn pass1_95_controller_actions(
         let Some(found) =
             laravel.controller_action(&pending.action, pending.namespace.as_deref(), symbol_table)
         else {
+            // The route names an action, not a closure: say so, so a reader
+            // of the edge-less Route node does not take it for an inline
+            // handler.
+            let route = &nodes[pending.route as usize];
+            let graph = &local_graphs[route.file_idx as usize];
+            blind_spots.push(BlindSpotRecord {
+                kind: string_pool.add(crate::php::laravel_routes::BS_KIND_UNBOUND_ACTION),
+                file_path: string_pool.add(&graph.file_path.to_string_lossy().replace('\\', "/")),
+                start_row: route.span.0,
+                start_col: route.span.1,
+                end_row: route.span.2,
+                end_col: route.span.3,
+                hint: string_pool.add(&crate::php::laravel_routes::unbound_action_hint(
+                    &pending.route_name,
+                    &pending.action,
+                )),
+                is_test: matches!(files[route.file_idx as usize].category, FileCategory::Test),
+            });
             continue;
         };
         let confidence = if found.by_namespace { 1.0 } else { 0.9 };

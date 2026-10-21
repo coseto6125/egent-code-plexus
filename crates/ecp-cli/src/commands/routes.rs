@@ -411,6 +411,27 @@ fn inspect_route(
             }
         }
 
+        // A Laravel route that names a controller action binding no method
+        // has no HandlesRoute edge either; the builder records the action
+        // in a BlindSpot. Its handler is unknown, not inline, and the
+        // registering scope's callers are not its callers.
+        if handler_indices.is_empty() {
+            if let Some(action) = unbound_action(graph, route_file_path, route_node, route_name) {
+                handlers_out.push(serde_json::json!({
+                    "uid": serde_json::Value::Null,
+                    "name": action,
+                    "kind": "UnresolvedAction",
+                    "handlerKind": "unresolved_action",
+                    "action": action,
+                    "filePath": route_file_path,
+                    "line": route_line,
+                    "route": route_name,
+                    "enclosingScope": enclosing_scope_json(graph, enclosing_idx),
+                }));
+                continue;
+            }
+        }
+
         // Inline-anonymous fallback: no HandlesRoute edge means the
         // registration was `app.get(path, (req, res) => …)` — the parser
         // intentionally does not synthesize a Node for an anonymous arrow.
@@ -481,6 +502,31 @@ fn inspect_route(
         "callers": callers_out,
     });
     emit(&result, fmt)
+}
+
+/// The controller action, as the route file writes it, of a Laravel Route
+/// node whose action binds no method: the builder's
+/// `laravel-unbound-action` BlindSpot at the registration names it.
+fn unbound_action<'g>(
+    graph: &'g ecp_core::graph::ArchivedZeroCopyGraph,
+    route_file_path: &str,
+    route_node: &ecp_core::graph::ArchivedNode,
+    route_name: &str,
+) -> Option<&'g str> {
+    let row = route_node.span.0.to_native();
+    graph.blind_spots.iter().find_map(|bs| {
+        if bs.start_row.to_native() != row
+            || bs.kind.resolve(&graph.string_pool)
+                != ecp_analyzer::php::laravel_routes::BS_KIND_UNBOUND_ACTION
+            || bs.file_path.resolve(&graph.string_pool) != route_file_path
+        {
+            return None;
+        }
+        ecp_analyzer::php::laravel_routes::unbound_action(
+            bs.hint.resolve(&graph.string_pool),
+            route_name,
+        )
+    })
 }
 
 /// BFS upstream over non-`HandlesRoute` incoming edges from `seed_idx`,

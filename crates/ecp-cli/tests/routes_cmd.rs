@@ -701,6 +701,8 @@ use Illuminate\Support\Facades\Route;
 
 Route::get('/health', function () { return 'ok'; });
 
+Route::post('/logintest', 'AwardController@logintest');
+
 Route::group(['middleware' => 'auth:admin'], function () {
     Route::prefix('import')
         ->group(function () {
@@ -942,4 +944,46 @@ fn test_routes_method_filter_verb_any_never_registers_drops_any_route() {
 
     let json = run_routes_json(repo.path(), home.path(), &["--method", "TRACE"]);
     assert!(method_rows(&json).is_empty(), "{json}");
+}
+
+/// `(handlerKind, name, action)` of each handler of route `path`.
+fn handler_kinds(repo: &Path, home: &Path, path: &str) -> Vec<(String, String, Option<String>)> {
+    let json = run_routes_json(repo, home, &[path]);
+    assert_eq!(json["status"], "found", "{json}");
+    json["handlers"]
+        .as_array()
+        .expect("handlers array missing")
+        .iter()
+        .map(|h| {
+            (
+                h["handlerKind"].as_str().unwrap_or("").to_string(),
+                h["name"].as_str().unwrap_or("").to_string(),
+                h["action"].as_str().map(str::to_string),
+            )
+        })
+        .collect()
+}
+
+/// A route whose string action names a method the controller lacks has no
+/// handler edge, like a closure route, but it is no inline handler: `ecp
+/// routes` reports the action as written, unresolved. A closure route stays
+/// `inline_anonymous`.
+#[test]
+fn test_routes_unbound_string_action_reports_unresolved_not_inline() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup_laravel_repo(repo.path(), home.path());
+
+    assert_eq!(
+        handler_kinds(repo.path(), home.path(), "/admin/logintest"),
+        [(
+            "unresolved_action".to_string(),
+            "AwardController@logintest".to_string(),
+            Some("AwardController@logintest".to_string()),
+        )]
+    );
+    assert_eq!(
+        handler_kinds(repo.path(), home.path(), "/admin/health"),
+        [("inline_anonymous".to_string(), "<inline>".to_string(), None)]
+    );
 }
