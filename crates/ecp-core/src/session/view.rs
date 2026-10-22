@@ -581,8 +581,12 @@ impl OverlayView {
                         // Inline, so `parsed` borrows `sym.calls` for as long
                         // as `module_calls` keeps its name.
                         let mut chain_failed = false;
+                        // The two chain callbacks run sequentially and share
+                        // the same file-metadata cache.
+                        let chain_metas = std::cell::RefCell::new(&mut base_metas);
                         let hit = CallSite::parse(raw_callee).resolve_chain(
                             |parsed| 'hit: {
+                                let mut base_metas = chain_metas.borrow_mut();
                                 if let Some(targets) = lexical.targets(span_of(sym), parsed.name())
                                 {
                                     break 'hit targets.first().copied().or_else(|| {
@@ -757,12 +761,23 @@ impl OverlayView {
                                             if caller.language != Language::Kotlin {
                                                 return None;
                                             }
-                                            resolve(
+                                            resolve_callee(
+                                                graph,
                                                 CallSite::Plain(member),
+                                                file_ord,
                                                 &file.imports,
+                                                caller,
+                                                &mut chain_metas.borrow_mut(),
+                                                &callables,
+                                                &types,
+                                                &qualifiers,
+                                                &nodes,
+                                                &replaced,
+                                                &dirty_base,
+                                                &facts,
                                                 Scope {
                                                     call: None,
-                                                    heritage: scope.heritage,
+                                                    heritage,
                                                     type_lookup: false,
                                                 },
                                             )
