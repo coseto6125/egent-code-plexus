@@ -163,4 +163,3 @@
 (package_declaration
   [(scoped_identifier) (identifier)] @namespace.name
 ) @namespace
-
