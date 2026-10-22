@@ -3274,6 +3274,13 @@ fn resolve_callee<'s>(
         .filter(|&(_, kind)| !free_only || kind != NodeKind::Method);
     if let Some(pick) = reexport::pick_call(same_file, call_target) {
         let hit = match call {
+            Some(call) if free_only => crate::analyzer::same_file_pick::prefer_free(
+                facts,
+                importer,
+                callee,
+                call.owner,
+                call_target,
+            ),
             Some(call) => prefer_owned(
                 facts,
                 importer,

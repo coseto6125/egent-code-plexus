@@ -103,6 +103,45 @@ pub fn is_free<F: PickFacts + ?Sized>(facts: &F, id: u32) -> bool {
     facts.owner(id).is_none() && facts.impl_member(id).is_none()
 }
 
+/// A receiverless name that cannot reach a method prefers its enclosing
+/// module's declaration, then an unowned declaration in the same file.
+pub fn prefer_free<F: PickFacts + ?Sized>(
+    facts: &F,
+    file: &str,
+    member: &str,
+    owner: Option<&str>,
+    target: ResolveTarget,
+) -> Option<u32> {
+    let module = owner.and_then(owner_key).and_then(|owner| {
+        if facts.is_namespace_owner(file, owner) {
+            return Some(owner);
+        }
+        let declarations = facts.pick_candidates(file, owner);
+        let mut types = declarations
+            .iter()
+            .copied()
+            .filter(|&id| facts.kind(id).is_type());
+        let ty = types.next()?;
+        if types.next().is_some() {
+            return None;
+        }
+        facts
+            .owner(ty)
+            .filter(|owner| facts.is_namespace_owner(file, owner))
+    });
+    let ids = facts.pick_candidates(file, member);
+    let predicate = target.kind_predicate();
+    let candidates = || {
+        ids.iter().copied().filter(|&id| {
+            let kind = facts.kind(id);
+            kind != NodeKind::Method && predicate(kind)
+        })
+    };
+    module
+        .and_then(|module| candidates().find(|&id| facts.owner(id) == Some(module)))
+        .or_else(|| candidates().find(|&id| is_free(facts, id)))
+}
+
 /// The owner the pick rules see for `id`, declared in `file`.
 pub fn pick_owner<'f, F: PickFacts + ?Sized>(facts: &'f F, id: u32, file: &str) -> PickOwner<'f> {
     let owner = facts.owner(id);

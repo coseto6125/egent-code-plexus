@@ -224,6 +224,8 @@ mod alpha {
     pub static NAME: &str = "alpha";
     fn local() { const LIMIT: u32 = 3; }
     mod nested { pub const LIMIT: u32 = 4; }
+    struct Config;
+    impl Config { const LIMIT: u32 = 5; }
 }
 mod beta {
     pub const LIMIT: u32 = 2;
@@ -237,6 +239,7 @@ mod beta {
         limits,
         vec![
             None,
+            Some("Config".into()),
             Some("alpha".into()),
             Some("beta".into()),
             Some("local".into()),

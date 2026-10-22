@@ -1373,6 +1373,13 @@ impl<'a> Resolver<'a> {
                 .lookup_call_in_file(&source_file_str, symbol_name, target, free_only);
         if let Some(node_id) = same_file_pick
             .and_then(|pick| match call {
+                Some(scope) if free_only => ecp_core::analyzer::same_file_pick::prefer_free(
+                    self.symbol_table,
+                    &source_file_str,
+                    symbol_name,
+                    scope.owner,
+                    target,
+                ),
                 Some(scope) => self.symbol_table.prefer_owned(
                     &source_file_str,
                     pick,

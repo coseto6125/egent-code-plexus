@@ -465,6 +465,14 @@ mod beta {
     pub static NAME: &str = "beta";
     pub fn read_beta() -> u32 { LIMIT + NAME.len() as u32 }
 }
+mod gamma {
+    pub const LIMIT: u32 = 3;
+    struct Config;
+    impl Config {
+        const LIMIT: u32 = 4;
+        fn read_gamma() -> u32 { LIMIT }
+    }
+}
 "#,
         )],
     );
@@ -491,6 +499,7 @@ mod beta {
             ("read_alpha", "alpha", "NAME"),
             ("read_beta", "beta", "LIMIT"),
             ("read_beta", "beta", "NAME"),
+            ("read_gamma", "gamma", "LIMIT"),
         ]
     );
 }
