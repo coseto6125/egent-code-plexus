@@ -8,7 +8,9 @@ use crate::framework_helpers::{
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode};
+use ecp_core::analyzer::types::{
+    BlindSpot, LocalGraph, NameRef, NameRefKind, RawFrameworkRef, RawImport, RawNode,
+};
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
@@ -109,6 +111,97 @@ fn body_has_call(node: tree_sitter::Node) -> bool {
         }
     }
     false
+}
+
+/// Record `Type::CONST` reads only when the parser emitted that exact constant
+/// as a member of the named type. Enum cases still go through `VariantRef`.
+fn extract_qualified_constant_refs(
+    root: tree_sitter::Node<'_>,
+    source: &[u8],
+    nodes: &mut [RawNode],
+) {
+    let owner_counts = nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.kind,
+                NodeKind::Class | NodeKind::Interface | NodeKind::Trait | NodeKind::Enum
+            )
+        })
+        .fold(rustc_hash::FxHashMap::default(), |mut counts, node| {
+            *counts.entry(node.name.as_str()).or_insert(0usize) += 1;
+            counts
+        });
+    let constants: rustc_hash::FxHashSet<(&str, &str)> = nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::Const)
+        .filter_map(|node| Some((node.owner_class.as_deref()?, node.name.as_str())))
+        .collect();
+    if constants.is_empty() {
+        return;
+    }
+
+    let mut refs: Vec<((u32, u32, u32, u32), String)> = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "class_constant_access_expression" {
+            let Some(text) = node.utf8_text(source).ok() else {
+                continue;
+            };
+            let Some((scope, constant)) = text.rsplit_once("::") else {
+                continue;
+            };
+            if constant.starts_with('$') {
+                continue;
+            }
+            let span = node_span(&node);
+            let owner = match scope.trim_start_matches('\\') {
+                "self" | "static" => nodes
+                    .iter()
+                    .filter(|raw| {
+                        matches!(raw.kind, NodeKind::Function | NodeKind::Method)
+                            && ecp_core::analyzer::types::span_contains(raw.span, span)
+                    })
+                    .min_by_key(|raw| crate::framework_helpers::span_area(raw.span))
+                    .and_then(|raw| raw.owner_class.as_deref()),
+                scope => {
+                    let scope = scope.trim_start_matches('\\');
+                    // The qualified resolver identifies its type by the final
+                    // segment. Do not discard a namespace path here: two
+                    // namespaces can declare the same class name.
+                    (!scope.contains('\\')).then_some(scope)
+                }
+            };
+            if let Some(owner) = owner.filter(|owner| {
+                owner_counts.get(*owner) == Some(&1) && constants.contains(&(*owner, constant))
+            }) {
+                refs.push((span, format!("{owner}.{constant}")));
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+
+    for (span, name) in refs {
+        let Some(target) = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, raw)| {
+                matches!(raw.kind, NodeKind::Function | NodeKind::Method)
+                    && ecp_core::analyzer::types::span_contains(raw.span, span)
+            })
+            .min_by_key(|(_, raw)| crate::framework_helpers::span_area(raw.span))
+            .map(|(idx, _)| idx)
+        else {
+            continue;
+        };
+        let entry = NameRef::encode(&name, NameRefKind::Constant);
+        if !nodes[target].field_reads.contains(&entry) {
+            nodes[target].field_reads.push(entry);
+        }
+    }
 }
 
 thread_local! {
@@ -972,6 +1065,7 @@ impl LanguageProvider for PhpProvider {
         detect_enum_imitation_blind_spots(tree.root_node(), path, is_test_file, &mut blind_spots);
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
+        extract_qualified_constant_refs(tree.root_node(), source, &mut nodes);
         // A class constant is its class's member: only `self::STATUS` or
         // `Order::STATUS` reaches it, never a bare `STATUS`. The kinds match
         // the containers `class_membership` links a member to.

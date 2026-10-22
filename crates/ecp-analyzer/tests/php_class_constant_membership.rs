@@ -30,6 +30,8 @@ fn incoming(graph: &ZeroCopyGraph, target: &str) -> Vec<(String, RelType)> {
 }
 
 const SRC: &str = "<?php\nconst LIMIT = 3;\n\nclass Order {\n    const STATUS = 'x';\n}\n\ninterface Shape {\n    const SIDES = 4;\n}\n\nenum Suit: string {\n    case Hearts = 'H';\n    const WILD = 'W';\n}\n";
+const ENUM_ONLY_SRC: &str =
+    "<?php\nenum Suit: string {\n    case Hearts = 'H';\n    const WILD = 'W';\n}\n";
 
 #[test]
 fn test_class_membership_php_class_constant_returns_has_property_from_class() {
@@ -60,7 +62,7 @@ fn test_class_membership_php_module_constant_keeps_file_defines() {
 
 #[test]
 fn test_class_membership_php_enum_constant_returns_has_property_from_enum() {
-    let g = graph(&PhpProvider::new().unwrap(), &[("p.php", SRC)]);
+    let g = graph(&PhpProvider::new().unwrap(), &[("p.php", ENUM_ONLY_SRC)]);
     assert_eq!(
         incoming(&g, "WILD"),
         vec![("Suit".to_string(), RelType::HasProperty)]

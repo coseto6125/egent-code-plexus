@@ -695,11 +695,22 @@ function readLimit() {\n    return LIMITS;\n}\n\n\
 function shadow($LIMITS) {\n    return $LIMITS;\n}\n";
 
 const PHP_QUALIFIED_CONSTANTS: &str = "<?php\n\
-class Config { const LIMIT = 3; }\n\
+class Config {\n\
+    const LIMIT = 3;\n\
+    public static function readSelf(): int { return self::LIMIT; }\n\
+    public static function readStatic(): int { return static::LIMIT; }\n\
+}\n\
+class Other {}\n\
 enum Suit { case Hearts; const WILD = 'W'; }\n\
 function readClass(): int { return Config::LIMIT; }\n\
 function readEnum(): string { return Suit::WILD; }\n\
 function readCase(): Suit { return Suit::Hearts; }\n";
+
+const PHP_QUALIFIED_CONSTANTS_MISSING: &str = "<?php\n\
+class Config { const LIMIT = 3; }\n\
+class Other {}\n\
+function missing(): int { return Other::MISSING; }\n\
+function wrongOwner(): int { return Other::LIMIT; }\n";
 
 #[test]
 fn test_value_read_php_top_level_const_returns_same_file_edge() {
@@ -746,7 +757,25 @@ fn test_value_read_php_qualified_class_and_enum_constants_return_same_file_edges
         value_reads(&g, "readEnum"),
         vec![r("p.php", "WILD", VALUE_READ, SAME_FILE)]
     );
+    assert_eq!(
+        value_reads(&g, "readSelf"),
+        vec![r("p.php", "LIMIT", VALUE_READ, SAME_FILE)]
+    );
+    assert_eq!(
+        value_reads(&g, "readStatic"),
+        vec![r("p.php", "LIMIT", VALUE_READ, SAME_FILE)]
+    );
     assert_eq!(value_reads(&g, "readCase"), none());
+}
+
+#[test]
+fn test_value_read_php_qualified_constant_missing_or_wrong_owner_returns_no_edge() {
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[("p.php", PHP_QUALIFIED_CONSTANTS_MISSING)],
+    );
+    assert_eq!(value_reads(&g, "missing"), none());
+    assert_eq!(value_reads(&g, "wrongOwner"), none());
 }
 
 // ---- Ruby ----

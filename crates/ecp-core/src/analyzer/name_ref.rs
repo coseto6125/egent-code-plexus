@@ -130,7 +130,13 @@ where
     let other_package = facts.file_of(id).is_some_and(|target| {
         std::path::Path::new(target).parent() != std::path::Path::new(file).parent()
     });
-    let type_member = name_ref.kind != NameRefKind::Function
+    // PHP records a verified `Type.CONST` for a class or enum constant.
+    // It must retain its member owner, while every other non-function value
+    // keeps the existing type-member rejection.
+    let php_qualified_constant =
+        qualified && language == Language::Php && name_ref.kind == NameRefKind::Constant;
+    let type_member = !php_qualified_constant
+        && name_ref.kind != NameRefKind::Function
         && !matches!(
             language,
             Language::Java
