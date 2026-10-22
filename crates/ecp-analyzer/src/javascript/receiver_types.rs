@@ -108,7 +108,6 @@ fn js_callee_name(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<St
             } else {
                 // Unknown receiver type — emit qualified name so resolver has context.
                 let obj_name = obj.utf8_text(source).ok()?;
-                let site = format!("{obj_name}.{prop_name}");
                 // A call receiver (`make().bar()`, `new Foo().bar()`): the
                 // resolver types it by the callee's return type or the
                 // constructed class, else the site resolves as before.
@@ -117,9 +116,12 @@ fn js_callee_name(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<St
                     "new_expression" => new_expression_call(obj, source),
                     _ => None,
                 };
+                // The chain fallback is the member name alone: the resolver
+                // keeps only its last segment, and the receiver text of a
+                // long chain would make every site O(depth).
                 Some(match inner {
-                    Some(inner) => CallSite::chained_member(&inner, &site),
-                    None => site,
+                    Some(inner) => CallSite::chained_member(&inner, prop_name),
+                    None => format!("{obj_name}.{prop_name}"),
                 })
             }
         }

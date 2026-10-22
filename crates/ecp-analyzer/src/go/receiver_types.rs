@@ -96,6 +96,9 @@ fn extract_method_receiver(node: &Node<'_>, source: &[u8]) -> Option<(String, St
 struct Scope {
     range: PosRange,
     bindings: HashMap<String, String>,
+    /// Every name a parameter, `var` or `:=` binds, typed or not, with the
+    /// position it takes effect from.
+    values: HashMap<String, Pos>,
 }
 
 /// Collection of all scopes in the file.
@@ -123,6 +126,15 @@ impl LocalTypes {
         }
         best
     }
+
+    /// Whether a parameter or local declared before `pos` binds `name`.
+    pub fn binds_local(&self, pos: Pos, name: &str) -> bool {
+        self.scopes.iter().any(|scope| {
+            scope.range.0 <= pos
+                && pos <= scope.range.1
+                && scope.values.get(name).is_some_and(|from| *from <= pos)
+        })
+    }
 }
 
 /// Build `LocalTypes` by scanning every `function_declaration` and
@@ -134,11 +146,14 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8], recv_map: &ReceiverMap
         match n.kind() {
             "function_declaration" | "method_declaration" => {
                 let mut bindings: HashMap<String, String> = HashMap::new();
+                let mut values: HashMap<String, Pos> = HashMap::new();
+                let scope_start = start_pos(n);
 
                 // For method_declaration: the receiver var itself is in scope.
                 if n.kind() == "method_declaration" {
                     if let Some(recv_list) = n.child_by_field_name("receiver") {
                         collect_params(&recv_list, source, &mut bindings);
+                        collect_param_names(&recv_list, source, scope_start, &mut values);
                     }
                     // Also bind the receiver var to the receiver type via recv_map.
                     // (Already handled by collect_params which reads the type field.)
@@ -147,17 +162,19 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8], recv_map: &ReceiverMap
                 // Collect typed parameters from the function signature.
                 if let Some(params) = n.child_by_field_name("parameters") {
                     collect_params(&params, source, &mut bindings);
+                    collect_param_names(&params, source, scope_start, &mut values);
                 }
 
                 // Collect var declarations and short-var assignments in the body.
                 if let Some(body) = n.child_by_field_name("body") {
-                    collect_body_bindings(&body, source, &mut bindings);
+                    collect_body_bindings(&body, source, &mut bindings, &mut values);
                 }
 
-                if !bindings.is_empty() {
+                if !bindings.is_empty() || !values.is_empty() {
                     scopes.push(Scope {
                         range: node_range(n),
                         bindings,
+                        values,
                     });
                 }
 
@@ -213,7 +230,12 @@ fn collect_params(params: &Node<'_>, source: &[u8], out: &mut HashMap<String, St
 /// Walk a function body and collect:
 /// - `var_declaration` → `var x Dog` / `var x *Dog`
 /// - `short_var_declaration` where the RHS is a composite literal → `x := Dog{}`
-fn collect_body_bindings(body: &Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
+fn collect_body_bindings(
+    body: &Node<'_>,
+    source: &[u8],
+    out: &mut HashMap<String, String>,
+    values: &mut HashMap<String, Pos>,
+) {
     let mut stack: Vec<Node<'_>> = vec![*body];
     while let Some(n) = stack.pop() {
         // Don't descend into nested function literals (they get their own scope).
@@ -226,17 +248,53 @@ fn collect_body_bindings(body: &Node<'_>, source: &[u8], out: &mut HashMap<Strin
                 for child in n.children(&mut c) {
                     if child.kind() == "var_spec" {
                         collect_var_spec(&child, source, out);
+                        record_names(&child, source, start_pos(child), values);
                     }
                 }
             }
             "short_var_declaration" => {
                 collect_short_var(&n, source, out);
+                if let Some(left) = n.child_by_field_name("left") {
+                    record_names(&left, source, start_pos(n), values);
+                }
             }
             _ => {}
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
             stack.push(child);
+        }
+    }
+}
+
+/// Record the identifier children of `node` as bound from `from`; the first
+/// declaration of a name wins.
+fn record_names(node: &Node<'_>, source: &[u8], from: Pos, out: &mut HashMap<String, Pos>) {
+    let mut c = node.walk();
+    for child in node.children(&mut c) {
+        if child.kind() == "identifier" {
+            if let Some(name) = node_text(child, source) {
+                let slot = out.entry(name).or_insert(from);
+                *slot = (*slot).min(from);
+            }
+        }
+    }
+}
+
+/// Record every parameter name of a `parameter_list`, typed or not.
+fn collect_param_names(
+    params: &Node<'_>,
+    source: &[u8],
+    from: Pos,
+    out: &mut HashMap<String, Pos>,
+) {
+    let mut c = params.walk();
+    for p in params.children(&mut c) {
+        if matches!(
+            p.kind(),
+            "parameter_declaration" | "variadic_parameter_declaration"
+        ) {
+            record_names(&p, source, from, out);
         }
     }
 }
@@ -366,7 +424,15 @@ fn go_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Option<
                 }
                 // `NewFoo().Bar()`: the resolver types the operand by the
                 // callee's return type.
-                if operand.kind() == "call_expression" {
+                // A callee that a parameter or local binds is a closure, not
+                // the same-named function whose return type would type it.
+                let calls_local = operand.kind() == "call_expression"
+                    && operand
+                        .child_by_field_name("function")
+                        .filter(|f| f.kind() == "identifier")
+                        .and_then(|f| node_text(f, source))
+                        .is_some_and(|name| locals.binds_local(start_pos(operand), &name));
+                if operand.kind() == "call_expression" && !calls_local {
                     if let Some(inner) = go_callee_name(operand, source, locals) {
                         return Some(CallSite::chained_member(&inner, &method_name));
                     }

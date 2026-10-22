@@ -475,6 +475,17 @@ fn python_callee_name(
                             // by the callee's return type or constructed class.
                             None if obj.kind() == "call" => {
                                 let untyped = CallSite::untyped_member(attr_name);
+                                // A callee that a parameter or local binds
+                                // (`make = lambda: Beta()`) is a value, not
+                                // the same-named function that would type it.
+                                let calls_local = obj
+                                    .child_by_field_name("function")
+                                    .filter(|f| f.kind() == "identifier")
+                                    .and_then(|f| f.utf8_text(source).ok())
+                                    .is_some_and(|name| locals.shadowed(obj, name));
+                                if calls_local {
+                                    return Some(untyped);
+                                }
                                 match python_callee_name(obj, source, locals, classes) {
                                     Some(inner) => CallSite::chained_member(&inner, &untyped),
                                     None => untyped,

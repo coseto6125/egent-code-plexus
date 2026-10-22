@@ -1011,3 +1011,148 @@ fn test_resolve_call_c_nested_free_calls_still_bind_both() {
     assert!(names.contains(&"foo_create".to_string()), "{names:?}");
     assert!(names.contains(&"foo_bar".to_string()), "{names:?}");
 }
+
+// ---- chain fallback length (JavaScript) ----
+
+/// The fallback of a chained site is the member name, not the receiver
+/// text, so a long chain stays near-linear: the receiver text made every
+/// site O(depth) and the file O(depth^3) bytes. The bound stands for
+/// "not cubic", a cubic file is megabytes here.
+#[test]
+fn test_js_callee_name_long_chain_stores_near_linear_callee_bytes() {
+    let depth = 200;
+    let mut src = String::from("let p = program;\nexport function run() {\n  p");
+    for _ in 0..depth {
+        src.push_str(".option('--flag', 'x')");
+    }
+    src.push_str(";\n}\n");
+    let calls = raw_calls(
+        &JavaScriptProvider::new().unwrap(),
+        "src/chain.js",
+        &src,
+        "run",
+    );
+    let total: usize = calls.iter().map(String::len).sum();
+    assert!(
+        calls.len() >= depth && total < depth * depth * 16,
+        "{} callees, {total} bytes",
+        calls.len()
+    );
+    for call in &calls {
+        if let site @ CallSite::ChainedMember { .. } = CallSite::parse(call) {
+            assert_eq!(site.fallback(), CallSite::Plain("option"), "{call:?}");
+        }
+    }
+}
+
+#[test]
+fn test_js_callee_name_new_receiver_chain_fallback_is_member_name() {
+    let calls = raw_calls(
+        &JavaScriptProvider::new().unwrap(),
+        JS_USE.0,
+        JS_USE.1,
+        "useNew",
+    );
+    let site = calls
+        .iter()
+        .map(|c| CallSite::parse(c))
+        .find(|s| matches!(s, CallSite::ChainedMember { .. }))
+        .unwrap_or_else(|| panic!("no chained entry: {calls:?}"));
+    assert_eq!(site.fallback(), CallSite::Plain("bar"), "{calls:?}");
+}
+
+// ---- chain on a local closure (Go, Python, Swift) ----
+
+/// `caller` never binds `Alpha.bar`, the module function's return type.
+fn assert_no_alpha_bar(graph: &ZeroCopyGraph, caller: &str) {
+    assert!(
+        !owners(graph, caller, "bar").contains(&"Alpha".to_string()),
+        "{caller}: a local closure is no module function; all: {:?}",
+        targets(graph, caller)
+    );
+}
+
+/// `caller`'s `make().bar()` binds `Alpha.bar` through the module function.
+fn assert_binds_alpha(graph: &ZeroCopyGraph, caller: &str) {
+    assert_eq!(
+        owners(graph, caller, "bar"),
+        ["Alpha"],
+        "{caller}: all: {:?}",
+        targets(graph, caller)
+    );
+}
+
+fn go_closure_graph() -> ZeroCopyGraph {
+    single(
+        &GoProvider::new().unwrap(),
+        &[(
+            "app/closure.go",
+            "package app\n\ntype Alpha struct{}\n\nfunc (a *Alpha) bar() {}\n\ntype Beta struct{}\n\nfunc (b *Beta) bar() {}\n\nfunc produce() Alpha { return Alpha{} }\n\nfunc useLocal() {\n\tproduce := func() Beta { return Beta{} }\n\tproduce().bar()\n}\n\nfunc useParam(produce func() Beta) {\n\tproduce().bar()\n}\n\nfunc useModule() {\n\tproduce().bar()\n}\n",
+        )],
+    )
+}
+
+#[test]
+fn test_resolve_call_go_local_closure_chain_skips_module_function_type() {
+    assert_no_alpha_bar(&go_closure_graph(), "useLocal");
+}
+
+#[test]
+fn test_resolve_call_go_closure_param_chain_skips_module_function_type() {
+    assert_no_alpha_bar(&go_closure_graph(), "useParam");
+}
+
+#[test]
+fn test_resolve_call_go_module_function_chain_binds_return_type_member() {
+    assert_binds_alpha(&go_closure_graph(), "useModule");
+}
+
+fn py_closure_graph() -> ZeroCopyGraph {
+    single(
+        &PythonProvider::new().unwrap(),
+        &[(
+            "closure.py",
+            "class Alpha:\n    def bar(self):\n        pass\n\n\nclass Beta:\n    def bar(self):\n        pass\n\n\ndef make() -> Alpha:\n    return Alpha()\n\n\ndef use_local():\n    make = lambda: Beta()\n    make().bar()\n\n\ndef use_param(make):\n    make().bar()\n\n\ndef use_module():\n    make().bar()\n",
+        )],
+    )
+}
+
+#[test]
+fn test_resolve_call_python_local_lambda_chain_skips_module_function_type() {
+    assert_no_alpha_bar(&py_closure_graph(), "use_local");
+}
+
+#[test]
+fn test_resolve_call_python_closure_param_chain_skips_module_function_type() {
+    assert_no_alpha_bar(&py_closure_graph(), "use_param");
+}
+
+#[test]
+fn test_resolve_call_python_module_function_chain_binds_return_type_member() {
+    assert_binds_alpha(&py_closure_graph(), "use_module");
+}
+
+fn swift_closure_graph() -> ZeroCopyGraph {
+    single(
+        &SwiftProvider::new().unwrap(),
+        &[(
+            "Sources/Closure.swift",
+            "class Alpha {\n    func bar() {}\n}\n\nclass Beta {\n    func bar() {}\n}\n\nfunc make() -> Alpha { return Alpha() }\n\nfunc useLocal() {\n    let make = { Beta() }\n    make().bar()\n}\n\nfunc useParam(make: () -> Beta) {\n    make().bar()\n}\n\nfunc useModule() {\n    make().bar()\n}\n",
+        )],
+    )
+}
+
+#[test]
+fn test_resolve_call_swift_local_closure_chain_skips_module_function_type() {
+    assert_no_alpha_bar(&swift_closure_graph(), "useLocal");
+}
+
+#[test]
+fn test_resolve_call_swift_closure_param_chain_skips_module_function_type() {
+    assert_no_alpha_bar(&swift_closure_graph(), "useParam");
+}
+
+#[test]
+fn test_resolve_call_swift_module_function_chain_binds_return_type_member() {
+    assert_binds_alpha(&swift_closure_graph(), "useModule");
+}
