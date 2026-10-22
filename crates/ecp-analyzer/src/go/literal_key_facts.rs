@@ -185,9 +185,10 @@ fn mark_elided_value(
         .then_some(value)
         .or_else(|| {
             let mut cursor = value.walk();
-            value
+            let literal = value
                 .named_children(&mut cursor)
-                .find(|child| child.kind() == "literal_value")
+                .find(|child| child.kind() == "literal_value");
+            literal
         });
     if let Some(literal) = literal {
         mark_literal_keys(literal, shape, definitions, position, facts);
