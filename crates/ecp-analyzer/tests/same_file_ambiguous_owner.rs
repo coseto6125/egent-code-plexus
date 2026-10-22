@@ -537,7 +537,7 @@ fn test_resolve_call_typescript_one_owner_binds_its_save() {
     assert_run_binds(
         &typescript(),
         "u.ts",
-        "class A { save() {} }\nfunction run(o: any) { o.save(); }\n",
+        "class A { save() {} }\nfunction run() { unknown().save(); }\n",
         "A",
     );
 }
@@ -547,7 +547,7 @@ fn test_resolve_call_javascript_one_owner_binds_its_save() {
     assert_run_binds(
         &javascript(),
         "u.js",
-        "class A { save() {} }\nfunction run(o) { o.save(); }\n",
+        "class A { save() {} }\nfunction run() { unknown().save(); }\n",
         "A",
     );
 }
