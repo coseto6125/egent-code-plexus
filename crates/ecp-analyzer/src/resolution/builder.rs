@@ -2584,6 +2584,7 @@ fn pass2_emit_node_edges(
 
     let call_heritage =
         ecp_core::analyzer::heritage::enclosing_class_heritage(raw_node, &local_graph.nodes);
+    let language = Language::from_path(&local_graph.file_path.to_string_lossy());
     for (call_idx, raw_callee) in raw_node.calls.iter().enumerate() {
         let lookup_key = CallMetaKey::new(raw_node.span, call_idx as u32);
         let meta = indirect_lookup.get(&lookup_key);
@@ -2603,7 +2604,8 @@ fn pass2_emit_node_edges(
             ),
         };
         // `Foo.create().bar()`: `bar` on the type the one bound `create`
-        // returns. Only an unknown return type permits the parser's fallback.
+        // returns. Only an unknown return type permits the parser's fallback,
+        // except Kotlin's existing top-level extension-function retry.
         let mut chain_failed = false;
         let targets = CallSite::parse(raw_callee).resolve_chain(resolve, |inner, member| {
             if chain_failed {
@@ -2613,9 +2615,27 @@ fn pass2_emit_node_edges(
                 return None;
             };
             type_ladder::returned_type(symbol_table, inner.0).map(|_| {
-                let target = resolver.resolve_chained_member(&local_graph.file_path, inner, member);
-                chain_failed = target.is_none();
-                target.into_iter().collect()
+                let targets = resolver
+                    .resolve_chained_member(&local_graph.file_path, inner, member)
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                let targets = if targets.is_empty() && language == Language::Kotlin {
+                    resolver
+                        .extension_fallback(
+                            &local_graph.file_path,
+                            member,
+                            &local_graph.imports,
+                            ResolveTarget::Callable,
+                            call_heritage,
+                        )
+                        .into_iter()
+                        .map(|(id, confidence)| (id, confidence.min(inner.1)))
+                        .collect()
+                } else {
+                    targets
+                };
+                chain_failed = targets.is_empty();
+                targets
             })
         });
         for (target_id, confidence) in targets {

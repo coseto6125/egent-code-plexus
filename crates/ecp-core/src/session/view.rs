@@ -751,12 +751,24 @@ impl OverlayView {
                                 }
                                 let inner = (*inner)?;
                                 type_ladder::returned_type(&facts, inner.0).map(|_| {
-                                    let target = facts.chained_member(
-                                        inner,
-                                        member,
-                                        caller.language,
-                                        &types,
-                                    );
+                                    let target = facts
+                                        .chained_member(inner, member, caller.language, &types)
+                                        .or_else(|| {
+                                            if caller.language != Language::Kotlin {
+                                                return None;
+                                            }
+                                            resolve(
+                                                CallSite::Plain(member),
+                                                &file.imports,
+                                                Scope {
+                                                    call: None,
+                                                    heritage: scope.heritage,
+                                                    type_lookup: false,
+                                                },
+                                            )
+                                            .filter(|&(idx, _)| is_free(&facts, idx))
+                                        })
+                                        .map(|(id, confidence)| (id, confidence.min(inner.1)));
                                     chain_failed = target.is_none();
                                     target
                                 })

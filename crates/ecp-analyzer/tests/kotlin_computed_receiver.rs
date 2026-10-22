@@ -119,6 +119,13 @@ fn test_resolve_call_kotlin_computed_receiver_extension_binds_top_level_function
 }
 
 #[test]
+fn test_resolve_call_kotlin_library_return_extension_binds_top_level_function() {
+    let source =
+        "fun String.ext() {}\nclass C { fun text(): String = \"\"\nfun go() { text().ext() } }\n";
+    assert_eq!(owners_called(&build_in(source), "go", "ext"), [""]);
+}
+
+#[test]
 fn test_resolve_call_kotlin_computed_receiver_member_precedes_extension() {
     let source = "class Other { fun ext() {} }\nfun Other.ext() {}\nclass C { fun other(): Other = Other()\nfun go() { other().ext() } }\n";
     assert_eq!(owners_called(&build_in(source), "go", "ext"), ["Other"]);

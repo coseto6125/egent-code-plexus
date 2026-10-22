@@ -1381,7 +1381,10 @@ fn test_overlay_kotlin_computed_receiver_extension_matches_reindex() {
         &KotlinProvider::new().unwrap(),
         &[("C.kt", before)],
         &[("C.kt", after)],
-        &[("C.kt".into(), "ext".into(), "".into(), 70)],
+        &[
+            ("C.kt".into(), "ext".into(), "".into(), 100),
+            ("C.kt".into(), "other".into(), "C".into(), 100),
+        ],
     );
 }
 
