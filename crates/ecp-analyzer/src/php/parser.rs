@@ -983,13 +983,14 @@ impl LanguageProvider for PhpProvider {
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         // A class constant is its class's member: only `self::STATUS` or
-        // `Order::STATUS` reaches it, never a bare `STATUS`.
+        // `Order::STATUS` reaches it, never a bare `STATUS`. The kinds match
+        // the containers `class_membership` links a member to.
         let types: Vec<_> = nodes
             .iter()
             .filter(|n| {
                 matches!(
                     n.kind,
-                    NodeKind::Class | NodeKind::Interface | NodeKind::Trait | NodeKind::Enum
+                    NodeKind::Class | NodeKind::Interface | NodeKind::Trait
                 )
             })
             .map(|n| (n.name.clone(), n.span))

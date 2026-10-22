@@ -218,6 +218,9 @@ fn emit_pass1_span(
         let rel_type = match member.kind {
             NodeKind::Function | NodeKind::Method | NodeKind::Constructor => RelType::HasMethod,
             NodeKind::Property => RelType::HasProperty,
+            // A class constant (PHP `const STATUS`) carries its class as
+            // owner, so `scope_defines` gives it no File edge.
+            NodeKind::Const if member.owner_class.is_some() => RelType::HasProperty,
             _ => continue,
         };
 
