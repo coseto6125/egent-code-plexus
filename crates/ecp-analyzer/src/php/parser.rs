@@ -12,7 +12,7 @@ use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImpor
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Node, Query, QueryCursor};
+use tree_sitter::{Query, QueryCursor};
 
 /// Blind-spot kind/hint pairs, indexed by `parse_file`: the first three by
 /// the capture-index dispatch, the last after the receiver walk.

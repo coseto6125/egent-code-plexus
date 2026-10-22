@@ -71,13 +71,9 @@ fn run_git(repo: &Path, args: &[&str]) {
     );
 }
 
-fn setup_fastapi_repo(repo: &Path, home: &Path) {
+fn setup_repo(repo: &Path, home: &Path, main_py: &str) {
     std::fs::create_dir(repo.join("src")).unwrap();
-    std::fs::write(
-        repo.join("src/main.py"),
-        include_str!("fixtures/fastapi_depends.py"),
-    )
-    .unwrap();
+    std::fs::write(repo.join("src/main.py"), main_py).unwrap();
     run_git(repo, &["init", "-q", "-b", "main"]);
     run_git(
         repo,
@@ -120,16 +116,18 @@ fn high_trust_only_filters_framework_edges_in_impact() {
     let tmp = tempfile::tempdir().unwrap();
     let home_tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
-    setup_fastapi_repo(repo, home_tmp.path());
-
-    // The only edges reaching get_db come from FastAPI `Depends(get_db)` —
-    // emitted as framework refs with confidence 0.6 ("fastapi-depends").
+    // The fixture must reach the target through low-confidence edges only.
+    // FastAPI `Depends(get_db)` no longer qualifies: passing `get_db` by name
+    // is also a certain `function_reference` edge. The getattr fan-out is
+    // the reflection guess (0.5 / sqrt(N)) the filter exists for:
     //
-    //   read_user --(Depends, 0.6)--> get_current_user --(Depends, 0.6)--> get_db
-    //
-    // Default impact upstream from get_db must include at least one caller
-    // (get_current_user) reached via the low-confidence edge.
-    let target_name = "get_db";
+    //   dispatch, alt_dispatch --(getattr fan-out, <0.7)--> handle_delete
+    setup_repo(
+        repo,
+        home_tmp.path(),
+        include_str!("fixtures/dispatcher_getattr.py"),
+    );
+    let target_name = "handle_delete";
     let default_out = Command::new(ecp_bin())
         .args([
             "impact",
@@ -158,11 +156,11 @@ fn high_trust_only_filters_framework_edges_in_impact() {
         .unwrap_or(0);
     assert!(
         default_count > 1,
-        "default upstream from get_db must traverse Depends edges (got count={default_count}): {default_json}"
+        "default upstream from handle_delete must traverse fan-out edges (got count={default_count}): {default_json}"
     );
 
-    // --high-trust-only=true: framework edges (confidence 0.6) filtered → only
-    // the target node itself remains in the BFS result.
+    // --high-trust-only=true: the fan-out edges are filtered, so only the
+    // target node itself remains in the BFS result.
     let strict_out = Command::new(ecp_bin())
         .args([
             "impact",
