@@ -220,14 +220,17 @@ fn simple_id_and_type(
     Some((name.to_string(), ty.to_string()))
 }
 
-/// Whether `call` invokes a local or parameter. Its result may have a type,
-/// but the binder does not infer delegate return types, so a same-named member
-/// must not type an enclosing member call.
-fn calls_local(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> bool {
+/// Whether `call` invokes a local, parameter, field or property. Its result
+/// may have a type, but the binder does not infer delegate return types, so a
+/// same-named member must not type an enclosing member call.
+fn calls_value(call: Node<'_>, source: &[u8], locals: &LocalTypes, nodes: &[RawNode]) -> bool {
     call.child_by_field_name("function")
         .filter(|function| function.kind() == "identifier")
         .and_then(|function| function.utf8_text(source).ok())
-        .is_some_and(|name| locals.lookup(start_pos(call), name).is_some())
+        .is_some_and(|name| {
+            let pos = start_pos(call);
+            locals.lookup(pos, name).is_some() || declares_member(nodes, pos, name)
+        })
 }
 
 /// Resolve the callee for a C# `invocation_expression`, applying receiver binding.
@@ -275,7 +278,9 @@ fn csharp_callee(
                 (Some(t), _) => format!("{t}.{method}"),
                 // `Foo.Create().Bar()`: the resolver types the receiver by
                 // the callee's return type.
-                (None, "invocation_expression") if !calls_local(receiver, source, locals) => {
+                (None, "invocation_expression")
+                    if !calls_value(receiver, source, locals, nodes) =>
+                {
                     match CallSite::nested_chain(|| csharp_callee(receiver, source, locals, nodes))
                     {
                         Some(inner) => CallSite::chained_member(&inner, method),

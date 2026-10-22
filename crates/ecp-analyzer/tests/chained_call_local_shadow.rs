@@ -67,16 +67,20 @@ fn test_cpp_callable_field_chain_does_not_use_free_function_return_type() {
             "class Alpha { public: void Bar() {} };\n\
              class Beta { public: void Bar() {} };\n\
              Alpha* make() { return nullptr; }\n\
+             Alpha* generic_make() { return nullptr; }\n\
              class Maker { public: Beta* operator()() { return nullptr; } };\n\
              class Use {\n\
                  Maker make;\n\
+                 std::function<Beta*()> generic_make;\n\
              public:\n\
                  void field() { make()->Bar(); }\n\
+                 void generic_field() { generic_make()->Bar(); }\n\
              };\n",
         )],
     );
 
     assert_no_alpha_bar(&graph, "field");
+    assert_no_alpha_bar(&graph, "generic_field");
 }
 
 #[test]
