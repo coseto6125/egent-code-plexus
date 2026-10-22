@@ -771,6 +771,28 @@ impl SymbolTable {
             .find(|&id| predicate(self.node_kinds[id as usize]))
     }
 
+    /// Whether `file_path` or a file in its directory declares a type named
+    /// `node_name`.
+    pub(crate) fn declares_type_beside(&self, file_path: &str, node_name: &str) -> bool {
+        if self
+            .lookup_in_file_with_kind(file_path, node_name, ResolveTarget::Type)
+            .is_some()
+        {
+            return true;
+        }
+        let dir = std::path::Path::new(file_path).parent();
+        let predicate = ResolveTarget::Type.kind_predicate();
+        self.global_scoped.get(node_name).is_some_and(|ids| {
+            ids.iter().any(|&id| {
+                predicate(self.node_kinds[id as usize])
+                    && self
+                        .file_of(id)
+                        .map(|file| std::path::Path::new(file).parent())
+                        == Some(dir)
+            })
+        })
+    }
+
     /// [`Self::lookup_in_file_with_kind`] for the bare name of a call site,
     /// through the shared [`pick_call`] rule. The pick is by source order
     /// only; a call site narrows it by owner through [`Self::prefer_owned`].

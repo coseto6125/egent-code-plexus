@@ -1,10 +1,12 @@
-//! A receiverless call `f()` reaches a `Method` at the Global tier only in a
-//! language that calls a member of the enclosing type with no receiver.
+//! A receiverless call `f()` reaches a `Method` only in a language that
+//! calls a member of the enclosing type with no receiver.
 //!
 //! PHP, Python, Rust and C: a bare `config()` never binds the same-named
 //! method of an unrelated class (a Laravel test's private `config()` stole
 //! every call of the global helper `config()`), and a free function `config`
-//! is the unique Global pick even when such a method exists.
+//! is the unique Global pick even when such a method exists. Nor does it bind
+//! the caller's own method or its base's: the same-file tier weighs no
+//! method, and the heritage tier does not run.
 //!
 //! JavaScript, TypeScript and Go keep the old Global tier: their parsers still
 //! write some member calls as the bare member, and those edges must survive.
@@ -293,6 +295,90 @@ fn test_resolve_call_c_bare_call_cpp_method_namesake_binds_free_function() {
         (c, "app.c", "void boot(void) {\n    config();\n}\n"),
     ]);
     assert_eq!(targets(&graph, "boot"), vec![target("lib.c", "", "config")]);
+}
+
+// ---- Same-file and heritage tiers: a bare call skips the caller's members ----
+
+/// `config()` is Laravel's global helper, not the class's own `config`.
+#[test]
+fn test_resolve_call_php_bare_call_same_file_method_returns_no_edge() {
+    let graph = single(
+        &PhpProvider::new().unwrap(),
+        &[(
+            "src/Settings.php",
+            "<?php\nclass Settings {\n    protected function config($k) {}\n    public function boot() {\n        return config('app.name');\n    }\n}\n",
+        )],
+    );
+    assert_eq!(targets(&graph, "boot"), Vec::<Target>::new());
+}
+
+/// The parent's `config` needs `$this->` / `parent::` too.
+#[test]
+fn test_resolve_call_php_bare_call_parent_method_returns_no_edge() {
+    let graph = single(
+        &PhpProvider::new().unwrap(),
+        &[
+            (
+                "src/Base.php",
+                "<?php\nclass Base {\n    protected function config($k) {}\n}\n",
+            ),
+            (
+                "src/Child.php",
+                "<?php\nclass Child extends Base {\n    public function boot() {\n        return config('app.name');\n    }\n}\n",
+            ),
+        ],
+    );
+    assert_eq!(targets(&graph, "boot"), Vec::<Target>::new());
+}
+
+/// `run` is `subprocess.run`, a library function: no edge, and never the
+/// class's own `run`.
+#[test]
+fn test_resolve_call_python_bare_call_same_file_method_library_import_returns_no_edge() {
+    let graph = single(
+        &PythonProvider::new().unwrap(),
+        &[(
+            "job.py",
+            "from subprocess import run\n\n\nclass Job:\n    def run(self):\n        pass\n\n    def build(self):\n        run([\"make\"])\n",
+        )],
+    );
+    assert_eq!(targets(&graph, "build"), Vec::<Target>::new());
+}
+
+#[test]
+fn test_resolve_call_python_bare_call_same_file_method_project_import_binds_import() {
+    let graph = single(
+        &PythonProvider::new().unwrap(),
+        &[
+            ("tools.py", "def run(cmd):\n    pass\n"),
+            (
+                "job.py",
+                "from tools import run\n\n\nclass Job:\n    def run(self):\n        pass\n\n    def build(self):\n        run([\"make\"])\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        targets(&graph, "build"),
+        vec![target("tools.py", "", "run")]
+    );
+}
+
+/// Inside `impl Config`, `load(p)` calls the free `load`: `Config::load`
+/// needs `Self::`. Before, Tier 1 picked `Config::load`, and the
+/// self-recursion skip then dropped the call.
+#[test]
+fn test_resolve_call_rust_bare_call_same_file_method_binds_free_function() {
+    let graph = single(
+        &RustProvider::new().unwrap(),
+        &[(
+            "src/lib.rs",
+            "pub struct Config;\n\nimpl Config {\n    pub fn load(p: &str) -> Self {\n        load(p);\n        Config\n    }\n}\n\npub fn load(p: &str) {}\n",
+        )],
+    );
+    assert_eq!(
+        targets(&graph, "load"),
+        vec![target("src/lib.rs", "", "load")]
+    );
 }
 
 // ---- JavaScript, TypeScript, Go: parsers still write member calls bare ----

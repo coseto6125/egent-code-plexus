@@ -462,7 +462,11 @@ fn python_callee_name(
                             attr_name,
                         ));
                     }
-                    Some(ImportedBinding::Symbol) => {}
+                    // `sym.attr.m()`: a member call on a value the import
+                    // names; a bare `m` would read as receiverless.
+                    Some(ImportedBinding::Symbol) => {
+                        return Some(CallSite::untyped_member(attr_name));
+                    }
                     None => {
                         let class = (obj.kind() == "identifier")
                             .then(|| obj.utf8_text(source).ok())

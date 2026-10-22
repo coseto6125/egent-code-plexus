@@ -766,6 +766,11 @@ impl<'a> Resolver<'a> {
     /// receiver, capped by `inner_confidence`. `None` when `callee` returns
     /// no reducible type or that type owns no `member`: the caller then
     /// resolves the site as its [`CallSite::fallback`].
+    ///
+    /// A Python / TS / JS callee's imports type the name, so a library
+    /// import (`import { Response } from 'node-fetch'`) names no project
+    /// type. Any other callee binds only a type its own directory declares:
+    /// the Go / Java / Kotlin package, or the header beside a C++ source.
     pub fn resolve_chained_member(
         &self,
         source_file: &Path,
@@ -775,6 +780,20 @@ impl<'a> Resolver<'a> {
         let st = self.symbol_table;
         let ty = type_ladder::returned_type(st, callee)?;
         let callee_file = st.file_of(callee)?;
+        // `graph.bin` archives the imports of Python / TS / JS files only, so
+        // the overlay can type no other file's name by its imports. A
+        // same-named project type elsewhere may stand for a library type the
+        // callee imports: no edge beats that guess.
+        let language = Language::from_normalized_path(callee_file);
+        let imports = if language == Language::Python || is_ecmascript(language) {
+            self.reexports
+                .and_then(|index| index.modules.get(callee_file))
+                .map_or(&[][..], |exports| exports.imports)
+        } else if st.declares_type_beside(callee_file, ty) {
+            &[][..]
+        } else {
+            return None;
+        };
         let target = call_target(source_file, CallSite::UntypedMember(member));
         match self.resolve_member_via_type(
             Path::new(callee_file),
@@ -783,7 +802,7 @@ impl<'a> Resolver<'a> {
             ty,
             member,
             target,
-            &[],
+            imports,
             true,
         ) {
             TypeMember::Edge(id, _, confidence) => Some((id, confidence.min(inner_confidence))),
@@ -1343,10 +1362,23 @@ impl<'a> Resolver<'a> {
         // win the lookup for a constructor call `Foo()` in the same file —
         // see `SymbolTable::file_scoped` doc). A call site narrows the pick
         // by owner; when the file holds several unrelated owners of the
-        // name, Tier 1 binds nothing and the later tiers decide.
-        if let Some(node_id) = self
-            .symbol_table
-            .lookup_call_in_file(&source_file_str, symbol_name, target)
+        // name, Tier 1 binds nothing and the later tiers decide. A bare call
+        // that reaches no member ([`reaches_free_only`]) weighs no method of
+        // the file, so a free function of the name still wins.
+        let free_only = call.is_some_and(|scope| scope.free_only);
+        let same_file_pick = if free_only {
+            reexport::pick_call(
+                self.symbol_table
+                    .decls_in_file(&source_file_str, symbol_name)
+                    .into_iter()
+                    .filter(|&(_, kind)| kind != NodeKind::Method),
+                target,
+            )
+        } else {
+            self.symbol_table
+                .lookup_call_in_file(&source_file_str, symbol_name, target)
+        };
+        if let Some(node_id) = same_file_pick
             .and_then(|pick| match call {
                 Some(scope) => self.symbol_table.prefer_owned(
                     &source_file_str,
@@ -1368,6 +1400,7 @@ impl<'a> Resolver<'a> {
                 ),
                 None => Some(pick),
             })
+            .filter(|&id| !free_only || self.symbol_table.node_kind(id) != NodeKind::Method)
         {
             results.push((node_id, ResolutionTier::SameFile.base_confidence()));
             self.record(
@@ -1672,8 +1705,12 @@ impl<'a> Resolver<'a> {
         // Stops at the first hit (heritage order is the source-order list
         // recorded by the parser, mirroring MRO precedence).
         // An untyped receiver is no `this`: the caller's bases do not own
-        // the member it reaches.
-        if !caller_heritage.is_empty() && !call.is_some_and(|scope| scope.untyped_receiver) {
+        // the member it reaches. Neither do they own what a bare call that
+        // reaches no member names.
+        if !caller_heritage.is_empty()
+            && !free_only
+            && !call.is_some_and(|scope| scope.untyped_receiver)
+        {
             for base in caller_heritage {
                 if let Some(qf) = self.resolve_qualifier_file(
                     source_file,
@@ -1747,7 +1784,6 @@ impl<'a> Resolver<'a> {
             .map(|i| i.source.as_str());
         let raw_count = self.symbol_table.global_match_count(symbol_name);
         let caller_meta = FileMeta::from_path(&source_file_str);
-        let free_only = call.is_some_and(|scope| scope.free_only);
 
         let hidden = |node_id: NodeId| {
             self.symbol_table.file_of(node_id).is_some_and(|module| {
@@ -1872,7 +1908,8 @@ fn call_target(source_file: &Path, site: CallSite<'_>) -> ResolveTarget {
 /// receiver never reaches a member: PHP needs `$this->` / `self::`, Python
 /// `self.`, Rust `self.` / `Self::`, and C declares no members. A same-named
 /// method of an unrelated class (a Laravel test's private `config()` for the
-/// global helper `config()`) must not bind it at the Global tier. Java,
+/// global helper `config()`, the caller's own or its base's `config`) must
+/// not bind it at any tier ([`CallScope::free_only`]). Java,
 /// Kotlin, C#, Swift, Dart, Scala, C++ and Ruby call a member of the
 /// enclosing type with no receiver. JavaScript, TypeScript and Go are no such
 /// languages either, but their parsers still write some member calls as the
@@ -2013,7 +2050,8 @@ struct CallScope<'c> {
     /// (`super(E, self).m()` starts after `E`).
     untyped_receiver: bool,
     /// A bare `f()` that never reaches a member ([`reaches_free_only`]):
-    /// the Global tier weighs no `Method`.
+    /// the same-file and Global tiers weigh no `Method`, and the heritage
+    /// tier does not run. A retry under another name keeps the flag.
     free_only: bool,
     /// The calling declaration: a Rust `self.m()` in an `impl` block the
     /// parser gave no owner reaches that block's own `m`.

@@ -505,6 +505,75 @@ fn test_overlay_php_bare_call_unrelated_method_no_edge_matches_reindex() {
 }
 
 #[test]
+fn test_overlay_php_bare_call_same_file_method_no_edge_matches_reindex() {
+    parity(
+        &php(),
+        &[(
+            "src/Settings.php",
+            "<?php\nclass Settings {\n    protected function config($k) {}\n    public function run() {}\n}\n",
+        )],
+        &[(
+            "src/Settings.php",
+            "<?php\nclass Settings {\n    protected function config($k) {}\n    public function run() { return config('app.name'); }\n}\n",
+        )],
+        // A bare PHP call never reaches the caller's own method.
+        &[],
+    );
+}
+
+#[test]
+fn test_overlay_php_bare_call_parent_method_no_edge_matches_reindex() {
+    parity(
+        &php(),
+        &[
+            (
+                "src/Base.php",
+                "<?php\nclass Base {\n    protected function config($k) {}\n}\n",
+            ),
+            (
+                "src/Child.php",
+                "<?php\nclass Child extends Base {\n    public function run() {}\n}\n",
+            ),
+        ],
+        &[(
+            "src/Child.php",
+            "<?php\nclass Child extends Base {\n    public function run() { return config('app.name'); }\n}\n",
+        )],
+        // Nor its base's: the heritage tier does not run.
+        &[],
+    );
+}
+
+/// `svc.mailer.send` retries as the short `send`, which is no bare call:
+/// the reindex keeps the original site's member reach and binds the unique
+/// method at the Global tier.
+#[test]
+fn test_overlay_python_module_alias_retry_reaches_method_matches_reindex() {
+    parity(
+        &py(),
+        &[
+            (
+                "app/mailer.py",
+                "class Mailer:\n    def send(self, msg):\n        pass\n",
+            ),
+            (
+                "app/services.py",
+                "from app.mailer import Mailer\n\nmailer = Mailer()\n",
+            ),
+            (
+                "main.py",
+                "import app.services as svc\n\n\ndef run(msg):\n    pass\n",
+            ),
+        ],
+        &[(
+            "main.py",
+            "import app.services as svc\n\n\ndef run(msg):\n    svc.mailer.send(msg)\n",
+        )],
+        &[("app/mailer.py".into(), "send".into(), "Mailer".into(), 70)],
+    );
+}
+
+#[test]
 fn test_overlay_rust_untyped_member_without_free_function_matches_reindex() {
     parity(
         &RustProvider::new().unwrap(),
@@ -1885,4 +1954,84 @@ fn test_overlay_python_chained_member_dirty_factory_return_type_matches_reindex(
         "bar",
         "Other",
     );
+}
+
+// A Java callee's imports never reach the overlay (`graph.bin` archives
+// Python / TS / JS imports only), so both bind a chain only through a return
+// type the callee's own package (directory) declares.
+
+const JAVA_CHAIN_FOO: (&str, &str) = (
+    "src/app/Foo.java",
+    "package app;\n\npublic class Foo {\n    public static Foo create() { return new Foo(); }\n    public void bar() {}\n}\n",
+);
+const JAVA_CHAIN_OTHER: (&str, &str) = (
+    "src/app/Other.java",
+    "package app;\n\npublic class Other {\n    public void bar() {}\n}\n",
+);
+const JAVA_CHAIN_FACTORY: (&str, &str) = (
+    "src/app/Factory.java",
+    "package app;\n\npublic class Factory {\n    public static Foo make() { return new Foo(); }\n}\n",
+);
+const JAVA_CHAIN_USE: (&str, &str) = (
+    "src/app/Use.java",
+    "package app;\n\npublic class Use {\n    void run() {}\n}\n",
+);
+
+#[test]
+fn test_overlay_java_chained_member_same_file_return_type_matches_reindex() {
+    chain_parity(
+        "run",
+        &java(),
+        &[JAVA_CHAIN_FOO, JAVA_CHAIN_OTHER, JAVA_CHAIN_USE],
+        &[(
+            "src/app/Use.java",
+            "package app;\n\npublic class Use {\n    void run() { Foo.create().bar(); }\n}\n",
+        )],
+        "bar",
+        "Foo",
+    );
+}
+
+#[test]
+fn test_overlay_java_chained_member_same_package_return_type_matches_reindex() {
+    chain_parity(
+        "run",
+        &java(),
+        &[
+            JAVA_CHAIN_FOO,
+            JAVA_CHAIN_OTHER,
+            JAVA_CHAIN_FACTORY,
+            JAVA_CHAIN_USE,
+        ],
+        &[(
+            "src/app/Use.java",
+            "package app;\n\npublic class Use {\n    void run() { Factory.make().bar(); }\n}\n",
+        )],
+        "bar",
+        "Foo",
+    );
+}
+
+#[test]
+fn test_overlay_java_chained_member_other_package_return_type_falls_back_matches_reindex() {
+    let files = [
+        JAVA_CHAIN_FOO,
+        JAVA_CHAIN_OTHER,
+        (
+            "src/factory/Factory.java",
+            "package factory;\n\nimport app.Foo;\n\npublic class Factory {\n    public static Foo make() { return new Foo(); }\n}\n",
+        ),
+        JAVA_CHAIN_USE,
+    ];
+    let dirty = [(
+        "src/app/Use.java",
+        "package app;\n\nimport factory.Factory;\n\npublic class Use {\n    void run() { Factory.make().bar(); }\n}\n",
+    )];
+    let tmp = tempfile::tempdir().unwrap();
+    let expected = targets(&reindex(tmp.path(), &java(), &files, &dirty), "run");
+    assert!(
+        !expected.iter().any(|(_, name, _, _)| name == "bar"),
+        "`Foo` is declared outside the callee's package: the untyped `bar` has two owners: {expected:?}"
+    );
+    check_parity_from("run", &java(), &files, &dirty, &expected, &expected);
 }

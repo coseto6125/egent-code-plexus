@@ -125,7 +125,8 @@ const FIXTURES: &[Fixture] = &[
         caller: ("k.py", "from base import Base\n\nclass K(Base):\n    def run(self):\n        save()\n"),
         rest: &[],
         caller_fn: "run",
-        expected: &[("save", "base.py", 0.8)],
+        // A bare call reaches only free functions here, never a method.
+        expected: &[],
     },
     Fixture {
         label: "PHP",
@@ -133,7 +134,8 @@ const FIXTURES: &[Fixture] = &[
         caller: ("K.php", "<?php\nclass K extends Base {\n function run() { save(); }\n}\n"),
         rest: &[],
         caller_fn: "run",
-        expected: &[("save", "Base.php", 0.8)],
+        // A bare call reaches only free functions here, never a method.
+        expected: &[],
     },
     // The heritage tier runs before the wildcard pass: the inherited member
     // beats the star-imported one.

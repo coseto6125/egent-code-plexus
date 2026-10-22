@@ -622,6 +622,7 @@ impl OverlayView {
                                         owner,
                                         caller: Some(source),
                                         untyped,
+                                        free_only: reaches_free_only(caller.language, site),
                                     }),
                                     heritage: if untyped { &[] } else { heritage },
                                     type_lookup: false,
@@ -2818,7 +2819,9 @@ impl<'a> OverlayFacts<'a> {
     /// The index's `Resolver::resolve_chained_member`: the member `member`
     /// of the type a call to `callee` returns, read in `callee`'s own file
     /// and found by the receiver-typing ladder, at the ladder's confidence
-    /// capped by `inner_confidence`.
+    /// capped by `inner_confidence`. A Python / TS / JS callee's imports type
+    /// the name; any other callee binds only a type its own directory
+    /// declares.
     fn chained_member(
         &self,
         (callee, inner_confidence): (u32, f32),
@@ -2827,6 +2830,27 @@ impl<'a> OverlayFacts<'a> {
     ) -> Option<(u32, f32)> {
         let ty = type_ladder::returned_type(self, callee)?;
         let callee_file = self.node_file(callee)?;
+        // `graph.bin` archives the imports of Python / TS / JS files only.
+        let language = Language::from_normalized_path(callee_file);
+        let imports: Vec<RawImport> = if language == Language::Python || is_ecmascript(language) {
+            self.imports(callee_file)
+                .map(|imports| {
+                    imports
+                        .iter()
+                        .map(|import| RawImport {
+                            source: import.source.to_owned(),
+                            imported_name: import.imported_name.to_owned(),
+                            alias: import.alias.map(str::to_owned),
+                            binding_kind: import.binding_kind,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else if self.declares_type_beside(callee_file, ty) {
+            Vec::new()
+        } else {
+            return None;
+        };
         // The index's `call_target`: Rust method syntax reaches only methods.
         let target = if caller == Language::Rust {
             ResolveTarget::Method
@@ -2836,12 +2860,32 @@ impl<'a> OverlayFacts<'a> {
         let qualified = format!("{ty}.{member}");
         let (id, confidence) = ladder_edge(self.receiver_ladder(
             callee_file,
-            &[],
+            &imports,
             (&qualified, ty, member),
             target,
             true,
         ))?;
         Some((id, confidence.min(inner_confidence)))
+    }
+
+    /// The index's `SymbolTable::declares_type_beside`: `file` or a file in
+    /// its directory declares a type named `name`.
+    fn declares_type_beside(&self, file: &str, name: &str) -> bool {
+        if self
+            .first_in_file(file, name, ResolveTarget::Type, None)
+            .is_some()
+        {
+            return true;
+        }
+        let dir = std::path::Path::new(file).parent();
+        let wanted = ResolveTarget::Type.kind_predicate();
+        self.global_named(name).into_iter().any(|id| {
+            wanted(self.kind_of(id))
+                && self
+                    .node_file(id)
+                    .map(|other| std::path::Path::new(other).parent())
+                    == Some(dir)
+        })
     }
 
     /// The index's `Resolver::may_be_receiverless_member_call`: a bare `m()`
@@ -3183,13 +3227,9 @@ fn resolve_callee<'s>(
     };
     let rust_method = site.uses_method_syntax() && caller.language == Language::Rust;
     let accepts = |idx: u32| !rust_method || is_method(idx);
-    // The index's `reaches_free_only`: a bare call in a language with no
-    // implicit receiver never reaches a member, so at Tier 3 no method binds
-    // it nor competes with the free function it does reach.
-    let free_only = matches!(
-        caller.language,
-        Language::Php | Language::Python | Language::Rust | Language::C
-    ) && matches!(site, CallSite::Plain(name) if !name.contains(['.', ':']));
+    // Read from the call site, never from `site`: a retry under the short
+    // name (`ImportBinding::Retry`) is no receiverless call.
+    let free_only = call.is_some_and(|call| call.free_only);
     let admits = |&(idx, _): &(u32, FileMeta)| !free_only || !is_method(idx);
     let importer = facts.scope.dirty()[file_ord].rel_path.as_str();
     if let CallSite::FromReceiver { receiver, member } = site {
@@ -3215,7 +3255,13 @@ fn resolve_callee<'s>(
         names.target
     };
     let decls = facts.decls_in_file(importer, callee);
-    if let Some(pick) = reexport::pick_call(decls.iter().copied(), call_target) {
+    // A bare call that reaches no member weighs no method of the file, so a
+    // free function of the name still wins.
+    let same_file = decls
+        .iter()
+        .copied()
+        .filter(|&(_, kind)| !free_only || kind != NodeKind::Method);
+    if let Some(pick) = reexport::pick_call(same_file, call_target) {
         let hit = match call {
             Some(call) => prefer_owned(
                 facts,
@@ -3234,7 +3280,7 @@ fn resolve_callee<'s>(
             ),
             None => Some(pick),
         };
-        if let Some(idx) = hit {
+        if let Some(idx) = hit.filter(|&idx| !free_only || !is_method(idx)) {
             return accepts(idx).then_some((idx, CONF_SAME_FILE));
         }
     }
@@ -3501,8 +3547,10 @@ fn resolve_callee<'s>(
     }
 
     // Tier 2.75: the caller's bases, in declared order, each as an implicit
-    // qualifier; the first base whose file holds the member decides.
-    for base in scope.heritage {
+    // qualifier; the first base whose file holds the member decides. A bare
+    // call that reaches no member skips it.
+    let heritage: &[String] = if free_only { &[] } else { scope.heritage };
+    for base in heritage {
         let Some(file) = facts.qualifier_file(
             file_ord,
             imports,
@@ -3640,6 +3688,20 @@ struct CallScope<'c> {
     /// The site is an untyped member call ([`CallSite::UntypedMember`]): no
     /// tier narrows it by the caller's type or bases.
     untyped: bool,
+    /// The site is a bare `f()` that never reaches a member
+    /// ([`reaches_free_only`]), kept through a retry under another name.
+    free_only: bool,
+}
+
+/// The index's `reaches_free_only`: a bare call in a language with no
+/// implicit receiver never reaches a member, so no method binds it nor
+/// competes with the free function it does reach, at the same-file and
+/// global tiers, and the heritage tier does not run.
+fn reaches_free_only(language: Language, site: CallSite<'_>) -> bool {
+    matches!(
+        language,
+        Language::Php | Language::Python | Language::Rust | Language::C
+    ) && matches!(site, CallSite::Plain(name) if !name.contains(['.', ':']))
 }
 
 /// What a lookup carries besides the name, as the index's
