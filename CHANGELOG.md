@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.16.1 - 2026-10-22
+
+### Performance
+
+- cache the built overlay view across processes; tokio 1.54.1 (#855)
+
 ## v0.16.0 - 2026-10-21
 
 ### Bug Fixes
