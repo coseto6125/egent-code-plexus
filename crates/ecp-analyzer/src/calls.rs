@@ -567,7 +567,7 @@ impl NameRefSpec {
             let pair = |pairs: &[(&'static str, &'static str)]| {
                 field & f::PAIR != 0 && {
                     let key = (parent.node.kind(), cursor.field_name().unwrap_or_default());
-                    pairs.iter().any(|&p| p == key)
+                    pairs.contains(&key)
                 }
             };
             if field & f::BINDING != 0
