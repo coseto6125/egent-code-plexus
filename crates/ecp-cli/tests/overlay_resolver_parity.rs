@@ -251,6 +251,29 @@ fn parity_from(
     check_parity_from(caller, provider, files, dirty, expected, expected);
 }
 
+#[test]
+fn test_overlay_rust_bare_call_in_inline_module_matches_reindex() {
+    let source = r#"
+mod imp {
+    struct Config;
+    impl Config {
+        fn load() {}
+        fn run() { load(); }
+    }
+    fn load() {}
+}
+struct Top;
+impl Top { fn load() {} }
+fn load() {}
+"#;
+    parity(
+        &RustProvider::new().unwrap(),
+        &[("src/lib.rs", source)],
+        &[("src/lib.rs", &format!("\n{source}"))],
+        &[("src/lib.rs".into(), "load".into(), "imp".into(), 100)],
+    );
+}
+
 /// A full reindex of `files` with `edits` applied, written under `root` so
 /// a Rust fixture gets its module tree.
 fn reindex(
