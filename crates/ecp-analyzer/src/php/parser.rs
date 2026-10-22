@@ -88,26 +88,6 @@ fn detect_enum_imitation_blind_spots(
     }
 }
 
-/// True iff the first positional argument of `call_node` is a PHP string
-/// literal (the call_user_func("known_function", ...) shape). Tree-sitter
-/// PHP uses `string` for double-quoted and `string_literal` for the legacy
-/// node — accept either to be robust across grammar versions.
-fn first_arg_is_literal_string(call_node: &Node) -> bool {
-    let Some(args) = call_node.child_by_field_name("arguments") else {
-        return false;
-    };
-    let Some(first_arg) = args.named_child(0) else {
-        return false;
-    };
-    // PHP wraps args in `argument` nodes — descend into the first named child
-    // to see the actual value.
-    let value = first_arg.named_child(0).unwrap_or(first_arg);
-    matches!(
-        value.kind(),
-        "string" | "string_literal" | "encapsed_string"
-    )
-}
-
 /// Whether `node`'s subtree contains a PHP call expression. Gates emission of
 /// `<anonymous>` callback nodes so empty callbacks (e.g. `array_map(fn($x) => $x * 2, $a)`)
 /// stay out of the graph.
@@ -627,7 +607,7 @@ impl LanguageProvider for PhpProvider {
                         is_test_file,
                     );
                 } else if Some(cap_idx) == idx_blind_call_user_func {
-                    if !first_arg_is_literal_string(&cap.node) {
+                    if super::receiver_types::literal_callable(cap.node, source).is_none() {
                         push_blind_spot(
                             &mut blind_spots,
                             BLIND_SPEC[1],

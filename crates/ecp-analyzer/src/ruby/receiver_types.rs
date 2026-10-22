@@ -107,6 +107,9 @@ pub fn extract_ruby_calls_and_path_literals(
 fn ruby_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Option<String> {
     let method_node = call.child_by_field_name("method")?;
     let method_name = method_node.utf8_text(source).ok()?;
+    // `send(:helper)` calls `helper`: record the named method, as `helper` /
+    // `obj.helper` would.
+    let method_name = literal_send_target(call, source).unwrap_or(method_name);
 
     let pos = start_pos(call);
 
@@ -133,6 +136,34 @@ fn ruby_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Option<Stri
             })
         }
     }
+}
+
+/// The method `send` / `public_send` / `__send__` names with a literal
+/// (`:helper`, `"helper"`); `None` for any other call, a non-literal target,
+/// or a literal that is no method name.
+pub(super) fn literal_send_target<'s>(call: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    let method = call.child_by_field_name("method")?.utf8_text(source).ok()?;
+    if !matches!(method, "send" | "public_send" | "__send__") {
+        return None;
+    }
+    let first = call.child_by_field_name("arguments")?.named_child(0)?;
+    let raw = first.utf8_text(source).ok()?;
+    let name = match first.kind() {
+        "simple_symbol" => raw.strip_prefix(':')?,
+        "string"
+            if first
+                .named_children(&mut first.walk())
+                .all(|c| c.kind() == "string_content") =>
+        {
+            raw.get(1..raw.len().checked_sub(1)?)?
+        }
+        _ => return None,
+    };
+    let body = name.strip_suffix(['?', '!']).unwrap_or(name);
+    let mut chars = body.chars();
+    let valid = chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_');
+    valid.then_some(name)
 }
 
 /// Whether `node` is `self`, a constant, or a chain of the constructor-like

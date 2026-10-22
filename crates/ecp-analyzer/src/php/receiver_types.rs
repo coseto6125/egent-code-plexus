@@ -123,6 +123,15 @@ pub fn extract_php_calls_and_path_literals<'t>(
                     constructions.push((start_pos(n), callee));
                 }
             }
+            "function_call_expression" => {
+                if let Some(target) = literal_callable(n, source) {
+                    attach_to_enclosing(
+                        start_pos(n),
+                        literal_callable_callee(target, start_pos(n), &ctx),
+                        nodes,
+                    );
+                }
+            }
             "member_call_expression" | "nullsafe_member_call_expression" => {
                 if let Some(callee) = php_member_callee(n, source, &ctx) {
                     attach_to_enclosing(start_pos(n), callee, nodes);
@@ -166,6 +175,143 @@ pub fn extract_php_calls_and_path_literals<'t>(
         attach_to_enclosing(pos, callee, nodes);
     }
     (path_literals, sql_refs, dynamic_calls)
+}
+
+/// A callable that `call_user_func` / `call_user_func_array` names with a
+/// literal, so the call is as static as the ordinary call of the same shape.
+pub(super) enum LiteralCallable {
+    /// `'helper'`
+    Function(String),
+    /// `'App\\Rows::hero'`, `[Rows::class, 'hero']`, `['App\\Rows', 'hero']`
+    Static { class: String, method: String },
+    /// `[self::class, 'm']`, `[static::class, 'm']`
+    Relative { method: String },
+    /// `[$this, 'm']`
+    This { method: String },
+}
+
+fn is_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// `Foo` / `\App\Foo` / `App\Foo` -> `App\Foo`; `None` for anything that is
+/// no name (spaces, `$`, empty).
+fn qualified_ident(s: &str) -> Option<&str> {
+    let s = s.strip_prefix('\\').unwrap_or(s);
+    s.split('\\').all(is_ident).then_some(s)
+}
+
+/// The unquoted, `\\`-unescaped text of a PHP string literal; interpolated
+/// text keeps its `$` and fails the name check.
+fn string_literal_text(n: Node<'_>, source: &[u8]) -> Option<String> {
+    if !matches!(n.kind(), "string" | "encapsed_string") {
+        return None;
+    }
+    let raw = n.utf8_text(source).ok()?;
+    let inner = raw.get(1..raw.len().checked_sub(1)?)?;
+    Some(inner.replace("\\\\", "\\"))
+}
+
+fn class_of_array_element(n: Node<'_>, source: &[u8]) -> Option<LiteralCallable> {
+    let method = String::new();
+    match n.kind() {
+        "string" | "encapsed_string" => {
+            let text = string_literal_text(n, source)?;
+            let class = qualified_ident(&text)?.to_string();
+            Some(LiteralCallable::Static { class, method })
+        }
+        "variable_name" if n.utf8_text(source).ok()? == "$this" => {
+            Some(LiteralCallable::This { method })
+        }
+        "class_constant_access_expression" => {
+            let scope = n.named_child(0)?;
+            let constant = n.named_child(1)?;
+            if constant.utf8_text(source).ok()? != "class" {
+                return None;
+            }
+            match scope.kind() {
+                "name" | "qualified_name" => {
+                    let class = qualified_ident(scope.utf8_text(source).ok()?)?.to_string();
+                    Some(LiteralCallable::Static { class, method })
+                }
+                "relative_scope" if matches!(scope.utf8_text(source).ok()?, "self" | "static") => {
+                    Some(LiteralCallable::Relative { method })
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The literal callable of `call_user_func(<callable>, ..)` /
+/// `call_user_func_array(<callable>, ..)`; `None` for any other call, a
+/// non-literal callable, or a literal that names no callable.
+pub(super) fn literal_callable(call: Node<'_>, source: &[u8]) -> Option<LiteralCallable> {
+    let function = call.child_by_field_name("function")?;
+    if function.kind() != "name"
+        || !matches!(
+            function.utf8_text(source).ok()?,
+            "call_user_func" | "call_user_func_array"
+        )
+    {
+        return None;
+    }
+    let first = call.child_by_field_name("arguments")?.named_child(0)?;
+    let value = first.named_child(0).unwrap_or(first);
+    match value.kind() {
+        "string" | "encapsed_string" => {
+            let text = string_literal_text(value, source)?;
+            match text.split_once("::") {
+                Some((class, method)) if is_ident(method) => Some(LiteralCallable::Static {
+                    class: qualified_ident(class)?.to_string(),
+                    method: method.to_string(),
+                }),
+                Some(_) => None,
+                None => Some(LiteralCallable::Function(
+                    qualified_ident(&text)?.to_string(),
+                )),
+            }
+        }
+        "array_creation_expression" => {
+            let mut cursor = value.walk();
+            let elements: Vec<Node<'_>> = value.named_children(&mut cursor).collect();
+            let [class, method] = elements[..] else {
+                return None;
+            };
+            let method_text = string_literal_text(method.named_child(0)?, source)?;
+            if !is_ident(&method_text) {
+                return None;
+            }
+            let mut target = class_of_array_element(class.named_child(0)?, source)?;
+            match &mut target {
+                LiteralCallable::Static { method, .. }
+                | LiteralCallable::Relative { method }
+                | LiteralCallable::This { method } => *method = method_text,
+                LiteralCallable::Function(_) => return None,
+            }
+            Some(target)
+        }
+        _ => None,
+    }
+}
+
+/// The callee entry the ordinary call of the same shape records.
+fn literal_callable_callee(target: LiteralCallable, pos: Pos, ctx: &ClassContext) -> String {
+    match target {
+        LiteralCallable::Function(name) => name,
+        LiteralCallable::Static { class, method } => format!("{class}.{method}"),
+        LiteralCallable::Relative { method } => match ctx.enclosing_class_name(pos, &method) {
+            Some(class) => format!("{class}.{method}"),
+            None => method,
+        },
+        LiteralCallable::This { method } => match ctx.enclosing_class_name(pos, &method) {
+            Some(class) => format!("{class}.{method}"),
+            None => CallSite::untyped_member(&method),
+        },
+    }
 }
 
 /// Whether a member, nullsafe member or scoped call names its method at

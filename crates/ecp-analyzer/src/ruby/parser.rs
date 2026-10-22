@@ -44,23 +44,6 @@ const BLIND_MODULE_AS_ENUM: (&str, &str) = (
     "ruby-module-as-enum",
     "module with \u{2265}2 constant assignments and no methods \u{2014} Ruby enum imitation pattern; verify before treating as plain Module",
 );
-
-/// True iff the first positional argument of `call_node` is a Ruby symbol
-/// literal (`:method`) or string literal (`"method"`) — the cases where
-/// `send` is statically resolvable per Constraint 2.
-fn ruby_first_arg_is_literal_callable(call_node: &Node) -> bool {
-    let Some(args) = call_node.child_by_field_name("arguments") else {
-        return false;
-    };
-    let Some(first) = args.named_child(0) else {
-        return false;
-    };
-    matches!(
-        first.kind(),
-        "simple_symbol" | "symbol_array" | "string" | "bare_symbol" | "delimited_symbol"
-    )
-}
-
 /// Receivers a Ruby route DSL sends its verb to. Hanami builds routes on a
 /// `router` object and Roda on the request object `r`; `map` and `app` cover
 /// Rack::Builder and modular Sinatra. Anything else holding a `get` with a
@@ -531,7 +514,7 @@ impl LanguageProvider for RubyProvider {
                         is_test_file,
                     );
                 } else if cap_idx == idx_blind_send
-                    && !ruby_first_arg_is_literal_callable(&cap.node)
+                    && super::receiver_types::literal_send_target(cap.node, source).is_none()
                 {
                     push_blind_spot(
                         &mut blind_spots,
