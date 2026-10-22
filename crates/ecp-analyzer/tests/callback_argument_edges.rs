@@ -682,3 +682,16 @@ fn test_field_read_java_method_reference_receiver_field_returns_edge() {
             .collect();
     assert_eq!(reads, vec!["sink".to_string()]);
 }
+
+/// A function declared inside the registrar is still a function it hands on.
+#[test]
+fn test_function_reference_typescript_nested_function_argument_returns_edge() {
+    let src = "export function inner(r: number[]) {\n  function update(v: number) { return v; }\n  return r.map(update);\n}\n";
+    assert_same_file_ref(
+        &TypeScriptProvider::new().unwrap(),
+        "a.ts",
+        src,
+        "inner",
+        "update",
+    );
+}

@@ -2477,6 +2477,12 @@ fn resolve_variant_ref(
         .map(|id| (id, confidence))
 }
 
+/// The last segment of an owner key (`outer::<anonymous:2:20>`, `Outer.Inner`).
+fn owner_name(owner: &str) -> &str {
+    let last = owner.rsplit("::").next().unwrap_or(owner);
+    last.rsplit('.').next().unwrap_or(last)
+}
+
 /// The reasons of the edges a [`NameRef`] yields: `ReadsField` to a
 /// constant or variable, `References` to a function.
 #[derive(Clone, Copy)]
@@ -2539,8 +2545,9 @@ fn resolve_name_ref(
             }
         }
         // A member the reader's type inherits: `Child.f` reads `Parent.LIMIT`.
-        let simple = owner.rsplit(['.', ':']).next().unwrap_or(owner);
-        if let Some(ty) = symbol_table.lookup_in_file_with_kind(file, simple, ResolveTarget::Type) {
+        if let Some(ty) =
+            symbol_table.lookup_in_file_with_kind(file, owner_name(owner), ResolveTarget::Type)
+        {
             for &target in own_kinds {
                 if let ecp_core::analyzer::type_ladder::Ownership::Owned { id, inherited } =
                     ecp_core::analyzer::type_ladder::member_ownership(
@@ -2617,7 +2624,15 @@ fn resolve_name_ref(
                 | Language::Dart
                 | Language::Cpp
                 | Language::Ruby
-        ) && symbol_table.owner(id).is_some()
+        ) && symbol_table.owner(id).is_some_and(|owner| {
+            // A nested function's owner is the function around it, not a type.
+            !symbol_table.file_of(id).is_some_and(|target| {
+                symbol_table
+                    .decls_in_file(target, owner_name(owner))
+                    .iter()
+                    .any(|&(_, kind)| kind.is_callable())
+            })
+        })
     };
     if (module_scoped && global)
         || (language == Language::Go && global && other_package())
