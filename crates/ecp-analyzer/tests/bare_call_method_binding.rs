@@ -220,6 +220,35 @@ const RS_UNRELATED: (&str, &str) = (
 );
 
 #[test]
+fn test_resolve_call_rust_bare_call_in_inline_module_binds_module_function() {
+    let source = r#"
+mod imp {
+    struct Config;
+    impl Config {
+        fn load() {}
+        fn run_inner() { load(); }
+    }
+    fn load() {}
+}
+struct Top;
+impl Top {
+    fn load() {}
+    fn run_root() { load(); }
+}
+fn load() {}
+"#;
+    let graph = single(&RustProvider::new().unwrap(), &[("src/lib.rs", source)]);
+    assert_eq!(
+        targets(&graph, "run_inner"),
+        vec![target("src/lib.rs", "imp", "load")]
+    );
+    assert_eq!(
+        targets(&graph, "run_root"),
+        vec![target("src/lib.rs", "", "load")]
+    );
+}
+
+#[test]
 fn test_resolve_call_rust_bare_call_unrelated_method_returns_no_edge() {
     let graph = single(
         &RustProvider::new().unwrap(),
