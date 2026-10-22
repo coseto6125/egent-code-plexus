@@ -409,34 +409,52 @@ fn test_overlay_view_concurrent_engines_agree_and_leave_one_valid_cache() {
     assert!(tmp_files(&f.session_dir).is_empty());
 }
 
-/// The engines above may serialize behind the first writer; here every
-/// thread is released straight into `write`, under a key of its own, so the
-/// writes themselves overlap. Each publishes a whole file: exactly one key
-/// reads back, intact, and no temp file is left.
+/// The engines above may serialize behind the first writer. Here two writers
+/// publish different views under their own keys in a loop while a reader
+/// reads both keys, so writes and reads overlap. The guarantee that matters
+/// is that a read never returns a wrong or mixed view: every hit must be
+/// exactly the view written under that key. A torn file is only a miss.
 #[test]
-fn test_view_cache_write_overlapping_writers_leave_one_whole_file() {
-    const WRITERS: u64 = 8;
+fn test_view_cache_concurrent_writes_and_reads_never_return_wrong_view() {
+    const ROUNDS: usize = 300;
     let f = Fixture::new();
     f.edit(&["keep_fn"], 1_000);
     let probe = f.engine();
-    let fresh = f.fresh(&probe);
+    let first = f.fresh(&probe);
+    f.edit(&["keep_fn", "renamed_fn"], 2_000);
+    let second = f.fresh(&probe);
+    assert_ne!(first, second);
     let nodes = probe.graph().unwrap().nodes.len();
-    let barrier = Barrier::new(WRITERS as usize);
+    let views = [(11_u64, &first), (22_u64, &second)];
+    let barrier = Barrier::new(views.len() + 1);
 
-    std::thread::scope(|scope| {
-        for key in 0..WRITERS {
-            let (barrier, fresh, dir) = (&barrier, &fresh, &f.session_dir);
+    let hits = std::thread::scope(|scope| {
+        for (key, view) in views {
+            let (barrier, dir) = (&barrier, &f.session_dir);
             scope.spawn(move || {
                 barrier.wait();
-                view_cache::write(dir, key, fresh);
+                for _ in 0..ROUNDS {
+                    view_cache::write(dir, key, view);
+                }
             });
         }
+        let reader = scope.spawn(|| {
+            barrier.wait();
+            let mut hits = 0;
+            for _ in 0..ROUNDS {
+                for (key, view) in views {
+                    if let Some(read) = view_cache::read(&f.session_dir, key, nodes) {
+                        assert_eq!(&read, view, "key {key} read another view");
+                        hits += 1;
+                    }
+                }
+            }
+            hits
+        });
+        reader.join().unwrap()
     });
 
-    let readable: Vec<u64> = (0..WRITERS)
-        .filter(|&key| view_cache::read(&f.session_dir, key, nodes).as_ref() == Some(&fresh))
-        .collect();
-    assert_eq!(readable.len(), 1, "{readable:?}");
+    assert!(hits > 0, "the reader never saw a published file");
     assert!(tmp_files(&f.session_dir).is_empty());
 }
 
@@ -514,7 +532,7 @@ fn test_view_cache_key_graph_touched_after_load_keeps_loaded_stamp() {
     set_mtime(&f.graph_path, 3_000);
 
     assert_eq!(engine.view_cache_key(7), Some(loaded));
-    assert_ne!(f.engine().view_cache_key(7), Some(loaded));
+    assert_ne!(f.engine().view_cache_key(7).unwrap(), loaded);
 }
 
 /// A publisher that renames a new graph over the path after the load: this
@@ -533,5 +551,5 @@ fn test_view_cache_key_graph_renamed_over_after_load_keeps_loaded_stamp() {
     fs::rename(&replacement, &f.graph_path).unwrap();
 
     assert_eq!(engine.view_cache_key(7), Some(loaded));
-    assert_ne!(f.engine().view_cache_key(7), Some(loaded));
+    assert_ne!(f.engine().view_cache_key(7).unwrap(), loaded);
 }
