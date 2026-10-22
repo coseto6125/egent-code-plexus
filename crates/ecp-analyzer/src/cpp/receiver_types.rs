@@ -533,6 +533,16 @@ fn member_receiver_type<'b>(
     }
 }
 
+/// Whether `call` invokes a local or parameter. Its result may have a type,
+/// but the binder does not infer callable return types, so a same-named free
+/// function must not type an enclosing member call.
+fn calls_local(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> bool {
+    call.child_by_field_name("function")
+        .filter(|function| function.kind() == "identifier")
+        .and_then(|function| function.utf8_text(source).ok())
+        .is_some_and(|name| bindings.lookup_local(start_pos(call), name).is_some())
+}
+
 fn cpp_callee_name(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> Option<String> {
     let function = call.child_by_field_name("function")?;
     let pos = start_pos(call);
@@ -563,7 +573,9 @@ fn cpp_callee_name(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> Opt
                     Some(ty) => format!("{ty}.{method}"),
                     // `Foo::create().bar()` / `make()->bar()`: the resolver
                     // types a call receiver by the callee's return type.
-                    None if receiver.kind() == "call_expression" => {
+                    None if receiver.kind() == "call_expression"
+                        && !calls_local(receiver, source, bindings) =>
+                    {
                         let untyped = CallSite::untyped_member(method);
                         match CallSite::nested_chain(|| cpp_callee_name(receiver, source, bindings))
                         {

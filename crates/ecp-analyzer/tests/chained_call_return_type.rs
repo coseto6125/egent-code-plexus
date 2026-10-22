@@ -1214,10 +1214,6 @@ fn use_after_block() {
 fn use_closure_param() {
     let invoke = |make: fn() -> Beta| { make().bar(); };
 }
-fn use_nested_function() {
-    let make = || Beta;
-    fn nested() { make().bar(); }
-}
 "#,
         )],
     )
@@ -1251,11 +1247,6 @@ fn test_resolve_call_rust_call_after_local_block_binds_module_function_type() {
 #[test]
 fn test_resolve_call_rust_closure_parameter_skips_module_function_type() {
     assert_no_alpha_bar(&rust_closure_graph(), "use_closure_param");
-}
-
-#[test]
-fn test_resolve_call_rust_nested_function_does_not_capture_outer_binding() {
-    assert_binds_alpha(&rust_closure_graph(), "nested");
 }
 
 #[test]

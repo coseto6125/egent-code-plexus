@@ -239,6 +239,7 @@ pub struct Scope {
     range: PosRange,
     /// var_name → bare type name (references/pointers stripped).
     pub bindings: HashMap<String, String>,
+    values: HashMap<String, Vec<PosRange>>,
     /// The impl-type in scope when this fn is inside an `impl_item`
     /// (used to resolve `self`).
     pub self_type: Option<String>,
@@ -253,6 +254,16 @@ impl LocalTypes {
     /// Iterate all scopes for flat export (used by indirect-dispatch detection).
     pub fn scopes(&self) -> &[Scope] {
         &self.scopes
+    }
+
+    fn contains_value(&self, pos: Pos, name: &str) -> bool {
+        // Nested functions cannot capture values from their enclosing function.
+        self.scopes
+            .iter()
+            .filter(|scope| scope.range.0 <= pos && pos <= scope.range.1)
+            .min_by_key(|scope| range_width(scope.range))
+            .and_then(|scope| scope.values.get(name))
+            .is_some_and(|ranges| ranges.iter().any(|range| range.0 <= pos && pos <= range.1))
     }
 
     /// Look up `var`'s type at `pos`, preferring the innermost scope.
@@ -316,24 +327,27 @@ fn collect_scopes<'a>(
             });
 
             let mut bindings: HashMap<String, String> = HashMap::new();
+            let mut values = HashMap::new();
 
             // Typed parameters.
             if let Some(params) = child.child_by_field_name("parameters") {
                 collect_params(&params, source, &mut bindings);
+                collect_parameter_values(params, source, node_range(child), &mut values);
             }
 
             // `let` bindings in the body.
             if let Some(body) = child.child_by_field_name("body") {
-                collect_body_bindings(&body, source, &mut bindings);
+                collect_body_bindings(&body, source, &mut bindings, &mut values);
             }
 
             out.push(Scope {
                 range: node_range(child),
                 bindings,
+                values,
                 self_type,
             });
 
-            // Recurse into the function body (nested closures get their own scope).
+            // Nested functions have independent value scopes.
             if let Some(body) = child.child_by_field_name("body") {
                 collect_scopes(body, source, impl_map, current_impl_type.as_deref(), out);
             }
@@ -380,21 +394,72 @@ fn collect_params(params: &Node<'_>, source: &[u8], out: &mut HashMap<String, St
     }
 }
 
-/// Walk a function body collecting `let_declaration` type annotations.
-/// Does NOT descend into nested closures (they get their own scope entry).
-fn collect_body_bindings(body: &Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
-    let mut stack: Vec<Node<'_>> = vec![*body];
-    while let Some(n) = stack.pop() {
-        // Don't descend into nested closures.
-        if n.kind() == "closure_expression" || n.kind() == "function_item" {
+fn record_value(
+    pattern: Node<'_>,
+    source: &[u8],
+    range: PosRange,
+    values: &mut HashMap<String, Vec<PosRange>>,
+) {
+    let name = match pattern.kind() {
+        "identifier" => node_text(pattern, source),
+        "mut_pattern" => pattern
+            .named_child(0)
+            .filter(|node| node.kind() == "identifier")
+            .and_then(|node| node_text(node, source)),
+        _ => None,
+    };
+    if let Some(name) = name {
+        values.entry(name).or_default().push(range);
+    }
+}
+
+fn collect_parameter_values(
+    parameters: Node<'_>,
+    source: &[u8],
+    range: PosRange,
+    values: &mut HashMap<String, Vec<PosRange>>,
+) {
+    let mut cursor = parameters.walk();
+    for parameter in parameters.named_children(&mut cursor) {
+        let pattern = parameter
+            .child_by_field_name("pattern")
+            .unwrap_or(parameter);
+        record_value(pattern, source, range, values);
+    }
+}
+
+fn collect_body_bindings(
+    body: &Node<'_>,
+    source: &[u8],
+    out: &mut HashMap<String, String>,
+    values: &mut HashMap<String, Vec<PosRange>>,
+) {
+    let mut stack = vec![(*body, node_range(*body).1, false)];
+    while let Some((n, mut scope_end, mut in_closure)) = stack.pop() {
+        if n.kind() == "function_item" {
             continue;
         }
+        if matches!(n.kind(), "block" | "closure_expression") {
+            scope_end = node_range(n).1;
+        }
+        if n.kind() == "closure_expression" {
+            in_closure = true;
+            if let Some(parameters) = n.child_by_field_name("parameters") {
+                collect_parameter_values(parameters, source, node_range(n), values);
+            }
+        }
         if n.kind() == "let_declaration" {
-            collect_let_binding(&n, source, out);
+            if !in_closure {
+                collect_let_binding(&n, source, out);
+            }
+            if let Some(pattern) = n.child_by_field_name("pattern") {
+                // The initializer still sees the preceding binding.
+                record_value(pattern, source, (node_range(n).1, scope_end), values);
+            }
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
-            stack.push(child);
+            stack.push((child, scope_end, in_closure));
         }
     }
 }
@@ -529,7 +594,16 @@ fn rust_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Optio
                 .child_by_field_name("value")
                 .filter(|value| value.kind() == "call_expression")
                 .and_then(|value| {
-                    CallSite::nested_chain(|| rust_callee_name(value, source, locals))
+                    let calls_local = value
+                        .child_by_field_name("function")
+                        .filter(|function| function.kind() == "identifier")
+                        .and_then(|function| function.utf8_text(source).ok())
+                        .is_some_and(|name| locals.contains_value(start_pos(value), name));
+                    if calls_local {
+                        None
+                    } else {
+                        CallSite::nested_chain(|| rust_callee_name(value, source, locals))
+                    }
                 });
             Some(match inner {
                 Some(inner) => CallSite::chained_member(&inner, &untyped),
