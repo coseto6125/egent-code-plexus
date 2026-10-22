@@ -650,6 +650,13 @@ impl NameRefSpec {
             {
                 return NameScope::Skip;
             }
+            // A member target (`CONFIG.debug = True`) declares nothing: its
+            // receiver is read.
+            if parent.scope == NameScope::Binding
+                && matches!(cursor.field_name(), Some("object" | "operand"))
+            {
+                return NameScope::Value;
+            }
             if field & f::BINDING != 0
                 || (field & f::NAME != 0 && parent.kind & (k::PARAMETER | k::DECLARATOR) != 0)
             {

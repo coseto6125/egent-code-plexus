@@ -1122,3 +1122,27 @@ namespace B { class Builder : BaseB { int Size() { return Max; } } }\n",
     );
     assert_eq!(value_reads(&g, "Size"), none());
 }
+
+/// Assigning to a member of a module-level object (`CONFIG.debug = True`)
+/// declares no local `CONFIG`: the receiver is read, and so is every later
+/// read of it in the function.
+#[test]
+fn test_value_read_python_member_assignment_target_reads_receiver_returns_edge() {
+    let g = graph(
+        &PythonProvider::new().unwrap(),
+        &[(
+            "a.py",
+            "CONFIG = Settings()\n\n\
+def enable():\n    CONFIG.debug = True\n    return CONFIG.debug\n\n\
+def each(items):\n    for CONFIG.item in items:\n        pass\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "enable"),
+        vec![r("a.py", "CONFIG", VALUE_READ, SAME_FILE)]
+    );
+    assert_eq!(
+        value_reads(&g, "each"),
+        vec![r("a.py", "CONFIG", VALUE_READ, SAME_FILE)]
+    );
+}
