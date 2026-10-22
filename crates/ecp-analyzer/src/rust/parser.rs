@@ -420,11 +420,10 @@ impl LanguageProvider for RustProvider {
                             enclosing_impl_type(root, source)
                         }
                         NodeKind::Function => {
-                            // Prefer impl-type owner (for methods matched by the
-                            // function pattern); fall back to enclosing function
-                            // name for nested free functions.
-                            enclosing_impl_type(root, source)
-                                .or_else(|| enclosing_function_name(root, source))
+                            // A nested function belongs to its lexical function,
+                            // even when that function is an impl method.
+                            enclosing_function_name(root, source)
+                                .or_else(|| enclosing_impl_type(root, source))
                         }
                         NodeKind::Impl => {
                             // Trait name for trait-impls; empty string for

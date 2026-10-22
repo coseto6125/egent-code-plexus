@@ -22,8 +22,8 @@
   (visibility_modifier)? @export
   name: (type_identifier) @trait_item.name) @trait
 
-;; Free-standing functions (top-level or nested in mod). Restricted to
-;; `source_file` / `mod_item` parents so impl-internal function_items don't
+;; Free-standing functions (top-level, inline module, or lexical block).
+;; These parents exclude impl-internal function_items so they don't
 ;; double-fire (they're separately captured below as `@method`).
 (source_file
   (function_item
@@ -36,6 +36,11 @@
       (visibility_modifier)? @export
       name: (identifier) @function_item.name
       return_type: (_)? @type) @function))
+(block
+  (function_item
+    (visibility_modifier)? @export
+    name: (identifier) @function_item.name
+    return_type: (_)? @type) @function)
 
 ;; Trait-impl methods: `impl Trait for Type { fn m(&self) { ... } }`.
 ;; return_type is optional — `fn m()` with no `-> T` was previously skipped.
