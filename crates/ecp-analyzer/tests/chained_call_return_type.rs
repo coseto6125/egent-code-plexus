@@ -1182,6 +1182,82 @@ fn test_resolve_call_typescript_module_function_chain_binds_return_type_member()
     assert_binds_alpha(&typescript_closure_graph(), "useModule");
 }
 
+fn rust_closure_graph() -> ZeroCopyGraph {
+    single(
+        &RustProvider::new().unwrap(),
+        &[(
+            "src/closure.rs",
+            r#"
+struct Alpha;
+impl Alpha { fn bar(&self) {} }
+struct Beta;
+impl Beta { fn bar(&self) {} }
+fn make() -> Alpha { Alpha }
+fn use_local() {
+    let make = || Beta;
+    make().bar();
+}
+fn use_param(make: fn() -> Beta) {
+    make().bar();
+}
+fn use_module() {
+    make().bar();
+}
+fn use_before_binding() {
+    make().bar();
+    let make = || Beta;
+}
+fn use_after_block() {
+    { let make = || Beta; }
+    make().bar();
+}
+fn use_closure_param() {
+    let invoke = |make: fn() -> Beta| { make().bar(); };
+}
+fn use_nested_function() {
+    let make = || Beta;
+    fn nested() { make().bar(); }
+}
+"#,
+        )],
+    )
+}
+
+#[test]
+fn test_resolve_call_rust_local_closure_chain_skips_module_function_type() {
+    assert_no_alpha_bar(&rust_closure_graph(), "use_local");
+}
+
+#[test]
+fn test_resolve_call_rust_closure_param_chain_skips_module_function_type() {
+    assert_no_alpha_bar(&rust_closure_graph(), "use_param");
+}
+
+#[test]
+fn test_resolve_call_rust_module_function_chain_binds_return_type_member() {
+    assert_binds_alpha(&rust_closure_graph(), "use_module");
+}
+
+#[test]
+fn test_resolve_call_rust_call_before_local_binding_binds_module_function_type() {
+    assert_binds_alpha(&rust_closure_graph(), "use_before_binding");
+}
+
+#[test]
+fn test_resolve_call_rust_call_after_local_block_binds_module_function_type() {
+    assert_binds_alpha(&rust_closure_graph(), "use_after_block");
+}
+
+#[test]
+fn test_resolve_call_rust_closure_parameter_skips_module_function_type() {
+    assert_no_alpha_bar(&rust_closure_graph(), "use_closure_param");
+}
+
+#[test]
+fn test_resolve_call_rust_nested_function_does_not_capture_outer_binding() {
+    assert_binds_alpha(&rust_closure_graph(), "nested");
+}
+
 #[test]
 fn test_chained_call_cut_receiver_namesake_does_not_type_outer_member() {
     let provider = TypeScriptProvider::new().unwrap();
