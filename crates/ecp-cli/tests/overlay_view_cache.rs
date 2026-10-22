@@ -532,7 +532,8 @@ fn test_view_cache_key_each_part_changes_key() {
     let path = Path::new("/g/graph.bin");
     let mtime = UNIX_EPOCH + Duration::from_secs(1_000);
     let base = view_cache::key((path, 10, mtime), 3, 7).unwrap();
-    let later = mtime + Duration::from_nanos(1);
+    // Windows `SystemTime` counts 100 ns ticks, so 1 ns would round away.
+    let later = mtime + Duration::from_micros(1);
 
     assert_eq!(view_cache::key((path, 10, mtime), 3, 7), Some(base));
     for (what, other) in [
