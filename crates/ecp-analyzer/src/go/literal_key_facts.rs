@@ -247,10 +247,13 @@ fn mark_imported_literal_keys(body: Node<'_>, source: &[u8], facts: &mut Literal
         else {
             continue;
         };
-        let Some(name) = (key.kind() == "identifier")
-            .then(|| node_text(key, source))
-            .flatten()
-        else {
+        let identifier = (key.kind() == "identifier").then_some(key).or_else(|| {
+            (key.kind() == "literal_element")
+                .then(|| key.named_child(0))
+                .flatten()
+                .filter(|child| child.kind() == "identifier")
+        });
+        let Some(name) = identifier.and_then(|identifier| node_text(identifier, source)) else {
             continue;
         };
         if name.chars().next().is_some_and(char::is_lowercase) {

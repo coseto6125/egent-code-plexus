@@ -85,7 +85,7 @@
 
 ;; Imports — wildcard / on-demand import (com.foo.Bar.*)
 (import_declaration
-  (scoped_identifier) @import.source
+  [(scoped_identifier) (identifier)] @import.source
   (asterisk) @import.wildcard
 ) @import
 

@@ -2604,15 +2604,18 @@ fn pass2_emit_node_edges(
         };
         // `Foo.create().bar()`: `bar` on the type the one bound `create`
         // returns. Only an unknown return type permits the parser's fallback.
+        let mut chain_failed = false;
         let targets = CallSite::parse(raw_callee).resolve_chain(resolve, |inner, member| {
+            if chain_failed {
+                return Some(Vec::new());
+            }
             let &[inner] = inner.as_slice() else {
                 return None;
             };
             type_ladder::returned_type(symbol_table, inner.0).map(|_| {
-                resolver
-                    .resolve_chained_member(&local_graph.file_path, inner, member)
-                    .into_iter()
-                    .collect()
+                let target = resolver.resolve_chained_member(&local_graph.file_path, inner, member);
+                chain_failed = target.is_none();
+                target.into_iter().collect()
             })
         });
         for (target_id, confidence) in targets {

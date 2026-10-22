@@ -578,6 +578,7 @@ impl OverlayView {
                         // innermost call outwards, as the index's does.
                         // Inline, so `parsed` borrows `sym.calls` for as long
                         // as `module_calls` keeps its name.
+                        let mut chain_failed = false;
                         let hit = CallSite::parse(raw_callee).resolve_chain(
                             |parsed| 'hit: {
                                 if let Some(targets) = lexical.targets(span_of(sym), parsed.name())
@@ -743,9 +744,19 @@ impl OverlayView {
                                 })
                             },
                             |inner, member| {
+                                if chain_failed {
+                                    return Some(None);
+                                }
                                 let inner = (*inner)?;
                                 type_ladder::returned_type(&facts, inner.0).map(|_| {
-                                    facts.chained_member(inner, member, caller.language, &types)
+                                    let target = facts.chained_member(
+                                        inner,
+                                        member,
+                                        caller.language,
+                                        &types,
+                                    );
+                                    chain_failed = target.is_none();
+                                    target
                                 })
                             },
                         );
