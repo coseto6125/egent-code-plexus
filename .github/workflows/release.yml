@@ -4,10 +4,27 @@ on:
   push:
     tags:
       - 'v*'
+    # Cache warm-up only (see the build job's CACHE_WARM_ONLY). GitHub skips
+    # path filters for tag pushes, so every v* tag still triggers a release.
+    branches:
+      - main
+    paths:
+      - 'Cargo.lock'
+      - '**/Cargo.toml'
+      - '.cargo/config.toml'
+      - '.github/workflows/release.yml'
+  # Warm-up twice a week: an unread cache is evicted after 7 days, and a
+  # new stable toolchain changes the key.
+  schedule:
+    - cron: '23 3 * * 1,4'
   workflow_dispatch:
     inputs:
       dry_run:
         description: 'Dry run (build only, no publish/release)'
+        required: false
+        default: 'false'
+      warm_only:
+        description: 'Only fetch dependencies into the build cache (no build, no publish). Run on main: a tag run reads only main''s cache'
         required: false
         default: 'false'
 
@@ -40,6 +57,13 @@ jobs:
       contents: read
       id-token: write       # SLSA OIDC token
       attestations: write   # actions/attest-build-provenance
+    env:
+      # A tag run can restore only a cache saved under its own tag or under
+      # main, so a cache saved by the previous release is invisible to the
+      # next one. Runs on main fetch the dependencies and save them for the
+      # next tag. On v0.16.0 a cold fetch of the git dependencies alone took
+      # 8 of the build's 12.5 minutes.
+      CACHE_WARM_ONLY: ${{ github.event_name == 'schedule' || (github.event_name == 'push' && github.ref_type == 'branch') || inputs.warm_only == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -80,13 +104,20 @@ jobs:
         # always rerun on workspace crates, see Build step note below).
         # shared-key per cross-build target so x86_64-windows and
         # aarch64-darwin don't trample each other's registry layout.
+        # A tag run saves nothing: no later run can read a tag-scoped cache.
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: release-${{ matrix.target }}
           cache-targets: false
           cache-on-failure: true
+          save-if: ${{ github.ref_type != 'tag' }}
+
+      - name: Fetch dependencies (cache warm-up only)
+        if: env.CACHE_WARM_ONLY == 'true'
+        run: cargo fetch --locked
 
       - name: Remap the builder's source paths out of the binary
+        if: env.CACHE_WARM_ONLY != 'true'
         shell: bash
         # The binary embeds a source path for every panic location rustc keeps
         # and every `assert()` the tree-sitter grammars compile in. `strip =
@@ -114,11 +145,13 @@ jobs:
           echo "remapping $src -> /cargo"
 
       - name: Build release binary
+        if: env.CACHE_WARM_ONLY != 'true'
         # target/ is intentionally NOT cached so LTO fat link always runs on
         # workspace crates. Only ~/.cargo/registry is cached (deps download).
         run: cargo build --profile release-dist --bin ${{ env.BIN_NAME }} --target ${{ matrix.target }}
 
       - name: Verify the remap applied
+        if: env.CACHE_WARM_ONLY != 'true'
         shell: bash
         # A remap whose prefix does not match leaves the artifact untouched and
         # reports nothing, so assert on the binary rather than trust the flag.
@@ -153,7 +186,7 @@ jobs:
           echo "$bin: no build-host paths, registry paths rewritten to /cargo"
 
       - name: Package (tar.gz)
-        if: matrix.archive == 'tar.gz'
+        if: matrix.archive == 'tar.gz' && env.CACHE_WARM_ONLY != 'true'
         shell: bash
         run: |
           # GITHUB_REF_NAME is the tag on a release, but the branch name on a
@@ -172,7 +205,7 @@ jobs:
 
 
       - name: Package (zip)
-        if: matrix.archive == 'zip'
+        if: matrix.archive == 'zip' && env.CACHE_WARM_ONLY != 'true'
         shell: pwsh
         run: |
           # Slash-sanitized for the same reason as the tar.gz step above.
@@ -188,11 +221,13 @@ jobs:
           "$hash  $name.zip" | Out-File -Encoding ASCII "dist/$name.zip.sha256"
 
       - name: Generate SLSA build provenance
+        if: env.CACHE_WARM_ONLY != 'true'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: 'dist/*.${{ matrix.archive }}'
 
       - name: Upload artifact
+        if: env.CACHE_WARM_ONLY != 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ env.BIN_NAME }}-${{ matrix.target }}
@@ -207,7 +242,7 @@ jobs:
     name: GitHub Release
     needs: [build]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true')
+    if: startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || (inputs.dry_run != 'true' && inputs.warm_only != 'true'))
     permissions:
       contents: write       # GitHub Release 上傳
       id-token: write       # cosign keyless signing
@@ -329,7 +364,7 @@ jobs:
   post-release-install-smoke:
     name: Install smoke (${{ matrix.os }})
     needs: [github-release]
-    if: startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true')
+    if: startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || (inputs.dry_run != 'true' && inputs.warm_only != 'true'))
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -385,7 +420,7 @@ jobs:
   post-release-cargo-smoke:
     name: cargo install --git smoke
     needs: [github-release]
-    if: startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true')
+    if: startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || (inputs.dry_run != 'true' && inputs.warm_only != 'true'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -426,7 +461,7 @@ jobs:
     name: Update Homebrew tap
     needs: [github-release]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true')
+    if: startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || (inputs.dry_run != 'true' && inputs.warm_only != 'true'))
     permissions:
       contents: read
 
@@ -530,7 +565,7 @@ jobs:
     name: brew install smoke (macOS)
     needs: [homebrew-tap]
     runs-on: macos-latest
-    if: vars.HOMEBREW_TAP_APP_ID != '' && startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true')
+    if: vars.HOMEBREW_TAP_APP_ID != '' && startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || (inputs.dry_run != 'true' && inputs.warm_only != 'true'))
     permissions:
       contents: read
 
@@ -572,7 +607,7 @@ jobs:
     name: Publish to crates.io
     needs: [build]
     runs-on: ubuntu-latest
-    if: vars.PUBLISH_CRATES == '1' && startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true')
+    if: vars.PUBLISH_CRATES == '1' && startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || (inputs.dry_run != 'true' && inputs.warm_only != 'true'))
     permissions:
       contents: read
 
@@ -616,7 +651,7 @@ jobs:
     name: Publish to npm
     needs: [github-release]
     runs-on: ubuntu-latest
-    if: vars.PUBLISH_NPM == '1' && startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true')
+    if: vars.PUBLISH_NPM == '1' && startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || (inputs.dry_run != 'true' && inputs.warm_only != 'true'))
     permissions:
       contents: read
       # npm provenance attestation (mirrors the SLSA posture of the binaries).
@@ -716,7 +751,7 @@ jobs:
     name: Publish to PyPI
     needs: [github-release]
     runs-on: ubuntu-latest
-    if: vars.PUBLISH_PYPI == '1' && startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true')
+    if: vars.PUBLISH_PYPI == '1' && startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || (inputs.dry_run != 'true' && inputs.warm_only != 'true'))
     permissions:
       contents: read
       # OIDC token for PyPI Trusted Publishing.
@@ -780,7 +815,7 @@ jobs:
     name: Deploy landing site
     needs: [github-release]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true')
+    if: startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || (inputs.dry_run != 'true' && inputs.warm_only != 'true'))
     permissions:
       contents: read
 
