@@ -285,28 +285,22 @@ fn bind_param(p: Node<'_>, source: &[u8], out: &mut FxHashMap<String, String>) {
     let Some(declarator) = p.child_by_field_name("declarator") else {
         return;
     };
-    let function_pointer = callable_param_identifier(declarator, source);
-    let is_function_pointer = function_pointer.is_some();
-    let Some(name) = function_pointer.or_else(|| unwrap_declarator_identifier(declarator, source))
-    else {
-        return;
-    };
-    if is_function_pointer {
+    if let Some(name) = callable_param_identifier(declarator, source) {
         // A callable parameter's declared type is its result type. Keeping
         // that as the callable's type would incorrectly type `make().m()`.
         out.entry(name).or_default();
         return;
     }
-    bind_local(p.child_by_field_name("type"), name, source, out);
+    if let Some(name) = unwrap_declarator_identifier(declarator, source) {
+        bind_local(p.child_by_field_name("type"), name, source, out);
+    }
 }
 
 /// The name in a parameter declarator that is itself callable, such as
 /// `Beta* (*make)()`. This only runs for parameters, so ordinary function
 /// declarations never become local values.
 fn callable_param_identifier(node: Node<'_>, source: &[u8]) -> Option<String> {
-    if node.kind() != "function_declarator" {
-        return None;
-    }
+    let node = find_function_declarator(node)?;
     let paren = node.child_by_field_name("declarator")?;
     if paren.kind() != "parenthesized_declarator" {
         return None;
