@@ -1287,6 +1287,8 @@ impl<'a> Resolver<'a> {
     /// ([`extension_retry`]). Only a top-level function can be an extension
     /// on that type: a typed receiver of a library type (`gson.fromJson()`)
     /// or `super.onResume()` must not land on a same-named member.
+    /// Extension receivers are not indexed, so the top-level retry remains
+    /// a by-name heuristic and cannot verify the declared receiver type.
     pub(crate) fn extension_fallback(
         &self,
         source_file: &Path,
