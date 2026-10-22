@@ -712,11 +712,11 @@ pub fn python_import_reexport<F: ModuleFacts + ?Sized>(
         .flatten()
 }
 
-/// `from pkg.sub import mod; mod.compute()`: a from-import of a name its
-/// module does not bind imports the submodule `pkg.sub.mod`, so the call
-/// binds as through `import pkg.sub.mod as mod`. `None` on any miss: the
-/// call then resolves as the bare member. Returns the declaration and the
-/// position of the import that bound it.
+/// `from pkg.sub import mod; mod.compute()` or `mod.client.compute()`: a
+/// from-import of a name its module does not bind imports a submodule, so the
+/// call binds as through `import pkg.sub.mod`. `None` on any miss: the call
+/// then resolves as the bare member. Returns the declaration and the position
+/// of the import that bound it.
 pub fn python_submodule_member<'i, F: ModuleFacts + ?Sized>(
     facts: &F,
     importer: &str,
@@ -728,10 +728,13 @@ pub fn python_submodule_member<'i, F: ModuleFacts + ?Sized>(
         .into_iter()
         .enumerate()
         .find_map(|(position, import)| {
+            let mut receiver_path = receiver.split('/');
+            let root = receiver_path.next()?;
             // The cheap gate first: most receivers are objects, whose names
             // no module file or package directory carries.
-            if import.imported_name == "*"
-                || import.local_name() != receiver
+            if root.is_empty()
+                || import.imported_name == "*"
+                || import.local_name() != root
                 || !facts.has_module_name(Language::Python, import.imported_name)
             {
                 return None;
@@ -750,8 +753,9 @@ pub fn python_submodule_member<'i, F: ModuleFacts + ?Sized>(
             } else {
                 "/"
             };
-            let submodule = [import.source, separator, import.imported_name].concat();
-            let module = match facts.python_module(importer, &submodule) {
+            let nested_separator = if separator.is_empty() { "." } else { separator };
+            let mut submodule = [import.source, separator, import.imported_name].concat();
+            let mut module = match facts.python_module(importer, &submodule) {
                 PyModule::Unique(module) => module,
                 PyModule::Missing | PyModule::Ambiguous => return None,
             };
@@ -764,6 +768,26 @@ pub fn python_submodule_member<'i, F: ModuleFacts + ?Sized>(
                 )
             }) {
                 return None;
+            }
+            for segment in receiver_path {
+                if segment.is_empty() {
+                    return None;
+                }
+                submodule.push_str(nested_separator);
+                submodule.push_str(segment);
+                let next_module = match facts.python_module(importer, &submodule) {
+                    PyModule::Unique(module) => module,
+                    PyModule::Missing | PyModule::Ambiguous => return None,
+                };
+                if attribute_shadows_submodule(
+                    facts,
+                    module.as_ref(),
+                    segment,
+                    next_module.as_ref(),
+                ) {
+                    return None;
+                }
+                module = next_module;
             }
             let decl = call_in_file(facts, module.as_ref(), member, target)
                 .or_else(|| python_reexport(facts, module.as_ref(), member, target))?;

@@ -455,17 +455,16 @@ fn python_callee_name(
                         return Some(segments.join("."));
                     }
                     // A `from` binding may name a submodule, which only the
-                    // resolver can tell from an object.
-                    Some(ImportedBinding::Symbol) if obj.kind() == "identifier" => {
-                        return Some(CallSite::from_receiver(
-                            obj.utf8_text(source).ok()?,
-                            attr_name,
-                        ));
-                    }
-                    // `sym.attr.m()`: a member call on a value the import
-                    // names; a bare `m` would read as receiverless.
+                    // resolver can tell from an object. Keep nested
+                    // attributes in the receiver path so the resolver can
+                    // distinguish `mod.client.m()` from `mod.m()`.
                     Some(ImportedBinding::Symbol) => {
-                        return Some(CallSite::untyped_member(attr_name));
+                        return match attribute_receiver_path(obj, source) {
+                            Some(receiver) => Some(CallSite::from_receiver(&receiver, attr_name)),
+                            // `sym.attr.m()`: a member call on a value the import
+                            // names; a bare `m` would read as receiverless.
+                            None => Some(CallSite::untyped_member(attr_name)),
+                        };
                     }
                     None => {
                         let class = (obj.kind() == "identifier")
@@ -506,6 +505,27 @@ fn python_callee_name(
         }
         _ => None,
     }
+}
+
+/// The identifier-led attribute path of `node`, joined for an internal call
+/// receiver. A slash is not valid in a Python identifier, so it preserves the
+/// final call member separator in [`CallSite::from_receiver`].
+fn attribute_receiver_path(mut node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut segments = Vec::new();
+    while node.kind() == "attribute" {
+        segments.push(
+            node.child_by_field_name("attribute")?
+                .utf8_text(source)
+                .ok()?,
+        );
+        node = node.child_by_field_name("object")?;
+    }
+    if node.kind() != "identifier" {
+        return None;
+    }
+    segments.push(node.utf8_text(source).ok()?);
+    segments.reverse();
+    Some(segments.join("/"))
 }
 
 /// The first parameter of a method declared in a class body (`self`, or
