@@ -274,6 +274,33 @@ fn load() {}
     );
 }
 
+#[test]
+fn test_overlay_nested_free_function_precedes_top_level_namesake_matches_reindex() {
+    let rust = RustProvider::new().unwrap();
+    let python = PythonProvider::new().unwrap();
+    let cases: &[(&dyn LanguageProvider, &str, &str)] = &[
+        (
+            &rust,
+            "src/lib.rs",
+            "fn outer() { fn helper() {} fn inner() { helper(); } } fn helper() {}",
+        ),
+        (
+            &python,
+            "main.py",
+            "def outer():\n    def helper():\n        pass\n    def inner():\n        helper()\ndef helper():\n    pass\n",
+        ),
+    ];
+    for &(provider, path, source) in cases {
+        parity_from(
+            "inner",
+            provider,
+            &[(path, source)],
+            &[(path, &format!("\n{source}"))],
+            &[(path.into(), "helper".into(), "outer".into(), 100)],
+        );
+    }
+}
+
 /// A full reindex of `files` with `edits` applied, written under `root` so
 /// a Rust fixture gets its module tree.
 fn reindex(

@@ -71,6 +71,32 @@ fn target(file: &str, owner: &str, name: &str) -> Target {
     (file.to_string(), owner.to_string(), name.to_string())
 }
 
+#[test]
+fn test_resolve_call_nested_free_function_precedes_top_level_namesake() {
+    let rust = RustProvider::new().unwrap();
+    let python = PythonProvider::new().unwrap();
+    let cases: &[(&dyn LanguageProvider, &str, &str)] = &[
+        (
+            &rust,
+            "src/lib.rs",
+            "fn outer() { fn helper() {} fn inner() { helper(); } } fn helper() {}",
+        ),
+        (
+            &python,
+            "main.py",
+            "def outer():\n    def helper():\n        pass\n    def inner():\n        helper()\ndef helper():\n    pass\n",
+        ),
+    ];
+    for &(provider, path, source) in cases {
+        let graph = single(provider, &[(path, source)]);
+        assert_eq!(
+            targets(&graph, "inner"),
+            vec![target(path, "outer", "helper")],
+            "{path}"
+        );
+    }
+}
+
 // ---- PHP: a bare call needs `$this->` / `self::` to reach a member ----
 
 const PHP_UNRELATED: (&str, &str) = (
