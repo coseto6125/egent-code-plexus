@@ -1629,13 +1629,8 @@ fn test_sweep_generations_keeping_two_successive_publishes_leave_one_generation(
         let published = commits.join(name(g));
         make_named_commit_dir(&commits, &name(g));
         filetime::set_file_mtime(&published, filetime::FileTime::now()).unwrap();
+        // Back-to-back forced builds: the predecessor is seconds old too.
         ecp_cli::admin::gc::sweep_generations_keeping(tmp.path(), false, Some(&published)).unwrap();
-        // The dir settles before the next forced build.
-        filetime::set_file_mtime(
-            &published,
-            filetime::FileTime::from_unix_time(1_000_000_000, 0),
-        )
-        .unwrap();
     }
     assert_eq!(
         gen_dirs(&commits),

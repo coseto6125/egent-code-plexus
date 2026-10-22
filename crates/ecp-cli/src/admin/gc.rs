@@ -609,9 +609,11 @@ pub fn sweep_stale_generations(repo_root: &Path, dry_run: bool) -> io::Result<Sw
 }
 
 /// [`sweep_stale_generations`] for a caller that just published `published`.
-/// That dir is settled by construction, so the 10 s in-flight guard does not
-/// apply to it (without this, a fresh publish hides itself and its
-/// predecessor is never paired with it), and it is never removed.
+/// That dir is settled by construction, and so is every lower generation of
+/// its SHA, which it supersedes: the 10 s in-flight guard applies to neither
+/// (without this, a fresh publish hides itself, and a forced build seconds
+/// after the last one keeps its predecessor). The published dir is never
+/// removed.
 pub fn sweep_generations_keeping(
     repo_root: &Path,
     dry_run: bool,
@@ -630,6 +632,14 @@ pub fn sweep_generations_keeping(
     let mut by_sha: FxHashMap<[u8; 20], Vec<(CommitDirName, std::path::PathBuf)>> =
         FxHashMap::default();
     let now = std::time::SystemTime::now();
+    let published_name = published
+        .and_then(Path::file_name)
+        .and_then(|n| CommitDirName::parse(&n.to_string_lossy()).ok());
+    let superseded = |parsed: &CommitDirName| {
+        published_name
+            .as_ref()
+            .is_some_and(|p| p.sha == parsed.sha && parsed.generation <= p.generation)
+    };
     for entry in it.flatten() {
         let Ok(meta) = entry.metadata() else {
             continue;
@@ -653,7 +663,7 @@ pub fn sweep_generations_keeping(
         let Ok(parsed) = CommitDirName::parse(&name) else {
             continue;
         };
-        if is_in_flight(&meta, now) && published != Some(entry.path().as_path()) {
+        if is_in_flight(&meta, now) && !superseded(&parsed) {
             continue;
         }
         by_sha
