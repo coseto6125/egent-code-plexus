@@ -59,40 +59,41 @@
 
 दो अन्य code-graph tools के साथ सीधी तुलना — [`codegraph`](https://github.com/colbymchenry/codegraph) (Node + SQLite) और upstream [`gitnexus`](https://github.com/abhigyanpatwari/GitNexus) (Node) — समान checkouts, समान machine पर। `ecp` एक stateless one-shot CLI है: नीचे की हर latency में **पूरा process startup शामिल** है, कोई daemon नहीं, कोई warm-up नहीं।
 
-*Versions: `ecp` 0.4.2 · `codegraph` 0.9.4 · `gitnexus` 1.6.5. जहाँ configurable हो वहाँ सभी tools 1 MiB max-file-size threshold पर cap (`gitnexus` 512 KB hard-code करता है)। `ecp` medians 5–7 runs पर। Hardware: AMD Ryzen 9 9950X (16 logical), Linux।*
+*Versions: `ecp` 0.16.2 · `codegraph` 1.6.2 · `gitnexus` 1.6.12, 2026-10-22 को measured। तीनों प्रति फ़ाइल 1 MiB पर cap। हर run AMD Ryzen 9 9950X पर 8 logical cores (`taskset -c 0-7`) पर pinned, Linux (WSL2)। Cold-index अनुपात interleaved runs से आते हैं; `ecp` index medians 5 runs पर, queries 7 पर।*
 
-### `microsoft/vscode` — 14,874 फ़ाइलें, घना single-language TypeScript
-
-| Metric | **`ecp`** | `codegraph` | `gitnexus` |
-|---|---|---|---|
-| **Cold index** | **4.6 s** | 166.9 s | **DNF** — 27 मिनट में kill |
-| Peak RSS | **~1.0 GiB** | 1.7 GiB | 4.6 GiB (अभी भी बढ़ रहा) |
-| Symbol find / query | **34.6 ms** | 169.5 ms | — |
-| Callers / impact | **27.2 ms** | 172.4 ms | — |
-| Inspect / context | **35.0 ms** | 415.9 ms | — |
-| Impact baseline (git-diff) | **725.9 ms** | N/A — ऐसा कोई mode नहीं | — |
-| Graph nodes | **507,257** | 315,498 | — |
-| Graph edges | 916,380 | **986,709** | — |
-| Index size on disk | **87 MiB** | 671 MiB | — |
-| Files indexed | **14,874** | 10,814 | — |
-
-*`gitnexus` finish नहीं हुआ — in-memory graph-resolution phase में 27 मिनट stuck रहने के बाद kill (RSS 4.6 GiB, कोई output नहीं लिखा)।*
-
-### `abhigyanpatwari/GitNexus` — 3,232 फ़ाइलें, polyglot (वह corpus जो तीनों finish कर सकते हैं)
+### `microsoft/vscode` — 14,854 फ़ाइलें, घना single-language TypeScript
 
 | Metric | **`ecp`** | `codegraph` | `gitnexus` |
 |---|---|---|---|
-| **Cold index** | **0.74 s** | 11.2 s | 77.6 s |
-| Peak RSS | **264 MiB** | 501 MiB | 2.5 GiB |
-| Find / query | **9.4 ms** | 103.5 ms | — |
-| Callers / impact | **9.2 ms** | 104.2 ms | 297.6 ms |
-| Inspect / context | **9.4 ms** | — | 295.5 ms |
-| Graph nodes | **49,122** | 19,604 | 30,223 |
-| Graph edges | **48,271** | 39,155 | 47,218 |
-| Index size on disk | **7.7 MiB** | 37 MiB | 306 MiB |
-| Files indexed | **3,232** | 2,968 | 3,232 |
+| **Cold index** | **8.6 s** | 82.8 s | 317 s |
+| Peak RSS | **0.99 GiB** | 7.7 GiB | 9.0 GiB |
+| Symbol find / query | **34.4 ms** | 329.6 ms | 2,017 ms |
+| Callers / impact | **34.6 ms** | 345.6 ms | 1,165 ms |
+| Inspect / context | **34.6 ms** | 321.9 ms | 2,825 ms |
+| Impact baseline (git-diff) | **251.6 ms** | N/A — ऐसा कोई mode नहीं | — |
+| Graph nodes | **495,839** | 380,766 | 356,556 |
+| Graph edges | 1,052,891 | 1,366,686 | **1,493,180** |
+| Index size on disk | **125 MiB** | 1,250 MiB | 3,957 MiB |
+| Files indexed | **12,294** | 10,688 | 11,710 |
 
-**Cold index: `codegraph` से 15–37× तेज़; `gitnexus` एक real large repo पर finish नहीं होता। हर scale पर — सबसे कम memory, सबसे छोटा on-disk index, सबसे घना graph।**
+*मई 2026 में `gitnexus` 1.6.5 इस repo को finish नहीं कर पाया (27 मिनट पर kill); 1.6.12 इसे 317 s में finish करता है। `ecp` का on-disk आँकड़ा live index है; इसका parse cache 127 MiB और जोड़ता है।*
+
+### `abhigyanpatwari/GitNexus` — 7,225 फ़ाइलें, polyglot
+
+| Metric | **`ecp`** | `codegraph` | `gitnexus` |
+|---|---|---|---|
+| **Cold index** | **3.22 s** | 56.5 s | 77.2 s |
+| Peak RSS | **0.40 GiB** | 4.04 GiB | 4.59 GiB |
+| Find / query | **20.4 ms** | 274.2 ms | 1,050 ms |
+| Callers / impact | **20.3 ms** | 273.3 ms | 818 ms |
+| Inspect / context | **22.3 ms** | 281.5 ms | 1,000 ms |
+| Impact baseline (git-diff) | **290.7 ms** | N/A — ऐसा कोई mode नहीं | — |
+| Graph nodes | **131,266** | 67,988 | 65,974 |
+| Graph edges | **272,150** | 221,484 | 217,919 |
+| Index size on disk | **32 MiB** | 293 MiB | 1,113 MiB |
+| Files indexed | **6,669** | 6,125 | 3,033 |
+
+**Cold index: vscode पर `codegraph` से ~9× तेज़ और GitNexus repo पर ~17×; `gitnexus` से 24–37× तेज़। दोनों corpora पर सबसे कम memory, सबसे छोटा on-disk index और सबसे तेज़ queries। vscode पर `codegraph` और `gitnexus` अधिक edges दर्ज करते हैं; `ecp` सबसे अधिक nodes दर्ज करता है।**
 
 ### Scale: `.sample_repo` — 22,645 फ़ाइलें, 25 languages, 2.1 GB polyglot corpus
 

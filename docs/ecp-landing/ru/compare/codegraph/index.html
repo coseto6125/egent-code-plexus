@@ -63,47 +63,48 @@
     <main class="container compare-main">
         <h2 class="section-heading">Как это измерялось</h2>
         <ul class="compare-method">
-            <li><strong>Versions</strong> — ecp 0.4.2 · codegraph 0.9.4 · gitnexus 1.6.5</li>
-            <li><strong>Hardware</strong> — AMD Ryzen 9 9950X (16 logical), Linux</li>
-            <li>Same checkouts, same machine. All tools capped at a 1 MiB max-file-size threshold where configurable (gitnexus hard-codes 512 KB). ecp medians over 5–7 runs. ecp is a stateless one-shot CLI, so every latency includes full process startup — no daemon, no warm-up.</li>
+            <li><strong>Версии</strong> — ecp 0.16.2 · codegraph 1.6.2 · gitnexus 1.6.12 (2026-10-22)</li>
+            <li><strong>Оборудование</strong> — AMD Ryzen 9 9950X, Linux (WSL2), привязка к 8 логическим ядрам</li>
+            <li>Те же checkout, та же машина, по одному инструменту за раз. У всех трёх лимит 1 MiB на файл. Медианы по 3–5 запускам индексации и по 7 запросам; соотношения холодной индексации получены из чередующихся запусков. ecp — CLI без состояния с разовым запуском, поэтому каждая задержка включает полный запуск процесса: без демона и без прогрева.</li>
         </ul>
 
             <h3 class="mono accent">microsoft/vscode</h3>
-            <p class="compare-shape">14,874 files, dense single-language TypeScript</p>
+            <p class="compare-shape">14,854 файлов, плотный однояязычный TypeScript</p>
             <div class="table-container">
                 <table class="saas-table">
-                    <thead><tr><th>Metric</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th></tr></thead>
+                    <thead><tr><th>Метрика</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th></tr></thead>
                     <tbody>
-                    <tr><td>Cold index</td><td class="compare-best">4.6 s</td><td>166.9 s</td></tr>
-                    <tr><td>Peak RSS</td><td class="compare-best">~1.0 GiB</td><td>1.7 GiB</td></tr>
-                    <tr><td>Symbol find / query</td><td class="compare-best">34.6 ms</td><td>169.5 ms</td></tr>
-                    <tr><td>Callers / impact</td><td class="compare-best">27.2 ms</td><td>172.4 ms</td></tr>
-                    <tr><td>Inspect / context</td><td class="compare-best">35.0 ms</td><td>415.9 ms</td></tr>
-                    <tr><td>Impact baseline (git diff)</td><td class="compare-best">725.9 ms</td><td>no such mode</td></tr>
-                    <tr><td>Graph nodes</td><td class="compare-best">507,257</td><td>315,498</td></tr>
-                    <tr><td>Graph edges</td><td>916,380</td><td class="compare-best">986,709</td></tr>
-                    <tr><td>Index size on disk</td><td class="compare-best">87 MiB</td><td>671 MiB</td></tr>
-                    <tr><td>Files indexed</td><td class="compare-best">14,874</td><td>10,814</td></tr>
+                    <tr><td>Холодная индексация</td><td class="compare-best">8.6 s</td><td>82.8 s</td></tr>
+                    <tr><td>Пиковый RSS</td><td class="compare-best">0.99 GiB</td><td>7.7 GiB</td></tr>
+                    <tr><td>Поиск символа / запрос</td><td class="compare-best">34.4 ms</td><td>329.6 ms</td></tr>
+                    <tr><td>Вызывающие / влияние</td><td class="compare-best">34.6 ms</td><td>345.6 ms</td></tr>
+                    <tr><td>Инспекция / контекст</td><td class="compare-best">34.6 ms</td><td>321.9 ms</td></tr>
+                    <tr><td>Базовое влияние (git-diff)</td><td class="compare-best">251.6 ms</td><td>нет такого режима</td></tr>
+                    <tr><td>Узлы графа</td><td class="compare-best">495,839</td><td>380,766</td></tr>
+                    <tr><td>Рёбра графа</td><td>1,052,891</td><td>1,366,686</td></tr>
+                    <tr><td>Размер индекса на диске</td><td class="compare-best">125 MiB</td><td>1,250 MiB</td></tr>
+                    <tr><td>Проиндексировано файлов</td><td class="compare-best">12,294</td><td>10,688</td></tr>
                     </tbody>
                 </table>
             </div>
-            <p class="table-caption">gitnexus did not finish — killed after 27 min stuck in its in-memory graph-resolution phase (RSS 4.6 GiB, no output written).</p>
+            <p class="table-caption">В мае 2026 gitnexus 1.6.5 не завершил этот репозиторий (убит через 27 мин); 1.6.12 завершает за 317 s. Размер ecp на диске — это живой индекс; его кэш разбора добавляет 127 MiB.</p>
 
             <h3 class="mono accent">abhigyanpatwari/GitNexus</h3>
-            <p class="compare-shape">3,232 files, polyglot — the corpus all three can finish</p>
+            <p class="compare-shape">7,225 файла, полиглот</p>
             <div class="table-container">
                 <table class="saas-table">
-                    <thead><tr><th>Metric</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th></tr></thead>
+                    <thead><tr><th>Метрика</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th></tr></thead>
                     <tbody>
-                    <tr><td>Cold index</td><td class="compare-best">0.74 s</td><td>11.2 s</td></tr>
-                    <tr><td>Peak RSS</td><td class="compare-best">264 MiB</td><td>501 MiB</td></tr>
-                    <tr><td>Find / query</td><td class="compare-best">9.4 ms</td><td>103.5 ms</td></tr>
-                    <tr><td>Callers / impact</td><td class="compare-best">9.2 ms</td><td>104.2 ms</td></tr>
-                    <tr><td>Inspect / context</td><td class="compare-best">9.4 ms</td><td>—</td></tr>
-                    <tr><td>Graph nodes</td><td class="compare-best">49,122</td><td>19,604</td></tr>
-                    <tr><td>Graph edges</td><td class="compare-best">48,271</td><td>39,155</td></tr>
-                    <tr><td>Index size on disk</td><td class="compare-best">7.7 MiB</td><td>37 MiB</td></tr>
-                    <tr><td>Files indexed</td><td class="compare-best">3,232</td><td>2,968</td></tr>
+                    <tr><td>Холодная индексация</td><td class="compare-best">3.22 s</td><td>56.5 s</td></tr>
+                    <tr><td>Пиковый RSS</td><td class="compare-best">0.40 GiB</td><td>4.04 GiB</td></tr>
+                    <tr><td>Поиск / запрос</td><td class="compare-best">20.4 ms</td><td>274.2 ms</td></tr>
+                    <tr><td>Вызывающие / влияние</td><td class="compare-best">20.3 ms</td><td>273.3 ms</td></tr>
+                    <tr><td>Инспекция / контекст</td><td class="compare-best">22.3 ms</td><td>281.5 ms</td></tr>
+                    <tr><td>Базовое влияние (git-diff)</td><td class="compare-best">290.7 ms</td><td>нет такого режима</td></tr>
+                    <tr><td>Узлы графа</td><td class="compare-best">131,266</td><td>67,988</td></tr>
+                    <tr><td>Рёбра графа</td><td class="compare-best">272,150</td><td>221,484</td></tr>
+                    <tr><td>Размер индекса на диске</td><td class="compare-best">32 MiB</td><td>293 MiB</td></tr>
+                    <tr><td>Проиндексировано файлов</td><td class="compare-best">6,669</td><td>6,125</td></tr>
                     </tbody>
                 </table>
             </div>

@@ -66,40 +66,41 @@ Inspired by [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by [Abhigyan
 
 Head-to-head against two other code-graph tools — [`codegraph`](https://github.com/colbymchenry/codegraph) (Node + SQLite) and upstream [`gitnexus`](https://github.com/abhigyanpatwari/GitNexus) (Node) — on the same checkouts, same machine. `ecp` is a stateless one-shot CLI: every latency below **includes full process startup**, no daemon, no warm-up.
 
-*Versions: `ecp` 0.4.2 · `codegraph` 0.9.4 · `gitnexus` 1.6.5. All tools capped at a 1 MiB max-file-size threshold where configurable (`gitnexus` hard-codes 512 KB). `ecp` medians over 5–7 runs. Hardware: AMD Ryzen 9 9950X (16 logical), Linux.*
+*Versions: `ecp` 0.16.2 · `codegraph` 1.6.2 · `gitnexus` 1.6.12, measured 2026-10-22. All three capped at 1 MiB per file. Every run pinned to 8 logical cores (`taskset -c 0-7`) on an AMD Ryzen 9 9950X, Linux (WSL2). Cold-index ratios come from interleaved runs; `ecp` index medians over 5 runs, queries over 7.*
 
-### `microsoft/vscode` — 14,874 files, dense single-language TypeScript
-
-| Metric | **`ecp`** | `codegraph` | `gitnexus` |
-|---|---|---|---|
-| **Cold index** | **4.6 s** | 166.9 s | **DNF** — killed at 27 min |
-| Peak RSS | **~1.0 GiB** | 1.7 GiB | 4.6 GiB (still climbing) |
-| Symbol find / query | **34.6 ms** | 169.5 ms | — |
-| Callers / impact | **27.2 ms** | 172.4 ms | — |
-| Inspect / context | **35.0 ms** | 415.9 ms | — |
-| Impact baseline (git-diff) | **725.9 ms** | N/A — no such mode | — |
-| Graph nodes | **507,257** | 315,498 | — |
-| Graph edges | 916,380 | **986,709** | — |
-| Index size on disk | **87 MiB** | 671 MiB | — |
-| Files indexed | **14,874** | 10,814 | — |
-
-*`gitnexus` did not finish — killed after 27 min stuck in its in-memory graph-resolution phase (RSS 4.6 GiB, no output written).*
-
-### `abhigyanpatwari/GitNexus` — 3,232 files, polyglot (the corpus all three can finish)
+### `microsoft/vscode` — 14,854 files, dense single-language TypeScript
 
 | Metric | **`ecp`** | `codegraph` | `gitnexus` |
 |---|---|---|---|
-| **Cold index** | **0.74 s** | 11.2 s | 77.6 s |
-| Peak RSS | **264 MiB** | 501 MiB | 2.5 GiB |
-| Find / query | **9.4 ms** | 103.5 ms | — |
-| Callers / impact | **9.2 ms** | 104.2 ms | 297.6 ms |
-| Inspect / context | **9.4 ms** | — | 295.5 ms |
-| Graph nodes | **49,122** | 19,604 | 30,223 |
-| Graph edges | **48,271** | 39,155 | 47,218 |
-| Index size on disk | **7.7 MiB** | 37 MiB | 306 MiB |
-| Files indexed | **3,232** | 2,968 | 3,232 |
+| **Cold index** | **8.6 s** | 82.8 s | 317 s |
+| Peak RSS | **0.99 GiB** | 7.7 GiB | 9.0 GiB |
+| Symbol find / query | **34.4 ms** | 329.6 ms | 2,017 ms |
+| Callers / impact | **34.6 ms** | 345.6 ms | 1,165 ms |
+| Inspect / context | **34.6 ms** | 321.9 ms | 2,825 ms |
+| Impact baseline (git-diff) | **251.6 ms** | N/A — no such mode | — |
+| Graph nodes | **495,839** | 380,766 | 356,556 |
+| Graph edges | 1,052,891 | 1,366,686 | **1,493,180** |
+| Index size on disk | **125 MiB** | 1,250 MiB | 3,957 MiB |
+| Files indexed | **12,294** | 10,688 | 11,710 |
 
-**Cold index: 15–37× faster than `codegraph`; `gitnexus` doesn't finish on a real large repo. Lowest memory, smallest on-disk index, densest graph — at every scale.**
+*In May 2026 `gitnexus` 1.6.5 did not finish this repo (killed at 27 min); 1.6.12 finishes in 317 s. `ecp`'s on-disk figure is the live index; its parse cache adds 127 MiB.*
+
+### `abhigyanpatwari/GitNexus` — 7,225 files, polyglot
+
+| Metric | **`ecp`** | `codegraph` | `gitnexus` |
+|---|---|---|---|
+| **Cold index** | **3.22 s** | 56.5 s | 77.2 s |
+| Peak RSS | **0.40 GiB** | 4.04 GiB | 4.59 GiB |
+| Find / query | **20.4 ms** | 274.2 ms | 1,050 ms |
+| Callers / impact | **20.3 ms** | 273.3 ms | 818 ms |
+| Inspect / context | **22.3 ms** | 281.5 ms | 1,000 ms |
+| Impact baseline (git-diff) | **290.7 ms** | N/A — no such mode | — |
+| Graph nodes | **131,266** | 67,988 | 65,974 |
+| Graph edges | **272,150** | 221,484 | 217,919 |
+| Index size on disk | **32 MiB** | 293 MiB | 1,113 MiB |
+| Files indexed | **6,669** | 6,125 | 3,033 |
+
+**Cold index: ~9× faster than `codegraph` on vscode and ~17× on the GitNexus repo; 24–37× faster than `gitnexus`. Lowest memory, smallest on-disk index and fastest queries on both corpora. On vscode, `codegraph` and `gitnexus` record more edges; `ecp` records the most nodes.**
 
 ### Scale: `.sample_repo` — 22,645 files, 25 languages, 2.1 GB polyglot corpus
 
