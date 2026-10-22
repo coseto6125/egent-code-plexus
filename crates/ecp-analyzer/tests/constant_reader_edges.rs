@@ -448,6 +448,53 @@ fn test_value_read_rust_used_const_returns_cross_file_edge() {
     assert_one_cross_file(&value_reads(&g, "read_limit"), "src/a.rs", "LIMIT");
 }
 
+#[test]
+fn test_value_read_rust_inline_module_constants_bind_their_own_readers() {
+    let g = graph(
+        &RustProvider::new().unwrap(),
+        &[(
+            "src/lib.rs",
+            r#"
+mod alpha {
+    pub const LIMIT: u32 = 1;
+    pub static NAME: &str = "alpha";
+    pub fn read_alpha() -> u32 { LIMIT + NAME.len() as u32 }
+}
+mod beta {
+    pub const LIMIT: u32 = 2;
+    pub static NAME: &str = "beta";
+    pub fn read_beta() -> u32 { LIMIT + NAME.len() as u32 }
+}
+"#,
+        )],
+    );
+    let pool = g.string_pool.as_slice();
+    let mut reads: Vec<_> = g
+        .edges
+        .iter()
+        .filter(|edge| edge.reason.resolve(pool) == VALUE_READ)
+        .map(|edge| {
+            let source = &g.nodes[edge.source as usize];
+            let target = &g.nodes[edge.target as usize];
+            (
+                source.name.resolve(pool),
+                target.owner_class.resolve(pool),
+                target.name.resolve(pool),
+            )
+        })
+        .collect();
+    reads.sort();
+    assert_eq!(
+        reads,
+        vec![
+            ("read_alpha", "alpha", "LIMIT"),
+            ("read_alpha", "alpha", "NAME"),
+            ("read_beta", "beta", "LIMIT"),
+            ("read_beta", "beta", "NAME"),
+        ]
+    );
+}
+
 // ---- PHP ----
 
 const PHP_SAME_FILE: &str = "<?php\nconst LIMITS = 3;\n\n\

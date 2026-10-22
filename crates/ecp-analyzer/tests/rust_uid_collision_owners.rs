@@ -214,6 +214,40 @@ fn bench_fn() {
     );
 }
 
+#[test]
+fn test_const_owner_inline_modules_preserve_distinct_scopes() {
+    let g = parse(
+        r#"
+const LIMIT: u32 = 0;
+mod alpha {
+    pub const LIMIT: u32 = 1;
+    pub static NAME: &str = "alpha";
+    fn local() { const LIMIT: u32 = 3; }
+    mod nested { pub const LIMIT: u32 = 4; }
+}
+mod beta {
+    pub const LIMIT: u32 = 2;
+    pub static NAME: &str = "beta";
+}
+"#,
+    );
+    let mut limits = owners_of(&g, "LIMIT", NodeKind::Const);
+    limits.sort();
+    assert_eq!(
+        limits,
+        vec![
+            None,
+            Some("alpha".into()),
+            Some("beta".into()),
+            Some("local".into()),
+            Some("nested".into()),
+        ]
+    );
+    let mut names = owners_of(&g, "NAME", NodeKind::Const);
+    names.sort();
+    assert_eq!(names, vec![Some("alpha".into()), Some("beta".into())]);
+}
+
 // ── cfg-guarded Function in same file ────────────────────────────────────────
 
 /// Two `#[cfg(…)]`-guarded `fn main()` definitions in the same file produce
