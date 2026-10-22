@@ -351,9 +351,9 @@ fn test_python_dotted_from_import_module_and_alias_bind_final_submodule() {
     }
 }
 
-/// Relative imports and namespace packages still walk the dotted module path.
+/// A relative import still walks the dotted module path.
 #[test]
-fn test_python_dotted_from_import_relative_and_namespace_package_bind_submodule() {
+fn test_python_dotted_from_import_relative_package_binds_submodule() {
     let relative = python(
         &[&[
             ("app/__init__.py", ""),
@@ -370,19 +370,64 @@ fn test_python_dotted_from_import_relative_and_namespace_package_bind_submodule(
         "caller",
         &[("app/config/settings.py", "", "get_db", import_tier())],
     );
+}
 
-    let namespace = python(
-        &[&[("app/config/settings.py", "def get_db():\n    return 1\n")]],
+/// Namespace packages still walk the dotted module path.
+#[test]
+fn test_python_dotted_from_import_namespace_package_binds_submodule() {
+    for initializer in [None, Some("from . import config\n")] {
+        let mut files = vec![("app/config/settings.py", "def get_db():\n    return 1\n")];
+        if let Some(source) = initializer {
+            files.push(("app/__init__.py", source));
+        }
+        let namespace = python(
+            &[&files],
+            (
+                "main.py",
+                "from app import config\n\ndef caller():\n    return config.settings.get_db()\n",
+            ),
+        );
+        assert_call_targets(
+            &namespace,
+            "caller",
+            &[("app/config/settings.py", "", "get_db", import_tier())],
+        );
+    }
+}
+
+/// A package binding shadows a namespace child with no initializer file.
+#[test]
+fn test_python_dotted_from_import_namespace_root_attribute_shadow_binds_no_submodule() {
+    let graph = python(
+        &[&[
+            ("app/__init__.py", "class config:\n    pass\n"),
+            ("app/config/settings.py", "def get_db():\n    return 1\n"),
+            ("fallback.py", "def get_db():\n    return 2\n"),
+        ]],
         (
             "main.py",
             "from app import config\n\ndef caller():\n    return config.settings.get_db()\n",
         ),
     );
-    assert_call_targets(
-        &namespace,
-        "caller",
-        &[("app/config/settings.py", "", "get_db", import_tier())],
+    assert_call_targets(&graph, "caller", &[]);
+}
+
+/// A concrete package binding shadows a nested namespace child.
+#[test]
+fn test_python_dotted_from_import_namespace_intermediate_attribute_shadow_binds_no_submodule() {
+    let graph = python(
+        &[&[
+            ("app/__init__.py", ""),
+            ("app/config/__init__.py", "class settings:\n    pass\n"),
+            ("app/config/settings/db.py", "def get_db():\n    return 1\n"),
+            ("fallback.py", "def get_db():\n    return 2\n"),
+        ]],
+        (
+            "main.py",
+            "from app import config\n\ndef caller():\n    return config.settings.db.get_db()\n",
+        ),
     );
+    assert_call_targets(&graph, "caller", &[]);
 }
 
 /// An attribute of the intermediate package shadows its same-named

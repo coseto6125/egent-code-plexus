@@ -756,15 +756,18 @@ pub fn python_submodule_member<'i, F: ModuleFacts + ?Sized>(
             let nested_separator = if separator.is_empty() { "." } else { separator };
             let mut submodule = [import.source, separator, import.imported_name].concat();
             let mut module = match facts.python_module(importer, &submodule) {
-                PyModule::Unique(module) => module,
-                PyModule::Missing | PyModule::Ambiguous => return None,
+                PyModule::Unique(module) => Some(module),
+                // An unindexed package initializer can be a namespace package.
+                // Keep walking because a deeper module may still be indexed.
+                PyModule::Missing => None,
+                PyModule::Ambiguous => return None,
             };
-            if package.is_some_and(|package| {
+            if package.as_ref().is_some_and(|package| {
                 attribute_shadows_submodule(
                     facts,
                     package.as_ref(),
                     import.imported_name,
-                    module.as_ref(),
+                    module.as_ref().map(|module| module.as_ref()),
                 )
             }) {
                 return None;
@@ -776,19 +779,23 @@ pub fn python_submodule_member<'i, F: ModuleFacts + ?Sized>(
                 submodule.push_str(nested_separator);
                 submodule.push_str(segment);
                 let next_module = match facts.python_module(importer, &submodule) {
-                    PyModule::Unique(module) => module,
-                    PyModule::Missing | PyModule::Ambiguous => return None,
+                    PyModule::Unique(module) => Some(module),
+                    PyModule::Missing => None,
+                    PyModule::Ambiguous => return None,
                 };
-                if attribute_shadows_submodule(
-                    facts,
-                    module.as_ref(),
-                    segment,
-                    next_module.as_ref(),
-                ) {
+                if module.as_ref().is_some_and(|module| {
+                    attribute_shadows_submodule(
+                        facts,
+                        module.as_ref(),
+                        segment,
+                        next_module.as_ref().map(|module| module.as_ref()),
+                    )
+                }) {
                     return None;
                 }
                 module = next_module;
             }
+            let module = module?;
             let decl = call_in_file(facts, module.as_ref(), member, target)
                 .or_else(|| python_reexport(facts, module.as_ref(), member, target))?;
             Some((decl, position))
@@ -828,7 +835,7 @@ fn attribute_shadows_submodule<F: ModuleFacts + ?Sized>(
     facts: &F,
     package: &str,
     name: &str,
-    submodule: &str,
+    submodule: Option<&str>,
 ) -> bool {
     if facts.declares(package, name) {
         return true;
@@ -852,8 +859,11 @@ fn attribute_shadows_submodule<F: ModuleFacts + ?Sized>(
             return false;
         }
         let binds_submodule = if import.imported_name == "*" {
-            names_file(import.source, submodule)
+            submodule.is_some_and(|submodule| names_file(import.source, submodule))
         } else {
+            // `from . import name` binds a namespace child even though it has
+            // no indexed initializer file. Other bindings are values until a
+            // concrete child proves otherwise.
             import.imported_name == name && names_file(import.source, package)
         };
         !binds_submodule
