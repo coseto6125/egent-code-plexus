@@ -119,7 +119,7 @@ func create() {
     );
 }
 
-/// Unknown receiver: call on an untyped variable falls back to bare method name.
+/// An unknown receiver keeps member syntax for the resolver.
 #[test]
 fn test_go_unknown_receiver_fallback() {
     let src = r#"package main
@@ -129,9 +129,11 @@ func process(a interface{}) {
 }
 "#;
     let calls = calls_for(src, "process");
-    // Should contain the bare method name "Speak" (fallback), not a qualified form.
     assert!(
-        calls.iter().any(|c| c == "Speak"),
-        "expected bare 'Speak' fallback, got: {calls:?}"
+        calls.iter().any(|c| {
+            ecp_core::analyzer::types::CallSite::parse(c)
+                == ecp_core::analyzer::types::CallSite::UntypedMember("Speak")
+        }),
+        "expected untyped member 'Speak', got: {calls:?}"
     );
 }

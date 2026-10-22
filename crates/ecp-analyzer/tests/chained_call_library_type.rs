@@ -4,10 +4,9 @@
 //! project file declares a class of that name: before the fix, the chain
 //! typed it with no imports, so the global lookup bound the namesake.
 //!
-//! Python / TS / JS: the callee file's imports type the name, so a type
-//! imported from a project file still binds. Every other language binds only
-//! a return type declared in the callee's own directory (its package): the
-//! overlay has no import of such a file to read, and the two must agree.
+//! The callee file's imports type the name in Python, TS, JS and Java, so a
+//! type imported from a project file still binds. PHP retains its
+//! directory-scoped lookup. The overlay uses the same visibility rules.
 //!
 //! Each fixture declares the member on two more project classes, so the
 //! untyped fallback binds nothing.
@@ -225,15 +224,14 @@ fn test_resolve_chained_member_java_library_return_type_binds_no_namesake() {
     assert_no_member_edge(&java_graph(), "useLib", "body");
 }
 
-/// Java binds only a return type the callee's own package declares.
+/// A return type declared beside the callee needs no import.
 #[test]
 fn test_resolve_chained_member_java_same_file_return_type_binds_type_member() {
     assert_binds(&java_graph(), "useOwn", "body", "Local");
 }
 
-/// A Java callee's imports never reach the overlay, so a return type
-/// declared in another package takes the untyped fallback in both.
+/// A project import binds the return type across package directories.
 #[test]
-fn test_resolve_chained_member_java_return_type_from_other_package_keeps_fallback() {
-    assert_no_member_edge(&java_graph(), "useImported", "body");
+fn test_resolve_chained_member_java_return_type_from_other_package_binds_member() {
+    assert_binds(&java_graph(), "useImported", "body", "Response");
 }

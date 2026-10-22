@@ -10,10 +10,8 @@
 //! - one hierarchy: an interface or trait and its implementations, the
 //!   implementations first → the interface or trait declaration, which a
 //!   call through any of them reaches.
-//! - one owner: only `A` declares `save` → `A.save`, as before. This guards
-//!   the "one owner keeps the first pick" step of the rule, not the
-//!   language's scoping: in TS / JS / Go a bare `save()` cannot reach a
-//!   method at all.
+//! - one owner: only `A` declares `save` → `A.save`, when the call syntax
+//!   permits a member. TS / JS / Go use an explicit receiver.
 //!
 //! Skipped cases: C has no members, so it has only the free-function and
 //! one-owner fixtures. Go and Rust declare methods outside the type body,
@@ -81,7 +79,7 @@ fn assert_run_binds_no_save(provider: &dyn LanguageProvider, path: &str, source:
     let targets = saves_called_by_run(&build(&[(provider, path, source)]));
     assert!(
         targets.is_empty(),
-        "{path}: two unrelated owners, so no `save` edge; got {targets:?}"
+        "{path}: no matching receiver, so no `save` edge; got {targets:?}"
     );
 }
 
@@ -527,7 +525,7 @@ fn test_resolve_call_java_interface_impls_first_binds_interface_declaration() {
     assert_run_binds(
         &java(),
         "J.java",
-        "class A implements H {\n  public void save() {}\n}\nclass B implements H {\n  public void save() {}\n}\ninterface H {\n  void save();\n}\nclass D {\n  Object next() {\n    return null;\n  }\n  void run() {\n    next().save();\n  }\n}\n",
+        "class A implements H {\n  public void save() {}\n}\nclass B implements H {\n  public void save() {}\n}\ninterface H {\n  void save();\n}\nclass D {\n  H next() {\n    return null;\n  }\n  void run() {\n    next().save();\n  }\n}\n",
         "H",
     );
 }
@@ -539,7 +537,7 @@ fn test_resolve_call_typescript_one_owner_binds_its_save() {
     assert_run_binds(
         &typescript(),
         "u.ts",
-        "class A { save() {} }\nfunction run() { save(); }\n",
+        "class A { save() {} }\nfunction run(o: any) { o.save(); }\n",
         "A",
     );
 }
@@ -549,7 +547,7 @@ fn test_resolve_call_javascript_one_owner_binds_its_save() {
     assert_run_binds(
         &javascript(),
         "u.js",
-        "class A { save() {} }\nfunction run() { save(); }\n",
+        "class A { save() {} }\nfunction run(o) { o.save(); }\n",
         "A",
     );
 }
@@ -569,8 +567,26 @@ fn test_resolve_call_java_one_owner_binds_its_save() {
     assert_run_binds(
         &java(),
         "U.java",
-        "class A {\n  void save() {}\n}\nclass D {\n  Object next() {\n    return null;\n  }\n  void run() {\n    next().save();\n  }\n}\n",
+        "class A {\n  void save() {}\n}\nclass D {\n  A next() {\n    return null;\n  }\n  void run() {\n    next().save();\n  }\n}\n",
         "A",
+    );
+}
+
+#[test]
+fn test_resolve_call_java_object_return_binds_no_unrelated_owner() {
+    assert_run_binds_no_save(
+        &java(),
+        "U.java",
+        "class A {\n  void save() {}\n}\nclass D {\n  Object next() {\n    return null;\n  }\n  void run() {\n    next().save();\n  }\n}\n",
+    );
+}
+
+#[test]
+fn test_resolve_call_java_object_return_binds_no_unrelated_interface() {
+    assert_run_binds_no_save(
+        &java(),
+        "J.java",
+        "class A implements H {\n  public void save() {}\n}\nclass B implements H {\n  public void save() {}\n}\ninterface H {\n  void save();\n}\nclass D {\n  Object next() {\n    return null;\n  }\n  void run() {\n    next().save();\n  }\n}\n",
     );
 }
 
@@ -599,7 +615,7 @@ fn test_resolve_call_go_one_receiver_type_binds_its_save() {
     assert_run_binds(
         &go(),
         "u.go",
-        "package demo\ntype A struct{}\nfunc (a *A) save() {}\nfunc run() { save() }\n",
+        "package demo\ntype A struct{}\nfunc (a *A) save() {}\nfunc run(o interface{}) { o.save() }\n",
         "A",
     );
 }

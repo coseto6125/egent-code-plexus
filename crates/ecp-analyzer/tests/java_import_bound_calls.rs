@@ -389,11 +389,9 @@ fn test_resolve_call_class_import_owner_declared_second_binds_named_class() {
     );
 }
 
-/// A package-private `Util` declared in `r/Helpers.java`: the import path
-/// names no file, so the import tier binds nothing and the call keeps the
-/// general tiers. The import tier does not search the package for the owner.
+/// A package declaration locates `Util` even when the file has another name.
 #[test]
-fn test_resolve_call_static_import_owner_in_unnamed_file_keeps_global() {
+fn test_resolve_call_static_import_owner_in_unnamed_file_binds_import() {
     let graph = java_graph(&[
         (
             "r/Helpers.java",
@@ -407,6 +405,6 @@ fn test_resolve_call_static_import_owner_in_unnamed_file_keeps_global() {
     assert_call_lines(
         &graph,
         "go10",
-        &[("r/Helpers.java", "Util", "run", 3, global())],
+        &[("r/Helpers.java", "Util", "run", 3, import_scoped())],
     );
 }
