@@ -2521,19 +2521,27 @@ fn resolve_name_ref(
     let qualified = member.len() != name_ref.name.len();
     let free_only = name_ref.kind == NameRefKind::Function
         && CallSite::Plain(name_ref.name).reaches_free_only(language);
+    let target = match name_ref.kind {
+        NameRefKind::Function => ResolveTarget::Callable,
+        NameRefKind::Value | NameRefKind::Constant => ResolveTarget::Value,
+    };
+    if language == Language::Rust && !qualified {
+        if let Some(id) = ecp_core::analyzer::same_file_pick::prefer_free(
+            symbol_table,
+            file,
+            member,
+            raw_node.owner_class.as_deref(),
+            target,
+        ) {
+            return (name_ref.kind != NameRefKind::Constant
+                || !symbol_table.node_kind(id).is_callable())
+            .then_some((id, ResolutionTier::SameFile.base_confidence()));
+        }
+    }
     if let (false, Some(owner)) = (qualified, raw_node.owner_class.as_deref()) {
         // `Method`, not `Callable`: inside `class Foo`, the receiver of
         // `Foo.Create()` names the type, never its constructor.
         let own_kinds: &[ResolveTarget] = match (name_ref.kind, language) {
-            (NameRefKind::Value | NameRefKind::Constant, Language::Rust)
-                if symbol_table.count_in_file_with_kind(file, owner, ResolveTarget::Qualifier)
-                    == 1
-                    && symbol_table
-                        .lookup_in_file_with_kind(file, owner, ResolveTarget::Qualifier)
-                        .is_some_and(|id| symbol_table.node_kind(id) == NodeKind::Module) =>
-            {
-                &[ResolveTarget::Value]
-            }
             _ if free_only => &[],
             (NameRefKind::Function, _) => &[ResolveTarget::Method],
             (NameRefKind::Value, Language::CSharp | Language::Swift | Language::Dart) => {
@@ -2581,10 +2589,6 @@ fn resolve_name_ref(
             }
         }
     }
-    let target = match name_ref.kind {
-        NameRefKind::Function => ResolveTarget::Callable,
-        NameRefKind::Value | NameRefKind::Constant => ResolveTarget::Value,
-    };
     let mut targets = resolver.resolve_symbol(
         &local_graph.file_path,
         name_ref.name,

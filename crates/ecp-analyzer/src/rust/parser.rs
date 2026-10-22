@@ -443,7 +443,9 @@ impl LanguageProvider for RustProvider {
                             // Falls back to None for top-level type aliases.
                             enclosing_impl_or_trait_context(root, source)
                         }
-                        NodeKind::Const | NodeKind::Macro => {
+                        NodeKind::Const => enclosing_function_name(root, source)
+                            .or_else(|| enclosing_impl_type(root, source)),
+                        NodeKind::Macro => {
                             // Const/macro inside a function → use function name.
                             enclosing_function_name(root, source)
                         }

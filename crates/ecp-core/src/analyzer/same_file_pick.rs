@@ -104,7 +104,7 @@ pub fn is_free<F: PickFacts + ?Sized>(facts: &F, id: u32) -> bool {
 }
 
 /// A receiverless name that cannot reach a method prefers its enclosing
-/// module's declaration, then an unowned declaration in the same file.
+/// lexical function or module's declaration, then an unowned declaration.
 pub fn prefer_free<F: PickFacts + ?Sized>(
     facts: &F,
     file: &str,
@@ -121,7 +121,13 @@ pub fn prefer_free<F: PickFacts + ?Sized>(
             .iter()
             .copied()
             .filter(|&id| facts.kind(id).is_type());
-        let ty = types.next()?;
+        let Some(ty) = types.next() else {
+            let mut functions = declarations
+                .iter()
+                .copied()
+                .filter(|&id| facts.kind(id) == NodeKind::Function);
+            return (functions.next().is_some() && functions.next().is_none()).then_some(owner);
+        };
         if types.next().is_some() {
             return None;
         }
