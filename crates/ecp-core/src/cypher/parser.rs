@@ -416,7 +416,7 @@ pub fn parse_return_clause(c: &mut Cursor) -> Result<ReturnClause, CypherError> 
 }
 
 fn parse_return_item(c: &mut Cursor) -> Result<ReturnItem, CypherError> {
-    let expr = if c.eat(&Token::Star) {
+    let mut expr = if c.eat(&Token::Star) {
         ReturnExpr::Star
     } else if let Some(Token::Ident(name)) = c.peek().cloned() {
         c.advance();
@@ -464,9 +464,33 @@ fn parse_return_item(c: &mut Cursor) -> Result<ReturnItem, CypherError> {
         } else {
             ReturnExpr::Var(name)
         }
+    } else if c.check(&Token::LBracket) {
+        // List literal projection is only meaningful when subscripted.
+        let lit = Expr::Lit(parse_literal(c)?);
+        if !c.check(&Token::LBracket) {
+            return Err(c.err("subscript after list literal"));
+        }
+        ReturnExpr::Subscript(parse_postfix(c, lit)?)
     } else {
         return Err(c.err("return item"));
     };
+    if !matches!(expr, ReturnExpr::Subscript(_)) && c.check(&Token::LBracket) {
+        let base = match expr {
+            ReturnExpr::Var(v) => Expr::Var(v),
+            ReturnExpr::Prop(v, p) => Expr::Prop(v, p),
+            ReturnExpr::FunCall {
+                name,
+                distinct,
+                args,
+            } => Expr::FunCall {
+                name,
+                distinct,
+                args,
+            },
+            ReturnExpr::Star | ReturnExpr::Subscript(_) => return Err(c.err("end of return item")),
+        };
+        expr = ReturnExpr::Subscript(parse_postfix(c, base)?);
+    }
 
     let alias = if c.eat(&Token::As) {
         match c.advance() {
@@ -614,6 +638,45 @@ fn parse_comparison(c: &mut Cursor) -> Result<Expr, CypherError> {
 }
 
 fn parse_primary(c: &mut Cursor) -> Result<Expr, CypherError> {
+    let atom = parse_atom(c)?;
+    if c.check(&Token::LBracket) {
+        parse_postfix(c, atom)
+    } else {
+        Ok(atom)
+    }
+}
+
+/// Postfix `[i]` / `[a..b]` / `[..b]` / `[a..]` chain; the caller has seen `[`.
+fn parse_postfix(c: &mut Cursor, mut base: Expr) -> Result<Expr, CypherError> {
+    while c.eat(&Token::LBracket) {
+        let from = if c.check(&Token::DotDot) {
+            None
+        } else {
+            Some(Box::new(parse_expr(c)?))
+        };
+        base = if c.eat(&Token::DotDot) {
+            let to = if c.check(&Token::RBracket) {
+                None
+            } else {
+                Some(Box::new(parse_expr(c)?))
+            };
+            Expr::Slice {
+                base: Box::new(base),
+                from,
+                to,
+            }
+        } else {
+            match from {
+                Some(idx) => Expr::Index(Box::new(base), idx),
+                None => return Err(c.err("index expression")),
+            }
+        };
+        c.expect(&Token::RBracket)?;
+    }
+    Ok(base)
+}
+
+fn parse_atom(c: &mut Cursor) -> Result<Expr, CypherError> {
     if c.eat(&Token::Exists) {
         let brace = c.eat(&Token::LBrace);
         if !brace {
@@ -747,6 +810,13 @@ fn parse_literal(c: &mut Cursor) -> Result<Literal, CypherError> {
         Some(Token::Int(n)) => Ok(Literal::Int(*n)),
         Some(Token::Float(f)) => Ok(Literal::Float(*f)),
         Some(Token::Str(s)) => Ok(Literal::Str(s.clone())),
+        // The lexer emits `-7` as Dash + Int; fold the sign here so negative
+        // list indices (`xs[-1]`) and comparisons (`x > -3`) parse.
+        Some(Token::Dash) => match c.advance() {
+            Some(Token::Int(n)) => Ok(Literal::Int(n.wrapping_neg())),
+            Some(Token::Float(f)) => Ok(Literal::Float(-*f)),
+            _ => Err(c.err("number after -")),
+        },
         Some(Token::LBracket) => {
             let mut items = Vec::new();
             if !c.check(&Token::RBracket) {
@@ -1351,5 +1421,51 @@ mod tests {
             }
             other => panic!("expected folded ExistsPattern in WHERE, got {other:?}"),
         }
+    }
+
+    fn qr(s: &str) -> Result<Query, CypherError> {
+        parse_query(&tokenize(s).unwrap())
+    }
+
+    #[test]
+    fn test_parse_return_subscript_funcall_index_yields_subscript() {
+        let query = qr("MATCH (n) RETURN labels(n)[0]").unwrap();
+        assert!(matches!(
+            query.return_.items[0].expr,
+            ReturnExpr::Subscript(Expr::Index(..))
+        ));
+    }
+
+    #[test]
+    fn test_parse_return_subscript_chain_and_slice_parse() {
+        for s in [
+            "MATCH (n) RETURN n.list[1]",
+            "MATCH (n) RETURN n.list[1][2] AS x",
+            "MATCH (n) RETURN [1,2,3][0]",
+            "MATCH (n) RETURN n.list[1..2]",
+            "MATCH (n) RETURN n.list[..2]",
+            "MATCH (n) RETURN n.list[1..]",
+            "MATCH (n) WHERE n.list[0] = 1 RETURN n",
+            "MATCH (n) RETURN n.list[-1]",
+        ] {
+            assert!(qr(s).is_ok(), "{s}");
+        }
+    }
+
+    #[test]
+    fn test_parse_subscript_empty_brackets_errors() {
+        assert!(qr("MATCH (n) RETURN labels(n)[]").is_err());
+    }
+
+    #[test]
+    fn test_parse_without_brackets_unchanged_and_in_list_still_parses() {
+        let query = qr("MATCH (n) RETURN labels(n)").unwrap();
+        assert!(matches!(
+            query.return_.items[0].expr,
+            ReturnExpr::FunCall { .. }
+        ));
+        let query = qr("MATCH (n) WHERE n.name IN ['a','b'] RETURN n.name").unwrap();
+        assert!(matches!(query.where_, Some(Expr::In(..))));
+        assert!(qr("MATCH (n) WHERE 'x' IN n.decorators RETURN n.name").is_ok());
     }
 }

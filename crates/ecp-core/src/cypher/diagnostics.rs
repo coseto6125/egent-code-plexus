@@ -141,6 +141,16 @@ fn collect_expr(e: &Expr, out: &mut Vec<String>) {
             }
         }
         Expr::IsNull { expr, .. } => collect_expr(expr, out),
+        Expr::Index(base, idx) => {
+            collect_expr(base, out);
+            collect_expr(idx, out);
+        }
+        Expr::Slice { base, from, to } => {
+            collect_expr(base, out);
+            for bound in [from, to].into_iter().flatten() {
+                collect_expr(bound, out);
+            }
+        }
         Expr::ExistsPattern { pattern, .. } => {
             for np in &pattern.nodes {
                 for (k, _) in &np.props {
@@ -160,6 +170,7 @@ fn collect_return_expr(e: &ReturnExpr, out: &mut Vec<String>) {
                 collect_expr(a, out);
             }
         }
+        ReturnExpr::Subscript(e) => collect_expr(e, out),
         ReturnExpr::Star | ReturnExpr::Var(_) => {}
     }
 }
