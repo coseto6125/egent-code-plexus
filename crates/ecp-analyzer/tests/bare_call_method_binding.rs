@@ -141,6 +141,31 @@ fn test_resolve_call_php_this_member_call_binds_own_method() {
     );
 }
 
+/// The class does not declare `helper`, so the parser cannot name its owner;
+/// the call is still a member call and must reach the trait's method, never
+/// the free function of the same name. One edge per call site.
+#[test]
+fn test_resolve_call_php_self_and_static_call_to_trait_method_binds_trait_method() {
+    let graph = single(
+        &PhpProvider::new().unwrap(),
+        &[
+            ("src/helpers.php", "<?php\nfunction helper() {}\n"),
+            (
+                "src/T.php",
+                "<?php\ntrait T {\n    public function helper() {}\n}\n",
+            ),
+            (
+                "src/K.php",
+                "<?php\nclass K {\n    use T;\n    public function run() {\n        self::helper();\n        static::helper();\n    }\n}\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        targets(&graph, "run"),
+        vec![target("src/T.php", "T", "helper"); 2]
+    );
+}
+
 // ---- Python: a bare call needs `self.` to reach a member ----
 
 const PY_UNRELATED: (&str, &str) = (

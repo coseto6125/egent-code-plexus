@@ -303,14 +303,12 @@ fn literal_callable_callee(target: LiteralCallable, pos: Pos, ctx: &ClassContext
     match target {
         LiteralCallable::Function(name) => name,
         LiteralCallable::Static { class, method } => format!("{class}.{method}"),
-        LiteralCallable::Relative { method } => match ctx.enclosing_class_name(pos, &method) {
-            Some(class) => format!("{class}.{method}"),
-            None => method,
-        },
-        LiteralCallable::This { method } => match ctx.enclosing_class_name(pos, &method) {
-            Some(class) => format!("{class}.{method}"),
-            None => CallSite::untyped_member(&method),
-        },
+        LiteralCallable::Relative { method } | LiteralCallable::This { method } => {
+            match ctx.enclosing_class_name(pos, &method) {
+                Some(class) => format!("{class}.{method}"),
+                None => CallSite::untyped_member(&method),
+            }
+        }
     }
 }
 
@@ -392,16 +390,19 @@ fn php_scoped_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Optio
                     if let Some(parent_name) = ctx.enclosing_parent_name(pos) {
                         return Some(format!("{parent_name}.{method_name}"));
                     }
-                    // parent:: with no known heritage — emit bare name
-                    Some(method_name.to_string())
+                    // A member of an unknown class, never a free function:
+                    // the bare name would bind none, since a bare PHP call
+                    // reaches free functions only at the Global tier.
+                    Some(CallSite::untyped_member(method_name))
                 }
                 "self" | "static" => {
                     if let Some(class_name) = ctx.enclosing_class_name(pos, method_name) {
                         return Some(format!("{class_name}.{method_name}"));
                     }
-                    Some(method_name.to_string())
+                    // Declared outside the class body (a trait, an ancestor).
+                    Some(CallSite::untyped_member(method_name))
                 }
-                _ => Some(method_name.to_string()),
+                _ => Some(CallSite::untyped_member(method_name)),
             }
         }
         "name" | "qualified_name" => {
@@ -409,6 +410,7 @@ fn php_scoped_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Optio
             let class_name = scope_node.utf8_text(source).ok()?;
             Some(format!("{class_name}.{method_name}"))
         }
-        _ => Some(method_name.to_string()),
+        // `$cls::m()`: a runtime class.
+        _ => Some(CallSite::untyped_member(method_name)),
     }
 }

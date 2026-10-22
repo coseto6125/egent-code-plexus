@@ -1432,8 +1432,18 @@ type NamedImportCache = FxHashMap<(usize, ResolveTarget), FxHashMap<Box<str>, Op
 /// Every input of [`resolve_callee`]'s Tier 3 that varies within one view:
 /// (dirty file ordinal, its imports slice, callee, kind family, whether a
 /// call site admits the nearest copy, and Rust method syntax).
-type GlobalCache =
-    FxHashMap<(usize, (usize, usize), Box<str>, ResolveTarget, bool, bool), Option<(u32, f32)>>;
+type GlobalCache = FxHashMap<
+    (
+        usize,
+        (usize, usize),
+        Box<str>,
+        ResolveTarget,
+        bool,
+        bool,
+        bool,
+    ),
+    Option<(u32, f32)>,
+>;
 
 /// The facts the shared import rules ([`reexport`]) read over the overlay:
 /// the base graph, with each dirty file's fresh parse in place of its
@@ -3078,13 +3088,20 @@ fn resolve_callee<'s>(
 ) -> Option<(u32, f32)> {
     let callee = site.name();
     let call = scope.call;
-    let accepts = |idx: u32| {
-        !(site.uses_method_syntax() && caller.language == Language::Rust)
-            || match idx.checked_sub(graph.nodes.len() as u32) {
-                Some(offset) => nodes[offset as usize].kind == NodeKind::Method,
-                None => NodeKind::from(&graph.nodes[idx as usize].kind) == NodeKind::Method,
-            }
+    let is_method = |idx: u32| match idx.checked_sub(graph.nodes.len() as u32) {
+        Some(offset) => nodes[offset as usize].kind == NodeKind::Method,
+        None => NodeKind::from(&graph.nodes[idx as usize].kind) == NodeKind::Method,
     };
+    let rust_method = site.uses_method_syntax() && caller.language == Language::Rust;
+    let accepts = |idx: u32| !rust_method || is_method(idx);
+    // The index's `reaches_free_only`: a bare call in a language with no
+    // implicit receiver never reaches a member, so at Tier 3 no method binds
+    // it nor competes with the free function it does reach.
+    let free_only = matches!(
+        caller.language,
+        Language::Php | Language::Python | Language::Rust | Language::C
+    ) && matches!(site, CallSite::Plain(name) if !name.contains(['.', ':']));
+    let admits = |&(idx, _): &(u32, FileMeta)| !free_only || !is_method(idx);
     let importer = facts.scope.dirty()[file_ord].rel_path.as_str();
     if let CallSite::FromReceiver { receiver, member } = site {
         if caller.language == Language::Python {
@@ -3103,7 +3120,6 @@ fn resolve_callee<'s>(
     // the pick narrows by owner (`prefer_owned`); when the file holds
     // several unrelated owners of the name it binds nothing and the later
     // tiers decide.
-    let rust_method = site.uses_method_syntax() && caller.language == Language::Rust;
     let call_target = if rust_method {
         ResolveTarget::Method
     } else {
@@ -3458,6 +3474,7 @@ fn resolve_callee<'s>(
         names.target,
         call.is_some(),
         rust_method,
+        free_only,
     );
     if let Some(&hit) = facts.global.borrow().get(&key) {
         return hit;
@@ -3479,7 +3496,8 @@ fn resolve_callee<'s>(
             base()
                 .iter()
                 .map(|&idx| (idx, base_meta(idx)))
-                .chain(overlay_candidates.iter().copied()),
+                .chain(overlay_candidates.iter().copied())
+                .filter(admits),
         );
         let (target, confidence) = match pick {
             GlobalPick::Unique(target) => (target, CONF_GLOBAL_UNIQUE),
@@ -3491,7 +3509,8 @@ fn resolve_callee<'s>(
                     base()
                         .iter()
                         .map(|&idx| (idx, base_meta(idx)))
-                        .chain(overlay_candidates.iter().copied()),
+                        .chain(overlay_candidates.iter().copied())
+                        .filter(admits),
                 )?,
                 NEAREST_COPY_CONFIDENCE,
             ),

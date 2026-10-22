@@ -453,6 +453,50 @@ fn test_overlay_python_untyped_member_collision_matches_reindex() {
 }
 
 #[test]
+fn test_overlay_python_bare_call_unrelated_method_no_edge_matches_reindex() {
+    parity(
+        &PythonProvider::new().unwrap(),
+        &[
+            ("app.py", "def run(): pass\n"),
+            ("other.py", "class K:\n    def config(self): pass\n"),
+        ],
+        &[("app.py", "def run(): config()\n")],
+        // A bare Python call never reaches a method of another class.
+        &[],
+    );
+}
+
+#[test]
+fn test_overlay_python_bare_call_free_function_beats_method_matches_reindex() {
+    parity(
+        &PythonProvider::new().unwrap(),
+        &[
+            ("app.py", "def run(): pass\n"),
+            ("helpers.py", "def config(): pass\n"),
+            ("other.py", "class K:\n    def config(self): pass\n"),
+        ],
+        &[("app.py", "def run(): config()\n")],
+        &[("helpers.py".into(), "config".into(), "".into(), 70)],
+    );
+}
+
+#[test]
+fn test_overlay_php_bare_call_unrelated_method_no_edge_matches_reindex() {
+    parity(
+        &php(),
+        &[
+            ("app.php", "<?php\nfunction run() {}\n"),
+            (
+                "tests/MiddlewareConfigTest.php",
+                "<?php\nclass MiddlewareConfigTest { private function config() {} }\n",
+            ),
+        ],
+        &[("app.php", "<?php\nfunction run() { config(); }\n")],
+        &[],
+    );
+}
+
+#[test]
 fn test_overlay_rust_untyped_member_without_free_function_matches_reindex() {
     parity(
         &RustProvider::new().unwrap(),
