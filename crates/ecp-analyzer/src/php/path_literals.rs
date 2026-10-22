@@ -74,7 +74,9 @@ fn extract_string_content<'a>(str_node: Node<'_>, source: &'a [u8]) -> Option<&'
             strip_quotes(raw)
         }
         "encapsed_string" => {
-            // PHP double-quoted string. Skip if it has variable_name children (interpolation).
+            // PHP double-quoted string. Skip it when any child is an
+            // interpolation (`$v`, `{$a->b}`, `$a[0]`, `${v}`): the value would
+            // otherwise splice the expression text into the content.
             // An escape (`\\`, `\n`) splits the text into several content
             // children; the value spans all of them, or `"C:\\x\\f.txt"`
             // would read as its last segment `f.txt`.
@@ -82,14 +84,12 @@ fn extract_string_content<'a>(str_node: Node<'_>, source: &'a [u8]) -> Option<&'
             let mut span: Option<(usize, usize)> = None;
             for child in str_node.children(&mut c) {
                 match child.kind() {
-                    "variable_name" | "encapsed_string_chars_after_variable" => {
-                        // Has interpolation — skip the whole string.
-                        return None;
-                    }
                     "string_value" | "string_content" | "escape_sequence" => {
                         let start = span.map_or(child.start_byte(), |(s, _)| s);
                         span = Some((start, child.end_byte()));
                     }
+                    "{" | "${" | "{$" => return None,
+                    _ if child.is_named() => return None,
                     _ => {}
                 }
             }

@@ -521,3 +521,40 @@ fn test_is_path_shaped_dart_windows_path_kept() {
         "real Windows path must surface: {lits:?}"
     );
 }
+
+#[test]
+fn test_extract_string_content_php_member_interpolation_skipped() {
+    let src = r##"<?php
+function f($d) { return file_get_contents("logs/{$this->dir}/app.log") . file_get_contents("logs/{$d['k']}/app.log") . file_get_contents("logs/${d}/app.log"); }
+"##;
+    let lits = path_literals(PhpProvider::new().expect("provider"), "test.php", src);
+    assert!(
+        !lits
+            .iter()
+            .any(|l| l.value.contains("$this->") || l.value.contains("$d")),
+        "interpolated expression leaked into a value: {lits:?}"
+    );
+}
+
+#[test]
+fn test_extract_string_content_php_plain_and_escaped_unchanged() {
+    let src = r##"<?php
+function f() { return file_get_contents("storage/app.log") . file_get_contents("C:\\logs\\app.log"); }
+"##;
+    let lits = path_literals(PhpProvider::new().expect("provider"), "test.php", src);
+    for want in ["storage/app.log", r"C:\\logs\\app.log"] {
+        assert!(lits.iter().any(|l| l.value == want), "{want}: {lits:?}");
+    }
+}
+
+#[test]
+fn test_is_path_shaped_php_escaped_fqcn_with_leading_backslash_rejected() {
+    let src = r##"<?php
+function f() { return file_get_contents("\\App\\Models\\User"); }
+"##;
+    let lits = path_literals(PhpProvider::new().expect("provider"), "test.php", src);
+    assert!(
+        !lits.iter().any(|l| l.value == r"\\App\\Models\\User"),
+        "false PathLiteral surfaced: {lits:?}"
+    );
+}

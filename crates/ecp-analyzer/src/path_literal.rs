@@ -86,8 +86,7 @@ fn has_path_separator(s: &str) -> bool {
 /// or a final segment carrying a file extension. Rejected: `::` (PHP static
 /// reference) and regex metacharacters.
 fn is_windows_path_shape(s: &str) -> bool {
-    if s.contains("::") || s.contains(['^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|'])
-    {
+    if s.contains("::") {
         return false;
     }
     let leading_run = s.bytes().take_while(|&b| b == b'\\').count();
@@ -97,6 +96,8 @@ fn is_windows_path_shape(s: &str) -> bool {
     }
     let first = segments[0];
     let bytes = s.as_bytes();
+    // A drive or `.`/`..` prefix is never a regex or an FQCN, so these two
+    // cases decide before the metacharacter test (`Notepad++`, `c$` are real).
     if leading_run == 0
         && bytes.len() > 2
         && bytes[0].is_ascii_alphabetic()
@@ -108,8 +109,19 @@ fn is_windows_path_shape(s: &str) -> bool {
     if leading_run == 0 && (first == "." || first == "..") {
         return true;
     }
-    if leading_run >= 2 && segments.iter().all(|seg| seg.len() >= 2) {
-        return true;
+    // The leading run must be twice the first inner run: `\\\\srv\\share` escaped
+    // or `\\srv\share` raw. An escaped FQCN `\\App\\Models` has equal runs.
+    let inner_run = s[leading_run + first.len()..]
+        .bytes()
+        .take_while(|&b| b == b'\\')
+        .count();
+    if leading_run >= 2 && leading_run == 2 * inner_run && segments.iter().all(|seg| seg.len() >= 2)
+    {
+        // `$` stays legal: administrative shares such as `c$`.
+        return !s.contains(['^', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|']);
+    }
+    if s.contains(['^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|']) {
+        return false;
     }
     has_file_extension(segments[segments.len() - 1])
 }
@@ -421,6 +433,30 @@ mod tests {
             r"\.\(\[",
         ] {
             assert!(!is_path_shaped(s), "expected non-path: {s:?}");
+        }
+    }
+
+    #[test]
+    fn test_is_path_shaped_escaped_fqcn_rejected() {
+        for s in [
+            r"\\App\\Models\\User",
+            r"\\App\\Http\\Controllers\\HomeController",
+        ] {
+            assert!(!is_path_shaped(s), "expected non-path: {s:?}");
+        }
+    }
+
+    #[test]
+    fn test_is_path_shaped_unc_and_metachar_paths_accepted() {
+        for s in [
+            r"\\srv\share\file.txt",
+            r"\\\\srv\\share\\file.txt",
+            r"\\\\srv\\c$\\app\\x.dll",
+            r"C:\\Tools\\Notepad++\\notepad++.exe",
+            r"C:\Tools\Notepad++\notepad++.exe",
+            r"..\\ünï\\a+b\\x.cfg",
+        ] {
+            assert!(is_path_shaped(s), "expected path-shaped: {s:?}");
         }
     }
 
