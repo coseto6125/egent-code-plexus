@@ -1008,7 +1008,7 @@ fn class_constant_class<'s>(node: Node, source: &'s [u8]) -> Option<&'s str> {
 }
 
 /// The value of a quoted literal without interpolation.
-fn string_value(node: Node, source: &[u8]) -> Option<String> {
+pub(super) fn string_value(node: Node, source: &[u8]) -> Option<String> {
     if !matches!(node.kind(), "string" | "encapsed_string") {
         return None;
     }

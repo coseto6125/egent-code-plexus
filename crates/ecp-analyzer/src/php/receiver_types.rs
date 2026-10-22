@@ -103,17 +103,19 @@ impl ClassContext {
 /// Walk the PHP AST once, attaching callees to enclosing nodes (with
 /// receiver binding for `$this->`, `parent::`, `self::`, `static::`)
 /// and collecting path-shaped and SQL-shaped `string` / `encapsed_string`
-/// literals.
-pub fn extract_php_calls_and_path_literals(
-    root: Node<'_>,
+/// literals, plus the method calls whose name is bound at runtime
+/// (`Cls::$m()`, `$o->$m()`, `$o?->{expr}()`).
+pub fn extract_php_calls_and_path_literals<'t>(
+    root: Node<'t>,
     source: &[u8],
     nodes: &mut [RawNode],
-) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
+) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>, Vec<Node<'t>>) {
     let ctx = ClassContext::from_nodes(nodes);
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
+    let mut dynamic_calls: Vec<Node<'t>> = Vec::new();
     let mut constructions: Vec<((u32, u32), String)> = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
+    let mut stack: Vec<Node<'t>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
             "object_creation_expression" => {
@@ -121,14 +123,18 @@ pub fn extract_php_calls_and_path_literals(
                     constructions.push((start_pos(n), callee));
                 }
             }
-            "member_call_expression" => {
+            "member_call_expression" | "nullsafe_member_call_expression" => {
                 if let Some(callee) = php_member_callee(n, source, &ctx) {
                     attach_to_enclosing(start_pos(n), callee, nodes);
+                } else if has_runtime_name(n) {
+                    dynamic_calls.push(n);
                 }
             }
             "scoped_call_expression" => {
                 if let Some(callee) = php_scoped_callee(n, source, &ctx) {
                     attach_to_enclosing(start_pos(n), callee, nodes);
+                } else if has_runtime_name(n) {
+                    dynamic_calls.push(n);
                 }
             }
             "string" | "encapsed_string" => {
@@ -159,7 +165,18 @@ pub fn extract_php_calls_and_path_literals(
     for (pos, callee) in constructions {
         attach_to_enclosing(pos, callee, nodes);
     }
-    (path_literals, sql_refs)
+    (path_literals, sql_refs, dynamic_calls)
+}
+
+/// Whether a member, nullsafe member or scoped call names its method at
+/// runtime: `$m`, `$$m`, or a braced expression (`{$p . 'x'}`, `{FOO}`).
+fn has_runtime_name(call: Node<'_>) -> bool {
+    call.child_by_field_name("name")
+        .is_some_and(is_runtime_name)
+}
+
+fn is_runtime_name(name: Node<'_>) -> bool {
+    name.kind() != "name" || name.prev_sibling().is_some_and(|s| s.kind() == "{")
 }
 
 /// The construction entry of `new Foo(..)` / `new \App\Foo(..)`; `None`
@@ -171,12 +188,14 @@ fn php_object_creation_call(creation: Node<'_>, source: &[u8]) -> Option<String>
     construction_call(class.utf8_text(source).ok()?.trim_start_matches('\\'))
 }
 
-/// Resolve the callee for `$obj->method(args)`.
+/// Resolve the callee for `$obj->method(args)` and `$obj?->method(args)`.
 /// Only `$this` is bound to the enclosing class; other receivers give an
 /// untyped member call, which resolves by the method name and never binds a
-/// `use function` import.
+/// `use function` import. `None` for a runtime method name.
 fn php_member_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Option<String> {
-    let name_node = call.child_by_field_name("name")?;
+    let name_node = call
+        .child_by_field_name("name")
+        .filter(|n| !is_runtime_name(*n))?;
     let method_name = name_node.utf8_text(source).ok()?;
 
     let obj_node = call.child_by_field_name("object")?;
@@ -200,8 +219,11 @@ fn php_member_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Optio
 /// - `parent::method` → `ParentClass.method` (using heritage)
 /// - `self::method` / `static::method` → `EnclosingClass.method`
 /// - `ClassName::method` → `ClassName.method` (explicit named scope)
+/// - `ClassName::$m` → `None` (runtime method name)
 fn php_scoped_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Option<String> {
-    let name_node = call.child_by_field_name("name")?;
+    let name_node = call
+        .child_by_field_name("name")
+        .filter(|n| !is_runtime_name(*n))?;
     let method_name = name_node.utf8_text(source).ok()?;
 
     let scope_node = call.child_by_field_name("scope")?;

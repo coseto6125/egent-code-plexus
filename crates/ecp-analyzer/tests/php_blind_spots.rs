@@ -88,3 +88,68 @@ fn php_ordinary_call_emits_no_blind_spot() {
         g.blind_spots
     );
 }
+
+// ── variable method name: Cls::$m(), $o->$m(), $o?->$m(), $o->{expr}() ──
+
+fn method_kinds(src: &str) -> usize {
+    kinds(&parse_php(src))
+        .into_iter()
+        .filter(|k| *k == "php-variable-method-call")
+        .count()
+}
+
+/// Every callee the parser attached to a node, for junk-callee checks.
+fn all_calls(g: &ecp_core::analyzer::types::LocalGraph) -> Vec<&str> {
+    g.nodes
+        .iter()
+        .flat_map(|n| n.calls.iter().map(String::as_str))
+        .collect()
+}
+
+#[test]
+fn test_parse_file_scoped_variable_method_call_records_blind_spot() {
+    let src = "<?php class A { function f($m) { return Rows::$m(1); } }";
+    assert_eq!(method_kinds(src), 1);
+}
+
+#[test]
+fn test_parse_file_member_variable_method_call_records_blind_spot() {
+    let src = "<?php class A { function f($o, $m) { return $o->$m(1); } }";
+    assert_eq!(method_kinds(src), 1);
+}
+
+#[test]
+fn test_parse_file_nullsafe_variable_method_call_records_blind_spot() {
+    let src = "<?php class A { function f($o, $m) { return $o?->$m(1); } }";
+    assert_eq!(method_kinds(src), 1);
+}
+
+#[test]
+fn test_parse_file_braced_expression_method_call_records_blind_spot() {
+    let src =
+        "<?php class A { function f($o, $p) { $o->{$p . 'x'}(); Rows::{$p}(); $o->{FOO}(); } }";
+    assert_eq!(method_kinds(src), 3);
+}
+
+#[test]
+fn test_parse_file_this_variable_method_call_with_param_name_records_blind_spot() {
+    let src = "<?php class A { function f($m) { return $this->$m(); } function g() {} }";
+    assert_eq!(method_kinds(src), 1);
+}
+
+#[test]
+fn test_parse_file_plain_method_calls_record_no_variable_method_blind_spot() {
+    let src = "<?php class A { function f($o) { Rows::hero(); self::g(); $o->m(); $o?->m(); $this->g(); } function g() {} }";
+    assert_eq!(method_kinds(src), 0);
+}
+
+#[test]
+fn test_parse_file_variable_method_call_emits_no_junk_callee() {
+    let src = "<?php class A { function f($o, $m, $p) { Rows::$m(); $o->$m(); $o?->$m(); $o->{$p . 'x'}(); $o->{FOO}(); } }";
+    let g = parse_php(src);
+    let calls = all_calls(&g);
+    assert!(
+        calls.iter().all(|c| !c.contains('$') && !c.contains("FOO")),
+        "a runtime method name must not become a callee; got: {calls:?}"
+    );
+}
