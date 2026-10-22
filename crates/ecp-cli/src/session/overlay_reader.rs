@@ -244,6 +244,14 @@ pub struct AcceptedFragment {
     bytes: Vec<u8>,
 }
 
+/// Whether `bytes` has the current fragment archive shape.
+///
+/// The freshness gate uses this same check before it skips a re-parse. A
+/// regular file alone is not enough: the view reader ignores malformed bins.
+pub(crate) fn valid_v5_fragment(bytes: &[u8]) -> bool {
+    rkyv::access::<ArchivedFragmentFile, RkyvError>(bytes).is_ok()
+}
+
 /// The dirty-file entries that may feed `OverlayView`, plus an xxh3 over
 /// each one's rel_path and fragment bytes in manifest order: the inputs'
 /// share of the view cache key. Entry validation guards the staleness holes
@@ -291,7 +299,7 @@ pub fn accepted_fragments(
         let Ok(bytes) = fs::read(&bin_path) else {
             continue;
         };
-        if rkyv::access::<ArchivedFragmentFile, RkyvError>(&bytes).is_err() {
+        if !valid_v5_fragment(&bytes) {
             continue;
         }
         super::view_cache::hash_part(&mut hasher, rel_path.as_bytes());

@@ -1151,9 +1151,11 @@ fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1Fre
             match mtime_ns_of(&worktree_root.join(rel)) {
                 Some(ns)
                     if ns == entry.mtime_ns
-                        && overlay_dir
-                            .join(format!("{}.bin", entry.fragment_id))
-                            .is_file() =>
+                        && fs::read(overlay_dir.join(format!("{}.bin", entry.fragment_id)))
+                            .ok()
+                            .is_some_and(|bytes| {
+                                crate::session::overlay_reader::valid_v5_fragment(&bytes)
+                            }) =>
                 {
                     false
                 }
@@ -1452,23 +1454,8 @@ mod fingerprint_drift_tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[test]
-    fn test_retain_stale_fragments_current_v5_skips_reparse() {
+    fn gate_with_current_v5_fragment(fragment: &[u8], session_id: &str) -> L1FreshnessGate {
         use ecp_core::session::{DirtyEntry, DirtyFiles, SessionMeta, FRAGMENT_FORMAT_V5};
-
-        const CHILD_ENV: &str = "ECP_AUTO_ENSURE_V5_REFRESH_CHILD";
-        const TEST_NAME: &str =
-            "auto_ensure::fingerprint_drift_tests::test_retain_stale_fragments_current_v5_skips_reparse";
-
-        if std::env::var_os(CHILD_ENV).is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", TEST_NAME, "--nocapture"])
-                .env(CHILD_ENV, "1")
-                .status()
-                .unwrap();
-            assert!(status.success(), "isolated test process failed: {status}");
-            return;
-        }
 
         let tmp = tempdir().unwrap();
         let worktree = tmp.path().join("repo");
@@ -1490,102 +1477,13 @@ mod fingerprint_drift_tests {
 
         let home = tmp.path().join("ecp-home");
         std::env::set_var("ECP_HOME", &home);
-        std::env::set_var("ECP_SESSION_ID", "v5-refresh-test");
-        let session_dir = resolve_session_overlay_dir(&worktree).unwrap();
-        fs::create_dir_all(session_dir.join("graph_overlay")).unwrap();
-        let mtime = mtime_ns_of(&worktree.join("app.py")).unwrap();
-        let head = git_head_sha(&worktree).unwrap();
-        let meta = SessionMeta {
-            version: 1,
-            session_id: "v5-refresh-test".into(),
-            pid: None,
-            started_at: String::new(),
-            last_touched: String::new(),
-            base_sha: head,
-            source_worktree: worktree.to_string_lossy().into(),
-            overlay_version: 1,
-            watcher_pid: None,
-            last_drained_offset: 0,
-            agent_name: None,
-        };
-        SessionMeta::write_atomic(&session_dir.join("session_meta.json"), &meta).unwrap();
-        let mut dirty = DirtyFiles::empty();
-        dirty.entries.insert(
-            "app.py".into(),
-            DirtyEntry {
-                mtime_ns: mtime,
-                content_hash: "fixture".into(),
-                fragment_id: "fixture".into(),
-                tantivy_delta_segment: None,
-                parse_failed: false,
-                dirty_symbols: vec![],
-                format: FRAGMENT_FORMAT_V5,
-            },
-        );
-        DirtyFiles::write_atomic(&session_dir.join("dirty_files.json"), &dirty).unwrap();
-        let fragment = crate::session::overlay_writer::FragmentFile {
-            symbols: vec![],
-            imports: vec![],
-            export_aliases: vec![],
-        };
-        fs::write(
-            session_dir.join("graph_overlay/fixture.bin"),
-            rkyv::to_bytes::<rkyv::rancor::Error>(&fragment).unwrap(),
-        )
-        .unwrap();
-
-        let gate = retain_stale_fragments(&worktree, vec!["app.py".into()]);
-        assert!(
-            gate.rel_paths.is_empty(),
-            "a current v5 fragment was re-parsed"
-        );
-    }
-
-    #[test]
-    fn test_retain_stale_fragments_corrupt_v5_reparses() {
-        use ecp_core::session::{DirtyEntry, DirtyFiles, SessionMeta, FRAGMENT_FORMAT_V5};
-
-        const CHILD_ENV: &str = "ECP_AUTO_ENSURE_V5_CORRUPT_CHILD";
-        const TEST_NAME: &str =
-            "auto_ensure::fingerprint_drift_tests::test_retain_stale_fragments_corrupt_v5_reparses";
-
-        if std::env::var_os(CHILD_ENV).is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", TEST_NAME, "--nocapture"])
-                .env(CHILD_ENV, "1")
-                .status()
-                .unwrap();
-            assert!(status.success(), "isolated test process failed: {status}");
-            return;
-        }
-
-        let tmp = tempdir().unwrap();
-        let worktree = tmp.path().join("repo");
-        fs::create_dir_all(&worktree).unwrap();
-        let git = |args: &[&str]| {
-            assert!(std::process::Command::new("git")
-                .args(args)
-                .current_dir(&worktree)
-                .status()
-                .unwrap()
-                .success());
-        };
-        git(&["init", "-q"]);
-        git(&["config", "user.email", "test@example.invalid"]);
-        git(&["config", "user.name", "test"]);
-        fs::write(worktree.join("app.py"), "def app(): pass\n").unwrap();
-        git(&["add", "app.py"]);
-        git(&["commit", "-qm", "base"]);
-
-        let home = tmp.path().join("ecp-home");
-        std::env::set_var("ECP_HOME", &home);
-        std::env::set_var("ECP_SESSION_ID", "v5-corrupt-test");
+        std::env::set_var("ECP_SESSION_ID", session_id);
         let session_dir = resolve_session_overlay_dir(&worktree).unwrap();
         fs::create_dir_all(session_dir.join("graph_overlay")).unwrap();
         let mtime = mtime_ns_of(&worktree.join("app.py")).unwrap();
         let meta = SessionMeta {
             version: 1,
-            session_id: "v5-corrupt-test".into(),
+            session_id: session_id.into(),
             pid: None,
             started_at: String::new(),
             last_touched: String::new(),
@@ -1611,10 +1509,60 @@ mod fingerprint_drift_tests {
             },
         );
         DirtyFiles::write_atomic(&session_dir.join("dirty_files.json"), &dirty).unwrap();
-        fs::write(session_dir.join("graph_overlay/fixture.bin"), []).unwrap();
+        fs::write(session_dir.join("graph_overlay/fixture.bin"), fragment).unwrap();
 
-        let gate = retain_stale_fragments(&worktree, vec!["app.py".into()]);
-        assert_eq!(gate.rel_paths, ["app.py"]);
+        retain_stale_fragments(&worktree, vec!["app.py".into()])
+    }
+
+    #[test]
+    fn test_retain_stale_fragments_current_v5_skips_reparse() {
+        const CHILD_ENV: &str = "ECP_AUTO_ENSURE_V5_REFRESH_CHILD";
+        const TEST_NAME: &str =
+            "auto_ensure::fingerprint_drift_tests::test_retain_stale_fragments_current_v5_skips_reparse";
+
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST_NAME, "--nocapture"])
+                .env(CHILD_ENV, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated test process failed: {status}");
+            return;
+        }
+
+        let fragment = crate::session::overlay_writer::FragmentFile {
+            symbols: vec![],
+            imports: vec![],
+            export_aliases: vec![],
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&fragment).unwrap();
+        let gate = gate_with_current_v5_fragment(&bytes, "v5-refresh-test");
+        assert!(
+            gate.rel_paths.is_empty(),
+            "a current v5 fragment was re-parsed"
+        );
+    }
+
+    #[test]
+    fn test_retain_stale_fragments_corrupt_v5_reparses() {
+        const CHILD_ENV: &str = "ECP_AUTO_ENSURE_V5_CORRUPT_CHILD";
+        const TEST_NAME: &str =
+            "auto_ensure::fingerprint_drift_tests::test_retain_stale_fragments_corrupt_v5_reparses";
+
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST_NAME, "--nocapture"])
+                .env(CHILD_ENV, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated test process failed: {status}");
+            return;
+        }
+
+        for corrupt in [b"".as_slice(), b"not a fragment".as_slice()] {
+            let gate = gate_with_current_v5_fragment(corrupt, "v5-corrupt-test");
+            assert_eq!(gate.rel_paths, ["app.py"]);
+        }
     }
 
     #[test]
