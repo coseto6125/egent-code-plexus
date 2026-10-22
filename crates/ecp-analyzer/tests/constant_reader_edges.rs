@@ -751,19 +751,19 @@ fn test_value_read_php_qualified_class_and_enum_constants_return_same_file_edges
     );
     assert_eq!(
         value_reads(&g, "readClass"),
-        vec![r("p.php", "LIMIT", VALUE_READ, SAME_FILE)]
+        vec![r("p.php", "LIMIT", VALUE_READ, 0.85)]
     );
     assert_eq!(
         value_reads(&g, "readEnum"),
-        vec![r("p.php", "WILD", VALUE_READ, SAME_FILE)]
+        vec![r("p.php", "WILD", VALUE_READ, 0.85)]
     );
     assert_eq!(
         value_reads(&g, "readSelf"),
-        vec![r("p.php", "LIMIT", VALUE_READ, SAME_FILE)]
+        vec![r("p.php", "LIMIT", VALUE_READ, 0.85)]
     );
     assert_eq!(
         value_reads(&g, "readStatic"),
-        vec![r("p.php", "LIMIT", VALUE_READ, SAME_FILE)]
+        vec![r("p.php", "LIMIT", VALUE_READ, 0.85)]
     );
     assert_eq!(value_reads(&g, "readCase"), none());
 }

@@ -238,7 +238,7 @@ fn emit_pass1_span(
 
         // Innermost enclosing class via smallest-area span. Scans the
         // pre-collected classes slice (K entries) instead of all raws.
-        let Some((class_name, _)) = owners
+        let Some((class_name, class_span)) = owners
             .iter()
             .filter(|(_, span)| span_contains(*span, member.span))
             .min_by_key(|(_, span)| span_area(*span))
@@ -246,6 +246,19 @@ fn emit_pass1_span(
         else {
             continue;
         };
+
+        // Namespace-qualified enum identities are not represented by the
+        // short-name lookup below. Do not bind an ambiguous enum constant.
+        if member.kind == NodeKind::Const
+            && !classes.contains(&(class_name, class_span))
+            && const_owners
+                .iter()
+                .filter(|(name, _)| *name == class_name)
+                .count()
+                != 1
+        {
+            continue;
+        }
 
         let Some(class_idx) = symbol_table.lookup_in_file(path_str, class_name) else {
             continue;

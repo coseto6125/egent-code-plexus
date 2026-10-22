@@ -120,6 +120,7 @@ fn extract_qualified_constant_refs(
     source: &[u8],
     nodes: &mut [RawNode],
 ) {
+    let has_namespaces = nodes.iter().any(|node| node.kind == NodeKind::Namespace);
     let owner_counts = nodes
         .iter()
         .filter(|node| {
@@ -155,7 +156,7 @@ fn extract_qualified_constant_refs(
                 continue;
             }
             let span = node_span(&node);
-            let owner = match scope.trim_start_matches('\\') {
+            let owner = match scope.trim() {
                 "self" | "static" => nodes
                     .iter()
                     .filter(|raw| {
@@ -165,17 +166,16 @@ fn extract_qualified_constant_refs(
                     .min_by_key(|raw| crate::framework_helpers::span_area(raw.span))
                     .and_then(|raw| raw.owner_class.as_deref()),
                 scope => {
-                    let scope = scope.trim_start_matches('\\');
                     // The qualified resolver identifies its type by the final
-                    // segment. Do not discard a namespace path here: two
-                    // namespaces can declare the same class name.
-                    (!scope.contains('\\')).then_some(scope)
+                    // segment and cannot prove PHP namespace visibility.
+                    (!has_namespaces && !scope.contains('\\')).then_some(scope)
                 }
             };
             if let Some(owner) = owner.filter(|owner| {
-                owner_counts.get(*owner) == Some(&1) && constants.contains(&(*owner, constant))
+                owner_counts.get(*owner) == Some(&1)
+                    && constants.contains(&(*owner, constant.trim()))
             }) {
-                refs.push((span, format!("{owner}.{constant}")));
+                refs.push((span, format!("{owner}.{}", constant.trim())));
             }
         }
         let mut cursor = node.walk();
