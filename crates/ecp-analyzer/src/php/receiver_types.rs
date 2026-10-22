@@ -246,6 +246,20 @@ fn class_of_array_element(n: Node<'_>, source: &[u8]) -> Option<LiteralCallable>
     }
 }
 
+/// The callable a string names: `'helper'` or `'App\\Rows::hero'`.
+fn string_callable(text: &str) -> Option<LiteralCallable> {
+    match text.split_once("::") {
+        Some((class, method)) if is_ident(method) => Some(LiteralCallable::Static {
+            class: qualified_ident(class)?.to_string(),
+            method: method.to_string(),
+        }),
+        Some(_) => None,
+        None => Some(LiteralCallable::Function(
+            qualified_ident(text)?.to_string(),
+        )),
+    }
+}
+
 /// The literal callable of `call_user_func(<callable>, ..)` /
 /// `call_user_func_array(<callable>, ..)`; `None` for any other call, a
 /// non-literal callable, or a literal that names no callable.
@@ -262,19 +276,7 @@ pub(super) fn literal_callable(call: Node<'_>, source: &[u8]) -> Option<LiteralC
     let first = call.child_by_field_name("arguments")?.named_child(0)?;
     let value = first.named_child(0).unwrap_or(first);
     match value.kind() {
-        "string" | "encapsed_string" => {
-            let text = string_literal_text(value, source)?;
-            match text.split_once("::") {
-                Some((class, method)) if is_ident(method) => Some(LiteralCallable::Static {
-                    class: qualified_ident(class)?.to_string(),
-                    method: method.to_string(),
-                }),
-                Some(_) => None,
-                None => Some(LiteralCallable::Function(
-                    qualified_ident(&text)?.to_string(),
-                )),
-            }
-        }
+        "string" | "encapsed_string" => string_callable(&string_literal_text(value, source)?),
         "array_creation_expression" => {
             let mut cursor = value.walk();
             let elements: Vec<Node<'_>> = value.named_children(&mut cursor).collect();
@@ -300,14 +302,18 @@ pub(super) fn literal_callable(call: Node<'_>, source: &[u8]) -> Option<LiteralC
 
 /// The function a builtin call hands on as a literal callable, for the
 /// name scan to record: `array_map('fmt', $xs)` hands on `fmt`,
-/// `usort($rows, 'Sorter::byName')` hands on `Sorter.byName`.
-/// `call_user_func` calls its callable, so [`literal_callable`] owns it.
+/// `usort($rows, 'Sorter::byName')` hands on `Sorter.byName`. The name keeps
+/// its namespace, as [`literal_callable`] records it. A file that declares
+/// its own function of the builtin's name (`namespace App; function
+/// array_map`) calls that one instead. `call_user_func` calls its callable,
+/// so [`literal_callable`] owns it.
 pub(crate) fn passed_callable(call: Node<'_>, source: &[u8]) -> Option<String> {
     let function = call.child_by_field_name("function")?;
     if function.kind() != "name" {
         return None;
     }
-    let position = match function.utf8_text(source).ok()? {
+    let builtin = function.utf8_text(source).ok()?;
+    let position = match builtin {
         "array_map"
         | "register_shutdown_function"
         | "spl_autoload_register"
@@ -326,21 +332,58 @@ pub(crate) fn passed_callable(call: Node<'_>, source: &[u8]) -> Option<String> {
         _ => return None,
     };
     let args = call.child_by_field_name("arguments")?;
-    let arg = args.named_children(&mut args.walk()).nth(position)?;
-    let value = arg.named_child(0).unwrap_or(arg);
-    let text = string_literal_text(value, source)?;
-    match text.split_once("::") {
-        Some((class, method)) if is_ident(method) => {
-            let class = qualified_ident(class)?;
-            let class = class.rsplit('\\').next().unwrap_or(class);
-            Some(format!("{class}.{method}"))
+    let mut cursor = args.walk();
+    let arguments: Vec<Node<'_>> = args
+        .named_children(&mut cursor)
+        .filter(|arg| arg.kind() == "argument")
+        .collect();
+    // Every builtin above names its callable parameter `callback`.
+    let arg = arguments
+        .iter()
+        .find(|arg| {
+            arg.child_by_field_name("name")
+                .is_some_and(|name| name.utf8_text(source).ok() == Some("callback"))
+        })
+        .or_else(|| {
+            arguments
+                .get(position)
+                .filter(|arg| arg.child_by_field_name("name").is_none())
+        })?;
+    let last = u32::try_from(arg.named_child_count().checked_sub(1)?).ok()?;
+    let value = arg.named_child(last)?;
+    let target = match string_callable(&string_literal_text(value, source)?)? {
+        LiteralCallable::Function(name) => name,
+        LiteralCallable::Static { class, method } => format!("{class}.{method}"),
+        LiteralCallable::Relative { .. } | LiteralCallable::This { .. } => return None,
+    };
+    (!declares_function(call, builtin, source)).then_some(target)
+}
+
+/// Whether the file holding `node` declares a top-level or namespace-level
+/// function named `name`.
+fn declares_function(node: Node<'_>, name: &str, source: &[u8]) -> bool {
+    let mut root = node;
+    while let Some(parent) = root.parent() {
+        root = parent;
+    }
+    let mut cursor = root.walk();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "function_definition"
+            && n.child_by_field_name("name")
+                .is_some_and(|f| f.utf8_text(source).ok() == Some(name))
+        {
+            return true;
         }
-        Some(_) => None,
-        None => {
-            let function = qualified_ident(&text)?;
-            Some(function.rsplit('\\').next().unwrap_or(function).to_string())
+        // A function declares at the top level or in a namespace block.
+        if matches!(
+            n.kind(),
+            "program" | "namespace_definition" | "compound_statement"
+        ) {
+            stack.extend(n.named_children(&mut cursor));
         }
     }
+    false
 }
 
 /// The callee entry the ordinary call of the same shape records.

@@ -985,25 +985,30 @@ impl LanguageProvider for PhpProvider {
         // A class constant is its class's member: only `self::STATUS` or
         // `Order::STATUS` reaches it, never a bare `STATUS`. The kinds match
         // the containers `class_membership` links a member to.
-        let types: Vec<_> = nodes
+        if nodes
             .iter()
-            .filter(|n| {
-                matches!(
-                    n.kind,
-                    NodeKind::Class | NodeKind::Interface | NodeKind::Trait
-                )
-            })
-            .map(|n| (n.name.clone(), n.span))
-            .collect();
-        for node in nodes
-            .iter_mut()
-            .filter(|n| n.kind == NodeKind::Const && n.owner_class.is_none())
+            .any(|n| n.kind == NodeKind::Const && n.owner_class.is_none())
         {
-            node.owner_class = types
+            let types: Vec<_> = nodes
                 .iter()
-                .filter(|(_, span)| ecp_core::analyzer::types::span_contains(*span, node.span))
-                .min_by_key(|(_, span)| crate::framework_helpers::span_area(*span))
-                .map(|(name, _)| name.clone());
+                .filter(|n| {
+                    matches!(
+                        n.kind,
+                        NodeKind::Class | NodeKind::Interface | NodeKind::Trait
+                    )
+                })
+                .map(|n| (n.name.clone(), n.span))
+                .collect();
+            for node in nodes
+                .iter_mut()
+                .filter(|n| n.kind == NodeKind::Const && n.owner_class.is_none())
+            {
+                node.owner_class = types
+                    .iter()
+                    .filter(|(_, span)| ecp_core::analyzer::types::span_contains(*span, node.span))
+                    .min_by_key(|(_, span)| crate::framework_helpers::span_area(*span))
+                    .map(|(name, _)| name.clone());
+            }
         }
         let tx_scopes =
             collect_symfony_transactional_scopes(&nodes, &[NodeKind::Method, NodeKind::Function]);

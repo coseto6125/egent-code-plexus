@@ -326,8 +326,9 @@ pub struct NameRefSpec {
     /// bare name declares that name. Python `(case_pattern, dotted_name)`:
     /// `case [LIMIT]:` captures, `case Color.RED:` compares.
     pub capture_patterns: &'static [(&'static str, &'static str)],
-    /// `(parent kind, field)` whose subtree names no value: Go
-    /// `(keyed_element, key)`, a struct literal's field name.
+    /// `(parent kind, field)` whose subtree names no value, unless the
+    /// literal's type is in `map_literal_types`: Go `(keyed_element, key)`,
+    /// a struct literal's field name.
     pub skip_fields: &'static [(&'static str, &'static str)],
     /// Kinds whose subtree names no value: imports, annotations, types.
     pub skip_kinds: &'static [&'static str],
@@ -353,8 +354,8 @@ pub struct NameRefSpec {
     /// module's, so it declares no local.
     pub global_decls: &'static [&'static str],
     /// Composite-literal type kinds whose keys are expressions: Go
-    /// `map_type`. Any other literal's keys are field names, which
-    /// `skip_fields` skips.
+    /// `map_type`, `slice_type`, `array_type`. `skip_fields` skips the keys
+    /// of any other literal, a named map type's included.
     pub map_literal_types: &'static [&'static str],
     /// A call kind, and what names the literal callable a call of that kind
     /// hands on: PHP `array_map('fmt', $xs)` hands on `fmt`.
@@ -641,11 +642,25 @@ impl NameRefSpec {
                     pairs.contains(&key)
                 }
             };
+            // A destructuring assignment writes the names it lists: they
+            // are neither read nor declared (`({ data: current } = res)`).
+            if field & f::LEFT != 0
+                && parent.kind & k::ASSIGNMENT != 0
+                && matches!(cursor.node().kind(), "object_pattern" | "array_pattern")
+            {
+                return NameScope::Skip;
+            }
             if field & f::BINDING != 0
                 || (field & f::NAME != 0 && parent.kind & (k::PARAMETER | k::DECLARATOR) != 0)
-                || pair(self.binding_fields)
             {
                 return NameScope::Binding;
+            }
+            if pair(self.binding_fields) {
+                return if parent.scope == NameScope::Skip {
+                    NameScope::Skip
+                } else {
+                    NameScope::Binding
+                };
             }
             if field & f::VALUE != 0 {
                 return NameScope::Value;

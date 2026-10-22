@@ -695,3 +695,66 @@ fn test_function_reference_typescript_nested_function_argument_returns_edge() {
         "update",
     );
 }
+
+/// A PHP string callable names a function, never a method of the class
+/// around the call or of its base.
+#[test]
+fn test_function_reference_php_string_callable_in_class_skips_namesake_methods_returns_function_edge(
+) {
+    assert_same_file_ref(
+        &PhpProvider::new().unwrap(),
+        "p.php",
+        "<?php\nfunction fmt($x) { return $x; }\n\nclass Base {\n    function fmt($x) { return $x; }\n}\n\nclass C extends Base {\n    function fmt($x) { return $x; }\n    function apply($xs) {\n        return array_map('fmt', $xs);\n    }\n}\n\nclass D extends Base {\n    function run($xs) {\n        return array_map('fmt', $xs);\n    }\n}\n",
+        "apply",
+        "fmt",
+    );
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[(
+            "p.php",
+            "<?php\nfunction fmt($x) { return $x; }\n\nclass Base {\n    function fmt($x) { return $x; }\n}\n\nclass D extends Base {\n    function run($xs) {\n        return array_map('fmt', $xs);\n    }\n}\n",
+        )],
+    );
+    let refs = function_refs(&g, "run");
+    assert_eq!(refs.len(), 1, "{refs:?}");
+    assert_eq!(
+        refs[0].3, SAME_FILE,
+        "the free fmt, not the inherited method: {refs:?}"
+    );
+}
+
+/// A namespaced string callable keeps its namespace: a same-named function
+/// of the global namespace is not it.
+#[test]
+fn test_function_reference_php_namespaced_string_callable_skips_global_namesake_returns_no_edge() {
+    assert_no_ref(
+        &PhpProvider::new().unwrap(),
+        "app.php",
+        "<?php\nfunction fmt($x) { return $x; }\n\nfunction apply($xs) {\n    return array_map('Vendor\\\\fmt', $xs);\n}\n",
+        "apply",
+    );
+}
+
+/// A file that declares its own `array_map` calls that one: its first
+/// argument is no callable.
+#[test]
+fn test_function_reference_php_shadowed_builtin_returns_no_edge() {
+    assert_no_ref(
+        &PhpProvider::new().unwrap(),
+        "p.php",
+        "<?php\nnamespace App;\n\nfunction fmt($x) { return $x; }\nfunction array_map($label, $xs) { return $xs; }\n\nfunction apply($xs) {\n    return array_map('fmt', $xs);\n}\n",
+        "apply",
+    );
+}
+
+/// PHP 8 named arguments: the callable is the `callback` argument.
+#[test]
+fn test_function_reference_php_named_callback_argument_returns_edge() {
+    assert_same_file_ref(
+        &PhpProvider::new().unwrap(),
+        "p.php",
+        "<?php\nfunction fmt($x) { return $x; }\n\nfunction apply($xs) {\n    return array_map(array: $xs, callback: 'fmt');\n}\n",
+        "apply",
+        "fmt",
+    );
+}

@@ -2477,12 +2477,6 @@ fn resolve_variant_ref(
         .map(|id| (id, confidence))
 }
 
-/// The last segment of an owner key (`outer::<anonymous:2:20>`, `Outer.Inner`).
-fn owner_name(owner: &str) -> &str {
-    let last = owner.rsplit("::").next().unwrap_or(owner);
-    last.rsplit('.').next().unwrap_or(last)
-}
-
 /// The reasons of the edges a [`NameRef`] yields: `ReadsField` to a
 /// constant or variable, `References` to a function.
 #[derive(Clone, Copy)]
@@ -2495,8 +2489,10 @@ struct NameRefReasons {
 ///
 /// In a language where a bare name reaches a member of the enclosing type
 /// (Java `TABLE`, C# method group `Print`), the reader's own type is tried
-/// first, then the types it inherits from. Then the ordinary tiers: same file, import, and the unique
-/// project-wide declaration ([`ResolutionTier::Global`]). The global tier is
+/// first, then the types it inherits from. A bare function name in PHP,
+/// Python, Rust or C never names a method (`array_map('fmt', $xs)`), so
+/// those skip the type. Then the ordinary tiers: same file, import, and the
+/// unique project-wide declaration ([`ResolutionTier::Global`]). The global tier is
 /// dropped where a module must import a name before it can use it bare, as
 /// there it can only stand for a local the parser did not see. An
 /// ambiguous name binds nothing.
@@ -2523,10 +2519,13 @@ fn resolve_name_ref(
         return None;
     }
     let qualified = member.len() != name_ref.name.len();
+    let free_only = name_ref.kind == NameRefKind::Function
+        && CallSite::Plain(name_ref.name).reaches_free_only(language);
     if let (false, Some(owner)) = (qualified, raw_node.owner_class.as_deref()) {
         // `Method`, not `Callable`: inside `class Foo`, the receiver of
         // `Foo.Create()` names the type, never its constructor.
         let own_kinds: &[ResolveTarget] = match (name_ref.kind, language) {
+            _ if free_only => &[],
             (NameRefKind::Function, _) => &[ResolveTarget::Method],
             (NameRefKind::Value, Language::CSharp | Language::Swift | Language::Dart) => {
                 &[ResolveTarget::Field, ResolveTarget::Method]
@@ -2545,8 +2544,13 @@ fn resolve_name_ref(
             }
         }
         // A member the reader's type inherits: `Child.f` reads `Parent.LIMIT`.
-        if let Some(ty) =
-            symbol_table.lookup_in_file_with_kind(file, owner_name(owner), ResolveTarget::Type)
+        // Two types of the owner's name in the file leave its bases unknown.
+        let own_type = owner_key(owner).filter(|&key| {
+            !own_kinds.is_empty()
+                && symbol_table.count_in_file_with_kind(file, key, ResolveTarget::Type) == 1
+        });
+        if let Some(ty) = own_type
+            .and_then(|key| symbol_table.lookup_in_file_with_kind(file, key, ResolveTarget::Type))
         {
             for &target in own_kinds {
                 if let ecp_core::analyzer::type_ladder::Ownership::Owned { id, inherited } =
@@ -2591,6 +2595,9 @@ fn resolve_name_ref(
             ResolveTarget::Field,
         );
     }
+    if free_only {
+        targets.retain(|&(id, _)| symbol_table.node_kind(id) != NodeKind::Method);
+    }
     let &[(id, confidence)] = targets.as_slice() else {
         return None;
     };
@@ -2625,12 +2632,15 @@ fn resolve_name_ref(
                 | Language::Cpp
                 | Language::Ruby
         ) && symbol_table.owner(id).is_some_and(|owner| {
-            // A nested function's owner is the function around it, not a type.
+            // A nested function's owner is the function around it, not a
+            // type. A PHP 4 constructor shares its class's name.
             !symbol_table.file_of(id).is_some_and(|target| {
                 symbol_table
-                    .decls_in_file(target, owner_name(owner))
-                    .iter()
-                    .any(|&(_, kind)| kind.is_callable())
+                    .lookup_in_file_with_kind(target, owner, ResolveTarget::Callable)
+                    .is_some()
+                    && symbol_table
+                        .lookup_in_file_with_kind(target, owner, ResolveTarget::Type)
+                        .is_none()
             })
         })
     };

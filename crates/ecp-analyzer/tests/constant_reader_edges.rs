@@ -1041,3 +1041,84 @@ fn test_value_read_java_own_field_hides_inherited_returns_same_file_edge() {
         vec![r("src/app/Child.java", "LIMIT", VALUE_READ, SAME_FILE)]
     );
 }
+
+/// A destructuring assignment writes the names it lists: it declares no
+/// local that hides the module's name, and it reads only a default value.
+const JS_DESTRUCTURING_ASSIGNMENT: &str = "export let current = null;\n\
+export const DEFAULT = 1;\n\
+export function load(res) {\n  ({ data: current } = res);\n  return current.id;\n}\n\
+export function store(res) {\n  ({ current } = res);\n  [current] = res;\n}\n\
+export function pick(res) {\n  let n;\n  ({ n = DEFAULT } = res);\n  return n;\n}\n";
+
+#[test]
+fn test_value_read_javascript_destructuring_assignment_declares_no_local_returns_edge() {
+    let g = graph(
+        &JavaScriptProvider::new().unwrap(),
+        &[("a.js", JS_DESTRUCTURING_ASSIGNMENT)],
+    );
+    assert_eq!(
+        value_reads(&g, "load"),
+        vec![r("a.js", "current", VALUE_READ, SAME_FILE)]
+    );
+}
+
+#[test]
+fn test_value_read_javascript_destructuring_assignment_target_returns_no_edge() {
+    let g = graph(
+        &JavaScriptProvider::new().unwrap(),
+        &[("a.js", JS_DESTRUCTURING_ASSIGNMENT)],
+    );
+    assert_eq!(value_reads(&g, "store"), none());
+}
+
+#[test]
+fn test_value_read_typescript_destructuring_assignment_default_returns_edge() {
+    let g = graph(
+        &TypeScriptProvider::new().unwrap(),
+        &[("a.ts", JS_DESTRUCTURING_ASSIGNMENT)],
+    );
+    assert_eq!(
+        value_reads(&g, "pick"),
+        vec![r("a.ts", "DEFAULT", VALUE_READ, SAME_FILE)]
+    );
+    assert_eq!(value_reads(&g, "store"), none());
+}
+
+/// A PHP 4 constructor shares its class's name: the class's constant stays
+/// the class's member, so a bare read elsewhere does not reach it.
+#[test]
+fn test_value_read_php_class_constant_beside_namesake_constructor_returns_no_edge() {
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[
+            (
+                "order.php",
+                "<?php\nclass Order {\n    const STATUS = 1;\n    function Order() {}\n}\n",
+            ),
+            (
+                "use.php",
+                "<?php\nfunction show() {\n    return STATUS;\n}\n",
+            ),
+        ],
+    );
+    assert_eq!(value_reads(&g, "show"), none());
+}
+
+/// Two classes of one name in a file (C# namespaces) leave the reader's
+/// bases unknown: no inherited edge.
+#[test]
+fn test_value_read_csharp_namesake_types_in_file_return_no_heritage_edge() {
+    let g = graph(
+        &CSharpProvider::new().unwrap(),
+        &[
+            ("BaseA.cs", "class BaseA { public const int Max = 1; }\n"),
+            ("BaseB.cs", "class BaseB { public const int Max = 2; }\n"),
+            (
+                "b.cs",
+                "namespace A { class Builder : BaseA { } }\n\
+namespace B { class Builder : BaseB { int Size() { return Max; } } }\n",
+            ),
+        ],
+    );
+    assert_eq!(value_reads(&g, "Size"), none());
+}
