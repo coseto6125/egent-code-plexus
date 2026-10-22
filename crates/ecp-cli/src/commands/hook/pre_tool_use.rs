@@ -550,7 +550,8 @@ fn cd_target_with_home(cmd: &str, cwd: &str, home: Option<&Path>, cdpath: bool) 
     }
     match current {
         None => CdTarget::Unchanged,
-        // `dunce` keeps a Windows path plain, without the `\\?\` prefix.
+        // `dunce` drops the `\\?\` prefix wherever the plain form names the
+        // same path; a long or UNC path keeps it.
         Some(dir) => dunce::canonicalize(dir)
             .ok()
             .and_then(|dir| dir.into_os_string().into_string().ok())
@@ -1067,6 +1068,10 @@ mod tests {
         for cmd in cmds {
             assert_eq!(target(&cmd, other.path()), dir(&path), "{cmd}");
         }
+        // A relative path carries no separator bash would eat, so the escaped
+        // space holds on every platform.
+        let relative = "cd 業主\\ 原始碼/outsourcing-backend-CN && rg Foo";
+        assert_eq!(target(relative, t.path()), dir(&path), "{relative}");
     }
 
     #[test]
