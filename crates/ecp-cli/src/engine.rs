@@ -37,18 +37,18 @@ fn validated_key(graph_path: &Path, file: &File) -> Option<ValidatedKey> {
 }
 
 /// Full structural validation, skipped when this process already validated
-/// a file of the same path, length and mtime. A rebuilt graph lands under a
-/// new commit dir, so an identical key means identical bytes.
-fn validate_once(graph_path: &Path, file: &File, bytes: &[u8]) -> io::Result<()> {
-    let key = validated_key(graph_path, file);
-    if let Some(key) = &key {
+/// a file of the same path, length and mtime (`key`, from
+/// [`validated_key`]). A rebuilt graph lands under a new commit dir, so an
+/// identical key means identical bytes.
+fn validate_once(key: Option<&ValidatedKey>, bytes: &[u8]) -> io::Result<()> {
+    if let Some(key) = key {
         if validated_set().lock().is_ok_and(|set| set.contains(key)) {
             return Ok(());
         }
     }
     validate_header(bytes)?;
     if let (Some(key), Ok(mut set)) = (key, validated_set().lock()) {
-        set.insert(key);
+        set.insert(key.clone());
     }
     Ok(())
 }
@@ -56,6 +56,10 @@ fn validate_once(graph_path: &Path, file: &File, bytes: &[u8]) -> io::Result<()>
 pub struct Engine {
     mmap: Mmap,
     graph_path: PathBuf,
+    /// Path, length and mtime of the mapped graph, stat'ed from the open
+    /// handle: the view cache keys on the bytes this engine reads, not on
+    /// whatever file the path names later.
+    graph_stamp: Option<ValidatedKey>,
     // Phase 3 reserves the slot; Phase 5 will wire L1 overlay merge into query paths.
     #[allow(dead_code)]
     overlay_dir: Option<PathBuf>,
@@ -107,10 +111,12 @@ impl Engine {
         // the kernel read ahead in bulk; best-effort, and a no-op when warm.
         #[cfg(unix)]
         let _ = mmap.advise(memmap2::Advice::WillNeed);
-        validate_once(&graph_path, &file, &mmap)?;
+        let graph_stamp = validated_key(&graph_path, &file);
+        validate_once(graph_stamp.as_ref(), &mmap)?;
         Ok(Self {
             mmap,
             graph_path,
+            graph_stamp,
             overlay_dir: None,
             worktree_root: None,
             overlay_view: OnceLock::new(),
@@ -213,18 +219,17 @@ impl Engine {
                 let dir = self.overlay_dir.as_deref()?;
                 let root = self.worktree_root.as_deref()?;
                 let graph = self.graph().ok()?;
-                let (inputs, inputs_hash) =
-                    crate::session::overlay_reader::load_view_inputs_hashed(dir, root).ok()?;
-                if inputs.is_empty() {
+                let (accepted, inputs_hash) =
+                    crate::session::overlay_reader::accepted_fragments(dir, root).ok()?;
+                if accepted.is_empty() {
                     return None;
                 }
-                let key = view_cache::key(&self.graph_path, graph.nodes.len(), inputs_hash);
-                let cached = key
-                    .and_then(|key| view_cache::read(dir, key))
-                    .filter(|view| view.base_len() as usize == graph.nodes.len());
-                if cached.is_some() {
-                    return cached;
+                let key = self.view_cache_key(inputs_hash);
+                let nodes = graph.nodes.len();
+                if let Some(view) = key.and_then(|key| view_cache::read(dir, key, nodes)) {
+                    return Some(view);
                 }
+                let inputs = crate::session::overlay_reader::decode_view_inputs(&accepted);
                 let view = OverlayView::build(graph, &inputs)?;
                 if let Some(key) = key {
                     view_cache::write(dir, key, &view);
@@ -232,6 +237,15 @@ impl Engine {
                 Some(view)
             })
             .as_ref()
+    }
+
+    /// The key `overlay_view` stores and looks up its view under, for the
+    /// inputs hash `accepted_fragments` returns. `None` when the mapped
+    /// file's stamp is unknown; the view is then built without the cache.
+    pub fn view_cache_key(&self, inputs_hash: u64) -> Option<u64> {
+        let (path, len, mtime) = self.graph_stamp.as_ref()?;
+        let nodes = self.graph().ok()?.nodes.len();
+        view_cache::key((path.as_path(), *len, (*mtime)?), nodes, inputs_hash)
     }
 
     /// Current view discriminator. PureReference sessions yield `L2Only`;
@@ -290,7 +304,7 @@ pub fn header_compatible(graph_path: &Path) -> bool {
     let Ok(mmap) = (unsafe { Mmap::map(&file) }) else {
         return false;
     };
-    validate_once(&graph_path, &file, &mmap).is_ok()
+    validate_once(validated_key(&graph_path, &file).as_ref(), &mmap).is_ok()
 }
 
 /// Reject `graph.bin` files that don't carry the ecp magic header or

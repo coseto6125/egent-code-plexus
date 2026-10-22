@@ -13,30 +13,34 @@
 
 use ecp_core::registry::BUILDER_FINGERPRINT;
 use ecp_core::session::{OverlayView, VIEW_CACHE_FORMAT};
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 use xxhash_rust::xxh3::{xxh3_64, Xxh3};
 
 pub const VIEW_CACHE_FILE: &str = "view_cache.bin";
 
 const HEADER_LEN: usize = 16;
 
-/// The cache key of a view built over the graph at `graph_path` (with
-/// `graph_nodes` nodes) from inputs whose hash is `inputs_hash`
-/// (`load_view_inputs_hashed`). The running binary is part of the key: its
-/// build sha alone misses a dev rebuild of a dirty checkout, so its length
-/// and mtime join too. `None` when either file cannot be stat'ed; the
-/// caller then skips the cache.
-pub fn key(graph_path: &Path, graph_nodes: usize, inputs_hash: u64) -> Option<u64> {
+/// The cache key of a view built over the graph file `graph` = (path,
+/// length, mtime), as stat'ed from the handle the engine mapped, with
+/// `graph_nodes` nodes, from inputs whose hash is `inputs_hash`
+/// (`accepted_fragments`). The running binary is part of the key: its build
+/// sha alone misses a dev rebuild of a dirty checkout, so its length and
+/// mtime join too. `None` when the binary cannot be stat'ed or a stamp
+/// predates the epoch; the caller then skips the cache.
+pub fn key(graph: (&Path, u64, SystemTime), graph_nodes: usize, inputs_hash: u64) -> Option<u64> {
     let exe = std::env::current_exe().ok()?;
+    let exe_meta = fs::metadata(&exe).ok()?;
     let mut hasher = Xxh3::new();
     hasher.update(&VIEW_CACHE_FORMAT.to_le_bytes());
     hash_part(&mut hasher, BUILDER_FINGERPRINT.as_bytes());
     hash_part(&mut hasher, env!("ECP_GIT_SHA").as_bytes());
-    hash_file_stamp(&mut hasher, &exe)?;
-    hash_file_stamp(&mut hasher, graph_path)?;
+    hash_stamp(&mut hasher, &exe, exe_meta.len(), exe_meta.modified().ok()?)?;
+    let (graph_path, graph_len, graph_mtime) = graph;
+    hash_stamp(&mut hasher, graph_path, graph_len, graph_mtime)?;
     hasher.update(&(graph_nodes as u64).to_le_bytes());
     hasher.update(&inputs_hash.to_le_bytes());
     Some(hasher.digest())
@@ -49,32 +53,31 @@ pub(crate) fn hash_part(hasher: &mut Xxh3, part: &[u8]) {
     hasher.update(part);
 }
 
-fn hash_file_stamp(hasher: &mut Xxh3, path: &Path) -> Option<()> {
-    let meta = fs::metadata(path).ok()?;
-    let mtime_ns = meta
-        .modified()
-        .ok()?
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_nanos();
+fn hash_stamp(hasher: &mut Xxh3, path: &Path, len: u64, mtime: SystemTime) -> Option<()> {
+    let mtime_ns = mtime.duration_since(UNIX_EPOCH).ok()?.as_nanos();
     hash_part(hasher, path.as_os_str().as_encoded_bytes());
-    hasher.update(&meta.len().to_le_bytes());
+    hasher.update(&len.to_le_bytes());
     hasher.update(&mtime_ns.to_le_bytes());
     Some(())
 }
 
-/// The cached view in `session_dir` when it was stored under `key` and its
-/// bytes are intact, else `None`.
-pub fn read(session_dir: &Path, key: u64) -> Option<OverlayView> {
-    let bytes = fs::read(session_dir.join(VIEW_CACHE_FILE)).ok()?;
-    let (header, body) = bytes.split_at_checked(HEADER_LEN)?;
+/// The cached view in `session_dir` when it was stored under `key`, its
+/// bytes are intact, and it indexes a graph of `graph_nodes` nodes, else
+/// `None`. A file under another key costs one header read, not the body.
+pub fn read(session_dir: &Path, key: u64, graph_nodes: usize) -> Option<OverlayView> {
+    let mut file = File::open(session_dir.join(VIEW_CACHE_FILE)).ok()?;
+    let mut header = [0u8; HEADER_LEN];
+    file.read_exact(&mut header).ok()?;
     let (stored_key, checksum) = header.split_at(8);
-    if u64::from_le_bytes(stored_key.try_into().ok()?) != key
-        || u64::from_le_bytes(checksum.try_into().ok()?) != xxh3_64(body)
-    {
+    if u64::from_le_bytes(stored_key.try_into().ok()?) != key {
         return None;
     }
-    OverlayView::from_cache_bytes(body)
+    let mut body = Vec::new();
+    file.read_to_end(&mut body).ok()?;
+    if u64::from_le_bytes(checksum.try_into().ok()?) != xxh3_64(&body) {
+        return None;
+    }
+    OverlayView::from_cache_bytes(&body, graph_nodes)
 }
 
 /// Store `view` under `key` in `session_dir`. Best effort: a missing or

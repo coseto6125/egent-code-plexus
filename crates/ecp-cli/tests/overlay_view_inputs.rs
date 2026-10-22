@@ -1,21 +1,29 @@
 //! Roundtrip + validation tests for the v2 fragment path feeding
 //! `OverlayView` (FU-2026-06-10-398a846bca42): `write_dirty_fragments_from_graphs`
-//! must persist owner_class / calls / imports, and `load_view_inputs` must
+//! must persist owner_class / calls / imports, and `accepted_fragments` must
 //! refuse entries that would serve stale overlay data (reverted files, v1 bins).
 
 #[path = "common/parity.rs"]
 mod parity;
 
-use ecp_cli::session::overlay_reader::{load_overlay_hits, load_view_inputs};
+use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs, load_overlay_hits};
 use ecp_cli::session::overlay_writer::{
     write_dirty_fragments_from_graphs, FragmentFileV3, FragmentSymbolV3,
 };
 use ecp_core::analyzer::types::{LocalGraph, RawImport, RawNode, VariantRef};
 use ecp_core::graph::NodeKind;
-use ecp_core::session::{DirtyEntry, DirtyFiles, SessionMeta, FRAGMENT_FORMAT_V3};
+use ecp_core::session::{
+    DirtyEntry, DirtyFiles, OverlayFileInput, SessionMeta, FRAGMENT_FORMAT_V3,
+};
 use parity::{callees, calls_after_edit, Parity};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
+
+/// The inputs `Engine::overlay_view` builds from on a cache miss.
+fn load_view_inputs(session_dir: &Path, worktree: &Path) -> Vec<OverlayFileInput> {
+    let (accepted, _) = accepted_fragments(session_dir, worktree).unwrap();
+    decode_view_inputs(&accepted)
+}
 
 fn make_session_dir(tmp: &Path, sid: &str) -> PathBuf {
     let session_dir = tmp.join("sessions").join(sid);
@@ -105,7 +113,7 @@ fn v2_roundtrip_preserves_owner_calls_imports() {
     );
     write_dirty_fragments_from_graphs(&session_dir, &[graph], &[mtime]).unwrap();
 
-    let inputs = load_view_inputs(&session_dir, &worktree).unwrap();
+    let inputs = load_view_inputs(&session_dir, &worktree);
     assert_eq!(inputs.len(), 1, "one valid v2 entry expected");
     let file = &inputs[0];
     assert_eq!(file.rel_path, "src/dirty.rs");
@@ -137,7 +145,7 @@ fn reverted_file_entry_is_skipped() {
     // file was reverted/touched after the fragment write.
     write_dirty_fragments_from_graphs(&session_dir, &[graph], &[real_mtime + 1]).unwrap();
 
-    let inputs = load_view_inputs(&session_dir, &worktree).unwrap();
+    let inputs = load_view_inputs(&session_dir, &worktree);
     assert!(
         inputs.is_empty(),
         "a stale manifest entry must never beat fresh base data: {inputs:?}"
@@ -167,7 +175,7 @@ fn v1_format_entry_is_skipped() {
     );
     DirtyFiles::write_atomic(&manifest, &df).unwrap();
 
-    let inputs = load_view_inputs(&session_dir, &worktree).unwrap();
+    let inputs = load_view_inputs(&session_dir, &worktree);
     assert!(
         inputs.is_empty(),
         "v1 bins carry no calls/imports — the view must treat them as clean"
@@ -213,7 +221,7 @@ fn test_load_view_inputs_session_written_by_0_14_8_returns_no_input() {
     assert!(!old.from_current_builder());
     assert_eq!(old.entries["app.py"].mtime_ns, mtime);
 
-    let inputs = load_view_inputs(&session_dir, &worktree).unwrap();
+    let inputs = load_view_inputs(&session_dir, &worktree);
     assert!(
         inputs.is_empty(),
         "another builder's fragment beat the base graph: {inputs:?}"
@@ -238,7 +246,7 @@ fn test_load_view_inputs_export_flag_and_aliases_roundtrip() {
     graph.export_aliases = Some(aliases.clone().into_boxed_slice());
     write_dirty_fragments_from_graphs(&session_dir, &[graph], &[mtime]).unwrap();
 
-    let inputs = load_view_inputs(&session_dir, &worktree).unwrap();
+    let inputs = load_view_inputs(&session_dir, &worktree);
     assert_eq!(inputs.len(), 1);
     let exported: Vec<(&str, bool)> = inputs[0]
         .symbols
@@ -285,7 +293,7 @@ fn test_load_view_inputs_heritage_and_variant_refs_roundtrip() {
     );
     write_dirty_fragments_from_graphs(&session_dir, &[graph], &[mtime]).unwrap();
 
-    let inputs = load_view_inputs(&session_dir, &worktree).unwrap();
+    let inputs = load_view_inputs(&session_dir, &worktree);
     assert_eq!(inputs.len(), 1);
     let sym = |name: &str| inputs[0].symbols.iter().find(|s| s.name == name).unwrap();
     assert_eq!(sym("Child").heritage, ["Base", "Iface"], "declared order");
@@ -313,7 +321,7 @@ fn test_load_view_inputs_two_fragments_for_one_file_serves_the_later() {
     write_dirty_fragments_from_graphs(&session_dir, &[first], &[mtime]).unwrap();
     write_dirty_fragments_from_graphs(&session_dir, &[second], &[mtime]).unwrap();
 
-    let inputs = load_view_inputs(&session_dir, &worktree).unwrap();
+    let inputs = load_view_inputs(&session_dir, &worktree);
     assert_eq!(inputs.len(), 1);
     assert_eq!(inputs[0].symbols[0].heritage, ["New"]);
 }
@@ -375,7 +383,7 @@ fn test_load_view_inputs_v3_entry_under_current_fingerprint_returns_no_input() {
         .unwrap()
         .from_current_builder());
 
-    let inputs = load_view_inputs(&session_dir, &worktree).unwrap();
+    let inputs = load_view_inputs(&session_dir, &worktree);
     assert!(inputs.is_empty(), "a v3 fragment was served: {inputs:?}");
 }
 
@@ -429,7 +437,7 @@ fn test_load_view_inputs_session_written_by_0_15_0_returns_no_input() {
     assert_eq!(old.entries["app.py"].format, FRAGMENT_FORMAT_V3);
     assert!(!old.from_current_builder());
 
-    let inputs = load_view_inputs(&session_dir, &worktree).unwrap();
+    let inputs = load_view_inputs(&session_dir, &worktree);
     assert!(inputs.is_empty(), "another builder's fragment: {inputs:?}");
 }
 

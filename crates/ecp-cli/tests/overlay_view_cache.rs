@@ -4,15 +4,16 @@
 //! build again.
 
 use ecp_cli::engine::Engine;
-use ecp_cli::session::overlay_reader::{load_view_inputs, load_view_inputs_hashed};
+use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
 use ecp_cli::session::overlay_writer::write_dirty_fragments_from_graphs;
 use ecp_cli::session::view_cache::{self, VIEW_CACHE_FILE};
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::graph::NodeKind;
 use ecp_core::graph_fixture::GraphFixture;
-use ecp_core::session::{DirtyFiles, OverlayView, SessionMeta};
+use ecp_core::session::{DirtyFiles, OverlayFileInput, OverlayView, SessionMeta};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Barrier;
 use std::time::{Duration, UNIX_EPOCH};
 
 const DIRTY: &str = "src/dirty.rs";
@@ -99,22 +100,27 @@ impl Fixture {
             .with_overlay(self.session_dir.clone(), self.worktree.clone())
     }
 
+    /// The inputs `Engine::overlay_view` builds from on a cache miss.
+    fn inputs(&self) -> Vec<OverlayFileInput> {
+        let (accepted, _) = accepted_fragments(&self.session_dir, &self.worktree).unwrap();
+        decode_view_inputs(&accepted)
+    }
+
     /// The view `OverlayView::build` makes from the current inputs.
     fn fresh(&self, engine: &Engine) -> OverlayView {
-        let inputs = load_view_inputs(&self.session_dir, &self.worktree).unwrap();
-        OverlayView::build(engine.graph().unwrap(), &inputs).unwrap()
+        OverlayView::build(engine.graph().unwrap(), &self.inputs()).unwrap()
     }
 
     /// The key `Engine::overlay_view` stores the current inputs under.
     fn key(&self, engine: &Engine) -> u64 {
-        let (_, inputs_hash) = load_view_inputs_hashed(&self.session_dir, &self.worktree).unwrap();
-        let graph_path = fs::canonicalize(&self.graph_path).unwrap();
-        view_cache::key(
-            &graph_path,
-            engine.graph().unwrap().nodes.len(),
-            inputs_hash,
-        )
-        .unwrap()
+        let (_, inputs_hash) = accepted_fragments(&self.session_dir, &self.worktree).unwrap();
+        engine.view_cache_key(inputs_hash).unwrap()
+    }
+
+    /// The view cached under `engine`'s key for the current inputs.
+    fn cached(&self, engine: &Engine) -> Option<OverlayView> {
+        let nodes = engine.graph().unwrap().nodes.len();
+        view_cache::read(&self.session_dir, self.key(engine), nodes)
     }
 
     fn cache_path(&self) -> PathBuf {
@@ -123,7 +129,7 @@ impl Fixture {
 
     /// A valid view that differs from the real one: it adds `planted_fn`.
     fn planted(&self, engine: &Engine) -> OverlayView {
-        let mut inputs = load_view_inputs(&self.session_dir, &self.worktree).unwrap();
+        let mut inputs = self.inputs();
         let mut extra = inputs[0].symbols[0].clone();
         extra.name = "planted_fn".to_string();
         inputs[0].symbols.push(extra);
@@ -181,10 +187,7 @@ fn test_overlay_view_first_engine_writes_cache_under_engine_key() {
     let view = engine.overlay_view().expect("a dirty file makes a view");
 
     assert_eq!(view, &f.fresh(&engine));
-    assert_eq!(
-        view_cache::read(&f.session_dir, f.key(&engine)).as_ref(),
-        Some(view)
-    );
+    assert_eq!(f.cached(&engine).as_ref(), Some(view));
     assert!(tmp_files(&f.session_dir).is_empty());
 }
 
@@ -238,7 +241,7 @@ fn test_overlay_view_edited_dirty_file_rebuilds_with_edit() {
     assert_eq!(names(view), ["renamed_fn"]);
     assert_eq!(view, &f.fresh(&second));
     assert_eq!(
-        view_cache::read(&f.session_dir, f.key(&second)).as_ref(),
+        f.cached(&second).as_ref(),
         Some(view),
         "the rebuilt view replaces the stale cache"
     );
@@ -338,6 +341,8 @@ fn test_overlay_view_missing_session_dir_returns_none_creates_nothing() {
     assert!(!missing.exists());
 }
 
+/// A session dir the process cannot write to still serves the built view,
+/// and the failed write leaves neither a cache nor a temp file behind.
 #[cfg(unix)]
 #[test]
 fn test_overlay_view_read_only_session_dir_returns_built_view() {
@@ -345,53 +350,79 @@ fn test_overlay_view_read_only_session_dir_returns_built_view() {
     let f = Fixture::new();
     f.edit(&["keep_fn"], 1_000);
     fs::set_permissions(&f.session_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    // Root ignores the mode bits, and then nothing here rejects a write.
+    let probe = f.session_dir.join("write-probe");
+    let writable = fs::write(&probe, b"").is_ok();
+    if writable {
+        fs::remove_file(&probe).unwrap();
+    }
 
     let engine = f.engine();
     let view = engine.overlay_view();
     let fresh = f.fresh(&engine);
+    let cache_written = f.cache_path().exists();
     let leftovers = tmp_files(&f.session_dir);
     fs::set_permissions(&f.session_dir, fs::Permissions::from_mode(0o755)).unwrap();
 
     assert_eq!(view, Some(&fresh));
-    assert!(leftovers.is_empty(), "{leftovers:?}");
+    if writable {
+        eprintln!(
+            "skipped the write-rejection checks: a 0555 dir stays writable to this user (root?)"
+        );
+    } else {
+        assert!(!cache_written, "a read-only session dir holds no cache");
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
 }
 
 #[test]
 fn test_overlay_view_concurrent_engines_agree_and_leave_one_valid_cache() {
+    const ENGINES: usize = 4;
     let f = Fixture::new();
     f.edit(&["keep_fn"], 1_000);
     let probe = f.engine();
     let fresh = f.fresh(&probe);
+    let engines: Vec<Engine> = (0..ENGINES).map(|_| f.engine()).collect();
+    let barrier = Barrier::new(ENGINES);
 
     std::thread::scope(|scope| {
-        for _ in 0..4 {
-            scope.spawn(|| {
-                let engine = f.engine();
-                assert_eq!(engine.overlay_view(), Some(&fresh));
+        for engine in &engines {
+            let barrier = &barrier;
+            scope.spawn(move || {
+                barrier.wait();
+                engine.overlay_view();
             });
         }
     });
 
-    assert_eq!(
-        view_cache::read(&f.session_dir, f.key(&probe)).as_ref(),
-        Some(&fresh)
-    );
+    for engine in &engines {
+        assert_eq!(engine.overlay_view(), Some(&fresh));
+    }
+    let cache_files: Vec<String> = fs::read_dir(&f.session_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(VIEW_CACHE_FILE))
+        .collect();
+    assert_eq!(cache_files, [VIEW_CACHE_FILE]);
+    assert_eq!(f.cached(&probe).as_ref(), Some(&fresh));
     assert!(tmp_files(&f.session_dir).is_empty());
 }
 
 #[test]
-fn test_load_view_inputs_hashed_fragment_change_changes_hash() {
+fn test_accepted_fragments_fragment_change_changes_hash() {
     let f = Fixture::new();
-    let (_, clean) = load_view_inputs_hashed(&f.session_dir, &f.worktree).unwrap();
+    let (_, clean) = accepted_fragments(&f.session_dir, &f.worktree).unwrap();
     f.edit(&["keep_fn"], 1_000);
-    let (inputs, first) = load_view_inputs_hashed(&f.session_dir, &f.worktree).unwrap();
-    let (_, again) = load_view_inputs_hashed(&f.session_dir, &f.worktree).unwrap();
+    let (accepted, first) = accepted_fragments(&f.session_dir, &f.worktree).unwrap();
+    let (_, again) = accepted_fragments(&f.session_dir, &f.worktree).unwrap();
     f.edit(&["renamed_fn"], 2_000);
-    let (_, edited) = load_view_inputs_hashed(&f.session_dir, &f.worktree).unwrap();
+    let (_, edited) = accepted_fragments(&f.session_dir, &f.worktree).unwrap();
     f.touch(3_000);
-    let (skipped, unparsed) = load_view_inputs_hashed(&f.session_dir, &f.worktree).unwrap();
+    let (skipped, unparsed) = accepted_fragments(&f.session_dir, &f.worktree).unwrap();
 
-    assert_eq!(inputs.len(), 1);
+    assert_eq!(accepted.len(), 1);
+    assert_eq!(decode_view_inputs(&accepted).len(), 1);
     assert_eq!(first, again, "same inputs, same hash");
     assert_ne!(first, clean);
     assert_ne!(first, edited);
@@ -402,36 +433,55 @@ fn test_load_view_inputs_hashed_fragment_change_changes_hash() {
 /// An unreadable manifest stays an error, and the engine still serves no
 /// view rather than a cached one.
 #[test]
-fn test_load_view_inputs_hashed_corrupt_manifest_returns_error() {
+fn test_accepted_fragments_corrupt_manifest_returns_error() {
     let f = Fixture::new();
     f.edit(&["keep_fn"], 1_000);
     f.engine().overlay_view().unwrap();
     fs::write(f.session_dir.join("dirty_files.json"), "{ not json").unwrap();
 
-    assert!(load_view_inputs_hashed(&f.session_dir, &f.worktree).is_err());
+    assert!(accepted_fragments(&f.session_dir, &f.worktree).is_err());
     assert!(f.engine().overlay_view().is_none());
 }
 
 #[test]
-fn test_view_cache_key_missing_graph_returns_none() {
-    let f = Fixture::new();
+fn test_view_cache_key_pre_epoch_graph_mtime_returns_none() {
+    let before_epoch = UNIX_EPOCH - Duration::from_secs(1);
 
-    assert!(view_cache::key(&f.graph_path.with_file_name("gone.bin"), 3, 0).is_none());
+    assert!(view_cache::key((Path::new("/g/graph.bin"), 10, before_epoch), 3, 0).is_none());
 }
 
 #[test]
 fn test_view_cache_key_each_part_changes_key() {
-    let f = Fixture::new();
-    let graph_path = fs::canonicalize(&f.graph_path).unwrap();
-    let base = view_cache::key(&graph_path, 3, 7).unwrap();
+    let path = Path::new("/g/graph.bin");
+    let mtime = UNIX_EPOCH + Duration::from_secs(1_000);
+    let base = view_cache::key((path, 10, mtime), 3, 7).unwrap();
+    let later = mtime + Duration::from_nanos(1);
 
-    assert_eq!(view_cache::key(&graph_path, 3, 7), Some(base));
-    assert_ne!(view_cache::key(&graph_path, 4, 7), Some(base));
-    assert_ne!(view_cache::key(&graph_path, 3, 8), Some(base));
-    let copy = graph_path.with_file_name("copy.bin");
-    fs::copy(&graph_path, &copy).unwrap();
-    set_mtime(&copy, 0);
-    set_mtime(&graph_path, 0);
-    let same_stamp = view_cache::key(&graph_path, 3, 7).unwrap();
-    assert_ne!(view_cache::key(&copy, 3, 7), Some(same_stamp), "path");
+    assert_eq!(view_cache::key((path, 10, mtime), 3, 7), Some(base));
+    for (what, other) in [
+        (
+            "path",
+            view_cache::key((Path::new("/g/copy.bin"), 10, mtime), 3, 7),
+        ),
+        ("length", view_cache::key((path, 11, mtime), 3, 7)),
+        ("mtime", view_cache::key((path, 10, later), 3, 7)),
+        ("node count", view_cache::key((path, 10, mtime), 4, 7)),
+        ("inputs", view_cache::key((path, 10, mtime), 3, 8)),
+    ] {
+        assert_ne!(other, Some(base), "{what}");
+    }
+}
+
+/// The key follows the file the engine mapped: a reindex in place after the
+/// load leaves this engine's key alone and gives the next engine another.
+#[test]
+fn test_view_cache_key_graph_touched_after_load_keeps_loaded_stamp() {
+    let f = Fixture::new();
+    let engine = f.engine();
+    let loaded = engine.view_cache_key(7).unwrap();
+
+    set_mtime(&f.graph_path, 3_000);
+
+    assert_eq!(engine.view_cache_key(7), Some(loaded));
+    assert_ne!(f.engine().view_cache_key(7), Some(loaded));
 }
