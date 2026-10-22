@@ -1,7 +1,7 @@
 //! Ruby-side helpers for `RawPathLiteral` extraction. Entry point
 //! `build_raw_path_literal` handles `string` nodes (single- and
 //! double-quoted share the same kind). Interpolated strings
-//! (`string_interpolation` child) are filtered internally. Invoked from
+//! (`interpolation` child) are filtered internally. Invoked from
 //! `receiver_types::extract_ruby_calls_and_path_literals` so a single
 //! DFS handles both call attribution and path-literal collection.
 
@@ -11,10 +11,10 @@ use tree_sitter::Node;
 use crate::path_literal::{classify_sink, is_ext_change_callee, is_path_shaped, sink_reason};
 
 pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
-    // Skip interpolated strings: any `string_interpolation` child means dynamic content.
+    // Skip interpolated strings: either child kind means dynamic content.
     let mut c = str_node.walk();
     for child in str_node.children(&mut c) {
-        if child.kind() == "string_interpolation" {
+        if matches!(child.kind(), "interpolation" | "string_interpolation") {
             return None;
         }
     }

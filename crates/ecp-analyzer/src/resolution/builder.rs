@@ -2629,6 +2629,7 @@ fn resolve_name_ref(
                 | Language::CSharp
                 | Language::Swift
                 | Language::Dart
+                | Language::C
                 | Language::Cpp
                 | Language::Ruby
         ) && symbol_table.owner(id).is_some_and(|owner| {

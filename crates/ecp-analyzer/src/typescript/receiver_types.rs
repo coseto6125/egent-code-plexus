@@ -26,13 +26,14 @@ use crate::calls::{
 };
 use crate::framework_helpers::{enclosing_class, node_span, Span};
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tree_sitter::Node;
 
 /// Map of function scopes (by position range) to their `var → type` bindings.
 #[derive(Debug, Default)]
 pub struct LocalTypes {
     scopes: Vec<(PosRange, HashMap<String, String>)>,
+    bindings: Vec<(PosRange, HashSet<String>)>,
 }
 
 impl LocalTypes {
@@ -53,12 +54,20 @@ impl LocalTypes {
         }
         best
     }
+
+    /// Whether a parameter or local declaration shadows a module function.
+    fn binds_local(&self, pos: Pos, name: &str) -> bool {
+        self.bindings
+            .iter()
+            .any(|((start, end), names)| *start <= pos && pos <= *end && names.contains(name))
+    }
 }
 
 /// Walk every `function_declaration` / `method_definition` / `arrow_function` node
-/// and collect typed parameter and variable bindings.
+/// and collect typed bindings plus every parameter and local declaration name.
 pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
     let mut scopes: Vec<(PosRange, HashMap<String, String>)> = Vec::new();
+    let mut bindings: Vec<(PosRange, HashSet<String>)> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         let is_fn = matches!(
@@ -72,17 +81,23 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
         if is_fn {
             let fn_span = node_range(n);
             let mut map: HashMap<String, String> = HashMap::new();
+            let mut names: HashSet<String> = HashSet::new();
 
             if let Some(params) = n.child_by_field_name("parameters") {
-                collect_typed_params(params, source, &mut map);
+                collect_typed_params(params, source, &mut map, &mut names);
+            } else if let Some(param) = n.child_by_field_name("parameter") {
+                insert_identifier(param, source, &mut names);
             }
 
             if let Some(body) = n.child_by_field_name("body") {
-                collect_typed_vars(body, source, &mut map);
+                collect_typed_vars(body, source, &mut map, &mut names);
             }
 
             if !map.is_empty() {
                 scopes.push((fn_span, map));
+            }
+            if !names.is_empty() {
+                bindings.push((fn_span, names));
             }
         }
         let mut c = n.walk();
@@ -90,12 +105,17 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8]) -> LocalTypes {
             stack.push(child);
         }
     }
-    LocalTypes { scopes }
+    LocalTypes { scopes, bindings }
 }
 
 /// Collect typed parameters from a `formal_parameters` node.
 /// Shape: `(required_parameter pattern: (identifier) type: (type_annotation (type_identifier)))`.
-fn collect_typed_params(params: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
+fn collect_typed_params(
+    params: Node<'_>,
+    source: &[u8],
+    out: &mut HashMap<String, String>,
+    bindings: &mut HashSet<String>,
+) {
     let mut c = params.walk();
     for p in params.children(&mut c) {
         // required_parameter and optional_parameter both carry `pattern` + `type`.
@@ -108,6 +128,7 @@ fn collect_typed_params(params: Node<'_>, source: &[u8], out: &mut HashMap<Strin
         if pat.kind() != "identifier" {
             continue;
         }
+        insert_identifier(pat, source, bindings);
         let Some(type_ann) = p.child_by_field_name("type") else {
             continue;
         };
@@ -120,7 +141,12 @@ fn collect_typed_params(params: Node<'_>, source: &[u8], out: &mut HashMap<Strin
 /// Walk a function body collecting typed `variable_declarator` nodes.
 /// Shape: `(variable_declarator name: (identifier) type: (type_annotation (type_identifier)))`.
 /// Does NOT descend into nested function declarations.
-fn collect_typed_vars(body: Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
+fn collect_typed_vars(
+    body: Node<'_>,
+    source: &[u8],
+    out: &mut HashMap<String, String>,
+    bindings: &mut HashSet<String>,
+) {
     let mut stack: Vec<Node<'_>> = vec![body];
     while let Some(n) = stack.pop() {
         // Don't descend into nested functions — they get their own scope.
@@ -128,13 +154,17 @@ fn collect_typed_vars(body: Node<'_>, source: &[u8], out: &mut HashMap<String, S
             n.kind(),
             "function_declaration" | "function" | "method_definition" | "arrow_function"
         ) {
+            if n.kind() == "function_declaration" {
+                if let Some(name) = n.child_by_field_name("name") {
+                    insert_identifier(name, source, bindings);
+                }
+            }
             continue;
         }
         if n.kind() == "variable_declarator" {
-            if let (Some(name_node), Some(type_ann)) =
-                (n.child_by_field_name("name"), n.child_by_field_name("type"))
-            {
-                if name_node.kind() == "identifier" {
+            if let Some(name_node) = n.child_by_field_name("name") {
+                insert_identifier(name_node, source, bindings);
+                if let Some(type_ann) = n.child_by_field_name("type") {
                     if let Some((name, ty)) = simple_name_and_type(name_node, type_ann, source) {
                         out.insert(name, ty);
                     }
@@ -144,6 +174,14 @@ fn collect_typed_vars(body: Node<'_>, source: &[u8], out: &mut HashMap<String, S
         let mut c = n.walk();
         for child in n.children(&mut c) {
             stack.push(child);
+        }
+    }
+}
+
+fn insert_identifier(node: Node<'_>, source: &[u8], out: &mut HashSet<String>) {
+    if node.kind() == "identifier" {
+        if let Ok(name) = node.utf8_text(source) {
+            out.insert(name.to_string());
         }
     }
 }
@@ -288,12 +326,25 @@ fn ts_callee_name(
                 // `Foo.create().bar()` / `new Foo().bar()`: the resolver
                 // types the receiver by the callee's return type, else the
                 // site binds the prop name as before.
-                "call_expression" => Some(
-                    match CallSite::nested_chain(|| ts_callee_name(obj, source, locals, nodes)) {
-                        Some(inner) => CallSite::chained_member(&inner, prop_name),
-                        None => prop_name.to_string(),
-                    },
-                ),
+                "call_expression" => {
+                    let local_callee = obj
+                        .child_by_field_name("function")
+                        .filter(|callee| callee.kind() == "identifier")
+                        .and_then(|callee| callee.utf8_text(source).ok())
+                        .is_some_and(|name| locals.binds_local(pos, name));
+                    Some(
+                        match CallSite::nested_chain(|| {
+                            if local_callee {
+                                None
+                            } else {
+                                ts_callee_name(obj, source, locals, nodes)
+                            }
+                        }) {
+                            Some(inner) => CallSite::chained_member(&inner, prop_name),
+                            None => prop_name.to_string(),
+                        },
+                    )
+                }
                 "new_expression" => Some(match new_expression_call(obj, source) {
                     Some(inner) => CallSite::chained_member(&inner, prop_name),
                     None => prop_name.to_string(),

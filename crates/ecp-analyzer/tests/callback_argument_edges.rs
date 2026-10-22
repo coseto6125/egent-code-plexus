@@ -31,8 +31,8 @@ use ecp_analyzer::typescript::parser::TypeScriptProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::graph::RelType;
 use name_ref_support::{
-    assert_one_cross_file, calls, function_refs, graph, r, Ref, FUNCTION_REFERENCE, IMPORT,
-    SAME_FILE,
+    assert_one_cross_file, calls, function_refs, graph, r, value_reads, Ref, FUNCTION_REFERENCE,
+    IMPORT, SAME_FILE,
 };
 
 fn none() -> Vec<Ref> {
@@ -574,6 +574,33 @@ fn test_function_reference_c_qsort_comparator_returns_edge() {
         "sort_all",
         "cmp",
     );
+}
+
+#[test]
+fn test_function_reference_c_receiver_convention_callback_returns_edge() {
+    let provider = CProvider::new().unwrap();
+    let src = r#"
+struct foo { int value; };
+
+void foo_free(struct foo *self) {
+    self->value = 0;
+}
+
+void register_cleanup(void (*callback)(struct foo *)) {
+    callback(0);
+}
+
+void setup(void) {
+    register_cleanup(foo_free);
+}
+"#;
+    let g = graph(&provider, &[("s.c", src)]);
+    assert_eq!(
+        function_refs(&g, "setup"),
+        vec![r("s.c", "foo_free", FUNCTION_REFERENCE, SAME_FILE)],
+        "{src}"
+    );
+    assert!(value_reads(&g, "setup").is_empty(), "{src}");
 }
 
 #[test]

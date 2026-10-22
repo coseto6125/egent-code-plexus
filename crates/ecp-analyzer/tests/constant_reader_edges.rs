@@ -28,6 +28,7 @@ use ecp_analyzer::ruby::parser::RubyProvider;
 use ecp_analyzer::rust::parser::RustProvider;
 use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_analyzer::typescript::parser::TypeScriptProvider;
+use ecp_core::analyzer::provider::LanguageProvider;
 use name_ref_support::{
     assert_one_cross_file, graph, r, value_reads, Ref, IMPORT, SAME_FILE, VALUE_READ,
 };
@@ -1123,26 +1124,69 @@ namespace B { class Builder : BaseB { int Size() { return Max; } } }\n",
     assert_eq!(value_reads(&g, "Size"), none());
 }
 
-/// Assigning to a member of a module-level object (`CONFIG.debug = True`)
-/// declares no local `CONFIG`: the receiver is read, and so is every later
-/// read of it in the function.
+/// Assigning to a member or an item of a module-level object
+/// (`CONFIG.debug = True`, `CACHE[KEY] = 1`) declares no local: the
+/// receiver, the index and every later read in the function are reads.
 #[test]
 fn test_value_read_python_member_assignment_target_reads_receiver_returns_edge() {
     let g = graph(
         &PythonProvider::new().unwrap(),
         &[(
             "a.py",
-            "CONFIG = Settings()\n\n\
-def enable():\n    CONFIG.debug = True\n    return CONFIG.debug\n\n\
+            "CONFIG = Settings()\ndebug = False\nKEY = 'k'\nCACHE = {}\n\n\
+def enable():\n    CONFIG.debug = True\n    return debug\n\n\
+def put():\n    CACHE[KEY] = 1\n    return KEY\n\n\
 def each(items):\n    for CONFIG.item in items:\n        pass\n",
         )],
     );
     assert_eq!(
         value_reads(&g, "enable"),
-        vec![r("a.py", "CONFIG", VALUE_READ, SAME_FILE)]
+        vec![
+            r("a.py", "CONFIG", VALUE_READ, SAME_FILE),
+            r("a.py", "debug", VALUE_READ, SAME_FILE),
+        ]
+    );
+    assert_eq!(
+        value_reads(&g, "put"),
+        vec![
+            r("a.py", "CACHE", VALUE_READ, SAME_FILE),
+            r("a.py", "KEY", VALUE_READ, SAME_FILE),
+        ]
     );
     assert_eq!(
         value_reads(&g, "each"),
         vec![r("a.py", "CONFIG", VALUE_READ, SAME_FILE)]
+    );
+}
+
+/// A loop that writes a member of a module-level object reads the object.
+#[test]
+fn test_value_read_member_loop_target_reads_receiver_returns_edge() {
+    let js = "export const CONFIG = {};\nexport function each(xs) {\n  for (CONFIG.item of xs) {}\n  return CONFIG.item;\n}\n";
+    for (provider, path) in [
+        (
+            Box::new(JavaScriptProvider::new().unwrap()) as Box<dyn LanguageProvider>,
+            "a.js",
+        ),
+        (Box::new(TypeScriptProvider::new().unwrap()), "a.ts"),
+    ] {
+        let g = graph(provider.as_ref(), &[(path, js)]);
+        assert_eq!(
+            value_reads(&g, "each"),
+            vec![r(path, "CONFIG", VALUE_READ, SAME_FILE)],
+            "{path}"
+        );
+    }
+    let g = graph(
+        &GoProvider::new().unwrap(),
+        &[(
+            "a.go",
+            "package a\n\nvar state = struct{ i int }{}\n\n\
+func each(xs []int) int {\n\tfor state.i = range xs {\n\t}\n\treturn state.i\n}\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "each"),
+        vec![r("a.go", "state", VALUE_READ, SAME_FILE)]
     );
 }

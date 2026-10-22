@@ -507,7 +507,11 @@ fn rust_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Optio
         "field_expression" => {
             let field = function.child_by_field_name("field")?;
             let method_name = node_text(field, source)?;
-            if let Some(value) = function.child_by_field_name("value") {
+            // A call receiver names no local; its text is the whole chain.
+            if let Some(value) = function
+                .child_by_field_name("value")
+                .filter(|value| value.kind() != "call_expression")
+            {
                 let obj_text = node_text(value, source)?;
                 // Strip leading `*` (deref) and `&` to get the plain var name.
                 let var_name = obj_text.trim_start_matches(['*', '&', ' ']);

@@ -33,7 +33,7 @@ use ecp_analyzer::rust::parser::RustProvider;
 use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_analyzer::typescript::parser::TypeScriptProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::CallSite;
+use ecp_core::analyzer::types::{CallSite, CHAIN_DEPTH_LIMIT};
 use ecp_core::graph::ZeroCopyGraph;
 use instantiation_calls_support::calls_from;
 use std::path::Path;
@@ -1157,11 +1157,53 @@ fn test_resolve_call_swift_module_function_chain_binds_return_type_member() {
     assert_binds_alpha(&swift_closure_graph(), "useModule");
 }
 
-/// In every language that encodes chains, the callee entries of a long
-/// chain grow linearly with it: each nests at most `CHAIN_DEPTH_LIMIT`
-/// receivers. Unbounded nesting stores about 0.7 MB for 300 calls.
+fn typescript_closure_graph() -> ZeroCopyGraph {
+    single(
+        &TypeScriptProvider::new().unwrap(),
+        &[(
+            "src/closure.ts",
+            "class Alpha { bar(): void {} }\n\nclass Beta { bar(): void {} }\n\nfunction make(): Alpha { return new Alpha(); }\n\nfunction useLocal(): void {\n    const make = (): Beta => new Beta();\n    make().bar();\n}\n\nfunction useParam(make: () => Beta): void {\n    make().bar();\n}\n\nfunction useModule(): void {\n    make().bar();\n}\n",
+        )],
+    )
+}
+
 #[test]
-fn test_chained_call_long_chain_stores_linear_callee_bytes_in_every_language() {
+fn test_resolve_call_typescript_local_closure_chain_skips_module_function_type() {
+    assert_no_alpha_bar(&typescript_closure_graph(), "useLocal");
+}
+
+#[test]
+fn test_resolve_call_typescript_closure_param_chain_skips_module_function_type() {
+    assert_no_alpha_bar(&typescript_closure_graph(), "useParam");
+}
+
+#[test]
+fn test_resolve_call_typescript_module_function_chain_binds_return_type_member() {
+    assert_binds_alpha(&typescript_closure_graph(), "useModule");
+}
+
+#[test]
+fn test_chained_call_cut_receiver_namesake_does_not_type_outer_member() {
+    let provider = TypeScriptProvider::new().unwrap();
+    for depth in [2, CHAIN_DEPTH_LIMIT as usize + 3] {
+        let source = format!(
+            "class Cmd {{ option(): Cmd {{ return this; }} run() {{}} }}\n\
+             class Logger {{ option(): Logger {{ return this; }} run() {{}} }}\n\
+             function option(): Logger {{ return new Logger(); }}\n\
+             function caller(p: Cmd) {{ p{}.run(); }}\n",
+            ".option()".repeat(depth)
+        );
+        let g = single(&provider, &[("a.ts", &source)]);
+        let expected = if depth == 2 { vec!["Cmd"] } else { vec![] };
+        assert_eq!(owners(&g, "caller", "run"), expected, "depth {depth}");
+    }
+}
+
+/// In every language that encodes chains, an entry of a long chain nests
+/// exactly `CHAIN_DEPTH_LIMIT` receiver calls and then the cut root, so the
+/// entries grow linearly with the chain.
+#[test]
+fn test_chained_call_long_chain_nests_to_depth_limit_in_every_language() {
     type Provider = fn() -> Box<dyn LanguageProvider>;
     let depth = 300;
     let chain = |link: &str| link.repeat(depth);
@@ -1247,11 +1289,23 @@ fn test_chained_call_long_chain_stores_linear_callee_bytes_in_every_language() {
     ];
     for (provider, path, src, caller) in cases {
         let calls = raw_calls(provider().as_ref(), path, &src, caller);
-        let total: usize = calls.iter().map(String::len).sum();
-        assert!(
-            calls.len() >= depth && total < depth * 400,
-            "{path}: {} callees, {total} bytes",
-            calls.len()
+        let deepest = calls
+            .iter()
+            .map(|raw| {
+                let mut site = CallSite::parse(raw);
+                let mut depth = 0;
+                while let CallSite::ChainedMember { inner, .. } = site {
+                    depth += 1;
+                    site = CallSite::parse(inner);
+                }
+                (depth, site)
+            })
+            .max_by_key(|&(depth, _)| depth);
+        assert!(calls.len() >= depth, "{path}: {} callees", calls.len());
+        assert_eq!(
+            deepest,
+            Some((CHAIN_DEPTH_LIMIT + 1, CallSite::Plain(CallSite::CUT_CHAIN))),
+            "{path}"
         );
     }
 }

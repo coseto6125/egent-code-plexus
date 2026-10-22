@@ -62,9 +62,9 @@ pub fn innermost_enclosing(spans: &[Span]) -> Vec<Option<usize>> {
     parents
 }
 
-/// How many receiver calls one chained entry nests. A chain thousands of
-/// calls long (`p.option().option()…`) would otherwise make every site
-/// recurse through, and store, every call before it.
+/// How many receiver calls one chained entry nests. Without a bound, every
+/// site of a chain thousands of calls long (`p.option().option()…`)
+/// encodes, and stores, every call before it.
 pub const CHAIN_DEPTH_LIMIT: u32 = 8;
 
 thread_local! {
@@ -117,6 +117,9 @@ impl<'a> CallSite<'a> {
     const UNTYPED_MEMBER_PREFIX: &'static str = "\u{1}member ";
     const FROM_RECEIVER_PREFIX: &'static str = "\u{1}from ";
     const CHAINED_MEMBER_PREFIX: &'static str = "\u{1}chain ";
+    /// The receiver of the outermost call [`Self::nested_chain`] cut. It
+    /// names nothing; a chain that ends in it types none of its levels.
+    pub const CUT_CHAIN: &'static str = "\u{1}cut";
     /// Ends the fallback of a chained entry. A fallback is never itself a
     /// chain, so the first separator ends it; `inner` may hold more.
     const CHAIN_SEPARATOR: char = '\u{2}';
@@ -142,20 +145,25 @@ impl<'a> CallSite<'a> {
 
     /// Runs `encode`, which encodes the receiver call of a chained site, one
     /// nesting level deeper. Past [`CHAIN_DEPTH_LIMIT`] levels it yields
-    /// `None`, and the site keeps its fallback.
+    /// [`Self::CUT_CHAIN`], and [`Self::resolve_chain`] resolves the site as
+    /// its fallback.
+    ///
+    /// The depth is thread-local because each parser's encoder recurses
+    /// through its own signature. It is restored on drop, so an encoder that
+    /// unwinds leaves no raised depth for the thread's next file.
     pub fn nested_chain(encode: impl FnOnce() -> Option<String>) -> Option<String> {
-        struct Level(u32);
-        impl Drop for Level {
+        struct Restore(u32);
+        impl Drop for Restore {
             fn drop(&mut self) {
-                CHAIN_DEPTH.with(|depth| depth.set(self.0));
+                CHAIN_DEPTH.set(self.0);
             }
         }
-        let level = CHAIN_DEPTH.with(Cell::get);
+        let level = CHAIN_DEPTH.get();
         if level >= CHAIN_DEPTH_LIMIT {
-            return None;
+            return Some(Self::CUT_CHAIN.to_owned());
         }
-        CHAIN_DEPTH.with(|depth| depth.set(level + 1));
-        let _restore = Level(level);
+        CHAIN_DEPTH.set(level + 1);
+        let _restore = Restore(level);
         encode()
     }
 
@@ -218,6 +226,12 @@ impl<'a> CallSite<'a> {
         while let Self::ChainedMember { inner, .. } = innermost {
             levels.push(innermost);
             innermost = Self::parse(inner);
+        }
+        // A cut chain lost its root: typing its levels through their
+        // fallbacks could bind a namesake, so the site resolves as it did
+        // before chains.
+        if innermost == Self::Plain(Self::CUT_CHAIN) {
+            return resolve(self.fallback());
         }
         let mut targets = resolve(innermost);
         for level in levels.into_iter().rev() {
@@ -1438,6 +1452,79 @@ mod tests {
 
         let plain = CallSite::Plain("f").resolve_chain(|site| site.name(), |_, _| None);
         assert_eq!(plain, "f");
+    }
+
+    #[test]
+    fn test_call_site_resolve_chain_cut_root_resolves_outermost_fallback_untyped() {
+        let inner = CallSite::chained_member(CallSite::CUT_CHAIN, "b");
+        let raw = CallSite::chained_member(&inner, "c");
+        let mut resolved = Vec::new();
+        let got = CallSite::parse(&raw).resolve_chain(
+            |site| {
+                resolved.push(site.name().to_string());
+                site.name().to_string()
+            },
+            |below, member| Some(format!("{below}>typed:{member}")),
+        );
+        assert_eq!(resolved, ["c"]);
+        assert_eq!(got, "c");
+    }
+
+    /// Encodes a chain `levels` calls deep the way a parser's encoder does.
+    fn encode_chain(levels: u32) -> Option<String> {
+        if levels == 0 {
+            return Some("root".to_string());
+        }
+        Some(match CallSite::nested_chain(|| encode_chain(levels - 1)) {
+            Some(inner) => CallSite::chained_member(&inner, "m"),
+            None => "m".to_string(),
+        })
+    }
+
+    fn chain_depth(raw: &str) -> (u32, CallSite<'_>) {
+        let mut site = CallSite::parse(raw);
+        let mut depth = 0;
+        while let CallSite::ChainedMember { inner, .. } = site {
+            depth += 1;
+            site = CallSite::parse(inner);
+        }
+        (depth, site)
+    }
+
+    #[test]
+    fn test_nested_chain_past_limit_returns_cut_root() {
+        let deep = encode_chain(CHAIN_DEPTH_LIMIT + 5).unwrap();
+        assert_eq!(
+            chain_depth(&deep),
+            (CHAIN_DEPTH_LIMIT + 1, CallSite::Plain(CallSite::CUT_CHAIN))
+        );
+        let shallow = encode_chain(CHAIN_DEPTH_LIMIT).unwrap();
+        assert_eq!(
+            chain_depth(&shallow),
+            (CHAIN_DEPTH_LIMIT, CallSite::Plain("root"))
+        );
+    }
+
+    #[test]
+    fn test_nested_chain_missing_receiver_restores_depth() {
+        assert_eq!(
+            CallSite::nested_chain(|| CallSite::nested_chain(|| None)),
+            None
+        );
+        assert_eq!(CHAIN_DEPTH.get(), 0);
+        let after = encode_chain(CHAIN_DEPTH_LIMIT).unwrap();
+        assert_eq!(chain_depth(&after).0, CHAIN_DEPTH_LIMIT);
+    }
+
+    #[test]
+    fn test_nested_chain_unwinding_encoder_restores_depth() {
+        let unwound = std::panic::catch_unwind(|| {
+            CallSite::nested_chain(|| CallSite::nested_chain(|| panic!("encoder failed")))
+        });
+        assert!(unwound.is_err());
+        assert_eq!(CHAIN_DEPTH.get(), 0);
+        let after = encode_chain(CHAIN_DEPTH_LIMIT).unwrap();
+        assert_eq!(chain_depth(&after).0, CHAIN_DEPTH_LIMIT);
     }
 
     /// Contract: a `from`-receiver entry decodes to its receiver and member,

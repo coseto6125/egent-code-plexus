@@ -114,20 +114,16 @@ fn js_callee_name(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<St
                 // O(depth).
                 let inner = match obj.kind() {
                     "call_expression" => {
-                        return Some(
-                            match CallSite::nested_chain(|| js_callee_name(obj, source, nodes)) {
-                                Some(inner) => CallSite::chained_member(&inner, prop_name),
-                                None => prop_name.to_string(),
-                            },
-                        );
+                        CallSite::nested_chain(|| js_callee_name(obj, source, nodes))
                     }
                     "new_expression" => new_expression_call(obj, source),
                     _ => None,
                 };
-                Some(match inner {
-                    Some(inner) => CallSite::chained_member(&inner, prop_name),
+                Some(match (inner, obj.kind()) {
+                    (Some(inner), _) => CallSite::chained_member(&inner, prop_name),
+                    (None, "call_expression") => prop_name.to_string(),
                     // Unknown receiver type — emit qualified name so resolver has context.
-                    None => format!("{}.{prop_name}", obj.utf8_text(source).ok()?),
+                    (None, _) => format!("{}.{prop_name}", obj.utf8_text(source).ok()?),
                 })
             }
         }

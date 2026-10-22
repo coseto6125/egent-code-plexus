@@ -431,7 +431,7 @@ struct Frame<'t> {
     /// The parent's [`kind_flag`]s.
     parent_kind: u32,
     /// The [`field_flag`]s of the field this node fills in its parent.
-    field: u8,
+    field: u16,
     scope: NameScope,
 }
 
@@ -486,16 +486,19 @@ mod kind_flag {
 
 /// Bits [`KindMemo::field`] records for a field name.
 mod field_flag {
-    pub const KNOWN: u8 = 1;
-    pub const BINDING: u8 = 1 << 1;
-    pub const VALUE: u8 = 1 << 2;
-    pub const SKIP: u8 = 1 << 3;
-    pub const NON_VALUE: u8 = 1 << 4;
-    pub const NAME: u8 = 1 << 5;
-    pub const LEFT: u8 = 1 << 6;
+    pub const KNOWN: u16 = 1;
+    pub const BINDING: u16 = 1 << 1;
+    pub const VALUE: u16 = 1 << 2;
+    pub const SKIP: u16 = 1 << 3;
+    pub const NON_VALUE: u16 = 1 << 4;
+    pub const NAME: u16 = 1 << 5;
+    pub const LEFT: u16 = 1 << 6;
     /// Named in the spec's `(parent kind, field)` pairs: the parent's kind
     /// decides.
-    pub const PAIR: u8 = 1 << 7;
+    pub const PAIR: u16 = 1 << 7;
+    /// A part of a member or index target (`CONFIG.debug`, `CACHE[KEY]`)
+    /// other than the target itself: a binding scope does not declare it.
+    pub const MEMBER_PART: u16 = 1 << 8;
 }
 
 /// What each node kind and field means to the walk, recorded per file on
@@ -505,7 +508,7 @@ struct KindMemo<'a> {
     spec: &'a NameRefSpec,
     field_kinds: &'a [&'a str],
     kinds: Vec<u32>,
-    fields: Vec<u8>,
+    fields: Vec<u16>,
 }
 
 impl<'a> KindMemo<'a> {
@@ -567,7 +570,7 @@ impl<'a> KindMemo<'a> {
     }
 
     /// The flags of the field `cursor`'s node fills; 0 for none.
-    fn field(&mut self, cursor: &TreeCursor<'_>) -> u8 {
+    fn field(&mut self, cursor: &TreeCursor<'_>) -> u16 {
         let Some(id) = cursor.field_id() else {
             return 0;
         };
@@ -585,7 +588,7 @@ impl<'a> KindMemo<'a> {
         }
     }
 
-    fn field_flags(&self, field: &str) -> u8 {
+    fn field_flags(&self, field: &str) -> u16 {
         use field_flag::*;
         let spec = self.spec;
         [
@@ -595,6 +598,10 @@ impl<'a> KindMemo<'a> {
             (NON_VALUE_FIELDS.contains(&field), NON_VALUE),
             (field == "name", NAME),
             (field == "left", LEFT),
+            (
+                matches!(field, "object" | "operand" | "attribute" | "subscript"),
+                MEMBER_PART,
+            ),
             (
                 spec.binding_fields
                     .iter()
@@ -613,7 +620,7 @@ impl NameRefSpec {
         &self,
         parent: ParentShape<'_>,
         child_kind: u32,
-        field: u8,
+        field: u16,
         cursor: &TreeCursor<'_>,
     ) -> NameScope {
         use field_flag as f;
@@ -650,11 +657,10 @@ impl NameRefSpec {
             {
                 return NameScope::Skip;
             }
-            // A member target (`CONFIG.debug = True`) declares nothing: its
-            // receiver is read.
-            if parent.scope == NameScope::Binding
-                && matches!(cursor.field_name(), Some("object" | "operand"))
-            {
+            // A member or index target (`CONFIG.debug = True`,
+            // `CACHE[KEY] = 1`) declares nothing: its receiver and index are
+            // read.
+            if field & f::MEMBER_PART != 0 && parent.scope == NameScope::Binding {
                 return NameScope::Value;
             }
             if field & f::BINDING != 0
