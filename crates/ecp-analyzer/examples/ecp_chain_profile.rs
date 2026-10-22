@@ -1,7 +1,7 @@
 use ecp_analyzer::java::JavaProvider;
 use ecp_analyzer::javascript::parser::JavaScriptProvider;
 use ecp_analyzer::python::PythonProvider;
-use ecp_analyzer::ruby::RubyProvider;
+use ecp_analyzer::ruby::parser::RubyProvider;
 use ecp_analyzer::typescript::TypeScriptProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use std::path::Path;
