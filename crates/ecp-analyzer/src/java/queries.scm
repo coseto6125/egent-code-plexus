@@ -159,3 +159,8 @@
   ])
   name: (identifier) @class.name
 ) @class
+;; Package declarations let wildcard imports resolve through declared packages.
+(package_declaration
+  [(scoped_identifier) (identifier)] @namespace.name
+) @namespace
+

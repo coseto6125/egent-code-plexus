@@ -2451,6 +2451,21 @@ fn test_overlay_java_chained_member_imported_return_type_matches_reindex() {
 }
 
 #[test]
+fn test_overlay_java_chained_member_wildcard_return_type_matches_reindex() {
+    let factory = (
+        "src/factory/Factory.java",
+        "package factory;\nimport app.*;\npublic class Factory { public static Foo make() { return new Foo(); } }\n",
+    );
+    let caller = (
+        "src/app/Use.java",
+        "package app;\nimport factory.Factory;\npublic class Use { void run() { Factory.make().bar(); } }\n",
+    );
+    let files = [JAVA_CHAIN_FOO, JAVA_CHAIN_OTHER, factory, JAVA_CHAIN_USE];
+    chain_parity("run", &java(), &files, &[caller], "bar", "Foo");
+    chain_parity("run", &java(), &files, &[factory, caller], "bar", "Foo");
+}
+
+#[test]
 fn test_overlay_java_chained_member_dirty_imported_factory_matches_reindex() {
     let factory = "package factory;\n\nimport app.Other;\n\npublic class Factory {\n    public static Other make() { return new Other(); }\n}\n";
     chain_parity(

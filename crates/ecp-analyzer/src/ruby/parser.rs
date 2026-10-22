@@ -923,15 +923,8 @@ impl LanguageProvider for RubyProvider {
         // Extract call sites with receiver-type binding.
         // Handles self.method → EnclosingClass.method, Constant.method → Constant.method.
         // Same DFS also collects path-shaped string literals.
-        let call_started = std::time::Instant::now();
         let (raw_path_literals, raw_sql_refs) =
             extract_ruby_calls_and_path_literals(tree.root_node(), source, &mut nodes);
-        if std::env::var_os("ECP_PROF").is_some() {
-            eprintln!(
-                "prof ruby.calls: {:.6}s",
-                call_started.elapsed().as_secs_f64()
-            );
-        }
         // Ruby has no field-read capture (`obj.x` is a call); the walk records
         // the constants a method reads and its `method(:name)` references.
         crate::calls::extract_field_reads(

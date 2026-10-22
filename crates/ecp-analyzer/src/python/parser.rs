@@ -1296,7 +1296,6 @@ impl LanguageProvider for PythonProvider {
         // when no annotation is in scope.
         let local_types = collect_local_types(tree.root_node(), source);
         let mut call_sites = crate::calls::CallSiteIndex::default();
-        let profile_calls = std::time::Instant::now();
         let (raw_path_literals, raw_sql_refs) = extract_python_calls_and_path_literals(
             tree.root_node(),
             source,
@@ -1304,12 +1303,6 @@ impl LanguageProvider for PythonProvider {
             &local_types,
             &mut call_sites,
         );
-        if std::env::var_os("ECP_PROF").is_some() {
-            eprintln!(
-                "prof python.calls: {:.6}s",
-                profile_calls.elapsed().as_secs_f64()
-            );
-        }
         crate::calls::extract_field_reads(
             tree.root_node(),
             source,
