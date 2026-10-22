@@ -8,8 +8,9 @@
 //! the caller's own method or its base's: the same-file tier weighs no
 //! method, and the heritage tier does not run.
 //!
-//! JavaScript, TypeScript and Go keep the old Global tier: their parsers still
-//! write some member calls as the bare member, and those edges must survive.
+//! JavaScript, TypeScript and Go require an explicit receiver. Their parsers
+//! preserve member syntax for receiver calls, so only genuine bare calls use
+//! the free-function tier.
 //!
 //! Java, Kotlin, C#, Swift, Dart, C++ and Ruby call a member of the enclosing
 //! type with no receiver: a bare call keeps reaching methods.
@@ -55,6 +56,25 @@ fn single(provider: &dyn LanguageProvider, files: &[(&str, &str)]) -> ZeroCopyGr
         .map(|&(path, src)| (provider, path, src))
         .collect();
     graph(&with_provider)
+}
+
+fn go_module(files: &[(&str, &str)]) -> ZeroCopyGraph {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let provider = GoProvider::new().unwrap();
+    let mut builder = GraphBuilder::new().with_repo_root(tmp.path().to_path_buf());
+    for &(path, source) in files {
+        let disk_path = tmp.path().join(path);
+        std::fs::create_dir_all(disk_path.parent().expect("parent")).expect("create parent");
+        std::fs::write(&disk_path, source).expect("write fixture");
+        if path.ends_with(".go") {
+            builder.add_graph(
+                provider
+                    .parse_file(Path::new(path), source.as_bytes())
+                    .expect("parse Go fixture"),
+            );
+        }
+    }
+    builder.build()
 }
 
 /// The `Calls` targets of every node named `caller`, sorted.
@@ -465,6 +485,21 @@ fn test_resolve_call_javascript_this_call_outside_class_binds_method() {
 }
 
 #[test]
+fn test_resolve_call_javascript_options_this_call_binds_same_object_method() {
+    let graph = single(
+        &JavaScriptProvider::new().unwrap(),
+        &[(
+            "comp.js",
+            "export default {\n  methods: {\n    shared() {},\n    run() { this.shared(); }\n  }\n};\n",
+        )],
+    );
+    assert_eq!(
+        targets(&graph, "run"),
+        vec![target("comp.js", "", "shared")]
+    );
+}
+
+#[test]
 fn test_resolve_call_javascript_bare_call_excludes_own_and_unrelated_methods() {
     let provider = JavaScriptProvider::new().unwrap();
     for files in [
@@ -551,18 +586,18 @@ fn test_resolve_call_go_untyped_selector_call_binds_method() {
 
 #[test]
 fn test_resolve_call_go_imported_package_and_alias_calls_bind_function() {
-    let provider = GoProvider::new().unwrap();
-    for (import, caller) in [("\"./pkg\"", "pkg.F()"), ("p \"./pkg\"", "p.F()")] {
-        let graph = single(
-            &provider,
-            &[
-                ("pkg/helper.go", "package pkg\n\nfunc F() {}\n"),
-                (
-                    "app.go",
-                    &format!("package main\n\nimport {import}\n\nfunc boot() {{ {caller} }}\n"),
-                ),
-            ],
-        );
+    for (import, caller) in [
+        ("\"example.com/app/pkg\"", "pkg.F()"),
+        ("p \"example.com/app/pkg\"", "p.F()"),
+    ] {
+        let graph = go_module(&[
+            ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+            ("pkg/helper.go", "package pkg\n\nfunc F() {}\n"),
+            (
+                "cmd/app.go",
+                &format!("package main\n\nimport {import}\n\nfunc boot() {{ {caller} }}\n"),
+            ),
+        ]);
         assert_eq!(
             targets(&graph, "boot"),
             vec![target("pkg/helper.go", "", "F")]
@@ -572,13 +607,13 @@ fn test_resolve_call_go_imported_package_and_alias_calls_bind_function() {
 
 #[test]
 fn test_resolve_call_go_local_and_parameter_shadow_import_alias_return_no_edge() {
-    let graph = single(
-        &GoProvider::new().unwrap(),
+    let graph = go_module(
         &[
+            ("go.mod", "module example.com/app\n\ngo 1.21\n"),
             ("pkg/helper.go", "package pkg\n\nfunc F() {}\n"),
             (
-                "app.go",
-                "package main\n\nimport p \"./pkg\"\n\nfunc parameter(p struct{}) { p.F() }\n\nfunc local() { p := struct{}{}; p.F() }\n",
+                "cmd/app.go",
+                "package main\n\nimport p \"example.com/app/pkg\"\n\nfunc parameter(p struct{}) { p.F() }\n\nfunc local() { p := struct{}{}; p.F() }\n",
             ),
         ],
     );

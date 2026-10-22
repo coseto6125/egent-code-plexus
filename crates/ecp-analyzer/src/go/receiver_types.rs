@@ -443,7 +443,7 @@ fn go_callee_name(
                     {
                         return Some(format!("{var_name}.{method_name}"));
                     }
-                    return Some(CallSite::from_receiver(&var_name, &method_name));
+                    return Some(CallSite::untyped_member(&method_name));
                 }
                 // `NewFoo().Bar()`: the resolver types the operand by the
                 // callee's return type.
@@ -459,12 +459,13 @@ fn go_callee_name(
                     if let Some(inner) =
                         CallSite::nested_chain(|| go_callee_name(operand, source, locals, imports))
                     {
-                        return Some(CallSite::chained_member(&inner, &method_name));
+                        let fallback = CallSite::untyped_member(&method_name);
+                        return Some(CallSite::chained_member(&inner, &fallback));
                     }
                 }
             }
             // The receiver syntax still distinguishes this from a bare call.
-            Some(CallSite::from_receiver("receiver", &method_name))
+            Some(CallSite::untyped_member(&method_name))
         }
         _ => {
             // Last resort: full text, then last segment after `.`.

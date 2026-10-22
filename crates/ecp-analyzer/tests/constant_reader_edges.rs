@@ -520,6 +520,25 @@ fn test_value_read_go_local_struct_type_shadows_package_map_returns_no_edge() {
     assert_eq!(value_reads(&g, "local_type"), none());
 }
 
+#[test]
+fn test_value_read_go_alias_uses_declaration_scope_not_literal_scope() {
+    let g = graph(
+        &GoProvider::new().unwrap(),
+        &[(
+            "g.go",
+            "package main\n\nconst PACKAGE = \"package\"\nconst LOCAL = \"local\"\n\ntype Labels map[string]int\ntype Alias = Labels\n\nfunc packageAlias() Alias {\n\ttype Labels struct { PACKAGE int }\n\treturn Alias{PACKAGE: 1}\n}\n\nfunc localAlias() {\n\ttype Labels map[string]int\n\ttype Alias = Labels\n\t{\n\t\ttype Labels struct { LOCAL int }\n\t\t_ = Alias{LOCAL: 1}\n\t}\n}\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "packageAlias"),
+        vec![r("g.go", "PACKAGE", VALUE_READ, SAME_FILE)]
+    );
+    assert_eq!(
+        value_reads(&g, "localAlias"),
+        vec![r("g.go", "LOCAL", VALUE_READ, SAME_FILE)]
+    );
+}
+
 // ---- Rust ----
 
 const RS_SAME_FILE: &str = "pub const LIMIT: u32 = 3;\npub static NAME: &str = \"x\";\n\n\

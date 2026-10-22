@@ -104,8 +104,7 @@ fn js_callee_name(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<St
                 if let Some((class_name, _)) = enclosing_class(nodes, call_span) {
                     return Some(format!("{class_name}.{prop_name}"));
                 }
-                // `this` outside a class (module-level self-reference, unusual but possible).
-                Some(prop_name.to_string())
+                Some(CallSite::from_receiver("this", prop_name))
             } else {
                 // A call receiver (`make().bar()`, `new Foo().bar()`): the
                 // resolver types it by the callee's return type or the
@@ -121,8 +120,11 @@ fn js_callee_name(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<St
                     _ => None,
                 };
                 Some(match (inner, obj.kind()) {
-                    (Some(inner), _) => CallSite::chained_member(&inner, prop_name),
-                    (None, "call_expression") => prop_name.to_string(),
+                    (Some(inner), _) => {
+                        let fallback = CallSite::from_receiver("call", prop_name);
+                        CallSite::chained_member(&inner, &fallback)
+                    }
+                    (None, "call_expression") => CallSite::from_receiver("call", prop_name),
                     // Unknown receiver type — emit qualified name so resolver has context.
                     (None, _) => format!("{}.{prop_name}", obj.utf8_text(source).ok()?),
                 })

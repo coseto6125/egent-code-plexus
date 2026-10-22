@@ -45,3 +45,16 @@ fn non_sql_string_yields_no_sql_ref() {
         "non-SQL string must not produce a sql_ref: {refs:?}"
     );
 }
+
+#[test]
+fn test_parse_sql_refs_long_chain_preserves_enclosing_symbol_and_owner() {
+    let source = format!(
+        "class Repository:\n    def run(self, db):\n        db{}.query(\"SELECT id FROM users\")\n",
+        ".option('x')".repeat(200)
+    );
+    let refs = parse_sql_refs(&source);
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].tables, vec![("users".into(), SqlVerb::Read)]);
+    assert_eq!(refs[0].enclosing_symbol.as_deref(), Some("run"));
+    assert_eq!(refs[0].enclosing_owner.as_deref(), Some("Repository"));
+}

@@ -274,14 +274,19 @@ impl<'a> CallSite<'a> {
     /// global helper `config()`, the caller's own or its base's `config`) must
     /// not bind it at any tier (the resolver's `CallScope::free_only`). Java,
     /// Kotlin, C#, Swift, Dart, Scala, C++ and Ruby call a member of the
-    /// enclosing type with no receiver. JavaScript, TypeScript and Go are no such
-    /// languages either, but their parsers still write some member calls as the
-    /// bare member: JS / TS `this.m()` outside a class (Vue options API object
-    /// methods), TS `a.b.m()`, Go `obj.M()` and `pkg.F()` on an untyped operand.
+    /// enclosing type with no receiver. JavaScript, TypeScript and Go also require
+    /// an explicit receiver. Their parsers encode retained member fallbacks as a
+    /// member site rather than `Plain`, so a genuine bare call stays free-only.
     pub fn reaches_free_only(self, language: Language) -> bool {
         matches!(
             language,
-            Language::Php | Language::Python | Language::Rust | Language::C
+            Language::Php
+                | Language::Python
+                | Language::Rust
+                | Language::C
+                | Language::JavaScript
+                | Language::TypeScript
+                | Language::Go
         ) && matches!(self, Self::Plain(name) if !name.contains(['.', ':']))
     }
 

@@ -4,11 +4,10 @@ use crate::calls::LiteralKeyFacts;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tree_sitter::Node;
 
-#[derive(Clone)]
 enum TypeShape {
     Map(Box<TypeShape>),
     Sequence(Box<TypeShape>),
-    Named(String),
+    Named { name: String, position: usize },
     Other,
 }
 
@@ -57,13 +56,7 @@ pub(super) fn collect_literal_key_facts(root: Node<'_>, source: &[u8]) -> Litera
                 node.child_by_field_name("type"),
                 node.child_by_field_name("body"),
             ) {
-                mark_literal_keys(
-                    body,
-                    &type_shape(ty, source),
-                    &definitions,
-                    node.start_byte(),
-                    &mut facts,
-                );
+                mark_literal_keys(body, &type_shape(ty, source), &definitions, &mut facts);
             }
         }
         let mut cursor = node.walk();
@@ -143,7 +136,10 @@ fn type_shape(ty: Node<'_>, source: &[u8]) -> TypeShape {
     }
     if ty.kind() == "type_identifier" {
         if let Some(name) = node_text(ty, source) {
-            return TypeShape::Named(name);
+            return TypeShape::Named {
+                name,
+                position: ty.start_byte(),
+            };
         }
     }
     TypeShape::Other
@@ -153,10 +149,9 @@ fn mark_literal_keys(
     body: Node<'_>,
     shape: &TypeShape,
     definitions: &Definitions,
-    position: usize,
     facts: &mut LiteralKeyFacts,
 ) {
-    let Some(element) = element_type(shape, definitions, position) else {
+    let Some(element) = element_type(shape, definitions) else {
         return;
     };
     let mut cursor = body.walk();
@@ -165,10 +160,11 @@ fn mark_literal_keys(
             "keyed_element" => {
                 facts.mark_map_key(child);
                 if let Some(value) = child.child_by_field_name("value") {
-                    mark_elided_value(value, element, definitions, position, facts);
+                    mark_elided_value(value, element, definitions, facts);
                 }
             }
-            "literal_value" => mark_literal_keys(child, element, definitions, position, facts),
+            "literal_value" => mark_literal_keys(child, element, definitions, facts),
+            "literal_element" => mark_elided_value(child, element, definitions, facts),
             _ => {}
         }
     }
@@ -178,7 +174,6 @@ fn mark_elided_value(
     value: Node<'_>,
     shape: &TypeShape,
     definitions: &Definitions,
-    position: usize,
     facts: &mut LiteralKeyFacts,
 ) {
     let literal = (value.kind() == "literal_value")
@@ -191,22 +186,18 @@ fn mark_elided_value(
             literal
         });
     if let Some(literal) = literal {
-        mark_literal_keys(literal, shape, definitions, position, facts);
+        mark_literal_keys(literal, shape, definitions, facts);
     }
 }
 
-fn element_type<'a>(
-    shape: &'a TypeShape,
-    definitions: &'a Definitions,
-    position: usize,
-) -> Option<&'a TypeShape> {
+fn element_type<'a>(shape: &'a TypeShape, definitions: &'a Definitions) -> Option<&'a TypeShape> {
     let mut current = shape;
     let mut seen = FxHashSet::default();
     loop {
         match current {
             TypeShape::Map(element) | TypeShape::Sequence(element) => return Some(element),
-            TypeShape::Named(name) if seen.insert(name.as_str()) => {
-                current = definitions.resolve(name, position)?;
+            TypeShape::Named { name, position } if seen.insert(name.as_str()) => {
+                current = definitions.resolve(name, *position)?;
             }
             _ => return None,
         }

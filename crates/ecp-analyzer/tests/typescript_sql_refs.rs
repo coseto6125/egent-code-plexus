@@ -56,3 +56,15 @@ fn ts_select_enclosing_symbol_captured() {
         "enclosing_symbol mismatch"
     );
 }
+
+#[test]
+fn test_parse_sql_refs_long_non_sql_chain_and_sql_preserves_ref() {
+    let chain = "x.".repeat(200);
+    let src = format!(
+        "function fetchOrders(db) {{\n  {chain}log(\"not SQL\");\n  return db.query(\"SELECT * FROM orders\");\n}}\n"
+    );
+    let refs = parse_sql_refs(&src);
+    assert_eq!(refs.len(), 1, "unexpected sql_refs: {refs:?}");
+    assert_eq!(refs[0].enclosing_symbol.as_deref(), Some("fetchOrders"));
+    assert_eq!(refs[0].tables, vec![("orders".to_string(), SqlVerb::Read)]);
+}

@@ -268,11 +268,11 @@ pub fn extract_ts_calls_and_path_literals(
                         }
                     };
                     if let Some(value) = value_opt {
-                        if let Some(sql_ref) = crate::sql_literal::try_sql_ref(
-                            value,
-                            n,
-                            enclosing_symbol_and_owner_pub(n, source),
-                        ) {
+                        if let Some(mut sql_ref) =
+                            crate::sql_literal::try_sql_ref(value, n, (None, None))
+                        {
+                            (sql_ref.enclosing_symbol, sql_ref.enclosing_owner) =
+                                enclosing_symbol_and_owner_pub(n, source);
                             sql_refs.push(sql_ref);
                         }
                     }
@@ -315,8 +315,7 @@ fn ts_callee_name(
                     if let Some((class_name, _)) = enclosing_class(nodes, call_span) {
                         return Some(format!("{class_name}.{prop_name}"));
                     }
-                    // No enclosing class (shouldn't happen for valid TS, but be safe).
-                    Some(prop_name.to_string())
+                    Some(CallSite::from_receiver("this", prop_name))
                 }
                 "identifier" => {
                     let obj_name = obj.utf8_text(source).ok()?;
@@ -343,18 +342,24 @@ fn ts_callee_name(
                                 ts_callee_name(obj, source, locals, nodes)
                             }
                         }) {
-                            Some(inner) => CallSite::chained_member(&inner, prop_name),
-                            None => prop_name.to_string(),
+                            Some(inner) => {
+                                let fallback = CallSite::from_receiver("call", prop_name);
+                                CallSite::chained_member(&inner, &fallback)
+                            }
+                            None => CallSite::from_receiver("call", prop_name),
                         },
                     )
                 }
                 "new_expression" => Some(match new_expression_call(obj, source) {
-                    Some(inner) => CallSite::chained_member(&inner, prop_name),
-                    None => prop_name.to_string(),
+                    Some(inner) => {
+                        let fallback = CallSite::from_receiver("new", prop_name);
+                        CallSite::chained_member(&inner, &fallback)
+                    }
+                    None => CallSite::from_receiver("new", prop_name),
                 }),
                 _ => {
                     // Chained member expression or other complex form: fall back to prop name.
-                    Some(prop_name.to_string())
+                    Some(CallSite::from_receiver("member", prop_name))
                 }
             }
         }

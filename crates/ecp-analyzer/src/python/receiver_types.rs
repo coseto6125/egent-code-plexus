@@ -350,11 +350,11 @@ pub fn extract_python_calls_and_path_literals(
                     let raw_bytes = &source[n.start_byte()..n.end_byte()];
                     if let Ok(raw) = std::str::from_utf8(raw_bytes) {
                         if let Some(value) = strip_python_string_quotes(raw) {
-                            if let Some(sql_ref) = crate::sql_literal::try_sql_ref(
-                                value,
-                                n,
-                                enclosing_symbol_and_owner(n, source),
-                            ) {
+                            if let Some(mut sql_ref) =
+                                crate::sql_literal::try_sql_ref(value, n, (None, None))
+                            {
+                                (sql_ref.enclosing_symbol, sql_ref.enclosing_owner) =
+                                    enclosing_symbol_and_owner(n, source);
                                 sql_refs.push(sql_ref);
                             }
                         }
