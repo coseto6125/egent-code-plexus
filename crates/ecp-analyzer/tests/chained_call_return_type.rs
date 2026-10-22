@@ -103,6 +103,16 @@ fn assert_falls_back(graph: &ZeroCopyGraph, caller: &str, member: &str) {
     );
 }
 
+/// A known return type cannot resolve `member`, so no chain level binds it.
+fn assert_no_member_edge(graph: &ZeroCopyGraph, caller: &str, member: &str) {
+    assert_eq!(
+        owners(graph, caller, member),
+        Vec::<String>::new(),
+        "{caller}: known receiver typing must not bind `{member}` by fallback; all: {:?}",
+        targets(graph, caller)
+    );
+}
+
 /// `caller` still binds the inner call `inner` (owned by `owner`).
 fn assert_inner_binds(graph: &ZeroCopyGraph, caller: &str, owner: &str, inner: &str) {
     assert_eq!(
@@ -511,7 +521,7 @@ fn test_resolve_call_java_factory_wildcard_imported_return_type_binds_member() {
 }
 
 #[test]
-fn test_resolve_call_java_factory_missing_imported_return_type_keeps_fallback() {
+fn test_resolve_call_java_factory_missing_imported_return_type_returns_no_edge() {
     let graph = single(
         &JavaProvider::new().unwrap(),
         &[
@@ -522,11 +532,11 @@ fn test_resolve_call_java_factory_missing_imported_return_type_keeps_fallback() 
         ],
     );
     assert_inner_binds(&graph, "caller", "Factory", "make");
-    assert_falls_back(&graph, "caller", "bar");
+    assert_no_member_edge(&graph, "caller", "bar");
 }
 
 #[test]
-fn test_resolve_call_java_factory_external_imported_return_type_keeps_fallback() {
+fn test_resolve_call_java_factory_external_imported_return_type_returns_no_edge() {
     let graph = single(
         &JavaProvider::new().unwrap(),
         &[
@@ -536,11 +546,11 @@ fn test_resolve_call_java_factory_external_imported_return_type_keeps_fallback()
         ],
     );
     assert_inner_binds(&graph, "caller", "Factory", "make");
-    assert_falls_back(&graph, "caller", "bar");
+    assert_no_member_edge(&graph, "caller", "bar");
 }
 
 #[test]
-fn test_resolve_call_java_factory_ambiguous_wildcard_imports_keep_fallback() {
+fn test_resolve_call_java_factory_ambiguous_wildcard_imports_return_no_edge() {
     let graph = single(
         &JavaProvider::new().unwrap(),
         &[
@@ -551,7 +561,7 @@ fn test_resolve_call_java_factory_ambiguous_wildcard_imports_keep_fallback() {
         ],
     );
     assert_inner_binds(&graph, "caller", "Factory", "make");
-    assert_falls_back(&graph, "caller", "bar");
+    assert_no_member_edge(&graph, "caller", "bar");
 }
 
 fn java_graph() -> ZeroCopyGraph {
@@ -700,7 +710,7 @@ fn test_resolve_call_kotlin_factory_alias_imported_return_type_binds_member() {
 }
 
 #[test]
-fn test_resolve_call_kotlin_factory_missing_imported_return_type_keeps_fallback() {
+fn test_resolve_call_kotlin_factory_missing_imported_return_type_returns_no_edge() {
     let graph = single(
         &KotlinProvider::new().unwrap(),
         &[
@@ -717,11 +727,11 @@ fn test_resolve_call_kotlin_factory_missing_imported_return_type_keeps_fallback(
         ],
     );
     assert_inner_binds(&graph, "caller", "Factory", "make");
-    assert_falls_back(&graph, "caller", "bar");
+    assert_no_member_edge(&graph, "caller", "bar");
 }
 
 #[test]
-fn test_resolve_call_kotlin_factory_external_imported_return_type_keeps_fallback() {
+fn test_resolve_call_kotlin_factory_external_imported_return_type_returns_no_edge() {
     let graph = single(
         &KotlinProvider::new().unwrap(),
         &[
@@ -740,11 +750,11 @@ fn test_resolve_call_kotlin_factory_external_imported_return_type_keeps_fallback
         ],
     );
     assert_inner_binds(&graph, "caller", "Factory", "make");
-    assert_falls_back(&graph, "caller", "bar");
+    assert_no_member_edge(&graph, "caller", "bar");
 }
 
 #[test]
-fn test_resolve_call_kotlin_factory_ambiguous_wildcard_imports_keep_fallback() {
+fn test_resolve_call_kotlin_factory_ambiguous_wildcard_imports_return_no_edge() {
     let graph = single(
         &KotlinProvider::new().unwrap(),
         &[
@@ -767,7 +777,7 @@ fn test_resolve_call_kotlin_factory_ambiguous_wildcard_imports_keep_fallback() {
         ],
     );
     assert_inner_binds(&graph, "caller", "Factory", "make");
-    assert_falls_back(&graph, "caller", "bar");
+    assert_no_member_edge(&graph, "caller", "bar");
 }
 
 fn kotlin_graph() -> ZeroCopyGraph {
@@ -866,6 +876,22 @@ fn test_resolve_call_csharp_factory_file_scoped_namespace_return_type_binds_memb
     );
     assert_inner_binds(&graph, "Caller", "Factory", "Make");
     assert_eq!(owners(&graph, "Caller", "Bar"), ["ModelValue"]);
+}
+
+#[test]
+fn test_resolve_call_csharp_nested_known_missing_member_returns_no_outer_edge() {
+    let graph = single(
+        &CSharpProvider::new().unwrap(),
+        &[
+            ("src/Models/Foo.cs", "namespace Models { public class Foo {} }\n"),
+            ("src/Decoy/Decoy.cs", "namespace Decoy { public class Decoy { public void Bar() {} } }\n"),
+            ("src/Services/Factory.cs", "using Models;\nnamespace Services { public class Factory { public static Foo Make() { return new Foo(); } } }\n"),
+            ("src/App/Use.cs", "using Services;\nnamespace App { public class Use { public void Caller() { Factory.Make().Missing().Bar(); } } }\n"),
+        ],
+    );
+    assert_inner_binds(&graph, "Caller", "Factory", "Make");
+    assert_no_member_edge(&graph, "Caller", "Missing");
+    assert_no_member_edge(&graph, "Caller", "Bar");
 }
 
 fn csharp_graph() -> ZeroCopyGraph {

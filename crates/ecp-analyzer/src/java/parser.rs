@@ -686,6 +686,20 @@ public class App {
     }
 
     #[test]
+    fn test_parse_file_single_segment_wildcard_preserves_import() {
+        let graph = parse("import models.*;\n");
+        assert!(
+            graph.imports.iter().any(|import| {
+                import.source == "models"
+                    && import.imported_name == "*"
+                    && import.alias.as_deref() == Some("*")
+            }),
+            "{:?}",
+            graph.imports
+        );
+    }
+
+    #[test]
     fn java_regular_import_no_alias() {
         let graph = parse("import com.example.Foo;\n");
         let imp = graph

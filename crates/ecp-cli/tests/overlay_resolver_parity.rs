@@ -2611,6 +2611,45 @@ fn test_overlay_csharp_chained_member_file_scoped_return_type_matches_reindex() 
 }
 
 #[test]
+fn test_overlay_csharp_nested_known_missing_member_returns_no_outer_edge() {
+    let files = [
+        ("src/Models/Foo.cs", "namespace Models { public class Foo {} }\n"),
+        ("src/Decoy/Decoy.cs", "namespace Decoy { public class Decoy { public void Bar() {} } }\n"),
+        ("src/Services/Factory.cs", "using Models;\nnamespace Services { public class Factory { public static Foo Make() { return new Foo(); } } }\n"),
+        ("src/App/Use.cs", "using Services;\nnamespace App { public class Use { public void Run() {} } }\n"),
+    ];
+    let dirty = [(
+        "src/App/Use.cs",
+        "using Services;\nnamespace App { public class Use { public void Run() { Factory.Make().Missing().Bar(); } } }\n",
+    )];
+    let tmp = tempfile::tempdir().unwrap();
+    let expected = targets(
+        &reindex(tmp.path(), &CSharpProvider::new().unwrap(), &files, &dirty),
+        "Run",
+    );
+    assert!(
+        expected
+            .iter()
+            .any(|(_, name, owner, _)| name == "Make" && owner == "Factory"),
+        "the innermost factory call stays bound: {expected:?}"
+    );
+    assert!(
+        !expected
+            .iter()
+            .any(|(_, name, _, _)| name == "Missing" || name == "Bar"),
+        "a known missing member must suppress outer fallback edges: {expected:?}"
+    );
+    check_parity_from(
+        "Run",
+        &CSharpProvider::new().unwrap(),
+        &files,
+        &dirty,
+        &expected,
+        &expected,
+    );
+}
+
+#[test]
 fn test_overlay_csharp_chained_member_dirty_imported_factory_matches_reindex() {
     chain_parity(
         "Run",
