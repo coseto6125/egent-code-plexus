@@ -873,13 +873,17 @@ impl LanguageProvider for PhpProvider {
         let (raw_path_literals, raw_sql_refs, dynamic_calls) =
             extract_php_calls_and_path_literals(tree.root_node(), source, &mut nodes);
         // A fan-out names every value the method variable can hold, so its
-        // site needs no blind spot.
+        // site keeps a blind spot only for a late-bound receiver.
         let mut fanout_refs = Vec::new();
+        let mut bound_cache = super::dynamic_dispatch::BoundValuesCache::default();
         for call in dynamic_calls {
-            match super::dynamic_dispatch::const_map_fanout(call, source, &nodes) {
-                Some(fanout) => fanout_refs.push(fanout),
-                None => push_blind_spot(&mut blind_spots, BLIND_SPEC[3], &call, path, is_test_file),
+            let fanout =
+                super::dynamic_dispatch::const_map_fanout(call, source, &nodes, &mut bound_cache);
+            let keep_blind_spot = fanout.as_ref().is_none_or(|(_, late_bound)| *late_bound);
+            if keep_blind_spot {
+                push_blind_spot(&mut blind_spots, BLIND_SPEC[3], &call, path, is_test_file);
             }
+            fanout_refs.extend(fanout.map(|(fanout, _)| fanout));
         }
         crate::calls::extract_field_reads(
             tree.root_node(),

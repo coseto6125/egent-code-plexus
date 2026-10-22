@@ -51,6 +51,18 @@ fn assert_fanout(src: &str, source: &str, candidates: &[&str]) {
     assert_eq!(blind_count(&g), 0, "blind spots: {:?}", g.blind_spots);
 }
 
+/// The single fan-out of `src`, from `source`, with exactly `candidates`,
+/// whose site keeps its blind spot: a late-bound receiver (`$this`,
+/// `static`) may dispatch to a subclass declaring the methods elsewhere.
+fn assert_fanout_keeps_blind_spot(src: &str, source: &str, candidates: &[&str]) {
+    let g = parse_php(src);
+    let found = fanouts(&g);
+    assert_eq!(found.len(), 1, "expected one fan-out: {:?}", g.fanout_refs);
+    assert_eq!(found[0].source_name, source);
+    assert_eq!(found[0].candidates, candidates);
+    assert_eq!(blind_count(&g), 1, "blind spots: {:?}", g.blind_spots);
+}
+
 /// `src` emits no fan-out and keeps exactly one variable-method blind spot.
 fn assert_blind_only(src: &str) {
     let g = parse_php(src);
@@ -82,21 +94,105 @@ fn test_parse_file_self_const_map_with_null_default_emits_fanout() {
 }
 
 #[test]
-fn test_parse_file_static_const_map_static_receiver_emits_fanout_on_enclosing_class() {
+fn test_parse_file_static_const_map_static_receiver_emits_fanout_and_keeps_blind_spot() {
     let src = api(
         "protected const MAP = ['x' => 'a', 'y' => 'b'];",
         "$m = static::MAP[$type];\n        return static::$m($p);",
+    );
+    assert_fanout_keeps_blind_spot(&src, "dispatch", &["Api.a", "Api.b"]);
+}
+
+#[test]
+fn test_parse_file_this_receiver_self_const_emits_fanout_and_keeps_blind_spot() {
+    let src = api(
+        "const MAP = ['a', 'b'];",
+        "$m = self::MAP[$type];\n        return $this->$m($p);",
+    );
+    assert_fanout_keeps_blind_spot(&src, "dispatch", &["Api.a", "Api.b"]);
+}
+
+#[test]
+fn test_parse_file_self_receiver_emits_fanout_without_blind_spot() {
+    let src = api(
+        "const MAP = ['a', 'b'];",
+        "$m = self::MAP[$type];\n        return self::$m($p);",
     );
     assert_fanout(&src, "dispatch", &["Api.a", "Api.b"]);
 }
 
 #[test]
-fn test_parse_file_this_receiver_self_const_emits_fanout_on_enclosing_class() {
+fn test_parse_file_string_literal_key_emits_only_that_value() {
     let src = api(
-        "const MAP = ['a', 'b'];",
-        "$m = self::MAP[$type];\n        return $this->$m($p);",
+        "const MAP = ['h' => 'hero', 's' => 'story'];",
+        "$m = self::MAP['s'];\n        return Rows::$m($p);",
     );
-    assert_fanout(&src, "dispatch", &["Api.a", "Api.b"]);
+    assert_fanout(&src, "dispatch", &["Rows.story"]);
+}
+
+#[test]
+fn test_parse_file_integer_key_on_list_emits_only_that_value() {
+    let src = api(
+        "const MAP = ['hero', 'story'];",
+        "$m = self::MAP[1];\n        return Rows::$m($p);",
+    );
+    assert_fanout(&src, "dispatch", &["Rows.story"]);
+}
+
+#[test]
+fn test_parse_file_literal_key_missing_from_map_records_blind_spot_only() {
+    assert_blind_only(&api(
+        "const MAP = ['h' => 'hero'];",
+        "$m = self::MAP['zzz'];\n        return Rows::$m($p);",
+    ));
+}
+
+#[test]
+fn test_parse_file_integer_key_on_mixed_array_unkeyed_element_records_blind_spot_only() {
+    assert_blind_only(&api(
+        "const MAP = ['h' => 'hero', 'story'];",
+        "$m = self::MAP[0];\n        return Rows::$m($p);",
+    ));
+}
+
+#[test]
+fn test_parse_file_string_offset_write_records_blind_spot_only() {
+    assert_blind_only(&api(
+        "const MAP = ['hero'];",
+        "$m = self::MAP[$type];\n        $m[0] = 'z';\n        return Rows::$m($p);",
+    ));
+}
+
+#[test]
+fn test_parse_file_qualified_name_const_records_blind_spot_only() {
+    let src = "<?php\nnamespace App;\nclass Rows\n{\n    const MAP = ['hero'];\n}\nclass Api\n{\n    public function dispatch($t)\n    {\n        $m = \\Legacy\\Rows::MAP[$t];\n        return \\Legacy\\Rows::$m();\n    }\n}\n";
+    assert_blind_only(src);
+}
+
+#[test]
+fn test_parse_file_short_name_declared_only_in_other_namespace_emits_ambiguous_fanout() {
+    let src = "<?php\nnamespace A {\n    class Rows\n    {\n        const MAP = ['hero'];\n    }\n}\nnamespace B {\n    class Api\n    {\n        public function dispatch($t)\n        {\n            $m = Rows::MAP[$t] ?? null;\n            return Rows::$m();\n        }\n    }\n}\n";
+    assert_eq!(ambiguous_fanout(src).candidates, ["Rows.hero"]);
+}
+
+#[test]
+fn test_parse_file_statement_namespace_same_as_class_keeps_plain_reason() {
+    let src = "<?php\nnamespace App;\n\nclass Rows\n{\n    const MAP = ['hero'];\n}\nclass Api\n{\n    public function dispatch($t)\n    {\n        $m = Rows::MAP[$t] ?? null;\n        return Rows::$m();\n    }\n}\n";
+    assert_fanout(src, "dispatch", &["Rows.hero"]);
+}
+
+#[test]
+fn test_parse_file_two_sites_sharing_name_variable_emit_two_fanouts() {
+    let src = api(
+        "const MAP = ['hero', 'story'];",
+        "$m = self::MAP[$type];\n        Rows::$m($p);\n        return Rows::$m($p);",
+    );
+    let g = parse_php(&src);
+    let found = fanouts(&g);
+    assert_eq!(found.len(), 2, "{:?}", g.fanout_refs);
+    for f in found {
+        assert_eq!(f.candidates, ["Rows.hero", "Rows.story"]);
+    }
+    assert_eq!(blind_count(&g), 0, "blind spots: {:?}", g.blind_spots);
 }
 
 #[test]
@@ -450,4 +546,64 @@ fn test_parse_file_nullsafe_call_in_arrow_callback_hosts_anonymous_node() {
         .filter(|n| n.name.starts_with("<anonymous") && n.calls.iter().any(|c| c.contains("inst")))
         .collect();
     assert_eq!(hosts.len(), 1, "nodes: {:?}", g.nodes);
+}
+
+/// `(kind, owner)` of every `References` source reaching the callable
+/// `target` (a Python `def` is a `Function`).
+fn reference_sources(
+    graph: &ecp_core::graph::ZeroCopyGraph,
+    target: &str,
+) -> Vec<(NodeKind, String)> {
+    let pool = graph.string_pool.as_slice();
+    let mut sources: Vec<_> = graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::References)
+        .filter(|e| {
+            let t = &graph.nodes[e.target as usize];
+            matches!(t.kind, NodeKind::Method | NodeKind::Function)
+                && t.name.resolve(pool) == target
+        })
+        .map(|e| {
+            let s = &graph.nodes[e.source as usize];
+            (s.kind, s.owner_class.resolve(pool).to_string())
+        })
+        .collect();
+    sources.sort_by(|a, b| a.1.cmp(&b.1));
+    sources
+}
+
+#[test]
+fn test_build_fanout_source_is_method_not_same_named_property() {
+    let src = "<?php\nnamespace App;\nclass Rows\n{\n    public static function hero() {}\n}\nclass Api\n{\n    protected const MAP = ['hero'];\n    private array $render = [];\n\n    public function render($t)\n    {\n        $m = self::MAP[$t] ?? null;\n        return Rows::$m();\n    }\n}\n";
+    let graph = graph_of(&PhpProvider::new().unwrap(), &[("src/Api.php", src)]);
+    assert_eq!(
+        reference_sources(&graph, "hero"),
+        [(NodeKind::Method, "Api".to_string())]
+    );
+}
+
+#[test]
+fn test_build_fanout_source_is_enclosing_class_method_not_first_same_named() {
+    let src = "<?php\nnamespace App;\nclass Rows\n{\n    public static function hero() {}\n}\nclass Plain\n{\n    public function handle() { return 1; }\n}\nclass Api\n{\n    const MAP = ['hero'];\n\n    public function handle($t)\n    {\n        $m = self::MAP[$t];\n        return Rows::$m();\n    }\n}\n";
+    let graph = graph_of(&PhpProvider::new().unwrap(), &[("src/Api.php", src)]);
+    assert_eq!(
+        reference_sources(&graph, "hero"),
+        [(NodeKind::Method, "Api".to_string())]
+    );
+}
+
+#[test]
+fn test_build_python_getattr_fanout_source_is_enclosing_class_method() {
+    let src = "class Plain:\n    def dispatch(self, action):\n        return 1\n\n\nclass Handler:\n    def dispatch(self, action):\n        name = f\"handle_{action}\"\n        return getattr(self, name)()\n\n    def handle_create(self):\n        return 1\n";
+    let graph = graph_of(
+        &ecp_analyzer::python::PythonProvider::new().unwrap(),
+        &[("disp.py", src)],
+    );
+    let sources = reference_sources(&graph, "handle_create");
+    assert!(!sources.is_empty(), "no fan-out edge reached handle_create");
+    assert!(
+        sources.iter().all(|(_, owner)| owner == "Handler"),
+        "{sources:?}"
+    );
 }

@@ -13,14 +13,17 @@
 //! overridden by a subclass, and a by-reference argument can rebind the name.
 //!
 //! `Name::MAP` matches classes by short name within this file. When the file
-//! declares that short name twice, or also imports it with `use`, the edge
-//! still lists the candidates but carries the `-ambiguous` reason, so the
-//! reader checks which class the constant belongs to.
+//! declares that short name twice, declares it only in another namespace, or
+//! also imports it with `use`, the edge still lists the candidates but carries
+//! the `-ambiguous` reason, so the reader checks which class the constant
+//! belongs to. A qualified `\Ns\Name::MAP` names a class this file cannot
+//! prove it declares, so the site stays a blind spot.
 
 use super::laravel_routes::string_value;
 use crate::framework_confidence;
 use crate::framework_helpers::{enclosing_function_name, node_span};
 use ecp_core::analyzer::types::{RawFanoutRef, RawNode};
+use rustc_hash::{FxHashMap, FxHashSet};
 use tree_sitter::Node;
 
 const REASON: &str = "php-const-map-dispatch";
@@ -42,14 +45,28 @@ const REBINDING_PARENTS: &[&str] = &[
     "unset_statement",
 ];
 
+/// The values a name variable can hold in one function, shared by every
+/// dynamic call in that function that uses the same variable.
+pub(super) type BoundValuesCache = FxHashMap<(usize, String), Option<BoundValues>>;
+
+#[derive(Clone)]
+pub(super) struct BoundValues {
+    values: Vec<String>,
+    ambiguous: bool,
+}
+
 /// The fan-out of a runtime-named method call, when every value its name
 /// variable can hold is a string literal written in this file and the
-/// receiver names one class. `None` leaves the site a blind spot.
+/// receiver names one class, plus whether the site keeps its blind spot:
+/// `$this` and `static` dispatch on the runtime class, which may be a
+/// subclass declaring the methods elsewhere. `None` leaves the site a blind
+/// spot.
 pub(super) fn const_map_fanout(
     call: Node<'_>,
     source: &[u8],
     nodes: &[RawNode],
-) -> Option<RawFanoutRef> {
+    cache: &mut BoundValuesCache,
+) -> Option<(RawFanoutRef, bool)> {
     let var = call
         .child_by_field_name("name")
         .filter(|n| n.kind() == "variable_name")?
@@ -57,17 +74,29 @@ pub(super) fn const_map_fanout(
         .ok()?;
     let function = enclosing_function(call)?;
     let class = enclosing_class(function);
-    let owner = receiver_owner(call, class, source)?;
-    let mut ambiguous = false;
-    let values = bound_values(function, var, class, source, &mut ambiguous)?;
+    let (owner, late_bound) = receiver_owner(call, class, source)?;
+    let bound = cache
+        .entry((function.id(), var.to_string()))
+        .or_insert_with(|| bound_values(function, var, class, source))
+        .clone()?;
     let span = node_span(&call);
-    Some(RawFanoutRef {
+    let fanout = RawFanoutRef {
         source_name: enclosing_function_name(nodes, span)?,
-        candidates: values.iter().map(|v| format!("{owner}.{v}")).collect(),
+        candidates: bound
+            .values
+            .iter()
+            .map(|v| format!("{owner}.{v}"))
+            .collect(),
         base_confidence: framework_confidence::FANOUT_BASE,
-        reason: if ambiguous { REASON_AMBIGUOUS } else { REASON }.to_string(),
+        reason: if bound.ambiguous {
+            REASON_AMBIGUOUS
+        } else {
+            REASON
+        }
+        .to_string(),
         span,
-    })
+    };
+    Some((fanout, late_bound))
 }
 
 /// The method or named function the call sits in; `None` inside a closure,
@@ -109,25 +138,32 @@ fn class_name<'s>(class: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
 }
 
 /// The class that owns the called method, written as the scoped-call callee
-/// writes it (`Rows`, `\App\Rows`): `self` / `static` / `$this` name the
-/// enclosing class. `parent::` and any other receiver give `None`.
+/// writes it (`Rows`, `\App\Rows`), and whether the receiver is late-bound:
+/// `self` / `static` / `$this` name the enclosing class, and `static` /
+/// `$this` resolve to the runtime class. `parent::` and any other receiver
+/// give `None`.
 fn receiver_owner<'s>(
     call: Node<'_>,
     class: Option<Node<'_>>,
     source: &'s [u8],
-) -> Option<&'s str> {
+) -> Option<(&'s str, bool)> {
     if call.kind() == "scoped_call_expression" {
         let scope = call.child_by_field_name("scope")?;
         let text = scope.utf8_text(source).ok()?;
         return match scope.kind() {
-            "name" | "qualified_name" => Some(text),
-            "relative_scope" if is_self_or_static(text) => class_name(class?, source),
+            "name" | "qualified_name" => Some((text, false)),
+            "relative_scope" if text.eq_ignore_ascii_case("self") => {
+                Some((class_name(class?, source)?, false))
+            }
+            "relative_scope" if text.eq_ignore_ascii_case("static") => {
+                Some((class_name(class?, source)?, true))
+            }
             _ => None,
         };
     }
     let object = call.child_by_field_name("object")?;
     if object.kind() == "variable_name" && object.utf8_text(source).ok()? == "$this" {
-        return class_name(class?, source);
+        return Some((class_name(class?, source)?, true));
     }
     None
 }
@@ -136,24 +172,38 @@ fn is_self_or_static(scope: &str) -> bool {
     scope.eq_ignore_ascii_case("self") || scope.eq_ignore_ascii_case("static")
 }
 
+/// Pushes `n`'s named children so the stack pops them in source order, and
+/// candidates list the values as written.
+fn push_children<'t>(stack: &mut Vec<Node<'t>>, n: Node<'t>) {
+    let start = stack.len();
+    let mut c = n.walk();
+    stack.extend(n.named_children(&mut c));
+    stack[start..].reverse();
+}
+
 /// Every value `var` can hold in `function`, deduplicated the way PHP matches
 /// method names (case-insensitively), spelled as first written. `None` when
-/// a parameter, a closure by reference, or any write other than a plain
-/// assignment of an enumerable value binds it, or nothing assigns it.
+/// a parameter, a closure by reference, a write into the string
+/// (`$m[0] = 'x'`) or any write other than a plain assignment of an
+/// enumerable value binds it, or nothing assigns it.
 fn bound_values(
     function: Node<'_>,
     var: &str,
     class: Option<Node<'_>>,
     source: &[u8],
-    ambiguous: &mut bool,
-) -> Option<Vec<String>> {
+) -> Option<BoundValues> {
     if let Some(params) = function.child_by_field_name("parameters") {
         if mentions(params, var, source) {
             return None;
         }
     }
     let body = function.child_by_field_name("body")?;
-    let mut values: Vec<String> = Vec::new();
+    let mut scan = Scan {
+        class,
+        source,
+        values: Vec::new(),
+        ambiguous: false,
+    };
     let mut assigned = false;
     let mut stack = vec![body];
     while let Some(n) = stack.pop() {
@@ -177,36 +227,28 @@ fn bound_values(
                     && parent.child_by_field_name("left") == Some(n)
                 {
                     assigned = true;
-                    rhs_values(
-                        parent.child_by_field_name("right")?,
-                        class,
-                        source,
-                        &mut values,
-                        ambiguous,
-                    )?;
-                } else if REBINDING_PARENTS.contains(&parent.kind()) || inside_list(n, function) {
+                    scan.rhs(parent.child_by_field_name("right")?)?;
+                } else if REBINDING_PARENTS.contains(&parent.kind())
+                    || inside_list(n, function)
+                    || (parent.kind() == "subscript_expression" && parent.named_child(0) == Some(n))
+                {
                     return None;
                 }
                 continue;
             }
             _ => {}
         }
-        // Reversed so the stack pops children in source order: candidates
-        // list the values as written.
-        let mut c = n.walk();
-        let children: Vec<Node<'_>> = n.named_children(&mut c).collect();
-        stack.extend(children.into_iter().rev());
+        push_children(&mut stack, n);
     }
     if !assigned {
         return None;
     }
-    let mut unique: Vec<String> = Vec::with_capacity(values.len());
-    for v in values {
-        if !unique.iter().any(|u| u.eq_ignore_ascii_case(&v)) {
-            unique.push(v);
-        }
-    }
-    Some(unique)
+    let mut seen = FxHashSet::default();
+    scan.values.retain(|v| seen.insert(v.to_ascii_lowercase()));
+    Some(BoundValues {
+        values: scan.values,
+        ambiguous: scan.ambiguous,
+    })
 }
 
 fn mentions(node: Node<'_>, var: &str, source: &[u8]) -> bool {
@@ -236,103 +278,142 @@ fn inside_list(var: Node<'_>, function: Node<'_>) -> bool {
     false
 }
 
-/// The values one assignment's right side gives: a string literal,
-/// `C::MAP[$k]`, or `C::MAP[$k] ?? null` / `?? '<literal>'`.
-fn rhs_values(
-    rhs: Node<'_>,
-    class: Option<Node<'_>>,
-    source: &[u8],
-    out: &mut Vec<String>,
-    ambiguous: &mut bool,
-) -> Option<()> {
-    match rhs.kind() {
-        "string" | "encapsed_string" => out.push(method_literal(rhs, source)?),
-        "subscript_expression" => const_map_values(rhs, class, source, out, ambiguous)?,
-        "binary_expression" => {
-            if rhs.child_by_field_name("operator")?.kind() != "??" {
-                return None;
-            }
-            let left = rhs.child_by_field_name("left")?;
-            if left.kind() != "subscript_expression" {
-                return None;
-            }
-            const_map_values(left, class, source, out, ambiguous)?;
-            let default = rhs.child_by_field_name("right")?;
-            if default.kind() != "null" {
-                out.push(method_literal(default, source)?);
-            }
-        }
-        _ => return None,
-    }
-    Some(())
+/// The subscript of `C::MAP[...]` when it is a literal key: only that
+/// element is reachable.
+enum Key {
+    Str(String),
+    Int(usize),
 }
 
-/// The values of `self::MAP[$k]` / `static::MAP[$k]` / `Name::MAP[$k]`: the
-/// constant must be declared on that class in this file, as a non-empty
-/// array of string literals. `Name` matches by short name; a second class or
-/// a `use` import of that short name sets `ambiguous` and unions the values
-/// of every same-named class that declares the constant.
-fn const_map_values(
-    subscript: Node<'_>,
-    class: Option<Node<'_>>,
-    source: &[u8],
-    out: &mut Vec<String>,
-    ambiguous: &mut bool,
-) -> Option<()> {
-    let access = subscript
-        .named_child(0)
-        .filter(|n| n.kind() == "class_constant_access_expression")?;
-    let scope = access.named_child(0)?;
-    let constant = access
-        .named_child(access.named_child_count().checked_sub(1)? as u32)
-        .filter(|n| n.kind() == "name")?
-        .utf8_text(source)
-        .ok()?;
-    let scope_text = scope.utf8_text(source).ok()?;
-    let owners = match scope.kind() {
-        "relative_scope" if is_self_or_static(scope_text) => vec![class?],
-        "name" | "qualified_name" => {
-            let short = scope_text.rsplit('\\').next()?;
-            let root = file_root(subscript);
-            let owners = file_classes(root, short, source);
-            *ambiguous |= owners.len() > 1 || imports_short_name(root, short, source);
-            owners
-        }
-        _ => return None,
-    };
-    let mut found = false;
-    for owner in owners {
-        if let Some(array) = const_initializer(owner, constant, source) {
-            push_array_values(array, source, out)?;
-            found = true;
-        }
-    }
-    found.then_some(())
+/// Collects the values the assignments of one name variable give.
+struct Scan<'t, 's> {
+    class: Option<Node<'t>>,
+    source: &'s [u8],
+    values: Vec<String>,
+    ambiguous: bool,
 }
 
-/// Every value of a non-empty array of string literals, or `None`.
-fn push_array_values(array: Node<'_>, source: &[u8], out: &mut Vec<String>) -> Option<()> {
-    let mut c = array.walk();
-    let mut count = 0usize;
-    for element in array
-        .named_children(&mut c)
-        .filter(|n| n.kind() == "array_element_initializer")
-    {
-        let mut ec = element.walk();
-        let parts: Vec<Node<'_>> = element
-            .named_children(&mut ec)
-            .filter(|n| n.kind() != "comment")
+impl<'t> Scan<'t, '_> {
+    /// One assignment's right side: a string literal, `C::MAP[$k]`, or
+    /// `C::MAP[$k] ?? null` / `?? '<literal>'`.
+    fn rhs(&mut self, rhs: Node<'t>) -> Option<()> {
+        match rhs.kind() {
+            "string" | "encapsed_string" => self.values.push(method_literal(rhs, self.source)?),
+            "subscript_expression" => self.const_map(rhs)?,
+            "binary_expression" => {
+                if rhs.child_by_field_name("operator")?.kind() != "??" {
+                    return None;
+                }
+                let left = rhs.child_by_field_name("left")?;
+                if left.kind() != "subscript_expression" {
+                    return None;
+                }
+                self.const_map(left)?;
+                let default = rhs.child_by_field_name("right")?;
+                if default.kind() != "null" {
+                    self.values.push(method_literal(default, self.source)?);
+                }
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    /// The values of `self::MAP[..]` / `static::MAP[..]` / `Name::MAP[..]`:
+    /// the constant must be declared on that class in this file, as an array
+    /// of string literals. A literal subscript keeps only its element.
+    fn const_map(&mut self, subscript: Node<'t>) -> Option<()> {
+        let source = self.source;
+        let access = subscript
+            .named_child(0)
+            .filter(|n| n.kind() == "class_constant_access_expression")?;
+        let scope = access.named_child(0)?;
+        let constant = access
+            .named_child(access.named_child_count().checked_sub(1)? as u32)
+            .filter(|n| n.kind() == "name")?
+            .utf8_text(source)
+            .ok()?;
+        let scope_text = scope.utf8_text(source).ok()?;
+        let owners = match scope.kind() {
+            "relative_scope" if is_self_or_static(scope_text) => vec![self.class?],
+            "name" => {
+                let root = file_root(subscript);
+                let owners = file_classes(root, scope_text, source);
+                if owners.is_empty() {
+                    return None;
+                }
+                let here = namespace_of(subscript, source);
+                self.ambiguous |= owners.len() > 1
+                    || owners.iter().any(|o| namespace_of(*o, source) != here)
+                    || imports_short_name(root, scope_text, source);
+                owners
+            }
+            _ => return None,
+        };
+        let key = literal_key(subscript, source);
+        let mut found = false;
+        for owner in owners {
+            if let Some(array) = const_initializer(owner, constant, source) {
+                self.push_array_values(array, key.as_ref())?;
+                found = true;
+            }
+        }
+        found.then_some(())
+    }
+
+    /// The values of an array of string literals, or only the element `key`
+    /// names; `None` when no value is pushed.
+    fn push_array_values(&mut self, array: Node<'_>, key: Option<&Key>) -> Option<()> {
+        let source = self.source;
+        let mut c = array.walk();
+        let elements: Vec<Vec<Node<'_>>> = array
+            .named_children(&mut c)
+            .filter(|n| n.kind() == "array_element_initializer")
+            .map(|element| {
+                let mut ec = element.walk();
+                element
+                    .named_children(&mut ec)
+                    .filter(|n| n.kind() != "comment")
+                    .collect()
+            })
             .collect();
-        if parts
-            .iter()
-            .any(|p| matches!(p.kind(), "by_ref" | "variadic_unpacking"))
-        {
-            return None;
+        let keyed = elements.iter().any(|parts| parts.len() == 2);
+        let mut count = 0usize;
+        for (position, parts) in elements.iter().enumerate() {
+            if parts
+                .iter()
+                .any(|p| matches!(p.kind(), "by_ref" | "variadic_unpacking"))
+            {
+                return None;
+            }
+            let selected = match (key, parts.as_slice()) {
+                (None, _) => true,
+                (Some(Key::Str(k)), [name, _]) => string_value(*name, source).as_ref() == Some(k),
+                (Some(Key::Int(i)), [index, _]) => {
+                    index.kind() == "integer"
+                        && index.utf8_text(source).ok()?.parse::<usize>().ok() == Some(*i)
+                }
+                // An unkeyed element's index is its position only in an array
+                // with no explicit keys.
+                (Some(Key::Int(i)), [_]) => !keyed && position == *i,
+                _ => false,
+            };
+            if selected {
+                self.values.push(method_literal(*parts.last()?, source)?);
+                count += 1;
+            }
         }
-        out.push(method_literal(*parts.last()?, source)?);
-        count += 1;
+        (count > 0).then_some(())
     }
-    (count > 0).then_some(())
+}
+
+fn literal_key(subscript: Node<'_>, source: &[u8]) -> Option<Key> {
+    let index = subscript.named_child(1)?;
+    match index.kind() {
+        "string" | "encapsed_string" => string_value(index, source).map(Key::Str),
+        "integer" => index.utf8_text(source).ok()?.parse().ok().map(Key::Int),
+        _ => None,
+    }
 }
 
 fn file_root(node: Node<'_>) -> Node<'_> {
@@ -341,6 +422,27 @@ fn file_root(node: Node<'_>) -> Node<'_> {
         root = p;
     }
     root
+}
+
+/// The namespace `node` sits in: the braced `namespace X { }` around it, or
+/// the last `namespace X;` statement before it. `None` is the global one.
+fn namespace_of<'s>(node: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    let mut top = node;
+    while let Some(p) = top.parent() {
+        match p.kind() {
+            "namespace_definition" => return p.child_by_field_name("name")?.utf8_text(source).ok(),
+            "program" => break,
+            _ => top = p,
+        }
+    }
+    let mut sibling = top.prev_named_sibling();
+    while let Some(s) = sibling {
+        if s.kind() == "namespace_definition" {
+            return s.child_by_field_name("name")?.utf8_text(source).ok();
+        }
+        sibling = s.prev_named_sibling();
+    }
+    None
 }
 
 /// Every `class_declaration` named `name` in the file.
@@ -354,43 +456,50 @@ fn file_classes<'t>(root: Node<'t>, name: &str, source: &[u8]) -> Vec<Node<'t>> 
             }
             continue;
         }
-        let mut c = n.walk();
-        let children: Vec<Node<'t>> = n.named_children(&mut c).collect();
-        stack.extend(children.into_iter().rev());
+        push_children(&mut stack, n);
     }
     found
 }
 
-/// Whether a class `use` in the file binds `short` (by alias or last segment).
+/// Whether a class `use` in the file binds `short` (by alias or last
+/// segment). `use` declarations sit at file level or in a namespace body.
 fn imports_short_name(root: Node<'_>, short: &str, source: &[u8]) -> bool {
     let mut stack = vec![root];
     while let Some(n) = stack.pop() {
-        if n.kind() == "namespace_use_clause" {
-            // `use function` / `use const` sits on the declaration, or on the
-            // clause inside a `use A\{function f}` group.
-            let declaration = n.parent().and_then(|p| match p.kind() {
-                "namespace_use_group" => p.parent(),
-                _ => Some(p),
-            });
-            let is_class = n.child_by_field_name("type").is_none()
-                && declaration.is_none_or(|d| d.child_by_field_name("type").is_none());
-            let bound = n.child_by_field_name("alias").or_else(|| {
+        match n.kind() {
+            "program"
+            | "namespace_definition"
+            | "compound_statement"
+            | "namespace_use_declaration"
+            | "namespace_use_group" => {
                 let mut c = n.walk();
-                let name = n
-                    .named_children(&mut c)
-                    .find(|ch| matches!(ch.kind(), "name" | "qualified_name"));
-                name
-            });
-            let bound_short = bound
-                .and_then(|b| b.utf8_text(source).ok())
-                .and_then(|t| t.rsplit('\\').next());
-            if is_class && bound_short == Some(short) {
-                return true;
+                stack.extend(n.named_children(&mut c));
             }
-            continue;
+            "namespace_use_clause" => {
+                // `use function` / `use const` sits on the declaration, or on
+                // the clause inside a `use A\{function f}` group.
+                let declaration = n.parent().and_then(|p| match p.kind() {
+                    "namespace_use_group" => p.parent(),
+                    _ => Some(p),
+                });
+                let is_class = n.child_by_field_name("type").is_none()
+                    && declaration.is_none_or(|d| d.child_by_field_name("type").is_none());
+                let bound = n.child_by_field_name("alias").or_else(|| {
+                    let mut c = n.walk();
+                    let name = n
+                        .named_children(&mut c)
+                        .find(|ch| matches!(ch.kind(), "name" | "qualified_name"));
+                    name
+                });
+                let bound_short = bound
+                    .and_then(|b| b.utf8_text(source).ok())
+                    .and_then(|t| t.rsplit('\\').next());
+                if is_class && bound_short == Some(short) {
+                    return true;
+                }
+            }
+            _ => {}
         }
-        let mut c = n.walk();
-        stack.extend(n.named_children(&mut c));
     }
     false
 }

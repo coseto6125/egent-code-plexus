@@ -98,7 +98,7 @@ pub struct FlowReport {
     pub coverage: String,
 }
 
-/// Case-sensitive like Laravel's view resolver: `V.BLADE.PHP` is plain PHP.
+/// Case-sensitive like Laravel's view resolver: `V.BLADE.php` is plain PHP.
 pub fn is_blade_template(path: &str) -> bool {
     path.ends_with(".blade.php")
 }

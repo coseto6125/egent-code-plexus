@@ -132,6 +132,12 @@ fn test_parse_file_braced_expression_method_call_records_blind_spot() {
 }
 
 #[test]
+fn test_parse_file_braced_constant_name_after_comment_records_blind_spot() {
+    let src = "<?php class A { function f($o) { $o?->{/* c */ FOO}(); Rows::{ /* c */ BAR}(); } }";
+    assert_eq!(method_kinds(src), 2);
+}
+
+#[test]
 fn test_parse_file_this_variable_method_call_with_param_name_records_blind_spot() {
     let src = "<?php class A { function f($m) { return $this->$m(); } function g() {} }";
     assert_eq!(method_kinds(src), 1);

@@ -176,7 +176,16 @@ fn has_runtime_name(call: Node<'_>) -> bool {
 }
 
 fn is_runtime_name(name: Node<'_>) -> bool {
-    name.kind() != "name" || name.prev_sibling().is_some_and(|s| s.kind() == "{")
+    if name.kind() != "name" {
+        return true;
+    }
+    // A comment is an extra node, so `{/* c */ FOO}` puts it between the
+    // brace and the name.
+    let mut prev = name.prev_sibling();
+    while let Some(p) = prev.filter(|p| p.kind() == "comment") {
+        prev = p.prev_sibling();
+    }
+    prev.is_some_and(|s| s.kind() == "{")
 }
 
 /// The construction entry of `new Foo(..)` / `new \App\Foo(..)`; `None`
