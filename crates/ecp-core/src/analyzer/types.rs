@@ -192,7 +192,11 @@ impl<'a> CallSite<'a> {
         }
         let mut targets = resolve(innermost);
         for level in levels.into_iter().rev() {
-            targets = match typed_member(&targets, level.name()) {
+            // A fallback may be the whole callee text (the JS parser writes
+            // `new Foo().bar`); the typed member is its last segment.
+            let name = level.name();
+            let member = name.rsplit(['.', ':']).next().unwrap_or(name);
+            targets = match typed_member(&targets, member) {
                 Some(typed) => typed,
                 None => resolve(level.fallback()),
             };
@@ -1323,7 +1327,8 @@ mod tests {
         assert!(site.uses_method_syntax());
         assert_eq!(site.constructed_type(Language::Python), None);
 
-        let bare = CallSite::parse(&CallSite::chained_member("make", "bar"));
+        let entry = CallSite::chained_member("make", "bar");
+        let bare = CallSite::parse(&entry);
         assert_eq!(bare.fallback(), CallSite::Plain("bar"));
         assert_eq!(bare.name(), "bar");
     }

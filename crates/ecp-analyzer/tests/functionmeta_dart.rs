@@ -187,6 +187,31 @@ fn dart_no_return_type_is_empty() {
     let _rt = m.return_type.resolve(g.string_pool.as_slice());
 }
 
+/// A method nests its function_signature under method_signature; the chained
+/// call `Foo.create().bar()` reads this type.
+#[test]
+fn test_extract_dart_method_return_type_captured() {
+    let src = "class Foo {\n  static Foo create() => Foo();\n  Foo? maybe() => null;\n}\n";
+    let g = analyze(src);
+    let pool = g.string_pool.as_slice();
+    assert_eq!(meta(&g, "create").return_type.resolve(pool), "Foo");
+    assert_eq!(meta(&g, "maybe").return_type.resolve(pool), "Foo?");
+}
+
+/// With no written type tree-sitter-dart puts `static` in the return_type
+/// field; a modifier is no type.
+#[test]
+fn test_extract_dart_static_method_without_type_returns_empty() {
+    let src = "class Foo {\n  static plain() => Foo();\n}\n";
+    let g = analyze(src);
+    assert_eq!(
+        meta(&g, "plain")
+            .return_type
+            .resolve(g.string_pool.as_slice()),
+        ""
+    );
+}
+
 // ── decorators / annotations ──────────────────────────────────────────────────
 
 #[test]
