@@ -61,7 +61,7 @@ Comparação direta com outras duas ferramentas de code-graph: [`codegraph`](htt
 
 *Versões: `ecp` 0.16.2 · `codegraph` 1.6.2 · `gitnexus` 1.6.12, medidas em 2026-10-22. As três limitadas a 1 MiB por arquivo. Cada execução fixada em 8 núcleos lógicos (`taskset -c 0-7`) em um AMD Ryzen 9 9950X, Linux (WSL2). As proporções do índice a frio vêm de execuções intercaladas; medianas do índice do `ecp` sobre 5 execuções, consultas sobre 7.*
 
-### `microsoft/vscode` — 14.874 arquivos, TypeScript denso de linguagem única
+### `microsoft/vscode` — 14.854 arquivos, TypeScript denso de linguagem única
 
 | Métrica | **`ecp`** | `codegraph` | `gitnexus` |
 |---|---|---|---|
@@ -78,7 +78,7 @@ Comparação direta com outras duas ferramentas de code-graph: [`codegraph`](htt
 
 *Em maio de 2026, o `gitnexus` 1.6.5 não concluiu este repositório (encerrado aos 27 min); o 1.6.12 conclui em 317 s. O valor em disco do `ecp` é o índice ativo; seu cache de parsing adiciona 127 MiB.*
 
-### `abhigyanpatwari/GitNexus` — 3.232 arquivos, poliglota (o corpus que as três ferramentas conseguem concluir)
+### `abhigyanpatwari/GitNexus` — 7.225 arquivos, poliglota
 
 | Métrica | **`ecp`** | `codegraph` | `gitnexus` |
 |---|---|---|---|
