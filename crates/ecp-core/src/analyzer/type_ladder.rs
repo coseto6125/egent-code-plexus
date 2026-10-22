@@ -6,6 +6,7 @@
 
 use crate::analyzer::reexport::ResolveTarget;
 use crate::analyzer::same_file_pick::PickFacts;
+use crate::analyzer::types::RawImport;
 use crate::file_category::{FileMeta, Language};
 use crate::graph::NodeKind;
 use std::borrow::Cow;
@@ -204,6 +205,91 @@ pub fn returned_type<F: TypeFacts + ?Sized>(facts: &F, callee: u32) -> Option<&s
             }
         }
         _ => None,
+    }
+}
+
+/// Select a visible return type before inspecting its members. An ambiguous
+/// type remains ambiguous even when only one candidate declares the member.
+pub fn visible_return_type<'q, F: TypeFacts + ?Sized>(
+    facts: &F,
+    source: &str,
+    name: &'q str,
+    mut visible: impl FnMut(u32) -> bool,
+) -> TypeCandidates<'q> {
+    let mut candidates = facts
+        .global_candidates(
+            name,
+            ResolveTarget::Type,
+            FileMeta::from_normalized_path(source),
+        )
+        .into_iter()
+        .filter(|&id| visible(id));
+    match (candidates.next(), candidates.next()) {
+        (Some(id), None) => TypeCandidates::Unique(id, name),
+        _ => TypeCandidates::None,
+    }
+}
+
+/// Namespace visible from a type's owner key. A file-scoped namespace has
+/// no stamped owner, so it requires one namespace in the file. Two full
+/// namespace names with one owner key cannot be distinguished.
+fn declared_namespace<'a>(
+    owner: Option<&str>,
+    namespaces: impl Iterator<Item = &'a str>,
+) -> Option<&'a str> {
+    let mut names = namespaces.filter(|name| {
+        owner.is_none_or(|owner| crate::analyzer::types::owner_key(name) == Some(owner))
+    });
+    match (names.next(), names.next()) {
+        (None, None) if owner.is_none() => Some(""),
+        (Some(name), None) => Some(name),
+        _ => None,
+    }
+}
+
+/// Whether a C# type belongs to the global namespace, the callee's one
+/// namespace, or an explicitly imported namespace.
+pub fn namespace_return_type_visible<'a>(
+    owner: Option<&str>,
+    namespaces: impl Iterator<Item = &'a str>,
+    source_namespaces: impl Iterator<Item = &'a str>,
+    imports: &[RawImport],
+) -> bool {
+    let Some(namespace) = declared_namespace(owner, namespaces) else {
+        return false;
+    };
+    namespace.is_empty()
+        || declared_namespace(None, source_namespaces) == Some(namespace)
+        || imports.iter().any(|import| {
+            import.alias.is_none()
+                && import.source == namespace
+                && import.imported_name == namespace
+        })
+}
+
+/// A Swift package target's conventional `Sources/<module>/` directory.
+/// Custom target paths have no module evidence here.
+fn swift_module(file: &str) -> Option<(&str, &str)> {
+    let (root, tail) = file
+        .rsplit_once("/Sources/")
+        .or_else(|| file.strip_prefix("Sources/").map(|tail| ("", tail)))?;
+    let (module, _) = tail.split_once('/')?;
+    Some((root, module))
+}
+
+/// A Swift return type is visible in its own target or an imported target
+/// of the same package. Without target layout evidence, preserve directory
+/// scope rather than guessing a module from a global namesake.
+pub fn swift_return_type_visible(source: &str, candidate: &str, imports: &[RawImport]) -> bool {
+    match (swift_module(source), swift_module(candidate)) {
+        (Some((root, module)), Some((other_root, other_module))) => {
+            root == other_root
+                && (module == other_module
+                    || imports
+                        .iter()
+                        .any(|import| import.alias.is_none() && import.source == other_module))
+        }
+        _ => Path::new(source).parent() == Path::new(candidate).parent(),
     }
 }
 

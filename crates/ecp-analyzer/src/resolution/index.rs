@@ -341,6 +341,31 @@ impl SymbolTable {
             .unwrap_or(&[])
     }
 
+    pub(crate) fn namespace_return_type_visible(
+        &self,
+        id: u32,
+        source: &str,
+        imports: &[ecp_core::analyzer::types::RawImport],
+    ) -> bool {
+        let Some(file) = self.file_of(id) else {
+            return false;
+        };
+        ecp_core::analyzer::type_ladder::namespace_return_type_visible(
+            self.owner(id),
+            self.file_namespaces
+                .get(file)
+                .into_iter()
+                .flatten()
+                .map(String::as_str),
+            self.file_namespaces
+                .get(source)
+                .into_iter()
+                .flatten()
+                .map(String::as_str),
+            imports,
+        )
+    }
+
     pub(crate) fn module_files_by_stem<'a>(&'a self, stem: &str) -> impl Iterator<Item = &'a str> {
         self.files_by_stem(stem)
             .iter()
@@ -428,7 +453,8 @@ impl SymbolTable {
                 self.namespace_decls.push((file_path.into(), key.into()));
             }
         }
-        if kind != NodeKind::Namespace || !fqn_language(language) {
+        if kind != NodeKind::Namespace || !(fqn_language(language) || language == Language::CSharp)
+        {
             return;
         }
         let namespace = node_name.replace('\\', ".");
@@ -1139,7 +1165,8 @@ impl SymbolTable {
             && self.node_kinds[a as usize] == self.node_kinds[b as usize]
             && self.node_owner[a as usize] == self.node_owner[b as usize]
             && leaf_path(a_file) == leaf_path(b_file)
-            && self.file_namespaces.get(a_file) == self.file_namespaces.get(b_file)
+            && (!fqn_language(Language::from_normalized_path(a_file))
+                || self.file_namespaces.get(a_file) == self.file_namespaces.get(b_file))
     }
 
     /// Members named `member` owned by `owner` anywhere in the scope of

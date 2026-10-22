@@ -70,8 +70,8 @@ impl<'a> LanguageFiles<'a> {
                 );
             }
         }
-        // Only fully qualified discovery reads declared namespaces.
-        if fqn_extension(language).is_none() {
+        // C# return types also use declared namespace membership.
+        if fqn_extension(language).is_none() && language != Language::CSharp {
             return files;
         }
         let fresh: FxHashSet<&str> = dirty.iter().map(|f| f.rel_path.as_str()).collect();
@@ -165,6 +165,33 @@ impl<'a> ImportScope<'a> {
 
     pub(crate) fn has_module_name(&self, language: Language, name: &str) -> bool {
         self.with_files(language, |files| files.module_names.contains(name))
+    }
+
+    pub(crate) fn namespace_return_type_visible(
+        &self,
+        file: &str,
+        owner: Option<&str>,
+        source: &str,
+        imports: &[RawImport],
+    ) -> bool {
+        self.with_files(Language::CSharp, |files| {
+            crate::analyzer::type_ladder::namespace_return_type_visible(
+                owner,
+                files
+                    .namespaces
+                    .get(file)
+                    .into_iter()
+                    .flatten()
+                    .map(String::as_str),
+                files
+                    .namespaces
+                    .get(source)
+                    .into_iter()
+                    .flatten()
+                    .map(String::as_str),
+                imports,
+            )
+        })
     }
 
     /// The resolver's `import_is_external`: a Missing import proves its callee
