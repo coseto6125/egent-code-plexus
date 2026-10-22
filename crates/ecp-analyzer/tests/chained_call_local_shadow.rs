@@ -58,6 +58,45 @@ fn test_cpp_local_callable_chain_does_not_use_free_function_return_type() {
 }
 
 #[test]
+fn test_cpp_callable_field_chain_does_not_use_free_function_return_type() {
+    let provider = CppProvider::new().expect("CppProvider::new");
+    let graph = graph_of(
+        &provider,
+        &[(
+            "src/field.cpp",
+            "class Alpha { public: void Bar() {} };\n\
+             class Beta { public: void Bar() {} };\n\
+             Alpha* make() { return nullptr; }\n\
+             class Maker { public: Beta* operator()() { return nullptr; } };\n\
+             class Use {\n\
+                 Maker make;\n\
+             public:\n\
+                 void field() { make()->Bar(); }\n\
+             };\n",
+        )],
+    );
+
+    assert_no_alpha_bar(&graph, "field");
+}
+
+#[test]
+fn test_cpp_function_pointer_parameter_chain_does_not_use_free_function_return_type() {
+    let provider = CppProvider::new().expect("CppProvider::new");
+    let graph = graph_of(
+        &provider,
+        &[(
+            "src/function_pointer.cpp",
+            "class Alpha { public: void Bar() {} };\n\
+             class Beta { public: void Bar() {} };\n\
+             Alpha* make() { return nullptr; }\n\
+             void parameter(Beta* (*make)()) { make()->Bar(); }\n",
+        )],
+    );
+
+    assert_no_alpha_bar(&graph, "parameter");
+}
+
+#[test]
 fn test_csharp_local_callable_chain_does_not_use_member_function_return_type() {
     let provider = CSharpProvider::new().expect("CSharpProvider::new");
     let graph = graph_of(
@@ -79,4 +118,25 @@ fn test_csharp_local_callable_chain_does_not_use_member_function_return_type() {
     assert_no_alpha_bar(&graph, "Local");
     assert_no_alpha_bar(&graph, "Parameter");
     assert_alpha_bar(&graph, "Module");
+}
+
+#[test]
+fn test_csharp_inherited_callable_field_chain_does_not_use_base_method_return_type() {
+    let provider = CSharpProvider::new().expect("CSharpProvider::new");
+    let graph = graph_of(
+        &provider,
+        &[(
+            "src/Field.cs",
+            "using System;\n\
+             class Alpha { public void Bar() {} }\n\
+             class Beta { public void Bar() {} }\n\
+             class Base { protected Alpha Make() { return new Alpha(); } }\n\
+             class Derived : Base {\n\
+                 private Func<Beta> Make = () => new Beta();\n\
+                 public void Field() { Make().Bar(); }\n\
+             }\n",
+        )],
+    );
+
+    assert_no_alpha_bar(&graph, "Field");
 }
