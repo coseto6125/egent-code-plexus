@@ -472,6 +472,21 @@ fn test_resolve_call_python_typed_param_receiver_still_binds_type_member() {
 
 // ---- Java ----
 
+#[test]
+fn test_resolve_call_java_factory_imported_return_type_cross_directory_binds_member() {
+    let graph = single(
+        &JavaProvider::new().unwrap(),
+        &[
+            ("src/models/Foo.java", "package models;\npublic class Foo { public void bar() {} }\n"),
+            ("src/decoy/Other.java", "package decoy;\npublic class Other { public void bar() {} }\n"),
+            ("src/services/Factory.java", "package services;\nimport models.Foo;\npublic class Factory { public static Foo make() { return new Foo(); } }\n"),
+            ("src/app/Use.java", "package app;\nimport services.Factory;\npublic class Use { void caller() { Factory.make().bar(); } }\n"),
+        ],
+    );
+    assert_inner_binds(&graph, "caller", "Factory", "make");
+    assert_binds_foo(&graph, "caller", "bar");
+}
+
 fn java_graph() -> ZeroCopyGraph {
     single(
         &JavaProvider::new().unwrap(),
@@ -536,6 +551,33 @@ fn test_resolve_call_java_typed_param_receiver_still_binds_type_member() {
 
 // ---- Kotlin ----
 
+#[test]
+fn test_resolve_call_kotlin_factory_imported_return_type_cross_directory_binds_member() {
+    let graph = single(
+        &KotlinProvider::new().unwrap(),
+        &[
+            (
+                "src/models/Foo.kt",
+                "package models\nclass Foo { fun bar() {} }\n",
+            ),
+            (
+                "src/decoy/Other.kt",
+                "package decoy\nclass Other { fun bar() {} }\n",
+            ),
+            (
+                "src/services/Factory.kt",
+                "package services\nimport models.Foo\nobject Factory { fun make(): Foo = Foo() }\n",
+            ),
+            (
+                "src/app/Use.kt",
+                "package app\nimport services.Factory\nfun caller() { Factory.make().bar() }\n",
+            ),
+        ],
+    );
+    assert_inner_binds(&graph, "caller", "Factory", "make");
+    assert_binds_foo(&graph, "caller", "bar");
+}
+
 fn kotlin_graph() -> ZeroCopyGraph {
     single(
         &KotlinProvider::new().unwrap(),
@@ -588,6 +630,21 @@ fn test_resolve_call_kotlin_typed_param_receiver_still_binds_type_member() {
 }
 
 // ---- C# ----
+
+#[test]
+fn test_resolve_call_csharp_factory_imported_return_type_cross_directory_binds_member() {
+    let graph = single(
+        &CSharpProvider::new().unwrap(),
+        &[
+            ("src/Models/Foo.cs", "namespace Models { public class Foo { public void Bar() {} } }\n"),
+            ("src/Decoy/Other.cs", "namespace Decoy { public class Other { public void Bar() {} } }\n"),
+            ("src/Services/Factory.cs", "using Models;\nnamespace Services { public class Factory { public static Foo Make() { return new Foo(); } } }\n"),
+            ("src/App/Use.cs", "using Services;\nnamespace App { public class Use { public void Caller() { Factory.Make().Bar(); } } }\n"),
+        ],
+    );
+    assert_inner_binds(&graph, "Caller", "Factory", "Make");
+    assert_binds_foo(&graph, "Caller", "Bar");
+}
 
 fn csharp_graph() -> ZeroCopyGraph {
     single(
@@ -830,6 +887,21 @@ fn test_resolve_call_ruby_untyped_call_receiver_chain_keeps_fallback() {
 }
 
 // ---- Swift ----
+
+#[test]
+fn test_resolve_call_swift_factory_imported_return_type_cross_directory_binds_member() {
+    let graph = single(
+        &SwiftProvider::new().unwrap(),
+        &[
+            ("Sources/Models/Foo.swift", "public class Foo { public func bar() {} }\n"),
+            ("Sources/Decoy/Other.swift", "public class Other { public func bar() {} }\n"),
+            ("Sources/Services/Factory.swift", "import Models\npublic class Factory { public static func make() -> Foo { return Foo() } }\n"),
+            ("Sources/App/Use.swift", "import Services\nfunc caller() { Factory.make().bar() }\n"),
+        ],
+    );
+    assert_inner_binds(&graph, "caller", "Factory", "make");
+    assert_binds_foo(&graph, "caller", "bar");
+}
 
 fn swift_graph() -> ZeroCopyGraph {
     single(
