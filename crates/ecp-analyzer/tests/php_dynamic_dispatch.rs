@@ -296,6 +296,33 @@ fn test_parse_file_name_variable_passed_as_argument_keeps_blind_spot() {
     assert_fanout_keeps_blind_spot(&src, "dispatch", &["Rows.hero"]);
 }
 
+#[test]
+fn test_parse_file_name_variable_passed_in_parentheses_keeps_blind_spot() {
+    let src = api(
+        "const MAP = ['hero'];",
+        "$m = self::MAP[$type] ?? null;\n        $this->normalize(name: (($m)));\n        return Rows::$m($p);",
+    );
+    assert_fanout_keeps_blind_spot(&src, "dispatch", &["Rows.hero"]);
+}
+
+#[test]
+fn test_parse_file_extract_in_function_keeps_blind_spot() {
+    let src = api(
+        "const MAP = ['hero'];",
+        "$m = self::MAP[$type] ?? null;\n        \\EXTRACT($p);\n        return Rows::$m($p);",
+    );
+    assert_fanout_keeps_blind_spot(&src, "dispatch", &["Rows.hero"]);
+}
+
+#[test]
+fn test_parse_file_variable_variable_in_function_keeps_blind_spot() {
+    let src = api(
+        "const MAP = ['hero'];",
+        "$m = self::MAP[$type] ?? null;\n        $$type = 'other';\n        return Rows::$m($p);",
+    );
+    assert_fanout_keeps_blind_spot(&src, "dispatch", &["Rows.hero"]);
+}
+
 // ── negative: the value set is not enumerable → blind spot only ──
 
 #[test]

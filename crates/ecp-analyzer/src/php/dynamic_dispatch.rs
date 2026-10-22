@@ -10,7 +10,8 @@
 //! Without it the static methods the map names have no caller, and
 //! `ecp impact` reports them dead. The fan-out names one candidate per value,
 //! so it stays below the high-trust bar: a `static::` constant can be
-//! overridden by a subclass, and a by-reference argument can rebind the name.
+//! overridden by a subclass, and a by-reference argument, `extract()` or a
+//! variable variable can rebind the name.
 //!
 //! `Name::MAP` matches classes by short name within this file. When the file
 //! declares that short name twice, declares it only in another namespace, or
@@ -53,9 +54,11 @@ pub(super) type BoundValuesCache = FxHashMap<(usize, String), Option<BoundValues
 pub(super) struct BoundValues {
     values: Vec<String>,
     ambiguous: bool,
-    /// The variable is passed to a call, whose by-reference parameter can
-    /// rebind it: the values stay candidates, but not a complete set.
-    passed_as_argument: bool,
+    /// Something can rebind the variable without an assignment the scan
+    /// reads: a call argument (a by-reference parameter), `extract()`, or a
+    /// variable variable (`$$name`). The values stay candidates, but not a
+    /// complete set.
+    may_rebind: bool,
 }
 
 /// The fan-out of a runtime-named method call, when every value its name
@@ -99,7 +102,7 @@ pub(super) fn const_map_fanout(
         .to_string(),
         span,
     };
-    Some((fanout, late_bound || bound.passed_as_argument))
+    Some((fanout, late_bound || bound.may_rebind))
 }
 
 /// The method or named function the call sits in; `None` inside a closure,
@@ -208,7 +211,7 @@ fn bound_values(
         ambiguous: false,
     };
     let mut assigned = false;
-    let mut passed_as_argument = false;
+    let mut may_rebind = false;
     let mut stack = vec![body];
     while let Some(n) = stack.pop() {
         match n.kind() {
@@ -237,10 +240,20 @@ fn bound_values(
                     || (parent.kind() == "subscript_expression" && parent.named_child(0) == Some(n))
                 {
                     return None;
-                } else if parent.kind() == "argument" {
-                    passed_as_argument = true;
+                } else if passes_as_argument(parent) {
+                    may_rebind = true;
                 }
                 continue;
+            }
+            "dynamic_variable_name" => may_rebind = true,
+            "function_call_expression"
+                if n.child_by_field_name("function")
+                    .and_then(|f| f.utf8_text(source).ok())
+                    .is_some_and(|f| {
+                        f.trim_start_matches('\\').eq_ignore_ascii_case("extract")
+                    }) =>
+            {
+                may_rebind = true;
             }
             _ => {}
         }
@@ -254,8 +267,20 @@ fn bound_values(
     Some(BoundValues {
         values: scan.values,
         ambiguous: scan.ambiguous,
-        passed_as_argument,
+        may_rebind,
     })
+}
+
+/// Whether `parent`, the parent of a variable, makes it a call argument:
+/// `f($m)`, `f(name: $m)` or `f(($m))`.
+fn passes_as_argument(mut parent: Node<'_>) -> bool {
+    while parent.kind() == "parenthesized_expression" {
+        let Some(p) = parent.parent() else {
+            return false;
+        };
+        parent = p;
+    }
+    parent.kind() == "argument"
 }
 
 fn mentions(node: Node<'_>, var: &str, source: &[u8]) -> bool {
