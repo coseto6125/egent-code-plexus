@@ -1328,6 +1328,84 @@ fn test_value_read_csharp_inherited_const_returns_heritage_edge() {
     );
 }
 
+#[test]
+fn test_value_read_kotlin_inherited_property_returns_heritage_edge() {
+    let g = graph(
+        &KotlinProvider::new().unwrap(),
+        &[
+            (
+                "src/app/Parent.kt",
+                "package app\nopen class Parent { val LIMIT = 3 }\n",
+            ),
+            (
+                "src/app/Child.kt",
+                "package app\nclass Child : Parent() { fun f(): Int = LIMIT }\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        value_reads(&g, "f"),
+        vec![r("src/app/Parent.kt", "LIMIT", VALUE_READ, 0.8)]
+    );
+}
+
+#[test]
+fn test_value_read_swift_inherited_property_returns_heritage_edge() {
+    let g = graph(
+        &SwiftProvider::new().unwrap(),
+        &[
+            ("Parent.swift", "class Parent { let LIMIT = 3 }\n"),
+            (
+                "Child.swift",
+                "class Child: Parent { func f() -> Int { return LIMIT } }\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        value_reads(&g, "f"),
+        vec![r("Parent.swift", "LIMIT", VALUE_READ, 0.8)]
+    );
+}
+
+#[test]
+fn test_value_read_dart_inherited_property_returns_heritage_edge() {
+    let g = graph(
+        &DartProvider::new().unwrap(),
+        &[
+            ("parent.dart", "class Parent { final int LIMIT = 3; }\n"),
+            (
+                "child.dart",
+                "import 'parent.dart';\nclass Child extends Parent { int f() => LIMIT; }\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        value_reads(&g, "f"),
+        vec![r("parent.dart", "LIMIT", VALUE_READ, 0.8)]
+    );
+}
+
+#[test]
+fn test_value_read_cpp_inherited_static_field_returns_heritage_edge() {
+    let g = graph(
+        &CppProvider::new().unwrap(),
+        &[
+            (
+                "parent.hpp",
+                "class Parent { protected: static const int LIMIT = 3; };\n",
+            ),
+            (
+                "child.cpp",
+                "#include \"parent.hpp\"\nclass Child : public Parent { int f() { return LIMIT; } };\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        value_reads(&g, "f"),
+        vec![r("parent.hpp", "LIMIT", VALUE_READ, 0.8)]
+    );
+}
+
 /// The class's own field hides the inherited one.
 #[test]
 fn test_value_read_java_own_field_hides_inherited_returns_same_file_edge() {
