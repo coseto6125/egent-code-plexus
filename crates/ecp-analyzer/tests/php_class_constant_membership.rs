@@ -1,6 +1,7 @@
 //! A PHP class constant is its class's member: the class links it with
 //! `HasProperty`, and no `File -Defines->` edge claims it as top-level. A
-//! module-level `const` and an enum's constant keep their `Defines` edge.
+//! module-level `const` keeps its `Defines` edge. Enum constants are members
+//! too, so their enum links them with `HasProperty`.
 mod name_ref_support;
 
 use ecp_analyzer::php::parser::PhpProvider;
@@ -49,11 +50,19 @@ fn test_class_membership_php_interface_constant_returns_has_property_from_interf
 }
 
 #[test]
-fn test_class_membership_php_module_and_enum_constants_keep_file_defines() {
+fn test_class_membership_php_module_constant_keeps_file_defines() {
     let g = graph(&PhpProvider::new().unwrap(), &[("p.php", SRC)]);
-    for name in ["LIMIT", "WILD"] {
-        let edges = incoming(&g, name);
-        assert_eq!(edges.len(), 1, "{name}: {edges:?}");
-        assert_eq!(edges[0].1, RelType::Defines, "{name}: {edges:?}");
-    }
+    assert_eq!(
+        incoming(&g, "LIMIT"),
+        vec![("p.php".to_string(), RelType::Defines)]
+    );
+}
+
+#[test]
+fn test_class_membership_php_enum_constant_returns_has_property_from_enum() {
+    let g = graph(&PhpProvider::new().unwrap(), &[("p.php", SRC)]);
+    assert_eq!(
+        incoming(&g, "WILD"),
+        vec![("Suit".to_string(), RelType::HasProperty)]
+    );
 }

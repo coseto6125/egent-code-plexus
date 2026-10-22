@@ -694,6 +694,13 @@ const PHP_SAME_FILE: &str = "<?php\nconst LIMITS = 3;\n\n\
 function readLimit() {\n    return LIMITS;\n}\n\n\
 function shadow($LIMITS) {\n    return $LIMITS;\n}\n";
 
+const PHP_QUALIFIED_CONSTANTS: &str = "<?php\n\
+class Config { const LIMIT = 3; }\n\
+enum Suit { case Hearts; const WILD = 'W'; }\n\
+function readClass(): int { return Config::LIMIT; }\n\
+function readEnum(): string { return Suit::WILD; }\n\
+function readCase(): Suit { return Suit::Hearts; }\n";
+
 #[test]
 fn test_value_read_php_top_level_const_returns_same_file_edge() {
     let g = graph(&PhpProvider::new().unwrap(), &[("p.php", PHP_SAME_FILE)]);
@@ -723,6 +730,23 @@ fn test_value_read_php_const_in_other_file_returns_cross_file_edge() {
         ],
     );
     assert_one_cross_file(&value_reads(&g, "readLimit"), "a.php", "LIMITS");
+}
+
+#[test]
+fn test_value_read_php_qualified_class_and_enum_constants_return_same_file_edges() {
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[("p.php", PHP_QUALIFIED_CONSTANTS)],
+    );
+    assert_eq!(
+        value_reads(&g, "readClass"),
+        vec![r("p.php", "LIMIT", VALUE_READ, SAME_FILE)]
+    );
+    assert_eq!(
+        value_reads(&g, "readEnum"),
+        vec![r("p.php", "WILD", VALUE_READ, SAME_FILE)]
+    );
+    assert_eq!(value_reads(&g, "readCase"), none());
 }
 
 // ---- Ruby ----
