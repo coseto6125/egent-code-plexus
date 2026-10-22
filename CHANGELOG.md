@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.16.2 - 2026-10-22
+
+### Bug Fixes
+
+- reject Blade in flow; resolve PHP const-map method dispatch; bind nullsafe calls (#858)
+
+### Performance
+
+- warm the release build cache from main (#857)
+
 ## v0.16.1 - 2026-10-22
 
 ### Performance
