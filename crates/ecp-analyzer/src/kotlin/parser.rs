@@ -626,6 +626,7 @@ impl LanguageProvider for KotlinProvider {
                 kind: crate::calls::NameRefKind::Value,
                 binding_fields: &[],
                 binding_parents: &["variable_declaration", "catch_block"],
+                capture_patterns: &[],
                 skip_fields: &[],
                 skip_kinds: &[
                     "import_header",
@@ -639,6 +640,10 @@ impl LanguageProvider for KotlinProvider {
                 infix_calls: &["infix_expression"],
                 method_refs: &["callable_reference"],
                 symbol_method_refs: false,
+                named_arg_parents: &["value_argument"],
+                global_decls: &[],
+                map_literal_types: &[],
+                passed_callable: None,
             },
         );
         crate::calls::extract_variant_refs(

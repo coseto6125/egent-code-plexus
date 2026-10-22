@@ -531,7 +531,8 @@ impl LanguageProvider for JavaProvider {
                     ("resource", "name"),
                     ("instanceof_expression", "name"),
                 ],
-                binding_parents: &[],
+                binding_parents: &["type_pattern", "record_pattern_component"],
+                capture_patterns: &[],
                 skip_fields: &[],
                 skip_kinds: &[
                     "marker_annotation",
@@ -544,6 +545,10 @@ impl LanguageProvider for JavaProvider {
                 infix_calls: &[],
                 method_refs: &["method_reference"],
                 symbol_method_refs: false,
+                named_arg_parents: &[],
+                global_decls: &[],
+                map_literal_types: &[],
+                passed_callable: None,
             },
         );
         crate::calls::extract_variant_refs(

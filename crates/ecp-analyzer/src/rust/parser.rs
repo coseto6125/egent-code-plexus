@@ -557,6 +557,7 @@ impl LanguageProvider for RustProvider {
                 kind: crate::calls::NameRefKind::Value,
                 binding_fields: &[("const_item", "name"), ("static_item", "name")],
                 binding_parents: &[],
+                capture_patterns: &[],
                 skip_fields: &[],
                 skip_kinds: &[
                     "use_declaration",
@@ -569,6 +570,10 @@ impl LanguageProvider for RustProvider {
                 infix_calls: &[],
                 method_refs: &[],
                 symbol_method_refs: false,
+                named_arg_parents: &[],
+                global_decls: &[],
+                map_literal_types: &[],
+                passed_callable: None,
             },
         );
         crate::calls::extract_variant_refs(

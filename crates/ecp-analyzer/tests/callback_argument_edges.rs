@@ -29,6 +29,7 @@ use ecp_analyzer::rust::parser::RustProvider;
 use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_analyzer::typescript::parser::TypeScriptProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
+use ecp_core::graph::RelType;
 use name_ref_support::{
     assert_one_cross_file, calls, function_refs, graph, r, Ref, FUNCTION_REFERENCE, IMPORT,
     SAME_FILE,
@@ -423,14 +424,41 @@ fn test_function_reference_rust_direct_call_returns_only_calls_edge() {
 
 // ---- PHP ----
 
-/// A string callable is left to the `call_user_func` literal path; this
-/// mechanism emits no reference for it.
+/// A builtin that takes a callable takes PHP's function value, a string.
 #[test]
-fn test_function_reference_php_string_callable_returns_no_reference_edge() {
-    assert_no_ref(
+fn test_function_reference_php_string_callable_returns_edge() {
+    assert_same_file_ref(
         &PhpProvider::new().unwrap(),
         "p.php",
         "<?php\nfunction fmt($x) { return $x; }\n\nfunction apply($xs) {\n    return array_map('fmt', $xs);\n}\n",
+        "apply",
+        "fmt",
+    );
+}
+
+#[test]
+fn test_function_reference_php_static_method_string_callable_returns_edge() {
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[(
+            "p.php",
+            "<?php\nclass Sorter {\n    public static function byName($a, $b) { return 0; }\n}\n\nfunction sortRows($rows) {\n    usort($rows, 'Sorter::byName');\n    return $rows;\n}\n",
+        )],
+    );
+    // The qualifier-scoped tier, as a direct `Sorter::byName()` call binds.
+    assert_eq!(
+        function_refs(&g, "sortRows"),
+        vec![r("p.php", "byName", FUNCTION_REFERENCE, 0.85)]
+    );
+}
+
+/// The string is a callable only in the builtin's callable position.
+#[test]
+fn test_function_reference_php_string_outside_callable_position_returns_no_edge() {
+    assert_no_ref(
+        &PhpProvider::new().unwrap(),
+        "p.php",
+        "<?php\nfunction fmt($x) { return $x; }\n\nfunction apply($xs) {\n    return array_filter(['fmt'], 'is_string') + [str_repeat('fmt', 2)];\n}\n",
         "apply",
     );
 }
@@ -635,4 +663,22 @@ fn test_function_reference_dart_direct_call_returns_only_calls_edge() {
         "one",
         "transform",
     );
+}
+
+/// The name scan stops at a method reference; the field-read walk does not.
+#[test]
+fn test_field_read_java_method_reference_receiver_field_returns_edge() {
+    let g = graph(
+        &JavaProvider::new().unwrap(),
+        &[(
+            "J.java",
+            "import java.util.List;\nclass Sink { void accept(String s) {} }\nclass J {\n    Sink sink;\n    void viaRef(List<String> xs) {\n        xs.forEach(this.sink::accept);\n    }\n}\n",
+        )],
+    );
+    let reads: Vec<String> =
+        name_ref_support::refs(&g, "viaRef", RelType::ReadsField, "field_read")
+            .into_iter()
+            .map(|(_, name, _, _)| name)
+            .collect();
+    assert_eq!(reads, vec!["sink".to_string()]);
 }

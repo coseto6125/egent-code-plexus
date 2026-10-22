@@ -748,6 +748,7 @@ impl LanguageProvider for CProvider {
                 kind: crate::calls::NameRefKind::Value,
                 binding_fields: &[],
                 binding_parents: &[],
+                capture_patterns: &[],
                 skip_fields: &[],
                 skip_kinds: &[
                     "preproc_include",
@@ -761,6 +762,10 @@ impl LanguageProvider for CProvider {
                 infix_calls: &[],
                 method_refs: &[],
                 symbol_method_refs: false,
+                named_arg_parents: &[],
+                global_decls: &[],
+                map_literal_types: &[],
+                passed_callable: None,
             },
         );
         crate::calls::extract_variant_refs(

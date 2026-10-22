@@ -937,6 +937,7 @@ impl LanguageProvider for RubyProvider {
                 kind: crate::calls::NameRefKind::Constant,
                 binding_fields: &[],
                 binding_parents: &[],
+                capture_patterns: &[],
                 skip_fields: &[],
                 skip_kinds: &[],
                 skip_parents: &[],
@@ -944,6 +945,10 @@ impl LanguageProvider for RubyProvider {
                 infix_calls: &[],
                 method_refs: &[],
                 symbol_method_refs: true,
+                named_arg_parents: &[],
+                global_decls: &[],
+                map_literal_types: &[],
+                passed_callable: None,
             },
         );
 

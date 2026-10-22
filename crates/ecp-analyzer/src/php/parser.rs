@@ -875,8 +875,10 @@ impl LanguageProvider for PhpProvider {
                 kind: crate::calls::NameRefKind::Constant,
                 binding_fields: &[],
                 binding_parents: &[],
+                capture_patterns: &[],
                 skip_fields: &[],
                 skip_kinds: &[
+                    "variable_name",
                     "namespace_use_declaration",
                     "namespace_definition",
                     "named_type",
@@ -897,6 +899,13 @@ impl LanguageProvider for PhpProvider {
                 infix_calls: &[],
                 method_refs: &[],
                 symbol_method_refs: false,
+                named_arg_parents: &[],
+                global_decls: &[],
+                map_literal_types: &[],
+                passed_callable: Some((
+                    "function_call_expression",
+                    super::receiver_types::passed_callable,
+                )),
             },
         );
         crate::calls::extract_variant_refs(
@@ -973,6 +982,28 @@ impl LanguageProvider for PhpProvider {
         detect_enum_imitation_blind_spots(tree.root_node(), path, is_test_file, &mut blind_spots);
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
+        // A class constant is its class's member: only `self::STATUS` or
+        // `Order::STATUS` reaches it, never a bare `STATUS`.
+        let types: Vec<_> = nodes
+            .iter()
+            .filter(|n| {
+                matches!(
+                    n.kind,
+                    NodeKind::Class | NodeKind::Interface | NodeKind::Trait | NodeKind::Enum
+                )
+            })
+            .map(|n| (n.name.clone(), n.span))
+            .collect();
+        for node in nodes
+            .iter_mut()
+            .filter(|n| n.kind == NodeKind::Const && n.owner_class.is_none())
+        {
+            node.owner_class = types
+                .iter()
+                .filter(|(_, span)| ecp_core::analyzer::types::span_contains(*span, node.span))
+                .min_by_key(|(_, span)| crate::framework_helpers::span_area(*span))
+                .map(|(name, _)| name.clone());
+        }
         let tx_scopes =
             collect_symfony_transactional_scopes(&nodes, &[NodeKind::Method, NodeKind::Function]);
         Ok(LocalGraph {

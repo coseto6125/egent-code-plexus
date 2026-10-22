@@ -89,6 +89,22 @@ fn test_send_literal_emits_no_blind_spot() {
     }
 }
 
+/// A setter or an operator is a method name too: the send is static.
+#[test]
+fn test_send_setter_and_operator_literal_emits_no_blind_spot() {
+    for body in [
+        "obj.send(:name=, 1)",
+        "obj.send(:[], 0)",
+        "obj.send(:<=>, 1)",
+    ] {
+        assert!(
+            blind_kinds(body).is_empty(),
+            "{body}: {:?}",
+            blind_kinds(body)
+        );
+    }
+}
+
 #[test]
 fn test_send_variable_target_keeps_blind_spot_and_no_edge() {
     assert_eq!(blind_kinds("obj.send(name)"), vec!["rb-send"]);

@@ -1317,7 +1317,11 @@ impl LanguageProvider for PythonProvider {
                     ("for_in_clause", "left"),
                     ("named_expression", "name"),
                 ],
-                binding_parents: &[],
+                binding_parents: &["splat_pattern"],
+                capture_patterns: &[
+                    ("case_pattern", "dotted_name"),
+                    ("keyword_pattern", "dotted_name"),
+                ],
                 skip_fields: &[],
                 skip_kinds: &[
                     "import_statement",
@@ -1328,11 +1332,15 @@ impl LanguageProvider for PythonProvider {
                     "dotted_name",
                     "type",
                 ],
-                skip_parents: &[],
+                skip_parents: &["keyword_pattern"],
                 call_suffixes: &[],
                 infix_calls: &[],
                 method_refs: &[],
                 symbol_method_refs: false,
+                named_arg_parents: &[],
+                global_decls: &["global_statement"],
+                map_literal_types: &[],
+                passed_callable: None,
             },
         );
         crate::calls::extract_variant_refs(

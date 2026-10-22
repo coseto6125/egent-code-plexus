@@ -759,10 +759,19 @@ impl LanguageProvider for TypeScriptProvider {
             &mut nodes,
             &["member_expression"],
             &crate::calls::NameRefSpec {
-                ident_kinds: &["identifier", "shorthand_property_identifier"],
+                ident_kinds: &[
+                    "identifier",
+                    "shorthand_property_identifier",
+                    "shorthand_property_identifier_pattern",
+                ],
                 kind: crate::calls::NameRefKind::Value,
-                binding_fields: &[("for_in_statement", "left")],
+                binding_fields: &[
+                    ("for_in_statement", "left"),
+                    ("pair_pattern", "value"),
+                    ("object_assignment_pattern", "left"),
+                ],
                 binding_parents: &[],
+                capture_patterns: &[],
                 skip_fields: &[],
                 skip_kinds: &[
                     "import_statement",
@@ -775,6 +784,10 @@ impl LanguageProvider for TypeScriptProvider {
                 infix_calls: &[],
                 method_refs: &[],
                 symbol_method_refs: false,
+                named_arg_parents: &[],
+                global_decls: &[],
+                map_literal_types: &[],
+                passed_callable: None,
             },
         );
         crate::calls::extract_variant_refs(

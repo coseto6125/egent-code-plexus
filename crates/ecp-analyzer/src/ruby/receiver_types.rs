@@ -148,8 +148,8 @@ fn ruby_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Option<Stri
 }
 
 /// The method `send` / `public_send` / `__send__` names with a literal
-/// (`:helper`, `"helper"`); `None` for any other call, a non-literal target,
-/// or a literal that is no method name.
+/// (`:helper`, `"helper"`, `:name=`, `:[]`); `None` for any other call, a
+/// non-literal target, or a literal that is no method name.
 pub(super) fn literal_send_target<'s>(call: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
     let method = call.child_by_field_name("method")?.utf8_text(source).ok()?;
     if !matches!(method, "send" | "public_send" | "__send__") {
@@ -168,11 +168,23 @@ pub(super) fn literal_send_target<'s>(call: Node<'_>, source: &'s [u8]) -> Optio
         }
         _ => return None,
     };
-    let body = name.strip_suffix(['?', '!']).unwrap_or(name);
+    is_method_name(name).then_some(name)
+}
+
+/// A name `def` can declare: an identifier with an optional `?`, `!` or
+/// setter `=`, or one of Ruby's operator methods.
+fn is_method_name(name: &str) -> bool {
+    const OPERATORS: &[&str] = &[
+        "[]", "[]=", "+", "-", "*", "/", "%", "**", "==", "!=", "<", ">", "<=", ">=", "<=>", "===",
+        "=~", "!~", "!", "<<", ">>", "&", "|", "^", "~", "+@", "-@",
+    ];
+    if OPERATORS.contains(&name) {
+        return true;
+    }
+    let body = name.strip_suffix(['?', '!', '=']).unwrap_or(name);
     let mut chars = body.chars();
-    let valid = chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
-        && chars.all(|c| c.is_alphanumeric() || c == '_');
-    valid.then_some(name)
+    chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
 /// Whether `node` is `self`, a constant, or a chain of the constructor-like

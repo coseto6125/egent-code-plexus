@@ -250,15 +250,18 @@ pub fn extract_field_reads(
                 });
             }
         }
-        if frame.scope != NameScope::Skip && scan.visit(&frame, kind, source, &mut memo) {
-            continue;
+        let mut scope = frame.scope;
+        if !matches!(scope, NameScope::Skip | NameScope::Off)
+            && scan.visit(&frame, kind, source, &mut memo)
+        {
+            scope = NameScope::Off;
         }
         let mut cursor = n.walk();
         if cursor.goto_first_child() {
             let parent = ParentShape {
                 node: n,
                 kind,
-                scope: frame.scope,
+                scope,
             };
             loop {
                 let child = cursor.node();
@@ -319,6 +322,10 @@ pub struct NameRefSpec {
     /// Parent kinds whose bare-name children declare local names: Kotlin
     /// `variable_declaration`, whose grammar has no fields.
     pub binding_parents: &'static [&'static str],
+    /// `(pattern kind, wrapper kind)`: a wrapper whose only named child is a
+    /// bare name declares that name. Python `(case_pattern, dotted_name)`:
+    /// `case [LIMIT]:` captures, `case Color.RED:` compares.
+    pub capture_patterns: &'static [(&'static str, &'static str)],
     /// `(parent kind, field)` whose subtree names no value: Go
     /// `(keyed_element, key)`, a struct literal's field name.
     pub skip_fields: &'static [(&'static str, &'static str)],
@@ -338,7 +345,24 @@ pub struct NameRefSpec {
     pub method_refs: &'static [&'static str],
     /// Ruby: `method(:name)` names the method `name`.
     pub symbol_method_refs: bool,
+    /// Parent kinds whose bare name right before `=` is an argument label:
+    /// Kotlin `value_argument` (`sink(limit = 1)`).
+    pub named_arg_parents: &'static [&'static str],
+    /// Statement kinds that say where a name lives without reading it:
+    /// Python `global`. A function's assignment to such a name writes the
+    /// module's, so it declares no local.
+    pub global_decls: &'static [&'static str],
+    /// Composite-literal type kinds whose keys are expressions: Go
+    /// `map_type`. Any other literal's keys are field names, which
+    /// `skip_fields` skips.
+    pub map_literal_types: &'static [&'static str],
+    /// A call kind, and what names the literal callable a call of that kind
+    /// hands on: PHP `array_map('fmt', $xs)` hands on `fmt`.
+    pub passed_callable: Option<(&'static str, CallableNamer)>,
 }
+
+/// Reads the callable name a call hands on, from the call node.
+pub type CallableNamer = fn(Node<'_>, &[u8]) -> Option<String>;
 
 /// Fields whose subtree declares local names in every grammar here.
 const BINDING_FIELDS: &[&str] = &[
@@ -395,13 +419,16 @@ enum NameScope {
     Binding,
     /// A type, import, annotation or label: a bare name is neither.
     Skip,
+    /// Below a node the scan recorded whole (a method reference): nothing
+    /// more is recorded, whatever a field says.
+    Off,
 }
 
 struct Frame<'t> {
     node: Node<'t>,
     parent: Option<Node<'t>>,
     /// The parent's [`kind_flag`]s.
-    parent_kind: u16,
+    parent_kind: u32,
     /// The [`field_flag`]s of the field this node fills in its parent.
     field: u8,
     scope: NameScope,
@@ -411,30 +438,49 @@ struct Frame<'t> {
 #[derive(Clone, Copy)]
 struct ParentShape<'t> {
     node: Node<'t>,
-    kind: u16,
+    kind: u32,
     scope: NameScope,
+}
+
+/// Whether an `=` token precedes `node` among its siblings: in a C#
+/// `let x = LIMIT`, `x` declares and `LIMIT` reads.
+fn after_equals(node: Node<'_>) -> bool {
+    let mut sibling = node.prev_sibling();
+    while let Some(prev) = sibling {
+        if prev.kind() == "=" {
+            return true;
+        }
+        sibling = prev.prev_sibling();
+    }
+    false
 }
 
 /// Bits [`KindMemo::kind`] records for a node kind.
 mod kind_flag {
-    pub const KNOWN: u16 = 1;
+    pub const KNOWN: u32 = 1;
     /// One of the language's member-access kinds.
-    pub const FIELD_ACCESS: u16 = 1 << 1;
-    pub const IDENT: u16 = 1 << 2;
-    pub const SKIP_KIND: u16 = 1 << 3;
+    pub const FIELD_ACCESS: u32 = 1 << 1;
+    pub const IDENT: u32 = 1 << 2;
+    pub const SKIP_KIND: u32 = 1 << 3;
     /// A `*parameter*` node: every child declares, unless a field says else.
-    pub const PARAMETER: u16 = 1 << 4;
+    pub const PARAMETER: u32 = 1 << 4;
     /// A `*declarator*` node: its `name` declares.
-    pub const DECLARATOR: u16 = 1 << 5;
-    pub const METHOD_REF: u16 = 1 << 6;
+    pub const DECLARATOR: u32 = 1 << 5;
+    pub const METHOD_REF: u32 = 1 << 6;
     /// Ruby `call`, which may be `method(:name)`.
-    pub const SYMBOL_CALL: u16 = 1 << 7;
-    pub const BINDING_PARENT: u16 = 1 << 8;
-    pub const SKIP_PARENT: u16 = 1 << 9;
-    pub const CALL_SUFFIX: u16 = 1 << 10;
-    pub const INFIX_CALL: u16 = 1 << 11;
+    pub const SYMBOL_CALL: u32 = 1 << 7;
+    pub const BINDING_PARENT: u32 = 1 << 8;
+    pub const SKIP_PARENT: u32 = 1 << 9;
+    pub const CALL_SUFFIX: u32 = 1 << 10;
+    pub const INFIX_CALL: u32 = 1 << 11;
     /// An `*assignment*` node, whose `left` is a target.
-    pub const ASSIGNMENT: u16 = 1 << 12;
+    pub const ASSIGNMENT: u32 = 1 << 12;
+    pub const NAMED_ARG_PARENT: u32 = 1 << 13;
+    pub const GLOBAL_DECL: u32 = 1 << 14;
+    /// The spec's [`NameRefSpec::passed_callable`] call kind.
+    pub const PASSED_CALL: u32 = 1 << 15;
+    /// A wrapper kind of the spec's [`NameRefSpec::capture_patterns`].
+    pub const CAPTURE_WRAPPER: u32 = 1 << 16;
 }
 
 /// Bits [`KindMemo::field`] records for a field name.
@@ -457,7 +503,7 @@ mod field_flag {
 struct KindMemo<'a> {
     spec: &'a NameRefSpec,
     field_kinds: &'a [&'a str],
-    kinds: Vec<u16>,
+    kinds: Vec<u32>,
     fields: Vec<u8>,
 }
 
@@ -471,7 +517,7 @@ impl<'a> KindMemo<'a> {
         }
     }
 
-    fn kind(&mut self, node: Node<'_>) -> u16 {
+    fn kind(&mut self, node: Node<'_>) -> u32 {
         let id = usize::from(node.kind_id());
         match self.kinds.get(id) {
             Some(&flags) if flags != 0 => flags,
@@ -486,7 +532,7 @@ impl<'a> KindMemo<'a> {
         }
     }
 
-    fn kind_flags(&self, kind: &str) -> u16 {
+    fn kind_flags(&self, kind: &str) -> u32 {
         use kind_flag::*;
         let spec = self.spec;
         [
@@ -502,6 +548,18 @@ impl<'a> KindMemo<'a> {
             (spec.call_suffixes.contains(&kind), CALL_SUFFIX),
             (spec.infix_calls.contains(&kind), INFIX_CALL),
             (kind.contains("assignment"), ASSIGNMENT),
+            (spec.named_arg_parents.contains(&kind), NAMED_ARG_PARENT),
+            (spec.global_decls.contains(&kind), GLOBAL_DECL),
+            (
+                spec.capture_patterns
+                    .iter()
+                    .any(|&(_, wrapper)| wrapper == kind),
+                CAPTURE_WRAPPER,
+            ),
+            (
+                spec.passed_callable.is_some_and(|(call, _)| call == kind),
+                PASSED_CALL,
+            ),
         ]
         .into_iter()
         .fold(KNOWN, |acc, (hit, bit)| if hit { acc | bit } else { acc })
@@ -553,12 +611,25 @@ impl NameRefSpec {
     fn child_scope(
         &self,
         parent: ParentShape<'_>,
-        child_kind: u16,
+        child_kind: u32,
         field: u8,
         cursor: &TreeCursor<'_>,
     ) -> NameScope {
         use field_flag as f;
         use kind_flag as k;
+        if parent.scope == NameScope::Off {
+            return NameScope::Off;
+        }
+        if child_kind & k::CAPTURE_WRAPPER != 0 {
+            let child = cursor.node();
+            if child.named_child_count() == 1
+                && self
+                    .capture_patterns
+                    .contains(&(parent.node.kind(), child.kind()))
+            {
+                return NameScope::Binding;
+            }
+        }
         if child_kind & k::SKIP_KIND != 0 {
             return NameScope::Skip;
         }
@@ -579,8 +650,15 @@ impl NameRefSpec {
             if field & f::VALUE != 0 {
                 return NameScope::Value;
             }
-            if field & f::SKIP != 0 || pair(self.skip_fields) {
+            if field & f::SKIP != 0 {
                 return NameScope::Skip;
+            }
+            if pair(self.skip_fields) {
+                return if literal_typed_by(parent.node, self.map_literal_types) {
+                    NameScope::Value
+                } else {
+                    NameScope::Skip
+                };
             }
         }
         if parameter && parent.scope != NameScope::Skip {
@@ -608,10 +686,27 @@ impl NameRefSpec {
         {
             return false;
         }
+        if parent & k::NAMED_ARG_PARENT != 0
+            && ident.next_sibling().is_some_and(|s| s.kind() == "=")
+        {
+            return false;
+        }
         !(parent & k::INFIX_CALL != 0
             && ident.prev_named_sibling().is_some()
             && ident.next_named_sibling().is_some())
     }
+}
+
+/// Whether the composite literal holding `keyed`, a keyed element, is
+/// typed by one of `types`. An elided inner literal (`{"a": {..}}`) names
+/// no type, so its keys stay field names.
+fn literal_typed_by(keyed: Node<'_>, types: &[&str]) -> bool {
+    !types.is_empty()
+        && keyed
+            .parent()
+            .and_then(|body| body.parent())
+            .and_then(|literal| literal.child_by_field_name("type"))
+            .is_some_and(|ty| types.contains(&ty.kind()))
 }
 
 /// A bare name read inside a body, pending its enclosing function.
@@ -631,15 +726,18 @@ struct PendingBinding<'s> {
 struct NameScan<'s> {
     reads: Vec<PendingName<'s>>,
     bindings: Vec<PendingBinding<'s>>,
+    /// Names a [`NameRefSpec::global_decls`] statement places in the module.
+    globals: Vec<PendingBinding<'s>>,
 }
 
 impl<'s> NameScan<'s> {
     /// Record what `frame`'s node declares or reads. True when its subtree
-    /// holds nothing more to record (a method reference).
+    /// holds no further name to record (a method reference); the walk still
+    /// descends for field reads.
     fn visit(
         &mut self,
         frame: &Frame<'_>,
-        kind: u16,
+        kind: u32,
         source: &'s [u8],
         memo: &mut KindMemo<'_>,
     ) -> bool {
@@ -657,7 +755,15 @@ impl<'s> NameScan<'s> {
                     pos: start_pos(n),
                     name,
                 }),
-                NameScope::Value if frame.parent_kind & kind_flag::BINDING_PARENT != 0 => {
+                NameScope::Value if frame.parent_kind & kind_flag::GLOBAL_DECL != 0 => {
+                    self.globals.push(PendingBinding {
+                        pos: start_pos(n),
+                        name,
+                    });
+                }
+                NameScope::Value
+                    if frame.parent_kind & kind_flag::BINDING_PARENT != 0 && !after_equals(n) =>
+                {
                     self.bindings.push(PendingBinding {
                         pos: start_pos(n),
                         name,
@@ -684,6 +790,15 @@ impl<'s> NameScan<'s> {
             }
             return true;
         }
+        if kind & kind_flag::PASSED_CALL != 0 {
+            if let Some(name) = spec.passed_callable.and_then(|(_, named)| named(n, source)) {
+                self.reads.push(PendingName {
+                    pos: start_pos(n),
+                    name: Cow::Owned(name),
+                    kind: NameRefKind::Function,
+                });
+            }
+        }
         if kind & kind_flag::SYMBOL_CALL != 0 {
             if let Some(name) = symbol_method_ref(n, source) {
                 self.reads.push(PendingName {
@@ -703,10 +818,16 @@ impl<'s> NameScan<'s> {
         if self.reads.is_empty() {
             return;
         }
+        let globals: rustc_hash::FxHashSet<(usize, &str)> = self
+            .globals
+            .iter()
+            .zip(enclosing_targets(containers, &self.globals, |g| g.pos))
+            .filter_map(|(global, target)| Some((target?, global.name)))
+            .collect();
         let mut bound: rustc_hash::FxHashMap<&str, Vec<usize>> = rustc_hash::FxHashMap::default();
         let binding_targets = enclosing_targets(containers, &self.bindings, |b| b.pos);
         for (binding, target) in self.bindings.iter().zip(binding_targets) {
-            if let Some(node_idx) = target {
+            if let Some(node_idx) = target.filter(|&t| !globals.contains(&(t, binding.name))) {
                 bound.entry(binding.name).or_default().push(node_idx);
             }
         }

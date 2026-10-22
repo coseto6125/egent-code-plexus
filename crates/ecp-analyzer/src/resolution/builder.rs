@@ -11,6 +11,7 @@ use ecp_core::analyzer::lexical::LexicalFunctions;
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::analyzer::reexport::{export_filter_applies, is_ecmascript, ImportRef};
+use ecp_core::analyzer::same_file_pick::PickFacts;
 use ecp_core::analyzer::types::{
     owner_key, CallSite, LocalGraph, NameRef, NameRefKind, RawImport, RawNode, RawRoute, VariantRef,
 };
@@ -2488,7 +2489,7 @@ struct NameRefReasons {
 ///
 /// In a language where a bare name reaches a member of the enclosing type
 /// (Java `TABLE`, C# method group `Print`), the reader's own type is tried
-/// first. Then the ordinary tiers: same file, import, and the unique
+/// first, then the types it inherits from. Then the ordinary tiers: same file, import, and the unique
 /// project-wide declaration ([`ResolutionTier::Global`]). The global tier is
 /// dropped where a module must import a name before it can use it bare, as
 /// there it can only stand for a local the parser did not see. An
@@ -2505,7 +2506,14 @@ fn resolve_name_ref(
         .name
         .rsplit_once('.')
         .map_or(name_ref.name, |(_, member)| member);
-    if symbol_table.global_match_count(member) == 0 {
+    // An import alias (`import { LIMITS as CAP }`) declares no node of its
+    // own name; the import tier still reaches the declaration it names.
+    if symbol_table.global_match_count(member) == 0
+        && !local_graph
+            .imports
+            .iter()
+            .any(|import| import.alias.as_deref() == Some(member))
+    {
         return None;
     }
     let qualified = member.len() != name_ref.name.len();
@@ -2528,6 +2536,28 @@ fn resolve_name_ref(
                 .as_slice()
             {
                 return Some((*id, ResolutionTier::SameFile.base_confidence()));
+            }
+        }
+        // A member the reader's type inherits: `Child.f` reads `Parent.LIMIT`.
+        let simple = owner.rsplit(['.', ':']).next().unwrap_or(owner);
+        if let Some(ty) = symbol_table.lookup_in_file_with_kind(file, simple, ResolveTarget::Type) {
+            for &target in own_kinds {
+                if let ecp_core::analyzer::type_ladder::Ownership::Owned { id, inherited } =
+                    ecp_core::analyzer::type_ladder::member_ownership(
+                        symbol_table,
+                        ty,
+                        owner,
+                        member,
+                        target,
+                    )
+                {
+                    let tier = if !inherited && symbol_table.file_of(id) == Some(file) {
+                        ResolutionTier::SameFile
+                    } else {
+                        ResolutionTier::HeritageScoped
+                    };
+                    return Some((id, tier.base_confidence()));
+                }
             }
         }
     }
@@ -2565,8 +2595,34 @@ fn resolve_name_ref(
             | Language::Java
             | Language::CSharp
     );
-    if (module_scoped && confidence <= ResolutionTier::Global.base_confidence())
+    let global = confidence <= ResolutionTier::Global.base_confidence();
+    // A Go bare name reaches only its own package: one directory.
+    let other_package = || {
+        fn dir(file: &str) -> Option<&std::path::Path> {
+            std::path::Path::new(file).parent()
+        }
+        symbol_table
+            .file_of(id)
+            .is_some_and(|target| dir(target) != dir(file))
+    };
+    // Only these languages reach a type's member by a bare name, through
+    // the reader's own type above; elsewhere a type's constant is no read.
+    let type_member = || {
+        !matches!(
+            language,
+            Language::Java
+                | Language::Kotlin
+                | Language::CSharp
+                | Language::Swift
+                | Language::Dart
+                | Language::Cpp
+                | Language::Ruby
+        ) && symbol_table.owner(id).is_some()
+    };
+    if (module_scoped && global)
+        || (language == Language::Go && global && other_package())
         || (name_ref.kind == NameRefKind::Constant && symbol_table.node_kind(id).is_callable())
+        || (name_ref.kind != NameRefKind::Function && type_member())
     {
         return None;
     }

@@ -714,3 +714,330 @@ fn test_value_read_dart_imported_const_returns_cross_file_edge() {
     );
     assert_one_cross_file(&value_reads(&g, "readLimit"), "a.dart", "limits");
 }
+
+// ---- Shapes a review found mis-scanned ----
+
+/// An import alias has no declaration of its own name; the read still
+/// reaches the declaration the import names.
+#[test]
+fn test_value_read_typescript_aliased_import_returns_import_edge() {
+    let g = graph(
+        &TypeScriptProvider::new().unwrap(),
+        &[
+            ("lib.ts", "export const LIMITS = { max: 3 };\n"),
+            (
+                "app.ts",
+                "import { LIMITS as CAP } from './lib';\nexport function readLimit(): number {\n  return CAP.max;\n}\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        value_reads(&g, "readLimit"),
+        vec![r("lib.ts", "LIMITS", VALUE_READ, IMPORT)]
+    );
+}
+
+#[test]
+fn test_value_read_python_aliased_import_returns_cross_file_edge() {
+    let g = graph(
+        &PythonProvider::new().unwrap(),
+        &[
+            ("lib.py", "LIMITS = {'max': 3}\n"),
+            (
+                "app.py",
+                "from lib import LIMITS as CAP\n\ndef read_limit():\n    return CAP['max']\n",
+            ),
+        ],
+    );
+    assert_one_cross_file(&value_reads(&g, "read_limit"), "lib.py", "LIMITS");
+}
+
+/// `const { LIMITS } = obj` declares a local `LIMITS`.
+#[test]
+fn test_value_read_typescript_destructured_local_shadows_constant_returns_no_edge() {
+    let g = graph(
+        &TypeScriptProvider::new().unwrap(),
+        &[(
+            "a.ts",
+            "export const LIMITS = { max: 3 };\nexport function f(obj: any): number {\n  const { LIMITS } = obj;\n  return LIMITS.max;\n}\n",
+        )],
+    );
+    assert_eq!(value_reads(&g, "f"), none());
+}
+
+#[test]
+fn test_value_read_javascript_destructured_parameter_shadows_constant_returns_no_edge() {
+    let g = graph(
+        &JavaScriptProvider::new().unwrap(),
+        &[(
+            "a.js",
+            "export const LIMITS = { max: 3 };\nexport function f({ LIMITS }) {\n  return LIMITS.max;\n}\n",
+        )],
+    );
+    assert_eq!(value_reads(&g, "f"), none());
+}
+
+/// `sink(LIMIT = 1)` names a parameter; only the value after `=` is read.
+#[test]
+fn test_value_read_kotlin_named_argument_label_returns_no_edge() {
+    let g = graph(
+        &KotlinProvider::new().unwrap(),
+        &[(
+            "a.kt",
+            "val LIMIT = 3\nval OTHER = 4\nfun sink(LIMIT: Int) {}\nfun f() {\n    sink(LIMIT = OTHER)\n}\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "f"),
+        vec![r("a.kt", "OTHER", VALUE_READ, SAME_FILE)]
+    );
+}
+
+/// `global TIMEOUT` declares where the name lives; it reads nothing.
+#[test]
+fn test_value_read_python_global_statement_returns_no_edge() {
+    let g = graph(
+        &PythonProvider::new().unwrap(),
+        &[(
+            "a.py",
+            "TIMEOUT = 5\n\ndef f():\n    global TIMEOUT\n    return 0\n",
+        )],
+    );
+    assert_eq!(value_reads(&g, "f"), none());
+}
+
+/// A map literal's key is an expression; a struct literal's key is a field
+/// name.
+#[test]
+fn test_value_read_go_map_literal_key_returns_edge_struct_key_returns_none() {
+    let g = graph(
+        &GoProvider::new().unwrap(),
+        &[(
+            "a.go",
+            "package a\n\nconst KEY = \"x\"\n\ntype S struct{ KEY int }\n\nfunc m() map[string]int {\n\treturn map[string]int{KEY: 1}\n}\n\nfunc s() S {\n\treturn S{KEY: 2}\n}\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "m"),
+        vec![r("a.go", "KEY", VALUE_READ, SAME_FILE)]
+    );
+    assert_eq!(value_reads(&g, "s"), none());
+}
+
+/// `global COUNTER` then `COUNTER = COUNTER + 1` writes the module's
+/// variable: the assignment declares no local, so the read binds.
+#[test]
+fn test_value_read_python_global_then_assignment_returns_module_edge() {
+    let g = graph(
+        &PythonProvider::new().unwrap(),
+        &[(
+            "a.py",
+            "COUNTER = 0\n\ndef bump():\n    global COUNTER\n    COUNTER = COUNTER + 1\n    return COUNTER\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "bump"),
+        vec![r("a.py", "COUNTER", VALUE_READ, SAME_FILE)]
+    );
+}
+
+/// PHP variables and constants live apart: `$LIMIT` neither reads nor
+/// shadows the constant `LIMIT`.
+#[test]
+fn test_value_read_php_variable_neither_reads_nor_shadows_constant() {
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[(
+            "p.php",
+            "<?php\nconst LIMIT = 3;\n\nfunction local_var() {\n    $LIMIT = 5;\n    return $LIMIT;\n}\n\nfunction param_then_const($LIMIT) {\n    return LIMIT;\n}\n",
+        )],
+    );
+    assert_eq!(value_reads(&g, "local_var"), none());
+    assert_eq!(
+        value_reads(&g, "param_then_const"),
+        vec![r("p.php", "LIMIT", VALUE_READ, SAME_FILE)]
+    );
+}
+
+/// A bare PHP name never reaches a class constant (that takes `self::`).
+#[test]
+fn test_value_read_php_class_constant_namesake_returns_no_edge() {
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[(
+            "p.php",
+            "<?php\nclass Order {\n    const STATUS = 'x';\n}\n\nfunction label() {\n    return STATUS;\n}\n",
+        )],
+    );
+    assert_eq!(value_reads(&g, "label"), none());
+}
+
+/// A Go bare name reaches its own package only; `log` here is the import.
+#[test]
+fn test_value_read_go_other_package_var_returns_no_edge() {
+    let g = graph(
+        &GoProvider::new().unwrap(),
+        &[
+            ("goa/a.go", "package goa\n\nvar log = 1\n"),
+            (
+                "gob/b.go",
+                "package gob\n\nimport \"log\"\n\nfunc Use() {\n\tlog.Println(\"x\")\n}\n",
+            ),
+        ],
+    );
+    assert_eq!(value_reads(&g, "Use"), none());
+}
+
+#[test]
+fn test_value_read_go_same_package_var_other_file_returns_edge() {
+    let g = graph(
+        &GoProvider::new().unwrap(),
+        &[
+            ("goa/a.go", "package goa\n\nvar limit = 1\n"),
+            (
+                "goa/b.go",
+                "package goa\n\nfunc Use() int {\n\treturn limit\n}\n",
+            ),
+        ],
+    );
+    assert_one_cross_file(&value_reads(&g, "Use"), "goa/a.go", "limit");
+}
+
+/// Pattern variables are locals.
+#[test]
+fn test_value_read_java_type_pattern_shadows_field_returns_no_edge() {
+    let g = graph(
+        &JavaProvider::new().unwrap(),
+        &[(
+            "J.java",
+            "class J {\n    static final int LIMIT = 3;\n    int sw(Object o) {\n        return switch (o) {\n            case Integer LIMIT -> LIMIT;\n            default -> 0;\n        };\n    }\n}\n",
+        )],
+    );
+    assert_eq!(value_reads(&g, "sw"), none());
+}
+
+#[test]
+fn test_value_read_csharp_tuple_deconstruction_shadows_const_returns_no_edge() {
+    let g = graph(
+        &CSharpProvider::new().unwrap(),
+        &[(
+            "C.cs",
+            "class C {\n    const int LIMIT = 3;\n    int Tuple((int, int) t) {\n        var (LIMIT, b) = t;\n        return LIMIT;\n    }\n}\n",
+        )],
+    );
+    assert_eq!(value_reads(&g, "Tuple"), none());
+}
+
+/// A LINQ `let` declares its name; its initializer still reads.
+#[test]
+fn test_value_read_csharp_linq_let_shadows_const_returns_initializer_edge_only() {
+    let g = graph(
+        &CSharpProvider::new().unwrap(),
+        &[(
+            "C.cs",
+            "class C {\n    const int LIMIT = 3;\n    object Shadow(int[] xs) {\n        return from x in xs let LIMIT = x select LIMIT;\n    }\n    object Read(int[] xs) {\n        return from x in xs let y = LIMIT select y;\n    }\n}\n",
+        )],
+    );
+    assert_eq!(value_reads(&g, "Shadow"), none());
+    assert_eq!(
+        value_reads(&g, "Read"),
+        vec![r("C.cs", "LIMIT", VALUE_READ, SAME_FILE)]
+    );
+}
+
+/// A bare name in a `case` pattern captures, a `*rest` captures, and a
+/// keyword pattern's label names an attribute: none reads the module's.
+#[test]
+fn test_value_read_python_case_capture_shadows_constant_returns_no_edge() {
+    let g = graph(
+        &PythonProvider::new().unwrap(),
+        &[(
+            "m.py",
+            "LIMIT = 3\nx = 1\n\n\ndef capture(v):\n    match v:\n        case [LIMIT]:\n            return LIMIT\n\n\ndef splat(v):\n    match v:\n        case [_, *LIMIT]:\n            return LIMIT\n\n\ndef keyword(v):\n    match v:\n        case Point(x=LIMIT):\n            return LIMIT\n",
+        )],
+    );
+    assert_eq!(value_reads(&g, "capture"), none());
+    assert_eq!(value_reads(&g, "splat"), none());
+    assert_eq!(value_reads(&g, "keyword"), none());
+}
+
+/// A guard outside the pattern still reads the module's constant.
+#[test]
+fn test_value_read_python_case_guard_reads_constant_returns_same_file_edge() {
+    let g = graph(
+        &PythonProvider::new().unwrap(),
+        &[(
+            "m.py",
+            "LIMIT = 3\n\n\ndef guard(v):\n    match v:\n        case [n] if n > LIMIT:\n            return n\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "guard"),
+        vec![r("m.py", "LIMIT", VALUE_READ, SAME_FILE)]
+    );
+}
+
+/// A bare name reaches a static constant the reader's class inherits.
+#[test]
+fn test_value_read_java_inherited_static_field_returns_heritage_edge() {
+    let g = graph(
+        &JavaProvider::new().unwrap(),
+        &[
+            (
+                "src/app/Parent.java",
+                "package app;\n\npublic class Parent {\n    static final int LIMIT = 3;\n}\n",
+            ),
+            (
+                "src/app/Child.java",
+                "package app;\n\npublic class Child extends Parent {\n    int f() {\n        return LIMIT;\n    }\n}\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        value_reads(&g, "f"),
+        vec![r("src/app/Parent.java", "LIMIT", VALUE_READ, 0.8)]
+    );
+}
+
+#[test]
+fn test_value_read_csharp_inherited_const_returns_heritage_edge() {
+    let g = graph(
+        &CSharpProvider::new().unwrap(),
+        &[
+            (
+                "Base.cs",
+                "public class Base {\n    public const int LIMIT = 3;\n}\n",
+            ),
+            (
+                "Derived.cs",
+                "public class Derived : Base {\n    int F() {\n        return LIMIT;\n    }\n}\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        value_reads(&g, "F"),
+        vec![r("Base.cs", "LIMIT", VALUE_READ, 0.8)]
+    );
+}
+
+/// The class's own field hides the inherited one.
+#[test]
+fn test_value_read_java_own_field_hides_inherited_returns_same_file_edge() {
+    let g = graph(
+        &JavaProvider::new().unwrap(),
+        &[
+            (
+                "src/app/Parent.java",
+                "package app;\n\npublic class Parent {\n    static final int LIMIT = 3;\n}\n",
+            ),
+            (
+                "src/app/Child.java",
+                "package app;\n\npublic class Child extends Parent {\n    static final int LIMIT = 4;\n    int f() {\n        return LIMIT;\n    }\n}\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        value_reads(&g, "f"),
+        vec![r("src/app/Child.java", "LIMIT", VALUE_READ, SAME_FILE)]
+    );
+}

@@ -651,8 +651,11 @@ impl LanguageProvider for CSharpProvider {
                     ("declaration_expression", "name"),
                     ("declaration_pattern", "name"),
                     ("from_clause", "name"),
+                    ("tuple_pattern", "name"),
+                    ("parenthesized_variable_designation", "name"),
                 ],
-                binding_parents: &[],
+                binding_parents: &["let_clause"],
+                capture_patterns: &[],
                 skip_fields: &[],
                 skip_kinds: &[
                     "using_directive",
@@ -666,6 +669,10 @@ impl LanguageProvider for CSharpProvider {
                 infix_calls: &[],
                 method_refs: &[],
                 symbol_method_refs: false,
+                named_arg_parents: &[],
+                global_decls: &[],
+                map_literal_types: &[],
+                passed_callable: None,
             },
         );
         crate::calls::extract_variant_refs(

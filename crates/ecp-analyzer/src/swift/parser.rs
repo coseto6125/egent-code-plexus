@@ -624,6 +624,7 @@ impl LanguageProvider for SwiftProvider {
                     ("catch_block", "error"),
                 ],
                 binding_parents: &[],
+                capture_patterns: &[],
                 skip_fields: &[],
                 skip_kinds: &[
                     "import_declaration",
@@ -637,6 +638,10 @@ impl LanguageProvider for SwiftProvider {
                 infix_calls: &[],
                 method_refs: &[],
                 symbol_method_refs: false,
+                named_arg_parents: &[],
+                global_decls: &[],
+                map_literal_types: &[],
+                passed_callable: None,
             },
         );
         crate::calls::extract_variant_refs(

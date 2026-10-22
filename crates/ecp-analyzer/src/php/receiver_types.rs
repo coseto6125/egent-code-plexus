@@ -298,6 +298,51 @@ pub(super) fn literal_callable(call: Node<'_>, source: &[u8]) -> Option<LiteralC
     }
 }
 
+/// The function a builtin call hands on as a literal callable, for the
+/// name scan to record: `array_map('fmt', $xs)` hands on `fmt`,
+/// `usort($rows, 'Sorter::byName')` hands on `Sorter.byName`.
+/// `call_user_func` calls its callable, so [`literal_callable`] owns it.
+pub(crate) fn passed_callable(call: Node<'_>, source: &[u8]) -> Option<String> {
+    let function = call.child_by_field_name("function")?;
+    if function.kind() != "name" {
+        return None;
+    }
+    let position = match function.utf8_text(source).ok()? {
+        "array_map"
+        | "register_shutdown_function"
+        | "spl_autoload_register"
+        | "set_error_handler"
+        | "set_exception_handler"
+        | "header_register_callback" => 0,
+        "array_filter"
+        | "array_walk"
+        | "array_walk_recursive"
+        | "array_reduce"
+        | "usort"
+        | "uasort"
+        | "uksort"
+        | "preg_replace_callback"
+        | "iterator_apply" => 1,
+        _ => return None,
+    };
+    let args = call.child_by_field_name("arguments")?;
+    let arg = args.named_children(&mut args.walk()).nth(position)?;
+    let value = arg.named_child(0).unwrap_or(arg);
+    let text = string_literal_text(value, source)?;
+    match text.split_once("::") {
+        Some((class, method)) if is_ident(method) => {
+            let class = qualified_ident(class)?;
+            let class = class.rsplit('\\').next().unwrap_or(class);
+            Some(format!("{class}.{method}"))
+        }
+        Some(_) => None,
+        None => {
+            let function = qualified_ident(&text)?;
+            Some(function.rsplit('\\').next().unwrap_or(function).to_string())
+        }
+    }
+}
+
 /// The callee entry the ordinary call of the same shape records.
 fn literal_callable_callee(target: LiteralCallable, pos: Pos, ctx: &ClassContext) -> String {
     match target {
