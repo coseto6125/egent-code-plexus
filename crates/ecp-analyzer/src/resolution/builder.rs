@@ -2525,6 +2525,15 @@ fn resolve_name_ref(
         // `Method`, not `Callable`: inside `class Foo`, the receiver of
         // `Foo.Create()` names the type, never its constructor.
         let own_kinds: &[ResolveTarget] = match (name_ref.kind, language) {
+            (NameRefKind::Value | NameRefKind::Constant, Language::Rust)
+                if symbol_table.count_in_file_with_kind(file, owner, ResolveTarget::Qualifier)
+                    == 1
+                    && symbol_table
+                        .lookup_in_file_with_kind(file, owner, ResolveTarget::Qualifier)
+                        .is_some_and(|id| symbol_table.node_kind(id) == NodeKind::Module) =>
+            {
+                &[ResolveTarget::Value]
+            }
             _ if free_only => &[],
             (NameRefKind::Function, _) => &[ResolveTarget::Method],
             (NameRefKind::Value, Language::CSharp | Language::Swift | Language::Dart) => {
