@@ -35,7 +35,8 @@ pub struct DirtyEntry {
     /// manifests parse unchanged) = `Vec<Fragment>` symbol list; `2` =
     /// `FragmentFile` (symbols + imports + per-symbol calls) consumed by the
     /// query-time `OverlayView`; `3` adds the file's export aliases; `4` adds
-    /// each symbol's heritage and enum-variant references. Readers MUST
+    /// each symbol's heritage and enum-variant references; `5` preserves all
+    /// field reads and function return types. Readers MUST
     /// dispatch on this — decoding a bin as another version is
     /// undefined under rkyv.
     #[serde(default = "default_fragment_format")]
@@ -52,9 +53,10 @@ fn default_fragment_format() -> u32 {
 pub const FRAGMENT_FORMAT_V2: u32 = 2;
 /// Fragment bins with export aliases, without heritage and variant refs.
 pub const FRAGMENT_FORMAT_V3: u32 = 3;
-/// Current fragment bin encoding version written by `overlay_writer`.
+/// v4 adds heritage and enum-variant references.
 pub const FRAGMENT_FORMAT_V4: u32 = 4;
-/// v5 persists every `RawNode.field_reads` entry and function return types.
+/// Current fragment bin encoding version written by `overlay_writer`; it
+/// persists every `RawNode.field_reads` entry and function return type.
 pub const FRAGMENT_FORMAT_V5: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

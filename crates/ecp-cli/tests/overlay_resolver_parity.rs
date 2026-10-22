@@ -2283,6 +2283,22 @@ fn chain_parity(
     check_parity_from(caller, provider, files, dirty, &expected, &expected);
 }
 
+fn chain_without_member_parity(
+    caller: &str,
+    provider: &dyn LanguageProvider,
+    files: &[(&str, &str)],
+    dirty: &[(&str, &str)],
+    member: &str,
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    let expected = targets(&reindex(tmp.path(), provider, files, dirty), caller);
+    assert!(
+        !expected.iter().any(|(_, name, _, _)| name == member),
+        "the unresolved return type must not bind a namesake member: {expected:?}"
+    );
+    check_parity_from(caller, provider, files, dirty, &expected, &expected);
+}
+
 const TS_FACTORY: (&str, &str) = (
     "foo.ts",
     "export class Foo {\n  static create(): Foo { return new Foo(); }\n  bar(): void {}\n}\nexport class Other {\n  bar(): void {}\n}\nexport function make(): Foo { return new Foo(); }\n",
@@ -2417,7 +2433,7 @@ fn test_overlay_java_chained_member_same_package_return_type_matches_reindex() {
 }
 
 #[test]
-fn test_overlay_java_chained_member_other_package_return_type_falls_back_matches_reindex() {
+fn test_overlay_java_chained_member_imported_return_type_matches_reindex() {
     let files = [
         JAVA_CHAIN_FOO,
         JAVA_CHAIN_OTHER,
@@ -2431,11 +2447,226 @@ fn test_overlay_java_chained_member_other_package_return_type_falls_back_matches
         "src/app/Use.java",
         "package app;\n\nimport factory.Factory;\n\npublic class Use {\n    void run() { Factory.make().bar(); }\n}\n",
     )];
-    let tmp = tempfile::tempdir().unwrap();
-    let expected = targets(&reindex(tmp.path(), &java(), &files, &dirty), "run");
-    assert!(
-        !expected.iter().any(|(_, name, _, _)| name == "bar"),
-        "`Foo` is declared outside the callee's package: the untyped `bar` has two owners: {expected:?}"
+    chain_parity("run", &java(), &files, &dirty, "bar", "Foo");
+}
+
+#[test]
+fn test_overlay_java_chained_member_dirty_imported_factory_matches_reindex() {
+    let factory = "package factory;\n\nimport app.Other;\n\npublic class Factory {\n    public static Other make() { return new Other(); }\n}\n";
+    chain_parity(
+        "run",
+        &java(),
+        &[
+            JAVA_CHAIN_FOO,
+            JAVA_CHAIN_OTHER,
+            (
+                "src/factory/Factory.java",
+                "package factory;\n\nimport app.Foo;\n\npublic class Factory {\n    public static Foo make() { return new Foo(); }\n}\n",
+            ),
+            JAVA_CHAIN_USE,
+        ],
+        &[
+            ("src/factory/Factory.java", factory),
+            (
+                "src/app/Use.java",
+                "package app;\n\nimport factory.Factory;\n\npublic class Use {\n    void run() { Factory.make().bar(); }\n}\n",
+            ),
+        ],
+        "bar",
+        "Other",
     );
-    check_parity_from("run", &java(), &files, &dirty, &expected, &expected);
+}
+
+#[test]
+fn test_overlay_kotlin_chained_member_imported_return_type_matches_reindex() {
+    let factory =
+        "package services\nimport models.Foo\nobject Factory { fun make(): Foo = Foo() }\n";
+    let use_file = "package app\nimport services.Factory\nfun run() { Factory.make().bar() }\n";
+    chain_parity(
+        "run",
+        &kotlin(),
+        &[
+            (
+                "src/models/Foo.kt",
+                "package models\nclass Foo { fun bar() {} }\n",
+            ),
+            (
+                "src/decoy/Other.kt",
+                "package decoy\nclass Other { fun bar() {} }\n",
+            ),
+            ("src/services/Factory.kt", factory),
+            (
+                "src/app/Use.kt",
+                "package app\nimport services.Factory\nfun run() {}\n",
+            ),
+        ],
+        &[("src/app/Use.kt", use_file)],
+        "bar",
+        "Foo",
+    );
+}
+
+#[test]
+fn test_overlay_kotlin_chained_member_dirty_imported_factory_matches_reindex() {
+    chain_parity(
+        "run",
+        &kotlin(),
+        &[
+            ("src/models/Foo.kt", "package models\nclass Foo { fun bar() {} }\n"),
+            ("src/decoy/Other.kt", "package decoy\nclass Other { fun bar() {} }\n"),
+            ("src/services/Factory.kt", "package services\nimport models.Foo\nobject Factory { fun make(): Foo = Foo() }\n"),
+            ("src/app/Use.kt", "package app\nimport services.Factory\nfun run() {}\n"),
+        ],
+        &[
+            ("src/services/Factory.kt", "package services\nimport decoy.Other\nobject Factory { fun make(): Other = Other() }\n"),
+            ("src/app/Use.kt", "package app\nimport services.Factory\nfun run() { Factory.make().bar() }\n"),
+        ],
+        "bar",
+        "Other",
+    );
+}
+
+#[test]
+fn test_overlay_csharp_chained_member_imported_return_type_matches_reindex() {
+    let factory = "using Models;\nnamespace Services { public class Factory { public static Foo Make() { return new Foo(); } } }\n";
+    let use_file = "using Services;\nnamespace App { public class Use { public void Run() { Factory.Make().Bar(); } } }\n";
+    chain_parity(
+        "Run",
+        &CSharpProvider::new().unwrap(),
+        &[
+            (
+                "src/Models/Foo.cs",
+                "namespace Models { public class Foo { public void Bar() {} } }\n",
+            ),
+            (
+                "src/Decoy/Other.cs",
+                "namespace Decoy { public class Other { public void Bar() {} } }\n",
+            ),
+            ("src/Services/Factory.cs", factory),
+            (
+                "src/App/Use.cs",
+                "using Services;\nnamespace App { public class Use { public void Run() {} } }\n",
+            ),
+        ],
+        &[("src/App/Use.cs", use_file)],
+        "Bar",
+        "Foo",
+    );
+}
+
+#[test]
+fn test_overlay_csharp_chained_member_dirty_imported_factory_matches_reindex() {
+    chain_parity(
+        "Run",
+        &CSharpProvider::new().unwrap(),
+        &[
+            ("src/Models/Foo.cs", "namespace Models { public class Foo { public void Bar() {} } }\n"),
+            ("src/Decoy/Other.cs", "namespace Decoy { public class Other { public void Bar() {} } }\n"),
+            ("src/Services/Factory.cs", "using Models;\nnamespace Services { public class Factory { public static Foo Make() { return new Foo(); } } }\n"),
+            ("src/App/Use.cs", "using Services;\nnamespace App { public class Use { public void Run() {} } }\n"),
+        ],
+        &[
+            ("src/Services/Factory.cs", "using Decoy;\nnamespace Services { public class Factory { public static Other Make() { return new Other(); } } }\n"),
+            ("src/App/Use.cs", "using Services;\nnamespace App { public class Use { public void Run() { Factory.Make().Bar(); } } }\n"),
+        ],
+        "Bar",
+        "Other",
+    );
+}
+
+#[test]
+fn test_overlay_csharp_chained_member_external_alias_does_not_bind_local_namesake() {
+    chain_without_member_parity(
+        "Run",
+        &CSharpProvider::new().unwrap(),
+        &[
+            (
+                "src/Project/Foo.cs",
+                "namespace Project { public class Foo { public void Bar() {} } }\n",
+            ),
+            (
+                "src/Services/Factory.cs",
+                "using Alias = External.Foo;\nnamespace Services { public class Factory { public static Alias Make() { return null; } } }\n",
+            ),
+            (
+                "src/App/Use.cs",
+                "using Services;\nnamespace App { public class Use { public void Run() {} } }\n",
+            ),
+        ],
+        &[(("src/App/Use.cs"), "using Services;\nnamespace App { public class Use { public void Run() { Factory.Make().Bar(); } } }\n")],
+        "Bar",
+    );
+}
+
+#[test]
+fn test_overlay_csharp_chained_member_same_leaf_namespaces_stay_suppressed() {
+    chain_without_member_parity(
+        "Run",
+        &CSharpProvider::new().unwrap(),
+        &[
+            (
+                "src/Models.cs",
+                "namespace First { public class Foo { public void Bar() {} } }\nnamespace Second { public class Foo { public void Bar() {} } }\n",
+            ),
+            (
+                "src/Services/Factory.cs",
+                "using First;\nnamespace Services { public class Factory { public static Foo Make() { return new Foo(); } } }\n",
+            ),
+            (
+                "src/App/Use.cs",
+                "using Services;\nnamespace App { public class Use { public void Run() {} } }\n",
+            ),
+        ],
+        &[(("src/App/Use.cs"), "using Services;\nnamespace App { public class Use { public void Run() { Factory.Make().Bar(); } } }\n")],
+        "Bar",
+    );
+}
+
+#[test]
+fn test_overlay_swift_chained_member_imported_return_type_matches_reindex() {
+    let factory = "import Models\npublic class Factory { public static func make() -> Foo { return Foo() } }\n";
+    let use_file = "import Services\nfunc run() { Factory.make().bar() }\n";
+    chain_parity(
+        "run",
+        &SwiftProvider::new().unwrap(),
+        &[
+            (
+                "Sources/Models/Foo.swift",
+                "public class Foo { public func bar() {} }\n",
+            ),
+            (
+                "Sources/Decoy/Other.swift",
+                "public class Other { public func bar() {} }\n",
+            ),
+            (
+                "OtherPackage/Sources/Models/Foo.swift",
+                "public class Foo { public func bar() {} }\n",
+            ),
+            ("Sources/Services/Factory.swift", factory),
+            ("Sources/App/Use.swift", "import Services\nfunc run() {}\n"),
+        ],
+        &[("Sources/App/Use.swift", use_file)],
+        "bar",
+        "Foo",
+    );
+}
+
+#[test]
+fn test_overlay_swift_chained_member_dirty_imported_factory_matches_reindex() {
+    chain_parity(
+        "run",
+        &SwiftProvider::new().unwrap(),
+        &[
+            ("Sources/Models/Foo.swift", "public class Foo { public func bar() {} }\n"),
+            ("Sources/Decoy/Other.swift", "public class Other { public func bar() {} }\n"),
+            ("Sources/Services/Factory.swift", "import Models\npublic class Factory { public static func make() -> Foo { return Foo() } }\n"),
+            ("Sources/App/Use.swift", "import Services\nfunc run() {}\n"),
+        ],
+        &[
+            ("Sources/Services/Factory.swift", "import Decoy\npublic class Factory { public static func make() -> Other { return Other() } }\n"),
+            ("Sources/App/Use.swift", "import Services\nfunc run() { Factory.make().bar() }\n"),
+        ],
+        "bar",
+        "Other",
+    );
 }

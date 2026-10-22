@@ -745,7 +745,7 @@ impl OverlayView {
                             |inner, member| {
                                 inner
                                     .and_then(|inner| {
-                                        facts.chained_member(inner, member, caller.language)
+                                        facts.chained_member(inner, member, caller.language, &types)
                                     })
                                     .map(Some)
                             },
@@ -2925,25 +2925,95 @@ impl<'a> OverlayFacts<'a> {
     /// The index's `Resolver::resolve_chained_member`: the member `member`
     /// of the type a call to `callee` returns, read in `callee`'s own file
     /// and found by the receiver-typing ladder, at the ladder's confidence
-    /// capped by `inner_confidence`. A Python / TS / JS callee's imports type
-    /// the name; any other callee types it only when its own directory
-    /// declares a type of it.
+    /// capped by `inner_confidence`. Import and namespace visibility is read
+    /// in the callee's file, including clean files' archived import facts.
     fn chained_member(
         &self,
         (callee, inner_confidence): (u32, f32),
         member: &str,
         caller: Language,
+        types: &OverlayNames<'_>,
     ) -> Option<(u32, f32)> {
         let ty = type_ladder::returned_type(self, callee)?;
         let callee_file = self.node_file(callee)?;
-        // `graph.bin` archives the imports of Python / TS / JS files only.
         let language = Language::from_normalized_path(callee_file);
-        let imports = if language == Language::Python || is_ecmascript(language) {
-            self.raw_imports(callee_file)
-        } else if self.declares_type_beside(callee_file, ty) {
-            Rc::default()
+        let imports = self.raw_imports(callee_file);
+        let candidates = if let Some(id) =
+            self.first_in_file(callee_file, ty, ResolveTarget::Type, None)
+        {
+            TypeCandidates::Unique(id, ty)
         } else {
-            return None;
+            match language {
+                Language::Java | Language::Kotlin
+                    if imports
+                        .iter()
+                        .any(|import| import_binding(import, ty, language).is_some()) =>
+                {
+                    let probe = |wildcard| {
+                        import_member_hit(
+                            self.graph,
+                            ty,
+                            callee_file,
+                            &imports,
+                            language,
+                            types,
+                            types,
+                            self.nodes,
+                            self.dirty_base,
+                            self,
+                            wildcard,
+                        )
+                    };
+                    let hit = match probe(false) {
+                        MemberHit::Unbound { bound: false } => probe(true),
+                        explicit => explicit,
+                    };
+                    match hit {
+                        MemberHit::Bound(id) => TypeCandidates::Unique(id, self.name_of(id)),
+                        MemberHit::Unbound { .. } => return None,
+                    }
+                }
+                Language::CSharp
+                    if imports
+                        .iter()
+                        .any(|import| import.alias.as_deref() == Some(ty)) =>
+                {
+                    let path = imports
+                        .iter()
+                        .find(|import| import.alias.as_deref() == Some(ty))?
+                        .imported_name
+                        .as_str();
+                    let name = owner_key(path)?;
+                    type_ladder::visible_return_type(self, callee_file, name, |id| {
+                        self.node_file(id).is_some_and(|file| {
+                            self.scope
+                                .namespace_type_path_matches(file, self.owner_of(id), path)
+                        })
+                    })
+                }
+                Language::CSharp => type_ladder::visible_return_type(self, callee_file, ty, |id| {
+                    self.node_file(id).is_some_and(|file| {
+                        self.scope.namespace_return_type_visible(
+                            file,
+                            self.owner_of(id),
+                            callee_file,
+                            &imports,
+                        )
+                    })
+                }),
+                Language::Swift => type_ladder::visible_return_type(self, callee_file, ty, |id| {
+                    self.node_file(id).is_some_and(|file| {
+                        type_ladder::swift_return_type_visible(callee_file, file, &imports)
+                    })
+                }),
+                Language::Python | Language::TypeScript | Language::JavaScript => {
+                    self.type_candidates(callee_file, ty, &imports)
+                }
+                _ if self.declares_type_beside(callee_file, ty) => {
+                    self.type_candidates(callee_file, ty, &[])
+                }
+                _ => return None,
+            }
         };
         // The index's `call_target`: Rust method syntax reaches only methods.
         let target = if caller == Language::Rust {
@@ -2951,11 +3021,11 @@ impl<'a> OverlayFacts<'a> {
         } else {
             ResolveTarget::Callable
         };
-        let qualified = format!("{ty}.{member}");
-        let (id, confidence) = ladder_edge(self.receiver_ladder(
+        let (id, confidence) = ladder_edge(type_ladder::member_via_type(
+            self,
+            candidates,
             callee_file,
-            &imports,
-            (&qualified, ty, member),
+            member,
             target,
             true,
         ))?;
@@ -3247,49 +3317,6 @@ impl ImplNode for OverlaySymbol {
     }
 }
 
-/// Mirror of index-time Pass-2 `Calls` resolution, narrowed to the inputs
-/// available at query time, over the kind family of `names`. Returns the
-/// merged-space target index.
-/// Rust `::` calls use the cached module-path branch in `build` first.
-/// Method eligibility is a post-filter, like index-time `lookup_call_in_file`:
-/// removing free functions before uniqueness checks would invent a winner.
-///
-/// A Python call on a from-imported submodule binds first, as in the index
-/// ([`reexport::python_submodule_member`]).
-/// Tier 1 — same file: the dirty file was FULLY re-parsed, so its own
-/// callable set is authoritative. The first match ([`reexport::pick_call`]),
-/// narrowed at a call site by [`prefer_owned`] → confidence 1.0; several
-/// unrelated owners bind nothing here and fall through.
-/// Tier 2 — import-scoped. In an [`import_member_fallback`] language,
-/// [`bind_import`] replays the index's import-member tier, a Python package
-/// re-export included. A TS / JS caller takes the index's named-import tier
-/// itself ([`reexport::named_import`]: export eligibility, export aliases,
-/// default imports and the one-hop barrel re-export); a non-relative
-/// specifier it misses keeps the segment match below. Elsewhere
-/// [`import_binding`] maps the callee to the name the import declares, as the
-/// index's named-import tier does. A relative source (`./`, `../`) probes the
-/// index's candidate files in its order ([`relative_module_rank`]) and the
-/// first one declaring that name wins; any other source narrows the
-/// candidates to files matching its last path segment, unique only. Hit →
-/// 0.95.
-/// Tier 2.5 — qualifier-scoped: a qualified callee (`K.save`, `K::st`)
-/// takes the member in the qualifier's file
-/// ([`OverlayFacts::qualified_callee`]) → 0.85, else the receiver-typing
-/// ladder ([`OverlayFacts::receiver_ladder`]), else no edge; it never
-/// reaches Tier 3. A Rust path the qualifier tier leaves unresolved goes on
-/// to the module tree and then the ladder in `build` (Tier 3.5).
-/// Tier 2.75 — heritage: a bare name in a class with declared bases takes
-/// the member in the first base's file that declares it → 0.8. Then, in a
-/// fully qualified language, the wildcard imports bind.
-/// Tier 3 — global: all clean-base callables (via the archived `name_index`)
-/// plus all overlay callables, through the index-time candidate filter
-/// [`pick_global`] (language and vendor barriers, unique only). ≥2
-/// remaining → suppressed, matching `DecisionTier::AmbiguousGlobal` (an
-/// invented edge is worse than a missing one), unless `call` is given and
-/// every candidate is a copy of one declaration: then the copy nearest the
-/// caller binds ([`OverlayFacts::nearest_copy`]) at
-/// [`NEAREST_COPY_CONFIDENCE`]. A TS / JS import naming the ES module of a
-/// private pick hides it ([`reexport::import_hides`]). Unique → 0.7.
 #[allow(clippy::too_many_arguments)]
 fn resolve_overlay_name_ref(
     graph: &ArchivedZeroCopyGraph,
@@ -3376,6 +3403,49 @@ fn resolve_overlay_name_ref(
     )
 }
 
+/// Mirror of index-time Pass-2 `Calls` resolution, narrowed to the inputs
+/// available at query time, over the kind family of `names`. Returns the
+/// merged-space target index.
+/// Rust `::` calls use the cached module-path branch in `build` first.
+/// Method eligibility is a post-filter, like index-time `lookup_call_in_file`:
+/// removing free functions before uniqueness checks would invent a winner.
+///
+/// A Python call on a from-imported submodule binds first, as in the index
+/// ([`reexport::python_submodule_member`]).
+/// Tier 1 — same file: the dirty file was FULLY re-parsed, so its own
+/// callable set is authoritative. The first match ([`reexport::pick_call`]),
+/// narrowed at a call site by [`prefer_owned`] → confidence 1.0; several
+/// unrelated owners bind nothing here and fall through.
+/// Tier 2 — import-scoped. In an [`import_member_fallback`] language,
+/// [`bind_import`] replays the index's import-member tier, a Python package
+/// re-export included. A TS / JS caller takes the index's named-import tier
+/// itself ([`reexport::named_import`]: export eligibility, export aliases,
+/// default imports and the one-hop barrel re-export); a non-relative
+/// specifier it misses keeps the segment match below. Elsewhere
+/// [`import_binding`] maps the callee to the name the import declares, as the
+/// index's named-import tier does. A relative source (`./`, `../`) probes the
+/// index's candidate files in its order ([`relative_module_rank`]) and the
+/// first one declaring that name wins; any other source narrows the
+/// candidates to files matching its last path segment, unique only. Hit →
+/// 0.95.
+/// Tier 2.5 — qualifier-scoped: a qualified callee (`K.save`, `K::st`)
+/// takes the member in the qualifier's file
+/// ([`OverlayFacts::qualified_callee`]) → 0.85, else the receiver-typing
+/// ladder ([`OverlayFacts::receiver_ladder`]), else no edge; it never
+/// reaches Tier 3. A Rust path the qualifier tier leaves unresolved goes on
+/// to the module tree and then the ladder in `build` (Tier 3.5).
+/// Tier 2.75 — heritage: a bare name in a class with declared bases takes
+/// the member in the first base's file that declares it → 0.8. Then, in a
+/// fully qualified language, the wildcard imports bind.
+/// Tier 3 — global: all clean-base callables (via the archived `name_index`)
+/// plus all overlay callables, through the index-time candidate filter
+/// [`pick_global`] (language and vendor barriers, unique only). ≥2
+/// remaining → suppressed, matching `DecisionTier::AmbiguousGlobal` (an
+/// invented edge is worse than a missing one), unless `call` is given and
+/// every candidate is a copy of one declaration: then the copy nearest the
+/// caller binds ([`OverlayFacts::nearest_copy`]) at
+/// [`NEAREST_COPY_CONFIDENCE`]. A TS / JS import naming the ES module of a
+/// private pick hides it ([`reexport::import_hides`]). Unique → 0.7.
 #[allow(clippy::too_many_arguments)]
 fn resolve_callee<'s>(
     graph: &ArchivedZeroCopyGraph,

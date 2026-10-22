@@ -194,6 +194,26 @@ impl<'a> ImportScope<'a> {
         })
     }
 
+    pub(crate) fn namespace_type_path_matches(
+        &self,
+        file: &str,
+        owner: Option<&str>,
+        path: &str,
+    ) -> bool {
+        self.with_files(Language::CSharp, |files| {
+            crate::analyzer::type_ladder::namespace_type_path_matches(
+                owner,
+                files
+                    .namespaces
+                    .get(file)
+                    .into_iter()
+                    .flatten()
+                    .map(String::as_str),
+                path,
+            )
+        })
+    }
+
     /// The resolver's `import_is_external`: a Missing import proves its callee
     /// external only when [`may_suppress`] allows it and no language of its
     /// [`import_family`] indexes its head or holds its module.

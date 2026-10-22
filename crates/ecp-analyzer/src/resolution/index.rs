@@ -366,6 +366,21 @@ impl SymbolTable {
         )
     }
 
+    pub(crate) fn namespace_type_path_matches(&self, id: u32, path: &str) -> bool {
+        let Some(file) = self.file_of(id) else {
+            return false;
+        };
+        ecp_core::analyzer::type_ladder::namespace_type_path_matches(
+            self.owner(id),
+            self.file_namespaces
+                .get(file)
+                .into_iter()
+                .flatten()
+                .map(String::as_str),
+            path,
+        )
+    }
+
     pub(crate) fn module_files_by_stem<'a>(&'a self, stem: &str) -> impl Iterator<Item = &'a str> {
         self.files_by_stem(stem)
             .iter()

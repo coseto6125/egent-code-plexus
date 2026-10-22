@@ -346,7 +346,7 @@ pub trait ModuleFacts {
     fn is_es_module(&self, file: &str) -> bool;
     /// `file`'s [`ExportAliasTable`], `None` when it has none.
     fn export_aliases(&self, file: &str) -> Option<Fact<'_, ExportAliasTable>>;
-    /// The ordered imports of a Python / TS / JS `file`, with the binding
+    /// The ordered imports of `file`, with the binding
     /// kinds the parsers marked. `None` when there is no record of them,
     /// which no rule reads as "no imports".
     fn imports(&self, file: &str) -> Option<FileImports<'_>>;

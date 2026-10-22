@@ -810,7 +810,7 @@ impl From<&ArchivedFileCategory> for FileCategory {
     }
 }
 
-/// One import of a Python / TS / JS file, in source order: its
+/// One import of a file, in source order: its
 /// [`crate::analyzer::types::RawImport`], kept so the overlay can follow a
 /// clean module's re-export without the module's parse.
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -1202,7 +1202,7 @@ pub struct ZeroCopyGraph {
     // ── Schema v13 additions ─────────────────────────────────────────
     /// CSR offsets over `files`, length `files.len() + 1`: the imports of
     /// file `f` are `imports[file_imports[f] .. file_imports[f + 1]]`.
-    /// Recorded for Python / TS / JS files; any other file has an empty
+    /// Recorded for all parsed languages; a file without imports has an empty
     /// range.
     pub file_imports: Vec<u32>,
     pub imports: Vec<ImportFact>,

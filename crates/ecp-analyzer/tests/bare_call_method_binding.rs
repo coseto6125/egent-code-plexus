@@ -31,6 +31,7 @@ use ecp_analyzer::ruby::parser::RubyProvider;
 use ecp_analyzer::rust::parser::RustProvider;
 use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_analyzer::typescript::parser::TypeScriptProvider;
+use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::graph::ZeroCopyGraph;
 use instantiation_calls_support::calls_from;
@@ -61,7 +62,12 @@ fn single(provider: &dyn LanguageProvider, files: &[(&str, &str)]) -> ZeroCopyGr
 fn go_module(files: &[(&str, &str)]) -> ZeroCopyGraph {
     let tmp = tempfile::tempdir().expect("tempdir");
     let provider = GoProvider::new().unwrap();
-    let mut builder = GraphBuilder::new().with_repo_root(tmp.path().to_path_buf());
+    // Mirrors the alias that the CLI derives from this fixture's go.mod.
+    let mut aliases = PathAliases::new();
+    aliases.add("example.com/app/*", vec!["./*".to_string()]);
+    let mut builder = GraphBuilder::new()
+        .with_repo_root(tmp.path().to_path_buf())
+        .with_path_aliases(aliases);
     for &(path, source) in files {
         let disk_path = tmp.path().join(path);
         std::fs::create_dir_all(disk_path.parent().expect("parent")).expect("create parent");
@@ -560,7 +566,7 @@ fn test_resolve_call_typescript_chained_member_call_binds_method() {
     );
 }
 
-/// Go writes `a.store.Fetch()` on an untyped operand as the bare member.
+/// Go writes `a.store.Fetch()` on an untyped operand as an untyped member.
 #[test]
 fn test_resolve_call_go_untyped_selector_call_binds_method() {
     let graph = single(

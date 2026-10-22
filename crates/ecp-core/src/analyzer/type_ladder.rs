@@ -267,6 +267,17 @@ pub fn namespace_return_type_visible<'a>(
         })
 }
 
+/// Whether a type's namespace agrees with a C# alias's full type path.
+pub fn namespace_type_path_matches<'a>(
+    owner: Option<&str>,
+    namespaces: impl Iterator<Item = &'a str>,
+    path: &str,
+) -> bool {
+    let path = path.strip_prefix("global::").unwrap_or(path);
+    let namespace = path.rsplit_once('.').map_or("", |(namespace, _)| namespace);
+    declared_namespace(owner, namespaces) == Some(namespace)
+}
+
 /// A Swift package target's conventional `Sources/<module>/` directory.
 /// Custom target paths have no module evidence here.
 fn swift_module(file: &str) -> Option<(&str, &str)> {

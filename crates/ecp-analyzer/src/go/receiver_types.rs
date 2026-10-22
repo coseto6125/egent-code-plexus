@@ -415,7 +415,7 @@ pub(super) fn extract_go_calls_and_path_literals_with_imports(
 ///
 /// - `foo()` → `"foo"`
 /// - `obj.Method()` where `obj`'s type is known → `"Type.Method"`
-/// - `obj.Method()` where type is unknown → `"Method"` (fallback)
+/// - `obj.Method()` where type is unknown → an untyped member call
 fn go_callee_name(
     call: Node<'_>,
     source: &[u8],

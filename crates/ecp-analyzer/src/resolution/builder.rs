@@ -917,7 +917,7 @@ fn record_path_aliases(
 }
 
 /// The import / export facts the overlay replays the import tier from
-/// (the v13 fields of `ZeroCopyGraph`): each Python / TS / JS file's
+/// (the v13 fields of `ZeroCopyGraph`): each file's
 /// imports in source order, each TS / JS file's export alias pairs and
 /// ES-module flag, and the exported declarations, as Pass 1 recorded them
 /// in `symbol_table`. `raw_nodes` is the node count after Pass 1. A TS / JS
@@ -945,32 +945,27 @@ fn record_module_facts(
     for local_graph in local_graphs {
         let path = local_graph.file_path.to_string_lossy().replace('\\', "/");
         let language = Language::from_normalized_path(&path);
-        if matches!(
-            language,
-            Language::Python | Language::TypeScript | Language::JavaScript
-        ) {
-            let ecmascript = is_ecmascript(language);
-            for import in &local_graph.imports {
-                let target_file = if ecmascript && followed_by_reexport(local_graph, import) {
-                    resolver
-                        .ecmascript_module(&path, import)
-                        .and_then(|module| {
-                            file_idx
-                                .get_or_insert_with(|| file_indices(local_graphs))
-                                .get(&*module)
-                                .copied()
-                        })
-                } else {
-                    None
-                };
-                facts.imports.push(ImportFact {
-                    source: string_pool.add(&import.source),
-                    imported_name: string_pool.add(&import.imported_name),
-                    alias: import.alias.as_deref().map(|alias| string_pool.add(alias)),
-                    binding_kind: import.binding_kind,
-                    target_file,
-                });
-            }
+        let ecmascript = is_ecmascript(language);
+        for import in &local_graph.imports {
+            let target_file = if ecmascript && followed_by_reexport(local_graph, import) {
+                resolver
+                    .ecmascript_module(&path, import)
+                    .and_then(|module| {
+                        file_idx
+                            .get_or_insert_with(|| file_indices(local_graphs))
+                            .get(&*module)
+                            .copied()
+                    })
+            } else {
+                None
+            };
+            facts.imports.push(ImportFact {
+                source: string_pool.add(&import.source),
+                imported_name: string_pool.add(&import.imported_name),
+                alias: import.alias.as_deref().map(|alias| string_pool.add(alias)),
+                binding_kind: import.binding_kind,
+                target_file,
+            });
         }
         facts.file_imports.push(facts.imports.len() as u32);
         if export_filter_applies(&path) {

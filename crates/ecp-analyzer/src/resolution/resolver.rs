@@ -92,7 +92,7 @@ type ModuleCache = FxHashMap<
 >;
 
 /// What the import tier reads to follow a module's re-export one hop: the
-/// imports of each Python / TypeScript / JavaScript file, and the modules
+/// imports of each file, and the modules
 /// each TS / JS file's `export * from` names. Built once per index build,
 /// after Pass 1, and shared by every resolver of that build.
 #[derive(Default)]
@@ -128,7 +128,7 @@ impl<'g> ReexportIndex<'g> {
         let modules = local_graphs
             .iter()
             .filter(|graph| !graph.imports.is_empty())
-            .filter_map(|graph| {
+            .map(|graph| {
                 let path = normalize_source_path(&graph.file_path);
                 let language = Language::from_normalized_path(&path);
                 if is_ecmascript(language) {
@@ -140,21 +140,23 @@ impl<'g> ReexportIndex<'g> {
                             import.alias.filter(|_| import.imported_name != "*")
                         }
                     }));
-                } else if language != Language::Python {
-                    return None;
                 }
-                let star_modules = reexport::resolve_star_modules(
-                    &facts,
-                    &path,
-                    graph.imports.iter().map(ImportRef::from),
-                );
-                Some((
+                let star_modules = if is_ecmascript(language) {
+                    reexport::resolve_star_modules(
+                        &facts,
+                        &path,
+                        graph.imports.iter().map(ImportRef::from),
+                    )
+                } else {
+                    Box::default()
+                };
+                (
                     path,
                     ModuleExports {
                         imports: &graph.imports,
                         star_modules,
                     },
-                ))
+                )
             })
             .collect();
         Self {
@@ -767,12 +769,9 @@ impl<'a> Resolver<'a> {
     /// no reducible type or that type owns no `member`: the caller then
     /// resolves the site as its [`CallSite::fallback`].
     ///
-    /// A Python / TS / JS callee's imports type the name, so a library
-    /// import (`import { Response } from 'node-fetch'`) names no project
-    /// type. Any other callee types the name only when its own directory
-    /// declares a type of it: the Go / Java / Kotlin package, or the header
-    /// beside a C++ source. A type from another directory, a C# namespace
-    /// or a Swift module included, binds nothing.
+    /// Read imports in the callee's file. Java/Kotlin imports bind a type;
+    /// C# namespaces and Swift package targets restrict visible types before
+    /// member lookup. Other languages retain the directory-scoped fallback.
     pub fn resolve_chained_member(
         &self,
         source_file: &Path,
@@ -782,34 +781,72 @@ impl<'a> Resolver<'a> {
         let st = self.symbol_table;
         let ty = type_ladder::returned_type(st, callee)?;
         let callee_file = st.file_of(callee)?;
-        // `graph.bin` archives the imports of Python / TS / JS files only, so
-        // the overlay can type no other file's name by its imports. A
-        // same-named project type elsewhere may stand for a library type the
-        // callee imports: no edge beats that guess.
         let language = Language::from_normalized_path(callee_file);
-        let imports = if language == Language::Python || is_ecmascript(language) {
-            self.reexports
-                .and_then(|index| index.modules.get(callee_file))
-                .map_or(&[][..], |exports| exports.imports)
-        } else if st.declares_type_beside(callee_file, ty) {
-            &[][..]
+        let imports = self
+            .reexports
+            .and_then(|index| index.modules.get(callee_file))
+            .map_or(&[][..], |exports| exports.imports);
+        let source = Path::new(callee_file);
+        let candidates = if let Some(id) =
+            st.lookup_in_file_with_kind(callee_file, ty, ResolveTarget::Type)
+        {
+            TypeCandidates::Unique(id, ty)
         } else {
-            return None;
+            match language {
+                Language::Java | Language::Kotlin
+                    if imports
+                        .iter()
+                        .any(|import| import_binding(import, ty, language).is_some()) =>
+                {
+                    let imported =
+                        self.resolve_imported_symbol(source, ty, imports, ResolveTarget::Type);
+                    match imported.as_slice() {
+                        [(id, _)] => TypeCandidates::Unique(*id, st.name_in_file(*id)?),
+                        _ => return None,
+                    }
+                }
+                Language::CSharp
+                    if imports
+                        .iter()
+                        .any(|import| import.alias.as_deref() == Some(ty)) =>
+                {
+                    let path = imports
+                        .iter()
+                        .find(|import| import.alias.as_deref() == Some(ty))?
+                        .imported_name
+                        .as_str();
+                    let name = owner_key(path)?;
+                    type_ladder::visible_return_type(st, callee_file, name, |id| {
+                        st.namespace_type_path_matches(id, path)
+                    })
+                }
+                Language::CSharp => type_ladder::visible_return_type(st, callee_file, ty, |id| {
+                    st.namespace_return_type_visible(id, callee_file, imports)
+                }),
+                Language::Swift => type_ladder::visible_return_type(st, callee_file, ty, |id| {
+                    st.file_of(id).is_some_and(|file| {
+                        type_ladder::swift_return_type_visible(callee_file, file, imports)
+                    })
+                }),
+                Language::Python | Language::TypeScript | Language::JavaScript => {
+                    self.type_candidates(source, callee_file, ty, imports)
+                }
+                _ if st.declares_type_beside(callee_file, ty) => {
+                    self.type_candidates(source, callee_file, ty, &[])
+                }
+                _ => return None,
+            }
         };
         let target = call_target(source_file, CallSite::UntypedMember(member));
-        match self.resolve_member_via_type(
-            Path::new(callee_file),
-            callee_file,
-            &format!("{ty}.{member}"),
-            ty,
-            member,
-            target,
-            imports,
-            true,
-        ) {
-            TypeMember::Edge(id, _, confidence) => Some((id, confidence.min(inner_confidence))),
-            TypeMember::Ambiguous | TypeMember::NoEdge => None,
-        }
+        let (id, tier) =
+            match type_ladder::member_via_type(st, candidates, callee_file, member, target, true) {
+                LadderMember::Owned(id) => (id, ResolutionTier::QualifierScoped),
+                LadderMember::Inherited(id) => (id, ResolutionTier::HeritageScoped),
+                LadderMember::Candidate(id) => (id, ResolutionTier::Global),
+                LadderMember::NearestCopy(id) => (id, ResolutionTier::NearestCopy),
+                LadderMember::Ambiguous | LadderMember::NoEdge => return None,
+            };
+        Some((id, tier.base_confidence().min(inner_confidence)))
     }
 
     /// Whether a bare `m()` that the constructor fallback would read as a
