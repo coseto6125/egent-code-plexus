@@ -13,7 +13,7 @@ use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::analyzer::reexport::{export_filter_applies, is_ecmascript, ImportRef};
 use ecp_core::analyzer::same_file_pick::PickFacts;
 use ecp_core::analyzer::types::{
-    owner_key, CallSite, LocalGraph, NameRef, NameRefKind, RawImport, RawNode, RawRoute, VariantRef,
+    owner_key, CallSite, LocalGraph, NameRef, RawImport, RawNode, RawRoute, VariantRef,
 };
 pub use ecp_core::analyzer::types::{
     FUNCTION_REFERENCE_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
@@ -2504,168 +2504,31 @@ fn resolve_name_ref(
     raw_node: &RawNode,
     name_ref: NameRef<'_>,
 ) -> Option<(u32, f32)> {
-    let member = name_ref
-        .name
-        .rsplit_once('.')
-        .map_or(name_ref.name, |(_, member)| member);
-    // An import alias (`import { LIMITS as CAP }`) declares no node of its
-    // own name; the import tier still reaches the declaration it names.
-    if symbol_table.global_match_count(member) == 0
-        && !local_graph
-            .imports
-            .iter()
-            .any(|import| import.alias.as_deref() == Some(member))
-    {
-        return None;
-    }
-    let qualified = member.len() != name_ref.name.len();
-    let free_only = name_ref.kind == NameRefKind::Function
-        && CallSite::Plain(name_ref.name).reaches_free_only(language);
-    let target = match name_ref.kind {
-        NameRefKind::Function => ResolveTarget::Callable,
-        NameRefKind::Value | NameRefKind::Constant => ResolveTarget::Value,
-    };
-    if language == Language::Rust && !qualified {
-        if let Some(id) = ecp_core::analyzer::same_file_pick::prefer_free(
-            symbol_table,
-            file,
-            member,
-            raw_node.owner_class.as_deref(),
-            target,
-        ) {
-            return (name_ref.kind != NameRefKind::Constant
-                || !symbol_table.node_kind(id).is_callable())
-            .then_some((id, ResolutionTier::SameFile.base_confidence()));
-        }
-    }
-    if let (false, Some(owner)) = (qualified, raw_node.owner_class.as_deref()) {
-        // `Method`, not `Callable`: inside `class Foo`, the receiver of
-        // `Foo.Create()` names the type, never its constructor.
-        let own_kinds: &[ResolveTarget] = match (name_ref.kind, language) {
-            _ if free_only => &[],
-            (NameRefKind::Function, _) => &[ResolveTarget::Method],
-            (NameRefKind::Value, Language::CSharp | Language::Swift | Language::Dart) => {
-                &[ResolveTarget::Field, ResolveTarget::Method]
-            }
-            (NameRefKind::Value, Language::Java | Language::Kotlin | Language::Cpp) => {
-                &[ResolveTarget::Field]
-            }
-            _ => &[],
-        };
-        for &target in own_kinds {
-            if let [id] = symbol_table
-                .owned_in_file(file, member, owner, target)
-                .as_slice()
-            {
-                return Some((*id, ResolutionTier::SameFile.base_confidence()));
-            }
-        }
-        // A member the reader's type inherits: `Child.f` reads `Parent.LIMIT`.
-        // Two types of the owner's name in the file leave its bases unknown.
-        let own_type = owner_key(owner).filter(|&key| {
-            !own_kinds.is_empty()
-                && symbol_table.count_in_file_with_kind(file, key, ResolveTarget::Type) == 1
-        });
-        if let Some(ty) = own_type
-            .and_then(|key| symbol_table.lookup_in_file_with_kind(file, key, ResolveTarget::Type))
-        {
-            for &target in own_kinds {
-                if let ecp_core::analyzer::type_ladder::Ownership::Owned { id, inherited } =
-                    ecp_core::analyzer::type_ladder::member_ownership(
-                        symbol_table,
-                        ty,
-                        owner,
-                        member,
-                        target,
-                    )
-                {
-                    let tier = if !inherited && symbol_table.file_of(id) == Some(file) {
-                        ResolutionTier::SameFile
-                    } else {
-                        ResolutionTier::HeritageScoped
-                    };
-                    return Some((id, tier.base_confidence()));
-                }
-            }
-        }
-    }
-    let mut targets = resolver.resolve_symbol(
-        &local_graph.file_path,
-        name_ref.name,
-        &local_graph.imports,
-        target,
-    );
-    // A Java / Kotlin static import names a class's field, which no bare
-    // name reaches through the general tiers.
-    if targets.is_empty()
-        && name_ref.kind == NameRefKind::Value
-        && matches!(language, Language::Java | Language::Kotlin)
-    {
-        targets = resolver.resolve_imported_symbol(
-            &local_graph.file_path,
-            name_ref.name,
-            &local_graph.imports,
-            ResolveTarget::Field,
-        );
-    }
-    if free_only {
-        targets.retain(|&(id, _)| symbol_table.node_kind(id) != NodeKind::Method);
-    }
-    let &[(id, confidence)] = targets.as_slice() else {
-        return None;
-    };
-    let module_scoped = matches!(
+    ecp_core::analyzer::name_ref::resolve_name_ref(
+        symbol_table,
+        file,
         language,
-        Language::TypeScript
-            | Language::JavaScript
-            | Language::Python
-            | Language::Java
-            | Language::CSharp
-    );
-    let global = confidence <= ResolutionTier::Global.base_confidence();
-    // A Go bare name reaches only its own package: one directory.
-    let other_package = || {
-        fn dir(file: &str) -> Option<&std::path::Path> {
-            std::path::Path::new(file).parent()
-        }
-        symbol_table
-            .file_of(id)
-            .is_some_and(|target| dir(target) != dir(file))
-    };
-    // Only these languages reach a type's member by a bare name, through
-    // the reader's own type above; elsewhere a type's constant is no read.
-    let type_member = || {
-        !matches!(
-            language,
-            Language::Java
-                | Language::Kotlin
-                | Language::CSharp
-                | Language::Swift
-                | Language::Dart
-                | Language::C
-                | Language::Cpp
-                | Language::Ruby
-        ) && symbol_table.owner(id).is_some_and(|owner| {
-            // A nested function's owner is the function around it, not a
-            // type. A PHP 4 constructor shares its class's name.
-            !symbol_table.file_of(id).is_some_and(|target| {
-                symbol_table
-                    .lookup_in_file_with_kind(target, owner, ResolveTarget::Callable)
-                    .is_some()
-                    && symbol_table
-                        .lookup_in_file_with_kind(target, owner, ResolveTarget::Type)
-                        .is_none()
-            })
-        })
-    };
-    if (module_scoped && global)
-        || (language == Language::Go && global && other_package())
-        || (name_ref.kind == NameRefKind::Constant && symbol_table.node_kind(id).is_callable())
-        || (name_ref.kind != NameRefKind::Function && type_member())
-    {
-        return None;
-    }
-    Some((id, confidence))
+        &local_graph.imports,
+        raw_node.owner_class.as_deref(),
+        name_ref,
+        ecp_core::analyzer::name_ref::NameRefTiers {
+            same_file: ResolutionTier::SameFile.base_confidence(),
+            heritage: ResolutionTier::HeritageScoped.base_confidence(),
+            global: ResolutionTier::Global.base_confidence(),
+        },
+        |name| symbol_table.global_match_count(name) > 0,
+        |name, target| {
+            resolver.resolve_symbol(&local_graph.file_path, name, &local_graph.imports, target)
+        },
+        |name, target| {
+            resolver.resolve_imported_symbol(
+                &local_graph.file_path,
+                name,
+                &local_graph.imports,
+                target,
+            )
+        },
+    )
 }
 
 /// Emit Pass-2 edges for a single `raw_node`'s heritage / calls / type

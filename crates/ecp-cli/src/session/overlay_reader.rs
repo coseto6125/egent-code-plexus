@@ -29,7 +29,7 @@ use ecp_core::graph::{Node, NodeKind};
 use ecp_core::pool::{StrRef, StringPool};
 use ecp_core::session::{
     DirtyFiles, Overlay, OverlayFileInput, OverlaySymbol, FRAGMENT_FORMAT_V2, FRAGMENT_FORMAT_V3,
-    FRAGMENT_FORMAT_V4,
+    FRAGMENT_FORMAT_V4, FRAGMENT_FORMAT_V5,
 };
 use rkyv::rancor::Error as RkyvError;
 use std::fs;
@@ -39,6 +39,7 @@ use xxhash_rust::xxh3::Xxh3;
 
 use super::overlay_writer::{
     ArchivedFragment, ArchivedFragmentFile, ArchivedFragmentFileV2, ArchivedFragmentFileV3,
+    ArchivedFragmentFileV4,
 };
 
 /// A single overlay symbol with the source-relative path it came from.
@@ -151,7 +152,13 @@ fn for_each_fragment(session_dir: &Path, mut f: impl FnMut(&str, FragSym<'_>)) -
                         Err(_) => continue,
                     }
                 }
-                FRAGMENT_FORMAT_V4 => match rkyv::access::<ArchivedFragmentFile, RkyvError>(&bytes)
+                FRAGMENT_FORMAT_V4 => {
+                    match rkyv::access::<ArchivedFragmentFileV4, RkyvError>(&bytes) {
+                        Ok(file) => visit_symbols!(file.symbols),
+                        Err(_) => continue,
+                    }
+                }
+                FRAGMENT_FORMAT_V5 => match rkyv::access::<ArchivedFragmentFile, RkyvError>(&bytes)
                 {
                     Ok(file) => visit_symbols!(file.symbols),
                     Err(_) => continue,
@@ -273,7 +280,7 @@ pub fn accepted_fragments(
     let mut out = Vec::new();
 
     for (rel_path, entry) in &df.entries {
-        if entry.parse_failed || entry.format != FRAGMENT_FORMAT_V4 {
+        if entry.parse_failed || entry.format != FRAGMENT_FORMAT_V5 {
             continue;
         }
         let on_disk_mtime_ns = crate::auto_ensure::mtime_ns_of(&worktree_root.join(rel_path));
@@ -340,10 +347,7 @@ pub fn decode_view_inputs(accepted: &[AcceptedFragment]) -> Vec<OverlayFileInput
                             .iter()
                             .map(|v| v.as_str().to_owned())
                             .collect(),
-                        // No fragment format stores a return type yet, so a
-                        // chained call on a dirty function resolves as its
-                        // fallback until the fragment carries one.
-                        return_type: None,
+                        return_type: s.return_type.as_ref().map(|ty| ty.as_str().to_owned()),
                     })
                     .collect(),
                 imports,

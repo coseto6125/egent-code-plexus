@@ -50,8 +50,7 @@
 //! overlay re-resolves that rel type from fragment data ([`REBUILT_RELS`],
 //! today `Calls`, plus the `References` reasons above) — for those the
 //! overlay adjacency is the file's truth. Rels the fragment carries no
-//! inputs for (ReadsField, Extends, …)
-//! keep their base edges: slightly stale beats silently absent for a
+//! inputs for (Extends, …) keep their base edges: slightly stale beats silently absent for a
 //! deterministic edge. A base edge whose **target** lies in a dirty file is
 //! redirected (replaced) or dropped (suppressed) regardless of rel.
 //! Clean↔clean edges are untouched. Consumers apply this via
@@ -59,8 +58,8 @@
 //!
 //! ## What stays out of scope (documented fidelity gaps)
 //!
-//! - `References` edges other than lexical closure, overload-set and
-//!   enum-variant references are not re-resolved: a dirty file keeps the
+//! - `References` edges other than lexical closure, overload-set,
+//!   enum-variant, and function-reference edges are not re-resolved: a dirty file keeps the
 //!   base ones of its surviving symbols (stale) and gains none for new code.
 //! - Builder-made nodes of a dirty file and their edges are as indexed; a
 //!   brand-new symbol gets no containment edge (`File -Defines->`, …).
@@ -123,9 +122,10 @@ use crate::analyzer::type_ladder::{
     self, TypeCandidates, TypeFacts, TypeMember as LadderMember, MAX_HERITAGE_DEPTH,
 };
 use crate::analyzer::types::{
-    innermost_enclosing, owner_key, CallSite, LocalGraph, RawExportAlias, RawImport, Span,
-    VariantRef, CLOSURE_REFERENCE_REASON, NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON,
-    OVERLOAD_SET_REASON, VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
+    innermost_enclosing, owner_key, CallSite, LocalGraph, NameRef, RawExportAlias, RawImport, Span,
+    VariantRef, CLOSURE_REFERENCE_REASON, FUNCTION_REFERENCE_REASON, NEAREST_COPY_CONFIDENCE,
+    NEAREST_COPY_REASON, OVERLOAD_SET_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON,
+    VARIANT_USE_REASON,
 };
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
@@ -156,8 +156,8 @@ pub struct OverlaySymbol {
     /// `RawNode.heritage`: the declared base names, as the parser wrote
     /// them. Empty for a non-type.
     pub heritage: Vec<String>,
-    /// The `RawNode.field_reads` entries that [`VariantRef::parse`] accepts,
-    /// still encoded.
+    /// Every raw `RawNode.field_reads` entry. The legacy name stays public
+    /// for callers that used it before tagged name references existed.
     pub variant_refs: Vec<String>,
     /// `RawFunctionMeta.return_type` of a function, method or constructor,
     /// as written; `None` when it declares none or the input does not carry
@@ -227,11 +227,7 @@ impl From<LocalGraph> for OverlayFileInput {
                     calls: n.calls,
                     is_exported: n.is_exported,
                     heritage: n.heritage,
-                    variant_refs: n
-                        .field_reads
-                        .into_iter()
-                        .filter(|read| VariantRef::parse(read).is_some())
-                        .collect(),
+                    variant_refs: n.field_reads,
                 })
                 .collect(),
             imports: local.imports,
@@ -424,6 +420,8 @@ impl OverlayView {
         let mut in_adj: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
         {
             let mut callables = OverlayNames::new(ResolveTarget::Callable);
+            let mut values = OverlayNames::new(ResolveTarget::Value);
+            let mut fields = OverlayNames::new(ResolveTarget::Field);
             let mut types = OverlayNames::new(ResolveTarget::Type);
             let mut qualifiers = OverlayNames::new(ResolveTarget::Qualifier);
             // Base-file meta, filled on first sight: a common callee name has
@@ -452,6 +450,8 @@ impl OverlayView {
                     let virt = base_len + virt_off as u32;
                     let first_of_uid = named_uids.insert(node.uid);
                     callables.add(file_ord, node, virt, file_metas[file_ord], first_of_uid);
+                    values.add(file_ord, node, virt, file_metas[file_ord], first_of_uid);
+                    fields.add(file_ord, node, virt, file_metas[file_ord], first_of_uid);
                     types.add(file_ord, node, virt, file_metas[file_ord], first_of_uid);
                     qualifiers.add(file_ord, node, virt, file_metas[file_ord], first_of_uid);
                     variants.add(node, virt, file_metas[file_ord], first_of_uid);
@@ -770,47 +770,122 @@ impl OverlayView {
                         }
                     }
 
-                    // The index's Pass 2 `field_reads` loop: one edge per
-                    // (variant, reason) per symbol (`E::A` and
-                    // `crate::m::E::A` in one body are one dependency).
+                    // The index's Pass 2 `field_reads` loop. `variant_refs`
+                    // is its legacy field name: v5 preserves every raw read,
+                    // including tagged name references and ordinary fields.
                     let mut emitted: Vec<(u32, bool)> = Vec::new();
+                    let mut name_edges: Vec<u32> = Vec::new();
+                    let mut field_edges: Vec<u32> = Vec::new();
                     for raw in &sym.variant_refs {
-                        let Some(variant_ref) = VariantRef::parse(raw) else {
+                        if let Some(name_ref) = NameRef::parse(raw) {
+                            let Some((target, confidence)) = resolve_overlay_name_ref(
+                                graph,
+                                file_ord,
+                                file,
+                                caller,
+                                sym,
+                                name_ref,
+                                &mut base_metas,
+                                &callables,
+                                &values,
+                                &fields,
+                                &types,
+                                &qualifiers,
+                                &nodes,
+                                &replaced,
+                                &dirty_base,
+                                &facts,
+                            ) else {
+                                continue;
+                            };
+                            if target == source || name_edges.contains(&target) {
+                                continue;
+                            }
+                            name_edges.push(target);
+                            let (rel_type, reason) = if facts.kind(target).is_callable() {
+                                (RelType::References, FUNCTION_REFERENCE_REASON)
+                            } else {
+                                (RelType::ReadsField, VALUE_READ_REASON)
+                            };
+                            push_edge(ViewEdge {
+                                source,
+                                target,
+                                rel_type,
+                                confidence,
+                                reason,
+                            });
                             continue;
-                        };
-                        let Some((target, confidence)) = resolve_variant_ref(
+                        }
+                        if let Some(variant_ref) = VariantRef::parse(raw) {
+                            let Some((target, confidence)) = resolve_variant_ref(
+                                graph,
+                                variant_ref,
+                                sym.owner_class.as_deref(),
+                                file_ord,
+                                file,
+                                caller,
+                                &mut base_metas,
+                                (&types, &qualifiers),
+                                &variants,
+                                &nodes,
+                                &replaced,
+                                &dirty_base,
+                                &facts,
+                                rust_tree,
+                                &mut variant_cache,
+                            ) else {
+                                continue;
+                            };
+                            if target == source || emitted.contains(&(target, variant_ref.pattern))
+                            {
+                                continue;
+                            }
+                            emitted.push((target, variant_ref.pattern));
+                            push_edge(ViewEdge {
+                                source,
+                                target,
+                                rel_type: RelType::References,
+                                confidence,
+                                reason: if variant_ref.pattern {
+                                    VARIANT_PATTERN_REASON
+                                } else {
+                                    VARIANT_USE_REASON
+                                },
+                            });
+                            continue;
+                        }
+                        let Some((target, confidence)) = resolve_callee(
                             graph,
-                            variant_ref,
-                            sym.owner_class.as_deref(),
+                            CallSite::Plain(raw),
                             file_ord,
-                            file,
+                            &file.imports,
                             caller,
                             &mut base_metas,
-                            (&types, &qualifiers),
-                            &variants,
+                            &fields,
+                            &types,
+                            &qualifiers,
                             &nodes,
                             &replaced,
                             &dirty_base,
                             &facts,
-                            rust_tree,
-                            &mut variant_cache,
+                            Scope {
+                                call: None,
+                                heritage: &[],
+                                type_lookup: false,
+                            },
                         ) else {
                             continue;
                         };
-                        if target == source || emitted.contains(&(target, variant_ref.pattern)) {
+                        if target == source || field_edges.contains(&target) {
                             continue;
                         }
-                        emitted.push((target, variant_ref.pattern));
+                        field_edges.push(target);
                         push_edge(ViewEdge {
                             source,
                             target,
-                            rel_type: RelType::References,
+                            rel_type: RelType::ReadsField,
                             confidence,
-                            reason: if variant_ref.pattern {
-                                VARIANT_PATTERN_REASON
-                            } else {
-                                VARIANT_USE_REASON
-                            },
+                            reason: "field_read",
                         });
                     }
                 }
@@ -861,9 +936,7 @@ impl OverlayView {
     /// can't rebuild would silently drop deterministic edges — keep
     /// mask ⊆ rebuild as fragment capabilities grow.
     pub fn masks_base_edge(&self, base_idx: u32, rel: RelType) -> bool {
-        // REBUILT_RELS: extend alongside resolve_callee when fragments gain
-        // inputs for more rel types (e.g. field_reads → ReadsField).
-        matches!(rel, RelType::Calls) && self.dirty_base.contains(&base_idx)
+        matches!(rel, RelType::Calls | RelType::ReadsField) && self.dirty_base.contains(&base_idx)
     }
 
     /// Whether the overlay rebuilds the base `References` edge with `reason`
@@ -876,6 +949,7 @@ impl OverlayView {
                 | OVERLOAD_SET_REASON
                 | VARIANT_USE_REASON
                 | VARIANT_PATTERN_REASON
+                | FUNCTION_REFERENCE_REASON
         ) && self.dirty_base.contains(&source)
     }
 
@@ -926,18 +1000,21 @@ impl OverlayView {
 
 /// Layout version of [`OverlayView::to_cache_bytes`]. Bump it whenever the
 /// cached layout changes shape; cache keys include it.
-pub const VIEW_CACHE_FORMAT: u32 = 2;
+pub const VIEW_CACHE_FORMAT: u32 = 3;
 
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
 /// never stored, so it costs a build per query as before the cache.
-const VIEW_EDGE_REASONS: [&str; 6] = [
+const VIEW_EDGE_REASONS: [&str; 9] = [
     OVERLOAD_SET_REASON,
     CLOSURE_REFERENCE_REASON,
     NEAREST_COPY_REASON,
     super::merged::OVERLAY_EDGE_REASON,
     VARIANT_USE_REASON,
     VARIANT_PATTERN_REASON,
+    VALUE_READ_REASON,
+    FUNCTION_REFERENCE_REASON,
+    "field_read",
 ];
 
 fn reason_index(reason: &str) -> Option<u8> {
@@ -3214,6 +3291,72 @@ impl ImplNode for OverlaySymbol {
 /// [`NEAREST_COPY_CONFIDENCE`]. A TS / JS import naming the ES module of a
 /// private pick hides it ([`reexport::import_hides`]). Unique → 0.7.
 #[allow(clippy::too_many_arguments)]
+fn resolve_overlay_name_ref(
+    graph: &ArchivedZeroCopyGraph,
+    file_ord: usize,
+    file: &OverlayFileInput,
+    caller: FileMeta,
+    symbol: &OverlaySymbol,
+    name_ref: NameRef<'_>,
+    base_metas: &mut FxHashMap<usize, FileMeta>,
+    callables: &OverlayNames<'_>,
+    values: &OverlayNames<'_>,
+    fields: &OverlayNames<'_>,
+    types: &OverlayNames<'_>,
+    qualifiers: &OverlayNames<'_>,
+    nodes: &[ViewNode],
+    replaced: &FxHashMap<u32, u32>,
+    dirty_base: &FxHashSet<u32>,
+    facts: &OverlayFacts<'_>,
+) -> Option<(u32, f32)> {
+    crate::analyzer::name_ref::resolve_name_ref(
+        facts,
+        &file.rel_path,
+        caller.language,
+        &file.imports,
+        symbol.owner_class.as_deref(),
+        name_ref,
+        crate::analyzer::name_ref::NameRefTiers {
+            same_file: CONF_SAME_FILE,
+            heritage: CONF_HERITAGE,
+            global: CONF_GLOBAL_UNIQUE,
+        },
+        |name| !facts.global_named(name).is_empty(),
+        |name, target| {
+            let names = match target {
+                ResolveTarget::Callable => callables,
+                ResolveTarget::Value => values,
+                ResolveTarget::Field => fields,
+                _ => return Vec::new(),
+            };
+            resolve_callee(
+                graph,
+                CallSite::Plain(name),
+                file_ord,
+                &file.imports,
+                caller,
+                base_metas,
+                names,
+                types,
+                qualifiers,
+                nodes,
+                replaced,
+                dirty_base,
+                facts,
+                Scope {
+                    call: None,
+                    heritage: &[],
+                    type_lookup: false,
+                },
+            )
+            .into_iter()
+            .collect()
+        },
+        |_, _| Vec::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn resolve_callee<'s>(
     graph: &ArchivedZeroCopyGraph,
     site: CallSite<'s>,
@@ -4998,12 +5141,10 @@ mod tests {
         assert_eq!(view.node(base_len).unwrap().replaced_base, Some(0));
         // gone_fn was deleted: traversal must drop it entirely.
         assert_eq!(view.redirect(1), None);
-        // both dirty-file base nodes mask their stale outgoing Calls edges —
-        // the overlay rebuilds Calls — but keep rels the fragment carries no
-        // inputs for (mask ⊆ rebuild).
+        // Both dirty-file base nodes mask the stale rels the overlay rebuilds.
         assert!(view.masks_base_edge(0, RelType::Calls));
         assert!(view.masks_base_edge(1, RelType::Calls));
-        assert!(!view.masks_base_edge(0, RelType::ReadsField));
+        assert!(view.masks_base_edge(0, RelType::ReadsField));
         // clean nodes keep their base edges.
         assert!(!view.masks_base_edge(2, RelType::Calls));
         assert_eq!(view.redirect(2), Some(2));

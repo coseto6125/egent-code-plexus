@@ -54,6 +54,8 @@ pub const FRAGMENT_FORMAT_V2: u32 = 2;
 pub const FRAGMENT_FORMAT_V3: u32 = 3;
 /// Current fragment bin encoding version written by `overlay_writer`.
 pub const FRAGMENT_FORMAT_V4: u32 = 4;
+/// v5 persists every `RawNode.field_reads` entry and function return types.
+pub const FRAGMENT_FORMAT_V5: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolRef {
