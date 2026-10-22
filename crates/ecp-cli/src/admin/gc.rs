@@ -889,7 +889,7 @@ mod subtree_build_tests {
 
         let retired = publish(&commits, "branch_e__5555.dead.1", &subtree);
 
-        let stats = sweep_subtree_builds(&repo_root).unwrap();
+        let stats = sweep_subtree_builds(&repo_root, false).unwrap();
 
         assert_eq!((stats.marked, stats.removed), (1, 1));
         assert!(
@@ -919,7 +919,7 @@ mod subtree_build_tests {
         let named = publish(&commits, "branch_feat_x.building-y__6666", &subtree);
         let building = publish(&commits, "branch_feat_z__7777.building", &subtree);
 
-        let stats = sweep_subtree_builds(&repo_root).unwrap();
+        let stats = sweep_subtree_builds(&repo_root, false).unwrap();
 
         assert_eq!((stats.marked, stats.removed), (1, 1));
         assert!(

@@ -10,11 +10,17 @@ use instantiation_calls_support::{calls_from, graph_of};
 use std::path::Path;
 
 const HELPER: (&str, &str) = ("lib/helper.rb", "def helper; end\ndef other; end\n");
+/// A receiver call reaches a method, never a top-level `def` (an untyped
+/// member never binds a free function), so the receiver forms target `ping`.
+const SVC: (&str, &str) = ("lib/svc.rb", "class Svc\n  def ping; end\nend\n");
 
 /// `name` of every `Calls` target of `go`, minus `send` itself.
 fn targets_of_body(body: &str) -> Vec<String> {
     let src = format!("def go(obj, name)\n  {body}\nend\n");
-    let graph = graph_of(&RubyProvider::new().unwrap(), &[HELPER, ("app.rb", &src)]);
+    let graph = graph_of(
+        &RubyProvider::new().unwrap(),
+        &[HELPER, SVC, ("app.rb", &src)],
+    );
     calls_from(&graph, "go")
         .into_iter()
         .map(|h| h.name)
@@ -38,6 +44,10 @@ fn helper() -> Vec<String> {
     vec!["helper".to_string()]
 }
 
+fn ping() -> Vec<String> {
+    vec!["ping".to_string()]
+}
+
 #[test]
 fn test_send_symbol_without_receiver_calls_method() {
     assert_eq!(targets_of_body("send(:helper)"), helper());
@@ -55,17 +65,17 @@ fn test_send_string_without_receiver_calls_method() {
 
 #[test]
 fn test_send_symbol_with_receiver_calls_method() {
-    assert_eq!(targets_of_body("obj.send(:helper)"), helper());
+    assert_eq!(targets_of_body("obj.send(:ping)"), ping());
 }
 
 #[test]
 fn test_send_string_with_receiver_calls_method() {
-    assert_eq!(targets_of_body("obj.send('helper')"), helper());
+    assert_eq!(targets_of_body("obj.send('ping')"), ping());
 }
 
 #[test]
 fn test_send_with_literal_keeps_extra_arguments_and_calls_method() {
-    assert_eq!(targets_of_body("obj.public_send(:helper, 1, 2)"), helper());
+    assert_eq!(targets_of_body("obj.public_send(:ping, 1, 2)"), ping());
 }
 
 #[test]
@@ -103,6 +113,6 @@ fn test_send_invalid_literal_keeps_blind_spot_and_no_edge() {
 
 #[test]
 fn test_ordinary_calls_still_resolve_after_literal_send_change() {
-    assert_eq!(targets_of_body("helper"), helper());
-    assert_eq!(targets_of_body("obj.helper"), helper());
+    assert_eq!(targets_of_body("helper()"), helper());
+    assert_eq!(targets_of_body("obj.ping"), ping());
 }
