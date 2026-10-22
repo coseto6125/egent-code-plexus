@@ -426,14 +426,18 @@ fn test_overlay_view_concurrent_engines_agree_and_leave_one_valid_cache() {
     assert!(tmp_files(&f.session_dir).is_empty());
 }
 
-/// The engines above may serialize behind the first writer. Here two writers
-/// publish different views under their own keys in a loop while a reader
-/// reads both keys, so writes and reads overlap. The guarantee that matters
-/// is that a read never returns a wrong or mixed view: every hit must be
-/// exactly the view written under that key. A torn file is only a miss.
+/// Two writers publish different views under their own keys while a reader
+/// reads both keys; every hit must be exactly the view written under that
+/// key (a torn file is only a miss). The file is published before the
+/// threads start, so it always holds one of the two views: a reader round
+/// with no rename between its two reads hits exactly once. The writers
+/// rename at most `2 * WRITES` times, so at least `READS - 2 * WRITES` rounds
+/// hit, whatever the scheduling. Overlap of reads and writes is likely but
+/// not forced; the hit floor is.
 #[test]
 fn test_view_cache_concurrent_writes_and_reads_never_return_wrong_view() {
-    const ROUNDS: usize = 300;
+    const WRITES: usize = 300;
+    const READS: usize = 2_000;
     let f = Fixture::new();
     f.edit(&["keep_fn"], 1_000);
     let probe = f.engine();
@@ -443,32 +447,36 @@ fn test_view_cache_concurrent_writes_and_reads_never_return_wrong_view() {
     assert_ne!(first, second);
     let nodes = probe.graph().unwrap().nodes.len();
     let views = [(11_u64, &first), (22_u64, &second)];
+    view_cache::write(&f.session_dir, views[0].0, views[0].1);
     let barrier = Barrier::new(views.len() + 1);
 
-    std::thread::scope(|scope| {
+    let hits = std::thread::scope(|scope| {
         for (key, view) in views {
             let (barrier, dir) = (&barrier, &f.session_dir);
             scope.spawn(move || {
                 barrier.wait();
-                for _ in 0..ROUNDS {
+                for _ in 0..WRITES {
                     view_cache::write(dir, key, view);
                 }
             });
         }
-        scope.spawn(|| {
+        let reader = scope.spawn(|| {
             barrier.wait();
-            for _ in 0..ROUNDS {
+            let mut hits = 0;
+            for _ in 0..READS {
                 for (key, view) in views {
                     if let Some(read) = view_cache::read(&f.session_dir, key, nodes) {
                         assert_eq!(&read, view, "key {key} read another view");
+                        hits += 1;
                     }
                 }
             }
+            hits
         });
+        reader.join().unwrap()
     });
 
-    // The reader may have run before any publish; the writers are done now,
-    // so exactly one key's view is on disk, intact.
+    assert!(hits >= READS - 2 * WRITES, "{hits} hits");
     let on_disk: Vec<u64> = views
         .iter()
         .filter(|(key, view)| view_cache::read(&f.session_dir, *key, nodes).as_ref() == Some(*view))
