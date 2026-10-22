@@ -105,6 +105,45 @@ fn test_parse_file_named_class_const_with_literal_default_emits_fanout() {
     assert_fanout(src, "dispatch", &["Rows.hero", "Rows.story"]);
 }
 
+/// The one fan-out of `src`, which must carry the `-ambiguous` reason.
+fn ambiguous_fanout(src: &str) -> RawFanoutRef {
+    let g = parse_php(src);
+    let found: Vec<_> = g
+        .fanout_refs
+        .iter()
+        .filter(|f| f.reason.starts_with(REASON))
+        .collect();
+    assert_eq!(found.len(), 1, "expected one fan-out: {:?}", g.fanout_refs);
+    assert_eq!(found[0].reason, "php-const-map-dispatch-ambiguous");
+    found[0].clone()
+}
+
+#[test]
+fn test_parse_file_short_name_declared_in_two_namespaces_emits_ambiguous_fanout() {
+    let src = "<?php\nnamespace A {\n    class Rows\n    {\n        const MAP = ['hero'];\n    }\n}\nnamespace B {\n    class Rows\n    {\n        const MAP = ['story'];\n    }\n    class Api\n    {\n        public function dispatch($t)\n        {\n            $m = Rows::MAP[$t] ?? null;\n            return Rows::$m();\n        }\n    }\n}\n";
+    let fanout = ambiguous_fanout(src);
+    assert_eq!(fanout.candidates, ["Rows.hero", "Rows.story"]);
+}
+
+#[test]
+fn test_parse_file_short_name_also_imported_with_use_emits_ambiguous_fanout() {
+    let src = "<?php\nnamespace A {\n    class Rows\n    {\n        const MAP = ['hero'];\n    }\n}\nnamespace B {\n    use Other\\Rows;\n    class Api\n    {\n        public function dispatch($t)\n        {\n            $m = Rows::MAP[$t] ?? null;\n            return Rows::$m();\n        }\n    }\n}\n";
+    let fanout = ambiguous_fanout(src);
+    assert_eq!(fanout.candidates, ["Rows.hero"]);
+}
+
+#[test]
+fn test_parse_file_use_function_of_same_short_name_keeps_plain_reason() {
+    let src = "<?php\nuse function Other\\Rows;\nclass Rows\n{\n    const MAP = ['hero'];\n    public static function hero() {}\n}\nclass Api\n{\n    public function dispatch($t)\n    {\n        $m = Rows::MAP[$t] ?? null;\n        return Rows::$m();\n    }\n}\n";
+    assert_fanout(src, "dispatch", &["Rows.hero"]);
+}
+
+#[test]
+fn test_parse_file_grouped_use_function_of_same_short_name_keeps_plain_reason() {
+    let src = "<?php\nuse Other\\{function Rows};\nclass Rows\n{\n    const MAP = ['hero'];\n    public static function hero() {}\n}\nclass Api\n{\n    public function dispatch($t)\n    {\n        $m = Rows::MAP[$t] ?? null;\n        return Rows::$m();\n    }\n}\n";
+    assert_fanout(src, "dispatch", &["Rows.hero"]);
+}
+
 #[test]
 fn test_parse_file_old_style_array_const_emits_fanout() {
     let src = api(

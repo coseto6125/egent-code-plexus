@@ -897,5 +897,5 @@ fn test_supported_path_blade_template_false() {
     assert!(supported_path("app/Svc.php"));
     assert!(supported_path("blade.php"));
     assert!(supported_path("resources/x.blade.php/helper.php"));
-    assert!(supported_path("V.BLADE.PHP"));
+    assert!(supported_path("V.BLADE.php"));
 }

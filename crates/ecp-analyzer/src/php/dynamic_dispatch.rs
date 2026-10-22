@@ -11,6 +11,11 @@
 //! `ecp impact` reports them dead. The fan-out names one candidate per value,
 //! so it stays below the high-trust bar: a `static::` constant can be
 //! overridden by a subclass, and a by-reference argument can rebind the name.
+//!
+//! `Name::MAP` matches classes by short name within this file. When the file
+//! declares that short name twice, or also imports it with `use`, the edge
+//! still lists the candidates but carries the `-ambiguous` reason, so the
+//! reader checks which class the constant belongs to.
 
 use super::laravel_routes::string_value;
 use crate::framework_confidence;
@@ -19,6 +24,7 @@ use ecp_core::analyzer::types::{RawFanoutRef, RawNode};
 use tree_sitter::Node;
 
 const REASON: &str = "php-const-map-dispatch";
+const REASON_AMBIGUOUS: &str = "php-const-map-dispatch-ambiguous";
 
 /// Positions that write the variable other than `$m = <rhs>`: the value they
 /// bind cannot be enumerated.
@@ -52,13 +58,14 @@ pub(super) fn const_map_fanout(
     let function = enclosing_function(call)?;
     let class = enclosing_class(function);
     let owner = receiver_owner(call, class, source)?;
-    let values = bound_values(function, var, class, source)?;
+    let mut ambiguous = false;
+    let values = bound_values(function, var, class, source, &mut ambiguous)?;
     let span = node_span(&call);
     Some(RawFanoutRef {
         source_name: enclosing_function_name(nodes, span)?,
         candidates: values.iter().map(|v| format!("{owner}.{v}")).collect(),
         base_confidence: framework_confidence::FANOUT_BASE,
-        reason: REASON.to_string(),
+        reason: if ambiguous { REASON_AMBIGUOUS } else { REASON }.to_string(),
         span,
     })
 }
@@ -138,6 +145,7 @@ fn bound_values(
     var: &str,
     class: Option<Node<'_>>,
     source: &[u8],
+    ambiguous: &mut bool,
 ) -> Option<Vec<String>> {
     if let Some(params) = function.child_by_field_name("parameters") {
         if mentions(params, var, source) {
@@ -174,6 +182,7 @@ fn bound_values(
                         class,
                         source,
                         &mut values,
+                        ambiguous,
                     )?;
                 } else if REBINDING_PARENTS.contains(&parent.kind()) || inside_list(n, function) {
                     return None;
@@ -182,8 +191,11 @@ fn bound_values(
             }
             _ => {}
         }
+        // Reversed so the stack pops children in source order: candidates
+        // list the values as written.
         let mut c = n.walk();
-        stack.extend(n.named_children(&mut c));
+        let children: Vec<Node<'_>> = n.named_children(&mut c).collect();
+        stack.extend(children.into_iter().rev());
     }
     if !assigned {
         return None;
@@ -231,10 +243,11 @@ fn rhs_values(
     class: Option<Node<'_>>,
     source: &[u8],
     out: &mut Vec<String>,
+    ambiguous: &mut bool,
 ) -> Option<()> {
     match rhs.kind() {
         "string" | "encapsed_string" => out.push(method_literal(rhs, source)?),
-        "subscript_expression" => const_map_values(rhs, class, source, out)?,
+        "subscript_expression" => const_map_values(rhs, class, source, out, ambiguous)?,
         "binary_expression" => {
             if rhs.child_by_field_name("operator")?.kind() != "??" {
                 return None;
@@ -243,7 +256,7 @@ fn rhs_values(
             if left.kind() != "subscript_expression" {
                 return None;
             }
-            const_map_values(left, class, source, out)?;
+            const_map_values(left, class, source, out, ambiguous)?;
             let default = rhs.child_by_field_name("right")?;
             if default.kind() != "null" {
                 out.push(method_literal(default, source)?);
@@ -256,12 +269,15 @@ fn rhs_values(
 
 /// The values of `self::MAP[$k]` / `static::MAP[$k]` / `Name::MAP[$k]`: the
 /// constant must be declared on that class in this file, as a non-empty
-/// array of string literals.
+/// array of string literals. `Name` matches by short name; a second class or
+/// a `use` import of that short name sets `ambiguous` and unions the values
+/// of every same-named class that declares the constant.
 fn const_map_values(
     subscript: Node<'_>,
     class: Option<Node<'_>>,
     source: &[u8],
     out: &mut Vec<String>,
+    ambiguous: &mut bool,
 ) -> Option<()> {
     let access = subscript
         .named_child(0)
@@ -273,15 +289,29 @@ fn const_map_values(
         .utf8_text(source)
         .ok()?;
     let scope_text = scope.utf8_text(source).ok()?;
-    let owner = match scope.kind() {
-        "relative_scope" if is_self_or_static(scope_text) => class?,
+    let owners = match scope.kind() {
+        "relative_scope" if is_self_or_static(scope_text) => vec![class?],
         "name" | "qualified_name" => {
             let short = scope_text.rsplit('\\').next()?;
-            file_class(subscript, short, source)?
+            let root = file_root(subscript);
+            let owners = file_classes(root, short, source);
+            *ambiguous |= owners.len() > 1 || imports_short_name(root, short, source);
+            owners
         }
         _ => return None,
     };
-    let array = const_initializer(owner, constant, source)?;
+    let mut found = false;
+    for owner in owners {
+        if let Some(array) = const_initializer(owner, constant, source) {
+            push_array_values(array, source, out)?;
+            found = true;
+        }
+    }
+    found.then_some(())
+}
+
+/// Every value of a non-empty array of string literals, or `None`.
+fn push_array_values(array: Node<'_>, source: &[u8], out: &mut Vec<String>) -> Option<()> {
     let mut c = array.walk();
     let mut count = 0usize;
     for element in array
@@ -305,24 +335,64 @@ fn const_map_values(
     (count > 0).then_some(())
 }
 
-/// The `class_declaration` named `name` in the file holding `node`.
-fn file_class<'t>(node: Node<'t>, name: &str, source: &[u8]) -> Option<Node<'t>> {
+fn file_root(node: Node<'_>) -> Node<'_> {
     let mut root = node;
     while let Some(p) = root.parent() {
         root = p;
     }
+    root
+}
+
+/// Every `class_declaration` named `name` in the file.
+fn file_classes<'t>(root: Node<'t>, name: &str, source: &[u8]) -> Vec<Node<'t>> {
+    let mut found = Vec::new();
     let mut stack = vec![root];
     while let Some(n) = stack.pop() {
         if n.kind() == "class_declaration" {
             if class_name(n, source) == Some(name) {
-                return Some(n);
+                found.push(n);
+            }
+            continue;
+        }
+        let mut c = n.walk();
+        let children: Vec<Node<'t>> = n.named_children(&mut c).collect();
+        stack.extend(children.into_iter().rev());
+    }
+    found
+}
+
+/// Whether a class `use` in the file binds `short` (by alias or last segment).
+fn imports_short_name(root: Node<'_>, short: &str, source: &[u8]) -> bool {
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "namespace_use_clause" {
+            // `use function` / `use const` sits on the declaration, or on the
+            // clause inside a `use A\{function f}` group.
+            let declaration = n.parent().and_then(|p| match p.kind() {
+                "namespace_use_group" => p.parent(),
+                _ => Some(p),
+            });
+            let is_class = n.child_by_field_name("type").is_none()
+                && declaration.is_none_or(|d| d.child_by_field_name("type").is_none());
+            let bound = n.child_by_field_name("alias").or_else(|| {
+                let mut c = n.walk();
+                let name = n
+                    .named_children(&mut c)
+                    .find(|ch| matches!(ch.kind(), "name" | "qualified_name"));
+                name
+            });
+            let bound_short = bound
+                .and_then(|b| b.utf8_text(source).ok())
+                .and_then(|t| t.rsplit('\\').next());
+            if is_class && bound_short == Some(short) {
+                return true;
             }
             continue;
         }
         let mut c = n.walk();
         stack.extend(n.named_children(&mut c));
     }
-    None
+    false
 }
 
 /// The array literal `class` assigns to its own constant `constant`; an

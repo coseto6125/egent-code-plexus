@@ -351,6 +351,7 @@ fn supported_framework_catalog() -> Vec<Value> {
         ("Python/Celery", "celery-task"),
         ("Python/reflection", "reflection-getattr-fanout"),
         ("PHP/dynamic-dispatch", "php-const-map-dispatch"),
+        ("PHP/dynamic-dispatch", "php-const-map-dispatch-ambiguous"),
         ("Rust/Axum", "axum-route-handler"),
         ("Rust/Actix", "actix-route-<method>"),
         ("Web/Express", "express-route-handler"),
@@ -366,7 +367,9 @@ fn supported_framework_catalog() -> Vec<Value> {
             "django-url-path" => fc::DJANGO_URL,
             "django-signal-receiver" | "django-signal-connect" => fc::DJANGO_SIGNAL,
             "celery-task" => fc::CELERY_TASK,
-            "reflection-getattr-fanout" | "php-const-map-dispatch" => fc::FANOUT_BASE,
+            "reflection-getattr-fanout"
+            | "php-const-map-dispatch"
+            | "php-const-map-dispatch-ambiguous" => fc::FANOUT_BASE,
             "axum-route-handler" => fc::AXUM_ROUTE,
             "actix-route-<method>" => fc::ACTIX_ROUTE,
             "express-route-handler" => fc::EXPRESS_ROUTE,
@@ -403,7 +406,7 @@ fn classify_framework_reason(reason: &str) -> Option<&'static str> {
         Some("Python/Celery")
     } else if reason == "reflection-getattr-fanout" {
         Some("Python/reflection")
-    } else if reason == "php-const-map-dispatch" {
+    } else if reason.starts_with("php-const-map-dispatch") {
         Some("PHP/dynamic-dispatch")
     } else if reason == "axum-route-handler" {
         Some("Rust/Axum")
@@ -565,6 +568,10 @@ mod tests {
         );
         assert_eq!(
             classify_framework_reason("php-const-map-dispatch"),
+            Some("PHP/dynamic-dispatch")
+        );
+        assert_eq!(
+            classify_framework_reason("php-const-map-dispatch-ambiguous"),
             Some("PHP/dynamic-dispatch")
         );
         assert_eq!(
