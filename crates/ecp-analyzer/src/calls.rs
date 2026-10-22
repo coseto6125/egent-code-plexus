@@ -616,6 +616,25 @@ impl<'a> KindMemo<'a> {
 }
 
 impl NameRefSpec {
+    pub const EMPTY: Self = Self {
+        ident_kinds: &[],
+        kind: NameRefKind::Value,
+        binding_fields: &[],
+        binding_parents: &[],
+        capture_patterns: &[],
+        skip_fields: &[],
+        skip_kinds: &[],
+        skip_parents: &[],
+        call_suffixes: &[],
+        infix_calls: &[],
+        method_refs: &[],
+        symbol_method_refs: false,
+        named_arg_parents: &[],
+        global_decls: &[],
+        map_literal_types: &[],
+        passed_callable: None,
+    };
+
     fn child_scope(
         &self,
         parent: ParentShape<'_>,

@@ -623,9 +623,6 @@ impl LanguageProvider for SwiftProvider {
                     ("for_statement", "item"),
                     ("catch_block", "error"),
                 ],
-                binding_parents: &[],
-                capture_patterns: &[],
-                skip_fields: &[],
                 skip_kinds: &[
                     "import_declaration",
                     "attribute",
@@ -635,13 +632,7 @@ impl LanguageProvider for SwiftProvider {
                 ],
                 skip_parents: &["value_argument_label"],
                 call_suffixes: &["call_suffix"],
-                infix_calls: &[],
-                method_refs: &[],
-                symbol_method_refs: false,
-                named_arg_parents: &[],
-                global_decls: &[],
-                map_literal_types: &[],
-                passed_callable: None,
+                ..crate::calls::NameRefSpec::EMPTY
             },
         );
         crate::calls::extract_variant_refs(

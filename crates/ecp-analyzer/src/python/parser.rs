@@ -1322,7 +1322,6 @@ impl LanguageProvider for PythonProvider {
                     ("case_pattern", "dotted_name"),
                     ("keyword_pattern", "dotted_name"),
                 ],
-                skip_fields: &[],
                 skip_kinds: &[
                     "import_statement",
                     "import_from_statement",
@@ -1333,14 +1332,8 @@ impl LanguageProvider for PythonProvider {
                     "type",
                 ],
                 skip_parents: &["keyword_pattern"],
-                call_suffixes: &[],
-                infix_calls: &[],
-                method_refs: &[],
-                symbol_method_refs: false,
-                named_arg_parents: &[],
                 global_decls: &["global_statement"],
-                map_literal_types: &[],
-                passed_callable: None,
+                ..crate::calls::NameRefSpec::EMPTY
             },
         );
         crate::calls::extract_variant_refs(

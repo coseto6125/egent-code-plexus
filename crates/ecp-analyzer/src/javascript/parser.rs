@@ -675,24 +675,13 @@ impl LanguageProvider for JavaScriptProvider {
                     ("pair_pattern", "value"),
                     ("object_assignment_pattern", "left"),
                 ],
-                binding_parents: &[],
-                capture_patterns: &[],
-                skip_fields: &[],
                 skip_kinds: &[
                     "import_statement",
                     "decorator",
                     "type_annotation",
                     "type_arguments",
                 ],
-                skip_parents: &[],
-                call_suffixes: &[],
-                infix_calls: &[],
-                method_refs: &[],
-                symbol_method_refs: false,
-                named_arg_parents: &[],
-                global_decls: &[],
-                map_literal_types: &[],
-                passed_callable: None,
+                ..crate::calls::NameRefSpec::EMPTY
             },
         );
 

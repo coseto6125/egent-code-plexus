@@ -873,10 +873,6 @@ impl LanguageProvider for PhpProvider {
             &crate::calls::NameRefSpec {
                 ident_kinds: &["name"],
                 kind: crate::calls::NameRefKind::Constant,
-                binding_fields: &[],
-                binding_parents: &[],
-                capture_patterns: &[],
-                skip_fields: &[],
                 skip_kinds: &[
                     "variable_name",
                     "namespace_use_declaration",
@@ -895,17 +891,11 @@ impl LanguageProvider for PhpProvider {
                     "named_label_statement",
                     "goto_statement",
                 ],
-                call_suffixes: &[],
-                infix_calls: &[],
-                method_refs: &[],
-                symbol_method_refs: false,
-                named_arg_parents: &[],
-                global_decls: &[],
-                map_literal_types: &[],
                 passed_callable: Some((
                     "function_call_expression",
                     super::receiver_types::passed_callable,
                 )),
+                ..crate::calls::NameRefSpec::EMPTY
             },
         );
         crate::calls::extract_variant_refs(

@@ -974,24 +974,15 @@ impl LanguageProvider for GoProvider {
                     ("var_spec", "name"),
                     ("const_spec", "name"),
                 ],
-                binding_parents: &[],
-                capture_patterns: &[],
                 skip_fields: &[("keyed_element", "key")],
                 skip_kinds: &["import_declaration", "type_arguments"],
-                skip_parents: &[],
-                call_suffixes: &[],
-                infix_calls: &[],
-                method_refs: &[],
-                symbol_method_refs: false,
-                named_arg_parents: &[],
-                global_decls: &[],
                 map_literal_types: &[
                     "map_type",
                     "slice_type",
                     "array_type",
                     "implicit_length_array_type",
                 ],
-                passed_callable: None,
+                ..crate::calls::NameRefSpec::EMPTY
             },
         );
 

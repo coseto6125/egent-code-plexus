@@ -496,9 +496,6 @@ impl LanguageProvider for DartProvider {
                     ("catch_clause", "exception"),
                     ("catch_clause", "stack_trace"),
                 ],
-                binding_parents: &[],
-                capture_patterns: &[],
-                skip_fields: &[],
                 skip_kinds: &[
                     "import_or_export",
                     "library_name",
@@ -508,14 +505,7 @@ impl LanguageProvider for DartProvider {
                     "type_arguments",
                 ],
                 skip_parents: &["label"],
-                call_suffixes: &[],
-                infix_calls: &[],
-                method_refs: &[],
-                symbol_method_refs: false,
-                named_arg_parents: &[],
-                global_decls: &[],
-                map_literal_types: &[],
-                passed_callable: None,
+                ..crate::calls::NameRefSpec::EMPTY
             },
         );
         crate::calls::extract_variant_refs(
