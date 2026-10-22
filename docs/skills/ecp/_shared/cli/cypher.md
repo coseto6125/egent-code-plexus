@@ -14,6 +14,7 @@ ecp cypher "MATCH (a)-[r]->(b) RETURN a,b" [--repo <PATH>]
 - **Null / existence**: `IS [NOT] NULL` (pair with `OPTIONAL MATCH`), `[NOT] EXISTS((a)-[:Rel]->(b))` (multi-hop + `*min..max` supported; multi-hop needs a var bound by an outer MATCH).
 - **Aggregations**: `COUNT(*)`.
 - **Pathing**: Variable-length paths `[:Rel*1..2]`, reverse arrows `<-[r]-`.
+- **Lists**: index or slice a list value: `labels(n)[0]`, `xs[-1]`, `xs[1..3]`.
 
 ## NodeKinds
 `Function`, `Method`, `Class`, `Property`, `Constructor`, `Interface`, `Const`, `Variable`, `Import`, `Route`, `Process`, `File`, `Struct`, `Enum`, `Trait`, `Impl`, `Module`, `Namespace`, `Typedef`, `Macro`, `Annotation`, `SchemaField`, `EventTopic`, `TransactionScope`, `PathLiteral`.
@@ -21,7 +22,7 @@ ecp cypher "MATCH (a)-[r]->(b) RETURN a,b" [--repo <PATH>]
 Category labels expand in MATCH and WHERE: `:Callable` (Function|Method|Constructor), `:Type` (Class|Interface|Struct|Enum|Typedef|Trait), `:Data` (Property|Variable|Const|EnumVariant|SchemaField). Prefer `:Callable` over bare `:Function` — the latter skips methods.
 
 ## RelTypes
-`Calls`, `Extends`, `Imports`, `Implements`, `HasMethod`, `HasProperty`, `Accesses`, `HandlesRoute`, `References`, `Defines`, `Fetches`, `MirrorsField`, `Publishes`, `Subscribes`, `EventTopicMirror`, `OpensTxScope`, `Overrides`, `UsesPathLiteral`.
+`Calls`, `Extends`, `Imports`, `Implements`, `HasMethod`, `HasProperty`, `Accesses`, `ReadsField`, `HandlesRoute`, `References`, `Defines`, `Fetches`, `MirrorsField`, `Publishes`, `Subscribes`, `EventTopicMirror`, `OpensTxScope`, `Overrides`, `UsesPathLiteral`.
 
 ## Common patterns
 
@@ -37,6 +38,14 @@ WHERE n.name = "session_meta.json"
 RETURN s.name, r.reason
 ```
 The `r.reason` payload is `sink:read|confidence:high`, `sink:write|confidence:high`, `sink:join|confidence:medium`, `sink:free|confidence:high`, etc. — split readers from writers without re-parsing.
+
+### Who reads a constant, or passes a function as a callback?
+```cypher
+MATCH (s)-[r]->(c {name: "MAX_RETRIES"})
+WHERE r.reason IN ["value_read", "function_reference"]
+RETURN s.name, s.filePath, r.reason, r.confidence
+```
+A bare-name read of a constant or variable is a `ReadsField` edge with reason `value_read`. A function named without a call (a callback argument, a method reference) is a `References` edge with reason `function_reference`. `ecp impact` on the target already counts these readers.
 
 ## Process Tracing (Leiden-community-aware execution paths)
 

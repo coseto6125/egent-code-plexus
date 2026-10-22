@@ -24,6 +24,7 @@ pub struct CypherArgs {
     /// - Aggregation:        COUNT(*), COUNT(DISTINCT x), SUM/MIN/MAX/AVG, COLLECT
     /// - Pipeline:           WITH ... [WHERE ...], OPTIONAL MATCH, UNION [ALL]
     /// - Output shaping:     RETURN [DISTINCT], ORDER BY, SKIP, LIMIT
+    /// - Lists:              labels(n)[0], xs[-1], xs[1..3] (index or slice a list value)
     ///
     /// Cypher operates on a single graph; --repo must resolve to one repo.
     #[arg(value_name = "QUERY")]
