@@ -1495,7 +1495,7 @@ mod fingerprint_drift_tests {
         fs::create_dir_all(session_dir.join("graph_overlay")).unwrap();
         let mtime = mtime_ns_of(&worktree.join("app.py")).unwrap();
         let head = git_head_sha(&worktree).unwrap();
-        SessionMeta {
+        let meta = SessionMeta {
             version: 1,
             session_id: "v5-refresh-test".into(),
             pid: None,
@@ -1507,9 +1507,8 @@ mod fingerprint_drift_tests {
             watcher_pid: None,
             last_drained_offset: 0,
             agent_name: None,
-        }
-        .write_atomic(&session_dir.join("session_meta.json"))
-        .unwrap();
+        };
+        SessionMeta::write_atomic(&session_dir.join("session_meta.json"), &meta).unwrap();
         let mut dirty = DirtyFiles::empty();
         dirty.entries.insert(
             "app.py".into(),
