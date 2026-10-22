@@ -1373,6 +1373,18 @@ fn test_overlay_kotlin_extension_under_indexed_root_matches_reindex() {
     );
 }
 
+#[test]
+fn test_overlay_kotlin_computed_receiver_extension_matches_reindex() {
+    let before = "class Other {}\nfun Other.ext() {}\nclass C { fun other(): Other = Other()\nfun run() {} }\n";
+    let after = "class Other {}\nfun Other.ext() {}\nclass C { fun other(): Other = Other()\nfun run() { other().ext() } }\n";
+    parity(
+        &KotlinProvider::new().unwrap(),
+        &[("C.kt", before)],
+        &[("C.kt", after)],
+        &[("C.kt".into(), "ext".into(), "".into(), 70)],
+    );
+}
+
 // A typed library receiver that retries onto the caller itself: the index
 // drops self-recursion Calls, so the overlay must too.
 #[test]
