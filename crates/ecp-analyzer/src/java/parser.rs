@@ -516,8 +516,15 @@ impl LanguageProvider for JavaProvider {
         // Extract call sites with receiver-type binding for `this.foo()`,
         // `super.foo()`, and typed-variable `obj.foo()` patterns; same DFS
         // also collects path-shaped string literals.
+        let profile_calls = std::time::Instant::now();
         let (raw_path_literals, raw_sql_refs) =
             extract_java_calls_and_path_literals(tree.root_node(), source, &mut nodes);
+        if std::env::var_os("ECP_PROF").is_some() {
+            eprintln!(
+                "prof java.calls: {:.6}s",
+                profile_calls.elapsed().as_secs_f64()
+            );
+        }
         crate::calls::extract_field_reads(
             tree.root_node(),
             source,
