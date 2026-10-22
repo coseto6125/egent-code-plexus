@@ -59,40 +59,41 @@ Inspirado em [GitNexus](https://github.com/abhigyanpatwari/GitNexus) por [Abhigy
 
 Comparação direta com outras duas ferramentas de code-graph: [`codegraph`](https://github.com/colbymchenry/codegraph) (Node + SQLite) e o [`gitnexus`](https://github.com/abhigyanpatwari/GitNexus) original (Node) — mesmos checkouts, mesma máquina. `ecp` é um CLI sem estado de execução única: todas as latências abaixo **incluem a inicialização completa do processo**, sem daemon, sem aquecimento.
 
-*Versões: `ecp` 0.4.2 · `codegraph` 0.9.4 · `gitnexus` 1.6.5. Todas as ferramentas limitadas ao limite de tamanho máximo de arquivo de 1 MiB onde configurável (`gitnexus` tem 512 KB fixo em código). Medianas do `ecp` em 5–7 execuções. Hardware: AMD Ryzen 9 9950X (16 lógicos), Linux.*
+*Versões: `ecp` 0.16.2 · `codegraph` 1.6.2 · `gitnexus` 1.6.12, medidas em 2026-10-22. As três limitadas a 1 MiB por arquivo. Cada execução fixada em 8 núcleos lógicos (`taskset -c 0-7`) em um AMD Ryzen 9 9950X, Linux (WSL2). As proporções do índice a frio vêm de execuções intercaladas; medianas do índice do `ecp` sobre 5 execuções, consultas sobre 7.*
 
 ### `microsoft/vscode` — 14.874 arquivos, TypeScript denso de linguagem única
 
 | Métrica | **`ecp`** | `codegraph` | `gitnexus` |
 |---|---|---|---|
-| **Índice a frio** | **4.6 s** | 166.9 s | **DNF** — encerrado aos 27 min |
-| RSS de pico | **~1.0 GiB** | 1.7 GiB | 4.6 GiB (ainda subindo) |
-| Busca de símbolo / consulta | **34.6 ms** | 169.5 ms | — |
-| Chamadores / impacto | **27.2 ms** | 172.4 ms | — |
-| Inspeção / contexto | **35.0 ms** | 415.9 ms | — |
-| Baseline de impacto (git-diff) | **725.9 ms** | N/A — sem este modo | — |
-| Nós do grafo | **507,257** | 315,498 | — |
-| Arestas do grafo | 916,380 | **986,709** | — |
-| Tamanho do índice em disco | **87 MiB** | 671 MiB | — |
-| Arquivos indexados | **14.874** | 10.814 | — |
+| **Índice a frio** | **8.6 s** | 82.8 s | 317 s |
+| RSS de pico | **0.99 GiB** | 7.7 GiB | 9.0 GiB |
+| Busca de símbolo / consulta | **34.4 ms** | 329.6 ms | 2,017 ms |
+| Chamadores / impacto | **34.6 ms** | 345.6 ms | 1,165 ms |
+| Inspeção / contexto | **34.6 ms** | 321.9 ms | 2,825 ms |
+| Baseline de impacto (git-diff) | **251.6 ms** | N/A — sem este modo | — |
+| Nós do grafo | **495,839** | 380,766 | 356,556 |
+| Arestas do grafo | 1,052,891 | 1,366,686 | **1,493,180** |
+| Tamanho do índice em disco | **125 MiB** | 1,250 MiB | 3,957 MiB |
+| Arquivos indexados | **12,294** | 10,688 | 11,710 |
 
-*`gitnexus` não concluiu — encerrado após 27 min preso em sua fase de resolução de grafo em memória (RSS 4.6 GiB, sem saída gravada).*
+*Em maio de 2026, o `gitnexus` 1.6.5 não concluiu este repositório (encerrado aos 27 min); o 1.6.12 conclui em 317 s. O valor em disco do `ecp` é o índice ativo; seu cache de parsing adiciona 127 MiB.*
 
 ### `abhigyanpatwari/GitNexus` — 3.232 arquivos, poliglota (o corpus que as três ferramentas conseguem concluir)
 
 | Métrica | **`ecp`** | `codegraph` | `gitnexus` |
 |---|---|---|---|
-| **Índice a frio** | **0.74 s** | 11.2 s | 77.6 s |
-| RSS de pico | **264 MiB** | 501 MiB | 2.5 GiB |
-| Busca / consulta | **9.4 ms** | 103.5 ms | — |
-| Chamadores / impacto | **9.2 ms** | 104.2 ms | 297.6 ms |
-| Inspeção / contexto | **9.4 ms** | — | 295.5 ms |
-| Nós do grafo | **49,122** | 19,604 | 30,223 |
-| Arestas do grafo | **48,271** | 39,155 | 47,218 |
-| Tamanho do índice em disco | **7.7 MiB** | 37 MiB | 306 MiB |
-| Arquivos indexados | **3.232** | 2.968 | 3.232 |
+| **Índice a frio** | **3.22 s** | 56.5 s | 77.2 s |
+| RSS de pico | **0.40 GiB** | 4.04 GiB | 4.59 GiB |
+| Busca / consulta | **20.4 ms** | 274.2 ms | 1,050 ms |
+| Chamadores / impacto | **20.3 ms** | 273.3 ms | 818 ms |
+| Inspeção / contexto | **22.3 ms** | 281.5 ms | 1,000 ms |
+| Baseline de impacto (git-diff) | **290.7 ms** | N/A — sem este modo | — |
+| Nós do grafo | **131,266** | 67,988 | 65,974 |
+| Arestas do grafo | **272,150** | 221,484 | 217,919 |
+| Tamanho do índice em disco | **32 MiB** | 293 MiB | 1,113 MiB |
+| Arquivos indexados | **6,669** | 6,125 | 3,033 |
 
-**Índice a frio: 15–37× mais rápido que `codegraph`; `gitnexus` não termina em um repositório real grande. Menor memória, menor índice em disco, grafo mais denso — em qualquer escala.**
+**Índice a frio: ~9× mais rápido que o `codegraph` no vscode e ~17× no repositório GitNexus; 24–37× mais rápido que o `gitnexus`. Menor memória, menor índice em disco e consultas mais rápidas em ambos os corpora. No vscode, `codegraph` e `gitnexus` registram mais arestas; o `ecp` registra mais nós.**
 
 ### Escala: `.sample_repo` — 22.645 arquivos, 25 linguagens, corpus poliglota de 2,1 GB
 
