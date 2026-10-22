@@ -189,6 +189,12 @@ pub fn run_analyzer_for_paths(
         _ => None,
     };
     let cache_ref: Option<&crate::parse_cache::ParseCache> = parse_cache.as_ref();
+    if prof {
+        eprintln!(
+            "prof step3.open_parse_cache: {:.6}s",
+            t_step3.elapsed().as_secs_f64()
+        );
+    }
     let t_parse = std::time::Instant::now();
     let mut local_graphs = pipeline.analyze_with_cache(files_to_analyze, |rel_path, hash| {
         cache_ref.and_then(|c| c.get(rel_path, hash))
