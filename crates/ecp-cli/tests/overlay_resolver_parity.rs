@@ -1775,20 +1775,14 @@ fn test_overlay_overload_delegating_to_sibling_matches_reindex() {
 /// (source uid, target uid, rel, reason, confidence %).
 type NameRefEdge = (u64, u64, RelType, String, u32);
 
-/// The `value_read` / `function_reference` edges a bare name yields
-/// (`ReadsField` to a constant, `References` to a function passed as a
-/// value), from the reindex of `dirty` and from the overlay of `dirty` over
-/// the base index.
-///
-/// The overlay rebuilds neither: its fragments carry no name references, so
-/// the base edge of a dirty reader survives with the source redirected (as
-/// for every `ReadsField`). An edit that keeps the reads therefore matches
-/// the reindex; an edit that adds or drops a read does not until the next
-/// reindex, which these cases do not cover.
-fn name_ref_edges(
+/// The selected `field_reads` edges from a reindex of `dirty` and an overlay
+/// of `dirty` over the base index. This covers ordinary property reads plus
+/// tagged NameRefs for values and callbacks.
+fn field_read_edges(
     provider: &dyn LanguageProvider,
     files: &[(&str, &str)],
     dirty: &[(&str, &str)],
+    reasons: &[&str],
 ) -> (Vec<NameRefEdge>, Vec<NameRefEdge>) {
     let parse = |path: &str, source: &str| {
         provider
@@ -1806,7 +1800,7 @@ fn name_ref_edges(
         }
         builder.build()
     };
-    let wanted = |reason: &str| reason == "value_read" || reason == "function_reference";
+    let wanted = |reason: &str| reasons.contains(&reason);
     let base = build(&[]);
     let full = build(dirty);
     let pool = &full.string_pool;
@@ -1859,13 +1853,14 @@ fn name_ref_edges(
 fn test_overlay_typescript_constant_read_shifted_reader_matches_reindex() {
     let app = "import { LIMITS } from './lib';\nexport function readLimit(): number {\n  return LIMITS.max;\n}\n";
     let shifted = format!("\n{app}");
-    let (full, overlay) = name_ref_edges(
+    let (full, overlay) = field_read_edges(
         &TypeScriptProvider::new().unwrap(),
         &[
             ("lib.ts", "export const LIMITS = { max: 3 };\n"),
             ("app.ts", app),
         ],
         &[("app.ts", &shifted)],
+        &["value_read", "function_reference"],
     );
     assert_eq!(full.len(), 1, "one imported constant read: {full:?}");
     assert_eq!(full[0].2, RelType::ReadsField);
@@ -1876,10 +1871,11 @@ fn test_overlay_typescript_constant_read_shifted_reader_matches_reindex() {
 fn test_overlay_typescript_callback_argument_shifted_registrar_matches_reindex() {
     let app = "function handler(): void {}\nexport function wire(el: any): void {\n  el.addEventListener('click', handler);\n}\n";
     let shifted = format!("\n{app}");
-    let (full, overlay) = name_ref_edges(
+    let (full, overlay) = field_read_edges(
         &TypeScriptProvider::new().unwrap(),
         &[("app.ts", app)],
         &[("app.ts", &shifted)],
+        &["value_read", "function_reference"],
     );
     assert_eq!(full.len(), 1, "one callback reference: {full:?}");
     assert_eq!(full[0].2, RelType::References);
@@ -1890,13 +1886,108 @@ fn test_overlay_typescript_callback_argument_shifted_registrar_matches_reindex()
 fn test_overlay_python_constant_read_and_callback_shifted_matches_reindex() {
     let app = "from lib import TIMEOUT\nimport threading\n\ndef worker():\n    pass\n\ndef start():\n    threading.Thread(target=worker).start()\n    return TIMEOUT\n";
     let shifted = format!("\n{app}");
-    let (full, overlay) = name_ref_edges(
+    let (full, overlay) = field_read_edges(
         &PythonProvider::new().unwrap(),
         &[("lib.py", "TIMEOUT = 5\n"), ("app.py", app)],
         &[("app.py", &shifted)],
+        &["value_read", "function_reference"],
     );
     assert_eq!(full.len(), 2, "one constant read, one callback: {full:?}");
     assert_eq!(overlay, full);
+}
+
+#[test]
+fn test_overlay_typescript_value_read_added_and_removed_matches_reindex() {
+    let base =
+        "import { LIMITS } from './lib';\nexport function readLimit(): number { return 0; }\n";
+    let with_read = "import { LIMITS } from './lib';\nexport function readLimit(): number { return LIMITS.max; }\n";
+    let files = [
+        ("lib.ts", "export const LIMITS = { max: 3 };\n"),
+        ("app.ts", base),
+    ];
+    let provider = TypeScriptProvider::new().unwrap();
+    let reasons = ["value_read", "function_reference"];
+
+    let (added, added_overlay) =
+        field_read_edges(&provider, &files, &[("app.ts", with_read)], &reasons);
+    assert_eq!(added.len(), 1, "the dirty read must be indexed: {added:?}");
+    assert_eq!(added_overlay, added, "the overlay must add a value_read");
+
+    let (removed, removed_overlay) = field_read_edges(
+        &provider,
+        &[
+            ("lib.ts", "export const LIMITS = { max: 3 };\n"),
+            ("app.ts", with_read),
+        ],
+        &[("app.ts", base)],
+        &reasons,
+    );
+    assert!(
+        removed.is_empty(),
+        "the reindex removes the value_read: {removed:?}"
+    );
+    assert_eq!(
+        removed_overlay, removed,
+        "the overlay must mask the stale value_read"
+    );
+}
+
+#[test]
+fn test_overlay_typescript_function_reference_added_and_removed_matches_reindex() {
+    let base = "function handler(): void {}\nexport function wire(el: any): void {}\n";
+    let with_reference = "function handler(): void {}\nexport function wire(el: any): void { el.addEventListener('click', handler); }\n";
+    let provider = TypeScriptProvider::new().unwrap();
+    let reasons = ["value_read", "function_reference"];
+
+    let (added, added_overlay) = field_read_edges(
+        &provider,
+        &[("app.ts", base)],
+        &[("app.ts", with_reference)],
+        &reasons,
+    );
+    assert_eq!(
+        added.len(),
+        1,
+        "the dirty callback must be indexed: {added:?}"
+    );
+    assert_eq!(added[0].2, RelType::References);
+    assert_eq!(
+        added_overlay, added,
+        "the overlay must add a function_reference"
+    );
+
+    let (removed, removed_overlay) = field_read_edges(
+        &provider,
+        &[("app.ts", with_reference)],
+        &[("app.ts", base)],
+        &reasons,
+    );
+    assert!(
+        removed.is_empty(),
+        "the reindex removes the function_reference: {removed:?}"
+    );
+    assert_eq!(
+        removed_overlay, removed,
+        "the overlay must mask the stale function_reference"
+    );
+}
+
+#[test]
+fn test_overlay_typescript_field_read_removed_masks_base_edge() {
+    let with_read = "class Config { timeout: number = 0; }\nexport function readTimeout(c: Config): number { return c.timeout; }\n";
+    let without_read = "class Config { timeout: number = 0; }\nexport function readTimeout(c: Config): number { return 0; }\n";
+    let provider = TypeScriptProvider::new().unwrap();
+    let (full, overlay) = field_read_edges(
+        &provider,
+        &[("app.ts", with_read)],
+        &[("app.ts", without_read)],
+        &["field_read"],
+    );
+    assert!(
+        full.is_empty(),
+        "the reindex removes the field read: {full:?}"
+    );
+    assert_eq!(overlay, full, "the overlay must mask the stale field_read");
 }
 
 // ---- Chained member calls typed by the inner callee's return type ----

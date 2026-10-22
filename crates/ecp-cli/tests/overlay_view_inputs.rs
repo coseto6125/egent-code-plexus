@@ -6,11 +6,13 @@
 #[path = "common/parity.rs"]
 mod parity;
 
+use ecp_analyzer::typescript::TypeScriptProvider;
 use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs, load_overlay_hits};
 use ecp_cli::session::overlay_writer::{
     write_dirty_fragments_from_graphs, FragmentFileV3, FragmentSymbolV3,
 };
-use ecp_core::analyzer::types::{LocalGraph, RawImport, RawNode, VariantRef};
+use ecp_core::analyzer::provider::LanguageProvider;
+use ecp_core::analyzer::types::{LocalGraph, NameRef, NameRefKind, RawImport, RawNode, VariantRef};
 use ecp_core::graph::NodeKind;
 use ecp_core::session::{
     DirtyEntry, DirtyFiles, OverlayFileInput, SessionMeta, FRAGMENT_FORMAT_V3,
@@ -277,7 +279,13 @@ fn test_load_view_inputs_heritage_and_variant_refs_roundtrip() {
     let mtime = write_worktree_file(&worktree, "src/a.rs");
     let used = VariantRef::encode("Color::Red", false);
     let matched = VariantRef::encode("Color::Blue", true);
-    let reads = vec![used.clone(), "plain_field".to_string(), matched.clone()];
+    let callback = NameRef::encode("callback", NameRefKind::Function);
+    let reads = vec![
+        used.clone(),
+        "plain_field".to_string(),
+        callback,
+        matched.clone(),
+    ];
     let graph = graph_for(
         "src/a.rs",
         vec![
@@ -301,9 +309,36 @@ fn test_load_view_inputs_heritage_and_variant_refs_roundtrip() {
     assert!(sym("paint").variant_refs.is_empty());
     assert_eq!(
         sym("uses").variant_refs,
-        [used, matched],
-        "variant entries stay raw and in order; the plain field read is dropped"
+        reads,
+        "all field reads, including tagged name references, stay raw and in order"
     );
+}
+
+/// A typed dirty factory enters the session through the writer and reader,
+/// rather than the direct `LocalGraph -> OverlayFileInput` conversion used by
+/// resolver parity tests. Its return type is required for `make().bar()`.
+#[test]
+fn test_write_dirty_fragments_factory_return_type_roundtrips() {
+    let tmp = tempfile::tempdir().unwrap();
+    let worktree = tmp.path().join("wt");
+    let session_dir = make_session_dir(tmp.path(), "return-sid");
+    let mtime = write_worktree_file(&worktree, "src/factory.ts");
+    let graph = TypeScriptProvider::new()
+        .unwrap()
+        .parse_file(
+            Path::new("src/factory.ts"),
+            b"export class Other { bar(): void {} }\nexport function make(): Other { return new Other(); }\n",
+        )
+        .unwrap();
+    write_dirty_fragments_from_graphs(&session_dir, &[graph], &[mtime]).unwrap();
+
+    let inputs = load_view_inputs(&session_dir, &worktree);
+    let factory = inputs[0]
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "make")
+        .unwrap();
+    assert_eq!(factory.return_type.as_deref(), Some("Other"));
 }
 
 /// Two writes for one file leave one manifest entry, the later one: the

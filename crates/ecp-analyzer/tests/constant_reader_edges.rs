@@ -401,6 +401,100 @@ fn test_value_read_go_same_package_other_file_returns_cross_file_edge() {
     assert_one_cross_file(&value_reads(&g, "readMax"), "a.go", "Max");
 }
 
+#[test]
+fn test_value_read_go_direct_and_named_map_literal_keys_return_edges() {
+    let g = graph(
+        &GoProvider::new().unwrap(),
+        &[(
+            "g.go",
+            "package main\n\nconst DIRECT = \"direct\"\nconst NAMED = \"named\"\n\ntype Labels map[string]int\n\nfunc direct() map[string]int {\n\treturn map[string]int{DIRECT: 1}\n}\n\nfunc named() Labels {\n\treturn Labels{NAMED: 1}\n}\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "direct"),
+        vec![r("g.go", "DIRECT", VALUE_READ, SAME_FILE)]
+    );
+    assert_eq!(
+        value_reads(&g, "named"),
+        vec![r("g.go", "NAMED", VALUE_READ, SAME_FILE)]
+    );
+}
+
+#[test]
+fn test_value_read_go_named_map_alias_chain_literal_key_returns_edge() {
+    let g = graph(
+        &GoProvider::new().unwrap(),
+        &[(
+            "g.go",
+            "package main\n\nconst KEY = \"alias\"\n\ntype Base map[string]int\ntype Middle = Base\ntype Final Middle\n\nfunc aliases() Final {\n\treturn Final{KEY: 1}\n}\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "aliases"),
+        vec![r("g.go", "KEY", VALUE_READ, SAME_FILE)]
+    );
+}
+
+#[test]
+fn test_value_read_go_elided_map_and_slice_literal_keys_return_edges() {
+    let g = graph(
+        &GoProvider::new().unwrap(),
+        &[(
+            "g.go",
+            "package main\n\nconst OUTER = \"outer\"\nconst INNER = \"inner\"\nconst SLICE = \"slice\"\n\nfunc maps() map[string]map[string]int {\n\treturn map[string]map[string]int{OUTER: {INNER: 1}}\n}\n\nfunc slices() []map[string]int {\n\treturn []map[string]int{{SLICE: 1}}\n}\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "maps"),
+        vec![
+            r("g.go", "INNER", VALUE_READ, SAME_FILE),
+            r("g.go", "OUTER", VALUE_READ, SAME_FILE),
+        ]
+    );
+    assert_eq!(
+        value_reads(&g, "slices"),
+        vec![r("g.go", "SLICE", VALUE_READ, SAME_FILE)]
+    );
+}
+
+#[test]
+fn test_value_read_go_known_struct_literal_keys_return_no_edge() {
+    let g = graph(
+        &GoProvider::new().unwrap(),
+        &[(
+            "g.go",
+            "package main\n\nconst FIELD = \"field\"\n\ntype Inner struct { FIELD int }\ntype Outer struct { Inner Inner }\n\nfunc direct() Inner {\n\treturn Inner{FIELD: 1}\n}\n\nfunc nested() Outer {\n\treturn Outer{Inner: {FIELD: 1}}\n}\n",
+        )],
+    );
+    assert_eq!(value_reads(&g, "direct"), none());
+    assert_eq!(value_reads(&g, "nested"), none());
+}
+
+#[test]
+fn test_value_read_go_unknown_external_literal_key_returns_no_edge() {
+    let g = graph(
+        &GoProvider::new().unwrap(),
+        &[(
+            "g.go",
+            "package main\n\nimport external \"example.com/external\"\n\nconst KEY = \"unknown\"\n\nfunc build() external.Labels {\n\treturn external.Labels{KEY: 1}\n}\n",
+        )],
+    );
+    assert_eq!(value_reads(&g, "build"), none());
+}
+
+#[test]
+fn test_value_read_go_named_map_key_local_and_parameter_shadow_returns_no_edge() {
+    let g = graph(
+        &GoProvider::new().unwrap(),
+        &[(
+            "g.go",
+            "package main\n\nconst KEY = \"package\"\n\ntype Labels map[string]int\n\nfunc parameter(KEY string) Labels {\n\treturn Labels{KEY: 1}\n}\n\nfunc local() Labels {\n\tKEY := \"local\"\n\treturn Labels{KEY: 1}\n}\n",
+        )],
+    );
+    assert_eq!(value_reads(&g, "parameter"), none());
+    assert_eq!(value_reads(&g, "local"), none());
+}
+
 // ---- Rust ----
 
 const RS_SAME_FILE: &str = "pub const LIMIT: u32 = 3;\npub static NAME: &str = \"x\";\n\n\
