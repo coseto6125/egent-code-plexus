@@ -3352,7 +3352,27 @@ fn resolve_overlay_name_ref(
             .into_iter()
             .collect()
         },
-        |_, _| Vec::new(),
+        |name, target| {
+            if target != ResolveTarget::Field {
+                return Vec::new();
+            }
+            match bind_import(
+                graph,
+                name,
+                file_ord,
+                &file.imports,
+                caller.language,
+                fields,
+                types,
+                nodes,
+                dirty_base,
+                facts,
+                &[],
+            ) {
+                Some(ImportBinding::Resolved(Some(target))) => vec![target],
+                _ => Vec::new(),
+            }
+        },
     )
 }
 

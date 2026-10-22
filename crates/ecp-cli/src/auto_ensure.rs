@@ -1094,7 +1094,7 @@ struct L1FreshnessGate {
 /// L1 freshness gate: drop dirty files whose overlay fragment is provably
 /// current, keep the rest for re-parse.
 ///
-/// A fragment is current when its `dirty_files.json` entry is a v4 bin that
+/// A fragment is current when its `dirty_files.json` entry is a v5 bin that
 /// parsed cleanly, is on disk, AND records exactly the file's present
 /// mtime_ns, in a manifest the running binary's parser wrote. Any doubt (no
 /// session dir / meta / manifest, HEAD drifted since the fragments were
@@ -1106,7 +1106,7 @@ struct L1FreshnessGate {
 /// base SHA) runs inside the full overlay path, so a drifted session must
 /// fall through to it rather than short-circuit here.
 fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1FreshnessGate {
-    use ecp_core::session::{DirtyFiles, FRAGMENT_FORMAT_V4};
+    use ecp_core::session::{DirtyFiles, FRAGMENT_FORMAT_V5};
 
     let pass = |rel_paths, session_meta| L1FreshnessGate {
         rel_paths,
@@ -1141,7 +1141,7 @@ fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1Fre
             let Some(entry) = manifest.entries.get(rel) else {
                 return true;
             };
-            if entry.format != FRAGMENT_FORMAT_V4 || entry.parse_failed {
+            if entry.format != FRAGMENT_FORMAT_V5 || entry.parse_failed {
                 return true;
             }
             // A bin the manifest names can still be gone (a cleanup that

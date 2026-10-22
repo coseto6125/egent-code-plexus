@@ -11,7 +11,6 @@ use ecp_core::analyzer::lexical::LexicalFunctions;
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::analyzer::reexport::{export_filter_applies, is_ecmascript, ImportRef};
-use ecp_core::analyzer::same_file_pick::PickFacts;
 use ecp_core::analyzer::types::{
     owner_key, CallSite, LocalGraph, NameRef, RawImport, RawNode, RawRoute, VariantRef,
 };

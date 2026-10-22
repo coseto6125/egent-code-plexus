@@ -2,6 +2,12 @@ use ecp_analyzer::python::PythonProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::rust::parser::RustProvider;
 use ecp_analyzer::typescript::TypeScriptProvider;
+use ecp_analyzer::{
+    c::parser::CProvider, c_sharp::parser::CSharpProvider, cpp::parser::CppProvider,
+    dart::parser::DartProvider, go::parser::GoProvider, java::parser::JavaProvider,
+    javascript::parser::JavaScriptProvider, kotlin::parser::KotlinProvider,
+    php::parser::PhpProvider, ruby::parser::RubyProvider, swift::parser::SwiftProvider,
+};
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::{ArchivedZeroCopyGraph, RelType, ZeroCopyGraph};
@@ -1847,6 +1853,209 @@ fn field_read_edges(
     expected.sort_by(|a, b| (a.0, a.1, &a.3, a.4).cmp(&(b.0, b.1, &b.3, b.4)));
     actual.sort_by(|a, b| (a.0, a.1, &a.3, a.4).cmp(&(b.0, b.1, &b.3, b.4)));
     (expected, actual)
+}
+
+macro_rules! name_ref_parity {
+    ($test:ident, $provider:expr, $path:literal, $value:literal, $value_count:expr, $callback:literal, $callback_count:expr) => {
+        #[test]
+        fn $test() {
+            let provider = $provider;
+            for (source, reason, expected_count) in [
+                ($value, "value_read", $value_count),
+                ($callback, "function_reference", $callback_count),
+            ] {
+                let shifted = format!("\n{source}");
+                let (full, overlay) = field_read_edges(
+                    &provider,
+                    &[($path, source)],
+                    &[($path, &shifted)],
+                    &[reason],
+                );
+                assert_eq!(
+                    full.len(),
+                    expected_count,
+                    "{reason} fixture must exercise the indexed path: {source}"
+                );
+                assert_eq!(overlay, full, "{reason} overlay parity: {source}");
+            }
+        }
+    };
+}
+
+name_ref_parity!(
+    test_overlay_typescript_name_refs_match_reindex,
+    TypeScriptProvider::new().unwrap(),
+    "app.ts",
+    "const LIMITS = { max: 3 };\nfunction readLimit(): number { return LIMITS.max; }\n",
+    1,
+    "function handler(): void {}\nexport function wire(el: any): void {\n  el.addEventListener('click', handler);\n}\n",
+    1
+);
+name_ref_parity!(
+    test_overlay_javascript_name_refs_match_reindex,
+    JavaScriptProvider::new().unwrap(),
+    "app.js",
+    "const LIMITS = { max: 3 };\nfunction readLimit() { return LIMITS.max; }\n",
+    1,
+    "function tick() {}\nexport function start() {\n  setTimeout(tick, 10);\n}\n",
+    1
+);
+name_ref_parity!(
+    test_overlay_python_name_refs_match_reindex,
+    PythonProvider::new().unwrap(),
+    "app.py",
+    "LIMITS = [1]\ndef read_limit():\n    return LIMITS[0]\n",
+    1,
+    "import threading\n\ndef worker():\n    pass\n\ndef start():\n    threading.Thread(target=worker).start()\n",
+    1
+);
+name_ref_parity!(
+    test_overlay_java_name_refs_match_reindex,
+    JavaProvider::new().unwrap(),
+    "App.java",
+    "class App { static final int LIMIT = 3; int read() { return LIMIT; } }\n",
+    1,
+    "class App {\n    void print(String s) {}\n    void run(java.util.List<String> xs) {\n        xs.forEach(this::print);\n    }\n}\n",
+    1
+);
+name_ref_parity!(
+    test_overlay_kotlin_name_refs_match_reindex,
+    KotlinProvider::new().unwrap(),
+    "app.kt",
+    "val LIMIT = 3\nfun read(): Int = LIMIT\n",
+    1,
+    "fun transform(x: Int): Int = x\nfun apply(xs: List<Int>): List<Int> = xs.map(::transform)\n",
+    1
+);
+name_ref_parity!(
+    test_overlay_csharp_name_refs_match_reindex,
+    CSharpProvider::new().unwrap(),
+    "App.cs",
+    "class App { const int Limit = 3; int Read() { return Limit; } }\n",
+    1,
+    "class App { void Print(string s) {} void Run(System.Collections.Generic.List<string> xs) { xs.ForEach(Print); } }\n",
+    1
+);
+name_ref_parity!(
+    test_overlay_go_name_refs_match_reindex,
+    GoProvider::new().unwrap(),
+    "app.go",
+    "package app\nconst Limit = 3\nfunc Read() int { return Limit }\n",
+    1,
+    "package app\nfunc handler() {}\nfunc wire() { register(handler) }\nfunc register(f func()) {}\n",
+    1
+);
+name_ref_parity!(
+    test_overlay_rust_name_refs_match_reindex,
+    RustProvider::new().unwrap(),
+    "src/lib.rs",
+    "const LIMIT: u32 = 3;\nfn read() -> u32 { LIMIT }\n",
+    1,
+    "fn parse_line(s: &str) -> u32 {\n    s.len() as u32\n}\n\npub fn parse_all(lines: &[&str]) -> Vec<u32> {\n    lines.iter().copied().map(parse_line).collect()\n}\n",
+    1
+);
+name_ref_parity!(
+    test_overlay_php_name_refs_match_reindex,
+    PhpProvider::new().unwrap(),
+    "app.php",
+    "<?php\nconst LIMIT = 3;\nfunction read_limit() { return LIMIT; }\n",
+    1,
+    "<?php\nfunction fmt($x) { return $x; }\n\nfunction apply($xs) {\n    return array_map('fmt', $xs);\n}\n",
+    1
+);
+name_ref_parity!(
+    test_overlay_ruby_name_refs_match_reindex,
+    RubyProvider::new().unwrap(),
+    "app.rb",
+    "LIMIT = 3\ndef read_limit\n  LIMIT\nend\n",
+    1,
+    "class App\n  def handler(x)\n    x\n  end\n  def wire(items)\n    items.each(&method(:handler))\n  end\nend\n",
+    1
+);
+name_ref_parity!(
+    test_overlay_swift_name_refs_match_reindex,
+    SwiftProvider::new().unwrap(),
+    "app.swift",
+    "let limit = 3\nfunc read() -> Int { return limit }\n",
+    1,
+    "func transform(_ x: Int) -> Int { return x }\nfunc apply(_ xs: [Int]) -> [Int] { return xs.map(transform) }\n",
+    1
+);
+name_ref_parity!(
+    test_overlay_c_name_refs_match_reindex,
+    CProvider::new().unwrap(),
+    "app.c",
+    "static const int LIMIT = 3;\nint read_limit(void) { return LIMIT; }\n",
+    1,
+    "#include <stdlib.h>\n\nint cmp(const void *a, const void *b) {\n    return 0;\n}\n\nvoid sort_all(int *xs, int n) {\n    qsort(xs, n, sizeof(int), cmp);\n}\n",
+    1
+);
+name_ref_parity!(
+    test_overlay_cpp_name_refs_match_reindex,
+    CppProvider::new().unwrap(),
+    "app.cpp",
+    "constexpr int limit = 3;\nint read_limit() { return limit; }\n",
+    1,
+    "#include <algorithm>\n#include <vector>\n\nbool byValue(int a, int b) {\n    return a < b;\n}\n\nvoid sortAll(std::vector<int>& xs) {\n    std::sort(xs.begin(), xs.end(), byValue);\n}\n",
+    1
+);
+name_ref_parity!(
+    test_overlay_dart_name_refs_match_reindex,
+    DartProvider::new().unwrap(),
+    "app.dart",
+    "const limit = 3;\nint readLimit() { return limit; }\n",
+    1,
+    "int transform(int x) { return x; }\nList<int> apply(List<int> xs) { return xs.map(transform).toList(); }\n",
+    1
+);
+
+#[test]
+fn test_overlay_java_inherited_value_read_matches_reindex() {
+    let child =
+        "package app;\npublic class Child extends Parent {\n    int read() { return LIMIT; }\n}\n";
+    let shifted = format!("\n{child}");
+    let (full, overlay) = field_read_edges(
+        &JavaProvider::new().unwrap(),
+        &[
+            (
+                "src/app/Parent.java",
+                "package app;\npublic class Parent { static final int LIMIT = 3; }\n",
+            ),
+            ("src/app/Child.java", child),
+        ],
+        &[("src/app/Child.java", &shifted)],
+        &["value_read"],
+    );
+    assert_eq!(
+        full.len(),
+        1,
+        "the inherited field must be indexed: {full:?}"
+    );
+    assert_eq!(overlay, full, "the overlay must preserve inherited fields");
+}
+
+#[test]
+fn test_overlay_csharp_inherited_value_read_matches_reindex() {
+    let child = "public class Derived : Base {\n    int Read() { return LIMIT; }\n}\n";
+    let shifted = format!("\n{child}");
+    let (full, overlay) = field_read_edges(
+        &CSharpProvider::new().unwrap(),
+        &[
+            (
+                "Base.cs",
+                "public class Base { public const int LIMIT = 3; }\n",
+            ),
+            ("Derived.cs", child),
+        ],
+        &[("Derived.cs", &shifted)],
+        &["value_read"],
+    );
+    assert_eq!(
+        full.len(),
+        1,
+        "the inherited field must be indexed: {full:?}"
+    );
+    assert_eq!(overlay, full, "the overlay must preserve inherited fields");
 }
 
 #[test]
