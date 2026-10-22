@@ -548,6 +548,12 @@ fn reindex_and_overlay(files: &[(String, String)], edits: &[&str]) -> (Vec<Call>
         .map(|(path, source)| parse(path, source).into())
         .collect();
     let view = OverlayView::build(base, &inputs).expect("edits make a view");
+    // Every view a test builds must survive the session view cache unchanged.
+    assert_eq!(
+        OverlayView::from_cache_bytes(&view.to_cache_bytes(), base.nodes.len()).as_ref(),
+        Some(&view),
+        "view cache round trip"
+    );
     let overlay = calls(&MergedGraph::new(base, Some(&view)), base, caller);
     (reindex, overlay)
 }

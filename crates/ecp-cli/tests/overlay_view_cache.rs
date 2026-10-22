@@ -409,6 +409,37 @@ fn test_overlay_view_concurrent_engines_agree_and_leave_one_valid_cache() {
     assert!(tmp_files(&f.session_dir).is_empty());
 }
 
+/// The engines above may serialize behind the first writer; here every
+/// thread is released straight into `write`, under a key of its own, so the
+/// writes themselves overlap. Each publishes a whole file: exactly one key
+/// reads back, intact, and no temp file is left.
+#[test]
+fn test_view_cache_write_overlapping_writers_leave_one_whole_file() {
+    const WRITERS: u64 = 8;
+    let f = Fixture::new();
+    f.edit(&["keep_fn"], 1_000);
+    let probe = f.engine();
+    let fresh = f.fresh(&probe);
+    let nodes = probe.graph().unwrap().nodes.len();
+    let barrier = Barrier::new(WRITERS as usize);
+
+    std::thread::scope(|scope| {
+        for key in 0..WRITERS {
+            let (barrier, fresh, dir) = (&barrier, &fresh, &f.session_dir);
+            scope.spawn(move || {
+                barrier.wait();
+                view_cache::write(dir, key, fresh);
+            });
+        }
+    });
+
+    let readable: Vec<u64> = (0..WRITERS)
+        .filter(|&key| view_cache::read(&f.session_dir, key, nodes).as_ref() == Some(&fresh))
+        .collect();
+    assert_eq!(readable.len(), 1, "{readable:?}");
+    assert!(tmp_files(&f.session_dir).is_empty());
+}
+
 #[test]
 fn test_accepted_fragments_fragment_change_changes_hash() {
     let f = Fixture::new();
@@ -481,6 +512,25 @@ fn test_view_cache_key_graph_touched_after_load_keeps_loaded_stamp() {
     let loaded = engine.view_cache_key(7).unwrap();
 
     set_mtime(&f.graph_path, 3_000);
+
+    assert_eq!(engine.view_cache_key(7), Some(loaded));
+    assert_ne!(f.engine().view_cache_key(7), Some(loaded));
+}
+
+/// A publisher that renames a new graph over the path after the load: this
+/// engine still reads the old mapping, so its key must not follow the path.
+/// Unix only: Windows refuses to replace a file another handle has mapped.
+#[cfg(unix)]
+#[test]
+fn test_view_cache_key_graph_renamed_over_after_load_keeps_loaded_stamp() {
+    let f = Fixture::new();
+    let engine = f.engine();
+    let loaded = engine.view_cache_key(7).unwrap();
+    let replacement = f.graph_path.with_extension("bin.new");
+    fs::copy(&f.graph_path, &replacement).unwrap();
+    set_mtime(&replacement, 3_000);
+
+    fs::rename(&replacement, &f.graph_path).unwrap();
 
     assert_eq!(engine.view_cache_key(7), Some(loaded));
     assert_ne!(f.engine().view_cache_key(7), Some(loaded));
