@@ -293,7 +293,7 @@ fn test_load_view_inputs_heritage_and_variant_refs_roundtrip() {
             type_node("Lone", &[], &[]),
             rn("paint", None, &[]),
             RawNode {
-                field_reads: reads,
+                field_reads: reads.clone(),
                 ..rn("uses", None, &[])
             },
         ],
