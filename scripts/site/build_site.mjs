@@ -435,6 +435,9 @@ function comparePage(locale, version, rival = null) {
     .map((tool) => `<th><a href="${tool.url}" rel="noopener">${tool.name}</a><br><span class="mono compare-stack">${tool.stack}</span></th>`)
     .join('');
 
+  // `terms` maps a suite's English string to its translation, so the numbers
+  // and their English wording keep one source and a missing entry stays English.
+  const term = (text) => t.terms?.[text] ?? text;
   const tables = compare.suites
     .map((suite) => {
       const rows = suite.rows
@@ -443,20 +446,20 @@ function comparePage(locale, version, rival = null) {
           // is dropped — and dropped entirely when the winner is the tool this
           // page does not show, rather than silently crowning the runner-up.
           const cells = keep
-            .map((column) => `<td${column === r.best ? ' class="compare-best"' : ''}>${escapeHtml(r.values[column])}</td>`)
+            .map((column) => `<td${column === r.best ? ' class="compare-best"' : ''}>${escapeHtml(term(r.values[column]))}</td>`)
             .join('');
-          return `<tr><td>${escapeHtml(r.metric)}</td>${cells}</tr>`;
+          return `<tr><td>${escapeHtml(term(r.metric))}</td>${cells}</tr>`;
         })
         .join('\n                    ');
       const note = suite.footnote
-        ? `<p class="table-caption">${escapeHtml(suite.footnote)}</p>`
+        ? `<p class="table-caption">${escapeHtml(term(suite.footnote))}</p>`
         : '';
       return `
             <h3 class="mono accent">${escapeHtml(suite.repo)}</h3>
-            <p class="compare-shape">${escapeHtml(suite.shape)}</p>
+            <p class="compare-shape">${escapeHtml(term(suite.shape))}</p>
             <div class="table-container">
                 <table class="saas-table">
-                    <thead><tr><th>Metric</th>${headers}</tr></thead>
+                    <thead><tr><th>${escapeHtml(term('Metric'))}</th>${headers}</tr></thead>
                     <tbody>
                     ${rows}
                     </tbody>
@@ -518,9 +521,9 @@ ${chrome.header}
     <main class="container compare-main">
         <h2 class="section-heading">${escapeHtml(t.methodologyHeading)}</h2>
         <ul class="compare-method">
-            <li><strong>Versions</strong> — ${escapeHtml(compare.methodology.versions)}</li>
-            <li><strong>Hardware</strong> — ${escapeHtml(compare.methodology.hardware)}</li>
-            <li>${escapeHtml(compare.methodology.protocol)}</li>
+            <li><strong>${escapeHtml(t.versionsLabel)}</strong> — ${escapeHtml(compare.methodology.versions)}</li>
+            <li><strong>${escapeHtml(t.hardwareLabel)}</strong> — ${escapeHtml(t.hardware ?? compare.methodology.hardware)}</li>
+            <li>${escapeHtml(t.protocol ?? compare.methodology.protocol)}</li>
         </ul>
 ${tables}
 

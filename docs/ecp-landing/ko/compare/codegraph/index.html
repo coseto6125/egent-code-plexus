@@ -63,48 +63,48 @@
     <main class="container compare-main">
         <h2 class="section-heading">측정 조건</h2>
         <ul class="compare-method">
-            <li><strong>Versions</strong> — ecp 0.16.2 · codegraph 1.6.2 · gitnexus 1.6.12 (2026-10-22)</li>
-            <li><strong>Hardware</strong> — AMD Ryzen 9 9950X, Linux (WSL2), pinned to 8 logical cores</li>
-            <li>Same checkouts, same machine, one tool at a time. All three capped at 1 MiB per file. Index medians over 3–5 runs, queries over 7; cold-index ratios from interleaved runs. ecp is a stateless one-shot CLI, so every latency includes full process startup — no daemon, no warm-up.</li>
+            <li><strong>버전</strong> — ecp 0.16.2 · codegraph 1.6.2 · gitnexus 1.6.12 (2026-10-22)</li>
+            <li><strong>하드웨어</strong> — AMD Ryzen 9 9950X, Linux(WSL2), 논리 코어 8개로 고정</li>
+            <li>같은 체크아웃, 같은 머신에서 한 번에 한 도구씩 실행했습니다. 세 도구 모두 파일당 1 MiB 상한입니다. 인덱스는 3~5회, 쿼리는 7회의 중앙값이며, 콜드 인덱스 배율은 교차 실행에서 얻었습니다. ecp는 상태 없는 일회성 CLI이므로 모든 지연 시간에 프로세스 시작이 포함됩니다. 데몬도 워밍업도 없습니다.</li>
         </ul>
 
             <h3 class="mono accent">microsoft/vscode</h3>
-            <p class="compare-shape">14,854 files, dense single-language TypeScript</p>
+            <p class="compare-shape">14,854개 파일, 밀집된 단일 언어 TypeScript</p>
             <div class="table-container">
                 <table class="saas-table">
-                    <thead><tr><th>Metric</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th></tr></thead>
+                    <thead><tr><th>지표</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th></tr></thead>
                     <tbody>
-                    <tr><td>Cold index</td><td class="compare-best">8.6 s</td><td>82.8 s</td></tr>
-                    <tr><td>Peak RSS</td><td class="compare-best">0.99 GiB</td><td>7.7 GiB</td></tr>
-                    <tr><td>Symbol find / query</td><td class="compare-best">34.4 ms</td><td>329.6 ms</td></tr>
-                    <tr><td>Callers / impact</td><td class="compare-best">34.6 ms</td><td>345.6 ms</td></tr>
-                    <tr><td>Inspect / context</td><td class="compare-best">34.6 ms</td><td>321.9 ms</td></tr>
-                    <tr><td>Impact baseline (git diff)</td><td class="compare-best">251.6 ms</td><td>no such mode</td></tr>
-                    <tr><td>Graph nodes</td><td class="compare-best">495,839</td><td>380,766</td></tr>
-                    <tr><td>Graph edges</td><td>1,052,891</td><td>1,366,686</td></tr>
-                    <tr><td>Index size on disk</td><td class="compare-best">125 MiB</td><td>1,250 MiB</td></tr>
-                    <tr><td>Files indexed</td><td class="compare-best">12,294</td><td>10,688</td></tr>
+                    <tr><td>콜드 인덱스</td><td class="compare-best">8.6 s</td><td>82.8 s</td></tr>
+                    <tr><td>피크 RSS</td><td class="compare-best">0.99 GiB</td><td>7.7 GiB</td></tr>
+                    <tr><td>심볼 검색 / 쿼리</td><td class="compare-best">34.4 ms</td><td>329.6 ms</td></tr>
+                    <tr><td>호출자 / 영향 범위</td><td class="compare-best">34.6 ms</td><td>345.6 ms</td></tr>
+                    <tr><td>검사 / 컨텍스트</td><td class="compare-best">34.6 ms</td><td>321.9 ms</td></tr>
+                    <tr><td>영향 기준선 (git-diff)</td><td class="compare-best">251.6 ms</td><td>해당 모드 없음</td></tr>
+                    <tr><td>그래프 노드 수</td><td class="compare-best">495,839</td><td>380,766</td></tr>
+                    <tr><td>그래프 엣지 수</td><td>1,052,891</td><td>1,366,686</td></tr>
+                    <tr><td>디스크 인덱스 크기</td><td class="compare-best">125 MiB</td><td>1,250 MiB</td></tr>
+                    <tr><td>인덱싱된 파일 수</td><td class="compare-best">12,294</td><td>10,688</td></tr>
                     </tbody>
                 </table>
             </div>
-            <p class="table-caption">In May 2026 gitnexus 1.6.5 did not finish this repo (killed at 27 min); 1.6.12 finishes in 317 s. ecp's on-disk figure is the live index; its parse cache adds 127 MiB.</p>
+            <p class="table-caption">2026년 5월에 gitnexus 1.6.5는 이 저장소를 완료하지 못했습니다 (27분 후 강제 종료). 1.6.12는 317 s에 완료합니다. ecp의 디스크 크기는 라이브 인덱스 기준이며, 파싱 캐시가 127 MiB 추가됩니다.</p>
 
             <h3 class="mono accent">abhigyanpatwari/GitNexus</h3>
-            <p class="compare-shape">7,225 files, polyglot</p>
+            <p class="compare-shape">7,225개 파일, 폴리글롯</p>
             <div class="table-container">
                 <table class="saas-table">
-                    <thead><tr><th>Metric</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th></tr></thead>
+                    <thead><tr><th>지표</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th></tr></thead>
                     <tbody>
-                    <tr><td>Cold index</td><td class="compare-best">3.22 s</td><td>56.5 s</td></tr>
-                    <tr><td>Peak RSS</td><td class="compare-best">0.40 GiB</td><td>4.04 GiB</td></tr>
-                    <tr><td>Find / query</td><td class="compare-best">20.4 ms</td><td>274.2 ms</td></tr>
-                    <tr><td>Callers / impact</td><td class="compare-best">20.3 ms</td><td>273.3 ms</td></tr>
-                    <tr><td>Inspect / context</td><td class="compare-best">22.3 ms</td><td>281.5 ms</td></tr>
-                    <tr><td>Impact baseline (git diff)</td><td class="compare-best">290.7 ms</td><td>no such mode</td></tr>
-                    <tr><td>Graph nodes</td><td class="compare-best">131,266</td><td>67,988</td></tr>
-                    <tr><td>Graph edges</td><td class="compare-best">272,150</td><td>221,484</td></tr>
-                    <tr><td>Index size on disk</td><td class="compare-best">32 MiB</td><td>293 MiB</td></tr>
-                    <tr><td>Files indexed</td><td class="compare-best">6,669</td><td>6,125</td></tr>
+                    <tr><td>콜드 인덱스</td><td class="compare-best">3.22 s</td><td>56.5 s</td></tr>
+                    <tr><td>피크 RSS</td><td class="compare-best">0.40 GiB</td><td>4.04 GiB</td></tr>
+                    <tr><td>검색 / 쿼리</td><td class="compare-best">20.4 ms</td><td>274.2 ms</td></tr>
+                    <tr><td>호출자 / 영향 범위</td><td class="compare-best">20.3 ms</td><td>273.3 ms</td></tr>
+                    <tr><td>검사 / 컨텍스트</td><td class="compare-best">22.3 ms</td><td>281.5 ms</td></tr>
+                    <tr><td>영향 기준선 (git-diff)</td><td class="compare-best">290.7 ms</td><td>해당 모드 없음</td></tr>
+                    <tr><td>그래프 노드 수</td><td class="compare-best">131,266</td><td>67,988</td></tr>
+                    <tr><td>그래프 엣지 수</td><td class="compare-best">272,150</td><td>221,484</td></tr>
+                    <tr><td>디스크 인덱스 크기</td><td class="compare-best">32 MiB</td><td>293 MiB</td></tr>
+                    <tr><td>인덱싱된 파일 수</td><td class="compare-best">6,669</td><td>6,125</td></tr>
                     </tbody>
                 </table>
             </div>

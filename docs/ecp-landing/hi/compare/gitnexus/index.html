@@ -63,13 +63,13 @@
     <main class="container compare-main">
         <h2 class="section-heading">ये कैसे मापे गए</h2>
         <ul class="compare-method">
-            <li><strong>Versions</strong> — ecp 0.16.2 · codegraph 1.6.2 · gitnexus 1.6.12 (2026-10-22)</li>
-            <li><strong>Hardware</strong> — AMD Ryzen 9 9950X, Linux (WSL2), pinned to 8 logical cores</li>
-            <li>Same checkouts, same machine, one tool at a time. All three capped at 1 MiB per file. Index medians over 3–5 runs, queries over 7; cold-index ratios from interleaved runs. ecp is a stateless one-shot CLI, so every latency includes full process startup — no daemon, no warm-up.</li>
+            <li><strong>संस्करण</strong> — ecp 0.16.2 · codegraph 1.6.2 · gitnexus 1.6.12 (2026-10-22)</li>
+            <li><strong>हार्डवेयर</strong> — AMD Ryzen 9 9950X, Linux (WSL2), 8 logical cores पर pinned</li>
+            <li>वही checkouts, वही मशीन, एक समय में एक tool। तीनों में प्रति file 1 MiB की सीमा। Index के लिए 3–5 runs और queries के लिए 7 runs का median; cold-index अनुपात interleaved runs से। ecp एक stateless one-shot CLI है, इसलिए हर latency में पूरा process startup शामिल है — न daemon, न warm-up।</li>
         </ul>
 
             <h3 class="mono accent">microsoft/vscode</h3>
-            <p class="compare-shape">14,854 files, dense single-language TypeScript</p>
+            <p class="compare-shape">14,854 फ़ाइलें, घना single-language TypeScript</p>
             <div class="table-container">
                 <table class="saas-table">
                     <thead><tr><th>Metric</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/abhigyanpatwari/GitNexus" rel="noopener">gitnexus</a><br><span class="mono compare-stack">Node</span></th></tr></thead>
@@ -79,7 +79,7 @@
                     <tr><td>Symbol find / query</td><td class="compare-best">34.4 ms</td><td>2,017 ms</td></tr>
                     <tr><td>Callers / impact</td><td class="compare-best">34.6 ms</td><td>1,165 ms</td></tr>
                     <tr><td>Inspect / context</td><td class="compare-best">34.6 ms</td><td>2,825 ms</td></tr>
-                    <tr><td>Impact baseline (git diff)</td><td class="compare-best">251.6 ms</td><td>—</td></tr>
+                    <tr><td>Impact baseline (git-diff)</td><td class="compare-best">251.6 ms</td><td>—</td></tr>
                     <tr><td>Graph nodes</td><td class="compare-best">495,839</td><td>356,556</td></tr>
                     <tr><td>Graph edges</td><td>1,052,891</td><td class="compare-best">1,493,180</td></tr>
                     <tr><td>Index size on disk</td><td class="compare-best">125 MiB</td><td>3,957 MiB</td></tr>
@@ -87,10 +87,10 @@
                     </tbody>
                 </table>
             </div>
-            <p class="table-caption">In May 2026 gitnexus 1.6.5 did not finish this repo (killed at 27 min); 1.6.12 finishes in 317 s. ecp's on-disk figure is the live index; its parse cache adds 127 MiB.</p>
+            <p class="table-caption">मई 2026 में gitnexus 1.6.5 इस repo को finish नहीं कर पाया (27 मिनट पर kill); 1.6.12 इसे 317 s में finish करता है। ecp का on-disk आँकड़ा live index है; इसका parse cache 127 MiB और जोड़ता है।</p>
 
             <h3 class="mono accent">abhigyanpatwari/GitNexus</h3>
-            <p class="compare-shape">7,225 files, polyglot</p>
+            <p class="compare-shape">7,225 फ़ाइलें, polyglot</p>
             <div class="table-container">
                 <table class="saas-table">
                     <thead><tr><th>Metric</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/abhigyanpatwari/GitNexus" rel="noopener">gitnexus</a><br><span class="mono compare-stack">Node</span></th></tr></thead>
@@ -100,7 +100,7 @@
                     <tr><td>Find / query</td><td class="compare-best">20.4 ms</td><td>1,050 ms</td></tr>
                     <tr><td>Callers / impact</td><td class="compare-best">20.3 ms</td><td>818 ms</td></tr>
                     <tr><td>Inspect / context</td><td class="compare-best">22.3 ms</td><td>1,000 ms</td></tr>
-                    <tr><td>Impact baseline (git diff)</td><td class="compare-best">290.7 ms</td><td>—</td></tr>
+                    <tr><td>Impact baseline (git-diff)</td><td class="compare-best">290.7 ms</td><td>—</td></tr>
                     <tr><td>Graph nodes</td><td class="compare-best">131,266</td><td>65,974</td></tr>
                     <tr><td>Graph edges</td><td class="compare-best">272,150</td><td>217,919</td></tr>
                     <tr><td>Index size on disk</td><td class="compare-best">32 MiB</td><td>1,113 MiB</td></tr>

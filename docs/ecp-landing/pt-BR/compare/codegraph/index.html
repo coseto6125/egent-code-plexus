@@ -63,48 +63,48 @@
     <main class="container compare-main">
         <h2 class="section-heading">Como isso foi medido</h2>
         <ul class="compare-method">
-            <li><strong>Versions</strong> — ecp 0.16.2 · codegraph 1.6.2 · gitnexus 1.6.12 (2026-10-22)</li>
-            <li><strong>Hardware</strong> — AMD Ryzen 9 9950X, Linux (WSL2), pinned to 8 logical cores</li>
-            <li>Same checkouts, same machine, one tool at a time. All three capped at 1 MiB per file. Index medians over 3–5 runs, queries over 7; cold-index ratios from interleaved runs. ecp is a stateless one-shot CLI, so every latency includes full process startup — no daemon, no warm-up.</li>
+            <li><strong>Versões</strong> — ecp 0.16.2 · codegraph 1.6.2 · gitnexus 1.6.12 (2026-10-22)</li>
+            <li><strong>Hardware</strong> — AMD Ryzen 9 9950X, Linux (WSL2), fixado em 8 núcleos lógicos</li>
+            <li>Mesmos checkouts, mesma máquina, uma ferramenta por vez. As três com limite de 1 MiB por arquivo. Medianas de 3–5 execuções na indexação e de 7 nas consultas; as razões de indexação a frio vêm de execuções intercaladas. ecp é uma CLI sem estado de execução única, então cada latência inclui a inicialização completa do processo: sem daemon, sem aquecimento.</li>
         </ul>
 
             <h3 class="mono accent">microsoft/vscode</h3>
-            <p class="compare-shape">14,854 files, dense single-language TypeScript</p>
+            <p class="compare-shape">14.854 arquivos, TypeScript denso de linguagem única</p>
             <div class="table-container">
                 <table class="saas-table">
-                    <thead><tr><th>Metric</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th></tr></thead>
+                    <thead><tr><th>Métrica</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th></tr></thead>
                     <tbody>
-                    <tr><td>Cold index</td><td class="compare-best">8.6 s</td><td>82.8 s</td></tr>
-                    <tr><td>Peak RSS</td><td class="compare-best">0.99 GiB</td><td>7.7 GiB</td></tr>
-                    <tr><td>Symbol find / query</td><td class="compare-best">34.4 ms</td><td>329.6 ms</td></tr>
-                    <tr><td>Callers / impact</td><td class="compare-best">34.6 ms</td><td>345.6 ms</td></tr>
-                    <tr><td>Inspect / context</td><td class="compare-best">34.6 ms</td><td>321.9 ms</td></tr>
-                    <tr><td>Impact baseline (git diff)</td><td class="compare-best">251.6 ms</td><td>no such mode</td></tr>
-                    <tr><td>Graph nodes</td><td class="compare-best">495,839</td><td>380,766</td></tr>
-                    <tr><td>Graph edges</td><td>1,052,891</td><td>1,366,686</td></tr>
-                    <tr><td>Index size on disk</td><td class="compare-best">125 MiB</td><td>1,250 MiB</td></tr>
-                    <tr><td>Files indexed</td><td class="compare-best">12,294</td><td>10,688</td></tr>
+                    <tr><td>Índice a frio</td><td class="compare-best">8.6 s</td><td>82.8 s</td></tr>
+                    <tr><td>RSS de pico</td><td class="compare-best">0.99 GiB</td><td>7.7 GiB</td></tr>
+                    <tr><td>Busca de símbolo / consulta</td><td class="compare-best">34.4 ms</td><td>329.6 ms</td></tr>
+                    <tr><td>Chamadores / impacto</td><td class="compare-best">34.6 ms</td><td>345.6 ms</td></tr>
+                    <tr><td>Inspeção / contexto</td><td class="compare-best">34.6 ms</td><td>321.9 ms</td></tr>
+                    <tr><td>Baseline de impacto (git-diff)</td><td class="compare-best">251.6 ms</td><td>sem este modo</td></tr>
+                    <tr><td>Nós do grafo</td><td class="compare-best">495,839</td><td>380,766</td></tr>
+                    <tr><td>Arestas do grafo</td><td>1,052,891</td><td>1,366,686</td></tr>
+                    <tr><td>Tamanho do índice em disco</td><td class="compare-best">125 MiB</td><td>1,250 MiB</td></tr>
+                    <tr><td>Arquivos indexados</td><td class="compare-best">12,294</td><td>10,688</td></tr>
                     </tbody>
                 </table>
             </div>
-            <p class="table-caption">In May 2026 gitnexus 1.6.5 did not finish this repo (killed at 27 min); 1.6.12 finishes in 317 s. ecp's on-disk figure is the live index; its parse cache adds 127 MiB.</p>
+            <p class="table-caption">Em maio de 2026, o gitnexus 1.6.5 não concluiu este repositório (encerrado aos 27 min); o 1.6.12 conclui em 317 s. O valor em disco do ecp é o índice ativo; seu cache de parsing adiciona 127 MiB.</p>
 
             <h3 class="mono accent">abhigyanpatwari/GitNexus</h3>
-            <p class="compare-shape">7,225 files, polyglot</p>
+            <p class="compare-shape">7.225 arquivos, poliglota</p>
             <div class="table-container">
                 <table class="saas-table">
-                    <thead><tr><th>Metric</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th></tr></thead>
+                    <thead><tr><th>Métrica</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th></tr></thead>
                     <tbody>
-                    <tr><td>Cold index</td><td class="compare-best">3.22 s</td><td>56.5 s</td></tr>
-                    <tr><td>Peak RSS</td><td class="compare-best">0.40 GiB</td><td>4.04 GiB</td></tr>
-                    <tr><td>Find / query</td><td class="compare-best">20.4 ms</td><td>274.2 ms</td></tr>
-                    <tr><td>Callers / impact</td><td class="compare-best">20.3 ms</td><td>273.3 ms</td></tr>
-                    <tr><td>Inspect / context</td><td class="compare-best">22.3 ms</td><td>281.5 ms</td></tr>
-                    <tr><td>Impact baseline (git diff)</td><td class="compare-best">290.7 ms</td><td>no such mode</td></tr>
-                    <tr><td>Graph nodes</td><td class="compare-best">131,266</td><td>67,988</td></tr>
-                    <tr><td>Graph edges</td><td class="compare-best">272,150</td><td>221,484</td></tr>
-                    <tr><td>Index size on disk</td><td class="compare-best">32 MiB</td><td>293 MiB</td></tr>
-                    <tr><td>Files indexed</td><td class="compare-best">6,669</td><td>6,125</td></tr>
+                    <tr><td>Índice a frio</td><td class="compare-best">3.22 s</td><td>56.5 s</td></tr>
+                    <tr><td>RSS de pico</td><td class="compare-best">0.40 GiB</td><td>4.04 GiB</td></tr>
+                    <tr><td>Busca / consulta</td><td class="compare-best">20.4 ms</td><td>274.2 ms</td></tr>
+                    <tr><td>Chamadores / impacto</td><td class="compare-best">20.3 ms</td><td>273.3 ms</td></tr>
+                    <tr><td>Inspeção / contexto</td><td class="compare-best">22.3 ms</td><td>281.5 ms</td></tr>
+                    <tr><td>Baseline de impacto (git-diff)</td><td class="compare-best">290.7 ms</td><td>sem este modo</td></tr>
+                    <tr><td>Nós do grafo</td><td class="compare-best">131,266</td><td>67,988</td></tr>
+                    <tr><td>Arestas do grafo</td><td class="compare-best">272,150</td><td>221,484</td></tr>
+                    <tr><td>Tamanho do índice em disco</td><td class="compare-best">32 MiB</td><td>293 MiB</td></tr>
+                    <tr><td>Arquivos indexados</td><td class="compare-best">6,669</td><td>6,125</td></tr>
                     </tbody>
                 </table>
             </div>

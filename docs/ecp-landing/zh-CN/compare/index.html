@@ -63,48 +63,48 @@
     <main class="container compare-main">
         <h2 class="section-heading">测量条件</h2>
         <ul class="compare-method">
-            <li><strong>Versions</strong> — ecp 0.16.2 · codegraph 1.6.2 · gitnexus 1.6.12 (2026-10-22)</li>
-            <li><strong>Hardware</strong> — AMD Ryzen 9 9950X, Linux (WSL2), pinned to 8 logical cores</li>
-            <li>Same checkouts, same machine, one tool at a time. All three capped at 1 MiB per file. Index medians over 3–5 runs, queries over 7; cold-index ratios from interleaved runs. ecp is a stateless one-shot CLI, so every latency includes full process startup — no daemon, no warm-up.</li>
+            <li><strong>版本</strong> — ecp 0.16.2 · codegraph 1.6.2 · gitnexus 1.6.12 (2026-10-22)</li>
+            <li><strong>硬件</strong> — AMD Ryzen 9 9950X，Linux（WSL2），固定使用 8 个逻辑核心</li>
+            <li>同一份 checkout、同一台机器、一次只跑一个工具。三个工具都设 1 MiB 单文件上限。索引取 3 到 5 次的中位数，查询取 7 次；cold index 的倍数来自交错执行。ecp 是无状态的一次性 CLI，因此每个延迟都包含完整的进程启动，没有 daemon、没有预热。</li>
         </ul>
 
             <h3 class="mono accent">microsoft/vscode</h3>
-            <p class="compare-shape">14,854 files, dense single-language TypeScript</p>
+            <p class="compare-shape">14,854 个文件、密集单语言 TypeScript</p>
             <div class="table-container">
                 <table class="saas-table">
-                    <thead><tr><th>Metric</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th><th><a href="https://github.com/abhigyanpatwari/GitNexus" rel="noopener">gitnexus</a><br><span class="mono compare-stack">Node</span></th></tr></thead>
+                    <thead><tr><th>指标</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th><th><a href="https://github.com/abhigyanpatwari/GitNexus" rel="noopener">gitnexus</a><br><span class="mono compare-stack">Node</span></th></tr></thead>
                     <tbody>
-                    <tr><td>Cold index</td><td class="compare-best">8.6 s</td><td>82.8 s</td><td>317 s</td></tr>
-                    <tr><td>Peak RSS</td><td class="compare-best">0.99 GiB</td><td>7.7 GiB</td><td>9.0 GiB</td></tr>
-                    <tr><td>Symbol find / query</td><td class="compare-best">34.4 ms</td><td>329.6 ms</td><td>2,017 ms</td></tr>
-                    <tr><td>Callers / impact</td><td class="compare-best">34.6 ms</td><td>345.6 ms</td><td>1,165 ms</td></tr>
-                    <tr><td>Inspect / context</td><td class="compare-best">34.6 ms</td><td>321.9 ms</td><td>2,825 ms</td></tr>
-                    <tr><td>Impact baseline (git diff)</td><td class="compare-best">251.6 ms</td><td>no such mode</td><td>—</td></tr>
-                    <tr><td>Graph nodes</td><td class="compare-best">495,839</td><td>380,766</td><td>356,556</td></tr>
-                    <tr><td>Graph edges</td><td>1,052,891</td><td>1,366,686</td><td class="compare-best">1,493,180</td></tr>
-                    <tr><td>Index size on disk</td><td class="compare-best">125 MiB</td><td>1,250 MiB</td><td>3,957 MiB</td></tr>
-                    <tr><td>Files indexed</td><td class="compare-best">12,294</td><td>10,688</td><td>11,710</td></tr>
+                    <tr><td>冷启动索引</td><td class="compare-best">8.6 s</td><td>82.8 s</td><td>317 s</td></tr>
+                    <tr><td>内存峰值 RSS</td><td class="compare-best">0.99 GiB</td><td>7.7 GiB</td><td>9.0 GiB</td></tr>
+                    <tr><td>符号查找 / 查询</td><td class="compare-best">34.4 ms</td><td>329.6 ms</td><td>2,017 ms</td></tr>
+                    <tr><td>调用者 / 影响范围</td><td class="compare-best">34.6 ms</td><td>345.6 ms</td><td>1,165 ms</td></tr>
+                    <tr><td>检视 / 上下文</td><td class="compare-best">34.6 ms</td><td>321.9 ms</td><td>2,825 ms</td></tr>
+                    <tr><td>影响基准（git-diff）</td><td class="compare-best">251.6 ms</td><td>无此模式</td><td>—</td></tr>
+                    <tr><td>图节点数</td><td class="compare-best">495,839</td><td>380,766</td><td>356,556</td></tr>
+                    <tr><td>图边数</td><td>1,052,891</td><td>1,366,686</td><td class="compare-best">1,493,180</td></tr>
+                    <tr><td>磁盘索引大小</td><td class="compare-best">125 MiB</td><td>1,250 MiB</td><td>3,957 MiB</td></tr>
+                    <tr><td>已索引文件数</td><td class="compare-best">12,294</td><td>10,688</td><td>11,710</td></tr>
                     </tbody>
                 </table>
             </div>
-            <p class="table-caption">In May 2026 gitnexus 1.6.5 did not finish this repo (killed at 27 min); 1.6.12 finishes in 317 s. ecp's on-disk figure is the live index; its parse cache adds 127 MiB.</p>
+            <p class="table-caption">2026 年 5 月，gitnexus 1.6.5 未能完成该仓库（27 分钟后被终止）；1.6.12 在 317 s 内完成。ecp 的磁盘占用为在用索引，其解析缓存另占 127 MiB。</p>
 
             <h3 class="mono accent">abhigyanpatwari/GitNexus</h3>
-            <p class="compare-shape">7,225 files, polyglot</p>
+            <p class="compare-shape">7,225 个文件、多语言</p>
             <div class="table-container">
                 <table class="saas-table">
-                    <thead><tr><th>Metric</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th><th><a href="https://github.com/abhigyanpatwari/GitNexus" rel="noopener">gitnexus</a><br><span class="mono compare-stack">Node</span></th></tr></thead>
+                    <thead><tr><th>指标</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th><th><a href="https://github.com/abhigyanpatwari/GitNexus" rel="noopener">gitnexus</a><br><span class="mono compare-stack">Node</span></th></tr></thead>
                     <tbody>
-                    <tr><td>Cold index</td><td class="compare-best">3.22 s</td><td>56.5 s</td><td>77.2 s</td></tr>
-                    <tr><td>Peak RSS</td><td class="compare-best">0.40 GiB</td><td>4.04 GiB</td><td>4.59 GiB</td></tr>
-                    <tr><td>Find / query</td><td class="compare-best">20.4 ms</td><td>274.2 ms</td><td>1,050 ms</td></tr>
-                    <tr><td>Callers / impact</td><td class="compare-best">20.3 ms</td><td>273.3 ms</td><td>818 ms</td></tr>
-                    <tr><td>Inspect / context</td><td class="compare-best">22.3 ms</td><td>281.5 ms</td><td>1,000 ms</td></tr>
-                    <tr><td>Impact baseline (git diff)</td><td class="compare-best">290.7 ms</td><td>no such mode</td><td>—</td></tr>
-                    <tr><td>Graph nodes</td><td class="compare-best">131,266</td><td>67,988</td><td>65,974</td></tr>
-                    <tr><td>Graph edges</td><td class="compare-best">272,150</td><td>221,484</td><td>217,919</td></tr>
-                    <tr><td>Index size on disk</td><td class="compare-best">32 MiB</td><td>293 MiB</td><td>1,113 MiB</td></tr>
-                    <tr><td>Files indexed</td><td class="compare-best">6,669</td><td>6,125</td><td>3,033</td></tr>
+                    <tr><td>冷启动索引</td><td class="compare-best">3.22 s</td><td>56.5 s</td><td>77.2 s</td></tr>
+                    <tr><td>内存峰值 RSS</td><td class="compare-best">0.40 GiB</td><td>4.04 GiB</td><td>4.59 GiB</td></tr>
+                    <tr><td>查找 / 查询</td><td class="compare-best">20.4 ms</td><td>274.2 ms</td><td>1,050 ms</td></tr>
+                    <tr><td>调用者 / 影响范围</td><td class="compare-best">20.3 ms</td><td>273.3 ms</td><td>818 ms</td></tr>
+                    <tr><td>检视 / 上下文</td><td class="compare-best">22.3 ms</td><td>281.5 ms</td><td>1,000 ms</td></tr>
+                    <tr><td>影响基准（git-diff）</td><td class="compare-best">290.7 ms</td><td>无此模式</td><td>—</td></tr>
+                    <tr><td>图节点数</td><td class="compare-best">131,266</td><td>67,988</td><td>65,974</td></tr>
+                    <tr><td>图边数</td><td class="compare-best">272,150</td><td>221,484</td><td>217,919</td></tr>
+                    <tr><td>磁盘索引大小</td><td class="compare-best">32 MiB</td><td>293 MiB</td><td>1,113 MiB</td></tr>
+                    <tr><td>已索引文件数</td><td class="compare-best">6,669</td><td>6,125</td><td>3,033</td></tr>
                     </tbody>
                 </table>
             </div>
