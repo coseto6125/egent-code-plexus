@@ -65,13 +65,23 @@ pub(super) fn enclosing_symbol_and_owner_pub(
 /// Extract the content of a `string` node. Looks for `string_content` child;
 /// if absent, strips surrounding quotes from the raw node text.
 fn extract_string_content<'a>(str_node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
-    // Try to find the string_content child node.
+    // An escape (`\\`, `\n`) splits the text into several content children;
+    // the value spans the run that starts at the first one, or
+    // `"C:\\x\\f.txt"` would read as `C:`. An interpolation ends the run.
     let mut c = str_node.walk();
+    let mut span: Option<(usize, usize)> = None;
     for child in str_node.children(&mut c) {
-        if child.kind() == "string_content" {
-            let raw = std::str::from_utf8(&source[child.start_byte()..child.end_byte()]).ok()?;
-            return Some(raw);
+        match child.kind() {
+            "string_content" | "escape_sequence" => {
+                let start = span.map_or(child.start_byte(), |(s, _)| s);
+                span = Some((start, child.end_byte()));
+            }
+            "interpolation" if span.is_some() => break,
+            _ => {}
         }
+    }
+    if let Some((start, end)) = span {
+        return std::str::from_utf8(&source[start..end]).ok();
     }
     // Fallback: strip quotes from the whole node text.
     let raw = std::str::from_utf8(&source[str_node.start_byte()..str_node.end_byte()]).ok()?;
