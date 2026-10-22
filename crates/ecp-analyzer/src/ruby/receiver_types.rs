@@ -21,6 +21,7 @@ use super::path_literals::{
 use crate::calls::{attach_to_enclosing, range_width, start_pos, Pos, PosRange};
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use ecp_core::graph::NodeKind;
+use rustc_hash::FxHashMap;
 use tree_sitter::Node;
 
 /// Enclosing class/module context built from the parsed node list.
@@ -64,13 +65,14 @@ pub fn extract_ruby_calls_and_path_literals(
     nodes: &mut [RawNode],
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let ctx = ClassContext::from_nodes(nodes);
+    let mut receiver_types = ReceiverTypes::new(source, &ctx);
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
             "call" => {
-                if let Some(callee) = ruby_callee(n, source, &ctx) {
+                if let Some(callee) = ruby_callee(n, source, &mut receiver_types) {
                     attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
@@ -104,14 +106,16 @@ pub fn extract_ruby_calls_and_path_literals(
 /// Tree-sitter-ruby `call` fields:
 /// - `receiver`: the object before `.` / `&.` / `::` (optional for bare calls)
 /// - `method`:   the method name identifier
-fn ruby_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Option<String> {
+fn ruby_callee(
+    call: Node<'_>,
+    source: &[u8],
+    receiver_types: &mut ReceiverTypes<'_>,
+) -> Option<String> {
     let method_node = call.child_by_field_name("method")?;
     let method_name = method_node.utf8_text(source).ok()?;
     // `send(:helper)` calls `helper`: record the named method, as `helper` /
     // `obj.helper` would.
     let method_name = literal_send_target(call, source).unwrap_or(method_name);
-
-    let pos = start_pos(call);
 
     match call.child_by_field_name("receiver") {
         None => {
@@ -122,26 +126,24 @@ fn ruby_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Option<Stri
             // Only a construction keeps a scoped receiver (`Shop::Item.new`):
             // other `A::B.m` calls resolve by the bare method name, and
             // qualifying them drops the Method edges that name binds.
-            let receiver_type = match (receiver.kind(), method_name) {
-                ("scope_resolution", "new") => receiver
-                    .utf8_text(source)
-                    .ok()
-                    .map(|s| s.trim_start_matches("::").to_string()),
-                _ => infer_receiver_type(receiver, source, ctx, pos),
-            };
-            Some(match receiver_type {
-                Some(inferred_type) => format!("{inferred_type}.{method_name}"),
-                None if is_type_rooted(receiver, source) => method_name.to_string(),
+            if receiver.kind() == "scope_resolution" && method_name == "new" {
+                if let Ok(path) = receiver.utf8_text(source) {
+                    return Some(format!("{}.new", path.trim_start_matches("::")));
+                }
+            }
+            Some(match receiver_types.resolve(receiver) {
+                ReceiverType::Typed(inferred_type) => format!("{inferred_type}.{method_name}"),
+                ReceiverType::TypeRooted => method_name.to_string(),
                 // A call receiver the name heuristic cannot type: the
                 // resolver types it by the callee's return type or class.
-                None if receiver.kind() == "call" => {
+                ReceiverType::Unknown if receiver.kind() == "call" => {
                     let untyped = CallSite::untyped_member(method_name);
-                    match CallSite::nested_chain(|| ruby_callee(receiver, source, ctx)) {
+                    match CallSite::nested_chain(|| ruby_callee(receiver, source, receiver_types)) {
                         Some(inner) => CallSite::chained_member(&inner, &untyped),
                         None => untyped,
                     }
                 }
-                None => CallSite::untyped_member(method_name),
+                ReceiverType::Unknown => CallSite::untyped_member(method_name),
             })
         }
     }
@@ -187,49 +189,78 @@ fn is_method_name(name: &str) -> bool {
         && chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
-/// Whether `node` is `self`, a constant, or a chain of the constructor-like
-/// calls [`infer_receiver_type`] follows on one (`Shop::Item.new`): a
-/// receiver whose method the bare name resolves as before.
-fn is_type_rooted(node: Node<'_>, source: &[u8]) -> bool {
-    match node.kind() {
-        "self" | "constant" | "scope_resolution" => true,
-        "call" => {
-            node.child_by_field_name("method")
-                .and_then(|m| m.utf8_text(source).ok())
-                .is_some_and(|m| TYPE_PRESERVING_METHODS.contains(&m))
-                && node
-                    .child_by_field_name("receiver")
-                    .is_some_and(|receiver| is_type_rooted(receiver, source))
-        }
-        _ => false,
-    }
-}
-
-/// Calls whose result [`infer_receiver_type`] takes to be an instance or
+/// Calls whose result [`ReceiverTypes`] takes to be an instance or
 /// relation of their receiver's type (`Item.new`, `Item.where(..)`).
 const TYPE_PRESERVING_METHODS: &[&str] = &[
     "new", "create", "create!", "find", "find_by", "find_by!", "where", "includes", "joins",
     "first", "last", "order", "limit", "offset",
 ];
 
-fn infer_receiver_type(
-    node: Node<'_>,
-    source: &[u8],
-    ctx: &ClassContext,
-    pos: Pos,
-) -> Option<String> {
-    match node.kind() {
-        "self" => ctx.enclosing_name(pos).map(|s| s.to_string()),
-        "constant" => node.utf8_text(source).ok().map(|s| s.to_string()),
-        "call" => {
-            let method_node = node.child_by_field_name("method")?;
-            let method_name = method_node.utf8_text(source).ok()?;
+#[derive(Clone, Copy)]
+enum ReceiverType<'s> {
+    Typed(&'s str),
+    TypeRooted,
+    Unknown,
+}
 
-            if !TYPE_PRESERVING_METHODS.contains(&method_name) {
-                return None;
-            }
-            infer_receiver_type(node.child_by_field_name("receiver")?, source, ctx, pos)
+/// Each receiver link is classified once. The iterative walk also avoids
+/// consuming the Rust stack for a generated, deeply nested call chain.
+struct ReceiverTypes<'s> {
+    source: &'s [u8],
+    context: &'s ClassContext,
+    by_node: FxHashMap<usize, ReceiverType<'s>>,
+    trail: Vec<usize>,
+}
+
+impl<'s> ReceiverTypes<'s> {
+    fn new(source: &'s [u8], context: &'s ClassContext) -> Self {
+        Self {
+            source,
+            context,
+            by_node: FxHashMap::default(),
+            trail: Vec::new(),
         }
-        _ => None,
+    }
+
+    fn resolve(&mut self, mut node: Node<'_>) -> ReceiverType<'s> {
+        let result = loop {
+            if let Some(&known) = self.by_node.get(&node.id()) {
+                break known;
+            }
+            self.trail.push(node.id());
+            match node.kind() {
+                "self" => {
+                    break self
+                        .context
+                        .enclosing_name(start_pos(node))
+                        .map_or(ReceiverType::TypeRooted, ReceiverType::Typed)
+                }
+                "constant" => {
+                    break node
+                        .utf8_text(self.source)
+                        .ok()
+                        .map_or(ReceiverType::TypeRooted, ReceiverType::Typed)
+                }
+                "scope_resolution" => break ReceiverType::TypeRooted,
+                "call" => {
+                    let preserves_type = node
+                        .child_by_field_name("method")
+                        .and_then(|method| method.utf8_text(self.source).ok())
+                        .is_some_and(|method| TYPE_PRESERVING_METHODS.contains(&method));
+                    match node
+                        .child_by_field_name("receiver")
+                        .filter(|_| preserves_type)
+                    {
+                        Some(receiver) => node = receiver,
+                        None => break ReceiverType::Unknown,
+                    }
+                }
+                _ => break ReceiverType::Unknown,
+            }
+        };
+        for id in self.trail.drain(..) {
+            self.by_node.insert(id, result);
+        }
+        result
     }
 }
