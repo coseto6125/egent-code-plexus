@@ -743,11 +743,10 @@ impl OverlayView {
                                 })
                             },
                             |inner, member| {
-                                inner
-                                    .and_then(|inner| {
-                                        facts.chained_member(inner, member, caller.language, &types)
-                                    })
-                                    .map(Some)
+                                let inner = (*inner)?;
+                                type_ladder::returned_type(&facts, inner.0).map(|_| {
+                                    facts.chained_member(inner, member, caller.language, &types)
+                                })
                             },
                         );
                         // The index drops self-recursion Calls (builder's

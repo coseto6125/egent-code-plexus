@@ -11,6 +11,7 @@ use ecp_core::analyzer::lexical::LexicalFunctions;
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::analyzer::reexport::{export_filter_applies, is_ecmascript, ImportRef};
+use ecp_core::analyzer::type_ladder;
 use ecp_core::analyzer::types::{
     owner_key, CallSite, LocalGraph, NameRef, RawImport, RawNode, RawRoute, VariantRef,
 };
@@ -2602,14 +2603,17 @@ fn pass2_emit_node_edges(
             ),
         };
         // `Foo.create().bar()`: `bar` on the type the one bound `create`
-        // returns, else the entry the parser wrote before chains.
+        // returns. Only an unknown return type permits the parser's fallback.
         let targets = CallSite::parse(raw_callee).resolve_chain(resolve, |inner, member| {
             let &[inner] = inner.as_slice() else {
                 return None;
             };
-            resolver
-                .resolve_chained_member(&local_graph.file_path, inner, member)
-                .map(|hit| vec![hit])
+            type_ladder::returned_type(symbol_table, inner.0).map(|_| {
+                resolver
+                    .resolve_chained_member(&local_graph.file_path, inner, member)
+                    .into_iter()
+                    .collect()
+            })
         });
         for (target_id, confidence) in targets {
             if target_id == current_node_idx {

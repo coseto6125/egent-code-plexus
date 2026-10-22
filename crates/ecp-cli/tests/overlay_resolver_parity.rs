@@ -2555,6 +2555,62 @@ fn test_overlay_csharp_chained_member_imported_return_type_matches_reindex() {
 }
 
 #[test]
+fn test_overlay_csharp_chained_member_alias_return_type_matches_reindex() {
+    let factory = "using Alias = Models.ModelValue;\nnamespace Services { public class Factory { public static Alias Make() { return new Alias(); } } }\n";
+    let use_file = "using Services;\nnamespace App { public class Use { public void Run() { Factory.Make().Bar(); } } }\n";
+    chain_parity(
+        "Run",
+        &CSharpProvider::new().unwrap(),
+        &[
+            (
+                "src/Models/ModelValue.cs",
+                "namespace Models { public class ModelValue { public void Bar() {} } }\n",
+            ),
+            (
+                "src/Decoy/DecoyValue.cs",
+                "namespace Decoy { public class DecoyValue { public void Bar() {} } }\n",
+            ),
+            ("src/Services/Factory.cs", factory),
+            (
+                "src/App/Use.cs",
+                "using Services;\nnamespace App { public class Use { public void Run() {} } }\n",
+            ),
+        ],
+        &[("src/App/Use.cs", use_file)],
+        "Bar",
+        "ModelValue",
+    );
+}
+
+#[test]
+fn test_overlay_csharp_chained_member_file_scoped_return_type_matches_reindex() {
+    let factory = "using Models;\nnamespace Services;\npublic class Factory { public static ModelValue Make() { return new ModelValue(); } }\n";
+    let use_file = "using Services;\nnamespace App;\npublic class Use { public void Run() { Factory.Make().Bar(); } }\n";
+    chain_parity(
+        "Run",
+        &CSharpProvider::new().unwrap(),
+        &[
+            (
+                "src/Models/ModelValue.cs",
+                "namespace Models;\npublic class ModelValue { public void Bar() {} }\n",
+            ),
+            (
+                "src/Decoy/DecoyValue.cs",
+                "namespace Decoy;\npublic class DecoyValue { public void Bar() {} }\n",
+            ),
+            ("src/Services/Factory.cs", factory),
+            (
+                "src/App/Use.cs",
+                "using Services;\nnamespace App;\npublic class Use { public void Run() {} }\n",
+            ),
+        ],
+        &[("src/App/Use.cs", use_file)],
+        "Bar",
+        "ModelValue",
+    );
+}
+
+#[test]
 fn test_overlay_csharp_chained_member_dirty_imported_factory_matches_reindex() {
     chain_parity(
         "Run",
@@ -2606,11 +2662,11 @@ fn test_overlay_csharp_chained_member_same_leaf_namespaces_stay_suppressed() {
         &[
             (
                 "src/Models.cs",
-                "namespace First { public class Foo { public void Bar() {} } }\nnamespace Second { public class Foo { public void Bar() {} } }\n",
+                "namespace First.Shared { public class Foo { public void Bar() {} } }\nnamespace Second.Shared { public class Foo { public void Bar() {} } }\n",
             ),
             (
                 "src/Services/Factory.cs",
-                "using First;\nnamespace Services { public class Factory { public static Foo Make() { return new Foo(); } } }\n",
+                "using First.Shared;\nnamespace Services { public class Factory { public static Foo Make() { return new Foo(); } } }\n",
             ),
             (
                 "src/App/Use.cs",

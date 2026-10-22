@@ -483,6 +483,52 @@ fn test_value_read_go_unknown_external_literal_key_returns_no_edge() {
 }
 
 #[test]
+fn test_value_read_go_imported_literal_unexported_keys_return_edges() {
+    let g = graph(
+        &GoProvider::new().unwrap(),
+        &[(
+            "g.go",
+            "package main\n\nimport prometheus \"example.com/prometheus\"\n\nconst labelMethod = \"method\"\n\ntype Labels = prometheus.Labels\n\nfunc direct() prometheus.Labels {\n\treturn prometheus.Labels{labelMethod: 1}\n}\n\nfunc alias() Labels {\n\treturn Labels{labelMethod: 1}\n}\n\nfunc nested() []prometheus.Labels {\n\treturn []prometheus.Labels{{labelMethod: 1}}\n}\n",
+        )],
+    );
+    for reader in ["direct", "alias", "nested"] {
+        assert_eq!(
+            value_reads(&g, reader),
+            vec![r("g.go", "labelMethod", VALUE_READ, SAME_FILE)],
+            "{reader}"
+        );
+    }
+}
+
+#[test]
+fn test_value_read_go_imported_literal_shadowed_key_returns_no_edge() {
+    let g = graph(
+        &GoProvider::new().unwrap(),
+        &[(
+            "g.go",
+            "package main\n\nimport external \"example.com/external\"\n\nconst key = \"package\"\n\nfunc parameter(key string) external.Labels {\n\treturn external.Labels{key: 1}\n}\n\nfunc local() external.Labels {\n\tkey := \"local\"\n\treturn external.Labels{key: 1}\n}\n",
+        )],
+    );
+    for reader in ["parameter", "local"] {
+        assert_eq!(value_reads(&g, reader), none(), "{reader}");
+    }
+}
+
+#[test]
+fn test_value_read_go_unbound_or_shadowed_literal_qualifier_returns_no_edge() {
+    let g = graph(
+        &GoProvider::new().unwrap(),
+        &[(
+            "g.go",
+            "package main\n\nimport external \"example.com/external\"\n\nconst key = \"package\"\n\nfunc missing() {\n\t_ = absent.Labels{key: 1}\n}\n\nfunc parameter(external any) {\n\t_ = external.Labels{key: 1}\n}\n\nfunc local() {\n\texternal := 1\n\t_ = external.Labels{key: 1}\n}\n",
+        )],
+    );
+    for reader in ["missing", "parameter", "local"] {
+        assert_eq!(value_reads(&g, reader), none(), "{reader}");
+    }
+}
+
+#[test]
 fn test_value_read_go_missing_and_cyclic_literal_types_return_no_edge() {
     let g = graph(
         &GoProvider::new().unwrap(),

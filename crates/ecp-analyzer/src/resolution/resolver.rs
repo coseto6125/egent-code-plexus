@@ -766,8 +766,8 @@ impl<'a> Resolver<'a> {
     /// it, and the member is found by the receiver-typing ladder, never by
     /// the name alone. The edge takes the ladder's confidence for a typed
     /// receiver, capped by `inner_confidence`. `None` when `callee` returns
-    /// no reducible type or that type owns no `member`: the caller then
-    /// resolves the site as its [`CallSite::fallback`].
+    /// no reducible type or that type owns no `member`. The caller permits
+    /// [`CallSite::fallback`] only when the return type is unknown.
     ///
     /// Read imports in the callee's file. Java/Kotlin imports bind a type;
     /// C# namespaces and Swift package targets restrict visible types before

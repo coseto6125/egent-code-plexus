@@ -10,8 +10,9 @@
 //!
 //! Where the return type is absent or is no bare type name (a generic such
 //! as `Promise<Foo>`, `Optional[Foo]`, `List<Foo>`), the site resolves as
-//! the entry the parser wrote before chains: a bare or untyped `bar`, which
-//! two owners leave unbound. Unwrapping generics is the follow-up.
+//! the entry the parser wrote before chains: a bare, untyped, or
+//! receiver-rooted member. The fixtures leave that fallback unbound.
+//! Unwrapping generics is the follow-up.
 //!
 //! C declares no methods: a nested call `foo_bar(foo_create())` is two
 //! direct calls, which keep binding.
@@ -211,7 +212,14 @@ fn test_ts_callee_name_call_receiver_emits_chained_member() {
         CallSite::parse(inner).name().ends_with("create"),
         "{calls:?}"
     );
-    assert_eq!(site.fallback(), CallSite::Plain("bar"), "{calls:?}");
+    assert_eq!(
+        site.fallback(),
+        CallSite::FromReceiver {
+            receiver: "call",
+            member: "bar",
+        },
+        "{calls:?}"
+    );
     assert_eq!(site.name(), "bar", "{calls:?}");
 }
 
@@ -487,6 +495,65 @@ fn test_resolve_call_java_factory_imported_return_type_cross_directory_binds_mem
     assert_binds_foo(&graph, "caller", "bar");
 }
 
+#[test]
+fn test_resolve_call_java_factory_wildcard_imported_return_type_binds_member() {
+    let graph = single(
+        &JavaProvider::new().unwrap(),
+        &[
+            ("src/models/Foo.java", "package models;\npublic class Foo { public void bar() {} }\n"),
+            ("src/decoy/Other.java", "package decoy;\npublic class Other { public void bar() {} }\n"),
+            ("src/services/Factory.java", "package services;\nimport models.*;\npublic class Factory { public static Foo make() { return new Foo(); } }\n"),
+            ("src/app/Use.java", "package app;\nimport services.Factory;\npublic class Use { void caller() { Factory.make().bar(); } }\n"),
+        ],
+    );
+    assert_inner_binds(&graph, "caller", "Factory", "make");
+    assert_binds_foo(&graph, "caller", "bar");
+}
+
+#[test]
+fn test_resolve_call_java_factory_missing_imported_return_type_keeps_fallback() {
+    let graph = single(
+        &JavaProvider::new().unwrap(),
+        &[
+            ("src/models/Present.java", "package models;\npublic class Present {}\n"),
+            ("src/decoy/Missing.java", "package decoy;\npublic class Missing { public void bar() {} }\n"),
+            ("src/services/Factory.java", "package services;\nimport models.Missing;\npublic class Factory { public static Missing make() { return null; } }\n"),
+            ("src/app/Use.java", "package app;\nimport services.Factory;\npublic class Use { void caller() { Factory.make().bar(); } }\n"),
+        ],
+    );
+    assert_inner_binds(&graph, "caller", "Factory", "make");
+    assert_falls_back(&graph, "caller", "bar");
+}
+
+#[test]
+fn test_resolve_call_java_factory_external_imported_return_type_keeps_fallback() {
+    let graph = single(
+        &JavaProvider::new().unwrap(),
+        &[
+            ("src/decoy/Foo.java", "package decoy;\npublic class Foo { public void bar() {} }\n"),
+            ("src/services/Factory.java", "package services;\nimport external.Foo;\npublic class Factory { public static Foo make() { return null; } }\n"),
+            ("src/app/Use.java", "package app;\nimport services.Factory;\npublic class Use { void caller() { Factory.make().bar(); } }\n"),
+        ],
+    );
+    assert_inner_binds(&graph, "caller", "Factory", "make");
+    assert_falls_back(&graph, "caller", "bar");
+}
+
+#[test]
+fn test_resolve_call_java_factory_ambiguous_wildcard_imports_keep_fallback() {
+    let graph = single(
+        &JavaProvider::new().unwrap(),
+        &[
+            ("src/left/Foo.java", "package left;\npublic class Foo { public void bar() {} }\n"),
+            ("src/right/Foo.java", "package right;\npublic class Foo { public void bar() {} }\n"),
+            ("src/services/Factory.java", "package services;\nimport left.*;\nimport right.*;\npublic class Factory { public static Foo make() { return null; } }\n"),
+            ("src/app/Use.java", "package app;\nimport services.Factory;\npublic class Use { void caller() { Factory.make().bar(); } }\n"),
+        ],
+    );
+    assert_inner_binds(&graph, "caller", "Factory", "make");
+    assert_falls_back(&graph, "caller", "bar");
+}
+
 fn java_graph() -> ZeroCopyGraph {
     single(
         &JavaProvider::new().unwrap(),
@@ -578,6 +645,131 @@ fn test_resolve_call_kotlin_factory_imported_return_type_cross_directory_binds_m
     assert_binds_foo(&graph, "caller", "bar");
 }
 
+#[test]
+fn test_resolve_call_kotlin_factory_wildcard_imported_return_type_binds_member() {
+    let graph = single(
+        &KotlinProvider::new().unwrap(),
+        &[
+            (
+                "src/models/Foo.kt",
+                "package models\nclass Foo { fun bar() {} }\n",
+            ),
+            (
+                "src/decoy/Other.kt",
+                "package decoy\nclass Other { fun bar() {} }\n",
+            ),
+            (
+                "src/services/Factory.kt",
+                "package services\nimport models.*\nobject Factory { fun make(): Foo = Foo() }\n",
+            ),
+            (
+                "src/app/Use.kt",
+                "package app\nimport services.Factory\nfun caller() { Factory.make().bar() }\n",
+            ),
+        ],
+    );
+    assert_inner_binds(&graph, "caller", "Factory", "make");
+    assert_binds_foo(&graph, "caller", "bar");
+}
+
+#[test]
+fn test_resolve_call_kotlin_factory_alias_imported_return_type_binds_member() {
+    let graph = single(
+        &KotlinProvider::new().unwrap(),
+        &[
+            (
+                "src/models/Foo.kt",
+                "package models\nclass Foo { fun bar() {} }\n",
+            ),
+            (
+                "src/decoy/Other.kt",
+                "package decoy\nclass Other { fun bar() {} }\n",
+            ),
+            (
+                "src/services/Factory.kt",
+                "package services\nimport models.Foo as BoundFoo\nobject Factory { fun make(): BoundFoo = BoundFoo() }\n",
+            ),
+            (
+                "src/app/Use.kt",
+                "package app\nimport services.Factory\nfun caller() { Factory.make().bar() }\n",
+            ),
+        ],
+    );
+    assert_inner_binds(&graph, "caller", "Factory", "make");
+    assert_binds_foo(&graph, "caller", "bar");
+}
+
+#[test]
+fn test_resolve_call_kotlin_factory_missing_imported_return_type_keeps_fallback() {
+    let graph = single(
+        &KotlinProvider::new().unwrap(),
+        &[
+            ("src/models/Present.kt", "package models\nclass Present\n"),
+            ("src/decoy/Missing.kt", "package decoy\nclass Missing { fun bar() {} }\n"),
+            (
+                "src/services/Factory.kt",
+                "package services\nimport models.Missing\nobject Factory { fun make(): Missing = TODO() }\n",
+            ),
+            (
+                "src/app/Use.kt",
+                "package app\nimport services.Factory\nfun caller() { Factory.make().bar() }\n",
+            ),
+        ],
+    );
+    assert_inner_binds(&graph, "caller", "Factory", "make");
+    assert_falls_back(&graph, "caller", "bar");
+}
+
+#[test]
+fn test_resolve_call_kotlin_factory_external_imported_return_type_keeps_fallback() {
+    let graph = single(
+        &KotlinProvider::new().unwrap(),
+        &[
+            (
+                "src/decoy/Foo.kt",
+                "package decoy\nclass Foo { fun bar() {} }\n",
+            ),
+            (
+                "src/services/Factory.kt",
+                "package services\nimport external.Foo\nobject Factory { fun make(): Foo = TODO() }\n",
+            ),
+            (
+                "src/app/Use.kt",
+                "package app\nimport services.Factory\nfun caller() { Factory.make().bar() }\n",
+            ),
+        ],
+    );
+    assert_inner_binds(&graph, "caller", "Factory", "make");
+    assert_falls_back(&graph, "caller", "bar");
+}
+
+#[test]
+fn test_resolve_call_kotlin_factory_ambiguous_wildcard_imports_keep_fallback() {
+    let graph = single(
+        &KotlinProvider::new().unwrap(),
+        &[
+            (
+                "src/left/Foo.kt",
+                "package left\nclass Foo { fun bar() {} }\n",
+            ),
+            (
+                "src/right/Foo.kt",
+                "package right\nclass Foo { fun bar() {} }\n",
+            ),
+            (
+                "src/services/Factory.kt",
+                "package services\nimport left.*\nimport right.*\nobject Factory { fun make(): Foo = TODO() }\n",
+            ),
+            (
+                "src/app/Use.kt",
+                "package app\nimport services.Factory\nfun caller() { Factory.make().bar() }\n",
+            ),
+        ],
+    );
+    assert_inner_binds(&graph, "caller", "Factory", "make");
+    assert_falls_back(&graph, "caller", "bar");
+}
+
 fn kotlin_graph() -> ZeroCopyGraph {
     single(
         &KotlinProvider::new().unwrap(),
@@ -644,6 +836,36 @@ fn test_resolve_call_csharp_factory_imported_return_type_cross_directory_binds_m
     );
     assert_inner_binds(&graph, "Caller", "Factory", "Make");
     assert_binds_foo(&graph, "Caller", "Bar");
+}
+
+#[test]
+fn test_resolve_call_csharp_factory_alias_return_type_binds_imported_member() {
+    let graph = single(
+        &CSharpProvider::new().unwrap(),
+        &[
+            ("src/Models/ModelValue.cs", "namespace Models { public class ModelValue { public void Bar() {} } }\n"),
+            ("src/Decoy/DecoyValue.cs", "namespace Decoy { public class DecoyValue { public void Bar() {} } }\n"),
+            ("src/Services/Factory.cs", "using Alias = Models.ModelValue;\nnamespace Services { public class Factory { public static Alias Make() { return new Alias(); } } }\n"),
+            ("src/App/Use.cs", "using Services;\nnamespace App { public class Use { public void Caller() { Factory.Make().Bar(); } } }\n"),
+        ],
+    );
+    assert_inner_binds(&graph, "Caller", "Factory", "Make");
+    assert_eq!(owners(&graph, "Caller", "Bar"), ["ModelValue"]);
+}
+
+#[test]
+fn test_resolve_call_csharp_factory_file_scoped_namespace_return_type_binds_member() {
+    let graph = single(
+        &CSharpProvider::new().unwrap(),
+        &[
+            ("src/Models/ModelValue.cs", "namespace Models;\npublic class ModelValue { public void Bar() {} }\n"),
+            ("src/Decoy/DecoyValue.cs", "namespace Decoy;\npublic class DecoyValue { public void Bar() {} }\n"),
+            ("src/Services/Factory.cs", "using Models;\nnamespace Services;\npublic class Factory { public static ModelValue Make() { return new ModelValue(); } }\n"),
+            ("src/App/Use.cs", "using Services;\nnamespace App;\npublic class Use { public void Caller() { Factory.Make().Bar(); } }\n"),
+        ],
+    );
+    assert_inner_binds(&graph, "Caller", "Factory", "Make");
+    assert_eq!(owners(&graph, "Caller", "Bar"), ["ModelValue"]);
 }
 
 fn csharp_graph() -> ZeroCopyGraph {
@@ -1086,10 +1308,10 @@ fn test_resolve_call_c_nested_free_calls_still_bind_both() {
 
 // ---- chain fallback length (JavaScript) ----
 
-/// The fallback of a chained site is the member name, not the receiver
-/// text, so a long chain stays near-linear: the receiver text made every
-/// site O(depth) and the file O(depth^3) bytes. The bound stands for
-/// "not cubic", a cubic file is megabytes here.
+/// The fallback stores a fixed receiver marker and member, not receiver text.
+/// A long chain stays near-linear: receiver text made every site O(depth) and
+/// the file O(depth^3) bytes. The bound stands for "not cubic", a cubic file
+/// is megabytes here.
 #[test]
 fn test_js_callee_name_long_chain_stores_near_linear_callee_bytes() {
     let depth = 200;
@@ -1112,13 +1334,20 @@ fn test_js_callee_name_long_chain_stores_near_linear_callee_bytes() {
     );
     for call in &calls {
         if let site @ CallSite::ChainedMember { .. } = CallSite::parse(call) {
-            assert_eq!(site.fallback(), CallSite::Plain("option"), "{call:?}");
+            assert_eq!(
+                site.fallback(),
+                CallSite::FromReceiver {
+                    receiver: "call",
+                    member: "option",
+                },
+                "{call:?}"
+            );
         }
     }
 }
 
 #[test]
-fn test_js_callee_name_new_receiver_chain_fallback_is_member_name() {
+fn test_js_callee_name_new_receiver_chain_fallback_is_from_receiver() {
     let calls = raw_calls(
         &JavaScriptProvider::new().unwrap(),
         JS_USE.0,
@@ -1130,7 +1359,14 @@ fn test_js_callee_name_new_receiver_chain_fallback_is_member_name() {
         .map(|c| CallSite::parse(c))
         .find(|s| matches!(s, CallSite::ChainedMember { .. }))
         .unwrap_or_else(|| panic!("no chained entry: {calls:?}"));
-    assert_eq!(site.fallback(), CallSite::Plain("bar"), "{calls:?}");
+    assert_eq!(
+        site.fallback(),
+        CallSite::FromReceiver {
+            receiver: "call",
+            member: "bar",
+        },
+        "{calls:?}"
+    );
 }
 
 // ---- chain on a local closure (Go, Python, Swift) ----
