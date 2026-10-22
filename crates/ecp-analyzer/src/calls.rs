@@ -4,7 +4,7 @@ use ecp_core::graph::NodeKind;
 use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-use tree_sitter::Node;
+use tree_sitter::{Node, TreeCursor};
 
 /// Saturating conversion of a tree-sitter row (`usize`) to `u32`.
 /// Files exceeding `u32::MAX` rows clamp to `u32::MAX` rather than silently
@@ -229,18 +229,20 @@ pub fn extract_field_reads(
     }
     let mut reads: Vec<PendingCall> = Vec::new();
     let mut scan = NameScan::default();
+    let mut memo = KindMemo::new(names, field_kinds);
     // Each node travels with its parent and its field in that parent:
     // `Node::parent` walks down from the root, which every node would pay.
     let mut stack: Vec<Frame<'_>> = vec![Frame {
         node: root,
         parent: None,
-        field: None,
+        parent_kind: 0,
+        field: 0,
         scope: NameScope::Value,
     }];
     while let Some(frame) = stack.pop() {
         let n = frame.node;
-        let kind = n.kind();
-        if field_kinds.contains(&kind) && !is_call_callee(n, frame.parent) {
+        let kind = memo.kind(n);
+        if kind & kind_flag::FIELD_ACCESS != 0 && !is_call_callee(n, frame.parent) {
             if let Some(name) = field_name_from(n, source) {
                 reads.push(PendingCall {
                     pos: start_pos(n),
@@ -248,20 +250,26 @@ pub fn extract_field_reads(
                 });
             }
         }
-        if frame.scope != NameScope::Skip && scan.visit(&frame, source, names) {
+        if frame.scope != NameScope::Skip && scan.visit(&frame, kind, source, &mut memo) {
             continue;
         }
         let mut cursor = n.walk();
         if cursor.goto_first_child() {
-            let parent = ParentShape::of(kind, frame.scope);
+            let parent = ParentShape {
+                node: n,
+                kind,
+                scope: frame.scope,
+            };
             loop {
                 let child = cursor.node();
-                let field = cursor.field_name();
+                let field = memo.field(&cursor);
+                let child_kind = memo.kind(child);
                 stack.push(Frame {
                     node: child,
                     parent: Some(n),
+                    parent_kind: kind,
                     field,
-                    scope: names.child_scope(parent, child.kind(), field),
+                    scope: names.child_scope(parent, child_kind, field, &cursor),
                 });
                 if !cursor.goto_next_sibling() {
                     break;
@@ -392,30 +400,152 @@ enum NameScope {
 struct Frame<'t> {
     node: Node<'t>,
     parent: Option<Node<'t>>,
-    field: Option<&'t str>,
+    /// The parent's [`kind_flag`]s.
+    parent_kind: u16,
+    /// The [`field_flag`]s of the field this node fills in its parent.
+    field: u8,
     scope: NameScope,
 }
 
-/// What a node passes on to its children's [`NameScope`], computed once per
-/// node rather than once per child.
+/// What a node passes on to its children's [`NameScope`].
 #[derive(Clone, Copy)]
-struct ParentShape<'k> {
-    kind: &'k str,
+struct ParentShape<'t> {
+    node: Node<'t>,
+    kind: u16,
     scope: NameScope,
-    /// A `*parameter*` node: every child declares, unless a field says else.
-    parameter: bool,
-    /// A `*declarator*` node: its `name` declares.
-    declarator: bool,
 }
 
-impl<'k> ParentShape<'k> {
-    fn of(kind: &'k str, scope: NameScope) -> Self {
+/// Bits [`KindMemo::kind`] records for a node kind.
+mod kind_flag {
+    pub const KNOWN: u16 = 1;
+    /// One of the language's member-access kinds.
+    pub const FIELD_ACCESS: u16 = 1 << 1;
+    pub const IDENT: u16 = 1 << 2;
+    pub const SKIP_KIND: u16 = 1 << 3;
+    /// A `*parameter*` node: every child declares, unless a field says else.
+    pub const PARAMETER: u16 = 1 << 4;
+    /// A `*declarator*` node: its `name` declares.
+    pub const DECLARATOR: u16 = 1 << 5;
+    pub const METHOD_REF: u16 = 1 << 6;
+    /// Ruby `call`, which may be `method(:name)`.
+    pub const SYMBOL_CALL: u16 = 1 << 7;
+    pub const BINDING_PARENT: u16 = 1 << 8;
+    pub const SKIP_PARENT: u16 = 1 << 9;
+    pub const CALL_SUFFIX: u16 = 1 << 10;
+    pub const INFIX_CALL: u16 = 1 << 11;
+    /// An `*assignment*` node, whose `left` is a target.
+    pub const ASSIGNMENT: u16 = 1 << 12;
+}
+
+/// Bits [`KindMemo::field`] records for a field name.
+mod field_flag {
+    pub const KNOWN: u8 = 1;
+    pub const BINDING: u8 = 1 << 1;
+    pub const VALUE: u8 = 1 << 2;
+    pub const SKIP: u8 = 1 << 3;
+    pub const NON_VALUE: u8 = 1 << 4;
+    pub const NAME: u8 = 1 << 5;
+    pub const LEFT: u8 = 1 << 6;
+    /// Named in the spec's `(parent kind, field)` pairs: the parent's kind
+    /// decides.
+    pub const PAIR: u8 = 1 << 7;
+}
+
+/// What each node kind and field means to the walk, recorded per file on
+/// first sight. Matching kind and field strings at every node cost a third
+/// of the walk.
+struct KindMemo<'a> {
+    spec: &'a NameRefSpec,
+    field_kinds: &'a [&'a str],
+    kinds: Vec<u16>,
+    fields: Vec<u8>,
+}
+
+impl<'a> KindMemo<'a> {
+    fn new(spec: &'a NameRefSpec, field_kinds: &'a [&'a str]) -> Self {
         Self {
-            kind,
-            scope,
-            parameter: kind.contains("parameter"),
-            declarator: kind.contains("declarator"),
+            spec,
+            field_kinds,
+            kinds: Vec::new(),
+            fields: Vec::new(),
         }
+    }
+
+    fn kind(&mut self, node: Node<'_>) -> u16 {
+        let id = usize::from(node.kind_id());
+        match self.kinds.get(id) {
+            Some(&flags) if flags != 0 => flags,
+            _ => {
+                let flags = self.kind_flags(node.kind());
+                if self.kinds.len() <= id {
+                    self.kinds.resize(id + 1, 0);
+                }
+                self.kinds[id] = flags;
+                flags
+            }
+        }
+    }
+
+    fn kind_flags(&self, kind: &str) -> u16 {
+        use kind_flag::*;
+        let spec = self.spec;
+        [
+            (self.field_kinds.contains(&kind), FIELD_ACCESS),
+            (spec.ident_kinds.contains(&kind), IDENT),
+            (spec.skip_kinds.contains(&kind), SKIP_KIND),
+            (kind.contains("parameter"), PARAMETER),
+            (kind.contains("declarator"), DECLARATOR),
+            (spec.method_refs.contains(&kind), METHOD_REF),
+            (spec.symbol_method_refs && kind == "call", SYMBOL_CALL),
+            (spec.binding_parents.contains(&kind), BINDING_PARENT),
+            (spec.skip_parents.contains(&kind), SKIP_PARENT),
+            (spec.call_suffixes.contains(&kind), CALL_SUFFIX),
+            (spec.infix_calls.contains(&kind), INFIX_CALL),
+            (kind.contains("assignment"), ASSIGNMENT),
+        ]
+        .into_iter()
+        .fold(KNOWN, |acc, (hit, bit)| if hit { acc | bit } else { acc })
+    }
+
+    /// The flags of the field `cursor`'s node fills; 0 for none.
+    fn field(&mut self, cursor: &TreeCursor<'_>) -> u8 {
+        let Some(id) = cursor.field_id() else {
+            return 0;
+        };
+        let id = usize::from(id.get());
+        match self.fields.get(id) {
+            Some(&flags) if flags != 0 => flags,
+            _ => {
+                let flags = cursor.field_name().map_or(0, |f| self.field_flags(f));
+                if self.fields.len() <= id {
+                    self.fields.resize(id + 1, 0);
+                }
+                self.fields[id] = flags;
+                flags
+            }
+        }
+    }
+
+    fn field_flags(&self, field: &str) -> u8 {
+        use field_flag::*;
+        let spec = self.spec;
+        [
+            (BINDING_FIELDS.contains(&field), BINDING),
+            (VALUE_FIELDS.contains(&field), VALUE),
+            (SKIP_FIELDS.contains(&field), SKIP),
+            (NON_VALUE_FIELDS.contains(&field), NON_VALUE),
+            (field == "name", NAME),
+            (field == "left", LEFT),
+            (
+                spec.binding_fields
+                    .iter()
+                    .chain(spec.skip_fields)
+                    .any(|&(_, f)| f == field),
+                PAIR,
+            ),
+        ]
+        .into_iter()
+        .fold(KNOWN, |acc, (hit, bit)| if hit { acc | bit } else { acc })
     }
 }
 
@@ -423,27 +553,37 @@ impl NameRefSpec {
     fn child_scope(
         &self,
         parent: ParentShape<'_>,
-        child_kind: &str,
-        field: Option<&str>,
+        child_kind: u16,
+        field: u8,
+        cursor: &TreeCursor<'_>,
     ) -> NameScope {
-        if self.skip_kinds.contains(&child_kind) {
+        use field_flag as f;
+        use kind_flag as k;
+        if child_kind & k::SKIP_KIND != 0 {
             return NameScope::Skip;
         }
-        if let Some(field) = field {
-            if BINDING_FIELDS.contains(&field)
-                || (field == "name" && (parent.parameter || parent.declarator))
-                || self.binding_fields.contains(&(parent.kind, field))
+        let parameter = parent.kind & k::PARAMETER != 0;
+        if field != 0 {
+            let pair = |pairs: &[(&'static str, &'static str)]| {
+                field & f::PAIR != 0 && {
+                    let key = (parent.node.kind(), cursor.field_name().unwrap_or_default());
+                    pairs.iter().any(|&p| p == key)
+                }
+            };
+            if field & f::BINDING != 0
+                || (field & f::NAME != 0 && parent.kind & (k::PARAMETER | k::DECLARATOR) != 0)
+                || pair(self.binding_fields)
             {
                 return NameScope::Binding;
             }
-            if VALUE_FIELDS.contains(&field) {
+            if field & f::VALUE != 0 {
                 return NameScope::Value;
             }
-            if SKIP_FIELDS.contains(&field) || self.skip_fields.contains(&(parent.kind, field)) {
+            if field & f::SKIP != 0 || pair(self.skip_fields) {
                 return NameScope::Skip;
             }
         }
-        if parent.parameter && parent.scope != NameScope::Skip {
+        if parameter && parent.scope != NameScope::Skip {
             return NameScope::Binding;
         }
         parent.scope
@@ -451,22 +591,24 @@ impl NameRefSpec {
 
     /// Whether `ident`, a bare name in an expression, reads a value: not a
     /// member or declared name, not a callee, not an assignment target.
-    fn reads_value(&self, ident: Node<'_>, parent: Node<'_>, field: Option<&str>) -> bool {
-        let parent_kind = parent.kind();
-        if field.is_some_and(|f| {
-            NON_VALUE_FIELDS.contains(&f) || (f == "left" && parent_kind.contains("assignment"))
-        }) || self.skip_parents.contains(&parent_kind)
+    fn reads_value(&self, ident: Node<'_>, frame: &Frame<'_>, memo: &mut KindMemo<'_>) -> bool {
+        use field_flag as f;
+        use kind_flag as k;
+        let (parent, field) = (frame.parent_kind, frame.field);
+        if field & f::NON_VALUE != 0
+            || (field & f::LEFT != 0 && parent & k::ASSIGNMENT != 0)
+            || parent & k::SKIP_PARENT != 0
         {
             return false;
         }
         if !self.call_suffixes.is_empty()
             && ident
                 .next_named_sibling()
-                .is_some_and(|s| self.call_suffixes.contains(&s.kind()))
+                .is_some_and(|s| memo.kind(s) & k::CALL_SUFFIX != 0)
         {
             return false;
         }
-        !(self.infix_calls.contains(&parent_kind)
+        !(parent & k::INFIX_CALL != 0
             && ident.prev_named_sibling().is_some()
             && ident.next_named_sibling().is_some())
     }
@@ -494,13 +636,19 @@ struct NameScan<'s> {
 impl<'s> NameScan<'s> {
     /// Record what `frame`'s node declares or reads. True when its subtree
     /// holds nothing more to record (a method reference).
-    fn visit(&mut self, frame: &Frame<'_>, source: &'s [u8], spec: &NameRefSpec) -> bool {
+    fn visit(
+        &mut self,
+        frame: &Frame<'_>,
+        kind: u16,
+        source: &'s [u8],
+        memo: &mut KindMemo<'_>,
+    ) -> bool {
         let n = frame.node;
-        let kind = n.kind();
-        if spec.ident_kinds.contains(&kind) {
-            let Some(parent) = frame.parent else {
+        let spec = memo.spec;
+        if kind & kind_flag::IDENT != 0 {
+            if frame.parent.is_none() {
                 return false;
-            };
+            }
             let Ok(name) = n.utf8_text(source) else {
                 return false;
             };
@@ -509,13 +657,13 @@ impl<'s> NameScan<'s> {
                     pos: start_pos(n),
                     name,
                 }),
-                NameScope::Value if spec.binding_parents.contains(&parent.kind()) => {
+                NameScope::Value if frame.parent_kind & kind_flag::BINDING_PARENT != 0 => {
                     self.bindings.push(PendingBinding {
                         pos: start_pos(n),
                         name,
                     });
                 }
-                NameScope::Value if spec.reads_value(n, parent, frame.field) => {
+                NameScope::Value if spec.reads_value(n, frame, memo) => {
                     self.reads.push(PendingName {
                         pos: start_pos(n),
                         name: Cow::Borrowed(name),
@@ -526,7 +674,7 @@ impl<'s> NameScan<'s> {
             }
             return false;
         }
-        if spec.method_refs.contains(&kind) {
+        if kind & kind_flag::METHOD_REF != 0 {
             if let Some(name) = method_reference(n, source, spec) {
                 self.reads.push(PendingName {
                     pos: start_pos(n),
@@ -536,7 +684,7 @@ impl<'s> NameScan<'s> {
             }
             return true;
         }
-        if spec.symbol_method_refs && kind == "call" {
+        if kind & kind_flag::SYMBOL_CALL != 0 {
             if let Some(name) = symbol_method_ref(n, source) {
                 self.reads.push(PendingName {
                     pos: start_pos(n),
