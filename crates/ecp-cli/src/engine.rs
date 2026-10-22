@@ -1,3 +1,4 @@
+use crate::session::view_cache;
 use ecp_core::graph::{ArchivedZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
 use ecp_core::session::OverlayView;
 use memmap2::Mmap;
@@ -201,17 +202,34 @@ impl Engine {
     }
 
     /// The query-time overlay merge view, built once per process on first
-    /// use. `None` when no session overlay is attached, the working tree is
-    /// clean, or every fragment failed validation — callers then traverse
-    /// the base graph exactly as before (zero added cost).
+    /// use, or decoded from the session's view cache when an earlier process
+    /// built it from the same graph, binary and fragments. `None` when no
+    /// session overlay is attached, the working tree is clean, or every
+    /// fragment failed validation — callers then traverse the base graph
+    /// exactly as before (zero added cost).
     pub fn overlay_view(&self) -> Option<&OverlayView> {
         self.overlay_view
             .get_or_init(|| {
                 let dir = self.overlay_dir.as_deref()?;
                 let root = self.worktree_root.as_deref()?;
                 let graph = self.graph().ok()?;
-                let inputs = crate::session::overlay_reader::load_view_inputs(dir, root).ok()?;
-                OverlayView::build(graph, &inputs)
+                let (inputs, inputs_hash) =
+                    crate::session::overlay_reader::load_view_inputs_hashed(dir, root).ok()?;
+                if inputs.is_empty() {
+                    return None;
+                }
+                let key = view_cache::key(&self.graph_path, graph.nodes.len(), inputs_hash);
+                let cached = key
+                    .and_then(|key| view_cache::read(dir, key))
+                    .filter(|view| view.base_len() as usize == graph.nodes.len());
+                if cached.is_some() {
+                    return cached;
+                }
+                let view = OverlayView::build(graph, &inputs)?;
+                if let Some(key) = key {
+                    view_cache::write(dir, key, &view);
+                }
+                Some(view)
             })
             .as_ref()
     }

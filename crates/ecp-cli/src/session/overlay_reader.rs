@@ -8,7 +8,7 @@
 //!   (inspect's node-set merge).
 //! - `load_view_inputs` — per-file `OverlayFileInput`s (symbols + imports +
 //!   calls + export flags and aliases) for the query-time `OverlayView`
-//!   edge merge.
+//!   edge merge; `load_view_inputs_hashed` adds the view cache's input key.
 //!
 //! Fragment → Node conversion:
 //! - `uid`:  `ecp_core::uid::compute(kind, rel_path, owner, name)` — same
@@ -33,6 +33,7 @@ use rkyv::rancor::Error as RkyvError;
 use std::fs;
 use std::io;
 use std::path::Path;
+use xxhash_rust::xxh3::Xxh3;
 
 use super::overlay_writer::{
     ArchivedFragment, ArchivedFragmentFile, ArchivedFragmentFileV2, ArchivedFragmentFileV3,
@@ -248,13 +249,25 @@ pub fn load_view_inputs(
     session_dir: &Path,
     worktree_root: &Path,
 ) -> io::Result<Vec<OverlayFileInput>> {
+    load_view_inputs_hashed(session_dir, worktree_root).map(|(inputs, _)| inputs)
+}
+
+/// [`load_view_inputs`] plus an xxh3 over each accepted entry's rel_path and
+/// fragment bytes, in manifest order: the inputs' share of the view cache
+/// key. The same pass computes both, so the key covers exactly the entries
+/// the acceptance rules let through.
+pub fn load_view_inputs_hashed(
+    session_dir: &Path,
+    worktree_root: &Path,
+) -> io::Result<(Vec<OverlayFileInput>, u64)> {
+    let mut hasher = Xxh3::new();
     let manifest = session_dir.join("dirty_files.json");
     if !manifest.exists() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), hasher.digest()));
     }
     let df = DirtyFiles::read(&manifest)?;
     if !df.from_current_builder() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), hasher.digest()));
     }
     let overlay_dir = session_dir.join("graph_overlay");
     let mut out = Vec::new();
@@ -286,6 +299,12 @@ pub fn load_view_inputs(
         ) else {
             continue;
         };
+        // Length prefixes keep two different (path, bytes) sequences from
+        // concatenating to the same stream.
+        for part in [rel_path.as_bytes(), bytes.as_slice()] {
+            hasher.update(&(part.len() as u64).to_le_bytes());
+            hasher.update(part);
+        }
         out.push(OverlayFileInput {
             rel_path: rel_path.clone(),
             symbols: archived
@@ -314,5 +333,5 @@ pub fn load_view_inputs(
             export_aliases,
         });
     }
-    Ok(out)
+    Ok((out, hasher.digest()))
 }
