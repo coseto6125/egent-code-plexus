@@ -223,6 +223,19 @@ pub fn extract_field_reads(
     field_kinds: &[&str],
     names: &NameRefSpec,
 ) {
+    extract_field_reads_with_literal_key_facts(root, source, nodes, field_kinds, names, None);
+}
+
+/// Like [`extract_field_reads`], with facts that classify keyed composite
+/// literal elements whose type is not written directly at the literal.
+pub fn extract_field_reads_with_literal_key_facts(
+    root: Node<'_>,
+    source: &[u8],
+    nodes: &mut [RawNode],
+    field_kinds: &[&str],
+    names: &NameRefSpec,
+    literal_key_facts: Option<&LiteralKeyFacts>,
+) {
     let containers = enclosing_containers(nodes);
     if containers.is_empty() {
         return;
@@ -272,7 +285,7 @@ pub fn extract_field_reads(
                     parent: Some(n),
                     parent_kind: kind,
                     field,
-                    scope: names.child_scope(parent, child_kind, field, &cursor),
+                    scope: names.child_scope(parent, child_kind, field, &cursor, literal_key_facts),
                 });
                 if !cursor.goto_next_sibling() {
                     break;
@@ -282,6 +295,25 @@ pub fn extract_field_reads(
     }
     attach_pending_field_reads(&containers, reads, nodes);
     scan.attach(&containers, nodes);
+}
+
+/// Per-file facts for keyed composite literal elements. A language-specific
+/// prepass marks only elements whose key is an expression, rather than a
+/// record field name.
+#[derive(Default)]
+pub struct LiteralKeyFacts {
+    map_keys: rustc_hash::FxHashSet<usize>,
+}
+
+impl LiteralKeyFacts {
+    /// Mark `keyed` as an element whose `key` is a value expression.
+    pub fn mark_map_key(&mut self, keyed: Node<'_>) {
+        self.map_keys.insert(keyed.id());
+    }
+
+    fn is_map_key(&self, keyed: Node<'_>) -> bool {
+        self.map_keys.contains(&keyed.id())
+    }
 }
 
 /// True when `access` is the callee of an enclosing call expression — i.e. its
@@ -641,6 +673,7 @@ impl NameRefSpec {
         child_kind: u32,
         field: u16,
         cursor: &TreeCursor<'_>,
+        literal_key_facts: Option<&LiteralKeyFacts>,
     ) -> NameScope {
         use field_flag as f;
         use kind_flag as k;
@@ -701,7 +734,9 @@ impl NameRefSpec {
                 return NameScope::Skip;
             }
             if pair(self.skip_fields) {
-                return if literal_typed_by(parent.node, self.map_literal_types) {
+                return if literal_typed_by(parent.node, self.map_literal_types)
+                    || literal_key_facts.is_some_and(|facts| facts.is_map_key(parent.node))
+                {
                     NameScope::Value
                 } else {
                     NameScope::Skip

@@ -463,7 +463,7 @@ fn test_value_read_go_known_struct_literal_keys_return_no_edge() {
         &GoProvider::new().unwrap(),
         &[(
             "g.go",
-            "package main\n\nconst FIELD = \"field\"\n\ntype Inner struct { FIELD int }\ntype Outer struct { Inner Inner }\n\nfunc direct() Inner {\n\treturn Inner{FIELD: 1}\n}\n\nfunc nested() Outer {\n\treturn Outer{Inner: {FIELD: 1}}\n}\n",
+            "package main\n\nconst FIELD = \"field\"\n\ntype Inner struct { FIELD int }\n\nfunc direct() Inner {\n\treturn Inner{FIELD: 1}\n}\n\nfunc nested() []Inner {\n\treturn []Inner{{FIELD: 1}}\n}\n",
         )],
     );
     assert_eq!(value_reads(&g, "direct"), none());
@@ -483,6 +483,19 @@ fn test_value_read_go_unknown_external_literal_key_returns_no_edge() {
 }
 
 #[test]
+fn test_value_read_go_missing_and_cyclic_literal_types_return_no_edge() {
+    let g = graph(
+        &GoProvider::new().unwrap(),
+        &[(
+            "g.go",
+            "package main\n\nconst MISSING = \"missing\"\nconst CYCLE = \"cycle\"\n\ntype Missing Absent\ntype First Second\ntype Second First\n\nfunc missing() Missing {\n\treturn Missing{MISSING: 1}\n}\n\nfunc cyclic() First {\n\treturn First{CYCLE: 1}\n}\n",
+        )],
+    );
+    assert_eq!(value_reads(&g, "missing"), none());
+    assert_eq!(value_reads(&g, "cyclic"), none());
+}
+
+#[test]
 fn test_value_read_go_named_map_key_local_and_parameter_shadow_returns_no_edge() {
     let g = graph(
         &GoProvider::new().unwrap(),
@@ -493,6 +506,18 @@ fn test_value_read_go_named_map_key_local_and_parameter_shadow_returns_no_edge()
     );
     assert_eq!(value_reads(&g, "parameter"), none());
     assert_eq!(value_reads(&g, "local"), none());
+}
+
+#[test]
+fn test_value_read_go_local_struct_type_shadows_package_map_returns_no_edge() {
+    let g = graph(
+        &GoProvider::new().unwrap(),
+        &[(
+            "g.go",
+            "package main\n\nconst KEY = \"package\"\n\ntype Labels map[string]int\n\nfunc local_type() {\n\ttype Labels struct { KEY int }\n\t_ = Labels{KEY: 1}\n}\n",
+        )],
+    );
+    assert_eq!(value_reads(&g, "local_type"), none());
 }
 
 // ---- Rust ----

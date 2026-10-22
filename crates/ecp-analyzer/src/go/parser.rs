@@ -1,3 +1,4 @@
+use super::literal_key_facts::collect_literal_key_facts;
 use super::receiver_types::{
     build_receiver_map, collect_local_types, extract_go_calls_and_path_literals,
     receiver_type_from_method_decl,
@@ -959,7 +960,8 @@ impl LanguageProvider for GoProvider {
         let local_types = collect_local_types(tree.root_node(), source, &recv_map);
         let (raw_path_literals, raw_sql_refs) =
             extract_go_calls_and_path_literals(tree.root_node(), source, &mut nodes, &local_types);
-        crate::calls::extract_field_reads(
+        let literal_key_facts = collect_literal_key_facts(tree.root_node(), source);
+        crate::calls::extract_field_reads_with_literal_key_facts(
             tree.root_node(),
             source,
             &mut nodes,
@@ -984,6 +986,7 @@ impl LanguageProvider for GoProvider {
                 ],
                 ..crate::calls::NameRefSpec::EMPTY
             },
+            Some(&literal_key_facts),
         );
 
         // owner_class is set at emit time via receiver_type_from_method_decl().
