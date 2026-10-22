@@ -1332,6 +1332,29 @@ fn test_sweep_stale_fragments_session_written_by_0_14_8_bin_removed_after_refres
 /// orphan before that would delete the new one.
 #[test]
 fn test_sweep_stale_fragments_overlay_lock_held_session_skipped() {
+    const CHILD: &str = "ECP_GC_OVERLAY_LOCK_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // Run in a separate process. A command from a concurrent test can
+        // retain this test's flock between fork and exec.
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "test_sweep_stale_fragments_overlay_lock_held_session_skipped",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("RUST_TEST_THREADS", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated lock-lifetime test failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
     let tmp = tempfile::tempdir().unwrap();
     let overlay = fragment_session(
         tmp.path(),

@@ -4,7 +4,8 @@
 //! the bases of the class that encloses the caller, each placed in its file,
 //! after the import tiers and before a wildcard import.
 //!
-//! Every fixture keeps the base class in another file and runs four edits:
+//! Every fixture keeps the base class in another file and runs four edits.
+//! Fixtures with a reachable bare member assert that edge in the first two:
 //!
 //! | edit           | dirty files      | asserts                                   |
 //! |----------------|------------------|-------------------------------------------|
@@ -109,7 +110,9 @@ const FIXTURES: &[Fixture] = &[
         caller: ("k.ts", "import { Base } from './base';\nclass K extends Base {\n run() { save(); }\n}\n"),
         rest: &[],
         caller_fn: "run",
-        expected: &[("save", "base.ts", 0.8)],
+        // A plain TypeScript call is free-only. Member calls require a
+        // receiver, even inside an inheriting class.
+        expected: &[],
     },
     Fixture {
         label: "JavaScript",
@@ -117,7 +120,9 @@ const FIXTURES: &[Fixture] = &[
         caller: ("k.js", "import { Base } from './base';\nclass K extends Base {\n run() { save(); }\n}\n"),
         rest: &[],
         caller_fn: "run",
-        expected: &[("save", "base.js", 0.8)],
+        // A plain JavaScript call is free-only. Member calls require a
+        // receiver, even inside an inheriting class.
+        expected: &[],
     },
     Fixture {
         label: "Python",
