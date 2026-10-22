@@ -3,6 +3,9 @@ use crate::cypher::error::CypherError;
 use crate::cypher::lexer::Token;
 use crate::graph::{NodeKind, RelType};
 
+/// Function names RETURN / WITH treat as aggregates.
+const AGGREGATES: &[&str] = &["COUNT", "SUM", "AVG", "MIN", "MAX", "COLLECT"];
+
 pub struct Cursor<'a> {
     tokens: &'a [Token],
     pos: usize,
@@ -447,12 +450,7 @@ fn parse_return_item(c: &mut Cursor) -> Result<ReturnItem, CypherError> {
                 }
                 c.expect(&Token::RParen)?;
                 let name = name.to_ascii_uppercase();
-                if args.is_empty()
-                    && matches!(
-                        name.as_str(),
-                        "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" | "COLLECT"
-                    )
-                {
+                if args.is_empty() && AGGREGATES.contains(&name.as_str()) {
                     return Err(c.err("aggregate argument"));
                 }
                 ReturnExpr::FunCall {
@@ -478,6 +476,11 @@ fn parse_return_item(c: &mut Cursor) -> Result<ReturnItem, CypherError> {
         let base = match expr {
             ReturnExpr::Var(v) => Expr::Var(v),
             ReturnExpr::Prop(v, p) => Expr::Prop(v, p),
+            // The executor groups only a bare aggregate item; a subscripted
+            // one would run per row.
+            ReturnExpr::FunCall { name, .. } if AGGREGATES.contains(&name.as_str()) => {
+                return Err(c.err("end of return item (to subscript an aggregate, name it first: WITH collect(x) AS xs RETURN xs[0])"));
+            }
             ReturnExpr::FunCall {
                 name,
                 distinct,
