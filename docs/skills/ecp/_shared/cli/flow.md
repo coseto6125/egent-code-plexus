@@ -34,6 +34,7 @@ A call that discards its return value does not create a return-value dependency 
 The engine analyzes JS/TS, Python, and PHP sources within the supplied directory.
 Ignore rules filter untracked files. Tracked sources remain visible in both snapshots, subject to dependency/cache directory exclusions.
 Missing external code remains an analysis boundary.
+Blade templates (`*.blade.php`) are rejected: flow does not parse `@php` blocks, `{{ }}` echoes or directives.
 The loader rejects scopes larger than 2,048 files or 32 MiB instead of silently analyzing a partial snapshot.
 Overlay JSON input also has a 32 MiB limit before parsing.
 

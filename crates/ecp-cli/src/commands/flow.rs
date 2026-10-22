@@ -5,7 +5,7 @@ pub use sources::{load_sources, load_sources_at_ref, relative_path, supported_pa
 
 use crate::output::{emit, OutputFormat};
 use clap::{Args, ValueEnum};
-use ecp_analyzer::flow::{analyze, Budgets, Direction, FlowRequest, Subject};
+use ecp_analyzer::flow::{analyze, is_blade_template, Budgets, Direction, FlowRequest, Subject};
 use ecp_core::EcpError;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -81,9 +81,13 @@ pub fn build_payload(args: &FlowArgs) -> Result<Value, EcpError> {
     }
     let file = sources::relative_path(&repo, Path::new(&args.file))?;
     if !sources::supported_path(&file) {
-        return Err(EcpError::InvalidArgument(format!(
-            "unsupported source language: {file} (flow reads JS/TS, Python, and PHP)"
-        )));
+        return Err(EcpError::InvalidArgument(if is_blade_template(&file) {
+            format!(
+                "unsupported source language: `{file}` is a Blade template; flow does not parse `@php` blocks, `{{{{ }}}}` echoes or directives, and does not bind view data passed by `view()`/render. Trace the PHP that builds the view data instead."
+            )
+        } else {
+            format!("unsupported source language: {file} (flow reads JS/TS, Python, and PHP)")
+        }));
     }
     let loaded = load_sources(&repo, args.overlay.as_deref())?;
     let sources = loaded.files;

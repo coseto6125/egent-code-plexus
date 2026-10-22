@@ -60,11 +60,23 @@ pub(super) fn build_literal_payload(value: &str, engine: &Engine) -> Result<Valu
         }));
     }
 
-    Ok(serde_json::json!({
+    let mut payload = serde_json::json!({
         "literal": value,
         "site_count": sites.len(),
         "sites": sites,
-    }))
+    });
+    if let Some(note) = unindexed_literal_note(value) {
+        payload["note"] = json!(note);
+    }
+    Ok(payload)
+}
+
+/// `site_count: 0` for a value that is not path-shaped reads as "unused", but
+/// only path-shaped strings become `PathLiteral` nodes.
+fn unindexed_literal_note(value: &str) -> Option<&'static str> {
+    (!ecp_analyzer::path_literal::is_path_shaped(value)).then_some(
+        "value is not path-shaped, so ecp never indexes it as a path literal; site_count says nothing about usage — use `grep` or `ecp pattern`",
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

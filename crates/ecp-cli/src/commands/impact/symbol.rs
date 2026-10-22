@@ -283,12 +283,8 @@ pub(super) fn impact_by_name(
         } else {
             json!(target_file_paths)
         };
-        result_obj["blind_spot_warning"] = json!({
-            "file": files_field,
-            "total": all_blind_spot_kinds.len(),
-            "by_kind": by_kind,
-            "note": "traversal may be incomplete — see `ecp doctor` blind spots catalog",
-        });
+        result_obj["blind_spot_warning"] =
+            blind_spot_warning(files_field, all_blind_spot_kinds.len(), &by_kind);
     }
 
     if args.test_coverage {
@@ -385,9 +381,34 @@ pub(super) fn collect_blind_spots(
         .collect()
 }
 
+/// The counts cover the target's own file only; a blind spot that hides a
+/// caller sits in the caller's file, so the note says those files are unread.
+fn blind_spot_warning(
+    files: Value,
+    total: usize,
+    by_kind: &std::collections::BTreeMap<String, u32>,
+) -> Value {
+    json!({
+        "file": files,
+        "total": total,
+        "by_kind": by_kind,
+        "note": "counts cover only the target's own file(s) listed in `file`; blind spots in callers' files are not included, so traversal may be incomplete — see `ecp doctor` blind spots catalog",
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_blind_spot_warning_note_names_scope_and_excludes_callers() {
+        let by_kind = std::collections::BTreeMap::from([("php-variable-call".to_string(), 6)]);
+        let w = blind_spot_warning(json!("app/Svc.php"), 6, &by_kind);
+        let note = w["note"].as_str().unwrap();
+        assert_eq!(w["file"], "app/Svc.php");
+        assert!(note.contains("only the target's own file"), "{note}");
+        assert!(note.contains("callers' files are not included"), "{note}");
+    }
 
     #[test]
     fn test_ambiguous_callers_command_path_with_space_is_single_quoted() {
