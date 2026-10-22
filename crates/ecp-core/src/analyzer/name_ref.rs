@@ -5,7 +5,7 @@
 //! paths cannot drift.
 
 use crate::analyzer::reexport::ResolveTarget;
-use crate::analyzer::same_file_pick::{prefer_free, PickFacts};
+use crate::analyzer::same_file_pick::prefer_free;
 use crate::analyzer::type_ladder::{self, Ownership, TypeFacts};
 use crate::analyzer::types::{owner_key, CallSite, NameRef, NameRefKind, RawImport};
 use crate::file_category::Language;
@@ -149,7 +149,7 @@ where
             })
         });
     if (module_scoped && global)
-        || (language == Language::Go && global && other_package())
+        || (language == Language::Go && global && other_package)
         || (name_ref.kind == NameRefKind::Constant && facts.kind(id).is_callable())
         || (name_ref.kind != NameRefKind::Function && type_member)
     {
