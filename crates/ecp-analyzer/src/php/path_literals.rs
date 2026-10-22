@@ -121,7 +121,7 @@ fn strip_quotes(raw: &str) -> Option<&str> {
 /// Climb the AST from a string literal to find the enclosing function call
 /// and resolve its callee name. PHP call shapes:
 ///   `function_call_expression` → `function` field
-///   `member_call_expression` → `name` field
+///   `member_call_expression` / `nullsafe_member_call_expression` → `name` field
 fn enclosing_callee(str_node: Node<'_>, source: &[u8]) -> Option<String> {
     let parent = str_node.parent()?;
     let call_node = if parent.kind() == "arguments" {
@@ -145,7 +145,7 @@ fn enclosing_callee(str_node: Node<'_>, source: &[u8]) -> Option<String> {
                 .ok()
                 .map(str::to_string)
         }
-        "member_call_expression" => {
+        "member_call_expression" | "nullsafe_member_call_expression" => {
             let name_node = call_node.child_by_field_name("name")?;
             std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
                 .ok()

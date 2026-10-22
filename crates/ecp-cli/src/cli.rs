@@ -36,7 +36,7 @@ pub enum Commands {
     /// does not hold. `--callers-of` scopes the scan to one symbol's callers.
     Pattern(commands::pattern::PatternArgs),
     /// Trace value dependencies from a source position, including resolved calls and returns.
-    /// Reads current JS/TS, Python, and PHP sources without requiring an index.
+    /// Reads current JS/TS, Python, and PHP sources (Blade `*.blade.php` templates are rejected) without requiring an index.
     Flow(commands::flow::FlowArgs),
     /// Cypher query escape hatch
     Cypher(commands::cypher::CypherArgs),

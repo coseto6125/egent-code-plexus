@@ -416,3 +416,36 @@ fn test_load_sources_tracked_readable_after_skipped_rejects_file_budget_overflow
         "{error}"
     );
 }
+
+#[test]
+fn test_flow_blade_template_rejects_with_blade_reason() {
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("v.blade.php"), "<p>{{ $name }}</p>\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ecp"))
+        .args([
+            "flow",
+            "--file",
+            "v.blade.php",
+            "--line",
+            "1",
+            "--column",
+            "8",
+        ])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unsupported source language:"), "{stderr}");
+    assert!(stderr.contains("Blade"), "{stderr}");
+}
+
+#[test]
+fn test_load_sources_blade_template_excluded_from_scope() {
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(repo.path().join("a.php"), "<?php\n$x = 1;\n").unwrap();
+    std::fs::write(repo.path().join("v.blade.php"), "<p>{{ $x }}</p>\n").unwrap();
+    let loaded = load_sources(repo.path(), None).unwrap();
+    let paths: Vec<&str> = loaded.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, ["a.php"]);
+}

@@ -98,7 +98,17 @@ pub struct FlowReport {
     pub coverage: String,
 }
 
+/// Case-sensitive like Laravel's view resolver: `V.BLADE.php` is plain PHP.
+pub fn is_blade_template(path: &str) -> bool {
+    path.ends_with(".blade.php")
+}
+
 fn language(path: &str) -> Option<tree_sitter::Language> {
+    // tree-sitter-php reads a Blade template (no `<?php`) as one HTML leaf, so
+    // flow would anchor the whole file instead of the requested span.
+    if is_blade_template(path) {
+        return None;
+    }
     Some(match path.rsplit_once('.')?.1 {
         "js" | "jsx" | "mjs" | "cjs" => tree_sitter_javascript::LANGUAGE.into(),
         "ts" | "mts" | "cts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),

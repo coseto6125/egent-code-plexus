@@ -14,8 +14,8 @@ use std::path::Path;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCursor};
 
-/// Blind-spot kind/hint pairs. Order matches the capture-index dispatch
-/// in `parse_file`.
+/// Blind-spot kind/hint pairs, indexed by `parse_file`: the first three by
+/// the capture-index dispatch, the last after the receiver walk.
 const BLIND_SPEC: &[(&str, &str)] = &[
     (
         "php-eval",
@@ -28,6 +28,10 @@ const BLIND_SPEC: &[(&str, &str)] = &[
     (
         "php-variable-call",
         "$<var>(...) — variable-function call; target callable bound at runtime via the variable's value",
+    ),
+    (
+        "php-variable-method-call",
+        "Cls::$m() / $o->$m() / $o?->{expr}() — method name bound at runtime; no edge names the called method",
     ),
 ];
 
@@ -111,7 +115,10 @@ fn body_has_call(node: tree_sitter::Node) -> bool {
     let mut stack = vec![node];
     while let Some(n) = stack.pop() {
         match n.kind() {
-            "function_call_expression" | "member_call_expression" | "scoped_call_expression" => {
+            "function_call_expression"
+            | "member_call_expression"
+            | "nullsafe_member_call_expression"
+            | "scoped_call_expression" => {
                 return true;
             }
             _ => {}
@@ -863,8 +870,21 @@ impl LanguageProvider for PhpProvider {
             &mut nodes,
             &["function_call_expression"],
         );
-        let (raw_path_literals, raw_sql_refs) =
+        let (raw_path_literals, raw_sql_refs, dynamic_calls) =
             extract_php_calls_and_path_literals(tree.root_node(), source, &mut nodes);
+        // A fan-out names every value the method variable can hold, so its
+        // site keeps a blind spot only for a late-bound receiver.
+        let mut fanout_refs = Vec::new();
+        let mut bound_cache = super::dynamic_dispatch::BoundValuesCache::default();
+        for call in dynamic_calls {
+            let fanout =
+                super::dynamic_dispatch::const_map_fanout(call, source, &nodes, &mut bound_cache);
+            let keep_blind_spot = fanout.as_ref().is_none_or(|(_, late_bound)| *late_bound);
+            if keep_blind_spot {
+                push_blind_spot(&mut blind_spots, BLIND_SPEC[3], &call, path, is_test_file);
+            }
+            fanout_refs.extend(fanout.map(|(fanout, _)| fanout));
+        }
         crate::calls::extract_field_reads(
             tree.root_node(),
             source,
@@ -955,7 +975,7 @@ impl LanguageProvider for PhpProvider {
             imports,
             documents: vec![],
             framework_refs,
-            fanout_refs: vec![],
+            fanout_refs,
             blind_spots,
             schema_fields: None,
             event_topics: None,

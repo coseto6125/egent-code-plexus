@@ -129,6 +129,8 @@ const LANGUAGES: &[LangEntry] = &[
             "php-eval",
             "php-call-user-func",
             "php-variable-call",
+            "php-variable-method-call",
+            "php-enum-imitation",
             "laravel-include-scope-cap",
             "laravel-controller-middleware-dynamic",
             "laravel-unbound-action",

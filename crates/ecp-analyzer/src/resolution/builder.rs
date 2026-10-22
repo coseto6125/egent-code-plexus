@@ -2639,6 +2639,7 @@ fn pass2_emit_framework_and_fanout(
     resolver: &Resolver<'_>,
     symbol_table: &SymbolTable,
     local_graph: &LocalGraph,
+    start_idx: u32,
     reason_cache: &FxHashMap<String, StrRef>,
     edges: &mut Vec<Edge>,
 ) {
@@ -2675,7 +2676,21 @@ fn pass2_emit_framework_and_fanout(
     }
 
     for fanout_ref in &local_graph.fanout_refs {
-        let source_id = symbol_table.lookup_in_file(&file_path_lossy, &fanout_ref.source_name);
+        // A name lookup takes the file's first node so named, which can be a
+        // property or a same-named method of another class; the callable whose
+        // span holds the call site is the one the parser named.
+        let (row, col, _, _) = fanout_ref.span;
+        let source_id =
+            crate::framework_helpers::enclosing_fn_idx_by_span(&local_graph.nodes, row, col)
+                .filter(|&i| local_graph.nodes[i as usize].name == fanout_ref.source_name)
+                .map(|i| start_idx + i)
+                .or_else(|| {
+                    symbol_table.lookup_in_file_with_kind(
+                        &file_path_lossy,
+                        &fanout_ref.source_name,
+                        ResolveTarget::Callable,
+                    )
+                });
         let Some(source_id) = source_id else { continue };
         let n = fanout_ref.candidates.len() as f32;
         if n < 1.0 {
@@ -2902,6 +2917,7 @@ fn pass2_resolve_edges(
                     resolver,
                     symbol_table_ref,
                     local_graph,
+                    start_indices[graph_idx],
                     reason_cache_ref,
                     &mut edges,
                 );
@@ -2995,6 +3011,7 @@ fn pass2_resolve_edges(
                         &resolver,
                         symbol_table_ref,
                         local_graph,
+                        start_idx,
                         reason_cache_ref,
                         &mut local_edges,
                     );

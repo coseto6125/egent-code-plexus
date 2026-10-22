@@ -53,3 +53,21 @@ function writer($d) {
     assert!(lits.iter().any(|l| l.value == "meta.json"));
     assert!(lits.iter().any(|l| l.value == "session_meta.json"));
 }
+
+#[test]
+fn test_enclosing_callee_nullsafe_member_call_matches_arrow_form() {
+    let src = r#"<?php
+function arrow($disk, $d) {
+    $disk->write("exports/out.json", $d);
+}
+function nullsafe($disk, $d) {
+    $disk?->write("exports/nullsafe.json", $d);
+}
+"#;
+    let lits = parse_path_literals(src);
+    let arrow = find_by_value(&lits, "exports/out.json");
+    let nullsafe = find_by_value(&lits, "exports/nullsafe.json");
+    assert_eq!(arrow.sink_reason, "sink:write|confidence:medium");
+    // Contract: `?->` is the same call as `->`, so it classifies the same sink.
+    assert_eq!(nullsafe.sink_reason, arrow.sink_reason);
+}
