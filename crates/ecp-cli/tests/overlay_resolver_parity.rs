@@ -1850,6 +1850,60 @@ fn field_read_edges(
 }
 
 #[test]
+fn test_overlay_java_static_value_import_matches_reindex() {
+    let app = "package use;\nimport static app.Consts.TABLE;\npublic class User { int read() { return TABLE; } }\n";
+    let shifted = format!("\n{app}");
+    let (full, overlay) = field_read_edges(
+        &java(),
+        &[
+            (
+                "src/app/Consts.java",
+                "package app; public class Consts { public static int TABLE = 1; }",
+            ),
+            ("src/use/User.java", app),
+        ],
+        &[("src/use/User.java", &shifted)],
+        &["value_read"],
+    );
+    assert_eq!(
+        full.len(),
+        1,
+        "the static value import must be indexed: {full:?}"
+    );
+    assert_eq!(
+        overlay, full,
+        "the overlay must keep the static value import"
+    );
+}
+
+#[test]
+fn test_overlay_kotlin_static_value_import_matches_reindex() {
+    let app = "package use\nimport app.Consts.TABLE\nclass User { fun read(): Int = TABLE }\n";
+    let shifted = format!("\n{app}");
+    let (full, overlay) = field_read_edges(
+        &kotlin(),
+        &[
+            (
+                "src/app/Consts.kt",
+                "package app\nobject Consts { val TABLE = 1 }\n",
+            ),
+            ("src/use/User.kt", app),
+        ],
+        &[("src/use/User.kt", &shifted)],
+        &["value_read"],
+    );
+    assert_eq!(
+        full.len(),
+        1,
+        "the static value import must be indexed: {full:?}"
+    );
+    assert_eq!(
+        overlay, full,
+        "the overlay must keep the static value import"
+    );
+}
+
+#[test]
 fn test_overlay_typescript_constant_read_shifted_reader_matches_reindex() {
     let app = "import { LIMITS } from './lib';\nexport function readLimit(): number {\n  return LIMITS.max;\n}\n";
     let shifted = format!("\n{app}");

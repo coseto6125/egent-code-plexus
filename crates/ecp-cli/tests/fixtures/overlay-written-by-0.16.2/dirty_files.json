@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "entries": {
+    "app.py": {
+      "mtime_ns": 1792703694112491101,
+      "content_hash": "2e3d1df0cf371fbf",
+      "fragment_id": "2e3d1df0cf371fbf",
+      "tantivy_delta_segment": null,
+      "parse_failed": false,
+      "dirty_symbols": [
+        {
+          "name": "stable",
+          "kind": "function",
+          "file": "app.py",
+          "line_start": 1,
+          "line_end": 2
+        },
+        {
+          "name": "added",
+          "kind": "function",
+          "file": "app.py",
+          "line_start": 4,
+          "line_end": 5
+        }
+      ],
+      "format": 4
+    }
+  },
+  "builder_fingerprint": "v0.16.2+schema19"
+}

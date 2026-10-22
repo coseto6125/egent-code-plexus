@@ -15,7 +15,7 @@ use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{LocalGraph, NameRef, NameRefKind, RawImport, RawNode, VariantRef};
 use ecp_core::graph::NodeKind;
 use ecp_core::session::{
-    DirtyEntry, DirtyFiles, OverlayFileInput, SessionMeta, FRAGMENT_FORMAT_V3,
+    DirtyEntry, DirtyFiles, OverlayFileInput, SessionMeta, FRAGMENT_FORMAT_V3, FRAGMENT_FORMAT_V4,
 };
 use parity::{callees, calls_after_edit, Parity};
 use std::path::{Path, PathBuf};
@@ -500,6 +500,77 @@ fn test_load_overlay_hits_bin_written_by_0_15_0_lists_its_symbols() {
         )
     };
     assert_eq!(hits, [app("helper", 1), app("go", 5), app("added", 9)]);
+}
+
+/// The session ecp 0.16.2 left for a dirty `app.py` is a native v4 bin.
+/// Its flat hits remain readable, but V5 is the first format with the facts
+/// required to rebuild dirty view edges.
+fn session_written_by_0_16_2(tmp: &Path) -> (PathBuf, PathBuf) {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/overlay-written-by-0.16.2");
+    let worktree = tmp.join("wt");
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::copy(fixture.join("app.py"), worktree.join("app.py")).unwrap();
+    let mtime = std::fs::metadata(worktree.join("app.py"))
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    let session_dir = make_session_dir(tmp, "sid-0-16-2");
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture.join("dirty_files.json")).unwrap())
+            .unwrap();
+    manifest["entries"]["app.py"]["mtime_ns"] = mtime.into();
+    std::fs::write(
+        session_dir.join("dirty_files.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    std::fs::create_dir_all(session_dir.join("graph_overlay")).unwrap();
+    std::fs::copy(
+        fixture.join("graph_overlay/2e3d1df0cf371fbf.bin"),
+        session_dir.join("graph_overlay/2e3d1df0cf371fbf.bin"),
+    )
+    .unwrap();
+    (session_dir, worktree)
+}
+
+#[test]
+fn test_load_overlay_hits_bin_written_by_0_16_2_lists_its_symbols() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (session_dir, _worktree) = session_written_by_0_16_2(tmp.path());
+
+    let hits: Vec<_> = load_overlay_hits(&session_dir)
+        .unwrap()
+        .into_iter()
+        .map(|hit| (hit.name, hit.kind, hit.rel_path, hit.line))
+        .collect();
+    assert_eq!(
+        hits,
+        [
+            ("stable".into(), NodeKind::Function, "app.py".into(), 1),
+            ("added".into(), NodeKind::Function, "app.py".into(), 4),
+        ]
+    );
+}
+
+#[test]
+fn test_load_view_inputs_v4_entry_under_current_fingerprint_returns_no_input() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (session_dir, worktree) = session_written_by_0_16_2(tmp.path());
+    let manifest = session_dir.join("dirty_files.json");
+    let mut dirty = DirtyFiles::read(&manifest).unwrap();
+    dirty.builder_fingerprint = Some(ecp_core::registry::BUILDER_FINGERPRINT.into());
+    DirtyFiles::write_atomic(&manifest, &dirty).unwrap();
+
+    assert_eq!(dirty.entries["app.py"].format, FRAGMENT_FORMAT_V4);
+    assert!(dirty.from_current_builder());
+    assert!(
+        load_view_inputs(&session_dir, &worktree).is_empty(),
+        "v4 lacks the complete field reads and return types required by V5"
+    );
 }
 
 /// The `m` of two traits `A` and `B` (`src/a.rs`, `src/b.rs`), both

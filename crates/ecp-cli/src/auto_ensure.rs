@@ -1453,6 +1453,87 @@ mod fingerprint_drift_tests {
     use tempfile::tempdir;
 
     #[test]
+    fn test_retain_stale_fragments_current_v5_skips_reparse() {
+        use ecp_core::session::{DirtyEntry, DirtyFiles, SessionMeta, FRAGMENT_FORMAT_V5};
+
+        const CHILD_ENV: &str = "ECP_AUTO_ENSURE_V5_REFRESH_CHILD";
+        const TEST_NAME: &str =
+            "auto_ensure::fingerprint_drift_tests::test_retain_stale_fragments_current_v5_skips_reparse";
+
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST_NAME, "--nocapture"])
+                .env(CHILD_ENV, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated test process failed: {status}");
+            return;
+        }
+
+        let tmp = tempdir().unwrap();
+        let worktree = tmp.path().join("repo");
+        fs::create_dir_all(&worktree).unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(&worktree)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "test"]);
+        fs::write(worktree.join("app.py"), "def app(): pass\n").unwrap();
+        git(&["add", "app.py"]);
+        git(&["commit", "-qm", "base"]);
+
+        let home = tmp.path().join("ecp-home");
+        std::env::set_var("ECP_HOME", &home);
+        std::env::set_var("ECP_SESSION_ID", "v5-refresh-test");
+        let session_dir = resolve_session_overlay_dir(&worktree).unwrap();
+        fs::create_dir_all(session_dir.join("graph_overlay")).unwrap();
+        let mtime = mtime_ns_of(&worktree.join("app.py")).unwrap();
+        let head = git_head_sha(&worktree).unwrap();
+        SessionMeta {
+            version: 1,
+            session_id: "v5-refresh-test".into(),
+            pid: None,
+            started_at: String::new(),
+            last_touched: String::new(),
+            base_sha: head,
+            source_worktree: worktree.to_string_lossy().into(),
+            overlay_version: 1,
+            watcher_pid: None,
+            last_drained_offset: 0,
+            agent_name: None,
+        }
+        .write_atomic(&session_dir.join("session_meta.json"))
+        .unwrap();
+        let mut dirty = DirtyFiles::empty();
+        dirty.entries.insert(
+            "app.py".into(),
+            DirtyEntry {
+                mtime_ns: mtime,
+                content_hash: "fixture".into(),
+                fragment_id: "fixture".into(),
+                tantivy_delta_segment: None,
+                parse_failed: false,
+                dirty_symbols: vec![],
+                format: FRAGMENT_FORMAT_V5,
+            },
+        );
+        DirtyFiles::write_atomic(&session_dir.join("dirty_files.json"), &dirty).unwrap();
+        fs::write(session_dir.join("graph_overlay/fixture.bin"), []).unwrap();
+
+        let gate = retain_stale_fragments(&worktree, vec!["app.py".into()]);
+        assert!(
+            gate.rel_paths.is_empty(),
+            "a current v5 fragment was re-parsed"
+        );
+    }
+
+    #[test]
     fn parse_porcelain_z_handles_spaces_and_renames() {
         let root = Path::new("/repo");
         // modified file with a space in its name + a rename (new\0old).
