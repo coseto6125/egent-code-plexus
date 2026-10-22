@@ -85,7 +85,14 @@ fn test_kotlin_callee_constructor_receiver_emits_class_member() {
 #[test]
 fn test_kotlin_callee_computed_receiver_with_own_member_emits_untyped_member() {
     let calls = raw_calls("viaCall");
-    assert!(calls.contains(&CallSite::untyped_member("m")), "{calls:?}");
+    // `other()` is a call receiver: a chain whose fallback is the untyped
+    // member, so the bare name never binds the caller's own `m`.
+    assert!(
+        calls
+            .iter()
+            .any(|c| CallSite::parse(c).fallback() == CallSite::UntypedMember("m")),
+        "{calls:?}"
+    );
     assert!(!calls.contains(&"m".to_string()), "{calls:?}");
 }
 

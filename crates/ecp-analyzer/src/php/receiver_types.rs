@@ -364,7 +364,29 @@ fn php_member_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Optio
         }
     }
 
-    Some(CallSite::untyped_member(method_name))
+    let untyped = CallSite::untyped_member(method_name);
+    // `Foo::create()->bar()`: the resolver types a call receiver by the
+    // callee's return type (`self` / `static` included).
+    Some(match php_receiver_call(obj_node, source, ctx) {
+        Some(inner) => CallSite::chained_member(&inner, &untyped),
+        None => untyped,
+    })
+}
+
+/// The `calls` entry of a call written as a receiver (`make()->m()`,
+/// `Foo::create()->m()`, `$a->b()->m()`, `(new Foo)->m()`), the same entry
+/// that call records for itself. `None` for any other receiver.
+fn php_receiver_call(obj: Node<'_>, source: &[u8], ctx: &ClassContext) -> Option<String> {
+    match obj.kind() {
+        "parenthesized_expression" => php_receiver_call(obj.named_child(0)?, source, ctx),
+        "member_call_expression" | "nullsafe_member_call_expression" => {
+            php_member_callee(obj, source, ctx)
+        }
+        "scoped_call_expression" => php_scoped_callee(obj, source, ctx),
+        "function_call_expression" => crate::calls::callee_name_from(obj, source),
+        "object_creation_expression" => php_object_creation_call(obj, source),
+        _ => None,
+    }
 }
 
 /// Resolve the callee for `Scope::method(args)`.

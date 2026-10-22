@@ -218,6 +218,7 @@ mod tests {
                         calls: vec![],
                         heritage: Vec::new(),
                         variant_refs: Vec::new(),
+                        return_type: None,
                     },
                     OverlaySymbol {
                         is_exported: false,
@@ -231,6 +232,7 @@ mod tests {
                         calls: vec![],
                         heritage: Vec::new(),
                         variant_refs: Vec::new(),
+                        return_type: None,
                     },
                 ],
                 imports: vec![],

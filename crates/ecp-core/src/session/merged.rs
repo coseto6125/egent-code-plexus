@@ -400,6 +400,7 @@ mod tests {
                 calls: vec!["target_fn".to_string()],
                 heritage: Vec::new(),
                 variant_refs: Vec::new(),
+                return_type: None,
             }],
             imports: vec![],
         }

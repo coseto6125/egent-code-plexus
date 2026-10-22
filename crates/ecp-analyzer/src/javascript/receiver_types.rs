@@ -14,7 +14,7 @@ use super::path_literals::{
 };
 use crate::calls::{attach_to_enclosing_span, new_expression_call, CallSiteIndex};
 use crate::framework_helpers::{enclosing_class, node_span, Span};
-use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use tree_sitter::Node;
 
 /// Walk the JavaScript AST once, attaching callees to enclosing
@@ -108,7 +108,19 @@ fn js_callee_name(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<St
             } else {
                 // Unknown receiver type — emit qualified name so resolver has context.
                 let obj_name = obj.utf8_text(source).ok()?;
-                Some(format!("{obj_name}.{prop_name}"))
+                let site = format!("{obj_name}.{prop_name}");
+                // A call receiver (`make().bar()`, `new Foo().bar()`): the
+                // resolver types it by the callee's return type or the
+                // constructed class, else the site resolves as before.
+                let inner = match obj.kind() {
+                    "call_expression" => js_callee_name(obj, source, nodes),
+                    "new_expression" => new_expression_call(obj, source),
+                    _ => None,
+                };
+                Some(match inner {
+                    Some(inner) => CallSite::chained_member(&inner, &site),
+                    None => site,
+                })
             }
         }
         _ => function.utf8_text(source).ok().map(str::to_string),

@@ -25,7 +25,7 @@ use crate::calls::{
     CallSiteIndex, Pos, PosRange,
 };
 use crate::framework_helpers::{enclosing_class, node_span, Span};
-use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -285,6 +285,17 @@ fn ts_callee_name(
                     // Unknown type — emit qualified name so the resolver can try.
                     Some(format!("{obj_name}.{prop_name}"))
                 }
+                // `Foo.create().bar()` / `new Foo().bar()`: the resolver
+                // types the receiver by the callee's return type, else the
+                // site binds the prop name as before.
+                "call_expression" => Some(match ts_callee_name(obj, source, locals, nodes) {
+                    Some(inner) => CallSite::chained_member(&inner, prop_name),
+                    None => prop_name.to_string(),
+                }),
+                "new_expression" => Some(match new_expression_call(obj, source) {
+                    Some(inner) => CallSite::chained_member(&inner, prop_name),
+                    None => prop_name.to_string(),
+                }),
                 _ => {
                     // Chained member expression or other complex form: fall back to prop name.
                     Some(prop_name.to_string())

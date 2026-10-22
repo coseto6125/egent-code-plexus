@@ -689,6 +689,9 @@ impl<'a> Resolver<'a> {
         caller_owner: Option<&str>,
         caller: Option<NodeId>,
     ) -> Vec<(NodeId, f32)> {
+        // A chain the caller did not type ([`Self::resolve_chained_member`])
+        // resolves as the entry the parser wrote before chains.
+        let site = site.fallback();
         let language = Language::from_normalized_path(&normalize_source_path(source_file));
         if let Some((node_id, import)) =
             self.python_submodule_member(source_file, language, site, raw_imports)
@@ -752,6 +755,40 @@ impl<'a> Resolver<'a> {
             targets.extend(self.resolve_instantiation(language, site, raw_imports, resolve));
         }
         targets
+    }
+
+    /// The member `member` of the type a call to `callee` returns
+    /// ([`type_ladder::returned_type`]): the receiver of `Foo.create().bar()`
+    /// is the return type of the one `create` the inner call binds. The
+    /// type name is read in `callee`'s own file, where its signature names
+    /// it, and the member is found by the receiver-typing ladder, never by
+    /// the name alone. The edge takes the ladder's confidence for a typed
+    /// receiver, capped by `inner_confidence`. `None` when `callee` returns
+    /// no reducible type or that type owns no `member`: the caller then
+    /// resolves the site as its [`CallSite::fallback`].
+    pub fn resolve_chained_member(
+        &self,
+        source_file: &Path,
+        (callee, inner_confidence): (NodeId, f32),
+        member: &str,
+    ) -> Option<(NodeId, f32)> {
+        let st = self.symbol_table;
+        let ty = type_ladder::returned_type(st, callee)?;
+        let callee_file = st.file_of(callee)?;
+        let target = call_target(source_file, CallSite::UntypedMember(member));
+        match self.resolve_member_via_type(
+            Path::new(callee_file),
+            callee_file,
+            &format!("{ty}.{member}"),
+            ty,
+            member,
+            target,
+            &[],
+            true,
+        ) {
+            TypeMember::Edge(id, _, confidence) => Some((id, confidence.min(inner_confidence))),
+            TypeMember::Ambiguous | TypeMember::NoEdge => None,
+        }
     }
 
     /// Whether a bare `m()` that the constructor fallback would read as a
@@ -829,6 +866,7 @@ impl<'a> Resolver<'a> {
         site: CallSite<'_>,
         raw_imports: &[RawImport],
     ) -> Vec<(NodeId, f32)> {
+        let site = site.fallback();
         if matches!(site, CallSite::UntypedMember(_)) {
             return Vec::new();
         }

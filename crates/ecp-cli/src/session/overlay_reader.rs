@@ -340,6 +340,10 @@ pub fn decode_view_inputs(accepted: &[AcceptedFragment]) -> Vec<OverlayFileInput
                             .iter()
                             .map(|v| v.as_str().to_owned())
                             .collect(),
+                        // No fragment format stores a return type yet, so a
+                        // chained call on a dirty function resolves as its
+                        // fallback until the fragment carries one.
+                        return_type: None,
                     })
                     .collect(),
                 imports,

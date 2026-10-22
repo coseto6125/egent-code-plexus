@@ -1,0 +1,1013 @@
+//! A member call on a call (`Foo.create().bar()`, `make().bar()`) binds the
+//! member of the type the inner callee declares it returns
+//! (FU-2026-10-22-67874c602c84). The parser records the outer call as a
+//! `CallSite::ChainedMember`; the resolver binds the inner call, reads the
+//! one target's return type in that target's own file, and runs the
+//! receiver-typing ladder on it.
+//!
+//! Every fixture declares `bar` on a second class too: with a unique `bar`
+//! the call binds by name alone, which hides the gap.
+//!
+//! Where the return type is absent or is no bare type name (a generic such
+//! as `Promise<Foo>`, `Optional[Foo]`, `List<Foo>`), the site resolves as
+//! the entry the parser wrote before chains: a bare or untyped `bar`, which
+//! two owners leave unbound. Unwrapping generics is the follow-up.
+//!
+//! C declares no methods: a nested call `foo_bar(foo_create())` is two
+//! direct calls, which keep binding.
+mod instantiation_calls_support;
+
+use ecp_analyzer::c::parser::CProvider;
+use ecp_analyzer::c_sharp::parser::CSharpProvider;
+use ecp_analyzer::cpp::parser::CppProvider;
+use ecp_analyzer::dart::parser::DartProvider;
+use ecp_analyzer::go::parser::GoProvider;
+use ecp_analyzer::java::parser::JavaProvider;
+use ecp_analyzer::javascript::parser::JavaScriptProvider;
+use ecp_analyzer::kotlin::parser::KotlinProvider;
+use ecp_analyzer::php::parser::PhpProvider;
+use ecp_analyzer::python::parser::PythonProvider;
+use ecp_analyzer::resolution::builder::GraphBuilder;
+use ecp_analyzer::ruby::parser::RubyProvider;
+use ecp_analyzer::rust::parser::RustProvider;
+use ecp_analyzer::swift::parser::SwiftProvider;
+use ecp_analyzer::typescript::parser::TypeScriptProvider;
+use ecp_core::analyzer::provider::LanguageProvider;
+use ecp_core::analyzer::types::CallSite;
+use ecp_core::graph::ZeroCopyGraph;
+use instantiation_calls_support::calls_from;
+use std::path::Path;
+
+/// `(file, owner, name)` of one `Calls` target.
+type Target = (String, String, String);
+
+fn graph(files: &[(&dyn LanguageProvider, &str, &str)]) -> ZeroCopyGraph {
+    let mut builder = GraphBuilder::new();
+    for (provider, path, src) in files {
+        let local = provider
+            .parse_file(Path::new(path), src.as_bytes())
+            .unwrap_or_else(|e| panic!("parse {path}: {e}"));
+        builder.add_graph(local);
+    }
+    builder.build()
+}
+
+fn single(provider: &dyn LanguageProvider, files: &[(&str, &str)]) -> ZeroCopyGraph {
+    let with_provider: Vec<_> = files
+        .iter()
+        .map(|&(path, src)| (provider, path, src))
+        .collect();
+    graph(&with_provider)
+}
+
+/// The `Calls` targets of every node named `caller`, sorted.
+fn targets(graph: &ZeroCopyGraph, caller: &str) -> Vec<Target> {
+    let mut out: Vec<Target> = calls_from(graph, caller)
+        .into_iter()
+        .map(|hit| (hit.file, hit.owner, hit.name))
+        .collect();
+    out.sort();
+    out
+}
+
+/// Owners of the `Calls` targets named `member` from `caller`, sorted.
+fn owners(graph: &ZeroCopyGraph, caller: &str, member: &str) -> Vec<String> {
+    let mut out: Vec<String> = calls_from(graph, caller)
+        .into_iter()
+        .filter(|hit| hit.name == member)
+        .map(|hit| hit.owner)
+        .collect();
+    out.sort();
+    out
+}
+
+/// `caller`'s chained `member` call binds `Foo`'s and never `Other`'s.
+fn assert_binds_foo(graph: &ZeroCopyGraph, caller: &str, member: &str) {
+    assert_eq!(
+        owners(graph, caller, member),
+        ["Foo"],
+        "{caller}: the receiver's return type picks `Foo.{member}`; all: {:?}",
+        targets(graph, caller)
+    );
+}
+
+/// Today's behaviour for an untyped chain: the fallback `member` has two
+/// owners, so it binds neither.
+fn assert_falls_back(graph: &ZeroCopyGraph, caller: &str, member: &str) {
+    assert_eq!(
+        owners(graph, caller, member),
+        Vec::<String>::new(),
+        "{caller}: no reducible return type, the ambiguous fallback binds nothing; all: {:?}",
+        targets(graph, caller)
+    );
+}
+
+/// `caller` still binds the inner call `inner` (owned by `owner`).
+fn assert_inner_binds(graph: &ZeroCopyGraph, caller: &str, owner: &str, inner: &str) {
+    assert_eq!(
+        owners(graph, caller, inner),
+        [owner],
+        "{caller}: the inner call keeps its own edge; all: {:?}",
+        targets(graph, caller)
+    );
+}
+
+/// The raw `calls` entries of `caller` in one parsed file.
+fn raw_calls(provider: &dyn LanguageProvider, path: &str, src: &str, caller: &str) -> Vec<String> {
+    let local = provider
+        .parse_file(Path::new(path), src.as_bytes())
+        .unwrap();
+    local
+        .nodes
+        .iter()
+        .filter(|n| n.name == caller)
+        .flat_map(|n| n.calls.clone())
+        .collect()
+}
+
+// ---- TypeScript ----
+
+const TS_FOO: (&str, &str) = (
+    "src/foo.ts",
+    r#"export class Foo {
+  static create(): Foo {
+    return new Foo();
+  }
+  again(): Foo {
+    return this;
+  }
+  static plain() {
+    return new Foo();
+  }
+  static wrapped(): Promise<Foo> {
+    return Promise.resolve(new Foo());
+  }
+  bar(): void {}
+}
+
+export class Other {
+  bar(): void {}
+}
+
+export function make(): Foo {
+  return new Foo();
+}
+
+export function maybe(): Foo | null {
+  return null;
+}
+"#,
+);
+
+const TS_USE: (&str, &str) = (
+    "src/use.ts",
+    r#"import { Foo, make, maybe } from "./foo";
+
+export function useIt() {
+  Foo.create().bar();
+}
+export function useMake() {
+  make().bar();
+}
+export function useMaybe() {
+  maybe()?.bar();
+}
+export function useNested() {
+  Foo.create().again().bar();
+}
+export function usePlain() {
+  Foo.plain().bar();
+}
+export function useWrapped() {
+  Foo.wrapped().bar();
+}
+export function useTyped(f: Foo) {
+  f.bar();
+}
+export function useNew() {
+  new Foo().bar();
+}
+"#,
+);
+
+fn ts_graph() -> ZeroCopyGraph {
+    single(&TypeScriptProvider::new().unwrap(), &[TS_FOO, TS_USE])
+}
+
+#[test]
+fn test_ts_callee_name_call_receiver_emits_chained_member() {
+    let calls = raw_calls(
+        &TypeScriptProvider::new().unwrap(),
+        TS_USE.0,
+        TS_USE.1,
+        "useIt",
+    );
+    let chained = calls.iter().find_map(|c| match CallSite::parse(c) {
+        site @ CallSite::ChainedMember { inner, .. } => Some((site, inner)),
+        _ => None,
+    });
+    let (site, inner) = chained.unwrap_or_else(|| panic!("no chained entry: {calls:?}"));
+    assert!(
+        CallSite::parse(inner).name().ends_with("create"),
+        "{calls:?}"
+    );
+    assert_eq!(site.fallback(), CallSite::Plain("bar"), "{calls:?}");
+    assert_eq!(site.name(), "bar", "{calls:?}");
+}
+
+#[test]
+fn test_resolve_call_typescript_static_factory_chain_binds_return_type_member() {
+    let graph = ts_graph();
+    assert_binds_foo(&graph, "useIt", "bar");
+    assert_inner_binds(&graph, "useIt", "Foo", "create");
+}
+
+#[test]
+fn test_resolve_call_typescript_free_function_chain_binds_return_type_member() {
+    assert_binds_foo(&ts_graph(), "useMake", "bar");
+}
+
+/// `Foo | null` reduces to `Foo`; `?.` keeps the call a member call.
+#[test]
+fn test_resolve_call_typescript_nullable_return_chain_binds_return_type_member() {
+    assert_binds_foo(&ts_graph(), "useMaybe", "bar");
+}
+
+/// `a().b().c()` types each level by the level below.
+#[test]
+fn test_resolve_call_typescript_nested_chain_binds_each_level() {
+    let graph = ts_graph();
+    assert_binds_foo(&graph, "useNested", "again");
+    assert_binds_foo(&graph, "useNested", "bar");
+}
+
+/// `new Foo().bar()`: the inner call constructs `Foo`.
+#[test]
+fn test_resolve_call_typescript_new_receiver_chain_binds_class_member() {
+    assert_binds_foo(&ts_graph(), "useNew", "bar");
+}
+
+/// No declared return type: today's bare `bar`.
+#[test]
+fn test_resolve_call_typescript_untyped_factory_chain_keeps_fallback() {
+    assert_falls_back(&ts_graph(), "usePlain", "bar");
+}
+
+/// Follow-up: `Promise<Foo>` is not unwrapped yet.
+#[test]
+fn test_resolve_call_typescript_generic_return_chain_keeps_fallback() {
+    assert_falls_back(&ts_graph(), "useWrapped", "bar");
+}
+
+#[test]
+fn test_resolve_call_typescript_typed_param_receiver_still_binds_type_member() {
+    assert_binds_foo(&ts_graph(), "useTyped", "bar");
+}
+
+/// The chained edge takes the ladder's typed-receiver confidence, never
+/// more than a typed receiver's own edge.
+#[test]
+fn test_resolve_call_typescript_chained_edge_confidence_not_above_typed_receiver() {
+    let graph = ts_graph();
+    let confidence = |caller: &str| {
+        calls_from(&graph, caller)
+            .into_iter()
+            .find(|hit| hit.name == "bar")
+            .unwrap_or_else(|| panic!("{caller} binds bar"))
+            .confidence
+    };
+    assert!(
+        confidence("useIt") <= confidence("useTyped"),
+        "chained {} > typed {}",
+        confidence("useIt"),
+        confidence("useTyped")
+    );
+}
+
+// ---- JavaScript ----
+
+const JS_FOO: (&str, &str) = (
+    "src/foo.js",
+    r#"export class Foo {
+  static create() {
+    return new Foo();
+  }
+  bar() {}
+  baz() {
+    this.bar();
+  }
+}
+
+export class Other {
+  bar() {}
+}
+
+export function make() {
+  return new Foo();
+}
+"#,
+);
+
+const JS_USE: (&str, &str) = (
+    "src/use.js",
+    r#"import { Foo, make } from "./foo";
+
+export function useIt() {
+  Foo.create().bar();
+}
+export function useMake() {
+  make().bar();
+}
+export function useNew() {
+  new Foo().bar();
+}
+"#,
+);
+
+fn js_graph() -> ZeroCopyGraph {
+    single(&JavaScriptProvider::new().unwrap(), &[JS_FOO, JS_USE])
+}
+
+/// JavaScript declares no return types (JSDoc is not read): today's
+/// behaviour, no `bar` edge.
+#[test]
+fn test_resolve_call_javascript_static_factory_chain_keeps_fallback() {
+    let graph = js_graph();
+    assert_falls_back(&graph, "useIt", "bar");
+    assert_inner_binds(&graph, "useIt", "Foo", "create");
+}
+
+#[test]
+fn test_resolve_call_javascript_free_function_chain_keeps_fallback() {
+    assert_falls_back(&js_graph(), "useMake", "bar");
+}
+
+/// A construction needs no return type: `new Foo()` is a `Foo`.
+#[test]
+fn test_resolve_call_javascript_new_receiver_chain_binds_class_member() {
+    assert_binds_foo(&js_graph(), "useNew", "bar");
+}
+
+#[test]
+fn test_resolve_call_javascript_this_receiver_still_binds_own_member() {
+    assert_binds_foo(&js_graph(), "baz", "bar");
+}
+
+// ---- Python ----
+
+const PY_FOO: (&str, &str) = (
+    "foo.py",
+    r#"from typing import Optional
+
+
+class Foo:
+    @staticmethod
+    def create() -> "Foo":
+        return Foo()
+
+    @staticmethod
+    def plain():
+        return Foo()
+
+    @staticmethod
+    def wrapped() -> Optional[Foo]:
+        return Foo()
+
+    def bar(self):
+        pass
+
+
+class Other:
+    def bar(self):
+        pass
+
+
+def make() -> Foo:
+    return Foo()
+
+
+def maybe() -> Foo | None:
+    return None
+"#,
+);
+
+const PY_USE: (&str, &str) = (
+    "use.py",
+    r#"from foo import Foo, make, maybe
+
+
+def use_it():
+    Foo.create().bar()
+
+
+def use_make():
+    make().bar()
+
+
+def use_maybe():
+    maybe().bar()
+
+
+def use_plain():
+    Foo.plain().bar()
+
+
+def use_wrapped():
+    Foo.wrapped().bar()
+
+
+def use_typed(f: Foo):
+    f.bar()
+
+
+def use_ctor():
+    Foo().bar()
+"#,
+);
+
+fn py_graph() -> ZeroCopyGraph {
+    single(&PythonProvider::new().unwrap(), &[PY_FOO, PY_USE])
+}
+
+/// The quoted forward reference `-> "Foo"` reduces to `Foo`.
+#[test]
+fn test_resolve_call_python_static_factory_chain_binds_return_type_member() {
+    let graph = py_graph();
+    assert_binds_foo(&graph, "use_it", "bar");
+    assert_inner_binds(&graph, "use_it", "Foo", "create");
+}
+
+#[test]
+fn test_resolve_call_python_free_function_chain_binds_return_type_member() {
+    assert_binds_foo(&py_graph(), "use_make", "bar");
+}
+
+/// `Foo | None` reduces to `Foo`.
+#[test]
+fn test_resolve_call_python_optional_union_chain_binds_return_type_member() {
+    assert_binds_foo(&py_graph(), "use_maybe", "bar");
+}
+
+/// `Foo().bar()`: the inner call constructs `Foo`.
+#[test]
+fn test_resolve_call_python_constructor_receiver_chain_binds_class_member() {
+    assert_binds_foo(&py_graph(), "use_ctor", "bar");
+}
+
+#[test]
+fn test_resolve_call_python_untyped_factory_chain_keeps_fallback() {
+    assert_falls_back(&py_graph(), "use_plain", "bar");
+}
+
+/// Follow-up: `Optional[Foo]` is not unwrapped yet.
+#[test]
+fn test_resolve_call_python_generic_return_chain_keeps_fallback() {
+    assert_falls_back(&py_graph(), "use_wrapped", "bar");
+}
+
+#[test]
+fn test_resolve_call_python_typed_param_receiver_still_binds_type_member() {
+    assert_binds_foo(&py_graph(), "use_typed", "bar");
+}
+
+// ---- Java ----
+
+fn java_graph() -> ZeroCopyGraph {
+    single(
+        &JavaProvider::new().unwrap(),
+        &[
+            (
+                "src/app/Foo.java",
+                "package app;\n\npublic class Foo {\n    public static Foo create() { return new Foo(); }\n    public static Object plain() { return new Foo(); }\n    public static java.util.Optional<Foo> wrapped() { return null; }\n    public void bar() {}\n}\n",
+            ),
+            (
+                "src/app/Other.java",
+                "package app;\n\npublic class Other {\n    public void bar() {}\n}\n",
+            ),
+            (
+                "src/app/Factory.java",
+                "package app;\n\npublic class Factory {\n    public static Foo make() { return new Foo(); }\n}\n",
+            ),
+            (
+                "src/app/Use.java",
+                "package app;\n\npublic class Use {\n    void useIt() { Foo.create().bar(); }\n    void useMake() { Factory.make().bar(); }\n    void usePlain() { Foo.plain().bar(); }\n    void useWrapped() { Foo.wrapped().bar(); }\n    void useCast() { ((Foo) Foo.plain()).bar(); }\n    void useNew() { new Foo().bar(); }\n    void useTyped(Foo f) { f.bar(); }\n}\n",
+            ),
+        ],
+    )
+}
+
+#[test]
+fn test_resolve_call_java_static_factory_chain_binds_return_type_member() {
+    let graph = java_graph();
+    assert_binds_foo(&graph, "useIt", "bar");
+    assert_inner_binds(&graph, "useIt", "Foo", "create");
+}
+
+/// Java has no free function: a factory on another class.
+#[test]
+fn test_resolve_call_java_other_class_factory_chain_binds_return_type_member() {
+    assert_binds_foo(&java_graph(), "useMake", "bar");
+}
+
+/// `Object` names no project type: today's untyped member.
+#[test]
+fn test_resolve_call_java_non_project_return_chain_keeps_fallback() {
+    assert_falls_back(&java_graph(), "usePlain", "bar");
+}
+
+/// Follow-up: `Optional<Foo>` is not unwrapped yet.
+#[test]
+fn test_resolve_call_java_generic_return_chain_keeps_fallback() {
+    assert_falls_back(&java_graph(), "useWrapped", "bar");
+}
+
+/// `expression_type` still types a cast and a `new` receiver by syntax.
+#[test]
+fn test_resolve_call_java_cast_and_new_receivers_still_bind_type_member() {
+    let graph = java_graph();
+    assert_binds_foo(&graph, "useCast", "bar");
+    assert_binds_foo(&graph, "useNew", "bar");
+}
+
+#[test]
+fn test_resolve_call_java_typed_param_receiver_still_binds_type_member() {
+    assert_binds_foo(&java_graph(), "useTyped", "bar");
+}
+
+// ---- Kotlin ----
+
+fn kotlin_graph() -> ZeroCopyGraph {
+    single(
+        &KotlinProvider::new().unwrap(),
+        &[
+            (
+                "src/app/Foo.kt",
+                "package app\n\nclass Foo {\n    fun bar() {}\n}\n\nclass Other {\n    fun bar() {}\n}\n\nobject Factory {\n    fun create(): Foo = Foo()\n}\n\nfun make(): Foo = Foo()\nfun plain() = Foo()\nfun wrapped(): List<Foo> = listOf(Foo())\nfun maybe(): Foo? = null\n",
+            ),
+            (
+                "src/app/Use.kt",
+                "package app\n\nfun useIt() {\n    Factory.create().bar()\n}\n\nfun useMake() {\n    make().bar()\n}\n\nfun useMaybe() {\n    maybe()?.bar()\n}\n\nfun usePlain() {\n    plain().bar()\n}\n\nfun useWrapped() {\n    wrapped().bar()\n}\n\nfun useTyped(f: Foo) {\n    f.bar()\n}\n",
+            ),
+        ],
+    )
+}
+
+#[test]
+fn test_resolve_call_kotlin_object_factory_chain_binds_return_type_member() {
+    let graph = kotlin_graph();
+    assert_binds_foo(&graph, "useIt", "bar");
+    assert_inner_binds(&graph, "useIt", "Factory", "create");
+}
+
+#[test]
+fn test_resolve_call_kotlin_free_function_chain_binds_return_type_member() {
+    assert_binds_foo(&kotlin_graph(), "useMake", "bar");
+}
+
+/// `Foo?` reduces to `Foo`.
+#[test]
+fn test_resolve_call_kotlin_nullable_return_chain_binds_return_type_member() {
+    assert_binds_foo(&kotlin_graph(), "useMaybe", "bar");
+}
+
+/// An expression body with no declared type: today's bare `bar`.
+#[test]
+fn test_resolve_call_kotlin_untyped_factory_chain_keeps_fallback() {
+    assert_falls_back(&kotlin_graph(), "usePlain", "bar");
+}
+
+/// Follow-up: `List<Foo>` is not unwrapped yet.
+#[test]
+fn test_resolve_call_kotlin_generic_return_chain_keeps_fallback() {
+    assert_falls_back(&kotlin_graph(), "useWrapped", "bar");
+}
+
+#[test]
+fn test_resolve_call_kotlin_typed_param_receiver_still_binds_type_member() {
+    assert_binds_foo(&kotlin_graph(), "useTyped", "bar");
+}
+
+// ---- C# ----
+
+fn csharp_graph() -> ZeroCopyGraph {
+    single(
+        &CSharpProvider::new().unwrap(),
+        &[
+            (
+                "src/Foo.cs",
+                "namespace App\n{\n    public class Foo\n    {\n        public static Foo Create() { return new Foo(); }\n        public static object Plain() { return new Foo(); }\n        public static Task<Foo> Wrapped() { return null; }\n        public static Foo? Maybe() { return null; }\n        public void Bar() {}\n    }\n\n    public class Other\n    {\n        public void Bar() {}\n    }\n\n    public static class Factory\n    {\n        public static Foo Make() { return new Foo(); }\n    }\n}\n",
+            ),
+            (
+                "src/Use.cs",
+                "namespace App\n{\n    public class Use\n    {\n        public void UseIt() { Foo.Create().Bar(); }\n        public void UseMake() { Factory.Make().Bar(); }\n        public void UseMaybe() { Foo.Maybe().Bar(); }\n        public void UsePlain() { Foo.Plain().Bar(); }\n        public void UseWrapped() { Foo.Wrapped().Bar(); }\n        public void UseTyped(Foo f) { f.Bar(); }\n    }\n}\n",
+            ),
+        ],
+    )
+}
+
+#[test]
+fn test_resolve_call_csharp_static_factory_chain_binds_return_type_member() {
+    let graph = csharp_graph();
+    assert_binds_foo(&graph, "UseIt", "Bar");
+    assert_inner_binds(&graph, "UseIt", "Foo", "Create");
+}
+
+#[test]
+fn test_resolve_call_csharp_other_class_factory_chain_binds_return_type_member() {
+    assert_binds_foo(&csharp_graph(), "UseMake", "Bar");
+}
+
+/// `Foo?` reduces to `Foo`.
+#[test]
+fn test_resolve_call_csharp_nullable_return_chain_binds_return_type_member() {
+    assert_binds_foo(&csharp_graph(), "UseMaybe", "Bar");
+}
+
+/// `object` names no project type: today's bare `Bar`, which a caller in
+/// a third class leaves unbound.
+#[test]
+fn test_resolve_call_csharp_non_project_return_chain_keeps_fallback() {
+    assert_falls_back(&csharp_graph(), "UsePlain", "Bar");
+}
+
+/// Follow-up: `Task<Foo>` is not unwrapped yet.
+#[test]
+fn test_resolve_call_csharp_generic_return_chain_keeps_fallback() {
+    assert_falls_back(&csharp_graph(), "UseWrapped", "Bar");
+}
+
+#[test]
+fn test_resolve_call_csharp_typed_param_receiver_still_binds_type_member() {
+    assert_binds_foo(&csharp_graph(), "UseTyped", "Bar");
+}
+
+// ---- Go ----
+
+fn go_graph() -> ZeroCopyGraph {
+    single(
+        &GoProvider::new().unwrap(),
+        &[
+            (
+                "app/foo.go",
+                "package app\n\ntype Foo struct{}\n\nfunc NewFoo() *Foo { return &Foo{} }\n\nfunc Plain() interface{} { return &Foo{} }\n\nfunc Wrapped() []*Foo { return nil }\n\nfunc (f *Foo) Bar() {}\n\ntype Other struct{}\n\nfunc (o *Other) Bar() {}\n",
+            ),
+            (
+                "app/use.go",
+                "package app\n\nfunc build() Foo { return Foo{} }\n\nfunc UseIt() {\n\tNewFoo().Bar()\n}\n\nfunc UseBuild() {\n\tbuild().Bar()\n}\n\nfunc UsePlain() {\n\tPlain().Bar()\n}\n\nfunc UseWrapped() {\n\tWrapped().Bar()\n}\n\nfunc UseTyped(f *Foo) {\n\tf.Bar()\n}\n",
+            ),
+        ],
+    )
+}
+
+/// Go has no static members: `NewFoo` is the factory, `*Foo` reduces to
+/// `Foo`.
+#[test]
+fn test_resolve_call_go_factory_pointer_return_chain_binds_return_type_member() {
+    let graph = go_graph();
+    assert_binds_foo(&graph, "UseIt", "Bar");
+    assert_inner_binds(&graph, "UseIt", "", "NewFoo");
+}
+
+/// A value return declared in the caller's own file.
+#[test]
+fn test_resolve_call_go_same_file_function_chain_binds_return_type_member() {
+    assert_binds_foo(&go_graph(), "UseBuild", "Bar");
+}
+
+#[test]
+fn test_resolve_call_go_non_project_return_chain_keeps_fallback() {
+    assert_falls_back(&go_graph(), "UsePlain", "Bar");
+}
+
+/// Follow-up: `[]*Foo` is not unwrapped yet.
+#[test]
+fn test_resolve_call_go_slice_return_chain_keeps_fallback() {
+    assert_falls_back(&go_graph(), "UseWrapped", "Bar");
+}
+
+#[test]
+fn test_resolve_call_go_typed_param_receiver_still_binds_type_member() {
+    assert_binds_foo(&go_graph(), "UseTyped", "Bar");
+}
+
+// ---- Rust ----
+
+/// One file: the GraphBuilder here runs with no module tree.
+fn rust_graph() -> ZeroCopyGraph {
+    single(
+        &RustProvider::new().unwrap(),
+        &[(
+            "src/lib.rs",
+            "pub struct Foo;\n\nimpl Foo {\n    pub fn create() -> Self { Foo }\n    pub fn plain() {}\n    pub fn wrapped() -> Option<Foo> { None }\n    pub fn bar(&self) {}\n}\n\npub struct Other;\n\nimpl Other {\n    pub fn bar(&self) {}\n}\n\npub fn make() -> Foo { Foo }\n\npub fn use_it() {\n    Foo::create().bar();\n}\n\npub fn use_make() {\n    make().bar();\n}\n\npub fn use_plain() {\n    Foo::plain().bar();\n}\n\npub fn use_wrapped() {\n    Foo::wrapped().bar();\n}\n\npub fn use_typed(f: Foo) {\n    f.bar();\n}\n",
+        )],
+    )
+}
+
+/// `-> Self` stands for the `impl` block's type.
+#[test]
+fn test_resolve_call_rust_self_returning_constructor_chain_binds_return_type_member() {
+    let graph = rust_graph();
+    assert_binds_foo(&graph, "use_it", "bar");
+    assert_inner_binds(&graph, "use_it", "Foo", "create");
+}
+
+#[test]
+fn test_resolve_call_rust_free_function_chain_binds_return_type_member() {
+    assert_binds_foo(&rust_graph(), "use_make", "bar");
+}
+
+/// A unit return: today's untyped member.
+#[test]
+fn test_resolve_call_rust_unit_return_chain_keeps_fallback() {
+    assert_falls_back(&rust_graph(), "use_plain", "bar");
+}
+
+/// Follow-up: `Option<Foo>` is not unwrapped yet.
+#[test]
+fn test_resolve_call_rust_generic_return_chain_keeps_fallback() {
+    assert_falls_back(&rust_graph(), "use_wrapped", "bar");
+}
+
+#[test]
+fn test_resolve_call_rust_typed_param_receiver_still_binds_type_member() {
+    assert_binds_foo(&rust_graph(), "use_typed", "bar");
+}
+
+// ---- PHP ----
+
+fn php_graph() -> ZeroCopyGraph {
+    single(
+        &PhpProvider::new().unwrap(),
+        &[
+            (
+                "src/Foo.php",
+                "<?php\nclass Foo {\n    public static function create(): static { return new static(); }\n    public static function plain() { return new Foo(); }\n    public static function wrapped(): array { return []; }\n    public function bar() {}\n    public function baz() { $this->bar(); }\n}\n\nclass Other {\n    public function bar() {}\n}\n\nfunction make(): Foo { return new Foo(); }\n\nfunction maybe(): ?Foo { return null; }\n",
+            ),
+            (
+                "src/use.php",
+                "<?php\nfunction useIt() { Foo::create()->bar(); }\nfunction useMake() { make()->bar(); }\nfunction useMaybe() { maybe()?->bar(); }\nfunction usePlain() { Foo::plain()->bar(); }\nfunction useWrapped() { Foo::wrapped()->bar(); }\nfunction useNew() { (new Foo())->bar(); }\n",
+            ),
+        ],
+    )
+}
+
+/// `: static` stands for the declaring class.
+#[test]
+fn test_resolve_call_php_static_factory_chain_binds_return_type_member() {
+    let graph = php_graph();
+    assert_binds_foo(&graph, "useIt", "bar");
+    assert_inner_binds(&graph, "useIt", "Foo", "create");
+}
+
+#[test]
+fn test_resolve_call_php_free_function_chain_binds_return_type_member() {
+    assert_binds_foo(&php_graph(), "useMake", "bar");
+}
+
+/// `?Foo` reduces to `Foo`; `?->` keeps the call a member call.
+#[test]
+fn test_resolve_call_php_nullable_return_chain_binds_return_type_member() {
+    assert_binds_foo(&php_graph(), "useMaybe", "bar");
+}
+
+/// `(new Foo())->bar()`: the inner call constructs `Foo`.
+#[test]
+fn test_resolve_call_php_new_receiver_chain_binds_class_member() {
+    assert_binds_foo(&php_graph(), "useNew", "bar");
+}
+
+#[test]
+fn test_resolve_call_php_untyped_factory_chain_keeps_fallback() {
+    assert_falls_back(&php_graph(), "usePlain", "bar");
+}
+
+/// `array` (PHP has no generic signature) names no project type.
+#[test]
+fn test_resolve_call_php_array_return_chain_keeps_fallback() {
+    assert_falls_back(&php_graph(), "useWrapped", "bar");
+}
+
+/// PHP types only `$this`: it still binds the enclosing class.
+#[test]
+fn test_resolve_call_php_this_receiver_still_binds_own_member() {
+    assert_binds_foo(&php_graph(), "baz", "bar");
+}
+
+// ---- Ruby ----
+
+fn ruby_graph() -> ZeroCopyGraph {
+    single(
+        &RubyProvider::new().unwrap(),
+        &[
+            (
+                "lib/foo.rb",
+                "class Foo\n  def self.create\n    new\n  end\n\n  def self.build\n    new\n  end\n\n  def bar\n  end\nend\n\nclass Other\n  def bar\n  end\nend\n\ndef make\n  Foo.new\nend\n",
+            ),
+            (
+                "lib/use.rb",
+                "def use_it\n  Foo.create.bar\nend\n\ndef use_build\n  Foo.build().bar\nend\n\ndef use_make\n  make().bar\nend\n\ndef use_new\n  Foo.new.bar\nend\n",
+            ),
+        ],
+    )
+}
+
+/// The `TYPE_PRESERVING_METHODS` name heuristic still types `create` and
+/// `new` chains.
+#[test]
+fn test_resolve_call_ruby_type_preserving_chain_still_binds_type_member() {
+    let graph = ruby_graph();
+    assert_binds_foo(&graph, "use_it", "bar");
+    assert_binds_foo(&graph, "use_new", "bar");
+}
+
+/// Ruby declares no return types: a call receiver the heuristic misses
+/// keeps today's untyped member.
+#[test]
+fn test_resolve_call_ruby_untyped_call_receiver_chain_keeps_fallback() {
+    let graph = ruby_graph();
+    assert_falls_back(&graph, "use_make", "bar");
+    assert_falls_back(&graph, "use_build", "bar");
+}
+
+// ---- Swift ----
+
+fn swift_graph() -> ZeroCopyGraph {
+    single(
+        &SwiftProvider::new().unwrap(),
+        &[
+            (
+                "Sources/Foo.swift",
+                "class Foo {\n    static func create() -> Foo { return Foo() }\n    static func plain() {}\n    static func wrapped() -> [Foo] { return [] }\n    static func maybe() -> Foo? { return nil }\n    func bar() {}\n}\n\nclass Other {\n    func bar() {}\n}\n\nfunc make() -> Foo { return Foo() }\n",
+            ),
+            (
+                "Sources/Use.swift",
+                "func useIt() {\n    Foo.create().bar()\n}\n\nfunc useMake() {\n    make().bar()\n}\n\nfunc useMaybe() {\n    Foo.maybe()?.bar()\n}\n\nfunc usePlain() {\n    Foo.plain().bar()\n}\n\nfunc useWrapped() {\n    Foo.wrapped().bar()\n}\n\nfunc useTyped(f: Foo) {\n    f.bar()\n}\n",
+            ),
+        ],
+    )
+}
+
+#[test]
+fn test_resolve_call_swift_static_factory_chain_binds_return_type_member() {
+    let graph = swift_graph();
+    assert_binds_foo(&graph, "useIt", "bar");
+    assert_inner_binds(&graph, "useIt", "Foo", "create");
+}
+
+#[test]
+fn test_resolve_call_swift_free_function_chain_binds_return_type_member() {
+    assert_binds_foo(&swift_graph(), "useMake", "bar");
+}
+
+/// `Foo?` reduces to `Foo`.
+#[test]
+fn test_resolve_call_swift_optional_return_chain_binds_return_type_member() {
+    assert_binds_foo(&swift_graph(), "useMaybe", "bar");
+}
+
+#[test]
+fn test_resolve_call_swift_untyped_factory_chain_keeps_fallback() {
+    assert_falls_back(&swift_graph(), "usePlain", "bar");
+}
+
+/// Follow-up: `[Foo]` is not unwrapped yet.
+#[test]
+fn test_resolve_call_swift_array_return_chain_keeps_fallback() {
+    assert_falls_back(&swift_graph(), "useWrapped", "bar");
+}
+
+#[test]
+fn test_resolve_call_swift_typed_param_receiver_still_binds_type_member() {
+    assert_binds_foo(&swift_graph(), "useTyped", "bar");
+}
+
+// ---- C++ ----
+
+fn cpp_graph() -> ZeroCopyGraph {
+    single(
+        &CppProvider::new().unwrap(),
+        &[
+            (
+                "src/foo.cpp",
+                "class Foo {\npublic:\n    static Foo create() { return Foo(); }\n    static Foo* createPtr() { return new Foo(); }\n    static auto plain() { return Foo(); }\n    static std::vector<Foo> wrapped() { return {}; }\n    void bar() {}\n};\n\nclass Other {\npublic:\n    void bar() {}\n};\n\nFoo make() { return Foo(); }\n",
+            ),
+            (
+                "src/use.cpp",
+                "void useIt() { Foo::create().bar(); }\nvoid usePtr() { Foo::createPtr()->bar(); }\nvoid useMake() { make().bar(); }\nvoid usePlain() { Foo::plain().bar(); }\nvoid useWrapped() { Foo::wrapped().bar(); }\nvoid useTyped(Foo f) { f.bar(); }\n",
+            ),
+        ],
+    )
+}
+
+#[test]
+fn test_resolve_call_cpp_static_factory_chain_binds_return_type_member() {
+    let graph = cpp_graph();
+    assert_binds_foo(&graph, "useIt", "bar");
+    assert_inner_binds(&graph, "useIt", "Foo", "create");
+}
+
+/// `Foo*` with `->`: the pointer sits in the declarator, the type is `Foo`.
+#[test]
+fn test_resolve_call_cpp_pointer_factory_chain_binds_return_type_member() {
+    assert_binds_foo(&cpp_graph(), "usePtr", "bar");
+}
+
+#[test]
+fn test_resolve_call_cpp_free_function_chain_binds_return_type_member() {
+    assert_binds_foo(&cpp_graph(), "useMake", "bar");
+}
+
+/// A deduced `auto` return: today's untyped member.
+#[test]
+fn test_resolve_call_cpp_auto_return_chain_keeps_fallback() {
+    assert_falls_back(&cpp_graph(), "usePlain", "bar");
+}
+
+/// Follow-up: `std::vector<Foo>` is not unwrapped yet.
+#[test]
+fn test_resolve_call_cpp_generic_return_chain_keeps_fallback() {
+    assert_falls_back(&cpp_graph(), "useWrapped", "bar");
+}
+
+#[test]
+fn test_resolve_call_cpp_typed_param_receiver_still_binds_type_member() {
+    assert_binds_foo(&cpp_graph(), "useTyped", "bar");
+}
+
+// ---- Dart ----
+
+fn dart_graph() -> ZeroCopyGraph {
+    single(
+        &DartProvider::new().unwrap(),
+        &[
+            (
+                "lib/foo.dart",
+                "class Foo {\n  static Foo create() => Foo();\n  static plain() => Foo();\n  static Future<Foo> wrapped() async => Foo();\n  static Foo? maybe() => null;\n  void bar() {}\n}\n\nclass Other {\n  void bar() {}\n}\n\nFoo make() => Foo();\n",
+            ),
+            (
+                "lib/use.dart",
+                "import 'foo.dart';\n\nvoid useIt() {\n  Foo.create().bar();\n}\n\nvoid useMake() {\n  make().bar();\n}\n\nvoid useMaybe() {\n  Foo.maybe()?.bar();\n}\n\nvoid usePlain() {\n  Foo.plain().bar();\n}\n\nvoid useWrapped() {\n  Foo.wrapped().bar();\n}\n\nvoid useTyped(Foo f) {\n  f.bar();\n}\n",
+            ),
+        ],
+    )
+}
+
+#[test]
+fn test_resolve_call_dart_static_factory_chain_binds_return_type_member() {
+    let graph = dart_graph();
+    assert_binds_foo(&graph, "useIt", "bar");
+    assert_inner_binds(&graph, "useIt", "Foo", "create");
+}
+
+#[test]
+fn test_resolve_call_dart_free_function_chain_binds_return_type_member() {
+    assert_binds_foo(&dart_graph(), "useMake", "bar");
+}
+
+/// `Foo?` reduces to `Foo`.
+#[test]
+fn test_resolve_call_dart_nullable_return_chain_binds_return_type_member() {
+    assert_binds_foo(&dart_graph(), "useMaybe", "bar");
+}
+
+#[test]
+fn test_resolve_call_dart_untyped_factory_chain_keeps_fallback() {
+    assert_falls_back(&dart_graph(), "usePlain", "bar");
+}
+
+/// Follow-up: `Future<Foo>` is not unwrapped yet.
+#[test]
+fn test_resolve_call_dart_generic_return_chain_keeps_fallback() {
+    assert_falls_back(&dart_graph(), "useWrapped", "bar");
+}
+
+#[test]
+fn test_resolve_call_dart_typed_param_receiver_still_binds_type_member() {
+    assert_binds_foo(&dart_graph(), "useTyped", "bar");
+}
+
+// ---- C: no methods ----
+
+/// A nested call is two direct calls: the chain rule never touches them.
+#[test]
+fn test_resolve_call_c_nested_free_calls_still_bind_both() {
+    let graph = single(
+        &CProvider::new().unwrap(),
+        &[
+            (
+                "src/foo.c",
+                "struct Foo { int x; };\nstruct Foo *foo_create(void) { return 0; }\nvoid foo_bar(struct Foo *f) {}\n",
+            ),
+            (
+                "src/use.c",
+                "struct Foo;\nstruct Foo *foo_create(void);\nvoid foo_bar(struct Foo *f);\nvoid use_it(void) { foo_bar(foo_create()); }\n",
+            ),
+        ],
+    );
+    let names: Vec<String> = targets(&graph, "use_it")
+        .into_iter()
+        .map(|(_, _, name)| name)
+        .collect();
+    assert!(names.contains(&"foo_create".to_string()), "{names:?}");
+    assert!(names.contains(&"foo_bar".to_string()), "{names:?}");
+}

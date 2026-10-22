@@ -471,6 +471,15 @@ fn python_callee_name(
                             .filter(|name| !locals.shadowed(obj, name));
                         return Some(match class {
                             Some(class) => format!("{class}.{attr_name}"),
+                            // `make().bar()`: the resolver types the receiver
+                            // by the callee's return type or constructed class.
+                            None if obj.kind() == "call" => {
+                                let untyped = CallSite::untyped_member(attr_name);
+                                match python_callee_name(obj, source, locals, classes) {
+                                    Some(inner) => CallSite::chained_member(&inner, &untyped),
+                                    None => untyped,
+                                }
+                            }
                             None => CallSite::untyped_member(attr_name),
                         });
                     }

@@ -375,6 +375,17 @@ fn dart_callee_name(
                                 && !declares_member(nodes, pos, cls)
                         }) {
                             Some(cls) => format!("{cls}.{method}"),
+                            // `Foo.create().bar()`: the resolver types a call
+                            // receiver by the callee's return type.
+                            None if obj.kind() == "call_expression"
+                                && !calls_local(obj, source, bindings, nodes, pos) =>
+                            {
+                                let untyped = CallSite::untyped_member(method);
+                                match dart_callee_name(obj, source, bindings, nodes) {
+                                    Some(inner) => CallSite::chained_member(&inner, &untyped),
+                                    None => untyped,
+                                }
+                            }
                             None => CallSite::untyped_member(method),
                         },
                     );
@@ -386,6 +397,24 @@ fn dart_callee_name(
             .ok()
             .map(str::to_string),
     }
+}
+
+/// Whether `call` calls a local, a parameter or a field of an enclosing
+/// type (`final make = () => A(); make()`): its callee is a value, not a
+/// declaration whose return type types the result.
+fn calls_local(
+    call: Node<'_>,
+    source: &[u8],
+    bindings: &DartBindings,
+    nodes: &[RawNode],
+    pos: Pos,
+) -> bool {
+    call.child_by_field_name("function")
+        .filter(|f| f.kind() == "identifier")
+        .and_then(|f| f.utf8_text(source).ok())
+        .is_some_and(|name| {
+            bindings.lookup_local(pos, name).is_some() || declares_member(nodes, pos, name)
+        })
 }
 
 /// The class a constructor call receiver (`Other()`) builds, when this

@@ -3,7 +3,7 @@ use ecp_core::analyzer::import_binding::{
 };
 use ecp_core::analyzer::reexport::{is_es_module, pick_call, ExportAliasTable};
 use ecp_core::analyzer::same_file_pick::{self, ImplMember as PickImplMember, PickFacts};
-use ecp_core::analyzer::type_ladder::TypeFacts;
+use ecp_core::analyzer::type_ladder::{return_type_key, TypeFacts};
 use ecp_core::analyzer::types::{owner_key, RawExportAlias};
 use ecp_core::file_category::pick_global;
 pub use ecp_core::file_category::{FileMeta, GlobalPick, Language};
@@ -248,6 +248,18 @@ pub struct SymbolTable {
     /// of another name, see [`SymbolTable::note_export_aliases`]. Sparse:
     /// only files with such an export have an entry.
     export_aliases: FxHashMap<Box<str>, ExportAliasTable>,
+
+    /// Function id → its interned [`return_type_key`]: the receiver type of
+    /// a chained call on it (`make().bar()`). Sparse: only functions whose
+    /// declared return type reduces to a bare name, filled by
+    /// [`Self::note_return_type`] after Pass 1.
+    return_types: FxHashMap<u32, u32>,
+
+    /// Return-type key → interned id, one entry per distinct type name.
+    return_type_ids: FxHashMap<Box<str>, u32>,
+
+    /// The inverse of `return_type_ids`.
+    return_type_keys: Vec<Box<str>>,
 }
 
 impl SymbolTable {
@@ -461,6 +473,32 @@ impl SymbolTable {
         self.owner_ids.insert(key.into(), id);
         self.owner_keys.push(key.into());
         id
+    }
+
+    /// Record the return type the function `node_id` declares, as written
+    /// (`RawFunctionMeta.return_type`). Only a type [`return_type_key`]
+    /// reduces to a bare name is kept, interned once per distinct name.
+    pub fn note_return_type(&mut self, node_id: u32, return_type: &str) {
+        let Some(key) = return_type_key(return_type) else {
+            return;
+        };
+        let id = match self.return_type_ids.get(key) {
+            Some(&id) => id,
+            None => {
+                let id = self.return_type_keys.len() as u32;
+                self.return_type_ids.insert(key.into(), id);
+                self.return_type_keys.push(key.into());
+                id
+            }
+        };
+        self.return_types.insert(node_id, id);
+    }
+
+    /// The [`return_type_key`] the function `node_id` declares.
+    pub fn return_type_of(&self, node_id: u32) -> Option<&str> {
+        self.return_types
+            .get(&node_id)
+            .map(|&id| &*self.return_type_keys[id as usize])
     }
 
     fn owner_id(&self, owner: &str) -> Option<u32> {
@@ -1449,6 +1487,10 @@ impl TypeFacts for SymbolTable {
 
     fn crate_root<'p>(&self, path: &'p str) -> &'p str {
         crate_root_prefix(path)
+    }
+
+    fn return_type_of(&self, callee: u32) -> Option<&str> {
+        SymbolTable::return_type_of(self, callee)
     }
 }
 

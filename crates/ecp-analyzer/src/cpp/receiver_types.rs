@@ -561,6 +561,15 @@ fn cpp_callee_name(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> Opt
             Some(
                 match member_receiver_type(receiver, source, bindings, pos) {
                     Some(ty) => format!("{ty}.{method}"),
+                    // `Foo::create().bar()` / `make()->bar()`: the resolver
+                    // types a call receiver by the callee's return type.
+                    None if receiver.kind() == "call_expression" => {
+                        let untyped = CallSite::untyped_member(method);
+                        match cpp_callee_name(receiver, source, bindings) {
+                            Some(inner) => CallSite::chained_member(&inner, &untyped),
+                            None => untyped,
+                        }
+                    }
                     None => CallSite::untyped_member(method),
                 },
             )

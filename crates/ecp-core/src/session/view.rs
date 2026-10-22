@@ -159,6 +159,10 @@ pub struct OverlaySymbol {
     /// The `RawNode.field_reads` entries that [`VariantRef::parse`] accepts,
     /// still encoded.
     pub variant_refs: Vec<String>,
+    /// `RawFunctionMeta.return_type` of a function, method or constructor,
+    /// as written; `None` when it declares none or the input does not carry
+    /// it (a fragment bin). Types the receiver of a chained call on it.
+    pub return_type: Option<String>,
 }
 
 impl HeritageNode for OverlaySymbol {
@@ -194,12 +198,25 @@ pub struct OverlayFileInput {
 
 impl From<LocalGraph> for OverlayFileInput {
     fn from(local: LocalGraph) -> Self {
+        // Paired by span, as the index's Pass 1.8 pairs them.
+        let return_types: FxHashMap<(u32, u32, u32, u32), String> = local
+            .raw_function_metas
+            .into_iter()
+            .filter(|meta| !meta.return_type.is_empty())
+            .map(|meta| (meta.span, meta.return_type))
+            .collect();
         Self {
             rel_path: local.file_path.to_string_lossy().replace('\\', "/"),
             symbols: local
                 .nodes
                 .into_iter()
                 .map(|n| OverlaySymbol {
+                    return_type: matches!(
+                        n.kind,
+                        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+                    )
+                    .then(|| return_types.get(&n.span).cloned())
+                    .flatten(),
                     name: n.name,
                     kind: n.kind,
                     owner_class: n.owner_class,
@@ -554,168 +571,184 @@ impl OverlayView {
                     };
                     let owner = sym.owner_class.as_deref().and_then(owner_key);
                     for raw_callee in &sym.calls {
-                        let parsed = CallSite::parse(raw_callee);
                         // The index's Pass 2 order in a JS / TS file: a bare
                         // call binds the innermost named function in scope
                         // first, and an ambiguous or unreachable one leaves
-                        // only the named-import tier.
-                        let hit = 'hit: {
-                            if let Some(targets) = lexical.targets(span_of(sym), parsed.name()) {
-                                break 'hit targets.first().copied().or_else(|| {
-                                    if matches!(parsed, CallSite::UntypedMember(_)) {
+                        // only the named-import tier. A chain walks from its
+                        // innermost call outwards, as the index's does.
+                        // Inline, so `parsed` borrows `sym.calls` for as long
+                        // as `module_calls` keeps its name.
+                        let hit = CallSite::parse(raw_callee).resolve_chain(
+                            |parsed| 'hit: {
+                                if let Some(targets) = lexical.targets(span_of(sym), parsed.name())
+                                {
+                                    break 'hit targets.first().copied().or_else(|| {
+                                        if matches!(parsed, CallSite::UntypedMember(_)) {
+                                            return None;
+                                        }
+                                        facts
+                                            .named_import(
+                                                file_ord,
+                                                &file.imports,
+                                                parsed.name(),
+                                                callables.target,
+                                            )
+                                            .map(|decl| (decl, CONF_IMPORT_SCOPED))
+                                    });
+                                }
+                                // The index's `Resolver::resolve_call`: a C#, Swift,
+                                // Kotlin or Dart receiver that names a type resolves
+                                // as `Receiver.member`; a Swift one that names none
+                                // is an untyped member call.
+                                let type_member = facts.type_receiver(
+                                    &file.rel_path,
+                                    caller.language,
+                                    parsed,
+                                    &file.imports,
+                                );
+                                let site = match (parsed, &type_member) {
+                                    (CallSite::FromReceiver { member, .. }, None)
+                                        if caller.language == Language::Swift =>
+                                    {
+                                        CallSite::UntypedMember(member)
+                                    }
+                                    _ => parsed,
+                                };
+                                let untyped = matches!(site, CallSite::UntypedMember(_));
+                                // An untyped receiver is no `this`: no tier reaches
+                                // the member through the caller's bases.
+                                let scope = Scope {
+                                    call: Some(CallScope {
+                                        owner,
+                                        caller: Some(source),
+                                        untyped,
+                                    }),
+                                    heritage: if untyped { &[] } else { heritage },
+                                    type_lookup: false,
+                                };
+                                let lookup = type_member.as_deref().map_or(site, CallSite::Plain);
+                                let mut resolve =
+                                    |site: CallSite<'_>, imports: &[RawImport], scope| {
+                                        resolve_callee(
+                                            graph,
+                                            site,
+                                            file_ord,
+                                            imports,
+                                            caller,
+                                            &mut base_metas,
+                                            &callables,
+                                            &types,
+                                            &qualifiers,
+                                            &nodes,
+                                            &replaced,
+                                            &dirty_base,
+                                            &facts,
+                                            scope,
+                                        )
+                                    };
+                                // The index's order for a Rust path: the qualifier
+                                // tier inside `resolve_callee`, then the module tree,
+                                // then the receiver-typing ladder.
+                                // No Rust receiver is typed by `type_receiver`, so
+                                // `site` is the lookup here.
+                                let mut hit = if caller.language == Language::Rust
+                                    && site.name().contains("::")
+                                {
+                                    let name = site.name();
+                                    *module_calls
+                                        .entry((name, owner, heritage.as_ptr()))
+                                        .or_insert_with(|| {
+                                            resolve(site, &file.imports, scope)
+                                                .or_else(|| {
+                                                    let (modules, chain) = rust_tree?;
+                                                    resolve_rust_module_callee(
+                                                        graph,
+                                                        name,
+                                                        &callables,
+                                                        &nodes,
+                                                        &dirty_base,
+                                                        modules,
+                                                        chain,
+                                                    )
+                                                })
+                                                .or_else(|| {
+                                                    let (qualifier, member) =
+                                                        split_qualifier(name)?;
+                                                    ladder_edge(facts.receiver_ladder(
+                                                        &file.rel_path,
+                                                        &file.imports,
+                                                        (name, qualifier, member),
+                                                        callables.target,
+                                                        true,
+                                                    ))
+                                                })
+                                        })
+                                } else {
+                                    resolve(lookup, &file.imports, scope)
+                                };
+                                if hit.is_none()
+                                    && type_member.is_some()
+                                    && caller.language == Language::Kotlin
+                                {
+                                    // `fun Reg.ext()` is a top-level function no
+                                    // member lookup on `Reg` finds.
+                                    hit = resolve(
+                                        CallSite::Plain(site.name()),
+                                        &file.imports,
+                                        Scope {
+                                            call: None,
+                                            heritage: scope.heritage,
+                                            type_lookup: false,
+                                        },
+                                    )
+                                    .filter(|&(idx, _)| is_free(&facts, idx));
+                                }
+                                if untyped {
+                                    // A Python module is a value: `api.helper()` on
+                                    // an untyped receiver may call another module's
+                                    // function, never one of the caller's own module.
+                                    hit = hit.filter(|&(idx, _)| {
+                                        member_call_admits(&facts, idx, owner)
+                                            || (caller.language == Language::Python
+                                                && is_free(&facts, idx)
+                                                && facts.node_file(idx)
+                                                    != Some(file.rel_path.as_str()))
+                                    });
+                                }
+                                hit.or_else(|| {
+                                    if facts.may_be_receiverless_member_call(site, caller) {
                                         return None;
                                     }
-                                    facts
-                                        .named_import(
-                                            file_ord,
-                                            &file.imports,
-                                            parsed.name(),
-                                            callables.target,
-                                        )
-                                        .map(|decl| (decl, CONF_IMPORT_SCOPED))
-                                });
-                            }
-                            // The index's `Resolver::resolve_call`: a C#, Swift,
-                            // Kotlin or Dart receiver that names a type resolves
-                            // as `Receiver.member`; a Swift one that names none
-                            // is an untyped member call.
-                            let type_member = facts.type_receiver(
-                                &file.rel_path,
-                                caller.language,
-                                parsed,
-                                &file.imports,
-                            );
-                            let site = match (parsed, &type_member) {
-                                (CallSite::FromReceiver { member, .. }, None)
-                                    if caller.language == Language::Swift =>
-                                {
-                                    CallSite::UntypedMember(member)
-                                }
-                                _ => parsed,
-                            };
-                            let untyped = matches!(site, CallSite::UntypedMember(_));
-                            // An untyped receiver is no `this`: no tier reaches
-                            // the member through the caller's bases.
-                            let scope = Scope {
-                                call: Some(CallScope {
-                                    owner,
-                                    caller: Some(source),
-                                    untyped,
-                                }),
-                                heritage: if untyped { &[] } else { heritage },
-                                type_lookup: false,
-                            };
-                            let lookup = type_member.as_deref().map_or(site, CallSite::Plain);
-                            let mut resolve = |site: CallSite<'_>, imports: &[RawImport], scope| {
-                                resolve_callee(
-                                    graph,
-                                    site,
-                                    file_ord,
-                                    imports,
-                                    caller,
-                                    &mut base_metas,
-                                    &callables,
-                                    &types,
-                                    &qualifiers,
-                                    &nodes,
-                                    &replaced,
-                                    &dirty_base,
-                                    &facts,
-                                    scope,
-                                )
-                            };
-                            // The index's order for a Rust path: the qualifier
-                            // tier inside `resolve_callee`, then the module tree,
-                            // then the receiver-typing ladder.
-                            // No Rust receiver is typed by `type_receiver`, so
-                            // `site` is the lookup here.
-                            let mut hit = if caller.language == Language::Rust
-                                && site.name().contains("::")
-                            {
-                                let name = site.name();
-                                *module_calls
-                                    .entry((name, owner, heritage.as_ptr()))
-                                    .or_insert_with(|| {
-                                        resolve(site, &file.imports, scope)
-                                            .or_else(|| {
-                                                let (modules, chain) = rust_tree?;
-                                                resolve_rust_module_callee(
-                                                    graph,
-                                                    name,
-                                                    &callables,
-                                                    &nodes,
-                                                    &dirty_base,
-                                                    modules,
-                                                    chain,
-                                                )
-                                            })
-                                            .or_else(|| {
-                                                let (qualifier, member) = split_qualifier(name)?;
-                                                ladder_edge(facts.receiver_ladder(
-                                                    &file.rel_path,
-                                                    &file.imports,
-                                                    (name, qualifier, member),
-                                                    callables.target,
-                                                    true,
-                                                ))
-                                            })
+                                    let (ty, confidence) = resolve_constructed_type(
+                                        graph,
+                                        site,
+                                        file_ord,
+                                        &file.imports,
+                                        caller,
+                                        &mut base_metas,
+                                        &types,
+                                        &qualifiers,
+                                        &nodes,
+                                        &replaced,
+                                        &dirty_base,
+                                        &facts,
+                                        scope,
+                                    )?;
+                                    let target =
+                                        *construction_targets.entry(ty).or_insert_with(|| {
+                                            construction_target(graph, &nodes, &type_ctors, ty)
+                                        });
+                                    Some((target, confidence))
+                                })
+                            },
+                            |inner, member| {
+                                inner
+                                    .and_then(|inner| {
+                                        facts.chained_member(inner, member, caller.language)
                                     })
-                            } else {
-                                resolve(lookup, &file.imports, scope)
-                            };
-                            if hit.is_none()
-                                && type_member.is_some()
-                                && caller.language == Language::Kotlin
-                            {
-                                // `fun Reg.ext()` is a top-level function no
-                                // member lookup on `Reg` finds.
-                                hit = resolve(
-                                    CallSite::Plain(site.name()),
-                                    &file.imports,
-                                    Scope {
-                                        call: None,
-                                        heritage: scope.heritage,
-                                        type_lookup: false,
-                                    },
-                                )
-                                .filter(|&(idx, _)| is_free(&facts, idx));
-                            }
-                            if untyped {
-                                // A Python module is a value: `api.helper()` on
-                                // an untyped receiver may call another module's
-                                // function, never one of the caller's own module.
-                                hit = hit.filter(|&(idx, _)| {
-                                    member_call_admits(&facts, idx, owner)
-                                        || (caller.language == Language::Python
-                                            && is_free(&facts, idx)
-                                            && facts.node_file(idx) != Some(file.rel_path.as_str()))
-                                });
-                            }
-                            hit.or_else(|| {
-                                if facts.may_be_receiverless_member_call(site, caller) {
-                                    return None;
-                                }
-                                let (ty, confidence) = resolve_constructed_type(
-                                    graph,
-                                    site,
-                                    file_ord,
-                                    &file.imports,
-                                    caller,
-                                    &mut base_metas,
-                                    &types,
-                                    &qualifiers,
-                                    &nodes,
-                                    &replaced,
-                                    &dirty_base,
-                                    &facts,
-                                    scope,
-                                )?;
-                                let target = *construction_targets.entry(ty).or_insert_with(|| {
-                                    construction_target(graph, &nodes, &type_ctors, ty)
-                                });
-                                Some((target, confidence))
-                            })
-                        };
+                                    .map(Some)
+                            },
+                        );
                         // The index drops self-recursion Calls (builder's
                         // `target_id == current_node_idx` skip).
                         if let Some((target, confidence)) = hit.filter(|&(t, _)| t != source) {
@@ -1518,6 +1551,9 @@ struct OverlayFacts<'a> {
     /// `impl Trait for Type` blocks: the files' old content, whose bases the
     /// archived supertypes of a clean Rust type still carry.
     dirty_impl_traits: FxHashMap<&'a str, Vec<&'a str>>,
+    /// Virtual idx → the return type the dirty function declares, as
+    /// written ([`OverlaySymbol::return_type`]). Sparse.
+    dirty_return_types: FxHashMap<u32, &'a str>,
 }
 
 /// A base Rust `Impl` node: its span, its idx and the [`owner_key`] of the
@@ -1543,6 +1579,7 @@ impl<'a> OverlayFacts<'a> {
         let mut exported = Vec::with_capacity(nodes.len());
         let mut es_modules = Vec::with_capacity(files.len());
         let mut dirty_aliases = Vec::with_capacity(files.len());
+        let mut dirty_return_types: FxHashMap<u32, &'a str> = FxHashMap::default();
         let mut seen_uids: FxHashSet<u64> = FxHashSet::default();
         let mut offset = 0usize;
         for (file_ord, file) in files.iter().enumerate() {
@@ -1563,6 +1600,9 @@ impl<'a> OverlayFacts<'a> {
                     exports_any |= symbol.is_exported;
                 }
                 exported.push(symbol.is_exported);
+                if let Some(return_type) = symbol.return_type.as_deref() {
+                    dirty_return_types.insert(base_len + offset as u32, return_type);
+                }
                 offset += 1;
             }
             if is_rust_source(std::path::Path::new(&file.rel_path)) {
@@ -1638,6 +1678,7 @@ impl<'a> OverlayFacts<'a> {
             base_namespaces: OnceCell::new(),
             dirty_supertypes: OnceCell::new(),
             dirty_impl_traits,
+            dirty_return_types,
         }
     }
 
@@ -2774,6 +2815,35 @@ impl<'a> OverlayFacts<'a> {
         type_ladder::member_via_type(self, candidates, source, member, target, call)
     }
 
+    /// The index's `Resolver::resolve_chained_member`: the member `member`
+    /// of the type a call to `callee` returns, read in `callee`'s own file
+    /// and found by the receiver-typing ladder, at the ladder's confidence
+    /// capped by `inner_confidence`.
+    fn chained_member(
+        &self,
+        (callee, inner_confidence): (u32, f32),
+        member: &str,
+        caller: Language,
+    ) -> Option<(u32, f32)> {
+        let ty = type_ladder::returned_type(self, callee)?;
+        let callee_file = self.node_file(callee)?;
+        // The index's `call_target`: Rust method syntax reaches only methods.
+        let target = if caller == Language::Rust {
+            ResolveTarget::Method
+        } else {
+            ResolveTarget::Callable
+        };
+        let qualified = format!("{ty}.{member}");
+        let (id, confidence) = ladder_edge(self.receiver_ladder(
+            callee_file,
+            &[],
+            (&qualified, ty, member),
+            target,
+            true,
+        ))?;
+        Some((id, confidence.min(inner_confidence)))
+    }
+
     /// The index's `Resolver::may_be_receiverless_member_call`: a bare `m()`
     /// that names a constructible type and an admitted `Method` both, which
     /// the constructor fallback leaves alone.
@@ -2991,6 +3061,25 @@ impl TypeFacts for OverlayFacts<'_> {
 
     fn nearest_copy(&self, caller_file: &str, candidates: &[u32]) -> Option<u32> {
         self.nearest_of_copies(caller_file, candidates)
+    }
+
+    /// A dirty function's from its fresh parse; a clean one's from the
+    /// archived `FunctionMeta`, which the index wrote from the same
+    /// `RawFunctionMeta.return_type`. A base node of a dirty file is stale.
+    fn return_type_of(&self, callee: u32) -> Option<&str> {
+        if callee >= self.base_len() {
+            return self.dirty_return_types.get(&callee).copied();
+        }
+        if self.dirty_base.contains(&callee) {
+            return None;
+        }
+        let graph = self.graph;
+        let metas = &graph.function_metas;
+        let at = metas
+            .binary_search_by_key(&callee, |meta| meta.node_idx.to_native())
+            .ok()?;
+        let return_type = metas[at].return_type.resolve(&graph.string_pool);
+        (!return_type.is_empty()).then_some(return_type)
     }
 }
 
@@ -4702,6 +4791,7 @@ mod tests {
             calls: calls.iter().map(|c| c.to_string()).collect(),
             heritage: Vec::new(),
             variant_refs: Vec::new(),
+            return_type: None,
         }
     }
 
@@ -5025,6 +5115,7 @@ mod tests {
             calls: vec![],
             heritage: Vec::new(),
             variant_refs: Vec::new(),
+            return_type: None,
         };
         let multi = OverlayFileInput {
             export_aliases: Vec::new(),
@@ -5120,6 +5211,7 @@ mod tests {
             calls: vec![],
             heritage: Vec::new(),
             variant_refs: Vec::new(),
+            return_type: None,
         };
         let outer = OverlayFileInput {
             export_aliases: Vec::new(),

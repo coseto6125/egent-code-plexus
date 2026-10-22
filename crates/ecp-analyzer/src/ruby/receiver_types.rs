@@ -132,6 +132,15 @@ fn ruby_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Option<Stri
             Some(match receiver_type {
                 Some(inferred_type) => format!("{inferred_type}.{method_name}"),
                 None if is_type_rooted(receiver, source) => method_name.to_string(),
+                // A call receiver the name heuristic cannot type: the
+                // resolver types it by the callee's return type or class.
+                None if receiver.kind() == "call" => {
+                    let untyped = CallSite::untyped_member(method_name);
+                    match ruby_callee(receiver, source, ctx) {
+                        Some(inner) => CallSite::chained_member(&inner, &untyped),
+                        None => untyped,
+                    }
+                }
                 None => CallSite::untyped_member(method_name),
             })
         }

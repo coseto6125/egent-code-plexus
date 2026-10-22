@@ -93,12 +93,23 @@ pub enum CallSite<'a> {
     /// names a type (or a library one) resolves as `Plain("Type.member")`;
     /// anywhere else the site resolves as `Plain(member)`.
     FromReceiver { receiver: &'a str, member: &'a str },
+    /// A member call whose receiver is itself a call (`Foo.create().bar()`,
+    /// `make().bar()`, `new Foo().bar()`). `inner` is the receiver call's own
+    /// encoded entry, `fallback` the entry the parser wrote for this site
+    /// before it recorded chains (a bare `bar` or an untyped member). The
+    /// resolver types the receiver by the return type of the one function
+    /// `inner` binds; where it cannot, the site resolves as `fallback`.
+    ChainedMember { inner: &'a str, fallback: &'a str },
 }
 
 impl<'a> CallSite<'a> {
     const CONSTRUCT_PREFIX: &'static str = "\u{1}new ";
     const UNTYPED_MEMBER_PREFIX: &'static str = "\u{1}member ";
     const FROM_RECEIVER_PREFIX: &'static str = "\u{1}from ";
+    const CHAINED_MEMBER_PREFIX: &'static str = "\u{1}chain ";
+    /// Ends the fallback of a chained entry. A fallback is never itself a
+    /// chain, so the first separator ends it; `inner` may hold more.
+    const CHAIN_SEPARATOR: char = '\u{2}';
 
     /// The qualifier of a Python `super().m()` callee (`super().m`): the
     /// resolver binds `m` on the caller class's bases, never by bare name.
@@ -119,8 +130,27 @@ impl<'a> CallSite<'a> {
         [Self::FROM_RECEIVER_PREFIX, receiver, ".", member].concat()
     }
 
+    /// The `RawNode.calls` entry of a member call on the call `inner`
+    /// (itself an encoded entry), which resolves as `fallback` when the
+    /// receiver's type stays unknown.
+    pub fn chained_member(inner: &str, fallback: &str) -> String {
+        let mut raw = String::with_capacity(
+            Self::CHAINED_MEMBER_PREFIX.len() + fallback.len() + 1 + inner.len(),
+        );
+        raw.push_str(Self::CHAINED_MEMBER_PREFIX);
+        raw.push_str(fallback);
+        raw.push(Self::CHAIN_SEPARATOR);
+        raw.push_str(inner);
+        raw
+    }
+
     pub fn parse(raw: &'a str) -> Self {
-        if let Some(ty) = raw.strip_prefix(Self::CONSTRUCT_PREFIX) {
+        if let Some((fallback, inner)) = raw
+            .strip_prefix(Self::CHAINED_MEMBER_PREFIX)
+            .and_then(|site| site.split_once(Self::CHAIN_SEPARATOR))
+        {
+            Self::ChainedMember { inner, fallback }
+        } else if let Some(ty) = raw.strip_prefix(Self::CONSTRUCT_PREFIX) {
             Self::Construct(ty)
         } else if let Some(member) = raw.strip_prefix(Self::UNTYPED_MEMBER_PREFIX) {
             Self::UntypedMember(member)
@@ -134,6 +164,42 @@ impl<'a> CallSite<'a> {
         }
     }
 
+    /// The site a [`Self::ChainedMember`] resolves as when its receiver
+    /// stays untyped; any other site is its own fallback.
+    pub fn fallback(self) -> Self {
+        match self {
+            Self::ChainedMember { fallback, .. } => Self::parse(fallback),
+            site => site,
+        }
+    }
+
+    /// Resolve `site` with `resolve`, and a chain (`a().b().c()`) from its
+    /// innermost call outwards: each level takes `typed_member` of the
+    /// targets the level below bound, or else resolves its
+    /// [`Self::fallback`]. A site that is no chain is one `resolve` call.
+    /// The index and the query-time overlay both walk chains here, so a
+    /// chain binds the same on both sides.
+    pub fn resolve_chain<T>(
+        self,
+        mut resolve: impl FnMut(Self) -> T,
+        mut typed_member: impl FnMut(&T, &'a str) -> Option<T>,
+    ) -> T {
+        let mut levels: Vec<Self> = Vec::new();
+        let mut innermost = self;
+        while let Self::ChainedMember { inner, .. } = innermost {
+            levels.push(innermost);
+            innermost = Self::parse(inner);
+        }
+        let mut targets = resolve(innermost);
+        for level in levels.into_iter().rev() {
+            targets = match typed_member(&targets, level.name()) {
+                Some(typed) => typed,
+                None => resolve(level.fallback()),
+            };
+        }
+        targets
+    }
+
     /// The callee the callable tiers resolve.
     pub fn name(self) -> &'a str {
         match self {
@@ -141,13 +207,14 @@ impl<'a> CallSite<'a> {
             | Self::Construct(name)
             | Self::UntypedMember(name)
             | Self::FromReceiver { member: name, .. } => name,
+            Self::ChainedMember { .. } => self.fallback().name(),
         }
     }
 
     /// Whether the call uses member syntax rather than a module path.
     pub fn uses_method_syntax(self) -> bool {
         match self {
-            Self::UntypedMember(_) | Self::FromReceiver { .. } => true,
+            Self::UntypedMember(_) | Self::FromReceiver { .. } | Self::ChainedMember { .. } => true,
             Self::Plain(name) => name.contains('.'),
             Self::Construct(_) => false,
         }
@@ -186,6 +253,7 @@ impl<'a> CallSite<'a> {
             (Language::Python, Self::FromReceiver { member, .. }) => Some((member, false)),
             // Only the Python parser emits a `from` receiver.
             (_, Self::FromReceiver { .. }) => None,
+            (_, Self::ChainedMember { .. }) => self.fallback().constructed_type(language),
             _ => None,
         }
     }
@@ -1233,6 +1301,91 @@ mod tests {
         for text in ["new Router().Handler", "member widget", "Widget", ""] {
             assert_eq!(CallSite::parse(text), CallSite::Plain(text));
         }
+    }
+
+    /// Contract: a chained entry decodes to its receiver call's own entry
+    /// and the fallback, and every tier that does not type the receiver
+    /// sees exactly the fallback the parser wrote before chains existed.
+    #[test]
+    fn test_call_site_parse_chained_member_returns_inner_and_fallback() {
+        let untyped = CallSite::untyped_member("bar");
+        let raw = CallSite::chained_member("Foo.create", &untyped);
+        let site = CallSite::parse(&raw);
+        assert_eq!(
+            site,
+            CallSite::ChainedMember {
+                inner: "Foo.create",
+                fallback: untyped.as_str()
+            }
+        );
+        assert_eq!(site.fallback(), CallSite::UntypedMember("bar"));
+        assert_eq!(site.name(), "bar");
+        assert!(site.uses_method_syntax());
+        assert_eq!(site.constructed_type(Language::Python), None);
+
+        let bare = CallSite::parse(&CallSite::chained_member("make", "bar"));
+        assert_eq!(bare.fallback(), CallSite::Plain("bar"));
+        assert_eq!(bare.name(), "bar");
+    }
+
+    /// Contract: a chain on a chain keeps the whole inner entry, so the
+    /// resolver can walk `a().b().c()` from the innermost call outwards.
+    #[test]
+    fn test_call_site_parse_nested_chain_returns_inner_chain() {
+        let inner = CallSite::chained_member(&CallSite::construct("Foo"), "b");
+        let raw = CallSite::chained_member(&inner, &CallSite::untyped_member("c"));
+        let CallSite::ChainedMember {
+            inner: got_inner,
+            fallback,
+        } = CallSite::parse(&raw)
+        else {
+            panic!("not a chain: {raw:?}");
+        };
+        assert_eq!(got_inner, inner);
+        assert_eq!(CallSite::parse(fallback), CallSite::UntypedMember("c"));
+        assert_eq!(
+            CallSite::parse(got_inner),
+            CallSite::ChainedMember {
+                inner: "\u{1}new Foo",
+                fallback: "b"
+            }
+        );
+        // Lookalike source text and a marker with no separator stay plain.
+        for text in ["chain bar", "\u{1}chain bar"] {
+            assert_eq!(CallSite::parse(text), CallSite::Plain(text));
+        }
+    }
+
+    /// Contract: a chain resolves innermost first; a level the typed step
+    /// answers never resolves its fallback, and a level it declines does.
+    #[test]
+    fn test_call_site_resolve_chain_typed_then_fallback_returns_outermost_targets() {
+        let inner = CallSite::chained_member("make", "b");
+        let raw = CallSite::chained_member(&inner, &CallSite::untyped_member("c"));
+        let mut resolved = Vec::new();
+        let got = CallSite::parse(&raw).resolve_chain(
+            |site| {
+                resolved.push(site.name().to_string());
+                format!("resolved:{}", site.name())
+            },
+            |below, member| (member == "b").then(|| format!("{below}>typed:{member}")),
+        );
+        assert_eq!(resolved, ["make", "c"]);
+        assert_eq!(got, "resolved:c");
+
+        let mut resolved = Vec::new();
+        let got = CallSite::parse(&raw).resolve_chain(
+            |site| {
+                resolved.push(site.name().to_string());
+                format!("resolved:{}", site.name())
+            },
+            |below, member| Some(format!("{below}>typed:{member}")),
+        );
+        assert_eq!(resolved, ["make"]);
+        assert_eq!(got, "resolved:make>typed:b>typed:c");
+
+        let plain = CallSite::Plain("f").resolve_chain(|site| site.name(), |_, _| None);
+        assert_eq!(plain, "f");
     }
 
     /// Contract: a `from`-receiver entry decodes to its receiver and member,

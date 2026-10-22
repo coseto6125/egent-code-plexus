@@ -261,9 +261,17 @@ fn csharp_callee(
                 }
                 _ => None,
             };
-            Some(match ty {
-                Some(t) => format!("{t}.{method}"),
-                None => method.to_string(),
+            Some(match (ty, receiver.kind()) {
+                (Some(t), _) => format!("{t}.{method}"),
+                // `Foo.Create().Bar()`: the resolver types the receiver by
+                // the callee's return type.
+                (None, "invocation_expression") => {
+                    match csharp_callee(receiver, source, locals, nodes) {
+                        Some(inner) => CallSite::chained_member(&inner, method),
+                        None => method.to_string(),
+                    }
+                }
+                (None, _) => method.to_string(),
             })
         }
         _ => {

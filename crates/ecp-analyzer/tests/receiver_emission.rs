@@ -186,7 +186,6 @@ fn test_swift_callee_name_untyped_receivers_bind_no_inherited_member() {
         "viaOptional",
         "viaProperty",
         "viaSelfProperty",
-        "viaChain",
         "viaLabeledParam",
     ] {
         assert_eq!(
@@ -195,6 +194,9 @@ fn test_swift_callee_name_untyped_receivers_bind_no_inherited_member() {
             "{caller}: an untyped receiver binds no `save`"
         );
     }
+    // `make() -> A` types the receiver of `make().save()`: a chained call
+    // binds the member of the callee's declared return type.
+    assert_eq!(owners_called(&graph, "viaChain", "save"), ["A"]);
 }
 
 #[test]
@@ -212,7 +214,6 @@ fn test_swift_callee_name_untyped_receivers_emit_untyped_member() {
         "viaOptional",
         "viaProperty",
         "viaSelfProperty",
-        "viaChain",
         "viaLabeledParam",
     ] {
         assert_calls(
@@ -223,6 +224,18 @@ fn test_swift_callee_name_untyped_receivers_emit_untyped_member() {
             &["save".to_string()],
         );
     }
+    // A call receiver is a chain whose fallback is the same untyped member.
+    let chain = raw_calls(&swift(), "C.swift", SWIFT_UNTYPED, "viaChain");
+    assert!(
+        chain
+            .iter()
+            .any(|c| CallSite::parse(c).fallback() == CallSite::UntypedMember("save")),
+        "viaChain: got {chain:?}"
+    );
+    assert!(
+        !chain.contains(&"save".to_string()),
+        "viaChain: got {chain:?}"
+    );
 }
 
 /// `$0` is a closure's implicit parameter, never a type.
@@ -488,7 +501,11 @@ fn test_java_callee_created_or_cast_receiver_emits_type_member() {
     assert!(has("b", &CallSite::untyped_member("size")));
     assert!(has("c", "List.size"));
     assert!(has("d", &CallSite::untyped_member("m")));
-    assert!(has("e", &CallSite::untyped_member("m")));
+    // A call receiver is a chain the resolver types by the callee's return
+    // type; untyped, it resolves as the same untyped member.
+    assert!(raw_calls(&java(), "D.java", src, "e")
+        .iter()
+        .any(|c| CallSite::parse(c).fallback() == CallSite::UntypedMember("m")));
 }
 
 /// A computed receiver already emitted an untyped member site; the call
@@ -588,7 +605,14 @@ fn test_kotlin_callee_property_param_or_local_named_like_type_emits_bare_member(
 #[test]
 fn test_kotlin_callee_chained_call_keeps_outer_member_bare() {
     let calls = raw_calls(&kotlin(), "D.kt", KOTLIN_TYPE, "viaChain");
-    assert!(calls.contains(&"toString".to_string()), "got {calls:?}");
+    // A chain on the call receiver, which resolves as the bare member when
+    // the callee's return type does not type it.
+    assert!(
+        calls
+            .iter()
+            .any(|c| CallSite::parse(c).fallback() == CallSite::Plain("toString")),
+        "got {calls:?}"
+    );
     assert!(
         calls.contains(&CallSite::from_receiver("Util", "create")),
         "got {calls:?}"

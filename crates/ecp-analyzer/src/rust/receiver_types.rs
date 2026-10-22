@@ -518,7 +518,17 @@ fn rust_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Optio
             }
             // Untyped receiver: the member name, marked so the resolver
             // never lands this method-syntax call on a free `fn`.
-            Some(CallSite::untyped_member(&method_name))
+            let untyped = CallSite::untyped_member(&method_name);
+            // `Foo::new().bar()`: the resolver types a call receiver by the
+            // callee's return type (`Self` included).
+            let inner = function
+                .child_by_field_name("value")
+                .filter(|value| value.kind() == "call_expression")
+                .and_then(|value| rust_callee_name(value, source, locals));
+            Some(match inner {
+                Some(inner) => CallSite::chained_member(&inner, &untyped),
+                None => untyped,
+            })
         }
 
         // Scoped path call: `Dog::new()` or `std::vec::Vec::new()`

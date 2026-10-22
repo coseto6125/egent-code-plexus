@@ -251,6 +251,43 @@ fn parity_from(
     check_parity_from(caller, provider, files, dirty, expected, expected);
 }
 
+/// A full reindex of `files` with `edits` applied, written under `root` so
+/// a Rust fixture gets its module tree.
+fn reindex(
+    root: &Path,
+    provider: &dyn LanguageProvider,
+    files: &[(&str, &str)],
+    edits: &[(&str, &str)],
+) -> ZeroCopyGraph {
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"overlay-parity\"\nversion = \"0.0.0\"\n",
+    )
+    .unwrap();
+    let mut builder = GraphBuilder::new().with_repo_root(root.to_path_buf());
+    let mut sources = files.to_vec();
+    sources.extend(
+        edits
+            .iter()
+            .filter(|(p, _)| !files.iter().any(|(old, _)| old == p)),
+    );
+    for &(path, original) in &sources {
+        let source = edits
+            .iter()
+            .find(|(p, _)| *p == path)
+            .map_or(original, |(_, s)| *s);
+        let disk = root.join(path);
+        std::fs::create_dir_all(disk.parent().unwrap()).unwrap();
+        std::fs::write(disk, source).unwrap();
+        builder.add_graph(
+            provider
+                .parse_file(Path::new(path), source.as_bytes())
+                .unwrap(),
+        );
+    }
+    builder.build()
+}
+
 fn check_parity_from(
     caller: &str,
     provider: &dyn LanguageProvider,
@@ -260,37 +297,8 @@ fn check_parity_from(
     overlay_expected: &[Target],
 ) {
     let tmp = tempfile::tempdir().unwrap();
-    std::fs::write(
-        tmp.path().join("Cargo.toml"),
-        "[package]\nname = \"overlay-parity\"\nversion = \"0.0.0\"\n",
-    )
-    .unwrap();
-    let build = |edits: &[(&str, &str)]| {
-        let mut builder = GraphBuilder::new().with_repo_root(tmp.path().to_path_buf());
-        let mut sources = files.to_vec();
-        sources.extend(
-            edits
-                .iter()
-                .filter(|(p, _)| !files.iter().any(|(old, _)| old == p)),
-        );
-        for &(path, original) in &sources {
-            let source = edits
-                .iter()
-                .find(|(p, _)| *p == path)
-                .map_or(original, |(_, s)| *s);
-            let disk = tmp.path().join(path);
-            std::fs::create_dir_all(disk.parent().unwrap()).unwrap();
-            std::fs::write(disk, source).unwrap();
-            builder.add_graph(
-                provider
-                    .parse_file(Path::new(path), source.as_bytes())
-                    .unwrap(),
-            );
-        }
-        builder.build()
-    };
-    let base = build(&[]);
-    let full = build(dirty);
+    let base = reindex(tmp.path(), provider, files, &[]);
+    let full = reindex(tmp.path(), provider, files, dirty);
     assert_eq!(
         targets(&full, caller),
         expected,
@@ -1770,4 +1778,111 @@ fn test_overlay_python_constant_read_and_callback_shifted_matches_reindex() {
     );
     assert_eq!(full.len(), 2, "one constant read, one callback: {full:?}");
     assert_eq!(overlay, full);
+}
+
+// ---- Chained member calls typed by the inner callee's return type ----
+// (FU-2026-10-22-67874c602c84). The reindex binds `member` on `owner` only;
+// the overlay must bind the same, whether the factory's return type comes
+// from the archived base graph (factory clean) or from the fresh parse
+// (factory dirty).
+
+fn chain_parity(
+    caller: &str,
+    provider: &dyn LanguageProvider,
+    files: &[(&str, &str)],
+    dirty: &[(&str, &str)],
+    member: &str,
+    owner: &str,
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    let expected = targets(&reindex(tmp.path(), provider, files, dirty), caller);
+    let mut owners: Vec<&str> = expected
+        .iter()
+        .filter(|(_, name, _, _)| name == member)
+        .map(|(_, _, owner, _)| owner.as_str())
+        .collect();
+    owners.dedup();
+    assert_eq!(
+        owners,
+        [owner],
+        "reindex binds `{owner}.{member}` from the return type: {expected:?}"
+    );
+    check_parity_from(caller, provider, files, dirty, &expected, &expected);
+}
+
+const TS_FACTORY: (&str, &str) = (
+    "foo.ts",
+    "export class Foo {\n  static create(): Foo { return new Foo(); }\n  bar(): void {}\n}\nexport class Other {\n  bar(): void {}\n}\nexport function make(): Foo { return new Foo(); }\n",
+);
+const TS_FACTORY_TO_OTHER: &str = "export class Foo {\n  static create(): Other { return new Other(); }\n  bar(): void {}\n}\nexport class Other {\n  bar(): void {}\n}\nexport function make(): Other { return new Other(); }\n";
+const TS_CHAIN_CALLER: (&str, &str) = (
+    "app.ts",
+    "import { Foo, make } from './foo';\nexport function run(): void {}\n",
+);
+const TS_CHAIN_CALLER_DIRTY: &str = "import { Foo, make } from './foo';\nexport function run(): void {\n  Foo.create().bar();\n  make().bar();\n}\n";
+
+#[test]
+fn test_overlay_typescript_chained_member_clean_factory_matches_reindex() {
+    chain_parity(
+        "run",
+        &TypeScriptProvider::new().unwrap(),
+        &[TS_FACTORY, TS_CHAIN_CALLER],
+        &[("app.ts", TS_CHAIN_CALLER_DIRTY)],
+        "bar",
+        "Foo",
+    );
+}
+
+#[test]
+fn test_overlay_typescript_chained_member_dirty_factory_return_type_matches_reindex() {
+    chain_parity(
+        "run",
+        &TypeScriptProvider::new().unwrap(),
+        &[TS_FACTORY, TS_CHAIN_CALLER],
+        &[
+            ("foo.ts", TS_FACTORY_TO_OTHER),
+            ("app.ts", TS_CHAIN_CALLER_DIRTY),
+        ],
+        "bar",
+        "Other",
+    );
+}
+
+const PY_FACTORY: (&str, &str) = (
+    "foo.py",
+    "class Foo:\n    @staticmethod\n    def create() -> \"Foo\":\n        return Foo()\n\n    def bar(self):\n        pass\n\n\nclass Other:\n    def bar(self):\n        pass\n\n\ndef make() -> Foo:\n    return Foo()\n",
+);
+const PY_FACTORY_TO_OTHER: &str = "class Foo:\n    @staticmethod\n    def create() -> \"Other\":\n        return Other()\n\n    def bar(self):\n        pass\n\n\nclass Other:\n    def bar(self):\n        pass\n\n\ndef make() -> Other:\n    return Other()\n";
+const PY_CHAIN_CALLER: (&str, &str) = (
+    "app.py",
+    "from foo import Foo, make\n\n\ndef run():\n    pass\n",
+);
+const PY_CHAIN_CALLER_DIRTY: &str =
+    "from foo import Foo, make\n\n\ndef run():\n    Foo.create().bar()\n    make().bar()\n";
+
+#[test]
+fn test_overlay_python_chained_member_clean_factory_matches_reindex() {
+    chain_parity(
+        "run",
+        &PythonProvider::new().unwrap(),
+        &[PY_FACTORY, PY_CHAIN_CALLER],
+        &[("app.py", PY_CHAIN_CALLER_DIRTY)],
+        "bar",
+        "Foo",
+    );
+}
+
+#[test]
+fn test_overlay_python_chained_member_dirty_factory_return_type_matches_reindex() {
+    chain_parity(
+        "run",
+        &PythonProvider::new().unwrap(),
+        &[PY_FACTORY, PY_CHAIN_CALLER],
+        &[
+            ("foo.py", PY_FACTORY_TO_OTHER),
+            ("app.py", PY_CHAIN_CALLER_DIRTY),
+        ],
+        "bar",
+        "Other",
+    );
 }

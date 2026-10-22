@@ -341,7 +341,8 @@ impl GraphBuilder {
         }
         let _t_pass18 = std::time::Instant::now();
         // Pass 1.8: FunctionMeta collection.
-        let function_metas = pass1_8_function_metas(&self.local_graphs, &mut string_pool);
+        let function_metas =
+            pass1_8_function_metas(&self.local_graphs, &mut string_pool, &mut symbol_table);
         if prof {
             eprintln!(
                 "prof build.pass18_function_meta: {:.3}s  count={}",
@@ -2107,9 +2108,12 @@ fn pass1_7_entry_points(
 /// Returned unsorted; `GraphAssembly::finish` sorts by `node_idx` — which is
 /// what `ZeroCopyGraph::function_meta()`'s binary search needs — and derives
 /// the dense `node_flags` mirror from the result.
+/// Also records each function's return type in `symbol_table`, where Pass 2
+/// types the receiver of a chained call (`make().bar()`) by it.
 fn pass1_8_function_metas(
     local_graphs: &[LocalGraph],
     string_pool: &mut StringPool,
+    symbol_table: &mut SymbolTable,
 ) -> Vec<FunctionMeta> {
     let mut function_metas: Vec<FunctionMeta> = Vec::new();
     {
@@ -2141,6 +2145,9 @@ fn pass1_8_function_metas(
                     let rfm = &local_graph.raw_function_metas[meta_idx[slot].1];
                     let params: Vec<StrRef> =
                         rfm.params.iter().map(|s| string_pool.add(s)).collect();
+                    if !rfm.return_type.is_empty() {
+                        symbol_table.note_return_type(node_idx, &rfm.return_type);
+                    }
                     let return_type = string_pool.add(&rfm.return_type);
                     let decorators: Vec<StrRef> =
                         rfm.decorators.iter().map(|s| string_pool.add(s)).collect();
@@ -2627,9 +2634,8 @@ fn pass2_emit_node_edges(
     for (call_idx, raw_callee) in raw_node.calls.iter().enumerate() {
         let lookup_key = CallMetaKey::new(raw_node.span, call_idx as u32);
         let meta = indirect_lookup.get(&lookup_key);
-        let site = CallSite::parse(raw_callee);
-        let callee = site.name();
-        let targets = match lexical_lookup.targets(raw_node.span, callee) {
+        let resolve = |site: CallSite<'_>| match lexical_lookup.targets(raw_node.span, site.name())
+        {
             Some(targets) if targets.is_empty() => {
                 resolver.resolve_imported_call(&local_graph.file_path, site, &local_graph.imports)
             }
@@ -2643,6 +2649,16 @@ fn pass2_emit_node_edges(
                 Some(current_node_idx),
             ),
         };
+        // `Foo.create().bar()`: `bar` on the type the one bound `create`
+        // returns, else the entry the parser wrote before chains.
+        let targets = CallSite::parse(raw_callee).resolve_chain(resolve, |inner, member| {
+            let &[inner] = inner.as_slice() else {
+                return None;
+            };
+            resolver
+                .resolve_chained_member(&local_graph.file_path, inner, member)
+                .map(|hit| vec![hit])
+        });
         for (target_id, confidence) in targets {
             if target_id == current_node_idx {
                 continue; // self-recursion edges are Louvain / process noise

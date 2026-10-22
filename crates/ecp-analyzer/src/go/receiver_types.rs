@@ -16,7 +16,7 @@
 
 use super::path_literals::{build_raw_path_literal, strip_go_string_value};
 use crate::calls::{attach_to_enclosing, node_range, range_width, start_pos, Pos, PosRange};
-use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -362,6 +362,13 @@ fn go_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Option<
                     let pos = start_pos(call);
                     if let Some(ty) = locals.lookup(pos, &var_name) {
                         return Some(format!("{ty}.{method_name}"));
+                    }
+                }
+                // `NewFoo().Bar()`: the resolver types the operand by the
+                // callee's return type.
+                if operand.kind() == "call_expression" {
+                    if let Some(inner) = go_callee_name(operand, source, locals) {
+                        return Some(CallSite::chained_member(&inner, &method_name));
                     }
                 }
             }
