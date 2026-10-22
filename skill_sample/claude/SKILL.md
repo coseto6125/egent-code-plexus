@@ -80,7 +80,7 @@ ecp diff --section bindings --baseline origin/main --repo .
 ecp routes /api/foo --repo .
 ```
 
-A breaking change to a public interface or an existing caller → **stop + confirm with user** before pushing, at any caller count. A wide blast radius (many upstream callers, or callers in core / widely-imported modules) decides how much to say when you ask. Cross-repo contract changes → `ecp contracts --repo @all --unmatched-only` for orphaned consumers.
+Before a breaking change, decide from the whole situation whether the user must judge it. When it usually must (the change alters what an end user or an agent calls, reads or must do, or its options trade off architecture or extensibility) → **stop + confirm with user** before pushing. Otherwise make it, update the internal callers, and report what broke and which callers changed. A wide blast radius (many upstream callers, or callers in core / widely-imported modules) decides how much to say when you ask. Cross-repo contract changes → `ecp contracts --repo @all --unmatched-only` for orphaned consumers.
 
 ## Group / multi-repo
 
