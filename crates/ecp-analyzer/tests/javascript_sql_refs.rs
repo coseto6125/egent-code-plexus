@@ -64,6 +64,19 @@ fn js_non_sql_string_not_emitted() {
 function load() {
     return fs.readFileSync("session_meta.json", "utf-8");
 }
+
+#[test]
+fn test_parse_sql_refs_long_chain_preserves_enclosing_symbol_and_owner() {
+    let source = format!(
+        "class Repository {{ run(db) {{ db{}.query(\"SELECT id FROM users\"); }} }}",
+        ".option('x')".repeat(200)
+    );
+    let refs = parse_sql_refs(&source);
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].tables, vec![("users".into(), SqlVerb::Read)]);
+    assert_eq!(refs[0].enclosing_symbol.as_deref(), Some("run"));
+    assert_eq!(refs[0].enclosing_owner.as_deref(), Some("Repository"));
+}
 "#;
     let refs = parse_sql_refs(src);
     assert!(
