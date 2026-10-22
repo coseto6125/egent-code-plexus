@@ -81,6 +81,22 @@ pub(crate) fn crate_root_prefix(path: &str) -> &str {
 
 pub use ecp_core::analyzer::reexport::ResolveTarget;
 
+/// The kinds a Tier-3 lookup weighs for `target`. Method syntax narrows the
+/// result, not the field: a same-named free fn still makes the name
+/// ambiguous, so `path.join(..)` on a std type never binds the project's
+/// only `join` method. A bare `f()` that never reaches a member
+/// (`free_only`) drops every `Method` from the field instead: the method of
+/// an unrelated class neither binds the call nor competes with the free
+/// function the call does reach.
+fn global_field(target: ResolveTarget, free_only: bool) -> impl Fn(NodeKind) -> bool {
+    let field = match target {
+        ResolveTarget::Method => ResolveTarget::Callable,
+        other => other,
+    }
+    .kind_predicate();
+    move |kind| field(kind) && !(free_only && kind == NodeKind::Method)
+}
+
 /// The last two components of `path`: its directory's name and its file
 /// name (`collect/Maps.java`), or the whole path at the root.
 fn leaf_path(path: &str) -> &str {
@@ -880,24 +896,19 @@ impl SymbolTable {
     }
 
     /// Tier-3 global lookup: kind-filtered same-name candidates through the
-    /// shared barrier filter, [`pick_global`].
+    /// shared barrier filter, [`pick_global`]. `free_only` is a bare `f()`
+    /// that never reaches a member ([`global_field`]).
     pub fn lookup_global(
         &self,
         node_name: &str,
         target: ResolveTarget,
         caller: FileMeta,
+        free_only: bool,
     ) -> GlobalPick {
         let Some(raw) = self.global_scoped.get(node_name) else {
             return GlobalPick::NoMatch;
         };
-        // Method syntax narrows the result, not the field: a same-named free
-        // fn still makes the name ambiguous, so `path.join(..)` on a std type
-        // never binds the project's only `join` method.
-        let field = match target {
-            ResolveTarget::Method => ResolveTarget::Callable,
-            other => other,
-        }
-        .kind_predicate();
+        let field = global_field(target, free_only);
         let pick = pick_global(
             caller,
             raw.iter()
@@ -1034,12 +1045,9 @@ impl SymbolTable {
         caller: FileMeta,
         node_name: &str,
         target: ResolveTarget,
+        free_only: bool,
     ) -> Option<u32> {
-        let field = match target {
-            ResolveTarget::Method => ResolveTarget::Callable,
-            other => other,
-        }
-        .kind_predicate();
+        let field = global_field(target, free_only);
         let mut copies: Vec<u32> = Vec::new();
         for &id in self.global_scoped.get(node_name)? {
             if !field(self.node_kinds[id as usize])
@@ -2192,7 +2200,7 @@ mod tests {
         ]);
         let caller = FileMeta::from_path("src/app.py");
         assert_eq!(
-            st.lookup_global("Svc", ResolveTarget::Type, caller),
+            st.lookup_global("Svc", ResolveTarget::Type, caller, false),
             GlobalPick::Ambiguous,
             "pick_global keeps a test double ambiguous"
         );
@@ -2233,7 +2241,7 @@ mod tests {
         let st = st_owned(&[("a.py", "Only", NodeKind::Class, None)]);
         let caller = FileMeta::from_path("b.py");
         assert_eq!(
-            st.lookup_global("Only", ResolveTarget::Type, caller),
+            st.lookup_global("Only", ResolveTarget::Type, caller, false),
             GlobalPick::Unique(0)
         );
         assert_eq!(

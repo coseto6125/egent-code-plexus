@@ -705,6 +705,7 @@ impl<'a> Resolver<'a> {
             _ => site,
         };
         let bind_import = !matches!(site, CallSite::UntypedMember(_));
+        let free_only = reaches_free_only(language, site);
         // An untyped receiver is no `this`: no tier reaches the member
         // through the caller's bases.
         let heritage: &[String] = if bind_import { caller_heritage } else { &[] };
@@ -719,6 +720,7 @@ impl<'a> Resolver<'a> {
                 Some(CallScope {
                     owner: caller_owner,
                     untyped_receiver: !bind_import,
+                    free_only,
                     caller,
                 }),
                 &mut None,
@@ -1704,6 +1706,7 @@ impl<'a> Resolver<'a> {
             .map(|i| i.source.as_str());
         let raw_count = self.symbol_table.global_match_count(symbol_name);
         let caller_meta = FileMeta::from_path(&source_file_str);
+        let free_only = call.is_some_and(|scope| scope.free_only);
 
         let hidden = |node_id: NodeId| {
             self.symbol_table.file_of(node_id).is_some_and(|module| {
@@ -1719,7 +1722,7 @@ impl<'a> Resolver<'a> {
         let (tier, target_id, confidence, alt_count) =
             match self
                 .symbol_table
-                .lookup_global(symbol_name, target, caller_meta)
+                .lookup_global(symbol_name, target, caller_meta, free_only)
             {
                 GlobalPick::Unique(node_id) if hidden(node_id) => {
                     (DecisionTier::Unresolved, None, None, raw_count)
@@ -1741,6 +1744,7 @@ impl<'a> Resolver<'a> {
                             caller_meta,
                             symbol_name,
                             target,
+                            free_only,
                         )
                     })
                     .filter(|&node_id| !hidden(node_id))
@@ -1821,6 +1825,23 @@ fn call_target(source_file: &Path, site: CallSite<'_>) -> ResolveTarget {
     } else {
         ResolveTarget::Callable
     }
+}
+
+/// Whether `site` is a bare `f()` in a language where a call written with no
+/// receiver never reaches a member: PHP needs `$this->` / `self::`, Python
+/// `self.`, Rust `self.` / `Self::`, and C declares no members. A same-named
+/// method of an unrelated class (a Laravel test's private `config()` for the
+/// global helper `config()`) must not bind it at the Global tier. Java,
+/// Kotlin, C#, Swift, Dart, Scala, C++ and Ruby call a member of the
+/// enclosing type with no receiver. JavaScript, TypeScript and Go are no such
+/// languages either, but their parsers still write some member calls as the
+/// bare member: JS / TS `this.m()` outside a class (Vue options API object
+/// methods), TS `a.b.m()`, Go `obj.M()` and `pkg.F()` on an untyped operand.
+fn reaches_free_only(language: Language, site: CallSite<'_>) -> bool {
+    matches!(
+        language,
+        Language::Php | Language::Python | Language::Rust | Language::C
+    ) && matches!(site, CallSite::Plain(name) if !name.contains(['.', ':']))
 }
 
 /// For a Rust path call `a::b::Q::m`, does the module path `a::b` that the
@@ -1950,6 +1971,9 @@ struct CallScope<'c> {
     /// reached through the caller's bases, so they do not narrow the pick
     /// (`super(E, self).m()` starts after `E`).
     untyped_receiver: bool,
+    /// A bare `f()` that never reaches a member ([`reaches_free_only`]):
+    /// the Global tier weighs no `Method`.
+    free_only: bool,
     /// The calling declaration: a Rust `self.m()` in an `impl` block the
     /// parser gave no owner reaches that block's own `m`.
     caller: Option<NodeId>,
@@ -2175,7 +2199,7 @@ impl<'a> Resolver<'a> {
         let caller_meta = FileMeta::from_path(&source_file_str);
         if let GlobalPick::Unique(id) =
             self.symbol_table
-                .lookup_global(qualifier, ResolveTarget::Qualifier, caller_meta)
+                .lookup_global(qualifier, ResolveTarget::Qualifier, caller_meta, false)
         {
             if let Some(qf) = self.symbol_table.file_of(id) {
                 if self
