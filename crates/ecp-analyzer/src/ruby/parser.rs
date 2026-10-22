@@ -925,6 +925,27 @@ impl LanguageProvider for RubyProvider {
         // Same DFS also collects path-shaped string literals.
         let (raw_path_literals, raw_sql_refs) =
             extract_ruby_calls_and_path_literals(tree.root_node(), source, &mut nodes);
+        // Ruby has no field-read capture (`obj.x` is a call); the walk records
+        // the constants a method reads and its `method(:name)` references.
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &[],
+            &crate::calls::NameRefSpec {
+                ident_kinds: &["constant"],
+                kind: crate::calls::NameRefKind::Constant,
+                binding_fields: &[],
+                binding_parents: &[],
+                skip_fields: &[],
+                skip_kinds: &[],
+                skip_parents: &[],
+                call_suffixes: &[],
+                infix_calls: &[],
+                method_refs: &[],
+                symbol_method_refs: true,
+            },
+        );
 
         let framework_refs = detect_ast_framework_patterns(source, RUBY_FRAMEWORKS);
 

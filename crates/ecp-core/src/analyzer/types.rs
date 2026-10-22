@@ -287,6 +287,7 @@ pub struct RawNode {
     /// symbols in Pass 2 → `RelType::ReadsField`. Only names that resolve to a
     /// `NodeKind::Property` target emit an edge, so method-call and local-var
     /// reads parsers may over-capture here are dropped at resolution.
+    /// Marked entries are [`VariantRef`]s and [`NameRef`]s instead.
     pub field_reads: Vec<String>,
     /// Owning class/struct/trait for methods and properties.
     /// Set by each language parser at parse time; `None` for module-level
@@ -1107,6 +1108,73 @@ impl<'a> VariantRef<'a> {
 pub const VARIANT_USE_REASON: &str = "enum_variant:use";
 /// The `References` reason of a variant in a pattern or case label.
 pub const VARIANT_PATTERN_REASON: &str = "enum_variant:pattern";
+
+/// What the bare name of a [`NameRef`] may name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NameRefKind {
+    /// A module-level / static constant or variable it reads, or a function
+    /// it uses as a value: passed as a callback, stored, returned.
+    Value,
+    /// A constant only: a PHP / Ruby bare name never names a function.
+    Constant,
+    /// A function only: a method reference (`Foo::bar`, `::f`, Ruby
+    /// `method(:f)`). A qualified name is written `Foo.bar`.
+    Function,
+}
+
+/// One name a function body uses as a value, not as a callee: `LIMITS` in
+/// `LIMITS.max`, `handler` in `addEventListener('x', handler)`. Parameters
+/// and locals of the enclosing function are never recorded.
+///
+/// The entry rides in [`RawNode::field_reads`] behind a U+0001 marker, like
+/// [`VariantRef`]. Pass 2 binds a constant or variable as a `ReadsField`
+/// edge ([`VALUE_READ_REASON`]) and a function as a `References` edge
+/// ([`FUNCTION_REFERENCE_REASON`]), never as a `Calls` edge: the function
+/// is registered or handed on here, not invoked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NameRef<'a> {
+    pub name: &'a str,
+    pub kind: NameRefKind,
+}
+
+impl<'a> NameRef<'a> {
+    const VALUE_PREFIX: &'static str = "\u{1}name ";
+    const CONSTANT_PREFIX: &'static str = "\u{1}const ";
+    const FUNCTION_PREFIX: &'static str = "\u{1}fnref ";
+
+    const fn prefix(kind: NameRefKind) -> &'static str {
+        match kind {
+            NameRefKind::Value => Self::VALUE_PREFIX,
+            NameRefKind::Constant => Self::CONSTANT_PREFIX,
+            NameRefKind::Function => Self::FUNCTION_PREFIX,
+        }
+    }
+
+    pub fn encode(name: &str, kind: NameRefKind) -> String {
+        [Self::prefix(kind), name].concat()
+    }
+
+    /// `None` for an ordinary field-read or variant entry.
+    pub fn parse(raw: &'a str) -> Option<Self> {
+        [
+            NameRefKind::Value,
+            NameRefKind::Constant,
+            NameRefKind::Function,
+        ]
+        .into_iter()
+        .find_map(|kind| {
+            raw.strip_prefix(Self::prefix(kind))
+                .map(|name| Self { name, kind })
+        })
+    }
+}
+
+/// The `ReadsField` reason of a constant or variable a function names bare,
+/// apart from `field_read` (`obj.field`).
+pub const VALUE_READ_REASON: &str = "value_read";
+/// The `References` reason of a function named as a value (callback
+/// argument, stored handler, method reference) rather than called.
+pub const FUNCTION_REFERENCE_REASON: &str = "function_reference";
 
 #[cfg(test)]
 mod tests {

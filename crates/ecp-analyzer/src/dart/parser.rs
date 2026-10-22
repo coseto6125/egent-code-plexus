@@ -485,6 +485,33 @@ impl LanguageProvider for DartProvider {
             source,
             &mut nodes,
             &["member_expression"],
+            &crate::calls::NameRefSpec {
+                ident_kinds: &["identifier"],
+                kind: crate::calls::NameRefKind::Value,
+                binding_fields: &[
+                    ("initialized_variable_definition", "name"),
+                    ("initialized_identifier", "name"),
+                    ("for_statement", "name"),
+                    ("for_element", "name"),
+                    ("catch_clause", "exception"),
+                    ("catch_clause", "stack_trace"),
+                ],
+                binding_parents: &[],
+                skip_fields: &[],
+                skip_kinds: &[
+                    "import_or_export",
+                    "library_name",
+                    "part_directive",
+                    "part_of_directive",
+                    "annotation",
+                    "type_arguments",
+                ],
+                skip_parents: &["label"],
+                call_suffixes: &[],
+                infix_calls: &[],
+                method_refs: &[],
+                symbol_method_refs: false,
+            },
         );
         crate::calls::extract_variant_refs(
             tree.root_node(),

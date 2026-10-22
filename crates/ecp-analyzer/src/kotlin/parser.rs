@@ -621,6 +621,25 @@ impl LanguageProvider for KotlinProvider {
             source,
             &mut nodes,
             &["navigation_expression"],
+            &crate::calls::NameRefSpec {
+                ident_kinds: &["simple_identifier"],
+                kind: crate::calls::NameRefKind::Value,
+                binding_fields: &[],
+                binding_parents: &["variable_declaration", "catch_block"],
+                skip_fields: &[],
+                skip_kinds: &[
+                    "import_header",
+                    "package_header",
+                    "annotation",
+                    "type_arguments",
+                    "user_type",
+                ],
+                skip_parents: &["navigation_suffix"],
+                call_suffixes: &["call_suffix"],
+                infix_calls: &["infix_expression"],
+                method_refs: &["callable_reference"],
+                symbol_method_refs: false,
+            },
         );
         crate::calls::extract_variant_refs(
             tree.root_node(),

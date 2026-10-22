@@ -1644,3 +1644,130 @@ fn test_overlay_overload_delegating_to_sibling_matches_reindex() {
     assert_eq!(full.len(), 1, "only the overload link");
     assert_eq!(overlay, full);
 }
+
+/// (source uid, target uid, rel, reason, confidence %).
+type NameRefEdge = (u64, u64, RelType, String, u32);
+
+/// The `value_read` / `function_reference` edges a bare name yields
+/// (`ReadsField` to a constant, `References` to a function passed as a
+/// value), from the reindex of `dirty` and from the overlay of `dirty` over
+/// the base index.
+///
+/// The overlay rebuilds neither: its fragments carry no name references, so
+/// the base edge of a dirty reader survives with the source redirected (as
+/// for every `ReadsField`). An edit that keeps the reads therefore matches
+/// the reindex; an edit that adds or drops a read does not until the next
+/// reindex, which these cases do not cover.
+fn name_ref_edges(
+    provider: &dyn LanguageProvider,
+    files: &[(&str, &str)],
+    dirty: &[(&str, &str)],
+) -> (Vec<NameRefEdge>, Vec<NameRefEdge>) {
+    let parse = |path: &str, source: &str| {
+        provider
+            .parse_file(Path::new(path), source.as_bytes())
+            .unwrap()
+    };
+    let build = |edits: &[(&str, &str)]| {
+        let mut builder = GraphBuilder::new();
+        for &(path, original) in files {
+            let source = edits
+                .iter()
+                .find(|(p, _)| *p == path)
+                .map_or(original, |(_, s)| *s);
+            builder.add_graph(parse(path, source));
+        }
+        builder.build()
+    };
+    let wanted = |reason: &str| reason == "value_read" || reason == "function_reference";
+    let base = build(&[]);
+    let full = build(dirty);
+    let pool = &full.string_pool;
+    let mut expected: Vec<NameRefEdge> = full
+        .edges
+        .iter()
+        .filter(|e| wanted(e.reason.resolve(pool)))
+        .map(|e| {
+            (
+                full.nodes[e.source as usize].uid,
+                full.nodes[e.target as usize].uid,
+                e.rel_type,
+                e.reason.resolve(pool).to_owned(),
+                (e.confidence * 100.0).round() as u32,
+            )
+        })
+        .collect();
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&base).unwrap();
+    let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    let inputs: Vec<_> = dirty
+        .iter()
+        .map(|&(path, source)| input(parse(path, source)))
+        .collect();
+    let view = OverlayView::build(archived, &inputs).unwrap();
+    assert_eq!(
+        OverlayView::from_cache_bytes(&view.to_cache_bytes(), archived.nodes.len()).as_ref(),
+        Some(&view),
+        "view cache round trip"
+    );
+    let merged = MergedGraph::new(archived, Some(&view));
+    let mut actual: Vec<NameRefEdge> = merged
+        .all_edges()
+        .filter(|e| wanted(e.reason(archived)))
+        .map(|e| {
+            (
+                merged.node(e.source).unwrap().uid(),
+                merged.node(e.target).unwrap().uid(),
+                e.rel_type(),
+                e.reason(archived).to_owned(),
+                (e.confidence() * 100.0).round() as u32,
+            )
+        })
+        .collect();
+    expected.sort_by(|a, b| (a.0, a.1, &a.3, a.4).cmp(&(b.0, b.1, &b.3, b.4)));
+    actual.sort_by(|a, b| (a.0, a.1, &a.3, a.4).cmp(&(b.0, b.1, &b.3, b.4)));
+    (expected, actual)
+}
+
+#[test]
+fn test_overlay_typescript_constant_read_shifted_reader_matches_reindex() {
+    let app = "import { LIMITS } from './lib';\nexport function readLimit(): number {\n  return LIMITS.max;\n}\n";
+    let shifted = format!("\n{app}");
+    let (full, overlay) = name_ref_edges(
+        &TypeScriptProvider::new().unwrap(),
+        &[
+            ("lib.ts", "export const LIMITS = { max: 3 };\n"),
+            ("app.ts", app),
+        ],
+        &[("app.ts", &shifted)],
+    );
+    assert_eq!(full.len(), 1, "one imported constant read: {full:?}");
+    assert_eq!(full[0].2, RelType::ReadsField);
+    assert_eq!(overlay, full);
+}
+
+#[test]
+fn test_overlay_typescript_callback_argument_shifted_registrar_matches_reindex() {
+    let app = "function handler(): void {}\nexport function wire(el: any): void {\n  el.addEventListener('click', handler);\n}\n";
+    let shifted = format!("\n{app}");
+    let (full, overlay) = name_ref_edges(
+        &TypeScriptProvider::new().unwrap(),
+        &[("app.ts", app)],
+        &[("app.ts", &shifted)],
+    );
+    assert_eq!(full.len(), 1, "one callback reference: {full:?}");
+    assert_eq!(full[0].2, RelType::References);
+    assert_eq!(overlay, full);
+}
+
+#[test]
+fn test_overlay_python_constant_read_and_callback_shifted_matches_reindex() {
+    let app = "from lib import TIMEOUT\nimport threading\n\ndef worker():\n    pass\n\ndef start():\n    threading.Thread(target=worker).start()\n    return TIMEOUT\n";
+    let shifted = format!("\n{app}");
+    let (full, overlay) = name_ref_edges(
+        &PythonProvider::new().unwrap(),
+        &[("lib.py", "TIMEOUT = 5\n"), ("app.py", app)],
+        &[("app.py", &shifted)],
+    );
+    assert_eq!(full.len(), 2, "one constant read, one callback: {full:?}");
+    assert_eq!(overlay, full);
+}

@@ -602,7 +602,10 @@ pub enum RelType {
     /// `graph.bin` files.
     UsesPathLiteral,
     /// `Function` / `Method` → a struct/class field (`Property`) it reads,
-    /// e.g. `obj.rel_path`, `self.count`, `cfg->timeout`.
+    /// e.g. `obj.rel_path`, `self.count`, `cfg->timeout` (reason
+    /// `field_read`), or a module-level / static constant or variable
+    /// (`Const` / `Variable`, or the reader's own type's `Property`) it
+    /// names bare, e.g. `LIMITS` in `readLimit()` (reason `value_read`).
     ///
     /// LLM-utility filter (A) Graph completeness: changing the meaning or type
     /// of a field (rename, repr change, semantic shift) has a blast radius
@@ -612,9 +615,11 @@ pub enum RelType {
     /// away, the same guarantee `Calls` gives for functions.
     ///
     /// Does NOT contradict the panel decision to drop function-body locals
-    /// (see `drop_locals`): the edge only resolves to `NodeKind::Property`
-    /// targets (the `ResolveTarget::Field` / `is_property` filter), and locals
-    /// are `NodeKind::Variable`, never `Property`. So the local fan-out the
+    /// (see `drop_locals`): a `field_read` resolves only to `Property`
+    /// targets (the `ResolveTarget::Field` / `is_property` filter), and a
+    /// `value_read` only to declarations the graph already holds, which no
+    /// function-body local is; the parser drops a bare name that a
+    /// parameter or local of the reader declares. So the local fan-out the
     /// panel rejected can never appear here. Both public and private fields
     /// emit edges — a private field's readers are just as load-bearing for an
     /// in-module refactor as a public one's, and omitting them would put the

@@ -45,6 +45,12 @@ pub enum ResolveTarget {
     /// A struct/class field, for `ReadsField` edge resolution. Filters to
     /// `NodeKind::is_property`.
     Field,
+    /// What a bare name in a function body can name as a value
+    /// ([`crate::analyzer::types::NameRef`]): a module-level `Const` /
+    /// `Variable`, or a `Function` passed or stored. Unlike `Field` it takes
+    /// the import tiers: `import { LIMITS }` binds the read. A `Method` or a
+    /// `Property` is reached only through the reader's own type.
+    Value,
 }
 
 impl ResolveTarget {
@@ -55,6 +61,12 @@ impl ResolveTarget {
             Self::Type => NodeKind::is_type,
             Self::Qualifier => NodeKind::is_qualifier,
             Self::Field => NodeKind::is_property,
+            Self::Value => |kind| {
+                matches!(
+                    kind,
+                    NodeKind::Const | NodeKind::Variable | NodeKind::Function
+                )
+            },
         }
     }
 }

@@ -12,9 +12,11 @@ use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::analyzer::reexport::{export_filter_applies, is_ecmascript, ImportRef};
 use ecp_core::analyzer::types::{
-    owner_key, CallSite, LocalGraph, RawImport, RawNode, RawRoute, VariantRef,
+    owner_key, CallSite, LocalGraph, NameRef, NameRefKind, RawImport, RawNode, RawRoute, VariantRef,
 };
-pub use ecp_core::analyzer::types::{VARIANT_PATTERN_REASON, VARIANT_USE_REASON};
+pub use ecp_core::analyzer::types::{
+    FUNCTION_REFERENCE_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
+};
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::{
     BlindSpotRecord, CallMeta, Edge, ExportAliasFact, File, FileCategory, FunctionMeta, ImportFact,
@@ -2467,6 +2469,103 @@ fn resolve_variant_ref(
         .map(|id| (id, confidence))
 }
 
+/// The reasons of the edges a [`NameRef`] yields: `ReadsField` to a
+/// constant or variable, `References` to a function.
+#[derive(Clone, Copy)]
+struct NameRefReasons {
+    value: StrRef,
+    function: StrRef,
+}
+
+/// The declaration a [`NameRef`] names, with the edge confidence.
+///
+/// In a language where a bare name reaches a member of the enclosing type
+/// (Java `TABLE`, C# method group `Print`), the reader's own type is tried
+/// first. Then the ordinary tiers: same file, import, and the unique
+/// project-wide declaration ([`ResolutionTier::Global`]). The global tier is
+/// dropped where a module must import a name before it can use it bare, as
+/// there it can only stand for a local the parser did not see. An
+/// ambiguous name binds nothing.
+fn resolve_name_ref(
+    resolver: &Resolver<'_>,
+    symbol_table: &SymbolTable,
+    local_graph: &LocalGraph,
+    (file, language): (&str, Language),
+    raw_node: &RawNode,
+    name_ref: NameRef<'_>,
+) -> Option<(u32, f32)> {
+    let member = name_ref
+        .name
+        .rsplit_once('.')
+        .map_or(name_ref.name, |(_, member)| member);
+    if symbol_table.global_match_count(member) == 0 {
+        return None;
+    }
+    let qualified = member.len() != name_ref.name.len();
+    if let (false, Some(owner)) = (qualified, raw_node.owner_class.as_deref()) {
+        // `Method`, not `Callable`: inside `class Foo`, the receiver of
+        // `Foo.Create()` names the type, never its constructor.
+        let own_kinds: &[ResolveTarget] = match (name_ref.kind, language) {
+            (NameRefKind::Function, _) => &[ResolveTarget::Method],
+            (NameRefKind::Value, Language::CSharp | Language::Swift | Language::Dart) => {
+                &[ResolveTarget::Field, ResolveTarget::Method]
+            }
+            (NameRefKind::Value, Language::Java | Language::Kotlin | Language::Cpp) => {
+                &[ResolveTarget::Field]
+            }
+            _ => &[],
+        };
+        for &target in own_kinds {
+            if let [id] = symbol_table
+                .owned_in_file(file, member, owner, target)
+                .as_slice()
+            {
+                return Some((*id, ResolutionTier::SameFile.base_confidence()));
+            }
+        }
+    }
+    let target = match name_ref.kind {
+        NameRefKind::Function => ResolveTarget::Callable,
+        NameRefKind::Value | NameRefKind::Constant => ResolveTarget::Value,
+    };
+    let mut targets = resolver.resolve_symbol(
+        &local_graph.file_path,
+        name_ref.name,
+        &local_graph.imports,
+        target,
+    );
+    // A Java / Kotlin static import names a class's field, which no bare
+    // name reaches through the general tiers.
+    if targets.is_empty()
+        && name_ref.kind == NameRefKind::Value
+        && matches!(language, Language::Java | Language::Kotlin)
+    {
+        targets = resolver.resolve_imported_symbol(
+            &local_graph.file_path,
+            name_ref.name,
+            &local_graph.imports,
+            ResolveTarget::Field,
+        );
+    }
+    let &[(id, confidence)] = targets.as_slice() else {
+        return None;
+    };
+    let module_scoped = matches!(
+        language,
+        Language::TypeScript
+            | Language::JavaScript
+            | Language::Python
+            | Language::Java
+            | Language::CSharp
+    );
+    if (module_scoped && confidence <= ResolutionTier::Global.base_confidence())
+        || (name_ref.kind == NameRefKind::Constant && symbol_table.node_kind(id).is_callable())
+    {
+        return None;
+    }
+    Some((id, confidence))
+}
+
 /// Emit Pass-2 edges for a single `raw_node`'s heritage / calls / type
 /// annotation. Factored out so the serial dump path and the parallel
 /// hot path can share the same per-node logic.
@@ -2489,6 +2588,7 @@ fn pass2_emit_node_edges(
     reason_call: CallReasons,
     reason_reads_field: StrRef,
     reason_variant: VariantReasons,
+    reason_name_ref: NameRefReasons,
     symbol_table: &SymbolTable,
     edges: &mut Vec<Edge>,
     indirect_lookup: &FxHashMap<CallMetaKey, (u8, String)>,
@@ -2583,8 +2683,47 @@ fn pass2_emit_node_edges(
     // `ResolveTarget::Field` predicate (is_property) admits only Property
     // nodes, so locals / Variables never match — the read edge stays on the
     // cross-function field contract without reintroducing local fan-out.
+    // A `NameRef` (a bare name the parser kept after dropping parameters and
+    // locals) binds a constant or variable as ReadsField, a function as
+    // References: one edge per target per body.
     let mut variant_edges: Vec<(u32, bool)> = Vec::new();
+    let mut name_edges: Vec<u32> = Vec::new();
+    let mut name_file: Option<(String, Language)> = None;
     for field_name in &raw_node.field_reads {
+        if let Some(name_ref) = NameRef::parse(field_name) {
+            let (file, language) = name_file.get_or_insert_with(|| {
+                let file = local_graph.file_path.to_string_lossy().replace('\\', "/");
+                let language = Language::from_normalized_path(&file);
+                (file, language)
+            });
+            let Some((target_id, confidence)) = resolve_name_ref(
+                resolver,
+                symbol_table,
+                local_graph,
+                (file.as_str(), *language),
+                raw_node,
+                name_ref,
+            ) else {
+                continue;
+            };
+            if target_id == current_node_idx || name_edges.contains(&target_id) {
+                continue;
+            }
+            name_edges.push(target_id);
+            let (rel_type, reason) = if symbol_table.node_kind(target_id).is_callable() {
+                (RelType::References, reason_name_ref.function)
+            } else {
+                (RelType::ReadsField, reason_name_ref.value)
+            };
+            edges.push(Edge {
+                source: current_node_idx,
+                target: target_id,
+                rel_type,
+                confidence,
+                reason,
+            });
+            continue;
+        }
         if let Some(variant_ref) = VariantRef::parse(field_name) {
             let Some((target_id, confidence)) =
                 resolve_variant_ref(resolver, symbol_table, local_graph, raw_node, variant_ref)
@@ -2780,6 +2919,10 @@ fn pass2_resolve_edges(
         used: string_pool.add(VARIANT_USE_REASON),
         matched: string_pool.add(VARIANT_PATTERN_REASON),
     };
+    let reason_name_ref = NameRefReasons {
+        value: string_pool.add(VALUE_READ_REASON),
+        function: string_pool.add(FUNCTION_REFERENCE_REASON),
+    };
 
     let mut reason_cache: FxHashMap<String, StrRef> = FxHashMap::default();
     for lg in local_graphs {
@@ -2890,6 +3033,7 @@ fn pass2_resolve_edges(
                     reason_call,
                     reason_reads_field,
                     reason_variant,
+                    reason_name_ref,
                     symbol_table,
                     &mut edges,
                     lookup,
@@ -2986,6 +3130,7 @@ fn pass2_resolve_edges(
                         reason_call,
                         reason_reads_field,
                         reason_variant,
+                        reason_name_ref,
                         symbol_table_ref,
                         &mut local_edges,
                         lookup,

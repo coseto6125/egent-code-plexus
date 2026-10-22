@@ -973,7 +973,10 @@ impl<'a> Resolver<'a> {
         target: ResolveTarget,
         barrel: &mut Option<Arc<str>>,
     ) -> Vec<(NodeId, f32)> {
-        if raw_imports.is_empty() || target == ResolveTarget::Field {
+        // `ResolveTarget::Field` reaches here only for a bare name an import
+        // may bind (Java `import static app.Consts.TABLE`); `resolve_symbol`
+        // keeps `obj.field` reads off the import tiers on its own.
+        if raw_imports.is_empty() {
             return Vec::new();
         }
         if !(bind_import && import_member_fallback(language)) {

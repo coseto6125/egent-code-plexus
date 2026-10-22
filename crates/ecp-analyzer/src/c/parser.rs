@@ -743,6 +743,25 @@ impl LanguageProvider for CProvider {
             source,
             &mut nodes,
             &["field_expression"],
+            &crate::calls::NameRefSpec {
+                ident_kinds: &["identifier"],
+                kind: crate::calls::NameRefKind::Value,
+                binding_fields: &[],
+                binding_parents: &[],
+                skip_fields: &[],
+                skip_kinds: &[
+                    "preproc_include",
+                    "preproc_def",
+                    "preproc_function_def",
+                    "preproc_call",
+                    "attribute_specifier",
+                ],
+                skip_parents: &[],
+                call_suffixes: &[],
+                infix_calls: &[],
+                method_refs: &[],
+                symbol_method_refs: false,
+            },
         );
         crate::calls::extract_variant_refs(
             tree.root_node(),

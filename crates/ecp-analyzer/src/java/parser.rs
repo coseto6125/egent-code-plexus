@@ -518,7 +518,34 @@ impl LanguageProvider for JavaProvider {
         // also collects path-shaped string literals.
         let (raw_path_literals, raw_sql_refs) =
             extract_java_calls_and_path_literals(tree.root_node(), source, &mut nodes);
-        crate::calls::extract_field_reads(tree.root_node(), source, &mut nodes, &["field_access"]);
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["field_access"],
+            &crate::calls::NameRefSpec {
+                ident_kinds: &["identifier"],
+                kind: crate::calls::NameRefKind::Value,
+                binding_fields: &[
+                    ("enhanced_for_statement", "name"),
+                    ("resource", "name"),
+                    ("instanceof_expression", "name"),
+                ],
+                binding_parents: &[],
+                skip_fields: &[],
+                skip_kinds: &[
+                    "marker_annotation",
+                    "annotation",
+                    "scoped_identifier",
+                    "type_arguments",
+                ],
+                skip_parents: &["break_statement", "continue_statement", "labeled_statement"],
+                call_suffixes: &[],
+                infix_calls: &[],
+                method_refs: &["method_reference"],
+                symbol_method_refs: false,
+            },
+        );
         crate::calls::extract_variant_refs(
             tree.root_node(),
             source,

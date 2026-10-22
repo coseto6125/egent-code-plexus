@@ -552,6 +552,24 @@ impl LanguageProvider for RustProvider {
             source,
             &mut nodes,
             &["field_expression"],
+            &crate::calls::NameRefSpec {
+                ident_kinds: &["identifier", "shorthand_field_identifier"],
+                kind: crate::calls::NameRefKind::Value,
+                binding_fields: &[("const_item", "name"), ("static_item", "name")],
+                binding_parents: &[],
+                skip_fields: &[],
+                skip_kinds: &[
+                    "use_declaration",
+                    "attribute_item",
+                    "inner_attribute_item",
+                    "type_arguments",
+                ],
+                skip_parents: &[],
+                call_suffixes: &[],
+                infix_calls: &[],
+                method_refs: &[],
+                symbol_method_refs: false,
+            },
         );
         crate::calls::extract_variant_refs(
             tree.root_node(),

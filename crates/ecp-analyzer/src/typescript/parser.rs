@@ -758,6 +758,24 @@ impl LanguageProvider for TypeScriptProvider {
             source,
             &mut nodes,
             &["member_expression"],
+            &crate::calls::NameRefSpec {
+                ident_kinds: &["identifier", "shorthand_property_identifier"],
+                kind: crate::calls::NameRefKind::Value,
+                binding_fields: &[("for_in_statement", "left")],
+                binding_parents: &[],
+                skip_fields: &[],
+                skip_kinds: &[
+                    "import_statement",
+                    "decorator",
+                    "type_annotation",
+                    "type_arguments",
+                ],
+                skip_parents: &[],
+                call_suffixes: &[],
+                infix_calls: &[],
+                method_refs: &[],
+                symbol_method_refs: false,
+            },
         );
         crate::calls::extract_variant_refs(
             tree.root_node(),

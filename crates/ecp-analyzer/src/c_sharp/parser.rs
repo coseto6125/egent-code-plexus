@@ -642,6 +642,31 @@ impl LanguageProvider for CSharpProvider {
             source,
             &mut nodes,
             &["member_access_expression"],
+            &crate::calls::NameRefSpec {
+                ident_kinds: &["identifier", "implicit_parameter"],
+                kind: crate::calls::NameRefKind::Value,
+                binding_fields: &[
+                    ("foreach_statement", "left"),
+                    ("catch_declaration", "name"),
+                    ("declaration_expression", "name"),
+                    ("declaration_pattern", "name"),
+                    ("from_clause", "name"),
+                ],
+                binding_parents: &[],
+                skip_fields: &[],
+                skip_kinds: &[
+                    "using_directive",
+                    "attribute_list",
+                    "type_argument_list",
+                    "qualified_name",
+                    "generic_name",
+                ],
+                skip_parents: &["labeled_statement", "goto_statement"],
+                call_suffixes: &[],
+                infix_calls: &[],
+                method_refs: &[],
+                symbol_method_refs: false,
+            },
         );
         crate::calls::extract_variant_refs(
             tree.root_node(),

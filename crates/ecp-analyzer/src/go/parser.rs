@@ -964,6 +964,25 @@ impl LanguageProvider for GoProvider {
             source,
             &mut nodes,
             &["selector_expression"],
+            &crate::calls::NameRefSpec {
+                ident_kinds: &["identifier"],
+                kind: crate::calls::NameRefKind::Value,
+                binding_fields: &[
+                    ("short_var_declaration", "left"),
+                    ("range_clause", "left"),
+                    ("receive_statement", "left"),
+                    ("var_spec", "name"),
+                    ("const_spec", "name"),
+                ],
+                binding_parents: &[],
+                skip_fields: &[("keyed_element", "key")],
+                skip_kinds: &["import_declaration", "type_arguments"],
+                skip_parents: &[],
+                call_suffixes: &[],
+                infix_calls: &[],
+                method_refs: &[],
+                symbol_method_refs: false,
+            },
         );
 
         // owner_class is set at emit time via receiver_type_from_method_decl().

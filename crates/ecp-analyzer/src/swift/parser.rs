@@ -615,6 +615,29 @@ impl LanguageProvider for SwiftProvider {
             source,
             &mut nodes,
             &["navigation_expression"],
+            &crate::calls::NameRefSpec {
+                ident_kinds: &["simple_identifier"],
+                kind: crate::calls::NameRefKind::Value,
+                binding_fields: &[
+                    ("property_declaration", "name"),
+                    ("for_statement", "item"),
+                    ("catch_block", "error"),
+                ],
+                binding_parents: &[],
+                skip_fields: &[],
+                skip_kinds: &[
+                    "import_declaration",
+                    "attribute",
+                    "type_annotation",
+                    "user_type",
+                    "type_arguments",
+                ],
+                skip_parents: &["value_argument_label"],
+                call_suffixes: &["call_suffix"],
+                infix_calls: &[],
+                method_refs: &[],
+                symbol_method_refs: false,
+            },
         );
         crate::calls::extract_variant_refs(
             tree.root_node(),

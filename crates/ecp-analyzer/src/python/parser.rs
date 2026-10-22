@@ -1303,7 +1303,38 @@ impl LanguageProvider for PythonProvider {
             &local_types,
             &mut call_sites,
         );
-        crate::calls::extract_field_reads(tree.root_node(), source, &mut nodes, &["attribute"]);
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["attribute"],
+            &crate::calls::NameRefSpec {
+                ident_kinds: &["identifier"],
+                kind: crate::calls::NameRefKind::Value,
+                binding_fields: &[
+                    ("assignment", "left"),
+                    ("for_statement", "left"),
+                    ("for_in_clause", "left"),
+                    ("named_expression", "name"),
+                ],
+                binding_parents: &[],
+                skip_fields: &[],
+                skip_kinds: &[
+                    "import_statement",
+                    "import_from_statement",
+                    "future_import_statement",
+                    "decorator",
+                    "nonlocal_statement",
+                    "dotted_name",
+                    "type",
+                ],
+                skip_parents: &[],
+                call_suffixes: &[],
+                infix_calls: &[],
+                method_refs: &[],
+                symbol_method_refs: false,
+            },
+        );
         crate::calls::extract_variant_refs(
             tree.root_node(),
             source,

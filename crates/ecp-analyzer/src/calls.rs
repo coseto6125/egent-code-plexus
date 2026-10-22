@@ -1,6 +1,7 @@
-pub use ecp_core::analyzer::types::VariantRef;
 use ecp_core::analyzer::types::{CallSite, RawNode};
+pub use ecp_core::analyzer::types::{NameRef, NameRefKind, VariantRef};
 use ecp_core::graph::NodeKind;
+use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use tree_sitter::Node;
@@ -212,20 +213,34 @@ pub fn attach_to_enclosing(
 /// `extract_calls` already records that as a `Calls` edge, and the field name
 /// there is a method, not a data field. The check is structural: if the access
 /// node is the `function` child of its parent call, it is a callee.
+///
+/// The same walk records each bare name the body uses as a value
+/// ([`NameRef`]), once per enclosing function, as `names` describes.
 pub fn extract_field_reads(
     root: Node<'_>,
     source: &[u8],
     nodes: &mut [RawNode],
     field_kinds: &[&str],
+    names: &NameRefSpec,
 ) {
     let containers = enclosing_containers(nodes);
     if containers.is_empty() {
         return;
     }
     let mut reads: Vec<PendingCall> = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
-        if field_kinds.contains(&n.kind()) && !is_call_callee(n) {
+    let mut scan = NameScan::default();
+    // Each node travels with its parent and its field in that parent:
+    // `Node::parent` walks down from the root, which every node would pay.
+    let mut stack: Vec<Frame<'_>> = vec![Frame {
+        node: root,
+        parent: None,
+        field: None,
+        scope: NameScope::Value,
+    }];
+    while let Some(frame) = stack.pop() {
+        let n = frame.node;
+        let kind = n.kind();
+        if field_kinds.contains(&kind) && !is_call_callee(n, frame.parent) {
             if let Some(name) = field_name_from(n, source) {
                 reads.push(PendingCall {
                     pos: start_pos(n),
@@ -233,19 +248,36 @@ pub fn extract_field_reads(
                 });
             }
         }
-        let mut c = n.walk();
-        for child in n.children(&mut c) {
-            stack.push(child);
+        if frame.scope != NameScope::Skip && scan.visit(&frame, source, names) {
+            continue;
+        }
+        let mut cursor = n.walk();
+        if cursor.goto_first_child() {
+            let parent = ParentShape::of(kind, frame.scope);
+            loop {
+                let child = cursor.node();
+                let field = cursor.field_name();
+                stack.push(Frame {
+                    node: child,
+                    parent: Some(n),
+                    field,
+                    scope: names.child_scope(parent, child.kind(), field),
+                });
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
         }
     }
     attach_pending_field_reads(&containers, reads, nodes);
+    scan.attach(&containers, nodes);
 }
 
 /// True when `access` is the callee of an enclosing call expression — i.e. its
 /// parent is a call/invocation whose `function` field is `access`. Such nodes
 /// are method calls handled by `extract_calls`, not data-field reads.
-fn is_call_callee(access: Node<'_>) -> bool {
-    let Some(parent) = access.parent() else {
+fn is_call_callee(access: Node<'_>, parent: Option<Node<'_>>) -> bool {
+    let Some(parent) = parent else {
         return false;
     };
     matches!(
@@ -256,6 +288,359 @@ fn is_call_callee(access: Node<'_>) -> bool {
             | "invocation_expression"
             | "call"
     ) && parent.child_by_field_name("function").map(|f| f.id()) == Some(access.id())
+}
+
+/// Where a language's grammar names a value by a bare name, for the
+/// [`NameRef`]s [`extract_field_reads`] records.
+///
+/// The fields every grammar here shares are built in: a `pattern`,
+/// `parameter(s)`, `declarator`, `alias` or `bound_identifier` subtree
+/// declares local names, as does a `name` under a `*parameter*` or
+/// `*declarator*` node and every child of a `*parameter*` node; a `value`,
+/// `right`, `body` … subtree is an expression again; a `type` subtree names
+/// no value.
+pub struct NameRefSpec {
+    /// Node kinds of a bare name: `identifier`, Kotlin / Swift
+    /// `simple_identifier`, Ruby `constant`, PHP `name`.
+    pub ident_kinds: &'static [&'static str],
+    /// What a bare name may name.
+    pub kind: NameRefKind,
+    /// `(parent kind, field)` whose subtree declares local names beyond the
+    /// shared ones: Python `(assignment, left)`, Go `(var_spec, name)`.
+    pub binding_fields: &'static [(&'static str, &'static str)],
+    /// Parent kinds whose bare-name children declare local names: Kotlin
+    /// `variable_declaration`, whose grammar has no fields.
+    pub binding_parents: &'static [&'static str],
+    /// `(parent kind, field)` whose subtree names no value: Go
+    /// `(keyed_element, key)`, a struct literal's field name.
+    pub skip_fields: &'static [(&'static str, &'static str)],
+    /// Kinds whose subtree names no value: imports, annotations, types.
+    pub skip_kinds: &'static [&'static str],
+    /// Parent kinds whose bare-name children name no value: a member
+    /// suffix (Kotlin `navigation_suffix`), a jump or argument label.
+    pub skip_parents: &'static [&'static str],
+    /// The sibling after a callee in a grammar with no `function` field:
+    /// Kotlin / Swift `call_suffix`.
+    pub call_suffixes: &'static [&'static str],
+    /// Parent kinds whose middle bare name is a callee: Kotlin
+    /// `infix_expression` (`a to b`).
+    pub infix_calls: &'static [&'static str],
+    /// Method-reference kinds whose last bare name is the function: Java
+    /// `method_reference`, Kotlin `callable_reference`.
+    pub method_refs: &'static [&'static str],
+    /// Ruby: `method(:name)` names the method `name`.
+    pub symbol_method_refs: bool,
+}
+
+/// Fields whose subtree declares local names in every grammar here.
+const BINDING_FIELDS: &[&str] = &[
+    "pattern",
+    "parameter",
+    "parameters",
+    "declarator",
+    "alias",
+    "bound_identifier",
+];
+
+/// Fields whose subtree is an expression again inside a declaration: the
+/// initializer of `let x = LIMIT`, a parameter default, a loop's iterable.
+const VALUE_FIELDS: &[&str] = &[
+    "value",
+    "right",
+    "default_value",
+    "body",
+    "condition",
+    "initializer",
+    "arguments",
+    "size",
+    "index",
+    "collection",
+];
+
+/// Fields whose subtree names no value.
+const SKIP_FIELDS: &[&str] = &["type", "return_type", "type_arguments"];
+
+/// Fields under which a bare name is a declared or member name, a callee,
+/// or a label, never a value read.
+const NON_VALUE_FIELDS: &[&str] = &[
+    "name",
+    "field",
+    "property",
+    "label",
+    "attribute",
+    "function",
+    "method",
+    "constructor",
+    "scope",
+    "suffix",
+    "macro",
+    "path",
+    "external_name",
+];
+
+/// Where a node sits for [`NameRef`] capture.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NameScope {
+    /// An expression: a bare name reads a value.
+    Value,
+    /// A declaration target: a bare name declares a local.
+    Binding,
+    /// A type, import, annotation or label: a bare name is neither.
+    Skip,
+}
+
+struct Frame<'t> {
+    node: Node<'t>,
+    parent: Option<Node<'t>>,
+    field: Option<&'t str>,
+    scope: NameScope,
+}
+
+/// What a node passes on to its children's [`NameScope`], computed once per
+/// node rather than once per child.
+#[derive(Clone, Copy)]
+struct ParentShape<'k> {
+    kind: &'k str,
+    scope: NameScope,
+    /// A `*parameter*` node: every child declares, unless a field says else.
+    parameter: bool,
+    /// A `*declarator*` node: its `name` declares.
+    declarator: bool,
+}
+
+impl<'k> ParentShape<'k> {
+    fn of(kind: &'k str, scope: NameScope) -> Self {
+        Self {
+            kind,
+            scope,
+            parameter: kind.contains("parameter"),
+            declarator: kind.contains("declarator"),
+        }
+    }
+}
+
+impl NameRefSpec {
+    fn child_scope(
+        &self,
+        parent: ParentShape<'_>,
+        child_kind: &str,
+        field: Option<&str>,
+    ) -> NameScope {
+        if self.skip_kinds.contains(&child_kind) {
+            return NameScope::Skip;
+        }
+        if let Some(field) = field {
+            if BINDING_FIELDS.contains(&field)
+                || (field == "name" && (parent.parameter || parent.declarator))
+                || self.binding_fields.contains(&(parent.kind, field))
+            {
+                return NameScope::Binding;
+            }
+            if VALUE_FIELDS.contains(&field) {
+                return NameScope::Value;
+            }
+            if SKIP_FIELDS.contains(&field) || self.skip_fields.contains(&(parent.kind, field)) {
+                return NameScope::Skip;
+            }
+        }
+        if parent.parameter && parent.scope != NameScope::Skip {
+            return NameScope::Binding;
+        }
+        parent.scope
+    }
+
+    /// Whether `ident`, a bare name in an expression, reads a value: not a
+    /// member or declared name, not a callee, not an assignment target.
+    fn reads_value(&self, ident: Node<'_>, parent: Node<'_>, field: Option<&str>) -> bool {
+        let parent_kind = parent.kind();
+        if field.is_some_and(|f| {
+            NON_VALUE_FIELDS.contains(&f) || (f == "left" && parent_kind.contains("assignment"))
+        }) || self.skip_parents.contains(&parent_kind)
+        {
+            return false;
+        }
+        if !self.call_suffixes.is_empty()
+            && ident
+                .next_named_sibling()
+                .is_some_and(|s| self.call_suffixes.contains(&s.kind()))
+        {
+            return false;
+        }
+        !(self.infix_calls.contains(&parent_kind)
+            && ident.prev_named_sibling().is_some()
+            && ident.next_named_sibling().is_some())
+    }
+}
+
+/// A bare name read inside a body, pending its enclosing function.
+struct PendingName<'s> {
+    pos: Pos,
+    name: Cow<'s, str>,
+    kind: NameRefKind,
+}
+
+/// A local name a declaration introduces at `pos`.
+struct PendingBinding<'s> {
+    pos: Pos,
+    name: &'s str,
+}
+
+#[derive(Default)]
+struct NameScan<'s> {
+    reads: Vec<PendingName<'s>>,
+    bindings: Vec<PendingBinding<'s>>,
+}
+
+impl<'s> NameScan<'s> {
+    /// Record what `frame`'s node declares or reads. True when its subtree
+    /// holds nothing more to record (a method reference).
+    fn visit(&mut self, frame: &Frame<'_>, source: &'s [u8], spec: &NameRefSpec) -> bool {
+        let n = frame.node;
+        let kind = n.kind();
+        if spec.ident_kinds.contains(&kind) {
+            let Some(parent) = frame.parent else {
+                return false;
+            };
+            let Ok(name) = n.utf8_text(source) else {
+                return false;
+            };
+            match frame.scope {
+                NameScope::Binding => self.bindings.push(PendingBinding {
+                    pos: start_pos(n),
+                    name,
+                }),
+                NameScope::Value if spec.binding_parents.contains(&parent.kind()) => {
+                    self.bindings.push(PendingBinding {
+                        pos: start_pos(n),
+                        name,
+                    });
+                }
+                NameScope::Value if spec.reads_value(n, parent, frame.field) => {
+                    self.reads.push(PendingName {
+                        pos: start_pos(n),
+                        name: Cow::Borrowed(name),
+                        kind: spec.kind,
+                    });
+                }
+                _ => {}
+            }
+            return false;
+        }
+        if spec.method_refs.contains(&kind) {
+            if let Some(name) = method_reference(n, source, spec) {
+                self.reads.push(PendingName {
+                    pos: start_pos(n),
+                    name,
+                    kind: NameRefKind::Function,
+                });
+            }
+            return true;
+        }
+        if spec.symbol_method_refs && kind == "call" {
+            if let Some(name) = symbol_method_ref(n, source) {
+                self.reads.push(PendingName {
+                    pos: start_pos(n),
+                    name: Cow::Borrowed(name),
+                    kind: NameRefKind::Function,
+                });
+            }
+        }
+        false
+    }
+
+    /// Attach each read to its smallest enclosing function, once per
+    /// function, unless a parameter or local of a function holding it
+    /// declares the same name.
+    fn attach(self, containers: &[EnclosingContainer], nodes: &mut [RawNode]) {
+        if self.reads.is_empty() {
+            return;
+        }
+        let mut bound: rustc_hash::FxHashMap<&str, Vec<usize>> = rustc_hash::FxHashMap::default();
+        let binding_targets = enclosing_targets(containers, &self.bindings, |b| b.pos);
+        for (binding, target) in self.bindings.iter().zip(binding_targets) {
+            if let Some(node_idx) = target {
+                bound.entry(binding.name).or_default().push(node_idx);
+            }
+        }
+        let targets = enclosing_targets(containers, &self.reads, |r| r.pos);
+        let mut seen: rustc_hash::FxHashSet<(usize, NameRefKind, &str)> =
+            rustc_hash::FxHashSet::default();
+        for (read, target) in self.reads.iter().zip(targets) {
+            let Some(node_idx) = target else { continue };
+            let shadowed = read.kind != NameRefKind::Function
+                && bound.get(read.name.as_ref()).is_some_and(|scopes| {
+                    scopes
+                        .iter()
+                        .any(|&scope| span_holds(nodes[scope].span, read.pos))
+                });
+            if !shadowed && seen.insert((node_idx, read.kind, read.name.as_ref())) {
+                nodes[node_idx]
+                    .field_reads
+                    .push(NameRef::encode(&read.name, read.kind));
+            }
+        }
+    }
+}
+
+/// The function a method reference names: `print` for `this::print` /
+/// `::print`, `Foo.bar` for `Foo::bar`. `None` for a constructor
+/// (`Foo::new`), a `super::` reference, or a computed receiver.
+fn method_reference<'s>(
+    reference: Node<'_>,
+    source: &'s [u8],
+    spec: &NameRefSpec,
+) -> Option<Cow<'s, str>> {
+    if reference
+        .child(reference.child_count().checked_sub(1)?)
+        .is_some_and(|last| last.kind() == "new")
+    {
+        return None;
+    }
+    let mut cursor = reference.walk();
+    let named: Vec<Node<'_>> = reference.named_children(&mut cursor).collect();
+    let (member, rest) = named.split_last()?;
+    if !spec.ident_kinds.contains(&member.kind()) {
+        return None;
+    }
+    let member = member.utf8_text(source).ok()?;
+    let Some(receiver) = rest.iter().rev().find(|n| n.kind() != "type_arguments") else {
+        return Some(Cow::Borrowed(member));
+    };
+    match receiver.kind() {
+        "this" | "this_expression" => Some(Cow::Borrowed(member)),
+        "identifier"
+        | "type_identifier"
+        | "simple_identifier"
+        | "scoped_type_identifier"
+        | "field_access"
+        | "user_type" => {
+            let text = receiver.utf8_text(source).ok()?;
+            let qualifier = text.rsplit('.').next().unwrap_or(text).trim();
+            Some(Cow::Owned(format!("{qualifier}.{member}")))
+        }
+        _ => None,
+    }
+}
+
+/// Ruby `method(:name)` with no receiver: the method `name` handed on as a
+/// `Method` object.
+fn symbol_method_ref<'s>(call: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    if call.child_by_field_name("receiver").is_some()
+        || call.child_by_field_name("method")?.utf8_text(source).ok()? != "method"
+    {
+        return None;
+    }
+    let args = call.child_by_field_name("arguments")?;
+    let mut cursor = args.walk();
+    let first = args.named_children(&mut cursor).next()?;
+    if first.kind() != "simple_symbol" {
+        return None;
+    }
+    first
+        .utf8_text(source)
+        .ok()?
+        .strip_prefix(':')
+        .filter(|name| !name.is_empty())
 }
 
 /// The accessed field's short name from a member-access node. Tries the
@@ -309,7 +694,7 @@ fn attach_pending_field_reads(
     if reads.is_empty() {
         return;
     }
-    let targets = enclosing_targets(containers, &reads);
+    let targets = enclosing_targets(containers, &reads, |r| r.pos);
     for (read, target) in reads.into_iter().zip(targets) {
         if let Some(node_idx) = target {
             nodes[node_idx].field_reads.push(read.name);
@@ -398,7 +783,7 @@ pub fn extract_variant_refs(
     if refs.is_empty() {
         return;
     }
-    let targets = enclosing_targets(&containers, &refs);
+    let targets = enclosing_targets(&containers, &refs, |r| r.pos);
     let mut seen: rustc_hash::FxHashSet<(usize, String)> = rustc_hash::FxHashSet::default();
     for (entry, target) in refs.into_iter().zip(targets) {
         let Some(node_idx) = target else { continue };
@@ -611,22 +996,23 @@ fn enclosing_containers(nodes: &[RawNode]) -> Vec<EnclosingContainer> {
 
 /// For each pending entry, the node index of the smallest container whose
 /// span holds its position.
-fn enclosing_targets(
+fn enclosing_targets<T>(
     containers: &[EnclosingContainer],
-    pending: &[PendingCall],
+    pending: &[T],
+    pos_of: impl Fn(&T) -> Pos,
 ) -> Vec<Option<usize>> {
     let mut targets: Vec<Option<usize>> = vec![None; pending.len()];
     if containers.is_empty() {
         return targets;
     }
     let mut order: Vec<usize> = (0..pending.len()).collect();
-    order.sort_unstable_by_key(|&idx| pending[idx].pos);
+    order.sort_unstable_by_key(|&idx| pos_of(&pending[idx]));
 
     let mut active: BinaryHeap<Reverse<((u32, i64), usize)>> = BinaryHeap::new();
     let mut next_container = 0usize;
 
     for &idx in &order {
-        let pos = pending[idx].pos;
+        let pos = pos_of(&pending[idx]);
         while next_container < containers.len() && containers[next_container].start <= pos {
             active.push(Reverse((containers[next_container].width, next_container)));
             next_container += 1;
@@ -647,7 +1033,7 @@ fn attach_pending_calls(
     calls: Vec<PendingCall>,
     nodes: &mut [RawNode],
 ) {
-    let targets = enclosing_targets(containers, &calls);
+    let targets = enclosing_targets(containers, &calls, |c| c.pos);
     for (call, target) in calls.into_iter().zip(targets) {
         if let Some(node_idx) = target {
             nodes[node_idx].calls.push(call.name);
@@ -823,6 +1209,25 @@ mod tests {
         }
         assert_eq!(VariantRef::parse("timeout"), None);
         assert_eq!(VariantRef::parse("variant E::A"), None);
+    }
+
+    #[test]
+    fn test_name_ref_encode_parse_round_trips_and_ignores_other_entries() {
+        for (name, kind) in [
+            ("LIMITS", NameRefKind::Value),
+            ("TIMEOUT", NameRefKind::Constant),
+            ("Foo.bar", NameRefKind::Function),
+        ] {
+            let entry = NameRef::encode(name, kind);
+            assert_eq!(
+                NameRef::parse(&entry),
+                Some(NameRef { name, kind }),
+                "{entry:?}"
+            );
+            assert_eq!(VariantRef::parse(&entry), None, "{entry:?}");
+        }
+        assert_eq!(NameRef::parse("timeout"), None);
+        assert_eq!(NameRef::parse(&VariantRef::encode("E::A", false)), None);
     }
 
     #[test]
