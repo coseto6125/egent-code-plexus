@@ -5459,15 +5459,11 @@ mod tests {
 
     #[test]
     fn test_static_reason_listed_and_unknown_reasons_map_to_constant_or_none() {
-        for reason in [
-            OVERLOAD_SET_REASON,
-            CLOSURE_REFERENCE_REASON,
-            NEAREST_COPY_REASON,
-            crate::session::merged::OVERLAY_EDGE_REASON,
-            VARIANT_USE_REASON,
-            VARIANT_PATTERN_REASON,
-        ] {
-            assert_eq!(static_reason(&reason.to_string()), Some(reason));
+        for reason in VIEW_EDGE_REASONS {
+            // A decoded reason is an owned string: the lookup must match by
+            // content, not by pointer.
+            let decoded = String::from(reason);
+            assert_eq!(static_reason(&decoded), Some(reason));
         }
         for unknown in ["", " ", "call", "l1-overlay "] {
             assert_eq!(static_reason(unknown), None, "{unknown:?}");

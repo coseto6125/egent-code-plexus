@@ -299,12 +299,8 @@ pub fn load_view_inputs_hashed(
         ) else {
             continue;
         };
-        // Length prefixes keep two different (path, bytes) sequences from
-        // concatenating to the same stream.
-        for part in [rel_path.as_bytes(), bytes.as_slice()] {
-            hasher.update(&(part.len() as u64).to_le_bytes());
-            hasher.update(part);
-        }
+        super::view_cache::hash_part(&mut hasher, rel_path.as_bytes());
+        super::view_cache::hash_part(&mut hasher, &bytes);
         out.push(OverlayFileInput {
             rel_path: rel_path.clone(),
             symbols: archived

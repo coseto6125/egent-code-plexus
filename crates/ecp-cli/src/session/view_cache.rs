@@ -42,7 +42,9 @@ pub fn key(graph_path: &Path, graph_nodes: usize, inputs_hash: u64) -> Option<u6
     Some(hasher.digest())
 }
 
-fn hash_part(hasher: &mut Xxh3, part: &[u8]) {
+/// Length-prefixed, so two different part sequences never concatenate to
+/// the same stream.
+pub(crate) fn hash_part(hasher: &mut Xxh3, part: &[u8]) {
     hasher.update(&(part.len() as u64).to_le_bytes());
     hasher.update(part);
 }
