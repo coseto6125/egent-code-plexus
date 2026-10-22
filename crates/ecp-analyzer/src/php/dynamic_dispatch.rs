@@ -53,6 +53,9 @@ pub(super) type BoundValuesCache = FxHashMap<(usize, String), Option<BoundValues
 pub(super) struct BoundValues {
     values: Vec<String>,
     ambiguous: bool,
+    /// The variable is passed to a call, whose by-reference parameter can
+    /// rebind it: the values stay candidates, but not a complete set.
+    passed_as_argument: bool,
 }
 
 /// The fan-out of a runtime-named method call, when every value its name
@@ -96,7 +99,7 @@ pub(super) fn const_map_fanout(
         .to_string(),
         span,
     };
-    Some((fanout, late_bound))
+    Some((fanout, late_bound || bound.passed_as_argument))
 }
 
 /// The method or named function the call sits in; `None` inside a closure,
@@ -205,6 +208,7 @@ fn bound_values(
         ambiguous: false,
     };
     let mut assigned = false;
+    let mut passed_as_argument = false;
     let mut stack = vec![body];
     while let Some(n) = stack.pop() {
         match n.kind() {
@@ -233,6 +237,8 @@ fn bound_values(
                     || (parent.kind() == "subscript_expression" && parent.named_child(0) == Some(n))
                 {
                     return None;
+                } else if parent.kind() == "argument" {
+                    passed_as_argument = true;
                 }
                 continue;
             }
@@ -248,6 +254,7 @@ fn bound_values(
     Some(BoundValues {
         values: scan.values,
         ambiguous: scan.ambiguous,
+        passed_as_argument,
     })
 }
 

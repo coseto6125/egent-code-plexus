@@ -282,9 +282,18 @@ fn test_parse_file_case_variant_values_emit_one_candidate() {
 fn test_parse_file_reads_of_name_variable_keep_fanout() {
     let src = api(
         "const MAP = ['hero'];",
-        "$m = self::MAP[$type] ?? null;\n        if (!$m || !method_exists(Rows::class, $m)) { return null; }\n        $log = function () use ($m) { return $m; };\n        return Rows::$m($p);",
+        "$m = self::MAP[$type] ?? null;\n        if (!$m) { return null; }\n        $log = function () use ($m) { return $m; };\n        return Rows::$m($p);",
     );
     assert_fanout(&src, "dispatch", &["Rows.hero"]);
+}
+
+#[test]
+fn test_parse_file_name_variable_passed_as_argument_keeps_blind_spot() {
+    let src = api(
+        "const MAP = ['hero'];",
+        "$m = self::MAP[$type] ?? null;\n        if (!method_exists(Rows::class, $m)) { return null; }\n        $this->normalize($m);\n        return Rows::$m($p);",
+    );
+    assert_fanout_keeps_blind_spot(&src, "dispatch", &["Rows.hero"]);
 }
 
 // ── negative: the value set is not enumerable → blind spot only ──
