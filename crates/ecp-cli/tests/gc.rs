@@ -1238,6 +1238,34 @@ fn test_sweep_stale_fragments_unreadable_manifest_keeps_every_bin() {
     assert!(overlay.join("bbbb.bin").exists());
 }
 
+#[test]
+fn test_sweep_stale_fragments_idle_session_dry_run_matches_real_sweep() {
+    let tmp = tempfile::tempdir().unwrap();
+    let overlay = fragment_session(tmp.path(), None, &[("bbbb.bin", 7200)]);
+    let old = chrono::Utc::now() - chrono::Duration::hours(48);
+    let sm = SessionMeta {
+        version: 1,
+        session_id: "sid".into(),
+        pid: None,
+        started_at: old.to_rfc3339(),
+        last_touched: old.to_rfc3339(),
+        base_sha: "0".repeat(40),
+        source_worktree: "/x".into(),
+        overlay_version: 0,
+        watcher_pid: None,
+        last_drained_offset: 0,
+        agent_name: None,
+    };
+    SessionMeta::write_atomic(&overlay.parent().unwrap().join("session_meta.json"), &sm).unwrap();
+    assert_eq!(sweep_sessions(tmp.path(), true).unwrap().marked, 1);
+    let dry = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), true).unwrap();
+    assert!(overlay.join("bbbb.bin").exists());
+    assert_eq!(sweep_sessions(tmp.path(), false).unwrap().marked, 1);
+    let real = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), false).unwrap();
+    assert_eq!(real.removed, 0);
+    assert_eq!(dry.would_remove.len(), real.removed);
+}
+
 /// The session ecp 0.14.8 left: its manifest names its bin, so the bin
 /// stays. Once this binary refreshes the session, the old manifest is
 /// replaced whole, and the old bin goes on the next gc.

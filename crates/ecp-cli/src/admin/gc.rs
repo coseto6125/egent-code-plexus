@@ -139,11 +139,8 @@ fn insert_active_session_bases(repo_root: &Path, set: &mut FxHashSet<String>) ->
                 continue;
             }
         };
-        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&sm.last_touched) {
-            let age = chrono::Utc::now().signed_duration_since(parsed.with_timezone(&chrono::Utc));
-            if age.num_hours() > SESSION_IDLE_HOURS {
-                continue;
-            }
+        if session_is_idle(&sm) {
+            continue;
         }
         set.insert(sm.base_sha);
     }
@@ -289,6 +286,15 @@ pub fn sweep_unreachable_commits(repo_root: &Path, dry_run: bool) -> io::Result<
     Ok(stats)
 }
 
+fn session_is_idle(sm: &SessionMeta) -> bool {
+    chrono::DateTime::parse_from_rfc3339(&sm.last_touched).is_ok_and(|t| {
+        chrono::Utc::now()
+            .signed_duration_since(t.with_timezone(&chrono::Utc))
+            .num_hours()
+            > SESSION_IDLE_HOURS
+    })
+}
+
 pub fn sweep_sessions(repo_root: &Path, dry_run: bool) -> io::Result<SweepStats> {
     let sessions_dir = repo_root.join("sessions");
     let mut stats = SweepStats::default();
@@ -317,14 +323,7 @@ pub fn sweep_sessions(repo_root: &Path, dry_run: bool) -> io::Result<SweepStats>
         // meta: it is always dead, so every session was marked on the first
         // sweep after enrolment (FU-2026-06-10-cc120f78889c). A live watcher
         // or a live agent keeps `last_touched` moving instead.
-        let should_mark = chrono::DateTime::parse_from_rfc3339(&sm.last_touched).is_ok_and(|t| {
-            chrono::Utc::now()
-                .signed_duration_since(t.with_timezone(&chrono::Utc))
-                .num_hours()
-                > SESSION_IDLE_HOURS
-        });
-
-        if should_mark {
+        if session_is_idle(&sm) {
             if !dry_run {
                 let ts = chrono::Utc::now().timestamp();
                 let dead = path.with_extension(format!("dead.{ts}"));
@@ -519,6 +518,11 @@ pub fn sweep_stale_fragments(repo_root: &Path, dry_run: bool) -> io::Result<Swee
         let dir = session.path();
         let overlay = dir.join("graph_overlay");
         if !overlay.is_dir() {
+            continue;
+        }
+        // A real GC retires idle sessions before this sweep. A dry run must
+        // leave their fragments out of its deletion report too.
+        if SessionMeta::read(&dir.join("session_meta.json")).is_ok_and(|sm| session_is_idle(&sm)) {
             continue;
         }
         // Held from the manifest read to the last unlink: a bin's name is its

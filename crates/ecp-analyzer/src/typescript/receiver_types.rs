@@ -193,6 +193,9 @@ fn simple_name_and_type(
     type_ann: Node<'_>,
     source: &[u8],
 ) -> Option<(String, String)> {
+    if name_node.kind() != "identifier" {
+        return None;
+    }
     // type_annotation wraps the actual type; unwrap one level.
     let inner = if type_ann.kind() == "type_annotation" {
         type_ann.named_child(0)?

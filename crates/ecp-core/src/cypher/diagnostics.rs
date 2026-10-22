@@ -9,7 +9,7 @@
 //! neither the node nor the edge set, so the CLI can warn before that silent
 //! empty result is mistaken for "no data".
 
-use crate::cypher::ast::{Expr, Query, ReturnExpr};
+use crate::cypher::ast::{Expr, Literal, Query, ReturnExpr};
 
 /// Known node-property names, mirroring every arm of
 /// `executor.rs::node_prop_value`. Keep in sync with that match — a new arm
@@ -142,6 +142,9 @@ fn collect_expr(e: &Expr, out: &mut Vec<String>) {
         }
         Expr::IsNull { expr, .. } => collect_expr(expr, out),
         Expr::Index(base, idx) => {
+            if let (Expr::Var(_), Expr::Lit(Literal::Str(prop))) = (base.as_ref(), idx.as_ref()) {
+                out.push(prop.clone());
+            }
             collect_expr(base, out);
             collect_expr(idx, out);
         }
@@ -324,6 +327,21 @@ mod tests {
         assert_eq!(unknown.len(), 1);
         assert_eq!(unknown[0].prop, "file");
         assert_eq!(unknown[0].suggestion.as_deref(), Some("filePath"));
+    }
+
+    #[test]
+    fn test_unknown_properties_string_subscript_reports_typo() {
+        let q = parse("MATCH (n) WHERE n['file'] CONTAINS 'x' RETURN n['name']").unwrap();
+        let unknown = unknown_properties(&q);
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].prop, "file");
+        assert_eq!(unknown[0].suggestion.as_deref(), Some("filePath"));
+    }
+
+    #[test]
+    fn test_unknown_properties_numeric_subscript_and_known_edge_property_are_silent() {
+        let q = parse("MATCH (a)-[r:Calls]->(b) RETURN labels(a)[0], r['reason']").unwrap();
+        assert!(unknown_properties(&q).is_empty());
     }
 
     #[test]
