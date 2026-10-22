@@ -618,7 +618,7 @@ mod tests {
             let expected = if edge.is_overlay() {
                 OVERLAY_EDGE_REASON
             } else {
-                "ast-call"
+                "framework-reference"
             };
             assert_eq!(edge.reason(graph), expected);
         }
