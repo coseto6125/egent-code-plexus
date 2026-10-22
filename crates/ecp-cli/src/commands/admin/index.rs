@@ -423,8 +423,23 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
                 );
             }
             r.join_background();
+            drop_superseded_generations(&r.commit_dir);
             Ok(())
         }
+    }
+}
+
+/// A forced rebuild publishes a new `.gen.*` dir beside the old one, which
+/// stays for readers already attached (see `force_rebuild_l2`). Once the build
+/// returns, converge the repo's same-SHA generations now instead of leaving
+/// ~100 MB per forced build until the next gc. A failed sweep never fails the
+/// index.
+fn drop_superseded_generations(published: &std::path::Path) {
+    let Some(repo_root) = published.parent().and_then(std::path::Path::parent) else {
+        return;
+    };
+    if let Err(e) = crate::admin::gc::sweep_generations_keeping(repo_root, false, Some(published)) {
+        eprintln!("index: sweep stale generations: {e}");
     }
 }
 
