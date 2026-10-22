@@ -16,7 +16,7 @@
 
 use super::path_literals::{build_raw_path_literal, strip_go_string_value};
 use crate::calls::{attach_to_enclosing, node_range, range_width, start_pos, Pos, PosRange};
-use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{CallSite, RawImport, RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -363,13 +363,23 @@ pub fn extract_go_calls_and_path_literals(
     nodes: &mut [RawNode],
     local_types: &LocalTypes,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
+    extract_go_calls_and_path_literals_with_imports(root, source, nodes, local_types, &[])
+}
+
+pub(super) fn extract_go_calls_and_path_literals_with_imports(
+    root: Node<'_>,
+    source: &[u8],
+    nodes: &mut [RawNode],
+    local_types: &LocalTypes,
+    imports: &[RawImport],
+) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
             "call_expression" => {
-                if let Some(callee) = go_callee_name(n, source, local_types) {
+                if let Some(callee) = go_callee_name(n, source, local_types, imports) {
                     attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
@@ -406,7 +416,12 @@ pub fn extract_go_calls_and_path_literals(
 /// - `foo()` → `"foo"`
 /// - `obj.Method()` where `obj`'s type is known → `"Type.Method"`
 /// - `obj.Method()` where type is unknown → `"Method"` (fallback)
-fn go_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Option<String> {
+fn go_callee_name(
+    call: Node<'_>,
+    source: &[u8],
+    locals: &LocalTypes,
+    imports: &[RawImport],
+) -> Option<String> {
     let function = call.child_by_field_name("function")?;
     match function.kind() {
         "identifier" => node_text(function, source),
@@ -421,6 +436,14 @@ fn go_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Option<
                     if let Some(ty) = locals.lookup(pos, &var_name) {
                         return Some(format!("{ty}.{method_name}"));
                     }
+                    if !locals.binds_local(pos, &var_name)
+                        && imports.iter().any(|import| {
+                            import.alias.as_deref().unwrap_or(&import.imported_name) == var_name
+                        })
+                    {
+                        return Some(format!("{var_name}.{method_name}"));
+                    }
+                    return Some(CallSite::from_receiver(&var_name, &method_name));
                 }
                 // `NewFoo().Bar()`: the resolver types the operand by the
                 // callee's return type.
@@ -434,14 +457,14 @@ fn go_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Option<
                         .is_some_and(|name| locals.binds_local(start_pos(operand), &name));
                 if operand.kind() == "call_expression" && !calls_local {
                     if let Some(inner) =
-                        CallSite::nested_chain(|| go_callee_name(operand, source, locals))
+                        CallSite::nested_chain(|| go_callee_name(operand, source, locals, imports))
                     {
                         return Some(CallSite::chained_member(&inner, &method_name));
                     }
                 }
             }
-            // Fallback: bare method name.
-            Some(method_name)
+            // The receiver syntax still distinguishes this from a bare call.
+            Some(CallSite::from_receiver("receiver", &method_name))
         }
         _ => {
             // Last resort: full text, then last segment after `.`.

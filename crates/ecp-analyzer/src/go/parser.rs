@@ -1,6 +1,6 @@
 use super::literal_key_facts::collect_literal_key_facts;
 use super::receiver_types::{
-    build_receiver_map, collect_local_types, extract_go_calls_and_path_literals,
+    build_receiver_map, collect_local_types, extract_go_calls_and_path_literals_with_imports,
     receiver_type_from_method_decl,
 };
 use super::spec::GoSpec;
@@ -958,8 +958,13 @@ impl LanguageProvider for GoProvider {
         // `Type.Method` when `obj`'s type is locally known.
         let recv_map = build_receiver_map(tree.root_node(), source);
         let local_types = collect_local_types(tree.root_node(), source, &recv_map);
-        let (raw_path_literals, raw_sql_refs) =
-            extract_go_calls_and_path_literals(tree.root_node(), source, &mut nodes, &local_types);
+        let (raw_path_literals, raw_sql_refs) = extract_go_calls_and_path_literals_with_imports(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &local_types,
+            &imports,
+        );
         let literal_key_facts = collect_literal_key_facts(tree.root_node(), source);
         crate::calls::extract_field_reads_with_literal_key_facts(
             tree.root_node(),

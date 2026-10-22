@@ -549,6 +549,43 @@ fn test_resolve_call_go_untyped_selector_call_binds_method() {
     );
 }
 
+#[test]
+fn test_resolve_call_go_imported_package_and_alias_calls_bind_function() {
+    let provider = GoProvider::new().unwrap();
+    for (import, caller) in [("\"./pkg\"", "pkg.F()"), ("p \"./pkg\"", "p.F()")] {
+        let graph = single(
+            &provider,
+            &[
+                ("pkg/helper.go", "package pkg\n\nfunc F() {}\n"),
+                (
+                    "app.go",
+                    &format!("package main\n\nimport {import}\n\nfunc boot() {{ {caller} }}\n"),
+                ),
+            ],
+        );
+        assert_eq!(
+            targets(&graph, "boot"),
+            vec![target("pkg/helper.go", "", "F")]
+        );
+    }
+}
+
+#[test]
+fn test_resolve_call_go_local_and_parameter_shadow_import_alias_return_no_edge() {
+    let graph = single(
+        &GoProvider::new().unwrap(),
+        &[
+            ("pkg/helper.go", "package pkg\n\nfunc F() {}\n"),
+            (
+                "app.go",
+                "package main\n\nimport p \"./pkg\"\n\nfunc parameter(p struct{}) { p.F() }\n\nfunc local() { p := struct{}{}; p.F() }\n",
+            ),
+        ],
+    );
+    assert!(targets(&graph, "parameter").is_empty());
+    assert!(targets(&graph, "local").is_empty());
+}
+
 // ---- Implicit-`this` languages: a bare call reaches members ----
 
 /// One implicit-`this` fixture: `own` declares class `K` whose `caller`

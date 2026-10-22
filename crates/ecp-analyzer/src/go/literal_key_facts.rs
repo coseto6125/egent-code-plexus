@@ -1,7 +1,7 @@
 //! Classify Go composite-literal keys without resolving types for each name.
 
 use crate::calls::LiteralKeyFacts;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use tree_sitter::Node;
 
 #[derive(Clone)]
@@ -12,13 +12,42 @@ enum TypeShape {
     Other,
 }
 
+struct ScopedDefinition {
+    name: String,
+    shape: TypeShape,
+    scope_start: usize,
+    scope_end: usize,
+    declared_at: usize,
+}
+
+struct Definitions {
+    file: FxHashMap<String, TypeShape>,
+    local: Vec<ScopedDefinition>,
+}
+
+impl Definitions {
+    fn resolve(&self, name: &str, position: usize) -> Option<&TypeShape> {
+        self.local
+            .iter()
+            .filter(|definition| {
+                definition.name == name
+                    && definition.declared_at <= position
+                    && definition.scope_start <= position
+                    && position < definition.scope_end
+            })
+            .min_by_key(|definition| definition.scope_end - definition.scope_start)
+            .map(|definition| &definition.shape)
+            .or_else(|| self.file.get(name))
+    }
+}
+
 /// Walk a Go file once to mark keyed elements whose keys are expressions.
 ///
 /// A keyed element in a map or array/slice literal has an expression key. A
 /// keyed element in a struct literal has a field name. Named types and aliases
 /// are resolved from declarations in this file. Missing, qualified, and cyclic
 /// names stay unknown, so their keys remain conservatively skipped.
-pub fn collect_literal_key_facts(root: Node<'_>, source: &[u8]) -> LiteralKeyFacts {
+pub(super) fn collect_literal_key_facts(root: Node<'_>, source: &[u8]) -> LiteralKeyFacts {
     let definitions = collect_type_definitions(root, source);
     let mut facts = LiteralKeyFacts::default();
     let mut stack = vec![root];
@@ -28,7 +57,13 @@ pub fn collect_literal_key_facts(root: Node<'_>, source: &[u8]) -> LiteralKeyFac
                 node.child_by_field_name("type"),
                 node.child_by_field_name("body"),
             ) {
-                mark_literal_keys(body, type_shape(ty, source), &definitions, &mut facts);
+                mark_literal_keys(
+                    body,
+                    &type_shape(ty, source),
+                    &definitions,
+                    node.start_byte(),
+                    &mut facts,
+                );
             }
         }
         let mut cursor = node.walk();
@@ -39,17 +74,30 @@ pub fn collect_literal_key_facts(root: Node<'_>, source: &[u8]) -> LiteralKeyFac
     facts
 }
 
-fn collect_type_definitions(root: Node<'_>, source: &[u8]) -> HashMap<String, TypeShape> {
-    let mut definitions = HashMap::new();
+fn collect_type_definitions(root: Node<'_>, source: &[u8]) -> Definitions {
+    let mut definitions = Definitions {
+        file: FxHashMap::default(),
+        local: Vec::new(),
+    };
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
-        if matches!(node.kind(), "type_spec" | "type_alias") && is_file_type_definition(node) {
+        if matches!(node.kind(), "type_spec" | "type_alias") {
             if let (Some(name), Some(ty)) = (
                 node.child_by_field_name("name"),
                 node.child_by_field_name("type"),
             ) {
                 if let Some(name) = node_text(name, source) {
-                    definitions.insert(name, type_shape(ty, source));
+                    if is_file_type_definition(node) {
+                        definitions.file.insert(name, type_shape(ty, source));
+                    } else if let Some(scope) = enclosing_block(node) {
+                        definitions.local.push(ScopedDefinition {
+                            name,
+                            shape: type_shape(ty, source),
+                            scope_start: scope.start_byte(),
+                            scope_end: scope.end_byte(),
+                            declared_at: node.start_byte(),
+                        });
+                    }
                 }
             }
         }
@@ -67,16 +115,26 @@ fn is_file_type_definition(node: Node<'_>) -> bool {
         .is_some_and(|parent| parent.kind() == "source_file")
 }
 
+fn enclosing_block(mut node: Node<'_>) -> Option<Node<'_>> {
+    while let Some(parent) = node.parent() {
+        if parent.kind() == "block" {
+            return Some(parent);
+        }
+        node = parent;
+    }
+    None
+}
+
 fn type_shape(ty: Node<'_>, source: &[u8]) -> TypeShape {
     let element = match ty.kind() {
-        "map_type" => ty.child_by_field_name("value").map(Box::new),
+        "map_type" => ty.child_by_field_name("value"),
         "slice_type" | "array_type" | "implicit_length_array_type" => {
-            ty.child_by_field_name("element").map(Box::new)
+            ty.child_by_field_name("element")
         }
         _ => None,
     };
     if let Some(element) = element {
-        let element = type_shape(*element, source);
+        let element = type_shape(element, source);
         return if ty.kind() == "map_type" {
             TypeShape::Map(Box::new(element))
         } else {
@@ -93,11 +151,12 @@ fn type_shape(ty: Node<'_>, source: &[u8]) -> TypeShape {
 
 fn mark_literal_keys(
     body: Node<'_>,
-    shape: TypeShape,
-    definitions: &HashMap<String, TypeShape>,
+    shape: &TypeShape,
+    definitions: &Definitions,
+    position: usize,
     facts: &mut LiteralKeyFacts,
 ) {
-    let Some(element) = element_type(&shape, definitions, &mut HashSet::new()) else {
+    let Some(element) = element_type(shape, definitions, position) else {
         return;
     };
     let mut cursor = body.walk();
@@ -106,10 +165,10 @@ fn mark_literal_keys(
             "keyed_element" => {
                 facts.mark_map_key(child);
                 if let Some(value) = child.child_by_field_name("value") {
-                    mark_elided_value(value, element.clone(), definitions, facts);
+                    mark_elided_value(value, element, definitions, position, facts);
                 }
             }
-            "literal_value" => mark_literal_keys(child, element.clone(), definitions, facts),
+            "literal_value" => mark_literal_keys(child, element, definitions, position, facts),
             _ => {}
         }
     }
@@ -117,26 +176,39 @@ fn mark_literal_keys(
 
 fn mark_elided_value(
     value: Node<'_>,
-    shape: TypeShape,
-    definitions: &HashMap<String, TypeShape>,
+    shape: &TypeShape,
+    definitions: &Definitions,
+    position: usize,
     facts: &mut LiteralKeyFacts,
 ) {
-    if value.kind() == "literal_value" {
-        mark_literal_keys(value, shape, definitions, facts);
+    let literal = (value.kind() == "literal_value")
+        .then_some(value)
+        .or_else(|| {
+            let mut cursor = value.walk();
+            value
+                .named_children(&mut cursor)
+                .find(|child| child.kind() == "literal_value")
+        });
+    if let Some(literal) = literal {
+        mark_literal_keys(literal, shape, definitions, position, facts);
     }
 }
 
-fn element_type(
-    shape: &TypeShape,
-    definitions: &HashMap<String, TypeShape>,
-    seen: &mut HashSet<String>,
-) -> Option<TypeShape> {
-    match shape {
-        TypeShape::Map(element) | TypeShape::Sequence(element) => Some((**element).clone()),
-        TypeShape::Named(name) if seen.insert(name.clone()) => definitions
-            .get(name)
-            .and_then(|definition| element_type(definition, definitions, seen)),
-        _ => None,
+fn element_type<'a>(
+    shape: &'a TypeShape,
+    definitions: &'a Definitions,
+    position: usize,
+) -> Option<&'a TypeShape> {
+    let mut current = shape;
+    let mut seen = FxHashSet::default();
+    loop {
+        match current {
+            TypeShape::Map(element) | TypeShape::Sequence(element) => return Some(element),
+            TypeShape::Named(name) if seen.insert(name.as_str()) => {
+                current = definitions.resolve(name, position)?;
+            }
+            _ => return None,
+        }
     }
 }
 
