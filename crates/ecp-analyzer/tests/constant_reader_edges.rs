@@ -778,6 +778,20 @@ fn test_value_read_php_qualified_constant_missing_or_wrong_owner_returns_no_edge
     assert_eq!(value_reads(&g, "wrongOwner"), none());
 }
 
+#[test]
+fn test_value_read_php_qualified_constant_wrong_namespace_returns_no_edge() {
+    let source = r"<?php
+namespace App { class Config { const LIMIT = 3; } }
+namespace Other {
+    function readRoot(): int { return \Config::LIMIT; }
+    function readLocal(): int { return Config::LIMIT; }
+}
+";
+    let g = graph(&PhpProvider::new().unwrap(), &[("p.php", source)]);
+    assert_eq!(value_reads(&g, "readRoot"), none());
+    assert_eq!(value_reads(&g, "readLocal"), none());
+}
+
 // ---- Ruby ----
 
 const RB_SAME_FILE: &str = "LIMITS = [1, 2].freeze\n\n\

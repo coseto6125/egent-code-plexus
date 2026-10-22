@@ -68,3 +68,12 @@ fn test_class_membership_php_enum_constant_returns_has_property_from_enum() {
         vec![("Suit".to_string(), RelType::HasProperty)]
     );
 }
+
+#[test]
+fn test_class_membership_php_ambiguous_enum_constant_returns_no_property_edge() {
+    let source = "<?php\nnamespace A { enum Suit { const WILD = 1; } }\nnamespace B { enum Suit { const WILD = 2; } }\n";
+    let g = graph(&PhpProvider::new().unwrap(), &[("p.php", source)]);
+    assert!(incoming(&g, "WILD")
+        .iter()
+        .all(|(_, rel)| *rel != RelType::HasProperty));
+}
