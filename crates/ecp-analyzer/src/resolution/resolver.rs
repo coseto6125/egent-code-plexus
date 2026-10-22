@@ -708,7 +708,7 @@ impl<'a> Resolver<'a> {
             _ => site,
         };
         let bind_import = !matches!(site, CallSite::UntypedMember(_));
-        let free_only = reaches_free_only(language, site);
+        let free_only = site.reaches_free_only(language);
         // An untyped receiver is no `this`: no tier reaches the member
         // through the caller's bases.
         let heritage: &[String] = if bind_import { caller_heritage } else { &[] };
@@ -769,8 +769,10 @@ impl<'a> Resolver<'a> {
     ///
     /// A Python / TS / JS callee's imports type the name, so a library
     /// import (`import { Response } from 'node-fetch'`) names no project
-    /// type. Any other callee binds only a type its own directory declares:
-    /// the Go / Java / Kotlin package, or the header beside a C++ source.
+    /// type. Any other callee types the name only when its own directory
+    /// declares a type of it: the Go / Java / Kotlin package, or the header
+    /// beside a C++ source. A type from another directory, a C# namespace
+    /// or a Swift module included, binds nothing.
     pub fn resolve_chained_member(
         &self,
         source_file: &Path,
@@ -1363,21 +1365,12 @@ impl<'a> Resolver<'a> {
         // see `SymbolTable::file_scoped` doc). A call site narrows the pick
         // by owner; when the file holds several unrelated owners of the
         // name, Tier 1 binds nothing and the later tiers decide. A bare call
-        // that reaches no member ([`reaches_free_only`]) weighs no method of
+        // that reaches no member ([`CallSite::reaches_free_only`]) weighs no method of
         // the file, so a free function of the name still wins.
         let free_only = call.is_some_and(|scope| scope.free_only);
-        let same_file_pick = if free_only {
-            reexport::pick_call(
-                self.symbol_table
-                    .decls_in_file(&source_file_str, symbol_name)
-                    .into_iter()
-                    .filter(|&(_, kind)| kind != NodeKind::Method),
-                target,
-            )
-        } else {
+        let same_file_pick =
             self.symbol_table
-                .lookup_call_in_file(&source_file_str, symbol_name, target)
-        };
+                .lookup_call_in_file(&source_file_str, symbol_name, target, free_only);
         if let Some(node_id) = same_file_pick
             .and_then(|pick| match call {
                 Some(scope) => self.symbol_table.prefer_owned(
@@ -1904,24 +1897,6 @@ fn call_target(source_file: &Path, site: CallSite<'_>) -> ResolveTarget {
     }
 }
 
-/// Whether `site` is a bare `f()` in a language where a call written with no
-/// receiver never reaches a member: PHP needs `$this->` / `self::`, Python
-/// `self.`, Rust `self.` / `Self::`, and C declares no members. A same-named
-/// method of an unrelated class (a Laravel test's private `config()` for the
-/// global helper `config()`, the caller's own or its base's `config`) must
-/// not bind it at any tier ([`CallScope::free_only`]). Java,
-/// Kotlin, C#, Swift, Dart, Scala, C++ and Ruby call a member of the
-/// enclosing type with no receiver. JavaScript, TypeScript and Go are no such
-/// languages either, but their parsers still write some member calls as the
-/// bare member: JS / TS `this.m()` outside a class (Vue options API object
-/// methods), TS `a.b.m()`, Go `obj.M()` and `pkg.F()` on an untyped operand.
-fn reaches_free_only(language: Language, site: CallSite<'_>) -> bool {
-    matches!(
-        language,
-        Language::Php | Language::Python | Language::Rust | Language::C
-    ) && matches!(site, CallSite::Plain(name) if !name.contains(['.', ':']))
-}
-
 /// For a Rust path call `a::b::Q::m`, does the module path `a::b` that the
 /// call names for `Q` agree with the import of `Q` from `import_source`?
 /// `de::Error::custom` with `use crate::error::Error` does not: `de::Error`
@@ -2049,7 +2024,7 @@ struct CallScope<'c> {
     /// reached through the caller's bases, so they do not narrow the pick
     /// (`super(E, self).m()` starts after `E`).
     untyped_receiver: bool,
-    /// A bare `f()` that never reaches a member ([`reaches_free_only`]):
+    /// A bare `f()` that never reaches a member ([`CallSite::reaches_free_only`]):
     /// the same-file and Global tiers weigh no `Method`, and the heritage
     /// tier does not run. A retry under another name keeps the flag.
     free_only: bool,

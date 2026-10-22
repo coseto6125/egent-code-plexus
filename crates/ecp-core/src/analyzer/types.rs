@@ -224,6 +224,24 @@ impl<'a> CallSite<'a> {
         }
     }
 
+    /// Whether the site is a bare `f()` in a language where a call written with no
+    /// receiver never reaches a member: PHP needs `$this->` / `self::`, Python
+    /// `self.`, Rust `self.` / `Self::`, and C declares no members. A same-named
+    /// method of an unrelated class (a Laravel test's private `config()` for the
+    /// global helper `config()`, the caller's own or its base's `config`) must
+    /// not bind it at any tier (the resolver's `CallScope::free_only`). Java,
+    /// Kotlin, C#, Swift, Dart, Scala, C++ and Ruby call a member of the
+    /// enclosing type with no receiver. JavaScript, TypeScript and Go are no such
+    /// languages either, but their parsers still write some member calls as the
+    /// bare member: JS / TS `this.m()` outside a class (Vue options API object
+    /// methods), TS `a.b.m()`, Go `obj.M()` and `pkg.F()` on an untyped operand.
+    pub fn reaches_free_only(self, language: Language) -> bool {
+        matches!(
+            language,
+            Language::Php | Language::Python | Language::Rust | Language::C
+        ) && matches!(self, Self::Plain(name) if !name.contains(['.', ':']))
+    }
+
     /// The type path this site may construct in `language`, and whether an
     /// unresolved qualified path may fall back to its last segment. `None`
     /// when the site cannot construct a type in `language`: Go, Rust and C

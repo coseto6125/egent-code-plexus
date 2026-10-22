@@ -774,12 +774,6 @@ impl SymbolTable {
     /// Whether `file_path` or a file in its directory declares a type named
     /// `node_name`.
     pub(crate) fn declares_type_beside(&self, file_path: &str, node_name: &str) -> bool {
-        if self
-            .lookup_in_file_with_kind(file_path, node_name, ResolveTarget::Type)
-            .is_some()
-        {
-            return true;
-        }
         let dir = std::path::Path::new(file_path).parent();
         let predicate = ResolveTarget::Type.kind_predicate();
         self.global_scoped.get(node_name).is_some_and(|ids| {
@@ -796,15 +790,20 @@ impl SymbolTable {
     /// [`Self::lookup_in_file_with_kind`] for the bare name of a call site,
     /// through the shared [`pick_call`] rule. The pick is by source order
     /// only; a call site narrows it by owner through [`Self::prefer_owned`].
+    /// `free_only` weighs no method
+    /// ([`ecp_core::analyzer::types::CallSite::reaches_free_only`]).
     pub fn lookup_call_in_file(
         &self,
         file_path: &str,
         node_name: &str,
         target: ResolveTarget,
+        free_only: bool,
     ) -> Option<u32> {
         let ids = self.file_scoped.get(file_path)?.get(node_name)?;
         pick_call(
-            ids.iter().map(|&id| (id, self.node_kinds[id as usize])),
+            ids.iter()
+                .map(|&id| (id, self.node_kinds[id as usize]))
+                .filter(|&(_, kind)| !free_only || kind != NodeKind::Method),
             target,
         )
     }
@@ -903,7 +902,7 @@ impl SymbolTable {
         let owner_id = match owner {
             MemberOwner::Any => {
                 return self
-                    .lookup_call_in_file(file_path, node_name, target)
+                    .lookup_call_in_file(file_path, node_name, target, false)
                     .and_then(|pick| {
                         self.prefer_owned(
                             file_path,

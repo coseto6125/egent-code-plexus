@@ -622,7 +622,7 @@ impl OverlayView {
                                         owner,
                                         caller: Some(source),
                                         untyped,
-                                        free_only: reaches_free_only(caller.language, site),
+                                        free_only: site.reaches_free_only(caller.language),
                                     }),
                                     heritage: if untyped { &[] } else { heritage },
                                     type_lookup: false,
@@ -1503,6 +1503,9 @@ struct OverlayFacts<'a> {
     /// Clean file index → its archived [`ExportAliasTable`], built on first
     /// read: a barrel is read once per name probed through it.
     clean_aliases: RefCell<FxHashMap<u32, Option<Rc<ExportAliasTable>>>>,
+    /// File → its imports as [`RawImport`]s, built on first read: a file's
+    /// chained calls type their receivers through one callee file's imports.
+    raw_imports: RefCell<FxHashMap<String, Rc<[RawImport]>>>,
     /// Module → its resolved `export *` modules, as the index resolves them
     /// once per module.
     star_modules: RefCell<StarModuleCache>,
@@ -1664,6 +1667,7 @@ impl<'a> OverlayFacts<'a> {
             es_modules,
             dirty_aliases,
             clean_aliases: RefCell::default(),
+            raw_imports: RefCell::default(),
             star_modules: RefCell::default(),
             named_imports: RefCell::default(),
             qualified: RefCell::default(),
@@ -2816,12 +2820,37 @@ impl<'a> OverlayFacts<'a> {
         type_ladder::member_via_type(self, candidates, source, member, target, call)
     }
 
+    /// [`Self::imports`] of `file` as [`RawImport`]s, converted once.
+    fn raw_imports(&self, file: &str) -> Rc<[RawImport]> {
+        if let Some(imports) = self.raw_imports.borrow().get(file) {
+            return Rc::clone(imports);
+        }
+        let imports: Rc<[RawImport]> = self
+            .imports(file)
+            .map(|imports| {
+                imports
+                    .iter()
+                    .map(|import| RawImport {
+                        source: import.source.to_owned(),
+                        imported_name: import.imported_name.to_owned(),
+                        alias: import.alias.map(str::to_owned),
+                        binding_kind: import.binding_kind,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.raw_imports
+            .borrow_mut()
+            .insert(file.to_owned(), Rc::clone(&imports));
+        imports
+    }
+
     /// The index's `Resolver::resolve_chained_member`: the member `member`
     /// of the type a call to `callee` returns, read in `callee`'s own file
     /// and found by the receiver-typing ladder, at the ladder's confidence
     /// capped by `inner_confidence`. A Python / TS / JS callee's imports type
-    /// the name; any other callee binds only a type its own directory
-    /// declares.
+    /// the name; any other callee types it only when its own directory
+    /// declares a type of it.
     fn chained_member(
         &self,
         (callee, inner_confidence): (u32, f32),
@@ -2832,22 +2861,10 @@ impl<'a> OverlayFacts<'a> {
         let callee_file = self.node_file(callee)?;
         // `graph.bin` archives the imports of Python / TS / JS files only.
         let language = Language::from_normalized_path(callee_file);
-        let imports: Vec<RawImport> = if language == Language::Python || is_ecmascript(language) {
-            self.imports(callee_file)
-                .map(|imports| {
-                    imports
-                        .iter()
-                        .map(|import| RawImport {
-                            source: import.source.to_owned(),
-                            imported_name: import.imported_name.to_owned(),
-                            alias: import.alias.map(str::to_owned),
-                            binding_kind: import.binding_kind,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
+        let imports = if language == Language::Python || is_ecmascript(language) {
+            self.raw_imports(callee_file)
         } else if self.declares_type_beside(callee_file, ty) {
-            Vec::new()
+            Rc::default()
         } else {
             return None;
         };
@@ -2871,12 +2888,6 @@ impl<'a> OverlayFacts<'a> {
     /// The index's `SymbolTable::declares_type_beside`: `file` or a file in
     /// its directory declares a type named `name`.
     fn declares_type_beside(&self, file: &str, name: &str) -> bool {
-        if self
-            .first_in_file(file, name, ResolveTarget::Type, None)
-            .is_some()
-        {
-            return true;
-        }
         let dir = std::path::Path::new(file).parent();
         let wanted = ResolveTarget::Type.kind_predicate();
         self.global_named(name).into_iter().any(|id| {
@@ -3689,19 +3700,8 @@ struct CallScope<'c> {
     /// tier narrows it by the caller's type or bases.
     untyped: bool,
     /// The site is a bare `f()` that never reaches a member
-    /// ([`reaches_free_only`]), kept through a retry under another name.
+    /// ([`CallSite::reaches_free_only`]), kept through a retry under another name.
     free_only: bool,
-}
-
-/// The index's `reaches_free_only`: a bare call in a language with no
-/// implicit receiver never reaches a member, so no method binds it nor
-/// competes with the free function it does reach, at the same-file and
-/// global tiers, and the heritage tier does not run.
-fn reaches_free_only(language: Language, site: CallSite<'_>) -> bool {
-    matches!(
-        language,
-        Language::Php | Language::Python | Language::Rust | Language::C
-    ) && matches!(site, CallSite::Plain(name) if !name.contains(['.', ':']))
 }
 
 /// What a lookup carries besides the name, as the index's
