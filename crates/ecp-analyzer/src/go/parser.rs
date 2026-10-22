@@ -965,7 +965,8 @@ impl LanguageProvider for GoProvider {
             &local_types,
             &imports,
         );
-        let literal_key_facts = collect_literal_key_facts(tree.root_node(), source);
+        let literal_key_facts =
+            collect_literal_key_facts(tree.root_node(), source, &imports, &local_types);
         crate::calls::extract_field_reads_with_literal_key_facts(
             tree.root_node(),
             source,
