@@ -6,9 +6,10 @@
 //! key of everything `build` reads, so a later process with the same inputs
 //! decodes it instead.
 //!
-//! File layout: key (u64 LE) · xxh3 of the view bytes (u64 LE) · view bytes
-//! ([`OverlayView::to_cache_bytes`]). The checksum catches a flipped byte
-//! that rkyv validation alone would accept as different but valid data.
+//! File layout: key (u64 LE) · xxh3 of key and view bytes (u64 LE) · view
+//! bytes ([`OverlayView::to_cache_bytes`]). The checksum catches a flipped
+//! byte that rkyv validation alone would accept as different but valid data,
+//! and covers the key so one writer's key can never vouch for another's body.
 //! Every I/O failure is a miss: the caller builds the view as before.
 
 use ecp_core::registry::BUILDER_FINGERPRINT;
@@ -18,7 +19,7 @@ use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use xxhash_rust::xxh3::{xxh3_64, Xxh3};
+use xxhash_rust::xxh3::Xxh3;
 
 pub const VIEW_CACHE_FILE: &str = "view_cache.bin";
 
@@ -74,7 +75,7 @@ pub fn read(session_dir: &Path, key: u64, graph_nodes: usize) -> Option<OverlayV
     }
     let mut body = Vec::new();
     file.read_to_end(&mut body).ok()?;
-    if u64::from_le_bytes(checksum.try_into().ok()?) != xxh3_64(&body) {
+    if u64::from_le_bytes(checksum.try_into().ok()?) != checksum_of(key, &body) {
         return None;
     }
     OverlayView::from_cache_bytes(&body, graph_nodes)
@@ -91,7 +92,7 @@ pub fn write(session_dir: &Path, key: u64, view: &OverlayView) {
     }
     let mut bytes = Vec::with_capacity(HEADER_LEN + body.len());
     bytes.extend_from_slice(&key.to_le_bytes());
-    bytes.extend_from_slice(&xxh3_64(&body).to_le_bytes());
+    bytes.extend_from_slice(&checksum_of(key, &body).to_le_bytes());
     bytes.extend_from_slice(&body);
     // Engines in one process share the pid; tests build many at once.
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -106,4 +107,11 @@ pub fn write(session_dir: &Path, key: u64, view: &OverlayView) {
     {
         let _ = fs::remove_file(&tmp);
     }
+}
+
+fn checksum_of(key: u64, body: &[u8]) -> u64 {
+    let mut hasher = Xxh3::new();
+    hasher.update(&key.to_le_bytes());
+    hasher.update(body);
+    hasher.digest()
 }

@@ -290,6 +290,23 @@ fn test_overlay_view_damaged_cache_file_rebuilds_and_rewrites() {
     }
 }
 
+/// A header whose key was rewritten while body and checksum stayed, as a
+/// torn overwrite could leave it: the checksum covers the key, so the body
+/// is never served under a key it was not written for.
+#[test]
+fn test_view_cache_read_key_swapped_over_intact_body_returns_none() {
+    let f = Fixture::new();
+    f.edit(&["keep_fn"], 1_000);
+    let probe = f.engine();
+    let nodes = probe.graph().unwrap().nodes.len();
+    view_cache::write(&f.session_dir, 1, &f.fresh(&probe));
+    let mut bytes = fs::read(f.cache_path()).unwrap();
+    bytes[..8].copy_from_slice(&2_u64.to_le_bytes());
+    fs::write(f.cache_path(), &bytes).unwrap();
+
+    assert!(view_cache::read(&f.session_dir, 2, nodes).is_none());
+}
+
 #[test]
 fn test_overlay_view_cache_under_other_key_rebuilds() {
     let f = Fixture::new();
@@ -428,7 +445,7 @@ fn test_view_cache_concurrent_writes_and_reads_never_return_wrong_view() {
     let views = [(11_u64, &first), (22_u64, &second)];
     let barrier = Barrier::new(views.len() + 1);
 
-    let hits = std::thread::scope(|scope| {
+    std::thread::scope(|scope| {
         for (key, view) in views {
             let (barrier, dir) = (&barrier, &f.session_dir);
             scope.spawn(move || {
@@ -438,23 +455,26 @@ fn test_view_cache_concurrent_writes_and_reads_never_return_wrong_view() {
                 }
             });
         }
-        let reader = scope.spawn(|| {
+        scope.spawn(|| {
             barrier.wait();
-            let mut hits = 0;
             for _ in 0..ROUNDS {
                 for (key, view) in views {
                     if let Some(read) = view_cache::read(&f.session_dir, key, nodes) {
                         assert_eq!(&read, view, "key {key} read another view");
-                        hits += 1;
                     }
                 }
             }
-            hits
         });
-        reader.join().unwrap()
     });
 
-    assert!(hits > 0, "the reader never saw a published file");
+    // The reader may have run before any publish; the writers are done now,
+    // so exactly one key's view is on disk, intact.
+    let on_disk: Vec<u64> = views
+        .iter()
+        .filter(|(key, view)| view_cache::read(&f.session_dir, *key, nodes).as_ref() == Some(*view))
+        .map(|(key, _)| *key)
+        .collect();
+    assert_eq!(on_disk.len(), 1, "{on_disk:?}");
     assert!(tmp_files(&f.session_dir).is_empty());
 }
 
