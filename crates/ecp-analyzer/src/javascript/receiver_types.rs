@@ -9,9 +9,7 @@
 //! annotations we cannot commit to a type, per the spec's "only commit ✓ for cases
 //! that work without guessing" rule.
 
-use super::path_literals::{
-    build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_js_string_value,
-};
+use super::path_literals::{build_raw_path_literal, strip_js_string_value, LiteralContext};
 use crate::calls::{attach_to_enclosing_span, new_expression_call, CallSiteIndex};
 use crate::framework_helpers::{enclosing_class, node_span, Span};
 use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
@@ -35,8 +33,8 @@ pub fn extract_js_calls_and_path_literals(
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
     let mut constructions: Vec<(Span, String)> = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
+    let mut stack = vec![(root, None, LiteralContext::default())];
+    while let Some((n, parent, context)) = stack.pop() {
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = js_callee_name(n, source, nodes) {
@@ -51,7 +49,7 @@ pub fn extract_js_calls_and_path_literals(
                 }
             }
             "string" => {
-                if let Some(rpl) = build_raw_path_literal(n, source) {
+                if let Some(rpl) = build_raw_path_literal(n, source, context) {
                     path_literals.push(rpl);
                 }
                 // SQL ref extraction: same string node, separate filter.
@@ -61,23 +59,26 @@ pub fn extract_js_calls_and_path_literals(
                         if let Some(mut sql_ref) =
                             crate::sql_literal::try_sql_ref(value, n, (None, None))
                         {
-                            (sql_ref.enclosing_symbol, sql_ref.enclosing_owner) =
-                                enclosing_symbol_and_owner_pub(n, source);
+                            (sql_ref.enclosing_symbol, sql_ref.enclosing_owner) = (
+                                context.symbol.map(str::to_string),
+                                context.owner.map(str::to_string),
+                            );
                             sql_refs.push(sql_ref);
                         }
                     }
                 }
             }
             "template_string" => {
-                if let Some(rpl) = build_raw_path_literal(n, source) {
+                if let Some(rpl) = build_raw_path_literal(n, source, context) {
                     path_literals.push(rpl);
                 }
             }
             _ => {}
         }
+        let child_context = context.for_children(n, parent, source);
         let mut c = n.walk();
         for child in n.children(&mut c) {
-            stack.push(child);
+            stack.push((child, Some(n), child_context));
         }
     }
     // After every call: the call-meta detectors index `calls` in

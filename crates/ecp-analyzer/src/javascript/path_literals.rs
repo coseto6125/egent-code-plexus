@@ -10,22 +10,70 @@ use tree_sitter::Node;
 
 use crate::path_literal::{classify_sink, is_ext_change_callee, is_path_shaped, sink_reason};
 
-pub(super) fn build_raw_path_literal(node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
+/// Names already known by the call walk, borrowed until a literal is emitted.
+#[derive(Clone, Copy, Default)]
+pub(super) struct LiteralContext<'s> {
+    pub symbol: Option<&'s str>,
+    pub owner: Option<&'s str>,
+    callee: Option<&'s str>,
+}
+
+impl<'s> LiteralContext<'s> {
+    pub fn for_children(self, node: Node<'_>, parent: Option<Node<'_>>, source: &'s [u8]) -> Self {
+        let name = |node: Node<'_>| node.child_by_field_name("name")?.utf8_text(source).ok();
+        let mut context = self;
+        context.callee = None;
+        match node.kind() {
+            "function_declaration" | "method_definition" | "function_expression" => {
+                context.symbol = name(node).or(context.symbol);
+            }
+            "arrow_function" => {
+                context.symbol = parent
+                    .filter(|parent| parent.kind() == "variable_declarator")
+                    .and_then(name)
+                    .or(context.symbol);
+            }
+            "class_declaration" | "class" => context.owner = name(node).or(context.owner),
+            "arguments" => {
+                context.callee = parent
+                    .filter(|parent| parent.kind() == "call_expression")
+                    .and_then(|call| call.child_by_field_name("function"))
+                    .and_then(|function| callee_name(function, source));
+            }
+            _ => {}
+        }
+        context
+    }
+}
+
+pub(super) fn build_raw_path_literal(
+    node: Node<'_>,
+    source: &[u8],
+    context: LiteralContext<'_>,
+) -> Option<RawPathLiteral> {
     match node.kind() {
-        "string" => build_from_string(node, source),
-        "template_string" => build_from_template(node, source),
+        "string" => build_from_string(node, source, context),
+        "template_string" => build_from_template(node, source, context),
         _ => None,
     }
 }
 
-fn build_from_string(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
+fn build_from_string(
+    str_node: Node<'_>,
+    source: &[u8],
+    context: LiteralContext<'_>,
+) -> Option<RawPathLiteral> {
     let raw_bytes = &source[str_node.start_byte()..str_node.end_byte()];
     let raw = std::str::from_utf8(raw_bytes).ok()?;
     let value = strip_quotes(raw)?;
-    emit(str_node, value, source)
+    emit(str_node, value, context)
 }
 
-fn build_from_template(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
+fn build_from_template(
+    str_node: Node<'_>,
+    source: &[u8],
+    context: LiteralContext<'_>,
+) -> Option<RawPathLiteral> {
     // Skip template literals with substitution (`${…}`).
     {
         let mut c = str_node.walk();
@@ -39,19 +87,16 @@ fn build_from_template(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiter
     let raw_bytes = &source[str_node.start_byte()..str_node.end_byte()];
     let raw = std::str::from_utf8(raw_bytes).ok()?;
     let value = strip_backticks(raw)?;
-    emit(str_node, value, source)
+    emit(str_node, value, context)
 }
 
-fn emit(str_node: Node<'_>, value: &str, source: &[u8]) -> Option<RawPathLiteral> {
-    let callee = enclosing_callee(str_node, source);
+fn emit(str_node: Node<'_>, value: &str, context: LiteralContext<'_>) -> Option<RawPathLiteral> {
     // Sink-override: ext-change callees accept short non-path-shaped values.
-    if !is_path_shaped(value) && !is_ext_change_callee(callee.as_deref()) {
+    if !is_path_shaped(value) && !is_ext_change_callee(context.callee) {
         return None;
     }
-    let (kind, conf) = classify_sink(callee.as_deref());
+    let (kind, conf) = classify_sink(context.callee);
     let reason = sink_reason(kind, conf);
-
-    let (enclosing_symbol, enclosing_owner) = enclosing_symbol_and_owner(str_node, source);
 
     let pos = str_node.start_position();
     let end = str_node.end_position();
@@ -63,8 +108,8 @@ fn emit(str_node: Node<'_>, value: &str, source: &[u8]) -> Option<RawPathLiteral
             end.row as u32,
             end.column as u32,
         ),
-        enclosing_symbol,
-        enclosing_owner,
+        enclosing_symbol: context.symbol.map(str::to_string),
+        enclosing_owner: context.owner.map(str::to_string),
         sink_reason: reason,
     })
 }
@@ -74,14 +119,6 @@ fn emit(str_node: Node<'_>, value: &str, source: &[u8]) -> Option<RawPathLiteral
 /// Re-exported as `pub(super)` for use in receiver_types SQL extraction.
 pub(super) fn strip_js_string_value(raw: &str) -> Option<&str> {
     strip_quotes(raw)
-}
-
-/// Re-exported as `pub(super)` for use in receiver_types SQL extraction.
-pub(super) fn enclosing_symbol_and_owner_pub(
-    str_node: tree_sitter::Node<'_>,
-    source: &[u8],
-) -> (Option<String>, Option<String>) {
-    enclosing_symbol_and_owner(str_node, source)
 }
 
 fn strip_quotes(raw: &str) -> Option<&str> {
@@ -110,86 +147,14 @@ fn strip_backticks(raw: &str) -> Option<&str> {
     std::str::from_utf8(&bytes[1..body_end]).ok()
 }
 
-/// Climb from a string literal to find the enclosing `call_expression` and
-/// resolve its callee name. Returns `None` when not a direct argument.
-fn enclosing_callee(str_node: Node<'_>, source: &[u8]) -> Option<String> {
-    let parent = str_node.parent()?;
-    if parent.kind() != "arguments" {
-        return None;
-    }
-    let call = parent.parent()?;
-    if call.kind() != "call_expression" {
-        return None;
-    }
-    let function = call.child_by_field_name("function")?;
-    callee_name(function, source)
-}
-
-fn callee_name(function: Node<'_>, source: &[u8]) -> Option<String> {
+fn callee_name<'s>(function: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
     let text = std::str::from_utf8(&source[function.start_byte()..function.end_byte()]).ok()?;
     match function.kind() {
-        "identifier" => Some(text.to_string()),
+        "identifier" => Some(text),
         "member_expression" => {
             let prop = function.child_by_field_name("property")?;
-            std::str::from_utf8(&source[prop.start_byte()..prop.end_byte()])
-                .ok()
-                .map(str::to_string)
+            std::str::from_utf8(&source[prop.start_byte()..prop.end_byte()]).ok()
         }
-        _ => Some(text.to_string()),
+        _ => Some(text),
     }
-}
-
-/// Climb from a string literal to find the innermost enclosing function/method
-/// and class. Returns `(function_name, owner_class)`.
-///
-/// JS function-boundary nodes: `function_declaration`, `method_definition`,
-/// `function_expression`, `arrow_function`. Class boundary: `class_declaration`.
-fn enclosing_symbol_and_owner(
-    str_node: Node<'_>,
-    source: &[u8],
-) -> (Option<String>, Option<String>) {
-    let mut cur = str_node.parent();
-    let mut function_name: Option<String> = None;
-    let mut owner: Option<String> = None;
-
-    while let Some(n) = cur {
-        match n.kind() {
-            "function_declaration" | "method_definition" | "function_expression"
-                if function_name.is_none() =>
-            {
-                if let Some(name_node) = n.child_by_field_name("name") {
-                    function_name =
-                        std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
-                            .ok()
-                            .map(str::to_string);
-                }
-            }
-            "arrow_function" if function_name.is_none() => {
-                // Arrow functions are anonymous; attempt to get name from parent
-                // variable_declarator if present.
-                if let Some(parent) = n.parent() {
-                    if parent.kind() == "variable_declarator" {
-                        if let Some(name_node) = parent.child_by_field_name("name") {
-                            function_name = std::str::from_utf8(
-                                &source[name_node.start_byte()..name_node.end_byte()],
-                            )
-                            .ok()
-                            .map(str::to_string);
-                        }
-                    }
-                }
-            }
-            "class_declaration" | "class" if owner.is_none() => {
-                if let Some(name_node) = n.child_by_field_name("name") {
-                    owner =
-                        std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
-                            .ok()
-                            .map(str::to_string);
-                }
-            }
-            _ => {}
-        }
-        cur = n.parent();
-    }
-    (function_name, owner)
 }
