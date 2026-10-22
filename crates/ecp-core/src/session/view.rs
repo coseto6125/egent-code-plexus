@@ -39,16 +39,18 @@
 //! - **enum-variant references** — `References` from each dirty symbol to
 //!   the `EnumVariant`s its `variant_refs` name (`enum_variant:use` /
 //!   `enum_variant:pattern`), by the index's `resolve_variant_ref`.
+//! - **name references** — `ReadsField` for member and bare value reads,
+//!   and `References` for function values, using the shared name-ref policy.
 //!
 //! The merge replaces only the base references of dirty sources whose
-//! reason the overlay rebuilds (closure, overload set, enum variant),
+//! reason the overlay rebuilds (closure, overload set, enum variant, function value),
 //! preserving every other References reason.
 //!
 //! ## The masking invariant: mask ⊆ rebuild
 //!
 //! A base edge whose **source** lies in a dirty file is masked ONLY when the
-//! overlay re-resolves that rel type from fragment data ([`REBUILT_RELS`],
-//! today `Calls`, plus the `References` reasons above) — for those the
+//! overlay re-resolves that rel type from fragment data (`Calls`,
+//! `ReadsField`, plus the `References` reasons above) — for those the
 //! overlay adjacency is the file's truth. Rels the fragment carries no
 //! inputs for (Extends, …) keep their base edges: slightly stale beats silently absent for a
 //! deterministic edge. A base edge whose **target** lies in a dirty file is
@@ -950,8 +952,8 @@ impl OverlayView {
     }
 
     /// Whether the overlay rebuilds the base `References` edge with `reason`
-    /// sourced at `source`: only lexical closure, overload-set and
-    /// enum-variant references are rebuilt, not References generally.
+    /// sourced at `source`: lexical closure, overload-set, enum-variant,
+    /// and function-value references are rebuilt, not References generally.
     pub(crate) fn rebuilds_reference(&self, source: u32, reason: &str) -> bool {
         matches!(
             reason,
