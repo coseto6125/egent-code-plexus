@@ -167,10 +167,19 @@ impl LanguageProvider for JavaScriptProvider {
     }
 
     fn parse_file(&self, path: &Path, source: &[u8]) -> anyhow::Result<LocalGraph> {
+        let prof = std::env::var_os("ECP_PROF").is_some();
+        let tree_started = prof.then(std::time::Instant::now);
         let tree = PARSER
             .with(|p| parse_with_budget(&mut p.borrow_mut(), source, ParseBudget::DEFAULT))
             .ok_or_else(|| anyhow::anyhow!("Failed to parse file"))?;
+        if let Some(started) = tree_started {
+            eprintln!(
+                "prof javascript.tree: {:.3}s",
+                started.elapsed().as_secs_f32()
+            );
+        }
 
+        let query_started = prof.then(std::time::Instant::now);
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), source);
 
@@ -647,17 +656,33 @@ impl LanguageProvider for JavaScriptProvider {
             }
         }
 
+        if let Some(started) = query_started {
+            eprintln!(
+                "prof javascript.query: {:.3}s",
+                started.elapsed().as_secs_f32()
+            );
+        }
+
         // Extract call sites with receiver-type binding:
         // - `this.method()` inside a class body → `ClassName.method`
         // - `obj.method()` (no type info in JS) → `obj.method` (qualified for resolver)
         // - `fn()` → `fn`
         let mut call_sites = crate::calls::CallSiteIndex::default();
+        let calls_started = prof.then(std::time::Instant::now);
         let (raw_path_literals, raw_sql_refs) = extract_js_calls_and_path_literals(
             tree.root_node(),
             source,
             &mut nodes,
             &mut call_sites,
         );
+        if let Some(started) = calls_started {
+            eprintln!(
+                "prof javascript.calls: {:.3}s",
+                started.elapsed().as_secs_f32()
+            );
+        }
+
+        let field_reads_started = prof.then(std::time::Instant::now);
         crate::calls::extract_field_reads(
             tree.root_node(),
             source,
@@ -684,6 +709,12 @@ impl LanguageProvider for JavaScriptProvider {
                 ..crate::calls::NameRefSpec::EMPTY
             },
         );
+        if let Some(started) = field_reads_started {
+            eprintln!(
+                "prof javascript.field_reads: {:.3}s",
+                started.elapsed().as_secs_f32()
+            );
+        }
 
         // Framework-presence gates: only emit Express/Hapi refs when the file
         // actually imports the matching package. Each framework has its own
@@ -742,26 +773,73 @@ impl LanguageProvider for JavaScriptProvider {
             }));
         }
 
+        let params_started = prof.then(std::time::Instant::now);
         let param_names = collect_js_param_names(tree.root_node(), source);
+        if let Some(started) = params_started {
+            eprintln!(
+                "prof javascript.params: {:.3}s",
+                started.elapsed().as_secs_f32()
+            );
+        }
+
+        let indirect_started = prof.then(std::time::Instant::now);
         let call_metas =
             detect_js_ts_indirect(tree.root_node(), source, &nodes, &param_names, &call_sites);
+        if let Some(started) = indirect_started {
+            eprintln!(
+                "prof javascript.indirect: {:.3}s",
+                started.elapsed().as_secs_f32()
+            );
+        }
+
+        let function_metas_started = prof.then(std::time::Instant::now);
         let raw_function_metas = crate::function_meta::javascript::extract(
             tree.root_node(),
             source,
             &nodes,
             file_category,
         );
+        if let Some(started) = function_metas_started {
+            eprintln!(
+                "prof javascript.function_metas: {:.3}s",
+                started.elapsed().as_secs_f32()
+            );
+        }
 
+        let exports_started = prof.then(std::time::Instant::now);
         let export_aliases =
             crate::framework_helpers::stamp_js_ts_exports(tree.root_node(), source, &mut nodes);
+        if let Some(started) = exports_started {
+            eprintln!(
+                "prof javascript.exports: {:.3}s",
+                started.elapsed().as_secs_f32()
+            );
+        }
+
+        let import_bindings_started = prof.then(std::time::Instant::now);
         crate::framework_helpers::mark_js_ts_import_bindings(
             tree.root_node(),
             source,
             &mut imports,
         );
+        if let Some(started) = import_bindings_started {
+            eprintln!(
+                "prof javascript.import_bindings: {:.3}s",
+                started.elapsed().as_secs_f32()
+            );
+        }
+
+        let ownership_started = prof.then(std::time::Instant::now);
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         crate::framework_helpers::stamp_js_function_owners(&mut nodes);
+        if let Some(started) = ownership_started {
+            eprintln!(
+                "prof javascript.ownership: {:.3}s",
+                started.elapsed().as_secs_f32()
+            );
+        }
 
+        let event_topics_started = prof.then(std::time::Instant::now);
         let event_topics = {
             let topics = crate::event_topic::extract_event_topics(
                 &tree,
@@ -777,6 +855,12 @@ impl LanguageProvider for JavaScriptProvider {
             );
             (!topics.is_empty()).then(|| topics.into_boxed_slice())
         };
+        if let Some(started) = event_topics_started {
+            eprintln!(
+                "prof javascript.event_topics: {:.3}s",
+                started.elapsed().as_secs_f32()
+            );
+        }
 
         let path_literals =
             (!raw_path_literals.is_empty()).then(|| raw_path_literals.into_boxed_slice());
