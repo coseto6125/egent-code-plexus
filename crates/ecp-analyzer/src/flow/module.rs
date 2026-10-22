@@ -243,11 +243,40 @@ impl Engine<'_> {
             })
             .map(|n| n.id)
             .collect();
-        FlowReport {
-            source_hashes: self.files.iter().map(|file| {
+        let mut hashes: Vec<(&str, String)> = self
+            .files
+            .iter()
+            .map(|file| {
                 let hash = ecp_core::uid::xxh3_64_bytes(file.source.as_bytes());
-                (file.path.clone(), format!("xxh3:{hash:016x}"))
-            }).collect(),
+                (file.path.as_str(), format!("xxh3:{hash:016x}"))
+            })
+            .collect();
+        hashes.sort();
+        let mut digest_input = String::new();
+        for (path, hash) in &hashes {
+            digest_input.push_str(path);
+            digest_input.push('\0');
+            digest_input.push_str(hash);
+            digest_input.push('\n');
+        }
+        let corpus_digest = format!(
+            "xxh3:{:016x}",
+            ecp_core::uid::xxh3_64_bytes(digest_input.as_bytes())
+        );
+        // Only the files the result names: the whole corpus map was ~90% of the payload.
+        let named: BTreeSet<&str> = nodes
+            .iter()
+            .map(|n| n.file.as_str())
+            .chain(boundaries.iter().map(|b| b.file.as_str()))
+            .collect();
+        let source_hashes: BTreeMap<String, String> = hashes
+            .into_iter()
+            .filter(|(path, _)| named.contains(path))
+            .map(|(path, hash)| (path.to_string(), hash))
+            .collect();
+        FlowReport {
+            source_hashes,
+            corpus_digest,
             anchor: anchors,
             nodes,
             edges: self.edges.into_iter().filter(|edge| {

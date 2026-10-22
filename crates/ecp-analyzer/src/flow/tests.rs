@@ -899,3 +899,65 @@ fn test_supported_path_blade_template_false() {
     assert!(supported_path("resources/x.blade.php/helper.php"));
     assert!(supported_path("V.BLADE.php"));
 }
+
+fn two_file_query(other: &str) -> FlowReport {
+    analyze(
+        &[
+            SourceFile {
+                path: "a.js".into(),
+                source: "var x = 1;\nconsume(x);".into(),
+            },
+            SourceFile {
+                path: "b.js".into(),
+                source: other.into(),
+            },
+            SourceFile {
+                path: "c.js".into(),
+                source: "var z = 3;".into(),
+            },
+        ],
+        &FlowRequest {
+            file: "a.js".into(),
+            line: 1,
+            column: 9,
+            subject: Subject::Value,
+            direction: Direction::Forward,
+            budgets: Budgets::default(),
+        },
+    )
+    .unwrap()
+}
+#[test]
+fn test_report_source_hashes_only_named_files() {
+    let report = two_file_query("var y = 2;");
+    let keys: Vec<&str> = report.source_hashes.keys().map(String::as_str).collect();
+    assert_eq!(keys, ["a.js"], "{report:#?}");
+    assert!(report.source_hashes["a.js"].starts_with("xxh3:"));
+}
+#[test]
+fn test_report_empty_consumers_keeps_queried_file_and_digest() {
+    let report = query("var x = 1;", 1, 9);
+    assert!(report.consumers.is_empty(), "{report:#?}");
+    assert_eq!(report.source_hashes.keys().collect::<Vec<_>>(), ["test.js"]);
+    assert!(report.corpus_digest.starts_with("xxh3:"));
+}
+#[test]
+fn test_report_corpus_digest_tracks_unrelated_file_changes() {
+    let base = two_file_query("var y = 2;");
+    let same = two_file_query("var y = 2;");
+    let changed = two_file_query("var y = 22;");
+    assert_eq!(base.corpus_digest, same.corpus_digest);
+    assert_ne!(base.corpus_digest, changed.corpus_digest);
+    assert_eq!(base.source_hashes, changed.source_hashes);
+}
+#[test]
+fn test_analyze_changes_no_anchor_empty_map_keeps_digest() {
+    let files = [SourceFile {
+        path: "a.js".into(),
+        source: "var x = 1;".into(),
+    }];
+    let changes = BTreeMap::from([("a.js".to_string(), vec![99usize])]);
+    let report = analyze_changes(&files, &changes, &Budgets::default()).unwrap();
+    assert!(report.source_hashes.is_empty(), "{report:#?}");
+    assert!(report.corpus_digest.starts_with("xxh3:"));
+}

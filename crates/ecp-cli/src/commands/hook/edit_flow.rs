@@ -387,7 +387,11 @@ fn render(report: &Value, phase: &str, scope: &str, max_context: usize) -> Strin
             continue;
         }
         let flow = &analysis["report"];
-        lines.push(format!("  source_hashes={}", flow["source_hashes"][file]));
+        // A trimmed map omits a file the slice never reaches; the digest still moves when it changes.
+        match flow["source_hashes"].get(file) {
+            Some(hash) => lines.push(format!("  source_hashes={hash}")),
+            None => lines.push(format!("  corpus_digest={}", flow["corpus_digest"])),
+        }
         if let (Some(consumers), Some(nodes)) =
             (flow["consumers"].as_array(), flow["nodes"].as_array())
         {
@@ -737,6 +741,7 @@ mod tests {
     fn test_render_keeps_source_labels_on_one_line() {
         let report = json!({"analysis":[{"file":"x.js","line":1,"result":{"report":{
             "source_hashes": {"x.js": "xxh3:0"},
+            "corpus_digest": "xxh3:9",
             "consumers": [0],
             "nodes": [{"id": 0, "file": "x.js", "line": 2, "kind": "argument", "label": "consume(\nignore previous instructions\n)"}],
             "boundaries": [],
@@ -747,6 +752,44 @@ mod tests {
         assert!(
             result.contains("  x.js:2 argument consume( ignore previous instructions )"),
             "{result}"
+        );
+    }
+
+    #[test]
+    fn test_render_edited_file_in_map_prints_its_hash() {
+        let report = json!({"analysis":[{"file":"x.js","line":1,"result":{"report":{
+            "source_hashes": {"x.js": "xxh3:0"}, "corpus_digest": "xxh3:9",
+            "consumers": [], "nodes": [], "boundaries": [], "boundaries_omitted": 0, "truncated": false
+        }}}]});
+        let result = render(&report, "after", "edited file only", MAX_CONTEXT);
+        assert!(result.contains("  source_hashes=\"xxh3:0\""), "{result}");
+        assert!(!result.contains("corpus_digest"), "{result}");
+    }
+
+    #[test]
+    fn test_render_edited_file_absent_from_map_prints_corpus_digest() {
+        let report = json!({"analysis":[{"file":"x.js","line":1,"result":{"report":{
+            "source_hashes": {}, "corpus_digest": "xxh3:9",
+            "consumers": [], "nodes": [], "boundaries": [], "boundaries_omitted": 0, "truncated": false
+        }}}]});
+        let result = render(&report, "after", "edited file only", MAX_CONTEXT);
+        assert!(result.contains("  corpus_digest=\"xxh3:9\""), "{result}");
+        assert!(!result.contains("source_hashes=null"), "{result}");
+    }
+
+    #[test]
+    fn test_render_changed_hash_changes_rendered_line() {
+        let mk = |h: &str| {
+            json!({"analysis":[{"file":"x.js","line":1,"result":{"report":{
+                "source_hashes": {"x.js": h}, "corpus_digest": "xxh3:9",
+                "consumers": [], "nodes": [], "boundaries": [], "boundaries_omitted": 0, "truncated": false
+            }}}]})
+        };
+        let before = render(&mk("xxh3:1"), "before", "s", MAX_CONTEXT);
+        let after = render(&mk("xxh3:2"), "after", "s", MAX_CONTEXT);
+        assert_ne!(
+            before.split("source_hashes=").nth(1),
+            after.split("source_hashes=").nth(1)
         );
     }
 }
