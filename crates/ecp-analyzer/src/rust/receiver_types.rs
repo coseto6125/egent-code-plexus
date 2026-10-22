@@ -524,7 +524,9 @@ fn rust_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Optio
             let inner = function
                 .child_by_field_name("value")
                 .filter(|value| value.kind() == "call_expression")
-                .and_then(|value| rust_callee_name(value, source, locals));
+                .and_then(|value| {
+                    CallSite::nested_chain(|| rust_callee_name(value, source, locals))
+                });
             Some(match inner {
                 Some(inner) => CallSite::chained_member(&inner, &untyped),
                 None => untyped,

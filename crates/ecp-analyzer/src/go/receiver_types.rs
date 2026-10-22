@@ -433,7 +433,9 @@ fn go_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Option<
                         .and_then(|f| node_text(f, source))
                         .is_some_and(|name| locals.binds_local(start_pos(operand), &name));
                 if operand.kind() == "call_expression" && !calls_local {
-                    if let Some(inner) = go_callee_name(operand, source, locals) {
+                    if let Some(inner) =
+                        CallSite::nested_chain(|| go_callee_name(operand, source, locals))
+                    {
                         return Some(CallSite::chained_member(&inner, &method_name));
                     }
                 }

@@ -136,7 +136,7 @@ fn ruby_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Option<Stri
                 // resolver types it by the callee's return type or class.
                 None if receiver.kind() == "call" => {
                     let untyped = CallSite::untyped_member(method_name);
-                    match ruby_callee(receiver, source, ctx) {
+                    match CallSite::nested_chain(|| ruby_callee(receiver, source, ctx)) {
                         Some(inner) => CallSite::chained_member(&inner, &untyped),
                         None => untyped,
                     }

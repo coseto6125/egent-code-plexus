@@ -381,7 +381,9 @@ fn dart_callee_name(
                                 && !calls_local(obj, source, bindings, nodes, pos) =>
                             {
                                 let untyped = CallSite::untyped_member(method);
-                                match dart_callee_name(obj, source, bindings, nodes) {
+                                match CallSite::nested_chain(|| {
+                                    dart_callee_name(obj, source, bindings, nodes)
+                                }) {
                                     Some(inner) => CallSite::chained_member(&inner, &untyped),
                                     None => untyped,
                                 }

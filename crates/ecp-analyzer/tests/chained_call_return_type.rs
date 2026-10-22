@@ -1156,3 +1156,102 @@ fn test_resolve_call_swift_closure_param_chain_skips_module_function_type() {
 fn test_resolve_call_swift_module_function_chain_binds_return_type_member() {
     assert_binds_alpha(&swift_closure_graph(), "useModule");
 }
+
+/// In every language that encodes chains, the callee entries of a long
+/// chain grow linearly with it: each nests at most `CHAIN_DEPTH_LIMIT`
+/// receivers. Unbounded nesting stores about 0.7 MB for 300 calls.
+#[test]
+fn test_chained_call_long_chain_stores_linear_callee_bytes_in_every_language() {
+    type Provider = fn() -> Box<dyn LanguageProvider>;
+    let depth = 300;
+    let chain = |link: &str| link.repeat(depth);
+    let cases: Vec<(Provider, &str, String, &str)> = vec![
+        (
+            || Box::new(JavaScriptProvider::new().unwrap()),
+            "a.js",
+            format!("function run() {{ p{}; }}\n", chain(".option('x')")),
+            "run",
+        ),
+        (
+            || Box::new(TypeScriptProvider::new().unwrap()),
+            "a.ts",
+            format!("function run() {{ p{}; }}\n", chain(".option('x')")),
+            "run",
+        ),
+        (
+            || Box::new(JavaProvider::new().unwrap()),
+            "A.java",
+            format!("class A {{ void run() {{ p{}; }} }}\n", chain(".option(1)")),
+            "run",
+        ),
+        (
+            || Box::new(CSharpProvider::new().unwrap()),
+            "A.cs",
+            format!("class A {{ void Run() {{ p{}; }} }}\n", chain(".Option(1)")),
+            "Run",
+        ),
+        (
+            || Box::new(KotlinProvider::new().unwrap()),
+            "a.kt",
+            format!("fun run() {{ p{} }}\n", chain(".option(1)")),
+            "run",
+        ),
+        (
+            || Box::new(SwiftProvider::new().unwrap()),
+            "a.swift",
+            format!("func run() {{ p{} }}\n", chain(".option(1)")),
+            "run",
+        ),
+        (
+            || Box::new(DartProvider::new().unwrap()),
+            "a.dart",
+            format!("void run() {{ p{}; }}\n", chain(".option(1)")),
+            "run",
+        ),
+        (
+            || Box::new(GoProvider::new().unwrap()),
+            "a.go",
+            format!("package a\nfunc run() {{ p{} }}\n", chain(".Option(1)")),
+            "run",
+        ),
+        (
+            || Box::new(RustProvider::new().unwrap()),
+            "a.rs",
+            format!("fn run() {{ p{}; }}\n", chain(".option(1)")),
+            "run",
+        ),
+        (
+            || Box::new(PythonProvider::new().unwrap()),
+            "a.py",
+            format!("def run():\n    p{}\n", chain(".option(1)")),
+            "run",
+        ),
+        (
+            || Box::new(PhpProvider::new().unwrap()),
+            "a.php",
+            format!("<?php\nfunction run() {{ $p{}; }}\n", chain("->option(1)")),
+            "run",
+        ),
+        (
+            || Box::new(RubyProvider::new().unwrap()),
+            "a.rb",
+            format!("def run\n  p{}\nend\n", chain(".option(1)")),
+            "run",
+        ),
+        (
+            || Box::new(CppProvider::new().unwrap()),
+            "a.cpp",
+            format!("void run() {{ p{}; }}\n", chain(".option(1)")),
+            "run",
+        ),
+    ];
+    for (provider, path, src, caller) in cases {
+        let calls = raw_calls(provider().as_ref(), path, &src, caller);
+        let total: usize = calls.iter().map(String::len).sum();
+        assert!(
+            calls.len() >= depth && total < depth * 400,
+            "{path}: {} callees, {total} bytes",
+            calls.len()
+        );
+    }
+}

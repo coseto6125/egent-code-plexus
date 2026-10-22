@@ -349,7 +349,8 @@ fn kotlin_callee(
             };
             Some(match receiver.kind() {
                 "call_expression" if !calls_value() => {
-                    match kotlin_callee(receiver, source, locals, nodes) {
+                    match CallSite::nested_chain(|| kotlin_callee(receiver, source, locals, nodes))
+                    {
                         Some(inner) => CallSite::chained_member(&inner, &site),
                         None => site,
                     }

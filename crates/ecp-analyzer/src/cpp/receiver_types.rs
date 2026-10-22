@@ -565,7 +565,8 @@ fn cpp_callee_name(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> Opt
                     // types a call receiver by the callee's return type.
                     None if receiver.kind() == "call_expression" => {
                         let untyped = CallSite::untyped_member(method);
-                        match cpp_callee_name(receiver, source, bindings) {
+                        match CallSite::nested_chain(|| cpp_callee_name(receiver, source, bindings))
+                        {
                             Some(inner) => CallSite::chained_member(&inner, &untyped),
                             None => untyped,
                         }

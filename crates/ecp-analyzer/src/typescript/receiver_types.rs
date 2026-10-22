@@ -288,10 +288,12 @@ fn ts_callee_name(
                 // `Foo.create().bar()` / `new Foo().bar()`: the resolver
                 // types the receiver by the callee's return type, else the
                 // site binds the prop name as before.
-                "call_expression" => Some(match ts_callee_name(obj, source, locals, nodes) {
-                    Some(inner) => CallSite::chained_member(&inner, prop_name),
-                    None => prop_name.to_string(),
-                }),
+                "call_expression" => Some(
+                    match CallSite::nested_chain(|| ts_callee_name(obj, source, locals, nodes)) {
+                        Some(inner) => CallSite::chained_member(&inner, prop_name),
+                        None => prop_name.to_string(),
+                    },
+                ),
                 "new_expression" => Some(match new_expression_call(obj, source) {
                     Some(inner) => CallSite::chained_member(&inner, prop_name),
                     None => prop_name.to_string(),

@@ -106,22 +106,28 @@ fn js_callee_name(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<St
                 // `this` outside a class (module-level self-reference, unusual but possible).
                 Some(prop_name.to_string())
             } else {
-                // Unknown receiver type — emit qualified name so resolver has context.
-                let obj_name = obj.utf8_text(source).ok()?;
                 // A call receiver (`make().bar()`, `new Foo().bar()`): the
                 // resolver types it by the callee's return type or the
-                // constructed class, else the site resolves as before.
+                // constructed class. The chain fallback is the member name
+                // alone: the resolver keeps only its last segment, and the
+                // receiver text of a long chain would make every site
+                // O(depth).
                 let inner = match obj.kind() {
-                    "call_expression" => js_callee_name(obj, source, nodes),
+                    "call_expression" => {
+                        return Some(
+                            match CallSite::nested_chain(|| js_callee_name(obj, source, nodes)) {
+                                Some(inner) => CallSite::chained_member(&inner, prop_name),
+                                None => prop_name.to_string(),
+                            },
+                        );
+                    }
                     "new_expression" => new_expression_call(obj, source),
                     _ => None,
                 };
-                // The chain fallback is the member name alone: the resolver
-                // keeps only its last segment, and the receiver text of a
-                // long chain would make every site O(depth).
                 Some(match inner {
                     Some(inner) => CallSite::chained_member(&inner, prop_name),
-                    None => format!("{obj_name}.{prop_name}"),
+                    // Unknown receiver type — emit qualified name so resolver has context.
+                    None => format!("{}.{prop_name}", obj.utf8_text(source).ok()?),
                 })
             }
         }

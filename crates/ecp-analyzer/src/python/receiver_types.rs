@@ -490,7 +490,9 @@ fn python_callee_name(
                                 if calls_local {
                                     return Some(untyped);
                                 }
-                                match python_callee_name(obj, source, locals, classes) {
+                                match CallSite::nested_chain(|| {
+                                    python_callee_name(obj, source, locals, classes)
+                                }) {
                                     Some(inner) => CallSite::chained_member(&inner, &untyped),
                                     None => untyped,
                                 }

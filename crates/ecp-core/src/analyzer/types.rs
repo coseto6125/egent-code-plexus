@@ -1,6 +1,7 @@
 use crate::file_category::Language;
 use crate::graph::NodeKind;
 use rkyv::{Archive, Deserialize, Serialize};
+use std::cell::Cell;
 use std::path::PathBuf;
 
 /// Source range as (start row, start column, end row, end column).
@@ -59,6 +60,15 @@ pub fn innermost_enclosing(spans: &[Span]) -> Vec<Option<usize>> {
         open.push(i);
     }
     parents
+}
+
+/// How many receiver calls one chained entry nests. A chain thousands of
+/// calls long (`p.option().option()…`) would otherwise make every site
+/// recurse through, and store, every call before it.
+pub const CHAIN_DEPTH_LIMIT: u32 = 8;
+
+thread_local! {
+    static CHAIN_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
 /// One [`RawNode::calls`] entry, decoded.
@@ -128,6 +138,25 @@ impl<'a> CallSite<'a> {
     /// The `RawNode.calls` entry of a member call on a `from`-imported name.
     pub fn from_receiver(receiver: &str, member: &str) -> String {
         [Self::FROM_RECEIVER_PREFIX, receiver, ".", member].concat()
+    }
+
+    /// Runs `encode`, which encodes the receiver call of a chained site, one
+    /// nesting level deeper. Past [`CHAIN_DEPTH_LIMIT`] levels it yields
+    /// `None`, and the site keeps its fallback.
+    pub fn nested_chain(encode: impl FnOnce() -> Option<String>) -> Option<String> {
+        struct Level(u32);
+        impl Drop for Level {
+            fn drop(&mut self) {
+                CHAIN_DEPTH.with(|depth| depth.set(self.0));
+            }
+        }
+        let level = CHAIN_DEPTH.with(Cell::get);
+        if level >= CHAIN_DEPTH_LIMIT {
+            return None;
+        }
+        CHAIN_DEPTH.with(|depth| depth.set(level + 1));
+        let _restore = Level(level);
+        encode()
     }
 
     /// The `RawNode.calls` entry of a member call on the call `inner`

@@ -506,7 +506,9 @@ fn swift_callee_name(
                     if calls_local {
                         return Some(untyped);
                     }
-                    match swift_callee_name(recv, source, bindings, nodes) {
+                    match CallSite::nested_chain(|| {
+                        swift_callee_name(recv, source, bindings, nodes)
+                    }) {
                         Some(inner) => CallSite::chained_member(&inner, &untyped),
                         None => untyped,
                     }

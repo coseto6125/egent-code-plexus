@@ -455,10 +455,12 @@ fn php_member_callee(call: Node<'_>, source: &[u8], ctx: &ClassContext) -> Optio
     let untyped = CallSite::untyped_member(method_name);
     // `Foo::create()->bar()`: the resolver types a call receiver by the
     // callee's return type (`self` / `static` included).
-    Some(match php_receiver_call(obj_node, source, ctx) {
-        Some(inner) => CallSite::chained_member(&inner, &untyped),
-        None => untyped,
-    })
+    Some(
+        match CallSite::nested_chain(|| php_receiver_call(obj_node, source, ctx)) {
+            Some(inner) => CallSite::chained_member(&inner, &untyped),
+            None => untyped,
+        },
+    )
 }
 
 /// The `calls` entry of a call written as a receiver (`make()->m()`,

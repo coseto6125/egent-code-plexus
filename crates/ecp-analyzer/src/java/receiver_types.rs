@@ -225,10 +225,13 @@ fn java_callee(
                 None => {
                     let untyped = CallSite::untyped_member(method_name);
                     return Some(match obj.kind() {
-                        "method_invocation" => match java_callee(obj, source, locals, nodes) {
-                            Some(inner) => CallSite::chained_member(&inner, &untyped),
-                            None => untyped,
-                        },
+                        "method_invocation" => {
+                            match CallSite::nested_chain(|| java_callee(obj, source, locals, nodes))
+                            {
+                                Some(inner) => CallSite::chained_member(&inner, &untyped),
+                                None => untyped,
+                            }
+                        }
                         _ => untyped,
                     });
                 }
