@@ -70,6 +70,12 @@ fn with_overlay(
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&base).unwrap();
     let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
     let view = OverlayView::build(archived, &inputs).unwrap();
+    // Every view a test builds must survive the session view cache unchanged.
+    assert_eq!(
+        OverlayView::from_cache_bytes(&view.to_cache_bytes(), archived.nodes.len()).as_ref(),
+        Some(&view),
+        "view cache round trip"
+    );
     check(&full, MergedGraph::new(archived, Some(&view)));
 }
 

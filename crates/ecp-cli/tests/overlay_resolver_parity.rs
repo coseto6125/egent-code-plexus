@@ -39,6 +39,12 @@ fn closure_parity(
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&base).unwrap();
     let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
     let view = OverlayView::build(archived, &[input(parse(after))]).unwrap();
+    // Every view a test builds must survive the session view cache unchanged.
+    assert_eq!(
+        OverlayView::from_cache_bytes(&view.to_cache_bytes(), archived.nodes.len()).as_ref(),
+        Some(&view),
+        "view cache round trip"
+    );
     let merged = MergedGraph::new(archived, Some(&view));
     let reason = "closure:lexical_reference";
     let mut expected: Vec<_> = full
@@ -310,6 +316,12 @@ fn check_parity_from(
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&base).unwrap();
     let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
     let view = OverlayView::build(archived, &files).unwrap();
+    // Every view a test builds must survive the session view cache unchanged.
+    assert_eq!(
+        OverlayView::from_cache_bytes(&view.to_cache_bytes(), archived.nodes.len()).as_ref(),
+        Some(&view),
+        "view cache round trip"
+    );
     let merged = MergedGraph::new(archived, Some(&view));
     let mut actual: Vec<Target> = merged
         .all_edges()
@@ -1504,6 +1516,12 @@ fn overload_edges(
         .map(|&(path, source)| input(parse(path, source)))
         .collect();
     let view = OverlayView::build(archived, &inputs).unwrap();
+    // Every view a test builds must survive the session view cache unchanged.
+    assert_eq!(
+        OverlayView::from_cache_bytes(&view.to_cache_bytes(), archived.nodes.len()).as_ref(),
+        Some(&view),
+        "view cache round trip"
+    );
     let merged = MergedGraph::new(archived, Some(&view));
     let mut actual: Vec<_> = merged
         .all_edges()

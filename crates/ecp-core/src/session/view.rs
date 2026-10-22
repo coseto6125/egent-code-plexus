@@ -4,8 +4,10 @@
 //! traversals (impact, cypher) without rebuilding L2 and without loading
 //! O(graph) data. The base `ArchivedZeroCopyGraph` stays an immutable mmap;
 //! the view is a small in-memory delta whose own allocation is O(dirty
-//! symbols). Building it scans `graph.files` and `graph.nodes` once each per
-//! query; two lazy helpers cost more, and only when their call shapes occur
+//! symbols). Building it scans `graph.files` and `graph.nodes` once each,
+//! and a query whose session cache holds a view of the same graph and
+//! fragments decodes that ([`OverlayView::from_cache_bytes`]) instead; two
+//! lazy helpers cost more, and only when their call shapes occur
 //! ([`OverlayView::build`] has the full cost):
 //!
 //! - **virtual nodes** — every symbol in a dirty file, addressed by virtual
@@ -222,7 +224,7 @@ impl From<LocalGraph> for OverlayFileInput {
 }
 
 /// A materialized overlay node. `rel_path` is shared per file via `Arc`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ViewNode {
     pub uid: u64,
     pub name: String,
@@ -260,7 +262,7 @@ const CONF_GLOBAL_UNIQUE: f32 = 0.7;
 /// The index's Tier 3.5 (`try_module_tree_resolve`).
 const CONF_MODULE_TREE: f32 = 1.0;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq)]
 pub struct OverlayView {
     base_len: u32,
     nodes: Vec<ViewNode>,
@@ -447,6 +449,10 @@ impl OverlayView {
                 debug_assert!(
                     edge.source >= base_len,
                     "overlay edge sources must be virtual indices"
+                );
+                debug_assert!(
+                    reason_index(edge.reason).is_some(),
+                    "VIEW_EDGE_REASONS must list every edge reason, or the view is never cached"
                 );
                 let ei = edges.len() as u32;
                 edges.push(edge);
@@ -881,6 +887,237 @@ impl OverlayView {
     /// source order, overloads included. Empty for any other node.
     pub fn constructors_of(&self, idx: u32) -> &[u32] {
         self.type_ctors.get(&idx).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
+
+/// Layout version of [`OverlayView::to_cache_bytes`]. Bump it whenever the
+/// cached layout changes shape; cache keys include it.
+pub const VIEW_CACHE_FORMAT: u32 = 2;
+
+/// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
+/// stores each reason as its index here; a view with an unlisted reason is
+/// never stored, so it costs a build per query as before the cache.
+const VIEW_EDGE_REASONS: [&str; 6] = [
+    OVERLOAD_SET_REASON,
+    CLOSURE_REFERENCE_REASON,
+    NEAREST_COPY_REASON,
+    super::merged::OVERLAY_EDGE_REASON,
+    VARIANT_USE_REASON,
+    VARIANT_PATTERN_REASON,
+];
+
+fn reason_index(reason: &str) -> Option<u8> {
+    VIEW_EDGE_REASONS
+        .iter()
+        .position(|&r| r == reason)
+        .map(|i| i as u8)
+}
+
+/// [`OverlayView`] as the session view cache stores it. Maps and sets are
+/// sorted vectors, so the layout depends on no rkyv hasher support. The
+/// adjacency maps are not stored: `build` fills them in edge order, and
+/// decoding replays that order.
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct CachedView {
+    base_len: u32,
+    paths: Vec<String>,
+    nodes: Vec<CachedNode>,
+    replaced: Vec<(u32, u32)>,
+    suppressed: Vec<u32>,
+    dirty_base: Vec<u32>,
+    edges: Vec<CachedEdge>,
+    type_ctors: Vec<(u32, Vec<u32>)>,
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct CachedNode {
+    uid: u64,
+    name: String,
+    kind: NodeKind,
+    owner_class: Option<String>,
+    /// Index into [`CachedView::paths`].
+    path: u32,
+    start_line: u32,
+    end_line: u32,
+    replaced_base: Option<u32>,
+    later_overload: bool,
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct CachedEdge {
+    source: u32,
+    target: u32,
+    rel_type: RelType,
+    confidence: f32,
+    /// Index into [`VIEW_EDGE_REASONS`].
+    reason: u8,
+}
+
+fn sorted<T: Ord>(mut items: Vec<T>) -> Vec<T> {
+    items.sort_unstable();
+    items
+}
+
+impl CachedView {
+    /// Whether every index lies where [`OverlayView::build`] puts it, for a
+    /// graph of `graph_nodes` nodes. Traversals index slices and the base
+    /// CSR with these values, so a decoded view that breaks one must never
+    /// reach them.
+    fn indices_valid(&self, graph_nodes: usize) -> bool {
+        let base_len = self.base_len;
+        let merged_len = u64::from(base_len) + self.nodes.len() as u64;
+        let base = |idx: u32| idx < base_len;
+        let virt = |idx: u32| idx >= base_len && u64::from(idx) < merged_len;
+        let merged = |idx: u32| u64::from(idx) < merged_len;
+        base_len as usize == graph_nodes
+            && self
+                .nodes
+                .iter()
+                .all(|n| (n.path as usize) < self.paths.len() && n.replaced_base.is_none_or(base))
+            && self.replaced.iter().all(|&(b, v)| base(b) && virt(v))
+            && self.suppressed.iter().copied().all(base)
+            && self.dirty_base.iter().copied().all(base)
+            && self
+                .edges
+                .iter()
+                .all(|e| virt(e.source) && merged(e.target))
+            && self
+                .type_ctors
+                .iter()
+                .all(|(ty, ctors)| virt(*ty) && ctors.iter().copied().all(virt))
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        rkyv::to_bytes::<rkyv::rancor::Error>(self)
+            .map(|bytes| bytes.into_vec())
+            .unwrap_or_default()
+    }
+}
+
+impl OverlayView {
+    /// The view as bytes for [`Self::from_cache_bytes`]. Empty when an edge
+    /// reason is missing from `VIEW_EDGE_REASONS` or serialization fails;
+    /// the cache then stores nothing.
+    pub fn to_cache_bytes(&self) -> Vec<u8> {
+        self.to_cached()
+            .map(|cached| cached.to_bytes())
+            .unwrap_or_default()
+    }
+
+    fn to_cached(&self) -> Option<CachedView> {
+        let mut path_ids: FxHashMap<&str, u32> = FxHashMap::default();
+        let mut paths: Vec<String> = Vec::new();
+        let nodes = self
+            .nodes
+            .iter()
+            .map(|n| CachedNode {
+                uid: n.uid,
+                name: n.name.clone(),
+                kind: n.kind,
+                owner_class: n.owner_class.clone(),
+                path: *path_ids.entry(&*n.rel_path).or_insert_with(|| {
+                    paths.push(n.rel_path.to_string());
+                    paths.len() as u32 - 1
+                }),
+                start_line: n.start_line,
+                end_line: n.end_line,
+                replaced_base: n.replaced_base,
+                later_overload: n.later_overload,
+            })
+            .collect();
+        let edges = self
+            .edges
+            .iter()
+            .map(|e| {
+                Some(CachedEdge {
+                    source: e.source,
+                    target: e.target,
+                    rel_type: e.rel_type,
+                    confidence: e.confidence,
+                    reason: reason_index(e.reason)?,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(CachedView {
+            base_len: self.base_len,
+            paths,
+            nodes,
+            replaced: sorted(self.replaced.iter().map(|(&b, &v)| (b, v)).collect()),
+            suppressed: sorted(self.suppressed.iter().copied().collect()),
+            dirty_base: sorted(self.dirty_base.iter().copied().collect()),
+            edges,
+            type_ctors: sorted(
+                self.type_ctors
+                    .iter()
+                    .map(|(&ty, ctors)| (ty, ctors.clone()))
+                    .collect(),
+            ),
+        })
+    }
+
+    /// Decode [`Self::to_cache_bytes`] output for a graph of `graph_nodes`
+    /// nodes. `None` for bytes that fail rkyv validation, name a reason past
+    /// `VIEW_EDGE_REASONS`, or hold an index `build` never produces: a
+    /// wrong view is worse than a rebuilt one.
+    pub fn from_cache_bytes(bytes: &[u8], graph_nodes: usize) -> Option<Self> {
+        // Checked access refuses misaligned input, and a `fs::read` buffer
+        // carries no alignment guarantee.
+        let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(bytes.len());
+        aligned.extend_from_slice(bytes);
+        let cached = rkyv::from_bytes::<CachedView, rkyv::rancor::Error>(&aligned).ok()?;
+        Self::from_cached(cached, graph_nodes)
+    }
+
+    fn from_cached(cached: CachedView, graph_nodes: usize) -> Option<Self> {
+        if !cached.indices_valid(graph_nodes) {
+            return None;
+        }
+        let paths: Vec<Arc<str>> = cached.paths.into_iter().map(Arc::from).collect();
+        let nodes = cached
+            .nodes
+            .into_iter()
+            .map(|n| ViewNode {
+                uid: n.uid,
+                name: n.name,
+                kind: n.kind,
+                owner_class: n.owner_class,
+                rel_path: paths[n.path as usize].clone(),
+                start_line: n.start_line,
+                end_line: n.end_line,
+                replaced_base: n.replaced_base,
+                later_overload: n.later_overload,
+            })
+            .collect();
+        let edges = cached
+            .edges
+            .into_iter()
+            .map(|e| {
+                Some(ViewEdge {
+                    source: e.source,
+                    target: e.target,
+                    rel_type: e.rel_type,
+                    confidence: e.confidence,
+                    reason: VIEW_EDGE_REASONS.get(usize::from(e.reason)).copied()?,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let mut out_adj: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+        let mut in_adj: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+        for (ei, edge) in edges.iter().enumerate() {
+            out_adj.entry(edge.source).or_default().push(ei as u32);
+            in_adj.entry(edge.target).or_default().push(ei as u32);
+        }
+        Some(Self {
+            base_len: cached.base_len,
+            nodes,
+            replaced: cached.replaced.into_iter().collect(),
+            suppressed: cached.suppressed.into_iter().collect(),
+            dirty_base: cached.dirty_base.into_iter().collect(),
+            edges,
+            out_adj,
+            in_adj,
+            type_ctors: cached.type_ctors.into_iter().collect(),
+        })
     }
 }
 
@@ -5143,5 +5380,268 @@ mod tests {
         assert_eq!(leaf_path("a/b/c.rs"), "b/c.rs");
         assert_eq!(leaf_path("b/c.rs"), "b/c.rs");
         assert_eq!(leaf_path("c.rs"), "c.rs");
+    }
+
+    /// A view holding every part the cache stores: replaced and suppressed
+    /// base nodes, `Calls` edges, closure and overload-set references, and a
+    /// type's constructors.
+    fn composite_view(graph: &ArchivedZeroCopyGraph) -> OverlayView {
+        let mut parent = sym("enclosing", &[]);
+        parent.end_line = 4;
+        let mut closure = sym("<anonymous:2:2>", &[]);
+        closure.start_line = 2;
+        closure.end_line = 3;
+        let closures = OverlayFileInput {
+            export_aliases: Vec::new(),
+            rel_path: "src/Closures.java".into(),
+            symbols: vec![parent, closure],
+            imports: vec![],
+        };
+        let ctor = |line: u32| OverlaySymbol {
+            kind: NodeKind::Constructor,
+            owner_class: Some("Multi".to_string()),
+            start_line: line,
+            end_line: line + 1,
+            ..sym("Multi", &[])
+        };
+        let multi = OverlayFileInput {
+            export_aliases: Vec::new(),
+            rel_path: "src/Multi.java".to_string(),
+            symbols: vec![
+                OverlaySymbol {
+                    kind: NodeKind::Class,
+                    end_line: 9,
+                    ..sym("Multi", &[])
+                },
+                ctor(2),
+                ctor(5),
+            ],
+            imports: vec![],
+        };
+        let new_multi = CallSite::construct("Multi");
+        let app = OverlayFileInput {
+            export_aliases: Vec::new(),
+            rel_path: "src/App.java".to_string(),
+            symbols: vec![sym("makeMulti", &[new_multi.as_str()])],
+            imports: vec![],
+        };
+        OverlayView::build(graph, &[dirty_input(), closures, multi, app]).unwrap()
+    }
+
+    #[test]
+    fn test_from_cache_bytes_built_view_round_trip_returns_equal_view() {
+        let bytes = base_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let view = composite_view(graph);
+        // The fixture must reach every part, or equality proves less.
+        let reasons: FxHashSet<&str> = view.edges().iter().map(|e| e.reason).collect();
+        for reason in [
+            CLOSURE_REFERENCE_REASON,
+            OVERLOAD_SET_REASON,
+            crate::session::merged::OVERLAY_EDGE_REASON,
+        ] {
+            assert!(
+                reasons.contains(reason),
+                "fixture lacks {reason}: {reasons:?}"
+            );
+        }
+        assert_eq!(view.redirect(0), Some(view.base_len()), "replaced");
+        assert_eq!(view.redirect(1), None, "suppressed");
+        // dirty_input's two symbols and the closure file's two precede it.
+        let multi = view.base_len() + 4;
+        assert_eq!(view.constructors_of(multi).len(), 2, "type_ctors");
+
+        let decoded =
+            OverlayView::from_cache_bytes(&view.to_cache_bytes(), graph.nodes.len()).unwrap();
+
+        assert_eq!(decoded, view);
+        let nodes = decoded.virtual_nodes();
+        assert!(
+            Arc::ptr_eq(&nodes[0].rel_path, &nodes[1].rel_path),
+            "one Arc per distinct path"
+        );
+        for idx in 0..view.base_len() + nodes.len() as u32 {
+            assert_eq!(decoded.redirect(idx), view.redirect(idx), "redirect({idx})");
+            assert_eq!(
+                decoded.overlay_out(idx).collect::<Vec<_>>(),
+                view.overlay_out(idx).collect::<Vec<_>>(),
+                "overlay_out({idx})"
+            );
+            assert_eq!(
+                decoded.overlay_in(idx).collect::<Vec<_>>(),
+                view.overlay_in(idx).collect::<Vec<_>>(),
+                "overlay_in({idx})"
+            );
+            assert_eq!(
+                decoded.masks_base_edge(idx, RelType::Calls),
+                view.masks_base_edge(idx, RelType::Calls)
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_cache_bytes_nearest_copy_edge_returns_same_reason_constant() {
+        let mut fx = GraphFixture::new();
+        fx.func("core/c/src/cm.c", "c_make");
+        fx.func("android/core/c/src/cm.c", "c_make");
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let file = OverlayFileInput {
+            export_aliases: Vec::new(),
+            rel_path: "core/c/test/t.c".into(),
+            symbols: vec![sym("t", &["c_make"])],
+            imports: vec![],
+        };
+        let view = OverlayView::build(graph, &[file]).unwrap();
+        assert_eq!(view.edges()[0].reason, NEAREST_COPY_REASON);
+
+        let decoded =
+            OverlayView::from_cache_bytes(&view.to_cache_bytes(), graph.nodes.len()).unwrap();
+
+        assert_eq!(decoded, view);
+    }
+
+    #[test]
+    fn test_reason_index_listed_and_unknown_reasons_map_to_index_or_none() {
+        for (i, reason) in VIEW_EDGE_REASONS.into_iter().enumerate() {
+            // An edge's reason may be a different allocation of the same
+            // text: the lookup must match by content, not by pointer.
+            let owned = String::from(reason);
+            assert_eq!(reason_index(&owned), Some(i as u8));
+        }
+        for unknown in ["", " ", "call", "l1-overlay "] {
+            assert_eq!(reason_index(unknown), None, "{unknown:?}");
+        }
+    }
+
+    /// An unlisted reason must leave nothing to store, or every query would
+    /// write a view that no decode accepts.
+    #[test]
+    fn test_to_cache_bytes_unknown_reason_returns_empty() {
+        let bytes = base_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let mut view = OverlayView::build(graph, &[dirty_input()]).unwrap();
+        view.edges[0].reason = "made-up-reason";
+        assert!(view.to_cache_bytes().is_empty());
+    }
+
+    #[test]
+    fn test_from_cache_bytes_edge_past_node_space_returns_none() {
+        let bytes = base_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let mut view = OverlayView::build(graph, &[dirty_input()]).unwrap();
+        view.edges[0].target = view.base_len() + view.virtual_nodes().len() as u32;
+        assert!(OverlayView::from_cache_bytes(&view.to_cache_bytes(), graph.nodes.len()).is_none());
+    }
+
+    #[test]
+    fn test_from_cache_bytes_graph_node_count_differs_returns_none() {
+        let bytes = base_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let cached = composite_view(graph).to_cache_bytes();
+        let nodes = graph.nodes.len();
+        assert!(OverlayView::from_cache_bytes(&cached, nodes).is_some());
+        for other in [nodes - 1, nodes + 1, 0] {
+            assert!(
+                OverlayView::from_cache_bytes(&cached, other).is_none(),
+                "graph of {other} nodes"
+            );
+        }
+    }
+
+    /// Each index `build` keeps in a fixed range, moved one step out of it.
+    /// The composite view holds every part, so each mutation has a target.
+    #[test]
+    fn test_from_cache_bytes_index_out_of_build_range_returns_none() {
+        let bytes = base_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let view = composite_view(graph);
+        let merged = |c: &CachedView| c.base_len + c.nodes.len() as u32;
+        type Mutation = (&'static str, fn(&mut CachedView));
+        let cases: [Mutation; 14] = [
+            ("node path past paths", |c| {
+                c.nodes[0].path = c.paths.len() as u32
+            }),
+            ("replaced_base in virtual space", |c| {
+                c.nodes[0].replaced_base = Some(c.base_len)
+            }),
+            ("replaced key in virtual space", |c| {
+                c.replaced[0].0 = c.base_len
+            }),
+            ("replaced value in base space", |c| {
+                c.replaced[0].1 = c.base_len - 1
+            }),
+            ("replaced value past merged space", |c| {
+                c.replaced[0].1 = c.base_len + c.nodes.len() as u32
+            }),
+            ("suppressed in virtual space", |c| {
+                c.suppressed.push(c.base_len)
+            }),
+            ("dirty_base in virtual space", |c| {
+                c.dirty_base.push(c.base_len)
+            }),
+            ("edge source in base space", |c| {
+                c.edges[0].source = c.base_len - 1
+            }),
+            ("edge source past merged space", |c| {
+                c.edges[0].source = c.base_len + c.nodes.len() as u32
+            }),
+            ("edge target past merged space", |c| {
+                c.edges[0].target = c.base_len + c.nodes.len() as u32
+            }),
+            ("edge reason past the table", |c| {
+                c.edges[0].reason = VIEW_EDGE_REASONS.len() as u8
+            }),
+            ("type_ctors key in base space", |c| {
+                c.type_ctors[0].0 = c.base_len - 1
+            }),
+            ("type_ctors value in base space", |c| {
+                c.type_ctors[0].1[0] = c.base_len - 1
+            }),
+            ("type_ctors value past merged space", |c| {
+                c.type_ctors[0].1[0] = c.base_len + c.nodes.len() as u32
+            }),
+        ];
+        let intact = view.to_cached().unwrap();
+        assert!(intact.base_len > 0 && merged(&intact) > intact.base_len);
+        assert!(OverlayView::from_cache_bytes(&intact.to_bytes(), graph.nodes.len()).is_some());
+        for (what, mutate) in cases {
+            let mut cached = view.to_cached().unwrap();
+            mutate(&mut cached);
+            assert!(
+                OverlayView::from_cache_bytes(&cached.to_bytes(), graph.nodes.len()).is_none(),
+                "{what}"
+            );
+        }
+    }
+
+    /// A base-space edge target is legitimate (a call into a clean file);
+    /// the bounds check must keep it.
+    #[test]
+    fn test_from_cache_bytes_edge_into_base_space_returns_view() {
+        let bytes = base_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let view = composite_view(graph);
+        assert!(view.edges().iter().any(|e| e.target < view.base_len()));
+
+        let decoded = OverlayView::from_cache_bytes(&view.to_cache_bytes(), graph.nodes.len());
+
+        assert_eq!(decoded.as_ref(), Some(&view));
+    }
+
+    #[test]
+    fn test_from_cache_bytes_truncated_garbage_or_empty_returns_none() {
+        let bytes = base_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let cached = composite_view(graph).to_cache_bytes();
+        let nodes = graph.nodes.len();
+        assert!(!cached.is_empty());
+        for len in [cached.len() - 1, 4, 0] {
+            assert!(
+                OverlayView::from_cache_bytes(&cached[..len], nodes).is_none(),
+                "truncated to {len}"
+            );
+        }
+        assert!(OverlayView::from_cache_bytes(&[0xAB; 512], nodes).is_none());
     }
 }

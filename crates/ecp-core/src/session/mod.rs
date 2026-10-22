@@ -11,4 +11,6 @@ pub use overlay::{
     FRAGMENT_FORMAT_V2, FRAGMENT_FORMAT_V3, FRAGMENT_FORMAT_V4,
 };
 pub use state::{SessionState, StaleReason};
-pub use view::{OverlayFileInput, OverlaySymbol, OverlayView, ViewEdge, ViewNode};
+pub use view::{
+    OverlayFileInput, OverlaySymbol, OverlayView, ViewEdge, ViewNode, VIEW_CACHE_FORMAT,
+};

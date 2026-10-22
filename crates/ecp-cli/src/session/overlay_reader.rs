@@ -6,9 +6,11 @@
 //!   name matching.
 //! - `load_overlay` — `ecp_core::session::Overlay` for `merge_archived`
 //!   (inspect's node-set merge).
-//! - `load_view_inputs` — per-file `OverlayFileInput`s (symbols + imports +
-//!   calls + export flags and aliases) for the query-time `OverlayView`
-//!   edge merge.
+//! - `accepted_fragments` + `decode_view_inputs` — per-file
+//!   `OverlayFileInput`s (symbols + imports + calls + export flags and
+//!   aliases) for the query-time `OverlayView` edge merge. The first pass
+//!   validates the entries and hashes them into the view cache's input key;
+//!   only a cache miss pays for the second.
 //!
 //! Fragment → Node conversion:
 //! - `uid`:  `ecp_core::uid::compute(kind, rel_path, owner, name)` — same
@@ -33,6 +35,7 @@ use rkyv::rancor::Error as RkyvError;
 use std::fs;
 use std::io;
 use std::path::Path;
+use xxhash_rust::xxh3::Xxh3;
 
 use super::overlay_writer::{
     ArchivedFragment, ArchivedFragmentFile, ArchivedFragmentFileV2, ArchivedFragmentFileV3,
@@ -227,8 +230,16 @@ pub fn load_overlay(session_dir: &Path) -> io::Result<Option<Overlay>> {
     Ok(Some(Overlay::new(nodes)))
 }
 
-/// Read the dirty-file set as `OverlayView` inputs: one `OverlayFileInput`
-/// per VALID v4 manifest entry. Entry validation guards the staleness holes
+/// A manifest entry `accepted_fragments` let through: its rel_path and the
+/// fragment bytes that passed archive validation.
+pub struct AcceptedFragment {
+    rel_path: String,
+    bytes: Vec<u8>,
+}
+
+/// The dirty-file entries that may feed `OverlayView`, plus an xxh3 over
+/// each one's rel_path and fragment bytes in manifest order: the inputs'
+/// share of the view cache key. Entry validation guards the staleness holes
 /// the manifest has by construction:
 ///
 /// - **another builder** — a manifest without the running binary's
@@ -242,19 +253,21 @@ pub fn load_overlay(session_dir: &Path) -> io::Result<Option<Overlay>> {
 ///   stale overlay data; the on-disk mtime is the cheap tell (the entry's
 ///   `mtime_ns` was stat'ed at fragment-write time from the same path).
 ///
-/// Returns an empty Vec on a clean tree — `OverlayView::build` then returns
-/// `None` and query paths stay on their original branch.
-pub fn load_view_inputs(
+/// Returns an empty Vec on a clean tree — query paths then stay on their
+/// original branch. The same pass computes the list and the hash, so the
+/// key covers exactly the entries the acceptance rules let through.
+pub fn accepted_fragments(
     session_dir: &Path,
     worktree_root: &Path,
-) -> io::Result<Vec<OverlayFileInput>> {
+) -> io::Result<(Vec<AcceptedFragment>, u64)> {
+    let mut hasher = Xxh3::new();
     let manifest = session_dir.join("dirty_files.json");
     if !manifest.exists() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), hasher.digest()));
     }
     let df = DirtyFiles::read(&manifest)?;
     if !df.from_current_builder() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), hasher.digest()));
     }
     let overlay_dir = session_dir.join("graph_overlay");
     let mut out = Vec::new();
@@ -271,48 +284,67 @@ pub fn load_view_inputs(
         let Ok(bytes) = fs::read(&bin_path) else {
             continue;
         };
-        let Ok(archived) = rkyv::access::<ArchivedFragmentFile, RkyvError>(&bytes) else {
+        if rkyv::access::<ArchivedFragmentFile, RkyvError>(&bytes).is_err() {
             continue;
-        };
-        // Symbols copy straight off the archived view — a full
-        // `rkyv::deserialize` of the whole FragmentFile would allocate every
-        // string twice (once into FragmentFile, once into OverlaySymbol).
-        // Imports and export aliases keep the one-line deserialize: the
-        // `binding_kind` enum makes a manual field map noisier than the
-        // small allocation it saves.
-        let (Ok(imports), Ok(export_aliases)) = (
-            rkyv::deserialize::<Vec<RawImport>, RkyvError>(&archived.imports),
-            rkyv::deserialize::<Vec<RawExportAlias>, RkyvError>(&archived.export_aliases),
-        ) else {
-            continue;
-        };
-        out.push(OverlayFileInput {
+        }
+        super::view_cache::hash_part(&mut hasher, rel_path.as_bytes());
+        super::view_cache::hash_part(&mut hasher, &bytes);
+        out.push(AcceptedFragment {
             rel_path: rel_path.clone(),
-            symbols: archived
-                .symbols
-                .iter()
-                .map(|s| OverlaySymbol {
-                    name: s.name.as_str().to_owned(),
-                    kind: NodeKind::from(&s.kind),
-                    owner_class: s.owner_class.as_ref().map(|o| o.as_str().to_owned()),
-                    // span rows are 0-based; Node line conventions are 1-based.
-                    start_line: s.span.0.to_native() + 1,
-                    end_line: s.span.2.to_native() + 1,
-                    start_column: s.span.1.to_native(),
-                    end_column: s.span.3.to_native(),
-                    calls: s.calls.iter().map(|c| c.as_str().to_owned()).collect(),
-                    is_exported: s.is_exported,
-                    heritage: s.heritage.iter().map(|h| h.as_str().to_owned()).collect(),
-                    variant_refs: s
-                        .variant_refs
-                        .iter()
-                        .map(|v| v.as_str().to_owned())
-                        .collect(),
-                })
-                .collect(),
-            imports,
-            export_aliases,
+            bytes,
         });
     }
-    Ok(out)
+    Ok((out, hasher.digest()))
+}
+
+/// The `OverlayView` inputs of `accepted`, one per fragment whose imports
+/// and export aliases deserialize. Dropping the rest keeps the cache key
+/// sound: this is a deterministic function of the bytes the key hashed, so
+/// equal keys still mean equal inputs.
+pub fn decode_view_inputs(accepted: &[AcceptedFragment]) -> Vec<OverlayFileInput> {
+    accepted
+        .iter()
+        .filter_map(|fragment| {
+            let archived = rkyv::access::<ArchivedFragmentFile, RkyvError>(&fragment.bytes).ok()?;
+            // Symbols copy straight off the archived view — a full
+            // `rkyv::deserialize` of the whole FragmentFile would allocate
+            // every string twice (once into FragmentFile, once into
+            // OverlaySymbol). Imports and export aliases keep the one-line
+            // deserialize: the `binding_kind` enum makes a manual field map
+            // noisier than the small allocation it saves.
+            let (Ok(imports), Ok(export_aliases)) = (
+                rkyv::deserialize::<Vec<RawImport>, RkyvError>(&archived.imports),
+                rkyv::deserialize::<Vec<RawExportAlias>, RkyvError>(&archived.export_aliases),
+            ) else {
+                return None;
+            };
+            Some(OverlayFileInput {
+                rel_path: fragment.rel_path.clone(),
+                symbols: archived
+                    .symbols
+                    .iter()
+                    .map(|s| OverlaySymbol {
+                        name: s.name.as_str().to_owned(),
+                        kind: NodeKind::from(&s.kind),
+                        owner_class: s.owner_class.as_ref().map(|o| o.as_str().to_owned()),
+                        // span rows are 0-based; Node line conventions are 1-based.
+                        start_line: s.span.0.to_native() + 1,
+                        end_line: s.span.2.to_native() + 1,
+                        start_column: s.span.1.to_native(),
+                        end_column: s.span.3.to_native(),
+                        calls: s.calls.iter().map(|c| c.as_str().to_owned()).collect(),
+                        is_exported: s.is_exported,
+                        heritage: s.heritage.iter().map(|h| h.as_str().to_owned()).collect(),
+                        variant_refs: s
+                            .variant_refs
+                            .iter()
+                            .map(|v| v.as_str().to_owned())
+                            .collect(),
+                    })
+                    .collect(),
+                imports,
+                export_aliases,
+            })
+        })
+        .collect()
 }

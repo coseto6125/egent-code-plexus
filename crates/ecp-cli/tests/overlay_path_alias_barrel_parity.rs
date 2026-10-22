@@ -117,6 +117,12 @@ fn test_overlay_clean_barrel_path_alias_reexport_matches_reindex() {
                 })
                 .collect();
             let view = OverlayView::build(base, &inputs).expect("edits make a view");
+            // Every view a test builds must survive the session view cache unchanged.
+            assert_eq!(
+                OverlayView::from_cache_bytes(&view.to_cache_bytes(), base.nodes.len()).as_ref(),
+                Some(&view),
+                "view cache round trip"
+            );
             assert_eq!(
                 calls_of_go(&MergedGraph::new(base, Some(&view))),
                 reindex,
