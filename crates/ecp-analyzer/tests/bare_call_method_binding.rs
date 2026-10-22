@@ -464,6 +464,48 @@ fn test_resolve_call_javascript_this_call_outside_class_binds_method() {
     );
 }
 
+#[test]
+fn test_resolve_call_javascript_bare_call_excludes_own_and_unrelated_methods() {
+    let provider = JavaScriptProvider::new().unwrap();
+    for files in [
+        vec![("app.js", "class App { helper() {} run() { helper(); } }\n")],
+        vec![
+            ("other.js", "class Other { helper() {} }\n"),
+            ("app.js", "function run() { helper(); }\n"),
+        ],
+    ] {
+        assert!(targets(&single(&provider, &files), "run").is_empty());
+    }
+}
+
+#[test]
+fn test_resolve_call_typescript_bare_call_excludes_own_and_unrelated_methods() {
+    let provider = TypeScriptProvider::new().unwrap();
+    for files in [
+        vec![("app.ts", "class App { helper() {} run() { helper(); } }\n")],
+        vec![
+            ("other.ts", "class Other { helper() {} }\n"),
+            ("app.ts", "function run() { helper(); }\n"),
+        ],
+    ] {
+        assert!(targets(&single(&provider, &files), "run").is_empty());
+    }
+}
+
+#[test]
+fn test_resolve_call_go_bare_call_excludes_own_and_unrelated_methods() {
+    let provider = GoProvider::new().unwrap();
+    for files in [
+        vec![("app.go", "package app\ntype App struct {}\nfunc (a App) Helper() {}\nfunc (a App) run() { Helper() }\n")],
+        vec![
+            ("other.go", "package app\ntype Other struct {}\nfunc (o Other) Helper() {}\n"),
+            ("app.go", "package app\nfunc run() { Helper() }\n"),
+        ],
+    ] {
+        assert!(targets(&single(&provider, &files), "run").is_empty());
+    }
+}
+
 /// TS writes a chained receiver (`this.svc.load()`) as the bare member.
 #[test]
 fn test_resolve_call_typescript_chained_member_call_binds_method() {
