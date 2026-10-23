@@ -227,6 +227,8 @@ fn is_scope_boundary(kind: &str) -> bool {
         "block"
             | "if_statement"
             | "for_statement"
+            | "expression_switch_statement"
+            | "type_switch_statement"
             | "expression_case"
             | "type_case"
             | "communication_case"
@@ -322,14 +324,14 @@ fn collect_scope_body(
                 for child in n.children(&mut c) {
                     if child.kind() == "var_spec" {
                         collect_var_spec(&child, source, out);
-                        record_names(&child, source, start_pos(child), values);
+                        record_names(&child, source, node_range(child).1, values);
                     }
                 }
             }
             "short_var_declaration" => {
                 collect_short_var(&n, source, out);
                 if let Some(left) = n.child_by_field_name("left") {
-                    record_names(&left, source, start_pos(n), values);
+                    record_names(&left, source, node_range(n).1, values);
                 }
             }
             _ => {}
