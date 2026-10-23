@@ -1448,6 +1448,55 @@ fn test_resolve_call_dart_part_file_external_library_type_returns_no_edge() {
 }
 
 #[test]
+fn test_resolve_call_dart_named_part_file_external_library_type_returns_no_edge() {
+    let graph = single(
+        &DartProvider::new().unwrap(),
+        &[
+            (
+                "lib.dart",
+                "library helpers;\nimport 'package:external/client.dart';\npart 'src/part.dart';\n",
+            ),
+            (
+                "src/part.dart",
+                "part of helpers;\nClient make() => Client();\nvoid run() { make().doWork(); }\n",
+            ),
+            ("src/helpers.dart", "class Client { void doWork() {} }"),
+            ("other.dart", "class Other { void doWork() {} }"),
+        ],
+    );
+    assert_inner_binds(&graph, "run", "", "make");
+    assert_no_member_edge(&graph, "run", "doWork");
+}
+
+/// A part file's library type keeps the parser fallback main had.
+#[test]
+fn test_resolve_call_dart_part_file_library_type_keeps_fallback_edge() {
+    let graph = single(
+        &DartProvider::new().unwrap(),
+        &[
+            (
+                "lib.dart",
+                "part 'src/part.dart';\nclass Foo { void bar() {} }\n",
+            ),
+            (
+                "src/part.dart",
+                "part of '../lib.dart';\nFoo make() => Foo();\nvoid run() { make().bar(); }\n",
+            ),
+        ],
+    );
+    let bars: Vec<_> = calls_from(&graph, "run")
+        .into_iter()
+        .filter(|hit| hit.name == "bar")
+        .collect();
+    assert_eq!(bars.len(), 1, "all targets: {:?}", targets(&graph, "run"));
+    assert_eq!(
+        (bars[0].file.as_str(), bars[0].owner.as_str()),
+        ("lib.dart", "Foo")
+    );
+    assert_eq!(bars[0].confidence, 0.7);
+}
+
+#[test]
 fn test_resolve_call_dart_filtered_import_rejects_hidden_project_namesake() {
     for combinator in ["hide Foo", "show Other"] {
         let source = format!("import 'entity/foo.dart' {combinator}; import 'package:external/foo.dart'; Foo make() => throw 0; void run() {{ make().bar(); }}");

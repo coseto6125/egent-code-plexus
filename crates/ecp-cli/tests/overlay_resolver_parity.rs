@@ -3780,6 +3780,49 @@ fn test_overlay_dart_part_file_external_library_type_returns_no_edge() {
 }
 
 #[test]
+fn test_overlay_dart_named_part_file_external_library_type_returns_no_edge() {
+    let provider = DartProvider::new().unwrap();
+    let before = "part of helpers;\nClient make() => Client();\nvoid run() {}\n";
+    let after = "part of helpers;\nClient make() => Client();\nvoid run() { make().doWork(); }\n";
+    parity(
+        &provider,
+        &[
+            (
+                "lib.dart",
+                "library helpers;\nimport 'package:external/client.dart';\npart 'src/part.dart';\n",
+            ),
+            ("src/part.dart", before),
+            ("src/helpers.dart", "class Client { void doWork() {} }"),
+            ("other.dart", "class Other { void doWork() {} }"),
+        ],
+        &[("src/part.dart", after)],
+        &[("src/part.dart".into(), "make".into(), "".into(), 100)],
+    );
+}
+
+#[test]
+fn test_overlay_dart_part_file_library_type_keeps_fallback_edge() {
+    let provider = DartProvider::new().unwrap();
+    let before = "part of '../lib.dart';\nFoo make() => Foo();\nvoid run() {}\n";
+    let after = "part of '../lib.dart';\nFoo make() => Foo();\nvoid run() { make().bar(); }\n";
+    parity(
+        &provider,
+        &[
+            (
+                "lib.dart",
+                "part 'src/part.dart';\nclass Foo { void bar() {} }\n",
+            ),
+            ("src/part.dart", before),
+        ],
+        &[("src/part.dart", after)],
+        &[
+            ("lib.dart".into(), "bar".into(), "Foo".into(), 70),
+            ("src/part.dart".into(), "make".into(), "".into(), 100),
+        ],
+    );
+}
+
+#[test]
 #[ignore = "FU-2026-10-23-ea1b2e71cc18: retain unmapped local-module fallback until provenance exists"]
 fn test_overlay_go_stdlib_selector_project_namesake_returns_no_edge() {
     let provider = GoProvider::new().unwrap();

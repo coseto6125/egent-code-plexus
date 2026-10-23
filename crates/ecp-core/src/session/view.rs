@@ -3155,6 +3155,11 @@ impl<'a> OverlayFacts<'a> {
                     };
                     TypeCandidates::Unique(id, ty)
                 }
+                // A Dart file without imports is a `part of` file, whose types
+                // come from its library's scope, or a library that sees no
+                // other project library. Neither a sibling file nor a unique
+                // project namesake is visible to it.
+                Language::Dart => return type_ladder::ChainOutcome::Unknown,
                 _ if self.declares_type_beside(callee_file, ty) => {
                     self.type_candidates(callee_file, ty, &[])
                 }
