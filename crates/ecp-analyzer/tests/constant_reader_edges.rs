@@ -919,6 +919,60 @@ fn test_value_read_php_braced_namespace_constant_in_other_namespace_returns_no_e
 }
 
 #[test]
+fn test_value_read_php_namespace_constants_with_same_leaf_return_no_edge() {
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[
+            (
+                "company.php",
+                "<?php\nnamespace Company\\Lib { const LIMIT = 1; }\n",
+            ),
+            (
+                "other.php",
+                "<?php\nnamespace Other\\Lib;\nfunction readOther(): int { return LIMIT; }\n",
+            ),
+        ],
+    );
+    assert_eq!(value_reads(&g, "readOther"), none());
+}
+
+#[test]
+fn test_value_read_php_namespace_constant_in_same_namespace_returns_cross_file_edge() {
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[
+            ("limit.php", "<?php\nnamespace App;\nconst LIMIT = 1;\n"),
+            (
+                "reader.php",
+                "<?php\nnamespace App;\nfunction readApp(): int { return LIMIT; }\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        value_reads(&g, "readApp"),
+        vec![r("limit.php", "LIMIT", VALUE_READ, 0.7)]
+    );
+}
+
+#[test]
+fn test_value_read_php_root_constant_from_namespace_returns_cross_file_edge() {
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[
+            ("limit.php", "<?php\nconst LIMIT = 1;\n"),
+            (
+                "reader.php",
+                "<?php\nnamespace App;\nfunction readApp(): int { return LIMIT; }\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        value_reads(&g, "readApp"),
+        vec![r("limit.php", "LIMIT", VALUE_READ, 0.7)]
+    );
+}
+
+#[test]
 fn test_value_read_php_qualified_constant_wrong_namespace_returns_no_edge() {
     let source = r"<?php
 namespace App { class Config { const LIMIT = 3; } }

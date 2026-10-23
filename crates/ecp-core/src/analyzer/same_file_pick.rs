@@ -74,6 +74,13 @@ pub trait PickFacts {
     /// `file` declares, and no type of `file`: C++ `detail::to_json`, a C#
     /// namespace's classes, a Rust inline `mod m`'s functions.
     fn is_namespace_owner(&self, file: &str, owner: &str) -> bool;
+    /// Whether a namespace declared in `target` is visible to `reader`.
+    ///
+    /// Targets without a namespace remain visible. Implementations that do
+    /// not retain namespace facts keep the preceding resolution behavior.
+    fn namespace_visible_from(&self, _reader: &str, _target: &str) -> bool {
+        true
+    }
     /// The file `id` is declared in.
     fn file_of(&self, id: u32) -> Option<&str>;
     /// Every type declaration named `owner` across the project.
@@ -81,6 +88,20 @@ pub trait PickFacts {
     /// The transitive resolved supertypes of the type `ty`, breadth-first,
     /// each type once, `ty` excluded.
     fn ancestors(&self, ty: u32) -> Vec<u32>;
+}
+
+/// The lexical scope of a Rust callable used for same-file free-function
+/// lookup. Trait implementations retain their public self-type owner, while
+/// nested declarations also need the trait name to stay distinct.
+pub fn rust_lexical_owner<F: PickFacts + ?Sized>(facts: &F, id: u32, name: &str) -> String {
+    let owner = facts.raw_owner(id);
+    match facts.impl_member(id).and_then(|member| member.trait_owner) {
+        Some(trait_owner) => owner.map_or_else(
+            || format!("{trait_owner}::{name}"),
+            |owner| format!("{trait_owner}::{owner}::{name}"),
+        ),
+        None => owner.map_or_else(|| name.to_string(), |owner| format!("{owner}::{name}")),
+    }
 }
 
 /// Whether a call through a type receiver in `language` reaches only that
@@ -114,13 +135,17 @@ pub fn is_free<F: PickFacts + ?Sized>(facts: &F, id: u32) -> bool {
 ///
 /// An unowned declaration is globally free.  A declaration directly owned by
 /// a module remains callable as a module-level free function.  A raw owner
-/// that differs from its normalized owner is a lexical function path and must
-/// not reappear through the global tiers.
+/// that differs from its normalized owner is normally a lexical function path
+/// and must not reappear through the global tiers. A path made entirely of
+/// declared modules remains a module-level free function.
 pub fn rust_free_global_candidate<F: PickFacts + ?Sized>(facts: &F, file: &str, id: u32) -> bool {
     match facts.raw_owner(id) {
         None => true,
         Some(raw_owner) => {
             facts.owner(id) == Some(raw_owner) && facts.is_namespace_owner(file, raw_owner)
+                || raw_owner
+                    .split("::")
+                    .all(|segment| facts.is_namespace_owner(file, segment))
         }
     }
 }

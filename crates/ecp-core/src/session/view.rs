@@ -3190,6 +3190,9 @@ impl PickFacts for OverlayFacts<'_> {
     }
 
     fn is_namespace_owner(&self, file: &str, owner: &str) -> bool {
+        if Language::from_normalized_path(file) == Language::Go {
+            return false;
+        }
         if let Some(&file_ord) = self.dirty.get(file) {
             return self.dirty_namespaces[file_ord].contains(&owner);
         }
@@ -3223,6 +3226,11 @@ impl PickFacts for OverlayFacts<'_> {
                 let kind = NodeKind::from(&node.kind);
                 node.file_idx.to_native() == file_idx && (kind.is_type() || kind == NodeKind::Impl)
             })
+    }
+
+    fn namespace_visible_from(&self, reader: &str, target: &str) -> bool {
+        self.scope
+            .namespace_visible_from(reader, target, Language::Php)
     }
 
     fn file_of(&self, id: u32) -> Option<&str> {
@@ -3542,8 +3550,38 @@ fn resolve_callee<'s>(
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
     facts: &OverlayFacts<'_>,
-    scope: Scope<'_>,
+    mut scope: Scope<'_>,
 ) -> Option<(u32, f32)> {
+    let importer = facts.scope.dirty()[file_ord].rel_path.as_str();
+    let site = if let CallSite::FromReceiver { receiver, member } = site {
+        if caller.language == Language::Go {
+            let normalized = match reexport::go_package_lookup(
+                facts,
+                importer,
+                receiver,
+                member,
+                imports.iter().map(ImportRef::from),
+            ) {
+                reexport::GoPackageLookup::Resolved(target) => {
+                    return target.map(|(target, _)| (target, CONF_IMPORT_SCOPED))
+                }
+                reexport::GoPackageLookup::Unmapped => CallSite::Plain(member),
+                reexport::GoPackageLookup::Value => CallSite::UntypedMember(member),
+            };
+            if let Some(call) = scope.call.as_mut() {
+                call.untyped = matches!(normalized, CallSite::UntypedMember(_));
+                call.free_only = normalized.reaches_free_only(caller.language);
+                if call.untyped {
+                    scope.heritage = &[];
+                }
+            }
+            normalized
+        } else {
+            site
+        }
+    } else {
+        site
+    };
     let callee = site.name();
     let call = scope.call;
     let is_method = |idx: u32| match idx.checked_sub(graph.nodes.len() as u32) {
@@ -3565,18 +3603,7 @@ fn resolve_callee<'s>(
                         )
                     })))
     };
-    let importer = facts.scope.dirty()[file_ord].rel_path.as_str();
     if let CallSite::FromReceiver { receiver, member } = site {
-        if caller.language == Language::Go {
-            return reexport::go_imported_package_member(
-                facts,
-                importer,
-                receiver,
-                member,
-                imports.iter().map(ImportRef::from),
-            )
-            .map(|(target, _)| (target, CONF_IMPORT_SCOPED));
-        }
         if caller.language == Language::Python {
             if let Some((target, _)) = reexport::python_submodule_member(
                 facts,
@@ -3609,11 +3636,11 @@ fn resolve_callee<'s>(
         let hit = match call {
             Some(call) if free_only && caller.language == Language::Rust => {
                 let lexical_owner = call.caller.map(|id| {
-                    let name = facts.name_of(id);
-                    match PickFacts::raw_owner(facts, id) {
-                        Some(owner) => format!("{owner}::{name}"),
-                        None => name.to_string(),
-                    }
+                    crate::analyzer::same_file_pick::rust_lexical_owner(
+                        facts,
+                        id,
+                        facts.name_of(id),
+                    )
                 });
                 crate::analyzer::same_file_pick::prefer_free_scoped(
                     facts,

@@ -713,7 +713,7 @@ impl<'a> Resolver<'a> {
     ) -> Vec<(NodeId, f32)> {
         // A chain the caller did not type ([`Self::resolve_chained_member`])
         // resolves as the entry the parser wrote before chains.
-        let site = site.fallback();
+        let mut site = site.fallback();
         let language = Language::from_normalized_path(&normalize_source_path(source_file));
         if let Some((node_id, import)) =
             self.python_submodule_member(source_file, language, site, raw_imports)
@@ -722,20 +722,28 @@ impl<'a> Resolver<'a> {
         }
         if let CallSite::FromReceiver { receiver, member } = site {
             if language == Language::Go {
-                return reexport::go_imported_package_member(
+                match reexport::go_package_lookup(
                     &IndexFacts(self),
                     &normalize_source_path(source_file),
                     receiver,
                     member,
                     raw_imports.iter().map(ImportRef::from),
-                )
-                .and_then(|(node_id, source)| {
-                    raw_imports
-                        .iter()
-                        .find(|import| import.source == source)
-                        .map(|import| self.import_scoped(source_file, member, import, node_id))
-                })
-                .unwrap_or_default();
+                ) {
+                    reexport::GoPackageLookup::Resolved(target) => {
+                        return target
+                            .and_then(|(node_id, source)| {
+                                raw_imports
+                                    .iter()
+                                    .find(|import| import.source == source)
+                                    .map(|import| {
+                                        self.import_scoped(source_file, member, import, node_id)
+                                    })
+                            })
+                            .unwrap_or_default();
+                    }
+                    reexport::GoPackageLookup::Unmapped => site = CallSite::Plain(member),
+                    reexport::GoPackageLookup::Value => site = CallSite::UntypedMember(member),
+                }
             }
         }
         let declared_python_attribute = matches!(site, CallSite::FromReceiver { receiver, .. }
@@ -1479,14 +1487,10 @@ impl<'a> Resolver<'a> {
                         .then(|| {
                             scope.caller.and_then(|caller| {
                                 let name = self.symbol_table.name_in_file(caller)?;
-                                let owner =
-                                    ecp_core::analyzer::same_file_pick::PickFacts::raw_owner(
-                                        self.symbol_table,
-                                        caller,
-                                    );
-                                Some(owner.map_or_else(
-                                    || name.to_string(),
-                                    |owner| format!("{owner}::{name}"),
+                                Some(ecp_core::analyzer::same_file_pick::rust_lexical_owner(
+                                    self.symbol_table,
+                                    caller,
+                                    name,
                                 ))
                             })
                         })

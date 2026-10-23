@@ -398,13 +398,45 @@ where
     F: ModuleFacts + ?Sized,
     I: IntoIterator<Item = ImportRef<'a>>,
 {
+    match go_package_lookup(facts, importer, receiver, member, imports) {
+        GoPackageLookup::Resolved(target) => target,
+        GoPackageLookup::Value | GoPackageLookup::Unmapped => None,
+    }
+}
+
+/// A selector can name a value, an unmapped package, or a resolved package.
+pub enum GoPackageLookup<'a> {
+    Value,
+    /// Preserve the existing global/nearest-copy heuristic for missing module mappings.
+    Unmapped,
+    /// A known package with no matching function conclusively resolves to no edge.
+    Resolved(Option<(u32, &'a str)>),
+}
+
+pub fn go_package_lookup<'a, F, I>(
+    facts: &F,
+    importer: &str,
+    receiver: &str,
+    member: &str,
+    imports: I,
+) -> GoPackageLookup<'a>
+where
+    F: ModuleFacts + ?Sized,
+    I: IntoIterator<Item = ImportRef<'a>>,
+{
     let namespace_files = facts.namespace_files(Language::Go, receiver);
     let mut found = None;
     let mut ambiguous = false;
+    let mut package = false;
+    let mut mapped = false;
 
     for import in imports {
         let is_alias = import.alias.is_some();
         if is_alias && import.alias != Some(receiver) {
+            continue;
+        }
+        package |= is_alias || import.source.rsplit('/').next() == Some(receiver);
+        if !is_alias && namespace_files.is_empty() {
             continue;
         }
         facts.for_each_candidate(importer, import.source, &mut |candidate| {
@@ -417,6 +449,7 @@ where
                 if !is_alias && !namespace_files.iter().any(|path| path.as_ref() == file) {
                     continue;
                 }
+                mapped = true;
                 let mut functions = facts
                     .decls_in_file(file, member)
                     .into_iter()
@@ -440,10 +473,18 @@ where
             !ambiguous
         });
         if ambiguous {
-            return None;
+            return GoPackageLookup::Resolved(None);
         }
     }
-    found
+    if mapped {
+        GoPackageLookup::Resolved(found)
+    } else if package && !namespace_files.is_empty() {
+        GoPackageLookup::Unmapped
+    } else if package {
+        GoPackageLookup::Resolved(None)
+    } else {
+        GoPackageLookup::Value
+    }
 }
 
 /// The declaration an import of `name` from module `file` binds. In an ES

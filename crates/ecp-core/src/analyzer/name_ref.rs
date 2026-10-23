@@ -135,6 +135,12 @@ where
     // keeps the existing type-member rejection.
     let php_qualified_constant =
         qualified && language == Language::Php && name_ref.kind == NameRefKind::Constant;
+    let php_invisible_namespace_constant = language == Language::Php
+        && global
+        && name_ref.kind == NameRefKind::Constant
+        && facts
+            .file_of(id)
+            .is_some_and(|target| !facts.namespace_visible_from(file, target));
     let type_member = !php_qualified_constant
         && name_ref.kind != NameRefKind::Function
         && !matches!(
@@ -157,6 +163,7 @@ where
         });
     if (module_scoped && global)
         || (language == Language::Go && global && other_package)
+        || php_invisible_namespace_constant
         || (name_ref.kind == NameRefKind::Constant && facts.kind(id).is_callable())
         || (name_ref.kind != NameRefKind::Function && type_member)
     {

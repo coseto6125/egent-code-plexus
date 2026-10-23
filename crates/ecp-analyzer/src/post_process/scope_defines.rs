@@ -98,7 +98,18 @@ pub fn emit_edges(
                     // Member of a Namespace or Module: container → symbol.
                     // Members of Class/Interface/Trait are covered by HasMethod/HasProperty;
                     // skip them here to preserve the no-duplication invariant.
-                    if let Some(&container_id) = container_ids.get(owner.as_str()) {
+                    let container_name = if ecp_core::file_category::Language::from_normalized_path(
+                        &file_path_lossy,
+                    ) == ecp_core::file_category::Language::Rust
+                        && owner
+                            .split("::")
+                            .all(|segment| container_ids.contains_key(segment))
+                    {
+                        owner.rsplit("::").next().unwrap_or(owner)
+                    } else {
+                        owner.as_str()
+                    };
+                    if let Some(&container_id) = container_ids.get(container_name) {
                         edges_out.push(Edge {
                             source: container_id,
                             target: child_id,

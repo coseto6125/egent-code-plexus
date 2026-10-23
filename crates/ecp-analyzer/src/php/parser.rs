@@ -162,7 +162,14 @@ fn extract_qualified_constant_refs(
                     let mut owner = None;
                     while let Some(container) = parent {
                         match container.kind() {
-                            "anonymous_class" => break,
+                            "anonymous_class"
+                                if container.child_by_field_name("body").is_some_and(|body| {
+                                    body.start_byte() <= node.start_byte()
+                                        && node.end_byte() <= body.end_byte()
+                                }) =>
+                            {
+                                break;
+                            }
                             "class_declaration"
                             | "interface_declaration"
                             | "trait_declaration"
@@ -1085,6 +1092,7 @@ impl LanguageProvider for PhpProvider {
             .iter()
             .any(|n| n.kind == NodeKind::Const && n.owner_class.is_none())
         {
+            let anonymous_class_bodies = anonymous_class_body_spans(tree.root_node());
             let types: Vec<_> = nodes
                 .iter()
                 .filter(|n| {
@@ -1099,6 +1107,12 @@ impl LanguageProvider for PhpProvider {
                 .iter_mut()
                 .filter(|n| n.kind == NodeKind::Const && n.owner_class.is_none())
             {
+                if anonymous_class_bodies
+                    .iter()
+                    .any(|body| ecp_core::analyzer::types::span_contains(*body, node.span))
+                {
+                    continue;
+                }
                 node.owner_class = types
                     .iter()
                     .filter(|(_, span)| ecp_core::analyzer::types::span_contains(*span, node.span))
@@ -1129,4 +1143,19 @@ impl LanguageProvider for PhpProvider {
             export_aliases: None,
         })
     }
+}
+
+fn anonymous_class_body_spans(root: tree_sitter::Node<'_>) -> Vec<(u32, u32, u32, u32)> {
+    let mut bodies = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "anonymous_class" {
+            if let Some(body) = node.child_by_field_name("body") {
+                bodies.push(node_span(&body));
+            }
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.children(&mut cursor));
+    }
+    bodies
 }

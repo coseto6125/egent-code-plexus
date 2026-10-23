@@ -123,7 +123,7 @@ parity!(
     "app.go",
     "package main\nimport \"pkg\"\nfunc run() { pkg.Helper() }",
     "Helper",
-    Global
+    ImportScoped
 );
 parity!(
     test_rust_import_target_and_tier,

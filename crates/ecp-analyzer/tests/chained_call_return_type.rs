@@ -996,6 +996,84 @@ fn test_resolve_call_go_typed_param_receiver_still_binds_type_member() {
 
 // ---- Rust ----
 
+#[test]
+fn test_resolve_call_rust_imported_cross_directory_return_type_binds_member() {
+    let graph = single(
+        &RustProvider::new().unwrap(),
+        &[
+            (
+                "src/config.rs",
+                "use crate::types::Foo; fn make() -> Foo { todo!() } fn run() { make().bar(); }",
+            ),
+            (
+                "src/types/mod.rs",
+                "pub struct Foo; impl Foo { pub fn bar(&self) {} }",
+            ),
+        ],
+    );
+    assert_binds_foo(&graph, "run", "bar");
+}
+
+#[test]
+fn test_resolve_call_rust_external_return_type_rejects_project_namesake() {
+    let graph = single(
+        &RustProvider::new().unwrap(),
+        &[
+            (
+                "src/config.rs",
+                "use external::Foo; fn make() -> Foo { todo!() } fn run() { make().bar(); }",
+            ),
+            (
+                "src/types/mod.rs",
+                "pub struct Foo; impl Foo { pub fn bar(&self) {} }",
+            ),
+        ],
+    );
+    assert!(owners(&graph, "run", "bar").is_empty());
+}
+
+#[test]
+fn test_resolve_call_php_imported_cross_directory_return_type_binds_member() {
+    let graph = single(&PhpProvider::new().unwrap(), &[
+        ("src/config.php", "<?php use App\\Entity\\Foo; function make(): Foo { return new Foo(); } function run() { make()->bar(); }"),
+        ("src/Entity/Foo.php", "<?php namespace App\\Entity; class Foo { public function bar() {} }"),
+    ]);
+    assert_binds_foo(&graph, "run", "bar");
+}
+
+#[test]
+fn test_resolve_call_php_external_return_type_rejects_project_namesake() {
+    let graph = single(&PhpProvider::new().unwrap(), &[
+        ("src/config.php", "<?php use External\\Foo; function make(): Foo { return new Foo(); } function run() { make()->bar(); }"),
+        ("src/Entity/Foo.php", "<?php namespace App\\Entity; class Foo { public function bar() {} }"),
+    ]);
+    assert!(owners(&graph, "run", "bar").is_empty());
+}
+
+#[test]
+fn test_resolve_call_dart_imported_cross_directory_return_type_binds_member() {
+    let graph = single(
+        &DartProvider::new().unwrap(),
+        &[
+            (
+                "lib/config.dart",
+                "import 'entity/foo.dart'; Foo make() => Foo(); void run() { make().bar(); }",
+            ),
+            ("lib/entity/foo.dart", "class Foo { void bar() {} }"),
+        ],
+    );
+    assert_binds_foo(&graph, "run", "bar");
+}
+
+#[test]
+fn test_resolve_call_cpp_included_cross_directory_return_type_binds_member() {
+    let graph = single(&CppProvider::new().unwrap(), &[
+        ("src/config.cpp", "#include \"../include/foo.h\"\nFoo* make() { return nullptr; } void run() { make()->bar(); }"),
+        ("include/foo.h", "class Foo { public: void bar() {} };"),
+    ]);
+    assert_binds_foo(&graph, "run", "bar");
+}
+
 /// One file: the GraphBuilder here runs with no module tree.
 fn rust_graph() -> ZeroCopyGraph {
     single(

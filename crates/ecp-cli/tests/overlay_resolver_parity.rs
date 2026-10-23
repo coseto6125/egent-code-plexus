@@ -348,6 +348,54 @@ fn test_overlay_go_declared_package_name_matches_exact_import_directory() {
 }
 
 #[test]
+fn test_overlay_go_unaliased_import_preserves_value_receiver_matches_reindex() {
+    let provider = GoProvider::new().unwrap();
+    let source = "package main\nimport \"fmt\"\ntype Store struct {}\nfunc (s *Store) Fetch() {}\nvar global = &Store{}\nfunc run() { global.Fetch() }\n";
+    let baseline = source.replace("import \"fmt\"\n", "");
+    let expected = [("main.go".into(), "Fetch".into(), "Store".into(), 100)];
+    parity(
+        &provider,
+        &[("main.go", &baseline)],
+        &[("main.go", source)],
+        &expected,
+    );
+}
+
+#[test]
+fn test_overlay_go_package_namesake_type_cross_file_method_matches_reindex() {
+    let provider = GoProvider::new().unwrap();
+    let source = "package cache\ntype cache struct {}\nfunc New() *cache { return &cache{} }\nfunc run() { New().Purge() }\n";
+    let method = "package cache\nfunc (c *cache) Purge() {}\n";
+    parity(
+        &provider,
+        &[("cache/cache.go", source), ("cache/purge.go", method)],
+        &[
+            ("cache/cache.go", &format!("\n{source}")),
+            ("cache/purge.go", method),
+        ],
+        &[
+            ("cache/cache.go".into(), "New".into(), "".into(), 100),
+            ("cache/purge.go".into(), "Purge".into(), "cache".into(), 85),
+        ],
+    );
+}
+
+#[test]
+fn test_overlay_go_module_root_import_matches_reindex() {
+    let provider = GoProvider::new().unwrap();
+    let source = "package main\nimport \"example.com/repo\"\nfunc run() { app.F() }\n";
+    parity(
+        &provider,
+        &[
+            ("main/main.go", source),
+            ("app.go", "package app\nfunc F() {}\n"),
+        ],
+        &[("main/main.go", &format!("\n{source}"))],
+        &[("app.go".into(), "F".into(), "".into(), 95)],
+    );
+}
+
+#[test]
 fn test_overlay_go_block_and_closure_alias_shadowing_matches_reindex() {
     let provider = GoProvider::new().unwrap();
     let dependency = "package pkg\nfunc F() {}\n";
@@ -685,6 +733,30 @@ fn test_overlay_php_bare_call_unrelated_method_no_edge_matches_reindex() {
         &[("app.php", "<?php\nfunction run() { config(); }\n")],
         &[],
     );
+}
+
+#[test]
+fn test_overlay_php_namespace_constant_in_other_namespace_returns_no_edge_matches_reindex() {
+    let (full, overlay) = field_read_edges(
+        &php(),
+        &[
+            (
+                "lib.php",
+                "<?php\nnamespace Company\\Lib { const LIMIT = 1; }\n",
+            ),
+            (
+                "app.php",
+                "<?php\nnamespace Other\\Lib;\nfunction readApp(): int { return LIMIT; }\n",
+            ),
+        ],
+        &[(
+            "app.php",
+            "\n<?php\nnamespace Other\\Lib;\nfunction readApp(): int { return LIMIT; }\n",
+        )],
+        &["value_read"],
+    );
+    assert!(full.is_empty(), "cross-namespace constant read: {full:?}");
+    assert_eq!(overlay, full);
 }
 
 #[test]

@@ -152,6 +152,29 @@ impl<'a> ImportScope<'a> {
         f(files)
     }
 
+    /// Whether a namespace declared by `target` is also declared by `reader`.
+    /// A target without a namespace is the global namespace and remains visible.
+    pub(crate) fn namespace_visible_from(
+        &self,
+        reader: &str,
+        target: &str,
+        language: Language,
+    ) -> bool {
+        self.with_files(language, |files| {
+            let Some(target_namespaces) = files.namespaces.get(target) else {
+                return true;
+            };
+            files
+                .namespaces
+                .get(reader)
+                .is_some_and(|reader_namespaces| {
+                    target_namespaces
+                        .iter()
+                        .any(|target| reader_namespaces.contains(target))
+                })
+        })
+    }
+
     /// Whether the `language` files `a` and `b` declare the same namespaces,
     /// as the resolver's `SymbolTable::is_copy` compares them. The resolver
     /// records namespaces for fully qualified languages only, so any other
@@ -496,6 +519,37 @@ fn defines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "manual release-mode directory lookup benchmark"]
+    fn test_files_in_directory_large_go_workload_reports_timing() {
+        let total = std::time::Instant::now();
+        let mut fixture = crate::graph_fixture::GraphFixture::new();
+        for index in 0..15_000 {
+            fixture.file(&format!("pkg/{index}/file.go"));
+        }
+        let bytes = fixture.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let dirty_base = FxHashSet::default();
+        let scope = ImportScope::new(graph, &[], &dirty_base);
+        let cold = std::time::Instant::now();
+        assert_eq!(
+            scope.files_in_directory(Language::Go, "pkg/1"),
+            ["pkg/1/file.go"]
+        );
+        let cold_seconds = cold.elapsed().as_secs_f64();
+        let warm = std::time::Instant::now();
+        let mut found = 0;
+        for index in 0..3_000 {
+            found += std::hint::black_box(
+                scope.files_in_directory(Language::Go, &format!("pkg/{}", index % 15)),
+            )
+            .len();
+        }
+        assert_eq!(found, 3_000);
+        println!("directory_profile cold_seconds={cold_seconds:.6} warm_seconds={:.6} total_seconds={:.6} found={found}",
+            warm.elapsed().as_secs_f64(), total.elapsed().as_secs_f64());
+    }
 
     #[test]
     fn test_python_candidates_relative_and_absolute_match_resolver_order() {

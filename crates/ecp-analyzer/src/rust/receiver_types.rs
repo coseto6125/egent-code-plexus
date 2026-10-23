@@ -208,8 +208,19 @@ pub fn enclosing_function_path(node: Node<'_>, source: &[u8]) -> Option<String> 
             }
             "impl_item" => {
                 if let Some(ty) = impl_self_type(&n, source) {
-                    segments.push(ty);
+                    let lexical_owner = impl_trait_name(&n, source)
+                        .map(|trait_name| format!("{trait_name}::{ty}"))
+                        .unwrap_or(ty);
+                    segments.push(lexical_owner);
                     found_impl = true;
+                }
+            }
+            "trait_item" => {
+                if let Some(name) = n
+                    .child_by_field_name("name")
+                    .and_then(|name| node_text(name, source))
+                {
+                    segments.push(name);
                 }
             }
             "mod_item" => {

@@ -361,6 +361,63 @@ impl std::fmt::Debug for A {
         .collect();
     assert_eq!(pads.len(), 2, "{graph:#?}");
     assert_ne!(pads[0].uid, pads[1].uid, "{graph:#?}");
+    for (caller_id, caller) in graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.name.resolve(pool) == "fmt")
+    {
+        let expected: Vec<_> = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| {
+                node.name.resolve(pool) == "pad"
+                    && ecp_core::analyzer::types::span_contains(caller.span, node.span)
+            })
+            .map(|(id, _)| id as u32)
+            .collect();
+        let actual: Vec<_> = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.rel_type == RelType::Calls && edge.source == caller_id as u32)
+            .filter(|edge| graph.nodes[edge.target as usize].name.resolve(pool) == "pad")
+            .map(|edge| edge.target)
+            .collect();
+        assert_eq!(expected.len(), 1);
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn test_resolve_call_rust_local_impl_binds_own_nested_helper() {
+    let graph = graph("fn helper() {}\nfn outer() { struct S; impl S { fn run() { fn helper() { let _ = 1; } helper(); } } }");
+    let pool = &graph.string_pool;
+    let (caller_id, caller) = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .find(|(_, node)| node.name.resolve(pool) == "run")
+        .unwrap();
+    let expected: Vec<_> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| {
+            node.name.resolve(pool) == "helper"
+                && ecp_core::analyzer::types::span_contains(caller.span, node.span)
+        })
+        .map(|(id, _)| id as u32)
+        .collect();
+    let actual: Vec<_> = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.rel_type == RelType::Calls && edge.source == caller_id as u32)
+        .filter(|edge| graph.nodes[edge.target as usize].name.resolve(pool) == "helper")
+        .map(|edge| edge.target)
+        .collect();
+    assert_eq!(expected.len(), 1);
+    assert_eq!(actual, expected);
 }
 
 #[test]
@@ -407,6 +464,48 @@ trait T {
         .map(|edge| edge.target)
         .collect();
     assert_eq!(targets, vec![nested], "{graph:#?}");
+}
+
+#[test]
+fn test_rust_closure_bare_call_binds_enclosing_nested_function() {
+    let source = r#"
+fn helper() {}
+
+fn outer(xs: &[i32]) {
+    fn helper() { let _ = 1; }
+    xs.iter().for_each(|_| helper());
+}
+"#;
+    let local = parse(source);
+    let nested_hash = local
+        .nodes
+        .iter()
+        .filter(|node| node.name == "helper")
+        .nth(1)
+        .map(|node| node.content_hash)
+        .expect("nested helper raw node");
+    let graph = graph(source);
+    let pool = graph.string_pool.as_slice();
+    let nested = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .find(|(_, node)| node.content_hash == nested_hash)
+        .map(|(idx, _)| idx as u32)
+        .expect("nested helper node");
+    let closure = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .find(|(_, node)| node.name.resolve(pool).starts_with("<anonymous:"))
+        .map(|(idx, _)| idx as u32)
+        .expect("closure node");
+    assert!(
+        graph.edges.iter().any(|edge| {
+            edge.rel_type == RelType::Calls && edge.source == closure && edge.target == nested
+        }),
+        "{graph:#?}"
+    );
 }
 
 #[test]

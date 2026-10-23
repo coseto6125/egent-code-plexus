@@ -489,7 +489,7 @@ impl SymbolTable {
         node_name: &str,
         kind: NodeKind,
     ) {
-        if matches!(kind, NodeKind::Namespace | NodeKind::Module) {
+        if language != Language::Go && matches!(kind, NodeKind::Namespace | NodeKind::Module) {
             if let Some(key) = owner_key(node_name) {
                 self.namespace_decls.push((file_path.into(), key.into()));
             }
@@ -1535,6 +1535,19 @@ impl PickFacts for SymbolTable {
                 .get(owner)
                 .is_some_and(|id| owners.contains(id))
         })
+    }
+
+    fn namespace_visible_from(&self, reader: &str, target: &str) -> bool {
+        let Some(target_namespaces) = self.file_namespaces.get(target) else {
+            return true;
+        };
+        self.file_namespaces
+            .get(reader)
+            .is_some_and(|reader_namespaces| {
+                target_namespaces
+                    .iter()
+                    .any(|target| reader_namespaces.contains(target))
+            })
     }
 
     fn file_of(&self, id: u32) -> Option<&str> {
