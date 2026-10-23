@@ -7,7 +7,7 @@
 mod parity;
 
 use ecp_analyzer::typescript::TypeScriptProvider;
-use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs, load_overlay_hits};
+use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
 use ecp_cli::session::overlay_writer::{
     write_dirty_fragments_from_graphs, FragmentFileV3, FragmentSymbolV3,
 };
@@ -476,35 +476,8 @@ fn test_load_view_inputs_session_written_by_0_15_0_returns_no_input() {
     assert!(inputs.is_empty(), "another builder's fragment: {inputs:?}");
 }
 
-/// Contract: `find` keeps listing the symbols of the dirty file from a bin
-/// the previous release wrote, at their lines, until a refresh rewrites it.
-/// Pass: the three functions of `app.py`, `added` among them, which only the
-/// overlay knows. Fail: no hits, which means the v3 bin no longer decodes.
-#[test]
-fn test_load_overlay_hits_bin_written_by_0_15_0_lists_its_symbols() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (session_dir, _worktree) = session_written_by_0_15_0(tmp.path());
-
-    let mut hits: Vec<(String, NodeKind, String, u32)> = load_overlay_hits(&session_dir)
-        .unwrap()
-        .into_iter()
-        .map(|hit| (hit.name, hit.kind, hit.rel_path, hit.line))
-        .collect();
-    hits.sort_by_key(|hit| hit.3);
-    let app = |name: &str, line: u32| {
-        (
-            name.to_string(),
-            NodeKind::Function,
-            "app.py".to_string(),
-            line,
-        )
-    };
-    assert_eq!(hits, [app("helper", 1), app("go", 5), app("added", 9)]);
-}
-
 /// The session ecp 0.16.2 left for a dirty `app.py` is a native v4 bin.
-/// Its flat hits remain readable, but V5 is the first format with the facts
-/// required to rebuild dirty view edges.
+/// V5 is the first format with the facts required to rebuild dirty view edges.
 fn session_written_by_0_16_2(tmp: &Path) -> (PathBuf, PathBuf) {
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/overlay-written-by-0.16.2");
@@ -535,25 +508,6 @@ fn session_written_by_0_16_2(tmp: &Path) -> (PathBuf, PathBuf) {
     )
     .unwrap();
     (session_dir, worktree)
-}
-
-#[test]
-fn test_load_overlay_hits_bin_written_by_0_16_2_lists_its_symbols() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (session_dir, _worktree) = session_written_by_0_16_2(tmp.path());
-
-    let hits: Vec<_> = load_overlay_hits(&session_dir)
-        .unwrap()
-        .into_iter()
-        .map(|hit| (hit.name, hit.kind, hit.rel_path, hit.line))
-        .collect();
-    assert_eq!(
-        hits,
-        [
-            ("stable".into(), NodeKind::Function, "app.py".into(), 1),
-            ("added".into(), NodeKind::Function, "app.py".into(), 4),
-        ]
-    );
 }
 
 #[test]

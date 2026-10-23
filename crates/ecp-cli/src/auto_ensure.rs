@@ -264,17 +264,14 @@ pub fn write_head_sha_sidecar(graph_path: &Path, worktree_root: &Path) {
 }
 
 /// Same as `write_head_sha_sidecar` but takes an already-known SHA, avoiding
-/// a second `git rev-parse`. The 41-byte write is detached into a background
-/// thread so callers (build / attach / overlay) never block on the sidecar —
-/// a write failure (permissions, full disk, process exits mid-syscall) just
-/// means the next `ensure_index` falls back to the existing mtime walk. The
-/// sidecar is a perf hint, not a correctness requirement.
+/// a second `git rev-parse`. Synchronous for the reason
+/// `write_builder_fingerprint_sidecar` gives: a short-lived CLI process exits
+/// before a detached write lands. A failed write (permissions, full disk) is
+/// covered for a graph in a commit dir, whose name `git_fingerprint_shortcut`
+/// falls back to. A graph outside one falls back to the mtime walk, which
+/// misses edits made before the build.
 pub fn write_head_sha_sidecar_with_sha(graph_path: &Path, sha: &str) {
-    let sidecar = head_sha_sidecar_path(graph_path);
-    let content = format!("{sha}\n");
-    std::thread::spawn(move || {
-        let _ = fs::write(&sidecar, content);
-    });
+    let _ = fs::write(head_sha_sidecar_path(graph_path), format!("{sha}\n"));
 }
 
 /// Path of the format-version sidecar next to `graph.bin`. Single ASCII line
@@ -321,8 +318,8 @@ pub fn builder_fingerprint_sidecar_path(graph_path: &Path) -> PathBuf {
 }
 
 /// Write the current `BUILDER_FINGERPRINT` next to `graph_path`. Unlike the
-/// head-SHA and compatible-version sidecars — pure read-side perf hints whose
-/// miss merely falls back to an mtime walk / `header_compatible` — a stale or
+/// compatible-version sidecar — a pure read-side perf hint whose miss merely
+/// falls back to `header_compatible` — a stale or
 /// missing fingerprint sidecar makes `fingerprint_drifted` report drift and
 /// triggers a full `build_l2` (the most expensive fallback, not a cheap one).
 /// So this write is synchronous: on return the sidecar reflects the running
@@ -402,27 +399,29 @@ fn slot_built_below_root(graph_path: &Path, worktree_root: &Path) -> bool {
 }
 
 /// Try to decide Ready vs Stale via the cheap git fingerprint.
-/// - Returns `Some(Ready)` when HEAD matches the sidecar AND `git status
-///   --porcelain -uall` is empty.
+/// - Returns `Some(Ready)` when HEAD matches the sidecar or the commit dir
+///   name AND `git status --porcelain -uall` is empty.
 /// - Returns `Some(Stale)` when HEAD matches but the working tree has
 ///   uncommitted changes (skip walk; let L1 overlay collect dirty files).
 /// - Returns `None` when the fingerprint check is inconclusive (not a git
-///   repo, sidecar missing, HEAD differs, or git command failed) so the
-///   caller falls back to the full mtime walk.
+///   repo, HEAD matches neither the sidecar nor the commit dir, or git
+///   command failed) so the caller falls back to the full mtime walk.
 fn git_fingerprint_shortcut(
     graph_path: &Path,
     worktree_root: &Path,
     graph_mtime: SystemTime,
 ) -> Option<EnsureResult> {
-    let sidecar_sha = fs::read_to_string(head_sha_sidecar_path(graph_path))
-        .ok()?
-        .trim()
-        .to_string();
-    if sidecar_sha.is_empty() {
+    // A short-lived process can exit before the detached sidecar write lands,
+    // leaving the file missing or empty. The commit dir's name is published
+    // with graph.bin, so a graph built at HEAD still takes this path; the
+    // mtime walk cannot see edits made before the build.
+    let sidecar = fs::read_to_string(head_sha_sidecar_path(graph_path)).unwrap_or_default();
+    let dir_sha = graph_path.parent().and_then(commit_dir_sha);
+    if sidecar.trim().is_empty() && dir_sha.is_none() {
         return None;
     }
     let head_sha = git_head_sha(worktree_root).ok()?;
-    if sidecar_sha != head_sha {
+    if sidecar.trim() != head_sha && dir_sha.as_deref() != Some(head_sha.as_str()) {
         return None;
     }
 

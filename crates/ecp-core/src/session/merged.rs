@@ -322,11 +322,11 @@ impl<'a> MergedNode<'a> {
 
     pub fn file_path(&self, graph: &MergedGraph<'a>) -> Option<&'a str> {
         match self {
-            Self::Base(n) => n.has_owning_file().then(|| {
-                graph.graph.files[n.file_idx.to_native() as usize]
-                    .path
-                    .resolve(&graph.graph.string_pool)
-            }),
+            Self::Base(n) => n
+                .has_owning_file()
+                .then(|| graph.graph.files.get(n.file_idx.to_native() as usize))
+                .flatten()
+                .map(|file| file.path.resolve(&graph.graph.string_pool)),
             Self::Virtual(n) => Some(&n.rel_path),
         }
     }
