@@ -8,8 +8,8 @@ use crate::commit_lookup::CommitIndex;
 use crate::git::safe_exec;
 use crate::repo_identity::repo_dir_name_for_cwd;
 use ecp_core::registry::{
-    resolve_home_ecp, CommitBuildMeta, EmbeddingStatus, Generation, RefRecord, RegistryFile,
-    RepoAlias, RepoMeta, SourceType, BUILDER_FINGERPRINT,
+    resolve_home_ecp, CommitBuildMeta, CommitDirName, EmbeddingStatus, Generation, RefRecord,
+    RegistryFile, RepoAlias, RepoMeta, SourceType, BUILDER_FINGERPRINT,
 };
 use fs2::FileExt;
 use std::fs::{self, File, OpenOptions};
@@ -361,13 +361,16 @@ pub(crate) fn attach_if_fingerprint_matches(
 }
 
 fn publish_dir_for(base_commit_dir: &Path) -> PathBuf {
-    if !base_commit_dir.exists() {
-        return base_commit_dir.to_path_buf();
-    }
     let name = base_commit_dir
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("commit");
+    // Readers rank the bare name below every `.gen` dir of the same SHA. Once a
+    // sweep has kept a generation and dropped the bare dir, a build published
+    // under the bare name would be shadowed by the older dir it replaces.
+    if !base_commit_dir.exists() && !has_generation_sibling(base_commit_dir, name) {
+        return base_commit_dir.to_path_buf();
+    }
     // `Generation::format_suffix` is the single source of truth for the
     // on-disk suffix shape, mirrored by `parse_generation_suffix` in
     // `ecp-core/src/registry/dirname.rs`. Wrap-around at u32::MAX of the
@@ -379,6 +382,22 @@ fn publish_dir_for(base_commit_dir: &Path) -> PathBuf {
         counter: GENERATION_COUNTER.fetch_add(1, Ordering::Relaxed) as u32,
     };
     base_commit_dir.with_file_name(format!("{name}{}", gen.format_suffix()))
+}
+
+fn has_generation_sibling(base_commit_dir: &Path, name: &str) -> bool {
+    let Ok(base) = CommitDirName::parse(name) else {
+        return false;
+    };
+    let Some(Ok(entries)) = base_commit_dir.parent().map(fs::read_dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .and_then(|n| CommitDirName::parse(n).ok())
+            .is_some_and(|dir| dir.sha == base.sha && dir.generation.is_some())
+    })
 }
 
 fn sha_bytes(sha_hex: &str) -> Option<[u8; 20]> {
@@ -823,6 +842,46 @@ mod tests {
     use super::*;
     use ecp_core::registry::{CommitBuildMeta, EmbeddingStatus, RefRecord, SourceType};
     use tempfile::TempDir;
+
+    /// A sweep after a forced build keeps the `.gen` dir and drops the bare
+    /// one. Readers rank the bare name below every generation, so the next
+    /// build must not reuse it: it would be shadowed by the older dir it
+    /// replaces, and the following gc would delete it.
+    #[test]
+    fn test_publish_dir_for_bare_name_free_with_generation_sibling_ranks_above_it() {
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path().join("commits");
+        let sha_hex = "0123456789abcdef0123456789abcdef01234567";
+        let base = parent.join(format!("branch_main__{sha_hex}"));
+        let older = format!("branch_main__{sha_hex}.gen.1730000000000.42.7");
+        fs::create_dir_all(parent.join(&older)).unwrap();
+        fs::create_dir_all(parent.join("branch_main__ffffffffffffffffffffffffffffffffffffffff"))
+            .unwrap();
+
+        let published = publish_dir_for(&base);
+        let name = |p: &Path| {
+            ecp_core::registry::CommitDirName::parse(p.file_name().unwrap().to_str().unwrap())
+                .unwrap()
+        };
+        let older = name(&parent.join(older));
+        assert_eq!(name(&published).sha, older.sha);
+        assert!(
+            name(&published).generation > older.generation,
+            "{published:?} must outrank the existing generation"
+        );
+    }
+
+    #[test]
+    fn test_publish_dir_for_no_same_sha_dir_uses_bare_name() {
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path().join("commits");
+        fs::create_dir_all(
+            parent.join("branch_main__ffffffffffffffffffffffffffffffffffffffff.gen.1.2.3"),
+        )
+        .unwrap();
+        let base = parent.join("branch_main__0123456789abcdef0123456789abcdef01234567");
+        assert_eq!(publish_dir_for(&base), base);
+    }
 
     #[test]
     fn wait_for_completion_prefers_latest_generation_for_same_sha() {
