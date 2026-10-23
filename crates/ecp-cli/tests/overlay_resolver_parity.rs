@@ -1058,7 +1058,10 @@ fn test_overlay_cpp_quoted_same_directory_include_return_type_matches_reindex() 
             "src/config.cpp",
             "#include \"foo.h\"\nFoo* make();\nvoid run() { make()->bar(); }",
         )],
-        &[("src/foo.h".into(), "bar".into(), "Foo".into(), 85)],
+        &[
+            ("src/config.cpp".into(), "make".into(), "".into(), 100),
+            ("src/foo.h".into(), "bar".into(), "Foo".into(), 85),
+        ],
     );
 }
 
@@ -1082,7 +1085,7 @@ fn test_overlay_rust_external_wildcard_return_type_rejects_project_namesake() {
             "src/app.rs",
             "use external::*; fn load() -> Config { todo!() } fn run() { load().get(); }",
         )],
-        &[],
+        &[("src/app.rs".into(), "load".into(), "".into(), 100)],
     );
 }
 
@@ -1109,7 +1112,7 @@ fn test_overlay_rust_ambiguous_wildcard_return_type_rejects_members() {
             "src/app.rs",
             "use crate::left::*; use crate::right::*; fn load() -> Config { todo!() } fn run() { load().get(); }",
         )],
-        &[],
+        &[("src/app.rs".into(), "load".into(), "".into(), 100)],
     );
 }
 
@@ -1132,7 +1135,7 @@ fn test_overlay_rust_named_external_import_precedes_local_glob() {
             "src/app.rs",
             "use external::Config; use crate::local::*; fn load() -> Config { todo!() } fn run() { load().get(); }",
         )],
-        &[],
+        &[("src/app.rs".into(), "load".into(), "".into(), 100)],
     );
 }
 
@@ -1156,7 +1159,7 @@ fn test_overlay_rust_local_glob_does_not_mask_external_reexport_glob() {
             "src/app.rs",
             "use crate::local::*; use crate::relay::*; fn load() -> Config { todo!() } fn run() { load().get(); }",
         )],
-        &[],
+        &[("src/app.rs".into(), "load".into(), "".into(), 100)],
     );
 }
 
@@ -1179,7 +1182,10 @@ fn test_overlay_rust_named_alias_return_type_binds_imported_member() {
             "src/app.rs",
             "use crate::models::Config as Alias; fn load() -> Alias { todo!() } fn run() { load().get(); }",
         )],
-        &[("src/models.rs".into(), "get".into(), "Config".into(), 85)],
+        &[
+            ("src/app.rs".into(), "load".into(), "".into(), 100),
+            ("src/models.rs".into(), "get".into(), "Config".into(), 85),
+        ],
     );
 }
 
@@ -1198,7 +1204,10 @@ fn test_overlay_cpp_quoted_include_preserves_root_candidate() {
             "src/config.cpp",
             "#include \"foo.h\"\nFoo* make();\nvoid run() { make()->bar(); }",
         )],
-        &[("foo.h".into(), "bar".into(), "Foo".into(), 85)],
+        &[
+            ("src/config.cpp".into(), "make".into(), "".into(), 100),
+            ("foo.h".into(), "bar".into(), "Foo".into(), 85),
+        ],
     );
 }
 
@@ -1224,7 +1233,7 @@ fn test_overlay_rust_external_pub_use_return_type_rejects_project_namesake() {
             "src/app.rs",
             "use crate::Config; fn load() -> Config { todo!() } fn run() { load().get(); }",
         )],
-        &[],
+        &[("src/app.rs".into(), "load".into(), "".into(), 100)],
     );
 }
 
