@@ -216,9 +216,9 @@ pub(crate) fn build_inside_locked(
         // Windows refuses to rename a directory that contains any open file
         // handles (os error 5). Drop the lock fd now — the rename is the
         // publication event, so the lock is no longer needed after this point.
+        let publish_dir = publish_dir_for(commit_dir);
         drop(lock_guard.take());
         let t_rename = std::time::Instant::now();
-        let publish_dir = publish_dir_for(commit_dir);
         ecp_core::registry::rename_with_retry(building, &publish_dir)?;
         if prof {
             eprintln!(
@@ -365,10 +365,11 @@ fn publish_dir_for(base_commit_dir: &Path) -> PathBuf {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("commit");
-    // Readers rank the bare name below every `.gen` dir of the same SHA. Once a
-    // sweep has kept a generation and dropped the bare dir, a build published
-    // under the bare name would be shadowed by the older dir it replaces.
-    if !base_commit_dir.exists() && !has_generation_sibling(base_commit_dir, name) {
+    // Readers rank a bare name below every `.gen` dir of the same SHA, and two
+    // bare names by mtime. Once a sweep has kept a generation and dropped the
+    // bare dir, a build published under the bare name would be shadowed by the
+    // older dir it replaces.
+    if !has_same_sha_dir(base_commit_dir, name) {
         return base_commit_dir.to_path_buf();
     }
     // `Generation::format_suffix` is the single source of truth for the
@@ -384,19 +385,24 @@ fn publish_dir_for(base_commit_dir: &Path) -> PathBuf {
     base_commit_dir.with_file_name(format!("{name}{}", gen.format_suffix()))
 }
 
-fn has_generation_sibling(base_commit_dir: &Path, name: &str) -> bool {
+/// Whether any published dir of this SHA, under any prefix, already exists.
+/// An unreadable parent counts as yes: a fresh `.gen` name is always safe.
+fn has_same_sha_dir(base_commit_dir: &Path, name: &str) -> bool {
+    if base_commit_dir.exists() {
+        return true;
+    }
     let Ok(base) = CommitDirName::parse(name) else {
         return false;
     };
     let Some(Ok(entries)) = base_commit_dir.parent().map(fs::read_dir) else {
-        return false;
+        return base_commit_dir.parent().is_some_and(Path::exists);
     };
     entries.flatten().any(|entry| {
         entry
             .file_name()
             .to_str()
             .and_then(|n| CommitDirName::parse(n).ok())
-            .is_some_and(|dir| dir.sha == base.sha && dir.generation.is_some())
+            .is_some_and(|dir| dir.sha == base.sha)
     })
 }
 
@@ -869,6 +875,40 @@ mod tests {
             name(&published).generation > older.generation,
             "{published:?} must outrank the existing generation"
         );
+    }
+
+    /// `commit__<sha>` was built before a branch pointed at the SHA. Two bare
+    /// names rank by mtime, so the branch build takes a generation instead.
+    #[test]
+    fn test_publish_dir_for_other_prefix_bare_sibling_gets_generation() {
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path().join("commits");
+        let sha_hex = "0123456789abcdef0123456789abcdef01234567";
+        fs::create_dir_all(parent.join(format!("commit__{sha_hex}"))).unwrap();
+        let base = parent.join(format!("branch_main__{sha_hex}"));
+        let published = publish_dir_for(&base);
+        let name = published.file_name().unwrap().to_str().unwrap();
+        assert!(
+            ecp_core::registry::CommitDirName::parse(name)
+                .unwrap()
+                .generation
+                .is_some(),
+            "{name}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_publish_dir_for_unreadable_parent_gets_generation() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path().join("commits");
+        fs::create_dir_all(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o300)).unwrap();
+        let base = parent.join("branch_main__0123456789abcdef0123456789abcdef01234567");
+        let published = publish_dir_for(&base);
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_ne!(published, base);
     }
 
     #[test]
