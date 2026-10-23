@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.16.3 - 2026-10-23
+
+### Features
+
+- constant readers, callback references and chained calls; free-only bare calls; cypher list indexing (#861)
+
+### Bug Fixes
+
+- serve pre-index edits when the head_sha sidecar is lost; read the L1 overlay in inspect (#863)
+
 ## v0.16.2 - 2026-10-22
 
 ### Bug Fixes
