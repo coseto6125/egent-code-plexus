@@ -663,15 +663,15 @@ fn test_overlay_php_same_namespace_unique_return_type_matches_reindex() {
     check_parity_from(
         "run",
         &php,
-        &[("src/config.php", config), ("src/Foo.php", foo)],
-        &[("src/config.php", &format!("\n{config}"))],
+        &[("app/config.php", config), ("src/Models/Foo.php", foo)],
+        &[("app/config.php", &format!("\n{config}"))],
         &[
-            ("src/Foo.php".into(), "bar".into(), "Foo".into(), 85),
-            ("src/config.php".into(), "make".into(), "".into(), 100),
+            ("app/config.php".into(), "make".into(), "".into(), 100),
+            ("src/Models/Foo.php".into(), "bar".into(), "Foo".into(), 85),
         ],
         &[
-            ("src/Foo.php".into(), "bar".into(), "Foo".into(), 85),
-            ("src/config.php".into(), "make".into(), "".into(), 100),
+            ("app/config.php".into(), "make".into(), "".into(), 100),
+            ("src/Models/Foo.php".into(), "bar".into(), "Foo".into(), 85),
         ],
     );
 }
@@ -708,18 +708,18 @@ fn test_overlay_php_ambiguous_return_type_keeps_unique_member_fallback() {
         "run",
         &php,
         &[
-            ("src/config.php", config),
-            ("src/one.php", no_member),
-            ("src/two.php", with_member),
+            ("app/config.php", config),
+            ("src/one/Foo.php", no_member),
+            ("src/two/Foo.php", with_member),
         ],
-        &[("src/config.php", &format!("\n{config}"))],
+        &[("app/config.php", &format!("\n{config}"))],
         &[
-            ("src/config.php".into(), "make".into(), "".into(), 100),
-            ("src/two.php".into(), "bar".into(), "Foo".into(), 70),
+            ("app/config.php".into(), "make".into(), "".into(), 100),
+            ("src/two/Foo.php".into(), "bar".into(), "Foo".into(), 70),
         ],
         &[
-            ("src/config.php".into(), "make".into(), "".into(), 100),
-            ("src/two.php".into(), "bar".into(), "Foo".into(), 70),
+            ("app/config.php".into(), "make".into(), "".into(), 100),
+            ("src/two/Foo.php".into(), "bar".into(), "Foo".into(), 70),
         ],
     );
 }

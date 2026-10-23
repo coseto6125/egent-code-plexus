@@ -1071,8 +1071,8 @@ fn test_resolve_call_php_external_return_type_rejects_project_namesake() {
 #[test]
 fn test_resolve_call_php_same_namespace_cross_directory_unique_return_type_binds_member() {
     let graph = single(&PhpProvider::new().unwrap(), &[
-        ("src/config.php", "<?php namespace App; function make(): Foo { return new Foo(); } function run() { make()->bar(); }"),
-        ("src/Foo.php", "<?php namespace App; class Foo { public function bar() {} }"),
+        ("app/config.php", "<?php namespace App; function make(): Foo { return new Foo(); } function run() { make()->bar(); }"),
+        ("src/Models/Foo.php", "<?php namespace App; class Foo { public function bar() {} }"),
     ]);
     assert_binds_foo(&graph, "run", "bar");
 }
@@ -1080,16 +1080,16 @@ fn test_resolve_call_php_same_namespace_cross_directory_unique_return_type_binds
 #[test]
 fn test_resolve_call_php_ambiguous_return_type_keeps_unique_member_fallback() {
     let graph = single(&PhpProvider::new().unwrap(), &[
-        ("src/config.php", "<?php namespace App; function make(): Foo { return new Foo(); } function run() { make()->bar(); }"),
-        ("src/one.php", "<?php namespace App; class Foo {}"),
-        ("src/two.php", "<?php namespace App; class Foo { public function bar() {} }"),
+        ("app/config.php", "<?php namespace App; function make(): Foo { return new Foo(); } function run() { make()->bar(); }"),
+        ("src/one/Foo.php", "<?php namespace App; class Foo {}"),
+        ("src/two/Foo.php", "<?php namespace App; class Foo { public function bar() {} }"),
     ]);
     let bars: Vec<_> = calls_from(&graph, "run")
         .into_iter()
         .filter(|hit| hit.name == "bar")
         .collect();
     assert_eq!(bars.len(), 1, "all targets: {:?}", targets(&graph, "run"));
-    assert_eq!(bars[0].file, "src/two.php");
+    assert_eq!(bars[0].file, "src/two/Foo.php");
     assert_eq!(bars[0].confidence, 0.7);
 }
 
