@@ -2107,6 +2107,22 @@ fn test_js_callee_name_long_chain_stores_near_linear_callee_bytes() {
 }
 
 #[test]
+fn test_js_callee_name_computed_new_receiver_emits_untyped_member() {
+    let calls = raw_calls(
+        &JavaScriptProvider::new().unwrap(),
+        "src/use.js",
+        "async function run() { new (await load())().bar(); }",
+        "run",
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| CallSite::parse(c) == CallSite::UntypedMember("bar")),
+        "{calls:?}"
+    );
+}
+
+#[test]
 fn test_js_callee_name_new_receiver_chain_fallback_is_untyped_member() {
     let calls = raw_calls(
         &JavaScriptProvider::new().unwrap(),

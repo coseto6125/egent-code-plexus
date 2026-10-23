@@ -124,7 +124,9 @@ fn js_callee_name(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<St
                         let fallback = CallSite::untyped_member(prop_name);
                         CallSite::chained_member(&inner, &fallback)
                     }
-                    (None, "call_expression") => CallSite::untyped_member(prop_name),
+                    (None, "call_expression" | "new_expression") => {
+                        CallSite::untyped_member(prop_name)
+                    }
                     // Unknown receiver type — emit qualified name so resolver has context.
                     (None, _) => format!("{}.{prop_name}", obj.utf8_text(source).ok()?),
                 })
