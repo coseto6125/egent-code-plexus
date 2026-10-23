@@ -264,13 +264,12 @@ pub(crate) fn build_inside_locked(
 
         // Write the HEAD-SHA fingerprint next to the freshly published graph.bin
         // so subsequent read commands can short-circuit `auto_ensure::ensure_index`
-        // without walking the working tree. Last step on the build path, detached
-        // to a background thread so the build's wall-clock isn't bumped by the
-        // tiny 41-byte write.
+        // without walking the working tree.
         let graph_bin = publish_dir.join("graph.bin");
         crate::auto_ensure::write_head_sha_sidecar_with_sha(&graph_bin, sha_hex);
         // Version sidecar lets `attach_latest_sibling_sha` skip the 10-50ms
-        // mmap + rkyv::access validation on warm-attach. Same detached pattern.
+        // mmap + rkyv::access validation on warm-attach. Detached: a lost write
+        // only costs that validation.
         crate::auto_ensure::write_compatible_version_sidecar(&graph_bin);
         // Builder-fingerprint sidecar lets `ensure_index` detect convention
         // drift (analyzer / path-normalization change at the same HEAD) and

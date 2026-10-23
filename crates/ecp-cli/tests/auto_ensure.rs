@@ -30,24 +30,6 @@ fn git_init_with_commit(p: &Path) -> String {
     String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
 
-/// Wait long enough for the detached sidecar write to flush. The write is
-/// spawned on a background thread (see `write_head_sha_sidecar_with_sha`),
-/// so callers that read the sidecar immediately after creating it need a
-/// short rendezvous. 50ms is comfortably above the observed ~100µs write
-/// latency on a warm fs.
-fn wait_for_sidecar(path: &Path) {
-    for _ in 0..50 {
-        if path.exists() {
-            if let Ok(content) = fs::read_to_string(path) {
-                if !content.trim().is_empty() {
-                    return;
-                }
-            }
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
-}
-
 /// Materialise a minimal v3 graph.bin so `ensure_index`'s header pre-check
 /// can confirm the file is well-formed and exit on mtime logic alone. The
 /// graph carries no nodes / edges; only the magic + version fields matter
@@ -188,7 +170,6 @@ fn shortcut_returns_ready_when_sidecar_matches_head_and_tree_clean() {
 
     // Drop the sidecar matching HEAD → shortcut path should win.
     write_head_sha_sidecar_with_sha(&graph_path, &head_sha);
-    wait_for_sidecar(&head_sha_sidecar_path(&graph_path));
 
     let result = ensure_index(&graph_path, tmp.path()).unwrap();
     assert!(
@@ -209,7 +190,6 @@ fn shortcut_returns_stale_when_tree_dirty_even_with_matching_sidecar() {
     let graph_path = tmp.path().join("graph.bin");
     write_valid_empty_graph(&graph_path);
     write_head_sha_sidecar_with_sha(&graph_path, &head_sha);
-    wait_for_sidecar(&head_sha_sidecar_path(&graph_path));
 
     // Introduce a real uncommitted change.
     std::thread::sleep(Duration::from_millis(20));
@@ -221,6 +201,103 @@ fn shortcut_returns_stale_when_tree_dirty_even_with_matching_sidecar() {
         "expected Stale (working tree dirty), got {:?}",
         result
     );
+}
+
+/// `admin index` used to write the `.head_sha` sidecar on a detached thread,
+/// so a fast exit left it missing or empty. A graph whose commit dir names
+/// HEAD must still report work made before indexing, which the mtime walk
+/// cannot see.
+#[test]
+fn test_ensure_index_head_sha_sidecar_lost_graph_at_head_reports_prior_edits_stale() {
+    for sidecar in [None, Some("")] {
+        let wt = TempDir::new().unwrap();
+        let head_sha = git_init_with_commit(wt.path());
+        fs::write(wt.path().join("untracked.rs"), "fn untracked_fn() {}").unwrap();
+        fs::write(wt.path().join("src.rs"), "fn foo() { edited(); }").unwrap();
+        let cache = TempDir::new().unwrap();
+        let dir = cache.path().join(format!("branch_main__{head_sha}"));
+        fs::create_dir_all(&dir).unwrap();
+        let graph_path = dir.join("graph.bin");
+        write_valid_empty_graph(&graph_path);
+        if let Some(content) = sidecar {
+            fs::write(head_sha_sidecar_path(&graph_path), content).unwrap();
+        }
+        // Both edits predate the graph: the mtime walk reports nothing.
+        let past = filetime::FileTime::from_unix_time(1_000_000_000, 0);
+        for file in ["untracked.rs", "src.rs"] {
+            filetime::set_file_mtime(wt.path().join(file), past).unwrap();
+        }
+        match ensure_index(&graph_path, wt.path()).unwrap() {
+            EnsureResult::Stale {
+                dirty_files: Some(paths),
+                ..
+            } => {
+                for file in ["untracked.rs", "src.rs"] {
+                    assert!(
+                        paths.iter().any(|p| p.ends_with(file)),
+                        "{sidecar:?} {file}: {paths:?}"
+                    );
+                }
+            }
+            other => panic!("{sidecar:?}: prior edits must reach the overlay, got {other:?}"),
+        }
+    }
+}
+
+/// The commit dir names an older commit and the sidecar is gone: the graph is
+/// behind HEAD, so the clean `git status` must not report Ready. The walk sees
+/// the file the newer commit touched.
+#[test]
+fn test_ensure_index_head_sha_sidecar_lost_graph_behind_head_reports_stale() {
+    let wt = TempDir::new().unwrap();
+    let older_sha = git_init_with_commit(wt.path());
+    let cache = TempDir::new().unwrap();
+    let dir = cache.path().join(format!("branch_main__{older_sha}"));
+    fs::create_dir_all(&dir).unwrap();
+    let graph_path = dir.join("graph.bin");
+    write_valid_empty_graph(&graph_path);
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(wt.path().join("src.rs"), "fn foo() { next(); }").unwrap();
+    let commit = Command::new("git")
+        .arg("-C")
+        .arg(wt.path())
+        .args(["commit", "-qam", "next"])
+        .output()
+        .unwrap();
+    assert!(commit.status.success(), "{commit:?}");
+    let result = ensure_index(&graph_path, wt.path()).unwrap();
+    assert!(
+        matches!(result, EnsureResult::Stale { .. }),
+        "a graph behind HEAD must stay Stale, got {result:?}"
+    );
+}
+
+/// The sidecar names another commit (an overlay refresh at a branch since left)
+/// while the commit dir names HEAD: the graph is HEAD's, so the shortcut lists
+/// the untracked file the mtime walk cannot see.
+#[test]
+fn test_ensure_index_head_sha_sidecar_other_sha_graph_at_head_reports_untracked_stale() {
+    let wt = TempDir::new().unwrap();
+    let head_sha = git_init_with_commit(wt.path());
+    fs::write(wt.path().join("untracked.rs"), "fn untracked_fn() {}").unwrap();
+    let cache = TempDir::new().unwrap();
+    let dir = cache.path().join(format!("branch_main__{head_sha}"));
+    fs::create_dir_all(&dir).unwrap();
+    let graph_path = dir.join("graph.bin");
+    write_valid_empty_graph(&graph_path);
+    write_head_sha_sidecar_with_sha(&graph_path, &"0".repeat(40));
+    let past = filetime::FileTime::from_unix_time(1_000_000_000, 0);
+    filetime::set_file_mtime(wt.path().join("untracked.rs"), past).unwrap();
+    match ensure_index(&graph_path, wt.path()).unwrap() {
+        EnsureResult::Stale {
+            dirty_files: Some(paths),
+            ..
+        } => assert!(
+            paths.iter().any(|p| p.ends_with("untracked.rs")),
+            "{paths:?}"
+        ),
+        other => panic!("untracked file must reach the overlay, got {other:?}"),
+    }
 }
 
 /// Sidecar SHA differs from current HEAD (e.g. user switched branches /
@@ -237,7 +314,6 @@ fn shortcut_falls_through_when_sidecar_sha_mismatch() {
     write_valid_empty_graph(&graph_path);
     // Write a sidecar with a bogus SHA (40 hex zeros).
     write_head_sha_sidecar_with_sha(&graph_path, "0".repeat(40).as_str());
-    wait_for_sidecar(&head_sha_sidecar_path(&graph_path));
 
     // Walk sees no newer files (graph is newest) ⇒ Ready, but reached via
     // the walk path, not the shortcut.

@@ -563,6 +563,21 @@ fn find_reports_the_worktree_line_for_a_symbol_that_moved() {
 /// is still findable, and it is: uncommitted work is the overlay's job.
 #[test]
 fn an_untracked_file_stays_out_of_the_commit_keyed_graph() {
+    assert_untracked_file_served_by_overlay(|_| {});
+}
+
+/// `admin index` used to write `graph.bin.head_sha` on a thread it never
+/// joined, so a fast exit left the sidecar missing or empty. The overlay must still serve
+/// the untracked file the build left out.
+#[test]
+fn test_find_head_sha_sidecar_lost_after_index_untracked_file_found() {
+    assert_untracked_file_served_by_overlay(|sidecar| {
+        let _ = std::fs::remove_file(sidecar);
+    });
+    assert_untracked_file_served_by_overlay(|sidecar| std::fs::write(sidecar, "").unwrap());
+}
+
+fn assert_untracked_file_served_by_overlay(lose_sidecar: impl Fn(&Path)) {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
     let home = tmp.path().join("home");
@@ -601,6 +616,17 @@ fn an_untracked_file_stays_out_of_the_commit_keyed_graph() {
             .env("HOME", &home),
         "ecp admin index",
     );
+    // Derived from graph.bin: the sidecar itself may already be lost.
+    let sidecars: Vec<PathBuf> = WalkDir::new(home.join(".ecp"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name() == "graph.bin")
+        .map(|e| e.into_path().with_file_name("graph.bin.head_sha"))
+        .collect();
+    assert!(!sidecars.is_empty(), "admin index published no graph.bin");
+    for sidecar in &sidecars {
+        lose_sidecar(sidecar);
+    }
 
     let summary = run(
         Command::new(ecp_bin())
