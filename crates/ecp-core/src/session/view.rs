@@ -3102,7 +3102,35 @@ impl<'a> OverlayFacts<'a> {
                 Language::Python | Language::TypeScript | Language::JavaScript => {
                     self.type_candidates(callee_file, ty, &imports)
                 }
-                Language::Rust | Language::Php
+                Language::Rust => match reexport::rust_imported_type(
+                    self,
+                    callee_file,
+                    ty,
+                    imports.iter().map(ImportRef::from),
+                ) {
+                    reexport::RustImportedType::Unique(id) => {
+                        let Some(name) = type_ladder::TypeFacts::name_of(self, id) else {
+                            return type_ladder::ChainOutcome::Conclusive;
+                        };
+                        TypeCandidates::Unique(id, name)
+                    }
+                    reexport::RustImportedType::External
+                    | reexport::RustImportedType::Conclusive => {
+                        return type_ladder::ChainOutcome::Conclusive;
+                    }
+                    reexport::RustImportedType::Unmodeled => {
+                        match type_ladder::unmodeled_return_type(self, callee_file, ty) {
+                            type_ladder::ChainOutcome::Bound(candidates) => candidates,
+                            type_ladder::ChainOutcome::Conclusive => {
+                                return type_ladder::ChainOutcome::Conclusive;
+                            }
+                            type_ladder::ChainOutcome::Unknown => {
+                                return type_ladder::ChainOutcome::Unknown;
+                            }
+                        }
+                    }
+                },
+                Language::Php
                     if imports.iter().any(|import| {
                         import.alias.as_deref().unwrap_or(&import.imported_name) == ty
                     }) =>
@@ -3622,7 +3650,7 @@ fn resolve_callee<'s>(
                 imports.iter().map(ImportRef::from),
             ) {
                 reexport::GoPackageLookup::Resolved(target) => {
-                    return target.map(|(target, _)| (target, CONF_IMPORT_SCOPED))
+                    return target.map(|(target, _)| (target, CONF_IMPORT_SCOPED));
                 }
                 reexport::GoPackageLookup::Unmapped => CallSite::Plain(member),
                 reexport::GoPackageLookup::Value => CallSite::UntypedMember(member),

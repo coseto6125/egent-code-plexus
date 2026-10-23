@@ -398,37 +398,153 @@ pub fn imported_file_type<'i, F: ModuleFacts + ?Sized>(
         if import.alias.is_some() {
             continue;
         }
-        let relative;
-        let source = if language == Language::Dart {
-            if import.imported_name != import.source
-                || import.source.contains(':')
-                || import.source.starts_with('/')
-            {
-                continue;
-            }
-            relative = format!("./{}", import.source);
-            if import.source.starts_with('.') {
-                import.source
-            } else {
-                &relative
-            }
-        } else {
-            import.source
+        let mut visit = |source: &str| {
+            facts.for_each_candidate(importer, source, &mut |file| {
+                for (id, kind) in facts.decls_in_file(file, name) {
+                    if kind.is_type() {
+                        ambiguous |= found.is_some_and(|previous| previous != id);
+                        found = Some(id);
+                    }
+                }
+                !ambiguous
+            });
+            !ambiguous
         };
-        facts.for_each_candidate(importer, source, &mut |file| {
-            for (id, kind) in facts.decls_in_file(file, name) {
-                if kind.is_type() {
-                    ambiguous |= found.is_some_and(|previous| previous != id);
-                    found = Some(id);
+        match language {
+            Language::Dart => {
+                if import.imported_name != import.source
+                    || import.source.contains(':')
+                    || import.source.starts_with('/')
+                {
+                    continue;
+                }
+                if import.source.starts_with('.') {
+                    visit(import.source);
+                } else {
+                    let relative = format!("./{}", import.source);
+                    visit(&relative);
                 }
             }
-            !ambiguous
-        });
+            // C++ RawImport strips both `"..."` and `<...>` delimiters.
+            // Probe the quoted-include interpretation first, then preserve
+            // the existing include-directory interpretation. Different type
+            // declarations remain ambiguous instead of picking either path.
+            Language::Cpp if !import.source.starts_with('.') && !import.source.starts_with('/') => {
+                let relative = format!("./{}", import.source);
+                if visit(&relative) {
+                    visit(import.source);
+                }
+            }
+            _ => visit(import.source),
+        }
         if ambiguous {
             return None;
         }
     }
     found
+}
+
+/// Rust import evidence for a return type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RustImportedType {
+    Unique(u32),
+    External,
+    Conclusive,
+    Unmodeled,
+}
+
+/// Resolve direct and glob Rust imports without consulting global names.
+pub fn rust_imported_type<'i, F, I>(
+    facts: &F,
+    importer: &str,
+    name: &str,
+    imports: I,
+) -> RustImportedType
+where
+    F: ModuleFacts + ?Sized,
+    I: Iterator<Item = ImportRef<'i>> + Clone,
+{
+    // Rust resolves a named binding before considering globs. An explicit
+    // external binding is therefore authoritative over a project glob.
+    let has_named = imports.clone().any(|import| {
+        import.imported_name != "*" && import.alias.unwrap_or(import.imported_name) == name
+    });
+    let mut found = None;
+    let mut ambiguous = false;
+    let mut relevant = false;
+    let mut external = false;
+    let mut forwarded = false;
+    for import in imports {
+        let is_glob = import.imported_name == "*";
+        let binding = import.alias.unwrap_or(import.imported_name);
+        if (has_named && (is_glob || binding != name)) || (!has_named && !is_glob) {
+            continue;
+        }
+        relevant = true;
+        let declaration = if is_glob { name } else { import.imported_name };
+        let mut local = false;
+        facts.for_each_candidate(importer, import.source, &mut |file| {
+            if !facts.has_file(file) {
+                return true;
+            }
+            local = true;
+            let mut declares_here = false;
+            for (id, kind) in facts.decls_in_file(file, declaration) {
+                if kind.is_type() {
+                    declares_here = true;
+                    if found.replace(id).is_some_and(|old| old != id) {
+                        ambiguous = true;
+                        return false;
+                    }
+                }
+            }
+            if !declares_here {
+                if let Some(nested) = facts.imports(file) {
+                    let nested_has_named = nested.iter().any(|import| {
+                        import.imported_name != "*"
+                            && import.alias.unwrap_or(import.imported_name) == declaration
+                    });
+                    for nested in nested.iter() {
+                        let nested_is_glob = nested.imported_name == "*";
+                        let nested_binding = nested.alias.unwrap_or(nested.imported_name);
+                        if (nested_has_named && (nested_is_glob || nested_binding != declaration))
+                            || (!nested_has_named && !nested_is_glob)
+                        {
+                            continue;
+                        }
+                        let mut nested_local = false;
+                        facts.for_each_candidate(file, nested.source, &mut |candidate| {
+                            if !facts.has_file(candidate) {
+                                return true;
+                            }
+                            nested_local = true;
+                            false
+                        });
+                        if nested_local {
+                            // A second local forwarding hop is deliberately
+                            // outside this bounded resolver.
+                            forwarded = true;
+                        } else {
+                            external = true;
+                        }
+                    }
+                }
+            }
+            true
+        });
+        external |= !local;
+    }
+    if ambiguous || forwarded {
+        RustImportedType::Conclusive
+    } else if external {
+        RustImportedType::External
+    } else if let Some(id) = found {
+        RustImportedType::Unique(id)
+    } else if relevant {
+        RustImportedType::Conclusive
+    } else {
+        RustImportedType::Unmodeled
+    }
 }
 
 /// The top-level callable a Go package selector reaches. A Go import's path
