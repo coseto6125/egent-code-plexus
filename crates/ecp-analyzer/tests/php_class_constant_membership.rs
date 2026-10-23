@@ -35,6 +35,10 @@ const ENUM_ONLY_SRC: &str =
 const DUPLICATE_SHORT_TYPE_NAMES: &str = "<?php\n\
 namespace First { class Foo { const CLASS_VALUE = 1; } }\n\
 namespace Second { interface Foo { const INTERFACE_VALUE = 2; } }\n";
+const ANONYMOUS_CLASS_CONSTANT: &str = "<?php\n\
+class Factory {\n\
+    function make(): object { return new class { const INNER = 1; }; }\n\
+}\n";
 
 #[test]
 fn test_class_membership_php_class_constant_returns_has_property_from_class() {
@@ -95,4 +99,18 @@ fn test_class_membership_php_same_short_type_names_suppress_ambiguous_constant_m
             "{constant}: {g:#?}"
         );
     }
+}
+
+#[test]
+fn test_class_membership_php_anonymous_constant_returns_no_outer_property_edge() {
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[("p.php", ANONYMOUS_CLASS_CONSTANT)],
+    );
+    assert!(
+        incoming(&g, "INNER")
+            .iter()
+            .all(|(source, rel)| source != "Factory" || *rel != RelType::HasProperty),
+        "anonymous class constant must not become a Factory member: {g:#?}"
+    );
 }

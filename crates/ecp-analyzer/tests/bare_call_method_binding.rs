@@ -110,6 +110,35 @@ fn target(file: &str, owner: &str, name: &str) -> Target {
 }
 
 #[test]
+fn test_resolve_call_go_unaliased_import_preserves_unknown_value_receiver() {
+    let provider = GoProvider::new().unwrap();
+    for body in [
+        "global.Fetch()",
+        "for _, item := range items { item.Fetch() }",
+    ] {
+        let source = format!(
+            "package main\nimport \"fmt\"\ntype Store struct {{}}\nfunc (s *Store) Fetch() {{}}\nvar global = &Store{{}}\nfunc run(items []*Store) {{ {body} }}\n"
+        );
+        let graph = single(&provider, &[("main.go", &source)]);
+        assert_eq!(
+            targets(&graph, "run"),
+            vec![target("main.go", "Store", "Fetch")],
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn test_resolve_call_go_package_namesake_type_keeps_cross_file_method() {
+    let provider = GoProvider::new().unwrap();
+    let graph = single(&provider, &[
+        ("cache/cache.go", "package cache\ntype cache struct {}\nfunc New() *cache { return &cache{} }\nfunc run() { New().Purge() }\n"),
+        ("cache/purge.go", "package cache\nfunc (c *cache) Purge() {}\n"),
+    ]);
+    assert!(targets(&graph, "run").contains(&target("cache/purge.go", "cache", "Purge")));
+}
+
+#[test]
 fn test_resolve_call_nested_free_function_precedes_top_level_namesake() {
     let rust = RustProvider::new().unwrap();
     let python = PythonProvider::new().unwrap();

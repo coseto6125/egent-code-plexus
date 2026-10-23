@@ -147,6 +147,23 @@ mod foo {
     );
 }
 
+#[test]
+fn test_rust_nested_module_defines_function() {
+    let provider = ecp_analyzer::rust::parser::RustProvider::new().expect("rust provider");
+    let graph = build(vec![parse_file(
+        &provider,
+        "nested.rs",
+        "mod a { pub mod b { pub fn f() {} } }",
+    )]);
+    let pairs = defines_pairs(&graph);
+    assert!(
+        pairs
+            .iter()
+            .any(|(source, target)| source == "b" && target == "f"),
+        "expected Module(b)->Defines->Function(f); got: {pairs:?}"
+    );
+}
+
 // ── 4. Module → Class — Python ───────────────────────────────────────────────
 
 #[test]

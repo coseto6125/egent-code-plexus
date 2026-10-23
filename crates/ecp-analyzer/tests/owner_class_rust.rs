@@ -332,6 +332,84 @@ mod services {
 }
 
 #[test]
+fn test_rust_trait_impl_nested_functions_keep_distinct_uids() {
+    let source = r#"
+struct A;
+
+impl std::fmt::Display for A {
+    fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn pad() { let _ = 1; }
+        pad();
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for A {
+    fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn pad() { let _ = 2; }
+        pad();
+        Ok(())
+    }
+}
+"#;
+    let graph = graph(source);
+    let pool = graph.string_pool.as_slice();
+    let pads: Vec<_> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.name.resolve(pool) == "pad")
+        .collect();
+    assert_eq!(pads.len(), 2, "{graph:#?}");
+    assert_ne!(pads[0].uid, pads[1].uid, "{graph:#?}");
+}
+
+#[test]
+fn test_rust_trait_default_nested_function_binds_lexically() {
+    let source = r#"
+fn helper() {}
+
+trait T {
+    fn d(&self) {
+        fn helper() { let _ = 1; }
+        helper();
+    }
+}
+"#;
+    let local = parse(source);
+    let nested_hash = local
+        .nodes
+        .iter()
+        .filter(|node| node.name == "helper")
+        .nth(1)
+        .map(|node| node.content_hash)
+        .expect("nested helper raw node");
+    let graph = graph(source);
+    let pool = graph.string_pool.as_slice();
+    let d = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .find(|(_, node)| node.name.resolve(pool) == "d")
+        .map(|(idx, _)| idx as u32)
+        .expect("trait default method node");
+    let nested = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .find(|(_, node)| node.content_hash == nested_hash)
+        .map(|(idx, _)| idx as u32)
+        .expect("nested helper node");
+    let targets: Vec<_> = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.rel_type == RelType::Calls && edge.source == d)
+        .filter(|edge| graph.nodes[edge.target as usize].name.resolve(pool) == "helper")
+        .map(|edge| edge.target)
+        .collect();
+    assert_eq!(targets, vec![nested], "{graph:#?}");
+}
+
+#[test]
 fn test_nested_rust_function_in_module_impl_matches_method_owner_path() {
     let source = r#"
 mod services {

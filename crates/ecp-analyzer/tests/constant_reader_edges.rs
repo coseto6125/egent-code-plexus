@@ -764,6 +764,16 @@ class Factory {\n\
     }\n\
 }\n";
 
+const PHP_ANONYMOUS_CLASS_CONSTRUCTOR_ARGUMENT: &str = "<?php\n\
+class Factory {\n\
+    const KIND = 'outer';\n\
+    public function make(): object {\n\
+        return new class(self::KIND) {\n\
+            public function __construct(public string $kind) {}\n\
+        };\n\
+    }\n\
+}\n";
+
 const PHP_BRACED_NAMESPACE_CONSTANT: &str = "<?php\n\
 namespace App {\n\
     const LIMIT = 3;\n\
@@ -863,6 +873,18 @@ fn test_value_read_php_anonymous_class_self_and_static_constants_do_not_bind_out
 }
 
 #[test]
+fn test_value_read_php_anonymous_constructor_argument_self_constant_returns_outer_edge() {
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[("p.php", PHP_ANONYMOUS_CLASS_CONSTRUCTOR_ARGUMENT)],
+    );
+    assert_eq!(
+        value_reads(&g, "make"),
+        vec![r("p.php", "KIND", VALUE_READ, 0.85)]
+    );
+}
+
+#[test]
 fn test_value_read_php_braced_and_unbraced_namespace_constants_return_same_file_edges() {
     let g = graph(
         &PhpProvider::new().unwrap(),
@@ -879,6 +901,21 @@ fn test_value_read_php_braced_and_unbraced_namespace_constants_return_same_file_
         value_reads(&g, "readFlat"),
         vec![r("flat.php", "OTHER_LIMIT", VALUE_READ, 1.0)]
     );
+}
+
+#[test]
+fn test_value_read_php_braced_namespace_constant_in_other_namespace_returns_no_edge() {
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[
+            ("lib.php", "<?php\nnamespace Lib { const LIMIT = 1; }\n"),
+            (
+                "app.php",
+                "<?php\nnamespace App;\nfunction readApp(): int { return LIMIT; }\n",
+            ),
+        ],
+    );
+    assert_eq!(value_reads(&g, "readApp"), none());
 }
 
 #[test]
