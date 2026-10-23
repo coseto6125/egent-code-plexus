@@ -1500,18 +1500,24 @@ impl<'a> Resolver<'a> {
         if let Some(node_id) = same_file_pick
             .and_then(|pick| match call {
                 Some(scope) if free_only => {
-                    let lexical_owner = (language == Language::Rust)
-                        .then(|| {
-                            scope.caller.and_then(|caller| {
-                                let name = self.symbol_table.name_in_file(caller)?;
-                                Some(ecp_core::analyzer::same_file_pick::rust_lexical_owner(
-                                    self.symbol_table,
-                                    caller,
-                                    name,
-                                ))
-                            })
+                    let lexical_owner = if language == Language::Rust {
+                        scope.caller.and_then(|caller| {
+                            self.symbol_table
+                                .rust_lexical_scope_of(caller)
+                                .map(str::to_owned)
+                                .or_else(|| {
+                                    self.symbol_table.name_in_file(caller).map(|name| {
+                                        ecp_core::analyzer::same_file_pick::rust_lexical_owner(
+                                            self.symbol_table,
+                                            caller,
+                                            name,
+                                        )
+                                    })
+                                })
                         })
-                        .flatten();
+                    } else {
+                        None
+                    };
                     ecp_core::analyzer::same_file_pick::prefer_free_scoped(
                         self.symbol_table,
                         &source_file_str,

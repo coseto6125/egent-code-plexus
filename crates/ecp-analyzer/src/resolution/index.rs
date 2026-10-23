@@ -746,6 +746,10 @@ impl SymbolTable {
         }
     }
 
+    pub(crate) fn rust_lexical_scope_of(&self, id: u32) -> Option<&str> {
+        self.rust_lexical_scopes.get(&id).map(Box::as_ref)
+    }
+
     /// Whether `id` has no owner and no `impl` block either.
     fn is_free(&self, id: u32) -> bool {
         self.node_owner[id as usize] == NO_OWNER && !self.impl_members.contains_key(&id)
@@ -1544,7 +1548,7 @@ impl PickFacts for SymbolTable {
     }
 
     fn rust_lexical_scope(&self, id: u32) -> Option<&str> {
-        self.rust_lexical_scopes.get(&id).map(Box::as_ref)
+        self.rust_lexical_scope_of(id)
     }
 
     fn impl_member(&self, id: u32) -> Option<PickImplMember<'_>> {
