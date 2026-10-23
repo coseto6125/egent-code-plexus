@@ -1103,11 +1103,14 @@ impl LanguageProvider for PhpProvider {
                     .map(|span| (format!("@anonymous_{}_{}", span.0, span.1), span)),
             );
             for node in nodes.iter_mut().filter(|node| node.kind == NodeKind::Const) {
-                node.owner_class = owners
+                if let Some(owner) = owners
                     .iter()
                     .filter(|(_, span)| ecp_core::analyzer::types::span_contains(*span, node.span))
                     .min_by_key(|(_, span)| crate::framework_helpers::span_area(*span))
-                    .map(|(name, _)| name.clone());
+                    .map(|(name, _)| name.clone())
+                {
+                    node.owner_class = Some(owner);
+                }
             }
         }
         extract_qualified_constant_refs(tree.root_node(), source, &mut nodes);

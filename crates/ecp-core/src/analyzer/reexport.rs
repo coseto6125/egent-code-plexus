@@ -528,21 +528,36 @@ where
                         {
                             continue;
                         }
-                        let (nested_source, _) = rust_import_parts(nested);
+                        let (nested_source, nested_name) = rust_import_parts(nested);
+                        let nested_declaration = if nested_is_glob {
+                            declaration
+                        } else {
+                            nested_name
+                        };
                         let mut nested_local = false;
+                        let mut nested_found = false;
                         facts.for_each_candidate(file, nested_source, &mut |candidate| {
                             if !facts.has_file(candidate) {
                                 return true;
                             }
                             nested_local = true;
-                            false
+                            for (id, kind) in facts.decls_in_file(candidate, nested_declaration) {
+                                if kind.is_type() {
+                                    nested_found = true;
+                                    if found.replace(id).is_some_and(|old| old != id) {
+                                        ambiguous = true;
+                                        return false;
+                                    }
+                                }
+                            }
+                            true
                         });
-                        if nested_local {
+                        if !nested_local {
+                            external = true;
+                        } else if !nested_found {
                             // A second local forwarding hop is deliberately
                             // outside this bounded resolver.
                             forwarded = true;
-                        } else {
-                            external = true;
                         }
                     }
                 }
