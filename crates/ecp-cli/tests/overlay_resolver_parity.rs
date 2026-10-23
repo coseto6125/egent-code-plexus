@@ -1026,6 +1026,74 @@ fn test_overlay_rust_external_module_never_uses_local_namesake() {
 }
 
 #[test]
+fn test_overlay_cpp_quoted_same_directory_include_return_type_matches_reindex() {
+    parity(
+        &CppProvider::new().unwrap(),
+        &[
+            (
+                "src/config.cpp",
+                "#include \"foo.h\"\nFoo* make();\nvoid run() {}",
+            ),
+            ("src/foo.h", "class Foo { public: void bar(); };"),
+        ],
+        &[(
+            "src/config.cpp",
+            "#include \"foo.h\"\nFoo* make();\nvoid run() { make()->bar(); }",
+        )],
+        &[("src/foo.h".into(), "bar".into(), "Foo".into(), 85)],
+    );
+}
+
+#[test]
+fn test_overlay_rust_external_wildcard_return_type_rejects_project_namesake() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "pub mod app; pub mod project;"),
+            (
+                "src/app.rs",
+                "use external::*; fn load() -> Config { todo!() } fn run() {}",
+            ),
+            (
+                "src/project.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+        ],
+        &[(
+            "src/app.rs",
+            "use external::*; fn load() -> Config { todo!() } fn run() { load().get(); }",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn test_overlay_rust_external_pub_use_return_type_rejects_project_namesake() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            (
+                "src/lib.rs",
+                "pub use external::Config; pub mod app; pub mod legacy;",
+            ),
+            (
+                "src/app.rs",
+                "use crate::Config; fn load() -> Config { todo!() } fn run() {}",
+            ),
+            (
+                "src/legacy.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+        ],
+        &[(
+            "src/app.rs",
+            "use crate::Config; fn load() -> Config { todo!() } fn run() { load().get(); }",
+        )],
+        &[],
+    );
+}
+
+#[test]
 fn test_overlay_rust_unanchored_nested_module_matches_unresolved_reindex() {
     parity(
         &RustProvider::new().unwrap(),
@@ -3380,5 +3448,47 @@ fn test_overlay_go_large_imported_package_lookup_reports_timing() {
         PACKAGES,
         SELECTORS,
         total.elapsed().as_secs_f64(),
+    );
+}
+
+#[test]
+fn test_overlay_go_external_versioned_package_selector_returns_no_edge() {
+    let provider = GoProvider::new().unwrap();
+    for (source, receiver) in [("github.com/jackc/pgx/v5", "pgx"), ("gopkg.in/x.v3", "x")] {
+        let before = "package main\nfunc run() {}\n";
+        let after = format!(
+            "package main\nimport \"{source}\"\nfunc run() {{ {receiver}.Connect(nil, \"\") }}\n"
+        );
+        parity(
+            &provider,
+            &[
+                ("main.go", before),
+                (
+                    "db/db.go",
+                    "package db\ntype DB struct{}\nfunc (DB) Connect(_ any, _ string) {}\n",
+                ),
+            ],
+            &[("main.go", after.as_str())],
+            &[],
+        );
+    }
+}
+
+#[test]
+fn test_overlay_go_stdlib_selector_project_namesake_returns_no_edge() {
+    let provider = GoProvider::new().unwrap();
+    let before = "package main\nfunc run() {}\n";
+    let after = "package main\nimport \"log\"\nfunc run() { log.Printf(\"x\") }\n";
+    parity(
+        &provider,
+        &[
+            ("main.go", before),
+            (
+                "internal/log/log.go",
+                "package log\nfunc Printf(format string, args ...any) {}\n",
+            ),
+        ],
+        &[("main.go", after)],
+        &[],
     );
 }

@@ -1033,6 +1033,62 @@ fn test_resolve_call_rust_external_return_type_rejects_project_namesake() {
 }
 
 #[test]
+fn test_resolve_call_cpp_quoted_same_directory_include_return_type_binds_member() {
+    let graph = single(
+        &CppProvider::new().unwrap(),
+        &[
+            (
+                "src/config.cpp",
+                "#include \"foo.h\"\nFoo* make();\nvoid run() { make()->bar(); }",
+            ),
+            ("src/foo.h", "class Foo { public: void bar(); };"),
+        ],
+    );
+    assert_binds_foo(&graph, "run", "bar");
+}
+
+#[test]
+fn test_resolve_call_rust_external_wildcard_return_type_rejects_project_namesake() {
+    let graph = single(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "pub mod app; pub mod project;"),
+            (
+                "src/app.rs",
+                "use external::*; fn load() -> Config { todo!() } fn run() { load().get(); }",
+            ),
+            (
+                "src/project.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+        ],
+    );
+    assert!(owners(&graph, "run", "get").is_empty());
+}
+
+#[test]
+fn test_resolve_call_rust_external_pub_use_return_type_rejects_project_namesake() {
+    let graph = single(
+        &RustProvider::new().unwrap(),
+        &[
+            (
+                "src/lib.rs",
+                "pub use external::Config; pub mod app; pub mod legacy;",
+            ),
+            (
+                "src/legacy.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+            (
+                "src/app.rs",
+                "use crate::Config; fn load() -> Config { todo!() } fn run() { load().get(); }",
+            ),
+        ],
+    );
+    assert!(owners(&graph, "run", "get").is_empty());
+}
+
+#[test]
 fn test_resolve_call_rust_wildcard_import_unique_return_type_binds_member() {
     let graph = single(
         &RustProvider::new().unwrap(),

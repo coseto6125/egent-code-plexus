@@ -686,6 +686,42 @@ fn test_resolve_call_go_declared_package_name_differs_from_import_path_binds_fun
 }
 
 #[test]
+fn test_resolve_call_go_external_versioned_package_selector_returns_no_edge() {
+    for (source, receiver) in [("github.com/jackc/pgx/v5", "pgx"), ("gopkg.in/x.v3", "x")] {
+        let graph = go_module(&[
+            ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+            (
+                "db/db.go",
+                "package db\n\ntype DB struct{}\n\nfunc (DB) Connect(_ any, _ string) {}\n",
+            ),
+            (
+                "cmd/main.go",
+                &format!(
+                    "package main\n\nimport \"{source}\"\n\nfunc run() {{ {receiver}.Connect(nil, \"\") }}\n"
+                ),
+            ),
+        ]);
+        assert!(targets(&graph, "run").is_empty(), "{source}");
+    }
+}
+
+#[test]
+fn test_resolve_call_go_stdlib_selector_project_namesake_returns_no_edge() {
+    let graph = go_module(&[
+        ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+        (
+            "internal/log/log.go",
+            "package log\n\nfunc Printf(format string, args ...any) {}\n",
+        ),
+        (
+            "cmd/main.go",
+            "package main\n\nimport \"log\"\n\nfunc run() { log.Printf(\"x\") }\n",
+        ),
+    ]);
+    assert!(targets(&graph, "run").is_empty());
+}
+
+#[test]
 fn test_resolve_call_go_package_selector_missing_or_ambiguous_target_returns_no_edge() {
     let missing = go_module(&[
         ("go.mod", "module example.com/app\n\ngo 1.21\n"),
