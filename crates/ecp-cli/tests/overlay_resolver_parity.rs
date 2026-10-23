@@ -370,13 +370,15 @@ fn test_overlay_go_block_and_closure_alias_shadowing_matches_reindex() {
 
 #[test]
 fn test_overlay_go_parenthesized_selector_preserves_member_target() {
-    let source = "package main\ntype Box struct{}\nfunc (b Box) F() {}\nfunc F() {}\nfunc run() { var b Box; (b.F)() }\n";
-    parity(
-        &GoProvider::new().unwrap(),
-        &[("main.go", source)],
-        &[("main.go", &format!("\n{source}"))],
-        &[("main.go".into(), "F".into(), "Box".into(), 100)],
-    );
+    for call in ["b.F()", "(b.F)()"] {
+        let source = format!("package main\ntype Box struct{{}}\nfunc (b Box) F() {{}}\nfunc F() {{}}\nfunc run() {{ var b Box; {call} }}\n");
+        parity(
+            &GoProvider::new().unwrap(),
+            &[("main.go", &source)],
+            &[("main.go", &format!("\n{source}"))],
+            &[("main.go".into(), "F".into(), "Box".into(), 85)],
+        );
+    }
 }
 
 #[test]
