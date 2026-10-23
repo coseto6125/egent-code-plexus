@@ -232,6 +232,12 @@ fn mismatches(fixtures: &[Fixture]) -> Vec<String> {
                     file == caller_path && name == fixture.caller_fn
                 });
             let label = format!("{}/{dirty_set}", fixture.label);
+            if *proves && fixture.expected.is_empty() && !reindex.is_empty() {
+                failures.push(format!(
+                    "{label}: a bare free-only call reaches inherited members: {reindex:#?}"
+                ));
+                continue;
+            }
             let missing: Vec<_> = fixture
                 .expected
                 .iter()
