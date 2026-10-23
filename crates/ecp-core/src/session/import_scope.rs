@@ -33,6 +33,8 @@ pub(crate) enum Module<'a> {
 struct LanguageFiles<'a> {
     paths: FxHashSet<&'a str>,
     by_stem: FxHashMap<&'a str, Vec<&'a str>>,
+    /// Direct Go children by parent path, preserving Path equality semantics.
+    by_directory: FxHashMap<&'a Path, Vec<&'a str>>,
     /// File stems and directory components (`SymbolTable::has_module_name`).
     module_names: FxHashSet<&'a str>,
     /// File → the namespaces it declares (`.`-joined), as the resolver's
@@ -58,6 +60,11 @@ impl<'a> LanguageFiles<'a> {
                 continue;
             }
             let file = Path::new(path);
+            if language == Language::Go {
+                if let Some(parent) = file.parent() {
+                    files.by_directory.entry(parent).or_default().push(path);
+                }
+            }
             if let Some(stem) = file.file_stem().and_then(|s| s.to_str()) {
                 files.by_stem.entry(stem).or_default().push(path);
                 files.module_names.insert(stem);
@@ -192,13 +199,18 @@ impl<'a> ImportScope<'a> {
 
     pub(crate) fn files_in_directory(&self, language: Language, directory: &str) -> Vec<&'a str> {
         self.with_files(language, |files| {
+            if language == Language::Go {
+                return files
+                    .by_directory
+                    .get(Path::new(directory))
+                    .cloned()
+                    .unwrap_or_default();
+            }
             files
                 .paths
                 .iter()
                 .copied()
-                .filter(|file| {
-                    std::path::Path::new(file).parent() == Some(std::path::Path::new(directory))
-                })
+                .filter(|file| Path::new(file).parent() == Some(Path::new(directory)))
                 .collect()
         })
     }
