@@ -1084,50 +1084,33 @@ impl LanguageProvider for PhpProvider {
         detect_enum_imitation_blind_spots(tree.root_node(), path, is_test_file, &mut blind_spots);
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
-        let anonymous_class_bodies = anonymous_class_body_spans(tree.root_node());
-        for node in nodes.iter_mut().filter(|node| node.kind == NodeKind::Const) {
-            if anonymous_class_bodies
+        // Constants belong to the innermost named or anonymous type. Anonymous
+        // owners retain distinct identities without exposing their names globally.
+        if nodes.iter().any(|node| node.kind == NodeKind::Const) {
+            let mut owners: Vec<_> = nodes
                 .iter()
-                .any(|body| ecp_core::analyzer::types::span_contains(*body, node.span))
-            {
-                node.owner_class = None;
-            }
-        }
-        extract_qualified_constant_refs(tree.root_node(), source, &mut nodes);
-        // A class constant is its class's member: only `self::STATUS` or
-        // `Order::STATUS` reaches it, never a bare `STATUS`. The kinds match
-        // the containers `class_membership` links a member to.
-        if nodes
-            .iter()
-            .any(|n| n.kind == NodeKind::Const && n.owner_class.is_none())
-        {
-            let types: Vec<_> = nodes
-                .iter()
-                .filter(|n| {
+                .filter(|node| {
                     matches!(
-                        n.kind,
-                        NodeKind::Class | NodeKind::Interface | NodeKind::Trait
+                        node.kind,
+                        NodeKind::Class | NodeKind::Interface | NodeKind::Trait | NodeKind::Enum
                     )
                 })
-                .map(|n| (n.name.clone(), n.span))
+                .map(|node| (node.name.clone(), node.span))
                 .collect();
-            for node in nodes
-                .iter_mut()
-                .filter(|n| n.kind == NodeKind::Const && n.owner_class.is_none())
-            {
-                if anonymous_class_bodies
-                    .iter()
-                    .any(|body| ecp_core::analyzer::types::span_contains(*body, node.span))
-                {
-                    continue;
-                }
-                node.owner_class = types
+            owners.extend(
+                anonymous_class_body_spans(tree.root_node())
+                    .into_iter()
+                    .map(|span| (format!("<anonymous:{}:{}>", span.0, span.1), span)),
+            );
+            for node in nodes.iter_mut().filter(|node| node.kind == NodeKind::Const) {
+                node.owner_class = owners
                     .iter()
                     .filter(|(_, span)| ecp_core::analyzer::types::span_contains(*span, node.span))
                     .min_by_key(|(_, span)| crate::framework_helpers::span_area(*span))
                     .map(|(name, _)| name.clone());
             }
         }
+        extract_qualified_constant_refs(tree.root_node(), source, &mut nodes);
         let tx_scopes =
             collect_symfony_transactional_scopes(&nodes, &[NodeKind::Method, NodeKind::Function]);
         Ok(LocalGraph {

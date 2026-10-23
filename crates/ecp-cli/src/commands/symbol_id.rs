@@ -54,6 +54,15 @@ pub fn split_fqn_target(s: &str) -> (Option<&str>, &str) {
     }
 }
 
+fn owner_matches(actual: Option<&str>, requested: &str, file: &str) -> bool {
+    actual.is_some_and(|owner| {
+        owner == requested
+            || (file.ends_with(".rs")
+                && !requested.contains("::")
+                && owner.rsplit("::").next() == Some(requested))
+    })
+}
+
 /// Every merged-space index whose symbol matches `name`, paired with the count
 /// of same-named definitions seen BEFORE `--kind` / `--file` / FQN narrowing
 /// (the Tier-3 resolver-defence counter, which keys on the global name
@@ -120,10 +129,10 @@ pub fn resolve_candidates(
             }
         }
         if let Some(owner) = owner_filter {
-            if !resolve_owner_class(graph, idx)
-                .map(|oc| oc == owner)
-                .unwrap_or(false)
-            {
+            let file = graph.files[node.file_idx.to_native() as usize]
+                .path
+                .resolve(&graph.string_pool);
+            if !owner_matches(resolve_owner_class(graph, idx), owner, file) {
                 continue;
             }
         }
@@ -153,7 +162,7 @@ pub fn resolve_candidates(
                 }
             }
             if let Some(owner) = owner_filter {
-                if vn.owner_class.as_deref() != Some(owner) {
+                if !owner_matches(vn.owner_class.as_deref(), owner, &vn.rel_path) {
                     continue;
                 }
             }
