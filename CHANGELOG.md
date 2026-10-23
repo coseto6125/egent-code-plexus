@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.16.4 - 2026-10-23
+
+### Bug Fixes
+
+- publish a forced rebuild above the generation it replaces (#864)
+
 ## v0.16.3 - 2026-10-23
 
 ### Features
