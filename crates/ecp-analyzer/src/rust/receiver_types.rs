@@ -182,6 +182,57 @@ pub fn enclosing_function_name(node: Node<'_>, source: &[u8]) -> Option<String> 
     None
 }
 
+/// Walk `node`'s parent chain and return its full lexical containment path.
+/// This path is an identity, not a type owner:
+/// `impl A { fn new() { fn helper() {} } }` gives `A::new` to `helper`.
+///
+/// A short function name is insufficient here.  Two `impl` blocks may both
+/// declare `new`, and a nested `helper` under each must keep a distinct UID.
+/// Module names participate for every function they contain, including a
+/// function directly under a module.  An `impl` keeps its established
+/// self-type owner, so modules outside that `impl` do not change a method's
+/// lexical path.  A root-level function returns `None`.
+pub fn enclosing_function_path(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut segments = Vec::new();
+    let mut found_impl = false;
+    let mut current = node.parent();
+    while let Some(n) = current {
+        match n.kind() {
+            "function_item" => {
+                if let Some(name) = n
+                    .child_by_field_name("name")
+                    .and_then(|name| node_text(name, source))
+                {
+                    segments.push(name);
+                }
+            }
+            "impl_item" => {
+                if let Some(ty) = impl_self_type(&n, source) {
+                    segments.push(ty);
+                    found_impl = true;
+                }
+            }
+            "mod_item" => {
+                if !found_impl {
+                    if let Some(name) = n
+                        .child_by_field_name("name")
+                        .and_then(|name| node_text(name, source))
+                    {
+                        segments.push(name);
+                    }
+                }
+            }
+            "source_file" => break,
+            _ => {}
+        }
+        current = n.parent();
+    }
+    (!segments.is_empty()).then(|| {
+        segments.reverse();
+        segments.join("::")
+    })
+}
+
 /// Walk `node`'s parent chain to find the nearest enclosing `impl_item` or
 /// `trait_item` and return a discriminating context string for associated types.
 ///

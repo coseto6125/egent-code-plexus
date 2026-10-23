@@ -601,9 +601,9 @@ fn test_resolve_call_java_other_class_factory_chain_binds_return_type_member() {
     assert_binds_foo(&java_graph(), "useMake", "bar");
 }
 
-/// `Object` names no project type: today's untyped member.
+/// `Object` names no project type, so the chain emits no member edge.
 #[test]
-fn test_resolve_call_java_non_project_return_chain_keeps_fallback() {
+fn test_resolve_call_java_non_project_return_chain_emits_no_member_edge() {
     assert_falls_back(&java_graph(), "usePlain", "bar");
 }
 
@@ -928,10 +928,9 @@ fn test_resolve_call_csharp_nullable_return_chain_binds_return_type_member() {
     assert_binds_foo(&csharp_graph(), "UseMaybe", "Bar");
 }
 
-/// `object` names no project type: today's bare `Bar`, which a caller in
-/// a third class leaves unbound.
+/// `object` names no project type, so the chain emits no member edge.
 #[test]
-fn test_resolve_call_csharp_non_project_return_chain_keeps_fallback() {
+fn test_resolve_call_csharp_non_project_return_chain_emits_no_member_edge() {
     assert_falls_back(&csharp_graph(), "UsePlain", "Bar");
 }
 

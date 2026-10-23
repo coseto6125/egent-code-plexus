@@ -307,6 +307,93 @@ fn test_overlay_nested_free_function_precedes_top_level_namesake_matches_reindex
     }
 }
 
+#[test]
+fn test_overlay_go_declared_package_name_matches_exact_import_directory() {
+    let provider = GoProvider::new().unwrap();
+    for (path, package, import, receiver) in [
+        ("v2/helper.go", "app", "\"example.com/repo/v2\"", "app"),
+        (
+            "internal/go-utils/helper.go",
+            "utils",
+            "\"example.com/repo/internal/go-utils\"",
+            "utils",
+        ),
+        (
+            "v2/helper.go",
+            "app",
+            "client \"example.com/repo/v2\"",
+            "client",
+        ),
+    ] {
+        let dependency = format!("package {package}\nfunc F() {{}}\n");
+        let source = format!(
+            "package main\nimport {import}\nfunc F() {{}}\nfunc run() {{ {receiver}.F() }}\n"
+        );
+        let files = [("main.go", source.as_str()), (path, dependency.as_str())];
+        for dirty_dependency in [false, true] {
+            let edited = format!("\n{source}");
+            let mut dirty = vec![("main.go", edited.as_str())];
+            if dirty_dependency {
+                dirty.push((path, dependency.as_str()));
+            }
+            parity(
+                &provider,
+                &files,
+                &dirty,
+                &[(path.into(), "F".into(), "".into(), 95)],
+            );
+        }
+    }
+}
+
+#[test]
+fn test_overlay_rust_nested_helpers_under_same_named_methods_keep_lexical_identity() {
+    let source = "struct A; struct B; impl A { fn new() { fn helper() {} helper(); } } impl B { fn new() { fn helper() { marker(); } helper(); } } fn marker() {}";
+    parity_from(
+        "new",
+        &RustProvider::new().unwrap(),
+        &[("src/lib.rs", source)],
+        &[("src/lib.rs", &format!("\n{source}"))],
+        &[
+            ("src/lib.rs".into(), "helper".into(), "A::new".into(), 100),
+            ("src/lib.rs".into(), "helper".into(), "B::new".into(), 100),
+        ],
+    );
+}
+
+#[test]
+fn test_overlay_rust_outer_call_prefers_its_nested_function() {
+    let source = "fn helper() {} fn run() { fn helper() { marker(); } helper(); } fn marker() {}";
+    parity(
+        &RustProvider::new().unwrap(),
+        &[("src/lib.rs", source)],
+        &[("src/lib.rs", &format!("\n{source}"))],
+        &[("src/lib.rs".into(), "helper".into(), "run".into(), 100)],
+    );
+}
+
+#[test]
+fn test_overlay_rust_nested_helper_in_another_scope_is_not_global() {
+    let provider = RustProvider::new().unwrap();
+    let source = "struct A; struct B; impl A { fn new() { fn helper() {} } } impl B { fn new() { helper(); } }";
+    parity_from(
+        "new",
+        &provider,
+        &[("src/lib.rs", source)],
+        &[("src/lib.rs", &format!("\n{source}"))],
+        &[],
+    );
+    parity(
+        &provider,
+        &[
+            ("src/lib.rs", "fn run() {}"),
+            ("src/other.rs", "fn outer() { fn helper() {} }"),
+        ],
+        &[("src/lib.rs", "fn run() { helper(); }")],
+        &[],
+    );
+}
+
 /// A full reindex of `files` with `edits` applied, written under `root` so
 /// a Rust fixture gets its module tree.
 fn reindex(
@@ -2824,6 +2911,21 @@ fn test_overlay_csharp_chained_member_same_leaf_namespaces_stay_suppressed() {
             ),
         ],
         &[(("src/App/Use.cs"), "using Services;\nnamespace App { public class Use { public void Run() { Factory.Make().Bar(); } } }\n")],
+        "Bar",
+    );
+}
+
+#[test]
+fn test_overlay_csharp_external_return_type_does_not_bind_invisible_project_namesake() {
+    chain_without_member_parity(
+        "Run",
+        &CSharpProvider::new().unwrap(),
+        &[
+            ("src/Project/Foo.cs", "namespace Project { public class Foo { public void Bar() {} } }\n"),
+            ("src/Services/Factory.cs", "using External;\nnamespace Services { public class Factory { public static Foo Make() { return null; } } }\n"),
+            ("src/App/Use.cs", "using Services;\nnamespace App { public class Use { public void Run() {} } }\n"),
+        ],
+        &[("src/App/Use.cs", "using Services;\nnamespace App { public class Use { public void Run() { Factory.Make().Bar(); } } }\n")],
         "Bar",
     );
 }

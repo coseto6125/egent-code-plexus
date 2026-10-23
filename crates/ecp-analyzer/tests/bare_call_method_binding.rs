@@ -616,6 +616,12 @@ fn test_resolve_call_go_declared_package_name_differs_from_import_path_binds_fun
     for (path, package, import, caller) in [
         ("v2/helper.go", "app", "\"example.com/app/v2\"", "app.F()"),
         (
+            "v2/helper.go",
+            "app",
+            "client \"example.com/app/v2\"",
+            "client.F()",
+        ),
+        (
             "internal/go-utils/helper.go",
             "utils",
             "\"example.com/app/internal/go-utils\"",
@@ -639,6 +645,46 @@ fn test_resolve_call_go_declared_package_name_differs_from_import_path_binds_fun
 }
 
 #[test]
+fn test_resolve_call_go_package_selector_missing_or_ambiguous_target_returns_no_edge() {
+    let missing = go_module(&[
+        ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+        ("decoy.go", "package app\n\nfunc F() {}\n"),
+        (
+            "cmd/app.go",
+            "package main\n\nimport \"example.com/app/missing\"\n\nfunc boot() { missing.F() }\n",
+        ),
+    ]);
+    assert!(targets(&missing, "boot").is_empty());
+
+    let duplicate = go_module(&[
+        ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+        ("pkg/one.go", "package pkg\n\nfunc F() {}\n"),
+        ("pkg/two.go", "package pkg\n\nfunc F() {}\n"),
+        (
+            "cmd/app.go",
+            "package main\n\nimport \"example.com/app/pkg\"\n\nfunc boot() { pkg.F() }\n",
+        ),
+    ]);
+    assert!(targets(&duplicate, "boot").is_empty());
+}
+
+#[test]
+fn test_resolve_call_go_package_selector_method_only_returns_no_edge() {
+    let graph = go_module(&[
+        ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+        (
+            "pkg/helper.go",
+            "package pkg\n\ntype T struct{}\n\nfunc (T) F() {}\n",
+        ),
+        (
+            "cmd/app.go",
+            "package main\n\nimport \"example.com/app/pkg\"\n\nfunc boot() { pkg.F() }\n",
+        ),
+    ]);
+    assert!(targets(&graph, "boot").is_empty());
+}
+
+#[test]
 fn test_resolve_call_go_local_and_parameter_shadow_import_alias_return_no_edge() {
     let graph = go_module(
         &[
@@ -652,6 +698,48 @@ fn test_resolve_call_go_local_and_parameter_shadow_import_alias_return_no_edge()
     );
     assert!(targets(&graph, "parameter").is_empty());
     assert!(targets(&graph, "local").is_empty());
+}
+
+#[test]
+fn test_resolve_call_go_block_shadow_import_alias_after_block_binds_package_function() {
+    let graph = go_module(
+        &[
+            ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+            ("pkg/helper.go", "package pkg\n\nfunc F() {}\n"),
+            (
+                "cmd/app.go",
+                "package main\n\nimport p \"example.com/app/pkg\"\n\nfunc boot(c bool) { if c { p := struct{}{}; _ = p }; p.F() }\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        targets(&graph, "boot"),
+        vec![target("pkg/helper.go", "", "F")]
+    );
+}
+
+#[test]
+fn test_resolve_call_go_func_literal_parameter_shadow_import_alias_returns_no_edge() {
+    let graph = go_module(
+        &[
+            ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+            ("pkg/helper.go", "package pkg\n\nfunc F() {}\n"),
+            (
+                "cmd/app.go",
+                "package main\n\nimport p \"example.com/app/pkg\"\n\nfunc boot() { func(p struct{}) { p.F() }(struct{}{}) }\n",
+            ),
+        ],
+    );
+    assert!(targets(&graph, "boot").is_empty());
+}
+
+#[test]
+fn test_resolve_call_go_parenthesized_selector_preserves_member_site() {
+    let graph = go_module(&[(
+        "main.go",
+        "package main\n\ntype T struct{}\n\nfunc (T) M() {}\n\nfunc boot(value T) { (value.M)() }\n",
+    )]);
+    assert_eq!(targets(&graph, "boot"), vec![target("main.go", "T", "M")]);
 }
 
 // ---- Implicit-`this` languages: a bare call reaches members ----

@@ -332,6 +332,14 @@ pub trait ModuleFacts {
 
     /// Whether `file` is indexed, symbols or not.
     fn has_file(&self, file: &str) -> bool;
+    /// Files of `language` directly within `directory`.
+    fn files_in_directory(&self, _language: Language, _directory: &str) -> Vec<Self::Path> {
+        Vec::new()
+    }
+    /// Files of `language` that declare `namespace`.
+    fn namespace_files(&self, _language: Language, _namespace: &str) -> Vec<Self::Path> {
+        Vec::new()
+    }
     /// Whether a file stem or directory of `language` is named `name`.
     fn has_module_name(&self, language: Language, name: &str) -> bool;
     /// Whether `file` declares `name`, any kind.
@@ -373,6 +381,69 @@ pub fn call_in_file<F: ModuleFacts + ?Sized>(
     target: ResolveTarget,
 ) -> Option<u32> {
     pick_call(facts.decls_in_file(file, name).into_iter(), target)
+}
+
+/// The top-level callable a Go package selector reaches. A Go import's path
+/// and its declared package name are independent, so an unaliased selector
+/// needs both facts. An explicit alias replaces the package spelling, but
+/// remains constrained to the imported directory.
+pub fn go_imported_package_member<'a, F, I>(
+    facts: &F,
+    importer: &str,
+    receiver: &str,
+    member: &str,
+    imports: I,
+) -> Option<(u32, &'a str)>
+where
+    F: ModuleFacts + ?Sized,
+    I: IntoIterator<Item = ImportRef<'a>>,
+{
+    let namespace_files = facts.namespace_files(Language::Go, receiver);
+    let mut found = None;
+    let mut ambiguous = false;
+
+    for import in imports {
+        let is_alias = import.alias.is_some();
+        if is_alias && import.alias != Some(receiver) {
+            continue;
+        }
+        facts.for_each_candidate(importer, import.source, &mut |candidate| {
+            let directory = candidate
+                .strip_prefix("./")
+                .unwrap_or(candidate)
+                .trim_end_matches('/');
+            for file in facts.files_in_directory(Language::Go, directory) {
+                let file = file.as_ref();
+                if !is_alias && !namespace_files.iter().any(|path| path.as_ref() == file) {
+                    continue;
+                }
+                let mut functions = facts
+                    .decls_in_file(file, member)
+                    .into_iter()
+                    .filter(|&(_, kind)| kind == NodeKind::Function);
+                let Some((node, _)) = functions.next() else {
+                    continue;
+                };
+                if functions.next().is_some() {
+                    ambiguous = true;
+                    return false;
+                }
+                match found {
+                    None => found = Some((node, import.source)),
+                    Some((previous, source)) if previous == node && source == import.source => {}
+                    Some(_) => {
+                        ambiguous = true;
+                        return false;
+                    }
+                }
+            }
+            !ambiguous
+        });
+        if ambiguous {
+            return None;
+        }
+    }
+    found
 }
 
 /// The declaration an import of `name` from module `file` binds. In an ES

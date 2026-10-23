@@ -167,6 +167,19 @@ impl<'a> ImportScope<'a> {
         self.with_files(language, |files| files.module_names.contains(name))
     }
 
+    pub(crate) fn files_in_directory(&self, language: Language, directory: &str) -> Vec<&'a str> {
+        self.with_files(language, |files| {
+            files
+                .paths
+                .iter()
+                .copied()
+                .filter(|file| {
+                    std::path::Path::new(file).parent() == Some(std::path::Path::new(directory))
+                })
+                .collect()
+        })
+    }
+
     pub(crate) fn namespace_return_type_visible(
         &self,
         file: &str,

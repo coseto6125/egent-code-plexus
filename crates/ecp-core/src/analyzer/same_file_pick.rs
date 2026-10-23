@@ -61,6 +61,13 @@ pub trait PickFacts {
     fn kind(&self, id: u32) -> NodeKind;
     /// The [`owner_key`] of the type declaring `id`; `None` at top level.
     fn owner(&self, id: u32) -> Option<&str>;
+    /// The parser's owner text before [`owner_key`] normalizes it.
+    ///
+    /// The default keeps existing facts compact.  Rust nested functions use
+    /// this only to distinguish lexical owners such as `A::new` and `B::new`.
+    fn raw_owner(&self, id: u32) -> Option<&str> {
+        self.owner(id)
+    }
     /// The `impl` block that declares the Rust callable `id`.
     fn impl_member(&self, id: u32) -> Option<ImplMember<'_>>;
     /// Whether the owner key `owner` names a namespace or module that
@@ -101,6 +108,21 @@ pub fn type_receiver_is_closed(language: Language) -> bool {
 /// Whether `id` has no owner and no `impl` block either.
 pub fn is_free<F: PickFacts + ?Sized>(facts: &F, id: u32) -> bool {
     facts.owner(id).is_none() && facts.impl_member(id).is_none()
+}
+
+/// Whether a Rust bare call may reach `id` outside its lexical function.
+///
+/// An unowned declaration is globally free.  A declaration directly owned by
+/// a module remains callable as a module-level free function.  A raw owner
+/// that differs from its normalized owner is a lexical function path and must
+/// not reappear through the global tiers.
+pub fn rust_free_global_candidate<F: PickFacts + ?Sized>(facts: &F, file: &str, id: u32) -> bool {
+    match facts.raw_owner(id) {
+        None => true,
+        Some(raw_owner) => {
+            facts.owner(id) == Some(raw_owner) && facts.is_namespace_owner(file, raw_owner)
+        }
+    }
 }
 
 /// A receiverless name that cannot reach a method prefers its enclosing
@@ -146,6 +168,44 @@ pub fn prefer_free<F: PickFacts + ?Sized>(
     module
         .and_then(|module| candidates().find(|&id| facts.owner(id) == Some(module)))
         .or_else(|| candidates().find(|&id| is_free(facts, id)))
+}
+
+/// Like [`prefer_free`], but first chooses one declaration in a known lexical
+/// function scope.  The scope uses the parser's raw owner text because
+/// [`owner_key`] intentionally collapses `A::new` and `B::new` to `new` for
+/// type-member resolution.  An ambiguous lexical scope remains unresolved.
+/// It checks each enclosing lexical scope before an unowned free function.
+/// Falling back to normalized owners would let `B::new` bind
+/// `A::new::helper` merely because both normalize to `new`.
+pub fn prefer_free_scoped<F: PickFacts + ?Sized>(
+    facts: &F,
+    file: &str,
+    member: &str,
+    lexical_owner: Option<&str>,
+    owner: Option<&str>,
+    target: ResolveTarget,
+) -> Option<u32> {
+    if let Some(lexical_owner) = lexical_owner {
+        let predicate = target.kind_predicate();
+        let ids = facts.pick_candidates(file, member);
+        let candidates = || {
+            ids.iter()
+                .copied()
+                .filter(|&id| facts.kind(id) != NodeKind::Method && predicate(facts.kind(id)))
+        };
+        let mut scope = Some(lexical_owner);
+        while let Some(owner) = scope {
+            let mut scoped = candidates().filter(|&id| facts.raw_owner(id) == Some(owner));
+            match (scoped.next(), scoped.next()) {
+                (Some(id), None) => return Some(id),
+                (Some(_), Some(_)) => return None,
+                (None, _) => {}
+            }
+            scope = owner.rsplit_once("::").map(|(parent, _)| parent);
+        }
+        return candidates().find(|&id| is_free(facts, id));
+    }
+    prefer_free(facts, file, member, owner, target)
 }
 
 /// The owner the pick rules see for `id`, declared in `file`.

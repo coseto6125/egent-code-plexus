@@ -136,6 +136,10 @@ pub struct SymbolTable {
     /// is hot (~14k × 3 inserts on `.sample_repo`).
     file_scoped: FxHashMap<String, FxHashMap<String, Vec<u32>>>,
 
+    /// Indexed files grouped by their direct directory. Go package imports
+    /// use this to keep an import from reaching a nested package.
+    directory_files: FxHashMap<String, Vec<String>>,
+
     /// Maps a `node_name` to a list of node IDs across all files.
     ///
     /// Tier-3 (Global) fallback consults this list, then narrows by
@@ -186,6 +190,10 @@ pub struct SymbolTable {
     /// `member`" for the receiver-typing ladder: `file_scoped` alone returns
     /// the first same-named member in the file, whichever type owns it.
     node_owner: Vec<u32>,
+
+    /// Parser owner text only where owner-key normalization would lose a
+    /// Rust lexical ancestor such as `B::new`.
+    raw_owner_overrides: FxHashMap<u32, Box<str>>,
 
     /// Owner key → interned id. One entry per distinct owner name, so the
     /// per-node cost is the 4-byte `node_owner` slot.
@@ -270,7 +278,25 @@ impl SymbolTable {
 
     /// Import-only package entry files still establish an indexed module.
     pub(crate) fn register_file(&mut self, path: &str) {
+        if !self.file_scoped.contains_key(path) {
+            let directory = std::path::Path::new(path)
+                .parent()
+                .and_then(|parent| parent.to_str())
+                .unwrap_or("");
+            self.directory_files
+                .entry(directory.to_string())
+                .or_default()
+                .push(path.to_string());
+        }
         self.file_scoped.entry(path.to_string()).or_default();
+    }
+
+    /// Files directly within `directory`, in registration order.
+    pub(crate) fn files_in_directory(&self, directory: &str) -> &[String] {
+        self.directory_files
+            .get(directory)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Populate the `stem_index` from the file paths already in
@@ -468,7 +494,8 @@ impl SymbolTable {
                 self.namespace_decls.push((file_path.into(), key.into()));
             }
         }
-        if kind != NodeKind::Namespace || !(fqn_language(language) || language == Language::CSharp)
+        if kind != NodeKind::Namespace
+            || !(fqn_language(language) || matches!(language, Language::CSharp | Language::Go))
         {
             return;
         }
@@ -597,6 +624,11 @@ impl SymbolTable {
         self.node_file_meta.push(file_meta);
         let owner_id = self.intern_owner(owner);
         self.node_owner.push(owner_id);
+        if let Some(raw_owner) =
+            owner.filter(|raw| file_meta.language == Language::Rust && owner_key(raw) != Some(*raw))
+        {
+            self.raw_owner_overrides.insert(node_id, raw_owner.into());
+        }
         if kind == NodeKind::Constructor && owner_id != NO_OWNER {
             self.constructors.push(node_id);
         }
@@ -1005,6 +1037,7 @@ impl SymbolTable {
         caller: FileMeta,
         free_only: bool,
     ) -> GlobalPick {
+        let rust_free_only = caller.language == Language::Rust && free_only;
         let Some(raw) = self.global_scoped.get(node_name) else {
             return GlobalPick::NoMatch;
         };
@@ -1013,6 +1046,14 @@ impl SymbolTable {
             caller,
             raw.iter()
                 .filter(|&&id| field(self.node_kinds[id as usize]))
+                .filter(|&&id| {
+                    !rust_free_only
+                        || self.file_of(id).is_some_and(|file| {
+                            ecp_core::analyzer::same_file_pick::rust_free_global_candidate(
+                                self, file, id,
+                            )
+                        })
+                })
                 .map(|&id| (id, self.node_file_meta[id as usize])),
         );
         match pick {
@@ -1147,11 +1188,18 @@ impl SymbolTable {
         target: ResolveTarget,
         free_only: bool,
     ) -> Option<u32> {
+        let rust_free_only = caller.language == Language::Rust && free_only;
         let field = global_field(target, free_only);
         let mut copies: Vec<u32> = Vec::new();
         for &id in self.global_scoped.get(node_name)? {
             if !field(self.node_kinds[id as usize])
                 || !caller.admits(self.node_file_meta[id as usize])
+                || (rust_free_only
+                    && !self.file_of(id).is_some_and(|file| {
+                        ecp_core::analyzer::same_file_pick::rust_free_global_candidate(
+                            self, file, id,
+                        )
+                    }))
             {
                 continue;
             }
@@ -1464,6 +1512,13 @@ impl PickFacts for SymbolTable {
     fn owner(&self, id: u32) -> Option<&str> {
         let owner = *self.node_owner.get(id as usize)?;
         (owner != NO_OWNER).then(|| &*self.owner_keys[owner as usize])
+    }
+
+    fn raw_owner(&self, id: u32) -> Option<&str> {
+        self.raw_owner_overrides
+            .get(&id)
+            .map(Box::as_ref)
+            .or_else(|| self.owner(id))
     }
 
     fn impl_member(&self, id: u32) -> Option<PickImplMember<'_>> {

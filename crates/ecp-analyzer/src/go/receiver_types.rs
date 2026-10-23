@@ -442,9 +442,7 @@ fn go_callee_name(
                             import.alias.as_deref().unwrap_or(&import.imported_name) == var_name
                         })
                     {
-                        // A recognized package import proves this is a free call. Keep the
-                        // unqualified name so global lookup can choose its unique function.
-                        return Some(method_name);
+                        return Some(CallSite::from_receiver(&var_name, &method_name));
                     }
                     return Some(CallSite::untyped_member(&method_name));
                 }

@@ -2436,6 +2436,24 @@ impl<'a> ModuleFacts for OverlayFacts<'a> {
         self.scope.has_module_name(language, name)
     }
 
+    fn namespace_files(&self, language: Language, namespace: &str) -> Vec<Self::Path> {
+        let mut files: Vec<_> = self
+            .global_named(namespace)
+            .into_iter()
+            .filter(|&id| {
+                self.kind_of(id) == NodeKind::Namespace && self.meta_of(id).language == language
+            })
+            .filter_map(|id| self.node_file(id))
+            .collect();
+        files.sort_unstable();
+        files.dedup();
+        files
+    }
+
+    fn files_in_directory(&self, language: Language, directory: &str) -> Vec<Self::Path> {
+        self.scope.files_in_directory(language, directory)
+    }
+
     fn declares(&self, file: &str, name: &str) -> bool {
         !self.decls_in_file(file, name).is_empty()
     }
@@ -3151,6 +3169,18 @@ impl PickFacts for OverlayFacts<'_> {
         self.owner_of(id)
     }
 
+    fn raw_owner(&self, id: u32) -> Option<&str> {
+        match id.checked_sub(self.base_len()) {
+            Some(offset) => self.nodes[offset as usize].owner_class.as_deref(),
+            None => {
+                let owner = self.graph.nodes[id as usize]
+                    .owner_class
+                    .resolve(&self.graph.string_pool);
+                (!owner.is_empty()).then_some(owner)
+            }
+        }
+    }
+
     fn impl_member(&self, id: u32) -> Option<ImplMember<'_>> {
         if id >= self.base_len() {
             self.dirty_impl_members.get(&id).copied()
@@ -3525,9 +3555,28 @@ fn resolve_callee<'s>(
     // Read from the call site, never from `site`: a retry under the short
     // name (`ImportBinding::Retry`) is no receiverless call.
     let free_only = call.is_some_and(|call| call.free_only);
-    let admits = |&(idx, _): &(u32, FileMeta)| !free_only || !is_method(idx);
+    let admits = |&(idx, _): &(u32, FileMeta)| {
+        !free_only
+            || (!is_method(idx)
+                && (caller.language != Language::Rust
+                    || facts.node_file(idx).is_some_and(|file| {
+                        crate::analyzer::same_file_pick::rust_free_global_candidate(
+                            facts, file, idx,
+                        )
+                    })))
+    };
     let importer = facts.scope.dirty()[file_ord].rel_path.as_str();
     if let CallSite::FromReceiver { receiver, member } = site {
+        if caller.language == Language::Go {
+            return reexport::go_imported_package_member(
+                facts,
+                importer,
+                receiver,
+                member,
+                imports.iter().map(ImportRef::from),
+            )
+            .map(|(target, _)| (target, CONF_IMPORT_SCOPED));
+        }
         if caller.language == Language::Python {
             if let Some((target, _)) = reexport::python_submodule_member(
                 facts,
@@ -3558,6 +3607,23 @@ fn resolve_callee<'s>(
         .filter(|&(_, kind)| !free_only || kind != NodeKind::Method);
     if let Some(pick) = reexport::pick_call(same_file, call_target) {
         let hit = match call {
+            Some(call) if free_only && caller.language == Language::Rust => {
+                let lexical_owner = call.caller.map(|id| {
+                    let name = facts.name_of(id);
+                    match PickFacts::raw_owner(facts, id) {
+                        Some(owner) => format!("{owner}::{name}"),
+                        None => name.to_string(),
+                    }
+                });
+                crate::analyzer::same_file_pick::prefer_free_scoped(
+                    facts,
+                    importer,
+                    callee,
+                    lexical_owner.as_deref(),
+                    call.owner,
+                    call_target,
+                )
+            }
             Some(call) if free_only => crate::analyzer::same_file_pick::prefer_free(
                 facts,
                 importer,

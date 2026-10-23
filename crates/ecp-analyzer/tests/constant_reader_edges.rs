@@ -458,6 +458,36 @@ fn test_value_read_go_elided_map_and_slice_literal_keys_return_edges() {
 }
 
 #[test]
+fn test_value_read_go_case_local_map_alias_does_not_leak_after_case() {
+    let g = graph(
+        &GoProvider::new().unwrap(),
+        &[(
+            "g.go",
+            "package main\n\nconst IN_CASE = \"case\"\nconst AFTER_CASE = \"after\"\n\ntype Labels struct {\n\tAFTER_CASE int\n}\n\nfunc reads() {\n\tswitch 1 {\n\tcase 1:\n\t\ttype Labels map[string]int\n\t\t_ = Labels{IN_CASE: 1}\n\t}\n\t_ = Labels{AFTER_CASE: 2}\n}\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "reads"),
+        vec![r("g.go", "IN_CASE", VALUE_READ, SAME_FILE)]
+    );
+}
+
+#[test]
+fn test_value_read_go_elided_pointer_named_map_literal_key_returns_edge() {
+    let g = graph(
+        &GoProvider::new().unwrap(),
+        &[(
+            "g.go",
+            "package main\n\nconst KEY = \"key\"\n\ntype Labels map[string]int\n\nfunc pointers() []*Labels {\n\treturn []*Labels{{KEY: 1}}\n}\n",
+        )],
+    );
+    assert_eq!(
+        value_reads(&g, "pointers"),
+        vec![r("g.go", "KEY", VALUE_READ, SAME_FILE)]
+    );
+}
+
+#[test]
 fn test_value_read_go_known_struct_literal_keys_return_no_edge() {
     let g = graph(
         &GoProvider::new().unwrap(),

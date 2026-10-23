@@ -6,9 +6,13 @@ use ecp_core::graph::{RelType, ZeroCopyGraph};
 use std::path::Path;
 
 fn parse(source: &str) -> LocalGraph {
+    parse_at("test.rs", source)
+}
+
+fn parse_at(path: &str, source: &str) -> LocalGraph {
     let provider = RustProvider::new().expect("RustProvider::new");
     provider
-        .parse_file(Path::new("test.rs"), source.as_bytes())
+        .parse_file(Path::new(path), source.as_bytes())
         .expect("parse_file")
 }
 
@@ -120,6 +124,14 @@ fn test_nested_rust_functions_under_same_named_methods_keep_distinct_uids_and_ca
         .collect();
     assert_eq!(helper_hashes.len(), 2, "{local:#?}");
     assert_ne!(helper_hashes[0], helper_hashes[1], "{local:#?}");
+    let helper_owners: Vec<_> = local
+        .nodes
+        .iter()
+        .filter(|node| node.name == "helper")
+        .filter_map(|node| node.owner_class.as_deref())
+        .collect();
+    assert!(helper_owners.contains(&"A::new"), "{local:#?}");
+    assert!(helper_owners.contains(&"B::new"), "{local:#?}");
 
     let graph = graph(RUST_NESTED_HELPER_UIDS);
     let pool = graph.string_pool.as_slice();
@@ -156,11 +168,7 @@ fn test_nested_rust_functions_under_same_named_methods_keep_distinct_uids_and_ca
     assert_eq!(b_targets, vec![b_helper], "{graph:#?}");
 }
 
-/// C6: lexical selection is a pre-existing resolver limit.  It remains
-/// ignored until the resolver has caller-span ancestry, separate from C5 UID
-/// preservation above.
 #[test]
-#[ignore = "C6: prefer_free has no lexical caller ancestry"]
 fn test_c6_rust_top_level_and_nested_same_name_prefer_nested_function() {
     let source = r#"
 fn helper() {}
@@ -204,4 +212,170 @@ fn outer() {
         .map(|edge| edge.target)
         .collect();
     assert_eq!(targets, vec![nested], "{graph:#?}");
+}
+
+#[test]
+fn test_nested_rust_function_without_local_declaration_does_not_bind_sibling_scope() {
+    let source = r#"
+struct A;
+struct B;
+fn marker_a() {}
+
+impl A {
+    fn new() -> Self {
+        fn helper() { marker_a(); }
+        A
+    }
+}
+
+impl B {
+    fn new() -> Self {
+        helper();
+        B
+    }
+}
+"#;
+    let graph = graph(source);
+    let pool = graph.string_pool.as_slice();
+    let b_new = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .find(|(_, node)| node.name.resolve(pool) == "new" && node.owner_class.resolve(pool) == "B")
+        .map(|(idx, _)| idx as u32)
+        .expect("B::new node");
+    let helper_targets: Vec<_> = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.rel_type == RelType::Calls && edge.source == b_new)
+        .filter(|edge| graph.nodes[edge.target as usize].name.resolve(pool) == "helper")
+        .collect();
+    assert!(helper_targets.is_empty(), "{graph:#?}");
+}
+
+#[test]
+fn test_nested_rust_function_in_another_file_does_not_bind_global_fallback() {
+    let mut builder = GraphBuilder::new();
+    builder.add_graph(parse_at(
+        "a.rs",
+        r#"
+struct A;
+impl A {
+    fn new() -> Self {
+        fn helper() {}
+        A
+    }
+}
+"#,
+    ));
+    builder.add_graph(parse_at(
+        "b.rs",
+        r#"
+fn caller() {
+    helper();
+}
+"#,
+    ));
+    let graph = builder.build();
+    let pool = graph.string_pool.as_slice();
+    let caller = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .find(|(_, node)| node.name.resolve(pool) == "caller")
+        .map(|(idx, _)| idx as u32)
+        .expect("caller node");
+    let helper_targets: Vec<_> = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.rel_type == RelType::Calls && edge.source == caller)
+        .filter(|edge| graph.nodes[edge.target as usize].name.resolve(pool) == "helper")
+        .collect();
+    assert!(helper_targets.is_empty(), "{graph:#?}");
+}
+
+#[test]
+fn test_rust_module_free_function_remains_callable_from_module_member() {
+    let source = r#"
+mod services {
+    fn helper() {}
+    fn caller() {
+        helper();
+    }
+}
+"#;
+    let graph = graph(source);
+    let pool = graph.string_pool.as_slice();
+    let caller = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .find(|(_, node)| node.name.resolve(pool) == "caller")
+        .map(|(idx, _)| idx as u32)
+        .expect("caller node");
+    let helper = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .find(|(_, node)| node.name.resolve(pool) == "helper")
+        .map(|(idx, _)| idx as u32)
+        .expect("helper node");
+    assert!(
+        graph
+            .edges
+            .iter()
+            .any(|edge| edge.rel_type == RelType::Calls
+                && edge.source == caller
+                && edge.target == helper),
+        "{graph:#?}"
+    );
+}
+
+#[test]
+fn test_nested_rust_function_in_module_impl_matches_method_owner_path() {
+    let source = r#"
+mod services {
+    struct A;
+    impl A {
+        fn new() -> Self {
+            fn helper() {}
+            helper();
+            A
+        }
+    }
+}
+"#;
+    let local = parse(source);
+    let helper = local
+        .nodes
+        .iter()
+        .find(|node| node.name == "helper")
+        .expect("helper raw node");
+    assert_eq!(helper.owner_class.as_deref(), Some("A::new"), "{local:#?}");
+
+    let graph = graph(source);
+    let pool = graph.string_pool.as_slice();
+    let new = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .find(|(_, node)| node.name.resolve(pool) == "new" && node.owner_class.resolve(pool) == "A")
+        .map(|(idx, _)| idx as u32)
+        .expect("A::new node");
+    let helper = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .find(|(_, node)| node.name.resolve(pool) == "helper")
+        .map(|(idx, _)| idx as u32)
+        .expect("A::new::helper node");
+    assert!(
+        graph
+            .edges
+            .iter()
+            .any(|edge| edge.rel_type == RelType::Calls
+                && edge.source == new
+                && edge.target == helper),
+        "{graph:#?}"
+    );
 }

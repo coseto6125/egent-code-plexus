@@ -182,6 +182,26 @@ impl ModuleFacts for IndexFacts<'_, '_> {
         self.0.symbol_table.has_indexed_file(file)
     }
 
+    fn files_in_directory(&self, language: Language, directory: &str) -> Vec<Self::Path> {
+        self.0
+            .symbol_table
+            .files_in_directory(directory)
+            .iter()
+            .filter(|file| Language::from_normalized_path(file) == language)
+            .map(|file| Arc::from(file.as_str()))
+            .collect()
+    }
+
+    fn namespace_files(&self, language: Language, namespace: &str) -> Vec<Self::Path> {
+        self.0
+            .symbol_table
+            .namespace_files(namespace)
+            .iter()
+            .filter(|file| Language::from_normalized_path(file) == language)
+            .map(|file| Arc::from(file.as_str()))
+            .collect()
+    }
+
     fn has_module_name(&self, language: Language, name: &str) -> bool {
         self.0.symbol_table.has_module_name(language, name)
     }
@@ -699,6 +719,24 @@ impl<'a> Resolver<'a> {
             self.python_submodule_member(source_file, language, site, raw_imports)
         {
             return self.import_scoped(source_file, site.name(), import, node_id);
+        }
+        if let CallSite::FromReceiver { receiver, member } = site {
+            if language == Language::Go {
+                return reexport::go_imported_package_member(
+                    &IndexFacts(self),
+                    &normalize_source_path(source_file),
+                    receiver,
+                    member,
+                    raw_imports.iter().map(ImportRef::from),
+                )
+                .and_then(|(node_id, source)| {
+                    raw_imports
+                        .iter()
+                        .find(|import| import.source == source)
+                        .map(|import| self.import_scoped(source_file, member, import, node_id))
+                })
+                .unwrap_or_default();
+            }
         }
         let declared_python_attribute = matches!(site, CallSite::FromReceiver { receiver, .. }
         if language == Language::Python
@@ -1436,13 +1474,32 @@ impl<'a> Resolver<'a> {
                 .lookup_call_in_file(&source_file_str, symbol_name, target, free_only);
         if let Some(node_id) = same_file_pick
             .and_then(|pick| match call {
-                Some(scope) if free_only => ecp_core::analyzer::same_file_pick::prefer_free(
-                    self.symbol_table,
-                    &source_file_str,
-                    symbol_name,
-                    scope.owner,
-                    target,
-                ),
+                Some(scope) if free_only => {
+                    let lexical_owner = (language == Language::Rust)
+                        .then(|| {
+                            scope.caller.and_then(|caller| {
+                                let name = self.symbol_table.name_in_file(caller)?;
+                                let owner =
+                                    ecp_core::analyzer::same_file_pick::PickFacts::raw_owner(
+                                        self.symbol_table,
+                                        caller,
+                                    );
+                                Some(owner.map_or_else(
+                                    || name.to_string(),
+                                    |owner| format!("{owner}::{name}"),
+                                ))
+                            })
+                        })
+                        .flatten();
+                    ecp_core::analyzer::same_file_pick::prefer_free_scoped(
+                        self.symbol_table,
+                        &source_file_str,
+                        symbol_name,
+                        lexical_owner.as_deref(),
+                        scope.owner,
+                        target,
+                    )
+                }
                 Some(scope) => self.symbol_table.prefer_owned(
                     &source_file_str,
                     pick,

@@ -1,7 +1,7 @@
 use super::receiver_types::{
     build_impl_map, collect_local_types, enclosing_enum_name, enclosing_function_name,
-    enclosing_impl_or_trait_context, enclosing_impl_type, enclosing_struct_type,
-    extract_rust_calls_and_path_literals, impl_trait_name,
+    enclosing_function_path, enclosing_impl_or_trait_context, enclosing_impl_type,
+    enclosing_struct_type, extract_rust_calls_and_path_literals, impl_trait_name,
 };
 use super::spec::RustSpec;
 use crate::framework_confidence;
@@ -422,7 +422,7 @@ impl LanguageProvider for RustProvider {
                         NodeKind::Function => {
                             // A nested function belongs to its lexical function,
                             // even when that function is an impl method.
-                            enclosing_function_name(root, source)
+                            enclosing_function_path(root, source)
                                 .or_else(|| enclosing_impl_type(root, source))
                         }
                         NodeKind::Impl => {

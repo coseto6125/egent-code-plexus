@@ -1,3 +1,8 @@
+;; Package clauses identify the import name independently of the directory.
+(package_clause
+  (package_identifier) @namespace.name
+) @namespace
+
 ;; Structs
 (type_spec
   name: (type_identifier) @struct.name
