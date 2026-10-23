@@ -33,7 +33,7 @@ use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_analyzer::typescript::parser::TypeScriptProvider;
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::graph::ZeroCopyGraph;
+use ecp_core::graph::{NodeKind, ZeroCopyGraph};
 use instantiation_calls_support::calls_from;
 use std::path::Path;
 
@@ -81,6 +81,18 @@ fn go_module(files: &[(&str, &str)]) -> ZeroCopyGraph {
         }
     }
     builder.build()
+}
+
+#[test]
+fn test_parse_file_package_clause_emits_namespace() {
+    let graph = GoProvider::new()
+        .expect("GoProvider init")
+        .parse_file(Path::new("helper.go"), b"package declared\nfunc F() {}\n")
+        .expect("Go fixture parses");
+    assert!(graph
+        .nodes
+        .iter()
+        .any(|node| node.kind == NodeKind::Namespace && node.name == "declared"));
 }
 
 /// The `Calls` targets of every node named `caller`, sorted.
@@ -712,6 +724,63 @@ fn test_resolve_call_go_block_shadow_import_alias_after_block_binds_package_func
             ),
         ],
     );
+    assert_eq!(
+        targets(&graph, "boot"),
+        vec![target("pkg/helper.go", "", "F")]
+    );
+}
+
+#[test]
+fn test_resolve_call_go_var_initializer_import_alias_binds_package_function() {
+    let graph = go_module(&[
+        ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+        (
+            "pkg/helper.go",
+            "package pkg\n\nfunc F() int { return 1 }\n",
+        ),
+        (
+            "cmd/app.go",
+            "package main\n\nimport p \"example.com/app/pkg\"\n\nfunc boot() { var p = p.F(); _ = p }\n",
+        ),
+    ]);
+    assert_eq!(
+        targets(&graph, "boot"),
+        vec![target("pkg/helper.go", "", "F")]
+    );
+}
+
+#[test]
+fn test_resolve_call_go_short_var_initializer_import_alias_binds_package_function() {
+    let graph = go_module(&[
+        ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+        (
+            "pkg/helper.go",
+            "package pkg\n\nfunc F() int { return 1 }\n",
+        ),
+        (
+            "cmd/app.go",
+            "package main\n\nimport p \"example.com/app/pkg\"\n\nfunc boot() { p := p.F(); _ = p }\n",
+        ),
+    ]);
+    assert_eq!(
+        targets(&graph, "boot"),
+        vec![target("pkg/helper.go", "", "F")]
+    );
+}
+
+#[test]
+fn test_resolve_call_go_switch_init_shadow_ends_after_switch() {
+    let graph = go_module(&[
+        ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+        (
+            "pkg/helper.go",
+            "package pkg\n\nfunc F() int { return 1 }\n",
+        ),
+        (
+            "cmd/app.go",
+            "package main\n\nimport p \"example.com/app/pkg\"\n\nfunc boot() {\n\tswitch p := 1; p {\n\tcase 1:\n\t\tp.F()\n\t}\n\tp.F()\n}\n",
+        ),
+    ]);
     assert_eq!(
         targets(&graph, "boot"),
         vec![target("pkg/helper.go", "", "F")]

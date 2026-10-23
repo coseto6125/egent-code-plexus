@@ -8,6 +8,7 @@ use ecp_analyzer::{
     javascript::parser::JavaScriptProvider, kotlin::parser::KotlinProvider,
     php::parser::PhpProvider, ruby::parser::RubyProvider, swift::parser::SwiftProvider,
 };
+use ecp_cli::config_parser::parse_configs;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::graph::{ArchivedZeroCopyGraph, RelType, ZeroCopyGraph};
@@ -347,6 +348,38 @@ fn test_overlay_go_declared_package_name_matches_exact_import_directory() {
 }
 
 #[test]
+fn test_overlay_go_block_and_closure_alias_shadowing_matches_reindex() {
+    let provider = GoProvider::new().unwrap();
+    let dependency = "package pkg\nfunc F() {}\n";
+    let before = "package main\nimport p \"example.com/repo/pkg\"\nfunc run() {}\n";
+    let after_block = "package main\nimport p \"example.com/repo/pkg\"\nfunc run() { if true { p := 1; _ = p }; p.F() }\n";
+    parity(
+        &provider,
+        &[("main.go", before), ("pkg/helper.go", dependency)],
+        &[("main.go", after_block)],
+        &[("pkg/helper.go".into(), "F".into(), "".into(), 95)],
+    );
+    let closure = "package main\nimport p \"example.com/repo/pkg\"\nfunc run() { func(p interface{ F() }) { p.F() }(nil) }\n";
+    parity(
+        &provider,
+        &[("main.go", before), ("pkg/helper.go", dependency)],
+        &[("main.go", closure)],
+        &[],
+    );
+}
+
+#[test]
+fn test_overlay_go_parenthesized_selector_preserves_member_target() {
+    let source = "package main\ntype Box struct{}\nfunc (b Box) F() {}\nfunc F() {}\nfunc run() { var b Box; (b.F)() }\n";
+    parity(
+        &GoProvider::new().unwrap(),
+        &[("main.go", source)],
+        &[("main.go", &format!("\n{source}"))],
+        &[("main.go".into(), "F".into(), "Box".into(), 100)],
+    );
+}
+
+#[test]
 fn test_overlay_rust_nested_helpers_under_same_named_methods_keep_lexical_identity() {
     let source = "struct A; struct B; impl A { fn new() { fn helper() {} helper(); } } impl B { fn new() { fn helper() { marker(); } helper(); } } fn marker() {}";
     parity_from(
@@ -407,7 +440,12 @@ fn reindex(
         "[package]\nname = \"overlay-parity\"\nversion = \"0.0.0\"\n",
     )
     .unwrap();
-    let mut builder = GraphBuilder::new().with_repo_root(root.to_path_buf());
+    if provider.name() == "go" {
+        std::fs::write(root.join("go.mod"), "module example.com/repo\n\ngo 1.21\n").unwrap();
+    }
+    let mut builder = GraphBuilder::new()
+        .with_path_aliases(parse_configs(root))
+        .with_repo_root(root.to_path_buf());
     let mut sources = files.to_vec();
     sources.extend(
         edits

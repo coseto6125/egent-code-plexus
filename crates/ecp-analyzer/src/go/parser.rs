@@ -347,6 +347,7 @@ impl LanguageProvider for GoProvider {
 
         detect_iota_const_blocks(tree.root_node(), path, is_test_file, &mut blind_spots);
 
+        let idx_namespace = self.query.capture_index_for_name("namespace");
         let idx_struct = self.query.capture_index_for_name("struct");
         let idx_interface = self.query.capture_index_for_name("interface");
         let idx_typedef = self.query.capture_index_for_name("typedef");
@@ -464,7 +465,8 @@ impl LanguageProvider for GoProvider {
                     // Source of truth: GoSpec::CAPTURE_KIND in spec.rs.
                     name_node = Some(cap.node);
                     kind = Some(k_from_spec);
-                } else if cap_idx == idx_struct
+                } else if cap_idx == idx_namespace
+                    || cap_idx == idx_struct
                     || cap_idx == idx_interface
                     || cap_idx == idx_typedef
                     || cap_idx == idx_method

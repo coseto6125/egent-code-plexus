@@ -203,6 +203,11 @@ pub fn prefer_free_scoped<F: PickFacts + ?Sized>(
             }
             scope = owner.rsplit_once("::").map(|(parent, _)| parent);
         }
+        if let Some(id) = prefer_free(facts, file, member, owner, target)
+            .filter(|&id| is_free(facts, id) || rust_free_global_candidate(facts, file, id))
+        {
+            return Some(id);
+        }
         return candidates().find(|&id| is_free(facts, id));
     }
     prefer_free(facts, file, member, owner, target)

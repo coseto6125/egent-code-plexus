@@ -131,7 +131,10 @@ fn is_file_type_definition(node: Node<'_>) -> bool {
 
 fn enclosing_block(mut node: Node<'_>) -> Option<Node<'_>> {
     while let Some(parent) = node.parent() {
-        if parent.kind() == "block" {
+        if matches!(
+            parent.kind(),
+            "block" | "expression_case" | "type_case" | "default_case" | "communication_case"
+        ) {
             return Some(parent);
         }
         node = parent;
@@ -145,6 +148,11 @@ fn type_shape(
     imports: &[RawImport],
     local_types: &LocalTypes,
 ) -> TypeShape {
+    if ty.kind() == "pointer_type" {
+        return ty.named_child(0).map_or(TypeShape::Other, |element| {
+            type_shape(element, source, imports, local_types)
+        });
+    }
     let element = match ty.kind() {
         "map_type" => ty.child_by_field_name("value"),
         "slice_type" | "array_type" | "implicit_length_array_type" => {
