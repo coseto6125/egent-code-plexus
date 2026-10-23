@@ -440,6 +440,38 @@ fn test_resolve_call_rust_local_impl_binds_own_nested_helper() {
 }
 
 #[test]
+fn test_resolve_call_rust_reference_impl_binds_own_nested_helper() {
+    for self_type in ["&A", "&mut A"] {
+        let source = format!(
+            "fn helper() {{}} struct A; trait T {{ fn go(&self); }} \
+             impl T for {self_type} {{ fn go(&self) {{ fn helper() {{}} helper(); }} }}"
+        );
+        let graph = graph(&source);
+        let pool = &graph.string_pool;
+        let (nested_id, nested) = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .find(|(_, node)| {
+                node.name.resolve(pool) == "helper" && !node.owner_class.resolve(pool).is_empty()
+            })
+            .expect("nested helper retains its lexical owner");
+        let targets: Vec<_> = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.rel_type == RelType::Calls)
+            .filter(|edge| {
+                let caller = &graph.nodes[edge.source as usize];
+                caller.name.resolve(pool) == "go"
+                    && ecp_core::analyzer::types::span_contains(caller.span, nested.span)
+            })
+            .map(|edge| edge.target)
+            .collect();
+        assert_eq!(targets, vec![nested_id as u32], "self type: {self_type}");
+    }
+}
+
+#[test]
 fn test_resolve_call_rust_local_module_impl_binds_own_nested_helper() {
     let graph = graph(
         "fn helper() {}\nfn outer() { mod inner { pub struct S; impl S { pub fn run() { fn helper() { let _ = 1; } helper(); } } } }",
