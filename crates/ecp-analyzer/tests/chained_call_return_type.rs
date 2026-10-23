@@ -1196,6 +1196,70 @@ fn test_resolve_call_rust_local_glob_beside_external_glob_binds_member() {
     );
 }
 
+/// Rust 2018 uniform paths: `use config::T` names the `mod config` beside it.
+#[test]
+fn test_resolve_call_rust_bare_module_import_return_type_binds_member() {
+    let graph = single(
+        &RustProvider::new().unwrap(),
+        &[
+            (
+                "src/main.rs",
+                "mod config; mod other; use config::Settings; fn load() -> Settings { Settings } fn run() { load().validate_paths(); }",
+            ),
+            (
+                "src/config.rs",
+                "pub struct Settings; impl Settings { pub fn validate_paths(&self) {} }",
+            ),
+            (
+                "src/other.rs",
+                "pub struct Other; impl Other { pub fn validate_paths(&self) {} }",
+            ),
+        ],
+    );
+    assert_eq!(
+        owners(&graph, "run", "validate_paths"),
+        ["Settings"],
+        "{:?}",
+        targets(&graph, "run")
+    );
+}
+
+/// `self::config` from `src/models.rs` is `src/models/config.rs`; the
+/// crate-root `src/config.rs` namesake is a different module.
+#[test]
+fn test_resolve_call_rust_child_module_reexport_ignores_parent_namesake() {
+    let graph = single(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "pub mod app; pub mod config; pub mod models;"),
+            (
+                "src/app.rs",
+                "use crate::models::Config; fn load() -> Config { todo!() } fn run() { load().get(); }",
+            ),
+            ("src/models.rs", "pub mod config; pub use self::config::Config;"),
+            (
+                "src/models/config.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+            (
+                "src/config.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+        ],
+    );
+    let gets: Vec<_> = calls_from(&graph, "run")
+        .into_iter()
+        .filter(|hit| hit.name == "get")
+        .map(|hit| hit.file)
+        .collect();
+    assert_eq!(
+        gets,
+        ["src/models/config.rs"],
+        "{:?}",
+        targets(&graph, "run")
+    );
+}
+
 #[test]
 fn test_resolve_call_rust_named_alias_return_type_binds_imported_member() {
     for import in [

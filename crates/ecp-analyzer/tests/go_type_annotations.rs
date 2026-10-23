@@ -39,8 +39,8 @@ fn test_parse_file_import_name_forms_preserve_unique_binding() {
     for (binding, alias, imported_name) in [
         ("", None, "client"),
         ("local ", Some("local"), "local"),
-        (". ", Some("."), "."),
-        ("_ ", Some("_"), "_"),
+        (". ", Some("."), "client"),
+        ("_ ", Some("_"), "client"),
     ] {
         let source = format!("package app\nimport {binding}\"github.com/ext/client\"\n");
         let graph = provider

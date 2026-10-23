@@ -916,13 +916,16 @@ impl LanguageProvider for GoProvider {
                             None
                         };
 
-                        let imported_name = if let Some(ref a) = alias {
-                            a.clone()
-                        } else if let Some(last_part) = source_path.split('/').next_back() {
-                            last_part.to_string()
-                        } else {
-                            source_path.clone()
-                        };
+                        // `.` and `_` bind no package name; keep them in `alias`
+                        // only, so no symbol named `_` resolves as the import.
+                        let imported_name =
+                            if let Some(a) = alias.as_ref().filter(|a| *a != "." && *a != "_") {
+                                a.clone()
+                            } else if let Some(last_part) = source_path.split('/').next_back() {
+                                last_part.to_string()
+                            } else {
+                                source_path.clone()
+                            };
 
                         imports.push(RawImport {
                             source: source_path,

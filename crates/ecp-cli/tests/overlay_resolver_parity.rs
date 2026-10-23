@@ -742,6 +742,75 @@ fn test_overlay_rust_local_glob_beside_external_glob_matches_reindex() {
 }
 
 #[test]
+fn test_overlay_rust_bare_module_import_return_type_matches_reindex() {
+    let main = "mod config; mod other; use config::Settings; fn load() -> Settings { Settings } fn run() {}";
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/main.rs", main),
+            (
+                "src/config.rs",
+                "pub struct Settings; impl Settings { pub fn validate_paths(&self) {} }",
+            ),
+            (
+                "src/other.rs",
+                "pub struct Other; impl Other { pub fn validate_paths(&self) {} }",
+            ),
+        ],
+        &[(
+            "src/main.rs",
+            &main.replace("fn run() {}", "fn run() { load().validate_paths(); }"),
+        )],
+        &[
+            (
+                "src/config.rs".into(),
+                "validate_paths".into(),
+                "Settings".into(),
+                85,
+            ),
+            ("src/main.rs".into(), "load".into(), "".into(), 100),
+        ],
+    );
+}
+
+#[test]
+fn test_overlay_rust_child_module_reexport_ignores_parent_namesake() {
+    let app = "use crate::models::Config; fn load() -> Config { todo!() } fn run() {}";
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "pub mod app; pub mod config; pub mod models;"),
+            ("src/app.rs", app),
+            (
+                "src/models.rs",
+                "pub mod config; pub use self::config::Config;",
+            ),
+            (
+                "src/models/config.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+            (
+                "src/config.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+        ],
+        &[(
+            "src/app.rs",
+            &app.replace("fn run() {}", "fn run() { load().get(); }"),
+        )],
+        &[
+            ("src/app.rs".into(), "load".into(), "".into(), 100),
+            (
+                "src/models/config.rs".into(),
+                "get".into(),
+                "Config".into(),
+                85,
+            ),
+        ],
+    );
+}
+
+#[test]
 fn test_overlay_rust_wildcard_import_unique_return_type_matches_reindex() {
     let rust = RustProvider::new().unwrap();
     let lib =

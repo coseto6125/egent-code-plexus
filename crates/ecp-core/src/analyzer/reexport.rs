@@ -490,6 +490,21 @@ fn rust_import_parts(import: ImportRef<'_>) -> (&str, &str) {
     (import.source, import.imported_name)
 }
 
+/// Rust 2018 uniform paths: a bare `config::T` in `file` names the
+/// `mod config` that `file` declares.
+fn rust_local_source<'s, F: ModuleFacts + ?Sized>(
+    facts: &F,
+    file: &str,
+    source: &'s str,
+) -> std::borrow::Cow<'s, str> {
+    let head = source.split("::").next().unwrap_or(source);
+    if !matches!(head, "crate" | "self" | "super") && facts.declares_top_level_module(file, head) {
+        std::borrow::Cow::Owned(format!("self::{source}"))
+    } else {
+        std::borrow::Cow::Borrowed(source)
+    }
+}
+
 /// Resolve direct and glob Rust imports without consulting global names.
 pub fn rust_imported_type<'i, F, I>(
     facts: &F,
@@ -520,9 +535,10 @@ where
         }
         relevant = true;
         let (import_source, import_name) = rust_import_parts(import);
+        let import_source = rust_local_source(facts, importer, import_source);
         let declaration = if is_glob { name } else { import_name };
         let mut local = false;
-        facts.for_each_candidate(importer, import_source, &mut |file| {
+        facts.for_each_candidate(importer, &import_source, &mut |file| {
             if !facts.has_file(file) {
                 return true;
             }
@@ -552,16 +568,7 @@ where
                             continue;
                         }
                         let (nested_source, nested_name) = rust_import_parts(nested);
-                        let module_head = nested_source.split("::").next().unwrap_or(nested_source);
-                        let local_source;
-                        let nested_source = if !matches!(module_head, "crate" | "self" | "super")
-                            && facts.declares_top_level_module(file, module_head)
-                        {
-                            local_source = format!("self::{nested_source}");
-                            local_source.as_str()
-                        } else {
-                            nested_source
-                        };
+                        let nested_source = rust_local_source(facts, file, nested_source);
                         let nested_declaration = if nested_is_glob {
                             declaration
                         } else {
@@ -569,7 +576,7 @@ where
                         };
                         let mut nested_local = false;
                         let mut nested_found = false;
-                        facts.for_each_candidate(file, nested_source, &mut |candidate| {
+                        facts.for_each_candidate(file, &nested_source, &mut |candidate| {
                             if !facts.has_file(candidate) {
                                 return true;
                             }
@@ -583,7 +590,9 @@ where
                                     }
                                 }
                             }
-                            true
+                            // A module path names one file; a later
+                            // candidate is a fallback for an empty probe.
+                            false
                         });
                         if !nested_local {
                             external = true;
@@ -595,7 +604,7 @@ where
                     }
                 }
             }
-            true
+            false
         });
         // rustc rejects a name two globs both supply (E0659), so a local
         // glob hit outranks a direct glob the graph cannot open.

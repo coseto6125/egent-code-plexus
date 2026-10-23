@@ -218,6 +218,26 @@ fn imports_go_package() {
     );
 }
 
+/// A blank import binds no package name, so it never resolves a symbol
+/// named `_` (stringer files declare `func _()`).
+#[test]
+fn imports_go_blank_import_skips_underscore_function() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(tmp.path(), "go.mod", "module sample\n\ngo 1.21\n");
+    write(
+        tmp.path(),
+        "level/level_string.go",
+        "package level\n\nfunc _() {}\n",
+    );
+    write(
+        tmp.path(),
+        "cmd/app/main.go",
+        "package main\n\nimport _ \"net/http/pprof\"\n\nfunc main() {}\n",
+    );
+    init_and_analyze(tmp.path());
+    assert_eq!(count_imports_to(tmp.path(), "_"), 0);
+}
+
 // ── Rust ──────────────────────────────────────────────────────────────────
 
 #[test]
