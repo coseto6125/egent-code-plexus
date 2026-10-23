@@ -421,6 +421,39 @@ fn test_resolve_call_rust_local_impl_binds_own_nested_helper() {
 }
 
 #[test]
+fn test_resolve_call_rust_local_module_impl_binds_own_nested_helper() {
+    let graph = graph(
+        "fn helper() {}\nfn outer() { mod inner { pub struct S; impl S { pub fn run() { fn helper() { let _ = 1; } helper(); } } } }",
+    );
+    let pool = &graph.string_pool;
+    let (caller_id, caller) = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .find(|(_, node)| node.name.resolve(pool) == "run")
+        .unwrap();
+    let expected: Vec<_> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| {
+            node.name.resolve(pool) == "helper"
+                && ecp_core::analyzer::types::span_contains(caller.span, node.span)
+        })
+        .map(|(id, _)| id as u32)
+        .collect();
+    let actual: Vec<_> = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.rel_type == RelType::Calls && edge.source == caller_id as u32)
+        .filter(|edge| graph.nodes[edge.target as usize].name.resolve(pool) == "helper")
+        .map(|edge| edge.target)
+        .collect();
+    assert_eq!(expected.len(), 1, "{graph:#?}");
+    assert_eq!(actual, expected, "{graph:#?}");
+}
+
+#[test]
 fn test_rust_trait_default_nested_function_binds_lexically() {
     let source = r#"
 fn helper() {}
