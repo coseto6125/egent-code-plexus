@@ -3144,16 +3144,28 @@ impl<'a> OverlayFacts<'a> {
                     self.type_candidates(callee_file, ty, &imports)
                 }
                 Language::Cpp | Language::Dart if !imports.is_empty() => {
-                    let Some(id) = reexport::imported_file_type(
+                    match reexport::imported_file_type(
                         self,
                         callee_file,
                         language,
                         ty,
                         imports.iter().map(ImportRef::from),
-                    ) else {
-                        return type_ladder::ChainOutcome::Conclusive;
-                    };
-                    TypeCandidates::Unique(id, ty)
+                    ) {
+                        reexport::ImportedFileType::Unique(id) => TypeCandidates::Unique(id, ty),
+                        // An indirect or precompiled-header include reaches a
+                        // header the graph does not follow; a same-directory
+                        // declaration stays evidence for C++.
+                        reexport::ImportedFileType::Missing
+                            if language == Language::Cpp
+                                && self.declares_type_beside(callee_file, ty) =>
+                        {
+                            self.type_candidates(callee_file, ty, &[])
+                        }
+                        reexport::ImportedFileType::Missing
+                        | reexport::ImportedFileType::Ambiguous => {
+                            return type_ladder::ChainOutcome::Conclusive;
+                        }
+                    }
                 }
                 // A Dart file without imports is a `part of` file, whose types
                 // come from its library's scope, or a library that sees no

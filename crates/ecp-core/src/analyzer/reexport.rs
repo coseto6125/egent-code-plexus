@@ -397,6 +397,14 @@ pub fn call_in_file<F: ModuleFacts + ?Sized>(
     pick_call(facts.decls_in_file(file, name).into_iter(), target)
 }
 
+/// C++ include or Dart file import evidence for a return type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportedFileType {
+    Unique(u32),
+    Missing,
+    Ambiguous,
+}
+
 /// A unique type declared by an unaliased C++ include or Dart file import.
 /// Only resolved import files contribute; project-wide namesakes do not.
 pub fn imported_file_type<'i, F: ModuleFacts + ?Sized>(
@@ -405,7 +413,7 @@ pub fn imported_file_type<'i, F: ModuleFacts + ?Sized>(
     language: Language,
     name: &str,
     imports: impl IntoIterator<Item = ImportRef<'i>>,
-) -> Option<u32> {
+) -> ImportedFileType {
     let mut found = None;
     let mut ambiguous = false;
     for import in imports {
@@ -454,10 +462,10 @@ pub fn imported_file_type<'i, F: ModuleFacts + ?Sized>(
             }
         }
         if ambiguous {
-            return None;
+            return ImportedFileType::Ambiguous;
         }
     }
-    found
+    found.map_or(ImportedFileType::Missing, ImportedFileType::Unique)
 }
 
 /// Rust import evidence for a return type.
@@ -502,6 +510,7 @@ where
     let mut ambiguous = false;
     let mut relevant = false;
     let mut external = false;
+    let mut unresolved_glob = false;
     let mut forwarded = false;
     for import in imports {
         let is_glob = import.imported_name == "*";
@@ -588,7 +597,13 @@ where
             }
             true
         });
-        external |= !local;
+        // rustc rejects a name two globs both supply (E0659), so a local
+        // glob hit outranks a direct glob the graph cannot open.
+        if is_glob {
+            unresolved_glob |= !local;
+        } else {
+            external |= !local;
+        }
     }
     if ambiguous || forwarded {
         RustImportedType::Conclusive
@@ -596,6 +611,8 @@ where
         RustImportedType::External
     } else if let Some(id) = found {
         RustImportedType::Unique(id)
+    } else if unresolved_glob {
+        RustImportedType::External
     } else if relevant {
         RustImportedType::Conclusive
     } else {

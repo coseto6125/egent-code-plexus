@@ -695,6 +695,53 @@ fn test_overlay_php_same_namespace_unique_return_type_matches_reindex() {
 }
 
 #[test]
+fn test_overlay_cpp_indirect_include_same_directory_type_matches_reindex() {
+    parity(
+        &CppProvider::new().unwrap(),
+        &[
+            (
+                "src/main.cpp",
+                "#include \"pch.h\"\nFoo* make();\nvoid run() {}",
+            ),
+            ("src/pch.h", "#include \"foo.h\""),
+            ("src/foo.h", "class Foo { public: void bar(); };"),
+        ],
+        &[(
+            "src/main.cpp",
+            "#include \"pch.h\"\nFoo* make();\nvoid run() { make()->bar(); }",
+        )],
+        &[
+            ("src/foo.h".into(), "bar".into(), "Foo".into(), 85),
+            ("src/main.cpp".into(), "make".into(), "".into(), 100),
+        ],
+    );
+}
+
+#[test]
+fn test_overlay_rust_local_glob_beside_external_glob_matches_reindex() {
+    let app = "use crate::settings::*; use std::io::prelude::*; fn load() -> Config { todo!() } fn run() {}";
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "pub mod app; pub mod settings;"),
+            ("src/app.rs", app),
+            (
+                "src/settings.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+        ],
+        &[(
+            "src/app.rs",
+            &app.replace("fn run() {}", "fn run() { load().get(); }"),
+        )],
+        &[
+            ("src/app.rs".into(), "load".into(), "".into(), 100),
+            ("src/settings.rs".into(), "get".into(), "Config".into(), 85),
+        ],
+    );
+}
+
+#[test]
 fn test_overlay_rust_wildcard_import_unique_return_type_matches_reindex() {
     let rust = RustProvider::new().unwrap();
     let lib =

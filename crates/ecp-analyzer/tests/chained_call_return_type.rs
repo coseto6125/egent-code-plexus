@@ -1170,6 +1170,32 @@ fn test_resolve_call_rust_local_glob_does_not_mask_external_reexport_glob() {
     assert!(owners(&graph, "run", "get").is_empty());
 }
 
+/// rustc rejects a name two globs both supply, so a local glob hit
+/// outranks a direct glob the graph cannot open.
+#[test]
+fn test_resolve_call_rust_local_glob_beside_external_glob_binds_member() {
+    let graph = single(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "pub mod app; pub mod settings;"),
+            (
+                "src/app.rs",
+                "use crate::settings::*; use std::io::prelude::*; fn load() -> Config { todo!() } fn run() { load().get(); }",
+            ),
+            (
+                "src/settings.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+        ],
+    );
+    assert_eq!(
+        owners(&graph, "run", "get"),
+        ["Config"],
+        "{:?}",
+        targets(&graph, "run")
+    );
+}
+
 #[test]
 fn test_resolve_call_rust_named_alias_return_type_binds_imported_member() {
     for import in [
@@ -1512,6 +1538,43 @@ fn test_resolve_call_dart_filtered_import_rejects_hidden_project_namesake() {
         );
         assert!(owners(&graph, "run", "bar").is_empty(), "{combinator}");
     }
+}
+
+/// A precompiled header reaches `foo.h` through a second include; the
+/// adjacent declaration stays evidence. Ambiguous includes stay sticky.
+#[test]
+fn test_resolve_call_cpp_indirect_include_same_directory_type_binds_member() {
+    let source = "#include \"pch.h\"\nFoo* make();\nvoid run() { make()->bar(); }";
+    let graph = single(
+        &CppProvider::new().unwrap(),
+        &[
+            ("src/main.cpp", source),
+            ("src/pch.h", "#include \"foo.h\""),
+            ("src/foo.h", "class Foo { public: void bar(); };"),
+        ],
+    );
+    assert_eq!(
+        owners(&graph, "run", "bar"),
+        ["Foo"],
+        "{:?}",
+        targets(&graph, "run")
+    );
+
+    let ambiguous = "#include \"../include/foo.h\"\n#include \"../other/foo.h\"\nFoo* make();\nvoid run() { make()->bar(); }";
+    let graph = single(
+        &CppProvider::new().unwrap(),
+        &[
+            ("src/main.cpp", ambiguous),
+            ("src/foo.h", "class Foo { public: void bar(); };"),
+            ("include/foo.h", "class Foo { public: void bar() {} };"),
+            ("other/foo.h", "class Foo { public: void bar() {} };"),
+        ],
+    );
+    assert!(
+        owners(&graph, "run", "bar").is_empty(),
+        "{:?}",
+        targets(&graph, "run")
+    );
 }
 
 #[test]

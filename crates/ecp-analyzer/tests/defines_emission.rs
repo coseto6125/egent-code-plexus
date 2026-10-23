@@ -419,3 +419,22 @@ fn owner_class_none_gate() {
         "at least 1 Defines edge expected; got {defines_count}"
     );
 }
+
+// ── PHP braced namespace constant ───────────────────────────────────────────
+
+#[test]
+fn test_defines_php_braced_namespace_constant_from_namespace() {
+    let provider = ecp_analyzer::php::parser::PhpProvider::new().expect("php provider");
+    let src = "<?php namespace Lib { const LIMIT = 1; function limit(): int { return LIMIT; } }";
+    let graph = build(vec![parse_file(&provider, "lib.php", src)]);
+
+    let pairs = defines_pairs(&graph);
+    assert!(
+        pairs.iter().any(|(s, t)| s == "Lib" && t == "LIMIT"),
+        "Namespace(Lib)->Defines->Const(LIMIT) must be emitted; got: {pairs:?}"
+    );
+    assert!(
+        !pairs.iter().any(|(s, t)| s == "lib.php" && t == "LIMIT"),
+        "File->Defines->Const(LIMIT) must not replace the namespace owner; got: {pairs:?}"
+    );
+}
