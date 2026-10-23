@@ -32,7 +32,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;700&family=Inter:wght@400;500;600;800&display=swap" rel="stylesheet">
-    <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"ecp 對比 codegraph 與 GitNexus · ecp vs codegraph","description":"三個程式碼圖譜工具，同一份 checkout，同一台機器。","inLanguage":"zh-TW","url":"https://coseto6125.github.io/egent-code-plexus/zh-TW/compare/codegraph/","dateModified":"2026-10-22","about":[{"@type":"SoftwareApplication","name":"ecp","applicationCategory":"DeveloperApplication","url":"https://github.com/coseto6125/egent-code-plexus"},{"@type":"SoftwareApplication","name":"codegraph","applicationCategory":"DeveloperApplication","url":"https://github.com/colbymchenry/codegraph"}],"isBasedOn":"https://github.com/coseto6125/egent-code-plexus#-performance-receipts"}</script>
+    <script type="application/ld+json">{"@context":"https://schema.org","@type":"TechArticle","headline":"ecp 對比 codegraph 與 GitNexus · ecp vs codegraph","description":"三個程式碼圖譜工具，同一份 checkout，同一台機器。","inLanguage":"zh-TW","url":"https://coseto6125.github.io/egent-code-plexus/zh-TW/compare/codegraph/","dateModified":"2026-10-23","about":[{"@type":"SoftwareApplication","name":"ecp","applicationCategory":"DeveloperApplication","url":"https://github.com/coseto6125/egent-code-plexus"},{"@type":"SoftwareApplication","name":"codegraph","applicationCategory":"DeveloperApplication","url":"https://github.com/colbymchenry/codegraph"}],"isBasedOn":"https://github.com/coseto6125/egent-code-plexus#-performance-receipts"}</script>
 </head>
 <body class="theme-dark">
 <header class="navbar">
@@ -63,47 +63,48 @@
     <main class="container compare-main">
         <h2 class="section-heading">測量條件</h2>
         <ul class="compare-method">
-            <li><strong>Versions</strong> — ecp 0.4.2 · codegraph 0.9.4 · gitnexus 1.6.5</li>
-            <li><strong>Hardware</strong> — AMD Ryzen 9 9950X (16 logical), Linux</li>
-            <li>Same checkouts, same machine. All tools capped at a 1 MiB max-file-size threshold where configurable (gitnexus hard-codes 512 KB). ecp medians over 5–7 runs. ecp is a stateless one-shot CLI, so every latency includes full process startup — no daemon, no warm-up.</li>
+            <li><strong>版本</strong> — ecp 0.16.2 · codegraph 1.6.2 · gitnexus 1.6.12 (2026-10-22)</li>
+            <li><strong>硬體</strong> — AMD Ryzen 9 9950X，Linux（WSL2），固定使用 8 個邏輯核心</li>
+            <li>同一份 checkout、同一台機器、一次只跑一個工具。三個工具都設 1 MiB 單檔上限。索引取 3 到 5 次的中位數，查詢取 7 次；cold index 的倍數來自交錯執行。ecp 是無狀態的一次性 CLI，所以每個延遲都包含完整的行程啟動，沒有 daemon、沒有預熱。</li>
         </ul>
 
             <h3 class="mono accent">microsoft/vscode</h3>
-            <p class="compare-shape">14,874 files, dense single-language TypeScript</p>
+            <p class="compare-shape">14,854 個檔案、密集單語言 TypeScript</p>
             <div class="table-container">
                 <table class="saas-table">
-                    <thead><tr><th>Metric</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th></tr></thead>
+                    <thead><tr><th>指標</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th></tr></thead>
                     <tbody>
-                    <tr><td>Cold index</td><td class="compare-best">4.6 s</td><td>166.9 s</td></tr>
-                    <tr><td>Peak RSS</td><td class="compare-best">~1.0 GiB</td><td>1.7 GiB</td></tr>
-                    <tr><td>Symbol find / query</td><td class="compare-best">34.6 ms</td><td>169.5 ms</td></tr>
-                    <tr><td>Callers / impact</td><td class="compare-best">27.2 ms</td><td>172.4 ms</td></tr>
-                    <tr><td>Inspect / context</td><td class="compare-best">35.0 ms</td><td>415.9 ms</td></tr>
-                    <tr><td>Impact baseline (git diff)</td><td class="compare-best">725.9 ms</td><td>no such mode</td></tr>
-                    <tr><td>Graph nodes</td><td class="compare-best">507,257</td><td>315,498</td></tr>
-                    <tr><td>Graph edges</td><td>916,380</td><td class="compare-best">986,709</td></tr>
-                    <tr><td>Index size on disk</td><td class="compare-best">87 MiB</td><td>671 MiB</td></tr>
-                    <tr><td>Files indexed</td><td class="compare-best">14,874</td><td>10,814</td></tr>
+                    <tr><td>冷啟動索引</td><td class="compare-best">8.6 s</td><td>82.8 s</td></tr>
+                    <tr><td>記憶體峰值 RSS</td><td class="compare-best">0.99 GiB</td><td>7.7 GiB</td></tr>
+                    <tr><td>符號查找 / 查詢</td><td class="compare-best">34.4 ms</td><td>329.6 ms</td></tr>
+                    <tr><td>呼叫者 / 影響範圍</td><td class="compare-best">34.6 ms</td><td>345.6 ms</td></tr>
+                    <tr><td>檢視 / 上下文</td><td class="compare-best">34.6 ms</td><td>321.9 ms</td></tr>
+                    <tr><td>影響基準（git-diff）</td><td class="compare-best">251.6 ms</td><td>無此模式</td></tr>
+                    <tr><td>圖節點數</td><td class="compare-best">495,839</td><td>380,766</td></tr>
+                    <tr><td>圖邊數</td><td>1,052,891</td><td>1,366,686</td></tr>
+                    <tr><td>磁碟索引大小</td><td class="compare-best">125 MiB</td><td>1,250 MiB</td></tr>
+                    <tr><td>已索引檔案數</td><td class="compare-best">12,294</td><td>10,688</td></tr>
                     </tbody>
                 </table>
             </div>
-            <p class="table-caption">gitnexus did not finish — killed after 27 min stuck in its in-memory graph-resolution phase (RSS 4.6 GiB, no output written).</p>
+            <p class="table-caption">2026 年 5 月，gitnexus 1.6.5 未能完成該儲存庫（27 分鐘後被終止）；1.6.12 在 317 s 內完成。ecp 的磁碟佔用為使用中的索引，其解析快取另佔 127 MiB。</p>
 
             <h3 class="mono accent">abhigyanpatwari/GitNexus</h3>
-            <p class="compare-shape">3,232 files, polyglot — the corpus all three can finish</p>
+            <p class="compare-shape">7,225 個檔案、多語言</p>
             <div class="table-container">
                 <table class="saas-table">
-                    <thead><tr><th>Metric</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th></tr></thead>
+                    <thead><tr><th>指標</th><th><a href="https://github.com/coseto6125/egent-code-plexus" rel="noopener">ecp</a><br><span class="mono compare-stack">Rust</span></th><th><a href="https://github.com/colbymchenry/codegraph" rel="noopener">codegraph</a><br><span class="mono compare-stack">Node + SQLite</span></th></tr></thead>
                     <tbody>
-                    <tr><td>Cold index</td><td class="compare-best">0.74 s</td><td>11.2 s</td></tr>
-                    <tr><td>Peak RSS</td><td class="compare-best">264 MiB</td><td>501 MiB</td></tr>
-                    <tr><td>Find / query</td><td class="compare-best">9.4 ms</td><td>103.5 ms</td></tr>
-                    <tr><td>Callers / impact</td><td class="compare-best">9.2 ms</td><td>104.2 ms</td></tr>
-                    <tr><td>Inspect / context</td><td class="compare-best">9.4 ms</td><td>—</td></tr>
-                    <tr><td>Graph nodes</td><td class="compare-best">49,122</td><td>19,604</td></tr>
-                    <tr><td>Graph edges</td><td class="compare-best">48,271</td><td>39,155</td></tr>
-                    <tr><td>Index size on disk</td><td class="compare-best">7.7 MiB</td><td>37 MiB</td></tr>
-                    <tr><td>Files indexed</td><td class="compare-best">3,232</td><td>2,968</td></tr>
+                    <tr><td>冷啟動索引</td><td class="compare-best">3.22 s</td><td>56.5 s</td></tr>
+                    <tr><td>記憶體峰值 RSS</td><td class="compare-best">0.40 GiB</td><td>4.04 GiB</td></tr>
+                    <tr><td>查找 / 查詢</td><td class="compare-best">20.4 ms</td><td>274.2 ms</td></tr>
+                    <tr><td>呼叫者 / 影響範圍</td><td class="compare-best">20.3 ms</td><td>273.3 ms</td></tr>
+                    <tr><td>檢視 / 上下文</td><td class="compare-best">22.3 ms</td><td>281.5 ms</td></tr>
+                    <tr><td>影響基準（git-diff）</td><td class="compare-best">290.7 ms</td><td>無此模式</td></tr>
+                    <tr><td>圖節點數</td><td class="compare-best">131,266</td><td>67,988</td></tr>
+                    <tr><td>圖邊數</td><td class="compare-best">272,150</td><td>221,484</td></tr>
+                    <tr><td>磁碟索引大小</td><td class="compare-best">32 MiB</td><td>293 MiB</td></tr>
+                    <tr><td>已索引檔案數</td><td class="compare-best">6,669</td><td>6,125</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -112,7 +113,7 @@
 
         <h2 class="section-heading">這些數字沒有告訴你的事</h2>
         <p class="hero-answer compare-limits">它們來自一台機器、一組版本、兩個 corpus。它們沒有回答哪個工具的 API 比較合你的用法、語言覆蓋是否對得上你的技術棧，也沒有回答在跟這兩份形狀不同的 repo 上會怎樣。冷索引輸掉的工具，如果它能回答其他兩者答不出的問題，仍然可能是對的選擇。<strong>決定之前請在你自己的 repo 上重跑一次</strong>，指令在各專案的 README 裡。</p>
-        <p class="table-caption">數字對應 ecp 0.16.2。有誤請開 issue 指正。</p>
+        <p class="table-caption">數字對應 ecp 0.16.3。有誤請開 issue 指正。</p>
         <p class="compare-back"><a href="../../">&larr; Egent Code Plexus — 為 agent 而生，不是為 IDE</a></p>
     </main>
 
