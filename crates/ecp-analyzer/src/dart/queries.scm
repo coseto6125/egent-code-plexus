@@ -178,7 +178,7 @@
 (import_or_export
   (library_import
     (import_specification
-      (configurable_uri) @import.name @import.source
+      uri: [(configurable_uri) (uri)] @import.name @import.source
       alias: (identifier)? @import.alias))) @import
 
 ;; Anonymous callbacks passed as call arguments (forEach, map, addListener,
