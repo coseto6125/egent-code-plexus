@@ -114,3 +114,34 @@ fn test_class_membership_php_anonymous_constant_returns_no_outer_property_edge()
         "anonymous class constant must not become a Factory member: {g:#?}"
     );
 }
+
+#[test]
+fn test_class_membership_php_anonymous_constant_returns_no_global_read_edge() {
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[
+            ("factory.php", ANONYMOUS_CLASS_CONSTANT),
+            (
+                "reader.php",
+                "<?php function readInner(): int { return INNER; }",
+            ),
+        ],
+    );
+    assert!(name_ref_support::value_reads(&g, "readInner").is_empty());
+}
+
+#[test]
+fn test_class_membership_php_distinct_anonymous_constants_keep_distinct_ids() {
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[("factory.php", "<?php function first() { return new class { const INNER = 1; }; } function second() { return new class { const INNER = 2; }; }")],
+    );
+    let constants: Vec<_> = g
+        .nodes
+        .iter()
+        .filter(|node| node.name.resolve(&g.string_pool) == "INNER")
+        .collect();
+    assert_eq!(constants.len(), 2);
+    assert_ne!(constants[0].uid, constants[1].uid);
+    assert_ne!(constants[0].owner_class, constants[1].owner_class);
+}

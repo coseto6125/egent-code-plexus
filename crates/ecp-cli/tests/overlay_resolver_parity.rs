@@ -912,6 +912,22 @@ fn test_overlay_php_namespace_constant_in_other_namespace_returns_no_edge_matche
 }
 
 #[test]
+fn test_overlay_php_anonymous_constant_returns_no_global_read_matches_reindex() {
+    let factory = "<?php class Factory { function make(): object { return new class { const INNER = 1; }; } }";
+    let reader = "<?php function readInner(): int { return INNER; }";
+    for (path, source) in [("factory.php", factory), ("reader.php", reader)] {
+        let (full, overlay) = field_read_edges(
+            &php(),
+            &[("factory.php", factory), ("reader.php", reader)],
+            &[(path, &format!("\n{source}"))],
+            &["value_read"],
+        );
+        assert!(full.is_empty(), "anonymous class constant read: {full:?}");
+        assert_eq!(overlay, full);
+    }
+}
+
+#[test]
 fn test_overlay_php_bare_call_same_file_method_no_edge_matches_reindex() {
     parity(
         &php(),

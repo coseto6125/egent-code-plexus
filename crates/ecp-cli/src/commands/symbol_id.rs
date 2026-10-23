@@ -170,6 +170,48 @@ mod tests {
     use ecp_core::graph_fixture::GraphFixture;
     use ecp_core::session::{OverlayFileInput, OverlaySymbol};
 
+    #[test]
+    fn test_resolve_candidates_rust_nested_module_short_owner_matches_base_and_overlay() {
+        use ecp_analyzer::resolution::builder::GraphBuilder;
+        use ecp_analyzer::rust::RustProvider;
+        use ecp_core::analyzer::provider::LanguageProvider;
+        use std::path::Path;
+
+        let provider = RustProvider::new().unwrap();
+        let parse = |source: &str| {
+            provider
+                .parse_file(Path::new("src/lib.rs"), source.as_bytes())
+                .unwrap()
+        };
+        let mut builder = GraphBuilder::new();
+        builder.add_graph(parse("mod a { pub mod b { pub fn f() {} } }"));
+        let graph = builder.build();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&graph).unwrap();
+        let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let full = resolve_candidates(archived, None, "a::b.f", None, None).0;
+        assert_eq!(full.len(), 1);
+        assert_eq!(
+            resolve_candidates(archived, None, "b.f", None, None).0,
+            full
+        );
+        assert!(resolve_candidates(archived, None, "other::b.f", None, None)
+            .0
+            .is_empty());
+
+        let dirty: OverlayFileInput =
+            parse("\nmod a { pub mod b { pub fn f() {} pub fn added() {} } }").into();
+        let view = OverlayView::build(archived, &[dirty]).unwrap();
+        for name in ["f", "added"] {
+            let full =
+                resolve_candidates(archived, Some(&view), &format!("a::b.{name}"), None, None).0;
+            assert_eq!(full.len(), 1);
+            assert_eq!(
+                resolve_candidates(archived, Some(&view), &format!("b.{name}"), None, None).0,
+                full
+            );
+        }
+    }
+
     /// "dup" repeats across kinds, owners and files; "shared" has 1200 nodes
     /// (see `same_name_nodes`). Also a tombstone (empty name) and a unicode
     /// name. Every node has its own uid.

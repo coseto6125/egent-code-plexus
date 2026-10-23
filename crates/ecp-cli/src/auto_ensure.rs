@@ -1542,7 +1542,7 @@ mod fingerprint_drift_tests {
             export_aliases: vec![],
         };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&fragment).unwrap();
-        let (_tmp, gate) = gate_with_fragment(
+        let (tmp, gate) = gate_with_fragment(
             &bytes,
             "v5-refresh-test",
             ecp_core::session::FRAGMENT_FORMAT_V5,
@@ -1551,6 +1551,18 @@ mod fingerprint_drift_tests {
         assert!(
             gate.rel_paths.is_empty(),
             "a current v5 fragment was re-parsed"
+        );
+        let worktree = tmp.path().join("repo");
+        let session_dir = resolve_session_overlay_dir(&worktree).unwrap();
+        let path = session_dir.join("dirty_files.json");
+        let mut dirty = ecp_core::session::DirtyFiles::read(&path).unwrap();
+        dirty.builder_fingerprint = "v0.16.2+schema19".into();
+        assert!(!dirty.from_current_builder());
+        ecp_core::session::DirtyFiles::write_atomic(&path, &dirty).unwrap();
+        assert_eq!(
+            retain_stale_fragments(&worktree, vec!["app.py".into()]).rel_paths,
+            ["app.py"],
+            "a valid, unchanged V5 fragment from another builder must be reparsed"
         );
     }
 
@@ -1616,17 +1628,23 @@ mod fingerprint_drift_tests {
         let worktree = tmp.path().join("repo");
         let session_dir = resolve_session_overlay_dir(&worktree).unwrap();
         let gate = if std::env::var(CHILD_ENV).as_deref() == Ok("released") {
-            let old =
+            let mut old =
                 ecp_core::session::DirtyFiles::read(&fixture.join("dirty_files.json")).unwrap();
             let path = session_dir.join("dirty_files.json");
-            let mut dirty = ecp_core::session::DirtyFiles::read(&path).unwrap();
-            dirty.builder_fingerprint = old.builder_fingerprint;
-            assert!(!dirty.from_current_builder());
+            old.entries.get_mut("app.py").unwrap().mtime_ns =
+                mtime_ns_of(&worktree.join("app.py")).unwrap();
+            let fragment_id = &old.entries["app.py"].fragment_id;
+            fs::copy(
+                fixture.join(format!("graph_overlay/{fragment_id}.bin")),
+                session_dir.join(format!("graph_overlay/{fragment_id}.bin")),
+            )
+            .unwrap();
+            assert!(!old.from_current_builder());
             assert_eq!(
-                dirty.entries["app.py"].mtime_ns,
+                old.entries["app.py"].mtime_ns,
                 mtime_ns_of(&worktree.join("app.py")).unwrap()
             );
-            ecp_core::session::DirtyFiles::write_atomic(&path, &dirty).unwrap();
+            ecp_core::session::DirtyFiles::write_atomic(&path, &old).unwrap();
             let gate = retain_stale_fragments(&worktree, vec!["app.py".into()]);
             assert_eq!(gate.rel_paths, ["app.py"]);
             gate
