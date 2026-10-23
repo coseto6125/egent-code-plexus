@@ -435,7 +435,9 @@ pub fn imported_file_type<'i, F: ModuleFacts + ?Sized>(
                     visit(import.source);
                 }
             }
-            _ => visit(import.source),
+            _ => {
+                visit(import.source);
+            }
         }
         if ambiguous {
             return None;
