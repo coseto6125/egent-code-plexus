@@ -486,6 +486,8 @@ impl From<&ArchivedBindingKind> for BindingKind {
 #[rkyv(derive(Debug))]
 pub struct RawImport {
     pub source: String,
+    /// Empty when the dependency is known but its symbol visibility is unmodeled.
+    /// Dart imports with `show` or `hide` retain only the dependency source.
     pub imported_name: String,
     pub alias: Option<String>,
     /// `None` for ordinary import statements; `Some(_)` for C named bindings

@@ -460,9 +460,18 @@ impl LanguageProvider for DartProvider {
                         None
                     };
 
+                    let filtered = i_src.parent().is_some_and(|specification| {
+                        specification
+                            .named_children(&mut specification.walk())
+                            .any(|child| child.kind() == "combinator")
+                    });
                     imports.push(RawImport {
                         alias: alias_str,
-                        imported_name: clean_src.clone(),
+                        imported_name: if filtered {
+                            String::new()
+                        } else {
+                            clean_src.clone()
+                        },
                         source: clean_src,
                         binding_kind: None,
                     });

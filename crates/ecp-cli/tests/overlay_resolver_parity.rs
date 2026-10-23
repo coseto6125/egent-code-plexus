@@ -656,6 +656,28 @@ fn test_overlay_chained_imported_cross_directory_types_match_reindex() {
 }
 
 #[test]
+fn test_overlay_dart_restricted_import_rejects_project_namesake_like_reindex() {
+    let dart = DartProvider::new().unwrap();
+    let path = "lib/config.dart";
+    let type_path = "lib/entity/foo.dart";
+    let type_source = "class Foo { void bar() {} }";
+    let expected = vec![(path.into(), "make".into(), "".into(), 100)];
+    for suffix in [" as entity", " hide Foo", " show Other"] {
+        let source = format!(
+            "import 'entity/foo.dart'{suffix}; import 'package:external/foo.dart'; \
+             Foo make() => throw 0; void run() {{ make().bar(); }}"
+        );
+        let files = [(path, source.as_str()), (type_path, type_source)];
+        for dirty in [
+            vec![(path, source.as_str())],
+            vec![(path, source.as_str()), (type_path, type_source)],
+        ] {
+            check_parity_from("run", &dart, &files, &dirty, &expected, &expected);
+        }
+    }
+}
+
+#[test]
 fn test_overlay_rust_untyped_member_with_free_function_matches_reindex() {
     parity(
         &RustProvider::new().unwrap(),

@@ -13,6 +13,33 @@ use ecp_core::analyzer::types::RawNode;
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 
+#[test]
+fn test_parse_file_import_visibility_preserves_alias_and_filtered_dependencies() {
+    let provider = DartProvider::new().unwrap();
+    for (suffix, alias, modeled) in [
+        ("", None, true),
+        (" as entity", Some("entity"), true),
+        (" deferred as entity", Some("entity"), true),
+        (" hide Foo", None, false),
+        (" show Other", None, false),
+        (" as entity show Foo hide Other", Some("entity"), false),
+    ] {
+        let source = format!("import 'entity/foo.dart'{suffix};");
+        let graph = provider
+            .parse_file(Path::new("lib/config.dart"), source.as_bytes())
+            .unwrap();
+        assert_eq!(graph.imports.len(), 1, "{source}");
+        let import = &graph.imports[0];
+        assert_eq!(import.source, "entity/foo.dart", "{source}");
+        assert_eq!(import.alias.as_deref(), alias, "{source}");
+        assert_eq!(
+            import.imported_name,
+            if modeled { "entity/foo.dart" } else { "" },
+            "{source}"
+        );
+    }
+}
+
 fn parse(src: &str) -> Vec<RawNode> {
     let provider = DartProvider::new().expect("DartProvider init");
     let graph = provider

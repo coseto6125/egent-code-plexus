@@ -400,7 +400,10 @@ pub fn imported_file_type<'i, F: ModuleFacts + ?Sized>(
         }
         let relative;
         let source = if language == Language::Dart {
-            if import.source.contains(':') || import.source.starts_with('/') {
+            if import.imported_name != import.source
+                || import.source.contains(':')
+                || import.source.starts_with('/')
+            {
                 continue;
             }
             relative = format!("./{}", import.source);
