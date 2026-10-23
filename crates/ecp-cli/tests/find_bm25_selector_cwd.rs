@@ -108,7 +108,10 @@ fn spawn_ecp(cwd: &Path, home: &Path, args: &[&str], stdin: Option<&str>) -> std
         .expect("ecp failed to spawn");
     let mut pipe = child.stdin.take().unwrap();
     if let Some(text) = stdin {
-        pipe.write_all(text.as_bytes()).unwrap();
+        // A command that fails fast exits before reading stdin.
+        if let Err(e) = pipe.write_all(text.as_bytes()) {
+            assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "{e}");
+        }
     }
     drop(pipe);
     child
