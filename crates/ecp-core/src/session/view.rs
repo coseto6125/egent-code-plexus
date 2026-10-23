@@ -163,7 +163,7 @@ pub struct OverlaySymbol {
     pub variant_refs: Vec<String>,
     /// `RawFunctionMeta.return_type` of a function, method or constructor,
     /// as written; `None` when it declares none or the input does not carry
-    /// it (a fragment bin). Types the receiver of a chained call on it.
+    /// it (a pre-V5 fragment). Types the receiver of a chained call on it.
     pub return_type: Option<String>,
 }
 
@@ -3580,7 +3580,9 @@ fn resolve_callee<'s>(
     // fully qualified language takes the named-import tier instead.
     let member_policy = import_member_fallback(caller.language)
         && !(scope.type_lookup && fqn_language(caller.language));
-    let binds_imports = !imports.is_empty() && !matches!(site, CallSite::UntypedMember(_));
+    let binds_imports = !imports.is_empty()
+        && !matches!(site, CallSite::UntypedMember(_))
+        && names.target != ResolveTarget::Field;
     // Set when no explicit import binds the callee: the wildcard imports
     // bind after the heritage tier.
     let mut wildcard_open = false;
@@ -3681,7 +3683,11 @@ fn resolve_callee<'s>(
 
     // Tier 2: import-scoped, the index's named-import tier: every import
     // binding the callee, in order, until one's module declares the name.
-    let segment_imports: &[RawImport] = if member_policy { &[] } else { imports };
+    let segment_imports: &[RawImport] = if member_policy || names.target == ResolveTarget::Field {
+        &[]
+    } else {
+        imports
+    };
     let base_len = graph.nodes.len() as u32;
     let base_path = |idx: u32| {
         graph

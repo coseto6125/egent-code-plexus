@@ -71,7 +71,9 @@ use std::path::Path;
 /// middleware from a route, a controller's own middleware (`$this->middleware`
 /// with `only` / `except`, static `HasMiddleware::middleware()`) joins its
 /// routes' list, and a group's controller reaches an included route file.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema19");
+/// schema20: functions read named constants and reference callbacks; imports
+/// persist for every language, and chained calls use callee return types.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema20");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
