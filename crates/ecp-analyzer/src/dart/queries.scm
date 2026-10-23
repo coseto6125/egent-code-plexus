@@ -171,7 +171,8 @@
 
 ;; Imports — Dart `import 'pkg.dart';`. tree-sitter-dart wraps imports
 ;; three levels deep: `import_or_export > library_import >
-;; import_specification > configurable_uri`. Mirrors upstream gitnexus's
+;; import_specification > configurable_uri` (`uri` for deferred imports).
+;; Mirrors upstream gitnexus's
 ;; query (see `_source_code/.../tree-sitter-queries.ts`). Double-tagged
 ;; @import.name/@import.source because Dart basic-form imports have no
 ;; separately-named symbol part.
