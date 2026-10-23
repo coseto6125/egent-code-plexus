@@ -150,8 +150,9 @@ where
         )
         && facts.owner(id).is_some_and(|owner| {
             !facts.file_of(id).is_some_and(|target| {
-                facts.count_in_file(target, owner, ResolveTarget::Callable) > 0
-                    && facts.count_in_file(target, owner, ResolveTarget::Type) == 0
+                facts.is_namespace_owner(target, owner)
+                    || (facts.count_in_file(target, owner, ResolveTarget::Callable) > 0
+                        && facts.count_in_file(target, owner, ResolveTarget::Type) == 0)
             })
         });
     if (module_scoped && global)

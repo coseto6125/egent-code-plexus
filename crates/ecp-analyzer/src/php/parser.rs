@@ -157,14 +157,26 @@ fn extract_qualified_constant_refs(
             }
             let span = node_span(&node);
             let owner = match scope.trim() {
-                "self" | "static" => nodes
-                    .iter()
-                    .filter(|raw| {
-                        matches!(raw.kind, NodeKind::Function | NodeKind::Method)
-                            && ecp_core::analyzer::types::span_contains(raw.span, span)
-                    })
-                    .min_by_key(|raw| crate::framework_helpers::span_area(raw.span))
-                    .and_then(|raw| raw.owner_class.as_deref()),
+                "self" | "static" => {
+                    let mut parent = node.parent();
+                    let mut owner = None;
+                    while let Some(container) = parent {
+                        match container.kind() {
+                            "anonymous_class" => break,
+                            "class_declaration"
+                            | "interface_declaration"
+                            | "trait_declaration"
+                            | "enum_declaration" => {
+                                owner = container
+                                    .child_by_field_name("name")
+                                    .and_then(|name| name.utf8_text(source).ok());
+                                break;
+                            }
+                            _ => parent = container.parent(),
+                        }
+                    }
+                    owner
+                }
                 scope => {
                     // The qualified resolver identifies its type by the final
                     // segment and cannot prove PHP namespace visibility.

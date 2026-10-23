@@ -87,29 +87,26 @@ pub fn emit_edges(
             // class-free files short-circuit cleanly.
             // Includes Struct/Trait/Interface so Rust `struct Foo` + `impl Foo`
             // bridge correctly now that structs no longer emit as Class.
-            let mut classes: Vec<(&str, Span)> = Vec::new();
             // An enum's methods and cases have separate semantics, but a
             // `Const` inside it is a type member just like a class constant.
-            // Keep this pool Const-only so Enum methods do not enter this
-            // generic class-membership pass.
-            let mut const_owners: Vec<(&str, Span)> = Vec::new();
+            // Retain the kind so only constants use enum owners.
+            let mut owners: Vec<(&str, NodeKind, Span)> = Vec::new();
             let mut classes_by_name: FxHashMap<&str, Vec<Span>> = FxHashMap::default();
             for n in raws {
                 if matches!(
                     n.kind,
                     NodeKind::Class | NodeKind::Struct | NodeKind::Trait | NodeKind::Interface
                 ) {
-                    classes.push((n.name.as_str(), n.span));
-                    const_owners.push((n.name.as_str(), n.span));
+                    owners.push((n.name.as_str(), n.kind, n.span));
                     classes_by_name
                         .entry(n.name.as_str())
                         .or_default()
                         .push(n.span);
                 } else if n.kind == NodeKind::Enum {
-                    const_owners.push((n.name.as_str(), n.span));
+                    owners.push((n.name.as_str(), n.kind, n.span));
                 }
             }
-            if const_owners.is_empty() {
+            if owners.is_empty() {
                 return (0, Vec::new());
             }
 
@@ -118,8 +115,7 @@ pub fn emit_edges(
             let mut local_emitted = 0usize;
             local_emitted += emit_pass1_span(
                 raws,
-                &classes,
-                &const_owners,
+                &owners,
                 path_str,
                 symbol_table,
                 &later,
@@ -214,8 +210,7 @@ fn member_node(
 /// (Property) edge from `c` to the member.
 fn emit_pass1_span(
     raws: &[RawNode],
-    classes: &[(&str, Span)],
-    const_owners: &[(&str, Span)],
+    owners: &[(&str, NodeKind, Span)],
     path_str: &str,
     symbol_table: &SymbolTable,
     later: &FxHashMap<usize, u32>,
@@ -225,35 +220,35 @@ fn emit_pass1_span(
     let mut emitted = 0usize;
 
     for (i, member) in raws.iter().enumerate() {
-        let (rel_type, owners) = match member.kind {
-            NodeKind::Function | NodeKind::Method | NodeKind::Constructor => {
-                (RelType::HasMethod, classes)
-            }
-            NodeKind::Property => (RelType::HasProperty, classes),
+        let rel_type = match member.kind {
+            NodeKind::Function | NodeKind::Method | NodeKind::Constructor => RelType::HasMethod,
+            NodeKind::Property => RelType::HasProperty,
             // A class constant (PHP `const STATUS`) carries its class as
             // owner, so `scope_defines` gives it no File edge.
-            NodeKind::Const if member.owner_class.is_some() => (RelType::HasProperty, const_owners),
+            NodeKind::Const if member.owner_class.is_some() => RelType::HasProperty,
             _ => continue,
         };
 
         // Innermost enclosing class via smallest-area span. Scans the
         // pre-collected classes slice (K entries) instead of all raws.
-        let Some((class_name, class_span)) = owners
+        let Some((class_name, _, _)) = owners
             .iter()
-            .filter(|(_, span)| span_contains(*span, member.span))
-            .min_by_key(|(_, span)| span_area(*span))
+            .filter(|(_, kind, span)| {
+                (member.kind == NodeKind::Const || *kind != NodeKind::Enum)
+                    && span_contains(*span, member.span)
+            })
+            .min_by_key(|(_, _, span)| span_area(*span))
             .copied()
         else {
             continue;
         };
 
-        // Namespace-qualified enum identities are not represented by the
-        // short-name lookup below. Do not bind an ambiguous enum constant.
+        // Namespace-qualified type identities are not represented by the
+        // short-name lookup below. Do not bind an ambiguous type constant.
         if member.kind == NodeKind::Const
-            && !classes.contains(&(class_name, class_span))
-            && const_owners
+            && owners
                 .iter()
-                .filter(|(name, _)| *name == class_name)
+                .filter(|(name, _, _)| *name == class_name)
                 .count()
                 != 1
         {
