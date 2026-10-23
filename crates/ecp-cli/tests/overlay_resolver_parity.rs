@@ -1218,6 +1218,65 @@ fn test_overlay_rust_external_named_alias_return_type_has_no_project_edge() {
 }
 
 #[test]
+fn test_overlay_rust_mod_reexport_return_type_binds_imported_member() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "pub mod app; pub mod models;"),
+            (
+                "src/models/mod.rs",
+                "mod config; pub use config::Config;",
+            ),
+            (
+                "src/models/config.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+            (
+                "src/app.rs",
+                "use crate::models::Config; pub fn load() -> Config { Config } pub fn run() {}",
+            ),
+        ],
+        &[(
+            "src/app.rs",
+            "use crate::models::Config; pub fn load() -> Config { Config } pub fn run() { load().get(); }",
+        )],
+        &[
+            ("src/app.rs".into(), "load".into(), "".into(), 100),
+            ("src/models/config.rs".into(), "get".into(), "Config".into(), 85),
+        ],
+    );
+}
+
+#[test]
+fn test_overlay_rust_root_reexport_return_type_binds_imported_member() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            (
+                "src/lib.rs",
+                "mod config; pub use config::Config; pub mod app;",
+            ),
+            (
+                "src/config.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+            (
+                "src/app.rs",
+                "use crate::Config; pub fn load() -> Config { Config } pub fn run() {}",
+            ),
+        ],
+        &[(
+            "src/app.rs",
+            "use crate::Config; pub fn load() -> Config { Config } pub fn run() { load().get(); }",
+        )],
+        &[
+            ("src/app.rs".into(), "load".into(), "".into(), 100),
+            ("src/config.rs".into(), "get".into(), "Config".into(), 85),
+        ],
+    );
+}
+
+#[test]
 fn test_overlay_cpp_quoted_include_preserves_root_candidate() {
     parity(
         &CppProvider::new().unwrap(),
@@ -3645,6 +3704,52 @@ fn test_overlay_go_external_versioned_package_selector_returns_no_edge() {
             &[],
         );
     }
+}
+
+#[test]
+fn test_overlay_go_dot_import_external_type_returns_no_edge() {
+    let provider = GoProvider::new().unwrap();
+    let before = "package svc\nimport . \"github.com/ext/client\"\nfunc New() *Client { return nil }\nfunc Run() {}\n";
+    let after = "package svc\nimport . \"github.com/ext/client\"\nfunc New() *Client { return nil }\nfunc Run() { New().Do() }\n";
+    parity_from(
+        "Run",
+        &provider,
+        &[
+            ("svc/svc.go", before),
+            (
+                "mock/client.go",
+                "package mock\ntype Client struct{}\nfunc (Client) Do() {}\n",
+            ),
+            (
+                "other.go",
+                "package app\ntype Other struct{}\nfunc (Other) Do() {}\n",
+            ),
+        ],
+        &[("svc/svc.go", after)],
+        &[("svc/svc.go".into(), "New".into(), "".into(), 100)],
+    );
+}
+
+#[test]
+fn test_overlay_dart_part_file_external_library_type_returns_no_edge() {
+    let provider = DartProvider::new().unwrap();
+    let before = "part of '../lib.dart';\nClient make() => Client();\nvoid run() {}\n";
+    let after =
+        "part of '../lib.dart';\nClient make() => Client();\nvoid run() { make().doWork(); }\n";
+    parity(
+        &provider,
+        &[
+            (
+                "lib.dart",
+                "import 'package:external/client.dart';\npart 'src/part.dart';\n",
+            ),
+            ("src/part.dart", before),
+            ("mock/client.dart", "class Client { void doWork() {} }"),
+            ("other.dart", "class Other { void doWork() {} }"),
+        ],
+        &[("src/part.dart", after)],
+        &[("src/part.dart".into(), "make".into(), "".into(), 100)],
+    );
 }
 
 #[test]

@@ -33,6 +33,7 @@ use ecp_analyzer::ruby::parser::RubyProvider;
 use ecp_analyzer::rust::parser::RustProvider;
 use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_analyzer::typescript::parser::TypeScriptProvider;
+use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{CallSite, CHAIN_DEPTH_LIMIT};
 use ecp_core::graph::ZeroCopyGraph;
@@ -59,6 +60,31 @@ fn single(provider: &dyn LanguageProvider, files: &[(&str, &str)]) -> ZeroCopyGr
         .map(|&(path, src)| (provider, path, src))
         .collect();
     graph(&with_provider)
+}
+
+/// Build a Go module fixture with the same module alias that the CLI derives
+/// from its preserved `go.mod`.
+fn go_module(files: &[(&str, &str)]) -> ZeroCopyGraph {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let provider = GoProvider::new().expect("GoProvider init");
+    let mut aliases = PathAliases::new();
+    aliases.add("example.com/app/*", vec!["./*".to_string()]);
+    let mut builder = GraphBuilder::new()
+        .with_repo_root(tmp.path().to_path_buf())
+        .with_path_aliases(aliases);
+    for &(path, source) in files {
+        let disk = tmp.path().join(path);
+        std::fs::create_dir_all(disk.parent().expect("parent")).expect("create parent");
+        std::fs::write(&disk, source).expect("write fixture");
+        if path.ends_with(".go") {
+            builder.add_graph(
+                provider
+                    .parse_file(Path::new(path), source.as_bytes())
+                    .expect("parse Go fixture"),
+            );
+        }
+    }
+    builder.build()
 }
 
 /// The `Calls` targets of every node named `caller`, sorted.
@@ -983,6 +1009,21 @@ fn test_resolve_call_go_non_project_return_chain_keeps_fallback() {
     assert_falls_back(&go_graph(), "UsePlain", "Bar");
 }
 
+#[test]
+fn test_resolve_call_go_dot_import_external_type_returns_no_edge() {
+    let graph = go_module(&[
+        ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+        (
+            "svc/svc.go",
+            "package svc\nimport . \"github.com/ext/client\"\nfunc New() *Client { return nil }\nfunc Run() { New().Do() }\n",
+        ),
+        ("mock/client.go", "package mock\ntype Client struct{}\nfunc (Client) Do() {}\n"),
+        ("other.go", "package app\ntype Other struct{}\nfunc (Other) Do() {}\n"),
+    ]);
+    assert_inner_binds(&graph, "Run", "", "New");
+    assert_no_member_edge(&graph, "Run", "Do");
+}
+
 /// Follow-up: `[]*Foo` is not unwrapped yet.
 #[test]
 fn test_resolve_call_go_slice_return_chain_keeps_fallback() {
@@ -1175,6 +1216,51 @@ fn test_resolve_call_rust_external_named_alias_return_type_has_no_project_edge()
 }
 
 #[test]
+fn test_resolve_call_rust_mod_reexport_return_type_binds_imported_member() {
+    let graph = single(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "pub mod app; pub mod models;"),
+            (
+                "src/models/mod.rs",
+                "mod config; pub use config::Config;",
+            ),
+            (
+                "src/models/config.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+            (
+                "src/app.rs",
+                "use crate::models::Config; pub fn load() -> Config { Config } pub fn run() { load().get(); }",
+            ),
+        ],
+    );
+    assert_eq!(owners(&graph, "run", "get"), ["Config"]);
+}
+
+#[test]
+fn test_resolve_call_rust_root_reexport_return_type_binds_imported_member() {
+    let graph = single(
+        &RustProvider::new().unwrap(),
+        &[
+            (
+                "src/lib.rs",
+                "mod config; pub use config::Config; pub mod app;",
+            ),
+            (
+                "src/config.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+            (
+                "src/app.rs",
+                "use crate::Config; pub fn load() -> Config { Config } pub fn run() { load().get(); }",
+            ),
+        ],
+    );
+    assert_eq!(owners(&graph, "run", "get"), ["Config"]);
+}
+
+#[test]
 fn test_resolve_call_cpp_quoted_include_preserves_root_candidate() {
     let graph = single(
         &CppProvider::new().unwrap(),
@@ -1315,6 +1401,27 @@ fn test_resolve_call_dart_imported_return_type_rejects_unavailable_type() {
         );
         assert!(owners(&graph, "run", "bar").is_empty(), "{import}");
     }
+}
+
+#[test]
+fn test_resolve_call_dart_part_file_external_library_type_returns_no_edge() {
+    let graph = single(
+        &DartProvider::new().unwrap(),
+        &[
+            (
+                "lib.dart",
+                "import 'package:external/client.dart';\npart 'src/part.dart';\n",
+            ),
+            (
+                "src/part.dart",
+                "part of '../lib.dart';\nClient make() => Client();\nvoid run() { make().doWork(); }\n",
+            ),
+            ("mock/client.dart", "class Client { void doWork() {} }"),
+            ("other.dart", "class Other { void doWork() {} }"),
+        ],
+    );
+    assert_inner_binds(&graph, "run", "", "make");
+    assert_no_member_edge(&graph, "run", "doWork");
 }
 
 #[test]
