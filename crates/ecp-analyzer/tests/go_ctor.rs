@@ -137,3 +137,23 @@ func process(a interface{}) {
         "expected untyped member 'Speak', got: {calls:?}"
     );
 }
+
+#[test]
+fn test_go_callee_func_literal_deferral_does_not_emit_bare_inner_member() {
+    let src = r#"package main
+
+func Unlock() {}
+
+func outer(mu interface { Unlock() }) {
+    defer func() { mu.Unlock() }()
+}
+"#;
+    let calls = calls_for(src, "outer");
+    assert!(
+        !calls.iter().any(|call| {
+            ecp_core::analyzer::types::CallSite::parse(call)
+                == ecp_core::analyzer::types::CallSite::Plain("Unlock")
+        }),
+        "a function literal must not encode its inner member as a bare call: {calls:?}"
+    );
+}

@@ -483,6 +483,20 @@ fn test_python_dotted_from_import_missing_path_or_member_keeps_global_tier() {
     }
 }
 
+/// A dotted receiver below a from-imported object is not a call on a
+/// same-file function with the terminal name.
+#[test]
+fn test_python_dotted_from_import_object_attribute_same_file_name_returns_no_edge() {
+    let graph = python(
+        &[&[("app/__init__.py", "settings = object()\n")]],
+        (
+            "main.py",
+            "from app import settings\n\ndef commit():\n    pass\n\ndef caller():\n    return settings.db.commit()\n",
+        ),
+    );
+    assert_call_targets(&graph, "caller", &[]);
+}
+
 /// A package attribute named like the submodule shadows it, as in Python:
 /// the class `mod` the package declares is the receiver, so the call binds
 /// its `compute`, never the submodule's (no edge on ecp 0.14.8).

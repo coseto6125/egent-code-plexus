@@ -32,6 +32,9 @@ fn incoming(graph: &ZeroCopyGraph, target: &str) -> Vec<(String, RelType)> {
 const SRC: &str = "<?php\nconst LIMIT = 3;\n\nclass Order {\n    const STATUS = 'x';\n}\n\ninterface Shape {\n    const SIDES = 4;\n}\n\nenum Suit: string {\n    case Hearts = 'H';\n    const WILD = 'W';\n}\n";
 const ENUM_ONLY_SRC: &str =
     "<?php\nenum Suit: string {\n    case Hearts = 'H';\n    const WILD = 'W';\n}\n";
+const DUPLICATE_SHORT_TYPE_NAMES: &str = "<?php\n\
+namespace First { class Foo { const CLASS_VALUE = 1; } }\n\
+namespace Second { interface Foo { const INTERFACE_VALUE = 2; } }\n";
 
 #[test]
 fn test_class_membership_php_class_constant_returns_has_property_from_class() {
@@ -76,4 +79,20 @@ fn test_class_membership_php_ambiguous_enum_constant_returns_no_property_edge() 
     assert!(incoming(&g, "WILD")
         .iter()
         .all(|(_, rel)| *rel != RelType::HasProperty));
+}
+
+#[test]
+fn test_class_membership_php_same_short_type_names_suppress_ambiguous_constant_membership() {
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[("p.php", DUPLICATE_SHORT_TYPE_NAMES)],
+    );
+    for constant in ["CLASS_VALUE", "INTERFACE_VALUE"] {
+        assert!(
+            incoming(&g, constant)
+                .iter()
+                .all(|(_, rel)| *rel != RelType::HasProperty),
+            "{constant}: {g:#?}"
+        );
+    }
 }

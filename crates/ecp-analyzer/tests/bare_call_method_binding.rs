@@ -612,6 +612,33 @@ fn test_resolve_call_go_imported_package_and_alias_calls_bind_function() {
 }
 
 #[test]
+fn test_resolve_call_go_declared_package_name_differs_from_import_path_binds_function() {
+    for (path, package, import, caller) in [
+        ("v2/helper.go", "app", "\"example.com/app/v2\"", "app.F()"),
+        (
+            "internal/go-utils/helper.go",
+            "utils",
+            "\"example.com/app/internal/go-utils\"",
+            "utils.F()",
+        ),
+    ] {
+        let graph = go_module(&[
+            ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+            (path, &format!("package {package}\n\nfunc F() {{}}\n")),
+            (
+                "cmd/app.go",
+                &format!("package main\n\nimport {import}\n\nfunc boot() {{ {caller} }}\n"),
+            ),
+        ]);
+        assert_eq!(
+            targets(&graph, "boot"),
+            vec![target(path, "", "F")],
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn test_resolve_call_go_local_and_parameter_shadow_import_alias_return_no_edge() {
     let graph = go_module(
         &[

@@ -712,6 +712,38 @@ class Other {}\n\
 function missing(): int { return Other::MISSING; }\n\
 function wrongOwner(): int { return Other::LIMIT; }\n";
 
+const PHP_ANONYMOUS_CLASS_WITHOUT_INNER_CONSTANT: &str = "<?php\n\
+class Factory {\n\
+    const KIND = 'outer';\n\
+    public static function readOuter(): string { return self::KIND; }\n\
+    public function makeWithoutInner(): object {\n\
+        return new class {\n\
+            public function readWithoutInner(): string { return self::KIND; }\n\
+        };\n\
+    }\n\
+}\n";
+
+const PHP_ANONYMOUS_CLASS_WITH_INNER_CONSTANT: &str = "<?php\n\
+class Factory {\n\
+    const KIND = 'outer';\n\
+    public function makeWithInner(): object {\n\
+        return new class {\n\
+            const KIND = 'inner';\n\
+            public function readWithInner(): string { return static::KIND; }\n\
+        };\n\
+    }\n\
+}\n";
+
+const PHP_BRACED_NAMESPACE_CONSTANT: &str = "<?php\n\
+namespace App {\n\
+    const LIMIT = 3;\n\
+    function readBraced(): int { return LIMIT; }\n\
+}\n";
+const PHP_UNBRACED_NAMESPACE_CONSTANT: &str = "<?php\n\
+namespace Flat;\n\
+const OTHER_LIMIT = 4;\n\
+function readFlat(): int { return OTHER_LIMIT; }\n";
+
 #[test]
 fn test_value_read_php_top_level_const_returns_same_file_edge() {
     let g = graph(&PhpProvider::new().unwrap(), &[("p.php", PHP_SAME_FILE)]);
@@ -776,6 +808,47 @@ fn test_value_read_php_qualified_constant_missing_or_wrong_owner_returns_no_edge
     );
     assert_eq!(value_reads(&g, "missing"), none());
     assert_eq!(value_reads(&g, "wrongOwner"), none());
+}
+
+#[test]
+fn test_value_read_php_anonymous_class_self_and_static_constants_do_not_bind_outer_class() {
+    let without_inner = graph(
+        &PhpProvider::new().unwrap(),
+        &[(
+            "without_inner.php",
+            PHP_ANONYMOUS_CLASS_WITHOUT_INNER_CONSTANT,
+        )],
+    );
+    assert_eq!(
+        value_reads(&without_inner, "readOuter"),
+        vec![r("without_inner.php", "KIND", VALUE_READ, 0.85)]
+    );
+    assert_eq!(value_reads(&without_inner, "readWithoutInner"), none());
+
+    let with_inner = graph(
+        &PhpProvider::new().unwrap(),
+        &[("with_inner.php", PHP_ANONYMOUS_CLASS_WITH_INNER_CONSTANT)],
+    );
+    assert_eq!(value_reads(&with_inner, "readWithInner"), none());
+}
+
+#[test]
+fn test_value_read_php_braced_and_unbraced_namespace_constants_return_same_file_edges() {
+    let g = graph(
+        &PhpProvider::new().unwrap(),
+        &[
+            ("braced.php", PHP_BRACED_NAMESPACE_CONSTANT),
+            ("flat.php", PHP_UNBRACED_NAMESPACE_CONSTANT),
+        ],
+    );
+    assert_eq!(
+        value_reads(&g, "readBraced"),
+        vec![r("braced.php", "LIMIT", VALUE_READ, 1.0)]
+    );
+    assert_eq!(
+        value_reads(&g, "readFlat"),
+        vec![r("flat.php", "OTHER_LIMIT", VALUE_READ, 1.0)]
+    );
 }
 
 #[test]
