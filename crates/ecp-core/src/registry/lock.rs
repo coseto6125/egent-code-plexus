@@ -21,6 +21,14 @@ pub struct FileLock {
     _file: File,
 }
 
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        // A concurrent fork can retain this open file description until exec.
+        // Release the lock at the guard boundary instead of the last close.
+        let _ = FileExt::unlock(&self._file);
+    }
+}
+
 impl FileLock {
     /// Acquire an exclusive lock on `path`, retrying for up to [`LOCK_TIMEOUT`].
     /// Creates the lockfile if missing. Records the owning PID in the lockfile
