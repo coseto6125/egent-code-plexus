@@ -2251,6 +2251,68 @@ fn test_overlay_typescript_function_reference_added_and_removed_matches_reindex(
 }
 
 #[test]
+fn test_overlay_java_field_read_external_import_matches_reindex() {
+    let source = "package app;\nimport external.value;\nclass Main { int read(Config c) { return c.value; } }\n";
+    let shifted = format!("\n{source}");
+    let (full, overlay) = field_read_edges(
+        &JavaProvider::new().unwrap(),
+        &[
+            ("src/app/Main.java", source),
+            (
+                "src/app/Config.java",
+                "package app;\nclass Config { int value; }\n",
+            ),
+        ],
+        &[("src/app/Main.java", &shifted)],
+        &["field_read"],
+    );
+    assert_eq!(full.len(), 1, "the index must bind the unique field");
+    assert_eq!(overlay, full, "a type import must not hide a field read");
+}
+
+#[test]
+fn test_overlay_java_field_read_wildcard_import_preserves_ambiguity() {
+    let source =
+        "package app;\nimport model.*;\nclass Main { int read(Config c) { return c.value; } }\n";
+    let shifted = format!("\n{source}");
+    let (full, overlay) = field_read_edges(
+        &JavaProvider::new().unwrap(),
+        &[
+            ("src/app/Main.java", source),
+            (
+                "src/model/Config.java",
+                "package model;\nclass Config { int value; }\n",
+            ),
+            (
+                "src/other/Other.java",
+                "package other;\nclass Other { int value; }\n",
+            ),
+        ],
+        &[("src/app/Main.java", &shifted)],
+        &["field_read"],
+    );
+    assert!(
+        full.is_empty(),
+        "the index must preserve field ambiguity: {full:?}"
+    );
+    assert_eq!(overlay, full, "a wildcard must not invent a field target");
+}
+
+#[test]
+fn test_overlay_typescript_field_read_retained_matches_reindex() {
+    let source = "class Config { timeout: number = 0; }\nexport function readTimeout(c: Config): number { return c.timeout; }\n";
+    let shifted = format!("\n{source}");
+    let (full, overlay) = field_read_edges(
+        &TypeScriptProvider::new().unwrap(),
+        &[("app.ts", source)],
+        &[("app.ts", &shifted)],
+        &["field_read"],
+    );
+    assert_eq!(full.len(), 1, "the read must exercise the indexed path");
+    assert_eq!(overlay, full, "the overlay must rebuild the field read");
+}
+
+#[test]
 fn test_overlay_typescript_field_read_removed_masks_base_edge() {
     let with_read = "class Config { timeout: number = 0; }\nexport function readTimeout(c: Config): number { return c.timeout; }\n";
     let without_read = "class Config { timeout: number = 0; }\nexport function readTimeout(c: Config): number { return 0; }\n";
