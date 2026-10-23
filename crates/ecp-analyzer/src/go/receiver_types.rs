@@ -301,6 +301,7 @@ fn collect_params(params: &Node<'_>, source: &[u8], out: &mut HashMap<String, St
 /// Walk a function body and collect:
 /// - `var_declaration` → `var x Dog` / `var x *Dog`
 /// - `short_var_declaration` where the RHS is a composite literal → `x := Dog{}`
+/// - range, receive and type-switch names, which only shadow
 fn collect_scope_body(
     body: &Node<'_>,
     source: &[u8],
@@ -332,6 +333,23 @@ fn collect_scope_body(
                 collect_short_var(&n, source, out);
                 if let Some(left) = n.child_by_field_name("left") {
                     record_names(&left, source, node_range(n).1, values);
+                }
+            }
+            // `=` assigns an outer variable; only `:=` declares a name.
+            "range_clause" | "receive_statement"
+                if n.children(&mut n.walk()).any(|token| token.kind() == ":=") =>
+            {
+                if let Some(left) = n.child_by_field_name("left") {
+                    record_names(&left, source, node_range(n).1, values);
+                }
+            }
+            "type_switch_statement" => {
+                // The guard expression still sees the outer name.
+                if let (Some(alias), Some(value)) = (
+                    n.child_by_field_name("alias"),
+                    n.child_by_field_name("value"),
+                ) {
+                    record_names(&alias, source, node_range(value).1, values);
                 }
             }
             _ => {}

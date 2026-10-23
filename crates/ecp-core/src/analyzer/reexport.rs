@@ -422,29 +422,26 @@ pub fn imported_file_type<'i, F: ModuleFacts + ?Sized>(
         }
         let mut visit = |source: &str| {
             facts.for_each_candidate(importer, source, &mut |file| {
-                for (id, kind) in facts.decls_in_file(file, name) {
-                    if kind.is_type() {
-                        ambiguous |= found.is_some_and(|previous| previous != id);
-                        found = Some(id);
-                    }
-                }
-                !ambiguous
+                scan_file_types(facts, file, name, &mut found, &mut ambiguous)
             });
             !ambiguous
         };
         match language {
             Language::Dart => {
-                if import.imported_name != import.source
-                    || import.source.contains(':')
-                    || import.source.starts_with('/')
-                {
+                if import.imported_name != import.source || import.source.starts_with('/') {
                     continue;
                 }
-                if import.source.starts_with('.') {
-                    visit(import.source);
-                } else {
-                    let relative = format!("./{}", import.source);
-                    visit(&relative);
+                if let Some(package) = import.source.strip_prefix("package:") {
+                    if let Some(file) = dart_project_package_file(facts, importer, package) {
+                        scan_file_types(facts, &file, name, &mut found, &mut ambiguous);
+                    }
+                } else if !import.source.contains(':') {
+                    if import.source.starts_with('.') {
+                        visit(import.source);
+                    } else {
+                        let relative = format!("./{}", import.source);
+                        visit(&relative);
+                    }
                 }
             }
             // C++ RawImport strips both `"..."` and `<...>` delimiters.
@@ -466,6 +463,53 @@ pub fn imported_file_type<'i, F: ModuleFacts + ?Sized>(
         }
     }
     found.map_or(ImportedFileType::Missing, ImportedFileType::Unique)
+}
+
+/// Records `file`'s type declarations of `name` into `found`; returns
+/// `false` once two different declarations make the import ambiguous.
+fn scan_file_types<F: ModuleFacts + ?Sized>(
+    facts: &F,
+    file: &str,
+    name: &str,
+    found: &mut Option<u32>,
+    ambiguous: &mut bool,
+) -> bool {
+    for (id, kind) in facts.decls_in_file(file, name) {
+        if kind.is_type() {
+            *ambiguous |= found.is_some_and(|previous| previous != id);
+            *found = Some(id);
+        }
+    }
+    !*ambiguous
+}
+
+/// The project file a Dart `package:<name>/<path>` import names:
+/// `<package root>/lib/<path>`, where the package root is the importer's
+/// nearest ancestor holding that file. `None` means an external package.
+fn dart_project_package_file<F: ModuleFacts + ?Sized>(
+    facts: &F,
+    importer: &str,
+    package: &str,
+) -> Option<String> {
+    let (_, path) = package.split_once('/')?;
+    let mut directory = importer.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let mut file = String::new();
+    loop {
+        file.clear();
+        if !directory.is_empty() {
+            file.push_str(directory);
+            file.push('/');
+        }
+        file.push_str("lib/");
+        file.push_str(path);
+        if facts.has_file(&file) {
+            return Some(file);
+        }
+        if directory.is_empty() {
+            return None;
+        }
+        directory = directory.rsplit_once('/').map_or("", |(parent, _)| parent);
+    }
 }
 
 /// Rust import evidence for a return type.

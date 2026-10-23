@@ -780,6 +780,65 @@ fn test_resolve_call_go_local_and_parameter_shadow_import_alias_return_no_edge()
 }
 
 #[test]
+fn test_resolve_call_go_range_switch_receive_shadow_import_alias_return_no_edge() {
+    let graph = go_module(&[
+        ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+        ("pkg/helper.go", "package pkg\n\nfunc F() {}\n"),
+        (
+            "cmd/app.go",
+            "package main\n\nimport p \"example.com/app/pkg\"\n\n\
+                 func ranged(xs []struct{}) { for _, p := range xs { p.F() } }\n\n\
+                 func switched(x any) { switch p := x.(type) { default: p.F() } }\n\n\
+                 func received(ch chan struct{}) { select { case p := <-ch: p.F() } }\n",
+        ),
+    ]);
+    for function in ["ranged", "switched", "received"] {
+        assert!(targets(&graph, function).is_empty(), "{function}");
+    }
+}
+
+#[test]
+fn test_resolve_call_go_type_switch_guard_import_alias_binds_package_function() {
+    let graph = go_module(&[
+        ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+        (
+            "pkg/helper.go",
+            "package pkg\n\nfunc F() any { return nil }\n",
+        ),
+        (
+            "cmd/app.go",
+            "package main\n\nimport p \"example.com/app/pkg\"\n\n\
+             func guarded() { switch p := p.F().(type) { default: _ = p } }\n",
+        ),
+    ]);
+    assert_eq!(
+        targets(&graph, "guarded"),
+        vec![target("pkg/helper.go", "", "F")]
+    );
+}
+
+#[test]
+fn test_resolve_call_go_range_receive_assignment_keeps_outer_type() {
+    let graph = go_module(&[
+        ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+        (
+            "animals/animals.go",
+            "package animals\n\ntype Dog struct{}\n\nfunc (Dog) Bark() {}\n\n\
+             type Cat struct{}\n\nfunc (Cat) Bark() {}\n\n\
+             func ranged(ds []Dog) { var d Dog; for _, d = range ds { d.Bark() } }\n\n\
+             func received(ch chan Dog) { var d Dog; select { case d = <-ch: d.Bark() } }\n",
+        ),
+    ]);
+    for function in ["ranged", "received"] {
+        assert_eq!(
+            targets(&graph, function),
+            vec![target("animals/animals.go", "Dog", "Bark")],
+            "{function}"
+        );
+    }
+}
+
+#[test]
 fn test_resolve_call_go_block_shadow_import_alias_after_block_binds_package_function() {
     let graph = go_module(
         &[

@@ -343,19 +343,19 @@ fn ts_callee_name(
                             }
                         }) {
                             Some(inner) => {
-                                let fallback = CallSite::from_receiver("call", prop_name);
+                                let fallback = CallSite::untyped_member(prop_name);
                                 CallSite::chained_member(&inner, &fallback)
                             }
-                            None => CallSite::from_receiver("call", prop_name),
+                            None => CallSite::untyped_member(prop_name),
                         },
                     )
                 }
                 "new_expression" => Some(match new_expression_call(obj, source) {
                     Some(inner) => {
-                        let fallback = CallSite::from_receiver("new", prop_name);
+                        let fallback = CallSite::untyped_member(prop_name);
                         CallSite::chained_member(&inner, &fallback)
                     }
-                    None => CallSite::from_receiver("new", prop_name),
+                    None => CallSite::untyped_member(prop_name),
                 }),
                 _ => {
                     // Chained member expression or other complex form: fall back to prop name.

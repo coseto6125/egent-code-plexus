@@ -93,8 +93,10 @@ pub enum CallSite<'a> {
     /// (`n.name.resolve()`) uses it too, so it never reaches a free `fn`, and
     /// so does a PHP `$obj->m()` other than `$this`, which a `use function`
     /// import never names, a Java call on a computed receiver (`a.b().m()`),
-    /// which no static import names, and an untyped Swift, Ruby or C++
-    /// receiver.
+    /// which no static import names, an untyped Swift, Ruby, C++ or Dart
+    /// receiver, and a JavaScript or TypeScript call or `new` receiver whose
+    /// type stays unknown (`fetch(u).json()`), which no import or base
+    /// class names.
     UntypedMember(&'a str),
     /// A member call whose receiver may name a type. In Python the receiver
     /// is a name a `from` import binds (`from pkg import mod; mod.f()`): a

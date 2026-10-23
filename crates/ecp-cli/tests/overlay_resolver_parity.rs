@@ -859,6 +859,28 @@ fn test_overlay_php_ambiguous_return_type_keeps_unique_member_fallback() {
 }
 
 #[test]
+fn test_overlay_dart_project_package_import_binds_member_like_reindex() {
+    let dart = DartProvider::new().unwrap();
+    let path = "test/config_test.dart";
+    let before = "import 'package:app/entity/foo.dart'; Foo make() => throw 0; void run() {}";
+    let after =
+        "import 'package:app/entity/foo.dart'; Foo make() => throw 0; void run() { make().bar(); }";
+    parity(
+        &dart,
+        &[
+            (path, before),
+            ("lib/entity/foo.dart", "class Foo { void bar() {} }"),
+            ("lib/other/foo.dart", "class Foo { void bar() {} }"),
+        ],
+        &[(path, after)],
+        &[
+            ("lib/entity/foo.dart".into(), "bar".into(), "Foo".into(), 85),
+            (path.into(), "make".into(), "".into(), 100),
+        ],
+    );
+}
+
+#[test]
 fn test_overlay_dart_restricted_import_rejects_project_namesake_like_reindex() {
     let dart = DartProvider::new().unwrap();
     let path = "lib/config.dart";

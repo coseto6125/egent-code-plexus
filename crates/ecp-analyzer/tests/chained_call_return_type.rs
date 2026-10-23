@@ -248,14 +248,7 @@ fn test_ts_callee_name_call_receiver_emits_chained_member() {
         CallSite::parse(inner).name().ends_with("create"),
         "{calls:?}"
     );
-    assert_eq!(
-        site.fallback(),
-        CallSite::FromReceiver {
-            receiver: "call",
-            member: "bar",
-        },
-        "{calls:?}"
-    );
+    assert_eq!(site.fallback(), CallSite::UntypedMember("bar"), "{calls:?}");
     assert_eq!(site.name(), "bar", "{calls:?}");
 }
 
@@ -1516,6 +1509,86 @@ fn test_resolve_call_dart_imported_return_type_rejects_unavailable_type() {
     }
 }
 
+/// The nearest ancestor holding `lib/<path>` is the importer's own package,
+/// from the package root, `lib/`, `test/` or a nested test directory.
+#[test]
+fn test_resolve_call_dart_project_package_import_return_type_binds_member() {
+    for (importer, root) in [
+        ("main.dart", ""),
+        ("lib/config.dart", ""),
+        ("test/config_test.dart", ""),
+        ("packages/app/test/a/x_test.dart", "packages/app/"),
+    ] {
+        let source = "import 'package:app/entity/foo.dart'; Foo make() => throw 0; void run() { make().bar(); }";
+        let own = format!("{root}lib/entity/foo.dart");
+        let decoy = format!("{root}lib/other/foo.dart");
+        let mut files = vec![
+            (importer, source),
+            (own.as_str(), "class Foo { void bar() {} }"),
+            (decoy.as_str(), "class Foo { void bar() {} }"),
+        ];
+        if !root.is_empty() {
+            // A farther package root must not win over the nearest one.
+            files.push(("lib/entity/foo.dart", "class Foo { void bar() {} }"));
+        }
+        let graph = single(&DartProvider::new().unwrap(), &files);
+        assert_eq!(
+            targets(&graph, "run")
+                .into_iter()
+                .filter(|(_, _, name)| name == "bar")
+                .collect::<Vec<_>>(),
+            vec![(own.clone(), "Foo".into(), "bar".into())],
+            "{importer}"
+        );
+    }
+}
+
+/// An untyped call receiver keeps the member name only: no free function,
+/// import or inherited method of that name is evidence for it.
+#[test]
+fn test_resolve_call_js_ts_untyped_call_receiver_member_binds_no_import_or_heritage() {
+    for (provider, path) in [
+        (
+            &JavaScriptProvider::new().unwrap() as &dyn LanguageProvider,
+            "main.js",
+        ),
+        (
+            &TypeScriptProvider::new().unwrap() as &dyn LanguageProvider,
+            "main.ts",
+        ),
+    ] {
+        let util = path.replace("main", "util");
+        let base = path.replace("main", "base");
+        let graph = single(
+            provider,
+            &[
+                (
+                    path,
+                    "import { json } from './util';\nimport { Base } from './base';\n\
+                     class K extends Base { run(u) { fetch(u).json(); getRepo().save(); } }\n\
+                     function top(u) { fetch(u).json(); new Response(u).json(); }\n",
+                ),
+                (util.as_str(), "export function json() {}\n"),
+                (base.as_str(), "export class Base { save() {} }\n"),
+            ],
+        );
+        for caller in ["run", "top"] {
+            assert!(owners(&graph, caller, "json").is_empty(), "{path} {caller}");
+        }
+        // Only the project-wide member-name fallback (0.7) remains, never
+        // the inherited method at the heritage tier (0.8).
+        let saves: Vec<f32> = calls_from(&graph, "run")
+            .into_iter()
+            .filter(|hit| hit.name == "save")
+            .map(|hit| hit.confidence)
+            .collect();
+        assert!(
+            !saves.is_empty() && saves.iter().all(|&c| c <= 0.7),
+            "{path} {saves:?}"
+        );
+    }
+}
+
 #[test]
 fn test_resolve_call_dart_part_file_external_library_type_returns_no_edge() {
     let graph = single(
@@ -2026,10 +2099,7 @@ fn test_js_callee_name_long_chain_stores_near_linear_callee_bytes() {
         if let site @ CallSite::ChainedMember { .. } = CallSite::parse(call) {
             assert_eq!(
                 site.fallback(),
-                CallSite::FromReceiver {
-                    receiver: "call",
-                    member: "option",
-                },
+                CallSite::UntypedMember("option"),
                 "{call:?}"
             );
         }
@@ -2037,7 +2107,7 @@ fn test_js_callee_name_long_chain_stores_near_linear_callee_bytes() {
 }
 
 #[test]
-fn test_js_callee_name_new_receiver_chain_fallback_is_from_receiver() {
+fn test_js_callee_name_new_receiver_chain_fallback_is_untyped_member() {
     let calls = raw_calls(
         &JavaScriptProvider::new().unwrap(),
         JS_USE.0,
@@ -2049,14 +2119,7 @@ fn test_js_callee_name_new_receiver_chain_fallback_is_from_receiver() {
         .map(|c| CallSite::parse(c))
         .find(|s| matches!(s, CallSite::ChainedMember { .. }))
         .unwrap_or_else(|| panic!("no chained entry: {calls:?}"));
-    assert_eq!(
-        site.fallback(),
-        CallSite::FromReceiver {
-            receiver: "call",
-            member: "bar",
-        },
-        "{calls:?}"
-    );
+    assert_eq!(site.fallback(), CallSite::UntypedMember("bar"), "{calls:?}");
 }
 
 // ---- chain on a local closure (Go, Python, Swift) ----
