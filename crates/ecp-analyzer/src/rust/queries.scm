@@ -153,19 +153,11 @@
   name: (identifier) @const_item.name) @const_decl
 
 ;; Impl blocks: `impl T` / `impl Trait for T`  (inherent and trait impls).
-;; For `impl Foo<'a>` / `impl<T> Foo<T>` descend into `generic_type` so we
-;; capture just the bare type_identifier — ref-gitnexus stores the type
-;; name without generic parameters, so including `<'a>` here produces
-;; spurious "Impl ref_only" parity drift on every generic impl block.
-;; A path-qualified self type (`impl W for io::Cursor<u8>`) keeps its last
-;; segment, the name its methods take as owner.
+;; The parser reduces the self type with the same helper used by lexical
+;; owners. References and generic paths therefore retain an Impl scope
+;; whose name agrees with the methods and nested functions it contains.
 (impl_item
-  type: [
-    (type_identifier) @impl_item.name
-    (generic_type type: (type_identifier) @impl_item.name)
-    (scoped_type_identifier name: (type_identifier) @impl_item.name)
-    (generic_type type: (scoped_type_identifier name: (type_identifier) @impl_item.name))
-  ]) @impl_block
+  type: (_) @impl_item.name) @impl_block
 
 ;; Anonymous closures passed as call arguments (thread::spawn, iterator adapters,
 ;; callback registration). Without a node here their body's calls are dropped by

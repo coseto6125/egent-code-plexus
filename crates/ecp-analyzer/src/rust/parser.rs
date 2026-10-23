@@ -1,7 +1,7 @@
 use super::receiver_types::{
     build_impl_map, collect_local_types, enclosing_enum_name, enclosing_function_name,
     enclosing_function_path, enclosing_impl_or_trait_context, enclosing_impl_type,
-    enclosing_struct_type, extract_rust_calls_and_path_literals, impl_trait_name,
+    enclosing_struct_type, extract_rust_calls_and_path_literals, impl_self_type, impl_trait_name,
 };
 use super::spec::RustSpec;
 use crate::framework_confidence;
@@ -375,6 +375,16 @@ impl LanguageProvider for RustProvider {
 
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
+                    let impl_name;
+                    let name_str = if k == NodeKind::Impl {
+                        let Some(name) = impl_self_type(&root, source) else {
+                            continue;
+                        };
+                        impl_name = name;
+                        impl_name.as_str()
+                    } else {
+                        name_str
+                    };
                     if matches!(k, NodeKind::Function | NodeKind::Method) {
                         fn_spans.push((name_str.to_string(), root.start_byte()..root.end_byte()));
                     }

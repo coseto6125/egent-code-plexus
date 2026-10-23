@@ -62,7 +62,7 @@ pub fn build_impl_map(root: Node<'_>, source: &[u8]) -> ImplMap {
 /// - `impl<P> Trait for Pin<P>`, `impl Trait for io::Cursor<u8>`,
 ///   `impl<'a> Trait for &'a mut Dog` → "Pin", "Cursor", "Dog": the last
 ///   path segment without generic arguments, as `owner_key` reduces owners.
-fn impl_self_type(impl_node: &Node<'_>, source: &[u8]) -> Option<String> {
+pub(super) fn impl_self_type(impl_node: &Node<'_>, source: &[u8]) -> Option<String> {
     // `type` field: the concrete type being implemented (present for both
     // inherent impls and trait impls).
     let ty_node = impl_node.child_by_field_name("type")?;
