@@ -424,6 +424,7 @@ fn go_callee_name(
 ) -> Option<String> {
     let function = call.child_by_field_name("function")?;
     match function.kind() {
+        "func_literal" => None,
         "identifier" => node_text(function, source),
         "selector_expression" => {
             // selector_expression: operand . field

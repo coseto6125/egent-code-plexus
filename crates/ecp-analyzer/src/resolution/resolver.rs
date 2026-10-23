@@ -700,11 +700,23 @@ impl<'a> Resolver<'a> {
         {
             return self.import_scoped(source_file, site.name(), import, node_id);
         }
+        let declared_python_attribute = matches!(site, CallSite::FromReceiver { receiver, .. }
+        if language == Language::Python
+            && receiver.contains('/')
+            && reexport::python_from_import_declared_attribute(
+                &IndexFacts(self),
+                &normalize_source_path(source_file),
+                receiver,
+                raw_imports.iter().map(ImportRef::from),
+            ));
         let type_member = self.type_receiver(source_file, language, site, raw_imports);
         // A Swift receiver that names no type is a value the parser cannot
         // see (a global, an inherited property): an untyped member call.
         let site = match (site, &type_member) {
             (CallSite::FromReceiver { member, .. }, None) if language == Language::Swift => {
+                CallSite::UntypedMember(member)
+            }
+            (CallSite::FromReceiver { member, .. }, None) if declared_python_attribute => {
                 CallSite::UntypedMember(member)
             }
             _ => site,
@@ -933,6 +945,18 @@ impl<'a> Resolver<'a> {
             self.python_submodule_member(source_file, language, site, raw_imports)
         {
             return self.import_scoped(source_file, site.name(), import, node_id);
+        }
+        if matches!(site, CallSite::FromReceiver { receiver, .. }
+        if language == Language::Python
+            && receiver.contains('/')
+            && reexport::python_from_import_declared_attribute(
+                &IndexFacts(self),
+                &normalize_source_path(source_file),
+                receiver,
+                raw_imports.iter().map(ImportRef::from),
+            ))
+        {
+            return Vec::new();
         }
         let resolve = |name: &str, target, bind: bool| {
             self.resolve_import_tiers(

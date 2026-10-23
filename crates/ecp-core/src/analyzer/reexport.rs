@@ -802,6 +802,28 @@ pub fn python_submodule_member<'i, F: ModuleFacts + ?Sized>(
         })
 }
 
+/// Whether a dotted receiver below a `from` import starts with an attribute
+/// declared by the imported package. Such an attribute is a value, not an
+/// unresolved submodule path.
+pub fn python_from_import_declared_attribute<'i, F: ModuleFacts + ?Sized>(
+    facts: &F,
+    importer: &str,
+    receiver: &str,
+    imports: impl IntoIterator<Item = ImportRef<'i>>,
+) -> bool {
+    let Some(root) = receiver.split('/').next() else {
+        return false;
+    };
+    imports.into_iter().any(|import| {
+        import.imported_name != "*"
+            && import.local_name() == root
+            && matches!(
+                facts.python_module(importer, import.source),
+                PyModule::Unique(module) if facts.declares(module.as_ref(), import.imported_name)
+            )
+    })
+}
+
 /// `from k import K; K.st()`: whether a from-import binds `receiver` to a
 /// type its module file declares, so the call names `K.st`. An object, a
 /// name the module only re-imports, or a library name keeps the bare member.

@@ -619,6 +619,18 @@ impl OverlayView {
                                     {
                                         CallSite::UntypedMember(member)
                                     }
+                                    (CallSite::FromReceiver { receiver, member }, None)
+                                        if caller.language == Language::Python
+                                            && receiver.contains('/')
+                                            && reexport::python_from_import_declared_attribute(
+                                                &facts,
+                                                &file.rel_path,
+                                                receiver,
+                                                file.imports.iter().map(ImportRef::from),
+                                            ) =>
+                                    {
+                                        CallSite::UntypedMember(member)
+                                    }
                                     _ => parsed,
                                 };
                                 let untyped = matches!(site, CallSite::UntypedMember(_));

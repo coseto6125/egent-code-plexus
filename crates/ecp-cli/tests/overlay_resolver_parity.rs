@@ -1173,6 +1173,25 @@ fn test_overlay_python_same_name_wrapper_matches_reindex() {
 
 // Was: the named import fell through to the repo's only `helper` globally.
 #[test]
+fn test_overlay_python_dotted_object_attribute_does_not_bind_same_file_function() {
+    let source = "from app import settings\n\ndef commit():\n    pass\n\ndef caller():\n    return settings.db.commit()\n";
+    let before = "from app import settings\n\ndef commit():\n    pass\n\ndef caller():\n    pass\n";
+    let files = [
+        ("app/__init__.py", "settings = object()\n"),
+        ("main.py", before),
+    ];
+    for dirty in [
+        vec![("main.py", source)],
+        vec![
+            ("main.py", source),
+            ("app/__init__.py", "settings = object()\n"),
+        ],
+    ] {
+        check_parity_from("caller", &py(), &files, &dirty, &[], &[]);
+    }
+}
+
+#[test]
 fn test_overlay_python_from_external_import_matches_reindex() {
     parity(
         &py(),
