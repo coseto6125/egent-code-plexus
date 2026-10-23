@@ -539,7 +539,12 @@ pub fn owned_member<F: TypeFacts + ?Sized>(
     let Some(ty_file) = facts.file_of(ty) else {
         return MemberLookup::Miss;
     };
-    let declares_owner = |file: &str| facts.count_in_file(file, ty_name, ResolveTarget::Qualifier);
+    let owner_target = if FileMeta::from_path(ty_file).language == Language::Go {
+        ResolveTarget::Type
+    } else {
+        ResolveTarget::Qualifier
+    };
+    let declares_owner = |file: &str| facts.count_in_file(file, ty_name, owner_target);
     let in_file = facts.owned_in_file(ty_file, member, ty_name, target);
     if let Some(&first) = in_file.first() {
         // Several hits are overloads of the one type, unless the file
@@ -590,8 +595,13 @@ pub fn type_unique_in_scope<F: TypeFacts + ?Sized>(
     let root = facts.crate_root(ty_file);
     let dir = Path::new(ty_file).parent();
     let same_package_only = meta.language == Language::Go;
+    let owner_target = if same_package_only {
+        ResolveTarget::Type
+    } else {
+        ResolveTarget::Qualifier
+    };
     facts
-        .global_candidates(ty_name, ResolveTarget::Qualifier, meta)
+        .global_candidates(ty_name, owner_target, meta)
         .into_iter()
         .filter(|&id| {
             facts.file_of(id).is_some_and(|f| {

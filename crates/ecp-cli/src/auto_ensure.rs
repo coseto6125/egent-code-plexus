@@ -1592,12 +1592,17 @@ mod fingerprint_drift_tests {
         const CHILD_ENV: &str = "ECP_AUTO_ENSURE_V4_REFRESH_CHILD";
         const TEST_NAME: &str = "auto_ensure::fingerprint_drift_tests::test_retain_stale_fragments_native_v4_refresh_restores_call_edge";
         if std::env::var_os(CHILD_ENV).is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", TEST_NAME, "--nocapture"])
-                .env(CHILD_ENV, "1")
-                .status()
-                .unwrap();
-            assert!(status.success(), "isolated test process failed: {status}");
+            for fingerprint in ["current", "released"] {
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", TEST_NAME, "--nocapture"])
+                    .env(CHILD_ENV, fingerprint)
+                    .status()
+                    .unwrap();
+                assert!(
+                    status.success(),
+                    "{fingerprint}: isolated test process failed: {status}"
+                );
+            }
             return;
         }
 
@@ -1610,6 +1615,24 @@ mod fingerprint_drift_tests {
         assert_eq!(gate.rel_paths, ["app.py"]);
         let worktree = tmp.path().join("repo");
         let session_dir = resolve_session_overlay_dir(&worktree).unwrap();
+        let gate = if std::env::var(CHILD_ENV).as_deref() == Ok("released") {
+            let old =
+                ecp_core::session::DirtyFiles::read(&fixture.join("dirty_files.json")).unwrap();
+            let path = session_dir.join("dirty_files.json");
+            let mut dirty = ecp_core::session::DirtyFiles::read(&path).unwrap();
+            dirty.builder_fingerprint = old.builder_fingerprint;
+            assert!(!dirty.from_current_builder());
+            assert_eq!(
+                dirty.entries["app.py"].mtime_ns,
+                mtime_ns_of(&worktree.join("app.py")).unwrap()
+            );
+            ecp_core::session::DirtyFiles::write_atomic(&path, &dirty).unwrap();
+            let gate = retain_stale_fragments(&worktree, vec!["app.py".into()]);
+            assert_eq!(gate.rel_paths, ["app.py"]);
+            gate
+        } else {
+            gate
+        };
         let provider = PythonProvider::new().unwrap();
         let local = provider
             .parse_file(Path::new("app.py"), source.as_bytes())
@@ -1622,6 +1645,7 @@ mod fingerprint_drift_tests {
         let manifest =
             ecp_core::session::DirtyFiles::read(&session_dir.join("dirty_files.json")).unwrap();
         assert_eq!(manifest.entries["app.py"].format, FRAGMENT_FORMAT_V5);
+        assert!(manifest.from_current_builder());
         assert!(retain_stale_fragments(&worktree, vec!["app.py".into()])
             .rel_paths
             .is_empty());

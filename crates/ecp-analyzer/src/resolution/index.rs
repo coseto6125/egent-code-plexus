@@ -2,7 +2,9 @@ use ecp_core::analyzer::import_binding::{
     fqn_language, owner_path_agrees, DeclaredType, MemberOwner,
 };
 use ecp_core::analyzer::reexport::{is_es_module, pick_call, ExportAliasTable};
-use ecp_core::analyzer::same_file_pick::{self, ImplMember as PickImplMember, PickFacts};
+use ecp_core::analyzer::same_file_pick::{
+    self, rust_lexical_scopes, ImplMember as PickImplMember, PickFacts,
+};
 use ecp_core::analyzer::type_ladder::{return_type_key, TypeFacts};
 use ecp_core::analyzer::types::{owner_key, RawExportAlias};
 use ecp_core::file_category::pick_global;
@@ -194,6 +196,11 @@ pub struct SymbolTable {
     /// Parser owner text only where owner-key normalization would lose a
     /// Rust lexical ancestor such as `B::new`.
     raw_owner_overrides: FxHashMap<u32, Box<str>>,
+
+    /// Complete Rust callable lexical paths, derived from parser spans.  The
+    /// graph keeps the compact public type owner; only Rust bare-call lookup
+    /// needs this path to distinguish nested declarations.
+    rust_lexical_scopes: FxHashMap<u32, Box<str>>,
 
     /// Owner key → interned id. One entry per distinct owner name, so the
     /// per-node cost is the 4-byte `node_owner` slot.
@@ -722,6 +729,21 @@ impl SymbolTable {
         let trait_owner = self.intern_owner(implemented);
         self.impl_members
             .insert(member, ImplMember { block, trait_owner });
+    }
+
+    /// Record the transient full lexical scope of every Rust callable in one
+    /// pass over a parsed file's symbols.
+    pub fn note_rust_lexical_scopes(
+        &mut self,
+        nodes: &[ecp_core::analyzer::types::RawNode],
+        start: u32,
+    ) {
+        for (offset, scope) in rust_lexical_scopes(nodes).into_iter().enumerate() {
+            if let Some(scope) = scope {
+                self.rust_lexical_scopes
+                    .insert(start + offset as u32, scope);
+            }
+        }
     }
 
     /// Whether `id` has no owner and no `impl` block either.
@@ -1519,6 +1541,10 @@ impl PickFacts for SymbolTable {
             .get(&id)
             .map(Box::as_ref)
             .or_else(|| self.owner(id))
+    }
+
+    fn rust_lexical_scope(&self, id: u32) -> Option<&str> {
+        self.rust_lexical_scopes.get(&id).map(Box::as_ref)
     }
 
     fn impl_member(&self, id: u32) -> Option<PickImplMember<'_>> {

@@ -383,6 +383,51 @@ pub fn call_in_file<F: ModuleFacts + ?Sized>(
     pick_call(facts.decls_in_file(file, name).into_iter(), target)
 }
 
+/// A unique type declared by an unaliased C++ include or Dart file import.
+/// Only resolved import files contribute; project-wide namesakes do not.
+pub fn imported_file_type<'i, F: ModuleFacts + ?Sized>(
+    facts: &F,
+    importer: &str,
+    language: Language,
+    name: &str,
+    imports: impl IntoIterator<Item = ImportRef<'i>>,
+) -> Option<u32> {
+    let mut found = None;
+    let mut ambiguous = false;
+    for import in imports {
+        if import.alias.is_some() {
+            continue;
+        }
+        let relative;
+        let source = if language == Language::Dart {
+            if import.source.contains(':') || import.source.starts_with('/') {
+                continue;
+            }
+            relative = format!("./{}", import.source);
+            if import.source.starts_with('.') {
+                import.source
+            } else {
+                &relative
+            }
+        } else {
+            import.source
+        };
+        facts.for_each_candidate(importer, source, &mut |file| {
+            for (id, kind) in facts.decls_in_file(file, name) {
+                if kind.is_type() {
+                    ambiguous |= found.is_some_and(|previous| previous != id);
+                    found = Some(id);
+                }
+            }
+            !ambiguous
+        });
+        if ambiguous {
+            return None;
+        }
+    }
+    found
+}
+
 /// The top-level callable a Go package selector reaches. A Go import's path
 /// and its declared package name are independent, so an unaliased selector
 /// needs both facts. An explicit alias replaces the package spelling, but

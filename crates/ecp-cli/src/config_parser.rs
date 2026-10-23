@@ -54,6 +54,7 @@ pub fn parse_configs(repo_path: &Path) -> PathAliases {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 2 {
                     let mod_name = parts[1];
+                    aliases.add(mod_name, vec!["./".to_string()]);
                     let pattern = format!("{}/*", mod_name);
                     aliases.add(&pattern, vec!["./*".to_string()]);
                 }

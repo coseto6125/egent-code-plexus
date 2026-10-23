@@ -117,8 +117,8 @@ use crate::analyzer::rust_paths::{
     rust_module_path_base, rust_path_prefix_agrees_with_import, rust_type_path_prefix,
 };
 use crate::analyzer::same_file_pick::{
-    is_free, member_call_admits, prefer_owned, rust_impl_members, type_receiver_is_closed,
-    ImplMember, ImplNode, PickFacts, PickScope,
+    is_free, member_call_admits, prefer_owned, rust_impl_members, rust_lexical_scopes,
+    type_receiver_is_closed, ImplMember, ImplNode, PickFacts, PickScope,
 };
 use crate::analyzer::type_ladder::{
     self, TypeCandidates, TypeFacts, TypeMember as LadderMember, MAX_HERITAGE_DEPTH,
@@ -1666,6 +1666,9 @@ struct OverlayFacts<'a> {
     /// Virtual idx → the Rust `impl` block that declares it, by the index's
     /// rule ([`rust_impl_members`]).
     dirty_impl_members: FxHashMap<u32, ImplMember<'a>>,
+    /// Virtual Rust callable index → its complete lexical scope.  This
+    /// mirrors the index-only derived map and is never persisted.
+    dirty_rust_lexical_scopes: FxHashMap<u32, Box<str>>,
     /// Per dirty file: the owner keys of its namespaces and modules that
     /// name no type of the file (the index's `build_owner_kinds`).
     dirty_namespaces: Vec<Vec<&'a str>>,
@@ -1707,6 +1710,7 @@ impl<'a> OverlayFacts<'a> {
         let mut declared: FxHashMap<(usize, &'a str), Vec<u32>> = FxHashMap::default();
         let mut dirty_by_name: FxHashMap<&'a str, Vec<u32>> = FxHashMap::default();
         let mut dirty_impl_members: FxHashMap<u32, ImplMember<'a>> = FxHashMap::default();
+        let mut dirty_rust_lexical_scopes: FxHashMap<u32, Box<str>> = FxHashMap::default();
         let mut dirty_namespaces: Vec<Vec<&'a str>> = Vec::with_capacity(files.len());
         let mut exported = Vec::with_capacity(nodes.len());
         let mut es_modules = Vec::with_capacity(files.len());
@@ -1748,6 +1752,11 @@ impl<'a> OverlayFacts<'a> {
                         },
                     );
                 });
+                for (offset, scope) in rust_lexical_scopes(&file.symbols).into_iter().enumerate() {
+                    if let Some(scope) = scope {
+                        dirty_rust_lexical_scopes.insert(start + offset as u32, scope);
+                    }
+                }
             }
             dirty_namespaces.push(namespace_owners(&file.symbols));
             let aliases = ExportAliasTable::build(alias_pairs(file));
@@ -1806,6 +1815,7 @@ impl<'a> OverlayFacts<'a> {
             later_overloads,
             dirty_by_name,
             dirty_impl_members,
+            dirty_rust_lexical_scopes,
             dirty_namespaces,
             base_impls: OnceCell::new(),
             base_namespaces: OnceCell::new(),
@@ -3078,6 +3088,23 @@ impl<'a> OverlayFacts<'a> {
                 Language::Python | Language::TypeScript | Language::JavaScript => {
                     self.type_candidates(callee_file, ty, &imports)
                 }
+                Language::Rust | Language::Php
+                    if imports.iter().any(|import| {
+                        import.alias.as_deref().unwrap_or(&import.imported_name) == ty
+                    }) =>
+                {
+                    self.type_candidates(callee_file, ty, &imports)
+                }
+                Language::Cpp | Language::Dart if !imports.is_empty() => {
+                    let id = reexport::imported_file_type(
+                        self,
+                        callee_file,
+                        language,
+                        ty,
+                        imports.iter().map(ImportRef::from),
+                    )?;
+                    TypeCandidates::Unique(id, ty)
+                }
                 _ if self.declares_type_beside(callee_file, ty) => {
                     self.type_candidates(callee_file, ty, &[])
                 }
@@ -3179,6 +3206,12 @@ impl PickFacts for OverlayFacts<'_> {
                 (!owner.is_empty()).then_some(owner)
             }
         }
+    }
+
+    fn rust_lexical_scope(&self, id: u32) -> Option<&str> {
+        (id >= self.base_len())
+            .then(|| self.dirty_rust_lexical_scopes.get(&id).map(Box::as_ref))
+            .flatten()
     }
 
     fn impl_member(&self, id: u32) -> Option<ImplMember<'_>> {

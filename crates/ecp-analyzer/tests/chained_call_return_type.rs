@@ -1074,6 +1074,47 @@ fn test_resolve_call_cpp_included_cross_directory_return_type_binds_member() {
     assert_binds_foo(&graph, "run", "bar");
 }
 
+#[test]
+fn test_resolve_call_dart_imported_return_type_rejects_unavailable_type() {
+    for import in [
+        "import 'entity/foo.dart' as entity;",
+        "import 'missing/foo.dart';",
+        "import 'package:external/foo.dart';",
+        "import 'entity/foo.dart'; import 'other/foo.dart';",
+    ] {
+        let source = format!("{import} Foo make() => throw 0; void run() {{ make().bar(); }}");
+        let graph = single(
+            &DartProvider::new().unwrap(),
+            &[
+                ("lib/config.dart", &source),
+                ("lib/entity/foo.dart", "class Foo { void bar() {} }"),
+                ("lib/other/foo.dart", "class Foo { void bar() {} }"),
+            ],
+        );
+        assert!(owners(&graph, "run", "bar").is_empty(), "{import}");
+    }
+}
+
+#[test]
+fn test_resolve_call_cpp_imported_return_type_rejects_unavailable_type() {
+    for include in [
+        "#include \"../missing/foo.h\"",
+        "#include \"../include/foo.h\"\n#include \"../other/foo.h\"",
+    ] {
+        let source =
+            format!("{include}\nFoo* make() {{ return nullptr; }} void run() {{ make()->bar(); }}");
+        let graph = single(
+            &CppProvider::new().unwrap(),
+            &[
+                ("src/config.cpp", &source),
+                ("include/foo.h", "class Foo { public: void bar() {} };"),
+                ("other/foo.h", "class Foo { public: void bar() {} };"),
+            ],
+        );
+        assert!(owners(&graph, "run", "bar").is_empty(), "{include}");
+    }
+}
+
 /// One file: the GraphBuilder here runs with no module tree.
 fn rust_graph() -> ZeroCopyGraph {
     single(

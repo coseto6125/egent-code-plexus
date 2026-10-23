@@ -348,7 +348,7 @@ impl LanguageProvider for RustProvider {
                                 span,
                                 calls: Vec::new(),
                                 field_reads: Vec::new(),
-                                owner_class: None,
+                                owner_class: enclosing_function_path(cap.node, source),
                                 content_hash: ecp_core::uid::xxh3_64_bytes(
                                     &source[cap.node.start_byte()..cap.node.end_byte()],
                                 ),

@@ -1263,6 +1263,7 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
         }
         if file_meta.language == Language::Rust {
             note_rust_impl_members(&mut symbol_table, &local_graph.nodes, graph_start);
+            symbol_table.note_rust_lexical_scopes(&local_graph.nodes, graph_start);
         }
 
         // NOTE: documents (markdown/yaml section/doc nodes) are parsed into

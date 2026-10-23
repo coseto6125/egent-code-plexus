@@ -68,6 +68,12 @@ pub trait PickFacts {
     fn raw_owner(&self, id: u32) -> Option<&str> {
         self.owner(id)
     }
+    /// The complete lexical path of a Rust callable, derived from the fresh
+    /// file symbols.  This stays separate from [`Self::owner`] because Rust
+    /// method ownership intentionally stores only the self type.
+    fn rust_lexical_scope(&self, _id: u32) -> Option<&str> {
+        None
+    }
     /// The `impl` block that declares the Rust callable `id`.
     fn impl_member(&self, id: u32) -> Option<ImplMember<'_>>;
     /// Whether the owner key `owner` names a namespace or module that
@@ -94,6 +100,9 @@ pub trait PickFacts {
 /// lookup. Trait implementations retain their public self-type owner, while
 /// nested declarations also need the trait name to stay distinct.
 pub fn rust_lexical_owner<F: PickFacts + ?Sized>(facts: &F, id: u32, name: &str) -> String {
+    if let Some(scope) = facts.rust_lexical_scope(id) {
+        return scope.to_string();
+    }
     let owner = facts.raw_owner(id);
     match facts.impl_member(id).and_then(|member| member.trait_owner) {
         Some(trait_owner) => owner.map_or_else(
@@ -523,6 +532,88 @@ pub fn hierarchy_root<'f, F: PickFacts + ?Sized>(
 pub trait ImplNode: HeritageNode {
     fn name(&self) -> &str;
     fn owner_class(&self) -> Option<&str>;
+}
+
+/// Derive the complete lexical path of each Rust callable in one source-order
+/// containment pass.  The path is transient index state: public method owners
+/// and persisted graph data retain their existing compact representation.
+///
+/// Rust's parser gives a nested function its enclosing path as raw owner text.
+/// Call resolution needs the matching path for a method caller, even though a
+/// method's public owner remains only its self type.  Trait implementations
+/// therefore use `Trait::Type`, while an outer local function remains a prefix.
+pub fn rust_lexical_scopes<N: ImplNode>(nodes: &[N]) -> Vec<Option<Box<str>>> {
+    fn contains(outer: (u32, u32, u32, u32), inner: (u32, u32, u32, u32)) -> bool {
+        (outer.0, outer.1) <= (inner.0, inner.1) && (inner.2, inner.3) <= (outer.2, outer.3)
+    }
+
+    fn is_scope(kind: NodeKind) -> bool {
+        matches!(
+            kind,
+            NodeKind::Module
+                | NodeKind::Trait
+                | NodeKind::Impl
+                | NodeKind::Function
+                | NodeKind::Method
+                | NodeKind::Constructor
+        )
+    }
+
+    fn is_callable(kind: NodeKind) -> bool {
+        matches!(
+            kind,
+            NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+        )
+    }
+
+    let mut order: Vec<usize> = (0..nodes.len())
+        .filter(|&idx| is_scope(nodes[idx].kind()))
+        .collect();
+    order.sort_unstable_by(|&left, &right| {
+        let left_span = nodes[left].span();
+        let right_span = nodes[right].span();
+        (left_span.0, left_span.1)
+            .cmp(&(right_span.0, right_span.1))
+            .then_with(|| (right_span.2, right_span.3).cmp(&(left_span.2, left_span.3)))
+            .then_with(|| left.cmp(&right))
+    });
+
+    let mut scopes = vec![None; nodes.len()];
+    let mut stack: Vec<usize> = Vec::new();
+    for idx in order {
+        while stack
+            .last()
+            .is_some_and(|&outer| !contains(nodes[outer].span(), nodes[idx].span()))
+        {
+            stack.pop();
+        }
+        let parent = stack.last().copied();
+        let parent_scope = parent.and_then(|parent| scopes[parent].as_deref());
+        let scope = match nodes[idx].kind() {
+            NodeKind::Module | NodeKind::Trait => parent_scope
+                .map(|parent| format!("{parent}::{}", nodes[idx].name()))
+                .unwrap_or_else(|| nodes[idx].name().to_string()),
+            NodeKind::Impl => {
+                let owner = nodes[idx]
+                    .owner_class()
+                    .filter(|owner| !owner.is_empty())
+                    .map(|owner| format!("{owner}::{}", nodes[idx].name()))
+                    .unwrap_or_else(|| nodes[idx].name().to_string());
+                parent
+                    .filter(|&parent| is_callable(nodes[parent].kind()))
+                    .and_then(|parent| scopes[parent].as_deref())
+                    .map(|parent| format!("{parent}::{owner}"))
+                    .unwrap_or(owner)
+            }
+            NodeKind::Function | NodeKind::Method | NodeKind::Constructor => parent_scope
+                .map(|parent| format!("{parent}::{}", nodes[idx].name()))
+                .unwrap_or_else(|| nodes[idx].name().to_string()),
+            _ => unreachable!("scope filter admits only known scope kinds"),
+        };
+        scopes[idx] = Some(scope.into_boxed_str());
+        stack.push(idx);
+    }
+    scopes
 }
 
 impl ImplNode for RawNode {

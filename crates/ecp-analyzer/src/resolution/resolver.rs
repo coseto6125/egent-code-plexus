@@ -889,6 +889,23 @@ impl<'a> Resolver<'a> {
                 Language::Python | Language::TypeScript | Language::JavaScript => {
                     self.type_candidates(source, callee_file, ty, imports)
                 }
+                Language::Rust | Language::Php
+                    if imports.iter().any(|import| {
+                        import.alias.as_deref().unwrap_or(&import.imported_name) == ty
+                    }) =>
+                {
+                    self.type_candidates(source, callee_file, ty, imports)
+                }
+                Language::Cpp | Language::Dart if !imports.is_empty() => {
+                    let id = reexport::imported_file_type(
+                        &IndexFacts(self),
+                        callee_file,
+                        language,
+                        ty,
+                        imports.iter().map(ImportRef::from),
+                    )?;
+                    TypeCandidates::Unique(id, ty)
+                }
                 _ if st.declares_type_beside(callee_file, ty) => {
                     self.type_candidates(source, callee_file, ty, &[])
                 }

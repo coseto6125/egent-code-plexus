@@ -477,6 +477,39 @@ fn test_overlay_rust_nested_helper_in_another_scope_is_not_global() {
     );
 }
 
+#[test]
+fn test_overlay_rust_trait_and_local_impl_nested_helpers_match_reindex() {
+    let provider = RustProvider::new().unwrap();
+    let trait_impl =
+        "struct A; impl std::fmt::Display for A { fn fmt(&self) { fn pad() {} pad(); } }";
+    parity_from(
+        "fmt",
+        &provider,
+        &[("src/lib.rs", trait_impl)],
+        &[("src/lib.rs", &format!("\n{trait_impl}"))],
+        &[(
+            "src/lib.rs".into(),
+            "pad".into(),
+            "std::fmt::Display::A::fmt".into(),
+            100,
+        )],
+    );
+
+    let local_impl = "fn helper() {} fn outer() { struct S; impl S { fn run() { fn helper() { let _ = 1; } helper(); } } }";
+    parity_from(
+        "run",
+        &provider,
+        &[("src/lib.rs", local_impl)],
+        &[("src/lib.rs", &format!("\n{local_impl}"))],
+        &[(
+            "src/lib.rs".into(),
+            "helper".into(),
+            "outer::S::run".into(),
+            100,
+        )],
+    );
+}
+
 /// A full reindex of `files` with `edits` applied, written under `root` so
 /// a Rust fixture gets its module tree.
 fn reindex(
@@ -592,6 +625,34 @@ fn check_parity_from(
         actual, overlay_expected,
         "merged overlay Calls must equal the expected reindex targets: {dirty:?}"
     );
+}
+
+#[test]
+fn test_overlay_chained_imported_cross_directory_types_match_reindex() {
+    let rust = RustProvider::new().unwrap();
+    let php = PhpProvider::new().unwrap();
+    let dart = DartProvider::new().unwrap();
+    let cpp = CppProvider::new().unwrap();
+    let cases: &[(&dyn LanguageProvider, &str, &str, &str, &str)] = &[
+        (&rust, "src/config.rs", "use crate::types::Foo; fn make() -> Foo { todo!() } fn run() { make().bar(); }", "src/types/mod.rs", "pub struct Foo; impl Foo { pub fn bar(&self) {} }"),
+        (&php, "src/config.php", "<?php use App\\Entity\\Foo; function make(): Foo { return new Foo(); } function run() { make()->bar(); }", "src/Entity/Foo.php", "<?php namespace App\\Entity; class Foo { public function bar() {} }"),
+        (&dart, "lib/config.dart", "import 'entity/foo.dart'; Foo make() => Foo(); void run() { make().bar(); }", "lib/entity/foo.dart", "class Foo { void bar() {} }"),
+        (&cpp, "src/config.cpp", "#include \"../include/foo.h\"\nFoo* make() { return nullptr; } void run() { make()->bar(); }", "include/foo.h", "class Foo { public: void bar() {} };"),
+    ];
+    for &(provider, path, source, type_path, type_source) in cases {
+        let files = [(path, source), (type_path, type_source)];
+        let mut expected = vec![
+            (path.into(), "make".into(), "".into(), 100),
+            (type_path.into(), "bar".into(), "Foo".into(), 85),
+        ];
+        expected.sort();
+        for dirty in [
+            vec![(path, source)],
+            vec![(path, source), (type_path, type_source)],
+        ] {
+            check_parity_from("run", provider, &files, &dirty, &expected, &expected);
+        }
+    }
 }
 
 #[test]
@@ -3088,5 +3149,129 @@ fn test_overlay_swift_chained_member_dirty_imported_factory_matches_reindex() {
         ],
         "bar",
         "Other",
+    );
+}
+
+fn build_in_memory(provider: &dyn LanguageProvider, files: &[(String, String)]) -> ZeroCopyGraph {
+    let mut builder = GraphBuilder::new();
+    for (path, source) in files {
+        builder.add_graph(
+            provider
+                .parse_file(Path::new(path), source.as_bytes())
+                .unwrap(),
+        );
+    }
+    builder.build()
+}
+
+#[test]
+#[ignore = "manual release-mode Go overlay directory lookup benchmark"]
+fn test_overlay_go_large_imported_package_lookup_reports_timing() {
+    const PACKAGES: usize = 15;
+    const FILES_PER_PACKAGE: usize = 1_000;
+    const SELECTORS: usize = 200;
+
+    let provider = GoProvider::new().unwrap();
+    let mut base_files = Vec::with_capacity(PACKAGES * FILES_PER_PACKAGE + 1);
+    for package in 0..PACKAGES {
+        let mut api = format!("package p{package}\n");
+        for selector in (package..SELECTORS).step_by(PACKAGES) {
+            api.push_str(&format!("func Fn{selector}() {{}}\n"));
+        }
+        base_files.push((format!("pkg/{package}/api.go"), api));
+        for file in 1..FILES_PER_PACKAGE {
+            base_files.push((
+                format!("pkg/{package}/filler_{file}.go"),
+                format!("package p{package}\nvar Filler{file} = {file}\n"),
+            ));
+        }
+    }
+
+    let imports = (0..PACKAGES)
+        .map(|package| format!("p{package} \"pkg/{package}\""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let calls = (0..SELECTORS)
+        .map(|selector| format!("p{}.Fn{}()", selector % PACKAGES, selector))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let dirty_source =
+        format!("package main\nimport (\n{imports}\n)\nfunc run() {{\n{calls}\n}}\n");
+    base_files.push(("app/main.go".into(), "package main\nfunc run() {}\n".into()));
+
+    // Build and parse are deliberately outside the timed overlay stage.
+    let base = build_in_memory(&provider, &base_files);
+    let mut full_files = base_files.clone();
+    full_files
+        .iter_mut()
+        .find(|(path, _)| path == "app/main.go")
+        .expect("caller file")
+        .1 = dirty_source.clone();
+    let full = build_in_memory(&provider, &full_files);
+    let full_targets = targets(&full, "run");
+    assert_eq!(
+        full_targets.len(),
+        SELECTORS,
+        "full reindex must retain every distinct selector"
+    );
+    assert!(
+        full_targets.iter().all(|(path, name, owner, confidence)| {
+            path.starts_with("pkg/")
+                && name.starts_with("Fn")
+                && owner.is_empty()
+                && *confidence == 95
+        }),
+        "unexpected full reindex targets: {full_targets:?}"
+    );
+
+    let total = std::time::Instant::now();
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&base).unwrap();
+    let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+
+    // This control measures view construction without a dirty Go caller. It
+    // does not exercise directory lookup and must remain separate from the
+    // dirty-overlay result.
+    let clean_start = std::time::Instant::now();
+    let clean = OverlayView::build(archived, &[]);
+    let clean_seconds = clean_start.elapsed().as_secs_f64();
+    assert!(clean.is_none());
+
+    let dirty = provider
+        .parse_file(Path::new("app/main.go"), dirty_source.as_bytes())
+        .unwrap();
+    let build_start = std::time::Instant::now();
+    let view = OverlayView::build(archived, &[input(dirty)]).unwrap();
+    let overlay_seconds = build_start.elapsed().as_secs_f64();
+    let merged = MergedGraph::new(archived, Some(&view));
+    let mut overlay_targets: Vec<Target> = merged
+        .all_edges()
+        .filter(|edge| {
+            edge.rel_type() == RelType::Calls
+                && merged.node(edge.source).unwrap().name(&merged) == "run"
+        })
+        .map(|edge| {
+            let node = merged.node(edge.target).unwrap();
+            (
+                node.file_path(&merged).unwrap().into(),
+                node.name(&merged).into(),
+                node.owner_class(&merged).unwrap_or_default().into(),
+                (edge.confidence() * 100.0).round() as u32,
+            )
+        })
+        .collect();
+    overlay_targets.sort();
+    overlay_targets.dedup();
+    assert_eq!(overlay_targets.len(), SELECTORS);
+    assert_eq!(
+        overlay_targets, full_targets,
+        "overlay and full reindex Calls differ"
+    );
+
+    println!(
+        "go_overlay_directory_profile files={} packages={} selectors={} clean_seconds={clean_seconds:.6} overlay_seconds={overlay_seconds:.6} total_seconds={:.6}",
+        PACKAGES * FILES_PER_PACKAGE,
+        PACKAGES,
+        SELECTORS,
+        total.elapsed().as_secs_f64(),
     );
 }

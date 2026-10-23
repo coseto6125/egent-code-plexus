@@ -1084,6 +1084,15 @@ impl LanguageProvider for PhpProvider {
         detect_enum_imitation_blind_spots(tree.root_node(), path, is_test_file, &mut blind_spots);
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
+        let anonymous_class_bodies = anonymous_class_body_spans(tree.root_node());
+        for node in nodes.iter_mut().filter(|node| node.kind == NodeKind::Const) {
+            if anonymous_class_bodies
+                .iter()
+                .any(|body| ecp_core::analyzer::types::span_contains(*body, node.span))
+            {
+                node.owner_class = None;
+            }
+        }
         extract_qualified_constant_refs(tree.root_node(), source, &mut nodes);
         // A class constant is its class's member: only `self::STATUS` or
         // `Order::STATUS` reaches it, never a bare `STATUS`. The kinds match
@@ -1092,7 +1101,6 @@ impl LanguageProvider for PhpProvider {
             .iter()
             .any(|n| n.kind == NodeKind::Const && n.owner_class.is_none())
         {
-            let anonymous_class_bodies = anonymous_class_body_spans(tree.root_node());
             let types: Vec<_> = nodes
                 .iter()
                 .filter(|n| {
