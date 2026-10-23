@@ -528,7 +528,7 @@ where
                         {
                             continue;
                         }
-                        let (nested_source, _) = rust_import_parts(*nested);
+                        let (nested_source, _) = rust_import_parts(nested);
                         let mut nested_local = false;
                         facts.for_each_candidate(file, nested_source, &mut |candidate| {
                             if !facts.has_file(candidate) {
