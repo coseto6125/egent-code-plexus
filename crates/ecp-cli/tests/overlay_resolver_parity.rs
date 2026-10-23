@@ -1205,8 +1205,8 @@ fn test_overlay_cpp_quoted_include_preserves_root_candidate() {
             "#include \"foo.h\"\nFoo* make();\nvoid run() { make()->bar(); }",
         )],
         &[
-            ("src/config.cpp".into(), "make".into(), "".into(), 100),
             ("foo.h".into(), "bar".into(), "Foo".into(), 85),
+            ("src/config.cpp".into(), "make".into(), "".into(), 100),
         ],
     );
 }
