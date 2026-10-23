@@ -33,6 +33,26 @@ fn find<'a>(nodes: &'a [RawNode], name: &str, kind: NodeKind) -> &'a RawNode {
         .unwrap_or_else(|| panic!("missing {kind:?} `{name}` in {nodes:#?}"))
 }
 
+#[test]
+fn test_parse_file_import_name_forms_preserve_unique_binding() {
+    let provider = GoProvider::new().expect("GoProvider init");
+    for (binding, alias, imported_name) in [
+        ("", None, "client"),
+        ("local ", Some("local"), "local"),
+        (". ", Some("."), "."),
+        ("_ ", Some("_"), "_"),
+    ] {
+        let source = format!("package app\nimport {binding}\"github.com/ext/client\"\n");
+        let graph = provider
+            .parse_file(Path::new("imports.go"), source.as_bytes())
+            .expect("parse_file");
+        assert_eq!(graph.imports.len(), 1, "{source}");
+        assert_eq!(graph.imports[0].source, "github.com/ext/client");
+        assert_eq!(graph.imports[0].alias.as_deref(), alias);
+        assert_eq!(graph.imports[0].imported_name, imported_name);
+    }
+}
+
 // param_type_* tests removed: formal parameters are no longer emitted as
 // Variable nodes (see `fix(analyzer): drop formal_parameter Variable
 // emission ...`).

@@ -1299,6 +1299,33 @@ fn test_overlay_cpp_quoted_include_preserves_root_candidate() {
 }
 
 #[test]
+fn test_overlay_rust_external_reexport_rejects_adjacent_undeclared_module() {
+    for declarations in ["", "mod inner { mod config {} }"] {
+        let module = format!("{declarations} pub use config::Config;");
+        parity(
+            &RustProvider::new().unwrap(),
+            &[
+                ("src/lib.rs", "pub mod app; pub mod models;"),
+                ("src/models/mod.rs", &module),
+                (
+                    "src/models/config.rs",
+                    "pub struct Config; impl Config { pub fn get(&self) {} }",
+                ),
+                (
+                    "src/app.rs",
+                    "use crate::models::Config; pub fn load() -> Config { Config } pub fn run() {}",
+                ),
+            ],
+            &[(
+                "src/app.rs",
+                "use crate::models::Config; pub fn load() -> Config { Config } pub fn run() { load().get(); }",
+            )],
+            &[("src/app.rs".into(), "load".into(), "".into(), 100)],
+        );
+    }
+}
+
+#[test]
 fn test_overlay_rust_external_pub_use_return_type_rejects_project_namesake() {
     parity(
         &RustProvider::new().unwrap(),

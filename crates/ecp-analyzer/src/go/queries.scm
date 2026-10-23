@@ -90,11 +90,14 @@
 ) @function
 
 ;; Imports
+;; Dot imports put exported dependency names directly in this file's scope.
+;; Preserve the alias so chained return typing retains an unknown result.
 (import_spec
-  name: (package_identifier) @import.alias
+  name: [(package_identifier) (dot) (blank_identifier)] @import.alias
   path: [ (interpreted_string_literal) (raw_string_literal) ] @import.source) @import
 
 (import_spec
+  !name
   path: [ (interpreted_string_literal) (raw_string_literal) ] @import.source) @import
 
 ;; Struct fields — per-name capture so `X, Y int` emits two Property nodes.

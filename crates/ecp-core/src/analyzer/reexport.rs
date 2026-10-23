@@ -205,6 +205,16 @@ pub fn is_ecmascript(language: Language) -> bool {
     matches!(language, Language::TypeScript | Language::JavaScript)
 }
 
+/// A Go dot import makes dependency exports available without a receiver.
+///
+/// The return-type ladder has no declaration-level binding for those names.
+/// Preserve its unknown state rather than selecting a same-named global type.
+pub fn go_dot_import_blocks_unmodeled_type<'a>(
+    imports: impl IntoIterator<Item = ImportRef<'a>>,
+) -> bool {
+    imports.into_iter().any(|import| import.alias == Some("."))
+}
+
 /// The ES-module rule ([`ModuleFacts::is_es_module`]) for `file`, of
 /// `language`: [`export_filter_applies`], and the file exports a
 /// declaration or has an [`ExportAliasTable`].
@@ -344,6 +354,10 @@ pub trait ModuleFacts {
     fn has_module_name(&self, language: Language, name: &str) -> bool;
     /// Whether `file` declares `name`, any kind.
     fn declares(&self, file: &str, name: &str) -> bool;
+    /// Whether `file` declares a module named `name` outside another owner.
+    fn declares_top_level_module(&self, _file: &str, _name: &str) -> bool {
+        false
+    }
     /// `file`'s declarations of `name`, in source order, with their kinds.
     /// Only the first declaration of each uid counts, as in the index.
     fn decls_in_file(&self, file: &str, name: &str) -> Vec<(u32, NodeKind)>;
@@ -529,6 +543,16 @@ where
                             continue;
                         }
                         let (nested_source, nested_name) = rust_import_parts(nested);
+                        let module_head = nested_source.split("::").next().unwrap_or(nested_source);
+                        let local_source;
+                        let nested_source = if !matches!(module_head, "crate" | "self" | "super")
+                            && facts.declares_top_level_module(file, module_head)
+                        {
+                            local_source = format!("self::{nested_source}");
+                            local_source.as_str()
+                        } else {
+                            nested_source
+                        };
                         let nested_declaration = if nested_is_glob {
                             declaration
                         } else {

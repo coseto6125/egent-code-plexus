@@ -2444,6 +2444,12 @@ fn alias_pairs<'f>(
 impl<'a> ModuleFacts for OverlayFacts<'a> {
     type Path = &'a str;
 
+    fn declares_top_level_module(&self, file: &str, name: &str) -> bool {
+        self.decls_in_file(file, name)
+            .into_iter()
+            .any(|(id, kind)| kind == NodeKind::Module && PickFacts::raw_owner(self, id).is_none())
+    }
+
     fn has_file(&self, file: &str) -> bool {
         self.dirty.contains_key(file) || self.graph.file_idx_of(file).is_some()
     }
@@ -3151,6 +3157,13 @@ impl<'a> OverlayFacts<'a> {
                 }
                 _ if self.declares_type_beside(callee_file, ty) => {
                     self.type_candidates(callee_file, ty, &[])
+                }
+                _ if language == Language::Go
+                    && reexport::go_dot_import_blocks_unmodeled_type(
+                        imports.iter().map(ImportRef::from),
+                    ) =>
+                {
+                    return type_ladder::ChainOutcome::Unknown;
                 }
                 _ => match type_ladder::unmodeled_return_type(self, callee_file, ty) {
                     type_ladder::ChainOutcome::Bound(candidates) => candidates,

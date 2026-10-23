@@ -210,6 +210,19 @@ impl ModuleFacts for IndexFacts<'_, '_> {
         self.0.symbol_table.lookup_in_file(file, name).is_some()
     }
 
+    fn declares_top_level_module(&self, file: &str, name: &str) -> bool {
+        self.decls_in_file(file, name)
+            .into_iter()
+            .any(|(id, kind)| {
+                kind == NodeKind::Module
+                    && ecp_core::analyzer::same_file_pick::PickFacts::raw_owner(
+                        self.0.symbol_table,
+                        id,
+                    )
+                    .is_none()
+            })
+    }
+
     fn decls_in_file(&self, file: &str, name: &str) -> Vec<(u32, NodeKind)> {
         self.0.symbol_table.decls_in_file(file, name)
     }
@@ -958,6 +971,13 @@ impl<'a> Resolver<'a> {
                 }
                 _ if st.declares_type_beside(callee_file, ty) => {
                     self.type_candidates(source, callee_file, ty, &[])
+                }
+                _ if language == Language::Go
+                    && reexport::go_dot_import_blocks_unmodeled_type(
+                        imports.iter().map(ImportRef::from),
+                    ) =>
+                {
+                    return type_ladder::ChainOutcome::Unknown;
                 }
                 _ => match type_ladder::unmodeled_return_type(st, callee_file, ty) {
                     type_ladder::ChainOutcome::Bound(candidates) => candidates,

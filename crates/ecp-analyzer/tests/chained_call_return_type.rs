@@ -1276,6 +1276,29 @@ fn test_resolve_call_cpp_quoted_include_preserves_root_candidate() {
 }
 
 #[test]
+fn test_resolve_call_rust_external_reexport_rejects_adjacent_undeclared_module() {
+    for declarations in ["", "mod inner { mod config {} }"] {
+        let module = format!("{declarations} pub use config::Config;");
+        let graph = single(
+            &RustProvider::new().unwrap(),
+            &[
+                ("src/lib.rs", "pub mod app; pub mod models;"),
+                ("src/models/mod.rs", &module),
+                (
+                    "src/models/config.rs",
+                    "pub struct Config; impl Config { pub fn get(&self) {} }",
+                ),
+                (
+                    "src/app.rs",
+                    "use crate::models::Config; pub fn load() -> Config { Config } pub fn run() { load().get(); }",
+                ),
+            ],
+        );
+        assert!(owners(&graph, "run", "get").is_empty(), "{module}");
+    }
+}
+
+#[test]
 fn test_resolve_call_rust_external_pub_use_return_type_rejects_project_namesake() {
     let graph = single(
         &RustProvider::new().unwrap(),
