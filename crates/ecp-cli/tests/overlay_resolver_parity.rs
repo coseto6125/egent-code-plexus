@@ -510,6 +510,24 @@ fn test_overlay_rust_trait_and_local_impl_nested_helpers_match_reindex() {
     );
 }
 
+#[test]
+fn test_overlay_rust_reference_impl_nested_helper_matches_reindex() {
+    let provider = RustProvider::new().unwrap();
+    for self_type in ["&A", "&mut A"] {
+        let source = format!(
+            "fn helper() {{}} struct A; trait T {{ fn go(&self); }} \
+             impl T for {self_type} {{ fn go(&self) {{ fn helper() {{}} helper(); }} }}"
+        );
+        parity_from(
+            "go",
+            &provider,
+            &[("src/lib.rs", &source)],
+            &[("src/lib.rs", &format!("\n{source}"))],
+            &[("src/lib.rs".into(), "helper".into(), "T::A::go".into(), 100)],
+        );
+    }
+}
+
 /// A full reindex of `files` with `edits` applied, written under `root` so
 /// a Rust fixture gets its module tree.
 fn reindex(
@@ -1049,13 +1067,14 @@ fn test_overlay_rust_external_wildcard_return_type_rejects_project_namesake() {
     parity(
         &RustProvider::new().unwrap(),
         &[
-            ("src/lib.rs", "pub mod app; pub mod project;"),
+            ("src/lib.rs", "pub mod app; pub mod models;"),
             (
                 "src/app.rs",
                 "use external::*; fn load() -> Config { todo!() } fn run() {}",
             ),
+            ("src/models.rs", "pub mod config;"),
             (
-                "src/project.rs",
+                "src/models/config.rs",
                 "pub struct Config; impl Config { pub fn get(&self) {} }",
             ),
         ],
@@ -1064,6 +1083,98 @@ fn test_overlay_rust_external_wildcard_return_type_rejects_project_namesake() {
             "use external::*; fn load() -> Config { todo!() } fn run() { load().get(); }",
         )],
         &[],
+    );
+}
+
+#[test]
+fn test_overlay_rust_ambiguous_wildcard_return_type_rejects_members() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "pub mod app; pub mod left; pub mod right;"),
+            (
+                "src/app.rs",
+                "use crate::left::*; use crate::right::*; fn load() -> Config { todo!() } fn run() {}",
+            ),
+            (
+                "src/left.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+            (
+                "src/right.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+        ],
+        &[(
+            "src/app.rs",
+            "use crate::left::*; use crate::right::*; fn load() -> Config { todo!() } fn run() { load().get(); }",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn test_overlay_rust_named_external_import_precedes_local_glob() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "pub mod app; pub mod local;"),
+            (
+                "src/app.rs",
+                "use external::Config; use crate::local::*; fn load() -> Config { todo!() } fn run() {}",
+            ),
+            (
+                "src/local.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+        ],
+        &[(
+            "src/app.rs",
+            "use external::Config; use crate::local::*; fn load() -> Config { todo!() } fn run() { load().get(); }",
+        )],
+        &[],
+    );
+}
+
+#[test]
+fn test_overlay_rust_named_alias_return_type_binds_imported_member() {
+    parity(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "pub mod app; pub mod models;"),
+            (
+                "src/app.rs",
+                "use crate::models::Config as Alias; fn load() -> Alias { todo!() } fn run() {}",
+            ),
+            (
+                "src/models.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+        ],
+        &[(
+            "src/app.rs",
+            "use crate::models::Config as Alias; fn load() -> Alias { todo!() } fn run() { load().get(); }",
+        )],
+        &[("src/models.rs".into(), "get".into(), "Config".into(), 85)],
+    );
+}
+
+#[test]
+fn test_overlay_cpp_quoted_include_preserves_root_candidate() {
+    parity(
+        &CppProvider::new().unwrap(),
+        &[
+            (
+                "src/config.cpp",
+                "#include \"foo.h\"\nFoo* make();\nvoid run() {}",
+            ),
+            ("foo.h", "class Foo { public: void bar(); };"),
+        ],
+        &[(
+            "src/config.cpp",
+            "#include \"foo.h\"\nFoo* make();\nvoid run() { make()->bar(); }",
+        )],
+        &[("foo.h".into(), "bar".into(), "Foo".into(), 85)],
     );
 }
 

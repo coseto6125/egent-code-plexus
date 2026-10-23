@@ -1052,18 +1052,95 @@ fn test_resolve_call_rust_external_wildcard_return_type_rejects_project_namesake
     let graph = single(
         &RustProvider::new().unwrap(),
         &[
-            ("src/lib.rs", "pub mod app; pub mod project;"),
+            ("src/lib.rs", "pub mod app; pub mod models;"),
             (
                 "src/app.rs",
                 "use external::*; fn load() -> Config { todo!() } fn run() { load().get(); }",
             ),
+            ("src/models.rs", "pub mod config;"),
             (
-                "src/project.rs",
+                "src/models/config.rs",
                 "pub struct Config; impl Config { pub fn get(&self) {} }",
             ),
         ],
     );
     assert!(owners(&graph, "run", "get").is_empty());
+}
+
+#[test]
+fn test_resolve_call_rust_ambiguous_wildcard_return_type_rejects_members() {
+    let graph = single(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "pub mod app; pub mod left; pub mod right;"),
+            (
+                "src/app.rs",
+                "use crate::left::*; use crate::right::*; fn load() -> Config { todo!() } fn run() { load().get(); }",
+            ),
+            (
+                "src/left.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+            (
+                "src/right.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+        ],
+    );
+    assert!(owners(&graph, "run", "get").is_empty());
+}
+
+#[test]
+fn test_resolve_call_rust_named_external_import_precedes_local_glob() {
+    let graph = single(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "pub mod app; pub mod local;"),
+            (
+                "src/app.rs",
+                "use external::Config; use crate::local::*; fn load() -> Config { todo!() } fn run() { load().get(); }",
+            ),
+            (
+                "src/local.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+        ],
+    );
+    assert!(owners(&graph, "run", "get").is_empty());
+}
+
+#[test]
+fn test_resolve_call_rust_named_alias_return_type_binds_imported_member() {
+    let graph = single(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "pub mod app; pub mod models;"),
+            (
+                "src/app.rs",
+                "use crate::models::Config as Alias; fn load() -> Alias { todo!() } fn run() { load().get(); }",
+            ),
+            (
+                "src/models.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+        ],
+    );
+    assert_eq!(owners(&graph, "run", "get"), ["Config"]);
+}
+
+#[test]
+fn test_resolve_call_cpp_quoted_include_preserves_root_candidate() {
+    let graph = single(
+        &CppProvider::new().unwrap(),
+        &[
+            (
+                "src/config.cpp",
+                "#include \"foo.h\"\nFoo* make();\nvoid run() { make()->bar(); }",
+            ),
+            ("foo.h", "class Foo { public: void bar(); };"),
+        ],
+    );
+    assert_binds_foo(&graph, "run", "bar");
 }
 
 #[test]
