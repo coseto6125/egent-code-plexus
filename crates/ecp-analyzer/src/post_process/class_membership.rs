@@ -246,11 +246,12 @@ fn emit_pass1_span(
         // Namespace-qualified type identities are not represented by the
         // short-name lookup below. Do not bind an ambiguous type constant.
         if member.kind == NodeKind::Const
-            && owners
-                .iter()
-                .filter(|(name, _, _)| *name == class_name)
-                .count()
-                != 1
+            && (member.owner_class.as_deref() != Some(class_name)
+                || owners
+                    .iter()
+                    .filter(|(name, _, _)| *name == class_name)
+                    .count()
+                    != 1)
         {
             continue;
         }

@@ -1100,7 +1100,7 @@ impl LanguageProvider for PhpProvider {
             owners.extend(
                 anonymous_class_body_spans(tree.root_node())
                     .into_iter()
-                    .map(|span| (format!("<anonymous:{}:{}>", span.0, span.1), span)),
+                    .map(|span| (format!("@anonymous_{}_{}", span.0, span.1), span)),
             );
             for node in nodes.iter_mut().filter(|node| node.kind == NodeKind::Const) {
                 node.owner_class = owners
