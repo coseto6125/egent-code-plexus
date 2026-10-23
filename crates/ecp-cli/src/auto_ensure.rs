@@ -1556,7 +1556,7 @@ mod fingerprint_drift_tests {
         let session_dir = resolve_session_overlay_dir(&worktree).unwrap();
         let path = session_dir.join("dirty_files.json");
         let mut dirty = ecp_core::session::DirtyFiles::read(&path).unwrap();
-        dirty.builder_fingerprint = "v0.16.2+schema19".into();
+        dirty.builder_fingerprint = Some("v0.16.2+schema19".into());
         assert!(!dirty.from_current_builder());
         ecp_core::session::DirtyFiles::write_atomic(&path, &dirty).unwrap();
         assert_eq!(

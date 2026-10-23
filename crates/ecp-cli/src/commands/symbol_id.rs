@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn test_resolve_candidates_rust_nested_module_short_owner_matches_base_and_overlay() {
         use ecp_analyzer::resolution::builder::GraphBuilder;
-        use ecp_analyzer::rust::RustProvider;
+        use ecp_analyzer::rust::parser::RustProvider;
         use ecp_core::analyzer::provider::LanguageProvider;
         use std::path::Path;
 
