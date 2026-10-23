@@ -386,7 +386,7 @@ fn publish_dir_for(base_commit_dir: &Path) -> PathBuf {
 }
 
 /// Whether any published dir of this SHA, under any prefix, already exists.
-/// An unreadable parent counts as yes: a fresh `.gen` name is always safe.
+/// An unreadable parent or entry counts as yes: a fresh `.gen` name is always safe.
 fn has_same_sha_dir(base_commit_dir: &Path, name: &str) -> bool {
     if base_commit_dir.exists() {
         return true;
@@ -397,12 +397,13 @@ fn has_same_sha_dir(base_commit_dir: &Path, name: &str) -> bool {
     let Some(Ok(entries)) = base_commit_dir.parent().map(fs::read_dir) else {
         return base_commit_dir.parent().is_some_and(Path::exists);
     };
-    entries.flatten().any(|entry| {
-        entry
+    entries.into_iter().any(|entry| match entry {
+        Err(_) => true,
+        Ok(entry) => entry
             .file_name()
             .to_str()
             .and_then(|n| CommitDirName::parse(n).ok())
-            .is_some_and(|dir| dir.sha == base.sha)
+            .is_some_and(|dir| dir.sha == base.sha),
     })
 }
 
@@ -905,6 +906,11 @@ mod tests {
         let parent = tmp.path().join("commits");
         fs::create_dir_all(&parent).unwrap();
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o300)).unwrap();
+        // Root ignores mode bits, so the parent stays readable and the case is unreachable.
+        if fs::read_dir(&parent).is_ok() {
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
         let base = parent.join("branch_main__0123456789abcdef0123456789abcdef01234567");
         let published = publish_dir_for(&base);
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
