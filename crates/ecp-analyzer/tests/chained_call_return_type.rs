@@ -1110,6 +1110,26 @@ fn test_resolve_call_rust_named_external_import_precedes_local_glob() {
 }
 
 #[test]
+fn test_resolve_call_rust_local_glob_does_not_mask_external_reexport_glob() {
+    let graph = single(
+        &RustProvider::new().unwrap(),
+        &[
+            ("src/lib.rs", "pub mod app; pub mod local; pub mod relay;"),
+            (
+                "src/app.rs",
+                "use crate::local::*; use crate::relay::*; fn load() -> Config { todo!() } fn run() { load().get(); }",
+            ),
+            (
+                "src/local.rs",
+                "pub struct Config; impl Config { pub fn get(&self) {} }",
+            ),
+            ("src/relay.rs", "pub use external::Config;"),
+        ],
+    );
+    assert!(owners(&graph, "run", "get").is_empty());
+}
+
+#[test]
 fn test_resolve_call_rust_named_alias_return_type_binds_imported_member() {
     let graph = single(
         &RustProvider::new().unwrap(),
