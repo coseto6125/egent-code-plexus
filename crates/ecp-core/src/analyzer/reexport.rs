@@ -455,6 +455,19 @@ pub enum RustImportedType {
     Unmodeled,
 }
 
+/// The direct `use path::Name as Alias` query captures `path::Name` as both
+/// source and imported name. Keep every other parser representation intact.
+#[inline]
+fn rust_import_parts(import: ImportRef<'_>) -> (&str, &str) {
+    if import.alias.is_some() && import.source == import.imported_name {
+        return import
+            .source
+            .rsplit_once("::")
+            .unwrap_or((import.source, import.imported_name));
+    }
+    (import.source, import.imported_name)
+}
+
 /// Resolve direct and glob Rust imports without consulting global names.
 pub fn rust_imported_type<'i, F, I>(
     facts: &F,
@@ -483,9 +496,10 @@ where
             continue;
         }
         relevant = true;
-        let declaration = if is_glob { name } else { import.imported_name };
+        let (import_source, import_name) = rust_import_parts(import);
+        let declaration = if is_glob { name } else { import_name };
         let mut local = false;
-        facts.for_each_candidate(importer, import.source, &mut |file| {
+        facts.for_each_candidate(importer, import_source, &mut |file| {
             if !facts.has_file(file) {
                 return true;
             }
@@ -514,8 +528,9 @@ where
                         {
                             continue;
                         }
+                        let (nested_source, _) = rust_import_parts(*nested);
                         let mut nested_local = false;
-                        facts.for_each_candidate(file, nested.source, &mut |candidate| {
+                        facts.for_each_candidate(file, nested_source, &mut |candidate| {
                             if !facts.has_file(candidate) {
                                 return true;
                             }

@@ -1165,13 +1165,44 @@ fn test_overlay_rust_local_glob_does_not_mask_external_reexport_glob() {
 
 #[test]
 fn test_overlay_rust_named_alias_return_type_binds_imported_member() {
+    for import in [
+        "use crate::models::Config as Alias;",
+        "use crate::models::{Config as Alias};",
+    ] {
+        parity(
+            &RustProvider::new().unwrap(),
+            &[
+                ("src/lib.rs", "pub mod app; pub mod models;"),
+                (
+                    "src/app.rs",
+                    &format!("{import} fn load() -> Alias {{ todo!() }} fn run() {{}}"),
+                ),
+                (
+                    "src/models.rs",
+                    "pub struct Config; impl Config { pub fn get(&self) {} }",
+                ),
+            ],
+            &[(
+                "src/app.rs",
+                &format!("{import} fn load() -> Alias {{ todo!() }} fn run() {{ load().get(); }}"),
+            )],
+            &[
+                ("src/app.rs".into(), "load".into(), "".into(), 100),
+                ("src/models.rs".into(), "get".into(), "Config".into(), 85),
+            ],
+        );
+    }
+}
+
+#[test]
+fn test_overlay_rust_external_named_alias_return_type_has_no_project_edge() {
     parity(
         &RustProvider::new().unwrap(),
         &[
             ("src/lib.rs", "pub mod app; pub mod models;"),
             (
                 "src/app.rs",
-                "use crate::models::Config as Alias; fn load() -> Alias { todo!() } fn run() {}",
+                "use external::Config as Alias; fn load() -> Alias { todo!() } fn run() {}",
             ),
             (
                 "src/models.rs",
@@ -1180,12 +1211,9 @@ fn test_overlay_rust_named_alias_return_type_binds_imported_member() {
         ],
         &[(
             "src/app.rs",
-            "use crate::models::Config as Alias; fn load() -> Alias { todo!() } fn run() { load().get(); }",
+            "use external::Config as Alias; fn load() -> Alias { todo!() } fn run() { load().get(); }",
         )],
-        &[
-            ("src/app.rs".into(), "load".into(), "".into(), 100),
-            ("src/models.rs".into(), "get".into(), "Config".into(), 85),
-        ],
+        &[("src/app.rs".into(), "load".into(), "".into(), 100)],
     );
 }
 

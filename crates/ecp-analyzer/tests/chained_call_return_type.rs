@@ -1131,13 +1131,39 @@ fn test_resolve_call_rust_local_glob_does_not_mask_external_reexport_glob() {
 
 #[test]
 fn test_resolve_call_rust_named_alias_return_type_binds_imported_member() {
+    for import in [
+        "use crate::models::Config as Alias;",
+        "use crate::models::{Config as Alias};",
+    ] {
+        let graph = single(
+            &RustProvider::new().unwrap(),
+            &[
+                ("src/lib.rs", "pub mod app; pub mod models;"),
+                (
+                    "src/app.rs",
+                    &format!(
+                        "{import} fn load() -> Alias {{ todo!() }} fn run() {{ load().get(); }}"
+                    ),
+                ),
+                (
+                    "src/models.rs",
+                    "pub struct Config; impl Config { pub fn get(&self) {} }",
+                ),
+            ],
+        );
+        assert_eq!(owners(&graph, "run", "get"), ["Config"], "{import}");
+    }
+}
+
+#[test]
+fn test_resolve_call_rust_external_named_alias_return_type_has_no_project_edge() {
     let graph = single(
         &RustProvider::new().unwrap(),
         &[
             ("src/lib.rs", "pub mod app; pub mod models;"),
             (
                 "src/app.rs",
-                "use crate::models::Config as Alias; fn load() -> Alias { todo!() } fn run() { load().get(); }",
+                "use external::Config as Alias; fn load() -> Alias { todo!() } fn run() { load().get(); }",
             ),
             (
                 "src/models.rs",
@@ -1145,7 +1171,7 @@ fn test_resolve_call_rust_named_alias_return_type_binds_imported_member() {
             ),
         ],
     );
-    assert_eq!(owners(&graph, "run", "get"), ["Config"]);
+    assert!(owners(&graph, "run", "get").is_empty());
 }
 
 #[test]
