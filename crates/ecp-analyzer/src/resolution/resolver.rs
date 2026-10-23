@@ -833,12 +833,26 @@ impl<'a> Resolver<'a> {
     pub fn resolve_chained_member(
         &self,
         source_file: &Path,
-        (callee, inner_confidence): (NodeId, f32),
+        callee: (NodeId, f32),
         member: &str,
     ) -> Option<(NodeId, f32)> {
+        self.resolve_chained_member_outcome(source_file, callee, member)
+            .bound()
+    }
+
+    pub(crate) fn resolve_chained_member_outcome(
+        &self,
+        source_file: &Path,
+        (callee, inner_confidence): (NodeId, f32),
+        member: &str,
+    ) -> type_ladder::ChainOutcome<(NodeId, f32)> {
         let st = self.symbol_table;
-        let ty = type_ladder::returned_type(st, callee)?;
-        let callee_file = st.file_of(callee)?;
+        let Some(ty) = type_ladder::returned_type(st, callee) else {
+            return type_ladder::ChainOutcome::Unknown;
+        };
+        let Some(callee_file) = st.file_of(callee) else {
+            return type_ladder::ChainOutcome::Unknown;
+        };
         let language = Language::from_normalized_path(callee_file);
         let imports = self
             .reexports
@@ -859,8 +873,10 @@ impl<'a> Resolver<'a> {
                     let imported =
                         self.resolve_imported_symbol(source, ty, imports, ResolveTarget::Type);
                     match imported.as_slice() {
-                        [(id, _)] => TypeCandidates::Unique(*id, st.name_in_file(*id)?),
-                        _ => return None,
+                        [(id, _)] => {
+                            TypeCandidates::Unique(*id, st.name_in_file(*id).unwrap_or(ty))
+                        }
+                        _ => return type_ladder::ChainOutcome::Conclusive,
                     }
                 }
                 Language::CSharp
@@ -868,12 +884,16 @@ impl<'a> Resolver<'a> {
                         .iter()
                         .any(|import| import.alias.as_deref() == Some(ty)) =>
                 {
-                    let path = imports
+                    let Some(import) = imports
                         .iter()
-                        .find(|import| import.alias.as_deref() == Some(ty))?
-                        .imported_name
-                        .as_str();
-                    let name = owner_key(path)?;
+                        .find(|import| import.alias.as_deref() == Some(ty))
+                    else {
+                        return type_ladder::ChainOutcome::Conclusive;
+                    };
+                    let path = import.imported_name.as_str();
+                    let Some(name) = owner_key(path) else {
+                        return type_ladder::ChainOutcome::Conclusive;
+                    };
                     type_ladder::visible_return_type(st, callee_file, name, |id| {
                         st.namespace_type_path_matches(id, path)
                     })
@@ -897,19 +917,29 @@ impl<'a> Resolver<'a> {
                     self.type_candidates(source, callee_file, ty, imports)
                 }
                 Language::Cpp | Language::Dart if !imports.is_empty() => {
-                    let id = reexport::imported_file_type(
+                    let Some(id) = reexport::imported_file_type(
                         &IndexFacts(self),
                         callee_file,
                         language,
                         ty,
                         imports.iter().map(ImportRef::from),
-                    )?;
+                    ) else {
+                        return type_ladder::ChainOutcome::Conclusive;
+                    };
                     TypeCandidates::Unique(id, ty)
                 }
                 _ if st.declares_type_beside(callee_file, ty) => {
                     self.type_candidates(source, callee_file, ty, &[])
                 }
-                _ => return None,
+                _ => match type_ladder::unmodeled_return_type(st, callee_file, ty) {
+                    type_ladder::ChainOutcome::Bound(candidates) => candidates,
+                    type_ladder::ChainOutcome::Conclusive => {
+                        return type_ladder::ChainOutcome::Conclusive;
+                    }
+                    type_ladder::ChainOutcome::Unknown => {
+                        return type_ladder::ChainOutcome::Unknown;
+                    }
+                },
             }
         };
         let target = call_target(source_file, CallSite::UntypedMember(member));
@@ -919,9 +949,11 @@ impl<'a> Resolver<'a> {
                 LadderMember::Inherited(id) => (id, ResolutionTier::HeritageScoped),
                 LadderMember::Candidate(id) => (id, ResolutionTier::Global),
                 LadderMember::NearestCopy(id) => (id, ResolutionTier::NearestCopy),
-                LadderMember::Ambiguous | LadderMember::NoEdge => return None,
+                LadderMember::Ambiguous | LadderMember::NoEdge => {
+                    return type_ladder::ChainOutcome::Conclusive
+                }
             };
-        Some((id, tier.base_confidence().min(inner_confidence)))
+        type_ladder::ChainOutcome::Bound((id, tier.base_confidence().min(inner_confidence)))
     }
 
     /// Whether a bare `m()` that the constructor fallback would read as a

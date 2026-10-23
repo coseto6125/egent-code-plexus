@@ -29,6 +29,49 @@ pub enum TypeCandidates<'q> {
     None,
 }
 
+/// The result of resolving a typed chain step.
+///
+/// `Conclusive` suppresses the parser-name fallback. `Unknown` permits it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainOutcome<T> {
+    Bound(T),
+    Conclusive,
+    Unknown,
+}
+
+impl<T> ChainOutcome<T> {
+    pub fn bound(self) -> Option<T> {
+        match self {
+            Self::Bound(value) => Some(value),
+            Self::Conclusive | Self::Unknown => None,
+        }
+    }
+}
+
+/// Resolve an otherwise-unmodeled return type from project candidates.
+///
+/// A missing project type is conclusive. Several project types leave the
+/// parser fallback available because no type identity is proven.
+pub fn unmodeled_return_type<'q>(
+    facts: &impl TypeFacts,
+    source: &str,
+    name: &'q str,
+) -> ChainOutcome<TypeCandidates<'q>> {
+    let mut candidates = facts
+        .global_candidates(
+            name,
+            ResolveTarget::Type,
+            FileMeta::from_normalized_path(source),
+        )
+        .into_iter();
+    match (candidates.next(), candidates.next()) {
+        (None, None) => ChainOutcome::Conclusive,
+        (Some(id), None) => ChainOutcome::Bound(TypeCandidates::Unique(id, name)),
+        (Some(_), Some(_)) => ChainOutcome::Unknown,
+        (None, Some(_)) => unreachable!("iterator cannot yield a second item first"),
+    }
+}
+
 /// Whether a type owns a member, directly or through its supertypes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ownership {

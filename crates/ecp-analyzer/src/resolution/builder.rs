@@ -2615,29 +2615,29 @@ fn pass2_emit_node_edges(
             let &[inner] = inner.as_slice() else {
                 return None;
             };
-            type_ladder::returned_type(symbol_table, inner.0).map(|_| {
-                let targets = resolver
-                    .resolve_chained_member(&local_graph.file_path, inner, member)
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                let targets = if targets.is_empty() && language == Language::Kotlin {
-                    resolver
-                        .extension_fallback(
-                            &local_graph.file_path,
-                            member,
-                            &local_graph.imports,
-                            ResolveTarget::Callable,
-                            call_heritage,
-                        )
-                        .into_iter()
-                        .map(|(id, confidence)| (id, confidence.min(inner.1)))
-                        .collect()
-                } else {
-                    targets
-                };
-                chain_failed = targets.is_empty();
-                targets
-            })
+            match resolver.resolve_chained_member_outcome(&local_graph.file_path, inner, member) {
+                type_ladder::ChainOutcome::Unknown => None,
+                type_ladder::ChainOutcome::Bound(target) => Some(vec![target]),
+                type_ladder::ChainOutcome::Conclusive => {
+                    let targets = if language == Language::Kotlin {
+                        resolver
+                            .extension_fallback(
+                                &local_graph.file_path,
+                                member,
+                                &local_graph.imports,
+                                ResolveTarget::Callable,
+                                call_heritage,
+                            )
+                            .into_iter()
+                            .map(|(id, confidence)| (id, confidence.min(inner.1)))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    chain_failed = targets.is_empty();
+                    Some(targets)
+                }
+            }
         });
         for (target_id, confidence) in targets {
             if target_id == current_node_idx {

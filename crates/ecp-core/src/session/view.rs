@@ -766,13 +766,16 @@ impl OverlayView {
                                     return Some(None);
                                 }
                                 let inner = (*inner)?;
-                                type_ladder::returned_type(&facts, inner.0).map(|_| {
-                                    let target = facts
-                                        .chained_member(inner, member, caller.language, &types)
-                                        .or_else(|| {
-                                            if caller.language != Language::Kotlin {
-                                                return None;
-                                            }
+                                match facts.chained_member_outcome(
+                                    inner,
+                                    member,
+                                    caller.language,
+                                    &types,
+                                ) {
+                                    type_ladder::ChainOutcome::Unknown => None,
+                                    type_ladder::ChainOutcome::Bound(target) => Some(Some(target)),
+                                    type_ladder::ChainOutcome::Conclusive => {
+                                        let target = if caller.language == Language::Kotlin {
                                             resolve_callee(
                                                 graph,
                                                 CallSite::Plain(member),
@@ -794,11 +797,14 @@ impl OverlayView {
                                                 },
                                             )
                                             .filter(|&(idx, _)| is_free(&facts, idx))
-                                        })
-                                        .map(|(id, confidence)| (id, confidence.min(inner.1)));
-                                    chain_failed = target.is_none();
-                                    target
-                                })
+                                            .map(|(id, confidence)| (id, confidence.min(inner.1)))
+                                        } else {
+                                            None
+                                        };
+                                        chain_failed = target.is_none();
+                                        Some(target)
+                                    }
+                                }
                             },
                         );
                         // The index drops self-recursion Calls (builder's
@@ -3006,15 +3012,19 @@ impl<'a> OverlayFacts<'a> {
     /// and found by the receiver-typing ladder, at the ladder's confidence
     /// capped by `inner_confidence`. Import and namespace visibility is read
     /// in the callee's file, including clean files' archived import facts.
-    fn chained_member(
+    fn chained_member_outcome(
         &self,
         (callee, inner_confidence): (u32, f32),
         member: &str,
         caller: Language,
         types: &OverlayNames<'_>,
-    ) -> Option<(u32, f32)> {
-        let ty = type_ladder::returned_type(self, callee)?;
-        let callee_file = self.node_file(callee)?;
+    ) -> type_ladder::ChainOutcome<(u32, f32)> {
+        let Some(ty) = type_ladder::returned_type(self, callee) else {
+            return type_ladder::ChainOutcome::Unknown;
+        };
+        let Some(callee_file) = self.node_file(callee) else {
+            return type_ladder::ChainOutcome::Unknown;
+        };
         let language = Language::from_normalized_path(callee_file);
         let imports = self.raw_imports(callee_file);
         let candidates = if let Some(id) =
@@ -3049,7 +3059,7 @@ impl<'a> OverlayFacts<'a> {
                     };
                     match hit {
                         MemberHit::Bound(id) => TypeCandidates::Unique(id, self.name_of(id)),
-                        MemberHit::Unbound { .. } => return None,
+                        MemberHit::Unbound { .. } => return type_ladder::ChainOutcome::Conclusive,
                     }
                 }
                 Language::CSharp
@@ -3057,12 +3067,16 @@ impl<'a> OverlayFacts<'a> {
                         .iter()
                         .any(|import| import.alias.as_deref() == Some(ty)) =>
                 {
-                    let path = imports
+                    let Some(import) = imports
                         .iter()
-                        .find(|import| import.alias.as_deref() == Some(ty))?
-                        .imported_name
-                        .as_str();
-                    let name = owner_key(path)?;
+                        .find(|import| import.alias.as_deref() == Some(ty))
+                    else {
+                        return type_ladder::ChainOutcome::Conclusive;
+                    };
+                    let path = import.imported_name.as_str();
+                    let Some(name) = owner_key(path) else {
+                        return type_ladder::ChainOutcome::Conclusive;
+                    };
                     type_ladder::visible_return_type(self, callee_file, name, |id| {
                         self.node_file(id).is_some_and(|file| {
                             self.scope
@@ -3096,19 +3110,29 @@ impl<'a> OverlayFacts<'a> {
                     self.type_candidates(callee_file, ty, &imports)
                 }
                 Language::Cpp | Language::Dart if !imports.is_empty() => {
-                    let id = reexport::imported_file_type(
+                    let Some(id) = reexport::imported_file_type(
                         self,
                         callee_file,
                         language,
                         ty,
                         imports.iter().map(ImportRef::from),
-                    )?;
+                    ) else {
+                        return type_ladder::ChainOutcome::Conclusive;
+                    };
                     TypeCandidates::Unique(id, ty)
                 }
                 _ if self.declares_type_beside(callee_file, ty) => {
                     self.type_candidates(callee_file, ty, &[])
                 }
-                _ => return None,
+                _ => match type_ladder::unmodeled_return_type(self, callee_file, ty) {
+                    type_ladder::ChainOutcome::Bound(candidates) => candidates,
+                    type_ladder::ChainOutcome::Conclusive => {
+                        return type_ladder::ChainOutcome::Conclusive;
+                    }
+                    type_ladder::ChainOutcome::Unknown => {
+                        return type_ladder::ChainOutcome::Unknown;
+                    }
+                },
             }
         };
         // The index's `call_target`: Rust method syntax reaches only methods.
@@ -3117,15 +3141,17 @@ impl<'a> OverlayFacts<'a> {
         } else {
             ResolveTarget::Callable
         };
-        let (id, confidence) = ladder_edge(type_ladder::member_via_type(
+        let Some((id, confidence)) = ladder_edge(type_ladder::member_via_type(
             self,
             candidates,
             callee_file,
             member,
             target,
             true,
-        ))?;
-        Some((id, confidence.min(inner_confidence)))
+        )) else {
+            return type_ladder::ChainOutcome::Conclusive;
+        };
+        type_ladder::ChainOutcome::Bound((id, confidence.min(inner_confidence)))
     }
 
     /// The index's `SymbolTable::declares_type_beside`: `file` or a file in
