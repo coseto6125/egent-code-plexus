@@ -115,6 +115,15 @@ pub enum Expr {
         distinct: bool,
         args: Vec<Expr>,
     },
+    /// Postfix list subscript `base[idx]`. Negative `idx` counts from the end;
+    /// out-of-range or non-list base evaluates to Null.
+    Index(Box<Expr>, Box<Expr>),
+    /// Postfix list slice `base[from..to]`; either bound may be omitted.
+    Slice {
+        base: Box<Expr>,
+        from: Option<Box<Expr>>,
+        to: Option<Box<Expr>>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +148,9 @@ pub enum ReturnExpr {
         distinct: bool,
         args: Vec<Expr>,
     },
+    /// Postfix-subscripted projection (`labels(n)[0]`, `n.list[1..]`); always
+    /// an `Expr::Index` / `Expr::Slice`, evaluated through `eval_expr`.
+    Subscript(Expr),
 }
 
 #[derive(Debug, Clone)]

@@ -6,7 +6,9 @@
 
 use crate::analyzer::reexport::ResolveTarget;
 use crate::analyzer::same_file_pick::PickFacts;
+use crate::analyzer::types::RawImport;
 use crate::file_category::{FileMeta, Language};
+use crate::graph::NodeKind;
 use std::borrow::Cow;
 use std::path::Path;
 
@@ -25,6 +27,49 @@ pub enum TypeCandidates<'q> {
     /// An import binds the qualifier to a file outside the project.
     External,
     None,
+}
+
+/// The result of resolving a typed chain step.
+///
+/// `Conclusive` suppresses the parser-name fallback. `Unknown` permits it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainOutcome<T> {
+    Bound(T),
+    Conclusive,
+    Unknown,
+}
+
+impl<T> ChainOutcome<T> {
+    pub fn bound(self) -> Option<T> {
+        match self {
+            Self::Bound(value) => Some(value),
+            Self::Conclusive | Self::Unknown => None,
+        }
+    }
+}
+
+/// Resolve an otherwise-unmodeled return type from project candidates.
+///
+/// A missing project type is conclusive. Several project types leave the
+/// parser fallback available because no type identity is proven.
+pub fn unmodeled_return_type<'q>(
+    facts: &impl TypeFacts,
+    source: &str,
+    name: &'q str,
+) -> ChainOutcome<TypeCandidates<'q>> {
+    let mut candidates = facts
+        .global_candidates(
+            name,
+            ResolveTarget::Type,
+            FileMeta::from_normalized_path(source),
+        )
+        .into_iter();
+    match (candidates.next(), candidates.next()) {
+        (None, None) => ChainOutcome::Conclusive,
+        (Some(id), None) => ChainOutcome::Bound(TypeCandidates::Unique(id, name)),
+        (Some(_), Some(_)) => ChainOutcome::Unknown,
+        (None, Some(_)) => unreachable!("iterator cannot yield a second item first"),
+    }
 }
 
 /// Whether a type owns a member, directly or through its supertypes.
@@ -101,12 +146,204 @@ pub trait TypeFacts: PickFacts {
     /// The one of `candidates`, copies of one declaration, nearest
     /// `caller_file`; `None` for a tie or when one is no copy.
     fn nearest_copy(&self, caller_file: &str, candidates: &[u32]) -> Option<u32>;
+    /// The return type the function `callee` declares, as its signature
+    /// writes it or already reduced by [`return_type_key`]; `None` when it
+    /// declares none or is no function.
+    fn return_type_of(&self, callee: u32) -> Option<&str>;
     /// The crate root of `path`: what precedes its last `/src/` or
     /// `/tests/` segment, else empty.
     fn crate_root<'p>(&self, path: &'p str) -> &'p str {
         path.rsplit_once("/src/")
             .or_else(|| path.rsplit_once("/tests/"))
             .map_or("", |(root, _)| root)
+    }
+}
+
+/// Whether a return type names the type that declares the function: Rust
+/// and Swift `Self`, PHP `self` / `static`, TypeScript `this`.
+fn names_declaring_type(key: &str) -> bool {
+    matches!(key, "Self" | "self" | "static" | "this")
+}
+
+/// The type name a declared return type reduces to when only wrappers that
+/// keep the type's members surround it: a leading `:` / `->` an extractor
+/// kept, Python string quotes (`"Foo"`),
+/// a union with a null (`Foo | null`, `Foo | undefined`, `Foo | None`), a
+/// nullable marker (`?Foo`, `Foo?`, `Foo!`), a pointer or reference
+/// (`*Foo`, `&Foo`, `&mut Foo`, `&'a Foo`, `Foo*`, `Foo&`), `const`, and a C
+/// `struct` / C++ `class` tag. `None` for everything else: a generic or an
+/// array (`Promise<Foo>`, `Optional<Foo>`, `Vec<Foo>`, `list[Foo]`,
+/// `Foo[]`), a qualified path, a tuple, a function type, a union of two
+/// real types. Those need their own unwrapping rules (a follow-up), and a
+/// guess would bind the wrong member.
+pub fn return_type_key(raw: &str) -> Option<&str> {
+    let mut ty = unquote(raw.trim());
+    if ty.contains('|') {
+        let mut kept = ty
+            .split('|')
+            .map(str::trim)
+            .filter(|part| !matches!(*part, "null" | "undefined" | "None" | "nil"));
+        ty = kept.next()?;
+        if kept.next().is_some() {
+            return None;
+        }
+    }
+    loop {
+        let before = ty;
+        ty = ty.trim();
+        for prefix in [
+            "->", ":", "?", "*", "&", "const ", "mut ", "struct ", "class ",
+        ] {
+            ty = ty.strip_prefix(prefix).unwrap_or(ty).trim_start();
+        }
+        if let Some(lifetimed) = ty.strip_prefix('\'') {
+            ty = lifetimed
+                .split_once(char::is_whitespace)
+                .map_or("", |(_, rest)| rest);
+        }
+        for suffix in ["?", "!", "*", "&", " const"] {
+            ty = ty.strip_suffix(suffix).unwrap_or(ty).trim_end();
+        }
+        if ty == before {
+            break;
+        }
+    }
+    let names_a_type = !ty.is_empty()
+        && !matches!(ty, "null" | "undefined" | "None" | "nil" | "void")
+        && ty
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '$');
+    names_a_type.then_some(ty)
+}
+
+/// `text` without one pair of surrounding `"` or `'` quotes.
+fn unquote(text: &str) -> &str {
+    for quote in ['"', '\''] {
+        if let Some(inner) = text
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+        {
+            return inner.trim();
+        }
+    }
+    text
+}
+
+/// The name of the type a call to `callee` returns, as the callee's own
+/// file names it: a constructor's owner, a constructible type itself (the
+/// constructor fallback lands on a type that declares no constructor), or
+/// the function's declared return type reduced by [`return_type_key`],
+/// where `Self` / `self` / `static` / `this` stand for the declaring type.
+/// The receiver of a chained call (`Foo.create().bar()`) has this type.
+pub fn returned_type<F: TypeFacts + ?Sized>(facts: &F, callee: u32) -> Option<&str> {
+    match facts.kind(callee) {
+        NodeKind::Constructor => facts.owner(callee),
+        kind if kind.is_constructible() => facts.name_of(callee),
+        NodeKind::Function | NodeKind::Method => {
+            let key = return_type_key(facts.return_type_of(callee)?)?;
+            if names_declaring_type(key) {
+                facts.owner(callee)
+            } else {
+                Some(key)
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Select a visible return type before inspecting its members. An ambiguous
+/// type remains ambiguous even when only one candidate declares the member.
+pub fn visible_return_type<'q, F: TypeFacts + ?Sized>(
+    facts: &F,
+    source: &str,
+    name: &'q str,
+    mut visible: impl FnMut(u32) -> bool,
+) -> TypeCandidates<'q> {
+    let mut candidates = facts
+        .global_candidates(
+            name,
+            ResolveTarget::Type,
+            FileMeta::from_normalized_path(source),
+        )
+        .into_iter()
+        .filter(|&id| visible(id));
+    match (candidates.next(), candidates.next()) {
+        (Some(id), None) => TypeCandidates::Unique(id, name),
+        _ => TypeCandidates::None,
+    }
+}
+
+/// Namespace visible from a type's owner key. A file-scoped namespace has
+/// no stamped owner, so it requires one namespace in the file. Two full
+/// namespace names with one owner key cannot be distinguished.
+fn declared_namespace<'a>(
+    owner: Option<&str>,
+    namespaces: impl Iterator<Item = &'a str>,
+) -> Option<&'a str> {
+    let mut names = namespaces.filter(|name| {
+        owner.is_none_or(|owner| crate::analyzer::types::owner_key(name) == Some(owner))
+    });
+    match (names.next(), names.next()) {
+        (None, None) if owner.is_none() => Some(""),
+        (Some(name), None) => Some(name),
+        _ => None,
+    }
+}
+
+/// Whether a C# type belongs to the global namespace, the callee's one
+/// namespace, or an explicitly imported namespace.
+pub fn namespace_return_type_visible<'a>(
+    owner: Option<&str>,
+    namespaces: impl Iterator<Item = &'a str>,
+    source_namespaces: impl Iterator<Item = &'a str>,
+    imports: &[RawImport],
+) -> bool {
+    let Some(namespace) = declared_namespace(owner, namespaces) else {
+        return false;
+    };
+    namespace.is_empty()
+        || declared_namespace(None, source_namespaces) == Some(namespace)
+        || imports.iter().any(|import| {
+            import.alias.is_none()
+                && import.source == namespace
+                && import.imported_name == namespace
+        })
+}
+
+/// Whether a type's namespace agrees with a C# alias's full type path.
+pub fn namespace_type_path_matches<'a>(
+    owner: Option<&str>,
+    namespaces: impl Iterator<Item = &'a str>,
+    path: &str,
+) -> bool {
+    let path = path.strip_prefix("global::").unwrap_or(path);
+    let namespace = path.rsplit_once('.').map_or("", |(namespace, _)| namespace);
+    declared_namespace(owner, namespaces) == Some(namespace)
+}
+
+/// A Swift package target's conventional `Sources/<module>/` directory.
+/// Custom target paths have no module evidence here.
+fn swift_module(file: &str) -> Option<(&str, &str)> {
+    let (root, tail) = file
+        .rsplit_once("/Sources/")
+        .or_else(|| file.strip_prefix("Sources/").map(|tail| ("", tail)))?;
+    let (module, _) = tail.split_once('/')?;
+    Some((root, module))
+}
+
+/// A Swift return type is visible in its own target or an imported target
+/// of the same package. Without target layout evidence, preserve directory
+/// scope rather than guessing a module from a global namesake.
+pub fn swift_return_type_visible(source: &str, candidate: &str, imports: &[RawImport]) -> bool {
+    match (swift_module(source), swift_module(candidate)) {
+        (Some((root, module)), Some((other_root, other_module))) => {
+            root == other_root
+                && (module == other_module
+                    || imports
+                        .iter()
+                        .any(|import| import.alias.is_none() && import.source == other_module))
+        }
+        _ => Path::new(source).parent() == Path::new(candidate).parent(),
     }
 }
 
@@ -345,7 +582,12 @@ pub fn owned_member<F: TypeFacts + ?Sized>(
     let Some(ty_file) = facts.file_of(ty) else {
         return MemberLookup::Miss;
     };
-    let declares_owner = |file: &str| facts.count_in_file(file, ty_name, ResolveTarget::Qualifier);
+    let owner_target = if FileMeta::from_path(ty_file).language == Language::Go {
+        ResolveTarget::Type
+    } else {
+        ResolveTarget::Qualifier
+    };
+    let declares_owner = |file: &str| facts.count_in_file(file, ty_name, owner_target);
     let in_file = facts.owned_in_file(ty_file, member, ty_name, target);
     if let Some(&first) = in_file.first() {
         // Several hits are overloads of the one type, unless the file
@@ -396,8 +638,13 @@ pub fn type_unique_in_scope<F: TypeFacts + ?Sized>(
     let root = facts.crate_root(ty_file);
     let dir = Path::new(ty_file).parent();
     let same_package_only = meta.language == Language::Go;
+    let owner_target = if same_package_only {
+        ResolveTarget::Type
+    } else {
+        ResolveTarget::Qualifier
+    };
     facts
-        .global_candidates(ty_name, ResolveTarget::Qualifier, meta)
+        .global_candidates(ty_name, owner_target, meta)
         .into_iter()
         .filter(|&id| {
             facts.file_of(id).is_some_and(|f| {
@@ -407,4 +654,66 @@ pub fn type_unique_in_scope<F: TypeFacts + ?Sized>(
         .take(2)
         .count()
         == 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Contract: only wrappers that keep the type's members reduce; a
+    /// generic, an array, a path or a two-type union stays unresolved (the
+    /// follow-up), so no chained call guesses its receiver.
+    #[test]
+    fn test_return_type_key_wrappers_and_generics_returns_bare_name_or_none() {
+        for (raw, want) in [
+            ("Foo", Some("Foo")),
+            ("  Foo ", Some("Foo")),
+            (": Foo", Some("Foo")),
+            ("-> Foo", Some("Foo")),
+            ("\"Foo\"", Some("Foo")),
+            ("'Foo'", Some("Foo")),
+            ("Foo | null", Some("Foo")),
+            ("undefined | Foo", Some("Foo")),
+            ("Foo | None", Some("Foo")),
+            ("\"Foo | None\"", Some("Foo")),
+            ("?Foo", Some("Foo")),
+            ("Foo?", Some("Foo")),
+            ("Foo!", Some("Foo")),
+            ("*Foo", Some("Foo")),
+            ("&Foo", Some("Foo")),
+            ("&mut Self", Some("Self")),
+            ("&'a Foo", Some("Foo")),
+            ("const Foo&", Some("Foo")),
+            ("Foo*", Some("Foo")),
+            ("struct Foo", Some("Foo")),
+            ("*const Foo", Some("Foo")),
+            ("static", Some("static")),
+            ("Promise<Foo>", None),
+            ("Optional<Foo>", None),
+            ("Vec<Foo>", None),
+            ("list[Foo]", None),
+            ("Foo[]", None),
+            ("Foo | Bar", None),
+            ("ns::Foo", None),
+            ("pkg.Foo", None),
+            ("(Foo, error)", None),
+            ("() => Foo", None),
+            ("", None),
+            ("null", None),
+            ("void", None),
+        ] {
+            assert_eq!(return_type_key(raw), want, "return_type_key({raw:?})");
+        }
+    }
+
+    /// Contract: the reduced key is a fixed point, so the index (which
+    /// stores the key) and the overlay (which reduces the raw text at query
+    /// time) read the same type.
+    #[test]
+    fn test_return_type_key_reduced_key_returns_itself() {
+        for raw in ["Foo", "?Foo", "&mut Self", "struct Foo", "\"Foo | None\""] {
+            let key = return_type_key(raw).unwrap();
+            assert_eq!(return_type_key(key), Some(key), "{raw:?}");
+        }
+    }
 }

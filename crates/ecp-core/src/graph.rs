@@ -602,7 +602,10 @@ pub enum RelType {
     /// `graph.bin` files.
     UsesPathLiteral,
     /// `Function` / `Method` → a struct/class field (`Property`) it reads,
-    /// e.g. `obj.rel_path`, `self.count`, `cfg->timeout`.
+    /// e.g. `obj.rel_path`, `self.count`, `cfg->timeout` (reason
+    /// `field_read`), or a module-level / static constant or variable
+    /// (`Const` / `Variable`, or the reader's own type's `Property`) it
+    /// names bare, e.g. `LIMITS` in `readLimit()` (reason `value_read`).
     ///
     /// LLM-utility filter (A) Graph completeness: changing the meaning or type
     /// of a field (rename, repr change, semantic shift) has a blast radius
@@ -612,9 +615,11 @@ pub enum RelType {
     /// away, the same guarantee `Calls` gives for functions.
     ///
     /// Does NOT contradict the panel decision to drop function-body locals
-    /// (see `drop_locals`): the edge only resolves to `NodeKind::Property`
-    /// targets (the `ResolveTarget::Field` / `is_property` filter), and locals
-    /// are `NodeKind::Variable`, never `Property`. So the local fan-out the
+    /// (see `drop_locals`): a `field_read` resolves only to `Property`
+    /// targets (the `ResolveTarget::Field` / `is_property` filter), and a
+    /// `value_read` only to declarations the graph already holds, which no
+    /// function-body local is; the parser drops a bare name that a
+    /// parameter or local of the reader declares. So the local fan-out the
     /// panel rejected can never appear here. Both public and private fields
     /// emit edges — a private field's readers are just as load-bearing for an
     /// in-module refactor as a public one's, and omitting them would put the
@@ -805,7 +810,7 @@ impl From<&ArchivedFileCategory> for FileCategory {
     }
 }
 
-/// One import of a Python / TS / JS file, in source order: its
+/// One import of a file, in source order: its
 /// [`crate::analyzer::types::RawImport`], kept so the overlay can follow a
 /// clean module's re-export without the module's parse.
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -1197,7 +1202,7 @@ pub struct ZeroCopyGraph {
     // ── Schema v13 additions ─────────────────────────────────────────
     /// CSR offsets over `files`, length `files.len() + 1`: the imports of
     /// file `f` are `imports[file_imports[f] .. file_imports[f + 1]]`.
-    /// Recorded for Python / TS / JS files; any other file has an empty
+    /// Recorded for all parsed languages; a file without imports has an empty
     /// range.
     pub file_imports: Vec<u32>,
     pub imports: Vec<ImportFact>,

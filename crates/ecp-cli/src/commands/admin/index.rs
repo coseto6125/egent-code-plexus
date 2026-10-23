@@ -189,6 +189,12 @@ pub fn run_analyzer_for_paths(
         _ => None,
     };
     let cache_ref: Option<&crate::parse_cache::ParseCache> = parse_cache.as_ref();
+    if prof {
+        eprintln!(
+            "prof step3.open_parse_cache: {:.6}s",
+            t_step3.elapsed().as_secs_f64()
+        );
+    }
     let t_parse = std::time::Instant::now();
     let mut local_graphs = pipeline.analyze_with_cache(files_to_analyze, |rel_path, hash| {
         cache_ref.and_then(|c| c.get(rel_path, hash))
@@ -423,8 +429,23 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
                 );
             }
             r.join_background();
+            drop_superseded_generations(&r.commit_dir);
             Ok(())
         }
+    }
+}
+
+/// A forced rebuild publishes a new `.gen.*` dir beside the old one, which
+/// stays for readers already attached (see `force_rebuild_l2`). Once the build
+/// returns, converge the repo's same-SHA generations now instead of leaving
+/// ~100 MB per forced build until the next gc. A failed sweep never fails the
+/// index.
+fn drop_superseded_generations(published: &std::path::Path) {
+    let Some(repo_root) = published.parent().and_then(std::path::Path::parent) else {
+        return;
+    };
+    if let Err(e) = crate::admin::gc::sweep_generations_keeping(repo_root, false, Some(published)) {
+        eprintln!("index: sweep stale generations: {e}");
     }
 }
 

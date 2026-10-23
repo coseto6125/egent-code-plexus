@@ -1,11 +1,11 @@
 //! Go receiver-type binding (Task A3):
 //! `func (d *Dog) Bark()` introduces `d → Dog`, so `d.Fetch()` rewrites to
 //! `Dog.Fetch`. Param/var/short-var with explicit type bind the same way.
-//! Without a known type, fall back to the bare method name.
+//! Without a known type, retain the untyped member call.
 
 use ecp_analyzer::go::parser::GoProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::RawNode;
+use ecp_core::analyzer::types::{CallSite, RawNode};
 use ecp_core::graph::NodeKind;
 
 fn parse(src: &str) -> Vec<RawNode> {
@@ -78,13 +78,15 @@ fn short_var_composite_literal_binds_receiver_type() {
 }
 
 #[test]
-fn short_var_from_function_call_falls_back_to_bare() {
+fn test_short_var_from_function_call_preserves_untyped_member() {
     let src = include_str!("fixtures/receiver_types.go");
     let nodes = parse(src);
     let calls = calls_of(&nodes, "UseNoType");
     assert!(
-        calls.iter().any(|c| c == "Bark"),
-        "`d := makeDog()` has no type info — d.Bark() must fall back to bare `Bark`; got {:?}",
+        calls
+            .iter()
+            .any(|c| CallSite::parse(c) == CallSite::UntypedMember("Bark")),
+        "`d := makeDog()` has no type info — d.Bark() must retain member syntax; got {:?}",
         calls,
     );
     assert!(

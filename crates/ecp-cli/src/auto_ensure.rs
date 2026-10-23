@@ -1094,7 +1094,7 @@ struct L1FreshnessGate {
 /// L1 freshness gate: drop dirty files whose overlay fragment is provably
 /// current, keep the rest for re-parse.
 ///
-/// A fragment is current when its `dirty_files.json` entry is a v4 bin that
+/// A fragment is current when its `dirty_files.json` entry is a v5 bin that
 /// parsed cleanly, is on disk, AND records exactly the file's present
 /// mtime_ns, in a manifest the running binary's parser wrote. Any doubt (no
 /// session dir / meta / manifest, HEAD drifted since the fragments were
@@ -1106,7 +1106,7 @@ struct L1FreshnessGate {
 /// base SHA) runs inside the full overlay path, so a drifted session must
 /// fall through to it rather than short-circuit here.
 fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1FreshnessGate {
-    use ecp_core::session::{DirtyFiles, FRAGMENT_FORMAT_V4};
+    use ecp_core::session::{DirtyFiles, FRAGMENT_FORMAT_V5};
 
     let pass = |rel_paths, session_meta| L1FreshnessGate {
         rel_paths,
@@ -1141,7 +1141,7 @@ fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1Fre
             let Some(entry) = manifest.entries.get(rel) else {
                 return true;
             };
-            if entry.format != FRAGMENT_FORMAT_V4 || entry.parse_failed {
+            if entry.format != FRAGMENT_FORMAT_V5 || entry.parse_failed {
                 return true;
             }
             // A bin the manifest names can still be gone (a cleanup that
@@ -1151,9 +1151,11 @@ fn retain_stale_fragments(worktree_root: &Path, rel_paths: Vec<String>) -> L1Fre
             match mtime_ns_of(&worktree_root.join(rel)) {
                 Some(ns)
                     if ns == entry.mtime_ns
-                        && overlay_dir
-                            .join(format!("{}.bin", entry.fragment_id))
-                            .is_file() =>
+                        && fs::read(overlay_dir.join(format!("{}.bin", entry.fragment_id)))
+                            .ok()
+                            .is_some_and(|bytes| {
+                                crate::session::overlay_reader::valid_v5_fragment(&bytes)
+                            }) =>
                 {
                     false
                 }
@@ -1451,6 +1453,242 @@ fn collect_dirty_files(
 mod fingerprint_drift_tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn gate_with_fragment(
+        fragment: &[u8],
+        session_id: &str,
+        format: u32,
+        source: &str,
+    ) -> (tempfile::TempDir, L1FreshnessGate) {
+        use ecp_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
+
+        let tmp = tempdir().unwrap();
+        let worktree = tmp.path().join("repo");
+        fs::create_dir_all(&worktree).unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(&worktree)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "test"]);
+        fs::write(worktree.join("app.py"), source).unwrap();
+        git(&["add", "app.py"]);
+        git(&["commit", "-qm", "base"]);
+
+        let home = tmp.path().join("ecp-home");
+        std::env::set_var("ECP_HOME", &home);
+        std::env::set_var("ECP_SESSION_ID", session_id);
+        let session_dir = resolve_session_overlay_dir(&worktree).unwrap();
+        fs::create_dir_all(session_dir.join("graph_overlay")).unwrap();
+        let mtime = mtime_ns_of(&worktree.join("app.py")).unwrap();
+        let meta = SessionMeta {
+            version: 1,
+            session_id: session_id.into(),
+            pid: None,
+            started_at: String::new(),
+            last_touched: String::new(),
+            base_sha: git_head_sha(&worktree).unwrap(),
+            source_worktree: worktree.to_string_lossy().into(),
+            overlay_version: 1,
+            watcher_pid: None,
+            last_drained_offset: 0,
+            agent_name: None,
+        };
+        SessionMeta::write_atomic(&session_dir.join("session_meta.json"), &meta).unwrap();
+        let mut dirty = DirtyFiles::empty();
+        dirty.entries.insert(
+            "app.py".into(),
+            DirtyEntry {
+                mtime_ns: mtime,
+                content_hash: "fixture".into(),
+                fragment_id: "fixture".into(),
+                tantivy_delta_segment: None,
+                parse_failed: false,
+                dirty_symbols: vec![],
+                format,
+            },
+        );
+        DirtyFiles::write_atomic(&session_dir.join("dirty_files.json"), &dirty).unwrap();
+        fs::write(session_dir.join("graph_overlay/fixture.bin"), fragment).unwrap();
+
+        let gate = retain_stale_fragments(&worktree, vec!["app.py".into()]);
+        (tmp, gate)
+    }
+
+    #[test]
+    fn test_retain_stale_fragments_current_v5_skips_reparse() {
+        const CHILD_ENV: &str = "ECP_AUTO_ENSURE_V5_REFRESH_CHILD";
+        const TEST_NAME: &str =
+            "auto_ensure::fingerprint_drift_tests::test_retain_stale_fragments_current_v5_skips_reparse";
+
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST_NAME, "--nocapture"])
+                .env(CHILD_ENV, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated test process failed: {status}");
+            return;
+        }
+
+        let fragment = crate::session::overlay_writer::FragmentFile {
+            symbols: vec![],
+            imports: vec![],
+            export_aliases: vec![],
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&fragment).unwrap();
+        let (tmp, gate) = gate_with_fragment(
+            &bytes,
+            "v5-refresh-test",
+            ecp_core::session::FRAGMENT_FORMAT_V5,
+            "def app(): pass\n",
+        );
+        assert!(
+            gate.rel_paths.is_empty(),
+            "a current v5 fragment was re-parsed"
+        );
+        let worktree = tmp.path().join("repo");
+        let session_dir = resolve_session_overlay_dir(&worktree).unwrap();
+        let path = session_dir.join("dirty_files.json");
+        let mut dirty = ecp_core::session::DirtyFiles::read(&path).unwrap();
+        dirty.builder_fingerprint = Some("v0.16.2+schema19".into());
+        assert!(!dirty.from_current_builder());
+        ecp_core::session::DirtyFiles::write_atomic(&path, &dirty).unwrap();
+        assert_eq!(
+            retain_stale_fragments(&worktree, vec!["app.py".into()]).rel_paths,
+            ["app.py"],
+            "a valid, unchanged V5 fragment from another builder must be reparsed"
+        );
+    }
+
+    #[test]
+    fn test_retain_stale_fragments_corrupt_v5_reparses() {
+        const CHILD_ENV: &str = "ECP_AUTO_ENSURE_V5_CORRUPT_CHILD";
+        const TEST_NAME: &str =
+            "auto_ensure::fingerprint_drift_tests::test_retain_stale_fragments_corrupt_v5_reparses";
+
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST_NAME, "--nocapture"])
+                .env(CHILD_ENV, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated test process failed: {status}");
+            return;
+        }
+
+        for corrupt in [b"".as_slice(), b"not a fragment".as_slice()] {
+            let (_tmp, gate) = gate_with_fragment(
+                corrupt,
+                "v5-corrupt-test",
+                ecp_core::session::FRAGMENT_FORMAT_V5,
+                "def app(): pass\n",
+            );
+            assert_eq!(gate.rel_paths, ["app.py"]);
+        }
+    }
+
+    #[test]
+    fn test_retain_stale_fragments_native_v4_refresh_restores_call_edge() {
+        use ecp_analyzer::python::PythonProvider;
+        use ecp_analyzer::resolution::builder::GraphBuilder;
+        use ecp_core::analyzer::provider::LanguageProvider;
+        use ecp_core::graph::{ArchivedZeroCopyGraph, RelType};
+        use ecp_core::session::{MergedGraph, OverlayView, FRAGMENT_FORMAT_V4, FRAGMENT_FORMAT_V5};
+
+        const CHILD_ENV: &str = "ECP_AUTO_ENSURE_V4_REFRESH_CHILD";
+        const TEST_NAME: &str = "auto_ensure::fingerprint_drift_tests::test_retain_stale_fragments_native_v4_refresh_restores_call_edge";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            for fingerprint in ["current", "released"] {
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", TEST_NAME, "--nocapture"])
+                    .env(CHILD_ENV, fingerprint)
+                    .status()
+                    .unwrap();
+                assert!(
+                    status.success(),
+                    "{fingerprint}: isolated test process failed: {status}"
+                );
+            }
+            return;
+        }
+
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/overlay-written-by-0.16.2");
+        let fragment = fs::read(fixture.join("graph_overlay/2e3d1df0cf371fbf.bin")).unwrap();
+        let source = fs::read_to_string(fixture.join("app.py")).unwrap();
+        let (tmp, gate) =
+            gate_with_fragment(&fragment, "v4-refresh-test", FRAGMENT_FORMAT_V4, &source);
+        assert_eq!(gate.rel_paths, ["app.py"]);
+        let worktree = tmp.path().join("repo");
+        let session_dir = resolve_session_overlay_dir(&worktree).unwrap();
+        let gate = if std::env::var(CHILD_ENV).as_deref() == Ok("released") {
+            let mut old =
+                ecp_core::session::DirtyFiles::read(&fixture.join("dirty_files.json")).unwrap();
+            let path = session_dir.join("dirty_files.json");
+            old.entries.get_mut("app.py").unwrap().mtime_ns =
+                mtime_ns_of(&worktree.join("app.py")).unwrap();
+            let fragment_id = &old.entries["app.py"].fragment_id;
+            fs::copy(
+                fixture.join(format!("graph_overlay/{fragment_id}.bin")),
+                session_dir.join(format!("graph_overlay/{fragment_id}.bin")),
+            )
+            .unwrap();
+            assert!(!old.from_current_builder());
+            assert_eq!(
+                old.entries["app.py"].mtime_ns,
+                mtime_ns_of(&worktree.join("app.py")).unwrap()
+            );
+            ecp_core::session::DirtyFiles::write_atomic(&path, &old).unwrap();
+            let gate = retain_stale_fragments(&worktree, vec!["app.py".into()]);
+            assert_eq!(gate.rel_paths, ["app.py"]);
+            gate
+        } else {
+            gate
+        };
+        let provider = PythonProvider::new().unwrap();
+        let local = provider
+            .parse_file(Path::new("app.py"), source.as_bytes())
+            .unwrap();
+        let mtimes = HashMap::from([(
+            "app.py".into(),
+            mtime_ns_of(&worktree.join("app.py")).unwrap(),
+        )]);
+        apply_l1_overlay_updates(&worktree, &[local], &mtimes, gate.session_meta).unwrap();
+        let manifest =
+            ecp_core::session::DirtyFiles::read(&session_dir.join("dirty_files.json")).unwrap();
+        assert_eq!(manifest.entries["app.py"].format, FRAGMENT_FORMAT_V5);
+        assert!(manifest.from_current_builder());
+        assert!(retain_stale_fragments(&worktree, vec!["app.py".into()])
+            .rel_paths
+            .is_empty());
+
+        let (accepted, _) =
+            crate::session::overlay_reader::accepted_fragments(&session_dir, &worktree).unwrap();
+        let inputs = crate::session::overlay_reader::decode_view_inputs(&accepted);
+        assert_eq!(inputs.len(), 1);
+        let mut builder = GraphBuilder::new();
+        builder.add_graph(
+            provider
+                .parse_file(Path::new("app.py"), b"def stable():\n    return 1\n")
+                .unwrap(),
+        );
+        let base = builder.build();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&base).unwrap();
+        let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let view = OverlayView::build(archived, &inputs).unwrap();
+        let merged = MergedGraph::new(archived, Some(&view));
+        assert!(merged.all_edges().any(|edge| {
+            edge.rel_type() == RelType::Calls
+                && merged.node(edge.source).unwrap().name(&merged) == "added"
+                && merged.node(edge.target).unwrap().name(&merged) == "stable"
+        }));
+    }
 
     #[test]
     fn parse_porcelain_z_handles_spaces_and_renames() {

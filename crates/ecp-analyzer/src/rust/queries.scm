@@ -22,8 +22,8 @@
   (visibility_modifier)? @export
   name: (type_identifier) @trait_item.name) @trait
 
-;; Free-standing functions (top-level or nested in mod). Restricted to
-;; `source_file` / `mod_item` parents so impl-internal function_items don't
+;; Free-standing functions (top-level, inline module, or lexical block).
+;; These parents exclude impl-internal function_items so they don't
 ;; double-fire (they're separately captured below as `@method`).
 (source_file
   (function_item
@@ -36,6 +36,11 @@
       (visibility_modifier)? @export
       name: (identifier) @function_item.name
       return_type: (_)? @type) @function))
+(block
+  (function_item
+    (visibility_modifier)? @export
+    name: (identifier) @function_item.name
+    return_type: (_)? @type) @function)
 
 ;; Trait-impl methods: `impl Trait for Type { fn m(&self) { ... } }`.
 ;; return_type is optional — `fn m()` with no `-> T` was previously skipped.
@@ -148,19 +153,11 @@
   name: (identifier) @const_item.name) @const_decl
 
 ;; Impl blocks: `impl T` / `impl Trait for T`  (inherent and trait impls).
-;; For `impl Foo<'a>` / `impl<T> Foo<T>` descend into `generic_type` so we
-;; capture just the bare type_identifier — ref-gitnexus stores the type
-;; name without generic parameters, so including `<'a>` here produces
-;; spurious "Impl ref_only" parity drift on every generic impl block.
-;; A path-qualified self type (`impl W for io::Cursor<u8>`) keeps its last
-;; segment, the name its methods take as owner.
+;; The parser reduces the self type with the same helper used by lexical
+;; owners. References and generic paths therefore retain an Impl scope
+;; whose name agrees with the methods and nested functions it contains.
 (impl_item
-  type: [
-    (type_identifier) @impl_item.name
-    (generic_type type: (type_identifier) @impl_item.name)
-    (scoped_type_identifier name: (type_identifier) @impl_item.name)
-    (generic_type type: (scoped_type_identifier name: (type_identifier) @impl_item.name))
-  ]) @impl_block
+  type: (_) @impl_item.name) @impl_block
 
 ;; Anonymous closures passed as call arguments (thread::spawn, iterator adapters,
 ;; callback registration). Without a node here their body's calls are dropped by

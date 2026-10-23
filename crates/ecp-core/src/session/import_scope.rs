@@ -33,6 +33,8 @@ pub(crate) enum Module<'a> {
 struct LanguageFiles<'a> {
     paths: FxHashSet<&'a str>,
     by_stem: FxHashMap<&'a str, Vec<&'a str>>,
+    /// Direct Go children by parent path, preserving Path equality semantics.
+    by_directory: FxHashMap<&'a Path, Vec<&'a str>>,
     /// File stems and directory components (`SymbolTable::has_module_name`).
     module_names: FxHashSet<&'a str>,
     /// File → the namespaces it declares (`.`-joined), as the resolver's
@@ -58,6 +60,11 @@ impl<'a> LanguageFiles<'a> {
                 continue;
             }
             let file = Path::new(path);
+            if language == Language::Go {
+                if let Some(parent) = file.parent() {
+                    files.by_directory.entry(parent).or_default().push(path);
+                }
+            }
             if let Some(stem) = file.file_stem().and_then(|s| s.to_str()) {
                 files.by_stem.entry(stem).or_default().push(path);
                 files.module_names.insert(stem);
@@ -70,8 +77,8 @@ impl<'a> LanguageFiles<'a> {
                 );
             }
         }
-        // Only fully qualified discovery reads declared namespaces.
-        if fqn_extension(language).is_none() {
+        // C# return types also use declared namespace membership.
+        if fqn_extension(language).is_none() && language != Language::CSharp {
             return files;
         }
         let fresh: FxHashSet<&str> = dirty.iter().map(|f| f.rel_path.as_str()).collect();
@@ -152,6 +159,29 @@ impl<'a> ImportScope<'a> {
         f(files)
     }
 
+    /// Whether a namespace declared by `target` is also declared by `reader`.
+    /// A target without a namespace is the global namespace and remains visible.
+    pub(crate) fn namespace_visible_from(
+        &self,
+        reader: &str,
+        target: &str,
+        language: Language,
+    ) -> bool {
+        self.with_files(language, |files| {
+            let Some(target_namespaces) = files.namespaces.get(target) else {
+                return true;
+            };
+            files
+                .namespaces
+                .get(reader)
+                .is_some_and(|reader_namespaces| {
+                    target_namespaces
+                        .iter()
+                        .any(|target| reader_namespaces.contains(target))
+                })
+        })
+    }
+
     /// Whether the `language` files `a` and `b` declare the same namespaces,
     /// as the resolver's `SymbolTable::is_copy` compares them. The resolver
     /// records namespaces for fully qualified languages only, so any other
@@ -165,6 +195,71 @@ impl<'a> ImportScope<'a> {
 
     pub(crate) fn has_module_name(&self, language: Language, name: &str) -> bool {
         self.with_files(language, |files| files.module_names.contains(name))
+    }
+
+    pub(crate) fn files_in_directory(&self, language: Language, directory: &str) -> Vec<&'a str> {
+        self.with_files(language, |files| {
+            if language == Language::Go {
+                return files
+                    .by_directory
+                    .get(Path::new(directory))
+                    .cloned()
+                    .unwrap_or_default();
+            }
+            files
+                .paths
+                .iter()
+                .copied()
+                .filter(|file| Path::new(file).parent() == Some(Path::new(directory)))
+                .collect()
+        })
+    }
+
+    pub(crate) fn namespace_return_type_visible(
+        &self,
+        file: &str,
+        owner: Option<&str>,
+        source: &str,
+        imports: &[RawImport],
+    ) -> bool {
+        self.with_files(Language::CSharp, |files| {
+            crate::analyzer::type_ladder::namespace_return_type_visible(
+                owner,
+                files
+                    .namespaces
+                    .get(file)
+                    .into_iter()
+                    .flatten()
+                    .map(String::as_str),
+                files
+                    .namespaces
+                    .get(source)
+                    .into_iter()
+                    .flatten()
+                    .map(String::as_str),
+                imports,
+            )
+        })
+    }
+
+    pub(crate) fn namespace_type_path_matches(
+        &self,
+        file: &str,
+        owner: Option<&str>,
+        path: &str,
+    ) -> bool {
+        self.with_files(Language::CSharp, |files| {
+            crate::analyzer::type_ladder::namespace_type_path_matches(
+                owner,
+                files
+                    .namespaces
+                    .get(file)
+                    .into_iter()
+                    .flatten()
+                    .map(String::as_str),
+                path,
+            )
+        })
     }
 
     /// The resolver's `import_is_external`: a Missing import proves its callee
@@ -436,6 +531,37 @@ fn defines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "manual release-mode directory lookup benchmark"]
+    fn test_files_in_directory_large_go_workload_reports_timing() {
+        let total = std::time::Instant::now();
+        let mut fixture = crate::graph_fixture::GraphFixture::new();
+        for index in 0..15_000 {
+            fixture.file(&format!("pkg/{index}/file.go"));
+        }
+        let bytes = fixture.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let dirty_base = FxHashSet::default();
+        let scope = ImportScope::new(graph, &[], &dirty_base);
+        let cold = std::time::Instant::now();
+        assert_eq!(
+            scope.files_in_directory(Language::Go, "pkg/1"),
+            ["pkg/1/file.go"]
+        );
+        let cold_seconds = cold.elapsed().as_secs_f64();
+        let warm = std::time::Instant::now();
+        let mut found = 0;
+        for index in 0..3_000 {
+            found += std::hint::black_box(
+                scope.files_in_directory(Language::Go, &format!("pkg/{}", index % 15)),
+            )
+            .len();
+        }
+        assert_eq!(found, 3_000);
+        println!("directory_profile cold_seconds={cold_seconds:.6} warm_seconds={:.6} total_seconds={:.6} found={found}",
+            warm.elapsed().as_secs_f64(), total.elapsed().as_secs_f64());
+    }
 
     #[test]
     fn test_python_candidates_relative_and_absolute_match_resolver_order() {

@@ -63,11 +63,14 @@ impl LocalTypes {
     /// Whether a function or class scope holding `pos` declares `var`,
     /// typed or not, or an import binds it.
     fn binds(&self, pos: Pos, var: &str) -> bool {
-        self.imports.contains_key(var)
-            || self
-                .scopes
-                .iter()
-                .any(|((start, end), map)| *start <= pos && pos <= *end && map.contains_key(var))
+        self.imports.contains_key(var) || self.binds_local(pos, var)
+    }
+
+    /// Whether a function or class scope holding `pos` declares `var`.
+    fn binds_local(&self, pos: Pos, var: &str) -> bool {
+        self.scopes
+            .iter()
+            .any(|((start, end), map)| *start <= pos && pos <= *end && map.contains_key(var))
     }
 }
 
@@ -319,8 +322,8 @@ fn kotlin_callee(
                 receiver.kind(),
                 "this_expression" | "super_expression" | "simple_identifier"
             );
-            Some(match ty {
-                Some(t) => format!("{t}.{method}"),
+            let site = match ty {
+                Some(t) => return Some(format!("{t}.{method}")),
                 // A computed receiver (`other().m()`) is no `this`: where an
                 // enclosing type declares `m`, the bare name would bind that
                 // member. Elsewhere the bare name still reaches an extension
@@ -330,6 +333,29 @@ fn kotlin_callee(
                     CallSite::untyped_member(method)
                 }
                 None => method.to_string(),
+            };
+            // A call receiver the parser cannot type: the resolver types it
+            // by the callee's return type.
+            // A callee that is a local or property (`val Other = { .. }`)
+            // is a value, not a declaration whose return type types it.
+            let calls_value = || {
+                receiver
+                    .named_child(0)
+                    .filter(|f| f.kind() == "simple_identifier")
+                    .and_then(|f| f.utf8_text(source).ok())
+                    .is_some_and(|name| {
+                        locals.binds_local(pos, name) || declares_member(nodes, pos, name)
+                    })
+            };
+            Some(match receiver.kind() {
+                "call_expression" if !calls_value() => {
+                    match CallSite::nested_chain(|| kotlin_callee(receiver, source, locals, nodes))
+                    {
+                        Some(inner) => CallSite::chained_member(&inner, &site),
+                        None => site,
+                    }
+                }
+                _ => site,
             })
         }
         _ => None,

@@ -84,7 +84,12 @@ pub struct Boundary {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FlowReport {
+    /// Hashes of the files the result names (nodes and boundaries) only.
     pub source_hashes: BTreeMap<String, String>,
+    /// One hash over every corpus file's path and hash, so a change in a file
+    /// the result does not name still shows.
+    #[serde(default)]
+    pub corpus_digest: String,
     pub anchor: Vec<usize>,
     pub nodes: Vec<FlowNode>,
     pub edges: Vec<FlowEdge>,

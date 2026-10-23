@@ -29,7 +29,7 @@ use ecp_core::graph::{Node, NodeKind};
 use ecp_core::pool::{StrRef, StringPool};
 use ecp_core::session::{
     DirtyFiles, Overlay, OverlayFileInput, OverlaySymbol, FRAGMENT_FORMAT_V2, FRAGMENT_FORMAT_V3,
-    FRAGMENT_FORMAT_V4,
+    FRAGMENT_FORMAT_V4, FRAGMENT_FORMAT_V5,
 };
 use rkyv::rancor::Error as RkyvError;
 use std::fs;
@@ -39,6 +39,7 @@ use xxhash_rust::xxh3::Xxh3;
 
 use super::overlay_writer::{
     ArchivedFragment, ArchivedFragmentFile, ArchivedFragmentFileV2, ArchivedFragmentFileV3,
+    ArchivedFragmentFileV4,
 };
 
 /// A single overlay symbol with the source-relative path it came from.
@@ -151,7 +152,13 @@ fn for_each_fragment(session_dir: &Path, mut f: impl FnMut(&str, FragSym<'_>)) -
                         Err(_) => continue,
                     }
                 }
-                FRAGMENT_FORMAT_V4 => match rkyv::access::<ArchivedFragmentFile, RkyvError>(&bytes)
+                FRAGMENT_FORMAT_V4 => {
+                    match rkyv::access::<ArchivedFragmentFileV4, RkyvError>(&bytes) {
+                        Ok(file) => visit_symbols!(file.symbols),
+                        Err(_) => continue,
+                    }
+                }
+                FRAGMENT_FORMAT_V5 => match rkyv::access::<ArchivedFragmentFile, RkyvError>(&bytes)
                 {
                     Ok(file) => visit_symbols!(file.symbols),
                     Err(_) => continue,
@@ -237,6 +244,14 @@ pub struct AcceptedFragment {
     bytes: Vec<u8>,
 }
 
+/// Whether `bytes` has the current fragment archive shape.
+///
+/// The freshness gate uses this same check before it skips a re-parse. A
+/// regular file alone is not enough: the view reader ignores malformed bins.
+pub(crate) fn valid_v5_fragment(bytes: &[u8]) -> bool {
+    rkyv::access::<ArchivedFragmentFile, RkyvError>(bytes).is_ok()
+}
+
 /// The dirty-file entries that may feed `OverlayView`, plus an xxh3 over
 /// each one's rel_path and fragment bytes in manifest order: the inputs'
 /// share of the view cache key. Entry validation guards the staleness holes
@@ -273,7 +288,7 @@ pub fn accepted_fragments(
     let mut out = Vec::new();
 
     for (rel_path, entry) in &df.entries {
-        if entry.parse_failed || entry.format != FRAGMENT_FORMAT_V4 {
+        if entry.parse_failed || entry.format != FRAGMENT_FORMAT_V5 {
             continue;
         }
         let on_disk_mtime_ns = crate::auto_ensure::mtime_ns_of(&worktree_root.join(rel_path));
@@ -284,7 +299,7 @@ pub fn accepted_fragments(
         let Ok(bytes) = fs::read(&bin_path) else {
             continue;
         };
-        if rkyv::access::<ArchivedFragmentFile, RkyvError>(&bytes).is_err() {
+        if !valid_v5_fragment(&bytes) {
             continue;
         }
         super::view_cache::hash_part(&mut hasher, rel_path.as_bytes());
@@ -340,6 +355,7 @@ pub fn decode_view_inputs(accepted: &[AcceptedFragment]) -> Vec<OverlayFileInput
                             .iter()
                             .map(|v| v.as_str().to_owned())
                             .collect(),
+                        return_type: s.return_type.as_ref().map(|ty| ty.as_str().to_owned()),
                     })
                     .collect(),
                 imports,

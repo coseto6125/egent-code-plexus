@@ -21,6 +21,14 @@ pub struct FileLock {
     _file: File,
 }
 
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        // A concurrent fork can retain this open file description until exec.
+        // Release the lock at the guard boundary instead of the last close.
+        let _ = FileExt::unlock(&self._file);
+    }
+}
+
 impl FileLock {
     /// Acquire an exclusive lock on `path`, retrying for up to [`LOCK_TIMEOUT`].
     /// Creates the lockfile if missing. Records the owning PID in the lockfile
@@ -151,6 +159,24 @@ fn owner_pid_is_dead(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_lock_drop_with_duplicate_descriptor_releases_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("inherited.lock");
+        let held = FileLock::acquire_exclusive(&path).unwrap();
+        // A duplicate shares the open file description, as a child does
+        // between fork and exec when another thread starts a command.
+        let duplicate = held._file.try_clone().unwrap();
+        assert!(FileLock::try_exclusive(&path).is_err());
+
+        drop(held);
+
+        let _next = FileLock::try_exclusive(&path)
+            .expect("dropping the guard must release the lock while a duplicate remains open");
+        drop(duplicate);
+    }
 
     /// The point of the bound is that a wedged holder ends the wait with an
     /// error instead of never ending it. Asserting only `is_err()` would also

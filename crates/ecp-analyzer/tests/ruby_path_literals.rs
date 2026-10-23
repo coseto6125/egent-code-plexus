@@ -57,3 +57,17 @@ end
     assert!(lits.iter().any(|l| l.value == "meta.json"));
     assert!(lits.iter().any(|l| l.value == "session_meta.json"));
 }
+
+#[test]
+fn test_build_raw_path_literal_interpolated_path_returns_none() {
+    let src = r#"
+def load(name)
+  File.read("/tmp/#{name}")
+end
+"#;
+    let lits = parse_path_literals(src);
+    assert!(
+        lits.is_empty(),
+        "interpolated path must not surface as PathLiteral: {lits:?}"
+    );
+}

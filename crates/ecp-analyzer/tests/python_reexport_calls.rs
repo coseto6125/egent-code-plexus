@@ -324,6 +324,179 @@ fn test_python_submodule_from_import_unique_name_binds_import_tier() {
     );
 }
 
+/// A dotted member below a from-imported package names the nested module,
+/// rather than an unrelated project method with the terminal name.
+#[test]
+fn test_python_dotted_from_import_module_and_alias_bind_final_submodule() {
+    let package: &[(&str, &str)] = &[
+        ("app/__init__.py", ""),
+        ("app/config/__init__.py", ""),
+        ("app/config/settings.py", "def get_db():\n    return 1\n"),
+    ];
+    for import in ["from app import config", "from app import config as c"] {
+        let receiver = if import.ends_with(" as c") {
+            "c"
+        } else {
+            "config"
+        };
+        let app = format!(
+            "{import}\n\nclass SameName:\n    def get_db(self):\n        return 2\n\ndef caller():\n    return {receiver}.settings.get_db()\n"
+        );
+        let graph = python(&[package], ("main.py", &app));
+        assert_call_targets(
+            &graph,
+            "caller",
+            &[("app/config/settings.py", "", "get_db", import_tier())],
+        );
+    }
+}
+
+/// A relative import still walks the dotted module path.
+#[test]
+fn test_python_dotted_from_import_relative_package_binds_submodule() {
+    let relative = python(
+        &[&[
+            ("app/__init__.py", ""),
+            ("app/config/__init__.py", ""),
+            ("app/config/settings.py", "def get_db():\n    return 1\n"),
+        ]],
+        (
+            "app/main.py",
+            "from . import config\n\ndef caller():\n    return config.settings.get_db()\n",
+        ),
+    );
+    assert_call_targets(
+        &relative,
+        "caller",
+        &[("app/config/settings.py", "", "get_db", import_tier())],
+    );
+}
+
+/// Namespace packages still walk the dotted module path.
+#[test]
+fn test_python_dotted_from_import_namespace_package_binds_submodule() {
+    for initializer in [None, Some("from . import config\n")] {
+        let mut files = vec![("app/config/settings.py", "def get_db():\n    return 1\n")];
+        if let Some(source) = initializer {
+            files.push(("app/__init__.py", source));
+        }
+        let namespace = python(
+            &[&files],
+            (
+                "main.py",
+                "from app import config\n\ndef caller():\n    return config.settings.get_db()\n",
+            ),
+        );
+        assert_call_targets(
+            &namespace,
+            "caller",
+            &[("app/config/settings.py", "", "get_db", import_tier())],
+        );
+    }
+}
+
+/// A package binding shadows a namespace child with no initializer file.
+#[test]
+fn test_python_dotted_from_import_namespace_root_attribute_shadow_binds_no_submodule() {
+    let graph = python(
+        &[&[
+            ("app/__init__.py", "class config:\n    pass\n"),
+            ("app/config/settings.py", "def get_db():\n    return 1\n"),
+            ("fallback.py", "def get_db():\n    return 2\n"),
+        ]],
+        (
+            "main.py",
+            "from app import config\n\ndef caller():\n    return config.settings.get_db()\n",
+        ),
+    );
+    assert_call_targets(&graph, "caller", &[]);
+}
+
+/// A concrete package binding shadows a nested namespace child.
+#[test]
+fn test_python_dotted_from_import_namespace_intermediate_attribute_shadow_binds_no_submodule() {
+    let graph = python(
+        &[&[
+            ("app/__init__.py", ""),
+            ("app/config/__init__.py", "class settings:\n    pass\n"),
+            ("app/config/settings/db.py", "def get_db():\n    return 1\n"),
+            ("fallback.py", "def get_db():\n    return 2\n"),
+        ]],
+        (
+            "main.py",
+            "from app import config\n\ndef caller():\n    return config.settings.db.get_db()\n",
+        ),
+    );
+    assert_call_targets(&graph, "caller", &[]);
+}
+
+/// An attribute of the intermediate package shadows its same-named
+/// submodule. The nested object's method type is not inferred.
+#[test]
+fn test_python_dotted_from_import_intermediate_attribute_shadow_binds_no_submodule() {
+    let graph = python(
+        &[&[
+            ("app/__init__.py", ""),
+            ("app/config/__init__.py", "from .model import settings\n"),
+            (
+                "app/config/model.py",
+                "class settings:\n    @staticmethod\n    def get_db():\n        return 2\n",
+            ),
+            ("app/config/settings.py", "def get_db():\n    return 1\n"),
+        ]],
+        (
+            "main.py",
+            "from app import config\n\ndef caller():\n    return config.settings.get_db()\n",
+        ),
+    );
+    assert_call_targets(&graph, "caller", &[]);
+}
+
+/// A missing dotted module or member preserves the existing global fallback.
+#[test]
+fn test_python_dotted_from_import_missing_path_or_member_keeps_global_tier() {
+    for files in [
+        vec![
+            ("app/__init__.py", ""),
+            ("app/config/__init__.py", ""),
+            ("fallback.py", "def get_db():\n    return 1\n"),
+        ],
+        vec![
+            ("app/__init__.py", ""),
+            ("app/config/__init__.py", ""),
+            ("app/config/settings.py", "def other():\n    return 1\n"),
+            ("fallback.py", "def get_db():\n    return 2\n"),
+        ],
+    ] {
+        let graph = python(
+            &[&files],
+            (
+                "main.py",
+                "from app import config\n\ndef caller():\n    return config.settings.get_db()\n",
+            ),
+        );
+        assert_call_targets(
+            &graph,
+            "caller",
+            &[("fallback.py", "", "get_db", global_tier())],
+        );
+    }
+}
+
+/// A dotted receiver below a from-imported object is not a call on a
+/// same-file function with the terminal name.
+#[test]
+fn test_python_dotted_from_import_object_attribute_same_file_name_returns_no_edge() {
+    let graph = python(
+        &[&[("app/__init__.py", "settings = object()\n")]],
+        (
+            "main.py",
+            "from app import settings\n\ndef commit():\n    pass\n\ndef caller():\n    return settings.db.commit()\n",
+        ),
+    );
+    assert_call_targets(&graph, "caller", &[]);
+}
+
 /// A package attribute named like the submodule shadows it, as in Python:
 /// the class `mod` the package declares is the receiver, so the call binds
 /// its `compute`, never the submodule's (no edge on ecp 0.14.8).

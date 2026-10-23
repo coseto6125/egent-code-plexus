@@ -1,5 +1,6 @@
+use super::literal_key_facts::collect_literal_key_facts;
 use super::receiver_types::{
-    build_receiver_map, collect_local_types, extract_go_calls_and_path_literals,
+    build_receiver_map, collect_local_types, extract_go_calls_and_path_literals_with_imports,
     receiver_type_from_method_decl,
 };
 use super::spec::GoSpec;
@@ -346,6 +347,7 @@ impl LanguageProvider for GoProvider {
 
         detect_iota_const_blocks(tree.root_node(), path, is_test_file, &mut blind_spots);
 
+        let idx_namespace = self.query.capture_index_for_name("namespace");
         let idx_struct = self.query.capture_index_for_name("struct");
         let idx_interface = self.query.capture_index_for_name("interface");
         let idx_typedef = self.query.capture_index_for_name("typedef");
@@ -463,7 +465,8 @@ impl LanguageProvider for GoProvider {
                     // Source of truth: GoSpec::CAPTURE_KIND in spec.rs.
                     name_node = Some(cap.node);
                     kind = Some(k_from_spec);
-                } else if cap_idx == idx_struct
+                } else if cap_idx == idx_namespace
+                    || cap_idx == idx_struct
                     || cap_idx == idx_interface
                     || cap_idx == idx_typedef
                     || cap_idx == idx_method
@@ -913,13 +916,16 @@ impl LanguageProvider for GoProvider {
                             None
                         };
 
-                        let imported_name = if let Some(ref a) = alias {
-                            a.clone()
-                        } else if let Some(last_part) = source_path.split('/').next_back() {
-                            last_part.to_string()
-                        } else {
-                            source_path.clone()
-                        };
+                        // `.` and `_` bind no package name; keep them in `alias`
+                        // only, so no symbol named `_` resolves as the import.
+                        let imported_name =
+                            if let Some(a) = alias.as_ref().filter(|a| *a != "." && *a != "_") {
+                                a.clone()
+                            } else if let Some(last_part) = source_path.split('/').next_back() {
+                                last_part.to_string()
+                            } else {
+                                source_path.clone()
+                            };
 
                         imports.push(RawImport {
                             source: source_path,
@@ -957,13 +963,41 @@ impl LanguageProvider for GoProvider {
         // `Type.Method` when `obj`'s type is locally known.
         let recv_map = build_receiver_map(tree.root_node(), source);
         let local_types = collect_local_types(tree.root_node(), source, &recv_map);
-        let (raw_path_literals, raw_sql_refs) =
-            extract_go_calls_and_path_literals(tree.root_node(), source, &mut nodes, &local_types);
-        crate::calls::extract_field_reads(
+        let (raw_path_literals, raw_sql_refs) = extract_go_calls_and_path_literals_with_imports(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &local_types,
+            &imports,
+        );
+        let literal_key_facts =
+            collect_literal_key_facts(tree.root_node(), source, &imports, &local_types);
+        crate::calls::extract_field_reads_with_literal_key_facts(
             tree.root_node(),
             source,
             &mut nodes,
             &["selector_expression"],
+            &crate::calls::NameRefSpec {
+                ident_kinds: &["identifier"],
+                kind: crate::calls::NameRefKind::Value,
+                binding_fields: &[
+                    ("short_var_declaration", "left"),
+                    ("range_clause", "left"),
+                    ("receive_statement", "left"),
+                    ("var_spec", "name"),
+                    ("const_spec", "name"),
+                ],
+                skip_fields: &[("keyed_element", "key")],
+                skip_kinds: &["import_declaration", "type_arguments"],
+                map_literal_types: &[
+                    "map_type",
+                    "slice_type",
+                    "array_type",
+                    "implicit_length_array_type",
+                ],
+                ..crate::calls::NameRefSpec::EMPTY
+            },
+            Some(&literal_key_facts),
         );
 
         // owner_class is set at emit time via receiver_type_from_method_decl().

@@ -49,17 +49,23 @@ fn extract_string_content<'a>(str_node: Node<'_>, source: &'a [u8]) -> Option<&'
                     return None;
                 }
             }
-            // Extract content from `line_str_text` or `multi_line_str_text` children,
-            // or strip quotes from the raw text.
+            // Extract content from the text children, or strip quotes from the
+            // raw text. An escape (`\\`, `\n`) splits the text into several
+            // children; the value spans all of them, or `"C:\\x\\f.txt"` would
+            // read as `C:`.
             let mut c2 = str_node.walk();
+            let mut span: Option<(usize, usize)> = None;
             for child in str_node.children(&mut c2) {
-                match child.kind() {
-                    "line_str_text" | "multi_line_str_text" => {
-                        return std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
-                            .ok();
-                    }
-                    _ => {}
+                if matches!(
+                    child.kind(),
+                    "line_str_text" | "multi_line_str_text" | "str_escaped_char"
+                ) {
+                    let start = span.map_or(child.start_byte(), |(s, _)| s);
+                    span = Some((start, child.end_byte()));
                 }
+            }
+            if let Some((start, end)) = span {
+                return std::str::from_utf8(&source[start..end]).ok();
             }
             // Fallback: strip surrounding quotes from raw node text.
             let raw =

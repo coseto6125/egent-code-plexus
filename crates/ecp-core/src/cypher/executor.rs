@@ -652,6 +652,7 @@ fn apply_order_by(
                 ReturnExpr::Var(v) => v.clone(),
                 ReturnExpr::Star => "*".into(),
                 ReturnExpr::FunCall { name, .. } => format!("{name}(*)"),
+                ReturnExpr::Subscript(e) => subscript_col_name(e),
             };
             let col_idx = col_index.get(&col_name).copied();
             let av = col_idx.and_then(|i| a.get(i));
@@ -911,6 +912,40 @@ fn eval_return_expr_with(
         ReturnExpr::Prop(var, prop) => prop_value(var, prop, b, graph, cache),
         ReturnExpr::Star => Value::Null,
         ReturnExpr::FunCall { name, args, .. } => eval_scalar_funcall(name, args, b, graph),
+        ReturnExpr::Subscript(e) => eval_subscript(e, b, graph, cache),
+    }
+}
+
+/// Subscript projection never errors: a failed inner eval degrades to Null,
+/// like the other scalar RETURN evaluators.
+fn eval_subscript(
+    e: &Expr,
+    b: &Binding,
+    graph: MergedGraph<'_>,
+    cache: &mut ContentCache,
+) -> Value {
+    eval_expr(e, b, graph, cache).unwrap_or(Value::Null)
+}
+
+/// Resolve a Cypher list index (negative counts from the end) to a position.
+fn list_pos(i: i64, len: usize) -> Option<usize> {
+    let pos = if i < 0 { i.checked_add(len as i64)? } else { i };
+    usize::try_from(pos).ok().filter(|&p| p < len)
+}
+
+/// Clamp a slice bound (negative counts from the end) into `0..=len`.
+fn slice_bound(v: Option<Value>, default: usize, len: usize) -> Option<usize> {
+    match v {
+        None => Some(default),
+        Some(Value::Int(i)) => {
+            let pos = if i < 0 {
+                i.saturating_add(len as i64)
+            } else {
+                i
+            };
+            Some(pos.clamp(0, len as i64) as usize)
+        }
+        Some(_) => None,
     }
 }
 
@@ -2032,6 +2067,36 @@ fn eval_expr(
         ExistsPattern { pattern, negated } => {
             Ok(Value::Bool(pattern_exists(pattern, b, graph)? ^ negated))
         }
+        Index(base, idx) => {
+            let idx = eval_expr(idx, b, graph, cache)?;
+            // `n['name']` reads a property, as `n.name` does.
+            if let (Expr::Var(var), Value::Str(prop)) = (base.as_ref(), &idx) {
+                return Ok(prop_value(var, prop, b, graph, cache));
+            }
+            let (Value::List(items), Value::Int(i)) = (eval_expr(base, b, graph, cache)?, idx)
+            else {
+                return Ok(Value::Null);
+            };
+            Ok(list_pos(i, items.len()).map_or(Value::Null, |p| items[p].clone()))
+        }
+        Slice { base, from, to } => {
+            let Value::List(items) = eval_expr(base, b, graph, cache)? else {
+                return Ok(Value::Null);
+            };
+            let len = items.len();
+            let mut bound = |e: &Option<Box<Expr>>, default| match e {
+                None => Ok(slice_bound(None, default, len)),
+                Some(e) => {
+                    eval_expr(e, b, graph, cache).map(|v| slice_bound(Some(v), default, len))
+                }
+            };
+            let (Some(lo), Some(hi)) = (bound(from, 0)?, bound(to, len)?) else {
+                return Ok(Value::Null);
+            };
+            Ok(Value::List(
+                items.get(lo..hi.max(lo)).unwrap_or(&[]).to_vec(),
+            ))
+        }
         FunCall { name, args, .. } => {
             // Aggregates have no meaning against a single row's binding — same
             // restriction as OpenCypher (`WHERE count(n) > 1` is a semantic
@@ -2680,6 +2745,30 @@ fn return_item_default_col(item: &ReturnItem) -> String {
         ReturnExpr::Prop(v, p) => format!("{v}.{p}"),
         ReturnExpr::Star => "*".into(),
         ReturnExpr::FunCall { name, .. } => format!("{name}(*)"),
+        ReturnExpr::Subscript(e) => subscript_col_name(e),
+    }
+}
+
+/// Default column label for a subscripted projection: `labels(*)[]` style,
+/// built from the innermost base so unaliased columns stay readable.
+fn subscript_col_name(e: &Expr) -> String {
+    // Two subscripts of one base need two names: ORDER BY and the reader
+    // tell the columns apart by name.
+    let bound = |e: &Expr| match e {
+        Expr::Lit(Literal::Int(i)) => i.to_string(),
+        Expr::Lit(Literal::Str(s)) => format!("'{s}'"),
+        _ => "?".into(),
+    };
+    match e {
+        Expr::Index(base, idx) => format!("{}[{}]", subscript_col_name(base), bound(idx)),
+        Expr::Slice { base, from, to } => {
+            let side = |e: &Option<Box<Expr>>| e.as_deref().map(bound).unwrap_or_default();
+            format!("{}[{}..{}]", subscript_col_name(base), side(from), side(to))
+        }
+        Expr::Var(v) => v.clone(),
+        Expr::Prop(v, p) => format!("{v}.{p}"),
+        Expr::FunCall { name, .. } => format!("{name}(*)"),
+        _ => "expr".into(),
     }
 }
 
@@ -3012,6 +3101,7 @@ mod tests {
                         calls: vec!["a".into()],
                         heritage: Vec::new(),
                         variant_refs: Vec::new(),
+                        return_type: None,
                     },
                     OverlaySymbol {
                         is_exported: false,
@@ -3025,6 +3115,7 @@ mod tests {
                         calls: vec!["a".into()],
                         heritage: Vec::new(),
                         variant_refs: Vec::new(),
+                        return_type: None,
                     },
                 ],
                 imports: vec![],
@@ -3398,6 +3489,173 @@ mod tests {
                 }
                 v => panic!("expected labels list, got {v:?}"),
             }
+        });
+    }
+
+    fn first_cell(g: &crate::graph::ArchivedZeroCopyGraph, query: &str) -> Value {
+        let q = parse(query).unwrap();
+        let r = execute(&q, g, None, Path::new(".")).unwrap();
+        r.rows[0][0].clone()
+    }
+
+    #[test]
+    fn test_list_index_labels_first_returns_label_string() {
+        with_two(|g| {
+            let v = first_cell(
+                g,
+                "MATCH (a:Function) WHERE a.name = 'caller' RETURN labels(a)[0]",
+            );
+            assert_eq!(v, Value::Str("Function".into()));
+        });
+    }
+
+    #[test]
+    fn test_list_index_negative_counts_from_end() {
+        with_two(|g| {
+            let v = first_cell(
+                g,
+                "MATCH (a:Function) WHERE a.name = 'caller' RETURN labels(a)[-1]",
+            );
+            assert_eq!(v, Value::Str("Function".into()));
+        });
+    }
+
+    #[test]
+    fn test_list_index_out_of_range_returns_null() {
+        with_two(|g| {
+            for idx in ["5", "-5"] {
+                let q =
+                    format!("MATCH (a:Function) WHERE a.name = 'caller' RETURN labels(a)[{idx}]");
+                assert_eq!(first_cell(g, &q), Value::Null, "index {idx}");
+            }
+        });
+    }
+
+    #[test]
+    fn test_list_index_on_null_returns_null() {
+        with_two(|g| {
+            // `labels(x)` of an unbound variable is Null.
+            let v = first_cell(g, "MATCH (a:Function) RETURN labels(zz)[0]");
+            assert_eq!(v, Value::Null);
+        });
+    }
+
+    #[test]
+    fn test_list_index_on_non_list_returns_null() {
+        with_two(|g| {
+            let v = first_cell(
+                g,
+                "MATCH (a:Function) WHERE a.name = 'caller' RETURN a.name[0]",
+            );
+            assert_eq!(v, Value::Null);
+            let v = first_cell(
+                g,
+                "MATCH (a:Function) WHERE a.name = 'caller' RETURN id(a)[0]",
+            );
+            assert_eq!(v, Value::Null);
+        });
+    }
+
+    #[test]
+    fn test_list_index_on_property_list_chains() {
+        with_two(|g| {
+            // `a.decorators` is a list property (empty here) -> out of range Null.
+            let v = first_cell(
+                g,
+                "MATCH (a:Function) WHERE a.name = 'caller' RETURN a.decorators[0]",
+            );
+            assert_eq!(v, Value::Null);
+        });
+    }
+
+    #[test]
+    fn test_list_index_literal_list_and_chain() {
+        with_two(|g| {
+            let v = first_cell(g, "MATCH (a:Function) RETURN [10,20,30][1]");
+            assert_eq!(v, Value::Int(20));
+            let v = first_cell(g, "MATCH (a:Function) RETURN [[1,2],[3,4]][1][0]");
+            assert_eq!(v, Value::Int(3));
+        });
+    }
+
+    #[test]
+    fn test_list_slice_bounds_return_sublist() {
+        with_two(|g| {
+            let ints = |xs: &[i64]| Value::List(xs.iter().map(|i| Value::Int(*i)).collect());
+            let cases: [(&str, &[i64]); 6] = [
+                ("[1,2,3,4][1..3]", &[2, 3]),
+                ("[1,2,3,4][..2]", &[1, 2]),
+                ("[1,2,3,4][2..]", &[3, 4]),
+                ("[1,2,3,4][-2..]", &[3, 4]),
+                ("[1,2,3,4][1..99]", &[2, 3, 4]),
+                ("[1,2,3,4][3..1]", &[]),
+            ];
+            for (expr, want) in cases {
+                let v = first_cell(g, &format!("MATCH (a:Function) RETURN {expr}"));
+                assert_eq!(v, ints(want), "{expr}");
+            }
+        });
+    }
+
+    #[test]
+    fn test_list_index_in_where_filters_rows() {
+        with_two(|g| {
+            let q =
+                parse("MATCH (a:Function) WHERE labels(a)[0] = 'Function' RETURN a.name").unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 2);
+            let q = parse("MATCH (a:Function) WHERE labels(a)[0] = 'Class' RETURN a.name").unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
+            assert_eq!(r.rows.len(), 0);
+        });
+    }
+
+    #[test]
+    fn test_list_index_aggregate_subscript_returns_parse_error() {
+        for q in [
+            "MATCH (a:Function) RETURN collect(a.name)[0]",
+            "MATCH (a:Function) RETURN count(*)[..1]",
+            "MATCH (a:Function) WITH collect(a.name)[0] AS x RETURN x",
+        ] {
+            let err = parse(q).expect_err(q).to_string();
+            assert!(err.contains("WITH collect(x) AS xs"), "{q}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_list_index_named_aggregate_returns_first_element() {
+        with_two(|g| {
+            let v = first_cell(
+                g,
+                "MATCH (a:Function) WHERE a.name = 'caller' WITH collect(a.name) AS xs RETURN xs[0]",
+            );
+            assert_eq!(v, Value::Str("caller".into()));
+        });
+    }
+
+    #[test]
+    fn test_list_index_string_key_on_node_returns_property() {
+        with_two(|g| {
+            let v = first_cell(
+                g,
+                "MATCH (a:Function) WHERE a['name'] = 'caller' RETURN a['name']",
+            );
+            assert_eq!(v, Value::Str("caller".into()));
+        });
+    }
+
+    #[test]
+    fn test_list_index_two_subscripts_of_one_base_return_distinct_columns() {
+        with_two(|g| {
+            let q = parse(
+                "MATCH (a:Function) WHERE a.name = 'caller' RETURN labels(a)[0], labels(a)[-1], labels(a)[..1]",
+            )
+            .unwrap();
+            let r = execute(&q, g, None, Path::new(".")).unwrap();
+            assert_eq!(
+                r.columns,
+                ["LABELS(*)[0]", "LABELS(*)[-1]", "LABELS(*)[..1]"]
+            );
         });
     }
 
@@ -5470,6 +5728,7 @@ mod tests {
                 calls: vec!["target_fn".to_string()],
                 heritage: Vec::new(),
                 variant_refs: Vec::new(),
+                return_type: None,
             }],
             imports: vec![],
         };
@@ -5515,6 +5774,7 @@ mod tests {
             calls: vec![],
             heritage: Vec::new(),
             variant_refs: Vec::new(),
+            return_type: None,
         };
         let dirty = OverlayFileInput {
             export_aliases: Vec::new(),
@@ -5689,6 +5949,7 @@ mod tests {
                 calls: vec![],
                 heritage: Vec::new(),
                 variant_refs: Vec::new(),
+                return_type: None,
             }],
             imports: vec![],
         };

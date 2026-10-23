@@ -368,7 +368,7 @@ mod tests {
     /// nodes: 0 keep_fn(dirty) · 1 gone_fn(dirty) · 2 clean_caller(clean)
     ///        3 target_fn(clean)
     /// edges: clean_caller→keep_fn, keep_fn→target_fn (Calls, stale),
-    ///        keep_fn→target_fn (ReadsField), clean_caller→gone_fn
+    ///        keep_fn→target_fn (ReadsField, References), clean_caller→gone_fn
     fn base_bytes() -> Vec<u8> {
         let mut fx = GraphFixture::new();
         let keep = fx.func("src/dirty.rs", "keep_fn");
@@ -378,6 +378,13 @@ mod tests {
         fx.edge(caller, keep, RelType::Calls);
         fx.edge(keep, target, RelType::Calls);
         fx.edge(keep, target, RelType::ReadsField);
+        fx.edge_with(
+            keep,
+            target,
+            RelType::References,
+            0.8,
+            "framework-reference",
+        );
         fx.edge(caller, gone, RelType::Calls);
         fx.into_bytes()
     }
@@ -400,6 +407,7 @@ mod tests {
                 calls: vec!["target_fn".to_string()],
                 heritage: Vec::new(),
                 variant_refs: Vec::new(),
+                return_type: None,
             }],
             imports: vec![],
         }
@@ -423,7 +431,10 @@ mod tests {
             .out_edges(0)
             .map(|e| (e.target, e.rel_type()))
             .collect();
-        assert_eq!(out, vec![(3, RelType::Calls), (3, RelType::ReadsField)]);
+        assert_eq!(out.len(), 3);
+        for rel in [RelType::Calls, RelType::ReadsField, RelType::References] {
+            assert!(out.contains(&(3, rel)));
+        }
         let into: Vec<u32> = merged.in_edges(0).map(|e| e.source).collect();
         assert_eq!(into, vec![2]);
         assert_eq!(merged.all_edges().count(), graph.edges.len());
@@ -497,16 +508,17 @@ mod tests {
                 .map(|e| (e.target, e.rel_type(), e.is_overlay()))
                 .collect();
             // The stale base Calls edge is gone; the overlay's own resolution
-            // stands in for it. ReadsField has no fragment input, so its base
-            // edge survives with the source redirected into merged space.
+            // stands in for it. The removed read disappears, while framework
+            // references survive with their source redirected into merged space.
             assert!(
                 out.contains(&(3, RelType::Calls, true)),
                 "overlay Calls edge missing: {out:?}"
             );
             assert!(
-                out.contains(&(3, RelType::ReadsField, false)),
+                out.contains(&(3, RelType::References, false)),
                 "non-rebuilt base rel must survive: {out:?}"
             );
+            assert!(out.iter().all(|(_, rel, _)| *rel != RelType::ReadsField));
             assert_eq!(
                 out.iter()
                     .filter(|(_, r, ov)| *r == RelType::Calls && !ov)
@@ -548,10 +560,12 @@ mod tests {
                 .map(|e| (e.source, e.target, e.rel_type(), e.is_overlay()))
                 .collect();
             assert!(edges.contains(&(2, keep_virt, RelType::Calls, false)));
-            assert!(edges.contains(&(keep_virt, 3, RelType::ReadsField, false)));
+            assert!(edges.contains(&(keep_virt, 3, RelType::References, false)));
+            assert!(edges
+                .iter()
+                .all(|(_, _, rel, _)| *rel != RelType::ReadsField));
             assert!(edges.contains(&(keep_virt, 3, RelType::Calls, true)));
-            // the deleted symbol's edge and the masked stale Calls edge are
-            // both absent.
+            // The deleted symbol, stale call, and removed read leave no edges.
             assert_eq!(edges.len(), 3, "unexpected merged edge set: {edges:?}");
         });
     }
@@ -604,7 +618,7 @@ mod tests {
             let expected = if edge.is_overlay() {
                 OVERLAY_EDGE_REASON
             } else {
-                "ast-call"
+                "framework-reference"
             };
             assert_eq!(edge.reason(graph), expected);
         }

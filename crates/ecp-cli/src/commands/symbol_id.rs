@@ -54,6 +54,15 @@ pub fn split_fqn_target(s: &str) -> (Option<&str>, &str) {
     }
 }
 
+fn owner_matches(actual: Option<&str>, requested: &str, file: &str) -> bool {
+    actual.is_some_and(|owner| {
+        owner == requested
+            || (file.ends_with(".rs")
+                && !requested.contains("::")
+                && owner.rsplit("::").next() == Some(requested))
+    })
+}
+
 /// Every merged-space index whose symbol matches `name`, paired with the count
 /// of same-named definitions seen BEFORE `--kind` / `--file` / FQN narrowing
 /// (the Tier-3 resolver-defence counter, which keys on the global name
@@ -120,10 +129,10 @@ pub fn resolve_candidates(
             }
         }
         if let Some(owner) = owner_filter {
-            if !resolve_owner_class(graph, idx)
-                .map(|oc| oc == owner)
-                .unwrap_or(false)
-            {
+            let file = graph.files[node.file_idx.to_native() as usize]
+                .path
+                .resolve(&graph.string_pool);
+            if !owner_matches(resolve_owner_class(graph, idx), owner, file) {
                 continue;
             }
         }
@@ -153,7 +162,7 @@ pub fn resolve_candidates(
                 }
             }
             if let Some(owner) = owner_filter {
-                if vn.owner_class.as_deref() != Some(owner) {
+                if !owner_matches(vn.owner_class.as_deref(), owner, &vn.rel_path) {
                     continue;
                 }
             }
@@ -169,6 +178,48 @@ mod tests {
     use ecp_core::graph::{NodeKind, ZeroCopyGraph};
     use ecp_core::graph_fixture::GraphFixture;
     use ecp_core::session::{OverlayFileInput, OverlaySymbol};
+
+    #[test]
+    fn test_resolve_candidates_rust_nested_module_short_owner_matches_base_and_overlay() {
+        use ecp_analyzer::resolution::builder::GraphBuilder;
+        use ecp_analyzer::rust::parser::RustProvider;
+        use ecp_core::analyzer::provider::LanguageProvider;
+        use std::path::Path;
+
+        let provider = RustProvider::new().unwrap();
+        let parse = |source: &str| {
+            provider
+                .parse_file(Path::new("src/lib.rs"), source.as_bytes())
+                .unwrap()
+        };
+        let mut builder = GraphBuilder::new();
+        builder.add_graph(parse("mod a { pub mod b { pub fn f() {} } }"));
+        let graph = builder.build();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&graph).unwrap();
+        let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        let full = resolve_candidates(archived, None, "a::b.f", None, None).0;
+        assert_eq!(full.len(), 1);
+        assert_eq!(
+            resolve_candidates(archived, None, "b.f", None, None).0,
+            full
+        );
+        assert!(resolve_candidates(archived, None, "other::b.f", None, None)
+            .0
+            .is_empty());
+
+        let dirty: OverlayFileInput =
+            parse("\nmod a { pub mod b { pub fn f() {} pub fn added() {} } }").into();
+        let view = OverlayView::build(archived, &[dirty]).unwrap();
+        for name in ["f", "added"] {
+            let full =
+                resolve_candidates(archived, Some(&view), &format!("a::b.{name}"), None, None).0;
+            assert_eq!(full.len(), 1);
+            assert_eq!(
+                resolve_candidates(archived, Some(&view), &format!("b.{name}"), None, None).0,
+                full
+            );
+        }
+    }
 
     /// "dup" repeats across kinds, owners and files; "shared" has 1200 nodes
     /// (see `same_name_nodes`). Also a tombstone (empty name) and a unicode
@@ -218,6 +269,7 @@ mod tests {
                         calls: vec![],
                         heritage: Vec::new(),
                         variant_refs: Vec::new(),
+                        return_type: None,
                     },
                     OverlaySymbol {
                         is_exported: false,
@@ -231,6 +283,7 @@ mod tests {
                         calls: vec![],
                         heritage: Vec::new(),
                         variant_refs: Vec::new(),
+                        return_type: None,
                     },
                 ],
                 imports: vec![],

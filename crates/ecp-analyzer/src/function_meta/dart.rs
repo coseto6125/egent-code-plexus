@@ -188,11 +188,21 @@ fn extract_one(
     let return_type = fn_node
         .child_by_field_name("return_type")
         .or_else(|| {
-            // For function_declaration, the function_signature child has the return_type.
+            // For function_declaration, the function_signature child has the
+            // return_type; a method_declaration nests it one level deeper,
+            // under its method_signature.
             find_child_by_kind(fn_node, "function_signature")
+                .or_else(|| {
+                    find_child_by_kind(fn_node, "method_signature")
+                        .and_then(|m| find_child_by_kind(&m, "function_signature"))
+                })
                 .and_then(|sig| sig.child_by_field_name("return_type"))
         })
-        .map(|n| node_text(&n, source).to_string())
+        .map(|n| node_text(&n, source))
+        // With no written type, tree-sitter-dart puts the modifier of
+        // `static plain() => ..` in the return_type field.
+        .filter(|t| !matches!(*t, "static" | "external" | "abstract"))
+        .map(str::to_string)
         .unwrap_or_default();
 
     Some(RawFunctionMeta {

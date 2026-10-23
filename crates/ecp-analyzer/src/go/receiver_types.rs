@@ -16,7 +16,7 @@
 
 use super::path_literals::{build_raw_path_literal, strip_go_string_value};
 use crate::calls::{attach_to_enclosing, node_range, range_width, start_pos, Pos, PosRange};
-use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{CallSite, RawImport, RawNode, RawPathLiteral, RawSqlRef};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -96,6 +96,9 @@ fn extract_method_receiver(node: &Node<'_>, source: &[u8]) -> Option<(String, St
 struct Scope {
     range: PosRange,
     bindings: HashMap<String, String>,
+    /// Every name a parameter, `var` or `:=` binds, typed or not, with the
+    /// position it takes effect from.
+    values: HashMap<String, Pos>,
 }
 
 /// Collection of all scopes in the file.
@@ -105,23 +108,34 @@ pub struct LocalTypes {
 }
 
 impl LocalTypes {
-    /// Find the type bound to `var` at `pos`, picking the smallest enclosing
-    /// scope that defines it (innermost wins for closures / nested functions).
+    /// Find the type bound to `var` at `pos`. The innermost visible binding
+    /// wins even when it has no reducible type, so an outer typed binding
+    /// cannot leak through a local shadow.
     pub fn lookup(&self, pos: Pos, var: &str) -> Option<&str> {
-        let mut best: Option<&str> = None;
+        let mut best: Option<&Scope> = None;
         let mut best_width = (u32::MAX, i64::MAX);
         for scope in &self.scopes {
-            if scope.range.0 <= pos && pos <= scope.range.1 {
-                if let Some(ty) = scope.bindings.get(var) {
-                    let w = range_width(scope.range);
-                    if w < best_width {
-                        best_width = w;
-                        best = Some(ty.as_str());
-                    }
+            if scope.range.0 <= pos
+                && pos <= scope.range.1
+                && scope.values.get(var).is_some_and(|from| *from <= pos)
+            {
+                let w = range_width(scope.range);
+                if w < best_width {
+                    best_width = w;
+                    best = Some(scope);
                 }
             }
         }
-        best
+        best.and_then(|scope| scope.bindings.get(var).map(String::as_str))
+    }
+
+    /// Whether a parameter or local declared before `pos` binds `name`.
+    pub fn binds_local(&self, pos: Pos, name: &str) -> bool {
+        self.scopes.iter().any(|scope| {
+            scope.range.0 <= pos
+                && pos <= scope.range.1
+                && scope.values.get(name).is_some_and(|from| *from <= pos)
+        })
     }
 }
 
@@ -133,33 +147,7 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8], recv_map: &ReceiverMap
     while let Some(n) = stack.pop() {
         match n.kind() {
             "function_declaration" | "method_declaration" => {
-                let mut bindings: HashMap<String, String> = HashMap::new();
-
-                // For method_declaration: the receiver var itself is in scope.
-                if n.kind() == "method_declaration" {
-                    if let Some(recv_list) = n.child_by_field_name("receiver") {
-                        collect_params(&recv_list, source, &mut bindings);
-                    }
-                    // Also bind the receiver var to the receiver type via recv_map.
-                    // (Already handled by collect_params which reads the type field.)
-                }
-
-                // Collect typed parameters from the function signature.
-                if let Some(params) = n.child_by_field_name("parameters") {
-                    collect_params(&params, source, &mut bindings);
-                }
-
-                // Collect var declarations and short-var assignments in the body.
-                if let Some(body) = n.child_by_field_name("body") {
-                    collect_body_bindings(&body, source, &mut bindings);
-                }
-
-                if !bindings.is_empty() {
-                    scopes.push(Scope {
-                        range: node_range(n),
-                        bindings,
-                    });
-                }
+                collect_function_scope(n, source, &mut scopes);
 
                 // Descend into body for nested function literals.
                 if let Some(body) = n.child_by_field_name("body") {
@@ -182,6 +170,106 @@ pub fn collect_local_types(root: Node<'_>, source: &[u8], recv_map: &ReceiverMap
     // recv_map is currently unused after the refactor but kept for API stability.
     let _ = recv_map;
     LocalTypes { scopes }
+}
+
+fn collect_function_scope(function: Node<'_>, source: &[u8], scopes: &mut Vec<Scope>) {
+    let mut bindings = HashMap::new();
+    let mut values = HashMap::new();
+    let scope_start = start_pos(function);
+
+    if function.kind() == "method_declaration" {
+        if let Some(receiver) = function.child_by_field_name("receiver") {
+            collect_params(&receiver, source, &mut bindings);
+            collect_param_names(&receiver, source, scope_start, &mut values);
+        }
+    }
+    if let Some(params) = function.child_by_field_name("parameters") {
+        collect_params(&params, source, &mut bindings);
+        collect_param_names(&params, source, scope_start, &mut values);
+    }
+    if let Some(body) = function.child_by_field_name("body") {
+        collect_scope_body(&body, source, &mut bindings, &mut values);
+        collect_nested_scopes(body, source, scopes);
+    }
+    if !bindings.is_empty() || !values.is_empty() {
+        scopes.push(Scope {
+            range: node_range(function),
+            bindings,
+            values,
+        });
+    }
+}
+
+fn collect_literal_scope(literal: Node<'_>, source: &[u8], scopes: &mut Vec<Scope>) {
+    let mut bindings = HashMap::new();
+    let mut values = HashMap::new();
+    let scope_start = start_pos(literal);
+    if let Some(params) = literal.child_by_field_name("parameters") {
+        collect_params(&params, source, &mut bindings);
+        collect_param_names(&params, source, scope_start, &mut values);
+    }
+    if let Some(body) = literal.child_by_field_name("body") {
+        collect_scope_body(&body, source, &mut bindings, &mut values);
+        collect_nested_scopes(body, source, scopes);
+    }
+    if !bindings.is_empty() || !values.is_empty() {
+        scopes.push(Scope {
+            range: node_range(literal),
+            bindings,
+            values,
+        });
+    }
+}
+
+fn is_scope_boundary(kind: &str) -> bool {
+    matches!(
+        kind,
+        "block"
+            | "if_statement"
+            | "for_statement"
+            | "expression_switch_statement"
+            | "type_switch_statement"
+            | "expression_case"
+            | "type_case"
+            | "communication_case"
+            | "default_case"
+    )
+}
+
+fn collect_nested_scopes(node: Node<'_>, source: &[u8], scopes: &mut Vec<Scope>) {
+    let mut stack = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        stack.push(child);
+    }
+    while let Some(node) = stack.pop() {
+        if node.kind() == "func_literal" {
+            collect_literal_scope(node, source, scopes);
+            continue;
+        }
+        if is_scope_boundary(node.kind()) {
+            collect_block_scope(node, source, scopes);
+            continue;
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
+fn collect_block_scope(node: Node<'_>, source: &[u8], scopes: &mut Vec<Scope>) {
+    let mut bindings = HashMap::new();
+    let mut values = HashMap::new();
+    collect_scope_body(&node, source, &mut bindings, &mut values);
+    collect_nested_scopes(node, source, scopes);
+    if !bindings.is_empty() || !values.is_empty() {
+        scopes.push(Scope {
+            range: node_range(node),
+            bindings,
+            values,
+        });
+    }
 }
 
 /// Collect typed parameter declarations from a `parameter_list`.
@@ -213,11 +301,22 @@ fn collect_params(params: &Node<'_>, source: &[u8], out: &mut HashMap<String, St
 /// Walk a function body and collect:
 /// - `var_declaration` → `var x Dog` / `var x *Dog`
 /// - `short_var_declaration` where the RHS is a composite literal → `x := Dog{}`
-fn collect_body_bindings(body: &Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
+/// - range, receive and type-switch names, which only shadow
+fn collect_scope_body(
+    body: &Node<'_>,
+    source: &[u8],
+    out: &mut HashMap<String, String>,
+    values: &mut HashMap<String, Pos>,
+) {
     let mut stack: Vec<Node<'_>> = vec![*body];
     while let Some(n) = stack.pop() {
-        // Don't descend into nested function literals (they get their own scope).
-        if n.kind() == "func_literal" || n.kind() == "function_declaration" {
+        // Nested blocks and function literals own their bindings. They are
+        // collected separately so their shadows do not escape their scope.
+        if n != *body
+            && (n.kind() == "func_literal"
+                || n.kind() == "function_declaration"
+                || is_scope_boundary(n.kind()))
+        {
             continue;
         }
         match n.kind() {
@@ -226,17 +325,70 @@ fn collect_body_bindings(body: &Node<'_>, source: &[u8], out: &mut HashMap<Strin
                 for child in n.children(&mut c) {
                     if child.kind() == "var_spec" {
                         collect_var_spec(&child, source, out);
+                        record_names(&child, source, node_range(child).1, values);
                     }
                 }
             }
             "short_var_declaration" => {
                 collect_short_var(&n, source, out);
+                if let Some(left) = n.child_by_field_name("left") {
+                    record_names(&left, source, node_range(n).1, values);
+                }
+            }
+            // `=` assigns an outer variable; only `:=` declares a name.
+            "range_clause" | "receive_statement"
+                if n.children(&mut n.walk()).any(|token| token.kind() == ":=") =>
+            {
+                if let Some(left) = n.child_by_field_name("left") {
+                    record_names(&left, source, node_range(n).1, values);
+                }
+            }
+            "type_switch_statement" => {
+                // The guard expression still sees the outer name.
+                if let (Some(alias), Some(value)) = (
+                    n.child_by_field_name("alias"),
+                    n.child_by_field_name("value"),
+                ) {
+                    record_names(&alias, source, node_range(value).1, values);
+                }
             }
             _ => {}
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
             stack.push(child);
+        }
+    }
+}
+
+/// Record the identifier children of `node` as bound from `from`; the first
+/// declaration of a name wins.
+fn record_names(node: &Node<'_>, source: &[u8], from: Pos, out: &mut HashMap<String, Pos>) {
+    let mut c = node.walk();
+    for child in node.children(&mut c) {
+        if child.kind() == "identifier" {
+            if let Some(name) = node_text(child, source) {
+                let slot = out.entry(name).or_insert(from);
+                *slot = (*slot).min(from);
+            }
+        }
+    }
+}
+
+/// Record every parameter name of a `parameter_list`, typed or not.
+fn collect_param_names(
+    params: &Node<'_>,
+    source: &[u8],
+    from: Pos,
+    out: &mut HashMap<String, Pos>,
+) {
+    let mut c = params.walk();
+    for p in params.children(&mut c) {
+        if matches!(
+            p.kind(),
+            "parameter_declaration" | "variadic_parameter_declaration"
+        ) {
+            record_names(&p, source, from, out);
         }
     }
 }
@@ -305,13 +457,23 @@ pub fn extract_go_calls_and_path_literals(
     nodes: &mut [RawNode],
     local_types: &LocalTypes,
 ) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
+    extract_go_calls_and_path_literals_with_imports(root, source, nodes, local_types, &[])
+}
+
+pub(super) fn extract_go_calls_and_path_literals_with_imports(
+    root: Node<'_>,
+    source: &[u8],
+    nodes: &mut [RawNode],
+    local_types: &LocalTypes,
+    imports: &[RawImport],
+) -> (Vec<RawPathLiteral>, Vec<RawSqlRef>) {
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
     let mut stack: Vec<Node<'_>> = vec![root];
     while let Some(n) = stack.pop() {
         match n.kind() {
             "call_expression" => {
-                if let Some(callee) = go_callee_name(n, source, local_types) {
+                if let Some(callee) = go_callee_name(n, source, local_types, imports) {
                     attach_to_enclosing(start_pos(n), callee, nodes);
                 }
             }
@@ -347,10 +509,19 @@ pub fn extract_go_calls_and_path_literals(
 ///
 /// - `foo()` → `"foo"`
 /// - `obj.Method()` where `obj`'s type is known → `"Type.Method"`
-/// - `obj.Method()` where type is unknown → `"Method"` (fallback)
-fn go_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Option<String> {
-    let function = call.child_by_field_name("function")?;
+/// - `obj.Method()` where type is unknown → an untyped member call
+fn go_callee_name(
+    call: Node<'_>,
+    source: &[u8],
+    locals: &LocalTypes,
+    imports: &[RawImport],
+) -> Option<String> {
+    let mut function = call.child_by_field_name("function")?;
+    while function.kind() == "parenthesized_expression" {
+        function = function.named_child(0)?;
+    }
     match function.kind() {
+        "func_literal" => None,
         "identifier" => node_text(function, source),
         "selector_expression" => {
             // selector_expression: operand . field
@@ -363,10 +534,37 @@ fn go_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Option<
                     if let Some(ty) = locals.lookup(pos, &var_name) {
                         return Some(format!("{ty}.{method_name}"));
                     }
+                    if !locals.binds_local(pos, &var_name)
+                        && imports.iter().any(|import| {
+                            import.alias.as_deref() == Some(var_name.as_str())
+                                || import.alias.is_none()
+                        })
+                    {
+                        return Some(CallSite::from_receiver(&var_name, &method_name));
+                    }
+                    return Some(CallSite::untyped_member(&method_name));
+                }
+                // `NewFoo().Bar()`: the resolver types the operand by the
+                // callee's return type.
+                // A callee that a parameter or local binds is a closure, not
+                // the same-named function whose return type would type it.
+                let calls_local = operand.kind() == "call_expression"
+                    && operand
+                        .child_by_field_name("function")
+                        .filter(|f| f.kind() == "identifier")
+                        .and_then(|f| node_text(f, source))
+                        .is_some_and(|name| locals.binds_local(start_pos(operand), &name));
+                if operand.kind() == "call_expression" && !calls_local {
+                    if let Some(inner) =
+                        CallSite::nested_chain(|| go_callee_name(operand, source, locals, imports))
+                    {
+                        let fallback = CallSite::untyped_member(&method_name);
+                        return Some(CallSite::chained_member(&inner, &fallback));
+                    }
                 }
             }
-            // Fallback: bare method name.
-            Some(method_name)
+            // The receiver syntax still distinguishes this from a bare call.
+            Some(CallSite::untyped_member(&method_name))
         }
         _ => {
             // Last resort: full text, then last segment after `.`.

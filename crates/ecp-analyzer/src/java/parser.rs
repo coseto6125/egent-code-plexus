@@ -55,6 +55,7 @@ struct JavaCaptureIndices {
     import_source: Option<u32>,
     /// Captured `asterisk` node present when the import is a wildcard (`.*`).
     import_wildcard: Option<u32>,
+    namespace: Option<u32>,
     class: Option<u32>,
     interface: Option<u32>,
     method: Option<u32>,
@@ -97,6 +98,7 @@ impl JavaProvider {
             import_name: query.capture_index_for_name("import.name"),
             import_source: query.capture_index_for_name("import.source"),
             import_wildcard: query.capture_index_for_name("import.wildcard"),
+            namespace: query.capture_index_for_name("namespace"),
             class: query.capture_index_for_name("class"),
             interface: query.capture_index_for_name("interface"),
             method: query.capture_index_for_name("method"),
@@ -241,7 +243,8 @@ impl LanguageProvider for JavaProvider {
                     import_src = Some(cap.node);
                 } else if cap_idx == idx.import_wildcard {
                     import_wildcard_node = Some(cap.node);
-                } else if cap_idx == idx.class
+                } else if cap_idx == idx.namespace
+                    || cap_idx == idx.class
                     || cap_idx == idx.interface
                     || cap_idx == idx.method
                     || cap_idx == idx.constructor
@@ -518,7 +521,31 @@ impl LanguageProvider for JavaProvider {
         // also collects path-shaped string literals.
         let (raw_path_literals, raw_sql_refs) =
             extract_java_calls_and_path_literals(tree.root_node(), source, &mut nodes);
-        crate::calls::extract_field_reads(tree.root_node(), source, &mut nodes, &["field_access"]);
+        crate::calls::extract_field_reads(
+            tree.root_node(),
+            source,
+            &mut nodes,
+            &["field_access"],
+            &crate::calls::NameRefSpec {
+                ident_kinds: &["identifier"],
+                kind: crate::calls::NameRefKind::Value,
+                binding_fields: &[
+                    ("enhanced_for_statement", "name"),
+                    ("resource", "name"),
+                    ("instanceof_expression", "name"),
+                ],
+                binding_parents: &["type_pattern", "record_pattern_component"],
+                skip_kinds: &[
+                    "marker_annotation",
+                    "annotation",
+                    "scoped_identifier",
+                    "type_arguments",
+                ],
+                skip_parents: &["break_statement", "continue_statement", "labeled_statement"],
+                method_refs: &["method_reference"],
+                ..crate::calls::NameRefSpec::EMPTY
+            },
+        );
         crate::calls::extract_variant_refs(
             tree.root_node(),
             source,
@@ -652,6 +679,38 @@ public class App {
             Some("static:*".to_string()),
             "static wildcard alias must be `static:*`"
         );
+    }
+
+    #[test]
+    fn test_parse_file_single_segment_wildcard_preserves_import() {
+        let graph = parse("import models.*;\n");
+        assert!(
+            graph.imports.iter().any(|import| {
+                import.source == "models"
+                    && import.imported_name == "*"
+                    && import.alias.as_deref() == Some("*")
+            }),
+            "{:?}",
+            graph.imports
+        );
+    }
+
+    #[test]
+    fn test_parse_file_package_declaration_preserves_namespace() {
+        for name in ["models", "app.models"] {
+            let graph = parse(&format!("package {name};\nclass Foo {{}}\n"));
+            let namespaces: Vec<_> = graph
+                .nodes
+                .iter()
+                .filter(|node| node.kind == NodeKind::Namespace)
+                .map(|node| (node.name.as_str(), node.span.0, node.span.2))
+                .collect();
+            assert_eq!(namespaces, [(name, 0, 0)]);
+        }
+        assert!(parse("class Foo {}\n")
+            .nodes
+            .iter()
+            .all(|node| node.kind != NodeKind::Namespace));
     }
 
     #[test]

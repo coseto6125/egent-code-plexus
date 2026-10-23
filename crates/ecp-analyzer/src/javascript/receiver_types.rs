@@ -9,12 +9,10 @@
 //! annotations we cannot commit to a type, per the spec's "only commit ✓ for cases
 //! that work without guessing" rule.
 
-use super::path_literals::{
-    build_raw_path_literal, enclosing_symbol_and_owner_pub, strip_js_string_value,
-};
+use super::path_literals::{build_raw_path_literal, strip_js_string_value, LiteralContext};
 use crate::calls::{attach_to_enclosing_span, new_expression_call, CallSiteIndex};
 use crate::framework_helpers::{enclosing_class, node_span, Span};
-use ecp_core::analyzer::types::{RawNode, RawPathLiteral, RawSqlRef};
+use ecp_core::analyzer::types::{CallSite, RawNode, RawPathLiteral, RawSqlRef};
 use tree_sitter::Node;
 
 /// Walk the JavaScript AST once, attaching callees to enclosing
@@ -35,8 +33,8 @@ pub fn extract_js_calls_and_path_literals(
     let mut path_literals: Vec<RawPathLiteral> = Vec::new();
     let mut sql_refs: Vec<RawSqlRef> = Vec::new();
     let mut constructions: Vec<(Span, String)> = Vec::new();
-    let mut stack: Vec<Node<'_>> = vec![root];
-    while let Some(n) = stack.pop() {
+    let mut stack = vec![(root, None, LiteralContext::default())];
+    while let Some((n, parent, context)) = stack.pop() {
         match n.kind() {
             "call_expression" => {
                 if let Some(callee) = js_callee_name(n, source, nodes) {
@@ -51,33 +49,36 @@ pub fn extract_js_calls_and_path_literals(
                 }
             }
             "string" => {
-                if let Some(rpl) = build_raw_path_literal(n, source) {
+                if let Some(rpl) = build_raw_path_literal(n, source, context) {
                     path_literals.push(rpl);
                 }
                 // SQL ref extraction: same string node, separate filter.
                 let raw_bytes = &source[n.start_byte()..n.end_byte()];
                 if let Ok(raw) = std::str::from_utf8(raw_bytes) {
                     if let Some(value) = strip_js_string_value(raw) {
-                        if let Some(sql_ref) = crate::sql_literal::try_sql_ref(
-                            value,
-                            n,
-                            enclosing_symbol_and_owner_pub(n, source),
-                        ) {
+                        if let Some(mut sql_ref) =
+                            crate::sql_literal::try_sql_ref(value, n, (None, None))
+                        {
+                            (sql_ref.enclosing_symbol, sql_ref.enclosing_owner) = (
+                                context.symbol.map(str::to_string),
+                                context.owner.map(str::to_string),
+                            );
                             sql_refs.push(sql_ref);
                         }
                     }
                 }
             }
             "template_string" => {
-                if let Some(rpl) = build_raw_path_literal(n, source) {
+                if let Some(rpl) = build_raw_path_literal(n, source, context) {
                     path_literals.push(rpl);
                 }
             }
             _ => {}
         }
+        let child_context = context.for_children(n, parent, source);
         let mut c = n.walk();
         for child in n.children(&mut c) {
-            stack.push(child);
+            stack.push((child, Some(n), child_context));
         }
     }
     // After every call: the call-meta detectors index `calls` in
@@ -103,12 +104,32 @@ fn js_callee_name(call: Node<'_>, source: &[u8], nodes: &[RawNode]) -> Option<St
                 if let Some((class_name, _)) = enclosing_class(nodes, call_span) {
                     return Some(format!("{class_name}.{prop_name}"));
                 }
-                // `this` outside a class (module-level self-reference, unusual but possible).
-                Some(prop_name.to_string())
+                Some(CallSite::from_receiver("this", prop_name))
             } else {
-                // Unknown receiver type — emit qualified name so resolver has context.
-                let obj_name = obj.utf8_text(source).ok()?;
-                Some(format!("{obj_name}.{prop_name}"))
+                // A call receiver (`make().bar()`, `new Foo().bar()`): the
+                // resolver types it by the callee's return type or the
+                // constructed class. The chain fallback is the member name
+                // alone: the resolver keeps only its last segment, and the
+                // receiver text of a long chain would make every site
+                // O(depth).
+                let inner = match obj.kind() {
+                    "call_expression" => {
+                        CallSite::nested_chain(|| js_callee_name(obj, source, nodes))
+                    }
+                    "new_expression" => new_expression_call(obj, source),
+                    _ => None,
+                };
+                Some(match (inner, obj.kind()) {
+                    (Some(inner), _) => {
+                        let fallback = CallSite::untyped_member(prop_name);
+                        CallSite::chained_member(&inner, &fallback)
+                    }
+                    (None, "call_expression" | "new_expression") => {
+                        CallSite::untyped_member(prop_name)
+                    }
+                    // Unknown receiver type — emit qualified name so resolver has context.
+                    (None, _) => format!("{}.{prop_name}", obj.utf8_text(source).ok()?),
+                })
             }
         }
         _ => function.utf8_text(source).ok().map(str::to_string),

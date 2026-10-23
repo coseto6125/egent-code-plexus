@@ -56,3 +56,16 @@ fn java_enclosing_symbol_and_owner_resolved() {
     assert_eq!(r.enclosing_symbol.as_deref(), Some("listChannels"));
     assert_eq!(r.enclosing_owner.as_deref(), Some("ChannelDao"));
 }
+
+#[test]
+fn test_parse_sql_refs_long_chain_preserves_enclosing_symbol_and_owner() {
+    let source = format!(
+        "class Repository {{ void run(Builder db) {{ db{}.query(\"SELECT id FROM users\"); }} }}",
+        ".option(\"x\")".repeat(200)
+    );
+    let refs = parse_sql_refs(&source);
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].tables, vec![("users".into(), SqlVerb::Read)]);
+    assert_eq!(refs[0].enclosing_symbol.as_deref(), Some("run"));
+    assert_eq!(refs[0].enclosing_owner.as_deref(), Some("Repository"));
+}

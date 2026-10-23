@@ -1,7 +1,7 @@
 use super::receiver_types::{
     build_impl_map, collect_local_types, enclosing_enum_name, enclosing_function_name,
-    enclosing_impl_or_trait_context, enclosing_impl_type, enclosing_struct_type,
-    extract_rust_calls_and_path_literals, impl_trait_name,
+    enclosing_function_path, enclosing_impl_or_trait_context, enclosing_impl_type,
+    enclosing_struct_type, extract_rust_calls_and_path_literals, impl_self_type, impl_trait_name,
 };
 use super::spec::RustSpec;
 use crate::framework_confidence;
@@ -348,7 +348,7 @@ impl LanguageProvider for RustProvider {
                                 span,
                                 calls: Vec::new(),
                                 field_reads: Vec::new(),
-                                owner_class: None,
+                                owner_class: enclosing_function_path(cap.node, source),
                                 content_hash: ecp_core::uid::xxh3_64_bytes(
                                     &source[cap.node.start_byte()..cap.node.end_byte()],
                                 ),
@@ -375,6 +375,16 @@ impl LanguageProvider for RustProvider {
 
             if let (Some(n), Some(k), Some(root)) = (name_node, kind, root_span_node) {
                 if let Ok(name_str) = std::str::from_utf8(&source[n.start_byte()..n.end_byte()]) {
+                    let impl_name;
+                    let name_str = if k == NodeKind::Impl {
+                        let Some(name) = impl_self_type(&root, source) else {
+                            continue;
+                        };
+                        impl_name = name;
+                        impl_name.as_str()
+                    } else {
+                        name_str
+                    };
                     if matches!(k, NodeKind::Function | NodeKind::Method) {
                         fn_spans.push((name_str.to_string(), root.start_byte()..root.end_byte()));
                     }
@@ -420,11 +430,10 @@ impl LanguageProvider for RustProvider {
                             enclosing_impl_type(root, source)
                         }
                         NodeKind::Function => {
-                            // Prefer impl-type owner (for methods matched by the
-                            // function pattern); fall back to enclosing function
-                            // name for nested free functions.
-                            enclosing_impl_type(root, source)
-                                .or_else(|| enclosing_function_name(root, source))
+                            // A nested function belongs to its lexical function,
+                            // even when that function is an impl method.
+                            enclosing_function_path(root, source)
+                                .or_else(|| enclosing_impl_type(root, source))
                         }
                         NodeKind::Impl => {
                             // Trait name for trait-impls; empty string for
@@ -443,7 +452,9 @@ impl LanguageProvider for RustProvider {
                             // Falls back to None for top-level type aliases.
                             enclosing_impl_or_trait_context(root, source)
                         }
-                        NodeKind::Const | NodeKind::Macro => {
+                        NodeKind::Const => enclosing_function_name(root, source)
+                            .or_else(|| enclosing_impl_type(root, source)),
+                        NodeKind::Macro => {
                             // Const/macro inside a function → use function name.
                             enclosing_function_name(root, source)
                         }
@@ -552,6 +563,18 @@ impl LanguageProvider for RustProvider {
             source,
             &mut nodes,
             &["field_expression"],
+            &crate::calls::NameRefSpec {
+                ident_kinds: &["identifier", "shorthand_field_identifier"],
+                kind: crate::calls::NameRefKind::Value,
+                binding_fields: &[("const_item", "name"), ("static_item", "name")],
+                skip_kinds: &[
+                    "use_declaration",
+                    "attribute_item",
+                    "inner_attribute_item",
+                    "type_arguments",
+                ],
+                ..crate::calls::NameRefSpec::EMPTY
+            },
         );
         crate::calls::extract_variant_refs(
             tree.root_node(),

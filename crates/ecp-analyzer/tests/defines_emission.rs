@@ -147,6 +147,23 @@ mod foo {
     );
 }
 
+#[test]
+fn test_rust_nested_module_defines_function() {
+    let provider = ecp_analyzer::rust::parser::RustProvider::new().expect("rust provider");
+    let graph = build(vec![parse_file(
+        &provider,
+        "nested.rs",
+        "mod a { pub mod b { pub fn f() {} } }",
+    )]);
+    let pairs = defines_pairs(&graph);
+    assert!(
+        pairs
+            .iter()
+            .any(|(source, target)| source == "b" && target == "f"),
+        "expected Module(b)->Defines->Function(f); got: {pairs:?}"
+    );
+}
+
 // ── 4. Module → Class — Python ───────────────────────────────────────────────
 
 #[test]
@@ -400,5 +417,24 @@ fn owner_class_none_gate() {
     assert!(
         defines_count >= 1,
         "at least 1 Defines edge expected; got {defines_count}"
+    );
+}
+
+// ── PHP braced namespace constant ───────────────────────────────────────────
+
+#[test]
+fn test_defines_php_braced_namespace_constant_from_namespace() {
+    let provider = ecp_analyzer::php::parser::PhpProvider::new().expect("php provider");
+    let src = "<?php namespace Lib { const LIMIT = 1; function limit(): int { return LIMIT; } }";
+    let graph = build(vec![parse_file(&provider, "lib.php", src)]);
+
+    let pairs = defines_pairs(&graph);
+    assert!(
+        pairs.iter().any(|(s, t)| s == "Lib" && t == "LIMIT"),
+        "Namespace(Lib)->Defines->Const(LIMIT) must be emitted; got: {pairs:?}"
+    );
+    assert!(
+        !pairs.iter().any(|(s, t)| s == "lib.php" && t == "LIMIT"),
+        "File->Defines->Const(LIMIT) must not replace the namespace owner; got: {pairs:?}"
     );
 }

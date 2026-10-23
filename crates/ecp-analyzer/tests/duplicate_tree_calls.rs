@@ -258,18 +258,20 @@ fn test_resolve_call_dart_duplicate_tree_package_import_binds_nearest_copy() {
 /// Two copies of one Go module: the import path names both.
 #[test]
 fn test_resolve_call_go_duplicate_module_binds_nearest_copy() {
-    assert_each_tree_binds_its_copy(
-        &[
-            ("go/go.mod", "module example.com/dup\n\ngo 1.21\n"),
-            ("go/pkg/pkg.go", "package pkg\n\nfunc Make() {}\n"),
-        ],
-        &[(
-            "go/cmd/main.go",
-            "package main\n\nimport \"example.com/dup/pkg\"\n\nfunc t() { pkg.Make() }\n",
-        )],
-        &[],
-        "Make",
-    );
+    for module in ["example.com/dup", "dup"] {
+        let manifest = format!("module {module}\n\ngo 1.21\n");
+        let caller =
+            format!("package main\n\nimport \"{module}/pkg\"\n\nfunc t() {{ pkg.Make() }}\n");
+        assert_each_tree_binds_its_copy(
+            &[
+                ("go/go.mod", &manifest),
+                ("go/pkg/pkg.go", "package pkg\n\nfunc Make() {}\n"),
+            ],
+            &[("go/cmd/main.go", &caller)],
+            &[],
+            "Make",
+        );
+    }
 }
 
 /// The workspace holds `core/dup` and `core/app`; the `android/` copy of

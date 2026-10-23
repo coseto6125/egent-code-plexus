@@ -45,6 +45,12 @@ pub enum ResolveTarget {
     /// A struct/class field, for `ReadsField` edge resolution. Filters to
     /// `NodeKind::is_property`.
     Field,
+    /// What a bare name in a function body can name as a value
+    /// ([`crate::analyzer::types::NameRef`]): a module-level `Const` /
+    /// `Variable`, or a `Function` passed or stored. Unlike `Field` it takes
+    /// the import tiers: `import { LIMITS }` binds the read. A `Method` or a
+    /// `Property` is reached only through the reader's own type.
+    Value,
 }
 
 impl ResolveTarget {
@@ -55,6 +61,12 @@ impl ResolveTarget {
             Self::Type => NodeKind::is_type,
             Self::Qualifier => NodeKind::is_qualifier,
             Self::Field => NodeKind::is_property,
+            Self::Value => |kind| {
+                matches!(
+                    kind,
+                    NodeKind::Const | NodeKind::Variable | NodeKind::Function
+                )
+            },
         }
     }
 }
@@ -193,6 +205,16 @@ pub fn is_ecmascript(language: Language) -> bool {
     matches!(language, Language::TypeScript | Language::JavaScript)
 }
 
+/// A Go dot import makes dependency exports available without a receiver.
+///
+/// The return-type ladder has no declaration-level binding for those names.
+/// Preserve its unknown state rather than selecting a same-named global type.
+pub fn go_dot_import_blocks_unmodeled_type<'a>(
+    imports: impl IntoIterator<Item = ImportRef<'a>>,
+) -> bool {
+    imports.into_iter().any(|import| import.alias == Some("."))
+}
+
 /// The ES-module rule ([`ModuleFacts::is_es_module`]) for `file`, of
 /// `language`: [`export_filter_applies`], and the file exports a
 /// declaration or has an [`ExportAliasTable`].
@@ -320,10 +342,22 @@ pub trait ModuleFacts {
 
     /// Whether `file` is indexed, symbols or not.
     fn has_file(&self, file: &str) -> bool;
+    /// Files of `language` directly within `directory`.
+    fn files_in_directory(&self, _language: Language, _directory: &str) -> Vec<Self::Path> {
+        Vec::new()
+    }
+    /// Files of `language` that declare `namespace`.
+    fn namespace_files(&self, _language: Language, _namespace: &str) -> Vec<Self::Path> {
+        Vec::new()
+    }
     /// Whether a file stem or directory of `language` is named `name`.
     fn has_module_name(&self, language: Language, name: &str) -> bool;
     /// Whether `file` declares `name`, any kind.
     fn declares(&self, file: &str, name: &str) -> bool;
+    /// Whether `file` declares a module named `name` outside another owner.
+    fn declares_top_level_module(&self, _file: &str, _name: &str) -> bool {
+        false
+    }
     /// `file`'s declarations of `name`, in source order, with their kinds.
     /// Only the first declaration of each uid counts, as in the index.
     fn decls_in_file(&self, file: &str, name: &str) -> Vec<(u32, NodeKind)>;
@@ -334,7 +368,7 @@ pub trait ModuleFacts {
     fn is_es_module(&self, file: &str) -> bool;
     /// `file`'s [`ExportAliasTable`], `None` when it has none.
     fn export_aliases(&self, file: &str) -> Option<Fact<'_, ExportAliasTable>>;
-    /// The ordered imports of a Python / TS / JS `file`, with the binding
+    /// The ordered imports of `file`, with the binding
     /// kinds the parsers marked. `None` when there is no record of them,
     /// which no rule reads as "no imports".
     fn imports(&self, file: &str) -> Option<FileImports<'_>>;
@@ -361,6 +395,386 @@ pub fn call_in_file<F: ModuleFacts + ?Sized>(
     target: ResolveTarget,
 ) -> Option<u32> {
     pick_call(facts.decls_in_file(file, name).into_iter(), target)
+}
+
+/// C++ include or Dart file import evidence for a return type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportedFileType {
+    Unique(u32),
+    Missing,
+    Ambiguous,
+}
+
+/// A unique type declared by an unaliased C++ include or Dart file import.
+/// Only resolved import files contribute; project-wide namesakes do not.
+pub fn imported_file_type<'i, F: ModuleFacts + ?Sized>(
+    facts: &F,
+    importer: &str,
+    language: Language,
+    name: &str,
+    imports: impl IntoIterator<Item = ImportRef<'i>>,
+) -> ImportedFileType {
+    let mut found = None;
+    let mut ambiguous = false;
+    for import in imports {
+        if import.alias.is_some() {
+            continue;
+        }
+        let mut visit = |source: &str| {
+            facts.for_each_candidate(importer, source, &mut |file| {
+                scan_file_types(facts, file, name, &mut found, &mut ambiguous)
+            });
+            !ambiguous
+        };
+        match language {
+            Language::Dart => {
+                if import.imported_name != import.source || import.source.starts_with('/') {
+                    continue;
+                }
+                if let Some(package) = import.source.strip_prefix("package:") {
+                    if let Some(file) = dart_project_package_file(facts, importer, package) {
+                        scan_file_types(facts, &file, name, &mut found, &mut ambiguous);
+                    }
+                } else if !import.source.contains(':') {
+                    if import.source.starts_with('.') {
+                        visit(import.source);
+                    } else {
+                        let relative = format!("./{}", import.source);
+                        visit(&relative);
+                    }
+                }
+            }
+            // C++ RawImport strips both `"..."` and `<...>` delimiters.
+            // Probe the quoted-include interpretation first, then preserve
+            // the existing include-directory interpretation. Different type
+            // declarations remain ambiguous instead of picking either path.
+            Language::Cpp if !import.source.starts_with('.') && !import.source.starts_with('/') => {
+                let relative = format!("./{}", import.source);
+                if visit(&relative) {
+                    visit(import.source);
+                }
+            }
+            _ => {
+                visit(import.source);
+            }
+        }
+        if ambiguous {
+            return ImportedFileType::Ambiguous;
+        }
+    }
+    found.map_or(ImportedFileType::Missing, ImportedFileType::Unique)
+}
+
+/// Records `file`'s type declarations of `name` into `found`; returns
+/// `false` once two different declarations make the import ambiguous.
+fn scan_file_types<F: ModuleFacts + ?Sized>(
+    facts: &F,
+    file: &str,
+    name: &str,
+    found: &mut Option<u32>,
+    ambiguous: &mut bool,
+) -> bool {
+    for (id, kind) in facts.decls_in_file(file, name) {
+        if kind.is_type() {
+            *ambiguous |= found.is_some_and(|previous| previous != id);
+            *found = Some(id);
+        }
+    }
+    !*ambiguous
+}
+
+/// The project file a Dart `package:<name>/<path>` import names:
+/// `<package root>/lib/<path>`, where the package root is the importer's
+/// nearest ancestor holding that file. `None` means an external package.
+fn dart_project_package_file<F: ModuleFacts + ?Sized>(
+    facts: &F,
+    importer: &str,
+    package: &str,
+) -> Option<String> {
+    let (_, path) = package.split_once('/')?;
+    let mut directory = importer.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let mut file = String::new();
+    loop {
+        file.clear();
+        if !directory.is_empty() {
+            file.push_str(directory);
+            file.push('/');
+        }
+        file.push_str("lib/");
+        file.push_str(path);
+        if facts.has_file(&file) {
+            return Some(file);
+        }
+        if directory.is_empty() {
+            return None;
+        }
+        directory = directory.rsplit_once('/').map_or("", |(parent, _)| parent);
+    }
+}
+
+/// Rust import evidence for a return type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RustImportedType {
+    Unique(u32),
+    External,
+    Conclusive,
+    Unmodeled,
+}
+
+/// The direct `use path::Name as Alias` query captures `path::Name` as both
+/// source and imported name. Keep every other parser representation intact.
+#[inline]
+fn rust_import_parts(import: ImportRef<'_>) -> (&str, &str) {
+    if import.alias.is_some() && import.source == import.imported_name {
+        return import
+            .source
+            .rsplit_once("::")
+            .unwrap_or((import.source, import.imported_name));
+    }
+    (import.source, import.imported_name)
+}
+
+/// Rust 2018 uniform paths: a bare `config::T` in `file` names the
+/// `mod config` that `file` declares.
+fn rust_local_source<'s, F: ModuleFacts + ?Sized>(
+    facts: &F,
+    file: &str,
+    source: &'s str,
+) -> std::borrow::Cow<'s, str> {
+    let head = source.split("::").next().unwrap_or(source);
+    if !matches!(head, "crate" | "self" | "super") && facts.declares_top_level_module(file, head) {
+        std::borrow::Cow::Owned(format!("self::{source}"))
+    } else {
+        std::borrow::Cow::Borrowed(source)
+    }
+}
+
+/// Resolve direct and glob Rust imports without consulting global names.
+pub fn rust_imported_type<'i, F, I>(
+    facts: &F,
+    importer: &str,
+    name: &str,
+    imports: I,
+) -> RustImportedType
+where
+    F: ModuleFacts + ?Sized,
+    I: Iterator<Item = ImportRef<'i>> + Clone,
+{
+    // Rust resolves a named binding before considering globs. An explicit
+    // external binding is therefore authoritative over a project glob.
+    let has_named = imports.clone().any(|import| {
+        import.imported_name != "*" && import.alias.unwrap_or(import.imported_name) == name
+    });
+    let mut found = None;
+    let mut ambiguous = false;
+    let mut relevant = false;
+    let mut external = false;
+    let mut unresolved_glob = false;
+    let mut forwarded = false;
+    for import in imports {
+        let is_glob = import.imported_name == "*";
+        let binding = import.alias.unwrap_or(import.imported_name);
+        if (has_named && (is_glob || binding != name)) || (!has_named && !is_glob) {
+            continue;
+        }
+        relevant = true;
+        let (import_source, import_name) = rust_import_parts(import);
+        let import_source = rust_local_source(facts, importer, import_source);
+        let declaration = if is_glob { name } else { import_name };
+        let mut local = false;
+        facts.for_each_candidate(importer, &import_source, &mut |file| {
+            if !facts.has_file(file) {
+                return true;
+            }
+            local = true;
+            let mut declares_here = false;
+            for (id, kind) in facts.decls_in_file(file, declaration) {
+                if kind.is_type() {
+                    declares_here = true;
+                    if found.replace(id).is_some_and(|old| old != id) {
+                        ambiguous = true;
+                        return false;
+                    }
+                }
+            }
+            if !declares_here {
+                if let Some(nested) = facts.imports(file) {
+                    let nested_has_named = nested.iter().any(|import| {
+                        import.imported_name != "*"
+                            && import.alias.unwrap_or(import.imported_name) == declaration
+                    });
+                    for nested in nested.iter() {
+                        let nested_is_glob = nested.imported_name == "*";
+                        let nested_binding = nested.alias.unwrap_or(nested.imported_name);
+                        if (nested_has_named && (nested_is_glob || nested_binding != declaration))
+                            || (!nested_has_named && !nested_is_glob)
+                        {
+                            continue;
+                        }
+                        let (nested_source, nested_name) = rust_import_parts(nested);
+                        let nested_source = rust_local_source(facts, file, nested_source);
+                        let nested_declaration = if nested_is_glob {
+                            declaration
+                        } else {
+                            nested_name
+                        };
+                        let mut nested_local = false;
+                        let mut nested_found = false;
+                        facts.for_each_candidate(file, &nested_source, &mut |candidate| {
+                            if !facts.has_file(candidate) {
+                                return true;
+                            }
+                            nested_local = true;
+                            for (id, kind) in facts.decls_in_file(candidate, nested_declaration) {
+                                if kind.is_type() {
+                                    nested_found = true;
+                                    if found.replace(id).is_some_and(|old| old != id) {
+                                        ambiguous = true;
+                                        return false;
+                                    }
+                                }
+                            }
+                            // A module path names one file; a later
+                            // candidate is a fallback for an empty probe.
+                            false
+                        });
+                        if !nested_local {
+                            external = true;
+                        } else if !nested_found {
+                            // A second local forwarding hop is deliberately
+                            // outside this bounded resolver.
+                            forwarded = true;
+                        }
+                    }
+                }
+            }
+            false
+        });
+        // rustc rejects a name two globs both supply (E0659), so a local
+        // glob hit outranks a direct glob the graph cannot open.
+        if is_glob {
+            unresolved_glob |= !local;
+        } else {
+            external |= !local;
+        }
+    }
+    if ambiguous || forwarded {
+        RustImportedType::Conclusive
+    } else if external {
+        RustImportedType::External
+    } else if let Some(id) = found {
+        RustImportedType::Unique(id)
+    } else if unresolved_glob {
+        RustImportedType::External
+    } else if relevant {
+        RustImportedType::Conclusive
+    } else {
+        RustImportedType::Unmodeled
+    }
+}
+
+/// The top-level callable a Go package selector reaches. A Go import's path
+/// and its declared package name are independent, so an unaliased selector
+/// needs both facts. An explicit alias replaces the package spelling, but
+/// remains constrained to the imported directory.
+pub fn go_imported_package_member<'a, F, I>(
+    facts: &F,
+    importer: &str,
+    receiver: &str,
+    member: &str,
+    imports: I,
+) -> Option<(u32, &'a str)>
+where
+    F: ModuleFacts + ?Sized,
+    I: IntoIterator<Item = ImportRef<'a>>,
+{
+    match go_package_lookup(facts, importer, receiver, member, imports) {
+        GoPackageLookup::Resolved(target) => target,
+        GoPackageLookup::Value | GoPackageLookup::Unmapped => None,
+    }
+}
+
+/// A selector can name a value, an unmapped package, or a resolved package.
+pub enum GoPackageLookup<'a> {
+    Value,
+    /// Preserve the existing global/nearest-copy heuristic for missing module mappings.
+    Unmapped,
+    /// A known package with no matching function conclusively resolves to no edge.
+    Resolved(Option<(u32, &'a str)>),
+}
+
+pub fn go_package_lookup<'a, F, I>(
+    facts: &F,
+    importer: &str,
+    receiver: &str,
+    member: &str,
+    imports: I,
+) -> GoPackageLookup<'a>
+where
+    F: ModuleFacts + ?Sized,
+    I: IntoIterator<Item = ImportRef<'a>>,
+{
+    let namespace_files = facts.namespace_files(Language::Go, receiver);
+    let mut found = None;
+    let mut ambiguous = false;
+    let mut package = false;
+    let mut mapped = false;
+
+    for import in imports {
+        let is_alias = import.alias.is_some();
+        if is_alias && import.alias != Some(receiver) {
+            continue;
+        }
+        package |= is_alias || import.source.rsplit('/').next() == Some(receiver);
+        if !is_alias && namespace_files.is_empty() {
+            continue;
+        }
+        facts.for_each_candidate(importer, import.source, &mut |candidate| {
+            let directory = candidate
+                .strip_prefix("./")
+                .unwrap_or(candidate)
+                .trim_end_matches('/');
+            for file in facts.files_in_directory(Language::Go, directory) {
+                let file = file.as_ref();
+                if !is_alias && !namespace_files.iter().any(|path| path.as_ref() == file) {
+                    continue;
+                }
+                mapped = true;
+                let mut functions = facts
+                    .decls_in_file(file, member)
+                    .into_iter()
+                    .filter(|&(_, kind)| kind == NodeKind::Function);
+                let Some((node, _)) = functions.next() else {
+                    continue;
+                };
+                if functions.next().is_some() {
+                    ambiguous = true;
+                    return false;
+                }
+                match found {
+                    None => found = Some((node, import.source)),
+                    Some((previous, source)) if previous == node && source == import.source => {}
+                    Some(_) => {
+                        ambiguous = true;
+                        return false;
+                    }
+                }
+            }
+            !ambiguous
+        });
+        if ambiguous {
+            return GoPackageLookup::Resolved(None);
+        }
+    }
+    if mapped {
+        GoPackageLookup::Resolved(found)
+    } else if package && !namespace_files.is_empty() {
+        GoPackageLookup::Unmapped
+    } else if package {
+        GoPackageLookup::Resolved(None)
+    } else {
+        GoPackageLookup::Value
+    }
 }
 
 /// The declaration an import of `name` from module `file` binds. In an ES
@@ -700,11 +1114,11 @@ pub fn python_import_reexport<F: ModuleFacts + ?Sized>(
         .flatten()
 }
 
-/// `from pkg.sub import mod; mod.compute()`: a from-import of a name its
-/// module does not bind imports the submodule `pkg.sub.mod`, so the call
-/// binds as through `import pkg.sub.mod as mod`. `None` on any miss: the
-/// call then resolves as the bare member. Returns the declaration and the
-/// position of the import that bound it.
+/// `from pkg.sub import mod; mod.compute()` or `mod.client.compute()`: a
+/// from-import of a name its module does not bind imports a submodule, so the
+/// call binds as through `import pkg.sub.mod`. `None` on any miss: the call
+/// then resolves as the bare member. Returns the declaration and the position
+/// of the import that bound it.
 pub fn python_submodule_member<'i, F: ModuleFacts + ?Sized>(
     facts: &F,
     importer: &str,
@@ -716,10 +1130,13 @@ pub fn python_submodule_member<'i, F: ModuleFacts + ?Sized>(
         .into_iter()
         .enumerate()
         .find_map(|(position, import)| {
+            let mut receiver_path = receiver.split('/');
+            let root = receiver_path.next()?;
             // The cheap gate first: most receivers are objects, whose names
             // no module file or package directory carries.
-            if import.imported_name == "*"
-                || import.local_name() != receiver
+            if root.is_empty()
+                || import.imported_name == "*"
+                || import.local_name() != root
                 || !facts.has_module_name(Language::Python, import.imported_name)
             {
                 return None;
@@ -738,25 +1155,75 @@ pub fn python_submodule_member<'i, F: ModuleFacts + ?Sized>(
             } else {
                 "/"
             };
-            let submodule = [import.source, separator, import.imported_name].concat();
-            let module = match facts.python_module(importer, &submodule) {
-                PyModule::Unique(module) => module,
-                PyModule::Missing | PyModule::Ambiguous => return None,
+            let nested_separator = if separator.is_empty() { "." } else { separator };
+            let mut submodule = [import.source, separator, import.imported_name].concat();
+            let mut module = match facts.python_module(importer, &submodule) {
+                PyModule::Unique(module) => Some(module),
+                // An unindexed package initializer can be a namespace package.
+                // Keep walking because a deeper module may still be indexed.
+                PyModule::Missing => None,
+                PyModule::Ambiguous => return None,
             };
-            if package.is_some_and(|package| {
+            if package.as_ref().is_some_and(|package| {
                 attribute_shadows_submodule(
                     facts,
                     package.as_ref(),
                     import.imported_name,
-                    module.as_ref(),
+                    module.as_ref().map(|module| module.as_ref()),
                 )
             }) {
                 return None;
             }
+            for segment in receiver_path {
+                if segment.is_empty() {
+                    return None;
+                }
+                submodule.push_str(nested_separator);
+                submodule.push_str(segment);
+                let next_module = match facts.python_module(importer, &submodule) {
+                    PyModule::Unique(module) => Some(module),
+                    PyModule::Missing => None,
+                    PyModule::Ambiguous => return None,
+                };
+                if module.as_ref().is_some_and(|module| {
+                    attribute_shadows_submodule(
+                        facts,
+                        module.as_ref(),
+                        segment,
+                        next_module.as_ref().map(|module| module.as_ref()),
+                    )
+                }) {
+                    return None;
+                }
+                module = next_module;
+            }
+            let module = module?;
             let decl = call_in_file(facts, module.as_ref(), member, target)
                 .or_else(|| python_reexport(facts, module.as_ref(), member, target))?;
             Some((decl, position))
         })
+}
+
+/// Whether a dotted receiver below a `from` import starts with an attribute
+/// declared by the imported package. Such an attribute is a value, not an
+/// unresolved submodule path.
+pub fn python_from_import_declared_attribute<'i, F: ModuleFacts + ?Sized>(
+    facts: &F,
+    importer: &str,
+    receiver: &str,
+    imports: impl IntoIterator<Item = ImportRef<'i>>,
+) -> bool {
+    let Some(root) = receiver.split('/').next() else {
+        return false;
+    };
+    imports.into_iter().any(|import| {
+        import.imported_name != "*"
+            && import.local_name() == root
+            && matches!(
+                facts.python_module(importer, import.source),
+                PyModule::Unique(module) if facts.declares(module.as_ref(), import.imported_name)
+            )
+    })
 }
 
 /// `from k import K; K.st()`: whether a from-import binds `receiver` to a
@@ -792,7 +1259,7 @@ fn attribute_shadows_submodule<F: ModuleFacts + ?Sized>(
     facts: &F,
     package: &str,
     name: &str,
-    submodule: &str,
+    submodule: Option<&str>,
 ) -> bool {
     if facts.declares(package, name) {
         return true;
@@ -816,8 +1283,11 @@ fn attribute_shadows_submodule<F: ModuleFacts + ?Sized>(
             return false;
         }
         let binds_submodule = if import.imported_name == "*" {
-            names_file(import.source, submodule)
+            submodule.is_some_and(|submodule| names_file(import.source, submodule))
         } else {
+            // `from . import name` binds a namespace child even though it has
+            // no indexed initializer file. Other bindings are values until a
+            // concrete child proves otherwise.
             import.imported_name == name && names_file(import.source, package)
         };
         !binds_submodule

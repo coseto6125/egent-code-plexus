@@ -147,9 +147,13 @@ class lexer {
 ",
     );
     let calls = calls_of(&g, "scan");
-    let untyped = CallSite::untyped_member("size");
+    // `make().size()` is a chain whose fallback is the untyped member:
+    // `make` returns `std::string`, no project type.
     assert_eq!(
-        calls.iter().filter(|c| **c == untyped).count(),
+        calls
+            .iter()
+            .filter(|c| CallSite::parse(c).fallback() == CallSite::UntypedMember("size"))
+            .count(),
         2,
         "`f.size()` and `make().size()` are untyped member calls: {calls:?}"
     );

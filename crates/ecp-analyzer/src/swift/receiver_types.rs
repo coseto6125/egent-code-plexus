@@ -492,6 +492,27 @@ fn swift_callee_name(
                         (_, None) => CallSite::from_receiver(var, method),
                     }
                 }
+                // `Foo.make().bar()` / `Foo().bar()`: the resolver types a
+                // call receiver by the callee's return type or class.
+                "call_expression" => {
+                    let untyped = CallSite::untyped_member(method);
+                    // A callee that a local or parameter binds
+                    // (`let make = { Beta() }`) is a value, not the
+                    // same-named function that would type it.
+                    let calls_local = first_named_where(recv, |ch| ch.kind() != "call_suffix")
+                        .filter(|f| f.kind() == "simple_identifier")
+                        .and_then(|f| f.utf8_text(source).ok())
+                        .is_some_and(|name| bindings.lookup_local(pos, name).is_some());
+                    if calls_local {
+                        return Some(untyped);
+                    }
+                    match CallSite::nested_chain(|| {
+                        swift_callee_name(recv, source, bindings, nodes)
+                    }) {
+                        Some(inner) => CallSite::chained_member(&inner, &untyped),
+                        None => untyped,
+                    }
+                }
                 _ => CallSite::untyped_member(method),
             })
         }

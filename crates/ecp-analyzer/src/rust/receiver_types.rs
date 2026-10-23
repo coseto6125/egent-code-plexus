@@ -62,7 +62,7 @@ pub fn build_impl_map(root: Node<'_>, source: &[u8]) -> ImplMap {
 /// - `impl<P> Trait for Pin<P>`, `impl Trait for io::Cursor<u8>`,
 ///   `impl<'a> Trait for &'a mut Dog` → "Pin", "Cursor", "Dog": the last
 ///   path segment without generic arguments, as `owner_key` reduces owners.
-fn impl_self_type(impl_node: &Node<'_>, source: &[u8]) -> Option<String> {
+pub(super) fn impl_self_type(impl_node: &Node<'_>, source: &[u8]) -> Option<String> {
     // `type` field: the concrete type being implemented (present for both
     // inherent impls and trait impls).
     let ty_node = impl_node.child_by_field_name("type")?;
@@ -182,6 +182,68 @@ pub fn enclosing_function_name(node: Node<'_>, source: &[u8]) -> Option<String> 
     None
 }
 
+/// Walk `node`'s parent chain and return its full lexical containment path.
+/// This path is an identity, not a type owner:
+/// `impl A { fn new() { fn helper() {} } }` gives `A::new` to `helper`.
+///
+/// A short function name is insufficient here.  Two `impl` blocks may both
+/// declare `new`, and a nested `helper` under each must keep a distinct UID.
+/// Module names participate for every function they contain, including a
+/// function directly under a module.  An `impl` keeps its established
+/// self-type owner, so modules outside that `impl` do not change a method's
+/// lexical path.  A root-level function returns `None`.
+pub fn enclosing_function_path(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut segments = Vec::new();
+    let mut found_impl = false;
+    let mut current = node.parent();
+    while let Some(n) = current {
+        match n.kind() {
+            "function_item" => {
+                if let Some(name) = n
+                    .child_by_field_name("name")
+                    .and_then(|name| node_text(name, source))
+                {
+                    segments.push(name);
+                }
+            }
+            "impl_item" => {
+                if let Some(ty) = impl_self_type(&n, source) {
+                    let lexical_owner = impl_trait_name(&n, source)
+                        .map(|trait_name| format!("{trait_name}::{ty}"))
+                        .unwrap_or(ty);
+                    segments.push(lexical_owner);
+                    found_impl = true;
+                }
+            }
+            "trait_item" => {
+                if let Some(name) = n
+                    .child_by_field_name("name")
+                    .and_then(|name| node_text(name, source))
+                {
+                    segments.push(name);
+                }
+            }
+            "mod_item" => {
+                if !found_impl {
+                    if let Some(name) = n
+                        .child_by_field_name("name")
+                        .and_then(|name| node_text(name, source))
+                    {
+                        segments.push(name);
+                    }
+                }
+            }
+            "source_file" => break,
+            _ => {}
+        }
+        current = n.parent();
+    }
+    (!segments.is_empty()).then(|| {
+        segments.reverse();
+        segments.join("::")
+    })
+}
+
 /// Walk `node`'s parent chain to find the nearest enclosing `impl_item` or
 /// `trait_item` and return a discriminating context string for associated types.
 ///
@@ -239,6 +301,7 @@ pub struct Scope {
     range: PosRange,
     /// var_name → bare type name (references/pointers stripped).
     pub bindings: HashMap<String, String>,
+    values: HashMap<String, Vec<PosRange>>,
     /// The impl-type in scope when this fn is inside an `impl_item`
     /// (used to resolve `self`).
     pub self_type: Option<String>,
@@ -253,6 +316,16 @@ impl LocalTypes {
     /// Iterate all scopes for flat export (used by indirect-dispatch detection).
     pub fn scopes(&self) -> &[Scope] {
         &self.scopes
+    }
+
+    fn contains_value(&self, pos: Pos, name: &str) -> bool {
+        // Nested functions cannot capture values from their enclosing function.
+        self.scopes
+            .iter()
+            .filter(|scope| scope.range.0 <= pos && pos <= scope.range.1)
+            .min_by_key(|scope| range_width(scope.range))
+            .and_then(|scope| scope.values.get(name))
+            .is_some_and(|ranges| ranges.iter().any(|range| range.0 <= pos && pos <= range.1))
     }
 
     /// Look up `var`'s type at `pos`, preferring the innermost scope.
@@ -316,24 +389,27 @@ fn collect_scopes<'a>(
             });
 
             let mut bindings: HashMap<String, String> = HashMap::new();
+            let mut values = HashMap::new();
 
             // Typed parameters.
             if let Some(params) = child.child_by_field_name("parameters") {
                 collect_params(&params, source, &mut bindings);
+                collect_parameter_values(params, source, node_range(child), &mut values);
             }
 
             // `let` bindings in the body.
             if let Some(body) = child.child_by_field_name("body") {
-                collect_body_bindings(&body, source, &mut bindings);
+                collect_body_bindings(&body, source, &mut bindings, &mut values);
             }
 
             out.push(Scope {
                 range: node_range(child),
                 bindings,
+                values,
                 self_type,
             });
 
-            // Recurse into the function body (nested closures get their own scope).
+            // Nested functions have independent value scopes.
             if let Some(body) = child.child_by_field_name("body") {
                 collect_scopes(body, source, impl_map, current_impl_type.as_deref(), out);
             }
@@ -380,21 +456,72 @@ fn collect_params(params: &Node<'_>, source: &[u8], out: &mut HashMap<String, St
     }
 }
 
-/// Walk a function body collecting `let_declaration` type annotations.
-/// Does NOT descend into nested closures (they get their own scope entry).
-fn collect_body_bindings(body: &Node<'_>, source: &[u8], out: &mut HashMap<String, String>) {
-    let mut stack: Vec<Node<'_>> = vec![*body];
-    while let Some(n) = stack.pop() {
-        // Don't descend into nested closures.
-        if n.kind() == "closure_expression" || n.kind() == "function_item" {
+fn record_value(
+    pattern: Node<'_>,
+    source: &[u8],
+    range: PosRange,
+    values: &mut HashMap<String, Vec<PosRange>>,
+) {
+    let name = match pattern.kind() {
+        "identifier" => node_text(pattern, source),
+        "mut_pattern" => pattern
+            .named_child(0)
+            .filter(|node| node.kind() == "identifier")
+            .and_then(|node| node_text(node, source)),
+        _ => None,
+    };
+    if let Some(name) = name {
+        values.entry(name).or_default().push(range);
+    }
+}
+
+fn collect_parameter_values(
+    parameters: Node<'_>,
+    source: &[u8],
+    range: PosRange,
+    values: &mut HashMap<String, Vec<PosRange>>,
+) {
+    let mut cursor = parameters.walk();
+    for parameter in parameters.named_children(&mut cursor) {
+        let pattern = parameter
+            .child_by_field_name("pattern")
+            .unwrap_or(parameter);
+        record_value(pattern, source, range, values);
+    }
+}
+
+fn collect_body_bindings(
+    body: &Node<'_>,
+    source: &[u8],
+    out: &mut HashMap<String, String>,
+    values: &mut HashMap<String, Vec<PosRange>>,
+) {
+    let mut stack = vec![(*body, node_range(*body).1, false)];
+    while let Some((n, mut scope_end, mut in_closure)) = stack.pop() {
+        if n.kind() == "function_item" {
             continue;
         }
+        if matches!(n.kind(), "block" | "closure_expression") {
+            scope_end = node_range(n).1;
+        }
+        if n.kind() == "closure_expression" {
+            in_closure = true;
+            if let Some(parameters) = n.child_by_field_name("parameters") {
+                collect_parameter_values(parameters, source, node_range(n), values);
+            }
+        }
         if n.kind() == "let_declaration" {
-            collect_let_binding(&n, source, out);
+            if !in_closure {
+                collect_let_binding(&n, source, out);
+            }
+            if let Some(pattern) = n.child_by_field_name("pattern") {
+                // The initializer still sees the preceding binding.
+                record_value(pattern, source, (node_range(n).1, scope_end), values);
+            }
         }
         let mut c = n.walk();
         for child in n.children(&mut c) {
-            stack.push(child);
+            stack.push((child, scope_end, in_closure));
         }
     }
 }
@@ -507,7 +634,11 @@ fn rust_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Optio
         "field_expression" => {
             let field = function.child_by_field_name("field")?;
             let method_name = node_text(field, source)?;
-            if let Some(value) = function.child_by_field_name("value") {
+            // A call receiver names no local; its text is the whole chain.
+            if let Some(value) = function
+                .child_by_field_name("value")
+                .filter(|value| value.kind() != "call_expression")
+            {
                 let obj_text = node_text(value, source)?;
                 // Strip leading `*` (deref) and `&` to get the plain var name.
                 let var_name = obj_text.trim_start_matches(['*', '&', ' ']);
@@ -518,7 +649,28 @@ fn rust_callee_name(call: Node<'_>, source: &[u8], locals: &LocalTypes) -> Optio
             }
             // Untyped receiver: the member name, marked so the resolver
             // never lands this method-syntax call on a free `fn`.
-            Some(CallSite::untyped_member(&method_name))
+            let untyped = CallSite::untyped_member(&method_name);
+            // `Foo::new().bar()`: the resolver types a call receiver by the
+            // callee's return type (`Self` included).
+            let inner = function
+                .child_by_field_name("value")
+                .filter(|value| value.kind() == "call_expression")
+                .and_then(|value| {
+                    let calls_local = value
+                        .child_by_field_name("function")
+                        .filter(|function| function.kind() == "identifier")
+                        .and_then(|function| function.utf8_text(source).ok())
+                        .is_some_and(|name| locals.contains_value(start_pos(value), name));
+                    if calls_local {
+                        None
+                    } else {
+                        CallSite::nested_chain(|| rust_callee_name(value, source, locals))
+                    }
+                });
+            Some(match inner {
+                Some(inner) => CallSite::chained_member(&inner, &untyped),
+                None => untyped,
+            })
         }
 
         // Scoped path call: `Dog::new()` or `std::vec::Vec::new()`

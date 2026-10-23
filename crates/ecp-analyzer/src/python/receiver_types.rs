@@ -350,11 +350,11 @@ pub fn extract_python_calls_and_path_literals(
                     let raw_bytes = &source[n.start_byte()..n.end_byte()];
                     if let Ok(raw) = std::str::from_utf8(raw_bytes) {
                         if let Some(value) = strip_python_string_quotes(raw) {
-                            if let Some(sql_ref) = crate::sql_literal::try_sql_ref(
-                                value,
-                                n,
-                                enclosing_symbol_and_owner(n, source),
-                            ) {
+                            if let Some(mut sql_ref) =
+                                crate::sql_literal::try_sql_ref(value, n, (None, None))
+                            {
+                                (sql_ref.enclosing_symbol, sql_ref.enclosing_owner) =
+                                    enclosing_symbol_and_owner(n, source);
                                 sql_refs.push(sql_ref);
                             }
                         }
@@ -455,14 +455,17 @@ fn python_callee_name(
                         return Some(segments.join("."));
                     }
                     // A `from` binding may name a submodule, which only the
-                    // resolver can tell from an object.
-                    Some(ImportedBinding::Symbol) if obj.kind() == "identifier" => {
-                        return Some(CallSite::from_receiver(
-                            obj.utf8_text(source).ok()?,
-                            attr_name,
-                        ));
+                    // resolver can tell from an object. Keep nested
+                    // attributes in the receiver path so the resolver can
+                    // distinguish `mod.client.m()` from `mod.m()`.
+                    Some(ImportedBinding::Symbol) => {
+                        return match attribute_receiver_path(obj, source) {
+                            Some(receiver) => Some(CallSite::from_receiver(&receiver, attr_name)),
+                            // `sym.attr.m()`: a member call on a value the import
+                            // names; a bare `m` would read as receiverless.
+                            None => Some(CallSite::untyped_member(attr_name)),
+                        };
                     }
-                    Some(ImportedBinding::Symbol) => {}
                     None => {
                         let class = (obj.kind() == "identifier")
                             .then(|| obj.utf8_text(source).ok())
@@ -471,6 +474,28 @@ fn python_callee_name(
                             .filter(|name| !locals.shadowed(obj, name));
                         return Some(match class {
                             Some(class) => format!("{class}.{attr_name}"),
+                            // `make().bar()`: the resolver types the receiver
+                            // by the callee's return type or constructed class.
+                            None if obj.kind() == "call" => {
+                                let untyped = CallSite::untyped_member(attr_name);
+                                // A callee that a parameter or local binds
+                                // (`make = lambda: Beta()`) is a value, not
+                                // the same-named function that would type it.
+                                let calls_local = obj
+                                    .child_by_field_name("function")
+                                    .filter(|f| f.kind() == "identifier")
+                                    .and_then(|f| f.utf8_text(source).ok())
+                                    .is_some_and(|name| locals.shadowed(obj, name));
+                                if calls_local {
+                                    return Some(untyped);
+                                }
+                                match CallSite::nested_chain(|| {
+                                    python_callee_name(obj, source, locals, classes)
+                                }) {
+                                    Some(inner) => CallSite::chained_member(&inner, &untyped),
+                                    None => untyped,
+                                }
+                            }
                             None => CallSite::untyped_member(attr_name),
                         });
                     }
@@ -480,6 +505,27 @@ fn python_callee_name(
         }
         _ => None,
     }
+}
+
+/// The identifier-led attribute path of `node`, joined for an internal call
+/// receiver. A slash is not valid in a Python identifier, so it preserves the
+/// final call member separator in [`CallSite::from_receiver`].
+fn attribute_receiver_path(mut node: Node<'_>, source: &[u8]) -> Option<String> {
+    let mut segments = Vec::new();
+    while node.kind() == "attribute" {
+        segments.push(
+            node.child_by_field_name("attribute")?
+                .utf8_text(source)
+                .ok()?,
+        );
+        node = node.child_by_field_name("object")?;
+    }
+    if node.kind() != "identifier" {
+        return None;
+    }
+    segments.push(node.utf8_text(source).ok()?);
+    segments.reverse();
+    Some(segments.join("/"))
 }
 
 /// The first parameter of a method declared in a class body (`self`, or

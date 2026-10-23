@@ -241,7 +241,7 @@ pub fn enclosing_class(nodes: &[RawNode], inner_span: Span) -> Option<(String, S
 /// class members at emit time without a parent-walk (Java / Kotlin / C# / Swift /
 /// Dart / JavaScript / TypeScript / Python / PHP / Ruby / C / C++). Snapshots
 /// class spans once, then matches each `Method`/`Function`/`Constructor`/
-/// `Property` against the snapshot — O(N+K·C) where N=nodes, K=members,
+/// `Property`/`Const` against the snapshot — O(N+K·C) where N=nodes, K=members,
 /// C=classes, vs O(N²) when each parser called `enclosing_class` in a map.
 /// Rust uses `enclosing_impl_type` instead (impl blocks split struct/fn spans);
 /// Go uses recv_map (explicit receiver types).
@@ -300,7 +300,11 @@ pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
         let span = node.span;
         let owner = if matches!(
             node.kind,
-            NodeKind::Method | NodeKind::Function | NodeKind::Constructor | NodeKind::Property
+            NodeKind::Method
+                | NodeKind::Function
+                | NodeKind::Constructor
+                | NodeKind::Property
+                | NodeKind::Const
         ) {
             // Members: find the tightest enclosing container span.
             owner_spans

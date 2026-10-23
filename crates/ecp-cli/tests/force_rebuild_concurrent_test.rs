@@ -107,13 +107,14 @@ fn two_concurrent_force_rebuilds_both_succeed_with_one_new_generation() {
         String::from_utf8_lossy(&o2.stderr)
     );
 
-    // Initial generation + one rebuilt generation for this SHA; the second
-    // concurrent force caller attaches to the winner.
+    // One rebuilt generation for this SHA: the forced build drops the
+    // initial one it supersedes, and the second concurrent force caller
+    // attaches to the winner.
     let ecp_home = home_path.join(".ecp");
     let (commit_dirs, building_dirs) = count_dirs(&ecp_home);
     assert_eq!(
-        commit_dirs, 2,
-        "expected initial + rebuilt generation, found {commit_dirs}"
+        commit_dirs, 1,
+        "expected only the rebuilt generation, found {commit_dirs}"
     );
     assert_eq!(
         building_dirs, 0,

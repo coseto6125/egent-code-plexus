@@ -4,7 +4,8 @@
 //! the bases of the class that encloses the caller, each placed in its file,
 //! after the import tiers and before a wildcard import.
 //!
-//! Every fixture keeps the base class in another file and runs four edits:
+//! Every fixture keeps the base class in another file and runs four edits.
+//! Fixtures with a reachable bare member assert that edge in the first two:
 //!
 //! | edit           | dirty files      | asserts                                   |
 //! |----------------|------------------|-------------------------------------------|
@@ -109,7 +110,9 @@ const FIXTURES: &[Fixture] = &[
         caller: ("k.ts", "import { Base } from './base';\nclass K extends Base {\n run() { save(); }\n}\n"),
         rest: &[],
         caller_fn: "run",
-        expected: &[("save", "base.ts", 0.8)],
+        // A plain TypeScript call is free-only. Member calls require a
+        // receiver, even inside an inheriting class.
+        expected: &[],
     },
     Fixture {
         label: "JavaScript",
@@ -117,7 +120,9 @@ const FIXTURES: &[Fixture] = &[
         caller: ("k.js", "import { Base } from './base';\nclass K extends Base {\n run() { save(); }\n}\n"),
         rest: &[],
         caller_fn: "run",
-        expected: &[("save", "base.js", 0.8)],
+        // A plain JavaScript call is free-only. Member calls require a
+        // receiver, even inside an inheriting class.
+        expected: &[],
     },
     Fixture {
         label: "Python",
@@ -125,7 +130,8 @@ const FIXTURES: &[Fixture] = &[
         caller: ("k.py", "from base import Base\n\nclass K(Base):\n    def run(self):\n        save()\n"),
         rest: &[],
         caller_fn: "run",
-        expected: &[("save", "base.py", 0.8)],
+        // A bare call reaches only free functions here, never a method.
+        expected: &[],
     },
     Fixture {
         label: "PHP",
@@ -133,7 +139,8 @@ const FIXTURES: &[Fixture] = &[
         caller: ("K.php", "<?php\nclass K extends Base {\n function run() { save(); }\n}\n"),
         rest: &[],
         caller_fn: "run",
-        expected: &[("save", "Base.php", 0.8)],
+        // A bare call reaches only free functions here, never a method.
+        expected: &[],
     },
     // The heritage tier runs before the wildcard pass: the inherited member
     // beats the star-imported one.
@@ -225,6 +232,12 @@ fn mismatches(fixtures: &[Fixture]) -> Vec<String> {
                     file == caller_path && name == fixture.caller_fn
                 });
             let label = format!("{}/{dirty_set}", fixture.label);
+            if *proves && fixture.expected.is_empty() && !reindex.is_empty() {
+                failures.push(format!(
+                    "{label}: a bare free-only call reaches inherited members: {reindex:#?}"
+                ));
+                continue;
+            }
             let missing: Vec<_> = fixture
                 .expected
                 .iter()

@@ -9,6 +9,7 @@ impl LangSpec for JavaSpec {
     const NAME: &'static str = "java";
 
     const CAPTURE_KIND: phf::Map<&'static str, NodeKind> = phf::phf_map! {
+        "namespace.name"      => NodeKind::Namespace,
         "class.name"          => NodeKind::Class,
         "interface.name"      => NodeKind::Interface,
         "method.name"         => NodeKind::Method,

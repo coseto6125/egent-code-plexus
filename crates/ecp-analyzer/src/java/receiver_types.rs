@@ -217,11 +217,24 @@ fn java_callee(
                 )
             }
             // A computed receiver (`a.b().m()`, `this.f.m()`): the member is
-            // never a static import's name. Its type is known only when a
-            // `new` or a cast spells it.
+            // never a static import's name. Its type is known by syntax when
+            // a `new` or a cast spells it, and by the resolver when it is a
+            // call (the callee's return type).
             _ => match expression_type(obj, source) {
                 Some(ty) => Some(ty.to_string()),
-                None => return Some(CallSite::untyped_member(method_name)),
+                None => {
+                    let untyped = CallSite::untyped_member(method_name);
+                    return Some(match obj.kind() {
+                        "method_invocation" => {
+                            match CallSite::nested_chain(|| java_callee(obj, source, locals, nodes))
+                            {
+                                Some(inner) => CallSite::chained_member(&inner, &untyped),
+                                None => untyped,
+                            }
+                        }
+                        _ => untyped,
+                    });
+                }
             },
         }
     } else {
@@ -295,11 +308,11 @@ pub fn extract_java_calls_and_path_literals(
                 let raw_bytes = &source[n.start_byte()..n.end_byte()];
                 if let Ok(raw) = std::str::from_utf8(raw_bytes) {
                     if let Some(value) = strip_java_string_value(raw) {
-                        if let Some(sql_ref) = crate::sql_literal::try_sql_ref(
-                            value,
-                            n,
-                            enclosing_symbol_and_owner_pub(n, source),
-                        ) {
+                        if let Some(mut sql_ref) =
+                            crate::sql_literal::try_sql_ref(value, n, (None, None))
+                        {
+                            (sql_ref.enclosing_symbol, sql_ref.enclosing_owner) =
+                                enclosing_symbol_and_owner_pub(n, source);
                             sql_refs.push(sql_ref);
                         }
                     }

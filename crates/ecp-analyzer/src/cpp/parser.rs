@@ -807,6 +807,23 @@ impl LanguageProvider for CppProvider {
             source,
             &mut nodes,
             &["field_expression"],
+            &crate::calls::NameRefSpec {
+                ident_kinds: &["identifier"],
+                kind: crate::calls::NameRefKind::Value,
+                skip_kinds: &[
+                    "preproc_include",
+                    "preproc_def",
+                    "preproc_function_def",
+                    "preproc_call",
+                    "attribute_declaration",
+                    "qualified_identifier",
+                    "template_argument_list",
+                    "using_declaration",
+                    "alias_declaration",
+                    "namespace_alias_definition",
+                ],
+                ..crate::calls::NameRefSpec::EMPTY
+            },
         );
         crate::calls::extract_variant_refs(
             tree.root_node(),

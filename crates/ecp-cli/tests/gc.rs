@@ -87,7 +87,7 @@ fn sweep_sessions_marks_idle_sessions_dead() {
     };
     SessionMeta::write_atomic(&sessions.join("session_meta.json"), &sm).unwrap();
 
-    let stats = sweep_sessions(repo_root).unwrap();
+    let stats = sweep_sessions(repo_root, false).unwrap();
     assert_eq!(stats.marked, 1);
     assert!(!sessions.exists());
     let sessions_dir = repo_root.join("sessions");
@@ -117,7 +117,7 @@ fn sweep_sessions_removes_already_marked_dead() {
     std::fs::create_dir_all(&dead_dir).unwrap();
     std::fs::write(dead_dir.join("x"), b"junk").unwrap();
 
-    let stats = sweep_sessions(repo_root).unwrap();
+    let stats = sweep_sessions(repo_root, false).unwrap();
     assert_eq!(stats.removed, 1);
     assert!(!dead_dir.exists());
 }
@@ -144,7 +144,7 @@ fn sweep_stale_generations_keeps_newest_per_sha() {
     make_named_commit_dir(&commits, &format!("branch_main__{sha_a}.gen.3000.30.0"));
     make_named_commit_dir(&commits, &format!("branch_main__{sha_b}.gen.1500.15.0"));
 
-    let stats = sweep_stale_generations(tmp.path()).unwrap();
+    let stats = sweep_stale_generations(tmp.path(), false).unwrap();
 
     assert_eq!(stats.removed, 2, "two older same-SHA generations removed");
     assert!(commits
@@ -174,7 +174,7 @@ fn sweep_stale_generations_skips_building() {
     let building = commits.join(&older).with_extension("building");
     std::fs::create_dir_all(&building).unwrap();
 
-    let stats = ecp_cli::admin::gc::sweep_stale_generations(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_stale_generations(tmp.path(), false).unwrap();
     assert_eq!(
         stats.removed, 0,
         "older dir guarded by .building sibling must stay"
@@ -194,7 +194,7 @@ fn sweep_stale_generations_skips_when_sha_has_active_building() {
     // matching orchestrator.rs:682 `branch_main__{sha}.building`.
     std::fs::create_dir_all(commits.join(format!("branch_main__{sha}.building"))).unwrap();
 
-    let stats = ecp_cli::admin::gc::sweep_stale_generations(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_stale_generations(tmp.path(), false).unwrap();
     assert_eq!(
         stats.removed, 0,
         "no gen deleted while a build for this SHA is active"
@@ -217,7 +217,7 @@ fn sweep_stale_generations_skips_fresh() {
     filetime::set_file_mtime(commits.join(&g1), now).unwrap();
     filetime::set_file_mtime(commits.join(&g2), now).unwrap();
 
-    let stats = ecp_cli::admin::gc::sweep_stale_generations(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_stale_generations(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 0, "freshly-written dirs (<10s) are skipped");
 }
 
@@ -229,7 +229,7 @@ fn test_sweep_retired_dirs_dead_repo_dirs_removed() {
     std::fs::create_dir_all(home_ecp.join("myrepo__abc123.dead.111.0.1700000000000")).unwrap();
     std::fs::create_dir_all(home_ecp.join("other__def456.dead.222.1.1700000000001")).unwrap();
 
-    let stats = sweep_retired_dirs(home_ecp).unwrap();
+    let stats = sweep_retired_dirs(home_ecp, false).unwrap();
 
     assert_eq!(stats.removed, 2, "both .dead.* repo dirs removed");
     assert!(
@@ -269,7 +269,7 @@ fn sweep_sessions_keeps_recently_touched_session_with_dead_pid() {
     };
     SessionMeta::write_atomic(&sessions.join("session_meta.json"), &sm).unwrap();
 
-    let stats = sweep_sessions(repo_root).unwrap();
+    let stats = sweep_sessions(repo_root, false).unwrap();
     assert_eq!(stats.marked, 0, "an active session must survive the sweep");
     assert!(sessions.exists());
 }
@@ -323,7 +323,7 @@ fn parse_cache_dir(repo_root: &std::path::Path, name: &str, idle_days: u64) -> s
 fn test_sweep_stale_parse_caches_idle_foreign_fingerprint_removed() {
     let tmp = tempfile::tempdir().unwrap();
     let stale = parse_cache_dir(tmp.path(), "deadbeef", 8);
-    let stats = ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 1);
     assert!(!stale.exists(), "idle foreign fingerprint dir survived gc");
 }
@@ -334,7 +334,7 @@ fn test_sweep_stale_parse_caches_idle_foreign_fingerprint_removed() {
 fn test_sweep_stale_parse_caches_recent_foreign_fingerprint_kept() {
     let tmp = tempfile::tempdir().unwrap();
     let recent = parse_cache_dir(tmp.path(), "cafef00d", 1);
-    let stats = ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 0);
     assert!(recent.exists());
 }
@@ -347,7 +347,7 @@ fn test_sweep_stale_parse_caches_current_fingerprint_kept_however_idle() {
         ecp_cli::parse_cache::ParseCache::current_dir_name(),
         400,
     );
-    let stats = ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 0);
     assert!(current.exists());
 }
@@ -355,7 +355,7 @@ fn test_sweep_stale_parse_caches_current_fingerprint_kept_however_idle() {
 #[test]
 fn test_sweep_stale_parse_caches_no_parse_cache_dir_removes_nothing() {
     let tmp = tempfile::tempdir().unwrap();
-    let stats = ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 0);
 }
 
@@ -365,7 +365,7 @@ fn test_sweep_stale_parse_caches_no_parse_cache_dir_removes_nothing() {
 fn test_sweep_stale_parse_caches_retired_leftover_removed() {
     let tmp = tempfile::tempdir().unwrap();
     let leftover = parse_cache_dir(tmp.path(), "deadbeef.dead.1.2.3", 0);
-    let stats = ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 1);
     assert!(!leftover.exists());
 }
@@ -377,7 +377,7 @@ fn test_sweep_stale_parse_caches_stray_file_ignored() {
     std::fs::create_dir_all(&cache).unwrap();
     let stray = cache.join("notes.txt");
     std::fs::write(&stray, b"x").unwrap();
-    let stats = ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 0);
     assert!(stray.exists());
 }
@@ -447,7 +447,7 @@ impl CommitFixture {
     }
 
     fn sweep(&self) -> ecp_cli::admin::gc::SweepStats {
-        ecp_cli::admin::gc::sweep_unreachable_commits(&self.repo_root).unwrap()
+        ecp_cli::admin::gc::sweep_unreachable_commits(&self.repo_root, false).unwrap()
     }
 }
 
@@ -893,7 +893,7 @@ fn test_sweep_stale_parse_caches_recently_opened_old_dir_kept() {
     )
     .unwrap();
     assert_eq!(
-        ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path())
+        ecp_cli::admin::gc::sweep_stale_parse_caches(tmp.path(), false)
             .unwrap()
             .removed,
         0
@@ -1076,7 +1076,7 @@ fn test_sweep_old_format_commits_idle_v12_graph_removed() {
         Some(12),
         8,
     );
-    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path(), false).unwrap();
     assert_eq!((stats.marked, stats.removed), (1, 1));
     assert!(!old.exists(), "an idle v12 graph survived gc");
 }
@@ -1092,7 +1092,7 @@ fn test_sweep_old_format_commits_v12_graph_without_sidecar_removed() {
         None,
         8,
     );
-    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 1);
     assert!(!old.exists());
 }
@@ -1108,7 +1108,7 @@ fn test_sweep_old_format_commits_recent_v12_graph_kept() {
         Some(12),
         1,
     );
-    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 0);
     assert!(recent.exists());
 }
@@ -1131,7 +1131,7 @@ fn test_sweep_old_format_commits_current_format_graph_kept_however_idle() {
         None,
         400,
     );
-    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 0);
     assert!(with_sidecar.exists() && without_sidecar.exists());
 }
@@ -1139,7 +1139,7 @@ fn test_sweep_old_format_commits_current_format_graph_kept_however_idle() {
 #[test]
 fn test_sweep_old_format_commits_building_dir_and_no_commits_dir_kept() {
     let tmp = tempfile::tempdir().unwrap();
-    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 0);
     let building = format_commit_dir(
         tmp.path(),
@@ -1148,7 +1148,7 @@ fn test_sweep_old_format_commits_building_dir_and_no_commits_dir_kept() {
         Some(12),
         30,
     );
-    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 0);
     assert!(building.exists());
 }
@@ -1214,7 +1214,7 @@ fn test_sweep_stale_fragments_settled_orphans_removed_named_and_young_kept() {
             ("notes.txt", 7200),
         ],
     );
-    let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 2);
     assert!(overlay.join("aaaa.bin").exists(), "a named bin was removed");
     assert!(
@@ -1233,9 +1233,37 @@ fn test_sweep_stale_fragments_settled_orphans_removed_named_and_young_kept() {
 fn test_sweep_stale_fragments_unreadable_manifest_keeps_every_bin() {
     let tmp = tempfile::tempdir().unwrap();
     let overlay = fragment_session(tmp.path(), Some("not json"), &[("bbbb.bin", 7200)]);
-    let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 0);
     assert!(overlay.join("bbbb.bin").exists());
+}
+
+#[test]
+fn test_sweep_stale_fragments_idle_session_dry_run_matches_real_sweep() {
+    let tmp = tempfile::tempdir().unwrap();
+    let overlay = fragment_session(tmp.path(), None, &[("bbbb.bin", 7200)]);
+    let old = chrono::Utc::now() - chrono::Duration::hours(48);
+    let sm = SessionMeta {
+        version: 1,
+        session_id: "sid".into(),
+        pid: None,
+        started_at: old.to_rfc3339(),
+        last_touched: old.to_rfc3339(),
+        base_sha: "0".repeat(40),
+        source_worktree: "/x".into(),
+        overlay_version: 0,
+        watcher_pid: None,
+        last_drained_offset: 0,
+        agent_name: None,
+    };
+    SessionMeta::write_atomic(&overlay.parent().unwrap().join("session_meta.json"), &sm).unwrap();
+    assert_eq!(sweep_sessions(tmp.path(), true).unwrap().marked, 1);
+    let dry = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), true).unwrap();
+    assert!(overlay.join("bbbb.bin").exists());
+    assert_eq!(sweep_sessions(tmp.path(), false).unwrap().marked, 1);
+    let real = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), false).unwrap();
+    assert_eq!(real.removed, 0);
+    assert_eq!(dry.would_remove.len(), real.removed);
 }
 
 /// The session ecp 0.14.8 left: its manifest names its bin, so the bin
@@ -1263,7 +1291,7 @@ fn test_sweep_stale_fragments_session_written_by_0_14_8_bin_removed_after_refres
     .unwrap();
     backdate_secs(&overlay.join(old_bin), 7200);
     let session = overlay.parent().unwrap();
-    let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 0, "a bin its manifest names was removed");
 
     let sm = SessionMeta {
@@ -1294,7 +1322,7 @@ fn test_sweep_stale_fragments_session_written_by_0_14_8_bin_removed_after_refres
         ["other.py"],
         "the 0.14.8 entry outlived the refresh"
     );
-    let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 1);
     assert!(!overlay.join(old_bin).exists());
 }
@@ -1314,14 +1342,14 @@ fn test_sweep_stale_fragments_overlay_lock_held_session_skipped() {
         &ecp_cli::session::overlay_writer::overlay_lock_path(overlay.parent().unwrap()),
     )
     .unwrap();
-    let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 0);
     assert!(
         overlay.join("bbbb.bin").exists(),
         "gc deleted a bin while a writer held the session"
     );
     drop(held);
-    let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_stale_fragments(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 1, "a released session was not swept");
     assert!(!overlay.join("bbbb.bin").exists());
 }
@@ -1349,7 +1377,7 @@ fn test_sweep_old_format_commits_newer_format_graph_without_sidecar_kept() {
         None,
         30,
     );
-    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 0);
     assert!(newer.exists(), "a newer version's graph was deleted as old");
 }
@@ -1359,7 +1387,7 @@ fn test_sweep_old_format_commits_newer_format_graph_without_sidecar_kept() {
 fn test_sweep_old_format_commits_unreadable_graph_without_sidecar_kept() {
     let tmp = tempfile::tempdir().unwrap();
     let torn = format_commit_dir(tmp.path(), "branch_main__9999", b"torn write", None, 30);
-    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 0);
     assert!(torn.exists(), "an unreadable graph was deleted as old");
 }
@@ -1377,7 +1405,7 @@ fn test_sweep_old_format_commits_recently_read_graph_kept() {
         30,
     );
     filetime::set_file_atime(read.join("graph.bin"), filetime::FileTime::now()).unwrap();
-    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 0);
     assert!(read.exists(), "a graph read today was deleted as idle");
 }
@@ -1405,7 +1433,7 @@ fn test_sweep_old_format_commits_header_read_graph_atime_unchanged() {
     );
     let graph = current.join("graph.bin");
     let before = filetime::FileTime::from_last_access_time(&std::fs::metadata(&graph).unwrap());
-    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 0);
     assert_eq!(
         filetime::FileTime::from_last_access_time(&std::fs::metadata(&graph).unwrap()),
@@ -1444,7 +1472,7 @@ fn test_sweep_old_format_commits_branch_named_building_removed() {
         Some(12),
         30,
     );
-    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path()).unwrap();
+    let stats = ecp_cli::admin::gc::sweep_old_format_commits(tmp.path(), false).unwrap();
     assert_eq!(stats.removed, 1);
     assert!(
         !named.exists(),
@@ -1463,4 +1491,195 @@ fn test_admin_gc_legacy_last_gc_stamp_removed_dry_run_kept() {
     assert!(legacy.exists(), "a dry run deleted the stamp");
     run_gc(home.path(), &[]);
     assert!(!legacy.exists(), "the retired stamp outlived gc");
+}
+
+fn gen_dirs(commits: &std::path::Path) -> std::collections::BTreeSet<String> {
+    std::fs::read_dir(commits)
+        .map(|it| {
+            it.flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Contract: a dry run tells the user what a real run would do and leaves the
+/// disk as it was. Fixture mirrors the field report: several stale same-SHA
+/// generations beside one current one.
+#[test]
+fn test_sweep_stale_generations_dry_run_stale_generations_listed_and_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let commits = tmp.path().join("commits");
+    std::fs::create_dir_all(&commits).unwrap();
+    let sha = "a".repeat(40);
+    for gen in [
+        "1000.10.0",
+        "2000.20.0",
+        "3000.30.0",
+        "4000.40.0",
+        "5000.50.0",
+    ] {
+        make_named_commit_dir(&commits, &format!("branch_main__{sha}.gen.{gen}"));
+    }
+    let before = gen_dirs(&commits);
+
+    let stats = sweep_stale_generations(tmp.path(), true).unwrap();
+
+    assert_eq!(stats.would_remove.len(), 4, "four stale generations named");
+    assert_eq!(stats.removed, 0, "a dry run removes nothing");
+    assert_eq!(gen_dirs(&commits), before, "every dir stays on disk");
+    assert!(
+        !stats
+            .would_remove
+            .iter()
+            .any(|p| p.ends_with(format!("branch_main__{sha}.gen.5000.50.0"))),
+        "the newest generation is never listed"
+    );
+}
+
+#[test]
+fn test_sweep_stale_generations_dry_run_matches_real_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let commits = tmp.path().join("commits");
+    std::fs::create_dir_all(&commits).unwrap();
+    let sha = "b".repeat(40);
+    for gen in ["1000.10.0", "2000.20.0", "3000.30.0"] {
+        make_named_commit_dir(&commits, &format!("branch_main__{sha}.gen.{gen}"));
+    }
+
+    let dry = sweep_stale_generations(tmp.path(), true).unwrap();
+    let real = sweep_stale_generations(tmp.path(), false).unwrap();
+
+    assert_eq!(dry.would_remove.len(), real.removed);
+    assert!(dry.would_remove.iter().all(|p| !p.exists()));
+}
+
+#[test]
+fn test_sweep_stale_generations_dry_run_clean_home_reports_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let commits = tmp.path().join("commits");
+    std::fs::create_dir_all(&commits).unwrap();
+    make_named_commit_dir(
+        &commits,
+        &format!("branch_main__{}.gen.1000.10.0", "a".repeat(40)),
+    );
+    make_named_commit_dir(
+        &commits,
+        &format!("branch_main__{}.gen.1000.10.0", "b".repeat(40)),
+    );
+
+    let stats = sweep_stale_generations(tmp.path(), true).unwrap();
+    assert!(stats.would_remove.is_empty());
+    assert_eq!(stats.removed, 0);
+}
+
+#[test]
+fn test_sweep_stale_generations_dry_run_missing_or_empty_home_reports_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let missing = sweep_stale_generations(&tmp.path().join("no-such-home"), true).unwrap();
+    assert!(missing.would_remove.is_empty());
+
+    std::fs::create_dir_all(tmp.path().join("commits")).unwrap();
+    let empty = sweep_stale_generations(tmp.path(), true).unwrap();
+    assert!(empty.would_remove.is_empty());
+}
+
+#[test]
+fn test_sweep_stale_generations_dry_run_building_and_fresh_dirs_not_listed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let commits = tmp.path().join("commits");
+    std::fs::create_dir_all(&commits).unwrap();
+    let building_sha = "c".repeat(40);
+    make_named_commit_dir(
+        &commits,
+        &format!("branch_main__{building_sha}.gen.1000.10.0"),
+    );
+    make_named_commit_dir(
+        &commits,
+        &format!("branch_main__{building_sha}.gen.2000.20.0"),
+    );
+    std::fs::create_dir_all(commits.join(format!("branch_main__{building_sha}.building"))).unwrap();
+    let fresh_sha = "d".repeat(40);
+    for gen in ["1000.10.0", "2000.20.0"] {
+        make_named_commit_dir(&commits, &format!("branch_main__{fresh_sha}.gen.{gen}"));
+        filetime::set_file_mtime(
+            commits.join(format!("branch_main__{fresh_sha}.gen.{gen}")),
+            filetime::FileTime::now(),
+        )
+        .unwrap();
+    }
+
+    let stats = sweep_stale_generations(tmp.path(), true).unwrap();
+    assert!(
+        stats.would_remove.is_empty(),
+        "the dry run applies the same guards as the real run"
+    );
+}
+
+/// A forced rebuild publishes a dir whose mtime is seconds old. The in-flight
+/// guard used to hide it, so its predecessor was a group of one and stayed.
+#[test]
+fn test_sweep_generations_keeping_fresh_published_dir_removes_predecessor_keeps_published() {
+    let tmp = tempfile::tempdir().unwrap();
+    let commits = tmp.path().join("commits");
+    std::fs::create_dir_all(&commits).unwrap();
+    let sha = "e".repeat(40);
+    let old = commits.join(format!("branch_main__{sha}.gen.1000.10.0"));
+    let published = commits.join(format!("branch_main__{sha}.gen.2000.20.0"));
+    make_named_commit_dir(&commits, old.file_name().unwrap().to_str().unwrap());
+    make_named_commit_dir(&commits, published.file_name().unwrap().to_str().unwrap());
+    filetime::set_file_mtime(&published, filetime::FileTime::now()).unwrap();
+
+    let plain = sweep_stale_generations(tmp.path(), true).unwrap();
+    assert!(
+        plain.would_remove.is_empty(),
+        "without the published hint the fresh dir hides itself"
+    );
+
+    let stats =
+        ecp_cli::admin::gc::sweep_generations_keeping(tmp.path(), false, Some(&published)).unwrap();
+    assert_eq!(stats.removed, 1);
+    assert!(!old.exists());
+    assert!(published.exists(), "the published generation is kept");
+}
+
+/// Two forced rebuilds in a row (the second backdates nothing: the first
+/// predecessor is aged by hand) leave one generation.
+#[test]
+fn test_sweep_generations_keeping_two_successive_publishes_leave_one_generation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let commits = tmp.path().join("commits");
+    std::fs::create_dir_all(&commits).unwrap();
+    let sha = "f".repeat(40);
+    let name = |g: &str| format!("branch_main__{sha}.gen.{g}");
+    make_named_commit_dir(&commits, &name("1000.10.0"));
+    for g in ["2000.20.0", "3000.30.0"] {
+        let published = commits.join(name(g));
+        make_named_commit_dir(&commits, &name(g));
+        filetime::set_file_mtime(&published, filetime::FileTime::now()).unwrap();
+        // Back-to-back forced builds: the predecessor is seconds old too.
+        ecp_cli::admin::gc::sweep_generations_keeping(tmp.path(), false, Some(&published)).unwrap();
+    }
+    assert_eq!(
+        gen_dirs(&commits),
+        std::iter::once(name("3000.30.0")).collect()
+    );
+}
+
+/// The published dir wins even when a concurrent build left a higher
+/// generation: both stay, nothing the caller just made is deleted.
+#[test]
+fn test_sweep_generations_keeping_published_below_newest_generation_is_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let commits = tmp.path().join("commits");
+    std::fs::create_dir_all(&commits).unwrap();
+    let sha = "9".repeat(40);
+    let published = commits.join(format!("branch_main__{sha}.gen.1000.10.0"));
+    make_named_commit_dir(&commits, published.file_name().unwrap().to_str().unwrap());
+    make_named_commit_dir(&commits, &format!("branch_main__{sha}.gen.2000.20.0"));
+
+    let stats =
+        ecp_cli::admin::gc::sweep_generations_keeping(tmp.path(), false, Some(&published)).unwrap();
+    assert_eq!(stats.removed, 0);
+    assert!(published.exists());
 }

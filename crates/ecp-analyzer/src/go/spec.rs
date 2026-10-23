@@ -9,6 +9,7 @@ impl LangSpec for GoSpec {
     const NAME: &'static str = "go";
 
     const CAPTURE_KIND: phf::Map<&'static str, NodeKind> = phf::phf_map! {
+        "namespace.name" => NodeKind::Namespace,
         "struct.name"    => NodeKind::Struct,
         "interface.name" => NodeKind::Interface,
         "typedef.name"   => NodeKind::Typedef,

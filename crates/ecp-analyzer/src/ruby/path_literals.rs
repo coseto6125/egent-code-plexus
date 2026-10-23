@@ -1,7 +1,7 @@
 //! Ruby-side helpers for `RawPathLiteral` extraction. Entry point
 //! `build_raw_path_literal` handles `string` nodes (single- and
 //! double-quoted share the same kind). Interpolated strings
-//! (`string_interpolation` child) are filtered internally. Invoked from
+//! (`interpolation` child) are filtered internally. Invoked from
 //! `receiver_types::extract_ruby_calls_and_path_literals` so a single
 //! DFS handles both call attribution and path-literal collection.
 
@@ -11,10 +11,10 @@ use tree_sitter::Node;
 use crate::path_literal::{classify_sink, is_ext_change_callee, is_path_shaped, sink_reason};
 
 pub(super) fn build_raw_path_literal(str_node: Node<'_>, source: &[u8]) -> Option<RawPathLiteral> {
-    // Skip interpolated strings: any `string_interpolation` child means dynamic content.
+    // Skip interpolated strings: either child kind means dynamic content.
     let mut c = str_node.walk();
     for child in str_node.children(&mut c) {
-        if child.kind() == "string_interpolation" {
+        if matches!(child.kind(), "interpolation" | "string_interpolation") {
             return None;
         }
     }
@@ -65,13 +65,23 @@ pub(super) fn enclosing_symbol_and_owner_pub(
 /// Extract the content of a `string` node. Looks for `string_content` child;
 /// if absent, strips surrounding quotes from the raw node text.
 fn extract_string_content<'a>(str_node: Node<'_>, source: &'a [u8]) -> Option<&'a str> {
-    // Try to find the string_content child node.
+    // An escape (`\\`, `\n`) splits the text into several content children;
+    // the value spans the run that starts at the first one, or
+    // `"C:\\x\\f.txt"` would read as `C:`. An interpolation ends the run.
     let mut c = str_node.walk();
+    let mut span: Option<(usize, usize)> = None;
     for child in str_node.children(&mut c) {
-        if child.kind() == "string_content" {
-            let raw = std::str::from_utf8(&source[child.start_byte()..child.end_byte()]).ok()?;
-            return Some(raw);
+        match child.kind() {
+            "string_content" | "escape_sequence" => {
+                let start = span.map_or(child.start_byte(), |(s, _)| s);
+                span = Some((start, child.end_byte()));
+            }
+            "interpolation" if span.is_some() => break,
+            _ => {}
         }
+    }
+    if let Some((start, end)) = span {
+        return std::str::from_utf8(&source[start..end]).ok();
     }
     // Fallback: strip quotes from the whole node text.
     let raw = std::str::from_utf8(&source[str_node.start_byte()..str_node.end_byte()]).ok()?;

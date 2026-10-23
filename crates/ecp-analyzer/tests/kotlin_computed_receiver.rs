@@ -32,11 +32,15 @@ class C {
 "#;
 
 fn build() -> ZeroCopyGraph {
+    build_in(SOURCE)
+}
+
+fn build_in(source: &str) -> ZeroCopyGraph {
     let mut builder = GraphBuilder::new();
     builder.add_graph(
         KotlinProvider::new()
             .unwrap()
-            .parse_file(Path::new("C.kt"), SOURCE.as_bytes())
+            .parse_file(Path::new("C.kt"), source.as_bytes())
             .unwrap(),
     );
     builder.build()
@@ -85,7 +89,14 @@ fn test_kotlin_callee_constructor_receiver_emits_class_member() {
 #[test]
 fn test_kotlin_callee_computed_receiver_with_own_member_emits_untyped_member() {
     let calls = raw_calls("viaCall");
-    assert!(calls.contains(&CallSite::untyped_member("m")), "{calls:?}");
+    // `other()` is a call receiver: a chain whose fallback is the untyped
+    // member, so the bare name never binds the caller's own `m`.
+    assert!(
+        calls
+            .iter()
+            .any(|c| CallSite::parse(c).fallback() == CallSite::UntypedMember("m")),
+        "{calls:?}"
+    );
     assert!(!calls.contains(&"m".to_string()), "{calls:?}");
 }
 
@@ -105,6 +116,39 @@ fn test_resolve_call_kotlin_computed_receiver_binds_no_own_member() {
 #[test]
 fn test_resolve_call_kotlin_computed_receiver_extension_binds_top_level_function() {
     assert_eq!(owners_called(&build(), "viaExtension", "ext"), [""]);
+}
+
+#[test]
+fn test_resolve_call_kotlin_library_return_extension_binds_top_level_function() {
+    let source =
+        "fun String.ext() {}\nclass C { fun text(): String = \"\"\nfun go() { text().ext() } }\n";
+    assert_eq!(owners_called(&build_in(source), "go", "ext"), [""]);
+}
+
+#[test]
+fn test_resolve_call_kotlin_computed_receiver_member_precedes_extension() {
+    let source = "class Other { fun ext() {} }\nfun Other.ext() {}\nclass C { fun other(): Other = Other()\nfun go() { other().ext() } }\n";
+    assert_eq!(owners_called(&build_in(source), "go", "ext"), ["Other"]);
+}
+
+#[test]
+fn test_resolve_call_kotlin_computed_receiver_known_missing_returns_no_edge() {
+    let source = "class Other {}\nclass C { fun missing() {}\nfun other(): Other = Other()\nfun go() { other().missing() } }\n";
+    assert!(
+        owners_called(&build_in(source), "go", "missing").is_empty(),
+        "a known Other receiver must not bind C.missing"
+    );
+}
+
+#[test]
+fn test_resolve_call_kotlin_nested_known_missing_suppresses_outer_fallback() {
+    let source = "class Foo {}\nclass Factory { fun make(): Foo = Foo() }\nfun bar() {}\nclass C { fun go() { Factory().make().missing().bar() } }\n";
+    let graph = build_in(source);
+    assert_eq!(owners_called(&graph, "go", "make"), ["Factory"]);
+    assert!(
+        owners_called(&graph, "go", "bar").is_empty(),
+        "a known Foo.missing failure must not bind top-level bar"
+    );
 }
 
 /// A local named like a class shadows it: `Other()` calls the local, whose

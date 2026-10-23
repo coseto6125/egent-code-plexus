@@ -73,7 +73,7 @@ impl CppBindings {
     fn receiver_type(&self, pos: Pos, var: &str) -> Option<&str> {
         match self.lookup_local(pos, var) {
             Some(ty) => (!ty.is_empty()).then_some(ty),
-            None => self.field_type(pos, var),
+            None => self.field_type(pos, var).filter(|ty| !ty.is_empty()),
         }
     }
 
@@ -282,13 +282,37 @@ fn bind_param(p: Node<'_>, source: &[u8], out: &mut FxHashMap<String, String>) {
     ) {
         return;
     }
-    let Some(name) = p
-        .child_by_field_name("declarator")
-        .and_then(|d| unwrap_declarator_identifier(d, source))
-    else {
+    let Some(declarator) = p.child_by_field_name("declarator") else {
         return;
     };
-    bind_local(p.child_by_field_name("type"), name, source, out);
+    if let Some(name) = callable_param_identifier(declarator, source) {
+        // A callable parameter's declared type is its result type. Keeping
+        // that as the callable's type would incorrectly type `make().m()`.
+        out.entry(name).or_default();
+        return;
+    }
+    if let Some(name) = unwrap_declarator_identifier(declarator, source) {
+        bind_local(p.child_by_field_name("type"), name, source, out);
+    }
+}
+
+/// The name in a parameter declarator that is itself callable, such as
+/// `Beta* (*make)()`. This only runs for parameters, so ordinary function
+/// declarations never become local values.
+fn callable_param_identifier(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let node = find_function_declarator(node)?;
+    let paren = node.child_by_field_name("declarator")?;
+    if paren.kind() != "parenthesized_declarator" {
+        return None;
+    }
+    let pointer = paren.named_child(0)?;
+    if !matches!(
+        pointer.kind(),
+        "pointer_declarator" | "reference_declarator"
+    ) {
+        return None;
+    }
+    unwrap_declarator_identifier(pointer, source)
 }
 
 /// Scan the function's declarator for parameter declarations.
@@ -372,18 +396,15 @@ fn collect_typed_fields(body: Node<'_>, source: &[u8], out: &mut FxHashMap<Strin
     for member in body.children(&mut c) {
         match member.kind() {
             "field_declaration" => {
-                let Some(ty) = member
+                let ty = member
                     .child_by_field_name("type")
                     .filter(|t| t.kind() == "type_identifier")
-                    .and_then(|t| t.utf8_text(source).ok())
-                else {
-                    continue;
-                };
+                    .and_then(|t| t.utf8_text(source).ok());
                 let mut dc = member.walk();
                 for decl in member.children_by_field_name("declarator", &mut dc) {
                     if let Some(name) = unwrap_field_identifier(decl, source) {
                         out.entry(name.to_string())
-                            .or_insert_with(|| ty.to_string());
+                            .or_insert_with(|| ty.map_or_else(String::new, str::to_string));
                     }
                 }
             }
@@ -527,10 +548,25 @@ fn member_receiver_type<'b>(
             if this.kind() != "this" {
                 return None;
             }
-            bindings.field_type(pos, field.utf8_text(source).ok()?)
+            bindings
+                .field_type(pos, field.utf8_text(source).ok()?)
+                .filter(|ty| !ty.is_empty())
         }
         _ => None,
     }
+}
+
+/// Whether `call` invokes a local, parameter or field. Its result may have a
+/// type, but the binder does not infer callable return types, so a same-named
+/// free function must not type an enclosing member call.
+fn calls_value(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> bool {
+    call.child_by_field_name("function")
+        .filter(|function| function.kind() == "identifier")
+        .and_then(|function| function.utf8_text(source).ok())
+        .is_some_and(|name| {
+            let pos = start_pos(call);
+            bindings.lookup_local(pos, name).is_some() || bindings.field_type(pos, name).is_some()
+        })
 }
 
 fn cpp_callee_name(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> Option<String> {
@@ -561,6 +597,18 @@ fn cpp_callee_name(call: Node<'_>, source: &[u8], bindings: &CppBindings) -> Opt
             Some(
                 match member_receiver_type(receiver, source, bindings, pos) {
                     Some(ty) => format!("{ty}.{method}"),
+                    // `Foo::create().bar()` / `make()->bar()`: the resolver
+                    // types a call receiver by the callee's return type.
+                    None if receiver.kind() == "call_expression"
+                        && !calls_value(receiver, source, bindings) =>
+                    {
+                        let untyped = CallSite::untyped_member(method);
+                        match CallSite::nested_chain(|| cpp_callee_name(receiver, source, bindings))
+                        {
+                            Some(inner) => CallSite::chained_member(&inner, &untyped),
+                            None => untyped,
+                        }
+                    }
                     None => CallSite::untyped_member(method),
                 },
             )

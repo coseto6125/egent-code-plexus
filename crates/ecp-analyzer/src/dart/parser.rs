@@ -460,9 +460,18 @@ impl LanguageProvider for DartProvider {
                         None
                     };
 
+                    let filtered = i_src.parent().is_some_and(|specification| {
+                        specification
+                            .named_children(&mut specification.walk())
+                            .any(|child| child.kind() == "combinator")
+                    });
                     imports.push(RawImport {
                         alias: alias_str,
-                        imported_name: clean_src.clone(),
+                        imported_name: if filtered {
+                            String::new()
+                        } else {
+                            clean_src.clone()
+                        },
                         source: clean_src,
                         binding_kind: None,
                     });
@@ -485,6 +494,28 @@ impl LanguageProvider for DartProvider {
             source,
             &mut nodes,
             &["member_expression"],
+            &crate::calls::NameRefSpec {
+                ident_kinds: &["identifier"],
+                kind: crate::calls::NameRefKind::Value,
+                binding_fields: &[
+                    ("initialized_variable_definition", "name"),
+                    ("initialized_identifier", "name"),
+                    ("for_statement", "name"),
+                    ("for_element", "name"),
+                    ("catch_clause", "exception"),
+                    ("catch_clause", "stack_trace"),
+                ],
+                skip_kinds: &[
+                    "import_or_export",
+                    "library_name",
+                    "part_directive",
+                    "part_of_directive",
+                    "annotation",
+                    "type_arguments",
+                ],
+                skip_parents: &["label"],
+                ..crate::calls::NameRefSpec::EMPTY
+            },
         );
         crate::calls::extract_variant_refs(
             tree.root_node(),

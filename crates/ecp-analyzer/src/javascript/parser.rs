@@ -658,11 +658,32 @@ impl LanguageProvider for JavaScriptProvider {
             &mut nodes,
             &mut call_sites,
         );
+
         crate::calls::extract_field_reads(
             tree.root_node(),
             source,
             &mut nodes,
             &["member_expression"],
+            &crate::calls::NameRefSpec {
+                ident_kinds: &[
+                    "identifier",
+                    "shorthand_property_identifier",
+                    "shorthand_property_identifier_pattern",
+                ],
+                kind: crate::calls::NameRefKind::Value,
+                binding_fields: &[
+                    ("for_in_statement", "left"),
+                    ("pair_pattern", "value"),
+                    ("object_assignment_pattern", "left"),
+                ],
+                skip_kinds: &[
+                    "import_statement",
+                    "decorator",
+                    "type_annotation",
+                    "type_arguments",
+                ],
+                ..crate::calls::NameRefSpec::EMPTY
+            },
         );
 
         // Framework-presence gates: only emit Express/Hapi refs when the file
@@ -723,8 +744,10 @@ impl LanguageProvider for JavaScriptProvider {
         }
 
         let param_names = collect_js_param_names(tree.root_node(), source);
+
         let call_metas =
             detect_js_ts_indirect(tree.root_node(), source, &nodes, &param_names, &call_sites);
+
         let raw_function_metas = crate::function_meta::javascript::extract(
             tree.root_node(),
             source,
@@ -734,11 +757,13 @@ impl LanguageProvider for JavaScriptProvider {
 
         let export_aliases =
             crate::framework_helpers::stamp_js_ts_exports(tree.root_node(), source, &mut nodes);
+
         crate::framework_helpers::mark_js_ts_import_bindings(
             tree.root_node(),
             source,
             &mut imports,
         );
+
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
         crate::framework_helpers::stamp_js_function_owners(&mut nodes);
 

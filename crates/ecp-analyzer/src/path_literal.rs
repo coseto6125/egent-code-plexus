@@ -11,7 +11,9 @@
 //!
 //! Both functions take only `&str` so per-language drift is impossible.
 //! Language-specific escape-sequence rules are unified here: the predicate
-//! treats `\\` as a path separator pair and known C-style escapes
+//! treats `\\` as a path separator pair only inside a Windows-path shape
+//! (drive / dot / UNC prefix, or a final segment with a file extension; no
+//! `::` or regex metacharacters) and known C-style escapes
 //! (`\n \t \r \0 \' \" \x \u`) as format escapes. This covers Rust, Python,
 //! JS/TS, Java, Kotlin, C#, C/C++, Go, Swift, Dart, Ruby, PHP — the 14
 //! mainstream targets in this workspace. Languages that allow additional
@@ -51,15 +53,16 @@ pub fn is_path_shaped(s: &str) -> bool {
 }
 
 /// Walks the literal looking for a path separator. `'/'` is unambiguous.
-/// `'\\'` (one source byte) is a path separator iff it is not followed by a
-/// standard C-style escape continuation. The `\\\\` pair (two source bytes
-/// = one literal `\` at runtime) is treated as a path separator.
+/// A backslash that is not a standard C-style escape (`\n \t \r \0 \' \" \x
+/// \u`) is a candidate Windows separator; it counts only when the whole
+/// literal has a Windows-path shape (see [`is_windows_path_shape`]).
 fn has_path_separator(s: &str) -> bool {
     if s.contains('/') {
         return true;
     }
     let bytes = s.as_bytes();
     let mut i = 0;
+    let mut candidate = false;
     while i < bytes.len() {
         if bytes[i] != b'\\' {
             i += 1;
@@ -67,10 +70,69 @@ fn has_path_separator(s: &str) -> bool {
         }
         match bytes.get(i + 1) {
             Some(b'n' | b't' | b'r' | b'0' | b'\'' | b'"' | b'x' | b'u') => i += 2,
-            Some(_) | None => return true,
+            _ => {
+                candidate = true;
+                break;
+            }
         }
     }
-    false
+    candidate && is_windows_path_shape(s)
+}
+
+/// Structural test separating Windows paths from PHP FQCNs, date formats and
+/// regexes that all contain backslashes. A run of backslashes (`\` or `\\`
+/// source form) is one separator. Accepted: drive prefix (`C:\`), literal
+/// leading `.`/`..` segment, UNC (`\\server\share`, every segment >= 2 chars),
+/// or a final segment carrying a file extension. Rejected: `::` (PHP static
+/// reference) and regex metacharacters.
+fn is_windows_path_shape(s: &str) -> bool {
+    if s.contains("::") {
+        return false;
+    }
+    let leading_run = s.bytes().take_while(|&b| b == b'\\').count();
+    let segments: Vec<&str> = s.split('\\').filter(|seg| !seg.is_empty()).collect();
+    if segments.len() < 2 {
+        return false;
+    }
+    let first = segments[0];
+    let bytes = s.as_bytes();
+    // A drive or `.`/`..` prefix is never a regex or an FQCN, so these two
+    // cases decide before the metacharacter test (`Notepad++`, `c$` are real).
+    if leading_run == 0
+        && bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && bytes[2] == b'\\'
+    {
+        return true;
+    }
+    if leading_run == 0 && (first == "." || first == "..") {
+        return true;
+    }
+    // The leading run must be twice the first inner run: `\\\\srv\\share` escaped
+    // or `\\srv\share` raw. An escaped FQCN `\\App\\Models` has equal runs.
+    let inner_run = s[leading_run + first.len()..]
+        .bytes()
+        .take_while(|&b| b == b'\\')
+        .count();
+    if leading_run >= 2 && leading_run == 2 * inner_run && segments.iter().all(|seg| seg.len() >= 2)
+    {
+        // `$` stays legal: administrative shares such as `c$`.
+        return !s.contains(['^', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|']);
+    }
+    if s.contains(['^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|']) {
+        return false;
+    }
+    has_file_extension(segments[segments.len() - 1])
+}
+
+/// `name.ext` with a 1-5 char alphanumeric extension and a non-empty stem.
+fn has_file_extension(seg: &str) -> bool {
+    seg.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty()
+            && (1..=5).contains(&ext.len())
+            && ext.bytes().all(|b| b.is_ascii_alphanumeric())
+    })
 }
 
 /// Suffixes that mark a string as a likely config / data path even without
@@ -334,6 +396,68 @@ mod tests {
             is_path_shaped("a\\xfoo.json"),
             "x escape doesn't strip suffix"
         ); // suffix wins
+    }
+
+    #[test]
+    fn test_is_path_shaped_windows_paths_accepted() {
+        for s in [
+            r"C:\\Users\\x\\file.txt",
+            r"C:\Users\x\file.txt",
+            r"..\\config\\app.json",
+            r"..\config\app.json",
+            r".\\scripts\\run.ps1",
+            r".\scripts\run.ps1",
+            r"\\\\server\\share\\f.txt",
+            r"\\server\share\f.txt",
+            r"src\\lib\\mod.rs",
+            r"src\lib\mod.rs",
+        ] {
+            assert!(is_path_shaped(s), "expected path-shaped: {s:?}");
+        }
+    }
+
+    #[test]
+    fn test_is_path_shaped_backslash_non_paths_rejected() {
+        for s in [
+            r"App\\Rows::hero",
+            r"App\Rows::hero",
+            r"App\\Models\\User",
+            r"App\Models\User",
+            r"Y-m-d\\TH:i:s\\Z",
+            r"Y-m-d\TH:i:s\Z",
+            r"\\d+\\.\\d+",
+            r"\d+\.\d+",
+            r"^\\w+$",
+            r"^\w+$",
+            r"\\d\\s\\b",
+            r"\.\(\[",
+        ] {
+            assert!(!is_path_shaped(s), "expected non-path: {s:?}");
+        }
+    }
+
+    #[test]
+    fn test_is_path_shaped_escaped_fqcn_rejected() {
+        for s in [
+            r"\\App\\Models\\User",
+            r"\\App\\Http\\Controllers\\HomeController",
+        ] {
+            assert!(!is_path_shaped(s), "expected non-path: {s:?}");
+        }
+    }
+
+    #[test]
+    fn test_is_path_shaped_unc_and_metachar_paths_accepted() {
+        for s in [
+            r"\\srv\share\file.txt",
+            r"\\\\srv\\share\\file.txt",
+            r"\\\\srv\\c$\\app\\x.dll",
+            r"C:\\Tools\\Notepad++\\notepad++.exe",
+            r"C:\Tools\Notepad++\notepad++.exe",
+            r"..\\ünï\\a+b\\x.cfg",
+        ] {
+            assert!(is_path_shaped(s), "expected path-shaped: {s:?}");
+        }
     }
 
     #[test]

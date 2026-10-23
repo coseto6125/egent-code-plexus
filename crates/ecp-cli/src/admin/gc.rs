@@ -54,9 +54,31 @@ fn commit_dir_last_use(dir: &Path, dir_meta: &fs::Metadata) -> Option<SystemTime
     dir_meta.modified().ok().max(read)
 }
 
+/// `would_remove` lists what a dry run found and left on disk; `removed`
+/// counts only what a real run deleted.
+#[derive(Default)]
 pub struct SweepStats {
     pub marked: usize,
     pub removed: usize,
+    pub would_remove: Vec<std::path::PathBuf>,
+}
+
+impl SweepStats {
+    /// Removes `path` through `remove` and counts it, or, in a dry run, lists
+    /// it and touches nothing.
+    fn dispose(&mut self, path: &Path, dry_run: bool, remove: impl FnOnce() -> bool) {
+        if dry_run {
+            self.would_remove.push(path.to_path_buf());
+        } else {
+            self.removed += usize::from(remove());
+        }
+    }
+
+    pub fn merge(&mut self, other: SweepStats) {
+        self.marked += other.marked;
+        self.removed += other.removed;
+        self.would_remove.extend(other.would_remove);
+    }
 }
 
 /// A directory marked dead: `<name>.dead`, or `.dead.` followed by any number
@@ -117,11 +139,8 @@ fn insert_active_session_bases(repo_root: &Path, set: &mut FxHashSet<String>) ->
                 continue;
             }
         };
-        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&sm.last_touched) {
-            let age = chrono::Utc::now().signed_duration_since(parsed.with_timezone(&chrono::Utc));
-            if age.num_hours() > SESSION_IDLE_HOURS {
-                continue;
-            }
+        if session_is_idle(&sm) {
+            continue;
         }
         set.insert(sm.base_sha);
     }
@@ -198,11 +217,8 @@ fn live_commit_shas(repo_root: &Path, common_dir: &Path) -> Option<FxHashSet<Str
 /// within it (see [`commit_dir_last_use`]). A merged branch or a deleted
 /// worktree otherwise leaves every graph it built behind. Removes nothing
 /// when the repo's git dir is unknown or git fails.
-pub fn sweep_unreachable_commits(repo_root: &Path) -> io::Result<SweepStats> {
-    let mut stats = SweepStats {
-        marked: 0,
-        removed: 0,
-    };
+pub fn sweep_unreachable_commits(repo_root: &Path, dry_run: bool) -> io::Result<SweepStats> {
+    let mut stats = SweepStats::default();
     let Ok(it) = fs::read_dir(repo_root.join("commits")) else {
         return Ok(stats);
     };
@@ -223,7 +239,7 @@ pub fn sweep_unreachable_commits(repo_root: &Path) -> io::Result<SweepStats> {
         }
         // Leftover of an earlier retire whose delete did not finish.
         if is_retired_dir(&name) {
-            stats.removed += usize::from(remove_retired(&dir));
+            stats.dispose(&dir, dry_run, || remove_retired(&dir));
             continue;
         }
         if name.starts_with('.')
@@ -265,24 +281,36 @@ pub fn sweep_unreachable_commits(repo_root: &Path) -> io::Result<SweepStats> {
             continue;
         }
         stats.marked += 1;
-        stats.removed += usize::from(retire_and_remove(&dir));
+        stats.dispose(&dir, dry_run, || retire_and_remove(&dir));
     }
     Ok(stats)
 }
 
-pub fn sweep_sessions(repo_root: &Path) -> io::Result<SweepStats> {
+fn session_is_idle(sm: &SessionMeta) -> bool {
+    chrono::DateTime::parse_from_rfc3339(&sm.last_touched).is_ok_and(|t| {
+        chrono::Utc::now()
+            .signed_duration_since(t.with_timezone(&chrono::Utc))
+            .num_hours()
+            > SESSION_IDLE_HOURS
+    })
+}
+
+pub fn sweep_sessions(repo_root: &Path, dry_run: bool) -> io::Result<SweepStats> {
     let sessions_dir = repo_root.join("sessions");
-    let mut marked = 0usize;
-    let mut removed = 0usize;
+    let mut stats = SweepStats::default();
     let Ok(it) = fs::read_dir(&sessions_dir) else {
-        return Ok(SweepStats { marked, removed });
+        return Ok(stats);
     };
     for entry in it.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
         if is_retired_dir(&name) || name.contains(".stale-") {
-            fs::remove_dir_all(&path)?;
-            removed += 1;
+            if dry_run {
+                stats.would_remove.push(path);
+            } else {
+                fs::remove_dir_all(&path)?;
+                stats.removed += 1;
+            }
             continue;
         }
         let sm_path = path.join("session_meta.json");
@@ -295,21 +323,16 @@ pub fn sweep_sessions(repo_root: &Path) -> io::Result<SweepStats> {
         // meta: it is always dead, so every session was marked on the first
         // sweep after enrolment (FU-2026-06-10-cc120f78889c). A live watcher
         // or a live agent keeps `last_touched` moving instead.
-        let should_mark = chrono::DateTime::parse_from_rfc3339(&sm.last_touched).is_ok_and(|t| {
-            chrono::Utc::now()
-                .signed_duration_since(t.with_timezone(&chrono::Utc))
-                .num_hours()
-                > SESSION_IDLE_HOURS
-        });
-
-        if should_mark {
-            let ts = chrono::Utc::now().timestamp();
-            let dead = path.with_extension(format!("dead.{ts}"));
-            fs::rename(&path, &dead)?;
-            marked += 1;
+        if session_is_idle(&sm) {
+            if !dry_run {
+                let ts = chrono::Utc::now().timestamp();
+                let dead = path.with_extension(format!("dead.{ts}"));
+                fs::rename(&path, &dead)?;
+            }
+            stats.marked += 1;
         }
     }
-    Ok(SweepStats { marked, removed })
+    Ok(stats)
 }
 
 /// Retire commit dirs whose recorded worktree still exists but is not a
@@ -317,11 +340,8 @@ pub fn sweep_sessions(repo_root: &Path) -> io::Result<SweepStats> {
 /// published from a subdirectory and hold that subtree's graph only. A
 /// recorded worktree that is gone is left alone; the query path rebuilds such
 /// a slot on first use.
-pub fn sweep_subtree_builds(repo_root: &Path) -> io::Result<SweepStats> {
-    let mut stats = SweepStats {
-        marked: 0,
-        removed: 0,
-    };
+pub fn sweep_subtree_builds(repo_root: &Path, dry_run: bool) -> io::Result<SweepStats> {
+    let mut stats = SweepStats::default();
     let Ok(it) = fs::read_dir(repo_root.join("commits")) else {
         return Ok(stats);
     };
@@ -348,7 +368,7 @@ pub fn sweep_subtree_builds(repo_root: &Path) -> io::Result<SweepStats> {
             )
         {
             stats.marked += 1;
-            stats.removed += usize::from(retire_and_remove(&dir));
+            stats.dispose(&dir, dry_run, || retire_and_remove(&dir));
         }
     }
     Ok(stats)
@@ -361,11 +381,8 @@ pub fn sweep_subtree_builds(repo_root: &Path) -> io::Result<SweepStats> {
 /// again; the grace keeps a second installed ecp version's live cache from
 /// being evicted on each gc, which would make the two binaries re-parse in
 /// turn.
-pub fn sweep_stale_parse_caches(repo_root: &Path) -> io::Result<SweepStats> {
-    let mut stats = SweepStats {
-        marked: 0,
-        removed: 0,
-    };
+pub fn sweep_stale_parse_caches(repo_root: &Path, dry_run: bool) -> io::Result<SweepStats> {
+    let mut stats = SweepStats::default();
     let Ok(it) = fs::read_dir(repo_root.join("parse_cache")) else {
         return Ok(stats);
     };
@@ -381,7 +398,7 @@ pub fn sweep_stale_parse_caches(repo_root: &Path) -> io::Result<SweepStats> {
         let name = entry.file_name().to_string_lossy().to_string();
         let dir = entry.path();
         if is_retired_dir(&name) {
-            stats.removed += usize::from(remove_retired(&dir));
+            stats.dispose(&dir, dry_run, || remove_retired(&dir));
             continue;
         }
         // Last use: the newer of the dir's mtime (an entry written) and the
@@ -396,7 +413,7 @@ pub fn sweep_stale_parse_caches(repo_root: &Path) -> io::Result<SweepStats> {
             continue;
         }
         stats.marked += 1;
-        stats.removed += usize::from(retire_and_remove(&dir));
+        stats.dispose(&dir, dry_run, || retire_and_remove(&dir));
     }
     Ok(stats)
 }
@@ -406,11 +423,8 @@ pub fn sweep_stale_parse_caches(repo_root: &Path) -> io::Result<SweepStats> {
 /// rebuilds such a slot. Kept while used within [`IDLE_GRACE_SECS`] (see
 /// [`commit_dir_last_use`]), because a second installed ecp version may still
 /// read them.
-pub fn sweep_old_format_commits(repo_root: &Path) -> io::Result<SweepStats> {
-    let mut stats = SweepStats {
-        marked: 0,
-        removed: 0,
-    };
+pub fn sweep_old_format_commits(repo_root: &Path, dry_run: bool) -> io::Result<SweepStats> {
+    let mut stats = SweepStats::default();
     let Ok(it) = fs::read_dir(repo_root.join("commits")) else {
         return Ok(stats);
     };
@@ -436,7 +450,7 @@ pub fn sweep_old_format_commits(repo_root: &Path) -> io::Result<SweepStats> {
             continue;
         }
         stats.marked += 1;
-        stats.removed += usize::from(retire_and_remove(&dir));
+        stats.dispose(&dir, dry_run, || retire_and_remove(&dir));
     }
     Ok(stats)
 }
@@ -490,11 +504,8 @@ const ORPHAN_FRAGMENT_IDLE_SECS: u64 = 3600;
 /// file writes a new one, and a manifest another builder wrote is replaced
 /// whole. Leftover `.tmp` writes go too. A session whose manifest cannot be
 /// read keeps its bins, and so does one whose writer holds its overlay lock.
-pub fn sweep_stale_fragments(repo_root: &Path) -> io::Result<SweepStats> {
-    let mut stats = SweepStats {
-        marked: 0,
-        removed: 0,
-    };
+pub fn sweep_stale_fragments(repo_root: &Path, dry_run: bool) -> io::Result<SweepStats> {
+    let mut stats = SweepStats::default();
     let Ok(sessions) = fs::read_dir(repo_root.join("sessions")) else {
         return Ok(stats);
     };
@@ -507,6 +518,11 @@ pub fn sweep_stale_fragments(repo_root: &Path) -> io::Result<SweepStats> {
         let dir = session.path();
         let overlay = dir.join("graph_overlay");
         if !overlay.is_dir() {
+            continue;
+        }
+        // A real GC retires idle sessions before this sweep. A dry run must
+        // leave their fragments out of its deletion report too.
+        if SessionMeta::read(&dir.join("session_meta.json")).is_ok_and(|sm| session_is_idle(&sm)) {
             continue;
         }
         // Held from the manifest read to the last unlink: a bin's name is its
@@ -545,10 +561,14 @@ pub fn sweep_stale_fragments(repo_root: &Path) -> io::Result<SweepStats> {
                 continue;
             }
             stats.marked += 1;
-            match fs::remove_file(bin.path()) {
-                Ok(()) => stats.removed += 1,
-                Err(e) => eprintln!("gc: remove {}: {e}", bin.path().display()),
-            }
+            let path = bin.path();
+            stats.dispose(&path, dry_run, || match fs::remove_file(&path) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("gc: remove {}: {e}", path.display());
+                    false
+                }
+            });
         }
     }
     Ok(stats)
@@ -588,11 +608,25 @@ fn remove_retired(dir: &Path) -> bool {
 /// are pure waste. Skips dirs whose mtime is < 10s old or that have a sibling
 /// `.building` marker (another session may be mid-ingest). Reuses
 /// `CommitDirName::parse` rather than hand-rolling the name grammar.
-pub fn sweep_stale_generations(repo_root: &Path) -> io::Result<SweepStats> {
+pub fn sweep_stale_generations(repo_root: &Path, dry_run: bool) -> io::Result<SweepStats> {
+    sweep_generations_keeping(repo_root, dry_run, None)
+}
+
+/// [`sweep_stale_generations`] for a caller that just published `published`.
+/// That dir is settled by construction, and so is every lower generation of
+/// its SHA, which it supersedes: the 10 s in-flight guard applies to neither
+/// (without this, a fresh publish hides itself, and a forced build seconds
+/// after the last one keeps its predecessor). The published dir is never
+/// removed.
+pub fn sweep_generations_keeping(
+    repo_root: &Path,
+    dry_run: bool,
+    published: Option<&Path>,
+) -> io::Result<SweepStats> {
     let commits = repo_root.join("commits");
-    let mut removed = 0usize;
+    let mut stats = SweepStats::default();
     let Ok(it) = fs::read_dir(&commits) else {
-        return Ok(SweepStats { marked: 0, removed });
+        return Ok(stats);
     };
 
     // First pass: collect SHAs with an active build.
@@ -602,6 +636,14 @@ pub fn sweep_stale_generations(repo_root: &Path) -> io::Result<SweepStats> {
     let mut by_sha: FxHashMap<[u8; 20], Vec<(CommitDirName, std::path::PathBuf)>> =
         FxHashMap::default();
     let now = std::time::SystemTime::now();
+    let published_name = published
+        .and_then(Path::file_name)
+        .and_then(|n| CommitDirName::parse(&n.to_string_lossy()).ok());
+    let superseded = |parsed: &CommitDirName| {
+        published_name
+            .as_ref()
+            .is_some_and(|p| p.sha == parsed.sha && parsed.generation <= p.generation)
+    };
     for entry in it.flatten() {
         let Ok(meta) = entry.metadata() else {
             continue;
@@ -625,7 +667,7 @@ pub fn sweep_stale_generations(repo_root: &Path) -> io::Result<SweepStats> {
         let Ok(parsed) = CommitDirName::parse(&name) else {
             continue;
         };
-        if is_in_flight(&meta, now) {
+        if is_in_flight(&meta, now) && !superseded(&parsed) {
             continue;
         }
         by_sha
@@ -644,20 +686,23 @@ pub fn sweep_stale_generations(repo_root: &Path) -> io::Result<SweepStats> {
         group.sort_by_key(|(parsed, _)| parsed.generation);
         let keep_idx = group.len() - 1;
         for (i, (_, path)) in group.iter().enumerate() {
-            if i == keep_idx {
+            if i == keep_idx || published == Some(path.as_path()) {
                 continue;
             }
-            match fs::remove_dir_all(path) {
-                Ok(()) => removed += 1,
-                Err(e) => eprintln!(
-                    "gc: failed to remove stale generation {}: {e}",
-                    path.display()
-                ),
-            }
+            stats.dispose(path, dry_run, || match fs::remove_dir_all(path) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!(
+                        "gc: failed to remove stale generation {}: {e}",
+                        path.display()
+                    );
+                    false
+                }
+            });
         }
     }
 
-    Ok(SweepStats { marked: 0, removed })
+    Ok(stats)
 }
 
 /// Remove retired dirs (`<name>.dead.<pid>.<n>.<ts>`) directly under
@@ -665,10 +710,10 @@ pub fn sweep_stale_generations(repo_root: &Path) -> io::Result<SweepStats> {
 /// thread died with the process before finishing: repo dirs under `~/.ecp`,
 /// and a repo root's `parse_cache` that `admin index --force` retires whole.
 /// Already marked dead → removal is unconditional.
-pub fn sweep_retired_dirs(parent: &Path) -> io::Result<SweepStats> {
-    let mut removed = 0usize;
+pub fn sweep_retired_dirs(parent: &Path, dry_run: bool) -> io::Result<SweepStats> {
+    let mut stats = SweepStats::default();
     let Ok(it) = fs::read_dir(parent) else {
-        return Ok(SweepStats { marked: 0, removed });
+        return Ok(stats);
     };
     for entry in it.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -679,12 +724,15 @@ pub fn sweep_retired_dirs(parent: &Path) -> io::Result<SweepStats> {
         if !path.is_dir() {
             continue;
         }
-        match fs::remove_dir_all(&path) {
-            Ok(()) => removed += 1,
-            Err(e) => eprintln!("gc: failed to remove retired dir {}: {e}", path.display()),
-        }
+        stats.dispose(&path, dry_run, || match fs::remove_dir_all(&path) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("gc: failed to remove retired dir {}: {e}", path.display());
+                false
+            }
+        });
     }
-    Ok(SweepStats { marked: 0, removed })
+    Ok(stats)
 }
 
 /// Remove orphaned atomic-write temp siblings (`<name>.<pid>.<n>.tmp`) left in
@@ -692,10 +740,10 @@ pub fn sweep_retired_dirs(parent: &Path) -> io::Result<SweepStats> {
 /// interrupted before the rename. The io.rs doc comment promises these "can be
 /// swept by cleanup tools" — this is that tool. Settled files only (see
 /// [`is_in_flight`]), so a live writer mid-`rename` is never touched.
-pub fn sweep_orphan_tmp(home_ecp: &Path) -> io::Result<SweepStats> {
-    let mut removed = 0usize;
+pub fn sweep_orphan_tmp(home_ecp: &Path, dry_run: bool) -> io::Result<SweepStats> {
+    let mut stats = SweepStats::default();
     let Ok(it) = fs::read_dir(home_ecp) else {
-        return Ok(SweepStats { marked: 0, removed });
+        return Ok(stats);
     };
     let now = std::time::SystemTime::now();
     for entry in it.flatten() {
@@ -709,15 +757,16 @@ pub fn sweep_orphan_tmp(home_ecp: &Path) -> io::Result<SweepStats> {
         if !meta.is_file() || is_in_flight(&meta, now) {
             continue;
         }
-        match fs::remove_file(entry.path()) {
-            Ok(()) => removed += 1,
-            Err(e) => eprintln!(
-                "gc: failed to remove orphan tmp {}: {e}",
-                entry.path().display()
-            ),
-        }
+        let path = entry.path();
+        stats.dispose(&path, dry_run, || match fs::remove_file(&path) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("gc: failed to remove orphan tmp {}: {e}", path.display());
+                false
+            }
+        });
     }
-    Ok(SweepStats { marked: 0, removed })
+    Ok(stats)
 }
 
 #[cfg(test)]
@@ -747,7 +796,7 @@ mod tests {
         let keep = home.join("registry.json");
         fs::write(&keep, b"{}").expect("write registry");
 
-        let stats = sweep_orphan_tmp(home).expect("sweep");
+        let stats = sweep_orphan_tmp(home, false).expect("sweep");
 
         assert_eq!(stats.removed, 1, "only the settled .tmp is removed");
         assert!(!stale.exists(), "settled orphan tmp deleted");
@@ -763,7 +812,7 @@ mod tests {
         fs::create_dir(&tmp_dir).expect("mkdir");
         backdate(&tmp_dir, 30);
 
-        let stats = sweep_orphan_tmp(home).expect("sweep");
+        let stats = sweep_orphan_tmp(home, false).expect("sweep");
         assert_eq!(stats.removed, 0, "dirs named *.tmp are not files; skipped");
         assert!(tmp_dir.exists());
     }
@@ -854,7 +903,7 @@ mod subtree_build_tests {
 
         let retired = publish(&commits, "branch_e__5555.dead.1", &subtree);
 
-        let stats = sweep_subtree_builds(&repo_root).unwrap();
+        let stats = sweep_subtree_builds(&repo_root, false).unwrap();
 
         assert_eq!((stats.marked, stats.removed), (1, 1));
         assert!(
@@ -884,7 +933,7 @@ mod subtree_build_tests {
         let named = publish(&commits, "branch_feat_x.building-y__6666", &subtree);
         let building = publish(&commits, "branch_feat_z__7777.building", &subtree);
 
-        let stats = sweep_subtree_builds(&repo_root).unwrap();
+        let stats = sweep_subtree_builds(&repo_root, false).unwrap();
 
         assert_eq!((stats.marked, stats.removed), (1, 1));
         assert!(

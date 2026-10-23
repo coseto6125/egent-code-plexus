@@ -50,3 +50,9 @@ fn module_level_function_has_no_owner() {
         "freeFunc is module-level, owner_class must be None; got {oc:?}"
     );
 }
+
+#[test]
+fn test_parse_php_braced_namespace_constant_preserves_owner() {
+    let graph = parse("<?php\nnamespace App { const LIMIT = 1; }\n");
+    assert_eq!(owner_of(&graph, "LIMIT").as_deref(), Some("App"));
+}

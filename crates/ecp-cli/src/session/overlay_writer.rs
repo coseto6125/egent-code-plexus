@@ -19,7 +19,7 @@
 #![allow(dead_code)]
 
 use ecp_core::analyzer::types::{
-    LocalGraph, RawEventTopic, RawExportAlias, RawImport, RawSchemaField, RawTxScope, VariantRef,
+    LocalGraph, RawEventTopic, RawExportAlias, RawImport, RawSchemaField, RawTxScope,
 };
 use ecp_core::graph::NodeKind;
 use ecp_core::registry::{atomic_write_json, replace_file, FileLock};
@@ -72,12 +72,13 @@ pub fn fragments_from_local_graph(graph: &LocalGraph) -> Vec<Fragment> {
         .collect()
 }
 
-/// One symbol in a v4 fragment bin. Compared to v1 `Fragment` it adds the
+/// One symbol in a v5 fragment bin. Compared to v1 `Fragment` it adds the
 /// fields the query-time `OverlayView` needs: `owner_class` (so the
 /// recomputed uid matches base-graph method uids exactly), `calls` (callee
 /// short names — the raw material for overlay `Calls` edges),
 /// `is_exported`, `heritage` (declared base names, as the parser wrote them)
-/// and `variant_refs` (the encoded enum-variant entries of `field_reads`);
+/// and `variant_refs` (every raw `field_reads` entry, including tagged name
+/// references); plus the paired function return type;
 /// it drops the always-empty v1 detector vectors.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
@@ -91,6 +92,7 @@ pub struct FragmentSymbol {
     pub calls: Vec<String>,
     pub heritage: Vec<String>,
     pub variant_refs: Vec<String>,
+    pub return_type: Option<String>,
 }
 
 /// The symbol shape of the v2 and v3 fragment bins (`FragmentSymbol` before
@@ -107,15 +109,38 @@ pub struct FragmentSymbolV3 {
     pub calls: Vec<String>,
 }
 
-/// v4 fragment bin payload: the whole dirty file's fresh parse, including
+/// v5 fragment bin payload: the whole dirty file's fresh parse, including
 /// file-level imports and export aliases for query-time Tier-2
-/// (import-scoped) resolution. `DirtyEntry.format == FRAGMENT_FORMAT_V4`
+/// (import-scoped) resolution. `DirtyEntry.format == FRAGMENT_FORMAT_V5`
 /// marks bins of this shape — readers MUST dispatch on the manifest marker,
 /// not guess the encoding.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct FragmentFile {
     pub symbols: Vec<FragmentSymbol>,
+    pub imports: Vec<RawImport>,
+    pub export_aliases: Vec<RawExportAlias>,
+}
+
+/// Exact v4 archive shape, retained to decode fragments written before v5.
+#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
+pub struct FragmentSymbolV4 {
+    pub name: String,
+    pub kind: NodeKind,
+    pub span: (u32, u32, u32, u32),
+    pub owner_class: Option<String>,
+    pub is_exported: bool,
+    pub calls: Vec<String>,
+    pub heritage: Vec<String>,
+    pub variant_refs: Vec<String>,
+}
+
+/// Exact v4 archive payload, retained for overlay hit readers.
+#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
+#[rkyv(derive(Debug))]
+pub struct FragmentFileV4 {
+    pub symbols: Vec<FragmentSymbolV4>,
     pub imports: Vec<RawImport>,
     pub export_aliases: Vec<RawExportAlias>,
 }
@@ -141,6 +166,12 @@ pub struct FragmentFileV2 {
 }
 
 pub fn fragment_file_from_local_graph(graph: &LocalGraph) -> FragmentFile {
+    let return_types: std::collections::HashMap<_, _> = graph
+        .raw_function_metas
+        .iter()
+        .filter(|meta| !meta.return_type.is_empty())
+        .map(|meta| (meta.span, meta.return_type.clone()))
+        .collect();
     FragmentFile {
         symbols: graph
             .nodes
@@ -153,12 +184,13 @@ pub fn fragment_file_from_local_graph(graph: &LocalGraph) -> FragmentFile {
                 is_exported: n.is_exported,
                 calls: n.calls.clone(),
                 heritage: n.heritage.clone(),
-                variant_refs: n
-                    .field_reads
-                    .iter()
-                    .filter(|read| VariantRef::parse(read).is_some())
-                    .cloned()
-                    .collect(),
+                variant_refs: n.field_reads.clone(),
+                return_type: matches!(
+                    n.kind,
+                    NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+                )
+                .then(|| return_types.get(&n.span).cloned())
+                .flatten(),
             })
             .collect(),
         imports: graph.imports.clone(),
@@ -393,7 +425,7 @@ fn write_fragment_file(
         tantivy_delta_segment: None,
         parse_failed,
         dirty_symbols,
-        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V4,
+        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V5,
     };
 
     let outcome = FragmentOutcome {
@@ -416,7 +448,7 @@ fn parse_graph(rel_path: &str, content: &[u8]) -> io::Result<LocalGraph> {
         .map_err(io::Error::other)
 }
 
-/// rkyv-serialise a graph's v4 fragment file. Shared by the re-parse route
+/// rkyv-serialise a graph's v5 fragment file. Shared by the re-parse route
 /// (`parse_to_fragment`) and the pre-parsed route (`write_fragment_from_graph`)
 /// so both emit byte-identical fragment archives.
 fn archive_fragments(graph: &LocalGraph) -> io::Result<Vec<u8>> {
@@ -464,7 +496,7 @@ fn write_fragment_from_graph(
         tantivy_delta_segment: None,
         parse_failed,
         dirty_symbols: symbols_from_graph(graph, &rel_path),
-        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V4,
+        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V5,
     };
     let outcome = FragmentOutcome {
         fragment_id,
@@ -565,7 +597,7 @@ impl OverlayWriter {
                 tantivy_delta_segment: None,
                 parse_failed,
                 dirty_symbols,
-                format: ecp_core::session::overlay::FRAGMENT_FORMAT_V4,
+                format: ecp_core::session::overlay::FRAGMENT_FORMAT_V5,
             },
         );
         atomic_write_json(&manifest_path, &df)

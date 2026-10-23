@@ -8,11 +8,13 @@ use crate::framework_helpers::{
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawFrameworkRef, RawImport, RawNode};
+use ecp_core::analyzer::types::{
+    BlindSpot, LocalGraph, NameRef, NameRefKind, RawFrameworkRef, RawImport, RawNode,
+};
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Node, Query, QueryCursor};
+use tree_sitter::{Query, QueryCursor};
 
 /// Blind-spot kind/hint pairs, indexed by `parse_file`: the first three by
 /// the capture-index dispatch, the last after the receiver walk.
@@ -88,26 +90,6 @@ fn detect_enum_imitation_blind_spots(
     }
 }
 
-/// True iff the first positional argument of `call_node` is a PHP string
-/// literal (the call_user_func("known_function", ...) shape). Tree-sitter
-/// PHP uses `string` for double-quoted and `string_literal` for the legacy
-/// node — accept either to be robust across grammar versions.
-fn first_arg_is_literal_string(call_node: &Node) -> bool {
-    let Some(args) = call_node.child_by_field_name("arguments") else {
-        return false;
-    };
-    let Some(first_arg) = args.named_child(0) else {
-        return false;
-    };
-    // PHP wraps args in `argument` nodes — descend into the first named child
-    // to see the actual value.
-    let value = first_arg.named_child(0).unwrap_or(first_arg);
-    matches!(
-        value.kind(),
-        "string" | "string_literal" | "encapsed_string"
-    )
-}
-
 /// Whether `node`'s subtree contains a PHP call expression. Gates emission of
 /// `<anonymous>` callback nodes so empty callbacks (e.g. `array_map(fn($x) => $x * 2, $a)`)
 /// stay out of the graph.
@@ -129,6 +111,116 @@ fn body_has_call(node: tree_sitter::Node) -> bool {
         }
     }
     false
+}
+
+/// Record `Type::CONST` reads only when the parser emitted that exact constant
+/// as a member of the named type. Enum cases still go through `VariantRef`.
+fn extract_qualified_constant_refs(
+    root: tree_sitter::Node<'_>,
+    source: &[u8],
+    nodes: &mut [RawNode],
+) {
+    let has_namespaces = nodes.iter().any(|node| node.kind == NodeKind::Namespace);
+    let owner_counts = nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.kind,
+                NodeKind::Class | NodeKind::Interface | NodeKind::Trait | NodeKind::Enum
+            )
+        })
+        .fold(rustc_hash::FxHashMap::default(), |mut counts, node| {
+            *counts.entry(node.name.as_str()).or_insert(0usize) += 1;
+            counts
+        });
+    let constants: rustc_hash::FxHashSet<(&str, &str)> = nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::Const)
+        .filter_map(|node| Some((node.owner_class.as_deref()?, node.name.as_str())))
+        .collect();
+    if constants.is_empty() {
+        return;
+    }
+
+    let mut refs: Vec<((u32, u32, u32, u32), String)> = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "class_constant_access_expression" {
+            let Some(text) = node.utf8_text(source).ok() else {
+                continue;
+            };
+            let Some((scope, constant)) = text.rsplit_once("::") else {
+                continue;
+            };
+            if constant.starts_with('$') {
+                continue;
+            }
+            let span = node_span(&node);
+            let owner = match scope.trim() {
+                "self" | "static" => {
+                    let mut parent = node.parent();
+                    let mut owner = None;
+                    while let Some(container) = parent {
+                        match container.kind() {
+                            "anonymous_class"
+                                if container.child_by_field_name("body").is_some_and(|body| {
+                                    body.start_byte() <= node.start_byte()
+                                        && node.end_byte() <= body.end_byte()
+                                }) =>
+                            {
+                                break;
+                            }
+                            "class_declaration"
+                            | "interface_declaration"
+                            | "trait_declaration"
+                            | "enum_declaration" => {
+                                owner = container
+                                    .child_by_field_name("name")
+                                    .and_then(|name| name.utf8_text(source).ok());
+                                break;
+                            }
+                            _ => parent = container.parent(),
+                        }
+                    }
+                    owner
+                }
+                scope => {
+                    // The qualified resolver identifies its type by the final
+                    // segment and cannot prove PHP namespace visibility.
+                    (!has_namespaces && !scope.contains('\\')).then_some(scope)
+                }
+            };
+            if let Some(owner) = owner.filter(|owner| {
+                owner_counts.get(*owner) == Some(&1)
+                    && constants.contains(&(*owner, constant.trim()))
+            }) {
+                refs.push((span, format!("{owner}.{}", constant.trim())));
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+
+    for (span, name) in refs {
+        let Some(target) = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, raw)| {
+                matches!(raw.kind, NodeKind::Function | NodeKind::Method)
+                    && ecp_core::analyzer::types::span_contains(raw.span, span)
+            })
+            .min_by_key(|(_, raw)| crate::framework_helpers::span_area(raw.span))
+            .map(|(idx, _)| idx)
+        else {
+            continue;
+        };
+        let entry = NameRef::encode(&name, NameRefKind::Constant);
+        if !nodes[target].field_reads.contains(&entry) {
+            nodes[target].field_reads.push(entry);
+        }
+    }
 }
 
 thread_local! {
@@ -627,7 +719,7 @@ impl LanguageProvider for PhpProvider {
                         is_test_file,
                     );
                 } else if Some(cap_idx) == idx_blind_call_user_func {
-                    if !first_arg_is_literal_string(&cap.node) {
+                    if super::receiver_types::literal_callable(cap.node, source).is_none() {
                         push_blind_spot(
                             &mut blind_spots,
                             BLIND_SPEC[1],
@@ -890,6 +982,33 @@ impl LanguageProvider for PhpProvider {
             source,
             &mut nodes,
             &["member_access_expression"],
+            &crate::calls::NameRefSpec {
+                ident_kinds: &["name"],
+                kind: crate::calls::NameRefKind::Constant,
+                skip_kinds: &[
+                    "variable_name",
+                    "namespace_use_declaration",
+                    "namespace_definition",
+                    "named_type",
+                    "optional_type",
+                    "union_type",
+                    "intersection_type",
+                    "qualified_name",
+                    "relative_name",
+                    "attribute_list",
+                    "class_constant_access_expression",
+                ],
+                skip_parents: &[
+                    "object_creation_expression",
+                    "named_label_statement",
+                    "goto_statement",
+                ],
+                passed_callable: Some((
+                    "function_call_expression",
+                    super::receiver_types::passed_callable,
+                )),
+                ..crate::calls::NameRefSpec::EMPTY
+            },
         );
         crate::calls::extract_variant_refs(
             tree.root_node(),
@@ -965,6 +1084,36 @@ impl LanguageProvider for PhpProvider {
         detect_enum_imitation_blind_spots(tree.root_node(), path, is_test_file, &mut blind_spots);
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
+        // Constants belong to the innermost named or anonymous type. Anonymous
+        // owners retain distinct identities without exposing their names globally.
+        if nodes.iter().any(|node| node.kind == NodeKind::Const) {
+            let mut owners: Vec<_> = nodes
+                .iter()
+                .filter(|node| {
+                    matches!(
+                        node.kind,
+                        NodeKind::Class | NodeKind::Interface | NodeKind::Trait | NodeKind::Enum
+                    )
+                })
+                .map(|node| (node.name.clone(), node.span))
+                .collect();
+            owners.extend(
+                anonymous_class_body_spans(tree.root_node())
+                    .into_iter()
+                    .map(|span| (format!("@anonymous_{}_{}", span.0, span.1), span)),
+            );
+            for node in nodes.iter_mut().filter(|node| node.kind == NodeKind::Const) {
+                if let Some(owner) = owners
+                    .iter()
+                    .filter(|(_, span)| ecp_core::analyzer::types::span_contains(*span, node.span))
+                    .min_by_key(|(_, span)| crate::framework_helpers::span_area(*span))
+                    .map(|(name, _)| name.clone())
+                {
+                    node.owner_class = Some(owner);
+                }
+            }
+        }
+        extract_qualified_constant_refs(tree.root_node(), source, &mut nodes);
         let tx_scopes =
             collect_symfony_transactional_scopes(&nodes, &[NodeKind::Method, NodeKind::Function]);
         Ok(LocalGraph {
@@ -988,4 +1137,19 @@ impl LanguageProvider for PhpProvider {
             export_aliases: None,
         })
     }
+}
+
+fn anonymous_class_body_spans(root: tree_sitter::Node<'_>) -> Vec<(u32, u32, u32, u32)> {
+    let mut bodies = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "anonymous_class" {
+            if let Some(body) = node.child_by_field_name("body") {
+                bodies.push(node_span(&body));
+            }
+        }
+        let mut cursor = node.walk();
+        stack.extend(node.children(&mut cursor));
+    }
+    bodies
 }

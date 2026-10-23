@@ -11,10 +11,13 @@ use ecp_core::analyzer::lexical::LexicalFunctions;
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::analyzer::reexport::{export_filter_applies, is_ecmascript, ImportRef};
+use ecp_core::analyzer::type_ladder;
 use ecp_core::analyzer::types::{
-    owner_key, CallSite, LocalGraph, RawImport, RawNode, RawRoute, VariantRef,
+    owner_key, CallSite, LocalGraph, NameRef, RawImport, RawNode, RawRoute, VariantRef,
 };
-pub use ecp_core::analyzer::types::{VARIANT_PATTERN_REASON, VARIANT_USE_REASON};
+pub use ecp_core::analyzer::types::{
+    FUNCTION_REFERENCE_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
+};
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::{
     BlindSpotRecord, CallMeta, Edge, ExportAliasFact, File, FileCategory, FunctionMeta, ImportFact,
@@ -339,7 +342,8 @@ impl GraphBuilder {
         }
         let _t_pass18 = std::time::Instant::now();
         // Pass 1.8: FunctionMeta collection.
-        let function_metas = pass1_8_function_metas(&self.local_graphs, &mut string_pool);
+        let function_metas =
+            pass1_8_function_metas(&self.local_graphs, &mut string_pool, &mut symbol_table);
         if prof {
             eprintln!(
                 "prof build.pass18_function_meta: {:.3}s  count={}",
@@ -914,7 +918,7 @@ fn record_path_aliases(
 }
 
 /// The import / export facts the overlay replays the import tier from
-/// (the v13 fields of `ZeroCopyGraph`): each Python / TS / JS file's
+/// (the v13 fields of `ZeroCopyGraph`): each file's
 /// imports in source order, each TS / JS file's export alias pairs and
 /// ES-module flag, and the exported declarations, as Pass 1 recorded them
 /// in `symbol_table`. `raw_nodes` is the node count after Pass 1. A TS / JS
@@ -942,32 +946,27 @@ fn record_module_facts(
     for local_graph in local_graphs {
         let path = local_graph.file_path.to_string_lossy().replace('\\', "/");
         let language = Language::from_normalized_path(&path);
-        if matches!(
-            language,
-            Language::Python | Language::TypeScript | Language::JavaScript
-        ) {
-            let ecmascript = is_ecmascript(language);
-            for import in &local_graph.imports {
-                let target_file = if ecmascript && followed_by_reexport(local_graph, import) {
-                    resolver
-                        .ecmascript_module(&path, import)
-                        .and_then(|module| {
-                            file_idx
-                                .get_or_insert_with(|| file_indices(local_graphs))
-                                .get(&*module)
-                                .copied()
-                        })
-                } else {
-                    None
-                };
-                facts.imports.push(ImportFact {
-                    source: string_pool.add(&import.source),
-                    imported_name: string_pool.add(&import.imported_name),
-                    alias: import.alias.as_deref().map(|alias| string_pool.add(alias)),
-                    binding_kind: import.binding_kind,
-                    target_file,
-                });
-            }
+        let ecmascript = is_ecmascript(language);
+        for import in &local_graph.imports {
+            let target_file = if ecmascript && followed_by_reexport(local_graph, import) {
+                resolver
+                    .ecmascript_module(&path, import)
+                    .and_then(|module| {
+                        file_idx
+                            .get_or_insert_with(|| file_indices(local_graphs))
+                            .get(&*module)
+                            .copied()
+                    })
+            } else {
+                None
+            };
+            facts.imports.push(ImportFact {
+                source: string_pool.add(&import.source),
+                imported_name: string_pool.add(&import.imported_name),
+                alias: import.alias.as_deref().map(|alias| string_pool.add(alias)),
+                binding_kind: import.binding_kind,
+                target_file,
+            });
         }
         facts.file_imports.push(facts.imports.len() as u32);
         if export_filter_applies(&path) {
@@ -1264,6 +1263,7 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
         }
         if file_meta.language == Language::Rust {
             note_rust_impl_members(&mut symbol_table, &local_graph.nodes, graph_start);
+            symbol_table.note_rust_lexical_scopes(&local_graph.nodes, graph_start);
         }
 
         // NOTE: documents (markdown/yaml section/doc nodes) are parsed into
@@ -2105,9 +2105,12 @@ fn pass1_7_entry_points(
 /// Returned unsorted; `GraphAssembly::finish` sorts by `node_idx` — which is
 /// what `ZeroCopyGraph::function_meta()`'s binary search needs — and derives
 /// the dense `node_flags` mirror from the result.
+/// Also records each function's return type in `symbol_table`, where Pass 2
+/// types the receiver of a chained call (`make().bar()`) by it.
 fn pass1_8_function_metas(
     local_graphs: &[LocalGraph],
     string_pool: &mut StringPool,
+    symbol_table: &mut SymbolTable,
 ) -> Vec<FunctionMeta> {
     let mut function_metas: Vec<FunctionMeta> = Vec::new();
     {
@@ -2139,6 +2142,9 @@ fn pass1_8_function_metas(
                     let rfm = &local_graph.raw_function_metas[meta_idx[slot].1];
                     let params: Vec<StrRef> =
                         rfm.params.iter().map(|s| string_pool.add(s)).collect();
+                    if !rfm.return_type.is_empty() {
+                        symbol_table.note_return_type(node_idx, &rfm.return_type);
+                    }
                     let return_type = string_pool.add(&rfm.return_type);
                     let decorators: Vec<StrRef> =
                         rfm.decorators.iter().map(|s| string_pool.add(s)).collect();
@@ -2467,6 +2473,60 @@ fn resolve_variant_ref(
         .map(|id| (id, confidence))
 }
 
+/// The reasons of the edges a [`NameRef`] yields: `ReadsField` to a
+/// constant or variable, `References` to a function.
+#[derive(Clone, Copy)]
+struct NameRefReasons {
+    value: StrRef,
+    function: StrRef,
+}
+
+/// The declaration a [`NameRef`] names, with the edge confidence.
+///
+/// In a language where a bare name reaches a member of the enclosing type
+/// (Java `TABLE`, C# method group `Print`), the reader's own type is tried
+/// first, then the types it inherits from. A bare function name in PHP,
+/// Python, Rust or C never names a method (`array_map('fmt', $xs)`), so
+/// those skip the type. Then the ordinary tiers: same file, import, and the
+/// unique project-wide declaration ([`ResolutionTier::Global`]). The global tier is
+/// dropped where a module must import a name before it can use it bare, as
+/// there it can only stand for a local the parser did not see. An
+/// ambiguous name binds nothing.
+fn resolve_name_ref(
+    resolver: &Resolver<'_>,
+    symbol_table: &SymbolTable,
+    local_graph: &LocalGraph,
+    (file, language): (&str, Language),
+    raw_node: &RawNode,
+    name_ref: NameRef<'_>,
+) -> Option<(u32, f32)> {
+    ecp_core::analyzer::name_ref::resolve_name_ref(
+        symbol_table,
+        file,
+        language,
+        &local_graph.imports,
+        raw_node.owner_class.as_deref(),
+        name_ref,
+        ecp_core::analyzer::name_ref::NameRefTiers {
+            same_file: ResolutionTier::SameFile.base_confidence(),
+            heritage: ResolutionTier::HeritageScoped.base_confidence(),
+            global: ResolutionTier::Global.base_confidence(),
+        },
+        |name| symbol_table.global_match_count(name) > 0,
+        |name, target| {
+            resolver.resolve_symbol(&local_graph.file_path, name, &local_graph.imports, target)
+        },
+        |name, target| {
+            resolver.resolve_imported_symbol(
+                &local_graph.file_path,
+                name,
+                &local_graph.imports,
+                target,
+            )
+        },
+    )
+}
+
 /// Emit Pass-2 edges for a single `raw_node`'s heritage / calls / type
 /// annotation. Factored out so the serial dump path and the parallel
 /// hot path can share the same per-node logic.
@@ -2489,6 +2549,7 @@ fn pass2_emit_node_edges(
     reason_call: CallReasons,
     reason_reads_field: StrRef,
     reason_variant: VariantReasons,
+    reason_name_ref: NameRefReasons,
     symbol_table: &SymbolTable,
     edges: &mut Vec<Edge>,
     indirect_lookup: &FxHashMap<CallMetaKey, (u8, String)>,
@@ -2524,12 +2585,12 @@ fn pass2_emit_node_edges(
 
     let call_heritage =
         ecp_core::analyzer::heritage::enclosing_class_heritage(raw_node, &local_graph.nodes);
+    let language = Language::from_path(&local_graph.file_path.to_string_lossy());
     for (call_idx, raw_callee) in raw_node.calls.iter().enumerate() {
         let lookup_key = CallMetaKey::new(raw_node.span, call_idx as u32);
         let meta = indirect_lookup.get(&lookup_key);
-        let site = CallSite::parse(raw_callee);
-        let callee = site.name();
-        let targets = match lexical_lookup.targets(raw_node.span, callee) {
+        let resolve = |site: CallSite<'_>| match lexical_lookup.targets(raw_node.span, site.name())
+        {
             Some(targets) if targets.is_empty() => {
                 resolver.resolve_imported_call(&local_graph.file_path, site, &local_graph.imports)
             }
@@ -2543,6 +2604,41 @@ fn pass2_emit_node_edges(
                 Some(current_node_idx),
             ),
         };
+        // `Foo.create().bar()`: `bar` on the type the one bound `create`
+        // returns. Only an unknown return type permits the parser's fallback,
+        // except Kotlin's existing top-level extension-function retry.
+        let mut chain_failed = false;
+        let targets = CallSite::parse(raw_callee).resolve_chain(resolve, |inner, member| {
+            if chain_failed {
+                return Some(Vec::new());
+            }
+            let &[inner] = inner.as_slice() else {
+                return None;
+            };
+            match resolver.resolve_chained_member_outcome(&local_graph.file_path, inner, member) {
+                type_ladder::ChainOutcome::Unknown => None,
+                type_ladder::ChainOutcome::Bound(target) => Some(vec![target]),
+                type_ladder::ChainOutcome::Conclusive => {
+                    let targets = if language == Language::Kotlin {
+                        resolver
+                            .extension_fallback(
+                                &local_graph.file_path,
+                                member,
+                                &local_graph.imports,
+                                ResolveTarget::Callable,
+                                call_heritage,
+                            )
+                            .into_iter()
+                            .map(|(id, confidence)| (id, confidence.min(inner.1)))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    chain_failed = targets.is_empty();
+                    Some(targets)
+                }
+            }
+        });
         for (target_id, confidence) in targets {
             if target_id == current_node_idx {
                 continue; // self-recursion edges are Louvain / process noise
@@ -2583,8 +2679,47 @@ fn pass2_emit_node_edges(
     // `ResolveTarget::Field` predicate (is_property) admits only Property
     // nodes, so locals / Variables never match — the read edge stays on the
     // cross-function field contract without reintroducing local fan-out.
+    // A `NameRef` (a bare name the parser kept after dropping parameters and
+    // locals) binds a constant or variable as ReadsField, a function as
+    // References: one edge per target per body.
     let mut variant_edges: Vec<(u32, bool)> = Vec::new();
+    let mut name_edges: Vec<u32> = Vec::new();
+    let mut name_file: Option<(String, Language)> = None;
     for field_name in &raw_node.field_reads {
+        if let Some(name_ref) = NameRef::parse(field_name) {
+            let (file, language) = name_file.get_or_insert_with(|| {
+                let file = local_graph.file_path.to_string_lossy().replace('\\', "/");
+                let language = Language::from_normalized_path(&file);
+                (file, language)
+            });
+            let Some((target_id, confidence)) = resolve_name_ref(
+                resolver,
+                symbol_table,
+                local_graph,
+                (file.as_str(), *language),
+                raw_node,
+                name_ref,
+            ) else {
+                continue;
+            };
+            if target_id == current_node_idx || name_edges.contains(&target_id) {
+                continue;
+            }
+            name_edges.push(target_id);
+            let (rel_type, reason) = if symbol_table.node_kind(target_id).is_callable() {
+                (RelType::References, reason_name_ref.function)
+            } else {
+                (RelType::ReadsField, reason_name_ref.value)
+            };
+            edges.push(Edge {
+                source: current_node_idx,
+                target: target_id,
+                rel_type,
+                confidence,
+                reason,
+            });
+            continue;
+        }
         if let Some(variant_ref) = VariantRef::parse(field_name) {
             let Some((target_id, confidence)) =
                 resolve_variant_ref(resolver, symbol_table, local_graph, raw_node, variant_ref)
@@ -2780,6 +2915,10 @@ fn pass2_resolve_edges(
         used: string_pool.add(VARIANT_USE_REASON),
         matched: string_pool.add(VARIANT_PATTERN_REASON),
     };
+    let reason_name_ref = NameRefReasons {
+        value: string_pool.add(VALUE_READ_REASON),
+        function: string_pool.add(FUNCTION_REFERENCE_REASON),
+    };
 
     let mut reason_cache: FxHashMap<String, StrRef> = FxHashMap::default();
     for lg in local_graphs {
@@ -2890,6 +3029,7 @@ fn pass2_resolve_edges(
                     reason_call,
                     reason_reads_field,
                     reason_variant,
+                    reason_name_ref,
                     symbol_table,
                     &mut edges,
                     lookup,
@@ -2986,6 +3126,7 @@ fn pass2_resolve_edges(
                         reason_call,
                         reason_reads_field,
                         reason_variant,
+                        reason_name_ref,
                         symbol_table_ref,
                         &mut local_edges,
                         lookup,

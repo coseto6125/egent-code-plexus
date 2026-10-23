@@ -85,7 +85,7 @@
 
 ;; Imports — wildcard / on-demand import (com.foo.Bar.*)
 (import_declaration
-  (scoped_identifier) @import.source
+  [(scoped_identifier) (identifier)] @import.source
   (asterisk) @import.wildcard
 ) @import
 
@@ -159,3 +159,7 @@
   ])
   name: (identifier) @class.name
 ) @class
+;; Package declarations let wildcard imports resolve through declared packages.
+(package_declaration
+  [(scoped_identifier) (identifier)] @namespace.name
+) @namespace

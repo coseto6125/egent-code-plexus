@@ -2,8 +2,10 @@ use ecp_core::analyzer::import_binding::{
     fqn_language, owner_path_agrees, DeclaredType, MemberOwner,
 };
 use ecp_core::analyzer::reexport::{is_es_module, pick_call, ExportAliasTable};
-use ecp_core::analyzer::same_file_pick::{self, ImplMember as PickImplMember, PickFacts};
-use ecp_core::analyzer::type_ladder::TypeFacts;
+use ecp_core::analyzer::same_file_pick::{
+    self, rust_lexical_scopes, ImplMember as PickImplMember, PickFacts,
+};
+use ecp_core::analyzer::type_ladder::{return_type_key, TypeFacts};
 use ecp_core::analyzer::types::{owner_key, RawExportAlias};
 use ecp_core::file_category::pick_global;
 pub use ecp_core::file_category::{FileMeta, GlobalPick, Language};
@@ -81,6 +83,22 @@ pub(crate) fn crate_root_prefix(path: &str) -> &str {
 
 pub use ecp_core::analyzer::reexport::ResolveTarget;
 
+/// The kinds a Tier-3 lookup weighs for `target`. Method syntax narrows the
+/// result, not the field: a same-named free fn still makes the name
+/// ambiguous, so `path.join(..)` on a std type never binds the project's
+/// only `join` method. A bare `f()` that never reaches a member
+/// (`free_only`) drops every `Method` from the field instead: the method of
+/// an unrelated class neither binds the call nor competes with the free
+/// function the call does reach.
+fn global_field(target: ResolveTarget, free_only: bool) -> impl Fn(NodeKind) -> bool {
+    let field = match target {
+        ResolveTarget::Method => ResolveTarget::Callable,
+        other => other,
+    }
+    .kind_predicate();
+    move |kind| field(kind) && !(free_only && kind == NodeKind::Method)
+}
+
 /// The last two components of `path`: its directory's name and its file
 /// name (`collect/Maps.java`), or the whole path at the root.
 fn leaf_path(path: &str) -> &str {
@@ -119,6 +137,10 @@ pub struct SymbolTable {
     /// is ~5x faster on this distribution and Build Pass 1's `register_node`
     /// is hot (~14k × 3 inserts on `.sample_repo`).
     file_scoped: FxHashMap<String, FxHashMap<String, Vec<u32>>>,
+
+    /// Indexed files grouped by their direct directory. Go package imports
+    /// use this to keep an import from reaching a nested package.
+    directory_files: FxHashMap<String, Vec<String>>,
 
     /// Maps a `node_name` to a list of node IDs across all files.
     ///
@@ -170,6 +192,15 @@ pub struct SymbolTable {
     /// `member`" for the receiver-typing ladder: `file_scoped` alone returns
     /// the first same-named member in the file, whichever type owns it.
     node_owner: Vec<u32>,
+
+    /// Parser owner text only where owner-key normalization would lose a
+    /// Rust lexical ancestor such as `B::new`.
+    raw_owner_overrides: FxHashMap<u32, Box<str>>,
+
+    /// Complete Rust callable lexical paths, derived from parser spans.  The
+    /// graph keeps the compact public type owner; only Rust bare-call lookup
+    /// needs this path to distinguish nested declarations.
+    rust_lexical_scopes: FxHashMap<u32, Box<str>>,
 
     /// Owner key → interned id. One entry per distinct owner name, so the
     /// per-node cost is the 4-byte `node_owner` slot.
@@ -232,6 +263,18 @@ pub struct SymbolTable {
     /// of another name, see [`SymbolTable::note_export_aliases`]. Sparse:
     /// only files with such an export have an entry.
     export_aliases: FxHashMap<Box<str>, ExportAliasTable>,
+
+    /// Function id → its interned [`return_type_key`]: the receiver type of
+    /// a chained call on it (`make().bar()`). Sparse: only functions whose
+    /// declared return type reduces to a bare name, filled by
+    /// [`Self::note_return_type`] after Pass 1.
+    return_types: FxHashMap<u32, u32>,
+
+    /// Return-type key → interned id, one entry per distinct type name.
+    return_type_ids: FxHashMap<Box<str>, u32>,
+
+    /// The inverse of `return_type_ids`.
+    return_type_keys: Vec<Box<str>>,
 }
 
 impl SymbolTable {
@@ -242,7 +285,25 @@ impl SymbolTable {
 
     /// Import-only package entry files still establish an indexed module.
     pub(crate) fn register_file(&mut self, path: &str) {
+        if !self.file_scoped.contains_key(path) {
+            let directory = std::path::Path::new(path)
+                .parent()
+                .and_then(|parent| parent.to_str())
+                .unwrap_or("");
+            self.directory_files
+                .entry(directory.to_string())
+                .or_default()
+                .push(path.to_string());
+        }
         self.file_scoped.entry(path.to_string()).or_default();
+    }
+
+    /// Files directly within `directory`, in registration order.
+    pub(crate) fn files_in_directory(&self, directory: &str) -> &[String] {
+        self.directory_files
+            .get(directory)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Populate the `stem_index` from the file paths already in
@@ -311,6 +372,46 @@ impl SymbolTable {
             .get(namespace)
             .map(Vec::as_slice)
             .unwrap_or(&[])
+    }
+
+    pub(crate) fn namespace_return_type_visible(
+        &self,
+        id: u32,
+        source: &str,
+        imports: &[ecp_core::analyzer::types::RawImport],
+    ) -> bool {
+        let Some(file) = self.file_of(id) else {
+            return false;
+        };
+        ecp_core::analyzer::type_ladder::namespace_return_type_visible(
+            self.owner(id),
+            self.file_namespaces
+                .get(file)
+                .into_iter()
+                .flatten()
+                .map(String::as_str),
+            self.file_namespaces
+                .get(source)
+                .into_iter()
+                .flatten()
+                .map(String::as_str),
+            imports,
+        )
+    }
+
+    pub(crate) fn namespace_type_path_matches(&self, id: u32, path: &str) -> bool {
+        let Some(file) = self.file_of(id) else {
+            return false;
+        };
+        ecp_core::analyzer::type_ladder::namespace_type_path_matches(
+            self.owner(id),
+            self.file_namespaces
+                .get(file)
+                .into_iter()
+                .flatten()
+                .map(String::as_str),
+            path,
+        )
     }
 
     pub(crate) fn module_files_by_stem<'a>(&'a self, stem: &str) -> impl Iterator<Item = &'a str> {
@@ -395,12 +496,14 @@ impl SymbolTable {
         node_name: &str,
         kind: NodeKind,
     ) {
-        if matches!(kind, NodeKind::Namespace | NodeKind::Module) {
+        if language != Language::Go && matches!(kind, NodeKind::Namespace | NodeKind::Module) {
             if let Some(key) = owner_key(node_name) {
                 self.namespace_decls.push((file_path.into(), key.into()));
             }
         }
-        if kind != NodeKind::Namespace || !fqn_language(language) {
+        if kind != NodeKind::Namespace
+            || !(fqn_language(language) || matches!(language, Language::CSharp | Language::Go))
+        {
             return;
         }
         let namespace = node_name.replace('\\', ".");
@@ -445,6 +548,32 @@ impl SymbolTable {
         self.owner_ids.insert(key.into(), id);
         self.owner_keys.push(key.into());
         id
+    }
+
+    /// Record the return type the function `node_id` declares, as written
+    /// (`RawFunctionMeta.return_type`). Only a type [`return_type_key`]
+    /// reduces to a bare name is kept, interned once per distinct name.
+    pub fn note_return_type(&mut self, node_id: u32, return_type: &str) {
+        let Some(key) = return_type_key(return_type) else {
+            return;
+        };
+        let id = match self.return_type_ids.get(key) {
+            Some(&id) => id,
+            None => {
+                let id = self.return_type_keys.len() as u32;
+                self.return_type_ids.insert(key.into(), id);
+                self.return_type_keys.push(key.into());
+                id
+            }
+        };
+        self.return_types.insert(node_id, id);
+    }
+
+    /// The [`return_type_key`] the function `node_id` declares.
+    pub fn return_type_of(&self, node_id: u32) -> Option<&str> {
+        self.return_types
+            .get(&node_id)
+            .map(|&id| &*self.return_type_keys[id as usize])
     }
 
     fn owner_id(&self, owner: &str) -> Option<u32> {
@@ -502,6 +631,11 @@ impl SymbolTable {
         self.node_file_meta.push(file_meta);
         let owner_id = self.intern_owner(owner);
         self.node_owner.push(owner_id);
+        if let Some(raw_owner) =
+            owner.filter(|raw| file_meta.language == Language::Rust && owner_key(raw) != Some(*raw))
+        {
+            self.raw_owner_overrides.insert(node_id, raw_owner.into());
+        }
         if kind == NodeKind::Constructor && owner_id != NO_OWNER {
             self.constructors.push(node_id);
         }
@@ -595,6 +729,25 @@ impl SymbolTable {
         let trait_owner = self.intern_owner(implemented);
         self.impl_members
             .insert(member, ImplMember { block, trait_owner });
+    }
+
+    /// Record the transient full lexical scope of every Rust callable in one
+    /// pass over a parsed file's symbols.
+    pub fn note_rust_lexical_scopes(
+        &mut self,
+        nodes: &[ecp_core::analyzer::types::RawNode],
+        start: u32,
+    ) {
+        for (offset, scope) in rust_lexical_scopes(nodes).into_iter().enumerate() {
+            if let Some(scope) = scope {
+                self.rust_lexical_scopes
+                    .insert(start + offset as u32, scope);
+            }
+        }
+    }
+
+    pub(crate) fn rust_lexical_scope_of(&self, id: u32) -> Option<&str> {
+        self.rust_lexical_scopes.get(&id).map(Box::as_ref)
     }
 
     /// Whether `id` has no owner and no `impl` block either.
@@ -717,18 +870,39 @@ impl SymbolTable {
             .find(|&id| predicate(self.node_kinds[id as usize]))
     }
 
+    /// Whether `file_path` or a file in its directory declares a type named
+    /// `node_name`.
+    pub(crate) fn declares_type_beside(&self, file_path: &str, node_name: &str) -> bool {
+        let dir = std::path::Path::new(file_path).parent();
+        let predicate = ResolveTarget::Type.kind_predicate();
+        self.global_scoped.get(node_name).is_some_and(|ids| {
+            ids.iter().any(|&id| {
+                predicate(self.node_kinds[id as usize])
+                    && self
+                        .file_of(id)
+                        .map(|file| std::path::Path::new(file).parent())
+                        == Some(dir)
+            })
+        })
+    }
+
     /// [`Self::lookup_in_file_with_kind`] for the bare name of a call site,
     /// through the shared [`pick_call`] rule. The pick is by source order
     /// only; a call site narrows it by owner through [`Self::prefer_owned`].
+    /// `free_only` weighs no method
+    /// ([`ecp_core::analyzer::types::CallSite::reaches_free_only`]).
     pub fn lookup_call_in_file(
         &self,
         file_path: &str,
         node_name: &str,
         target: ResolveTarget,
+        free_only: bool,
     ) -> Option<u32> {
         let ids = self.file_scoped.get(file_path)?.get(node_name)?;
         pick_call(
-            ids.iter().map(|&id| (id, self.node_kinds[id as usize])),
+            ids.iter()
+                .map(|&id| (id, self.node_kinds[id as usize]))
+                .filter(|&(_, kind)| !free_only || kind != NodeKind::Method),
             target,
         )
     }
@@ -827,7 +1001,7 @@ impl SymbolTable {
         let owner_id = match owner {
             MemberOwner::Any => {
                 return self
-                    .lookup_call_in_file(file_path, node_name, target)
+                    .lookup_call_in_file(file_path, node_name, target, false)
                     .and_then(|pick| {
                         self.prefer_owned(
                             file_path,
@@ -880,28 +1054,32 @@ impl SymbolTable {
     }
 
     /// Tier-3 global lookup: kind-filtered same-name candidates through the
-    /// shared barrier filter, [`pick_global`].
+    /// shared barrier filter, [`pick_global`]. `free_only` is a bare `f()`
+    /// that never reaches a member ([`global_field`]).
     pub fn lookup_global(
         &self,
         node_name: &str,
         target: ResolveTarget,
         caller: FileMeta,
+        free_only: bool,
     ) -> GlobalPick {
+        let rust_free_only = caller.language == Language::Rust && free_only;
         let Some(raw) = self.global_scoped.get(node_name) else {
             return GlobalPick::NoMatch;
         };
-        // Method syntax narrows the result, not the field: a same-named free
-        // fn still makes the name ambiguous, so `path.join(..)` on a std type
-        // never binds the project's only `join` method.
-        let field = match target {
-            ResolveTarget::Method => ResolveTarget::Callable,
-            other => other,
-        }
-        .kind_predicate();
+        let field = global_field(target, free_only);
         let pick = pick_global(
             caller,
             raw.iter()
                 .filter(|&&id| field(self.node_kinds[id as usize]))
+                .filter(|&&id| {
+                    !rust_free_only
+                        || self.file_of(id).is_some_and(|file| {
+                            ecp_core::analyzer::same_file_pick::rust_free_global_candidate(
+                                self, file, id,
+                            )
+                        })
+                })
                 .map(|&id| (id, self.node_file_meta[id as usize])),
         );
         match pick {
@@ -1034,16 +1212,20 @@ impl SymbolTable {
         caller: FileMeta,
         node_name: &str,
         target: ResolveTarget,
+        free_only: bool,
     ) -> Option<u32> {
-        let field = match target {
-            ResolveTarget::Method => ResolveTarget::Callable,
-            other => other,
-        }
-        .kind_predicate();
+        let rust_free_only = caller.language == Language::Rust && free_only;
+        let field = global_field(target, free_only);
         let mut copies: Vec<u32> = Vec::new();
         for &id in self.global_scoped.get(node_name)? {
             if !field(self.node_kinds[id as usize])
                 || !caller.admits(self.node_file_meta[id as usize])
+                || (rust_free_only
+                    && !self.file_of(id).is_some_and(|file| {
+                        ecp_core::analyzer::same_file_pick::rust_free_global_candidate(
+                            self, file, id,
+                        )
+                    }))
             {
                 continue;
             }
@@ -1072,7 +1254,8 @@ impl SymbolTable {
             && self.node_kinds[a as usize] == self.node_kinds[b as usize]
             && self.node_owner[a as usize] == self.node_owner[b as usize]
             && leaf_path(a_file) == leaf_path(b_file)
-            && self.file_namespaces.get(a_file) == self.file_namespaces.get(b_file)
+            && (!fqn_language(Language::from_normalized_path(a_file))
+                || self.file_namespaces.get(a_file) == self.file_namespaces.get(b_file))
     }
 
     /// Members named `member` owned by `owner` anywhere in the scope of
@@ -1357,6 +1540,17 @@ impl PickFacts for SymbolTable {
         (owner != NO_OWNER).then(|| &*self.owner_keys[owner as usize])
     }
 
+    fn raw_owner(&self, id: u32) -> Option<&str> {
+        self.raw_owner_overrides
+            .get(&id)
+            .map(Box::as_ref)
+            .or_else(|| self.owner(id))
+    }
+
+    fn rust_lexical_scope(&self, id: u32) -> Option<&str> {
+        self.rust_lexical_scope_of(id)
+    }
+
     fn impl_member(&self, id: u32) -> Option<PickImplMember<'_>> {
         self.impl_members.get(&id).map(|member| PickImplMember {
             block: member.block,
@@ -1371,6 +1565,19 @@ impl PickFacts for SymbolTable {
                 .get(owner)
                 .is_some_and(|id| owners.contains(id))
         })
+    }
+
+    fn namespace_visible_from(&self, reader: &str, target: &str) -> bool {
+        let Some(target_namespaces) = self.file_namespaces.get(target) else {
+            return true;
+        };
+        self.file_namespaces
+            .get(reader)
+            .is_some_and(|reader_namespaces| {
+                target_namespaces
+                    .iter()
+                    .any(|target| reader_namespaces.contains(target))
+            })
     }
 
     fn file_of(&self, id: u32) -> Option<&str> {
@@ -1441,6 +1648,10 @@ impl TypeFacts for SymbolTable {
 
     fn crate_root<'p>(&self, path: &'p str) -> &'p str {
         crate_root_prefix(path)
+    }
+
+    fn return_type_of(&self, callee: u32) -> Option<&str> {
+        SymbolTable::return_type_of(self, callee)
     }
 }
 
@@ -2192,7 +2403,7 @@ mod tests {
         ]);
         let caller = FileMeta::from_path("src/app.py");
         assert_eq!(
-            st.lookup_global("Svc", ResolveTarget::Type, caller),
+            st.lookup_global("Svc", ResolveTarget::Type, caller, false),
             GlobalPick::Ambiguous,
             "pick_global keeps a test double ambiguous"
         );
@@ -2233,7 +2444,7 @@ mod tests {
         let st = st_owned(&[("a.py", "Only", NodeKind::Class, None)]);
         let caller = FileMeta::from_path("b.py");
         assert_eq!(
-            st.lookup_global("Only", ResolveTarget::Type, caller),
+            st.lookup_global("Only", ResolveTarget::Type, caller, false),
             GlobalPick::Unique(0)
         );
         assert_eq!(
