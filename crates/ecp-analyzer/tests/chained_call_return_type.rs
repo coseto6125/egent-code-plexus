@@ -1033,6 +1033,24 @@ fn test_resolve_call_rust_external_return_type_rejects_project_namesake() {
 }
 
 #[test]
+fn test_resolve_call_rust_wildcard_import_unique_return_type_binds_member() {
+    let graph = single(
+        &RustProvider::new().unwrap(),
+        &[
+            (
+                "src/lib.rs",
+                "mod models; use crate::models::*; fn make() -> Foo { Foo } fn run() { make().bar(); }",
+            ),
+            (
+                "src/models.rs",
+                "pub struct Foo; impl Foo { pub fn bar(&self) {} }",
+            ),
+        ],
+    );
+    assert_binds_foo(&graph, "run", "bar");
+}
+
+#[test]
 fn test_resolve_call_php_imported_cross_directory_return_type_binds_member() {
     let graph = single(&PhpProvider::new().unwrap(), &[
         ("src/config.php", "<?php use App\\Entity\\Foo; function make(): Foo { return new Foo(); } function run() { make()->bar(); }"),
@@ -1048,6 +1066,31 @@ fn test_resolve_call_php_external_return_type_rejects_project_namesake() {
         ("src/Entity/Foo.php", "<?php namespace App\\Entity; class Foo { public function bar() {} }"),
     ]);
     assert!(owners(&graph, "run", "bar").is_empty());
+}
+
+#[test]
+fn test_resolve_call_php_same_namespace_cross_directory_unique_return_type_binds_member() {
+    let graph = single(&PhpProvider::new().unwrap(), &[
+        ("src/config.php", "<?php namespace App; function make(): Foo { return new Foo(); } function run() { make()->bar(); }"),
+        ("src/Foo.php", "<?php namespace App; class Foo { public function bar() {} }"),
+    ]);
+    assert_binds_foo(&graph, "run", "bar");
+}
+
+#[test]
+fn test_resolve_call_php_ambiguous_return_type_keeps_unique_member_fallback() {
+    let graph = single(&PhpProvider::new().unwrap(), &[
+        ("src/config.php", "<?php namespace App; function make(): Foo { return new Foo(); } function run() { make()->bar(); }"),
+        ("src/one.php", "<?php namespace App; class Foo {}"),
+        ("src/two.php", "<?php namespace App; class Foo { public function bar() {} }"),
+    ]);
+    let bars: Vec<_> = calls_from(&graph, "run")
+        .into_iter()
+        .filter(|hit| hit.name == "bar")
+        .collect();
+    assert_eq!(bars.len(), 1, "all targets: {:?}", targets(&graph, "run"));
+    assert_eq!(bars[0].file, "src/two.php");
+    assert_eq!(bars[0].confidence, 0.7);
 }
 
 #[test]

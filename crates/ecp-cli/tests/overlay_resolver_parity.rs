@@ -656,6 +656,75 @@ fn test_overlay_chained_imported_cross_directory_types_match_reindex() {
 }
 
 #[test]
+fn test_overlay_php_same_namespace_unique_return_type_matches_reindex() {
+    let php = PhpProvider::new().unwrap();
+    let config = "<?php namespace App; function make(): Foo { return new Foo(); } function run() { make()->bar(); }";
+    let foo = "<?php namespace App; class Foo { public function bar() {} }";
+    check_parity_from(
+        "run",
+        &php,
+        &[("src/config.php", config), ("src/Foo.php", foo)],
+        &[("src/config.php", &format!("\n{config}"))],
+        &[
+            ("src/Foo.php".into(), "bar".into(), "Foo".into(), 85),
+            ("src/config.php".into(), "make".into(), "".into(), 100),
+        ],
+        &[
+            ("src/Foo.php".into(), "bar".into(), "Foo".into(), 85),
+            ("src/config.php".into(), "make".into(), "".into(), 100),
+        ],
+    );
+}
+
+#[test]
+fn test_overlay_rust_wildcard_import_unique_return_type_matches_reindex() {
+    let rust = RustProvider::new().unwrap();
+    let lib =
+        "mod models; use crate::models::*; fn make() -> Foo { Foo } fn run() { make().bar(); }";
+    let models = "pub struct Foo; impl Foo { pub fn bar(&self) {} }";
+    check_parity_from(
+        "run",
+        &rust,
+        &[("src/lib.rs", lib), ("src/models.rs", models)],
+        &[("src/lib.rs", &format!("\n{lib}"))],
+        &[
+            ("src/lib.rs".into(), "make".into(), "".into(), 100),
+            ("src/models.rs".into(), "bar".into(), "Foo".into(), 85),
+        ],
+        &[
+            ("src/lib.rs".into(), "make".into(), "".into(), 100),
+            ("src/models.rs".into(), "bar".into(), "Foo".into(), 85),
+        ],
+    );
+}
+
+#[test]
+fn test_overlay_php_ambiguous_return_type_keeps_unique_member_fallback() {
+    let php = PhpProvider::new().unwrap();
+    let config = "<?php namespace App; function make(): Foo { return new Foo(); } function run() { make()->bar(); }";
+    let no_member = "<?php namespace App; class Foo {}";
+    let with_member = "<?php namespace App; class Foo { public function bar() {} }";
+    check_parity_from(
+        "run",
+        &php,
+        &[
+            ("src/config.php", config),
+            ("src/one.php", no_member),
+            ("src/two.php", with_member),
+        ],
+        &[("src/config.php", &format!("\n{config}"))],
+        &[
+            ("src/config.php".into(), "make".into(), "".into(), 100),
+            ("src/two.php".into(), "bar".into(), "Foo".into(), 70),
+        ],
+        &[
+            ("src/config.php".into(), "make".into(), "".into(), 100),
+            ("src/two.php".into(), "bar".into(), "Foo".into(), 70),
+        ],
+    );
+}
+
+#[test]
 fn test_overlay_dart_restricted_import_rejects_project_namesake_like_reindex() {
     let dart = DartProvider::new().unwrap();
     let path = "lib/config.dart";
