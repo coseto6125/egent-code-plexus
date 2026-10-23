@@ -1096,6 +1096,24 @@ fn test_resolve_call_dart_imported_return_type_rejects_unavailable_type() {
 }
 
 #[test]
+fn test_resolve_call_dart_filtered_import_rejects_hidden_project_namesake() {
+    for combinator in ["hide Foo", "show Other"] {
+        let source = format!("import 'entity/foo.dart' {combinator}; import 'package:external/foo.dart'; Foo make() => throw 0; void run() {{ make().bar(); }}");
+        let graph = single(
+            &DartProvider::new().unwrap(),
+            &[
+                ("lib/config.dart", &source),
+                (
+                    "lib/entity/foo.dart",
+                    "class Foo { void bar() {} } class Other {}",
+                ),
+            ],
+        );
+        assert!(owners(&graph, "run", "bar").is_empty(), "{combinator}");
+    }
+}
+
+#[test]
 fn test_resolve_call_cpp_imported_return_type_rejects_unavailable_type() {
     for include in [
         "#include \"../missing/foo.h\"",

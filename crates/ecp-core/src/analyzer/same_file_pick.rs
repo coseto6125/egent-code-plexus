@@ -579,6 +579,7 @@ pub fn rust_lexical_scopes<N: ImplNode>(nodes: &[N]) -> Vec<Option<Box<str>>> {
     });
 
     let mut scopes = vec![None; nodes.len()];
+    let mut nearest_callable = vec![None; nodes.len()];
     let mut stack: Vec<usize> = Vec::new();
     for idx in order {
         while stack
@@ -589,6 +590,11 @@ pub fn rust_lexical_scopes<N: ImplNode>(nodes: &[N]) -> Vec<Option<Box<str>>> {
         }
         let parent = stack.last().copied();
         let parent_scope = parent.and_then(|parent| scopes[parent].as_deref());
+        let enclosing_callable = parent.and_then(|parent| {
+            is_callable(nodes[parent].kind())
+                .then_some(parent)
+                .or(nearest_callable[parent])
+        });
         let scope = match nodes[idx].kind() {
             NodeKind::Module | NodeKind::Trait => parent_scope
                 .map(|parent| format!("{parent}::{}", nodes[idx].name()))
@@ -599,8 +605,7 @@ pub fn rust_lexical_scopes<N: ImplNode>(nodes: &[N]) -> Vec<Option<Box<str>>> {
                     .filter(|owner| !owner.is_empty())
                     .map(|owner| format!("{owner}::{}", nodes[idx].name()))
                     .unwrap_or_else(|| nodes[idx].name().to_string());
-                parent
-                    .filter(|&parent| is_callable(nodes[parent].kind()))
+                enclosing_callable
                     .and_then(|parent| scopes[parent].as_deref())
                     .map(|parent| format!("{parent}::{owner}"))
                     .unwrap_or(owner)
@@ -611,6 +616,9 @@ pub fn rust_lexical_scopes<N: ImplNode>(nodes: &[N]) -> Vec<Option<Box<str>>> {
             _ => unreachable!("scope filter admits only known scope kinds"),
         };
         scopes[idx] = Some(scope.into_boxed_str());
+        nearest_callable[idx] = is_callable(nodes[idx].kind())
+            .then_some(idx)
+            .or(enclosing_callable);
         stack.push(idx);
     }
     scopes

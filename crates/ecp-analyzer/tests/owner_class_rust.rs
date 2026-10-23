@@ -359,8 +359,27 @@ impl std::fmt::Debug for A {
         .iter()
         .filter(|node| node.name.resolve(pool) == "pad")
         .collect();
-    assert_eq!(pads.len(), 2, "{graph:#?}");
-    assert_ne!(pads[0].uid, pads[1].uid, "{graph:#?}");
+    assert_eq!(pads.len(), 2);
+    assert_ne!(pads[0].uid, pads[1].uid);
+    let fmt_nodes: Vec<_> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.name.resolve(pool) == "fmt")
+        .collect();
+    let node_summary: Vec<_> = graph
+        .nodes
+        .iter()
+        .map(|node| {
+            (
+                node.kind,
+                node.uid,
+                node.span,
+                node.owner_class.resolve(pool),
+            )
+        })
+        .collect();
+    assert_eq!(fmt_nodes.len(), 2, "nodes={node_summary:?}");
+    assert_ne!(fmt_nodes[0].uid, fmt_nodes[1].uid, "nodes={node_summary:?}");
     for (caller_id, caller) in graph
         .nodes
         .iter()
@@ -449,8 +468,8 @@ fn test_resolve_call_rust_local_module_impl_binds_own_nested_helper() {
         .filter(|edge| graph.nodes[edge.target as usize].name.resolve(pool) == "helper")
         .map(|edge| edge.target)
         .collect();
-    assert_eq!(expected.len(), 1, "{graph:#?}");
-    assert_eq!(actual, expected, "{graph:#?}");
+    assert_eq!(expected.len(), 1);
+    assert_eq!(actual, expected);
 }
 
 #[test]
