@@ -19,7 +19,7 @@ pub struct VerifyResolverArgs {
     pub oracle: PathBuf,
 
     /// Path to the ecp resolver dump JSONL (produced by
-    /// `ecp analyze --dump-resolver`).
+    /// `ecp admin index --dump-resolver`).
     #[arg(long)]
     pub ecp: PathBuf,
 

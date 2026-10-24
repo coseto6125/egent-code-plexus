@@ -8,8 +8,8 @@
 //! every command — visible in the 10ms warm-query budget.
 //!
 //! Cache is keyed by canonical cwd. HEAD entries piggy-back on the current
-//! HEAD target's mtime so mid-process commits/checkouts (`ecp diff` does this
-//! via `GitGuard`) transparently invalidate without explicit `clear()` calls.
+//! HEAD target's mtime so mid-process commits/checkouts transparently
+//! invalidate without explicit `clear()` calls.
 //! Common-dir entries cache for the process lifetime — git's common-dir does
 //! not move under us.
 

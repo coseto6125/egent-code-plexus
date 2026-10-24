@@ -162,7 +162,7 @@ pub struct GraphBuilder {
     /// absolute path when the fetch-shape pass needs to re-read the file
     /// content. Optional: when `None`, fetch-shape extraction is skipped
     /// (graph still builds; `route_shapes` is empty and no `Fetches`
-    /// edges are emitted). Production callers (the `analyze` command)
+    /// edges are emitted). Production callers (`ecp admin index`)
     /// always pass this; in-process tests opt in via tempdirs.
     repo_root: Option<std::path::PathBuf>,
     /// T7-6: per-file set of symbol UIDs whose body hash is UNCHANGED since

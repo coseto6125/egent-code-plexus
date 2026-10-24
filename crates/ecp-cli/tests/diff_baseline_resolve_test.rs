@@ -80,7 +80,7 @@ fn diff_baseline_pr_form_calls_gh() {
 }
 
 #[test]
-fn git_guard_restores_branch_on_drop() {
+fn diff_baseline_leaves_the_branch_unchanged() {
     use std::env;
 
     // Capture current branch HEAD ref.

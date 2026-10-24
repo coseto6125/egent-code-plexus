@@ -580,7 +580,7 @@ fn exact_sha_builds_in_foreground_instead_of_warm_attaching() {
 }
 
 /// `ExactSha(Some(sha))` is the variant the parameter exists for — `diff`
-/// passes the baseline commit under a `GitGuard` checkout. Pin that it also
+/// passes the baseline commit of a `BaselineCheckout` worktree. Pin that it also
 /// refuses a sibling, not just the `None` form.
 #[test]
 fn exact_sha_with_explicit_commit_also_refuses_a_sibling() {
