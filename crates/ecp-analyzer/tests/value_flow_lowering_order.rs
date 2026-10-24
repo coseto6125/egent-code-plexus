@@ -93,10 +93,15 @@ fn test_analyze_imported_file_lowered_before_filler_reaches_callee() {
                 .any(|n| n.file == lib && n.kind == "binding" && n.label == parameter),
             "{main}: the callee parameter in {lib} must be reached: {report:#?}"
         );
-        assert!(report.truncated, "{main}: {filler} must still be cut");
+        // The slice never reaches the filler, so its cut leaves the answer
+        // complete and shows as a boundary rather than a truncation.
+        assert!(!report.truncated, "{main}: {report:#?}");
         assert!(
-            report.boundaries_omitted >= 1,
-            "{main}: the cut in the unreached {filler} stays counted: {report:#?}"
+            report
+                .boundaries
+                .iter()
+                .any(|b| b.kind == "ast_budget" && b.file == filler),
+            "{main}: {filler} must still be cut: {report:#?}"
         );
     }
 }
