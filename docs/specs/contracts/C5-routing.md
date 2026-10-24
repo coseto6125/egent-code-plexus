@@ -68,6 +68,7 @@ Constructed only by `FileRouter::route`. Fields are private.
 | `capabilities_before_parse()` | `CapabilitySet` | The capabilities of every candidate (intersection). |
 | `identifier_finder()` | `IdentifierFinder` | `Supported { language, dialect }` when the fixed language has `Capability::IdentifierFinder`; else `Unsupported`. |
 | `after_parse(accepted, script)` | `Result<ParsedLanguage, AfterParseError>` | See below. |
+| `key()` | `RouteKey` | Equal for two paths only when the rule, the dialect and the fixed language are equal. See below. |
 
 Because no sniffed candidate is mainstream, a reader that needs only a mainstream language may use `fixed_language()` before the parse.
 
@@ -80,7 +81,30 @@ Because no sniffed candidate is mainstream, a reader that needs only a mainstrea
 
 `after_parse` returns `NotACandidate` when `accepted` is not a candidate. It returns `ScriptNotEmbeddable` when `script` is not in `accepted.embedded_scripts()`. Only Vue, Astro and Svelte embed scripts: TypeScript or JavaScript. A sniffed route whose gates all reject has no `ParsedLanguage`, and the file has no graph.
 
+**Handoff to C2.** C2's `Ecosystem::for_language` (`contracts/workspace.rs:58-93`) takes this `Language` with an exhaustive match. It reads `ParsedLanguage::resolution()`, so a Vue, Svelte or Astro file with a script maps through TypeScript or JavaScript to `Node`. The `Vue`, `Astro` and `Svelte` arms are reached only for a component with no script; the recommendation is `Node` there too, so a caller that passes `file()` by mistake gets the same answer. `Language` has no `Unknown`: an unrouted path has no language and no ecosystem.
+
 **The compatibility rule.** `ParsedLanguage::admits_global(candidate)` is `self.resolution == candidate.resolution`. It is the one language rule of the global (Tier-3) tier. The vendor barrier stays in `file_category::FileMeta`.
+
+### `RouteKey` (fragment identity)
+
+`FileRoute::key()` returns three bytes: the `PathRule` discriminant, the `Dialect` discriminant, and the fixed `Language` discriminant (`0xFF` for a sniffed route). `RouteKey::to_bytes()` gives them for hashing.
+
+| Invariant | How it holds |
+|---|---|
+| A different route gives a different key. | The key holds every route field that chooses a provider or a grammar. Tests: `deploy.yaml` against `.github/workflows/deploy.yaml`, `a.ts` against `a.tsx`. |
+| The same route gives the same key, whatever the directory. | Test: `a.rs` against `b/c.rs`. |
+| `0xFF` never names a language. | `Language` has fewer than 255 variants (test). |
+
+An L1 fragment key is the hash of `RouteKey::to_bytes()` and the file content. Today it is the content hash only, so a route collision exists:
+
+- `write_fragment_file` sets `fragment_id = content_hash` (`session/overlay_writer.rs:395-396`), and `write_fragment_from_graph` does the same from the graph's content hash (`:472-473`).
+- The bin path is `<fragment_id>.bin` (`:358`), and the publish loop replaces it in order (`:356-360`).
+- `deploy.yaml` (kubernetes provider) and `.github/workflows/deploy.yaml` (github-actions provider) with identical bytes produce two different graphs but one bin. The second write wins, and the reader loads it for both manifest entries (`session/overlay_reader.rs:82`).
+- An omitted graph carries a zero content hash (`ecp-core/src/analyzer/types.rs:1136`), and the overlay writes a fragment for every graph it gets (`session/overlay_writer.rs:298-305`). So every omitted dirty file shares the fragment id `0000000000000000`. The new key hashes the real content for an omitted file too.
+
+`FragmentFile` holds no path (`session/overlay_writer.rs:168-199`), so the route key is enough only if no parser reads more of the path than its route. The adoption slice proves this with a 14-language test: two paths with one route and one content give equal fragment bytes. If the test fails for a language, the key hashes the repo-relative path instead of the route key.
+
+A change to the routing table (a rule, a default extension, a candidate list) also bumps `BUILDER_FINGERPRINT`, so manifests of the old table are re-parsed. The table has no version of its own.
 
 ### `Capability` and `CapabilitySet`
 
@@ -106,6 +130,16 @@ Capabilities that this slice does not define: call extraction, `Overrides` marke
 |---|---|
 | `bytes` | The per-file byte cap. `admits(len)` is `len <= bytes`. A file over the cap is routed but not parsed, and the reader records it as omitted. |
 | `source` | `Env`, `RepoConfig` or `BuiltIn`. |
+
+**Cache validity.** The effective cap is an input of every cached parse result. A cache compares `bytes()`, never `source()`: one cap from two sources parses the same. Three places read it:
+
+| Place | Rule |
+|---|---|
+| Omission decision | `admits(len)` on the route's own `size_cap()`. No reader keeps a second cap. |
+| Dirty manifest freshness | The manifest records the `bytes()` it was parsed under, beside `builder_fingerprint` (`session/overlay.rs:13-18`). A manifest with another value is stale as a whole, like a fingerprint mismatch: every dirty file is re-parsed. The three manifest readers check it where they check the fingerprint today: `auto_ensure.rs:1188`, `session/overlay_reader.rs:68`, `session/overlay_writer.rs:370`. |
+| View cache key | `view_cache::key` (`session/view_cache.rs:35-48`) hashes `bytes()`. Today the key holds the binary, the graph stamp and the accepted fragments, but no cap. |
+
+Today the cap is in no cache key. Example: a 2 MiB dirty file is parsed under a 16 MiB cap; the cap then drops to 1 MiB. The manifest entry keeps its mtime, so the freshness gate keeps it (`auto_ensure.rs:1199-1211`), and the view cache key does not change. A one-time `BUILDER_FINGERPRINT` bump cannot cover a later config change.
 
 `SizeCap::resolve(env, repo_config)` takes a parseable `ECP_MAX_FILE_BYTES` value first, then `[index] max_file_bytes`, then `DEFAULT_MAX_FILE_BYTES` (1 MiB). A malformed env value falls through. This is the precedence of `config.rs:170-184`. The cold index, the overlay and the baseline read one `SizeCap`.
 
@@ -180,7 +214,7 @@ The tests `test_route_path_ledger_matches_today_readers` and `test_to_legacy_eve
 |---|---|---|
 | 1 (shared ladder) | `ParsedLanguage::resolution()` for call normalization (`resolver.rs:730`, `session/view.rs:2828`); `admits_global` as the one language rule of the global tier (`file_category.rs:400`) | deriving the language from the path on each call; comparing `file_category::Language` values |
 | 2 (owner split) | `resolution() == Rust` for Rust owner rules (`resolution/index.rs:635`, `resolution/builder.rs:1264`) | `FileMeta::from_path(...).language` for owner decisions |
-| 4 (workspace scope) | `resolution()` in the `Imports` pass (`post_process/imports_edges.rs:152`); C2 config files are not routed sources | its own language lookup. A `.vue` file with a TS script now binds imports by local name (`binds_local`), a behaviour change the area 4 slice approves. |
+| 4 (workspace scope) | `resolution()` in the `Imports` pass (`post_process/imports_edges.rs:152`); C2's `Ecosystem::for_language` (`contracts/workspace.rs:58`) takes `contracts::routing::Language` and is called with `resolution()`. A config file can also be a routed source: `webpack.config.ts` is TypeScript source and a Node config (`workspace.rs:106-107`), so its change triggers a parse and a config invalidation. | its own language lookup; `file_category::Language` in `for_language`. A `.vue` file with a TS script now binds imports by local name (`binds_local`), a behaviour change the area 4 slice approves. |
 | 5 (read path) | `RouteOutcome::Routed` marks a dirty path as source for C3; `display_name()` for the `language` field (`commands/find.rs:1335`); `Language::from_extension` for pathspecs (`impact/ambiguous.rs:130`) | parsing an excluded path in the overlay; routing by basename (`overlay_writer.rs:693`) |
 | 6 (routing) | owns `routing.rs`; makes the cold walk, the overlay, reanalysis and the baseline call `FileRouter::route` with one `SizeCap` | `EXTENSION_TABLE`, `provider_name_for_path`, `should_analyze_path`'s list, `ALL_PROVIDER_NAMES`, `file_category::Language::from_*`, the finder and flow extension matches, `schema.rs`'s capability table |
 | 7 (post-parse edges) | `resolution() == Rust` in scope defines (`post_process/scope_defines.rs:101`) | `Language::from_normalized_path(&file_path_lossy)` there |
@@ -194,18 +228,19 @@ The tests `test_route_path_ledger_matches_today_readers` and `test_to_legacy_eve
 | Pair | Requirement | How C5 meets it |
 |---|---|---|
 | 1-6, 2-6 | one language value and one compatibility rule for call normalization, global admission and Rust owners | `ParsedLanguage::resolution()` and `admits_global`. Open point 7 decides where the value is stored. |
-| 4-6, 4-5 | config files have no provider; a filter on "has a provider" hides their changes | C5 never classifies config. `RouteOutcome` says only whether a path is source. C3 takes the config class from C2. `tsconfig.json` and `package.json` are both: they route to `JsonContent`. Open point 12. |
+| 4-6, 4-5 | config files have no provider; a filter on "has a provider" hides their changes | C5 never classifies config. `RouteOutcome` says only whether a path is source; C2's `config_ecosystem` (`workspace.rs:452`) says whether it is resolution config. The C3 class is a set of both. `webpack.config.ts`, `jest.config.js`, `tsconfig.json` and `package.json` are both source and config; `Cargo.toml`, `go.mod`, `go.work`, `pyproject.toml` and `*.csproj` are config only (test `test_route_config_file_names_source_or_not`). Open point 12. |
 | 3-6 | area 3 defines the snapshot; area 6 reads from it | `FileRouter::route` reads only the path, so it applies to any snapshot. |
 
 ## Stored data
 
 | Identifier | Changes when |
 |---|---|
-| `BUILDER_FINGERPRINT` (`registry/commit_meta.rs:79`) | the slice that switches the cold index to `FileRouter` and routes generic and OpenAPI YAML (new nodes); the slice that gives the overlay the full provider set and one `SizeCap`. An old manifest marks a `.sh` file `parse_failed`; only a fingerprint mismatch makes the next refresh re-parse it (`session/overlay.rs:13-18`, `:101-103`). |
+| `BUILDER_FINGERPRINT` (`registry/commit_meta.rs:79`) | every slice that changes the routing table or what a route parses to: the cold index on `FileRouter`, generic and OpenAPI YAML (new nodes), the full provider set in the overlay. The reason is a fragment that parsed successfully but whose meaning is stale. A `parse_failed` entry needs no bump: the freshness gate already re-parses it (`auto_ensure.rs:1199`). But `config/app.yaml` (no Kubernetes markers) parsed today to an empty kubernetes graph is a successful entry (`parse_failed` is set only when archiving fails, `session/overlay_writer.rs:485`); with an unchanged mtime the gate keeps it (`auto_ensure.rs:1199-1211`), and only the fingerprint mismatch (`auto_ensure.rs:1188`, `session/overlay.rs:101-103`) makes it parse as generic YAML. |
+| L1 fragment encoding and dirty manifest entry (`FRAGMENT_FORMAT_V5`, `session/overlay.rs:57`) | the slice that keys fragments by `RouteKey` and content: `FRAGMENT_FORMAT_V6`. The gate and the reader drop a V5 entry (`auto_ensure.rs:1199`, `session/overlay_reader.rs:75`), so every old manifest entry is re-parsed. The bytes also gain the per-file language if open point 7 stores it. |
+| Dirty manifest header (`DirtyFiles`, `session/overlay.rs:9-18`) | the slice that makes the cap a cache input: a `size_cap_bytes` field beside `builder_fingerprint`. A manifest without it, or with another value, is stale as a whole. |
+| View cache key (`session/view_cache.rs:35-48`) | the same slice: the key hashes `SizeCap::bytes()`. `VIEW_CACHE_FORMAT` (`session/view.rs:1060`) needs no bump, because a changed key only misses. |
+| `meta.json` (`CommitBuildMeta`) | the same slice: the L2 build records the cap it ran under. Open point 14. |
 | `GRAPH_FORMAT_VERSION` (`graph.rs:36`, now 15) | only if `ParsedLanguage` is stored per file (open point 7): one `file` and one `resolution` byte per file record |
-| L1 fragment encoding (`FRAGMENT_FORMAT_V5`, `session/overlay.rs:57`) | same condition as `GRAPH_FORMAT_VERSION` |
-| Dirty manifest | no format change. Its entries become stale through the fingerprint. |
-| View cache key | none |
 
 A stored `Language` uses the `#[repr(u8)]` discriminant, which is append-only.
 
@@ -213,16 +248,17 @@ A stored `Language` uses the `#[repr(u8)]` discriminant, which is append-only.
 
 | # | Decision | Options | Recommendation |
 |---|---|---|---|
-| 1 | Default size cap | 1 MiB (`config.rs:164`) or 16 MiB (`pipeline.rs:13`) | 1 MiB. It is the documented default, the omission message names `[index] max_file_bytes` (`admin/index.rs:288`), and the cold index already enforces it, so only the overlay changes. |
+| 1 | Default size cap | 1 MiB (`config.rs:164`) or 16 MiB (`pipeline.rs:13`) | 1 MiB. It is the documented default, the omission message names `[index] max_file_bytes` (`admin/index.rs:288`), and the cold index already enforces it, so only the overlay changes. This holds only together with the cache rule of `SizeCap` (Defines): without it a cap change leaves old overlay results in place. |
 | 2 | The markdown provider | route `md`/`txt`/`rst`, or delete the provider | Delete it in an area 6 cleanup slice. It is constructed and never routed today, and no LLM query has shown a need. |
 | 3 | Extension case | case-sensitive, or ASCII case-insensitive | Case-sensitive, as the cold index is today. The finders' lowercasing goes. |
-| 4 | Extensions that one reader accepts: `mts`, `cts`, `phtml`, `nims`, `zon` | add to the defaults, or drop | Add `mts` and `cts` to TypeScript as a capability-addition slice with tests. Drop the others. |
+| 4 | Extensions that one reader accepts: `mts`, `cts`, `phtml`, `nims`, `zon` | add to the defaults, or drop | Add `mts` and `cts` to TypeScript as a capability-addition slice with tests. Drop the others, with this capability loss: `phtml` loses `Flow` (`flow/mod.rs:122`); `nims` loses `IdentifierFinder` (`identifier_finder/mod.rs:79`); `zon` loses `IdentifierFinder` (`:82`). None of the three is indexed today. |
 | 5 | TypeScript and JavaScript at the global tier | keep them apart, or one ECMAScript family | Keep apart: today's behaviour. A family change is a separate slice with its own parity run. |
-| 6 | Generic YAML gets a graph | route it (plan target), or end the YAML chain at OpenAPI | Route it, after a node-count measurement on this repo and vscode. Drop the `Yaml` candidate if the nodes only add noise. |
+| 6 | Generic YAML gets a graph | route it (plan target), or end the YAML chain at OpenAPI | Route it, after a node-count measurement on this repo and vscode. The measurement has not run, so this recommendation is not yet a pass: the slice merges only with the measured counts. Drop the `Yaml` candidate if the nodes only add noise. |
 | 7 | Where `ParsedLanguage` lives | stored per file (format bump), or derived from the path at each read | Store it. The SFC script and the sniffed language are not in the path, and storage removes 69 path re-derivations. |
 | 8 | Per-rule size caps | none, or a cap per rule | None until a measurement asks for one. |
-| 9 | An SFC with two script blocks of different languages | first block, TypeScript if any, or a `BlindSpot` | The parser reports TypeScript if any block is TypeScript and records a `BlindSpot` on a mismatch. The Vue parser already defaults to TypeScript (`vue/parser.rs:174-175`). |
+| 9 | An SFC with two script blocks of different languages | first block, TypeScript if any, or a `BlindSpot` | The parser reports TypeScript if any block is TypeScript and keeps a `BlindSpot` on every language mismatch, so the answer names the file. The Vue parser already defaults to TypeScript (`vue/parser.rs:174-175`). |
 | 10 | The OpenAPI branch inside the YAML provider (`yaml/parser.rs:126`) | keep, or remove | Remove. `OpenApi` precedes `Yaml` in the chain, and the OpenAPI provider already reads YAML (`openapi/schema_scan.rs:136`). |
 | 11 | Template exclusion: a C5 path rule or an area 3 snapshot rule | either | C5, on the repo-relative path. Index and overlay then apply it the same way. Area 3 keeps the ignore files. |
 | 12 | A path that is both config (C2) and source (C5), e.g. `tsconfig.json` | one class wins, or the class is a set | A set. C3 widens the invalidation scope and also re-parses the file. |
-| 13 | Capabilities not defined here: call extraction (Vue, Svelte, Astro emit none), `Overrides` markers, variant references, local types | add now from the plan's counts, or add with the area 10 inventory | Add with the area 10 inventory, each with a code citation. An unverified set would tell a reader that a capability exists. |
+| 13 | Capabilities not defined here: call extraction (Vue, Svelte, Astro emit none), `Overrides` markers, variant references, local types | add now from the plan's counts, or add with the area 10 inventory | Add with the area 10 inventory, each with a code citation. Until then no language claims these capabilities as supported, and a reader treats their absence as "not supported". |
+| 14 | The L2 graph and a cap change | rebuild when the recorded cap differs, or answer with a caveat | Rebuild. A cap change is rare, and the omission `BlindSpot` tells the agent to raise the cap (`admin/index.rs:288-289`), which today changes nothing until the next commit. Area 3 owns `meta.json` and decides the field. |

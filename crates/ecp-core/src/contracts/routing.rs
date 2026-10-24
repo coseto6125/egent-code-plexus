@@ -523,10 +523,27 @@ pub enum FileFormat {
 
 /// The grammar variant of a language that has two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum Dialect {
-    Standard,
+    Standard = 0,
     /// `.tsx`: the TSX grammar of TypeScript.
-    Tsx,
+    Tsx = 1,
+}
+
+/// The part of a parse's input that the path decides: the rule, the dialect
+/// and the fixed language (`0xFF` for a sniffed route). An L1 fragment key
+/// hashes these bytes with the file content, so two paths with identical
+/// bytes and different routes never share a fragment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RouteKey([u8; 3]);
+
+impl RouteKey {
+    /// The byte that stands for "no fixed language".
+    pub const SNIFFED: u8 = u8::MAX;
+
+    pub const fn to_bytes(self) -> [u8; 3] {
+        self.0
+    }
 }
 
 /// How the parse picks the provider.
@@ -566,6 +583,11 @@ pub enum SizeCapSource {
 /// The one per-file byte cap that the cold index, the overlay and the
 /// baseline read. A file over the cap is routed but not parsed, and the
 /// reader records it as omitted.
+///
+/// The cap is an input of every cached parse result: the dirty manifest
+/// records [`SizeCap::bytes`], and the view cache key hashes it. A cache
+/// compares `bytes`, never `source`: one cap from two sources parses the
+/// same.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SizeCap {
     bytes: u64,
@@ -640,6 +662,16 @@ impl FileRoute {
 
     pub const fn size_cap(&self) -> SizeCap {
         self.size_cap
+    }
+
+    /// The fragment identity part of this route. Equal for two routes only
+    /// when the rule, the dialect and the fixed language are equal.
+    pub const fn key(&self) -> RouteKey {
+        let language = match self.dispatch {
+            Dispatch::Fixed(language) => language as u8,
+            Dispatch::Sniffed(_) => RouteKey::SNIFFED,
+        };
+        RouteKey([self.rule as u8, self.dialect as u8, language])
     }
 
     /// The language when the path decides it. `None` for a sniffed route:
@@ -752,7 +784,9 @@ impl ParsedLanguage {
 
     /// The language the file's code follows: the embedded script language of
     /// a single-file component, else [`Self::file`]. Call normalization,
-    /// import binding, owner rules and global admission read this value.
+    /// import binding, owner rules, global admission and the C2 ecosystem
+    /// lookup (`contracts::workspace::Ecosystem::for_language`) read this
+    /// value.
     pub const fn resolution(self) -> Language {
         self.resolution
     }
@@ -1302,6 +1336,80 @@ mod tests {
         assert!(!ts.admits_global(js));
         assert!(!vue_bare.admits_global(ts));
         assert!(vue_bare.admits_global(vue_bare));
+    }
+
+    #[test]
+    fn test_route_key_workflow_and_plain_yaml_differ() {
+        assert_ne!(
+            routed("deploy.yaml").key(),
+            routed(".github/workflows/deploy.yaml").key()
+        );
+        assert_ne!(routed("a.yaml").key(), routed("a.json").key());
+    }
+
+    #[test]
+    fn test_route_key_tsx_and_ts_differ() {
+        assert_ne!(routed("a.ts").key(), routed("a.tsx").key());
+    }
+
+    #[test]
+    fn test_route_key_same_route_any_directory_equal() {
+        assert_eq!(routed("a.rs").key(), routed("b/c.rs").key());
+        assert_eq!(routed("x.yml").key(), routed("k8s/y.yaml").key());
+    }
+
+    #[test]
+    fn test_route_key_bytes_name_rule_dialect_language() {
+        assert_eq!(
+            routed("ui/App.tsx").key().to_bytes(),
+            [
+                PathRule::Extension as u8,
+                Dialect::Tsx as u8,
+                Language::TypeScript as u8
+            ]
+        );
+        assert_eq!(routed("a.json").key().to_bytes()[2], RouteKey::SNIFFED);
+    }
+
+    #[test]
+    fn test_route_key_sniffed_byte_names_no_language() {
+        assert!(Language::ALL.len() < RouteKey::SNIFFED as usize);
+    }
+
+    #[test]
+    fn test_size_cap_same_bytes_different_source_same_bytes() {
+        let env = SizeCap::resolve(Some("4096"), None);
+        let config = SizeCap::resolve(None, Some(4096));
+        assert_ne!(env, config);
+        assert_eq!(env.bytes(), config.bytes());
+    }
+
+    // C2 config file names (`contracts::workspace::Ecosystem::classify_config`)
+    // that C3 classifies. Source and config are a set: a routed config file
+    // is re-parsed and also invalidates its scopes.
+    #[test]
+    fn test_route_config_file_names_source_or_not() {
+        for path in [
+            "webpack.config.ts",
+            "webpack.config.js",
+            "jest.config.js",
+            "jest.config.ts",
+            "pkg/tsconfig.json",
+            "package.json",
+            "jsconfig.json",
+            "jest.config.json",
+        ] {
+            assert!(router().route(path).route().is_some(), "{path} is source");
+        }
+        for path in [
+            "Cargo.toml",
+            "go.mod",
+            "go.work",
+            "pyproject.toml",
+            "app/App.csproj",
+        ] {
+            assert_eq!(router().route(path), RouteOutcome::Unrouted, "{path}");
+        }
     }
 
     #[test]
