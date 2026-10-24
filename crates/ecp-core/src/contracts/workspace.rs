@@ -3,10 +3,10 @@
 //! One table of resolution scopes per indexed commit: the scope of each
 //! file, the root of that scope, its effective configuration and its
 //! dependency map. The index builds it once and stores it in `graph.bin`;
-//! the index resolver, the overlay, `ecp flow` and the post-process
-//! `Imports` pass read the same rows. Every path in this module is
-//! repo-relative, `/`-separated, with no leading `./` and no trailing `/`;
-//! the repo root directory is the empty string.
+//! the index resolver, the overlay and the post-process `Imports` pass read
+//! the same rows, and `ecp flow` runs the same producer. Every path in this
+//! module is repo-relative, `/`-separated, with no leading `./` and no
+//! trailing `/`; the repo root directory is the empty string.
 //!
 //! The table is small (one row per scope), so a reader deserializes it once
 //! per view and queries the owned form. Rows carry plain `String`s, not
@@ -14,8 +14,14 @@
 //! without the graph's string pool.
 
 use crate::analyzer::path_aliases::PathAliases;
-use crate::file_category::Language;
+use crate::contracts::routing::Language;
 use rkyv::{Archive, Deserialize, Serialize};
+
+/// The BlindSpot kind a consumer records for a file whose
+/// [`WorkspaceFacts::scope_of`] answer is [`ScopeMatch::Ambiguous`]. The
+/// consumer then resolves that file with no scope's config, never with one
+/// picked from the candidates.
+pub const SCOPE_AMBIGUOUS_BLIND_SPOT: &str = "workspace-scope-ambiguous";
 
 /// The package ecosystem whose config files define a scope. Variants are
 /// append-only: the discriminant is stored in `graph.bin`. A new variant
@@ -53,46 +59,55 @@ pub enum ConfigRole {
 impl Ecosystem {
     /// The ecosystem whose scopes resolve the imports of a file in
     /// `language`; `None` for a language with no workspace facts yet. The
-    /// match has no wildcard arm, so a new `Language` variant fails to
-    /// compile until it is mapped here.
+    /// caller passes C5's language after parse (`ParsedLanguage::resolution`),
+    /// so a component with a script arrives as TypeScript or JavaScript.
+    /// The component arms answer `Node` too, so a caller that passes the
+    /// file's language gets the same scope. The match has no wildcard arm:
+    /// a new `Language` variant fails to compile until it is mapped here.
     pub fn for_language(language: Language) -> Option<Self> {
         match language {
             Language::Rust => Some(Self::Cargo),
-            Language::TypeScript | Language::JavaScript => Some(Self::Node),
+            Language::TypeScript
+            | Language::JavaScript
+            | Language::Vue
+            | Language::Astro
+            | Language::Svelte => Some(Self::Node),
             Language::Go => Some(Self::Go),
             Language::Python => Some(Self::Python),
             Language::CSharp => Some(Self::DotNet),
-            Language::Unknown
-            | Language::Java
+            Language::Java
             | Language::Kotlin
-            | Language::Ruby
             | Language::Php
+            | Language::Ruby
             | Language::Swift
-            | Language::Dart
-            | Language::Solidity
-            | Language::Sql
             | Language::C
             | Language::Cpp
+            | Language::Dart
+            | Language::Bash
+            | Language::Lua
+            | Language::Crystal
             | Language::Move
+            | Language::Solidity
+            | Language::Dockerfile
             | Language::Nim
-            | Language::Cairo
+            | Language::Hcl
+            | Language::Sql
             | Language::Vyper
             | Language::Verilog
-            | Language::Hcl
-            | Language::Crystal
-            | Language::Lua
+            | Language::Cairo
             | Language::Zig
-            | Language::Bash
-            | Language::Dockerfile
+            | Language::Protobuf
             | Language::DockerCompose
             | Language::GitHubActions
-            | Language::Yaml
-            | Language::Markdown
-            | Language::Kubernetes => None,
+            | Language::Kubernetes
+            | Language::OpenApi
+            | Language::Yaml => None,
         }
     }
 
     /// The ecosystem and role of a config file, by its file name alone.
+    /// Being a config says nothing about being source: `webpack.config.ts`
+    /// is both, so a change to it is parsed and also invalidates config.
     /// A file that only an `extends` (or similar) reference makes a config,
     /// such as `tsconfig.base.json`, is not named here: the table lists it
     /// in [`Scope::config_files`] instead, see
@@ -130,20 +145,71 @@ impl ScopeId {
     }
 }
 
-/// One resolution scope: a directory whose files share one effective
-/// config and one dependency map.
+/// Whether the producer found a config path it tried to read.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+#[repr(u8)]
+pub enum ConfigPresence {
+    /// The producer read the file's bytes.
+    Read,
+    /// The producer looked for the file and it did not exist: an `extends`
+    /// target that is not there yet. Its later appearance changes the
+    /// effective config, so the path stays a dependency.
+    Missing,
+}
+
+/// One config path the producer tried to read for a scope.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub struct ConfigRead {
+    pub path: String,
+    pub presence: ConfigPresence,
+}
+
+/// Which files under the scope root belong to the scope.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub enum Membership {
+    /// Every file of the ecosystem under `root`, unless a deeper root of the
+    /// same ecosystem admits it first.
+    Subtree,
+    /// Exactly these files, strictly sorted, each under `root`: a
+    /// `tsconfig.json` `files` / `include` set or a `*.csproj` compile list,
+    /// expanded by the producer.
+    Listed(Vec<String>),
+}
+
+impl Membership {
+    /// Whether a file under the scope root belongs to the scope.
+    pub fn admits(&self, path: &str) -> bool {
+        match self {
+            Self::Subtree => true,
+            Self::Listed(files) => files
+                .binary_search_by(|file| file.as_str().cmp(path))
+                .is_ok(),
+        }
+    }
+}
+
+/// One resolution scope: one project manifest, the files it governs, one
+/// effective config and one dependency map.
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 #[rkyv(derive(Debug))]
 pub struct Scope {
     pub ecosystem: Ecosystem,
-    /// The scope root directory. `(ecosystem, root)` is unique in a table.
+    /// The scope root directory: the directory of the manifest.
     pub root: String,
-    /// Every file whose bytes the effective config read: first the manifest
-    /// that made `root` a scope (it lives directly in `root`), then each
-    /// inherited or extended file (a workspace `Cargo.toml`, a `go.work`,
-    /// an `extends` target, an ancestor `tsconfig.json`). A change to any of
-    /// them makes this scope stale. Never empty.
-    pub config_files: Vec<String>,
+    /// Every config path the effective config tried to read. The first is
+    /// the manifest that made this scope: present, directly in `root`, and
+    /// a `Root` config name of `ecosystem`. Its path is the scope's
+    /// identity: `(ecosystem, root, manifest)` is unique, so `App.csproj`
+    /// and `Tests.csproj` in one directory are two scopes. Then each
+    /// inherited, extended or missing path (a workspace `Cargo.toml`, a
+    /// `go.work`, an `extends` target, an ancestor `tsconfig.json`). A change
+    /// to any of them, an appearance included, makes this scope stale.
+    pub config_files: Vec<ConfigRead>,
+    /// The files this scope governs.
+    pub membership: Membership,
     /// The files a path through this scope's name starts from, best first.
     /// Cargo: the lib entry (`[lib] path`, else `src/lib.rs`, else
     /// `src/main.rs`), then the bin roots. May be empty.
@@ -223,11 +289,22 @@ pub struct ScopeName {
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Default)]
 #[rkyv(derive(Debug))]
 pub struct WorkspaceFacts {
-    /// Sorted by `(ecosystem, root)`, strictly.
+    /// Sorted by `(ecosystem, root, manifest path)`, strictly.
     pub scopes: Vec<Scope>,
     /// Sorted by `(ecosystem, name, rank, scope)`, strictly. Two entries may
     /// share a name; [`WorkspaceFacts::lookup_name`] reports that.
     pub names: Vec<ScopeName>,
+}
+
+/// The resolution scope of one file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopeMatch {
+    Unique(ScopeId),
+    /// Several scopes at the deepest admitting root govern the file, sorted.
+    /// The consumer records [`SCOPE_AMBIGUOUS_BLIND_SPOT`] and applies none.
+    Ambiguous(Vec<ScopeId>),
+    /// No scope of the ecosystem governs the file.
+    Unscoped,
 }
 
 /// The answer of a name lookup.
@@ -262,13 +339,17 @@ pub struct RescopedSubtree {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceFactsError {
     /// `scopes[index]` is not strictly after `scopes[index - 1]` by
-    /// `(ecosystem, root)`.
+    /// `(ecosystem, root, manifest path)`.
     ScopesNotSorted { index: usize },
-    /// A root, config file, entry file or search root is not a normal
-    /// repo-relative path.
+    /// A root, config path, listed member, entry file or search root is not
+    /// a normal repo-relative path.
     BadPath { scope: ScopeId, path: String },
-    /// `config_files` is empty, or its first file is not directly in `root`.
+    /// `config_files` is empty, or its first entry is missing, not directly
+    /// in `root`, or not a `Root` config name of the scope's ecosystem.
     MissingRootManifest { scope: ScopeId },
+    /// A `Listed` membership is not strictly sorted, or lists a file outside
+    /// `root`.
+    BadMembership { scope: ScopeId },
     /// An alias entry has no replacement.
     EmptyAlias { scope: ScopeId, pattern: String },
     /// The dependency names of `scope` are not strictly sorted.
@@ -282,6 +363,14 @@ pub enum WorkspaceFactsError {
 }
 
 impl Scope {
+    /// The path of the manifest that made this scope; empty only in a row
+    /// that fails validation.
+    pub fn manifest(&self) -> &str {
+        self.config_files
+            .first()
+            .map_or("", |config| config.path.as_str())
+    }
+
     /// The declared dependency that code in this scope names `name`.
     pub fn dependency(&self, name: &str) -> Option<DependencyTarget> {
         self.dependencies
@@ -298,6 +387,10 @@ impl Scope {
             aliases.add(alias.pattern.as_str(), alias.replacements.clone());
         }
         aliases
+    }
+
+    fn reads(&self, path: &str) -> bool {
+        self.config_files.iter().any(|config| config.path == path)
     }
 }
 
@@ -348,9 +441,15 @@ impl WorkspaceFacts {
         if !is_normal_dir(&scope.root) {
             return Err(bad_path(&scope.root));
         }
+        let listed: &[String] = match &scope.membership {
+            Membership::Subtree => &[],
+            Membership::Listed(files) => files,
+        };
         if let Some(path) = scope
             .config_files
             .iter()
+            .map(|config| &config.path)
+            .chain(listed)
             .chain(&scope.entry_files)
             .find(|path| !is_normal_path(path))
         {
@@ -360,8 +459,19 @@ impl WorkspaceFacts {
             return Err(bad_path(dir));
         }
         match scope.config_files.first() {
-            Some(manifest) if parent_dir(manifest) == scope.root => {}
+            Some(manifest)
+                if manifest.presence == ConfigPresence::Read
+                    && parent_dir(&manifest.path) == scope.root
+                    && Ecosystem::classify_config(file_name(&manifest.path))
+                        == Some((scope.ecosystem, ConfigRole::Root)) => {}
             _ => return Err(WorkspaceFactsError::MissingRootManifest { scope: id }),
+        }
+        if listed.windows(2).any(|pair| pair[0] >= pair[1])
+            || listed
+                .iter()
+                .any(|file| !is_within(parent_dir(file), &scope.root))
+        {
+            return Err(WorkspaceFactsError::BadMembership { scope: id });
         }
         if let Some(alias) = scope.aliases.iter().find(|a| a.replacements.is_empty()) {
             return Err(WorkspaceFactsError::EmptyAlias {
@@ -394,29 +504,49 @@ impl WorkspaceFacts {
         self.scopes.get(id.index())
     }
 
-    /// The scope whose root is exactly `root`.
-    pub fn scope_at(&self, ecosystem: Ecosystem, root: &str) -> Option<ScopeId> {
-        self.scopes
-            .binary_search_by(|scope| scope_key(scope).cmp(&(ecosystem, root)))
-            .ok()
-            .map(|i| ScopeId(i as u32))
+    /// The scopes whose root is exactly `root`, in table order.
+    pub fn scopes_at(&self, ecosystem: Ecosystem, root: &str) -> impl Iterator<Item = ScopeId> {
+        let start = self
+            .scopes
+            .partition_point(|scope| (scope.ecosystem, scope.root.as_str()) < (ecosystem, root));
+        let len = self.scopes[start..]
+            .partition_point(|scope| scope.ecosystem == ecosystem && scope.root == root);
+        (start as u32..(start + len) as u32).map(ScopeId)
     }
 
-    /// The resolution scope of the file at `path`: the scope of `ecosystem`
-    /// with the deepest root that contains the file. `None` when no root
-    /// contains it. An indexed file and a new dirty file get the same
-    /// answer, because the rule reads only the path.
-    pub fn scope_of(&self, path: &str, ecosystem: Ecosystem) -> Option<ScopeId> {
-        self.scope_of_dir(parent_dir(path), ecosystem)
-    }
-
-    fn scope_of_dir(&self, mut dir: &str, ecosystem: Ecosystem) -> Option<ScopeId> {
+    /// The resolution scope of the file at `path`. Walk from the file's
+    /// directory up to the repo root; at the first directory where some
+    /// scope of `ecosystem` admits the file, one admitting scope is
+    /// `Unique` and several are `Ambiguous`. `Unscoped` when no directory
+    /// has one. The rule reads only the path and the stored rows, so an
+    /// indexed file and a new dirty file get the same answer.
+    pub fn scope_of(&self, path: &str, ecosystem: Ecosystem) -> ScopeMatch {
+        let mut dir = parent_dir(path);
         loop {
-            if let Some(id) = self.scope_at(ecosystem, dir) {
-                return Some(id);
+            let admitting: Vec<ScopeId> = self
+                .scopes_at(ecosystem, dir)
+                .filter(|&id| self.scopes[id.index()].membership.admits(path))
+                .collect();
+            match admitting.len() {
+                0 => {}
+                1 => return ScopeMatch::Unique(admitting[0]),
+                _ => return ScopeMatch::Ambiguous(admitting),
             }
             if dir.is_empty() {
-                return None;
+                return ScopeMatch::Unscoped;
+            }
+            dir = parent_dir(dir);
+        }
+    }
+
+    /// Every scope at the deepest directory, from `dir` up, that holds a
+    /// scope of `ecosystem`, whatever its membership: the conservative set
+    /// for a config change in `dir`.
+    fn enclosing_scopes(&self, mut dir: &str, ecosystem: Ecosystem) -> Vec<ScopeId> {
+        loop {
+            let found: Vec<ScopeId> = self.scopes_at(ecosystem, dir).collect();
+            if !found.is_empty() || dir.is_empty() {
+                return found;
             }
             dir = parent_dir(dir);
         }
@@ -446,24 +576,26 @@ impl WorkspaceFacts {
     }
 
     /// The ecosystem of `path` when it is a resolution config: its file
-    /// name is a config name, or some scope lists it in `config_files`.
-    /// This is the "resolution config" class of contract C3. Cost: one
-    /// match, then one pass over every scope's config files.
+    /// name is a config name, or some scope lists it in `config_files`,
+    /// present or missing. This is one member of C3's class set; the same
+    /// path can also be source by C5's routing. Cost: one match, then one
+    /// pass over every scope's config paths.
     pub fn config_ecosystem(&self, path: &str) -> Option<Ecosystem> {
         Ecosystem::classify_config(file_name(path))
             .map(|(ecosystem, _)| ecosystem)
             .or_else(|| {
                 self.scopes
                     .iter()
-                    .find(|scope| scope.config_files.iter().any(|file| file == path))
+                    .find(|scope| scope.reads(path))
                     .map(|scope| scope.ecosystem)
             })
     }
 
     /// The scopes that a change to `path` (added, modified or deleted) makes
-    /// stale: the scopes that read it, the scopes its directory can hold or
-    /// inherit into when its name is a config name, and one hop of scopes
-    /// that depend on any of those. Empty for a path that is no resolution
+    /// stale: the scopes that tried to read it, present or missing; when its
+    /// name is a config name, the scopes at the nearest enclosing root and
+    /// every scope at or below its directory; then one hop of scopes that
+    /// depend on any of those. Empty for a path that is no resolution
     /// config. A changed scope can also gain a name that another scope
     /// declares as `External`; [`WorkspaceFacts::dependents_of_name`]
     /// answers that once the new config is read.
@@ -471,13 +603,13 @@ impl WorkspaceFacts {
         let mut scopes: Vec<ScopeId> = self
             .ids()
             .zip(&self.scopes)
-            .filter(|(_, scope)| scope.config_files.iter().any(|file| file == path))
+            .filter(|(_, scope)| scope.reads(path))
             .map(|(id, _)| id)
             .collect();
         let mut rescoped = None;
         if let Some((ecosystem, role)) = Ecosystem::classify_config(file_name(path)) {
             let dir = parent_dir(path);
-            scopes.extend(self.scope_of_dir(dir, ecosystem));
+            scopes.extend(self.enclosing_scopes(dir, ecosystem));
             scopes.extend(
                 self.ids()
                     .zip(&self.scopes)
@@ -527,8 +659,8 @@ impl WorkspaceFacts {
     }
 }
 
-fn scope_key(scope: &Scope) -> (Ecosystem, &str) {
-    (scope.ecosystem, scope.root.as_str())
+fn scope_key(scope: &Scope) -> (Ecosystem, &str, &str) {
+    (scope.ecosystem, scope.root.as_str(), scope.manifest())
 }
 
 fn name_key(entry: &ScopeName) -> (Ecosystem, &str, NameRank, ScopeId) {
@@ -577,11 +709,26 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
+    fn read(path: &str) -> ConfigRead {
+        ConfigRead {
+            path: path.to_string(),
+            presence: ConfigPresence::Read,
+        }
+    }
+
+    fn missing(path: &str) -> ConfigRead {
+        ConfigRead {
+            path: path.to_string(),
+            presence: ConfigPresence::Missing,
+        }
+    }
+
     fn scope(ecosystem: Ecosystem, root: &str, config_files: &[&str]) -> Scope {
         Scope {
             ecosystem,
             root: root.to_string(),
-            config_files: strings(config_files),
+            config_files: config_files.iter().map(|path| read(path)).collect(),
+            membership: Membership::Subtree,
             entry_files: Vec::new(),
             aliases: Vec::new(),
             search_roots: Vec::new(),
@@ -607,7 +754,7 @@ mod tests {
 
     /// 0: Cargo `crates/a` (depends on `b` and on external `serde`),
     /// 1: Cargo `crates/b`, 2: Node root, 3: Node `packages/a` (extends
-    /// `tsconfig.base.json`).
+    /// `tsconfig.base.json` and the missing `config/base.json`).
     fn fixture_scopes() -> Vec<Scope> {
         let mut crate_a = scope(
             Ecosystem::Cargo,
@@ -631,6 +778,7 @@ mod tests {
             "packages/a",
             &["packages/a/tsconfig.json", "tsconfig.base.json"],
         );
+        package_a.config_files.push(missing("config/base.json"));
         package_a.aliases = vec![
             ScopeAlias {
                 pattern: "@/*".to_string(),
@@ -657,6 +805,16 @@ mod tests {
         WorkspaceFacts::new(fixture_scopes(), fixture_names()).unwrap()
     }
 
+    /// 0: `svc/App.csproj`, 1: `svc/Tests.csproj`, both in `svc`, with the
+    /// given memberships.
+    fn two_projects(app: Membership, tests: Membership) -> WorkspaceFacts {
+        let mut app_scope = scope(Ecosystem::DotNet, "svc", &["svc/App.csproj"]);
+        app_scope.membership = app;
+        let mut tests_scope = scope(Ecosystem::DotNet, "svc", &["svc/Tests.csproj"]);
+        tests_scope.membership = tests;
+        WorkspaceFacts::new(vec![app_scope, tests_scope], Vec::new()).unwrap()
+    }
+
     #[test]
     fn test_for_language_rust_returns_cargo() {
         assert_eq!(
@@ -670,9 +828,29 @@ mod tests {
     }
 
     #[test]
+    fn test_for_language_components_return_node() {
+        for language in [Language::Vue, Language::Astro, Language::Svelte] {
+            assert_eq!(
+                Ecosystem::for_language(language),
+                Some(Ecosystem::Node),
+                "{language:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_for_language_without_facts_returns_none() {
-        assert_eq!(Ecosystem::for_language(Language::Markdown), None);
-        assert_eq!(Ecosystem::for_language(Language::Unknown), None);
+        assert_eq!(Ecosystem::for_language(Language::Yaml), None);
+        assert_eq!(Ecosystem::for_language(Language::Java), None);
+    }
+
+    #[test]
+    fn test_for_language_every_language_maps_nine_to_an_ecosystem() {
+        let mapped = Language::ALL
+            .iter()
+            .filter(|&&language| Ecosystem::for_language(language).is_some())
+            .count();
+        assert_eq!(mapped, 9);
     }
 
     #[test]
@@ -700,7 +878,7 @@ mod tests {
             Some((Ecosystem::Go, ConfigRole::Contributing))
         );
         assert_eq!(
-            Ecosystem::classify_config("jest.config.ts"),
+            Ecosystem::classify_config("webpack.config.ts"),
             Some((Ecosystem::Node, ConfigRole::Contributing))
         );
     }
@@ -733,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_duplicate_root_returns_scopes_not_sorted() {
+    fn test_new_duplicate_manifest_returns_scopes_not_sorted() {
         let scopes = vec![
             scope(Ecosystem::Go, "svc", &["svc/go.mod"]),
             scope(Ecosystem::Go, "svc", &["svc/go.mod"]),
@@ -742,6 +920,13 @@ mod tests {
             WorkspaceFacts::new(scopes, Vec::new()),
             Err(WorkspaceFactsError::ScopesNotSorted { index: 1 })
         );
+    }
+
+    #[test]
+    fn test_new_two_manifests_in_one_root_returns_ok() {
+        let facts = two_projects(Membership::Subtree, Membership::Subtree);
+        assert_eq!(facts.scopes[0].manifest(), "svc/App.csproj");
+        assert_eq!(facts.scopes[1].manifest(), "svc/Tests.csproj");
     }
 
     #[test]
@@ -792,6 +977,63 @@ mod tests {
                 "{config:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_new_first_config_not_root_of_ecosystem_returns_missing_root_manifest() {
+        for first in [
+            "crates/a/package.json",
+            "crates/a/README.md",
+            "crates/a/go.work",
+        ] {
+            let row = scope(Ecosystem::Cargo, "crates/a", &[first]);
+            assert_eq!(
+                WorkspaceFacts::new(vec![row], Vec::new()),
+                Err(WorkspaceFactsError::MissingRootManifest { scope: ScopeId(0) }),
+                "{first}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_new_missing_first_config_returns_missing_root_manifest() {
+        let mut row = scope(Ecosystem::Cargo, "crates/a", &[]);
+        row.config_files = vec![missing("crates/a/Cargo.toml")];
+        assert_eq!(
+            WorkspaceFacts::new(vec![row], Vec::new()),
+            Err(WorkspaceFactsError::MissingRootManifest { scope: ScopeId(0) })
+        );
+    }
+
+    #[test]
+    fn test_new_bad_listed_membership_returns_bad_membership() {
+        for files in [
+            &["svc/b.cs", "svc/a.cs"][..],
+            &["svc/a.cs", "svc/a.cs"][..],
+            &["other/a.cs"][..],
+            &["svcx/a.cs"][..],
+        ] {
+            let mut row = scope(Ecosystem::DotNet, "svc", &["svc/App.csproj"]);
+            row.membership = Membership::Listed(strings(files));
+            assert_eq!(
+                WorkspaceFacts::new(vec![row], Vec::new()),
+                Err(WorkspaceFactsError::BadMembership { scope: ScopeId(0) }),
+                "{files:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_new_listed_member_with_dotdot_returns_bad_path() {
+        let mut row = scope(Ecosystem::DotNet, "svc", &["svc/App.csproj"]);
+        row.membership = Membership::Listed(strings(&["svc/../a.cs"]));
+        assert_eq!(
+            WorkspaceFacts::new(vec![row], Vec::new()),
+            Err(WorkspaceFactsError::BadPath {
+                scope: ScopeId(0),
+                path: "svc/../a.cs".to_string()
+            })
+        );
     }
 
     #[test]
@@ -891,13 +1133,22 @@ mod tests {
     }
 
     #[test]
-    fn test_scope_at_exact_root_returns_scope() {
+    fn test_scopes_at_exact_root_returns_every_manifest() {
         let facts = fixture();
         assert_eq!(
-            facts.scope_at(Ecosystem::Cargo, "crates/b"),
-            Some(ScopeId(1))
+            facts
+                .scopes_at(Ecosystem::Cargo, "crates/b")
+                .collect::<Vec<_>>(),
+            vec![ScopeId(1)]
         );
-        assert_eq!(facts.scope_at(Ecosystem::Node, "crates/b"), None);
+        assert_eq!(facts.scopes_at(Ecosystem::Node, "crates/b").count(), 0);
+        let projects = two_projects(Membership::Subtree, Membership::Subtree);
+        assert_eq!(
+            projects
+                .scopes_at(Ecosystem::DotNet, "svc")
+                .collect::<Vec<_>>(),
+            vec![ScopeId(0), ScopeId(1)]
+        );
     }
 
     #[test]
@@ -905,11 +1156,11 @@ mod tests {
         let facts = fixture();
         assert_eq!(
             facts.scope_of("crates/a/src/deep/mod.rs", Ecosystem::Cargo),
-            Some(ScopeId(0))
+            ScopeMatch::Unique(ScopeId(0))
         );
         assert_eq!(
             facts.scope_of("packages/a/src/util.ts", Ecosystem::Node),
-            Some(ScopeId(3))
+            ScopeMatch::Unique(ScopeId(3))
         );
     }
 
@@ -918,16 +1169,78 @@ mod tests {
         let facts = fixture();
         assert_eq!(
             facts.scope_of("packages/ab/main.ts", Ecosystem::Node),
-            Some(ScopeId(2))
+            ScopeMatch::Unique(ScopeId(2))
         );
-        assert_eq!(facts.scope_of("main.ts", Ecosystem::Node), Some(ScopeId(2)));
+        assert_eq!(
+            facts.scope_of("main.ts", Ecosystem::Node),
+            ScopeMatch::Unique(ScopeId(2))
+        );
     }
 
     #[test]
-    fn test_scope_of_file_outside_every_root_returns_none() {
+    fn test_scope_of_file_outside_every_root_returns_unscoped() {
         let facts = fixture();
-        assert_eq!(facts.scope_of("tools/x.rs", Ecosystem::Cargo), None);
-        assert_eq!(facts.scope_of("crates/a/main.go", Ecosystem::Go), None);
+        assert_eq!(
+            facts.scope_of("tools/x.rs", Ecosystem::Cargo),
+            ScopeMatch::Unscoped
+        );
+        assert_eq!(
+            facts.scope_of("crates/a/main.go", Ecosystem::Go),
+            ScopeMatch::Unscoped
+        );
+    }
+
+    #[test]
+    fn test_scope_of_two_subtree_projects_in_one_root_returns_ambiguous() {
+        let facts = two_projects(Membership::Subtree, Membership::Subtree);
+        assert_eq!(
+            facts.scope_of("svc/Program.cs", Ecosystem::DotNet),
+            ScopeMatch::Ambiguous(vec![ScopeId(0), ScopeId(1)])
+        );
+    }
+
+    #[test]
+    fn test_scope_of_listed_projects_in_one_root_returns_member_scope() {
+        let facts = two_projects(
+            Membership::Listed(strings(&["svc/Program.cs"])),
+            Membership::Listed(strings(&["svc/ProgramTests.cs"])),
+        );
+        assert_eq!(
+            facts.scope_of("svc/Program.cs", Ecosystem::DotNet),
+            ScopeMatch::Unique(ScopeId(0))
+        );
+        assert_eq!(
+            facts.scope_of("svc/ProgramTests.cs", Ecosystem::DotNet),
+            ScopeMatch::Unique(ScopeId(1))
+        );
+        assert_eq!(
+            facts.scope_of("svc/Orphan.cs", Ecosystem::DotNet),
+            ScopeMatch::Unscoped
+        );
+    }
+
+    #[test]
+    fn test_scope_of_file_not_listed_deeper_returns_ancestor_scope() {
+        let root = scope(Ecosystem::Node, "", &["tsconfig.json"]);
+        let mut package = scope(Ecosystem::Node, "pkg", &["pkg/tsconfig.json"]);
+        package.membership = Membership::Listed(strings(&["pkg/src/a.ts"]));
+        let facts = WorkspaceFacts::new(vec![root, package], Vec::new()).unwrap();
+        assert_eq!(
+            facts.scope_of("pkg/src/a.ts", Ecosystem::Node),
+            ScopeMatch::Unique(ScopeId(1))
+        );
+        assert_eq!(
+            facts.scope_of("pkg/scripts/b.ts", Ecosystem::Node),
+            ScopeMatch::Unique(ScopeId(0))
+        );
+    }
+
+    #[test]
+    fn test_admits_listed_membership_returns_listed_only() {
+        let listed = Membership::Listed(strings(&["a/x.ts", "a/y.ts"]));
+        assert!(listed.admits("a/y.ts"));
+        assert!(!listed.admits("a/z.ts"));
+        assert!(Membership::Subtree.admits("anything.ts"));
     }
 
     #[test]
@@ -1027,6 +1340,19 @@ mod tests {
             facts.config_ecosystem("tsconfig.base.json"),
             Some(Ecosystem::Node)
         );
+        assert_eq!(
+            facts.config_ecosystem("web/webpack.config.ts"),
+            Some(Ecosystem::Node)
+        );
+    }
+
+    #[test]
+    fn test_config_ecosystem_missing_extends_target_returns_node() {
+        let facts = fixture();
+        assert_eq!(
+            facts.config_ecosystem("config/base.json"),
+            Some(Ecosystem::Node)
+        );
     }
 
     #[test]
@@ -1077,6 +1403,18 @@ mod tests {
     }
 
     #[test]
+    fn test_invalidated_by_missing_extends_target_appears_returns_reader() {
+        let facts = fixture();
+        assert_eq!(
+            facts.invalidated_by("config/base.json"),
+            Invalidation {
+                scopes: vec![ScopeId(3)],
+                rescoped: None,
+            }
+        );
+    }
+
+    #[test]
     fn test_invalidated_by_added_root_manifest_returns_enclosing_and_subtree() {
         let facts = fixture();
         assert_eq!(
@@ -1086,6 +1424,21 @@ mod tests {
                 rescoped: Some(RescopedSubtree {
                     ecosystem: Ecosystem::Node,
                     dir: "packages/b".to_string()
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn test_invalidated_by_project_beside_projects_returns_every_project_at_root() {
+        let facts = two_projects(Membership::Subtree, Membership::Subtree);
+        assert_eq!(
+            facts.invalidated_by("svc/Bench.csproj"),
+            Invalidation {
+                scopes: vec![ScopeId(0), ScopeId(1)],
+                rescoped: Some(RescopedSubtree {
+                    ecosystem: Ecosystem::DotNet,
+                    dir: "svc".to_string()
                 }),
             }
         );
@@ -1135,7 +1488,9 @@ mod tests {
 
     #[test]
     fn test_rkyv_roundtrip_fixture_returns_equal_table() {
-        let facts = fixture();
+        let mut scopes = fixture_scopes();
+        scopes[3].membership = Membership::Listed(strings(&["packages/a/src/util.ts"]));
+        let facts = WorkspaceFacts::new(scopes, fixture_names()).unwrap();
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&facts).unwrap();
         let archived = rkyv::access::<ArchivedWorkspaceFacts, rkyv::rancor::Error>(&bytes).unwrap();
         let back = rkyv::deserialize::<WorkspaceFacts, rkyv::rancor::Error>(archived).unwrap();
