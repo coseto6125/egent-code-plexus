@@ -118,6 +118,7 @@ pub fn run(args: DoctorArgs) -> Result<(), EcpError> {
     }
     if want(CheckTarget::Config) {
         results.extend(checks::config::check());
+        results.extend(checks::git_hook::check());
     }
     if want(CheckTarget::Registry) {
         results.extend(checks::registry::check(fix));

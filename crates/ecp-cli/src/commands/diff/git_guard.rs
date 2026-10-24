@@ -10,8 +10,12 @@
 //! `Drop`: the temp dir and one prunable `.git/worktrees/<name>` entry stay,
 //! and the user's tree is still untouched.
 //!
-//! The `worktree add` writes files, so it carries `safe_exec::filter_overrides`:
-//! content conversion is what runs a repository's own filter driver.
+//! Content conversion is what runs a repository's own filter driver, so the
+//! tree is written by a `reset --hard` that carries `safe_exec::filter_overrides`
+//! read *inside* the new worktree. `worktree add` only registers it
+//! (`--no-checkout`): its own checkout runs under the new worktree's config,
+//! where an `includeIf "gitdir:**/worktrees/**"` section can define a driver
+//! that the main worktree's config never shows.
 
 use crate::git::safe_exec;
 use ecp_core::EcpError;
@@ -30,7 +34,7 @@ pub struct BaselineCheckout {
 
 impl BaselineCheckout {
     pub fn create(repo_dir: &Path, target_sha: &str) -> Result<Self, EcpError> {
-        let filter_overrides = safe_exec::filter_overrides(repo_dir);
+        let main_overrides = safe_exec::filter_overrides(repo_dir);
         let scratch = tempfile::Builder::new()
             .prefix("ecp-diff-baseline-")
             .tempdir()
@@ -38,26 +42,34 @@ impl BaselineCheckout {
         let checkout_root = scratch.path().join("checkout");
         let prefix = show_prefix(repo_dir)?;
 
-        let out = safe_exec::git_with_overrides(repo_dir, &filter_overrides)
-            .args(["worktree", "add", "--detach"])
-            .arg(&checkout_root)
-            .arg(target_sha)
-            .output()
-            .map_err(|e| EcpError::Output(format!("git worktree add failed to spawn: {e}")))?;
-        if !out.status.success() {
-            return Err(EcpError::Output(format!(
-                "git worktree add {target_sha} failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
-        }
-
-        Ok(Self {
+        run_git(
+            safe_exec::git_with_overrides(repo_dir, &main_overrides)
+                .args(["worktree", "add", "--no-checkout", "--detach"])
+                .arg(&checkout_root)
+                .arg(target_sha),
+            &format!("git worktree add {target_sha}"),
+        )?;
+        // Built before the reset, so a failed reset still removes the
+        // registered worktree on drop.
+        let mut checkout = Self {
             repo_dir: repo_dir.to_path_buf(),
             checkout_root,
             prefix,
             scratch,
-            filter_overrides,
-        })
+            filter_overrides: main_overrides,
+        };
+        checkout
+            .filter_overrides
+            .extend(safe_exec::filter_overrides(&checkout.checkout_root));
+        checkout.filter_overrides.sort_unstable();
+        checkout.filter_overrides.dedup();
+
+        run_git(
+            safe_exec::git_with_overrides(&checkout.checkout_root, &checkout.filter_overrides)
+                .args(["reset", "--hard", "-q", "--no-recurse-submodules"]),
+            "git reset --hard in the baseline worktree",
+        )?;
+        Ok(checkout)
     }
 
     /// Directory to index: the baseline counterpart of the user's `repo_dir`.
@@ -88,6 +100,19 @@ impl Drop for BaselineCheckout {
     }
 }
 
+fn run_git(cmd: &mut std::process::Command, what: &str) -> Result<(), EcpError> {
+    let out = cmd
+        .output()
+        .map_err(|e| EcpError::Output(format!("{what} failed to spawn: {e}")))?;
+    if !out.status.success() {
+        return Err(EcpError::Output(format!(
+            "{what} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
 fn show_prefix(repo_dir: &Path) -> Result<PathBuf, EcpError> {
     let out = safe_exec::git()
         .args(["rev-parse", "--show-prefix"])
@@ -100,7 +125,25 @@ fn show_prefix(repo_dir: &Path) -> Result<PathBuf, EcpError> {
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
-    Ok(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+    // git prints the prefix verbatim plus one newline. A directory name may
+    // begin with a space or hold bytes that are not UTF-8, so only that
+    // newline comes off.
+    let mut prefix = out.stdout;
+    if prefix.last() == Some(&b'\n') {
+        prefix.pop();
+    }
+    Ok(path_from_git_bytes(prefix))
+}
+
+#[cfg(unix)]
+fn path_from_git_bytes(bytes: Vec<u8>) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    PathBuf::from(std::ffi::OsString::from_vec(bytes))
+}
+
+#[cfg(not(unix))]
+fn path_from_git_bytes(bytes: Vec<u8>) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[cfg(test)]
@@ -183,6 +226,7 @@ mod tests {
         let bogus = "0123456789abcdef0123456789abcdef01234567";
         assert!(BaselineCheckout::create(dir.path(), bogus).is_err());
         assert_eq!(snapshot(dir.path()), before);
+        assert_eq!(git(dir.path(), &["worktree", "list"]).lines().count(), 1);
     }
 
     #[test]
@@ -215,5 +259,29 @@ mod tests {
         // Untracked in the user's tree, absent from the baseline checkout.
         let checkout = BaselineCheckout::create(&sub, &baseline).unwrap();
         assert!(checkout.path().ends_with("checkout/sub"));
+    }
+
+    #[test]
+    fn test_show_prefix_leading_space_directory_keeps_the_space() {
+        let (dir, _) = dirty_repo();
+        let sub = dir.path().join(" src");
+        std::fs::create_dir(&sub).unwrap();
+        assert_eq!(show_prefix(&sub).unwrap(), PathBuf::from(" src/"));
+    }
+
+    #[test]
+    fn test_create_from_leading_space_directory_indexes_that_baseline_directory() {
+        let (dir, _) = dirty_repo();
+        let sub = dir.path().join(" src");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("s.txt"), "in space dir\n").unwrap();
+        git(dir.path(), &["add", " src/s.txt"]);
+        git(dir.path(), &["commit", "-qm", "space dir"]);
+        let head = git(dir.path(), &["rev-parse", "HEAD"]).trim().to_string();
+        let checkout = BaselineCheckout::create(&sub, &head).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(checkout.path().join("s.txt")).unwrap(),
+            "in space dir\n"
+        );
     }
 }

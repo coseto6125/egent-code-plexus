@@ -1,5 +1,6 @@
 pub(super) mod config;
 pub(super) mod coverage;
+pub(super) mod git_hook;
 pub(super) mod host;
 pub(super) mod index;
 pub(crate) mod install_source;

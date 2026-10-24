@@ -19,14 +19,14 @@ use std::time::{Duration, Instant};
 ///   scanned repository's `.git/hooks/post-checkout` (and the rest) cannot run
 ///   during ecp's own bookkeeping. This one needs no config at all from the
 ///   attacker: an executable dropped in `.git/hooks/` is enough, and
-///   `ecp diff --baseline` checks out and stashes on the user's behalf.
+///   `ecp diff --baseline` adds a worktree and checks a commit out into it.
 ///
 /// Three execution vectors are not covered by these flags, because the
 /// program's name comes from `.gitattributes` rather than from config: an
 /// external diff driver, a textconv driver, and a filter driver. Diff-family
 /// callers pass [`DIFF_HARDENING`] for the first two. Commands that convert
-/// worktree content — `checkout`, `stash`, `archive` — pass the overrides from
-/// [`filter_overrides`] for the third.
+/// worktree content — `checkout`, `reset --hard`, `stash`, `archive` — pass the
+/// overrides from [`filter_overrides`] for the third.
 ///
 /// `-c diff.external=` is deliberately NOT set here — git treats the empty
 /// value as a command to run and dies with `cannot run : No such file or
@@ -66,11 +66,17 @@ pub const DIFF_HARDENING: [&str; 2] = ["--no-ext-diff", "--no-textconv"];
 /// `-c` settings that neutralise every filter driver visible to git in
 /// `repo_dir`. Pair with [`git_with_overrides`].
 ///
-/// `checkout`, `stash` and `archive` all convert content, so a `.gitattributes`
-/// line naming `filter=<driver>` runs that driver's program. `core.hooksPath`
-/// does not touch it, none of the three commands has a `--no-filters`, and the
-/// driver name lives in the repository's own attributes file — so the names
-/// have to be read out of the config before they can be overridden.
+/// `checkout`, `reset --hard`, `stash` and `archive` all convert content, so a
+/// `.gitattributes` line naming `filter=<driver>` runs that driver's program.
+/// `core.hooksPath` does not touch it, none of these commands has a
+/// `--no-filters`, and the driver name lives in the repository's own
+/// attributes file — so the names have to be read out of the config before
+/// they can be overridden.
+///
+/// Call it with the directory the converting command runs in. The config is
+/// read as git sees it there, and a linked worktree can see drivers its main
+/// worktree cannot: an `includeIf "gitdir:**/worktrees/**"` section applies
+/// only inside the linked one.
 ///
 /// The enumeration deliberately asks for the *effective* config rather than a
 /// scope. Scoping it to `--local` looked tighter and was leaky: a driver in

@@ -161,7 +161,7 @@ fn repo_supplied_hooks_do_not_run() {
     repo_with_two_commits(&repo);
 
     // No config needed for this one: an executable in `.git/hooks/` is the
-    // whole attack, and ecp checks out and stashes on the user's behalf.
+    // whole attack, and `ecp diff` adds a worktree and checks a commit out.
     let marker = tmp.path().join("hook-ran");
     let hook = repo.join(".git/hooks/post-checkout");
     payload_script(&hook, &marker);
@@ -265,14 +265,23 @@ fn review_rejects_an_option_shaped_since_even_when_files_are_given() {
 }
 
 /// A filter driver is the third way a scanned repository names a program for
-/// git to run, and the only one that fires on the `git worktree add` that
-/// `ecp diff` uses to check out its baseline. `core.hooksPath=/dev/null` does
-/// not touch it, and `worktree add` has no `--no-filters`.
+/// git to run, and the only one that fires when `ecp diff` writes its baseline
+/// worktree. `core.hooksPath=/dev/null` does not touch it, and neither
+/// `worktree add` nor `reset --hard` has a `--no-filters`.
 ///
 /// Run once per way a repository can place the driver, because the first fix
-/// enumerated `--config --local` and two of these three are invisible there:
-/// `.git/config.worktree` needs `extensions.worktreeConfig`, and `include.path`
-/// needs nothing at all. Both executed on checkout when measured.
+/// enumerated `--config --local` and two of these are invisible there:
+/// `.git/config.worktree` needs `extensions.worktreeConfig` (and git copies it
+/// into a new worktree), and `include.path` needs nothing at all. Both executed
+/// on checkout when measured. `include-if-worktree` defines the driver only in
+/// an `includeIf "gitdir:**/worktrees/**"` section, which applies inside the
+/// new worktree and is invisible from the main one, so drivers enumerated in
+/// the main worktree miss it.
+///
+/// The baseline is the commit that carries the `.gitattributes` naming the
+/// filter: a baseline without it never reaches a filter, and the test would
+/// pass for an unguarded checkout. The control step proves the attack fires on
+/// this git before the guarded checkout runs.
 ///
 /// `process` is set alongside `smudge` and `clean` on purpose: it takes
 /// precedence, so a fix covering only the other two leaves every case red.
@@ -286,7 +295,12 @@ fn review_rejects_an_option_shaped_since_even_when_files_are_given() {
 #[cfg(unix)]
 #[test]
 fn repo_defined_filter_drivers_do_not_run_during_baseline_checkout() {
-    for placement in ["local", "worktree-config", "include-path"] {
+    for placement in [
+        "local",
+        "worktree-config",
+        "include-path",
+        "include-if-worktree",
+    ] {
         assert_filter_placement_is_neutralised(placement);
     }
 }
@@ -326,6 +340,9 @@ fn assert_filter_placement_is_neutralised(placement: &str) {
         "filter.evil.clean",
         "filter.evil.process",
     ];
+    let driver_section = format!(
+        "[filter \"evil\"]\n\tsmudge = {driver}\n\tclean = {driver}\n\tprocess = {driver}\n"
+    );
     match placement {
         "local" => {
             for k in keys {
@@ -339,22 +356,27 @@ fn assert_filter_placement_is_neutralised(placement: &str) {
             }
         }
         "include-path" => {
-            let extra = repo.join(".git/extra.cfg");
-            fs::write(
-                &extra,
-                format!(
-                    "[filter \"evil\"]\n\tsmudge = {driver}\n\tclean = {driver}\n\tprocess = {driver}\n"
-                ),
-            )
-            .unwrap();
+            fs::write(repo.join(".git/extra.cfg"), &driver_section).unwrap();
             git(&repo, &["config", "include.path", "./extra.cfg"]);
+        }
+        "include-if-worktree" => {
+            let extra = repo.join(".git/linked-only.cfg");
+            fs::write(&extra, &driver_section).unwrap();
+            git(
+                &repo,
+                &[
+                    "config",
+                    "includeIf.gitdir:**/worktrees/**.path",
+                    extra.to_str().unwrap(),
+                ],
+            );
         }
         other => panic!("unknown placement {other}"),
     }
 
     let base = String::from_utf8(
         Command::new("git")
-            .args(["rev-parse", "HEAD~1"])
+            .args(["rev-parse", "HEAD"])
             .current_dir(&repo)
             .output()
             .unwrap()
@@ -363,6 +385,31 @@ fn assert_filter_placement_is_neutralised(placement: &str) {
     .unwrap()
     .trim()
     .to_string();
+
+    // Control: a plain `worktree add` of the same commit runs the driver.
+    // Without this, a git that never reaches the driver for this placement
+    // turns every assertion below into a pass that proves nothing.
+    let control = tmp.path().join("control");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            control.to_str().unwrap(),
+            &base,
+        ],
+    );
+    assert!(
+        marker.exists(),
+        "[{placement}] control: an unguarded checkout of the baseline did not run the driver"
+    );
+    git(
+        &repo,
+        &["worktree", "remove", "--force", control.to_str().unwrap()],
+    );
+    fs::remove_file(&marker).unwrap();
 
     // Left dirty to prove the baseline checkout never touches the user's tree.
     fs::write(repo.join("f.txt"), "dirty\n").unwrap();
