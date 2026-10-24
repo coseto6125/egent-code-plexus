@@ -146,8 +146,8 @@ pub enum IndexNeed<'a> {
     /// The staleness probe underneath is HEAD-relative — it compares the
     /// sidecar against `git_head_sha` and walks mtimes — so this does **not**
     /// verify that HEAD is already the requested commit. Callers passing
-    /// `Some(sha)` are expected to hold a checkout guard, as `diff` does with
-    /// `GitGuard`.
+    /// `Some(sha)` must point it at a checkout of that commit, as `diff` does
+    /// with its `BaselineCheckout` worktree.
     ExactSha(Option<&'a str>),
 }
 

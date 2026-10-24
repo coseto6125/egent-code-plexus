@@ -21,17 +21,6 @@ pub enum OutputFormat {
     Text,
 }
 
-impl OutputFormat {
-    pub fn parse(s: Option<&str>) -> Self {
-        match s {
-            Some("json") => OutputFormat::Json,
-            Some("toon") => OutputFormat::Toon,
-            Some("text") => OutputFormat::Text,
-            _ => OutputFormat::Llm, // default
-        }
-    }
-}
-
 /// Format `value` per `format` and return the rendered string. Does NOT
 /// write to stdout — callers decide. Used by CLI `emit()` (which prints)
 /// and by MCP daemon-mode dispatch (which wraps the string in
@@ -511,15 +500,6 @@ mod tests {
         assert_eq!(v["impact"][0]["name"], json!("<anonymous>"));
         assert_eq!(v["impact"][1]["name"], json!("real_fn"));
         assert_eq!(v["impact"][2]["name"], json!("<anonymous>"));
-    }
-
-    #[test]
-    fn output_format_parse_routes_each_flag() {
-        assert_eq!(OutputFormat::parse(None), OutputFormat::Llm);
-        assert_eq!(OutputFormat::parse(Some("")), OutputFormat::Llm); // unknown falls through
-        assert_eq!(OutputFormat::parse(Some("toon")), OutputFormat::Toon);
-        assert_eq!(OutputFormat::parse(Some("json")), OutputFormat::Json);
-        assert_eq!(OutputFormat::parse(Some("text")), OutputFormat::Text);
     }
 
     #[test]

@@ -125,8 +125,8 @@ impl TantivyEngine {
     /// Returns `Err` instead of panicking so the caller can degrade
     /// gracefully — `graph.bin` is the primary artifact and exact-name
     /// resolution still works when BM25 build fails (writer lock held
-    /// by zombie, prior commit corrupt, FS full). The next `ecp analyze`
-    /// rebuilds from scratch via the `remove_dir_all` step below.
+    /// by zombie, prior commit corrupt, FS full). The next build sweeps the
+    /// leftover staging dir and builds the index again.
     pub fn build_index(index_dir: &Path, graph: &ZeroCopyGraph) -> Result<(), String> {
         let final_dir = index_dir.join("tantivy");
         // Build beside the final dir and rename in after `commit()`: a reader
@@ -378,8 +378,8 @@ mod tests {
     fn test_build_index_retired_parent_creates_nothing() {
         let tmp = TempDir::new().unwrap();
         let published = tmp.path().join("commit__x");
-        fs::create_dir(&published).unwrap();
-        fs::rename(&published, tmp.path().join("commit__x.dead.1.2.3")).unwrap();
+        std::fs::create_dir(&published).unwrap();
+        std::fs::rename(&published, tmp.path().join("commit__x.dead.1.2.3")).unwrap();
         let graph = build_graph_with_names(&["parseConfig"]);
 
         assert!(super::TantivyEngine::build_index(&published, &graph).is_err());

@@ -935,8 +935,11 @@ pub(crate) fn parent_sha(worktree: &Path, sha: &str) -> io::Result<String> {
 /// never read from the published dir. Every walk error fails the publish; a
 /// file left unsynced would otherwise be published as if it were durable.
 pub(crate) fn sync_tree(dir: &Path, publish: &dyn Publish) -> io::Result<()> {
+    // Pre-order, not `contents_first`: with `contents_first` walkdir yields a
+    // directory's children before `filter_entry` sees the directory, so `_src`
+    // would still be walked. Reversed pre-order puts children before parents.
+    let mut dirs = Vec::new();
     for entry in walkdir::WalkDir::new(dir)
-        .contents_first(true)
         .into_iter()
         .filter_entry(|entry| !(entry.depth() == 1 && entry.file_name() == "_src"))
     {
@@ -945,8 +948,11 @@ pub(crate) fn sync_tree(dir: &Path, publish: &dyn Publish) -> io::Result<()> {
         if file_type.is_file() {
             publish.sync_file(entry.path())?;
         } else if file_type.is_dir() {
-            publish.sync_dir(entry.path())?;
+            dirs.push(entry.into_path());
         }
+    }
+    for path in dirs.iter().rev() {
+        publish.sync_dir(path)?;
     }
     Ok(())
 }
@@ -1776,7 +1782,7 @@ mod tests {
 
 /// `git_archive_to` is the widest path a scanned repository's filter driver
 /// can reach, so it gets its own guard rather than relying on the one over
-/// `GitGuard`. `process` is set alongside `smudge` on purpose: it takes
+/// `BaselineCheckout`. `process` is set alongside `smudge` on purpose: it takes
 /// precedence, so a fix covering only `smudge` and `clean` leaves this red.
 #[cfg(all(test, unix))]
 mod archive_filter_tests {
