@@ -307,7 +307,28 @@ In `crates/ecp-cli/src/build/orchestrator.rs` tests:
 | `test_worktree_clean_and_head_matches_untracked_csv_returns_false` | An "other" file still makes the tree not clean for the build. |
 | `test_worktree_clean_and_head_matches_malformed_status_returns_false` | Only reachable with a fake status; else note it as infeasible. |
 
-Latency: lane 0a's dirty scenario in `scripts/benchmark/benchmark_ecp.py`, plus 12,000 untracked `.csv` files on the 10k-file corpus of freshness F6. Pass criterion before the run: the later-query median is within 10% of the clean query.
+Latency: lane 0a's dirty scenario in `scripts/benchmark/benchmark_ecp.py`, plus 12,000 untracked `.csv` files on the 10k-file corpus of freshness F6.
+
+The first pass criterion failed, and the criterion changed after review. The record:
+
+| Item | Value |
+|---|---|
+| First criterion, fixed before the run | The later-query median is within 10% of the clean query. |
+| Run | This repo cloned locally (2,393 tracked files), `ecp find parse_sha`, 30 interleaved runs, a separate `ECP_HOME` per binary, median. |
+| 0.16.4 | clean 12.3 ms, 12k `.csv` 184.2 ms |
+| C3 slice | clean 15.9 ms, 12k `.csv` 28.4 ms (ratio 1.79: fail) |
+| Cause | `git status --porcelain -z -uall` lists 12,000 paths: 17.8 ms, against 9.6 ms for `-unormal`. The classification makes no syscall. |
+| Clean regression | +3.6 ms from the filter-driver guard's `git config` read (FU-2026-10-25-b39d68734257). |
+
+Current criterion: on the named corpus, the later-query median is under 30 ms, and ecp does no per-path filesystem operation for an "other" path. Re-verify with a fixed binary SHA, a separate `ECP_HOME` per binary kept across runs, and the first query (cache build) reported apart from the later queries. Track the clean regression and the filter-guard cost apart from this criterion.
+
+Rejected alternatives:
+
+| Option | Failure |
+|---|---|
+| `-unormal` | A new untracked directory prints as `dir/` only, so its `.py` files never reach the overlay. A walk of our own must reproduce the ignore rules and brings back the per-path cost. |
+| `core.untrackedCache` | Already on: `private_index.rs:339` reuses the private index copy while the index and config identity hold. The cache does not remove the cost of printing 12,000 paths. |
+| `-uno`, or ignoring `.csv` | `-uno` misses a new source file. Ignoring `.csv` changes the user's ignore semantics. |
 
 ## Open points
 
