@@ -319,7 +319,7 @@ Each fix stands alone. The ids come from the area map; the size is the reviewer'
 | agent A7 | Remove the git hook calls to `rename-branch` and `prune`. | `crates/ecp-cli/src/commands/hook_watcher.rs:55-60` | S |
 | agent A8 | Show the update notice to the human channel, not to `additionalContext`. | `crates/ecp-cli/src/commands/hook/user_prompt_submit.rs` | S |
 | agent A10 | Remove the five stub hosts from the menu. | `crates/ecp-cli/src/admin/host_integration/mcp/mod.rs:17-116` | S |
-| freshness F6 | Discard providerless paths straight after the porcelain parse, before any per-path syscall. | `crates/ecp-cli/src/auto_ensure.rs:443-451,631-665` | S |
+| freshness F6 | Moved to lane F: classify porcelain paths (contract C3) and skip per-path syscalls only for paths that are neither source nor resolution config. A filter on "has a provider" would drop `tsconfig.json`, `go.mod` and `Cargo.toml` changes. | `crates/ecp-cli/src/auto_ensure.rs:443-451,631-665` | S |
 | freshness F10 | Write a failed marker for warm-attach and behind-head rebuilds. | `crates/ecp-cli/src/auto_ensure.rs:928-952` | S |
 | types-session A5 | Match `Interface` in the Kotlin enclosing-class lookup, after a Kotlin query confirms the defect. | `crates/ecp-analyzer/src/kotlin/receiver_types.rs:477` | S |
 | index F11 | Make `ecp admin index` check the builder fingerprint, like `build_l2`. | `crates/ecp-cli/src/commands/admin/index.rs:376-394,481-495` | S |
@@ -397,7 +397,7 @@ Not a repo change: the project instruction file `.claude/CLAUDE.md` is gitignore
 | `crates/ecp-core/src/file_category.rs` (`determine_category`, `is_test_path`, `pick_global`) | One classifier and one Tier-3 barrier shared by index and overlay. Only the `Language` table is a problem. |
 | `crates/ecp-core/src/registry/lock.rs`, `io.rs`; `uid.rs`; `pool.rs` | Bounded wait with a dead-holder probe; atomic writers; zero-allocation hash. |
 | `crates/ecp-core/src/graph_fixture.rs` (`GraphFixture`) | 32 CLI test files use it. The model for tests T-3. |
-| `crates/ecp-cli/tests/common/parity.rs` (`CallEdge` identity) | The correct comparison key. Make it the only harness (tests T-1). |
+| `crates/ecp-cli/tests/common/parity.rs` (`CallEdge` identity) | Its identity fields are the right base for the strict harness (tests T-1), but it dedups edges (`:88`, `:178`); the strict harness compares multisets. |
 | `KNOWN_DIVERGENCES` pattern in the overlay parity tests | A known gap is asserted to still differ, so closing it turns the test red. |
 | `*_support` helper dirs and black-box CLI tests | Shared builders assert on resolved edges. Black-box tests assert the agent-visible output. |
 | `crates/ecp-analyzer/src/parse_budget.rs`, `preproc_fallback.rs` | Every provider uses the budget. The fallback documents its precision limits. |
