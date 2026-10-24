@@ -21,8 +21,8 @@ A dirty path is relative to the worktree top. It follows the path rule of C2: `/
 | `RepoPath` | value | One path in the path rule. |
 | `NotRepoRelative` | error | A path that breaks the path rule. |
 | `PathClass` | stored value (serde) | The class of one path: a set of two flags, `source` and `resolution_config`. The empty set is "other". |
-| `PathChange` | stored enum (serde) | The state of one path against the base commit: `added`, `modified`, `deleted`. |
-| `DirtyEvent<P>` | record | One change: `Added(P)`, `Modified(P)`, `Deleted(P)`, `Renamed { from: P, to: P }`. `P` is `RepoPath` before classification, `ClassifiedPath` after it. |
+| `PathChange` | stored enum (serde) | The state of one path against the base commit: `added`, `modified`, `deleted`. `unmerged` exists only before the reader's stat; a writer stores the confirmed change. |
+| `DirtyEvent<P>` | record | One change: `Added(P)`, `Modified(P)`, `Deleted(P)`, `Renamed { from: P, to: P }`, `Unmerged(P)`. `P` is `RepoPath` before classification, `ClassifiedPath` after it. |
 | `ClassifiedPath` | value | A `RepoPath` with its `PathClass`. |
 | `DirtySet<P>` | collection | The dirty set of one worktree, plus the entries it could not represent. |
 | `SkippedEntry`, `SkipReason` | record, enum | A porcelain path that is not UTF-8 or breaks the path rule. |
@@ -36,11 +36,12 @@ The base commit is HEAD at the time of `git status`.
 | Variant | Invariant | What a reader does |
 |---|---|---|
 | `Added(p)` | The worktree holds `p`. Porcelain proves that HEAD does not. | Parse `p`. |
-| `Modified(p)` | The worktree holds `p`. HEAD holds it, or porcelain cannot tell (an unmerged entry). | Parse `p`. Its nodes replace the base nodes of `p`, if any. |
-| `Deleted(p)` | The worktree lacks `p`. HEAD holds it, or porcelain cannot tell. | Tombstone the whole file: drop every base node of `p` and every base edge that starts or ends there. Never "keep base". |
+| `Modified(p)` | The worktree holds `p`. HEAD holds it. | Parse `p`. Its nodes replace the base nodes of `p`. |
+| `Deleted(p)` | The worktree lacks `p`. HEAD holds it. | Tombstone the whole file: drop every base node of `p` and every base edge that starts or ends there. Never "keep base". |
 | `Renamed { from, to }` | `from` as in `Deleted`, `to` as in `Added`, `from != to`, and git paired them. | Tombstone `from`, parse `to`. |
+| `Unmerged(p)` | An unmerged entry (`U` in a column, `AA`, `DD`). Its letters describe index stages, not the file: a `UU` file can be deleted by hand, and a `DD` path can be recreated without staging. HEAD and the worktree are both unknown. | Stat `p` once, then `confirm(exists)`: present gives `Modified(p)`, absent gives `Deleted(p)`. Read no half before that. |
 
-`worktree_path()` gives the half to parse (`Added`, `Modified`, `Renamed.to`). `removed_path()` gives the half to tombstone (`Deleted`, `Renamed.from`). `halves()` gives each path with its own `PathChange`: a rename gives `(Deleted, from)`, then `(Added, to)`.
+`worktree_path()` gives the half to parse (`Added`, `Modified`, `Renamed.to`). `removed_path()` gives the half to tombstone (`Deleted`, `Renamed.from`). Both return `None` for `Unmerged` until `confirm` resolves it. `halves()` gives each path with its own `PathChange`: a rename gives `(Deleted, from)`, then `(Added, to)`.
 
 ### `PathClass`
 
@@ -69,27 +70,30 @@ Rules:
 
 ### `DirtySet::from_porcelain_z`
 
-The input is the stdout of `git status --porcelain -z --untracked-files=all` (format v1). The parser reads entries in order. A rename or copy entry (`R` or `C` in either column) is followed by one source segment. Each entry adds two facts to its path: what it says about HEAD, and whether it proves that the worktree holds the path.
+The input is the stdout of `git status --porcelain -z --untracked-files=all` (format v1). The parser reads entries in order. A rename or copy entry (`R` or `C` in either column) is followed by one source segment. Each entry adds two facts to its path: what it says about HEAD, and what it says about the worktree file (present, absent or unknown).
 
-| Status `XY` | HEAD | Worktree holds the path |
+| Status `XY` | HEAD | Worktree file |
 |---|---|---|
-| `??` | lacks | yes |
+| `??` | lacks | present |
 | `!!` | no record | no record |
-| unmerged (`U` in a column, `AA`, `DD`) | unknown | yes, except `DD` |
-| `R` or `C` in a column: destination | lacks | yes, unless `Y` is `D` |
-| `R` in a column: source | holds | no |
+| unmerged (`U` in a column, `AA`, `DD`) | unknown | unknown |
+| `R` or `C` in a column: destination | lacks | present, unless `Y` is `D` |
+| `R` in a column: source | holds | absent |
 | `C` in a column: source | no record | no record |
-| `A` in `X` (other cases) | lacks | yes, unless `Y` is `D` |
-| other (`M`, `T`, `D`, space in `X`) | holds | yes, unless `X` or `Y` is `D` |
+| `A` in `X` (other cases) | lacks | present, unless `Y` is `D` |
+| other (`M`, `T`, `D`, space in `X`) | holds | present, unless `X` or `Y` is `D` |
 
-Facts merge per path. "Holds" beats "lacks" beats "unknown", and any entry that proves presence wins. `D  a` followed by `?? a` (after `git rm --cached a`) is therefore `Modified`.
+Facts merge per path. For HEAD, "holds" beats "lacks" beats "unknown". For the worktree, "present" beats "absent" beats "unknown". `D  a` followed by `?? a` (after `git rm --cached a`) is therefore `Modified`.
 
-| HEAD | Worktree holds | Record |
+| HEAD | Worktree file | Record |
 |---|---|---|
-| lacks | yes | `Added` |
-| holds or unknown | yes | `Modified` |
-| holds or unknown | no | `Deleted` |
-| lacks | no | none (`AD`: added, then deleted) |
+| any | unknown | `Unmerged` |
+| lacks | present | `Added` |
+| holds or unknown | present | `Modified` |
+| holds or unknown | absent | `Deleted` |
+| lacks | absent | none (`AD`: added, then deleted) |
+
+Only an unmerged entry leaves the worktree unknown.
 
 A rename becomes `Renamed` only when its source is `Deleted` and its destination is `Added` after the merge. Otherwise its halves stay separate records: `RD` gives `Deleted(from)`, and a source recreated as untracked gives `Modified(from)` plus `Added(to)`.
 
@@ -137,6 +141,7 @@ Freshness F6 (`docs/specs/2026-10-25-architecture-review.md:163`) measured the r
 | `D  p` + `?? p` → `p` twice | `Modified(p)` once | one record per path |
 | `AD p` → `p` kept | no record | |
 | `C  to\0from` → `to` kept | `Added(to)` | none |
+| `UU p`, `AA p`, `DD p` and the other unmerged pairs → `p` kept; `reanalyze_files` parses it when it exists (`reanalyze.rs:203`) | `Unmerged(p)` | the reader's stat decides `Modified` or `Deleted`; today a missing file is dropped and its base nodes stay |
 | a rename source with a space at byte 2, such as `ab c.py` | the rename source | today reads it as an entry for `c.py` (`auto_ensure.rs:506-509`) |
 | a non-UTF-8 path → a lossy path that does not exist | `SkippedEntry { NotUtf8 }` | recorded, not guessed |
 | a path with `\` | `SkippedEntry { NotRepoRelative }` | today the manifest key replaces `\` with `/` (`auto_ensure.rs:630`), which names another file |
@@ -174,7 +179,7 @@ Must stop: treating "has a provider" as "is a change". `Cargo.toml` and `go.mod`
 
 ### Area 5: one read path (owner of the dirty-event flow)
 
-Reads: `DirtySet::from_porcelain_z` once per query, from the worktree top. Then `classify`, then `without_other` before any per-path syscall. `skipped` goes into the payload caveat. A `PorcelainError` makes the dirty set unknown, as a failed status does today (`auto_ensure.rs:427-429`).
+Reads: `DirtySet::from_porcelain_z` once per query, from the worktree top. Then `classify`, then `without_other` before any per-path syscall. Each remaining `Unmerged` path gets one stat and `confirm` before any other reader sees it. `skipped` goes into the payload caveat. A `PorcelainError` makes the dirty set unknown, as a failed status does today (`auto_ensure.rs:427-429`).
 
 Must stop:
 
@@ -213,12 +218,37 @@ Lane 0a's dirty-event fixtures (added, modified, deleted, renamed, unmerged, unt
 | Identifier | This contract slice | The C3 behaviour slice | The first slice that reads tombstones (area 5) |
 |---|---|---|---|
 | `GRAPH_FORMAT_VERSION` | none | none | none |
-| `BUILDER_FINGERPRINT` | none | none, when "source" keeps today's provider term (open point 2) | none |
-| L1 fragment encoding | none | none | none |
-| Dirty manifest | none | none (open point 1) | `DirtyEntry` gains `change: PathChange` (serde default `modified`) and `class: PathClass` (serde default source). A tombstone entry has no fragment bin. |
-| View cache key | none | none | `inputs_hash` must hash every tombstone path. Else a cached view survives a deletion. |
+| `BUILDER_FINGERPRINT` | none | none, when "source" keeps today's provider term (open point 2) | none: the new manifest namespace isolates the change (below) |
+| L1 fragment encoding | none | none | none: the bins keep the V5 encoding, in the new directory |
+| Dirty manifest | none | none (open point 1) | a new namespace: `<session>/l1/dirty_events.json`, versioned by `DIRTY_EVENTS_FORMAT = 1`, with bins in `<session>/l1/fragments/`. `dirty_files.json` and `graph_overlay/` are no longer read. |
+| View cache key | none | none | `VIEW_CACHE_FORMAT` bump, and `inputs_hash` hashes every tombstone path. Else a cached view survives a deletion. |
 
-Old manifests: `DirtyFiles` has no `deny_unknown_fields` (`overlay.rs:8-19`), so an older binary of the same fingerprint ignores the new fields. A tombstone entry needs a `format` that today's reader skips (`overlay_reader.rs:75-77` skips every format but V5). The area-5 slice proves the migration with a manifest that 0.16.4 wrote: `crates/ecp-cli/tests/stored_formats_prev_release.rs` already loads one (`DIRTY_FILES` `:50`, fixture `tests/fixtures/stored-by-0.16.4`).
+### Manifest isolation (the area-5 tombstone slice)
+
+A new field in today's `dirty_files.json` is not safe while an older binary of the same fingerprint can write the file. The older writer reads the whole manifest into its own `DirtyEntry`, which has no catch-all field (`ecp-core/src/session/overlay.rs:21-41`). It then writes the whole manifest back (`ecp-cli/src/session/overlay_writer.rs:362-377`). The unknown `change` and `class` fields are gone, and a new reader applies their defaults: a tombstone reads as `modified`, an "other" path reads as source. A format check that skips non-V5 entries (`overlay_reader.rs:75-77`) protects only the reader, not the data.
+
+| Option | Cost | Decision |
+|---|---|---|
+| Bump `BUILDER_FINGERPRINT` | Every repo pays a full L2 rebuild on upgrade (`auto_ensure.rs:202-209`), for a change to session state only. Two binaries of one fingerprint (two dev builds of one release) still share the file. | Reject. |
+| A new namespace: `<session>/l1/dirty_events.json` and `<session>/l1/fragments/` | Older binaries never open it: today's writer, reader and gate use `dirty_files.json` and `graph_overlay/` only (`overlay_writer.rs:362`, `overlay_reader.rs:63`, `auto_ensure.rs:1183`, `:1191`), and today's `admin gc` sweeps only `graph_overlay/` (`admin/gc.rs:544`, `:564`), so it cannot delete a bin that only the new manifest names. An older binary's peer watcher sees a new session as clean (`peer/watcher.rs:165`, `commands/peers.rs:238`). | Accept. |
+
+Rules of the new namespace:
+
+- `dirty_events.json` holds `format: u32`. The reader accepts only `DIRTY_EVENTS_FORMAT` (1). Any other value, or no value, makes every dirty file a re-parse. That is the gate's existing "any doubt re-parses" rule (`auto_ensure.rs:1149-1162`).
+- `change` and `class` are required fields with no serde default. There is no older data in the namespace to default for.
+- The manifest stores confirmed changes only: never `unmerged`.
+- A tombstone entry has a path, `change: deleted`, a class and no bin.
+- The new binary ignores `dirty_files.json` and `graph_overlay/`. Its `admin gc` sweeps both namespaces and retires the old one once it is idle.
+- Session promotion (`promotion.rs`) and the peer watcher move to the new namespace in the same slice.
+
+Tests of that slice, written before the run with their pass criterion:
+
+| Test | File | Pass criterion |
+|---|---|---|
+| `test_dirty_events_old_writer_manifest_beside_new_namespace_keeps_tombstone` | `crates/ecp-cli/tests/stored_formats_prev_release.rs` | A session holds the 0.16.4 `dirty_files.json` and `graph_overlay/` of the existing fixture (`:50`, `tests/fixtures/stored-by-0.16.4`), rewritten after the new binary wrote a `lib.rs` tombstone to `l1/`. `ecp find` of a `lib.rs` symbol answers `found: false`; the old manifest's `lib.rs` entry is never served. |
+| `test_dirty_events_missing_format_reparses_every_dirty_file` | `crates/ecp-cli/tests/overlay_view_cache.rs` | `REANALYZE_CALL_COUNT` covers every dirty file; no entry of that manifest is served. |
+| `test_sweep_stale_fragments_bin_named_only_by_new_namespace_survives` | `crates/ecp-cli/src/admin/gc.rs` tests | The bin is still on disk after the sweep. |
+| `test_overlay_view_tombstone_changes_view_cache_key` | `crates/ecp-cli/tests/overlay_view_cache.rs` | Two views, before and after `rm`, have different keys. |
 
 ## The C3 behaviour slice
 
@@ -232,7 +262,7 @@ Needs: C2 and C5 committed and reviewed (C2 `294320e3`, C5 `00bb6b82`).
 |---|---|
 | `ecp-cli/src/auto_ensure.rs` `git_fingerprint_shortcut` (`:405-457`) | Replace `parse_porcelain_paths` with `DirtySet::from_porcelain_z`. On `PorcelainError`, return `None` (the inconclusive branch). Classify with `FileRouter` and `facts = None`. Add the legacy source term (open point 2). Call `without_other`. Run `is_ecp_artifact` only on the remaining worktree halves. No event left gives `Ready`, as `:445-447` does. Print a count of `skipped` entries on stderr. |
 | `auto_ensure.rs` `EnsureResult::Stale` (`:121-125`) | `dirty_files` becomes `Option<DirtySet<ClassifiedPath>>`. |
-| `auto_ensure.rs` `ensure_fresh_with_rebuild` (`:614-631`) | Take the repo-relative paths from the set; drop the `strip_prefix`. The gate and `reanalyze_files` receive every **source** half: worktree halves and removed halves, as today's ` D` entries already reach them. Config-only halves stay in the set for areas 4 and 5, and do not reach `reanalyze_files`, which drops them today anyway (`reanalyze.rs:186-192`). Wrap the mtime-walk paths (`:617-621`) as `Modified` events through `from_events` and classify them the same way. |
+| `auto_ensure.rs` `ensure_fresh_with_rebuild` (`:614-631`) | Take the repo-relative paths from the set; drop the `strip_prefix`. The gate and `reanalyze_files` receive every **source** half: worktree halves and removed halves, as today's ` D` entries already reach them. Config-only halves stay in the set for areas 4 and 5, and do not reach `reanalyze_files`, which drops them today anyway (`reanalyze.rs:186-192`). An `Unmerged` source path reaches them as today's unmerged path does; the existence check in `reanalyze_files` (`reanalyze.rs:203`) is its one stat. The slice writes no tombstone for it. Wrap the mtime-walk paths (`:617-621`) as `Modified` events through `from_events` and classify them the same way. |
 | `ecp-cli/src/build/orchestrator.rs` `worktree_clean_and_head_matches` (`:787-821`) | Use `from_porcelain_z` with no classification. Any event or skipped entry that is not an ecp artifact means "not clean". A `PorcelainError` means "not clean". The build reads more than source (config, ignore files), so "other" must not count as clean here. |
 | `auto_ensure.rs:500-511`, `:1748-1767` | Delete `parse_porcelain_paths` and its two unit tests. The contract tests cover the parse. |
 
@@ -260,6 +290,7 @@ In `crates/ecp-cli/tests/auto_ensure.rs`, with a git repo and a HEAD sidecar, as
 | `test_ensure_index_modified_tsconfig_returns_source_and_config` | The class is a set. |
 | `test_ensure_index_git_mv_returns_renamed_both_halves` | `Renamed { from, to }`. |
 | `test_ensure_index_deleted_source_returns_deleted_event` | `Deleted(p)`, with no stat of `p`. |
+| `test_ensure_index_conflicted_file_deleted_by_hand_returns_unmerged` | A `UU` file removed with `rm` gives `Unmerged(p)`, not `Modified(p)`. |
 | `test_ensure_index_head_sha_sidecar_other_sha_graph_at_head_reports_untracked_stale` (`:279`) | Rewritten for the new `dirty_files` type; same assertion. |
 
 In the `auto_ensure.rs` unit tests, where `test_counters` is reachable:
@@ -282,10 +313,10 @@ Latency: lane 0a's dirty scenario in `scripts/benchmark/benchmark_ecp.py`, plus 
 
 | # | Decision | Options | Recommendation |
 |---|---|---|---|
-| 1 | When the dirty manifest gains the change and the class | (a) the C3 behaviour slice writes tombstone and config entries now; (b) the first area-5 slice that reads tombstones adds them, with the reader | (b). The plan's Stored formats row puts it in C3's slice, but F6 needs no stored change: each query classifies its own porcelain before the gate. Data that no reader reads cannot be tested for what the reader gets (repo `CLAUDE.md`, stored data). The serde types are ready. |
+| 1 | When the dirty manifest gains the change and the class | (a) the C3 behaviour slice writes tombstone and config entries now; (b) the first area-5 slice that reads tombstones adds them, with the reader | (b), in the new namespace of "Manifest isolation". F6 needs no stored change: each query classifies its own porcelain before the gate. Data that no reader reads cannot be tested for what the reader gets (repo `CLAUDE.md`, stored data). Writer and reader ship together, and the namespace keeps an older writer from stripping the fields. The plan's Stored formats row changes to match (replacement text in the C3 fix-round return). |
 | 2 | "Source" before area 6 | (a) C5 `Routed` only; (b) C5 `Routed` or `AnalyzerPipeline::provider_name_for_path` is `Some` | (b) in the C3 slice; area 6 deletes the second term. The two differ on the template paths only (C5 note, value mapping): C5 excludes `__brick__` and `{{…}}`, and today's overlay parses them. (b) keeps the overlay input set, so no fingerprint bump. |
-| 3 | Workspace table at the gate | (a) `facts = None`: names only; (b) map `graph.bin` before the gate and pass `WorkspaceFacts` | (a) until B's first round stores the table and area 5's read context maps the graph before the gate. Gap: a config file that only a scope lists and whose extension C5 does not route (test `test_classify_extends_target_without_facts_is_other`) is "other". Most extends targets are `.json`, which C5 routes, so they stay source. |
-| 4 | Unmerged entries | `Modified`, or a separate conflict kind | `Modified`: the worktree holds the file, and a reader parses it. `DD` is `Deleted`. |
+| 3 | Workspace table at the gate | (a) `facts = None`: names only; (b) map `graph.bin` before the gate and pass `WorkspaceFacts` | (a) only as a transition, in the C3 behaviour slice, while no consumer reads the config class. Gap: a config path that only a scope lists and whose extension C5 does not route is "other" (test `test_classify_extends_target_without_facts_is_other`). A missing `extends` target such as `build/x.custom` that appears is then dropped before any consumer sees it. So (b) is required before area 4 ships: from that slice on, classification reads the workspace facts (test `test_classify_missing_extends_target_with_facts_is_config`). |
+| 4 | Unmerged entries | (a) `Modified`, and `DD` as `Deleted`; (b) `Unmerged`, existence unknown, confirmed by one stat | (b). Git's unmerged `XY` describes the index stages, not the current file: a `UU` file can be deleted by hand after the conflict, and a `DD` path can be recreated and not staged. (a) would parse a missing file, or tombstone a file that exists. The reader stats the path once and calls `DirtyEvent::confirm`. An unmerged "other" path is dropped by `without_other` with no stat. Tests: `test_from_porcelain_z_unmerged_codes_return_unmerged`, `test_dirty_event_confirm_unmerged_file_present_returns_modified`, `test_dirty_event_confirm_unmerged_file_deleted_by_hand_returns_deleted`. |
 | 5 | Paths git prints that the path rule rejects (non-UTF-8; `\` on Unix) | lossy path, or skipped entry | Skipped entry, reported in the caveat. The lossy path names no file today. |
 | 6 | Index-scope files: `.gitignore`, `.ecpignore`, `[index] max_file_bytes` | a fourth class, or "other" | "Other". An edit to them changes the cold index's file set; the overlay ignores them today too. Area 3's snapshot owns them. |
 | 7 | The base of the delta | porcelain compares the worktree with HEAD; the overlay's base graph can be a warm-attached sibling or behind HEAD (`auto_ensure.rs:720`) | Area 5's read context applies tombstones only when the base graph is HEAD's, else it adds a caveat. Area 3 owns the build handle. |

@@ -1,7 +1,8 @@
 //! Contract C3: dirty event (`docs/specs/contracts/C3-dirty-event.md`).
 //!
 //! One record per changed path of a worktree against its base commit:
-//! added, modified, deleted, or renamed with both halves. Each path carries
+//! added, modified, deleted, renamed with both halves, or unmerged (existence
+//! unknown until the reader stats the file). Each path carries
 //! a class: source (contract C5 routes it), resolution config (contract C2
 //! names it), both, or neither ("other"). Only an event whose every path is
 //! "other" may skip the per-path syscalls of the freshness gate.
@@ -115,14 +116,16 @@ impl PathClass {
     }
 }
 
-/// The state of one path against the base commit. Stored in the dirty
-/// manifest by the C3 behaviour slice as `added`, `modified`, `deleted`.
+/// The state of one path against the base commit, stored as `added`,
+/// `modified`, `deleted`. `unmerged` exists only before the reader's stat:
+/// a writer stores the confirmed change ([`DirtyEvent::confirm`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PathChange {
     Added,
     Modified,
     Deleted,
+    Unmerged,
 }
 
 /// One record of the dirty set. `P` is [`RepoPath`] before classification
@@ -131,16 +134,21 @@ pub enum PathChange {
 pub enum DirtyEvent<P = RepoPath> {
     /// The worktree holds the path, and the base commit does not.
     Added(P),
-    /// The worktree holds the path. The base commit holds it too, or the
-    /// status cannot tell (an unmerged entry).
+    /// The worktree holds the path. The base commit holds it too.
     Modified(P),
-    /// The worktree lacks the path. The base commit holds it, or the status
-    /// cannot tell. A reader drops every base node and edge of the file: a
-    /// whole-file tombstone, never "keep base".
+    /// The worktree lacks the path. The base commit holds it. A reader
+    /// drops every base node and edge of the file: a whole-file tombstone,
+    /// never "keep base".
     Deleted(P),
     /// `from` as in `Deleted`, `to` as in `Added`, and git paired them.
     /// The two paths differ.
     Renamed { from: P, to: P },
+    /// An unmerged entry (`U` in a column, `AA`, `DD`). Its status letters
+    /// describe the index stages, not the file: a `UU` file can be deleted
+    /// by hand, a `DD` path recreated. The base commit and the worktree are
+    /// both unknown. The reader stats the path once and calls
+    /// [`DirtyEvent::confirm`] before it reads any half.
+    Unmerged(P),
 }
 
 impl<P> DirtyEvent<P> {
@@ -150,7 +158,7 @@ impl<P> DirtyEvent<P> {
         match self {
             Self::Added(path) | Self::Modified(path) => Some(path),
             Self::Renamed { to, .. } => Some(to),
-            Self::Deleted(_) => None,
+            Self::Deleted(_) | Self::Unmerged(_) => None,
         }
     }
 
@@ -159,7 +167,18 @@ impl<P> DirtyEvent<P> {
         match self {
             Self::Deleted(path) => Some(path),
             Self::Renamed { from, .. } => Some(from),
-            Self::Added(_) | Self::Modified(_) => None,
+            Self::Added(_) | Self::Modified(_) | Self::Unmerged(_) => None,
+        }
+    }
+
+    /// The event after the reader's stat of an `Unmerged` path: `Modified`
+    /// when the file exists, else `Deleted`. Every other variant is
+    /// returned unchanged, so `exists` is read only for `Unmerged`.
+    pub fn confirm(self, exists: bool) -> Self {
+        match self {
+            Self::Unmerged(path) if exists => Self::Modified(path),
+            Self::Unmerged(path) => Self::Deleted(path),
+            other => other,
         }
     }
 
@@ -170,6 +189,7 @@ impl<P> DirtyEvent<P> {
             Self::Added(path) => ((PathChange::Added, path), None),
             Self::Modified(path) => ((PathChange::Modified, path), None),
             Self::Deleted(path) => ((PathChange::Deleted, path), None),
+            Self::Unmerged(path) => ((PathChange::Unmerged, path), None),
             Self::Renamed { from, to } => {
                 ((PathChange::Deleted, from), Some((PathChange::Added, to)))
             }
@@ -182,6 +202,7 @@ impl<P> DirtyEvent<P> {
             Self::Added(path) => DirtyEvent::Added(f(path)),
             Self::Modified(path) => DirtyEvent::Modified(f(path)),
             Self::Deleted(path) => DirtyEvent::Deleted(f(path)),
+            Self::Unmerged(path) => DirtyEvent::Unmerged(f(path)),
             Self::Renamed { from, to } => DirtyEvent::Renamed {
                 from: f(from),
                 to: f(to),
@@ -191,7 +212,10 @@ impl<P> DirtyEvent<P> {
 
     fn first(&self) -> &P {
         match self {
-            Self::Added(path) | Self::Modified(path) | Self::Deleted(path) => path,
+            Self::Added(path)
+            | Self::Modified(path)
+            | Self::Deleted(path)
+            | Self::Unmerged(path) => path,
             Self::Renamed { from, .. } => from,
         }
     }
@@ -324,7 +348,7 @@ impl DirtySet<RepoPath> {
             }
             match (x, y) {
                 (b'?', b'?') => {
-                    parse.note(path, Head::Lacks, true);
+                    parse.note(path, Head::Lacks, Worktree::Present);
                 }
                 (b'!', b'!') => {}
                 _ if matches!(x, b'?' | b'!') || matches!(y, b'?' | b'!') => {
@@ -334,16 +358,16 @@ impl DirtySet<RepoPath> {
                     });
                 }
                 _ if is_unmerged(x, y) => {
-                    parse.note(path, Head::Unknown, (x, y) != (b'D', b'D'));
+                    parse.note(path, Head::Unknown, Worktree::Unknown);
                 }
                 _ if matches!(x, b'R' | b'C') || matches!(y, b'R' | b'C') => {
                     let Some((_, source)) = next_segment(stdout, &mut pos)? else {
                         return Err(PorcelainError::MissingSource { offset });
                     };
-                    let to = parse.note(path, Head::Lacks, y != b'D');
+                    let to = parse.note(path, Head::Lacks, Worktree::unless(y == b'D'));
                     // A copy leaves its source unchanged.
                     if x == b'R' || y == b'R' {
-                        let from = parse.note(source, Head::Has, false);
+                        let from = parse.note(source, Head::Has, Worktree::Absent);
                         if let (Some(from), Some(to)) = (from, to) {
                             parse.renames.push((from, to));
                         }
@@ -351,7 +375,7 @@ impl DirtySet<RepoPath> {
                 }
                 _ => {
                     let head = if x == b'A' { Head::Lacks } else { Head::Has };
-                    parse.note(path, head, x != b'D' && y != b'D');
+                    parse.note(path, head, Worktree::unless(x == b'D' || y == b'D'));
                 }
             }
         }
@@ -426,11 +450,31 @@ enum Head {
     Has,
 }
 
+/// What the entries say about the worktree file. Merging takes the
+/// maximum: an entry that proves presence (`?? a`) beats one that implies
+/// absence (`D  a`), which beats an unmerged entry that says nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+enum Worktree {
+    #[default]
+    Unknown,
+    Absent,
+    Present,
+}
+
+impl Worktree {
+    fn unless(absent: bool) -> Self {
+        if absent {
+            Self::Absent
+        } else {
+            Self::Present
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct PathFacts {
     head: Head,
-    /// Some entry proves the worktree holds the path.
-    present: bool,
+    worktree: Worktree,
 }
 
 #[derive(Debug, Default)]
@@ -441,7 +485,7 @@ struct PorcelainParse {
 }
 
 impl PorcelainParse {
-    fn note(&mut self, raw: &[u8], head: Head, present: bool) -> Option<RepoPath> {
+    fn note(&mut self, raw: &[u8], head: Head, worktree: Worktree) -> Option<RepoPath> {
         let Ok(text) = std::str::from_utf8(raw) else {
             self.skipped.push(SkippedEntry {
                 path_lossy: String::from_utf8_lossy(raw).into_owned(),
@@ -458,7 +502,7 @@ impl PorcelainParse {
         };
         let facts = self.facts.entry(path.clone()).or_default();
         facts.head = facts.head.max(head);
-        facts.present |= present;
+        facts.worktree = facts.worktree.max(worktree);
         Some(path)
     }
 
@@ -467,11 +511,12 @@ impl PorcelainParse {
             .facts
             .into_iter()
             .filter_map(|(path, facts)| {
-                let change = match (facts.present, facts.head) {
-                    (true, Head::Lacks) => PathChange::Added,
-                    (true, _) => PathChange::Modified,
-                    (false, Head::Lacks) => return None,
-                    (false, _) => PathChange::Deleted,
+                let change = match (facts.worktree, facts.head) {
+                    (Worktree::Unknown, _) => PathChange::Unmerged,
+                    (Worktree::Present, Head::Lacks) => PathChange::Added,
+                    (Worktree::Present, _) => PathChange::Modified,
+                    (Worktree::Absent, Head::Lacks) => return None,
+                    (Worktree::Absent, _) => PathChange::Deleted,
                 };
                 Some((path, change))
             })
@@ -490,6 +535,7 @@ impl PorcelainParse {
             PathChange::Added => DirtyEvent::Added(path),
             PathChange::Modified => DirtyEvent::Modified(path),
             PathChange::Deleted => DirtyEvent::Deleted(path),
+            PathChange::Unmerged => DirtyEvent::Unmerged(path),
         }));
         DirtySet::sorted(events, self.skipped)
     }
@@ -691,6 +737,7 @@ mod tests {
             (PathChange::Added, "\"added\""),
             (PathChange::Modified, "\"modified\""),
             (PathChange::Deleted, "\"deleted\""),
+            (PathChange::Unmerged, "\"unmerged\""),
         ] {
             assert_eq!(serde_json::to_string(&change).unwrap(), text);
             assert_eq!(serde_json::from_str::<PathChange>(text).unwrap(), change);
@@ -751,6 +798,50 @@ mod tests {
             modified.halves().collect::<Vec<_>>(),
             vec![(PathChange::Modified, &path("c"))]
         );
+    }
+
+    #[test]
+    fn test_dirty_event_unmerged_has_no_half_to_read_until_confirmed() {
+        let unmerged = DirtyEvent::Unmerged(path("c.py"));
+        assert_eq!(unmerged.worktree_path(), None);
+        assert_eq!(unmerged.removed_path(), None);
+        assert_eq!(
+            unmerged.halves().collect::<Vec<_>>(),
+            vec![(PathChange::Unmerged, &path("c.py"))]
+        );
+    }
+
+    #[test]
+    fn test_dirty_event_confirm_unmerged_file_present_returns_modified() {
+        assert_eq!(
+            DirtyEvent::Unmerged(path("c.py")).confirm(true),
+            DirtyEvent::Modified(path("c.py"))
+        );
+    }
+
+    #[test]
+    fn test_dirty_event_confirm_unmerged_file_deleted_by_hand_returns_deleted() {
+        assert_eq!(
+            DirtyEvent::Unmerged(path("c.py")).confirm(false),
+            DirtyEvent::Deleted(path("c.py"))
+        );
+    }
+
+    #[test]
+    fn test_dirty_event_confirm_other_variants_ignores_stat() {
+        let renamed = DirtyEvent::Renamed {
+            from: path("a"),
+            to: path("b"),
+        };
+        for event in [
+            DirtyEvent::Added(path("a")),
+            DirtyEvent::Modified(path("a")),
+            DirtyEvent::Deleted(path("a")),
+            renamed,
+        ] {
+            assert_eq!(event.clone().confirm(true), event);
+            assert_eq!(event.clone().confirm(false), event);
+        }
     }
 
     #[test]
@@ -937,13 +1028,14 @@ mod tests {
     }
 
     #[test]
-    fn test_from_porcelain_z_unmerged_both_modified_returns_modified() {
-        for code in [*b"UU", *b"AA", *b"AU", *b"UA", *b"DU", *b"UD"] {
+    fn test_from_porcelain_z_unmerged_codes_return_unmerged() {
+        // The letters describe index stages, never the file on disk.
+        for code in [*b"UU", *b"AA", *b"AU", *b"UA", *b"DU", *b"UD", *b"DD"] {
             let mut stdout = code.to_vec();
             stdout.extend_from_slice(b" c.py\0");
             assert_eq!(
                 parse(&stdout),
-                vec![DirtyEvent::Modified(path("c.py"))],
+                vec![DirtyEvent::Unmerged(path("c.py"))],
                 "{}",
                 String::from_utf8_lossy(&code)
             );
@@ -951,8 +1043,14 @@ mod tests {
     }
 
     #[test]
-    fn test_from_porcelain_z_unmerged_both_deleted_returns_deleted() {
-        assert_eq!(parse(b"DD c.py\0"), vec![DirtyEvent::Deleted(path("c.py"))]);
+    fn test_from_porcelain_z_unmerged_beside_other_entries_keeps_only_its_path_unknown() {
+        assert_eq!(
+            parse(b"UU c.py\0 M a.py\0"),
+            vec![
+                DirtyEvent::Modified(path("a.py")),
+                DirtyEvent::Unmerged(path("c.py")),
+            ]
+        );
     }
 
     #[test]
@@ -1179,6 +1277,21 @@ mod tests {
                 from: classified("a.py", PathClass::SOURCE),
                 to: classified("a.py.bak", PathClass::OTHER),
             }]
+        );
+    }
+
+    #[test]
+    fn test_without_other_unmerged_csv_dropped_and_unmerged_py_kept() {
+        let set = DirtySet::from_porcelain_z(b"UU data.csv\0DD lib.py\0")
+            .unwrap()
+            .classify(&router(), None)
+            .without_other();
+        assert_eq!(
+            set.events(),
+            &[DirtyEvent::Unmerged(classified(
+                "lib.py",
+                PathClass::SOURCE
+            ))]
         );
     }
 
