@@ -22,9 +22,18 @@ pub struct CypherArgs {
     ///   property name fails the query with a structured error on stdout.
     /// - Properties (edge):  confidence, reason, rel_type
     /// - Aggregation:        COUNT(*), COUNT(DISTINCT x), SUM/MIN/MAX/AVG, COLLECT
-    /// - Pipeline:           WITH ... [WHERE ...], OPTIONAL MATCH, UNION [ALL]
+    /// - Pipeline:           one WITH ... [WHERE ...], OPTIONAL MATCH, UNION [ALL]
     /// - Output shaping:     RETURN [DISTINCT], ORDER BY, SKIP, LIMIT
     /// - Lists:              labels(n)[0], xs[-1], xs[1..3] (index or slice a list value)
+    ///
+    /// Evaluated with openCypher semantics (comma patterns join, EXISTS with
+    /// both ends bound checks the pair, DISTINCT on a node counts nodes, `\d`
+    /// reaches the regex engine, several MATCH WHEREs are ANDed). Refused with
+    /// an error, never guessed: a second WITH, MATCH after WITH, WHERE right
+    /// after OPTIONAL MATCH (use `WITH a, b WHERE ...`), ORDER BY outside the
+    /// projection, functions other than type/id/labels and the aggregates,
+    /// and variable-length patterns without DISTINCT in RETURN, with an edge
+    /// variable, or with a minimum above 1.
     ///
     /// Cypher operates on a single graph; --repo must resolve to one repo.
     #[arg(value_name = "QUERY")]
@@ -46,7 +55,7 @@ pub struct CypherArgs {
     /// Output format. Omit for the LLM-tuned default; explicit `--format
     /// toon|json|text` for the neutral / round-trippable / human paths.
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 }
 
 impl CypherArgs {
@@ -96,7 +105,7 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), ecp_core::EcpError> 
     let query = cypher::parse(query_str)
         .map_err(|e| ecp_core::EcpError::InvalidArgument(format_cypher_error(query_str, &e)))?;
 
-    fail_on_unknown_properties(&query, OutputFormat::parse(args.format.as_deref()))?;
+    fail_on_unknown_properties(&query, args.format.unwrap_or_default())?;
 
     let result = cypher::execute(
         &query,
@@ -119,7 +128,7 @@ pub fn run(args: CypherArgs, engine: &Engine) -> Result<(), ecp_core::EcpError> 
         .then(|| cypher::diagnostics::CALLS_LOWER_BOUND_CAVEAT.to_string());
     emit_with_caveat(
         &payload,
-        OutputFormat::parse(args.format.as_deref()),
+        args.format.unwrap_or_default(),
         crate::output::merge_caveats(engine.caveat(), absence_caveat),
     )?;
     Ok(())

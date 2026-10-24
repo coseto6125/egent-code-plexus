@@ -4,6 +4,7 @@
 //! (bindings / routes / contracts / all). See spec
 //! `docs/superpowers/specs/2026-05-16-tier-b-surface-and-diff-design.md` §5.
 
+use crate::output::OutputFormat;
 use clap::{Args, ValueEnum};
 use ecp_core::EcpError;
 use std::path::PathBuf;
@@ -65,7 +66,7 @@ pub struct DiffArgs {
     /// Output format. Omit for the LLM-tuned default; pass
     /// `--format text|json|toon` for the alternative renderings.
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 
     /// List every change (text format only). Default truncates to top-10 per section.
     #[arg(long, default_value_t = false)]
@@ -78,8 +79,7 @@ pub struct DiffArgs {
 
 pub fn run(args: DiffArgs) -> Result<(), EcpError> {
     let payload = build_payload(&args)?;
-    let format = args.format.as_deref().unwrap_or("");
-    output::emit(&payload, format)
+    output::emit(&payload, args.format.unwrap_or_default())
 }
 
 pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, EcpError> {

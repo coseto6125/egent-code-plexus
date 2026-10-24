@@ -60,7 +60,7 @@ pub struct FlowArgs {
     #[arg(long)]
     pub no_cache: bool,
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 }
 
 fn bounded(max: u64) -> clap::builder::RangedU64ValueParser<usize> {
@@ -69,7 +69,7 @@ fn bounded(max: u64) -> clap::builder::RangedU64ValueParser<usize> {
 
 pub fn run(args: FlowArgs) -> Result<(), EcpError> {
     let payload = build_payload(&args)?;
-    emit(&payload, OutputFormat::parse(args.format.as_deref()))
+    emit(&payload, args.format.unwrap_or_default())
 }
 
 pub fn build_payload(args: &FlowArgs) -> Result<Value, EcpError> {

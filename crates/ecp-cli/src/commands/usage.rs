@@ -31,7 +31,7 @@ pub struct UsageArgs {
     pub all: bool,
     /// Output format: text (default) or json.
     #[arg(long, default_value = "text")]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
     /// Force color off (also honored: NO_COLOR env, non-TTY stdout).
     #[arg(long)]
     pub no_color: bool,
@@ -77,7 +77,7 @@ pub fn run(args: UsageArgs) -> Result<(), EcpError> {
     if args.clear {
         return run_clear(&args);
     }
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
     let recs = collect_records(&args)?;
     if matches!(format, OutputFormat::Json) {
         return emit(&build_json(&recs), format);

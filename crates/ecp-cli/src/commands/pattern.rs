@@ -67,11 +67,11 @@ pub struct PatternArgs {
     pub repo: Option<String>,
 
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 }
 
 pub fn run(args: PatternArgs, engine: &Engine) -> Result<(), EcpError> {
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
     let payload = build_payload(&args, engine)?;
     emit(&payload, format)
 }

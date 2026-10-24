@@ -46,11 +46,11 @@ pub struct SummaryArgs {
     /// neutral toon encoding of the full payload; `--format json` is the
     /// full-fidelity JSON; `--format text` is the human-friendly fallback.
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 }
 
 pub fn run(args: SummaryArgs, _graph_arg: &Path) -> Result<(), EcpError> {
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
     let payload = build_payload(&args, _graph_arg)?;
     emit(&payload, format)
 }

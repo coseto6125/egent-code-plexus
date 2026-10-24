@@ -17,7 +17,7 @@ fn test_find_schema_bindings_missing_field_returns_err_naming_field() {
     let args = FindSchemaBindingsArgs {
         field: "User.email".to_string(),
         repo: None,
-        format: Some("json".to_string()),
+        format: Some(ecp_cli::output::OutputFormat::Json),
     };
     let err = run(args, &engine).expect_err("missing field must be an Err");
     assert!(err.to_string().contains("User.email"), "{err}");

@@ -60,7 +60,7 @@ pub struct FindSchemaBindingsArgs {
 
     /// Output format: toon (default) | json | text
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 }
 
 /// Tier label derived from edge confidence.
@@ -187,7 +187,7 @@ fn build_blind_spot_entry(graph: &ArchivedZeroCopyGraph, node_idx: usize) -> ser
 
 pub fn run(args: FindSchemaBindingsArgs, engine: &Engine) -> Result<(), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
 
     let (owner_filter, bare_name) = split_fqn_target(&args.field);
 

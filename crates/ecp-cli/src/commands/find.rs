@@ -112,7 +112,7 @@ pub struct FindArgs {
 
     /// Output format: text (default) | json | toon.
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 
     /// Read patterns from stdin (`bm25` mode only — one per line, lines
     /// starting with `#` or empty are skipped). Engines are loaded once
@@ -273,7 +273,7 @@ fn run_bm25(args: FindArgs, engine: Option<&Engine>) -> Result<(), EcpError> {
         return run_batch(args, engine);
     }
 
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
     let pattern = args.pattern.clone().ok_or_else(|| {
         EcpError::InvalidArgument("pattern is required (or use --batch to read from stdin)".into())
     })?;
@@ -570,7 +570,7 @@ fn base_candidates(
 
 fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result<(), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
     let pattern = args.pattern.as_deref().ok_or_else(|| {
         EcpError::InvalidArgument("pattern is required in exact / fuzzy mode".into())
     })?;
@@ -719,7 +719,7 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
 fn run_batch(args: FindArgs, engine: Option<&Engine>) -> Result<(), EcpError> {
     use std::io::BufRead;
 
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
     let targets = resolve_targets(args.repo.as_deref())?;
     let cwd = if targets.is_empty() {
         Some(cwd_engine(engine)?)

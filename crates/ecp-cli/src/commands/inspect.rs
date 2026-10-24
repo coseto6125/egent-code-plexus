@@ -25,7 +25,7 @@ pub struct InspectArgs {
 
     /// Output format
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 
     /// Comma-separated list of node kinds (lowercase, e.g. `function,method`)
     /// to keep on the *target* side of incoming/outgoing edges.
@@ -647,7 +647,7 @@ fn search_nodes(
 
 pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
 
     let name_query = args
         .name

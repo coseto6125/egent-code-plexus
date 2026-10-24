@@ -26,7 +26,7 @@ pub struct InsightArgs {
 
     /// Output format: json (default), text, or toon.
     #[arg(long, default_value = "json")]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 
     /// Aggregation window in hours. Default 24, max 168 (one week).
     #[arg(long, default_value_t = 24)]
@@ -38,7 +38,7 @@ pub struct InsightArgs {
 }
 
 pub fn run(args: InsightArgs) -> Result<(), EcpError> {
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
     let payload = build_payload(&args)?;
     emit(&payload, format)
 }

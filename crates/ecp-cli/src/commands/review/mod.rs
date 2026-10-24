@@ -44,7 +44,7 @@ pub struct ReviewArgs {
 
     /// Output format: toon (default) | json
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 
     /// Emit provable verdicts derived from `ecp diff --section all` instead
     /// of the per-file aggregate findings. Requires `--since <ref>` (the
@@ -96,7 +96,7 @@ pub fn run(args: ReviewArgs, engine: &Engine) -> Result<(), EcpError> {
         }
         payload["elapsed_ms"] = serde_json::json!(start.elapsed().as_millis() as u64);
     }
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
     emit(&payload, format)
 }
 
@@ -134,6 +134,6 @@ fn run_verdicts(args: &ReviewArgs) -> Result<(), EcpError> {
         },
         "elapsed_ms": start.elapsed().as_millis() as u64,
     });
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
     emit(&json, format)
 }

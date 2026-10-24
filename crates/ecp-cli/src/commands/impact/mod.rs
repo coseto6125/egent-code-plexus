@@ -133,7 +133,7 @@ pub struct ImpactArgs {
 
     /// Output format (mostly internal — agent doesn't set this).
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 
     /// List sites of a path-shaped string literal by exact value.
     /// Mutually exclusive with --target/--baseline/<name>. Returns JSON
@@ -238,7 +238,7 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
     if args.batch {
         return run_batch(args, engine);
     }
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
     if args.literal_coherence {
         let payload = build_literal_coherence_payload(engine)?;
         return emit_with_caveat(&payload, format, engine.caveat());
@@ -309,7 +309,7 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
 fn run_batch(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
     use std::io::BufRead;
 
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
 
     let stdin = std::io::stdin();
     let targets: Vec<String> = stdin

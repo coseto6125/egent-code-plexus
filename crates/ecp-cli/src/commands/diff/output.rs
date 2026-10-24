@@ -10,8 +10,7 @@ use crate::output::{emit_to_string, OutputFormat};
 use ecp_core::EcpError;
 use serde_json::Value;
 
-pub fn emit(payload: &DiffPayload, format: &str) -> Result<(), EcpError> {
-    let fmt = OutputFormat::parse(Some(format));
+pub fn emit(payload: &DiffPayload, fmt: OutputFormat) -> Result<(), EcpError> {
     match fmt {
         OutputFormat::Json | OutputFormat::Toon | OutputFormat::Llm => {
             let json_value = build_json(payload);

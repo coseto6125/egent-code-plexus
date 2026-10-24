@@ -65,11 +65,11 @@ pub struct ContractsArgs {
 
     /// Output format: toon (default) | json.
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 }
 
 pub fn run(args: ContractsArgs) -> Result<(), EcpError> {
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
 
     // 1. Load registry and resolve selector.
     let home_ecp = resolve_home_ecp();

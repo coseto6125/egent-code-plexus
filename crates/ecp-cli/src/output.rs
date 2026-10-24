@@ -4,12 +4,13 @@
 use ecp_core::EcpError;
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum OutputFormat {
     /// Default output: per-command LLM-tuned payload (token compression,
     /// rounded floats, trimmed timestamps, etc.) rendered through the toon
     /// encoder. Commands without command-specific tuning fall through to the
     /// same output as `Toon`.
+    #[default]
     Llm,
     /// Neutral toon: the json payload encoded as toon, no lossy compression.
     /// Use when you want round-trippable structure but tighter than JSON.

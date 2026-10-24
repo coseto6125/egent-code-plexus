@@ -23,7 +23,7 @@ pub enum McpAction {
         /// Output format. Omit for the LLM-tuned default (text-tab); pass
         /// `--format json|toon` for the structured shapes.
         #[arg(long)]
-        format: Option<String>,
+        format: Option<crate::output::OutputFormat>,
     },
 }
 
@@ -47,9 +47,10 @@ pub fn run(args: McpArgs, root_cmd: Command) -> Result<(), EcpError> {
         McpAction::Tools { format } => {
             let tools = server.list_tools();
 
-            match format.as_deref() {
-                Some("json") | Some("toon") => {
-                    if format.as_deref() == Some("toon") {
+            use crate::output::OutputFormat;
+            match format {
+                Some(OutputFormat::Json | OutputFormat::Toon) => {
+                    if format == Some(OutputFormat::Toon) {
                         eprintln!(
                             "warning: toon renderer not yet integrated, falling back to json"
                         );

@@ -39,7 +39,7 @@ fn write_fixture(dir: &std::path::Path, lines: &[(&str, u64, bool)]) -> PathBuf 
 fn insight_args(telemetry_path: PathBuf) -> InsightArgs {
     InsightArgs {
         repo: None,
-        format: Some("json".into()),
+        format: Some(ecp_cli::output::OutputFormat::Json),
         hours: 24,
         telemetry_path: Some(telemetry_path),
     }

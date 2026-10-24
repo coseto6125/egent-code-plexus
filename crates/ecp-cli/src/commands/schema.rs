@@ -1,3 +1,4 @@
+use crate::output::OutputFormat;
 use clap::{Args, Subcommand};
 use ecp_core::graph::RelType;
 use ecp_core::EcpError;
@@ -35,7 +36,7 @@ pub enum SchemaCommands {
 pub struct FormatArgs {
     /// Output format. Default `json`; `text` is a human-readable table.
     #[arg(long, default_value = "json")]
-    pub format: String,
+    pub format: OutputFormat,
 }
 
 /// Detection status for a per-lang capability. Append-only enum (string
@@ -193,7 +194,7 @@ fn blindspots(args: FormatArgs) -> Result<(), EcpError> {
     let report = BlindspotsReport {
         languages: LANGUAGES,
     };
-    emit(&args.format, &report, print_blindspots_text)
+    emit(args.format, &report, print_blindspots_text)
 }
 
 fn print_blindspots_text(report: &BlindspotsReport) {
@@ -219,18 +220,24 @@ fn print_blindspots_text(report: &BlindspotsReport) {
 }
 
 /// Generic JSON/text dispatcher — keeps each subcommand's run-fn trivial.
-fn emit<T: Serialize>(format: &str, payload: &T, text_printer: fn(&T)) -> Result<(), EcpError> {
+fn emit<T: Serialize>(
+    format: OutputFormat,
+    payload: &T,
+    text_printer: fn(&T),
+) -> Result<(), EcpError> {
     match format {
-        "json" => {
+        OutputFormat::Json => {
             let s = serde_json::to_string_pretty(payload)
                 .map_err(|e| EcpError::Serialization(format!("schema report: {e}")))?;
             println!("{}", s);
         }
-        "text" => text_printer(payload),
+        OutputFormat::Text => text_printer(payload),
         other => {
+            let name = clap::ValueEnum::to_possible_value(&other)
+                .map(|v| v.get_name().to_string())
+                .unwrap_or_default();
             return Err(EcpError::InvalidArgument(format!(
-                "unknown --format `{}`; expected `json` or `text`",
-                other
+                "unknown --format `{name}`; expected `json` or `text`"
             )));
         }
     }
@@ -324,7 +331,7 @@ fn reltypes(args: FormatArgs) -> Result<(), EcpError> {
     let report = ReltypesReport {
         reltypes: reltype_views(),
     };
-    emit(&args.format, &report, print_reltypes_text)
+    emit(args.format, &report, print_reltypes_text)
 }
 
 fn print_reltypes_text(report: &ReltypesReport) {
@@ -402,7 +409,7 @@ fn node_kinds(args: FormatArgs) -> Result<(), EcpError> {
         node_kinds: NODE_KINDS,
         variant_count: ecp_core::graph::NodeKind::VARIANT_COUNT,
     };
-    emit(&args.format, &report, print_node_kinds_text)
+    emit(args.format, &report, print_node_kinds_text)
 }
 
 fn print_node_kinds_text(report: &NodeKindsReport) {
@@ -449,7 +456,7 @@ fn graph_version(args: FormatArgs) -> Result<(), EcpError> {
         current_version: ecp_core::graph::GRAPH_FORMAT_VERSION,
         history: VERSION_HISTORY,
     };
-    emit(&args.format, &report, print_graph_version_text)
+    emit(args.format, &report, print_graph_version_text)
 }
 
 fn print_graph_version_text(report: &GraphVersionReport) {

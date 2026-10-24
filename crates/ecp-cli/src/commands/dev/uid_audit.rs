@@ -61,7 +61,7 @@ pub struct UidAuditArgs {
     /// is hidden from agents by design; see `ecp dev --help`). `json` and
     /// `toon` available for downstream tooling.
     #[arg(long, default_value = "text")]
-    pub format: String,
+    pub format: OutputFormat,
 }
 
 pub fn run(args: UidAuditArgs, cli_graph: &std::path::Path) -> Result<(), EcpError> {
@@ -81,7 +81,7 @@ pub fn run(args: UidAuditArgs, cli_graph: &std::path::Path) -> Result<(), EcpErr
     // nature is loud whether the caller is piping JSON or reading text.
     print_warning_header();
 
-    let format = OutputFormat::parse(Some(args.format.as_str()));
+    let format = args.format;
     match format {
         OutputFormat::Text => print_text_body(&report, &graph_path),
         _ => emit(

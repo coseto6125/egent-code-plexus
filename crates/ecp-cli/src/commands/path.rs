@@ -89,7 +89,7 @@ pub struct PathArgs {
 
     /// Output format (toon / json / text).
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 }
 
 /// Rejects out-of-range and NaN rather than silently filtering every edge and
@@ -109,7 +109,7 @@ pub fn run(args: PathArgs, engine: &Engine) -> Result<(), EcpError> {
     let (payload, caveat) = build_payload(&args, engine)?;
     emit_with_caveat(
         &payload,
-        OutputFormat::parse(args.format.as_deref()),
+        args.format.unwrap_or_default(),
         // The engine's staleness caveat comes first: a `found: false` read off
         // a warm-attached or behind-HEAD graph is provisional, and this payload
         // otherwise states the opposite in as many words.

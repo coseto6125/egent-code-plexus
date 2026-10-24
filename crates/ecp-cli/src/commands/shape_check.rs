@@ -37,7 +37,7 @@ pub struct ShapeCheckArgs {
 
     /// Output format: text (default) | json | toon
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 
     /// Filter: only report drift for routes whose path matches this substring.
     /// When None (default), all routes with extracted shape are checked.
@@ -281,7 +281,7 @@ fn render_text(value: &serde_json::Value, hints: &ShapeCheckHints) -> serde_json
 }
 
 pub fn run(args: ShapeCheckArgs, engine: &crate::engine::Engine) -> Result<(), ecp_core::EcpError> {
-    let format = crate::output::OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
     let (value, hints) = build_payload_with_hints(&args, engine)?;
     if let Some(filter) = &hints.unmatched_route_filter {
         eprintln!("No routes match `{filter}` in the graph.");
