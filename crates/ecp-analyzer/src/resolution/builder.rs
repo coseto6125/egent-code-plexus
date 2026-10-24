@@ -1403,7 +1403,7 @@ fn pass1_5_extract_routes(
             let handler_idx = current_handler_idx;
 
             for dec in &raw_node.decorators {
-                if let Some(detected) = crate::route_detector::detect_from_decorator(dec) {
+                for detected in crate::route_detector::detect_all_from_decorator(dec) {
                     let route_name = format!("{} {}", detected.method, detected.path);
 
                     let route_idx = nodes.len() as u32;
