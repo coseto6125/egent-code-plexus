@@ -140,8 +140,10 @@ fn apply(f: &Fixture, change: Change) {
             set_mtime(&f.repo.join(".git/index"), mtime - Duration::from_secs(100));
         }
         Change::MetadataOnly => set_mtime(&file, fresh_past()),
+        // Same size as the committed `a\n`: a size change alone marks the file
+        // modified, and git would never read it through the driver.
         Change::Content => {
-            fs::write(&file, "changed\n").unwrap();
+            fs::write(&file, "b\n").unwrap();
             set_mtime(&file, fresh_past());
         }
     }

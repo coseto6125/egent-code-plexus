@@ -1589,6 +1589,7 @@ fn gen_dirs(commits: &std::path::Path) -> std::collections::BTreeSet<String> {
         .map(|it| {
             it.flatten()
                 .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .filter(|e| e.file_name() != ecp_cli::commit_lookup::LOCKS_DIR)
                 .map(|e| e.file_name().to_string_lossy().to_string())
                 .collect()
         })

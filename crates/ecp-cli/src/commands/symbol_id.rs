@@ -74,9 +74,9 @@ fn owner_matches(actual: Option<&str>, requested: &str, file: &str) -> bool {
 ///
 /// `name` takes the bare symbol or the `Owner.Method` FQN form. `kind_needle`
 /// matches the node kind case-insensitively; `file_needle` is a substring of
-/// the file path. When a substring leaves several matches, the ones whose path
-/// is the needle or ends with `/needle` win (see `narrow_to_path_suffix`), so
-/// `cmd/main.go` can pick itself over `tools/cmd/main.go`.
+/// the file path. When a substring leaves several matches, a path equal to the
+/// needle wins, then paths ending with `/needle` (see `narrow_to_path_suffix`),
+/// so `cmd/main.go` can pick itself over `tools/cmd/main.go`.
 ///
 /// Shared by `ecp impact` and `ecp path` so both land on the same node for the
 /// same argument: a path whose endpoints disagree with impact's target would
@@ -205,14 +205,18 @@ fn narrow_to_path_suffix(matches: &mut Vec<(usize, &str)>, needle: &str) {
     if matches.len() < 2 || needle.is_empty() {
         return;
     }
-    let exact = |path: &str| {
-        path == needle
-            || path
-                .strip_suffix(needle)
-                .is_some_and(|head| head.ends_with('/'))
+    // Equality before a `/`-bounded suffix: `cmd/main.go` is also a bounded
+    // suffix of `tools/cmd/main.go`, so only equality can pick the shorter one.
+    let equal = |path: &str| path == needle;
+    let bounded = |path: &str| {
+        path.strip_suffix(needle)
+            .is_some_and(|head| head.ends_with('/'))
     };
-    if matches.iter().any(|&(_, path)| exact(path)) {
-        matches.retain(|&(_, path)| exact(path));
+    for tier in [&equal as &dyn Fn(&str) -> bool, &bounded] {
+        if matches.iter().any(|&(_, path)| tier(path)) {
+            matches.retain(|&(_, path)| tier(path));
+            return;
+        }
     }
 }
 

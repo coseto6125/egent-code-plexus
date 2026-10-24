@@ -805,7 +805,12 @@ pub(crate) fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io:
     // filter. Two definitions of "clean" that disagree is what let this
     // through. The plain command rather than the private index: a wrong
     // "clean" here poisons that shared slot, and a build costs seconds anyway.
-    let out = crate::git::status::plain(worktree)?;
+    // A status that cannot run (its filter guard failed, or git rejects the
+    // index) means "not known clean": the archive path reads only HEAD's tree
+    // and guards its own filters.
+    let Ok(out) = crate::git::status::plain(worktree) else {
+        return Ok(false);
+    };
     if !out.status.success() {
         return Ok(false);
     }

@@ -1113,11 +1113,19 @@ mod tests {
     }
 
     #[test]
-    fn test_porcelain_all_index_shorter_than_checksum_matches_plain_without_copy() {
+    fn test_porcelain_all_index_shorter_than_checksum_fails_like_plain_without_copy() {
+        // git rejects a truncated index ("index file smaller than expected"),
+        // so both entry points fail; neither may report a clean tree.
+        let failed = |r: io::Result<std::process::Output>| r.map_or(true, |o| !o.status.success());
         for body in [&b""[..], &b"DIRC\0\0\0\x02\0\0"[..]] {
             let f = fixture();
             fs::write(f.repo.join(".git/index"), body).unwrap();
-            assert_matches_plain(&f.repo, &f.cache);
+            let env = isolated_env();
+            assert!(failed(plain_in(&f.repo, &env)), "plain");
+            assert!(
+                failed(porcelain_all_in(&f.repo, &f.cache, &env)),
+                "porcelain_all"
+            );
             assert!(copies(&f.cache).is_empty(), "{} bytes copied", body.len());
         }
     }
@@ -2296,7 +2304,9 @@ mod tests {
             git(&sub, &["config", &format!("filter.child.{key}"), program]);
         }
         git(&sub, &["config", "filter.child.required", "true"]);
-        write(&sub, "lib.rs", "pub fn changed() {}\n");
+        // Same size as the committed `pub fn a() {}`: a size change alone marks
+        // the file modified without reading it through the driver.
+        write(&sub, "lib.rs", "pub fn b() {}\n");
         let env = isolated_env();
         assert!(
             status_overrides(&f.repo, &env).unwrap() != FilterOverrides::default(),
