@@ -254,7 +254,7 @@ pub(crate) fn sweep_unreachable_commits_with(
     let idle_shas: FxHashSet<[u8; 20]> = listing
         .dirs
         .iter()
-        .filter(|d| idle(*d))
+        .filter(|d| idle(d))
         .map(|d| d.parsed.sha)
         .collect();
     if idle_shas.is_empty() {
@@ -276,7 +276,7 @@ pub(crate) fn sweep_unreachable_commits_with(
         let retired =
             retire_under_sha_lock(&commits, &sha, dry_run, &listing, fs_ops, &mut stats, |l| {
                 l.same_sha(&sha)
-                    .filter(|d| unreachable(*d))
+                    .filter(|d| unreachable(d))
                     .map(|d| d.path.clone())
                     .collect()
             });
@@ -694,7 +694,7 @@ pub(crate) fn sweep_generations_with(
         superseded || fs::symlink_metadata(&dir.path).is_ok_and(|m| !is_in_flight(&m, now))
     };
     let mut settled_per_sha: FxHashMap<[u8; 20], usize> = FxHashMap::default();
-    for dir in listing.dirs.iter().filter(|d| settled(*d)) {
+    for dir in listing.dirs.iter().filter(|d| settled(d)) {
         *settled_per_sha.entry(dir.parsed.sha).or_default() += 1;
     }
 
@@ -717,7 +717,7 @@ pub(crate) fn sweep_generations_with(
                     return Vec::new();
                 };
                 l.same_sha(&sha)
-                    .filter(|d| d.name != current.name && settled(*d))
+                    .filter(|d| d.name != current.name && settled(d))
                     .map(|d| d.path.clone())
                     .filter(|path| published != Some(path.as_path()))
                     .collect()

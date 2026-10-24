@@ -16,7 +16,7 @@ fn test_engine_load_unknown_version_names_admin_index_force() {
     g.version = GRAPH_FORMAT_VERSION.wrapping_add(99);
     let dir = tempdir().unwrap();
     let path = dir.path().join("graph.bin");
-    std::fs::write(&path, rkyv::to_bytes::<Error>(&g).unwrap().to_vec()).unwrap();
+    std::fs::write(&path, rkyv::to_bytes::<Error>(&g).unwrap()).unwrap();
     let Err(err) = Engine::load(&path) else {
         panic!("unknown version must be rejected");
     };

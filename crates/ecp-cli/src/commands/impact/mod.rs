@@ -350,7 +350,7 @@ fn run_batch(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
             no_heuristic: args.no_heuristic,
             confidence_threshold: args.confidence_threshold,
             explain_confidence: args.explain_confidence,
-            format: args.format.clone(),
+            format: args.format,
             literal: None,
             literal_coherence: false,
             batch: false,
