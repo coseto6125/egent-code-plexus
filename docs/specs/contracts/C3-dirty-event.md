@@ -6,7 +6,7 @@ Plan row (`docs/specs/2026-10-25-architecture-direction.md`, "Contracts before c
 
 The plan's Order section ships C3 with one behaviour slice: the classification of porcelain paths that replaces freshness F6. This note describes that slice (section "The C3 behaviour slice"). This contract slice does not implement it.
 
-Every `file:line` below was read on branch `feat/arch-p1-contracts` at `d47511a4`.
+Every `file:line` below was read on branch `feat/arch-p1-contracts` at `1c69c974`.
 
 ## Defines
 
@@ -53,6 +53,7 @@ Rules:
 
 - The class is a set. `tsconfig.json`, `package.json` and `jest.config.ts` are source and resolution config.
 - The class reads the path only. A deleted path gets the same class as a present one, with no syscall.
+- A config path that a scope tried to read and did not find (C2 `ConfigPresence::Missing`) is resolution config, so its appearance is a config change (test `test_classify_missing_extends_target_with_facts_is_config`).
 - `DirtyEvent::class()` is the union of the halves' classes. `is_other()` is true only when every half is "other".
 - Only an event whose halves are all "other" may skip a per-path syscall (`DirtySet::without_other`). A rename with one "other" half stays, and the reader checks each half.
 - The stored form is `{"source": bool, "resolution_config": bool}`. `PathClass::default()` is "other".
@@ -100,7 +101,7 @@ A rename becomes `Renamed` only when its source is `Deleted` and its destination
 
 | Fact | Produced today | Read today |
 |---|---|---|
-| Porcelain bytes | `porcelain_all` (`ecp-cli/src/git/status.rs:63-65`) with `STATUS_ARGS` (`:34`): `status --porcelain -z --untracked-files=all`. The plain form is `plain` (`:82-84`). | `git_fingerprint_shortcut` (`auto_ensure.rs:426`); `worktree_clean_and_head_matches` (`build/orchestrator.rs:812`). |
+| Porcelain bytes | `porcelain_all` (`ecp-cli/src/git/status.rs:63-65`) with `STATUS_ARGS` (`:34`): `status --porcelain -z --untracked-files=all`. The plain form is `plain` (`:82-84`). | `git_fingerprint_shortcut` (`auto_ensure.rs:426`); `worktree_clean_and_head_matches` (`build/orchestrator.rs:811`). |
 | Changed paths | `parse_porcelain_paths` (`auto_ensure.rs:500-511`). It keeps each segment with a space at byte 2 (`:506`), decodes it lossily (`:507`) and joins it onto `worktree_root` (`:509`). | `git_fingerprint_shortcut` (`:441`); `worktree_clean_and_head_matches` (`orchestrator.rs:818-820`). |
 | Artifact filter | `is_ecp_artifact` (`auto_ensure.rs:466-488`): one `fs::canonicalize` per path (`:471`). | `:443`; `orchestrator.rs:820`. |
 | Dirty set handed on | `EnsureResult::Stale.dirty_files: Option<Vec<PathBuf>>`, absolute paths (`auto_ensure.rs:121-125`), set at `:452-456`. `None` when the mtime walk decided. | `ensure_fresh_with_rebuild` (`:614-623`), which falls back to `collect_dirty_files` (`:1465-1505`). |
@@ -204,7 +205,7 @@ Lane 0a's dirty-event fixtures (added, modified, deleted, renamed, unmerged, unt
 
 | Proposal | Decision |
 |---|---|
-| C2 open point 7: C3 classifies a "resolution config" path by calling `config_ecosystem`. | Accept. `PathClass::classify` calls `WorkspaceFacts::config_ecosystem` when it has the table. Without the table it calls `Ecosystem::classify_config`, the name half of the same function (`workspace.rs:452-461`). See open point 3. |
+| C2 open point 7: C3 classifies a "resolution config" path by calling `config_ecosystem`. | Accept. `PathClass::classify` calls `WorkspaceFacts::config_ecosystem` when it has the table. Without the table it calls `Ecosystem::classify_config`, the name half of the same function (`workspace.rs:583-591`). See open point 3. |
 | C5 open point 12: a file can be config and source; the class is a set. | Accept. `PathClass` holds two flags. `tsconfig.json` is both (test `test_classify_tsconfig_json_is_source_and_config`). |
 
 ## Stored data
@@ -223,7 +224,7 @@ Old manifests: `DirtyFiles` has no `deny_unknown_fields` (`overlay.rs:8-19`), so
 
 Goal: the freshness gate classifies each porcelain path once and drops "other" events before any per-path syscall. This replaces freshness F6. After it lands, the absolute latency thresholds bind (plan line 67).
 
-Needs: C2 and C5 committed (`fb7d6c14`, `01cf2641`).
+Needs: C2 and C5 committed and reviewed (C2 `294320e3`, C5 `00bb6b82`).
 
 ### What changes, and where
 
@@ -241,7 +242,7 @@ Unchanged: the gate, the manifest, `reanalyze_files`, the overlay writer and rea
 
 | Case | Before | After |
 |---|---|---|
-| Only "other" files dirty | `Stale`; the full L1 refresh runs every query | `Ready` |
+| Only "other" files dirty | `Stale`; every query runs the refresh path (gate, `git ls-files`, session meta, sidecar write) and parses nothing | `Ready` |
 | "Other" and source files dirty | every path is canonicalized, statted and passed to `reanalyze_files` | only the source paths |
 | A rename `R  to\0from` | `to` only | both halves; `from` also enters the shadow cascade (`reanalyze.rs:157-176`) |
 | A rename source with a space at byte 2 | a spurious path | the source |
@@ -289,4 +290,4 @@ Latency: lane 0a's dirty scenario in `scripts/benchmark/benchmark_ecp.py`, plus 
 | 6 | Index-scope files: `.gitignore`, `.ecpignore`, `[index] max_file_bytes` | a fourth class, or "other" | "Other". An edit to them changes the cold index's file set; the overlay ignores them today too. Area 3's snapshot owns them. |
 | 7 | The base of the delta | porcelain compares the worktree with HEAD; the overlay's base graph can be a warm-attached sibling or behind HEAD (`auto_ensure.rs:720`) | Area 5's read context applies tombstones only when the base graph is HEAD's, else it adds a caveat. Area 3 owns the build handle. |
 | 8 | Per-query cost of a deleted source file | keep (each query: a failed canonicalize, a failed stat, `git ls-files`), or gate it | Keep in the C3 slice: the cost is not "other" cost. The area-5 tombstone slice records the tombstone and lets the gate skip it. |
-| 9 | The path rule in two places | `is_repo_relative` here copies C2's private `is_normal_path` (`workspace.rs:543-549`) | Make one `pub(crate)` function when a slice next edits both files. |
+| 9 | The path rule in two places | Settled: `DirtySet` calls C2's `pub(crate) is_normal_path` (`workspace.rs:675`). | Done. |

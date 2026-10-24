@@ -672,7 +672,7 @@ fn name_key(entry: &ScopeName) -> (Ecosystem, &str, NameRank, ScopeId) {
     )
 }
 
-fn is_normal_path(path: &str) -> bool {
+pub(crate) fn is_normal_path(path: &str) -> bool {
     !path.is_empty()
         && !path.contains('\\')
         && path
