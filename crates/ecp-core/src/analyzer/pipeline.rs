@@ -146,7 +146,10 @@ impl AnalyzerPipeline {
         let RouteOutcome::Routed(route) = ROUTER.route(path.to_str()?) else {
             return None;
         };
-        route.providers().next()
+        route
+            .candidates()
+            .first()
+            .map(|language| language.provider())
     }
 
     /// Analyze files concurrently using a Multi-Producer Single-Consumer architecture

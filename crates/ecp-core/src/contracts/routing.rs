@@ -1490,12 +1490,7 @@ mod tests {
             ),
             ("README.md", None, None, LegacyLanguage::Markdown),
             ("notes.txt", None, None, LegacyLanguage::Markdown),
-            (
-                "__brick__/lib/a.dart",
-                None,
-                Some("dart"),
-                LegacyLanguage::Dart,
-            ),
+            ("__brick__/lib/a.dart", None, None, LegacyLanguage::Dart),
             ("x.mts", None, None, LegacyLanguage::Unknown),
             (".py", None, None, LegacyLanguage::Python),
         ];

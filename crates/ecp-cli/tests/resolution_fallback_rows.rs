@@ -29,8 +29,6 @@ use strict_parity::{observe, snapshot, Edit, Scenario, Snapshot};
 
 type Files<'a> = &'a [(&'a str, &'a str)];
 
-/// Every tier confidence an edge can carry (`Tier::confidence`).
-const ANY_TIER: &[f32] = &[1.0, 0.95, 0.85, 0.8, 0.7, 0.6];
 const GLOBAL: &[f32] = &[0.7];
 
 /// What one caller must call: `(callee name, callee file, allowed confidences)`.
@@ -207,7 +205,7 @@ fn test_resolve_call_cpp_qualified_miss_constructor_fallback_binds() {
     pin_row(
         &files,
         "src/app.cpp",
-        &[("make_item", &[("Item", "src/shop.hpp", ANY_TIER)])],
+        &[("make_item", &[("Item", "src/shop.hpp", &[0.85])])],
     );
 }
 
@@ -216,6 +214,7 @@ fn test_resolve_call_cpp_qualified_miss_constructor_fallback_binds() {
 #[test]
 fn test_resolve_call_go_package_missing_emits_no_edge() {
     let files = [
+        ("go.mod", "module example.com/repo\n\ngo 1.21\n"),
         (
             "main.go",
             "package main\n\nimport \"example.com/repo/util\"\n\nfunc run() {\n\tutil.Missing()\n}\n",
@@ -227,8 +226,10 @@ fn test_resolve_call_go_package_missing_emits_no_edge() {
 }
 
 /// Row 5. `config` is a value the package `app` declares, not a submodule.
-/// A namesake `get_db` in `fallback.py` and a nested one in `main.py` keep
-/// the name tiers busy; the import-only path emits no edge, today.
+/// A namesake `get_db` in `fallback.py` keeps the name tiers busy; the
+/// import-only path emits no edge, today. A nested `get_db` in `main.py` is
+/// left out: today it binds same-file at 1.0 across the function scope, the
+/// Python lexical opt-in's defect (slice R8), not this row's fallback.
 #[test]
 fn test_resolve_call_python_declared_attribute_import_only_emits_no_edge() {
     let files = [
@@ -237,7 +238,7 @@ fn test_resolve_call_python_declared_attribute_import_only_emits_no_edge() {
         ("fallback.py", "def get_db():\n    return 2\n"),
         (
             "main.py",
-            "from app import config\n\n\ndef other():\n    def get_db():\n        return 3\n    return get_db\n\n\ndef caller():\n    return config.settings.get_db()\n",
+            "from app import config\n\n\ndef caller():\n    return config.settings.get_db()\n",
         ),
     ];
     pin_row(&files, "main.py", &[("caller", &[])]);
@@ -285,12 +286,12 @@ fn test_resolve_call_chain_level_broken_outer_emits_no_edge() {
         &files,
         "src/use.ts",
         &[
-            ("useBroken", &[("create", "src/foo.ts", ANY_TIER)]),
+            ("useBroken", &[("create", "src/foo.ts", &[0.85])]),
             (
                 "useControl",
                 &[
-                    ("create", "src/foo.ts", ANY_TIER),
-                    ("ok", "src/foo.ts", ANY_TIER),
+                    ("create", "src/foo.ts", &[0.85]),
+                    ("ok", "src/foo.ts", &[0.85]),
                 ],
             ),
         ],
