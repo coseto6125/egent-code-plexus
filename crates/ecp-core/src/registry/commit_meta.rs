@@ -85,7 +85,8 @@ use std::path::Path;
 /// its route lists, as the cold index does (bash, lua, crystal, nim, zig,
 /// move, solidity, vyper, cairo, verilog, sql, hcl, protobuf, dockerfile,
 /// docker-compose and github-actions fragments now exist), and routes by the
-/// repo-relative path rather than the basename.
+/// repo-relative path rather than the basename; OpenAPI schema and field
+/// nodes carry the line of their key instead of line 1.
 pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema23");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
