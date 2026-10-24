@@ -262,3 +262,53 @@ components:
     assert_eq!(user_fields.len(), 1);
     assert_eq!(addr_fields.len(), 2);
 }
+
+// ── Source lines: each schema and field carries the line of its key ─────────
+
+/// `(start_row, end_row)` of the Struct node `name` in an OpenAPI parse.
+fn struct_rows(filename: &str, src: &str, name: &str) -> (u32, u32) {
+    let local = OpenApiProvider::new()
+        .unwrap()
+        .parse_file(filename.as_ref(), src.as_bytes())
+        .unwrap();
+    let node = local.nodes.iter().find(|n| n.name == name).unwrap();
+    (node.span.0, node.span.2)
+}
+
+fn field_row(fields: &[ecp_core::analyzer::types::RawSchemaField], owner: &str, name: &str) -> u32 {
+    fields
+        .iter()
+        .find(|f| f.owner_class.as_ref() == owner && f.name.as_ref() == name)
+        .unwrap()
+        .span
+        .0
+}
+
+#[test]
+fn test_extract_fields_yaml_schema_and_field_carry_key_rows() {
+    // `id` also appears nested under `address` before `Pet.id`: the field row
+    // must come from the `properties` level, not the first `id:` text.
+    let src = "openapi: 3.0.0\ninfo:\n  title: t\n  version: \"1\"\ncomponents:\n  schemas:\n    Pet:\n      type: object\n      properties:\n        address:\n          type: object\n          properties:\n            id:\n              type: string\n        id:\n          type: integer\n    Owner:\n      properties:\n        name:\n          type: string\n";
+    assert_eq!(struct_rows("openapi.yaml", src, "Pet"), (6, 15));
+    assert_eq!(struct_rows("openapi.yaml", src, "Owner"), (16, 19));
+    let fields = parse_openapi("openapi.yaml", src);
+    assert_eq!(field_row(&fields, "Pet", "address"), 9);
+    assert_eq!(field_row(&fields, "Pet", "id"), 14);
+    assert_eq!(field_row(&fields, "Owner", "name"), 18);
+}
+
+#[test]
+fn test_extract_fields_json_schema_and_field_carry_key_rows() {
+    let src = "{\n  \"openapi\": \"3.0.0\",\n  \"info\": {\"title\": \"t\", \"version\": \"1\"},\n  \"components\": {\n    \"schemas\": {\n      \"Pet\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"id\": {\"type\": \"integer\"}\n        }\n      }\n    }\n  }\n}\n";
+    assert_eq!(struct_rows("openapi.json", src, "Pet"), (5, 10));
+    let fields = parse_openapi("openapi.json", src);
+    assert_eq!(field_row(&fields, "Pet", "id"), 8);
+}
+
+#[test]
+fn test_extract_fields_swagger_definitions_carry_key_rows() {
+    let src = "swagger: \"2.0\"\ninfo:\n  title: t\n  version: \"1\"\ndefinitions:\n  Tag:\n    properties:\n      label:\n        type: string\n";
+    assert_eq!(struct_rows("swagger.yaml", src, "Tag"), (5, 8));
+    let fields = parse_openapi("swagger.yaml", src);
+    assert_eq!(field_row(&fields, "Tag", "label"), 7);
+}
