@@ -42,8 +42,8 @@ pub struct ProcessesArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format. Omit for the LLM-tuned toon payload; `json` is full-fidelity.
-    /// `text` prints one compact JSON line per result.
+    /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
+    /// toon. `json`: full-fidelity JSON. `text`: one compact JSON line per result.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 
@@ -78,8 +78,8 @@ pub struct TraceArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format. Omit for the LLM-tuned toon payload; `json` is full-fidelity.
-    /// `text` prints one compact JSON line per result.
+    /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
+    /// toon. `json`: full-fidelity JSON. `text`: one compact JSON line per result.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 

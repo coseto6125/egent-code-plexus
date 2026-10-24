@@ -42,8 +42,8 @@ pub struct ReviewArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format. Omit for the LLM-tuned toon payload; `json` is full-fidelity.
-    /// `text` is pretty-printed JSON.
+    /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
+    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 

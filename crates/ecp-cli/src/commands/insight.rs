@@ -24,8 +24,8 @@ pub struct InsightArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format. Defaults to `json` (clap `default_value`, not the LLM toon payload).
-    /// `llm` / `toon` encode the payload as toon; `text` is pretty-printed JSON.
+    /// Output format. `json`: full-fidelity JSON. `llm`: the LLM-tuned toon payload.
+    /// `toon`: uncompressed toon. `text`: pretty-printed JSON.
     #[arg(long, default_value = "json")]
     pub format: Option<OutputFormat>,
 

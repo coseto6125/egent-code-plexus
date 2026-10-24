@@ -29,8 +29,8 @@ pub struct UsageArgs {
     /// Show the full per-subcommand table (no truncation).
     #[arg(long)]
     pub all: bool,
-    /// Output format. Defaults to `text` (clap `default_value`): the dashboard table.
-    /// Only `json` differs; `llm` / `toon` print the same dashboard, colour is `text`-only.
+    /// Output format. `text`: the dashboard table, coloured on a terminal. `llm` and
+    /// `toon`: the same table without colour. `json`: full-fidelity JSON.
     #[arg(long, default_value = "text")]
     pub format: Option<OutputFormat>,
     /// Force color off (also honored: NO_COLOR env, non-TTY stdout).

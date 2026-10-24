@@ -110,8 +110,9 @@ pub struct FindArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format. Omit for the LLM-tuned bucketed toon payload. `text` prints
-    /// one `[kind] file:line (name)` line per match; `json` / `toon` emit the structured payload.
+    /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
+    /// toon. `json`: full-fidelity JSON. `text`: one `[kind] file:line (name)` line per
+    /// match.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 

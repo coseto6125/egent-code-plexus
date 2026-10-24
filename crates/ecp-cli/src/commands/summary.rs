@@ -41,10 +41,8 @@ pub struct SummaryArgs {
     #[arg(long, default_value_t = false)]
     pub detailed: bool,
 
-    /// Output format. Omit for the LLM-tuned default (toon-encoded, lossy
-    /// confidence rounding + compact timestamps). `--format toon` is the
-    /// neutral toon encoding of the full payload; `--format json` is the
-    /// full-fidelity JSON; `--format text` is pretty-printed JSON.
+    /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
+    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 }
