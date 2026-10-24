@@ -60,7 +60,10 @@ pub fn emit_to_string(value: &Value, format: OutputFormat) -> Result<String, Ecp
             if let Some(results) = value.get("results").and_then(|v| v.as_array()) {
                 Ok(results
                     .iter()
-                    .filter_map(|r| r.as_str())
+                    .map(|r| match r {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    })
                     .collect::<Vec<_>>()
                     .join("\n"))
             } else {
@@ -393,11 +396,24 @@ mod tests {
     }
 
     #[test]
-    fn emit_to_string_text_silently_drops_non_string_results_entries() {
+    fn emit_to_string_text_renders_every_results_entry_on_its_own_line() {
+        // Contract: text mode prints one line per result. Dropping non-string
+        // entries made `routes` / `processes` print nothing, which reads as
+        // "no results".
         let value = json!({"results": [123, "hello", true, "world"]});
         let out = emit_to_string(&value, OutputFormat::Text).expect("ok");
-        // Non-string entries are filtered out — only strings remain, joined by \n.
-        assert_eq!(out, "hello\nworld");
+        assert_eq!(out, "123\nhello\ntrue\nworld");
+    }
+
+    #[test]
+    fn emit_to_string_text_object_results_render_as_compact_json_lines() {
+        let value =
+            json!({"results": [{"method": "GET", "path": "/a"}, {"method": "POST", "path": "/b"}]});
+        let out = emit_to_string(&value, OutputFormat::Text).expect("ok");
+        assert_eq!(
+            out,
+            "{\"method\":\"GET\",\"path\":\"/a\"}\n{\"method\":\"POST\",\"path\":\"/b\"}"
+        );
     }
 
     #[test]

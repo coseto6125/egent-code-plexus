@@ -110,7 +110,8 @@ pub struct FindArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format: text (default) | json | toon.
+    /// Output format. Omit for the LLM-tuned bucketed toon payload. `text` prints
+    /// one `[kind] file:line (name)` line per match; `json` / `toon` emit the structured payload.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 

@@ -67,7 +67,8 @@ pub struct FindEventMirrorsArgs {
     #[arg(long, value_name = "PATTERN")]
     pub topic: Option<String>,
 
-    /// Output format: text (default) | json | toon
+    /// Output format. Omit for the LLM-tuned toon payload. `text` prints a mirror
+    /// table straight to stdout (no envelope); `json` / `toon` emit the structured payload.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 }

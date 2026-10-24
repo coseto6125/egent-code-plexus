@@ -131,7 +131,8 @@ pub struct ImpactArgs {
     #[arg(long, default_value_t = false)]
     pub explain_confidence: bool,
 
-    /// Output format (mostly internal — agent doesn't set this).
+    /// Output format. Omit for the LLM-tuned toon payload; `json` is full-fidelity.
+    /// `text` is pretty-printed JSON.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 

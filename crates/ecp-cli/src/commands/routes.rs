@@ -41,7 +41,8 @@ pub struct RoutesArgs {
     #[arg(long)]
     pub include_tests: bool,
 
-    /// Output format (toon / json / text).
+    /// Output format. Omit for the LLM-tuned toon payload (middleware names joined);
+    /// `json` is full-fidelity. `text` prints one compact JSON line per route.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 }

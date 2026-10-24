@@ -63,8 +63,8 @@ pub struct DiffArgs {
     #[arg(long, requires = "baseline_graph")]
     pub current_graph: Option<PathBuf>,
 
-    /// Output format. Omit for the LLM-tuned default; pass
-    /// `--format text|json|toon` for the alternative renderings.
+    /// Output format. Omit for the LLM-tuned toon payload; `json` is full-fidelity,
+    /// `toon` is uncompressed toon, `text` is pretty-printed JSON.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 

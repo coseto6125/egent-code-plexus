@@ -35,7 +35,8 @@ pub struct ShapeCheckArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format: text (default) | json | toon
+    /// Output format. Omit for the LLM-tuned toon payload. `text` renders
+    /// a human-readable line report; `json` / `toon` emit the structured payload.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 

@@ -42,7 +42,8 @@ pub struct ReviewArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format: toon (default) | json
+    /// Output format. Omit for the LLM-tuned toon payload; `json` is full-fidelity.
+    /// `text` is pretty-printed JSON.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 

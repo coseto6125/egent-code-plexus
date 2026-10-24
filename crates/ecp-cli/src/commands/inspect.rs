@@ -23,7 +23,8 @@ pub struct InspectArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format
+    /// Output format. Omit for the LLM-tuned toon payload (edge boilerplate stripped).
+    /// `json` keeps the full edges; `text` is pretty-printed JSON.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 

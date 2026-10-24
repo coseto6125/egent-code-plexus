@@ -87,7 +87,8 @@ pub struct PathArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format (toon / json / text).
+    /// Output format. Omit for the LLM-tuned toon payload; `json` is full-fidelity.
+    /// `text` is pretty-printed JSON.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 }

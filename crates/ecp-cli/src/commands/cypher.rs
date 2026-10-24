@@ -52,8 +52,8 @@ pub struct CypherArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format. Omit for the LLM-tuned default; explicit `--format
-    /// toon|json|text` for the neutral / round-trippable / human paths.
+    /// Output format. Omit for the LLM-tuned toon payload; `toon` is uncompressed,
+    /// `json` is full-fidelity, `text` is pretty-printed JSON.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 }

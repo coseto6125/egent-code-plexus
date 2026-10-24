@@ -59,6 +59,8 @@ pub struct FlowArgs {
     /// Bypass the latest-result cache. Source hashes always invalidate changed results.
     #[arg(long)]
     pub no_cache: bool,
+    /// Output format. Omit for the LLM-tuned toon payload; `json` is full-fidelity.
+    /// `text` is pretty-printed JSON.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 }
