@@ -28,7 +28,7 @@
 
 use crate::commands::symbol_id::{resolve_owner_class, split_fqn_target};
 use crate::engine::Engine;
-use crate::output::{emit, OutputFormat};
+use crate::output::{emit_with_caveat, OutputFormat};
 use clap::Args;
 use ecp_analyzer::pattern_finder::{
     compile, lang_for_path, match_source, CompiledPattern, PatternError, PatternLang,
@@ -67,15 +67,17 @@ pub struct PatternArgs {
     pub repo: Option<String>,
 
     /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
-    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON.
+    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON. A `result`
+    /// field appears only when the answer carries a caveat (stale or warm-attached
+    /// graph, unreadable uncommitted paths); absent means current.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 }
 
-pub fn run(args: PatternArgs, engine: &Engine) -> Result<(), EcpError> {
+pub fn run(args: PatternArgs, engine: &Engine, caveat: Option<String>) -> Result<(), EcpError> {
     let format = args.format.unwrap_or_default();
     let payload = build_payload(&args, engine)?;
-    emit(&payload, format)
+    emit_with_caveat(&payload, format, caveat)
 }
 
 pub fn build_payload(args: &PatternArgs, engine: &Engine) -> Result<serde_json::Value, EcpError> {

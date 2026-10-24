@@ -9,7 +9,7 @@
 
 use crate::commands::diff::{self, DiffArgs, DiffSection};
 use crate::engine::Engine;
-use crate::output::{emit, OutputFormat};
+use crate::output::{emit, emit_with_caveat, OutputFormat};
 use clap::Args;
 use ecp_core::EcpError;
 
@@ -43,7 +43,10 @@ pub struct ReviewArgs {
     pub repo: Option<String>,
 
     /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
-    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON.
+    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON. In the default
+    /// (non-`--verdicts`) mode a `result` field appears only when the answer carries a
+    /// caveat (stale or warm-attached graph, unreadable uncommitted paths); absent means
+    /// current. `--verdicts` reads no worktree graph and never carries one.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 
@@ -54,7 +57,7 @@ pub struct ReviewArgs {
     pub verdicts: bool,
 }
 
-pub fn run(args: ReviewArgs, engine: &Engine) -> Result<(), EcpError> {
+pub fn run(args: ReviewArgs, engine: &Engine, caveat: Option<String>) -> Result<(), EcpError> {
     if args.verdicts && !args.include.is_empty() {
         return Err(EcpError::InvalidArgument(
             "--include flow cannot be combined with --verdicts".into(),
@@ -98,7 +101,7 @@ pub fn run(args: ReviewArgs, engine: &Engine) -> Result<(), EcpError> {
         payload["elapsed_ms"] = serde_json::json!(start.elapsed().as_millis() as u64);
     }
     let format = args.format.unwrap_or_default();
-    emit(&payload, format)
+    emit_with_caveat(&payload, format, caveat)
 }
 
 fn run_verdicts(args: &ReviewArgs) -> Result<(), EcpError> {

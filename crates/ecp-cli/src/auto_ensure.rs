@@ -184,9 +184,20 @@ pub enum EnsureFreshOutcome {
 }
 
 pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<EnsureResult> {
+    probe_index(graph_path, worktree_root).map(|(result, _)| result)
+}
+
+type Probe = (EnsureResult, Option<DirtySet<ClassifiedPath>>);
+
+/// [`ensure_index`] plus the dirty set a `Ready` verdict still saw. Its events
+/// are empty (nothing changed that a source or config reader needs) but its
+/// skipped entries survive, so a caller can still report the paths git printed
+/// that the set cannot name. `EnsureResult::Ready` stays a unit variant for the
+/// doctor, summary and hook matches that never read the set.
+pub(crate) fn probe_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Probe> {
     let graph_mtime = match fs::metadata(graph_path) {
         Ok(m) => m.modified()?,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(EnsureResult::Missing),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((EnsureResult::Missing, None)),
         Err(e) => return Err(e),
     };
 
@@ -196,11 +207,14 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
     // rebuilds.
     if !crate::engine::header_compatible(graph_path) {
         spawn_upgrade_gc();
-        return Ok(EnsureResult::Stale {
-            age_seconds: 0,
-            needs_full_rebuild: true,
-            dirty_files: None,
-        });
+        return Ok((
+            EnsureResult::Stale {
+                age_seconds: 0,
+                needs_full_rebuild: true,
+                dirty_files: None,
+            },
+            None,
+        ));
     }
 
     // Convention-drift gate (FU-2026-05-25-005). `header_compatible` only
@@ -214,11 +228,14 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
     // or build_l2 branch.
     if fingerprint_drifted(graph_path) {
         spawn_upgrade_gc();
-        return Ok(EnsureResult::Stale {
-            age_seconds: 0,
-            needs_full_rebuild: true,
-            dirty_files: None,
-        });
+        return Ok((
+            EnsureResult::Stale {
+                age_seconds: 0,
+                needs_full_rebuild: true,
+                dirty_files: None,
+            },
+            None,
+        ));
     }
 
     // A slot built from a subdirectory answers `found:false` for everything
@@ -226,11 +243,14 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
     // the fingerprint gate: the sidecar match would otherwise return Ready for
     // ever. One small JSON read per query buys back the core promise.
     if slot_built_below_root(graph_path, worktree_root) {
-        return Ok(EnsureResult::Stale {
-            age_seconds: 0,
-            needs_full_rebuild: true,
-            dirty_files: None,
-        });
+        return Ok((
+            EnsureResult::Stale {
+                age_seconds: 0,
+                needs_full_rebuild: true,
+                dirty_files: None,
+            },
+            None,
+        ));
     }
 
     // Fast path: if the working tree is a git repo, the indexed HEAD matches
@@ -246,15 +266,18 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
             .duration_since(graph_mtime)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        return Ok(EnsureResult::Stale {
-            age_seconds: age,
-            needs_full_rebuild: false,
-            // mtime walk only answers "is anything newer", not "which files";
-            // ensure_fresh falls back to collect_dirty_files for the path list.
-            dirty_files: None,
-        });
+        return Ok((
+            EnsureResult::Stale {
+                age_seconds: age,
+                needs_full_rebuild: false,
+                // mtime walk only answers "is anything newer", not "which files";
+                // ensure_fresh falls back to collect_dirty_files for the path list.
+                dirty_files: None,
+            },
+            None,
+        ));
     }
-    Ok(EnsureResult::Ready)
+    Ok((EnsureResult::Ready, None))
 }
 
 /// Path of the HEAD-SHA sidecar written next to `graph.bin`. One line, 40 hex
@@ -422,7 +445,7 @@ fn git_fingerprint_shortcut(
     graph_path: &Path,
     worktree_root: &Path,
     graph_mtime: SystemTime,
-) -> Option<EnsureResult> {
+) -> Option<Probe> {
     // A short-lived process can exit before the detached sidecar write lands,
     // leaving the file missing or empty. The commit dir's name is published
     // with graph.bin, so a graph built at HEAD still takes this path; the
@@ -444,7 +467,7 @@ fn git_fingerprint_shortcut(
         return None;
     }
     if porcelain.stdout.is_empty() {
-        return Some(EnsureResult::Ready);
+        return Some((EnsureResult::Ready, None));
     }
     // Output that is not porcelain v1 proves nothing about the tree: take
     // the mtime walk, as for a failed status.
@@ -463,7 +486,7 @@ fn git_fingerprint_shortcut(
     // must not send every query down the refresh path (freshness F6).
     let mut dirty = classify_dirty(dirty).without_other();
     if dirty.events().is_empty() {
-        return Some(EnsureResult::Ready);
+        return Some((EnsureResult::Ready, Some(dirty)));
     }
     // ecp's own artifacts are filtered out (mirroring `any_source_newer_than`):
     // with `--untracked-files=all` they would otherwise keep porcelain
@@ -481,17 +504,20 @@ fn git_fingerprint_shortcut(
         DirtyEvent::Deleted(_) | DirtyEvent::Renamed { .. } | DirtyEvent::Unmerged(_) => true,
     });
     if dirty.events().is_empty() {
-        return Some(EnsureResult::Ready);
+        return Some((EnsureResult::Ready, Some(dirty)));
     }
     let age = SystemTime::now()
         .duration_since(graph_mtime)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    Some(EnsureResult::Stale {
-        age_seconds: age,
-        needs_full_rebuild: false,
-        dirty_files: Some(dirty),
-    })
+    Some((
+        EnsureResult::Stale {
+            age_seconds: age,
+            needs_full_rebuild: false,
+            dirty_files: Some(dirty),
+        },
+        None,
+    ))
 }
 
 /// C5 routing, the same table `reanalyze_files` dispatches on. No syscall.
@@ -589,16 +615,19 @@ pub(crate) fn ensure_fresh_with_rebuild(
     worktree_root: &Path,
 ) -> Result<Ensured, String> {
     beat_session_heartbeat(worktree_root);
-    let state =
-        ensure_index(graph_path, worktree_root).map_err(|e| format!("ensure_index probe: {e}"))?;
+    let (state, ready_dirty) =
+        probe_index(graph_path, worktree_root).map_err(|e| format!("ensure_index probe: {e}"))?;
     // `ExactSha` carries the commit to build; `NearCurrent` builds HEAD.
     let target_sha = match need {
         IndexNeed::ExactSha(sha) => sha,
         IndexNeed::NearCurrent => None,
     };
     match state {
-        // Ready proves no source or config change, so the set is empty.
-        EnsureResult::Ready => Ok(Ensured::current(DirtySet::from_events(Vec::new()).ok())),
+        // Ready proves no source or config change, so the events are empty;
+        // the probe's set still names the entries it skipped.
+        EnsureResult::Ready => Ok(Ensured::current(
+            ready_dirty.or_else(|| DirtySet::from_events(Vec::new()).ok()),
+        )),
         EnsureResult::Missing => {
             // A sibling is a different commit, so it is only ever an answer to
             // `NearCurrent`. Deciding here rather than unwinding a warm-attach

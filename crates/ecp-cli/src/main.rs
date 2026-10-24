@@ -157,7 +157,8 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
     // index scan, background reindex spawn); graph-free commands must not pay
     // for it, so the whole load is skipped rather than run and discarded —
     // down to the `current_dir()` syscall.
-    let (engine, graph_path) = if cli.command.needs_graph(graph_path::is_custom(&cli.graph)) {
+    let (engine, graph_path, caveat) = if cli.command.needs_graph(graph_path::is_custom(&cli.graph))
+    {
         // `--repo` names the directory this invocation answers about. When it
         // is not one, the value used to flow on as a relative path, resolve to
         // nothing, and leave the cwd's own graph attached — so `ecp impact
@@ -229,13 +230,15 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
                 } => format!("Error loading graph from {}: {error}", graph_path.display()),
             })
         })?;
+        // Read before the destructure: the caveats need the dirty set.
+        let caveat = ecp_cli::output::join_caveats(ctx.caveats());
         let ReadContext {
             engine, graph_path, ..
         } = ctx;
 
-        (Some(engine), Some(graph_path))
+        (Some(engine), Some(graph_path), caveat)
     } else {
-        (None, None)
+        (None, None, None)
     };
     let engine = engine.as_ref();
 
@@ -251,17 +254,17 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
             commands::impact::run(args, engine.expect("needs_graph() gates this arm"))
         }
         Commands::Rename(args) => {
-            commands::rename::run(args, engine.expect("needs_graph() gates this arm"))
+            commands::rename::run(args, engine.expect("needs_graph() gates this arm"), caveat)
         }
         Commands::Pattern(args) => {
-            commands::pattern::run(args, engine.expect("needs_graph() gates this arm"))
+            commands::pattern::run(args, engine.expect("needs_graph() gates this arm"), caveat)
         }
         Commands::Flow(args) => commands::flow::run(args),
         Commands::Cypher(args) => {
             commands::cypher::run(args, engine.expect("needs_graph() gates this arm"))
         }
         Commands::Routes(args) => {
-            commands::routes::run(args, engine.expect("needs_graph() gates this arm"))
+            commands::routes::run(args, engine.expect("needs_graph() gates this arm"), caveat)
         }
         Commands::ShapeCheck(args) => {
             commands::shape_check::run(args, engine.expect("needs_graph() gates this arm"))
@@ -270,7 +273,7 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
             commands::tool_map::run(args, engine.expect("needs_graph() gates this arm"))
         }
         Commands::Review(args) => {
-            commands::review::run(args, engine.expect("needs_graph() gates this arm"))
+            commands::review::run(args, engine.expect("needs_graph() gates this arm"), caveat)
         }
         Commands::Heuristics(args) => {
             commands::heuristics::run(args, engine.expect("needs_graph() gates this arm"))
@@ -288,7 +291,7 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
             commands::path::run(args, engine.expect("needs_graph() gates this arm"))
         }
         Commands::Processes(args) => {
-            commands::processes::run(args, engine.expect("needs_graph() gates this arm"))
+            commands::processes::run(args, engine.expect("needs_graph() gates this arm"), caveat)
         }
         Commands::HookHandle(args) => commands::hook_handle::run(args),
         Commands::HookWatcher(args) => commands::hook_watcher::run(args),

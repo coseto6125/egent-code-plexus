@@ -93,6 +93,12 @@ pub fn merge_caveats(a: Option<String>, b: Option<String>) -> Option<String> {
     }
 }
 
+/// The single `result` string of every caveat a read context reports, one per
+/// line like [`merge_caveats`]; `None` when there is none.
+pub fn join_caveats(caveats: Vec<String>) -> Option<String> {
+    (!caveats.is_empty()).then(|| caveats.join("\n"))
+}
+
 /// Like [`emit`] but injects an optional `result` caveat first. Commands with
 /// access to a caveat source (e.g. a warm-attach engine) route through here so
 /// the staleness/completeness signal lands in the structured payload the LLM
@@ -341,6 +347,15 @@ mod tests {
             value.get("result").and_then(|v| v.as_str()),
             Some("graph is stale; rebuild"),
             "Some caveat must surface as a `result` field the LLM parses"
+        );
+    }
+
+    #[test]
+    fn test_join_caveats_two_notes_one_line_each() {
+        assert_eq!(join_caveats(Vec::new()), None);
+        assert_eq!(
+            join_caveats(vec!["a".to_string(), "b".to_string()]),
+            Some("a\nb".to_string())
         );
     }
 

@@ -33,6 +33,9 @@ use std::path::{Path, PathBuf};
 
 /// AST-powered multi-language rename: locates all identifier occurrences
 /// via tree-sitter and rewrites them atomically, with optional dry-run preview.
+/// The closing toon payload gains a `result` field only when the answer carries
+/// a caveat (a warm-attached or behind-HEAD graph, or uncommitted paths that
+/// could not be read); its absence means the graph was current.
 #[derive(Args, Debug, Clone, Serialize)]
 pub struct RenameArgs {
     /// The symbol name to rename (equivalent to `--symbol` flag).
@@ -241,7 +244,11 @@ fn apply_markdown_rename(
 // Main entry point
 // ---------------------------------------------------------------------------
 
-pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpError> {
+pub fn run(
+    args: RenameArgs,
+    engine: &crate::engine::Engine,
+    caveat: Option<String>,
+) -> Result<(), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let repo_root = args
         .repo
@@ -438,6 +445,22 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
                 target_symbol, target_new_name
             );
         }
+        // A stale or warm-attached graph is the likeliest reason a symbol the
+        // agent just wrote is absent: the verdict must carry that reason. The
+        // payload appears only with a caveat, so the plain output stays as is.
+        if caveat.is_some() {
+            let payload = json!({
+                "operation": if args.dry_run { "dry-run" } else { "applied" },
+                "old": target_symbol,
+                "new": target_new_name,
+                "rename_count": 0,
+            });
+            let _ = crate::output::emit_with_caveat(
+                &payload,
+                crate::output::OutputFormat::Toon,
+                caveat,
+            );
+        }
         return Ok(());
     }
 
@@ -481,6 +504,7 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
             &target_new_name,
             total_ast_hits,
             true,
+            caveat,
         );
         return Ok(());
     }
@@ -511,6 +535,7 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
         &target_new_name,
         total_ast_hits,
         false,
+        caveat,
     );
     Ok(())
 }
@@ -525,6 +550,7 @@ fn emit_verification_payload(
     new: &str,
     rename_count: usize,
     dry_run: bool,
+    caveat: Option<String>,
 ) {
     let residuals = scan_word_occurrences(repo_root, old);
     let new_distribution = scan_word_occurrences(repo_root, new);
@@ -539,7 +565,7 @@ fn emit_verification_payload(
     });
 
     // Best-effort: emit as structured JSON after main output.
-    let _ = crate::output::emit(&payload, crate::output::OutputFormat::Toon);
+    let _ = crate::output::emit_with_caveat(&payload, crate::output::OutputFormat::Toon, caveat);
 }
 
 // ---------------------------------------------------------------------------

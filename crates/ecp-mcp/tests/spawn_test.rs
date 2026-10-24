@@ -37,6 +37,32 @@ fn spawn_invokes_subcommand_and_captures_stdout() {
     assert!(out.contains("arg2=foo"));
 }
 
+// Contract, not a regression of spawn.rs: every ecp graph command carries its
+// caveat in the stdout payload (`result`), and `run_spawn` returns stdout only.
+// The stub plants a payload with a `result` caveat on stdout and progress noise
+// on stderr; the MCP client must read the caveat and none of the noise, so a
+// machine-parsed payload stays intact. It passes on today's spawn.rs; the CLI
+// tests in `ecp-cli/tests/caveat_payload.rs` are the ones that fail before F6.
+#[test]
+#[cfg(unix)]
+fn test_run_spawn_caveat_in_stdout_payload() {
+    let _guard = stub_guard();
+    let dir = TempDir::new().unwrap();
+    let stub = write_stub(
+        dir.path(),
+        "#!/bin/sh\necho 'l2.warm-attach sibling=/x rebuild=background' >&2\n\
+         printf '{\"status\":\"success\",\"result\":\"graph is behind HEAD\"}\\n'\n",
+    );
+    let tool = dummy_tool("routes");
+    let out = run_spawn(&stub, &tool, &json!({})).unwrap();
+    let payload: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(payload["result"], "graph is behind HEAD", "got: {out}");
+    assert!(
+        !out.contains("warm-attach"),
+        "stderr leaked into stdout: {out}"
+    );
+}
+
 #[test]
 fn spawn_subprocess_failure_returns_err_with_stderr() {
     let _guard = stub_guard();
