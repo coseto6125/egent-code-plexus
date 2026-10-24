@@ -511,15 +511,10 @@ fn test_uninstall_hook_without_claude_code_keeps_foreign_hook() {
 fn test_uninstall_hook_relative_core_hooks_path_from_linked_worktree_removes_both() {
     let (tmp, repo, home) = hook_repo();
     git_in(&repo, &["config", "core.hooksPath", "my hooks"]);
-    let configured = repo.join("my hooks/reference-transaction");
-    std::fs::create_dir_all(configured.parent().unwrap()).unwrap();
-    std::fs::write(&configured, ECP_HOOK).unwrap();
-    let legacy = repo.join(".git/hooks/reference-transaction");
-    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-    std::fs::write(&legacy, ECP_HOOK).unwrap();
-
     // A relative core.hooksPath resolves against the worktree git runs the
     // hook in, so the linked worktree's own `my hooks/` dir is the one in use.
+    // The worktree comes before the hooks: git on Windows runs a hook it
+    // finds whatever its mode bits, and ECP_HOOK names a missing binary.
     let linked = tmp.path().join("linked wt");
     git_in(
         &repo,
@@ -531,6 +526,12 @@ fn test_uninstall_hook_relative_core_hooks_path_from_linked_worktree_removes_bot
             linked.to_str().unwrap(),
         ],
     );
+    let configured = repo.join("my hooks/reference-transaction");
+    std::fs::create_dir_all(configured.parent().unwrap()).unwrap();
+    std::fs::write(&configured, ECP_HOOK).unwrap();
+    let legacy = repo.join(".git/hooks/reference-transaction");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, ECP_HOOK).unwrap();
     let linked_hook = linked.join("my hooks/reference-transaction");
     std::fs::create_dir_all(linked_hook.parent().unwrap()).unwrap();
     std::fs::write(&linked_hook, ECP_HOOK).unwrap();

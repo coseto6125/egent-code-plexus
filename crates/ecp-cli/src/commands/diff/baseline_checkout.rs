@@ -185,6 +185,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
         git(repo, &["init", "-q", "-b", "main"]);
+        // Windows runners set core.autocrlf=true; the asserts compare bytes.
+        git(repo, &["config", "core.autocrlf", "false"]);
         std::fs::write(repo.join("a.txt"), "v1\n").unwrap();
         git(repo, &["add", "-A"]);
         git(repo, &["commit", "-qm", "v1"]);

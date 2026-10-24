@@ -13,3 +13,8 @@ scripts/site/** text eol=lf
 *.webp binary
 *.woff binary
 *.woff2 binary
+
+# Stored-data fixtures are byte-exact: a CRLF checkout changes their content
+# hashes and the SHA of the repository the tests rebuild from them.
+crates/ecp-cli/tests/fixtures/stored-by-0.16.4/** -text
+crates/ecp-cli/tests/fixtures/stored-commits-by-0.16.4/** -text

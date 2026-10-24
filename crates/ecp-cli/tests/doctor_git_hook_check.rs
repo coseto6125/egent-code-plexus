@@ -67,13 +67,18 @@ fn write_hook(path: &Path, body: &str) {
     std::fs::write(path, body).unwrap();
 }
 
+/// Compares files, not spellings: on Windows the message joins `\\` and `/`
+/// and git may print the 8.3 short form of the temp dir.
 fn assert_warns_about(rows: &[serde_json::Value], hook: &Path) {
+    let want = std::fs::canonicalize(hook).unwrap();
     let row = rows
         .iter()
         .find(|r| {
             r["message"]
                 .as_str()
-                .is_some_and(|m| m.contains(&*hook.to_string_lossy()))
+                .and_then(|m| m.split(" is a retired ecp hook").next())
+                .and_then(|named| std::fs::canonicalize(named).ok())
+                .is_some_and(|named| named == want)
         })
         .unwrap_or_else(|| panic!("no row names {}: {rows:?}", hook.display()));
     assert_eq!(row["status"], "warn", "{row}");
@@ -106,8 +111,8 @@ fn test_check_ecp_hook_in_relative_core_hooks_path_warns() {
 #[test]
 fn test_check_ecp_hook_seen_from_linked_worktree_warns() {
     let (tmp, repo, home) = repo_and_home();
-    let hook = repo.join(".git/hooks/reference-transaction");
-    write_hook(&hook, ECP_HOOK);
+    // The worktree comes first: git on Windows runs a hook it finds whatever
+    // its mode bits, and the planted hook names a binary that does not exist.
     let linked = tmp.path().join("linked wt");
     git(
         &repo,
@@ -119,6 +124,8 @@ fn test_check_ecp_hook_seen_from_linked_worktree_warns() {
             linked.to_str().unwrap(),
         ],
     );
+    let hook = repo.join(".git/hooks/reference-transaction");
+    write_hook(&hook, ECP_HOOK);
     let rows = git_hook_rows(&linked, &home);
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_warns_about(&rows, &hook);
