@@ -307,7 +307,7 @@ fn repo_defined_filter_drivers_do_not_run_during_baseline_checkout() {
 
 #[cfg(unix)]
 fn assert_filter_placement_is_neutralised(placement: &str) {
-    use ecp_cli::commands::diff::git_guard::BaselineCheckout;
+    use ecp_cli::commands::diff::baseline_checkout::BaselineCheckout;
 
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");

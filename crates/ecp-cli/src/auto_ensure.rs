@@ -16,7 +16,7 @@ use ecp_core::session::SessionMeta;
 use ignore::WalkBuilder;
 use std::collections::HashMap;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
@@ -971,7 +971,6 @@ impl RebuildMarkers {
     /// The job writes the failed marker itself, so a launcher that never
     /// started must write it here.
     fn record_launch_failure(&self) {
-        use std::io::Write;
         let _ = std::fs::remove_file(&self.complete);
         let _ = std::fs::write(&self.failed, b"");
         if let Ok(mut log) = std::fs::OpenOptions::new()

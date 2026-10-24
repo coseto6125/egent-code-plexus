@@ -10,9 +10,9 @@ use ecp_core::EcpError;
 use std::path::PathBuf;
 
 pub mod baseline;
+pub mod baseline_checkout;
 pub mod bindings;
 pub mod contracts;
-pub mod git_guard;
 pub mod output;
 pub mod routes;
 pub mod symbols;
@@ -184,7 +184,7 @@ pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, EcpError> {
     // it ONCE per state regardless of which sections are requested.
     // Built from a scratch checkout, never from the user's tree: stashing and
     // checking out there loses staged state and races a second `ecp diff`.
-    let baseline_checkout = git_guard::BaselineCheckout::create(&repo_dir, &baseline_sha)?;
+    let baseline_checkout = baseline_checkout::BaselineCheckout::create(&repo_dir, &baseline_sha)?;
     let current_jsonl = baseline_checkout.scratch().join("current.jsonl");
     let baseline_jsonl = baseline_checkout.scratch().join("baseline.jsonl");
     let baseline_graph_tmp = baseline_checkout.scratch().join("baseline-graph.bin");

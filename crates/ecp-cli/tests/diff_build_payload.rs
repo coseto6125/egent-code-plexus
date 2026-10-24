@@ -40,7 +40,7 @@ fn diff_build_payload_identical_shas_returns_envelope_shape() {
     init_repo(repo.path());
 
     // `--baseline HEAD` → baseline_sha == current_sha → fast-path in build_payload.
-    // The fast-path returns empty diffs without touching git_guard or graph.bin.
+    // The fast-path returns empty diffs without touching the baseline checkout or graph.bin.
     let out = Command::new(ecp_bin())
         .args([
             "diff",
