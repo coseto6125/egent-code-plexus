@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "session_id": "fxsession0001",
+  "pid": 780069,
+  "started_at": "2026-10-24T18:21:49.523190370+00:00",
+  "last_touched": "2026-10-24T18:21:49.536497335+00:00",
+  "base_sha": "e7ca0e6a663e619e7b245890db6cb47653fed6dc",
+  "source_worktree": "/home/enor/.cache/claude-tmp/claude-1000/-home-enor-code-graph-nexus/87d213ca-488b-4d94-929e-b10e85a7e210/scratchpad/dev/fx.e7UbnZ",
+  "overlay_version": 2,
+  "watcher_pid": null,
+  "last_drained_offset": 0
+}
