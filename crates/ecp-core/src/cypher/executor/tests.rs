@@ -37,9 +37,21 @@ fn execute_materialising(
         None => bindings,
     };
 
-    let (columns, rows) = project_return(&query.return_.items, &bindings, graph, cache)?;
+    // An aggregating WITH clears the pattern variables, as in `stream_projection`.
+    let matches: &[MatchClause] = match &query.with {
+        Some(wc) if has_aggregate(&wc.items) => &[],
+        _ => &query.matches,
+    };
+    let (columns, rows) = project_return(&query.return_.items, matches, &bindings, graph, cache)?;
 
-    let rows = apply_order_by(&query.order_by, &columns, rows)?;
+    let rows = apply_order_by(
+        &query.order_by,
+        &query.return_.items,
+        &columns,
+        rows,
+        graph,
+        cache,
+    )?;
     let rows = apply_distinct(query.return_.distinct, rows);
     let rows = apply_skip_limit(query.skip, query.limit, rows);
     let rows = apply_union(
@@ -1582,13 +1594,15 @@ fn exec_virtual_label_callable_in_where() {
 
 #[test]
 fn exec_union_concat() {
-    // UNION concatenates results from two sub-queries.
+    // UNION concatenates results from two sub-queries that name their columns alike.
     with_func_and_method(|g| {
-        let q =
-            parse("MATCH (a:Function) RETURN a.name UNION MATCH (b:Method) RETURN b.name").unwrap();
+        let q = parse(
+            "MATCH (a:Function) RETURN a.name AS name UNION MATCH (b:Method) RETURN b.name AS name",
+        )
+        .unwrap();
         let r = execute(&q, g, None, Path::new(".")).unwrap();
         // 1 Function + 1 Method = 2 rows (distinct by default).
-        assert_eq!(r.columns, vec!["a.name"], "left-side column names kept");
+        assert_eq!(r.columns, vec!["name"]);
         let names: Vec<&str> = r
             .rows
             .iter()
@@ -1607,6 +1621,23 @@ fn exec_union_concat() {
 }
 
 #[test]
+fn exec_union_different_column_names_is_refused() {
+    // Labelling the right branch's rows with the left branch's name hid that
+    // the two columns mean different things. Old: succeeded, columns ["a.name"].
+    with_func_and_method(|g| {
+        let q =
+            parse("MATCH (a:Function) RETURN a.name UNION MATCH (b:Method) RETURN b.name").unwrap();
+        let error = execute(&q, g, None, Path::new("."))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("[a.name]") && error.contains("[b.name]"),
+            "{error}"
+        );
+    });
+}
+
+#[test]
 fn exec_union_all_keeps_dupes() {
     // UNION ALL keeps duplicates; matching all :Function nodes gives 1 from left, 1 from right.
     // Actually in this fixture Function=my_func, Method=my_method.
@@ -1614,7 +1645,7 @@ fn exec_union_all_keeps_dupes() {
     with_fan(|g| {
         // Both sides match all Function nodes → 6 rows with UNION ALL.
         let q =
-            parse("MATCH (a:Function) RETURN a.name UNION ALL MATCH (b:Function) RETURN b.name")
+            parse("MATCH (a:Function) RETURN a.name UNION ALL MATCH (a:Function) RETURN a.name")
                 .unwrap();
         let r = execute(&q, g, None, Path::new(".")).unwrap();
         assert_eq!(r.rows.len(), 6, "UNION ALL keeps duplicates: 3+3");
@@ -1625,7 +1656,7 @@ fn exec_union_all_keeps_dupes() {
 fn exec_union_dedupes_without_all() {
     // UNION (no ALL) deduplicates.
     with_fan(|g| {
-        let q = parse("MATCH (a:Function) RETURN a.name UNION MATCH (b:Function) RETURN b.name")
+        let q = parse("MATCH (a:Function) RETURN a.name UNION MATCH (a:Function) RETURN a.name")
             .unwrap();
         let r = execute(&q, g, None, Path::new(".")).unwrap();
         assert_eq!(r.rows.len(), 3, "UNION deduplicates: 3 unique names");

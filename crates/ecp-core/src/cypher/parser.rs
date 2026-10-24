@@ -16,12 +16,20 @@ fn check_function_known(name: &str) -> Result<(), CypherError> {
     if AGGREGATES.contains(&upper.as_str()) || SCALAR_FUNCTIONS.contains(&upper.as_str()) {
         return Ok(());
     }
+    // Built from the two lists so the message cannot drift from what is accepted.
+    let supported = SCALAR_FUNCTIONS
+        .iter()
+        .chain(AGGREGATES)
+        .map(|f| f.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(", ");
     Err(CypherError::Semantic {
-        msg: format!(
-            "unknown function '{name}' (supported: type, id, labels, count, sum, avg, min, max, collect)"
-        ),
+        msg: format!("unknown function '{name}' (supported: {supported})"),
     })
 }
+
+/// Hint for a SQL `JOIN` written where a Cypher clause belongs.
+const SQL_JOIN_HINT: &str = "SQL syntax detected; for left-join semantics use `MATCH (a) OPTIONAL MATCH (a)-[r]->(b) WITH a, r WHERE r IS NULL RETURN a`";
 
 fn unsupported(construct: &str) -> CypherError {
     CypherError::Semantic {
@@ -99,10 +107,10 @@ fn hint_for_unsupported(tokens: &[Token], pos: usize) -> Option<String> {
             if matches!(a.as_str(), "LEFT" | "RIGHT" | "INNER" | "FULL")
                 && ident_at(i + 1).as_deref() == Some("JOIN")
             {
-                return Some("SQL syntax detected; for left-join semantics use `MATCH (a) OPTIONAL MATCH (a)-[r]->(b) WITH a, r WHERE r IS NULL RETURN a`".into());
+                return Some(SQL_JOIN_HINT.into());
             }
             if a == "JOIN" {
-                return Some("SQL syntax detected; for left-join semantics use `MATCH (a) OPTIONAL MATCH (a)-[r]->(b) WITH a, r WHERE r IS NULL RETURN a`".into());
+                return Some(SQL_JOIN_HINT.into());
             }
             if a == "CALL" {
                 return Some("stored procedures (CALL \u{2026} YIELD) are unsupported; for a node's edge types use `ecp inspect --name X`".into());
@@ -1647,5 +1655,16 @@ mod tests {
         let query = qr("MATCH (n) WHERE n.name IN ['a','b'] RETURN n.name").unwrap();
         assert!(matches!(query.where_, Some(Expr::In(..))));
         assert!(qr("MATCH (n) WHERE 'x' IN n.decorators RETURN n.name").is_ok());
+    }
+
+    #[test]
+    fn test_check_function_known_message_lists_every_accepted_name() {
+        let message = check_function_known("frobnicate").unwrap_err().to_string();
+        for name in AGGREGATES.iter().chain(SCALAR_FUNCTIONS) {
+            assert!(
+                message.contains(&name.to_ascii_lowercase()),
+                "{name}: {message}"
+            );
+        }
     }
 }

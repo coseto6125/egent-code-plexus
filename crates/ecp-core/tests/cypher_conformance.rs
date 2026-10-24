@@ -411,6 +411,11 @@ fn cycle_rows(text: &str) -> Vec<String> {
     fx.edge(t1, t2, RelType::Calls);
     fx.edge(t2, t3, RelType::Calls);
     fx.edge(t3, t1, RelType::Calls);
+    sorted_names(fx, text)
+}
+
+/// Run `text` on `fx` and return the first column, which must be names, sorted.
+fn sorted_names(fx: GraphFixture, text: &str) -> Vec<String> {
     let bytes = fx.into_bytes();
     let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
     let result = cypher::execute(&cypher::parse(text).unwrap(), graph, None, Path::new("."))
@@ -483,6 +488,382 @@ fn test_execute_exists_variable_length_sees_the_cycle_back_to_start() {
         cycle_rows("MATCH (a:Function) WHERE EXISTS((a)-[:Calls*1..2]->(a)) RETURN a.name"),
         vec!["cx", "cy", "loop"]
     );
+}
+
+// ---- variable-length cost: no trail enumeration ------------------------------
+
+const SPOKES: usize = 300;
+
+/// `leaf -> hub`, `hub -> s0..s299`, and the spokes in a ring `s_i -> s_(i+1)`.
+/// The old closed-trail DFS from `leaf` re-entered `hub` through every spoke
+/// pair, so it grew as degree^(k-2); `back_edge` adds `s0 -> leaf` to close a
+/// 3-hop cycle through `leaf`.
+fn hub_fixture(back_edge: bool) -> GraphFixture {
+    let mut fx = GraphFixture::new();
+    let leaf = fx.func("src/h.rs", "leaf");
+    let hub = fx.func("src/h.rs", "hub");
+    let spokes: Vec<_> = (0..SPOKES)
+        .map(|i| fx.func("src/h.rs", &format!("s{i}")))
+        .collect();
+    fx.edge(leaf, hub, RelType::Calls);
+    for (i, &spoke) in spokes.iter().enumerate() {
+        fx.edge(hub, spoke, RelType::Calls);
+        fx.edge(spoke, spokes[(i + 1) % SPOKES], RelType::Calls);
+    }
+    if back_edge {
+        fx.edge(spokes[0], leaf, RelType::Calls);
+    }
+    fx
+}
+
+#[test]
+fn test_execute_variable_length_undirected_leaf_of_a_degree_300_hub_has_no_closed_trail() {
+    // leaf has one relationship, so it is on no cycle: hub and the 300 spokes
+    // are reachable, leaf is not.
+    let names = sorted_names(
+        hub_fixture(false),
+        "MATCH (a {name:'leaf'})-[:Calls*1..6]-(t) RETURN DISTINCT t.name",
+    );
+    assert_eq!(names.len(), SPOKES + 1);
+    assert!(names.contains(&"hub".to_string()));
+    assert!(!names.contains(&"leaf".to_string()));
+}
+
+#[test]
+fn test_execute_variable_length_undirected_hub_start_sees_its_own_cycle() {
+    // hub-s0-s1 is a triangle (hub-s0, s0-s1, hub-s1), so hub is returned from
+    // hub within 3 hops. One BFS per incident relationship: 300 of them.
+    let names = sorted_names(
+        hub_fixture(false),
+        "MATCH (a {name:'hub'})-[:Calls*1..3]-(t) RETURN DISTINCT t.name",
+    );
+    assert!(names.contains(&"hub".to_string()));
+    let two_hops = sorted_names(
+        hub_fixture(false),
+        "MATCH (a {name:'hub'})-[:Calls*1..2]-(t) RETURN DISTINCT t.name",
+    );
+    assert!(!two_hops.contains(&"hub".to_string()));
+}
+
+#[test]
+fn test_execute_variable_length_undirected_closes_through_a_back_edge_only_in_range() {
+    // leaf-hub-s0-leaf is a 3-hop cycle once s0 -> leaf exists.
+    let in_range = sorted_names(
+        hub_fixture(true),
+        "MATCH (a {name:'leaf'})-[:Calls*1..3]-(t) RETURN DISTINCT t.name",
+    );
+    assert!(in_range.contains(&"leaf".to_string()));
+    let short = sorted_names(
+        hub_fixture(true),
+        "MATCH (a {name:'leaf'})-[:Calls*1..2]-(t) RETURN DISTINCT t.name",
+    );
+    assert!(!short.contains(&"leaf".to_string()));
+}
+
+#[test]
+fn test_execute_variable_length_directed_cycle_back_to_start_respects_the_hop_cap() {
+    let with_cycle = |query: &str| sorted_names(hub_fixture(true), query);
+    // Out: leaf -> hub -> s0 -> leaf.
+    assert!(
+        with_cycle("MATCH (a {name:'leaf'})-[:Calls*1..3]->(t) RETURN DISTINCT t.name")
+            .contains(&"leaf".to_string())
+    );
+    assert!(
+        !with_cycle("MATCH (a {name:'leaf'})-[:Calls*1..2]->(t) RETURN DISTINCT t.name")
+            .contains(&"leaf".to_string())
+    );
+    // In: the same cycle walked backwards.
+    assert!(
+        with_cycle("MATCH (a {name:'leaf'})<-[:Calls*1..3]-(t) RETURN DISTINCT t.name")
+            .contains(&"leaf".to_string())
+    );
+    assert!(
+        !with_cycle("MATCH (a {name:'leaf'})<-[:Calls*1..2]-(t) RETURN DISTINCT t.name")
+            .contains(&"leaf".to_string())
+    );
+}
+
+#[test]
+fn test_execute_variable_length_directed_without_a_cycle_never_returns_the_start() {
+    let names = sorted_names(
+        hub_fixture(false),
+        "MATCH (a {name:'leaf'})-[:Calls*1..6]->(t) RETURN DISTINCT t.name",
+    );
+    assert_eq!(names.len(), SPOKES + 1);
+    assert!(!names.contains(&"leaf".to_string()));
+}
+
+#[test]
+fn test_execute_variable_length_minimum_zero_returns_the_start_without_a_cycle() {
+    assert_eq!(
+        sorted_names(
+            hub_fixture(false),
+            "MATCH (a {name:'leaf'})-[:Calls*0..1]-(t) RETURN DISTINCT t.name"
+        ),
+        vec!["hub", "leaf"]
+    );
+}
+
+#[test]
+fn test_execute_variable_length_undirected_parallel_relationships_are_a_two_hop_cycle() {
+    // Two distinct relationships between p and q form a cycle of 2 hops; a
+    // trail may use each once.
+    let mut fx = GraphFixture::new();
+    let p = fx.func("src/p.rs", "p");
+    let q = fx.func("src/p.rs", "q");
+    fx.edge(p, q, RelType::Calls);
+    fx.edge(p, q, RelType::Calls);
+    assert_eq!(
+        sorted_names(
+            fx,
+            "MATCH (a {name:'p'})-[:Calls*1..2]-(t) RETURN DISTINCT t.name"
+        ),
+        vec!["p", "q"]
+    );
+}
+
+// ---- OPTIONAL MATCH variables are valid for every row ------------------------
+
+#[test]
+fn test_execute_optional_match_node_variable_projects_null_when_first_row_is_unmatched() {
+    // alpha, the first function, has no caller. Old: `unbound variable 'c'`
+    // whenever the first row was unmatched, success whenever it was matched.
+    let result = run("MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) RETURN c")
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(result.columns, vec!["c.name", "c.kind", "c.filePath"]);
+    // 5 callers + 5 functions without one.
+    assert_eq!(result.rows.len(), 10);
+    assert_eq!(
+        result
+            .rows
+            .iter()
+            .filter(|row| row[0] == Value::Null)
+            .count(),
+        5
+    );
+}
+
+#[test]
+fn test_execute_optional_match_edge_variable_projects_null_when_first_row_is_unmatched() {
+    let result = run("MATCH (f:Function) OPTIONAL MATCH (c)-[r:Calls]->(f) RETURN r")
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(result.rows.len(), 10);
+    assert_eq!(
+        result
+            .rows
+            .iter()
+            .filter(|row| row[0] == Value::Null)
+            .count(),
+        5
+    );
+}
+
+#[test]
+fn test_execute_optional_match_variable_groups_null_in_an_aggregate() {
+    // alpha, dup(x), dup(y), item7, itemd have no caller: one null group of 5.
+    let rows = rows("MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) RETURN c, count(*) AS n");
+    let null_group: Vec<_> = rows.iter().filter(|row| row[0] == Value::Null).collect();
+    assert_eq!(null_group.len(), 1);
+    assert_eq!(null_group[0][3], Value::Int(5));
+}
+
+#[test]
+fn test_execute_unbound_return_variable_is_still_refused() {
+    let error = run("MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) RETURN zz")
+        .expect_err("a variable no clause binds must be refused")
+        .to_string();
+    assert!(error.contains("unbound variable 'zz'"), "{error}");
+}
+
+// ---- an aliased relationship variable is still the relationship ---------------
+
+#[test]
+fn test_execute_aliased_edge_variable_projects_the_relationship() {
+    // Old: null for every row.
+    let projected = rows("MATCH (a)-[r:Calls]->(b) RETURN r AS rel");
+    assert_eq!(projected.len(), 5);
+    assert!(
+        projected.iter().all(|row| matches!(
+            row[0],
+            Value::EdgeRef {
+                rel_type: RelType::Calls,
+                ..
+            }
+        )),
+        "{projected:?}"
+    );
+}
+
+// ---- ORDER BY: null is the largest value ---------------------------------------
+
+#[test]
+fn test_execute_order_by_ascending_puts_null_last() {
+    let sorted = rows(
+        "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) RETURN c.name ORDER BY c.name ASC",
+    );
+    assert_eq!(sorted.len(), 10);
+    assert_eq!(sorted[0], vec![text("alpha")]);
+    assert!(
+        sorted[5..].iter().all(|row| row[0] == Value::Null),
+        "{sorted:?}"
+    );
+}
+
+#[test]
+fn test_execute_order_by_descending_puts_null_first() {
+    let sorted = rows(
+        "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) RETURN c.name ORDER BY c.name DESC",
+    );
+    assert!(
+        sorted[..5].iter().all(|row| row[0] == Value::Null),
+        "{sorted:?}"
+    );
+    assert_eq!(sorted[5], vec![text("dup")]);
+    assert_eq!(sorted.last().unwrap(), &vec![text("alpha")]);
+}
+
+// ---- UNION branches name their columns alike -------------------------------------
+
+#[test]
+fn test_execute_union_with_different_column_names_is_refused_naming_both() {
+    let error = run("MATCH (a:Function {name:'alpha'}) RETURN a.name AS x \
+         UNION MATCH (b:Function {name:'beta'}) RETURN b.name AS y")
+    .expect_err("different column names must be refused")
+    .to_string();
+    assert!(error.contains("[x]") && error.contains("[y]"), "{error}");
+    assert!(error.contains("AS"), "the hint names the fix: {error}");
+}
+
+#[test]
+fn test_execute_union_with_unaliased_names_from_different_variables_is_refused() {
+    let error = run("MATCH (a:Function) RETURN a.name UNION MATCH (b:Function) RETURN b.name")
+        .expect_err("a.name and b.name are different columns")
+        .to_string();
+    assert!(
+        error.contains("[a.name]") && error.contains("[b.name]"),
+        "{error}"
+    );
+}
+
+#[test]
+fn test_execute_union_with_equal_column_names_concatenates() {
+    assert_eq!(
+        rows(
+            "MATCH (a:Function {name:'alpha'}) RETURN a.name AS x \
+             UNION MATCH (b:Function {name:'beta'}) RETURN b.name AS x"
+        ),
+        vec![vec![text("alpha")], vec![text("beta")]]
+    );
+}
+
+// ---- ORDER BY keys that the projection carries under another spelling -------------
+
+fn name_of(value: &Value) -> String {
+    match value {
+        Value::NodeRef { name, .. } => name.to_string(),
+        Value::Str(s) => s.to_string(),
+        other => panic!("expected a node or a name, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_execute_order_by_property_projected_under_an_alias_sorts() {
+    let sorted =
+        rows("MATCH (f:Function) RETURN f.name AS name, f.filePath AS file ORDER BY f.name DESC");
+    let names: Vec<String> = sorted.iter().map(|row| name_of(&row[0])).collect();
+    assert_eq!(
+        names,
+        vec!["itemd", "item7", "gamma", "dup", "dup", "beta", "alpha"]
+    );
+}
+
+#[test]
+fn test_execute_order_by_property_of_a_with_computed_node_sorts() {
+    // beta has 1 caller, gamma 4. Old: `ORDER BY 'f.name' is not in the projection`.
+    let query = |direction: &str| {
+        format!(
+            "MATCH (f:Function)<-[:Calls]-(c) WITH f, count(c) AS n RETURN f, n \
+             ORDER BY f.name {direction}"
+        )
+    };
+    let ascending = rows(&query("ASC"));
+    assert_eq!(
+        ascending
+            .iter()
+            .map(|row| name_of(&row[0]))
+            .collect::<Vec<_>>(),
+        vec!["beta", "gamma"]
+    );
+    let descending = rows(&query("DESC"));
+    assert_eq!(
+        descending
+            .iter()
+            .map(|row| name_of(&row[0]))
+            .collect::<Vec<_>>(),
+        vec!["gamma", "beta"]
+    );
+    assert_eq!(descending[0][1], Value::Int(4));
+}
+
+#[test]
+fn test_execute_order_by_property_of_a_plain_with_node_sorts() {
+    let sorted = rows("MATCH (a:Function) WITH a RETURN a ORDER BY a.name DESC");
+    assert_eq!(name_of(&sorted[0][0]), "itemd");
+    assert_eq!(name_of(&sorted.last().unwrap()[0]), "alpha");
+}
+
+#[test]
+fn test_execute_order_by_aggregate_projected_under_an_alias_sorts() {
+    let sorted =
+        rows("MATCH (f:Function) RETURN f.name AS fn, count(*) AS c ORDER BY count(*) DESC");
+    // `dup` is the only name two nodes share.
+    assert_eq!(sorted[0], vec![text("dup"), Value::Int(2)]);
+    assert_eq!(sorted.len(), 6);
+}
+
+#[test]
+fn test_execute_order_by_picks_the_item_with_the_same_arguments() {
+    // Every aggregate defaults to the column name `COUNT(*)`, so the key must
+    // match on its arguments: gamma leads either way (4 callers, 4 rows), the
+    // runner-up tells the two keys apart (beta by callers, dup by rows).
+    let query = |key: &str| {
+        format!(
+            "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) \
+             RETURN f.name AS fn, count(c) AS callers, count(*) AS total ORDER BY {key} DESC"
+        )
+    };
+    let by_callers = rows(&query("count(c)"));
+    assert_eq!(by_callers[0][0], text("gamma"));
+    assert_eq!(by_callers[1][0], text("beta"));
+    let by_total = rows(&query("count(*)"));
+    assert_eq!(by_total[0][0], text("gamma"));
+    assert_eq!(by_total[1][0], text("dup"));
+}
+
+#[test]
+fn test_execute_order_by_property_of_a_scalar_column_is_refused() {
+    let error = run("MATCH (f:Function) WITH f.name AS n RETURN n ORDER BY n.zzz")
+        .expect_err("a scalar column has no properties")
+        .to_string();
+    assert!(error.contains("ORDER BY 'n.zzz'"), "{error}");
+}
+
+// ---- an unknown relationship type -------------------------------------------------
+
+#[test]
+fn test_parse_unknown_relationship_type_is_refused_naming_it() {
+    for query in [
+        "MATCH (a)-[:NoSuchRel]->(b) RETURN a",
+        "MATCH (a)-[:Calls|NoSuchRel]->(b) RETURN a",
+    ] {
+        let error = parse_error(query);
+        assert!(
+            error.contains("unknown RelType 'NoSuchRel'"),
+            "{query}: {error}"
+        );
+    }
+    // Control: a known type still parses.
+    assert!(cypher::parse("MATCH (a)-[:Calls]->(b) RETURN a").is_ok());
 }
 
 // ---- hints name a spelling the engine accepts ------------------------------

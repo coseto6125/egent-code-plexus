@@ -231,10 +231,23 @@ fn execute_inner(
             Some(wc) => exec_with(wc, bindings, graph, cache)?,
             None => bindings,
         };
-        project_return(&query.return_.items, &bindings, graph, cache)?
+        project_return(
+            &query.return_.items,
+            &query.matches,
+            &bindings,
+            graph,
+            cache,
+        )?
     };
 
-    let rows = apply_order_by(&query.order_by, &columns, rows)?;
+    let rows = apply_order_by(
+        &query.order_by,
+        &query.return_.items,
+        &columns,
+        rows,
+        graph,
+        cache,
+    )?;
     let rows = apply_distinct(query.return_.distinct, rows);
     let rows = apply_skip_limit(query.skip, query.limit, rows);
     let rows = apply_union(
@@ -295,6 +308,7 @@ fn apply_where(
 /// to the aggregate or plain projection depending on what's in the list.
 fn project_return(
     return_items: &[ReturnItem],
+    matches: &[MatchClause],
     bindings: &[Binding],
     graph: MergedGraph<'_>,
     cache: &mut ContentCache,
@@ -302,7 +316,7 @@ fn project_return(
     // Pre-expand bare Var RETURN items into concrete prop columns.
     // We use the first binding to infer whether each var is node/edge/computed-bound.
     let expanded_items: Vec<(String, ReturnExpr)> =
-        expand_return_items(return_items, bindings.first())?;
+        expand_return_items(return_items, bindings.first(), matches)?;
 
     // Detect aggregation in expanded items. Scalar function calls (`type(r)`,
     // `id(n)`, `labels(n)`) are NOT aggregates and must not trigger the
@@ -568,7 +582,8 @@ fn stream_projection(
             }
             let bindings = agg.finish_with();
             let bindings = apply_where(wc.where_.as_ref(), bindings, graph, cache)?;
-            return project_return(&query.return_.items, &bindings, graph, cache);
+            // Aggregation cleared the pattern variables; only WITH aliases remain.
+            return project_return(&query.return_.items, &[], &bindings, graph, cache);
         }
     }
     let mut agg = None;
@@ -602,7 +617,7 @@ fn stream_projection(
             return Ok(());
         }
         if agg.is_none() {
-            match expand_return_items(&query.return_.items, Some(b)) {
+            match expand_return_items(&query.return_.items, Some(b), &query.matches) {
                 Ok(items) => agg = Some(Aggregation::new(items, Stage::Return)),
                 Err(error) => {
                     aggregate_error = Some(error);
@@ -619,7 +634,7 @@ fn stream_projection(
     let agg = match agg {
         Some(agg) => agg,
         None => Aggregation::new(
-            expand_return_items(&query.return_.items, None)?,
+            expand_return_items(&query.return_.items, None, &query.matches)?,
             Stage::Return,
         ),
     };
@@ -638,15 +653,73 @@ fn passes_where(
     }
 }
 
-/// Column an ORDER BY key sorts by. `Ok(None)`: an empty result keeps a bare
-/// variable as one unexpanded column, so `a.name` has no column but there are
-/// no rows to sort. A key that is not in the projection is an error: the rows
+/// Where an ORDER BY key reads its value from.
+enum OrderKey {
+    Column(usize),
+    /// `v.prop` where column `v` holds a node reference (a WITH-computed node):
+    /// the property is resolved through the node, row by row.
+    NodeProp(usize, String),
+}
+
+/// Structural equality of two projection expressions. `Expr` has no
+/// `PartialEq`, but `Debug` prints every field, so equal output is equal AST.
+fn same_expr(a: &ReturnExpr, b: &ReturnExpr) -> bool {
+    format!("{a:?}") == format!("{b:?}")
+}
+
+/// Column position of each RETURN item, or `None` for all of them when the
+/// widths do not add up to `columns`. A bare node or edge variable expands to
+/// three columns, which shifts every later item, so positions come from
+/// walking the items against the column names.
+fn item_columns(items: &[ReturnItem], columns: &[String]) -> Vec<Option<usize>> {
+    let mut pos = 0;
+    let starts: Vec<usize> = items
+        .iter()
+        .map(|item| {
+            let start = pos;
+            pos += match (&item.expr, &item.alias) {
+                (ReturnExpr::Var(v), None)
+                    if columns.get(pos).is_some_and(|c| {
+                        *c == format!("{v}.name") || *c == format!("{v}.rel_type")
+                    }) =>
+                {
+                    3
+                }
+                _ => 1,
+            };
+            start
+        })
+        .collect();
+    if pos == columns.len() {
+        starts.into_iter().map(Some).collect()
+    } else {
+        vec![None; items.len()]
+    }
+}
+
+/// Column an ORDER BY key sorts by. A RETURN item whose expression equals the
+/// key gives its column even when it is aliased, so `RETURN f.name AS n ORDER
+/// BY f.name` sorts. A key that is not in the projection is an error: the rows
 /// no longer carry the value, and ignoring the key returned unsorted rows.
-fn order_key_index(
+fn order_key(
     expr: &ReturnExpr,
+    return_items: &[ReturnItem],
+    item_cols: &[Option<usize>],
     col_index: &HashMap<String, usize>,
-    no_rows: bool,
-) -> Result<Option<usize>, CypherError> {
+) -> Result<OrderKey, CypherError> {
+    // A bare unaliased variable expands to several columns; it is resolved by
+    // name below, as a node sorts by its name.
+    let item_col = return_items
+        .iter()
+        .zip(item_cols)
+        .find(|(item, _)| {
+            !matches!((&item.expr, &item.alias), (ReturnExpr::Var(_), None))
+                && same_expr(&item.expr, expr)
+        })
+        .and_then(|(_, col)| *col);
+    if let Some(i) = item_col {
+        return Ok(OrderKey::Column(i));
+    }
     let exact = match expr {
         ReturnExpr::Prop(var, prop) => format!("{var}.{prop}"),
         ReturnExpr::Var(v) => v.clone(),
@@ -655,17 +728,17 @@ fn order_key_index(
         ReturnExpr::Subscript(e) => subscript_col_name(e),
     };
     if let Some(&i) = col_index.get(&exact) {
-        return Ok(Some(i));
+        return Ok(OrderKey::Column(i));
     }
     // A bare node variable evaluates to its name everywhere else in this engine.
     if let ReturnExpr::Var(v) = expr {
         if let Some(&i) = col_index.get(&format!("{v}.name")) {
-            return Ok(Some(i));
+            return Ok(OrderKey::Column(i));
         }
     }
-    if let ReturnExpr::Prop(var, _) = expr {
-        if no_rows && col_index.contains_key(var.as_str()) {
-            return Ok(None);
+    if let ReturnExpr::Prop(var, prop) = expr {
+        if let Some(&i) = col_index.get(var.as_str()) {
+            return Ok(OrderKey::NodeProp(i, prop.clone()));
         }
     }
     Err(CypherError::Semantic {
@@ -675,11 +748,35 @@ fn order_key_index(
     })
 }
 
+/// `prop` of the node a cell references. A null cell (an unmatched OPTIONAL
+/// row) has a null property; any other cell is not a node, so ordering by its
+/// property would be a silent no-op.
+fn order_cell_prop(
+    cell: &Value,
+    prop: &str,
+    key: &str,
+    graph: MergedGraph<'_>,
+    cache: &mut ContentCache,
+) -> Result<Value, CypherError> {
+    match cell {
+        Value::NodeRef { idx, .. } => Ok(node_prop_value(*idx, prop, graph, cache)),
+        Value::Null => Ok(Value::Null),
+        _ => Err(CypherError::Semantic {
+            msg: format!(
+                "ORDER BY '{key}': the column is not a node, so it has no property '{prop}'; return the property itself and sort by it"
+            ),
+        }),
+    }
+}
+
 /// ORDER BY stage: no-op when the clause is absent.
 fn apply_order_by(
     order_by: &[OrderItem],
+    return_items: &[ReturnItem],
     columns: &[String],
-    mut rows: Vec<Vec<Value>>,
+    rows: Vec<Vec<Value>>,
+    graph: MergedGraph<'_>,
+    cache: &mut ContentCache,
 ) -> Result<Vec<Vec<Value>>, CypherError> {
     if order_by.is_empty() {
         return Ok(rows);
@@ -690,29 +787,48 @@ fn apply_order_by(
         .enumerate()
         .map(|(i, c)| (c.clone(), i))
         .collect();
-    let keys: Vec<(Option<usize>, bool)> = order_by
+    let item_cols = item_columns(return_items, columns);
+    let keys: Vec<OrderKey> = order_by
         .iter()
-        .map(|oi| {
-            Ok((
-                order_key_index(&oi.expr, &col_index, rows.is_empty())?,
-                oi.desc,
-            ))
+        .map(|oi| order_key(&oi.expr, return_items, &item_cols, &col_index))
+        .collect::<Result<_, _>>()?;
+    // A node-property key is resolved once per row, before the sort.
+    let resolved: Vec<Option<Vec<Value>>> = keys
+        .iter()
+        .zip(order_by)
+        .map(|(key, oi)| match (key, &oi.expr) {
+            (OrderKey::NodeProp(col, prop), ReturnExpr::Prop(var, _)) => rows
+                .iter()
+                .map(|row| {
+                    order_cell_prop(&row[*col], prop, &format!("{var}.{prop}"), graph, cache)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Some),
+            _ => Ok(None),
         })
-        .collect::<Result<_, CypherError>>()?;
-    rows.sort_by(|a, b| {
-        for &(col_idx, desc) in &keys {
-            let ord = cmp_values(
-                col_idx.and_then(|i| a.get(i)),
-                col_idx.and_then(|i| b.get(i)),
-            );
-            let ord = if desc { ord.reverse() } else { ord };
+        .collect::<Result<_, _>>()?;
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|&a, &b| {
+        for (k, (key, oi)) in keys.iter().zip(order_by).enumerate() {
+            let ord = match (key, &resolved[k]) {
+                (OrderKey::Column(c), _) => cmp_values(rows[a].get(*c), rows[b].get(*c)),
+                (OrderKey::NodeProp(..), Some(values)) => {
+                    cmp_values(Some(&values[a]), Some(&values[b]))
+                }
+                (OrderKey::NodeProp(..), None) => std::cmp::Ordering::Equal,
+            };
+            let ord = if oi.desc { ord.reverse() } else { ord };
             if ord != std::cmp::Ordering::Equal {
                 return ord;
             }
         }
         std::cmp::Ordering::Equal
     });
-    Ok(rows)
+    let mut slots: Vec<Option<Vec<Value>>> = rows.into_iter().map(Some).collect();
+    Ok(order
+        .into_iter()
+        .map(|i| slots[i].take().expect("each row index appears once"))
+        .collect())
 }
 
 /// DISTINCT stage.
@@ -759,6 +875,17 @@ fn apply_union(
             msg: "UNION column count mismatch".into(),
         });
     }
+    // openCypher requires equal names; labelling the right rows with the left
+    // names would present one branch's data under another branch's meaning.
+    if right.columns != columns {
+        return Err(CypherError::Semantic {
+            msg: format!(
+                "UNION branches return different column names: [{}] vs [{}]; give both branches the same names with AS, e.g. `RETURN a.name AS name UNION MATCH (b) RETURN b.name AS name`",
+                columns.join(", "),
+                right.columns.join(", ")
+            ),
+        });
+    }
     rows.extend(right.rows);
     if !union_all {
         dedup_rows(&mut rows);
@@ -791,10 +918,11 @@ fn cmp_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
 fn cmp_value_pair(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
     match (a, b) {
-        // Null sorts before everything.
+        // openCypher: null is the largest value, so ASC puts it last and the
+        // `desc` reversal in `apply_order_by` puts it first.
         (Value::Null, Value::Null) => Equal,
-        (Value::Null, _) => Less,
-        (_, Value::Null) => Greater,
+        (Value::Null, _) => Greater,
+        (_, Value::Null) => Less,
         // Bool: false < true.
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
         // Int-Int.
@@ -811,70 +939,94 @@ fn cmp_value_pair(a: &Value, b: &Value) -> std::cmp::Ordering {
     }
 }
 
+/// What a bare RETURN variable is bound to.
+#[derive(Clone, Copy)]
+enum VarShape {
+    Computed,
+    Node,
+    Edge,
+}
+
+/// Shape of a variable that only an OPTIONAL clause introduces. An unmatched
+/// optional row leaves it out of the binding, so the first row alone cannot
+/// say whether it is a node or an edge; the pattern does. A variable that a
+/// non-OPTIONAL clause binds is in every row and never reaches this lookup.
+fn optional_var_shape(matches: &[MatchClause], name: &str) -> Option<VarShape> {
+    matches
+        .iter()
+        .filter(|mc| mc.optional)
+        .flat_map(|mc| &mc.patterns)
+        .find_map(|pat| {
+            if pat.nodes.iter().any(|n| n.var.as_deref() == Some(name)) {
+                Some(VarShape::Node)
+            } else if pat.rels.iter().any(|r| r.var.as_deref() == Some(name)) {
+                Some(VarShape::Edge)
+            } else {
+                None
+            }
+        })
+}
+
 /// Expand RETURN items: replace bare `Var(name)` with 3 concrete prop columns
 /// when `name` is node-bound (name/kind/filePath) or edge-bound (rel_type/confidence/reason).
-/// Computed and unbound vars are kept as a single column.
+/// Computed and unbound vars are kept as a single column. `matches` resolves a
+/// variable that the first binding lacks only because its OPTIONAL clause did
+/// not match that row; pass `&[]` where no pattern variable is in scope.
 fn expand_return_items(
     items: &[ReturnItem],
     first_binding: Option<&Binding>,
+    matches: &[MatchClause],
 ) -> Result<Vec<(String, ReturnExpr)>, CypherError> {
     let mut out: Vec<(String, ReturnExpr)> = Vec::new();
     for item in items {
         match &item.expr {
             ReturnExpr::Var(name) => {
-                // Check if it's a computed binding first.
-                let is_computed = first_binding
-                    .map(|b| b.computed.contains_key(name))
-                    .unwrap_or(false);
-                let is_node = first_binding
-                    .map(|b| b.node_vars.contains_key(name))
-                    .unwrap_or(false);
-                let is_edge = first_binding
-                    .map(|b| b.edge_vars.contains_key(name))
-                    .unwrap_or(false);
+                let shape = first_binding.and_then(|b| {
+                    if b.computed.contains_key(name) {
+                        Some(VarShape::Computed)
+                    } else if b.node_vars.contains_key(name) {
+                        Some(VarShape::Node)
+                    } else if b.edge_vars.contains_key(name) {
+                        Some(VarShape::Edge)
+                    } else {
+                        optional_var_shape(matches, name)
+                    }
+                });
 
                 // If aliased with AS, treat as single column regardless of binding type.
                 if let Some(col) = &item.alias {
                     out.push((col.clone(), item.expr.clone()));
-                } else if is_computed {
+                    continue;
+                }
+                match shape {
                     // Single computed column.
-                    out.push((name.clone(), item.expr.clone()));
-                } else if is_node {
+                    Some(VarShape::Computed) => out.push((name.clone(), item.expr.clone())),
                     // Expand node var into 3 columns: .name, .kind, .filePath
-                    out.push((
-                        format!("{name}.name"),
-                        ReturnExpr::Prop(name.clone(), "name".into()),
-                    ));
-                    out.push((
-                        format!("{name}.kind"),
-                        ReturnExpr::Prop(name.clone(), "kind".into()),
-                    ));
-                    out.push((
-                        format!("{name}.filePath"),
-                        ReturnExpr::Prop(name.clone(), "filePath".into()),
-                    ));
-                } else if is_edge {
+                    Some(VarShape::Node) => {
+                        for prop in ["name", "kind", "filePath"] {
+                            out.push((
+                                format!("{name}.{prop}"),
+                                ReturnExpr::Prop(name.clone(), prop.into()),
+                            ));
+                        }
+                    }
                     // Expand edge var into 3 columns: .rel_type, .confidence, .reason
-                    out.push((
-                        format!("{name}.rel_type"),
-                        ReturnExpr::Prop(name.clone(), "rel_type".into()),
-                    ));
-                    out.push((
-                        format!("{name}.confidence"),
-                        ReturnExpr::Prop(name.clone(), "confidence".into()),
-                    ));
-                    out.push((
-                        format!("{name}.reason"),
-                        ReturnExpr::Prop(name.clone(), "reason".into()),
-                    ));
-                } else if first_binding.is_some() {
+                    Some(VarShape::Edge) => {
+                        for prop in ["rel_type", "confidence", "reason"] {
+                            out.push((
+                                format!("{name}.{prop}"),
+                                ReturnExpr::Prop(name.clone(), prop.into()),
+                            ));
+                        }
+                    }
                     // Bound binding exists but var is not in it — semantic error.
-                    return Err(CypherError::Semantic {
-                        msg: format!("unbound variable '{name}'"),
-                    });
-                } else {
+                    None if first_binding.is_some() => {
+                        return Err(CypherError::Semantic {
+                            msg: format!("unbound variable '{name}'"),
+                        });
+                    }
                     // No bindings at all (empty result set) — emit as-is.
-                    out.push((name.clone(), item.expr.clone()));
+                    None => out.push((name.clone(), item.expr.clone())),
                 }
             }
             _ => {
@@ -889,15 +1041,16 @@ fn expand_return_items(
     Ok(out)
 }
 
-/// How a bound `Var` collapses when a `ReturnExpr::Var` is evaluated. The two
-/// callers only ever disagree on this one axis — `Prop`/`Star`/`FunCall` are
-/// identical either way — so it is the sole parameter distinguishing them.
+/// How a bound node `Var` collapses when a `ReturnExpr::Var` is evaluated. The
+/// two callers only ever disagree on this one axis — `Prop`/`Star`/`FunCall`
+/// and edge variables are identical either way — so it is the sole parameter
+/// distinguishing them.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VarCollapse {
-    /// Node/edge vars resolve to their display name (`Value::Str`) — used by
+    /// Node vars resolve to their display name (`Value::Str`) — used by
     /// the plain RETURN projection path, matching legacy scalar semantics.
     ToStr,
-    /// Node/edge vars resolve to `Value::NodeRef`/`Value::EdgeRef`, preserving
+    /// Node vars resolve to `Value::NodeRef`, preserving
     /// identity — used by WITH group-key computation so `a.name` still
     /// resolves after aggregation clears `node_vars`.
     ToRef,
@@ -932,27 +1085,28 @@ fn eval_return_expr_with(
                     },
                 };
             }
-            if collapse == VarCollapse::ToRef {
-                if let Some(&eidx) = b.edge_vars.get(var) {
-                    if let Some(e) = graph.overlay_edge(eidx) {
-                        return Value::EdgeRef {
-                            src: e.source,
-                            tgt: e.target,
-                            rel_type: e.rel_type,
-                            confidence: e.confidence,
-                            reason: e.reason.to_string(),
-                        };
-                    }
-                    let e = &graph.edges[eidx as usize];
-                    let rt = crate::graph::RelType::from(&e.rel_type);
+            // Both collapses keep an edge as an EdgeRef: `RETURN r AS rel` is
+            // the only way a bare edge variable reaches ToStr, and Null there
+            // dropped the relationship the query asked for.
+            if let Some(&eidx) = b.edge_vars.get(var) {
+                if let Some(e) = graph.overlay_edge(eidx) {
                     return Value::EdgeRef {
-                        src: e.source.to_native(),
-                        tgt: e.target.to_native(),
-                        rel_type: rt,
-                        confidence: e.confidence.to_native(),
-                        reason: e.reason.resolve(&graph.string_pool).to_string(),
+                        src: e.source,
+                        tgt: e.target,
+                        rel_type: e.rel_type,
+                        confidence: e.confidence,
+                        reason: e.reason.to_string(),
                     };
                 }
+                let e = &graph.edges[eidx as usize];
+                let rt = crate::graph::RelType::from(&e.rel_type);
+                return Value::EdgeRef {
+                    src: e.source.to_native(),
+                    tgt: e.target.to_native(),
+                    rel_type: rt,
+                    confidence: e.confidence.to_native(),
+                    reason: e.reason.resolve(&graph.string_pool).to_string(),
+                };
             }
             Value::Null
         }
@@ -1836,10 +1990,7 @@ fn bfs_var_len(
             }
         });
     }
-    if min == 1
-        && !out.iter().any(|&(n, _)| n == start)
-        && closed_trail_exists(start, rel, graph, max)
-    {
+    if min == 1 && closed_trail_exists(start, rel, graph, max) {
         out.push((start, None));
     }
     out
@@ -1847,25 +1998,37 @@ fn bfs_var_len(
 
 /// Is there a trail (no relationship repeated) of 1..=`max` hops from `start`
 /// back to `start`? A node-visited BFS never revisits `start`, so `*1..n`
-/// would miss a cycle or a self-loop. The DFS only enters nodes that can still
-/// reach `start` in the hops left (`back` holds their distances), so an acyclic
-/// neighbourhood costs one reverse BFS and no forward search.
+/// would miss a cycle or a self-loop. Neither direction enumerates trails: a
+/// closed trail through `start` exists exactly when `start` lies on a simple
+/// cycle of at most `max` hops (a closed trail splits into edge-disjoint
+/// simple cycles, and `start` is on one), so a shortest-path test is exact and
+/// enumeration cost (degree^(k-2) per start row) is avoided.
 fn closed_trail_exists(start: u32, rel: &RelPat, graph: MergedGraph<'_>, max: u32) -> bool {
     if max == 0 {
         return false;
     }
+    if rel.dir == Direction::Both {
+        undirected_cycle_exists(start, rel, graph, max)
+    } else {
+        directed_cycle_exists(start, rel, graph, max)
+    }
+}
+
+/// Directed hops: the shortest closed walk through `start` is a simple cycle,
+/// hence a trail. One reverse BFS gives every node's distance back to `start`
+/// (`back`, up to `max - 1`); a self-loop is `start` itself at distance 0.
+fn directed_cycle_exists(start: u32, rel: &RelPat, graph: MergedGraph<'_>, max: u32) -> bool {
     let reverse = RelPat {
         dir: invert_dir(rel.dir),
         ..rel.clone()
     };
-    let mut back: HashMap<u32, u32> = HashMap::from([(start, 0)]);
+    let mut back: HashSet<u32> = HashSet::from([start]);
     let mut frontier = vec![start];
-    for depth in 1..max {
+    for _ in 1..max {
         let mut next = Vec::new();
         for &n in &frontier {
             walk_rel(n, &reverse, graph, |src, _| {
-                if let std::collections::hash_map::Entry::Vacant(e) = back.entry(src) {
-                    e.insert(depth);
+                if back.insert(src) {
                     next.push(src);
                 }
             });
@@ -1875,43 +2038,57 @@ fn closed_trail_exists(start: u32, rel: &RelPat, graph: MergedGraph<'_>, max: u3
         }
         frontier = next;
     }
+    let mut closes = false;
+    walk_rel(start, rel, graph, |tgt, _| closes |= back.contains(&tgt));
+    closes
+}
 
-    struct Search<'a> {
-        start: u32,
-        rel: &'a RelPat,
-        graph: MergedGraph<'a>,
-        max: u32,
-        back: HashMap<u32, u32>,
-    }
-    fn dfs(cx: &Search<'_>, node: u32, hops: u32, used: &mut Vec<u32>) -> bool {
-        let mut steps = Vec::new();
-        walk_rel(node, cx.rel, cx.graph, |tgt, edge| steps.push((tgt, edge)));
-        for (tgt, edge) in steps {
-            if used.contains(&edge) {
-                continue;
-            }
-            if tgt == cx.start {
-                return true;
-            }
-            let left = cx.max - (hops + 1);
-            if cx.back.get(&tgt).is_some_and(|&d| d <= left) {
-                used.push(edge);
-                if dfs(cx, tgt, hops + 1, used) {
-                    return true;
+/// Undirected hops: for each relationship `e = (start, t)`, `start` is on a
+/// cycle through `e` of at most `max` hops iff `t` reaches `start` in at most
+/// `max - 1` hops without `e`. One BFS per incident relationship, so the cost
+/// is O(degree * (V + E)), never exponential in `max`.
+fn undirected_cycle_exists(start: u32, rel: &RelPat, graph: MergedGraph<'_>, max: u32) -> bool {
+    let mut incident = Vec::new();
+    walk_rel(start, rel, graph, |tgt, edge| incident.push((tgt, edge)));
+    incident.into_iter().any(|(tgt, edge)| {
+        tgt == start || reaches_without_edge(tgt, start, edge, rel, graph, max - 1)
+    })
+}
+
+/// BFS from `from` to `target` within `hops` hops, never crossing `excluded`.
+fn reaches_without_edge(
+    from: u32,
+    target: u32,
+    excluded: u32,
+    rel: &RelPat,
+    graph: MergedGraph<'_>,
+    hops: u32,
+) -> bool {
+    let mut seen: HashSet<u32> = HashSet::from([from]);
+    let mut frontier = vec![from];
+    for _ in 0..hops {
+        let mut next = Vec::new();
+        let mut found = false;
+        for &n in &frontier {
+            walk_rel(n, rel, graph, |tgt, edge| {
+                if edge == excluded {
+                    return;
                 }
-                used.pop();
-            }
+                found |= tgt == target;
+                if seen.insert(tgt) {
+                    next.push(tgt);
+                }
+            });
         }
-        false
+        if found {
+            return true;
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
     }
-    let cx = Search {
-        start,
-        rel,
-        graph,
-        max,
-        back,
-    };
-    dfs(&cx, start, 0, &mut Vec::new())
+    false
 }
 
 /// Merged-space node filter: `node_idx` may be a base or virtual index.
