@@ -108,8 +108,10 @@ fn two_concurrent_force_rebuilds_both_succeed_with_one_new_generation() {
     );
 
     // One rebuilt generation for this SHA: the forced build drops the
-    // initial one it supersedes, and the second concurrent force caller
-    // attaches to the winner.
+    // initial one it supersedes. The second force caller attaches to the
+    // winner when it waited on the SHA lock while the winner published; when
+    // it took the lock only after, it rebuilds once more and its own sweep
+    // drops the winner. Either way one generation and no staging remain.
     let ecp_home = home_path.join(".ecp");
     let (commit_dirs, building_dirs) = count_dirs(&ecp_home);
     assert_eq!(
@@ -118,12 +120,13 @@ fn two_concurrent_force_rebuilds_both_succeed_with_one_new_generation() {
     );
     assert_eq!(
         building_dirs, 0,
-        "expected no .building leftovers, found {building_dirs}"
+        "expected no staging leftovers, found {building_dirs}"
     );
 }
 
-/// Recursively count: (a) commit dirs whose name starts with "branch_",
-/// (b) `.building` dirs at any depth.
+/// Recursively count: (a) published commit dirs (`branch_*`, not a recovery
+/// name), (b) staging dirs of either shape (`.building`,
+/// `.building.<pid>.<n>`), retired or not, at any depth.
 fn count_dirs(root: &std::path::Path) -> (usize, usize) {
     let mut commits = 0;
     let mut building = 0;
@@ -134,16 +137,15 @@ fn count_dirs(root: &std::path::Path) -> (usize, usize) {
         };
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".building") {
+            let recovery = ecp_cli::commit_lookup::is_recovery_dir_name(&name);
+            if recovery && name.contains(".building") {
                 *b += 1;
             }
-            if let Ok(ft) = e.file_type() {
-                if ft.is_dir() {
-                    if name.starts_with("branch_") {
-                        *c += 1;
-                    } else {
-                        walk(&e.path(), c, b);
-                    }
+            if e.file_type().is_ok_and(|ft| ft.is_dir()) {
+                if !name.starts_with("branch_") {
+                    walk(&e.path(), c, b);
+                } else if !recovery {
+                    *c += 1;
                 }
             }
         }

@@ -3,21 +3,18 @@
 
 use crate::build::dirname_picker::pick_dirname;
 use crate::build::orchestrator::{
-    attach_latest_if_fingerprint_matches, build_inside_locked, wait_for_completion, BuildResult,
+    acquire_sha_lock, attach_if_fingerprint_matches, build_inside_locked, parse_sha,
+    published_during_wait, report_wait, worktree_toplevel, BuildResult, DurablePublish, Holder,
+    Waited, BUILD_LOCK_TIMEOUT,
 };
-use crate::commit_lookup::CommitIndex;
+use crate::commit_lookup::{CommitDirListing, CommitIndex};
 use crate::repo_identity::repo_dir_name_for_cwd;
 use crate::session::state::classify_with_index;
 use ecp_core::registry::{resolve_home_ecp, retire_dir_async, SourceType};
 use ecp_core::session::{SessionState, StaleReason};
-use fs2::FileExt;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-
-/// Ceiling on the wait for another `--force` at the same SHA. See the call
-/// site for how the number was chosen.
-const BUILD_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 #[derive(Debug, Default, Clone)]
 pub struct InvalidateReport {
@@ -145,57 +142,47 @@ impl ForceRebuildResult {
 
 /// --force orchestration. See spec §4.2.
 ///
-/// Order: acquire lock (attach-and-retake if contended) → invalidate matching
-/// L1 sessions → drop existing L2 → re-run build pipeline → atomic publish.
-/// L1-before-L2 keeps crash recovery self-consistent.
+/// Order: SHA lock (attach if a newer build was published while waiting) →
+/// invalidate matching L1 sessions → drop the parse cache → the shared build
+/// and publish, which keeps the SHA lock through the rename. L1-before-L2
+/// keeps crash recovery self-consistent.
 pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRebuildResult> {
     // Same rule as build_l2: the slot is keyed by sha, so a subdirectory must
     // not publish its subtree as the commit's graph.
-    let toplevel = super::orchestrator::worktree_toplevel(worktree);
+    let toplevel = worktree_toplevel(worktree);
     let worktree = toplevel.as_deref().unwrap_or(worktree);
-    let sha_hex = target_sha.to_string();
-    if sha_hex.len() != 40 || !sha_hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(io::Error::other(format!("invalid sha: {sha_hex}")));
-    }
+    let sha = parse_sha(target_sha)?;
+    let repo_root = resolve_home_ecp().join(repo_dir_name_for_cwd(worktree)?);
+    force_rebuild_l2_at(worktree, &sha, &repo_root, report_wait)
+}
 
-    let home_ecp = resolve_home_ecp();
-    let repo_dir_name = repo_dir_name_for_cwd(worktree)?;
-    let repo_root = home_ecp.join(&repo_dir_name);
-    fs::create_dir_all(repo_root.join("commits"))?;
+/// [`force_rebuild_l2`] for a resolved worktree root, SHA and repo root.
+pub(crate) fn force_rebuild_l2_at(
+    worktree: &Path,
+    sha: &[u8; 20],
+    repo_root: &Path,
+    on_wait: impl FnOnce(&Holder),
+) -> io::Result<ForceRebuildResult> {
+    let sha_hex = hex::encode(sha);
+    let commits_dir = repo_root.join("commits");
+    fs::create_dir_all(&commits_dir)?;
+    let base = pick_dirname(worktree, &sha_hex)?;
 
-    let dirname = pick_dirname(worktree, &sha_hex)?;
-    let commit_dir = repo_root.join("commits").join(&dirname);
-    let building = repo_root
-        .join("commits")
-        .join(format!("{dirname}.building"));
-
-    // 1. Acquire lock. Use blocking lock_exclusive on the retake path so that
-    // N concurrent --force callers serialize instead of racing on try_lock_
-    // exclusive (which would hard-fail all losers after the first retaker).
-    // The held lock_guard fd lives until function return — fs2 advisory locks
-    // release on fd close, and dropping mid-function would let another
-    // --force race into our drop+rebuild window.
-    fs::create_dir_all(&building)?;
-    let lock_path = building.join(".build.lock");
-    let lock = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)?;
-    let lock_guard = if lock.try_lock_exclusive().is_err() {
-        // Windows/WSL: Must drop the open file handle before waiting, otherwise the winning
-        // builder will get Access Denied (os error 5) when trying to rename the building dir.
-        drop(lock);
-        wait_for_completion(&building, &commit_dir)?;
-
-        // 1a. Fingerprint short-circuit. If the winning builder just published
-        // an L2 at our SHA with the current binary fingerprint, our own
-        // rebuild would just reproduce the same artifact. Attach to the
-        // winner's result instead of drop+rebuild. This collapses N
-        // concurrent --force into 1 actual build.
-        if let Some(attached) =
-            attach_latest_if_fingerprint_matches(&repo_root.join("commits"), &sha_hex, worktree)
-        {
+    let (sha_lock, waited) = acquire_sha_lock(&commits_dir, sha, BUILD_LOCK_TIMEOUT, on_wait)?;
+    // N concurrent --force collapse into one build: a waiter attaches to what
+    // the holder published during the wait. Only a build that is provably
+    // newer than the one current before the wait counts; the build that was
+    // already current is exactly what --force was asked to replace.
+    if let Waited::Yes(before) = waited {
+        let after = CommitDirListing::read(&commits_dir);
+        let attached = after
+            .as_ref()
+            .ok()
+            .and_then(|after| published_during_wait(&before, after, sha, &commits_dir))
+            .and_then(|winner| {
+                attach_if_fingerprint_matches(&commits_dir.join(&winner.name), worktree)
+            });
+        if let Some(attached) = attached {
             return Ok(ForceRebuildResult {
                 sha_hex: attached.sha_hex,
                 source_type: attached.source_type,
@@ -205,28 +192,10 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
                 tantivy_handle: attached.tantivy_handle,
             });
         }
+    }
 
-        fs::create_dir_all(&building)?;
-        let lock2 = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)?;
-        // Bounded, but far above the registry's five seconds: this wait is for
-        // another `--force` to finish a whole index, not for a JSON rewrite.
-        // The largest corpus measured here (14882 files) cold-indexes in 5.3s
-        // median and 7.5s worst, so the ceiling is roughly forty times the
-        // worst run — long enough never to fire on a real build, short enough
-        // that a wedged holder surfaces as an error instead of a hang.
-        ecp_core::registry::lock_exclusive_within(&lock2, &lock_path, BUILD_LOCK_TIMEOUT)
-            .map_err(|e| io::Error::other(format!("blocking re-lock failed: {e}")))?;
-        lock2
-    } else {
-        lock
-    };
-
-    // 2. Invalidate matching L1 BEFORE dropping L2 (spec §4.4)
-    let invalidate_report = invalidate_matching_l1(&repo_root, &sha_hex)?;
+    // 2. Invalidate matching L1 BEFORE publishing the new L2 (spec §4.4)
+    let invalidate_report = invalidate_matching_l1(repo_root, &sha_hex)?;
 
     // 3. Keep existing L2 in place. The rebuild publishes a same-SHA
     // generation dir so active readers can continue mmaping the old graph.
@@ -242,26 +211,16 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
     // dir so the next build re-parses every file with the current binary.
     // Stale-fingerprint orphan subdirs disappear with this too, which is OK
     // since they were unreachable already.
-    let parse_cache_dir = repo_root.join("parse_cache");
-    let _ = retire_dir_async(&parse_cache_dir)?;
+    let _ = retire_dir_async(&repo_root.join("parse_cache"))?;
 
-    // 4-8. Shared build pipeline (source → analyzer → meta → atomic publish → repo_meta)
+    // 4-8. Shared build pipeline (source → analyzer → meta → durable publish
+    // → repo_meta). It releases the SHA lock after the publish.
     let BuildResult {
         sha_hex,
         source_type,
         commit_dir,
         tantivy_handle,
-    } = build_inside_locked(
-        worktree,
-        &sha_hex,
-        &repo_root,
-        &building,
-        &commit_dir,
-        lock_guard,
-    )?;
-
-    // lock_guard is explicitly dropped inside build_inside_locked just before rename,
-    // so no need to drop here.
+    } = build_inside_locked(worktree, sha, repo_root, &base, sha_lock, &DurablePublish)?;
 
     Ok(ForceRebuildResult {
         sha_hex,
@@ -271,4 +230,88 @@ pub fn force_rebuild_l2(worktree: &Path, target_sha: &str) -> io::Result<ForceRe
         tantivy_handle,
         invalidate_report,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build::orchestrator::test_support::*;
+    use crate::commit_lookup::sha_lock_path;
+    use ecp_core::registry::FileLock;
+
+    /// Nothing else holds the SHA: --force replaces even a build that the
+    /// current binary made, and the new build is the one readers pick.
+    #[test]
+    fn test_force_rebuild_l2_at_uncontended_matching_build_rebuilds() {
+        let fx = fx();
+        let first = build_at(&fx, &fx.repo_root);
+        let mut r = force_rebuild_l2_at(&fx.wt, &fx.sha, &fx.repo_root, no_wait).unwrap();
+        r.join_background();
+        assert!(r.rebuilt);
+        assert_ne!(r.commit_dir, first.commit_dir);
+        assert_eq!(
+            current_name(&fx).as_deref(),
+            r.commit_dir.file_name().and_then(|n| n.to_str())
+        );
+    }
+
+    /// Hold the SHA lock, start a --force that waits on it, publish `winner`
+    /// into `commits/` once the waiter has taken its before-wait snapshot
+    /// (`publish_during_wait`) or before it starts, then release.
+    fn force_while_held(fx: &Fx, winner: &Path, publish_during_wait: bool) -> ForceRebuildResult {
+        let published = fx.commits.join(winner.file_name().unwrap());
+        if !publish_during_wait {
+            fs::rename(winner, &published).unwrap();
+        }
+        let held = FileLock::acquire_exclusive(&sha_lock_path(&fx.commits, &fx.sha)).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut r = std::thread::scope(|s| {
+            let waiter = s.spawn(|| {
+                force_rebuild_l2_at(&fx.wt, &fx.sha, &fx.repo_root, move |_: &Holder| {
+                    tx.send(()).unwrap()
+                })
+            });
+            rx.recv().expect("the waiter reports its wait");
+            if publish_during_wait {
+                fs::rename(winner, &published).unwrap();
+            }
+            drop(held);
+            waiter.join().unwrap().unwrap()
+        });
+        r.join_background();
+        r
+    }
+
+    /// F4: a matching build published while this --force waited is the
+    /// result of a concurrent --force; this one attaches instead of building
+    /// the same thing again.
+    #[test]
+    fn test_force_rebuild_l2_at_published_during_wait_attaches() {
+        let fx = fx();
+        let built = build_at(&fx, &fx.tmp.path().join("home").join("elsewhere"));
+        let r = force_while_held(&fx, &built.commit_dir, true);
+        assert!(!r.rebuilt);
+        assert_eq!(
+            r.commit_dir,
+            fx.commits.join(built.commit_dir.file_name().unwrap())
+        );
+        assert_eq!(CommitDirListing::read(&fx.commits).unwrap().dirs.len(), 1);
+    }
+
+    /// F4: the winner was already current when the waiter looked, so nothing
+    /// proves it is a concurrent --force rather than the build this --force
+    /// was asked to replace. The waiter builds: one extra build, never a
+    /// skipped rebuild.
+    #[test]
+    fn test_force_rebuild_l2_at_published_before_snapshot_rebuilds() {
+        let fx = fx();
+        let built = build_at(&fx, &fx.tmp.path().join("home").join("elsewhere"));
+        let r = force_while_held(&fx, &built.commit_dir, false);
+        assert!(r.rebuilt);
+        assert_eq!(CommitDirListing::read(&fx.commits).unwrap().dirs.len(), 2);
+        assert_eq!(
+            current_name(&fx).as_deref(),
+            r.commit_dir.file_name().and_then(|n| n.to_str())
+        );
+    }
 }

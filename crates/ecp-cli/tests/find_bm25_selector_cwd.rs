@@ -350,8 +350,13 @@ fn test_find_selector_twice_concurrently_prints_identical_stdout() {
 fn test_find_selector_naming_cwd_repo_with_pruned_graph_rebuilds_and_lists_hit() {
     let w = World::new();
     let commits = w.home.path().join(".ecp").join(&w.key).join("commits");
+    // Graph dirs only: `admin gc` prunes graphs, while the per-SHA build
+    // lock files beside them are never deleted.
     for entry in std::fs::read_dir(&commits).unwrap() {
-        std::fs::remove_dir_all(entry.unwrap().path()).unwrap();
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(path).unwrap();
+        }
     }
 
     let out = w.ecp(&w.repo(), &selector_find(&w.key), None);

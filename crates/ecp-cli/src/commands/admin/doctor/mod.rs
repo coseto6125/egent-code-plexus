@@ -120,6 +120,7 @@ pub fn run(args: DoctorArgs) -> Result<(), EcpError> {
     }
     if want(CheckTarget::Registry) {
         results.extend(checks::registry::check(fix));
+        results.extend(checks::staging::check());
     }
     if want(CheckTarget::Version) {
         results.push(checks::version::check());

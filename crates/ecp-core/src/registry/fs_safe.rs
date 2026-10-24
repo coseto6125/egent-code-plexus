@@ -79,6 +79,41 @@ fn replace_file_windows(from: &Path, to: &Path) -> io::Result<()> {
     })
 }
 
+/// Flush a directory's own entries (a rename into it, a file created in it)
+/// to stable storage. The commit publish calls it on `commits/` after the
+/// rename, so a crash cannot keep a later gc's delete of the previous build
+/// and lose the name of the new one.
+///
+/// Windows has no directory fsync in std: the dir is opened with
+/// `FILE_FLAG_BACKUP_SEMANTICS` and flushed with `FlushFileBuffers`. Access
+/// denied there means the volume does not support it and reads as success;
+/// the rename then rests on NTFS's ordered metadata log. macOS `fsync` does
+/// not flush the drive cache (`F_FULLFSYNC` would); neither gap is tested.
+pub fn sync_dir(path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const ERROR_ACCESS_DENIED: i32 = 5;
+        let unsupported = |e: &io::Error| e.raw_os_error() == Some(ERROR_ACCESS_DENIED);
+        let dir = match fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+        {
+            Ok(dir) => dir,
+            Err(e) if unsupported(&e) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        return match dir.sync_all() {
+            Err(e) if unsupported(&e) => Ok(()),
+            other => other,
+        };
+    }
+    #[cfg(not(windows))]
+    fs::File::open(path)?.sync_all()
+}
+
 pub fn retire_dir(path: &Path) -> io::Result<Option<PathBuf>> {
     match fs::metadata(path) {
         Ok(metadata) if metadata.is_dir() => {}
@@ -152,6 +187,13 @@ mod tests {
             .to_string_lossy()
             .starts_with("index.dead."));
         assert!(retired.join("graph.bin").exists());
+    }
+
+    #[test]
+    fn test_sync_dir_directory_ok_missing_err() {
+        let tmp = tempfile::tempdir().unwrap();
+        sync_dir(tmp.path()).expect("a directory flushes, or reads as unsupported on Windows");
+        assert!(sync_dir(&tmp.path().join("missing")).is_err());
     }
 
     #[test]

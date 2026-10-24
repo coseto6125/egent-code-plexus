@@ -52,7 +52,7 @@ fn parse_generation_suffix_single_integer_back_compat() {
 
 #[test]
 fn parse_generation_three_tuple_current_format() {
-    // Current `publish_dir_for` writes `.gen.{timestamp_ms}.{pid}.{counter}`.
+    // `orchestrator::next_publish_name` writes `.gen.{timestamp_ms}.{pid}.{counter}`.
     let n = CommitDirName::parse(
         "branch_main__abc123def4567890abc123def4567890abc123de.gen.1730000000123.4567.42",
     )

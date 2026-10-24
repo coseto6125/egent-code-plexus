@@ -51,6 +51,19 @@ impl FileLock {
         Ok(Self { _file: file })
     }
 
+    /// [`FileLock::acquire_exclusive`] with the caller's wait budget, for a
+    /// lock whose holder does more than a registry write (a whole build).
+    pub fn acquire_exclusive_within(path: &Path, timeout: Duration) -> io::Result<Self> {
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)?;
+        lock_exclusive_within(&file, path, timeout)?;
+        Ok(Self { _file: file })
+    }
+
     /// Try to acquire exclusive lock without blocking.
     pub fn try_exclusive(path: &Path) -> io::Result<Self> {
         let file = OpenOptions::new()
@@ -63,6 +76,42 @@ impl FileLock {
         record_owner_pid(path);
         Ok(Self { _file: file })
     }
+
+    /// Probe a lock that another program owns, without creating anything:
+    /// `Ok(None)` when the lock file is absent, `Err` of kind `WouldBlock`
+    /// while a holder has it, any other error as it came.
+    ///
+    /// No owner sidecar is written. The lock this probes can sit inside a
+    /// directory an older ecp is still building, and a file written there
+    /// would be published with that build.
+    pub fn try_existing(path: &Path) -> io::Result<Option<Self>> {
+        let file = match OpenOptions::new().read(true).write(true).open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        match file.try_lock_exclusive() {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(e) if is_lock_contended(&e) => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!("lock {} is held", path.display()),
+            )),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// True when `err` is a lock attempt that failed only because another
+/// descriptor holds the lock. Windows reports that as `ERROR_LOCK_VIOLATION`,
+/// which std does not map to `WouldBlock`.
+pub fn is_lock_contended(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::WouldBlock
+        || err.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
+/// The PID the last holder of `path` recorded, for a diagnostic that names it.
+pub fn lock_owner_pid(path: &Path) -> Option<u32> {
+    read_owner_pid(path)
 }
 
 /// Bounded exclusive lock on an already-open `file`, with the dead-holder
@@ -235,6 +284,58 @@ mod tests {
             .unwrap();
         lock_exclusive_within(&file, &path, Duration::from_millis(200))
             .expect("an unheld lock must be granted");
+    }
+
+    /// gc probes a lock that an older ecp may own. An absent lock is reported
+    /// as absent, and the probe leaves no file behind: a file created inside
+    /// an older build's staging dir would be published with that build.
+    #[test]
+    fn test_file_lock_try_existing_absent_none_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("absent.lock");
+        assert!(FileLock::try_existing(&path).unwrap().is_none());
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn test_file_lock_try_existing_held_would_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("held.lock");
+        let held = FileLock::acquire_exclusive(&path).unwrap();
+        let err = FileLock::try_existing(&path)
+            .err()
+            .expect("a held lock must read as busy");
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        assert!(is_lock_contended(&err));
+        drop(held);
+        assert!(FileLock::try_existing(&path).unwrap().is_some());
+    }
+
+    #[test]
+    fn test_file_lock_try_existing_free_writes_no_owner_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("legacy.lock");
+        std::fs::write(&path, b"").unwrap();
+        let probe = FileLock::try_existing(&path).unwrap();
+        assert!(probe.is_some());
+        assert!(!owner_pid_sidecar(&path).exists());
+    }
+
+    /// A zero budget ends at once with the holder's PID, so a build waiter
+    /// can report who it waited for.
+    #[test]
+    fn test_file_lock_acquire_exclusive_within_zero_budget_names_holder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("build.lock");
+        let held = FileLock::acquire_exclusive(&path).unwrap();
+        let err = FileLock::acquire_exclusive_within(&path, Duration::ZERO)
+            .err()
+            .expect("a held lock must not be handed out twice");
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(lock_owner_pid(&path), Some(std::process::id()));
+        drop(held);
+        FileLock::acquire_exclusive_within(&path, Duration::ZERO)
+            .expect("a free lock is granted on the first try");
     }
 
     /// A lock that cannot be taken for a reason other than contention must

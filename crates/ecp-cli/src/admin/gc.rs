@@ -3,13 +3,14 @@
 //!
 //! Covered by `tests/gc.rs` integration tests.
 
+use crate::commit_lookup::{sha_lock_path, CommitDir, CommitDirListing, StagingShape};
 use crate::git::safe_exec;
-use ecp_core::registry::{CommitBuildMeta, CommitDirName};
+use ecp_core::registry::{CommitBuildMeta, CommitDirName, FileLock};
 use ecp_core::session::{DirtyFiles, SessionMeta};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 const SESSION_IDLE_HOURS: i64 = 24;
@@ -219,7 +220,8 @@ fn live_commit_shas(repo_root: &Path, common_dir: &Path) -> Option<FxHashSet<Str
 /// when the repo's git dir is unknown or git fails.
 pub fn sweep_unreachable_commits(repo_root: &Path, dry_run: bool) -> io::Result<SweepStats> {
     let mut stats = SweepStats::default();
-    let Ok(it) = fs::read_dir(repo_root.join("commits")) else {
+    let commits = repo_root.join("commits");
+    let Ok(it) = fs::read_dir(&commits) else {
         return Ok(stats);
     };
     let now = SystemTime::now();
@@ -251,7 +253,7 @@ pub fn sweep_unreachable_commits(repo_root: &Path, dry_run: bool) -> io::Result<
         let Ok(parsed) = CommitDirName::parse(&name) else {
             continue;
         };
-        candidates.push((dir, parsed.sha_hex()));
+        candidates.push((dir, parsed.sha));
     }
     if candidates.is_empty() {
         return Ok(stats);
@@ -263,7 +265,7 @@ pub fn sweep_unreachable_commits(repo_root: &Path, dry_run: bool) -> io::Result<
         return Ok(stats);
     };
     for (dir, sha) in candidates {
-        if live.contains(&sha) {
+        if live.contains(&hex::encode(sha)) {
             continue;
         }
         let Ok(cm) = CommitBuildMeta::read(&dir.join("meta.json")) else {
@@ -280,6 +282,11 @@ pub fn sweep_unreachable_commits(repo_root: &Path, dry_run: bool) -> io::Result<
         if !old_enough {
             continue;
         }
+        // A builder of this SHA may be about to attach to the dir or publish
+        // beside it.
+        let Some(_lock) = sweep_sha_lock(&commits, &sha, dry_run) else {
+            continue;
+        };
         stats.marked += 1;
         stats.dispose(&dir, dry_run, || retire_and_remove(&dir));
     }
@@ -601,13 +608,12 @@ fn remove_retired(dir: &Path) -> bool {
     }
 }
 
-/// Converge same-SHA generation dirs under `<repo_root>/commits/`: for each SHA,
-/// keep only the dir with the greatest `Generation` (a base dir with no `.gen`
-/// suffix has `generation == None`, ordering below any `Some(_)`), remove the
-/// rest. Same SHA → identical graph (ingest is idempotent), so older generations
-/// are pure waste. Skips dirs whose mtime is < 10s old or that have a sibling
-/// `.building` marker (another session may be mid-ingest). Reuses
-/// `CommitDirName::parse` rather than hand-rolling the name grammar.
+/// Converge same-SHA generation dirs under `<repo_root>/commits/`: per SHA,
+/// keep the dir readers pick ([`CommitDirListing::current`]) and retire the
+/// rest. Same SHA → identical graph (ingest is idempotent), so older
+/// generations are pure waste. Skips dirs younger than 10 s, a SHA whose lock
+/// another process holds, and a SHA an older ecp is building (its
+/// `<base>.building/.build.lock` is held).
 pub fn sweep_stale_generations(repo_root: &Path, dry_run: bool) -> io::Result<SweepStats> {
     sweep_generations_keeping(repo_root, dry_run, None)
 }
@@ -623,86 +629,161 @@ pub fn sweep_generations_keeping(
     dry_run: bool,
     published: Option<&Path>,
 ) -> io::Result<SweepStats> {
+    sweep_generations_with(
+        repo_root,
+        dry_run,
+        published,
+        &CommitDirListing::read,
+        &ecp_core::registry::sync_dir,
+    )
+}
+
+/// [`sweep_generations_keeping`] with the listing and the directory fsync
+/// passed in, so a test can tear the listing or fail the fsync.
+pub(crate) fn sweep_generations_with(
+    repo_root: &Path,
+    dry_run: bool,
+    published: Option<&Path>,
+    read_listing: &dyn Fn(&Path) -> io::Result<CommitDirListing>,
+    sync_dir: &dyn Fn(&Path) -> io::Result<()>,
+) -> io::Result<SweepStats> {
     let commits = repo_root.join("commits");
     let mut stats = SweepStats::default();
-    let Ok(it) = fs::read_dir(&commits) else {
+    let Ok(listing) = read_listing(&commits) else {
         return Ok(stats);
     };
-
-    // First pass: collect SHAs with an active build.
-    // Real markers are `<base_dirname>.building` (append-style, per orchestrator.rs:71/682/756),
-    // keyed on the commit SHA — never on a specific generation dir.
-    let mut building_shas: FxHashSet<[u8; 20]> = FxHashSet::default();
-    let mut by_sha: FxHashMap<[u8; 20], Vec<(CommitDirName, std::path::PathBuf)>> =
-        FxHashMap::default();
-    let now = std::time::SystemTime::now();
+    // A missed entry may be the current dir of a SHA; retiring what then
+    // looks older would delete the graph readers use.
+    if !listing.complete {
+        eprintln!(
+            "gc: {} listing incomplete; generation sweep skipped",
+            commits.display()
+        );
+        return Ok(stats);
+    }
+    let now = SystemTime::now();
     let published_name = published
         .and_then(Path::file_name)
         .and_then(|n| CommitDirName::parse(&n.to_string_lossy()).ok());
-    let superseded = |parsed: &CommitDirName| {
-        published_name
+    let settled = |dir: &CommitDir| {
+        let superseded = published_name
             .as_ref()
-            .is_some_and(|p| p.sha == parsed.sha && parsed.generation <= p.generation)
+            .is_some_and(|p| p.sha == dir.parsed.sha && dir.parsed.generation <= p.generation);
+        superseded
+            || fs::symlink_metadata(commits.join(&dir.name)).is_ok_and(|m| !is_in_flight(&m, now))
     };
-    for entry in it.flatten() {
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
-        if !meta.is_dir() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') {
-            continue;
-        }
-        if name.contains(".building") {
-            // Strip the `.building` suffix and parse the remainder to get the SHA.
-            if let Some(base) = name.strip_suffix(".building") {
-                if let Ok(parsed) = CommitDirName::parse(base) {
-                    building_shas.insert(parsed.sha);
-                }
-            }
-            continue;
-        }
-        let Ok(parsed) = CommitDirName::parse(&name) else {
-            continue;
-        };
-        if is_in_flight(&meta, now) && !superseded(&parsed) {
-            continue;
-        }
-        by_sha
-            .entry(parsed.sha)
-            .or_default()
-            .push((parsed, entry.path()));
+    let mut settled_per_sha: FxHashMap<[u8; 20], usize> = FxHashMap::default();
+    for dir in listing.dirs.iter().filter(|d| settled(*d)) {
+        *settled_per_sha.entry(dir.parsed.sha).or_default() += 1;
     }
 
-    for (sha, mut group) in by_sha {
-        if group.len() < 2 {
+    for (sha, settled_count) in settled_per_sha {
+        if settled_count < 2 || legacy_build_active(&listing, &sha, &commits) {
             continue;
         }
-        if building_shas.contains(&sha) {
+        let Some(_lock) = sweep_sha_lock(&commits, &sha, dry_run) else {
+            continue;
+        };
+        // Read again under the lock: a builder may have published a higher
+        // generation since the first listing, and that one is current now.
+        let relisted;
+        let listing = if dry_run {
+            &listing
+        } else {
+            match read_listing(&commits) {
+                Ok(fresh) if fresh.complete => {
+                    relisted = fresh;
+                    &relisted
+                }
+                _ => continue,
+            }
+        };
+        let Some(current) = listing.current(&sha, &commits) else {
+            continue;
+        };
+        let victims: Vec<PathBuf> = listing
+            .same_sha(&sha)
+            .filter(|d| d.name != current.name && settled(*d))
+            .map(|d| commits.join(&d.name))
+            .filter(|path| published != Some(path.as_path()))
+            .collect();
+        if victims.is_empty() {
             continue;
         }
-        group.sort_by_key(|(parsed, _)| parsed.generation);
-        let keep_idx = group.len() - 1;
-        for (i, (_, path)) in group.iter().enumerate() {
-            if i == keep_idx || published == Some(path.as_path()) {
+        // A builder that died after its rename and before its fsync of
+        // `commits/` left a publish a power loss can undo. Making it durable
+        // first means a crash can never leave this SHA with neither dir.
+        if !dry_run {
+            if let Err(e) = sync_dir(&commits) {
+                eprintln!(
+                    "gc: fsync {}: {e}; previous generations of {} kept",
+                    commits.display(),
+                    hex::encode(sha)
+                );
                 continue;
             }
-            stats.dispose(path, dry_run, || match fs::remove_dir_all(path) {
-                Ok(()) => true,
-                Err(e) => {
-                    eprintln!(
-                        "gc: failed to remove stale generation {}: {e}",
-                        path.display()
-                    );
-                    false
-                }
-            });
+        }
+        for path in victims {
+            stats.dispose(&path, dry_run, || retire_and_remove(&path));
         }
     }
 
     Ok(stats)
+}
+
+/// Retires new-style staging dirs (`<base>.building.<pid>.<n>`) whose SHA
+/// lock is free, whatever else exists for the SHA. A builder keeps such a
+/// dir only while it holds that lock, so a free lock proves the dir
+/// abandoned (a crash, a kill); the PID in the name proves nothing, PIDs are
+/// reused. Old-style `<base>.building/` dirs are never touched: an older ecp
+/// may still own one, and `ecp admin doctor` reports them instead.
+pub fn sweep_abandoned_staging(repo_root: &Path, dry_run: bool) -> io::Result<SweepStats> {
+    let commits = repo_root.join("commits");
+    let mut stats = SweepStats::default();
+    let Ok(listing) = CommitDirListing::read(&commits) else {
+        return Ok(stats);
+    };
+    let mut by_sha: FxHashMap<[u8; 20], Vec<&str>> = FxHashMap::default();
+    for staging in &listing.staging {
+        if matches!(staging.shape, StagingShape::PerAttempt { .. }) {
+            by_sha.entry(staging.sha).or_default().push(&staging.name);
+        }
+    }
+    for (sha, names) in by_sha {
+        let Some(_lock) = sweep_sha_lock(&commits, &sha, dry_run) else {
+            continue;
+        };
+        for name in names {
+            let path = commits.join(name);
+            stats.marked += 1;
+            stats.dispose(&path, dry_run, || retire_and_remove(&path));
+        }
+    }
+    Ok(stats)
+}
+
+/// The SHA lock for a gc sweep, try only: `None` means another process holds
+/// it, so the SHA is skipped in this run. A real run keeps the lock for the
+/// sweep of that SHA. A dry run only probes, without creating the lock file,
+/// so it judges every SHA as a real run would and leaves nothing on disk.
+fn sweep_sha_lock(commits: &Path, sha: &[u8; 20], dry_run: bool) -> Option<Option<FileLock>> {
+    let path = sha_lock_path(commits, sha);
+    if dry_run {
+        return FileLock::try_existing(&path).ok().map(|_| None);
+    }
+    FileLock::try_exclusive(&path).ok().map(Some)
+}
+
+/// True while an older ecp may be building the SHA: it holds
+/// `<base>.building/.build.lock` until just before its rename. Any probe
+/// error counts as held. The lock file is opened without create, so the
+/// probe never writes into a dir gc does not own.
+fn legacy_build_active(listing: &CommitDirListing, sha: &[u8; 20], commits: &Path) -> bool {
+    listing
+        .staging
+        .iter()
+        .filter(|s| s.sha == *sha && s.shape == StagingShape::Legacy)
+        .any(|s| FileLock::try_existing(&commits.join(&s.name).join(".build.lock")).is_err())
 }
 
 /// Remove retired dirs (`<name>.dead.<pid>.<n>.<ts>`) directly under
@@ -941,5 +1022,210 @@ mod subtree_build_tests {
             "a branch named *.building* was never swept"
         );
         assert!(building.exists(), "an in-progress build was swept");
+    }
+}
+
+#[cfg(test)]
+mod sha_lock_sweep_tests {
+    use super::*;
+    use crate::commit_lookup::staging_dir_name;
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    const SHA: &str = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+
+    fn sha() -> [u8; 20] {
+        crate::build::orchestrator::parse_sha(SHA).unwrap()
+    }
+
+    /// A dir past the 10 s in-flight guard.
+    fn settled_dir(commits: &Path, name: &str) -> PathBuf {
+        let dir = commits.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("graph.bin"), b"g").unwrap();
+        let old = filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(60));
+        filetime::set_file_mtime(&dir, old).unwrap();
+        dir
+    }
+
+    fn two_generations(root: &Path) -> (PathBuf, PathBuf) {
+        let commits = root.join("commits");
+        (
+            settled_dir(&commits, &format!("commit__{SHA}.gen.1000.1.0")),
+            settled_dir(&commits, &format!("commit__{SHA}.gen.2000.1.0")),
+        )
+    }
+
+    fn lock_path(root: &Path) -> PathBuf {
+        sha_lock_path(&root.join("commits"), &sha())
+    }
+
+    /// A builder holds the SHA from its last existence check through its
+    /// fsync of `commits/`; gc must not retire a generation inside that span.
+    #[test]
+    fn test_sweep_stale_generations_sha_lock_held_skips_sha() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (old, new) = two_generations(tmp.path());
+        let held = FileLock::acquire_exclusive(&lock_path(tmp.path())).unwrap();
+        let stats = sweep_stale_generations(tmp.path(), false).unwrap();
+        assert_eq!(stats.removed, 0);
+        assert!(old.exists() && new.exists());
+        drop(held);
+        let stats = sweep_stale_generations(tmp.path(), false).unwrap();
+        assert_eq!(stats.removed, 1);
+        assert!(!old.exists() && new.exists());
+    }
+
+    /// F2: the newer generation's rename may not be durable yet. Without a
+    /// successful fsync of `commits/`, the previous generation stays.
+    #[test]
+    fn test_sweep_generations_with_commits_fsync_fails_previous_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (old, new) = two_generations(tmp.path());
+        let fail = |_: &Path| -> io::Result<()> { Err(io::Error::other("injected")) };
+        let stats = sweep_generations_with(tmp.path(), false, None, &CommitDirListing::read, &fail)
+            .unwrap();
+        assert_eq!(stats.removed, 0);
+        assert!(old.exists() && new.exists());
+    }
+
+    /// F2: a builder died after its rename and before its fsync of
+    /// `commits/`. gc's fsync runs while both generations still exist, and
+    /// the previous one goes only after it.
+    #[test]
+    fn test_sweep_generations_with_publish_not_durable_fsync_before_retire() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (old, new) = two_generations(tmp.path());
+        let commits = tmp.path().join("commits");
+        let both_present_at_sync = Cell::new(None);
+        let record = |dir: &Path| -> io::Result<()> {
+            assert_eq!(dir, commits);
+            both_present_at_sync.set(Some(old.exists() && new.exists()));
+            Ok(())
+        };
+        let stats =
+            sweep_generations_with(tmp.path(), false, None, &CommitDirListing::read, &record)
+                .unwrap();
+        assert_eq!(both_present_at_sync.get(), Some(true));
+        assert_eq!(stats.removed, 1);
+        assert!(!old.exists() && new.exists());
+    }
+
+    /// A torn listing may have missed the current dir of a SHA.
+    #[test]
+    fn test_sweep_generations_with_incomplete_listing_removes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (old, new) = two_generations(tmp.path());
+        let torn = |dir: &Path| -> io::Result<CommitDirListing> {
+            let mut listing = CommitDirListing::read(dir)?;
+            listing.complete = false;
+            Ok(listing)
+        };
+        let stats = sweep_generations_with(
+            tmp.path(),
+            false,
+            None,
+            &torn,
+            &ecp_core::registry::sync_dir,
+        )
+        .unwrap();
+        assert_eq!(stats.removed, 0);
+        assert!(old.exists() && new.exists());
+    }
+
+    #[test]
+    fn test_sweep_stale_generations_dry_run_creates_no_lock_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (old, new) = two_generations(tmp.path());
+        let stats = sweep_stale_generations(tmp.path(), true).unwrap();
+        assert_eq!(stats.would_remove, vec![old.clone()]);
+        assert!(old.exists() && new.exists());
+        assert!(!lock_path(tmp.path()).exists());
+    }
+
+    fn staging(root: &Path, pid: u32) -> PathBuf {
+        settled_dir(
+            &root.join("commits"),
+            &staging_dir_name(&format!("commit__{SHA}"), pid, 0),
+        )
+    }
+
+    /// F5: a crash before the first publish leaves staging with no published
+    /// dir beside it; the generation sweep never sees that SHA.
+    #[test]
+    fn test_sweep_abandoned_staging_no_published_dir_retired() {
+        let tmp = tempfile::tempdir().unwrap();
+        let junk = staging(tmp.path(), 4242);
+        let stats = sweep_abandoned_staging(tmp.path(), false).unwrap();
+        assert_eq!((stats.marked, stats.removed), (1, 1));
+        assert!(!junk.exists());
+    }
+
+    /// F5: one published dir is no group of two, so the generation sweep
+    /// skips the SHA; the staging sweep still retires the staging.
+    #[test]
+    fn test_sweep_abandoned_staging_one_published_dir_staging_retired_published_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let published = settled_dir(&tmp.path().join("commits"), &format!("commit__{SHA}"));
+        let junk = staging(tmp.path(), 4242);
+        let stats = sweep_abandoned_staging(tmp.path(), false).unwrap();
+        assert_eq!(stats.removed, 1);
+        assert!(!junk.exists() && published.exists());
+    }
+
+    #[test]
+    fn test_sweep_abandoned_staging_sha_lock_held_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live = staging(tmp.path(), std::process::id());
+        let held = FileLock::acquire_exclusive(&lock_path(tmp.path())).unwrap();
+        let stats = sweep_abandoned_staging(tmp.path(), false).unwrap();
+        assert_eq!((stats.marked, stats.removed), (0, 0));
+        assert!(live.exists());
+        drop(held);
+    }
+
+    /// F1: an older ecp may own `<base>.building/` even with its lock free
+    /// (it releases just before its rename); doctor reports it, gc keeps it.
+    #[test]
+    fn test_sweep_abandoned_staging_legacy_staging_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = settled_dir(
+            &tmp.path().join("commits"),
+            &format!("commit__{SHA}.building"),
+        );
+        let stats = sweep_abandoned_staging(tmp.path(), false).unwrap();
+        assert_eq!(stats.marked, 0);
+        assert!(legacy.join("graph.bin").exists());
+    }
+
+    #[test]
+    fn test_sweep_abandoned_staging_dry_run_listed_kept_no_lock_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let junk = staging(tmp.path(), 4242);
+        let stats = sweep_abandoned_staging(tmp.path(), true).unwrap();
+        assert_eq!(stats.would_remove, vec![junk.clone()]);
+        assert!(junk.exists());
+        assert!(!lock_path(tmp.path()).exists());
+    }
+
+    /// F5: an attach never enters the build path, so the staging a crashed
+    /// builder left stays until gc's staging sweep retires it.
+    #[test]
+    fn test_sweep_abandoned_staging_after_attach_retired() {
+        use crate::build::orchestrator::test_support::*;
+        let fx = fx();
+        let built = build_at(&fx, &fx.repo_root);
+        let junk = fx.commits.join(staging_dir_name(&fx.base, 999_999, 0));
+        fs::create_dir_all(&junk).unwrap();
+        let attached = build_at(&fx, &fx.repo_root);
+        assert_eq!(
+            attached.commit_dir, built.commit_dir,
+            "the second build attaches"
+        );
+        assert!(junk.exists());
+        let stats = sweep_abandoned_staging(&fx.repo_root, false).unwrap();
+        assert_eq!(stats.removed, 1);
+        assert!(!junk.exists());
+        assert!(attached.commit_dir.exists());
     }
 }

@@ -5,4 +5,5 @@ pub(super) mod index;
 pub(crate) mod install_source;
 pub(super) mod registry;
 pub(super) mod skills;
+pub(super) mod staging;
 pub(crate) mod version;
