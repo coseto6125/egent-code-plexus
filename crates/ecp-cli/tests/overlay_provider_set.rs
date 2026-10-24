@@ -186,7 +186,7 @@ fn test_reanalyze_files_hardware_data_and_schema_family_parses() {
         ),
         (
             "api/greeter.proto",
-            "syntax = \"proto3\";\nmessage Greeter {}\n",
+            "syntax = \"proto3\";\nmessage Greeter {\n  string name = 1;\n}\n",
             "Greet",
         ),
     ]);
@@ -198,7 +198,8 @@ fn test_reanalyze_files_hardware_data_and_schema_family_parses() {
 #[test]
 fn test_reanalyze_files_container_and_ci_family_parses() {
     assert_family_reaches_overlay(&[
-        ("Dockerfile", "FROM alpine AS greeter\nRUN echo hi\n", "greet"),
+        // The dockerfile provider names a stage by its base image.
+        ("Dockerfile", "FROM alpine AS greeter\nRUN echo hi\n", "alpine"),
         (
             "docker-compose.yml",
             "services:\n  greeter:\n    image: alpine\n",
