@@ -6,6 +6,8 @@ Typical use:
     python scripts/benchmark/benchmark_ecp.py                              # full sweep
     python scripts/benchmark/benchmark_ecp.py --runs 5 --json out.json     # CI mode
     python scripts/benchmark/benchmark_ecp.py --skip-cold                  # don't wipe index
+    python scripts/benchmark/benchmark_ecp.py --dirty-only --dirty-repo ~/vscode \
+        --dirty-file src/vs/base/common/strings.ts --no-build                # dirty-file latency
     # analyze phases default to 1 sample (~±20% wall noise); --runs N>1 or
     # --analyze-runs N raises analyze repeats for CI regression detection.
 """
@@ -99,10 +101,14 @@ def _fmt(seconds: float) -> str:
     return f"{seconds * 1000:>6.1f}ms" if seconds < 1 else f"{seconds:>6.2f}s "
 
 
-def _run(cmd: list[str], cwd: Path | None) -> tuple[float, int, str, str]:
+def _run(
+    cmd: list[str], cwd: Path | None, env: dict[str, str] | None = None
+) -> tuple[float, int, str, str]:
     start = time.perf_counter()
     try:
-        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=CMD_TIMEOUT_S)
+        proc = subprocess.run(
+            cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=CMD_TIMEOUT_S
+        )
     except subprocess.TimeoutExpired:
         return CMD_TIMEOUT_S, 124, "", f"timeout after {CMD_TIMEOUT_S}s"
     return time.perf_counter() - start, proc.returncode, proc.stdout, proc.stderr
@@ -158,6 +164,113 @@ def _probe_symbols(binary: Path, repo: Path) -> dict[str, str]:
     out["method_kind"] = first[4]
     out["method_file"] = first[5]
     return out
+
+
+# Every variable `session/resolver.rs` reads a session id from. Each dirty-file
+# run clears all of them, then sets the one id its phase needs, so the host
+# session of whoever launched the bench never leaks into a sample.
+SESSION_ENV_VARS = (
+    "ECP_SESSION_ID",
+    "GEMINI_CLI_SESSION_ID",
+    "CODEX_SESSION_ID",
+    "CODEX_THREAD_ID",
+    "CLAUDE_CODE_SESSION_ID",
+)
+
+# The appended edit per suffix: one new exported function, as the latency
+# protocol edits `src/vs/base/common/strings.ts` on vscode. `{name}` is unique
+# per bench invocation so the edit never collides with a real symbol.
+DIRTY_APPEND = {
+    ".ts": "\nexport function {name}(): number {{\n\treturn 1;\n}}\n",
+    ".tsx": "\nexport function {name}(): number {{\n\treturn 1;\n}}\n",
+    ".js": "\nexport function {name}() {{\n\treturn 1;\n}}\n",
+    ".py": "\n\ndef {name}():\n    return 1\n",
+    ".rs": "\npub fn {name}() -> i32 {{\n    1\n}}\n",
+    ".go": "\nfunc {name}() int {{\n\treturn 1\n}}\n",
+}
+
+
+def _session_env(session_id: str | None) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k not in SESSION_ENV_VARS}
+    if session_id is not None:
+        env["ECP_SESSION_ID"] = session_id
+    return env
+
+
+def _git_head(repo: Path) -> str | None:
+    proc = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, timeout=30
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def _bench_dirty(
+    binary: Path, repo: Path, rel_file: str, query: str, mode: str | None, append: str, runs: int
+) -> list[Sample]:
+    """Time `ecp find` on a clean tree and after one edit, in paired runs.
+
+    Each pair: (a) the clean tree with a new session id; (b) the first query
+    after the edit, with a new session id so its L1 state starts empty; (c) a
+    later query in that same session and dirty state; (d) the dirty state with
+    every session variable cleared (the no-session case). Pair 0 is a discarded
+    warm-up. The file's bytes and mtime are restored before every pair and on
+    any exit, so git sees the tree clean again.
+    """
+    target = repo / rel_file
+    original = target.read_bytes()
+    stat = target.stat()
+    edited = original + append.encode()
+    cmd = [str(binary), "find", query, "--repo", str(repo)]
+    if mode:
+        cmd += ["--mode", mode]
+    phases = (
+        "find dirty: clean",
+        "find dirty: first after edit",
+        "find dirty: later after edit",
+        "find dirty: no session",
+    )
+    samples = [Sample(name=name, cmd=cmd, cwd=str(repo)) for name in phases]
+    tag = f"{os.getpid()}-{time.time_ns()}"
+
+    def restore() -> None:
+        target.write_bytes(original)
+        os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+    try:
+        for i in range(runs + 1):
+            restore()
+            clean_sid = f"bench-clean-{tag}-{i}"
+            dirty_sid = f"bench-dirty-{tag}-{i}"
+            pair: list[float] = []
+            for phase, sid in enumerate((clean_sid, dirty_sid, dirty_sid, None)):
+                if phase == 1:
+                    target.write_bytes(edited)
+                elapsed, rc, _out, stderr = _run(cmd, repo, env=_session_env(sid))
+                if rc != 0:
+                    tail = stderr.strip().splitlines()[-1] if stderr.strip() else f"exit {rc}"
+                    samples[phase].err = tail[:160]
+                    return samples
+                pair.append(elapsed)
+            if i == 0:
+                continue
+            for s, elapsed in zip(samples, pair):
+                s.runs.append(elapsed)
+    finally:
+        restore()
+    return samples
+
+
+def _print_dirty_deltas(samples: list[Sample]) -> None:
+    """Median of the paired differences against the clean query of each pair."""
+    clean = samples[0]
+    if not clean.runs:
+        return
+    for s in samples[1:]:
+        if len(s.runs) != len(clean.runs):
+            continue
+        delta = median(b - a for a, b in zip(clean.runs, s.runs))
+        ratio = median(b / a for a, b in zip(clean.runs, s.runs))
+        print(f"  {s.name:<30} paired delta {delta * 1000:+7.1f}ms  ratio x{ratio:.3f}")
 
 
 def _hardware() -> dict[str, object]:
@@ -259,6 +372,50 @@ def _print_summary(samples: list[Sample]) -> None:
     print(bar)
 
 
+def _dirty_phase(args: argparse.Namespace) -> tuple[list[Sample], dict[str, object] | None]:
+    """Run the dirty-file scenario; return its samples and its protocol record."""
+    repo: Path = args.dirty_repo
+    target = repo / args.dirty_file
+    if not target.is_file():
+        print(f"error: dirty file {target} not found", file=sys.stderr)
+        return [], None
+    name = f"ecpBenchDirty{os.getpid()}"
+    append = args.dirty_append
+    if append is None:
+        template = DIRTY_APPEND.get(target.suffix)
+        if template is None:
+            print(f"error: no default edit for {target.suffix}; pass --dirty-append", file=sys.stderr)
+            return [], None
+        append = template.format(name=name)
+    print(f"→ dirty-file scenario: index {repo}")
+    _run([str(args.binary), "admin", "index", "--repo", str(repo)], cwd=repo, env=_session_env(None))
+    query = args.dirty_query or _probe_symbols(args.binary, repo).get("method_name", "main")
+    print(
+        f"→ dirty-file scenario: find {query!r} mode={args.dirty_mode or 'default'} "
+        f"edit={args.dirty_file} runs={args.dirty_runs}+1 warm-up"
+    )
+    samples = _bench_dirty(
+        args.binary, repo, args.dirty_file, query, args.dirty_mode, append, args.dirty_runs
+    )
+    for s in samples:
+        if s.err:
+            print(f"  {s.name}: FAIL: {s.err}")
+        elif s.runs:
+            print(f"  {s.name:<30} median {_fmt(s.median_s).strip()}")
+    _print_dirty_deltas(samples)
+    protocol: dict[str, object] = {
+        "repo": str(repo),
+        "head": _git_head(repo),
+        "file": args.dirty_file,
+        "append": append,
+        "query": query,
+        "mode": args.dirty_mode,
+        "paired_runs": args.dirty_runs,
+        "warmup_runs": 1,
+    }
+    return samples, protocol
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -296,11 +453,46 @@ def main() -> int:
         action="store_true",
         help="Skip the auto `cargo build --release` step (use the existing binary as-is)",
     )
+    ap.add_argument(
+        "--dirty-file",
+        help="Repo-relative file the dirty-file scenario edits; the scenario runs only when set",
+    )
+    ap.add_argument(
+        "--dirty-repo",
+        type=Path,
+        help="Indexed git repo for the dirty-file scenario (default: --git-repo)",
+    )
+    ap.add_argument(
+        "--dirty-query",
+        help="`ecp find` pattern for the dirty-file scenario (default: a probed method name)",
+    )
+    ap.add_argument(
+        "--dirty-mode", help="`ecp find --mode` for the dirty-file scenario (default: the CLI default)"
+    )
+    ap.add_argument(
+        "--dirty-append",
+        help="Text appended to --dirty-file (default: one exported function for its suffix)",
+    )
+    ap.add_argument(
+        "--dirty-runs",
+        type=int,
+        default=10,
+        help="Paired runs for the dirty-file scenario, after one discarded warm-up",
+    )
+    ap.add_argument(
+        "--dirty-only",
+        action="store_true",
+        help="Run only the dirty-file scenario (needs --dirty-file)",
+    )
     args = ap.parse_args()
     analyze_runs = args.analyze_runs or (args.runs if args.runs > 1 else 1)
     args.repo = args.repo.resolve()
     args.git_repo = args.git_repo.resolve()
     args.binary = args.binary.resolve()
+    args.dirty_repo = (args.dirty_repo or args.git_repo).resolve()
+    if args.dirty_only and not args.dirty_file:
+        print("error: --dirty-only needs --dirty-file", file=sys.stderr)
+        return 1
 
     _ensure_binary_fresh(args.binary, skip=args.no_build)
     if not args.binary.exists():
@@ -310,6 +502,15 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    if args.dirty_only:
+        samples, dirty = _dirty_phase(args)
+        _print_summary(samples)
+        if args.json:
+            payload = {"binary": str(args.binary), "hardware": _hardware(), "dirty": dirty}
+            payload["samples"] = [asdict(s) for s in samples]
+            args.json.write_text(json.dumps(payload, indent=2))
+            print(f"\n→ wrote {args.json}")
+        return 0 if dirty and all(s.runs for s in samples) else 3
     if not args.repo.is_dir():
         print(f"error: repo {args.repo} not found", file=sys.stderr)
         return 1
@@ -460,12 +661,13 @@ def main() -> int:
         ),
         # Multi-hop variable-length edge: exercises the frontier-expansion path
         # over 1..3 Calls hops, the most allocation-heavy traversal shape.
+        # DISTINCT: count(*) counted walks, which Cypher's exact-or-refuse rule now refuses.
         (
             "cypher multi-hop Calls*1..3",
             [
                 str(args.binary),
                 "cypher",
-                "MATCH (a:Method)-[:Calls*1..3]->(b:Method) RETURN count(*)",
+                "MATCH (a:Method)-[:Calls*1..3]->(b:Method) RETURN count(DISTINCT b)",
                 "--repo",
                 str(args.repo),
             ],
@@ -565,6 +767,11 @@ def main() -> int:
                 f"(min {_fmt(min(s.runs)).strip()}, max {_fmt(max(s.runs)).strip()})"
             )
 
+    dirty: dict[str, object] | None = None
+    if args.dirty_file:
+        dirty_samples, dirty = _dirty_phase(args)
+        samples.extend(dirty_samples)
+
     _print_summary(samples)
 
     if args.json:
@@ -576,6 +783,8 @@ def main() -> int:
             "hardware": hw,
             "samples": [asdict(s) for s in samples],
         }
+        if dirty is not None:
+            payload["dirty"] = dirty
         args.json.write_text(json.dumps(payload, indent=2))
         print(f"\n→ wrote {args.json}")
 
