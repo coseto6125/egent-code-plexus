@@ -934,7 +934,7 @@ impl PathRule {
 }
 
 fn components(path: &str) -> impl Iterator<Item = &str> {
-    path.split(|c: char| c == '/' || c == '\\')
+    path.split(['/', '\\'])
         .filter(|component| !component.is_empty() && *component != ".")
 }
 
