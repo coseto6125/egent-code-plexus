@@ -484,3 +484,23 @@ fn test_execute_exists_variable_length_sees_the_cycle_back_to_start() {
         vec!["cx", "cy", "loop"]
     );
 }
+
+// ---- hints name a spelling the engine accepts ------------------------------
+
+#[test]
+fn test_parse_sql_join_hint_suggests_a_query_that_parses() {
+    // The hint used to suggest `OPTIONAL MATCH ... WHERE r IS NULL`, which the
+    // engine now refuses; an agent following it hit a second error.
+    for query in [
+        "MATCH (f) WITH f LEFT JOIN (x)-[r]->(f) RETURN f",
+        "MATCH (f) WITH f JOIN (x)-[r]->(f) RETURN f",
+    ] {
+        let error = parse_error(query);
+        let suggested = error
+            .split('`')
+            .nth(1)
+            .unwrap_or_else(|| panic!("hint carries a quoted query: {error}"));
+        cypher::parse(suggested)
+            .unwrap_or_else(|e| panic!("suggested query must parse: {suggested}: {e}"));
+    }
+}

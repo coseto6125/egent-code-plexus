@@ -99,10 +99,10 @@ fn hint_for_unsupported(tokens: &[Token], pos: usize) -> Option<String> {
             if matches!(a.as_str(), "LEFT" | "RIGHT" | "INNER" | "FULL")
                 && ident_at(i + 1).as_deref() == Some("JOIN")
             {
-                return Some("SQL syntax detected; Cypher uses OPTIONAL MATCH (a)-[r]->(b) WHERE r IS NULL for left-join semantics".into());
+                return Some("SQL syntax detected; for left-join semantics use `MATCH (a) OPTIONAL MATCH (a)-[r]->(b) WITH a, r WHERE r IS NULL RETURN a`".into());
             }
             if a == "JOIN" {
-                return Some("SQL syntax detected; Cypher uses OPTIONAL MATCH (a)-[r]->(b) WHERE r IS NULL for left-join semantics".into());
+                return Some("SQL syntax detected; for left-join semantics use `MATCH (a) OPTIONAL MATCH (a)-[r]->(b) WITH a, r WHERE r IS NULL RETURN a`".into());
             }
             if a == "CALL" {
                 return Some("stored procedures (CALL \u{2026} YIELD) are unsupported; for a node's edge types use `ecp inspect --name X`".into());
