@@ -327,12 +327,12 @@ fn visible_scope(nodes: &[RawNode], candidate: usize, site: Span) -> Option<Opti
     Some(innermost)
 }
 
+/// Sort key of a scope: start position, then reversed end position.
+type ScopeDepth = ((u32, u32), Reverse<(u32, u32)>);
+
 /// Orders scopes that contain one site from outer to inner: file top level
 /// first, then by later start, then by earlier end.
-fn scope_depth(
-    nodes: &[RawNode],
-    scope: Option<usize>,
-) -> Option<((u32, u32), Reverse<(u32, u32)>)> {
+fn scope_depth(nodes: &[RawNode], scope: Option<usize>) -> Option<ScopeDepth> {
     scope.map(|c| {
         let (r1, c1, r2, c2) = nodes[c].span;
         ((r1, c1), Reverse((r2, c2)))
