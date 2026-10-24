@@ -77,7 +77,11 @@ use std::path::Path;
 /// verb, read from the method argument; a docker-compose flow-mapping `build`
 /// is read; the Cargo / pyproject package alias comes from the TOML table; a
 /// Python transaction decorator binds the innermost function.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema21");
+/// schema22: every path routes through the C5 `FileRouter`: one size cap
+/// (1 MiB default) on the cold and incremental paths alike, a sniffed OpenAPI
+/// YAML reaches the openapi provider, template paths and non-UTF-8 names are
+/// never parsed.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema22");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
