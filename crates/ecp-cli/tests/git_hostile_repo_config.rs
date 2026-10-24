@@ -512,7 +512,8 @@ fn test_diff_baseline_status_include_if_worktree_driver_never_runs() {
         ],
     );
     let main_sees = Command::new("git")
-        .args(["config", "--get-regexp", "^filter\\."])
+        // Only `evil`: a CI runner's global config defines `filter.lfs`.
+        .args(["config", "--get-regexp", "^filter\\.evil\\."])
         .current_dir(&repo)
         .output()
         .unwrap();
