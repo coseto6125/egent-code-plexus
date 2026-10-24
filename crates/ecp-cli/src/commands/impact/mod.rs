@@ -371,10 +371,16 @@ fn run_batch(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
                 p
             }
             Err(e) => {
+                // An agent branches on `status`; a name with several
+                // definitions is not a missing name.
+                let status = match e {
+                    EcpError::AmbiguousSymbol { .. } => "ambiguous",
+                    _ => "not_found",
+                };
                 serde_json::json!({
                     "error": e.to_string(),
                     "target": target_name,
-                    "status": "not_found",
+                    "status": status,
                 })
             }
         };

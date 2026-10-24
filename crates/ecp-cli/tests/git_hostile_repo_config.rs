@@ -265,9 +265,9 @@ fn review_rejects_an_option_shaped_since_even_when_files_are_given() {
 }
 
 /// A filter driver is the third way a scanned repository names a program for
-/// git to run, and the only one that fires on the commands `ecp diff` uses to
-/// move the worktree. `core.hooksPath=/dev/null` does not touch it, and neither
-/// `checkout` nor `stash` has a `--no-filters`.
+/// git to run, and the only one that fires on the `git worktree add` that
+/// `ecp diff` uses to check out its baseline. `core.hooksPath=/dev/null` does
+/// not touch it, and `worktree add` has no `--no-filters`.
 ///
 /// Run once per way a repository can place the driver, because the first fix
 /// enumerated `--config --local` and two of these three are invisible there:
@@ -285,7 +285,7 @@ fn review_rejects_an_option_shaped_since_even_when_files_are_given() {
 /// `filter_overrides` passing no scope flag rather than on a case here.
 #[cfg(unix)]
 #[test]
-fn repo_defined_filter_drivers_do_not_run_during_checkout_or_stash() {
+fn repo_defined_filter_drivers_do_not_run_during_baseline_checkout() {
     for placement in ["local", "worktree-config", "include-path"] {
         assert_filter_placement_is_neutralised(placement);
     }
@@ -293,7 +293,7 @@ fn repo_defined_filter_drivers_do_not_run_during_checkout_or_stash() {
 
 #[cfg(unix)]
 fn assert_filter_placement_is_neutralised(placement: &str) {
-    use ecp_cli::commands::diff::git_guard::GitGuard;
+    use ecp_cli::commands::diff::git_guard::BaselineCheckout;
 
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
@@ -364,33 +364,34 @@ fn assert_filter_placement_is_neutralised(placement: &str) {
     .trim()
     .to_string();
 
-    // Left dirty so the guard takes its `stash push -u` path as well.
+    // Left dirty to prove the baseline checkout never touches the user's tree.
     fs::write(repo.join("f.txt"), "dirty\n").unwrap();
 
     {
-        let _guard = GitGuard::enter(&repo, &base).expect("the guard must still enter");
-        // Without this the test would also pass for a guard that checked
-        // nothing out, which never reaches a filter at all.
+        let checkout =
+            BaselineCheckout::create(&repo, &base).expect("the baseline checkout must succeed");
+        // Without this the test would also pass for a checkout that wrote
+        // nothing, which never reaches a filter at all.
         assert_eq!(
-            fs::read_to_string(repo.join("f.txt")).unwrap(),
+            fs::read_to_string(checkout.path().join("f.txt")).unwrap(),
             "b\n",
-            "[{placement}] the guard must check out the requested base"
+            "[{placement}] the baseline must hold the requested base"
         );
         assert!(
             !marker.exists(),
-            "[{placement}] a filter driver ran during stash/checkout: {}",
+            "[{placement}] a filter driver ran during the baseline checkout: {}",
             fs::read_to_string(&marker).unwrap_or_default()
         );
     }
 
     assert!(
         !marker.exists(),
-        "[{placement}] a filter driver ran while the guard restored the worktree: {}",
+        "[{placement}] a filter driver ran while the baseline checkout was removed: {}",
         fs::read_to_string(&marker).unwrap_or_default()
     );
     assert_eq!(
         fs::read_to_string(repo.join("f.txt")).unwrap(),
         "dirty\n",
-        "[{placement}] the guard must hand the dirty worktree back unchanged"
+        "[{placement}] the user's dirty worktree must stay unchanged"
     );
 }
