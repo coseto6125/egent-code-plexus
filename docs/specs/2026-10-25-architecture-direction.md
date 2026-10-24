@@ -470,7 +470,7 @@ Two areas conflict when they change one function, one stored format or one piece
 | 1, 5 | dirty symbols and call resolution in `OverlayView::build` (`view.rs:369`, `:587`) | C3 first; a deleted file is a whole-file tombstone, never "keep base" |
 | 1, 6 and 2, 6 | `Language` decides call normalization (`resolver.rs:730`), global admission (`file_category.rs:400`) and Rust owners | C5 first; areas 1, 2 and 6 read one language value and one compatibility rule |
 | 1, 7 | heritage: the overlay pre-pass (`view.rs:521`) and `Overrides` (`overrides.rs:153`) | `Overrides` reads the shared heritage facts |
-| 2, 5 | the target resolver reads the owner (`symbol_id.rs:135`); rename treats an empty owner as top level (`rename.rs:333`) | C1 first; rename's scoped exclusion ships with A's opt-in |
+| 2, 5 | the target resolver reads the owner (`symbol_id.rs:135`); rename treats an empty owner as top level (`rename.rs:333`) | C1 first. One target resolver reads the qualified path. A bare name matches top-level and scoped declarations; a tie is an ambiguity that `rename` refuses. `::name` selects the top-level declaration. The resolver ships before A's opt-in (C1 Open point 5) |
 | 2, 7 | raw slots kept in pass 1 (`builder.rs:1198`) | C4's index mapping; area 7 waits for that mapping, not for A-A |
 | 2, 8 | Route uids made in two places (`builder.rs:1411`, `:1481`) | C1's route and handler identity |
 | 3, 4 and 3, 6 | the source snapshot (`orchestrator.rs:139`) feeds config reads and file filters | area 3 defines the snapshot; areas 4 and 6 read from it |

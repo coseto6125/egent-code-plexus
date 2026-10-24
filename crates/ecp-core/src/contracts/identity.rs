@@ -27,12 +27,14 @@ const SCOPED_TAG: u8 = 0x01;
 const ANCHOR_TAG: u8 = 0x02;
 
 /// A semantic fact that tells apart two declarations whose kind, path, owner
-/// and name are equal. It enters the anchor, never the uid, so a slice that
-/// adds one changes no stored uid.
+/// and name are equal. It enters the anchor, never the declaration's own
+/// uid. Every scoped descendant hashes the anchor, so adding a discriminator
+/// to a declaration changes the stored uid of each scoped node below it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Discriminator<'a> {
-    /// The trait of the Rust `impl Trait for Type` block that declares the
-    /// node: `Display` for the `fmt` in `impl Display for A`.
+    /// The full trait text of the Rust `impl Trait for Type` block that
+    /// declares the node, generic arguments included, as `impl_trait_name`
+    /// produces it: `Display`, `Conv<u8>`.
     ImplTrait(&'a str),
     /// The parameter type list of an overload, as the parser normalises it.
     Signature(&'a str),
@@ -42,11 +44,24 @@ pub enum Discriminator<'a> {
 }
 
 impl<'a> Discriminator<'a> {
-    fn tag_byte(self) -> u8 {
+    /// The stored variant byte: the anchor stream hashes it, and the L2
+    /// discriminator table stores it beside the text.
+    pub fn stored_tag(self) -> u8 {
         match self {
             Self::ImplTrait(_) => 1,
             Self::Signature(_) => 2,
             Self::Tag(_) => 3,
+        }
+    }
+
+    /// The inverse of [`Discriminator::stored_tag`] plus [`Discriminator::text`].
+    /// `None` for an unknown byte.
+    pub fn from_stored(tag: u8, text: &'a str) -> Option<Self> {
+        match tag {
+            1 => Some(Self::ImplTrait(text)),
+            2 => Some(Self::Signature(text)),
+            3 => Some(Self::Tag(text)),
+            _ => None,
         }
     }
 
@@ -74,31 +89,33 @@ pub enum Scope {
 pub enum IdentityError {
     /// The path holds a `\` or starts with `./`; see [`canonical_path`].
     NonCanonicalPath(String),
-    /// The owner holds a generic argument list or outer whitespace; see
-    /// [`canonical_owner`].
-    NonCanonicalOwner(String),
     /// A discriminator with empty text separates nothing.
     EmptyDiscriminator,
     /// The declaration's lexical parent is out of range or forms a cycle.
     BadParent { decl: u32 },
     /// A lexically scoped declaration carries an owner (invariant I1).
     ScopedWithOwner { decl: u32 },
-    /// A kind that keeps overloads is never scoped (invariant I3).
-    ScopedOverloadKind { decl: u32 },
+    /// A kind that keeps overloads is never scoped (invariant I3). `decl` is
+    /// the row index when `assign_file` finds it, `None` from
+    /// [`DeclKey::scoped`].
+    ScopedOverloadKind { kind: NodeKind, decl: Option<u32> },
 }
 
 impl fmt::Display for IdentityError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NonCanonicalPath(p) => write!(f, "path is not canonical: {p:?}"),
-            Self::NonCanonicalOwner(o) => write!(f, "owner is not canonical: {o:?}"),
             Self::EmptyDiscriminator => f.write_str("discriminator text is empty"),
             Self::BadParent { decl } => write!(f, "declaration {decl} has a bad lexical parent"),
             Self::ScopedWithOwner { decl } => {
                 write!(f, "scoped declaration {decl} carries an owner")
             }
-            Self::ScopedOverloadKind { decl } => {
-                write!(f, "declaration {decl} keeps overloads and cannot be scoped")
+            Self::ScopedOverloadKind { kind, decl } => {
+                write!(
+                    f,
+                    "a {} keeps overloads and cannot be scoped (declaration {decl:?})",
+                    kind.as_str()
+                )
             }
         }
     }
@@ -120,10 +137,13 @@ pub fn canonical_path(path: &str) -> Cow<'_, str> {
     }
 }
 
-/// The canonical owner spelling: every generic argument list removed and
-/// outer whitespace trimmed, so `Walk<'s, 't>` and `Walk` are one owner.
-/// Borrowed when unchanged.
-pub fn canonical_owner(owner: &str) -> Cow<'_, str> {
+/// The matching form of an owner or qualifier segment: every generic
+/// argument list removed and outer whitespace trimmed, so a request `Walk`
+/// matches the owner `Walk<'s, 't>`. Matching only: identity keeps the owner
+/// text as the producer wrote it, so `Conv<u8>` and `Conv<u16>` stay two
+/// owners. A text that is all generic list (`<anonymous:3:4>`) keeps its
+/// text. Borrowed when unchanged.
+pub fn owner_match_form(owner: &str) -> Cow<'_, str> {
     if !owner.contains('<') && owner.trim().len() == owner.len() {
         return Cow::Borrowed(owner);
     }
@@ -137,7 +157,10 @@ pub fn canonical_owner(owner: &str) -> Cow<'_, str> {
             _ => {}
         }
     }
-    Cow::Owned(out.trim().to_string())
+    match out.trim() {
+        "" => Cow::Borrowed(owner),
+        trimmed => Cow::Owned(trimmed.to_string()),
+    }
 }
 
 fn check_path(path: &str) -> Result<(), IdentityError> {
@@ -148,7 +171,7 @@ fn check_path(path: &str) -> Result<(), IdentityError> {
 }
 
 /// The identity of one declaration. Construct it with [`DeclKey::unscoped`]
-/// or [`DeclKey::scoped`]; both validate the canonical forms.
+/// or [`DeclKey::scoped`]; both validate the path spelling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeclKey<'a> {
     kind: NodeKind,
@@ -160,8 +183,10 @@ pub struct DeclKey<'a> {
 }
 
 impl<'a> DeclKey<'a> {
-    /// A declaration that no callable body declares. An empty owner is no
-    /// owner, as `uid::compute` already treats it.
+    /// A declaration that no callable body declares. The owner text stays as
+    /// the producer wrote it, generic arguments included (`Conv<u8>`), so
+    /// the uid is today's. An empty owner is no owner, as `uid::compute`
+    /// already treats it.
     pub fn unscoped(
         kind: NodeKind,
         path: &'a str,
@@ -170,11 +195,6 @@ impl<'a> DeclKey<'a> {
     ) -> Result<Self, IdentityError> {
         check_path(path)?;
         let owner = owner.filter(|o| !o.is_empty());
-        if let Some(o) = owner {
-            if let Cow::Owned(_) = canonical_owner(o) {
-                return Err(IdentityError::NonCanonicalOwner(o.to_string()));
-            }
-        }
         Ok(Self {
             kind,
             path,
@@ -186,7 +206,8 @@ impl<'a> DeclKey<'a> {
     }
 
     /// A declaration that the callable with anchor `parent_anchor` declares.
-    /// It has no owner (invariant I1).
+    /// It has no owner (invariant I1), and its kind does not keep overloads
+    /// (invariant I3).
     pub fn scoped(
         kind: NodeKind,
         path: &'a str,
@@ -194,6 +215,9 @@ impl<'a> DeclKey<'a> {
         parent_anchor: u64,
     ) -> Result<Self, IdentityError> {
         check_path(path)?;
+        if uid::keeps_overloads(kind) {
+            return Err(IdentityError::ScopedOverloadKind { kind, decl: None });
+        }
         Ok(Self {
             kind,
             path,
@@ -253,7 +277,7 @@ impl<'a> DeclKey<'a> {
         let mut h = Xxh3::new();
         h.update(&[ANCHOR_TAG]);
         h.update(&base.to_le_bytes());
-        h.update(&[d.tag_byte(), 0]);
+        h.update(&[d.stored_tag(), 0]);
         h.update(d.text().as_bytes());
         h.update(&[0xFF]);
         h.digest()
@@ -356,7 +380,10 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
                         return Err(IdentityError::ScopedWithOwner { decl: j as u32 });
                     }
                     if uid::keeps_overloads(d.kind) {
-                        return Err(IdentityError::ScopedOverloadKind { decl: j as u32 });
+                        return Err(IdentityError::ScopedOverloadKind {
+                            kind: d.kind,
+                            decl: Some(j as u32),
+                        });
                     }
                     let parent_anchor =
                         anchors[p as usize].expect("the chain resolves a parent before its child");
@@ -504,8 +531,13 @@ pub fn lexical_parents(decls: &[(NodeKind, Span)], scoped_kinds: &[NodeKind]) ->
 /// One qualifier segment of a target request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Segment {
-    /// An owner, module or lexical parent name, in canonical owner spelling.
+    /// An owner, module or lexical parent name in [`owner_match_form`]. It
+    /// matches a path segment whose match form is equal.
     Name(String),
+    /// `` `text` ``: the exact text of a path segment, such as a closure
+    /// parent `<anonymous:3:4>` or the owner `Walk<'s, 't>`. Inside the
+    /// backticks, a doubled backtick is one backtick.
+    Literal(String),
     /// `<A as Display>`: the type `A` in the `impl Display for A` block.
     ImplTrait { self_ty: String, trait_name: String },
 }
@@ -529,6 +561,8 @@ pub enum TargetSyntaxError {
     Empty,
     EmptySegment,
     UnclosedAngle,
+    /// A `` ` `` opens a literal segment that no `` ` `` closes.
+    UnclosedQuote,
     /// `<T as Tr>` must qualify a name; it cannot be the name.
     ImplTraitAsName,
     /// `<…>` without the form `<Type as Trait>`.
@@ -546,6 +580,7 @@ impl fmt::Display for TargetSyntaxError {
             Self::Empty => f.write_str("target is empty"),
             Self::EmptySegment => f.write_str("target has an empty segment"),
             Self::UnclosedAngle => f.write_str("target has an unclosed `<`"),
+            Self::UnclosedQuote => f.write_str("target has an unclosed backtick"),
             Self::ImplTraitAsName => f.write_str("`<Type as Trait>` must be followed by a name"),
             Self::BadImplTrait(s) => write!(f, "expected `<Type as Trait>`, got {s:?}"),
             Self::RootWithQualifier => f.write_str("a leading `::` takes a bare name"),
@@ -578,9 +613,11 @@ pub struct PathSegment<'a> {
 }
 
 impl<'a> PathSegment<'a> {
-    /// The segments of a stored owner, split on `.` and `::`.
+    /// The segments of a stored owner, split on `.` and `::` outside a
+    /// generic argument list: `a::Conv<b::C>` gives `a`, `Conv<b::C>`.
     pub fn from_owner(owner: &'a str) -> Vec<PathSegment<'a>> {
-        split_owner(owner)
+        owner_segments(owner)
+            .into_iter()
             .map(|name| PathSegment {
                 name,
                 impl_trait: None,
@@ -589,15 +626,61 @@ impl<'a> PathSegment<'a> {
     }
 }
 
-fn split_owner(owner: &str) -> impl Iterator<Item = &str> {
-    owner
-        .split("::")
-        .flat_map(|part| part.split('.'))
-        .filter(|s| !s.is_empty())
+fn owner_segments(owner: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = owner;
+    while !rest.is_empty() {
+        let (seg, tail) = rest.split_at(next_separator(rest));
+        if !seg.is_empty() {
+            out.push(seg);
+        }
+        rest = tail
+            .strip_prefix("::")
+            .or_else(|| tail.strip_prefix('.'))
+            .unwrap_or(tail);
+    }
+    out
 }
 
 fn last_segment(s: &str) -> &str {
-    split_owner(s).last().unwrap_or(s)
+    owner_segments(s).last().copied().unwrap_or(s)
+}
+
+/// Whether a segment or a name must be written in backticks to parse back
+/// to the same text.
+fn needs_quote(s: &str) -> bool {
+    s.is_empty()
+        || s.starts_with(char::is_whitespace)
+        || s.ends_with(char::is_whitespace)
+        || s.contains(['.', ':', '<', '>', '@', '`'])
+}
+
+fn push_quoted(out: &mut String, s: &str) {
+    match needs_quote(s) {
+        true => push_quoted_always(out, s),
+        false => out.push_str(s),
+    }
+}
+
+fn push_quoted_always(out: &mut String, s: &str) {
+    out.push('`');
+    out.push_str(&s.replace('`', "``"));
+    out.push('`');
+}
+
+/// A request's trait text against a path segment's trait text. Both
+/// compare by their last segment. A request trait with generic arguments
+/// compares the full text, whitespace aside, so `Conv<u8>` never matches
+/// `Conv<u16>`; a request trait without them matches every instance.
+fn trait_matches(want: &str, have: &str) -> bool {
+    let (want, have) = (last_segment(want), last_segment(have));
+    match want.contains('<') {
+        true => {
+            let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+            squash(want) == squash(have)
+        }
+        false => owner_match_form(have) == want,
+    }
 }
 
 /// What the resolver knows of one declaration that has the requested name.
@@ -657,7 +740,13 @@ fn split_line(text: &str) -> Result<(&str, Option<u32>), TargetSyntaxError> {
     let Some((head, tail)) = text.rsplit_once('@') else {
         return Ok((text, None));
     };
-    if head.is_empty() || tail.is_empty() || !tail.bytes().all(|b| b.is_ascii_digit()) {
+    // An odd backtick count before the `@` puts it inside a literal segment.
+    let inside_quote = head.bytes().filter(|&b| b == b'`').count() % 2 == 1;
+    if inside_quote
+        || head.is_empty()
+        || tail.is_empty()
+        || !tail.bytes().all(|b| b.is_ascii_digit())
+    {
         return Ok((text, None));
     }
     match tail.parse::<u32>() {
@@ -719,6 +808,30 @@ fn parse_segment(seg: &str) -> Result<Segment, TargetSyntaxError> {
     }
 }
 
+/// The text of the literal segment that opens `s` (which starts with a
+/// backtick), and the rest after its closing backtick. A doubled backtick
+/// inside is one backtick.
+fn read_quoted(s: &str) -> Result<(String, &str), TargetSyntaxError> {
+    let mut text = String::new();
+    let mut chars = s[1..].char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c != '`' {
+            text.push(c);
+            continue;
+        }
+        if chars.peek().is_some_and(|&(_, next)| next == '`') {
+            chars.next();
+            text.push('`');
+            continue;
+        }
+        return match text.is_empty() {
+            true => Err(TargetSyntaxError::EmptySegment),
+            false => Ok((text, &s[1 + i + 1..])),
+        };
+    }
+    Err(TargetSyntaxError::UnclosedQuote)
+}
+
 fn split_segments(body: &str) -> Result<Vec<Segment>, TargetSyntaxError> {
     if body.trim().is_empty() {
         return Err(TargetSyntaxError::Empty);
@@ -726,14 +839,24 @@ fn split_segments(body: &str) -> Result<Vec<Segment>, TargetSyntaxError> {
     let mut out = Vec::new();
     let mut rest = body;
     loop {
-        let (seg, tail) = match rest.starts_with('<') {
-            true => {
-                let close = matching_angle(rest).ok_or(TargetSyntaxError::UnclosedAngle)?;
-                (&rest[..=close], &rest[close + 1..])
+        let (seg, tail) = match rest.as_bytes().first() {
+            Some(b'`') => {
+                let (literal, tail) = read_quoted(rest)?;
+                out.push(Segment::Literal(literal));
+                (&rest[..rest.len() - tail.len()], tail)
             }
-            false => rest.split_at(next_separator(rest)),
+            Some(b'<') => {
+                let close = matching_angle(rest).ok_or(TargetSyntaxError::UnclosedAngle)?;
+                let (seg, tail) = (&rest[..=close], &rest[close + 1..]);
+                out.push(parse_segment(seg)?);
+                (seg, tail)
+            }
+            _ => {
+                let (seg, tail) = rest.split_at(next_separator(rest));
+                out.push(parse_segment(seg)?);
+                (seg, tail)
+            }
         };
-        out.push(parse_segment(seg)?);
         if tail.is_empty() {
             return Ok(out);
         }
@@ -750,15 +873,16 @@ fn split_segments(body: &str) -> Result<Vec<Segment>, TargetSyntaxError> {
 impl Segment {
     fn matches(&self, have: &PathSegment<'_>) -> bool {
         match self {
-            Self::Name(n) => n == have.name,
+            Self::Name(n) => owner_match_form(have.name) == n.as_str(),
+            Self::Literal(text) => text == have.name,
             Self::ImplTrait {
                 self_ty,
                 trait_name,
             } => {
-                last_segment(self_ty) == have.name
+                owner_match_form(last_segment(self_ty)) == owner_match_form(have.name)
                     && have
                         .impl_trait
-                        .is_some_and(|t| last_segment(t) == last_segment(trait_name))
+                        .is_some_and(|t| trait_matches(trait_name, t))
             }
         }
     }
@@ -766,6 +890,7 @@ impl Segment {
     fn render(&self, out: &mut String) {
         match self {
             Self::Name(n) => out.push_str(n),
+            Self::Literal(text) => push_quoted_always(out, text),
             Self::ImplTrait {
                 self_ty,
                 trait_name,
@@ -807,6 +932,9 @@ impl Qualifier {
                             self_ty: s.name.to_string(),
                             trait_name: t.to_string(),
                         },
+                        None if needs_quote(s.name) || owner_match_form(s.name) != s.name => {
+                            Segment::Literal(s.name.to_string())
+                        }
                         None => Segment::Name(s.name.to_string()),
                     })
                     .collect(),
@@ -829,14 +957,14 @@ impl TargetRequest {
         };
         let mut segments = split_segments(body)?;
         let name = match segments.pop() {
-            Some(Segment::Name(n)) => n,
+            Some(Segment::Name(n) | Segment::Literal(n)) => n,
             Some(Segment::ImplTrait { .. }) => return Err(TargetSyntaxError::ImplTraitAsName),
             None => return Err(TargetSyntaxError::Empty),
         };
         for seg in &mut segments {
             if let Segment::Name(n) = seg {
-                let canonical = canonical_owner(n).into_owned();
-                *n = canonical;
+                let match_form = owner_match_form(n).into_owned();
+                *n = match_form;
             }
         }
         let qualifier = match (root, segments.is_empty()) {
@@ -878,8 +1006,10 @@ impl TargetRequest {
     }
 
     /// The target text in canonical form: segments joined by `.`, a root
-    /// declaration as `::name`, the line as `@N`. [`TargetRequest::parse`]
-    /// reads it back to an equal qualifier, name and line.
+    /// declaration as `::name`, the line as `@N`. A literal segment, and a
+    /// name that holds `.`, `:`, `<`, `>`, `@` or a backtick, go in
+    /// backticks. [`TargetRequest::parse`] reads it back to an equal
+    /// qualifier, name and line.
     pub fn render(&self) -> String {
         let mut out = String::new();
         match &self.qualifier {
@@ -892,7 +1022,7 @@ impl TargetRequest {
                 }
             }
         }
-        out.push_str(&self.name);
+        push_quoted(&mut out, &self.name);
         if let Some(line) = self.line {
             out.push('@');
             out.push_str(&line.to_string());
@@ -1157,15 +1287,19 @@ impl RouteKey {
 }
 
 /// Compose a router prefix and a route path with exactly one `/` at the
-/// joint and a leading `/`. A trailing `/` of the route path is kept.
+/// joint and a leading `/`. An empty route path gives the prefix as
+/// written; a slash-only route path gives the prefix with one trailing `/`,
+/// so `("/api", "")` is `/api` and `("/api", "/")` is `/api/`. A trailing
+/// `/` of a longer route path is kept.
 pub fn join_route_path(prefix: &str, path: &str) -> String {
-    let head = prefix.trim().trim_end_matches('/');
-    let tail = path.trim().trim_start_matches('/');
-    let joined = match (head.is_empty(), tail.is_empty()) {
-        (true, true) => return String::from("/"),
-        (true, false) => tail.to_string(),
-        (false, true) => head.to_string(),
-        (false, false) => format!("{head}/{tail}"),
+    let (prefix, path) = (prefix.trim(), path.trim());
+    let joined = match path.is_empty() {
+        true => prefix.to_string(),
+        false => format!(
+            "{}/{}",
+            prefix.trim_end_matches('/'),
+            path.trim_start_matches('/')
+        ),
     };
     match joined.starts_with('/') {
         true => joined,
@@ -1178,7 +1312,12 @@ pub fn join_route_path(prefix: &str, path: &str) -> String {
 pub enum HandlerRef {
     /// A declaration node; `uid` is its [`UidSlot::uid`].
     Declaration { uid: u64 },
-    /// An anonymous function written at the registration; no node exists.
+    /// An anonymous function written at the registration that has its own
+    /// closure node (a name that starts with `<anonymous:`). A parser emits
+    /// that node only when the body holds a call. `uid` is the node's
+    /// [`UidSlot::uid`].
+    Closure { uid: u64 },
+    /// An anonymous function written at the registration with no node.
     /// `line` is the registration's 1-based line.
     Inline { line: u32 },
     /// The registration names a handler that binds no declaration.
@@ -1192,7 +1331,7 @@ impl HandlerRef {
     pub fn handler_kind(&self) -> &'static str {
         match self {
             Self::Declaration { .. } => "named",
-            Self::Inline { .. } => "inline_anonymous",
+            Self::Closure { .. } | Self::Inline { .. } => "inline_anonymous",
             Self::Unresolved { .. } => "unresolved",
             Self::Absent => "absent",
         }
@@ -1256,11 +1395,12 @@ mod tests {
     }
 
     #[test]
-    fn test_canonical_owner_generic_arguments_removed() {
-        assert_eq!(canonical_owner("Walk<'s, 't>"), "Walk");
-        assert_eq!(canonical_owner("a::Foo<Vec<T>>::Bar"), "a::Foo::Bar");
-        assert_eq!(canonical_owner(" Foo "), "Foo");
-        assert!(matches!(canonical_owner("a::b"), Cow::Borrowed("a::b")));
+    fn test_owner_match_form_generic_arguments_removed() {
+        assert_eq!(owner_match_form("Walk<'s, 't>"), "Walk");
+        assert_eq!(owner_match_form("a::Foo<Vec<T>>::Bar"), "a::Foo::Bar");
+        assert_eq!(owner_match_form(" Foo "), "Foo");
+        assert!(matches!(owner_match_form("a::b"), Cow::Borrowed("a::b")));
+        assert_eq!(owner_match_form("<anonymous:3:4>"), "<anonymous:3:4>");
     }
 
     #[test]
@@ -1282,15 +1422,66 @@ mod tests {
     }
 
     #[test]
-    fn test_unscoped_non_canonical_inputs_rejected() {
+    fn test_unscoped_non_canonical_path_rejected() {
         assert_eq!(
             DeclKey::unscoped(NodeKind::Function, "src\\a.rs", None, "f"),
             Err(IdentityError::NonCanonicalPath("src\\a.rs".into()))
         );
+    }
+
+    #[test]
+    fn test_unscoped_generic_owner_kept_as_produced() {
+        let u8_key = DeclKey::unscoped(NodeKind::Impl, "a.rs", Some("Conv<u8>"), "A").unwrap();
+        let u16_key = DeclKey::unscoped(NodeKind::Impl, "a.rs", Some("Conv<u16>"), "A").unwrap();
+        assert_eq!(u8_key.owner(), Some("Conv<u8>"));
         assert_eq!(
-            DeclKey::unscoped(NodeKind::Method, "a.rs", Some("Walk<'s>"), "f"),
-            Err(IdentityError::NonCanonicalOwner("Walk<'s>".into()))
+            u8_key.uid(),
+            uid::compute(NodeKind::Impl, "a.rs", Some("Conv<u8>"), "A")
         );
+        assert_ne!(u8_key.uid(), u16_key.uid());
+        let walk = DeclKey::unscoped(NodeKind::Method, "a.rs", Some("Walk<'s, 't>"), "f").unwrap();
+        assert_eq!(
+            walk.uid(),
+            uid::compute(NodeKind::Method, "a.rs", Some("Walk<'s, 't>"), "f")
+        );
+    }
+
+    #[test]
+    fn test_scoped_method_kind_rejected() {
+        assert_eq!(
+            DeclKey::scoped(NodeKind::Method, "a.rs", "m", 7),
+            Err(IdentityError::ScopedOverloadKind {
+                kind: NodeKind::Method,
+                decl: None
+            })
+        );
+    }
+
+    #[test]
+    fn test_scoped_constructor_kind_rejected() {
+        assert_eq!(
+            DeclKey::scoped(NodeKind::Constructor, "a.rs", "new", 7),
+            Err(IdentityError::ScopedOverloadKind {
+                kind: NodeKind::Constructor,
+                decl: None
+            })
+        );
+    }
+
+    #[test]
+    fn test_discriminator_stored_tag_round_trip() {
+        for d in [
+            Discriminator::ImplTrait("Conv<u8>"),
+            Discriminator::Signature("(i32, &str)"),
+            Discriminator::Tag("Deployment"),
+        ] {
+            assert_eq!(
+                Discriminator::from_stored(d.stored_tag(), d.text()),
+                Some(d)
+            );
+        }
+        assert_eq!(Discriminator::from_stored(0, "x"), None);
+        assert_eq!(Discriminator::from_stored(4, "x"), None);
     }
 
     #[test]
@@ -1496,8 +1687,28 @@ mod tests {
         method[1].parent = Some(0);
         assert_eq!(
             assign_file("a.rs", &method),
-            Err(IdentityError::ScopedOverloadKind { decl: 1 })
+            Err(IdentityError::ScopedOverloadKind {
+                kind: NodeKind::Method,
+                decl: Some(1)
+            })
         );
+    }
+
+    #[test]
+    fn test_assign_file_discriminator_changes_scoped_child_uid() {
+        let mut plain = vec![
+            decl(NodeKind::Method, Some("A"), "fmt"),
+            decl(NodeKind::Function, None, "pad"),
+        ];
+        plain[1].parent = Some(0);
+        let mut tagged = plain.clone();
+        tagged[0].discriminator = Some(Discriminator::ImplTrait("Display"));
+        let (p, t) = (
+            assign_file("a.rs", &plain).unwrap(),
+            assign_file("a.rs", &tagged).unwrap(),
+        );
+        assert_eq!(p[0].slot, t[0].slot);
+        assert_ne!(p[1].slot.uid(), t[1].slot.uid());
     }
 
     #[test]
@@ -1688,7 +1899,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_qualifier_generic_canonicalised_name_kept() {
+    fn test_parse_qualifier_generic_match_form_name_kept() {
         let r = TargetRequest::parse("Walk<'s>.next", None, None).unwrap();
         assert_eq!(
             r.qualifier(),
@@ -1769,6 +1980,76 @@ mod tests {
         let names: Vec<&str> = segs.iter().map(|s| s.name).collect();
         assert_eq!(names, ["a", "b", "C"]);
         assert!(PathSegment::from_owner("").is_empty());
+    }
+
+    #[test]
+    fn test_path_segment_from_owner_depth_aware() {
+        let segs = PathSegment::from_owner("a::Conv<b::C>.D");
+        let names: Vec<&str> = segs.iter().map(|s| s.name).collect();
+        assert_eq!(names, ["a", "Conv<b::C>", "D"]);
+    }
+
+    #[test]
+    fn test_qualifier_impl_trait_generic_trait_text_exact() {
+        let conv = |t: &'static str| {
+            [PathSegment {
+                name: "A",
+                impl_trait: Some(t),
+            }]
+        };
+        let (u8_path, u16_path) = (conv("Conv<u8>"), conv("Conv<u16>"));
+        let exact = TargetRequest::parse("<A as Conv<u8>>.f", None, None).unwrap();
+        assert!(exact.qualifier().matches(&u8_path));
+        assert!(!exact.qualifier().matches(&u16_path));
+        let spaced = TargetRequest::parse("<A as Conv< u8 >>.f", None, None).unwrap();
+        assert!(spaced.qualifier().matches(&u8_path));
+        let any = TargetRequest::parse("<A as Conv>.f", None, None).unwrap();
+        assert!(any.qualifier().matches(&u8_path) && any.qualifier().matches(&u16_path));
+    }
+
+    #[test]
+    fn test_parse_literal_name_anonymous_closure() {
+        let name = TargetRequest::parse("`<anonymous:3:4>`", None, None).unwrap();
+        assert_eq!(name.qualifier(), &Qualifier::Any);
+        assert_eq!(name.name(), "<anonymous:3:4>");
+        let child = TargetRequest::parse("::`<anonymous:3:4>`@3", None, None).unwrap();
+        assert_eq!(
+            (child.qualifier(), child.name(), child.line()),
+            (&Qualifier::Root, "<anonymous:3:4>", Some(3))
+        );
+        let nested = TargetRequest::parse("run.`<anonymous:3:4>`.helper", None, None).unwrap();
+        assert_eq!(
+            nested.qualifier(),
+            &Qualifier::Path(vec![
+                Segment::Name("run".into()),
+                Segment::Literal("<anonymous:3:4>".into())
+            ])
+        );
+        let tick = TargetRequest::parse("`a``b@1`", None, None).unwrap();
+        assert_eq!((tick.name(), tick.line()), ("a`b@1", None));
+        assert_eq!(
+            TargetRequest::parse("`<anonymous:3:4>", None, None),
+            Err(TargetSyntaxError::UnclosedQuote)
+        );
+        assert_eq!(
+            TargetRequest::parse("``", None, None),
+            Err(TargetSyntaxError::EmptySegment)
+        );
+        assert!(matches!(
+            TargetRequest::parse("<anonymous:3:4>.helper", None, None),
+            Err(TargetSyntaxError::BadImplTrait(_))
+        ));
+    }
+
+    #[test]
+    fn test_qualifier_literal_matches_exact_text_only() {
+        let walk = [seg("Walk<'s, 't>")];
+        let plain = [seg("Walk")];
+        let literal = TargetRequest::parse("`Walk<'s, 't>`.next", None, None).unwrap();
+        assert!(literal.qualifier().matches(&walk));
+        assert!(!literal.qualifier().matches(&plain));
+        let name = TargetRequest::parse("Walk.next", None, None).unwrap();
+        assert!(name.qualifier().matches(&walk) && name.qualifier().matches(&plain));
     }
 
     #[test]
@@ -1925,6 +2206,148 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_target_top_level_and_nested_helper_bare_name_ambiguous() {
+        let named = [
+            facts(1, NodeKind::Function, "a.rs", 1, vec![], "helper"),
+            facts(
+                2,
+                NodeKind::Function,
+                "a.rs",
+                5,
+                vec![seg("outer")],
+                "helper",
+            ),
+        ];
+        let bare = TargetRequest::parse("helper", None, None).unwrap();
+        let TargetResolution::Ambiguous(amb) = resolve_target(&bare, &named) else {
+            panic!("a bare name must not pick the top-level helper");
+        };
+        assert_eq!(amb.total(), 2);
+        assert!(matches!(
+            amb.to_error(&bare),
+            EcpError::AmbiguousSymbol {
+                owner_form: true,
+                ..
+            }
+        ));
+        let root = TargetRequest::parse("::helper", None, None).unwrap();
+        assert!(matches!(
+            resolve_target(&root, &named),
+            TargetResolution::Unique(Candidate { node: 1, .. })
+        ));
+        let nested = TargetRequest::parse("outer.helper", None, None).unwrap();
+        assert!(matches!(
+            resolve_target(&nested, &named),
+            TargetResolution::Unique(Candidate { node: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn test_resolve_target_overloads_on_one_line_no_reusable() {
+        let named = [
+            facts(1, NodeKind::Method, "a.cpp", 3, vec![seg("A")], "f"),
+            facts(2, NodeKind::Method, "a.cpp", 3, vec![seg("A")], "f"),
+        ];
+        let r = TargetRequest::parse("A.f", None, None).unwrap();
+        let TargetResolution::Ambiguous(amb) = resolve_target(&r, &named) else {
+            panic!("expected an ambiguity");
+        };
+        assert!(amb.candidates().iter().all(|c| c.reusable.is_none()));
+    }
+
+    #[test]
+    fn test_reusable_render_parse_selects_only_original_every_shape() {
+        let conv = |t: &'static str| PathSegment {
+            name: "A",
+            impl_trait: Some(t),
+        };
+        let all = [
+            facts(0, NodeKind::Function, "a.rs", 3, vec![], "<anonymous:3:4>"),
+            facts(1, NodeKind::Function, "b.rs", 3, vec![], "<anonymous:3:4>"),
+            facts(
+                2,
+                NodeKind::Function,
+                "a.rs",
+                4,
+                vec![seg("<anonymous:3:4>")],
+                "helper",
+            ),
+            facts(3, NodeKind::Function, "a.rs", 10, vec![], "helper"),
+            facts(
+                4,
+                NodeKind::Function,
+                "a.rs",
+                12,
+                vec![seg("run")],
+                "helper",
+            ),
+            facts(5, NodeKind::Method, "a.rs", 20, vec![conv("Conv<u8>")], "f"),
+            facts(
+                6,
+                NodeKind::Method,
+                "a.rs",
+                25,
+                vec![conv("Conv<u16>")],
+                "f",
+            ),
+            facts(
+                7,
+                NodeKind::Method,
+                "a.rs",
+                30,
+                vec![seg("Walk<'s, 't>")],
+                "next",
+            ),
+            facts(8, NodeKind::Method, "a.rs", 35, vec![seg("Walk")], "next"),
+            facts(
+                9,
+                NodeKind::Method,
+                "c.cpp",
+                5,
+                vec![seg("Foo")],
+                "operator<",
+            ),
+            facts(
+                10,
+                NodeKind::Method,
+                "c.cpp",
+                9,
+                vec![seg("Foo")],
+                "operator<",
+            ),
+            facts(11, NodeKind::Function, "a.rs", 40, vec![seg("a`b")], "g"),
+        ];
+        let picked: Vec<usize> = (0..all.len()).collect();
+        let amb = Ambiguity::new(&all, &picked);
+        for (i, c) in amb.candidates().iter().enumerate() {
+            let req = c.reusable.as_ref().unwrap_or_else(|| panic!("{c:?}"));
+            let text = req.render();
+            let back =
+                TargetRequest::parse(&text, req.kind().map(NodeKind::as_str), req.file()).unwrap();
+            assert_eq!(&back, req, "{text}");
+            assert_eq!(select(&back, &all), vec![i], "{text}");
+        }
+        let text = |i: usize| amb.candidates()[i].reusable.as_ref().unwrap().render();
+        assert_eq!(text(0), "::`<anonymous:3:4>`");
+        assert_eq!(text(2), "`<anonymous:3:4>`.helper");
+        assert_eq!(text(3), "::helper");
+        assert_eq!(text(5), "<A as Conv<u8>>.f");
+        assert_eq!(text(7), "`Walk<'s, 't>`.next");
+        assert_eq!(text(9), "Foo.`operator<`@5");
+        assert_eq!(text(11), "`a``b`.g");
+    }
+
+    #[test]
+    fn test_select_explicit_kind_impl_keeps_impl() {
+        let named = [
+            facts(1, NodeKind::Struct, "a.rs", 1, vec![], "A"),
+            facts(2, NodeKind::Impl, "a.rs", 5, vec![], "A"),
+        ];
+        let r = TargetRequest::parse("A", Some("impl"), None).unwrap();
+        assert_eq!(select(&r, &named), vec![1]);
+    }
+
+    #[test]
     fn test_ambiguity_to_error_matches_todays_fields() {
         let named = [
             facts(
@@ -2013,6 +2436,15 @@ mod tests {
     }
 
     #[test]
+    fn test_join_route_path_slash_only_path_keeps_trailing_slash() {
+        assert_eq!(join_route_path("/api", "/"), "/api/");
+        assert_eq!(join_route_path("/api/", "/"), "/api/");
+        assert_eq!(join_route_path("/api/", ""), "/api/");
+        assert_eq!(join_route_path("api", " / "), "/api/");
+        assert_ne!(join_route_path("/api", "/"), join_route_path("/api", ""));
+    }
+
+    #[test]
     fn test_join_route_path_one_slash_at_joint() {
         assert_eq!(join_route_path("/api/", "/users"), "/api/users");
         assert_eq!(join_route_path("api", "users"), "/api/users");
@@ -2026,6 +2458,10 @@ mod tests {
     #[test]
     fn test_handler_ref_handler_kind_values() {
         assert_eq!(HandlerRef::Declaration { uid: 1 }.handler_kind(), "named");
+        assert_eq!(
+            HandlerRef::Closure { uid: 1 }.handler_kind(),
+            "inline_anonymous"
+        );
         assert_eq!(
             HandlerRef::Inline { line: 3 }.handler_kind(),
             "inline_anonymous"

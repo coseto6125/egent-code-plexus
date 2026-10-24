@@ -24,34 +24,36 @@ Every `file:line` below was read on branch `feat/arch-p1-contracts` at `1d267693
 |---|---|---|
 | `DeclKey` | value | The identity inputs of one declaration: kind, path, owner, name, scope, discriminator. |
 | `Scope` | enum | `Unscoped`, or `Lexical { parent_anchor }`. |
-| `Discriminator` | enum | `ImplTrait`, `Signature` or `Tag`: a semantic fact that separates equal keys. |
+| `Discriminator` | enum | `ImplTrait`, `Signature` or `Tag`: a semantic fact that separates equal keys. `stored_tag` and `from_stored` give its stored byte. |
 | `FileDecl` | input row | One declaration of a file, as `assign_file` reads it. |
 | `UidSlot` | result | `First(uid)`, `Later { first, ordinal, uid }` or `Duplicate { first, uid }`. |
 | `Uniqueness` | result | `Unique`, or `Shared { position, count }`. |
 | `DeclIdentity` | result | The slot, the anchor and the uniqueness of one declaration. |
 | `IdentityError` | result | The invariant that an input breaks. |
 | `TargetRequest` | value | The parsed target text plus the `--kind` and `--file` filters. |
-| `Qualifier`, `Segment` | enum | The part of a target before the name. |
+| `Qualifier`, `Segment` | enum | The part of a target before the name. `Segment` is `Name`, `Literal` or `ImplTrait`. |
 | `TargetSyntaxError` | result | Why a target text does not parse. |
 | `CandidateFacts`, `PathSegment` | input row | What the resolver knows of one declaration with the requested name. |
 | `FileMatch` | enum | The tier of a `--file` match: `Substring`, `Suffix`, `Equal`. |
 | `TargetResolution` | result | `Unique(Candidate)`, `Ambiguous(Ambiguity)` or `NotFound { named }`. |
 | `Candidate`, `Ambiguity` | result | One matching declaration; the full list when several match. |
 | `RouteKey` | value | The identity of one endpoint: file, verb, composed path. |
-| `HandlerRef` | enum | What serves a route: `Declaration { uid }`, `Inline { line }`, `Unresolved { name }`, `Absent`. |
+| `HandlerRef` | enum | What serves a route: `Declaration { uid }`, `Closure { uid }`, `Inline { line }`, `Unresolved { name }`, `Absent`. |
 | `RouteBinding` | value | One `HandlesRoute` fact: a route key and a handler. |
 
-Functions: `canonical_path`, `canonical_owner`, `scoped_uid`, `assign_file`, `pair_by_anchor`, `is_scope_container`, `lexical_parents`, `file_match`, `normalize_file_needle`, `select`, `resolve_target`, `join_route_path`.
+Functions: `canonical_path`, `owner_match_form`, `scoped_uid`, `assign_file`, `pair_by_anchor`, `is_scope_container`, `lexical_parents`, `file_match`, `normalize_file_needle`, `select`, `resolve_target`, `join_route_path`.
 
 ### Declaration identity: fields and invariants
 
 | Field | Invariant |
 |---|---|
 | `DeclKey.path` | Repo-relative and `/`-separated, with no leading `./`. `canonical_path` gives that form. A constructor rejects any other spelling. |
-| `DeclKey.owner` | The type, namespace or module that declares the node (meanings M1, M2 and M4 of design A §1.2). `Some("")` is `None`, as `uid::compute` already treats it. The spelling has no generic argument list: `canonical_owner("Walk<'s, 't>")` is `Walk`. The separators `.` and `::` stay as the producer writes them. |
+| `DeclKey.owner` | The type, namespace or module that declares the node (meanings M1, M2 and M4 of design A §1.2). `Some("")` is `None`, as `uid::compute` already treats it. The text stays as the producer writes it, generic arguments and separators included. Identity never normalises it: the Rust `Impl` owners `Conv<u8>` and `Conv<u16>` are two owners and two uids (`test_unscoped_generic_owner_kept_as_produced`). |
+| owner match form | `owner_match_form` removes every generic argument list and the outer whitespace: `Walk<'s, 't>` gives `Walk`. Only the target resolver uses it, to compare a request segment with a path segment. It never enters a uid. |
 | `DeclKey.name` | The bare declared name, as `Node.name` stores it. |
-| `DeclKey.scope` | `Unscoped`: `uid()` equals `uid::compute(kind, path, owner, name)`, today's value. `Lexical { parent_anchor }`: `owner` is `None` (I1), the kind does not keep overloads (I3), and `uid()` is `scoped_uid(parent_anchor, kind, name)`. |
-| `DeclKey.discriminator` | Optional. Its text is not empty. It enters the anchor and never the uid, so adding one changes no stored uid. |
+| `DeclKey.scope` | `Unscoped`: `uid()` equals `uid::compute(kind, path, owner, name)`, today's value. `Lexical { parent_anchor }`: `owner` is `None` (I1), the kind does not keep overloads (I3), and `uid()` is `scoped_uid(parent_anchor, kind, name)`. `DeclKey::scoped` rejects `Method` and `Constructor` with `ScopedOverloadKind` (`test_scoped_method_kind_rejected`, `test_scoped_constructor_kind_rejected`). |
+| `DeclKey.discriminator` | Optional. Its text is not empty. It enters the anchor and never the declaration's own uid. A scoped child hashes the parent's anchor, so adding a discriminator to a parent changes the stored uid of every scoped node below it (`test_assign_file_discriminator_changes_scoped_child_uid`). |
+| discriminator storage | The variant byte is `stored_tag`: `ImplTrait` 1, `Signature` 2, `Tag` 3. A stored discriminator is the pair (byte, text); `from_stored` reads it back. |
 | `scoped_uid` stream | Starts with byte `0x01` and is at least 14 bytes long. A `compute` stream starts with an ASCII letter. An `overload` stream is 12 bytes. No two streams are equal. |
 | anchor stream | Equals the base uid without a discriminator. With one, it starts with `0x02` and is at least 13 bytes long. |
 
@@ -92,7 +94,8 @@ target    := [ root ] path [ "@" line ]
 root      := "::" | "."                      (only before a bare name)
 path      := segment ( sep segment )*        (the last segment is the name)
 sep       := "." | "::"                      (outside a generic argument list)
-segment   := name | "<" type " as " trait ">"
+segment   := name | literal | "<" type " as " trait ">"
+literal   := "`" text "`"                    (a doubled backtick is one backtick)
 line      := 1-based decimal start line
 ```
 
@@ -103,6 +106,9 @@ line      := 1-based decimal start line
 | `Engine.load`, `Engine::load` | a `load` whose qualified path ends with the segment `Engine`. |
 | `a::b.f`, `a.b.f`, `a::b::f` | one request: segments `a`, `b`, name `f`. |
 | `<A as Display>.fmt.pad` | the `pad` inside the `fmt` of `impl Display for A`. The type and the trait compare by their last segment. |
+| `<A as Conv<u8>>.f` | the `f` of `impl Conv<u8> for A` only. A request trait with generic arguments compares the full text, whitespace aside; `<A as Conv>.f` matches every `Conv` instance (`test_qualifier_impl_trait_generic_trait_text_exact`). |
+| `` `<anonymous:3:4>` ``, `` run.`<anonymous:3:4>`.helper `` | a name or a parent written as its exact stored text. Rust, Ruby, Swift, Java, JavaScript, TypeScript, Dart, PHP, C# and Kotlin name a closure node `<anonymous:line:col>` (`rust/parser.rs:335-357`, `ruby/parser.rs:547`, `swift/parser.rs:311`, `java/parser.rs:317`, `javascript/parser.rs:350`, `dart/parser.rs:305`, `typescript/parser.rs:513`, `php/parser.rs:701`, `c_sharp/parser.rs:363`, `kotlin/parser.rs:460`). Unquoted, `<anonymous:3:4>` is a bad `<Type as Trait>` segment (`test_parse_literal_name_anonymous_closure`). |
+| `` `Walk<'s, 't>`.next `` | a `next` whose owner text is exactly `Walk<'s, 't>`. `Walk.next` matches the owners `Walk<'s, 't>` and `Walk` (`test_qualifier_literal_matches_exact_text_only`). |
 | `pad@42` | a `pad` that starts on line 42. |
 | `--kind method` | `NodeKind::from_str` of the text; an unknown kind is a syntax error. |
 | `--file cmd/main.go` | `\` becomes `/`, a leading `./` goes. A resolver keeps the best tier present: `Equal`, then `Suffix` (`/needle`), then `Substring`. |
@@ -110,9 +116,11 @@ line      := 1-based decimal start line
 | Rule | Statement |
 |---|---|
 | Qualifier match | The request segments equal a segment-bounded suffix of the candidate's qualified path. This holds for every language. |
-| Canonical qualifier | A qualifier segment goes through `canonical_owner`, so `Walk<'s>.next` matches owner `Walk`. The final name keeps its text, so `operator<` stays a name. |
-| `@` | Only `@` plus digits at the end is a line. `route@fx` is a name. `@0` is an error. |
-| Render | `TargetRequest::render` joins segments with `.`, prints a root as `::name` and a line as `@N`. `parse(render(r))` gives back `r`'s qualifier, name and line. |
+| Name segment | A `Name` qualifier segment is stored in its match form and compares with the match form of the path segment, so `Walk<'s>.next` matches the owners `Walk` and `Walk<'s, 't>`. The final name keeps its text, so `operator<` stays a name. |
+| Literal segment | A `Literal` segment compares its text with the path segment text, byte for byte. A literal can be the final name. An empty literal is `EmptySegment`; a missing closing backtick is `UnclosedQuote`. |
+| `@` | Only `@` plus digits at the end, outside a literal, is a line. `route@fx` is a name. `` `a@1` `` is a name. `@0` is an error. |
+| Render | `TargetRequest::render` joins segments with `.`, prints a root as `::name` and a line as `@N`. It writes a `Literal` segment in backticks. It writes a name in backticks when the name holds `.`, `:`, `<`, `>`, `@` or a backtick. `parse(render(r))` gives back `r`'s qualifier, name and line. |
+| Reusable form | `Qualifier::of_path` writes a path segment as `Literal` when it needs backticks or its match form differs from its text, and as `Name` otherwise. So a reusable target never widens through the match form: `` `Walk<'s, 't>`.next `` selects that owner only. |
 
 ### Typed target result: `resolve_target(request, named)`
 
@@ -122,7 +130,9 @@ line      := 1-based decimal start line
 | One match | `Unique(Candidate)`. |
 | Several | `Ambiguous(Ambiguity)`. `total()` is the true count. The command never picks the first. A command that writes files refuses it. |
 | None | `NotFound { named }`. `named` counts the declarations with that name before the filters: 0 means the name is not declared. |
-| Reusable target | Each candidate of an ambiguity carries `reusable`: a request that selects that candidate alone among all of `named`. It escalates from the qualified name, then adds `--file`, then `@line`, then `--kind`. `None` means no target text and no filter can separate it, for example two macro-generated nodes on one line. |
+| Reusable target | Each candidate of an ambiguity carries `reusable`: a request that selects that candidate alone among all of `named`. It escalates from the qualified name, then adds `--file`, then `@line`, then `--kind`. `None` means no target text and no filter can separate it, for example two macro-generated nodes on one line, or two overloads of one owner on one line (`test_resolve_target_overloads_on_one_line_no_reusable`). `test_reusable_render_parse_selects_only_original_every_shape` renders each reusable target, parses the text back, and asserts that it selects the original candidate only. Its shapes: a closure name, a closure parent, `Conv<u8>` beside `Conv<u16>`, `Walk<'s, 't>` beside `Walk`, a top-level and a nested `helper`, `operator<` overloads, and a backtick in a segment. |
+| Bare name | A bare name matches top-level and scoped declarations. A top-level `helper` and a `helper` inside `outer` give `Ambiguous`; `::helper` and `outer.helper` each give `Unique` (`test_resolve_target_top_level_and_nested_helper_bare_name_ambiguous`). |
+| Explicit kind | `--kind` filters candidates before any command display rule. `inspect A --kind impl` keeps the `Impl` node (`test_select_explicit_kind_impl_keeps_impl`); see Open point 12. |
 | Old error | `Ambiguity::to_error` builds today's `EcpError::AmbiguousSymbol` (`ecp-core/src/error.rs:22-31`) with the same fields, so the message does not change when a command adopts the type. |
 
 ### Route identity and handler identity
@@ -131,12 +141,13 @@ line      := 1-based decimal start line
 |---|---|
 | `RouteKey.file` | The registering file, canonical as `DeclKey.path`. |
 | `RouteKey.verb` | Upper-case ASCII, not empty, no whitespace. `GRPC`, `MOUNT` and `ANY` are verbs too. |
-| `RouteKey.path` | The full path with every prefix composed. `join_route_path` composes with one `/` at the joint and a leading `/`; it keeps a trailing `/`. |
+| `RouteKey.path` | The full path with every prefix composed. `join_route_path` composes with one `/` at the joint and a leading `/`. An empty route path gives the prefix as written: `("/api", "")` is `/api`. A slash-only route path gives the prefix plus one `/`: `("/api", "/")` and `("/api/", "/")` are `/api/` (`test_join_route_path_slash_only_path_keeps_trailing_slash`). A longer route path keeps its trailing `/`. |
 | `RouteKey::name` | `"<VERB> <path>"`, today's stored `Route` name. `split_name` inverts it on the first space. |
 | `RouteKey::uid` | `uid::compute(Route, file, None, name)`, today's value. Both route producers call this one function. Two producers that see one endpoint make one key, so they make one node. |
 | Separation | A route key never holds the handler. A handler key never holds the route. |
 | `HandlerRef::Declaration { uid }` | The stored uid of the handler declaration. A route can have several bindings, and a handler can serve several routes. |
-| `HandlerRef::Inline { line }` | An anonymous function at the registration. No node exists. |
+| `HandlerRef::Closure { uid }` | An anonymous function at the registration that has its own closure node: a node whose name starts with `<anonymous:` (`is_anonymous_closure`, `resolution/builder.rs:2183-2185`). `uid` is that node's stored uid. A parser emits the node only when the body holds a call (`rust/parser.rs:335-337`). It prints as `inline_anonymous`. |
+| `HandlerRef::Inline { line }` | An anonymous function at the registration with no node. It prints as `inline_anonymous`. |
 | `HandlerRef::Unresolved { name }` | The registration names a handler that binds no declaration. It is never printed as inline. |
 | `HandlerRef::Absent` | The producer saw no handler. |
 
@@ -151,8 +162,8 @@ line      := 1-based decimal start line
 | same identity, other kind | builder pushes a tombstone (`builder.rs:1100-1118` comment, D1 collision recovery) | the tombstone has an empty name | `UidSlot::Duplicate`, unchanged; see Open point 4 |
 | "keeps overloads" | `uid::keeps_overloads` (`uid.rs:33-35`): `Method`, `Constructor` | builder, view | used as is |
 | overlay pairing | `dirty_base_by_uid` (`view.rs:348-355`), lookup at `view.rs:388`: by stored uid, so by position for overloads | `ViewNode.replaced_base` (`view.rs:254`) | `pair_by_anchor`; a `Shared` anchor pairs nothing |
-| owner (M1, M2, M4) | parsers; `stamp_owner_class_by_span` (`ecp-analyzer/src/framework_helpers.rs:260`); Rust `enclosing_impl_type` (`rust/receiver_types.rs:286`); Rust `Impl` owner is the trait (`rust/parser.rs:402-460` comment) | `Node.owner_class` (`graph.rs:698-702`) | `DeclKey.owner` after `canonical_owner` |
-| owner spelling | path literal owner `Walk<'s, 't>` beside function owner `Walk` (review page, postparse F1) | `ecp-analyzer/src/post_process/path_literal_nodes.rs` (producer not traced) | `canonical_owner`: `Walk` |
+| owner (M1, M2, M4) | parsers; `stamp_owner_class_by_span` (`ecp-analyzer/src/framework_helpers.rs:260`); Rust `enclosing_impl_type` (`rust/receiver_types.rs:286`), which strips the self type's generics; Rust `Impl` owner is the raw trait text, generics included (`rust/parser.rs:438-444`, `impl_trait_name` at `rust/receiver_types.rs:113-118`); Rust `Typedef` in an impl takes the same trait text (`rust/parser.rs:446-453`, `enclosing_impl_or_trait_context` at `rust/receiver_types.rs:258-273`) | `Node.owner_class` (`graph.rs:698-702`) | `DeclKey.owner`, text unchanged |
+| owner spelling | `PathLiteral` owner is the enclosing owner verbatim (`post_process/path_literal_nodes.rs:45-70`), so `Walk<'s, 't>` sits beside the function owner `Walk` (review page, postparse F1); C++ `Foo<int>::m` takes owner `Foo` (`cpp/parser.rs:526-534`, `scope_type_name` at `cpp/receiver_types.rs:207-212`) | target lookup | identity keeps each text; the resolver compares by `owner_match_form` |
 | Rust trait of an impl member | Method owner is the self type only (`enclosing_impl_type`); the `Impl` node's owner holds the trait | none for a member | `Discriminator::ImplTrait`, read from the enclosing `Impl` node |
 | overload signature | none: `RawNode` has no parameter list (`ecp-core/src/analyzer/types.rs:411-444`) | — | `Discriminator::Signature` has no producer yet |
 | YAML resource kind | not in the uid (review page: `Service` and `Deployment` share one identity) | — | `Discriminator::Tag` has no producer yet |
@@ -195,9 +206,11 @@ line      := 1-based decimal start line
 | duplicate Route nodes | NestJS gives two `Route` nodes with one uid (review page, frameworks F2; producer pair not traced) | `ecp routes` prints two rows | one key gives one node |
 | route name split | `split_route_name` (`commands/routes.rs:201`); `diff/routes.rs:77` | routes, diff | `RouteKey::split_name` |
 | verb case | `route_detector.rs:225` upper-cases | — | `RouteKey::new` upper-cases |
+| prefix join | `join_route_path` (`ecp-analyzer/src/route_detector.rs:353-371`) drops every empty segment and every trailing `/`: `["/api", "/"]` gives `/api`, `["/api", "users/"]` gives `/api/users` | Laravel group routes | C1 `join_route_path` keeps a slash-only or trailing `/`. A grouped route written as `/` or with a trailing `/` changes its path and its Route uid; the `RouteKey` row of Stored data bumps the fingerprint for it |
 | handler, decorator | the decorated node (`builder.rs:1403`, edge at `:1421-1427`) | `routes.rs` incoming `HandlesRoute` | `HandlerRef::Declaration` |
 | handler, call | `RawRoute.handler: Option<String>` (`ecp-core/src/analyzer/types.rs:507`), bound by `lookup_in_file`, first node of that name (`builder.rs:1508`) | — | `HandlerRef::Declaration` through C4's endpoint; `Unresolved` when nothing binds |
-| handler kinds printed | `named` (`routes.rs:478`), `unresolved_action` (`:424`), `inline_anonymous` for every route with no edge (`:446`) | agent | `Declaration` → `named`; `Unresolved` → `unresolved`; `Inline` → `inline_anonymous`; `Absent` → `absent` |
+| handler kinds printed | `named` (`routes.rs:478`), `unresolved_action` (`:424`), `inline_anonymous` for every route with no edge (`:446`) | agent | `Declaration` → `named`; `Unresolved` → `unresolved`; `Closure` and `Inline` → `inline_anonymous`; `Absent` → `absent` |
+| C4 handler endpoint | C4 maps `Node(i)` to `Declaration`, `Unresolved(Named)` to `Unresolved`, `Unresolved(Anonymous)` to `Inline { line }` and no handler to `Absent` (`C4-raw-records.md:230-235`) | — | `Node(i)` whose node is a `<anonymous:` closure → `Closure { uid }`; any other `Node(i)` → `Declaration { uid }`; settles C4 Open point 5 below |
 | EntryPoint uid | `compute(EntryPoint, path, None, "tag:handler_name")` (`builder.rs:2067-2073`); controller actions add the owner (`builder.rs:1737-1746`) | entry-point readers | not mapped; see Open point 8 |
 
 ## Consumers
@@ -205,7 +218,7 @@ line      := 1-based decimal start line
 | Area | Reads | Must stop |
 |---|---|---|
 | 1 (resolution) | `pair_by_anchor` for `replaced_base`; `lexical_parents` as the lexical tier input on both sides; "scoped means not a global candidate" for the global filter | pairing by stored uid (`view.rs:388`); the Rust lexical scope strings in `index.rs:196-203` and `same_file_pick.rs:545`; `has_owner` as the lexical admission input |
-| 2 (owner split) | `DeclKey`, `Scope`, `Discriminator`, `assign_file`, `lexical_parents`, `canonical_owner` | writing M3 strings into `owner_class`; tombstoning a repeated scoped node; hashing a parent's positional uid; printing an owner the target syntax cannot read back |
+| 2 (owner split) | `DeclKey`, `Scope`, `Discriminator` with `stored_tag`, `assign_file`, `lexical_parents` | writing M3 strings into `owner_class`; tombstoning a repeated scoped node; hashing a parent's positional uid; printing an owner the target syntax cannot read back |
 | 5 (read path) | `TargetRequest::parse`, `resolve_target`, `TargetResolution`, `Ambiguity::to_error` | seven resolvers; the Rust-only suffix match; `rename` renaming every match; `inspect` returning full blocks for an ambiguity; a bare `rename` meaning top-level only |
 | 8 (routes) | `RouteKey`, `join_route_path`, `HandlerRef`, `RouteBinding` | two `uid::compute(Route, …)` sites; one node per producer for one endpoint; a handler bound by first-name lookup; `inline_anonymous` for a named handler that did not bind |
 | 9 (Cypher) | node identity is the merged node index: `DISTINCT` on a node keys on it (`ecp-core/src/cypher/executor.rs:462-468`, `value.rs:53-57`); the `uid` property is `UidSlot::uid` (`executor.rs:2816`) | deduplicating nodes by name; reading `ownerClass` (`executor.rs:2817`) as an identity |
@@ -215,38 +228,44 @@ line      := 1-based decimal start line
 | Pair | Requirement | How C1 meets it |
 |---|---|---|
 | 1, 2 | the global candidate filter (`resolution/index.rs:1073`, now `:1059-1081`), the lexical input, the uid pairing (`view.rs:388`) | one `lexical_parents` gives both the filter fact and the lexical input; `pair_by_anchor` replaces uid pairing. The order of the slices stays as the plan's Order section states. |
-| 2, 5 | the target resolver reads the owner (`symbol_id.rs:141`); `rename` treats an empty owner as top level (`rename.rs:332-345`) | the resolver reads the qualified path (owner plus parents), never the raw owner. The top-level meaning has its own syntax, `::name`. `rename`'s scoped exclusion becomes an ambiguity that `rename` refuses (Open point 5). |
+| 2, 5 | the target resolver reads the owner (`symbol_id.rs:141`); `rename` treats an empty owner as top level (`rename.rs:332-345`) | the resolver reads the qualified path (owner plus parents), never the raw owner. A bare name matches top-level and scoped declarations; a tie is an ambiguity that `rename` refuses. The top-level meaning has its own syntax, `::name` (Open point 5, adopted). |
 | 2, 8 | Route uids made in two places (`builder.rs:1411`, `:1481`) | `RouteKey::uid` is the one constructor. It hashes no handler and goes through no `assign_file` numbering, so a uid change of area 2 does not move a Route uid. |
 
 ## Stored data
 
 | Change | `GRAPH_FORMAT_VERSION` (15, `graph.rs:36`) | `BUILDER_FINGERPRINT` (`schema21`, `registry/commit_meta.rs:80`) | L1 fragment (`FRAGMENT_FORMAT_V5`, `session/overlay.rs:57`) | dirty manifest | view cache key (`VIEW_CACHE_FORMAT` 3, `view.rs:1060`) |
 |---|---|---|---|---|---|
-| adopt `DeclKey` for unscoped nodes, no discriminator | none | none | none | none | none |
+| adopt `DeclKey` for unscoped nodes, no discriminator, owner text as produced | none | none | none | none | none |
 | `assign_file` in the four paths that skip ordinals (A-A) | none | bump | none | none | follows |
 | the parent link table (A-B) | bump | bump | none | none | follows |
-| a language opts in to scoped uids (A-C, A-D, A-E) | none | bump | none: `FragmentSymbol` has kind, span and owner (`ecp-cli/src/session/overlay_writer.rs:85-96`) | none | follows |
-| repeated scoped node becomes `Later`, not a tombstone | none | bump | none | none | follows |
-| `canonical_owner` applied by a producer | none | bump | none | none | follows |
-| `Discriminator::ImplTrait` | none | none: the anchor is not stored | none: the `Impl` nodes are in the fragment | none | follows |
-| `Discriminator::Signature` or `Tag` | none | bump (new parser fact) | bump: `FragmentSymbol` lacks the fact | none | follows |
+| a language opts in to scoped uids (A-C, A-D, A-E): every scoped node of that language changes its stored uid | none | bump | none: `FragmentSymbol` has kind, span and owner (`ecp-cli/src/session/overlay_writer.rs:85-96`) | none | follows |
+| a repeated scoped node, and a `#[cfg]` twin under Open point 4, gets the overload uid `uid::overload(base, ordinal)`, not a tombstone | none | bump | none | none | follows |
+| a producer changes its owner text (for example drops the generic arguments of the `PathLiteral` owner or of the Rust `Impl` and `Typedef` owners): the unscoped uids of those kinds change. C1 does not require it, because the resolver matches by `owner_match_form` | none | bump | none | none | follows |
+| `Discriminator::ImplTrait` lands in or before the slice where Rust opts in to scoped uids | none | none: an unscoped uid does not hash it, and no scoped child exists yet | none: the `Impl` nodes are in the fragment | none | follows |
+| `Discriminator::ImplTrait` lands after Rust opts in: the stored uid of every scoped node under a trait-impl member changes | none | bump | none | none | follows |
+| `Discriminator::Signature` or `Tag`: a new stored table `discriminators: Vec<DiscriminatorFact { node_idx: u32, tag: u8, text: StrRef }>` in `ZeroCopyGraph`, appended at the end of the archived struct, `tag` from `stored_tag` | bump | bump (new parser fact; also changes scoped child uids when the language already opts in) | bump: `FragmentSymbol` lacks the fact | none | follows |
 | `pair_by_anchor` in the overlay | none | none | none | none | follows: the binary path, size and mtime are in the key (`ecp-cli/src/session/view_cache.rs:36-43`) |
 | `RouteKey` with composed prefixes; one node per key | none | bump | none | none | follows |
 | `TargetRequest` / `resolve_target` | none | none | none | none | none |
+
+Not every stored uid stays as today. Three changes move uids, and each one bumps `BUILDER_FINGERPRINT` in the slice that makes it: a scoped node takes a uid from its parent's anchor; a repeated node takes the overload uid; a producer that changes its owner text changes the unscoped uids of its kinds. Only an unscoped declaration whose owner text and kind do not change keeps today's uid.
+
+The `ImplTrait` text for a base node comes from the enclosing `Impl` node's owner at read time (Open point 7), so it needs no stored column. `Signature` and `Tag` have no node to read them from, so they need the `discriminators` table above.
 
 ## Open points
 
 | # | Decision | Options | Recommendation |
 |---|---|---|---|
-| 1 | Does the discriminator enter the stored uid? | (a) anchor only; (b) the uid too | (a). The uid of every Rust trait-impl method stays as today. Only pairing, `diff`, targets and child uids need the trait. (b) changes uids of nodes that have no defect. |
-| 2 | Who supplies `Discriminator::Signature`? | (a) a parser field per language; (b) none, and `Shared` stays | (b) for now. Java, Kotlin, C#, C++, Swift and Dart overloads stay `Shared`, so they pair nothing and need `@line` as a target. Add (a) only when a measured case needs it. |
+| 1 | Does the discriminator enter the stored uid? | (a) anchor only; (b) the uid too | (a). The declaration's own uid stays as today for every Rust trait-impl method. The uids of scoped nodes below it still change, because they hash the anchor: see the `ImplTrait` rows of Stored data. (b) changes uids of nodes that have no defect. |
+| 2 | Who supplies `Discriminator::Signature`? | (a) a parser field per language; (b) none, and `Shared` stays | (b) for now. Java, Kotlin, C#, C++, Swift and Dart overloads stay `Shared`, so they pair nothing and need `@line` as a target. Two overloads of one owner on one line cannot be told apart by `@line` either; they get no reusable target (`test_resolve_target_overloads_on_one_line_no_reusable`). Add (a) only when a measured case needs it; (a) needs the `discriminators` table and a `GRAPH_FORMAT_VERSION` bump. |
 | 3 | What pairs a `Shared` group in the overlay? | (a) nothing; (b) equal `content_hash` first, then the one remaining pair | (a) in the first slice; the view suppresses the base members and the caveat names them. (b) needs a per-symbol hash in `FragmentSymbol` (L1 bump). `impact --baseline` already pairs closures by body hash (`impact/baseline.rs:408-444`), so (b) has a precedent. |
-| 4 | A `Duplicate` of a kind that does not keep overloads (a `#[cfg]` twin) | (a) tombstone, as today; (b) `Later` for every kind | (b), after `is_later_overload` (`graph.rs:1483`) stops recomputing `compute` and reads the slot. The twin stays findable; the review counts 15 hidden `Function` tombstones in this repo. Owner: area 2. |
-| 5 | Does a bare name match scoped nodes? | (a) yes, and a tie is an ambiguity; (b) no, as design A §5.5 proposes for `rename` | (a). One rule for every command. `rename` refuses the ambiguity and lists `::helper` and the scoped target. This departs from design A §5.5. |
+| 4 | A `Duplicate` of a kind that does not keep overloads (a `#[cfg]` twin) | (a) tombstone, as today; (b) `Later` for every kind | (b), after `is_later_overload` (`graph.rs:1483`) stops recomputing `compute` and reads the slot. The twin stays findable; the review counts 15 hidden `Function` tombstones in this repo. It takes the overload uid, a stored-uid change. Owner: area 2. |
+| 5 | Does a bare name match scoped nodes? | (a) yes, and a tie is an ambiguity; (b) no, as design A §5.5 proposes for `rename` | Adopted: (a). One rule for every command. `rename helper` with a top-level and a nested `helper` refuses the ambiguity and lists `::helper` and `outer.helper` (`test_resolve_target_top_level_and_nested_helper_bare_name_ambiguous`). This departs from design A §5.5. The plan's conflict row 2-5 states it. |
 | 6 | The scope of a route key | (a) the registering file, as today; (b) the service root | (a). It keeps today's uids. Two services in one monorepo stay apart when their route files differ. |
-| 7 | Where does `ImplTrait` come from for a base node? | (a) the enclosing `Impl` node's owner, by span, at read time; (b) a stored column | (a). `graph.bin` has no per-file node range, so the reader scans the file's nodes, as the overlay already does for a dirty file (`view.rs:348-355`). |
-| 8 | EntryPoint identity | (a) keep `compute(EntryPoint, path, None, "tag:name")`; (b) hash the handler's stored uid | (b), in area 8. Today two same-named handlers of one file share an EntryPoint uid outside the controller path (`builder.rs:2070-2073`). |
+| 7 | Where does `ImplTrait` come from for a base node? | (a) the enclosing `Impl` node's owner, by span, at read time; (b) a stored column | (a). The text is the full trait text as `impl_trait_name` produces it, generic arguments included (`Conv<u8>`), so `impl Conv<u8> for A` and `impl Conv<u16> for A` get two anchors. `graph.bin` has no per-file node range, so the reader scans the file's nodes, as the overlay already does for a dirty file (`view.rs:348-355`). |
+| 8 | EntryPoint identity | (a) keep `compute(EntryPoint, path, None, "tag:name")`; (b) hash the handler's stored uid | (b), in area 8. The tag stays part of the key: the key hashes the tag plus the handler's stored uid, so one handler with two entry-point tags keeps two EntryPoint nodes. Today two same-named handlers of one file share an EntryPoint uid outside the controller path (`builder.rs:2070-2073`). |
 | 9 | `impact --baseline` and `peers` identity keys | (a) adopt the anchor; (b) leave them | (b) in phase 2. Neither area in this contract owns them. File a follow-up when area 5 lands. |
-| 10 | C++ explicit specializations under `canonical_owner` | `Foo<int>` and `Foo<char>` become owner `Foo` | Accept. Their methods become `Later` overloads and stay distinct nodes; a target needs `@line`. |
+| 10 | C++ explicit specializations | `Foo<int>::m` and `Foo<char>::m` | No change. The verified producer is the C++ `Method` path: `scope_type_name` (`cpp/receiver_types.rs:207-212`) already gives owner `Foo` (`cpp/parser.rs:526-534`), so these methods are `Later` overloads today and stay so. A target needs `@line`. Other C++ kinds were not traced. |
 | 11 | Cypher `ownerClass` of a scoped node | (a) stored owner (`null`); (b) the display path | (a), plus a separate parent property that area 9 names. A property that changes meaning per node kind misleads a query. |
-| 12 | The `Impl`-beside-type rule of `inspect` (`inspect.rs:703-740`) | (a) keep it as a command filter before `resolve_target`; (b) drop it | (a). It is a display choice of one command, not identity. |
+| 12 | The `Impl`-beside-type rule of `inspect` (`inspect.rs:703-740`) | (a) keep it as a command filter before `resolve_target`; (b) drop it | (a). It is a display choice of one command, not identity. An explicit `--kind` wins over it: `inspect A --kind impl` keeps the `Impl` node, and the rule applies only when no `--kind` is given. |
+| 13 | C4 Open point 5: a closure handler | (a) a closure node is a `Node` endpoint; (b) always `Unbound::Anonymous` | (a), with `HandlerRef::Closure { uid }`. C4 reads a `Node(i)` endpoint whose node name starts with `<anonymous:` as `Closure { uid }`, any other `Node(i)` as `Declaration { uid }`, and `Unresolved(Anonymous)` as `Inline { line }`. `Closure` and `Inline` both print `inline_anonymous`, so `ecp routes` output keeps its values. The uid lets `impact` reach the calls inside the closure. |
