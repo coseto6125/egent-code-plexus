@@ -162,17 +162,17 @@ fn sweep_stale_generations_keeps_newest_per_sha() {
 }
 
 /// An older ecp builds in `<name>.building/` and holds `.build.lock` inside
-/// it until just before its rename. Returns the held lock.
+/// it until just before its rename. Returns the held lock. The dir is fresh,
+/// which is what gc goes by; it never probes that lock.
 fn hold_legacy_build(commits: &std::path::Path, name: &str) -> FileLock {
     let building = commits.join(format!("{name}.building"));
     std::fs::create_dir_all(&building).unwrap();
     FileLock::acquire_exclusive(&building.join(".build.lock")).unwrap()
 }
 
-/// Contract: while an older ecp is mid-build for a SHA (its legacy lock is
-/// held), gc converges none of that SHA's generations. Before the SHA lock,
-/// the bare existence of a `.building` dir stood for "mid-build"; now only
-/// the held lock does. This one stages under a generation-shaped name.
+/// Contract: while an older ecp may be mid-build for a SHA (its legacy
+/// staging dir was written within the 7-day grace), gc converges none of
+/// that SHA's generations. This one stages under a generation-shaped name.
 #[test]
 fn sweep_stale_generations_skips_building() {
     let tmp = tempfile::tempdir().unwrap();
@@ -187,7 +187,7 @@ fn sweep_stale_generations_skips_building() {
     let stats = ecp_cli::admin::gc::sweep_stale_generations(tmp.path(), false).unwrap();
     assert_eq!(
         stats.removed, 0,
-        "older dir guarded by a held legacy build lock must stay"
+        "older dir guarded by a recent legacy build dir must stay"
     );
     assert!(commits.join(&older).exists());
 }
@@ -211,11 +211,12 @@ fn sweep_stale_generations_skips_when_sha_has_active_building() {
     );
 }
 
-/// A `.building` dir a crashed older ecp left, its lock free, used to block
-/// the SHA's convergence for ever. Now the SHA converges, and the leftover
-/// itself stays: gc never removes old-style staging (doctor reports it).
+/// A `.building` dir a crashed older ecp left used to block the SHA's
+/// convergence for ever. Once nothing wrote to it for the 7-day grace, the
+/// SHA converges, and the leftover itself stays: gc never removes old-style
+/// staging (doctor reports it).
 #[test]
-fn test_sweep_stale_generations_unlocked_legacy_leftover_converges_and_kept() {
+fn test_sweep_stale_generations_idle_legacy_leftover_converges_and_kept() {
     let tmp = tempfile::tempdir().unwrap();
     let commits = tmp.path().join("commits");
     std::fs::create_dir_all(&commits).unwrap();
@@ -227,6 +228,11 @@ fn test_sweep_stale_generations_unlocked_legacy_leftover_converges_and_kept() {
     let leftover = commits.join(format!("branch_main__{sha}.building"));
     std::fs::create_dir_all(&leftover).unwrap();
     std::fs::write(leftover.join("graph.bin"), b"half").unwrap();
+    let idle = filetime::FileTime::from_system_time(
+        std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 86_400),
+    );
+    filetime::set_file_mtime(leftover.join("graph.bin"), idle).unwrap();
+    filetime::set_file_mtime(&leftover, idle).unwrap();
 
     let stats = ecp_cli::admin::gc::sweep_stale_generations(tmp.path(), false).unwrap();
     let staging = ecp_cli::admin::gc::sweep_abandoned_staging(tmp.path(), false).unwrap();
@@ -545,10 +551,10 @@ fn test_sweep_unreachable_commits_sha_lock_held_kept() {
     let fx = CommitFixture::new();
     let sha = "a".repeat(40);
     let orphan = fx.graph(&sha, 30);
-    let lock = fx
-        .repo_root
-        .join("commits")
-        .join(format!("{sha}.build.lock"));
+    let mut sha_bytes = [0u8; 20];
+    hex::decode_to_slice(&sha, &mut sha_bytes).unwrap();
+    let lock = ecp_cli::commit_lookup::sha_lock_path(&fx.repo_root.join("commits"), &sha_bytes);
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
     let held = FileLock::acquire_exclusive(&lock).unwrap();
     assert_eq!(fx.sweep().removed, 0);
     assert!(orphan.exists());
@@ -1684,8 +1690,8 @@ fn test_sweep_stale_generations_dry_run_building_and_fresh_dirs_not_listed() {
         &commits,
         &format!("branch_main__{building_sha}.gen.2000.20.0"),
     );
-    // Contract: a dry run applies the eligibility of a real run, and a held
-    // legacy build lock is what keeps a SHA from converging.
+    // Contract: a dry run applies the eligibility of a real run, and a
+    // recent legacy build dir is what keeps a SHA from converging.
     let _held = hold_legacy_build(&commits, &format!("branch_main__{building_sha}"));
     let fresh_sha = "d".repeat(40);
     for gen in ["1000.10.0", "2000.20.0"] {

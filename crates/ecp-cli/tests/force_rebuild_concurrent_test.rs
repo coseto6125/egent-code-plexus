@@ -107,11 +107,11 @@ fn two_concurrent_force_rebuilds_both_succeed_with_one_new_generation() {
         String::from_utf8_lossy(&o2.stderr)
     );
 
-    // One rebuilt generation for this SHA: the forced build drops the
-    // initial one it supersedes. The second force caller attaches to the
-    // winner when it waited on the SHA lock while the winner published; when
-    // it took the lock only after, it rebuilds once more and its own sweep
-    // drops the winner. Either way one generation and no staging remain.
+    // One rebuilt generation for this SHA. The two forces hold the SHA lock
+    // one after the other and each builds, a waiter too: what the first
+    // published may be any build, and only a build of its own drops the parse
+    // cache. The second publishes above the first, and its sweep drops every
+    // lower generation. One generation and no staging remain.
     let ecp_home = home_path.join(".ecp");
     let (commit_dirs, building_dirs) = count_dirs(&ecp_home);
     assert_eq!(

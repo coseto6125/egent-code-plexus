@@ -76,11 +76,11 @@ impl World {
     }
 
     fn lock_files(&self) -> Vec<String> {
-        std::fs::read_dir(self.commits())
+        std::fs::read_dir(self.commits().join(ecp_cli::commit_lookup::LOCKS_DIR))
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.ends_with(".build.lock"))
+            .filter(|name| name.ends_with(".lock"))
             .collect()
     }
 }
@@ -97,7 +97,7 @@ fn test_build_l2_uppercase_sha_lowercase_name_and_lock() {
     upper.join_background();
     let name = upper.commit_dir.file_name().unwrap().to_string_lossy();
     assert!(name.ends_with(&w.sha), "{name}");
-    assert_eq!(w.lock_files(), vec![format!("{}.build.lock", w.sha)]);
+    assert_eq!(w.lock_files(), vec![format!("{}.lock", &w.sha[..2])]);
 
     let mut lower = build_l2(&w.wt, Some(&w.sha)).unwrap();
     lower.join_background();
@@ -134,8 +134,10 @@ fn test_build_l2_concurrent_same_sha_one_publish() {
     assert!(listing.staging.is_empty());
 }
 
-/// git missing: the build fails with an error, and leaves no dir, no staging
-/// and no held lock.
+/// git missing: the build fails with an error and leaves no dir and no
+/// staging. It fails before it takes the SHA lock, so the release of a held
+/// lock on failure is covered by
+/// `orchestrator::tests::test_build_inside_locked_sync_file_fails_lock_free_no_staging`.
 #[test]
 fn test_build_l2_git_missing_error_nothing_left() {
     let _env = env_lock();
@@ -156,7 +158,9 @@ fn test_build_l2_git_missing_error_nothing_left() {
         listing.dirs.is_empty() && listing.staging.is_empty(),
         "{listing:?}"
     );
-    let lock = commits.join(format!("{}.build.lock", w.sha));
+    let mut sha = [0u8; 20];
+    hex::decode_to_slice(&w.sha, &mut sha).unwrap();
+    let lock = ecp_cli::commit_lookup::sha_lock_path(&commits, &sha);
     assert!(
         FileLock::try_existing(&lock).is_ok(),
         "the SHA lock is not held"
@@ -179,6 +183,9 @@ fn ecp_index(w: &World) -> std::process::Output {
 /// fingerprint; it now rebuilds and drops the superseded dir.
 #[test]
 fn test_admin_index_stale_fingerprint_rebuilds() {
+    // The child inherits this process's `PATH`, which the git-missing test
+    // empties for a moment.
+    let _env = env_lock();
     let w = World::new();
     let first = ecp_index(&w);
     assert!(

@@ -371,16 +371,20 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
     let start = std::time::Instant::now();
     let sha = crate::build::orchestrator::head_sha_hex(&worktree)
         .map_err(|e| format!("git rev-parse HEAD: {e}"))?;
-    let commit_dir =
-        locate_commit_dir(&worktree, &sha).map_err(|e| format!("locate commit dir: {e}"))?;
     // Reuse only what `build_l2` would reuse. A graph built by another ecp
     // version reported `l2.exists` here, while every query path rejected it on
-    // its fingerprint and rebuilt.
-    let root = crate::build::orchestrator::worktree_toplevel(&worktree)
-        .unwrap_or_else(|| worktree.clone());
-    let reusable = commit_dir.filter(|dir| {
-        crate::build::orchestrator::attach_if_fingerprint_matches(dir, &root).is_some()
-    });
+    // its fingerprint and rebuilt. `--force` rebuilds whatever exists.
+    let reusable = if args.force {
+        None
+    } else {
+        let root = crate::build::orchestrator::worktree_toplevel(&worktree)
+            .unwrap_or_else(|| worktree.clone());
+        locate_commit_dir(&worktree, &sha)
+            .map_err(|e| format!("locate commit dir: {e}"))?
+            .filter(|dir| {
+                crate::build::orchestrator::attach_if_fingerprint_matches(dir, &root).is_some()
+            })
+    };
 
     match (args.force, reusable) {
         (false, Some(existing)) => {

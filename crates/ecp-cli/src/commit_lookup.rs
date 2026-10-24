@@ -65,6 +65,8 @@ fn scan_cache() -> &'static CommitIndexCache {
 pub struct CommitDir {
     pub name: String,
     pub parsed: CommitDirName,
+    /// `commits/<name>`.
+    pub path: PathBuf,
     /// [`commit_dir_mtime`], read on the first equal-generation tie only: it
     /// costs a `stat`, and a cache with 130 commit dirs spent 1.3 ms of every
     /// query on stats that decided nothing.
@@ -72,10 +74,8 @@ pub struct CommitDir {
 }
 
 impl CommitDir {
-    fn mtime(&self, commits_dir: &Path) -> SystemTime {
-        *self
-            .mtime
-            .get_or_init(|| commit_dir_mtime(&commits_dir.join(&self.name)))
+    fn mtime(&self) -> SystemTime {
+        *self.mtime.get_or_init(|| commit_dir_mtime(&self.path))
     }
 }
 
@@ -96,6 +96,19 @@ pub struct StagingDir {
     pub name: String,
     pub sha: [u8; 20],
     pub shape: StagingShape,
+}
+
+/// The newest write to an old-style staging dir: the dir itself, its
+/// `meta.json` or its `graph.bin`. `None` when none of them can be read.
+pub(crate) fn legacy_staging_last_write(dir: &Path) -> Option<SystemTime> {
+    [
+        dir.to_path_buf(),
+        dir.join("meta.json"),
+        dir.join("graph.bin"),
+    ]
+    .iter()
+    .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+    .max()
 }
 
 /// The name of one build attempt's staging dir.
@@ -125,13 +138,16 @@ pub(crate) fn parse_staging_name(name: &str) -> Option<StagingDir> {
 }
 
 /// One read of `commits/`: the candidates, the staging dirs, and whether the
-/// read saw every entry. The single candidate reader for `CommitIndex`, the
-/// builders and gc.
+/// read saw every entry. The single reader of `commits/` for `CommitIndex`,
+/// the builders and every gc sweep of it.
 #[derive(Debug, Default)]
 pub struct CommitDirListing {
     pub dirs: Vec<CommitDir>,
     /// Staging dirs of both shapes; never candidates.
     pub staging: Vec<StagingDir>,
+    /// Dirs a retire renamed out of view (`crate::admin::gc::is_retired_dir`)
+    /// whose delete has not finished.
+    pub retired: Vec<String>,
     /// Directories that are neither commit dirs nor recovery debris. Only the
     /// cross-SHA `graph.bin` lookup reads them, as it did before this reader.
     pub unparsed: Vec<String>,
@@ -154,21 +170,28 @@ impl CommitDirListing {
             }
             Err(e) => return Err(e),
         };
-        Ok(Self::from_entries(it.filter_map(|entry| {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(e) => return Some(Err(e)),
-            };
-            // A non-UTF-8 name is never one ecp wrote.
-            let name = entry.file_name().into_string().ok()?;
-            // `DirEntry::file_type` comes from the directory read itself on
-            // Linux and Windows, and does not follow a symlink.
-            Some(entry.file_type().map(|t| (name, t.is_dir())))
-        })))
+        Ok(Self::from_entries(
+            commits_dir,
+            it.filter_map(|entry| {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(e) => return Some(Err(e)),
+                };
+                // A non-UTF-8 name is never one ecp wrote.
+                let name = entry.file_name().into_string().ok()?;
+                // `DirEntry::file_type` comes from the directory read itself on
+                // Linux and Windows, and does not follow a symlink.
+                Some(entry.file_type().map(|t| (name, t.is_dir())))
+            }),
+        ))
     }
 
-    /// The listing of `(name, is_dir)` entries; an `Err` marks it incomplete.
-    pub fn from_entries(entries: impl IntoIterator<Item = io::Result<(String, bool)>>) -> Self {
+    /// The listing of `(name, is_dir)` entries of `commits_dir`; an `Err`
+    /// marks it incomplete.
+    pub fn from_entries(
+        commits_dir: &Path,
+        entries: impl IntoIterator<Item = io::Result<(String, bool)>>,
+    ) -> Self {
         let mut listing = Self {
             complete: true,
             ..Self::default()
@@ -178,7 +201,11 @@ impl CommitDirListing {
                 listing.complete = false;
                 continue;
             };
-            if !is_dir {
+            if !is_dir || name == LOCKS_DIR {
+                continue;
+            }
+            if crate::admin::gc::is_retired_dir(&name) {
+                listing.retired.push(name);
                 continue;
             }
             if is_recovery_dir_name(&name) {
@@ -189,6 +216,7 @@ impl CommitDirListing {
             }
             match CommitDirName::parse(&name) {
                 Ok(parsed) => listing.dirs.push(CommitDir {
+                    path: commits_dir.join(&name),
                     name,
                     parsed,
                     mtime: OnceCell::new(),
@@ -205,9 +233,8 @@ impl CommitDirListing {
     }
 
     /// The current build of `sha`: the greatest under [`rank_cmp`].
-    pub fn current(&self, sha: &[u8; 20], commits_dir: &Path) -> Option<&CommitDir> {
-        self.same_sha(sha)
-            .max_by(|a, b| rank_cmp(a, b, commits_dir))
+    pub fn current(&self, sha: &[u8; 20]) -> Option<&CommitDir> {
+        self.same_sha(sha).max_by(|a, b| rank_cmp(a, b))
     }
 }
 
@@ -217,21 +244,28 @@ impl CommitDirListing {
 /// existing one, so the mtime step decides only between dirs older binaries
 /// wrote, as it did before, and the name step makes the order total, so the
 /// reader and gc can never keep different dirs.
-pub fn rank_cmp(a: &CommitDir, b: &CommitDir, commits_dir: &Path) -> Ordering {
+pub fn rank_cmp(a: &CommitDir, b: &CommitDir) -> Ordering {
     a.parsed
         .generation
         .cmp(&b.parsed.generation)
-        .then_with(|| a.mtime(commits_dir).cmp(&b.mtime(commits_dir)))
+        .then_with(|| a.mtime().cmp(&b.mtime()))
         .then_with(|| a.name.cmp(&b.name))
 }
 
+/// The dir under `commits/` that holds the SHA locks. Every scan of
+/// `commits/` skips it.
+pub const LOCKS_DIR: &str = ".locks";
+
 /// The lock every builder and gc of this binary takes for one SHA of one
-/// repo: `commits/<sha40>.build.lock`, lowercase, whatever case the caller
-/// was given (the key is the parsed bytes, not text). A builder holds it from
-/// its last check for an existing build through the rename and the fsync of
-/// `commits/`; gc holds it to retire any dir of the SHA. The file is never
-/// deleted: unlinking it while a waiter holds a descriptor would let two
-/// holders in, one per inode.
+/// repo: `commits/.locks/<xx>.lock`, `xx` the first byte of the SHA in
+/// lowercase hex (the key is the parsed bytes, not text). One stripe covers
+/// every SHA with that first byte, so a repo holds at most 256 lock files and
+/// 256 owner sidecars however many SHAs it built; two SHAs of one stripe
+/// build one after the other. A builder holds it from its last check for an
+/// existing build through the rename and the fsync of `commits/`; gc holds
+/// it to retire any dir of the SHA. Neither file is ever deleted: unlinking a
+/// lock while a waiter holds a descriptor would let two holders in, one per
+/// inode.
 ///
 /// The guarantee ends at this binary. An ecp older than this lock neither
 /// takes nor honours it: its builder can publish beside a new one, and its gc
@@ -239,18 +273,39 @@ pub fn rank_cmp(a: &CommitDir, b: &CommitDir, commits_dir: &Path) -> Ordering {
 /// rename and its fsync of `commits/`. Complete exclusion holds only once
 /// every builder and gc on the machine runs this code.
 pub fn sha_lock_path(commits_dir: &Path, sha: &[u8; 20]) -> PathBuf {
-    commits_dir.join(format!("{}.build.lock", hex::encode(sha)))
+    commits_dir
+        .join(LOCKS_DIR)
+        .join(format!("{:02x}.lock", sha[0]))
+}
+
+/// Name the holder of `sha`'s stripe lock in its owner sidecar as
+/// `<pid> <role> <sha40>`, so a waiter for another SHA of the stripe can tell
+/// that this holder is not building its SHA.
+pub(crate) fn record_sha_lock_owner(lock_path: &Path, role: &str, sha: &[u8; 20]) {
+    ecp_core::registry::FileLock::record_owner(lock_path, &format!("{role} {}", hex::encode(sha)));
+}
+
+/// `sha`'s stripe lock without waiting, `.locks` created first, its holder
+/// named as `role`. An `Err` of a lock contention means another process (or
+/// another descriptor of this one) holds the stripe.
+pub(crate) fn try_sha_lock(
+    commits_dir: &Path,
+    sha: &[u8; 20],
+    role: &str,
+) -> io::Result<ecp_core::registry::FileLock> {
+    let path = sha_lock_path(commits_dir, sha);
+    std::fs::create_dir_all(commits_dir.join(LOCKS_DIR))?;
+    let lock = ecp_core::registry::FileLock::try_exclusive(&path)?;
+    record_sha_lock_owner(&path, role, sha);
+    Ok(lock)
 }
 
 impl CommitIndex {
     pub fn scan(commits_dir: &Path) -> io::Result<Self> {
-        Ok(Self::from_listing(
-            &CommitDirListing::read(commits_dir)?,
-            commits_dir,
-        ))
+        Ok(Self::from_listing(&CommitDirListing::read(commits_dir)?))
     }
 
-    fn from_listing(listing: &CommitDirListing, commits_dir: &Path) -> Self {
+    fn from_listing(listing: &CommitDirListing) -> Self {
         let mut best: FxHashMap<[u8; 20], &CommitDir> = FxHashMap::default();
         for dir in &listing.dirs {
             match best.entry(dir.parsed.sha) {
@@ -258,7 +313,7 @@ impl CommitIndex {
                     slot.insert(dir);
                 }
                 Entry::Occupied(mut slot) => {
-                    if rank_cmp(dir, slot.get(), commits_dir) == Ordering::Greater {
+                    if rank_cmp(dir, slot.get()) == Ordering::Greater {
                         slot.insert(dir);
                     }
                 }
@@ -402,7 +457,7 @@ fn graph_dirs_with_mtime(commits_dir: &Path) -> Vec<(SystemTime, PathBuf)> {
     let Ok(listing) = CommitDirListing::read(commits_dir) else {
         return Vec::new();
     };
-    let current = CommitIndex::from_listing(&listing, commits_dir);
+    let current = CommitIndex::from_listing(&listing);
     current
         .by_sha
         .values()
@@ -571,10 +626,13 @@ mod tests {
 
     #[test]
     fn test_commit_dir_listing_entry_error_incomplete() {
-        let listing = CommitDirListing::from_entries([
-            Ok((format!("commit__{SHA}"), true)),
-            Err(io::Error::other("entry vanished")),
-        ]);
+        let listing = CommitDirListing::from_entries(
+            Path::new("commits"),
+            [
+                Ok((format!("commit__{SHA}"), true)),
+                Err(io::Error::other("entry vanished")),
+            ],
+        );
         assert!(!listing.complete);
         assert_eq!(
             listing.dirs.len(),
@@ -615,12 +673,16 @@ mod tests {
     #[test]
     fn test_commit_dir_listing_staging_shapes_parsed_retired_skipped() {
         let base = format!("branch_main__{SHA}");
-        let listing = CommitDirListing::from_entries([
-            Ok((format!("{base}.building"), true)),
-            Ok((staging_dir_name(&base, 42, 7), true)),
-            Ok((format!("{base}.building.42.7.dead.1.2.3"), true)),
-            Ok((format!("{base}.building"), false)),
-        ]);
+        let listing = CommitDirListing::from_entries(
+            Path::new("commits"),
+            [
+                Ok((format!("{base}.building"), true)),
+                Ok((staging_dir_name(&base, 42, 7), true)),
+                Ok((format!("{base}.building.42.7.dead.1.2.3"), true)),
+                Ok((format!("{base}.building"), false)),
+                Ok((LOCKS_DIR.to_string(), true)),
+            ],
+        );
         let shapes: Vec<StagingShape> = listing.staging.iter().map(|s| s.shape).collect();
         assert_eq!(
             shapes,
@@ -634,6 +696,11 @@ mod tests {
         );
         assert!(listing.staging.iter().all(|s| s.sha == sha()));
         assert!(listing.dirs.is_empty());
+        assert!(listing.unparsed.is_empty(), "the lock dir is no candidate");
+        assert_eq!(
+            listing.retired,
+            vec![format!("{base}.building.42.7.dead.1.2.3")]
+        );
     }
 
     /// Old binaries ship this predicate. It must hide the per-attempt
@@ -658,7 +725,7 @@ mod tests {
         dir_with_meta(commits, &format!("branch_main__{SHA}"), 5_000);
         dir_with_meta(commits, &format!("tag_v1__{SHA}"), 5_000);
         let listing = CommitDirListing::read(commits).unwrap();
-        let current = listing.current(&sha(), commits).unwrap();
+        let current = listing.current(&sha()).unwrap();
         assert_eq!(current.name, format!("tag_v1__{SHA}"));
         assert_eq!(
             CommitIndex::scan(commits).unwrap().find(&sha()),
@@ -677,7 +744,7 @@ mod tests {
         dir_with_meta(commits, &format!("tag_v1__{SHA}"), 8_000);
         let listing = CommitDirListing::read(commits).unwrap();
         assert_eq!(
-            listing.current(&sha(), commits).unwrap().name,
+            listing.current(&sha()).unwrap().name,
             format!("branch_main__{SHA}")
         );
         dir_with_meta(
@@ -740,12 +807,34 @@ mod tests {
     }
 
     #[test]
-    fn test_sha_lock_path_lowercase_hex_not_a_commit_dir() {
-        let path = sha_lock_path(Path::new("commits"), &sha());
-        let name = path.file_name().unwrap().to_str().unwrap();
-        assert_eq!(name, format!("{SHA}.build.lock"));
-        assert!(CommitDirName::parse(name).is_err());
-        assert!(!is_recovery_dir_name(name));
+    fn test_sha_lock_path_first_byte_stripe_under_locks_dir() {
+        let commits = Path::new("commits");
+        let path = sha_lock_path(commits, &sha());
+        assert_eq!(path, commits.join(LOCKS_DIR).join("01.lock"));
+        let mut same_stripe = sha();
+        same_stripe[19] ^= 0xff;
+        assert_eq!(sha_lock_path(commits, &same_stripe), path);
+        let mut other_stripe = sha();
+        other_stripe[0] = 0xab;
+        assert_eq!(
+            sha_lock_path(commits, &other_stripe),
+            commits.join(LOCKS_DIR).join("ab.lock")
+        );
+    }
+
+    /// The lock dir sits among the commit dirs; no scan of `commits/` may
+    /// offer it, even with a `graph.bin` in it.
+    #[test]
+    fn test_commit_dir_listing_locks_dir_excluded_everywhere() {
+        let tmp = tempfile::tempdir().unwrap();
+        let commits = tmp.path();
+        let good = published(commits, "commit__aa", 1_000);
+        published(commits, LOCKS_DIR, 9_000);
+        let listing = CommitDirListing::read(commits).unwrap();
+        assert!(listing.dirs.is_empty() && listing.staging.is_empty());
+        assert_eq!(listing.unparsed, vec!["commit__aa".to_string()]);
+        assert_eq!(find_all_by_mtime_desc(commits), vec![good.clone()]);
+        assert_eq!(find_latest_by_mtime(commits), Some(good));
     }
 
     /// A commits dir whose last change is old enough to be settled.

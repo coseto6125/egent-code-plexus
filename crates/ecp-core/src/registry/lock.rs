@@ -99,6 +99,25 @@ impl FileLock {
             Err(e) => Err(e),
         }
     }
+
+    /// Replace the owner sidecar of `path` with `<pid> <detail>`, for a lock
+    /// that several keys share: the waiter then learns which key the holder
+    /// holds it for, not only who. Best-effort, like the PID write.
+    pub fn record_owner(path: &Path, detail: &str) {
+        let _ = std::fs::write(
+            owner_pid_sidecar(path),
+            format!("{} {detail}", std::process::id()),
+        );
+    }
+
+    /// The owner sidecar of `path`: the PID and what the holder wrote after
+    /// it (empty for a holder that wrote its PID only).
+    pub fn owner(path: &Path) -> Option<(u32, String)> {
+        let s = std::fs::read_to_string(owner_pid_sidecar(path)).ok()?;
+        let s = s.trim();
+        let (pid, rest) = s.split_once(char::is_whitespace).unwrap_or((s, ""));
+        Some((pid.parse().ok()?, rest.trim().to_string()))
+    }
 }
 
 /// True when `err` is a lock attempt that failed only because another
@@ -186,13 +205,15 @@ fn record_owner_pid(path: &Path) {
     let _ = std::fs::write(owner_pid_sidecar(path), std::process::id().to_string());
 }
 
+/// The first word of the sidecar: [`FileLock::record_owner`] writes more
+/// words after the PID.
 fn read_owner_pid(path: &Path) -> Option<u32> {
     let mut s = String::new();
     File::open(owner_pid_sidecar(path))
         .ok()?
         .read_to_string(&mut s)
         .ok()?;
-    s.trim().parse().ok()
+    s.split_whitespace().next()?.parse().ok()
 }
 
 /// True when the lockfile names an owner PID that is no longer alive. A missing
@@ -319,6 +340,24 @@ mod tests {
         let probe = FileLock::try_existing(&path).unwrap();
         assert!(probe.is_some());
         assert!(!owner_pid_sidecar(&path).exists());
+    }
+
+    /// A holder that names its key keeps the PID readable for the
+    /// dead-holder probe, which reads the first word only.
+    #[test]
+    fn test_file_lock_record_owner_detail_pid_still_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("ab.lock");
+        let held = FileLock::acquire_exclusive(&path).unwrap();
+        FileLock::record_owner(&path, "build abab");
+        assert_eq!(lock_owner_pid(&path), Some(std::process::id()));
+        assert_eq!(
+            FileLock::owner(&path),
+            Some((std::process::id(), "build abab".to_string()))
+        );
+        drop(held);
+        std::fs::write(owner_pid_sidecar(&path), "77\n").unwrap();
+        assert_eq!(FileLock::owner(&path), Some((77, String::new())));
     }
 
     /// A zero budget ends at once with the holder's PID, so a build waiter

@@ -1,6 +1,7 @@
-//! Global build concurrency cap. Per-repo `.build.lock` already serializes
-//! rebuilds *of one repo*, but nothing bounds how many *different* repos
-//! rebuild at once — and each L2 build issues ~180 MB of I/O. On WSL2 the
+//! Global build concurrency cap. The SHA stripe lock
+//! (`commits/.locks/<xx>.lock`) already serializes builds *of one SHA*, but
+//! nothing bounds how many *different* repos rebuild at once — and each L2
+//! build issues ~180 MB of I/O. On WSL2 the
 //! `~/.ecp` vhdx saturates under a handful of concurrent builds and hangs the
 //! host (load spiked to 8.4 with 8 concurrent agents). This caps the number of
 //! *simultaneous* L2 builds machine-wide using the same `fs2` advisory file
@@ -21,8 +22,8 @@ const ENV_MAX: &str = "ECP_MAX_CONCURRENT_BUILDS";
 
 /// How long a builder waits for a free slot before proceeding anyway. The cap is
 /// a safety throttle, not a correctness barrier: if every slot is held for this
-/// long we let the build run rather than stall indefinitely (the per-repo
-/// `.build.lock` still prevents duplicate work for the same SHA).
+/// long we let the build run rather than stall indefinitely (the SHA stripe
+/// lock still prevents duplicate work for the same SHA).
 const SLOT_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_millis(150);
 
@@ -123,7 +124,7 @@ pub fn acquire(home_ecp: &Path) -> Option<BuildSlot> {
         }
         if Instant::now() >= deadline {
             // All slots held past the timeout — proceed anyway (throttle is
-            // best-effort; per-repo .build.lock still guards correctness).
+            // best-effort; the SHA stripe lock still guards correctness).
             return None;
         }
         thread::sleep(POLL_INTERVAL);

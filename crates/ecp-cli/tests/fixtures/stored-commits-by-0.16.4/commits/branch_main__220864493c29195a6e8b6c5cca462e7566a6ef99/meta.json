@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "sha": "220864493c29195a6e8b6c5cca462e7566a6ef99",
+  "source_type": "Branch",
+  "source_id": "main",
+  "built_from_worktree": "/home/enor/.cache/claude-tmp/claude-1000/-home-enor-code-graph-nexus/87d213ca-488b-4d94-929e-b10e85a7e210/scratchpad/dev/fx0b.3rhMmg/repo",
+  "built_at": "2026-10-24T20:03:23.541913386+00:00",
+  "parent_sha": null,
+  "node_count": 14,
+  "embedding_status": "None",
+  "refs_at_build": [
+    {
+      "ref_name": "refs/heads/main",
+      "seen_at": "2026-10-24T20:03:23.537891359+00:00"
+    }
+  ],
+  "refs_seen_since": [],
+  "builder_fingerprint": "v0.16.4+schema20",
+  "binary_commit_sha": "a9b0c9c"
+}

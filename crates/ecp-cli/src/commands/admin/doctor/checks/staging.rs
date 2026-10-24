@@ -1,13 +1,14 @@
 //! Old-style build dirs (`<base>.building/`) that an ecp from before the SHA
 //! lock left in `~/.ecp/<repo>/commits/`. No current ecp writes, reads or
-//! removes one: an older ecp still running may own it, and its free lock
-//! proves nothing (that builder releases the lock just before its rename).
-//! So doctor reports each one, and the operator removes it once every older
-//! ecp has exited.
+//! removes one: an older ecp still running may own it. Its lock is not
+//! probed either: an older ecp that tries that lock while a probe holds it
+//! fails its build after 5 s. Doctor reports each one with the days since
+//! its last write, and the operator removes it once every older ecp has
+//! exited.
 
 use crate::commands::admin::doctor::CheckResult;
-use crate::commit_lookup::{CommitDirListing, StagingShape};
-use ecp_core::registry::{resolve_home_ecp, FileLock};
+use crate::commit_lookup::{legacy_staging_last_write, CommitDirListing, StagingShape};
+use ecp_core::registry::resolve_home_ecp;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -41,12 +42,7 @@ fn check_in(home: &Path, now: SystemTime) -> Vec<CheckResult> {
         .map(|dir| {
             CheckResult::warn(
                 "staging:legacy",
-                format!(
-                    "{} age={} lock={}",
-                    dir.display(),
-                    age(dir, now),
-                    lock_state(dir)
-                ),
+                format!("{} age={}", dir.display(), age(dir, now)),
             )
             .with_remediation(format!(
                 "after every older ecp has exited: {}",
@@ -57,28 +53,12 @@ fn check_in(home: &Path, now: SystemTime) -> Vec<CheckResult> {
 }
 
 /// Days since the newest write to the dir, its `meta.json` or its
-/// `graph.bin`; `?` when none can be read or the time is in the future.
+/// `graph.bin` (the same age gc judges it by); `?` when none can be read or
+/// the time is in the future.
 fn age(dir: &Path, now: SystemTime) -> String {
-    [
-        dir.to_path_buf(),
-        dir.join("meta.json"),
-        dir.join("graph.bin"),
-    ]
-    .iter()
-    .filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
-    .max()
-    .and_then(|newest| now.duration_since(newest).ok())
-    .map_or_else(|| "?".to_string(), |d| format!("{}d", d.as_secs() / 86_400))
-}
-
-/// `held` while the older builder still holds `<dir>/.build.lock`. The probe
-/// opens the file without create, so it writes nothing into the dir.
-fn lock_state(dir: &Path) -> &'static str {
-    match FileLock::try_existing(&dir.join(".build.lock")) {
-        Ok(_) => "free",
-        Err(e) if ecp_core::registry::is_lock_contended(&e) => "held",
-        Err(_) => "unknown",
-    }
+    legacy_staging_last_write(dir)
+        .and_then(|newest| now.duration_since(newest).ok())
+        .map_or_else(|| "?".to_string(), |d| format!("{}d", d.as_secs() / 86_400))
 }
 
 fn remove_command(dir: &Path) -> String {
@@ -123,7 +103,7 @@ mod tests {
         assert_eq!(results[0].status, CheckStatus::Ok);
     }
 
-    /// F1: reported with path, age and lock state, and left on disk.
+    /// F1: reported with path and age, and left on disk.
     #[test]
     fn test_check_in_legacy_dir_reported_not_removed() {
         let tmp = tempfile::tempdir().unwrap();
@@ -138,8 +118,8 @@ mod tests {
         );
         assert_eq!(
             r.message,
-            format!("{} age=3d lock=free", dir.display()),
-            "path, age and lock state as key=value fields"
+            format!("{} age=3d", dir.display()),
+            "path and age as key=value fields"
         );
         let hint = r.remediation.as_deref().unwrap();
         assert!(
@@ -154,17 +134,16 @@ mod tests {
         );
     }
 
+    /// The legacy lock is never probed: an older builder that holds it is
+    /// reported by age alone.
     #[test]
-    fn test_check_in_legacy_lock_held_reported_held() {
+    fn test_check_in_legacy_lock_held_reported_by_age_only() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = legacy(tmp.path());
-        let held = FileLock::acquire_exclusive(&dir.join(".build.lock")).unwrap();
+        let held =
+            ecp_core::registry::FileLock::acquire_exclusive(&dir.join(".build.lock")).unwrap();
         let results = check_in(tmp.path(), SystemTime::now());
-        assert!(
-            results[0].message.ends_with("lock=held"),
-            "{}",
-            results[0].message
-        );
+        assert_eq!(results[0].message, format!("{} age=0d", dir.display()));
         drop(held);
     }
 
