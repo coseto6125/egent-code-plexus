@@ -12,6 +12,6 @@ Options:
       --repo <REPO>             Repository root. Defaults to current dir
       --dry-run                 Plan + verify only — do not mutate any file. Prints the diff summary to stdout
       --markdown                Also rename word-boundary occurrences in .md / .markdown / .rst / .txt documentation files. Default OFF
-      --show-heuristic-mirrors  Expand the heuristic mirror list in the output. When unset, only the count is shown. Tier/check data is a T-H2 placeholder; T4-7 populates real values
+      --show-heuristic-mirrors  Expand the heuristic mirror list in the output. When unset, only the count is shown. Tier shows the `unresolved` sentinel until T4-7 populates real tier/check values
       --graph <GRAPH>           Path to the graph.bin file [default: .ecp/graph.bin]
   -h, --help                    Print help
