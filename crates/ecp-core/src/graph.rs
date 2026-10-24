@@ -908,7 +908,7 @@ pub struct RouteMiddleware {
 
 /// File-level record of a truly unresolvable code pattern (eval/dynamic
 /// import/cross-object reflection/...). Persisted in the graph so that
-/// `ecp context` / `ecp analyze` can surface blind spots to the LLM,
+/// `ecp context` / `ecp admin index` can surface blind spots to the LLM,
 /// telling it "we cannot see past this site — confirm manually".
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
@@ -997,6 +997,49 @@ pub fn format_hint(bs_kind: &str, first: HintFields<'_>, second: HintFields<'_>)
         second.path,
         second.owner,
         second.name,
+    )
+}
+
+/// Human / agent rendering of a stored hint. The stored form stays
+/// separator-joined because `uid_audit::parse_hint` reads it back; this view
+/// is built from the parsed fields. `line` is the BlindSpot's own row, which
+/// is the colliding (second) declaration; the first declaration's line is not
+/// recorded. A hint that is not a collision pair is returned as it is, and a
+/// malformed one only loses its separators.
+pub fn render_hint(hint: &str, line: u32) -> String {
+    let Some((bs_kind, rest)) = hint.split_once(": first=") else {
+        return hint.to_string();
+    };
+    let Some((first, second)) = rest.rsplit_once(" second=") else {
+        return hint.replace(HINT_FIELD_SEP, " ");
+    };
+    fn parse(side: &str) -> Option<HintFields<'_>> {
+        let mut it = side.splitn(4, HINT_FIELD_SEP);
+        Some(HintFields {
+            kind: it.next()?,
+            path: it.next()?,
+            owner: it.next()?,
+            name: it.next()?,
+        })
+    }
+    let (Some(a), Some(b)) = (parse(first), parse(second)) else {
+        return hint.replace(HINT_FIELD_SEP, " ");
+    };
+    let qualified = |f: &HintFields<'_>| {
+        if f.owner.is_empty() {
+            f.name.to_string()
+        } else {
+            format!("{}.{}", f.owner, f.name)
+        }
+    };
+    format!(
+        "{bs_kind}: first={} {} {} second={} {}:{line} {}",
+        a.kind,
+        a.path,
+        qualified(&a),
+        b.kind,
+        b.path,
+        qualified(&b),
     )
 }
 

@@ -9,13 +9,13 @@ pub enum EcpError {
     #[error("graph deserialization failed: {0}")]
     Rkyv(String),
 
-    #[error("graph.bin not found at {path:?} — run `ecp analyze` first")]
+    #[error("graph.bin not found at {path:?} — run `ecp admin index` first")]
     GraphNotFound { path: PathBuf },
 
     #[error("symbol UID '{uid}' not found in graph")]
     SymbolNotFound { uid: String },
 
-    #[error("symbol name '{name}' is ambiguous ({count} candidates){}", candidates.as_ref().map(|c| format!(" — add --file or --kind:\ncandidates[filePath,kind,line]:\n{c}")).unwrap_or_else(|| " — pass --uid".into()))]
+    #[error("symbol name '{name}' is ambiguous ({count} candidates){}", candidates.as_ref().map(|c| format!(" — add --file or --kind:\ncandidates[filePath,kind,line]:\n{c}")).unwrap_or_else(|| " — add --file or --kind, or use the `Owner.name` form".into()))]
     AmbiguousSymbol {
         name: String,
         count: usize,
@@ -36,3 +36,32 @@ pub enum EcpError {
 }
 
 pub type EcpResult<T> = Result<T, EcpError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_graph_not_found_names_admin_index() {
+        let msg = EcpError::GraphNotFound {
+            path: "g.bin".into(),
+        }
+        .to_string();
+        assert!(
+            msg.contains("ecp admin index") && !msg.contains("ecp analyze"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn test_ambiguous_symbol_without_candidates_does_not_name_missing_uid_flag() {
+        let msg = EcpError::AmbiguousSymbol {
+            name: "load".into(),
+            count: 2,
+            candidates: None,
+        }
+        .to_string();
+        assert!(!msg.contains("--uid"), "{msg}");
+        assert!(msg.contains("--file") && msg.contains("--kind"), "{msg}");
+    }
+}

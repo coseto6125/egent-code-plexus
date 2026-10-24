@@ -224,9 +224,13 @@ pub fn run(args: FindSchemaBindingsArgs, engine: &Engine) -> Result<(), EcpError
             "blind_spot_candidates": [],
             "summary": { "mirrors_count": 0, "blind_spot_count": 0 },
         });
-        // Non-zero exit for "not found" — caller can detect programmatically.
+        // Err (not process::exit) so `main` still records telemetry and joins
+        // the tantivy writers; `main` turns it into the non-zero exit.
         emit(&result, format)?;
-        std::process::exit(1);
+        return Err(EcpError::InvalidArgument(format!(
+            "no SchemaField named '{}'; check the spelling or use the `Class.field` form",
+            args.field
+        )));
     }
 
     let mut mirrors: Vec<serde_json::Value> = Vec::new();

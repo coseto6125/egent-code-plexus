@@ -159,6 +159,76 @@ fn strip_edge_boilerplate(result: &mut serde_json::Value) {
     }
 }
 
+/// Per-edge values that never vary today (see `build_inspect_block`). JSON
+/// keeps them once at the top level of an ambiguous result instead of on every
+/// edge of every match; an edge whose value differs keeps its own copy.
+fn edge_defaults() -> serde_json::Value {
+    serde_json::json!({ "tier": "unresolved", "checks": {} })
+}
+
+fn hoist_edge_defaults(block: &mut serde_json::Value) {
+    let defaults = edge_defaults();
+    for key in [
+        "incoming",
+        "outgoing",
+        "heuristic_incoming",
+        "heuristic_outgoing",
+    ] {
+        let Some(section) = block.get_mut(key).and_then(|s| s.as_object_mut()) else {
+            continue;
+        };
+        for entry in section
+            .values_mut()
+            .filter_map(|v| v.as_array_mut())
+            .flatten()
+        {
+            let Some(obj) = entry.as_object_mut() else {
+                continue;
+            };
+            for field in ["tier", "checks"] {
+                if obj.get(field) == defaults.get(field) {
+                    obj.remove(field);
+                }
+            }
+        }
+    }
+}
+
+/// Ambiguous result: every match as a full block. `--file` / `--kind` filter a
+/// block's neighbours, not the match list, so the hint names what does narrow it.
+fn ambiguous_result(
+    mut blocks: Vec<serde_json::Value>,
+    name: &str,
+    omitted_kinds: serde_json::Map<String, serde_json::Value>,
+    json: bool,
+) -> serde_json::Value {
+    let message = format!(
+        "Found {} symbols matching '{}'. --file and --kind filter neighbours, not the match. \
+         Re-run `ecp inspect --name Owner.{}` using matches[].symbol.ownerClass, \
+         or pick a match by matches[].symbol.filePath and startLine.",
+        blocks.len(),
+        name,
+        name
+    );
+    for block in &mut blocks {
+        if json {
+            hoist_edge_defaults(block);
+        } else {
+            strip_edge_boilerplate(block);
+        }
+    }
+    let mut result = serde_json::json!({
+        "status": "ambiguous",
+        "message": message,
+        "matches": blocks,
+        "omitted_kinds": omitted_kinds,
+    });
+    if json {
+        result["edge_defaults"] = edge_defaults();
+    }
+    result
+}
+
 /// Build the full inspect payload for a single merged-space node index.
 ///
 /// Returns a JSON object with: symbol (no uid), incoming, outgoing,
@@ -306,7 +376,10 @@ fn build_inspect_block(
                 serde_json::json!({
                     "kind": bs.kind.resolve(&merged.string_pool),
                     "line": bs.start_row.to_native(),
-                    "hint": bs.hint.resolve(&merged.string_pool),
+                    "hint": ecp_core::graph::render_hint(
+                        bs.hint.resolve(&merged.string_pool),
+                        bs.start_row.to_native(),
+                    ),
                 })
             })
             .collect(),
@@ -734,24 +807,12 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
             "note: {impl_n} Impl node(s) omitted (primary type matched); use `ecp cypher` to query implementors"
         );
     }
-    let mut result = serde_json::json!({
-        "status": "ambiguous",
-        "message": format!(
-            "Found {} symbols matching '{}'. Use --file or --kind to disambiguate.",
-            blocks.len(),
-            name
-        ),
-        "matches": blocks,
-        "omitted_kinds": omitted_kinds,
-    });
-    if !matches!(format, OutputFormat::Json) {
-        // Strip boilerplate from each match block's edge sections.
-        if let Some(matches) = result.get_mut("matches").and_then(|m| m.as_array_mut()) {
-            for block in matches.iter_mut() {
-                strip_edge_boilerplate(block);
-            }
-        }
-    }
+    let result = ambiguous_result(
+        blocks,
+        name,
+        omitted_kinds,
+        matches!(format, OutputFormat::Json),
+    );
     emit_with_caveat(&result, format, engine.caveat())
 }
 
@@ -1162,5 +1223,61 @@ mod tests {
         let bytes = archive(&same_name_graph());
         let merged = MergedGraph::new(access(&bytes), None);
         assert_eq!(search_nodes(&merged, "", None).len(), 12);
+    }
+
+    fn block_with_edge(owner: &str) -> serde_json::Value {
+        serde_json::json!({
+            "symbol": {"name": "validate", "ownerClass": owner, "kind": "Method",
+                       "filePath": "src/a.py", "startLine": 3},
+            "incoming": {"calls": [
+                {"name": "c", "tier": "unresolved", "checks": {}},
+                {"name": "d", "tier": "verified", "checks": {"x": true}},
+            ]},
+            "outgoing": {},
+        })
+    }
+
+    #[test]
+    fn test_ambiguous_result_hint_does_not_point_at_neighbour_filters() {
+        let r = ambiguous_result(
+            vec![block_with_edge("Foo")],
+            "validate",
+            Default::default(),
+            true,
+        );
+        let msg = r["message"].as_str().unwrap();
+        assert!(!msg.contains("to disambiguate"), "{msg}");
+        assert!(
+            msg.contains("Owner.validate") && msg.contains("ownerClass"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn test_ambiguous_result_json_hoists_constant_edge_keys_once() {
+        let r = ambiguous_result(
+            vec![block_with_edge("Foo")],
+            "validate",
+            Default::default(),
+            true,
+        );
+        assert_eq!(r["edge_defaults"], edge_defaults());
+        let calls = &r["matches"][0]["incoming"]["calls"];
+        assert!(calls[0].get("tier").is_none() && calls[0].get("checks").is_none());
+        // A non-default edge keeps its own values, and the symbol keeps ownerClass.
+        assert_eq!(calls[1]["tier"], "verified");
+        assert_eq!(calls[1]["checks"], serde_json::json!({"x": true}));
+        assert_eq!(r["matches"][0]["symbol"]["ownerClass"], "Foo");
+    }
+
+    #[test]
+    fn test_ambiguous_result_toon_has_no_edge_defaults_key() {
+        let r = ambiguous_result(
+            vec![block_with_edge("Foo")],
+            "validate",
+            Default::default(),
+            false,
+        );
+        assert!(r.get("edge_defaults").is_none());
     }
 }

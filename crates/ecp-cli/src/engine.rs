@@ -335,15 +335,15 @@ fn validate_header(bytes: &[u8]) -> io::Result<()> {
             io::ErrorKind::InvalidData,
             format!(
                 "graph.bin: incompatible format version {version} \
-                 (this reader expects {GRAPH_FORMAT_VERSION}) — run `ecp analyze` to regenerate"
+                 (this reader expects {GRAPH_FORMAT_VERSION}) — run `ecp admin index --force` to regenerate"
             ),
         ));
     }
     if !archived.has_module_facts() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "graph.bin: import / export facts missing or inconsistent — run `ecp analyze` to \
-             regenerate",
+            "graph.bin: import / export facts missing or inconsistent — run `ecp admin index --force` \
+             to regenerate",
         ));
     }
     Ok(())

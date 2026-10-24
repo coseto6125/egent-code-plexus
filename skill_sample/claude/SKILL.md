@@ -49,7 +49,7 @@ Indexing is automatic: agent commands auto-rebuild stale/missing graphs (`✓ In
 MATCH (a:Kind)-[r:Rel]->(b:Kind) [WHERE ...] RETURN ...
 ```
 
-openCypher read subset: `AND / OR / NOT`, `= != < <= > >=`, `STARTS WITH / ENDS WITH / CONTAINS / =~ / IN [...]`, `COUNT(*)`, `DISTINCT`, `ORDER BY / SKIP / LIMIT`, `WITH`, `UNION`, var-length `[:Rel*1..2]`, reverse `<-[r:Rel]-`. Keep minimal — richer → `ecp find` / `ecp inspect` / post-process JSON.
+openCypher read subset: `AND / OR / NOT`, `= != < <= > >=`, `STARTS WITH / ENDS WITH / CONTAINS / =~ / IN [...]`, functions `type / id / labels / count / sum / avg / min / max / collect` only (others are errors), `DISTINCT`, `ORDER BY` (a projected key) `/ SKIP / LIMIT`, one `WITH`, `UNION`, var-length `[:Rel*1..2]` (needs `RETURN DISTINCT`, no edge variable, minimum 0 or 1), reverse `<-[r:Rel]-`. After `OPTIONAL MATCH` filter with `WITH f, c WHERE c IS NULL`, not a direct `WHERE`. Keep minimal — richer → `ecp find` / `ecp inspect` / post-process JSON.
 
 **NodeKind** (case-sensitive): `Function / Method / Class / Property / Constructor / Interface / Const / Variable / Import / Route / Process / Document / Section / EntryPoint / File`.
 

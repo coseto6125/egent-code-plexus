@@ -147,10 +147,10 @@ pub(super) fn impact_by_name(
         )));
     }
 
-    // Multiple matches without disambiguation → report candidates then fail.
-    // FQN targeting (owner_filter present) already narrows by owner, so only
-    // fall into the ambiguous branch when the remaining options still exceed 1.
-    if matches.len() > 1 && file_needle.is_none() && kind_needle.is_none() {
+    // Several matches left after --file / --kind / FQN narrowing → report
+    // candidates then fail. A narrowing flag that leaves 2+ matches (two
+    // `load` methods, `--kind method`) must not merge unrelated blast radii.
+    if matches.len() > 1 {
         let fqn_label = format_fqn(owner_filter, bare_name);
         let candidates: Vec<Value> = matches
             .iter()

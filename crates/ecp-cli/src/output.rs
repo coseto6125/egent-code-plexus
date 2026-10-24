@@ -129,12 +129,29 @@ pub fn emit_with_caveat(
 pub fn compress_for_llm(v: &mut Value) {
     match v {
         Value::Object(map) => {
-            // `uid` is a deterministic `<kind>:<filePath>:<name>` triple of
-            // fields that already co-reside in every emit-row, so it's pure
-            // redundancy. `handlerUid` looks similar but points at a
-            // *different* node (the handler) than the row's own filePath/name
-            // — keep it; the LLM has no other handle to link route → handler.
-            map.remove("uid");
+            // Drop `uid` only when it is literally the `<kind>:<filePath>:<name>`
+            // triple of fields already in the row. The graph's real uid is a
+            // u64 hash that no field reproduces, and it is the agent's handle
+            // for cypher; keep it. `handlerUid` points at a *different* node
+            // (the handler) than the row's own filePath/name — keep it too.
+            let derivable = match (
+                map.get("uid").and_then(Value::as_str),
+                map.get("kind").and_then(Value::as_str),
+                map.get("filePath").and_then(Value::as_str),
+                map.get("name").and_then(Value::as_str),
+            ) {
+                (Some(uid), Some(kind), Some(path), Some(name)) => {
+                    uid.strip_prefix(kind)
+                        .and_then(|r| r.strip_prefix(':'))
+                        .and_then(|r| r.strip_prefix(path))
+                        .and_then(|r| r.strip_prefix(':'))
+                        == Some(name)
+                }
+                _ => false,
+            };
+            if derivable {
+                map.remove("uid");
+            }
             for child in map.values_mut() {
                 compress_for_llm(child);
             }
@@ -540,6 +557,26 @@ mod tests {
         assert_eq!(row["kind"], json!("Route"));
         assert_eq!(row["filePath"], json!("src/api.py"));
         assert_eq!(row["name"], json!("GET /users"));
+    }
+
+    #[test]
+    fn test_compress_for_llm_keeps_hash_uid_and_uid_without_row_fields() {
+        let mut v = json!({
+            "results": [
+                { "kind": "Function", "filePath": "a.py", "name": "f", "uid": "9876543210123456789" },
+                { "kind": "Function", "filePath": "a.py", "name": "f", "uid": 9876543210123456789_u64 },
+                { "uid": "Function:a.py:f" },
+                { "kind": "Function", "filePath": "a.py", "name": "g", "uid": "Function:a.py:f" },
+                { "kind": "Function", "filePath": "a.py", "name": "", "uid": "" }
+            ]
+        });
+        compress_for_llm(&mut v);
+        for i in 0..5 {
+            assert!(
+                v["results"][i].get("uid").is_some(),
+                "row {i} lost its uid: {v}"
+            );
+        }
     }
 
     #[test]
