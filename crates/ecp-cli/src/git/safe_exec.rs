@@ -27,9 +27,10 @@ use std::time::{Duration, Instant};
 /// program's name comes from `.gitattributes` rather than from config: an
 /// external diff driver, a textconv driver, and a filter driver. Diff-family
 /// callers pass [`DIFF_HARDENING`] for the first two. Commands that convert
-/// content — `checkout`, `reset --hard`, `stash`, `archive`, and `status`,
-/// which runs the clean filter over every racily clean or stat-dirty file —
-/// pass the overrides from [`filter_overrides`] for the third.
+/// content — `checkout`, `reset --hard`, `stash`, `archive`, and `status` and
+/// a `diff` against the worktree, which run the clean filter over every racily
+/// clean or stat-dirty file — pass the overrides from [`filter_overrides`] for
+/// the third.
 ///
 /// `-c diff.external=` is deliberately NOT set here — git treats the empty
 /// value as a command to run and dies with `cannot run : No such file or

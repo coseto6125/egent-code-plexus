@@ -18,7 +18,8 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-use ecp_cli::git::{safe_exec, status};
+use ecp_cli::git::diff_parser::DiffHunk;
+use ecp_cli::git::{safe_exec, status, DiffScope, FileDiff, GitDiffProvider, ShellGitProvider};
 
 #[derive(Clone, Copy, Debug)]
 enum Change {
@@ -211,4 +212,84 @@ fn test_porcelain_all_metadata_only_change_driver_never_runs() {
 #[test]
 fn test_porcelain_all_content_change_driver_never_runs_and_reports_file() {
     assert_driver_never_runs(Change::Content);
+}
+
+/// The diff `ShellGitProvider` runs for `scope`, hardened, without filter
+/// overrides: the command ecp ran before.
+fn unguarded_diff(repo: &Path, scope: &DiffScope) {
+    let rev = match scope {
+        DiffScope::Unstaged => None,
+        DiffScope::Staged => Some("--staged"),
+        DiffScope::All => Some("HEAD"),
+        DiffScope::Compare(base) => Some(base.as_str()),
+    };
+    let _ = safe_exec::git()
+        .arg("diff")
+        .args(safe_exec::DIFF_HARDENING)
+        .args(rev)
+        .arg("-U0")
+        .current_dir(repo)
+        .output()
+        .unwrap();
+}
+
+/// A diff against the worktree re-reads a stat-dirty file through its clean
+/// filter, as status does.
+#[test]
+fn test_shell_git_provider_diff_worktree_scopes_driver_never_runs() {
+    let scopes = [
+        DiffScope::Unstaged,
+        DiffScope::All,
+        DiffScope::Compare("HEAD".into()),
+    ];
+    for key in DRIVER_KEYS {
+        for scope in &scopes {
+            let f = fixture(key);
+            let case = format!("[{key} {scope:?}]");
+
+            apply(&f, Change::Content);
+            unguarded_diff(&f.repo, scope);
+            assert!(
+                f.marker.exists(),
+                "{case} control: the diff without overrides did not run the driver"
+            );
+            fs::remove_file(&f.marker).unwrap();
+
+            apply(&f, Change::Content);
+            let got = ShellGitProvider.diff(&f.repo, scope).unwrap();
+            assert!(
+                !f.marker.exists(),
+                "{case} the guarded diff ran the repository's driver"
+            );
+            assert_eq!(
+                got,
+                vec![FileDiff {
+                    file_path: "f.txt".into(),
+                    hunks: vec![DiffHunk {
+                        start_line: 1,
+                        end_line: 1,
+                    }],
+                }],
+                "{case}"
+            );
+        }
+    }
+}
+
+/// `--staged` compares the index with HEAD, so it takes no overrides: even
+/// the unguarded command reads no worktree file.
+#[test]
+fn test_shell_git_provider_diff_staged_reads_no_worktree_file() {
+    for key in DRIVER_KEYS {
+        let f = fixture(key);
+        apply(&f, Change::Content);
+        unguarded_diff(&f.repo, &DiffScope::Staged);
+        assert!(!f.marker.exists(), "[{key}] the staged diff ran the driver");
+        apply(&f, Change::Content);
+        assert_eq!(
+            ShellGitProvider.diff(&f.repo, &DiffScope::Staged).unwrap(),
+            Vec::<FileDiff>::new()
+        );
+        assert!(!f.marker.exists(), "[{key}] the staged diff ran the driver");
+    }
 }

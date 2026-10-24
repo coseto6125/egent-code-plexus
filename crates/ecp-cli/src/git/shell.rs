@@ -25,7 +25,19 @@ impl GitDiffProvider for ShellGitProvider {
         }
         args.push(ZERO_CONTEXT);
 
-        let output = super::safe_exec::git()
+        let mut git = super::safe_exec::git();
+        // A diff against the worktree re-reads every stat-dirty file through its
+        // clean filter, a submodule's included. `--staged` compares the index
+        // with HEAD and reads no worktree file, so no filter runs (measured with
+        // git 2.43, a dirty submodule included).
+        if *scope != DiffScope::Staged {
+            let overrides =
+                super::status::status_overrides(repo, &[]).map_err(|e| EcpError::GitDiff {
+                    reason: format!("filter drivers: {e}"),
+                })?;
+            overrides.apply(&mut git);
+        }
+        let output = git
             .args(&args)
             .current_dir(repo)
             .output()
