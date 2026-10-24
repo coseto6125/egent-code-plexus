@@ -543,10 +543,10 @@ A-E needs a shared contract and tests for implicit `this` and lexical precedence
 
 | Identifier | Changes when | Changes planned |
 |---|---|---|
-| `graph.bin` (`GRAPH_FORMAT_VERSION`) | the archived layout changes | B's first round: the C2 Rust crate table. A: lexical parents. Area 8: only if it adds a route table. Area 4's other languages add rows to the C2 facts, not layout, if C2 is designed for that |
+| `graph.bin` (`GRAPH_FORMAT_VERSION`) | the archived layout changes | B's first round: the C2 Rust crate table. A: lexical parents, and C1's discriminator table when a Signature or Tag discriminator is first stored. Area 8: only if it adds a route table. Area 4's other languages add rows to the C2 facts, not layout, if C2 is designed for that |
 | parse cache (`BUILDER_FINGERPRINT`, archived `LocalGraph`) | parser output, raw-record layout (C4), uid assignment (A-A), routing (C5), or graph-building semantics (B3b) | per slice |
-| L1 fragment encoding (V5 today, `overlay_reader.rs:75`) | the overlay replays new raw records | the incremental overlay |
-| dirty manifest | C3 adds the event class and deletions | C3's behaviour slice |
+| L1 fragment encoding (V5 today, `overlay_reader.rs:75`) | the overlay replays new raw records; the fragment id gains C5's route key, because two dirty files with equal bytes and different providers share one bin today (FU-2026-10-25-f21cfea445d0) | area 5 (the route key, V6); the incremental overlay |
+| dirty manifest | the overlay reads tombstones and per-path classes: a new namespace `<session>/l1/dirty_events.json` (`DIRTY_EVENTS_FORMAT = 1`, required `change` and `class` fields) with bins in `<session>/l1/fragments/`; `dirty_files.json` and `graph_overlay/` are no longer read, so an older writer cannot strip the new fields | the first area-5 slice that reads tombstones, writer and reader together; C3's behaviour slice changes no stored data |
 | view cache key (`view_cache.rs:40`) | any of the above | follows them |
 
 Phases 0 to 3 ship in one release. One value of an identifier maps to one data contract:
