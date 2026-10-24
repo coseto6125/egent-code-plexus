@@ -442,3 +442,162 @@ fn assert_filter_placement_is_neutralised(placement: &str) {
         "[{placement}] the user's dirty worktree must stay unchanged"
     );
 }
+
+/// Right after `ecp diff` checks its baseline out, every file in the scratch
+/// worktree is racily clean, and the build's `git status` there re-reads each
+/// one through its clean filter. The driver here is defined only under
+/// `includeIf "gitdir:**/worktrees/**"`, so the user's own worktree never sees
+/// it and only a config read inside the scratch worktree finds it.
+///
+/// Only `clean` is set: the checkout itself then runs nothing, and the control
+/// proves the status alone fires the driver. The second diff reuses the
+/// baseline graph and must stay just as quiet.
+#[cfg(unix)]
+#[test]
+fn test_diff_baseline_status_include_if_worktree_driver_never_runs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(tmp.path()).unwrap();
+    let repo = root.join("repo");
+    let home = root.join("home");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    git(&repo, &["init", "-q", "."]);
+    git(&repo, &["config", "user.email", "t@example.invalid"]);
+    git(&repo, &["config", "user.name", "t"]);
+    fs::write(repo.join("a.ts"), "function a() { return 1; }\n").unwrap();
+    fs::write(repo.join(".gitattributes"), "*.ts filter=evil\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "one"]);
+    let base = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    fs::write(repo.join("b.ts"), "function b() { return a(); }\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "two"]);
+
+    let marker = root.join("filter-ran");
+    let script = root.join("filter.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf 'executed' > '{}'\ncat\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let extra = repo.join(".git/linked-only.cfg");
+    fs::write(
+        &extra,
+        format!("[filter \"evil\"]\n\tclean = {}\n", script.display()),
+    )
+    .unwrap();
+    git(
+        &repo,
+        &[
+            "config",
+            "includeIf.gitdir:**/worktrees/**.path",
+            extra.to_str().unwrap(),
+        ],
+    );
+    let main_sees = Command::new("git")
+        .args(["config", "--get-regexp", "^filter\\."])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert_eq!(
+        main_sees.status.code(),
+        Some(1),
+        "the driver must be invisible from the user's worktree: {}",
+        String::from_utf8_lossy(&main_sees.stdout)
+    );
+
+    // Control: an unguarded status in a linked worktree of the baseline runs
+    // the driver once the index no longer vouches for the files' stat.
+    let control = root.join("control");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            control.to_str().unwrap(),
+            &base,
+        ],
+    );
+    assert!(!marker.exists(), "the checkout itself must run nothing");
+    let index = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-path", "index"])
+            .current_dir(&control)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let file_mtime = fs::metadata(control.join("a.ts"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    fs::File::options()
+        .write(true)
+        .open(index.trim())
+        .unwrap()
+        .set_times(
+            fs::FileTimes::new().set_modified(file_mtime - std::time::Duration::from_secs(100)),
+        )
+        .unwrap();
+    let _ = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&control)
+        .output()
+        .unwrap();
+    assert!(
+        marker.exists(),
+        "control: an unguarded status in the linked worktree did not run the driver"
+    );
+    git(
+        &repo,
+        &["worktree", "remove", "--force", control.to_str().unwrap()],
+    );
+    fs::remove_file(&marker).unwrap();
+
+    for run in ["first", "graph-reuse"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_ecp"))
+            .args(["diff", "--section", "symbols", "--baseline", &base])
+            .args(["--format", "json"])
+            .current_dir(&repo)
+            .env("ECP_HOME", &home)
+            .env("HOME", &home)
+            .env("ECP_SKIP_BG_REBUILD", "1")
+            .env("ECP_NO_PROGRESS", "1")
+            .output()
+            .expect("run ecp diff");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !marker.exists(),
+            "[{run}] a filter driver ran during ecp diff: {stderr}"
+        );
+        assert!(out.status.success(), "[{run}] ecp diff failed: {stderr}");
+        if run == "first" {
+            // Without a build the scratch worktree never meets a status, and
+            // the assertion above would hold for an unguarded one.
+            assert!(
+                stderr.contains("l2.built"),
+                "[{run}] the first diff must build: {stderr}"
+            );
+        }
+    }
+}

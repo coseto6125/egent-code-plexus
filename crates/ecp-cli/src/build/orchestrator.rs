@@ -826,7 +826,7 @@ pub(crate) fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io:
 pub(crate) fn git_archive_to(worktree: &Path, sha: &str, dest: &Path) -> io::Result<()> {
     use std::io::Read;
 
-    let overrides = safe_exec::filter_overrides(worktree);
+    let overrides = safe_exec::filter_overrides(worktree)?;
     // git's stdout is tar's stdin, so the kernel pipe holds the archive rather
     // than this process. `.output()` used to buffer the whole tar first, which
     // made peak memory a function of what the repository tracks: a 200 MB blob

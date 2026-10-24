@@ -17,7 +17,7 @@
 //! where an `includeIf "gitdir:**/worktrees/**"` section can define a driver
 //! that the main worktree's config never shows.
 
-use crate::git::safe_exec;
+use crate::git::safe_exec::{self, FilterOverrides};
 use ecp_core::EcpError;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -29,12 +29,12 @@ pub struct BaselineCheckout {
     /// subdirectory indexes the same subdirectory of the baseline.
     prefix: PathBuf,
     scratch: TempDir,
-    filter_overrides: Vec<String>,
+    filter_overrides: FilterOverrides,
 }
 
 impl BaselineCheckout {
     pub fn create(repo_dir: &Path, target_sha: &str) -> Result<Self, EcpError> {
-        let main_overrides = safe_exec::filter_overrides(repo_dir);
+        let main_overrides = read_filter_overrides(repo_dir)?;
         let scratch = tempfile::Builder::new()
             .prefix("ecp-diff-baseline-")
             .tempdir()
@@ -58,11 +58,8 @@ impl BaselineCheckout {
             scratch,
             filter_overrides: main_overrides,
         };
-        checkout
-            .filter_overrides
-            .extend(safe_exec::filter_overrides(&checkout.checkout_root));
-        checkout.filter_overrides.sort_unstable();
-        checkout.filter_overrides.dedup();
+        let linked = read_filter_overrides(&checkout.checkout_root)?;
+        checkout.filter_overrides.merge(linked);
 
         run_git(
             safe_exec::git_with_overrides(&checkout.checkout_root, &checkout.filter_overrides)
@@ -98,6 +95,11 @@ impl Drop for BaselineCheckout {
             Ok(_) => {}
         }
     }
+}
+
+fn read_filter_overrides(dir: &Path) -> Result<FilterOverrides, EcpError> {
+    safe_exec::filter_overrides(dir)
+        .map_err(|e| EcpError::Output(format!("read filter drivers in {}: {e}", dir.display())))
 }
 
 fn run_git(cmd: &mut std::process::Command, what: &str) -> Result<(), EcpError> {
