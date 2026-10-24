@@ -135,23 +135,6 @@ impl AnalyzerPipeline {
         fallback
     }
 
-    /// The provider `name` that parses `path`: the first candidate of its
-    /// route. The incremental path (`reanalyze`) uses it to build a pipeline
-    /// holding ONLY the providers a dirty set needs, instead of paying the
-    /// full tree-sitter `Query` compile (~0.65s) to reparse one changed file
-    /// (~8ms). A thin view of [`FileRouter::route`]; it goes when its callers
-    /// read the route.
-    pub fn provider_name_for_path(path: &std::path::Path) -> Option<&'static str> {
-        const ROUTER: FileRouter = FileRouter::new(SizeCap::BUILT_IN);
-        let RouteOutcome::Routed(route) = ROUTER.route(path.to_str()?) else {
-            return None;
-        };
-        route
-            .candidates()
-            .first()
-            .map(|language| language.provider())
-    }
-
     /// Analyze files concurrently using a Multi-Producer Single-Consumer architecture
     pub fn analyze(&self, files: Vec<(PathBuf, PathBuf)>) -> Vec<LocalGraph> {
         // No-cache fast path — the closure short-circuits in the inner
@@ -451,17 +434,19 @@ mod tests {
     }
 
     #[test]
-    fn yaml_routes_to_kubernetes_provider() {
-        use std::path::Path;
-        let pn = AnalyzerPipeline::provider_name_for_path;
+    fn test_route_yaml_candidates_put_kubernetes_first() {
+        let router = FileRouter::new(SizeCap::BUILT_IN);
+        let first = |path: &str| {
+            let RouteOutcome::Routed(route) = router.route(path) else {
+                panic!("{path} is routed");
+            };
+            route.providers().next()
+        };
         // Plain `.yaml`/`.yml` → kubernetes (content-sniffed inside the provider).
-        assert_eq!(pn(Path::new("k8s/deploy.yaml")), Some("kubernetes"));
-        assert_eq!(pn(Path::new("manifest.yml")), Some("kubernetes"));
+        assert_eq!(first("k8s/deploy.yaml"), Some("kubernetes"));
+        assert_eq!(first("manifest.yml"), Some("kubernetes"));
         // Filename/path specials still win over the kubernetes fallback.
-        assert_eq!(pn(Path::new("docker-compose.yml")), Some("docker-compose"));
-        assert_eq!(
-            pn(Path::new(".github/workflows/ci.yml")),
-            Some("github-actions")
-        );
+        assert_eq!(first("docker-compose.yml"), Some("docker-compose"));
+        assert_eq!(first(".github/workflows/ci.yml"), Some("github-actions"));
     }
 }

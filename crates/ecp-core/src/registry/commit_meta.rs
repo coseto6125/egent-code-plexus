@@ -81,7 +81,12 @@ use std::path::Path;
 /// (1 MiB default) on the cold and incremental paths alike, a sniffed OpenAPI
 /// YAML reaches the openapi provider, template paths and non-UTF-8 names are
 /// never parsed.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema22");
+/// schema23: the session overlay parses each dirty path with the providers
+/// its route lists, as the cold index does (bash, lua, crystal, nim, zig,
+/// move, solidity, vyper, cairo, verilog, sql, hcl, protobuf, dockerfile,
+/// docker-compose and github-actions fragments now exist), and routes by the
+/// repo-relative path rather than the basename.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema23");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

@@ -959,8 +959,6 @@ fn in_github_workflows(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analyzer::pipeline::AnalyzerPipeline;
-    use std::path::Path;
 
     fn router() -> FileRouter {
         FileRouter::new(SizeCap::BUILT_IN)
@@ -1419,20 +1417,22 @@ mod tests {
         assert!(router().route("__brick__/a.go").route().is_none());
     }
 
-    // The two tests below are the ledger of differences between today's two
-    // path readers and this contract. Each listed row is a known defect or a
-    // decided change (design note, "Today"). The area 6 adoption slice
-    // deletes these tests together with `provider_name_for_path` and
-    // `file_category::Language::from_path`; until then a new difference
-    // fails here instead of shipping unnoticed.
+    // The ledger below lists the differences between the legacy
+    // `file_category::Language` reader and this contract. Each row is a known
+    // defect or a decided change (design note, "Today"). The area 6 adoption
+    // slice deletes it together with `file_category::Language::from_path`;
+    // until then a new difference fails here instead of shipping unnoticed.
 
     #[test]
-    fn test_route_every_language_extension_matches_provider_name_for_path() {
+    fn test_route_every_language_extension_first_provider_is_its_language() {
         for &language in Language::ALL {
             for ext in language.extensions() {
                 let path = format!("src/x.{ext}");
                 assert_eq!(
-                    AnalyzerPipeline::provider_name_for_path(Path::new(&path)),
+                    router()
+                        .route(&path)
+                        .route()
+                        .and_then(|route| route.providers().next()),
                     Some(language.provider()),
                     "{path}"
                 );
@@ -1442,69 +1442,41 @@ mod tests {
 
     #[test]
     fn test_route_path_ledger_matches_today_readers() {
-        // (path, first provider of the contract route, today's provider,
+        // (path, first provider of the contract route,
         //  today's `file_category::Language`)
-        let ledger: &[(&str, Option<&str>, Option<&str>, LegacyLanguage)] = &[
-            (
-                "Dockerfile",
-                Some("dockerfile"),
-                Some("dockerfile"),
-                LegacyLanguage::Dockerfile,
-            ),
+        let ledger: &[(&str, Option<&str>, LegacyLanguage)] = &[
+            ("Dockerfile", Some("dockerfile"), LegacyLanguage::Dockerfile),
             (
                 "svc/x.dockerfile",
-                Some("dockerfile"),
                 Some("dockerfile"),
                 LegacyLanguage::Unknown,
             ),
             (
                 "svc/compose.yaml",
                 Some("docker-compose"),
-                Some("docker-compose"),
                 LegacyLanguage::DockerCompose,
             ),
             (
                 ".github/workflows/ci.yml",
                 Some("github-actions"),
-                Some("github-actions"),
                 LegacyLanguage::GitHubActions,
             ),
-            (
-                "k8s/deploy.yaml",
-                Some("kubernetes"),
-                Some("kubernetes"),
-                LegacyLanguage::Yaml,
-            ),
-            (
-                "api/spec.json",
-                Some("openapi"),
-                Some("openapi"),
-                LegacyLanguage::Unknown,
-            ),
-            ("App.vue", Some("vue"), Some("vue"), LegacyLanguage::Unknown),
-            (
-                "api.proto",
-                Some("protobuf"),
-                Some("protobuf"),
-                LegacyLanguage::Unknown,
-            ),
-            ("README.md", None, None, LegacyLanguage::Markdown),
-            ("notes.txt", None, None, LegacyLanguage::Markdown),
-            ("__brick__/lib/a.dart", None, None, LegacyLanguage::Dart),
-            ("x.mts", None, None, LegacyLanguage::Unknown),
-            (".py", None, None, LegacyLanguage::Python),
+            ("k8s/deploy.yaml", Some("kubernetes"), LegacyLanguage::Yaml),
+            ("api/spec.json", Some("openapi"), LegacyLanguage::Unknown),
+            ("App.vue", Some("vue"), LegacyLanguage::Unknown),
+            ("api.proto", Some("protobuf"), LegacyLanguage::Unknown),
+            ("README.md", None, LegacyLanguage::Markdown),
+            ("notes.txt", None, LegacyLanguage::Markdown),
+            ("__brick__/lib/a.dart", None, LegacyLanguage::Dart),
+            ("x.mts", None, LegacyLanguage::Unknown),
+            (".py", None, LegacyLanguage::Python),
         ];
-        for (path, contract, provider, legacy) in ledger {
+        for (path, contract, legacy) in ledger {
             let outcome = router().route(path);
             assert_eq!(
                 outcome.route().and_then(|route| route.providers().next()),
                 *contract,
                 "contract {path}"
-            );
-            assert_eq!(
-                AnalyzerPipeline::provider_name_for_path(Path::new(path)),
-                *provider,
-                "provider {path}"
             );
             assert_eq!(
                 LegacyLanguage::from_normalized_path(path),

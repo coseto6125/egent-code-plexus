@@ -6,7 +6,7 @@
 //! rewrite happens after the fragment rename, in the same `atomic_write_json`
 //! style — readers always see a consistent snapshot.
 //!
-//! Several items below (`OverlayWriter` struct + impl, `PIPELINE` / `pipeline()` /
+//! Several items below (`OverlayWriter` struct + impl, `pipeline_for_path` /
 //! `map_node_kind` helpers, `relativise`, `extract_symbols`) are the
 //! write-time symbol-extraction surface spec'd by
 //! `docs/superpowers/specs/2026-05-17-multi-agent-peer-sync-design.md:152`
@@ -443,7 +443,8 @@ fn write_fragment_file(
 
 fn parse_graph(rel_path: &str, content: &[u8]) -> io::Result<LocalGraph> {
     let path = std::path::Path::new(rel_path);
-    pipeline()
+    pipeline_for_path(path)
+        .ok_or_else(|| io::Error::other(format!("no provider for {rel_path:?}")))?
         .parse_file_raw(path, content)
         .map_err(io::Error::other)
 }
@@ -516,9 +517,9 @@ fn content_hash_hex(bytes: &[u8]) -> String {
 
 static WRITE_BATCH_SEQ: AtomicU64 = AtomicU64::new(0);
 
-// Process-wide pipeline — built once, shared across all consumers (both
-// overlay writes and reanalyze hot path) via `crate::reanalyze::pipeline()`.
-use crate::reanalyze::pipeline;
+// One pipeline per distinct provider set, built on first use and shared by
+// every overlay write: a path gets the providers the cold index would build.
+use crate::reanalyze::pipeline_for_path;
 
 /// `None` for nodes that are not a declaration two sessions can both edit —
 /// File, Import, Route, Process, Document, Section, EntryPoint, PathLiteral and
@@ -689,10 +690,14 @@ fn symbols_from_graph(graph: &LocalGraph, file_str: &str) -> Vec<SymbolRef> {
 /// pipeline has no provider for the extension or returns no graph.
 fn extract_symbols(path: &Path, file_str: &str) -> (Vec<SymbolRef>, bool) {
     let abs = path.to_path_buf();
-    // Use the file name as the rel_path so the pipeline selects on extension.
-    let rel = PathBuf::from(path.file_name().unwrap_or(path.as_os_str()));
+    // Route by the repo-relative path, not the basename: path rules (a
+    // workflow directory, a template directory) decide the provider.
+    let rel = PathBuf::from(file_str.replace('\\', "/"));
 
-    let graphs = pipeline().analyze(vec![(abs, rel)]);
+    let Some(pipeline) = pipeline_for_path(&rel) else {
+        return (vec![], true);
+    };
+    let graphs = pipeline.analyze(vec![(abs, rel)]);
     match graphs.into_iter().next() {
         None => (vec![], true),
         Some(graph) => (symbols_from_graph(&graph, file_str), false),

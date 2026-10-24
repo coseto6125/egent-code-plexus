@@ -75,8 +75,8 @@ fn has_blind_spot(graph: &ZeroCopyGraph, kind: &str, file: &str) -> bool {
 
 /// Contract: the walk's "is this source" answer is the router's `Routed`
 /// answer, for every extension default of every language (the 14 mainstream
-/// languages and the DSL and config languages), and the provider that the
-/// wrapper names is the route's first provider.
+/// languages and the DSL and config languages), and the route's first provider
+/// is its language's provider.
 ///
 /// Fails on today's code: `should_analyze_path` is private to the binary
 /// module, and today it accepts `md`/`txt`/`rst`, which the router leaves
@@ -97,7 +97,7 @@ fn test_should_analyze_path_agrees_with_route_every_default_extension() {
                 "{rel}: the walk must accept what the router routes"
             );
             assert_eq!(
-                AnalyzerPipeline::provider_name_for_path(Path::new(&rel)),
+                route.providers().next(),
                 Some(language.provider()),
                 "{rel}: the provider name comes from the route"
             );
@@ -115,7 +115,7 @@ fn test_should_analyze_path_agrees_with_route_every_default_extension() {
 
 /// Contract: a path the router does not route is not walked, whatever the
 /// old extension list said. `md`, `txt` and `rst` have no provider today
-/// (`provider_name_for_path` returns `None`), upper-case extensions are
+/// (the router leaves them unrouted), upper-case extensions are
 /// unrouted, and the template rules exclude by repo-relative path.
 ///
 /// Fails on today's code: `should_analyze_path` is private, and it accepts
@@ -138,19 +138,17 @@ fn test_should_analyze_path_unrouted_and_excluded_paths_rejected() {
             "{rel:?} must not be walked"
         );
         assert!(
-            AnalyzerPipeline::provider_name_for_path(Path::new(rel)).is_none(),
+            ecp_cli::reanalyze::pipeline_for_path(Path::new(rel)).is_none(),
             "{rel:?} must have no provider"
         );
     }
 }
 
-/// Contract: path rules decide before extensions, and the wrapper keeps
-/// today's answer for the YAML and JSON content-sniffed routes (the first
-/// candidate: `kubernetes`, `openapi`).
-///
-/// Pins today's behaviour of `provider_name_for_path` for these paths.
+/// Contract: path rules decide before extensions, and the YAML and JSON
+/// content-sniffed routes list `kubernetes` or `openapi` as the first
+/// candidate.
 #[test]
-fn test_provider_name_for_path_path_rules_and_sniffed_routes_keep_first_candidate() {
+fn test_route_first_provider_path_rules_and_sniffed_routes_keep_first_candidate() {
     for (rel, provider) in [
         ("Dockerfile", "dockerfile"),
         ("svc/dockerfile", "dockerfile"),
@@ -162,7 +160,10 @@ fn test_provider_name_for_path_path_rules_and_sniffed_routes_keep_first_candidat
         ("api/spec.json", "openapi"),
     ] {
         assert_eq!(
-            AnalyzerPipeline::provider_name_for_path(Path::new(rel)),
+            router()
+                .route(rel)
+                .route()
+                .and_then(|route| route.providers().next()),
             Some(provider),
             "{rel}"
         );

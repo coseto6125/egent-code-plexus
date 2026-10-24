@@ -4,11 +4,11 @@
 //! `impact --baseline` used to build the full 20-provider `make_pipeline()`
 //! regardless of which languages the diff touched, paying ~0.65s of
 //! tree-sitter `Query` compilation for a diff that might parse in ~8ms. The
-//! fix scopes the pipeline to `provider_name_for_path` names derived from
-//! `parsed_paths`. These tests assert the JSON payload is unchanged by that
+//! fix scopes the pipeline to the provider names that the routes of
+//! `parsed_paths` list. These tests assert the JSON payload is unchanged by that
 //! swap — a diff still yields its `changed_symbols`, and a markdown file in
 //! the diff behaves exactly as it did under the old full pipeline (which
-//! could never route `.md` through `provider_name_for_path` either, so it
+//! could never route `.md` through the router either, so it
 //! contributed zero symbols before and must still contribute zero now).
 
 use serde_json::Value;
@@ -172,7 +172,7 @@ fn multi_language_diff_yields_symbols_for_every_touched_language() {
 /// Guards the markdown/yaml caveat: a markdown file changing alongside code
 /// must still surface in `changed_paths` (unfiltered git-diff list), and
 /// must NOT contribute to `changed_symbols` — matching the pre-fix full
-/// pipeline, which also never dispatches `.md` through `provider_name_for_path`
+/// pipeline, which also never routes `.md` to a provider
 /// (no extension entry exists for markdown; confirmed dead in `make_pipeline()`
 /// too). If a future fix wires real markdown dispatch, this assertion is the
 /// one to update alongside it.

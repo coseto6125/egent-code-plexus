@@ -212,26 +212,34 @@ fn from_graphs_matches_reparse_route_fragment_id() {
     );
 }
 
-/// The dispatch table extracted from `find_provider` must keep resolving the
-/// extensions the reanalyze subset relies on.
+/// The overlay's per-path pipeline exists for exactly the paths a route
+/// lists, and the route's first provider is the one the reanalyze subset
+/// relies on, for common extensions and path rules.
 #[test]
-fn provider_name_dispatch_covers_common_extensions() {
-    use ecp_core::analyzer::pipeline::AnalyzerPipeline as P;
+fn provider_dispatch_covers_common_extensions() {
+    use ecp_cli::reanalyze::pipeline_for_path;
+    use ecp_core::contracts::routing::{FileRouter, SizeCap};
     use std::path::Path;
-    assert_eq!(
-        P::provider_name_for_path(Path::new("a.ts")),
-        Some("typescript")
-    );
-    assert_eq!(P::provider_name_for_path(Path::new("a.rs")), Some("rust"));
-    assert_eq!(P::provider_name_for_path(Path::new("a.py")), Some("python"));
-    assert_eq!(P::provider_name_for_path(Path::new("a.h")), Some("cpp"));
-    assert_eq!(
-        P::provider_name_for_path(Path::new("Dockerfile")),
-        Some("dockerfile")
-    );
-    assert_eq!(
-        P::provider_name_for_path(Path::new(".github/workflows/ci.yml")),
-        Some("github-actions")
-    );
-    assert_eq!(P::provider_name_for_path(Path::new("a.unknownext")), None);
+    let router = FileRouter::new(SizeCap::BUILT_IN);
+    for (rel, first) in [
+        ("a.ts", Some("typescript")),
+        ("a.rs", Some("rust")),
+        ("a.py", Some("python")),
+        ("a.h", Some("cpp")),
+        ("a.sh", Some("bash")),
+        ("Dockerfile", Some("dockerfile")),
+        (".github/workflows/ci.yml", Some("github-actions")),
+        ("a.unknownext", None),
+    ] {
+        let routed = router
+            .route(rel)
+            .route()
+            .and_then(|route| route.providers().next());
+        assert_eq!(routed, first, "{rel}");
+        assert_eq!(
+            pipeline_for_path(Path::new(rel)).is_some(),
+            first.is_some(),
+            "{rel}"
+        );
+    }
 }

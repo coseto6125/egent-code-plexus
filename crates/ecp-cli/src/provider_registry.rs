@@ -82,7 +82,7 @@ pub const PROVIDER_CONSTRUCTORS: &[(&str, ProviderCtor)] = &[
     ("kubernetes", || Ok(Box::new(KubernetesProvider::new()?))),
 ];
 
-/// Construct one provider by its `provider_name_for_path`-compatible name.
+/// Construct one provider by the name `FileRoute::providers` lists.
 /// `None` for an unknown name.
 pub fn make_provider(name: &str) -> Option<anyhow::Result<Box<dyn LanguageProvider>>> {
     PROVIDER_CONSTRUCTORS
@@ -120,7 +120,7 @@ mod tests {
         for name in names {
             assert!(
                 make_provider(name).is_some(),
-                "PROVIDER_CONSTRUCTORS has no entry for {name:?}, which provider_name_for_path can return"
+                "PROVIDER_CONSTRUCTORS has no entry for {name:?}, which a route can list"
             );
         }
     }

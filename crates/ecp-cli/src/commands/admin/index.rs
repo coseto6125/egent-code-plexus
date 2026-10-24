@@ -563,10 +563,7 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
         let path = Path::new(std::ffi::OsStr::from_bytes(b"src/caf\xe9.py"));
         assert!(!should_analyze_path(path));
-        assert_eq!(
-            ecp_core::analyzer::pipeline::AnalyzerPipeline::provider_name_for_path(path),
-            None
-        );
+        assert!(crate::reanalyze::pipeline_for_path(path).is_none());
     }
 
     #[test]
@@ -659,7 +656,7 @@ mod tests {
     }
 
     /// Every name the canonical dispatch can produce must be constructible —
-    /// the set carries names straight from `provider_name_for_path` to
+    /// the set carries names straight from `FileRoute::providers` to
     /// `PROVIDER_CONSTRUCTORS`, so a name with no constructor is a silently
     /// skipped language.
     #[test]
