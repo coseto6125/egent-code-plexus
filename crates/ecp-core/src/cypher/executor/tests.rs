@@ -39,7 +39,7 @@ fn execute_materialising(
 
     let (columns, rows) = project_return(&query.return_.items, &bindings, graph, cache)?;
 
-    let rows = apply_order_by(&query.order_by, &columns, rows);
+    let rows = apply_order_by(&query.order_by, &columns, rows)?;
     let rows = apply_distinct(query.return_.distinct, rows);
     let rows = apply_skip_limit(query.skip, query.limit, rows);
     let rows = apply_union(
@@ -194,7 +194,7 @@ const STREAMING_ORACLE_QUERIES: &[&str] = &[
     "MATCH (a)-[r]->(b) RETURN type(r) AS t, count(*) AS n ORDER BY n DESC SKIP 1 LIMIT 1",
     "MATCH (a:Function {name:'missing'}) RETURN count(*), sum(a.startLine), collect(a.name)",
     "MATCH (a)-[:Calls]->(b)-[:Calls]->(c) RETURN collect(a.name), count(*)",
-    "MATCH (a)-[:Calls*0..2]->(b) RETURN collect(b.name), count(*)",
+    "MATCH (a)-[:Calls*0..2]->(b) RETURN collect(DISTINCT b.name), count(DISTINCT b)",
     "MATCH (a:Function {name:'b'}) OPTIONAL MATCH (c)-[:Calls]->(a) RETURN count(c)",
     "MATCH (a:Function), (b:Function) RETURN count(a), count(b)",
     "MATCH (a)-[r]->(b) RETURN b, count(*)",
@@ -207,7 +207,7 @@ const EXTRA_SUCCESS_QUERIES: &[&str] = &[
     "MATCH (a)-[r]->(b) WITH type(r) AS value, count(*) AS value RETURN value, count(*)",
     "MATCH (a)-[r]->(b) WITH count(*) AS n RETURN count(n) AS n",
     "MATCH (a)-[r]->(b) WITH b AS x WHERE x.name = 'b' RETURN count(x)",
-    "MATCH (a)-[r:Calls*1..2]->(b) RETURN count(r)",
+    "MATCH (a)-[:Calls*1..2]->(b) RETURN count(DISTINCT b)",
     "MATCH (a:Function) MATCH (a)-[r:Calls]->(b) RETURN a.name, count(r)",
     "MATCH (a:Function) MATCH (a)-[r:Calls]->(b), (c:Function) RETURN count(r)",
     "MATCH (a)-[r:Calls]-(b) RETURN count(r)",
@@ -291,7 +291,7 @@ fn test_execute_aggregate_streaming_matches_materialising_rows() {
         assert_public_error_matches_materialising(text, archived, None);
     }
     assert_public_error_matches_materialising(
-        "MATCH (a:Function), (b:Function) WHERE EXISTS { (a)-[:Calls*0..1]->(x) } RETURN missing, count(*)",
+        "MATCH (a:Function) WHERE EXISTS { (x)-[:Calls*0..1]->(y) } RETURN missing, count(*)",
         archived,
         None,
     );
@@ -526,7 +526,7 @@ fn exec_var_len_bfs_one_to_three() {
     // Chain: a->b->c->d. `*1..3` from a should reach b, c, d.
     with_four(|g| {
         let q = parse(
-            "MATCH (a:Function)-[:Calls*1..3]->(b:Function) WHERE a.name = 'a' RETURN b.name",
+            "MATCH (a:Function)-[:Calls*1..3]->(b:Function) WHERE a.name = 'a' RETURN DISTINCT b.name",
         )
         .unwrap();
         let r = execute(&q, g, None, Path::new(".")).unwrap();
@@ -549,16 +549,15 @@ fn exec_var_len_bfs_one_to_three() {
 }
 
 #[test]
-fn exec_var_len_min_two_skips_direct_neighbour() {
-    // `*2..3` from a should skip b, reach c and d.
-    with_four(|g| {
-        let q = parse(
-            "MATCH (a:Function)-[:Calls*2..3]->(b:Function) WHERE a.name = 'a' RETURN b.name",
-        )
-        .unwrap();
-        let r = execute(&q, g, None, Path::new(".")).unwrap();
-        assert_eq!(r.rows.len(), 2, "expected c and d, got {:?}", r.rows);
-    });
+fn test_parse_var_len_minimum_above_one_is_refused() {
+    // A walk-based expansion cannot enforce openCypher's no-repeated-relationship
+    // rule, so `*2..3` is refused rather than answered from walks.
+    let error = parse(
+        "MATCH (a:Function)-[:Calls*2..3]->(b:Function) WHERE a.name = 'a' RETURN DISTINCT b.name",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("minimum above 1"), "{error}");
 }
 
 // -----------------------------------------------------------------------
@@ -1034,7 +1033,7 @@ fn aggregate_kind_every_variant_builds_a_working_accumulator() {
     ];
     for kind in kinds {
         let mut acc = Accumulator::new(kind, false);
-        acc.feed(Value::Int(1), false);
+        acc.feed(Value::Int(1), false, None);
         let out = acc.finalize();
         assert_ne!(
             out,
@@ -1360,7 +1359,7 @@ fn pushdown_skips_var_introduced_by_optional_match() {
     // Pushing into an OPTIONAL pattern flips "row kept with null, then
     // WHERE-filtered" into "row kept" — left-join semantics must win.
     let q = parse(
-        "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) WHERE c.name = 'fan' RETURN f.name",
+        "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) MATCH (g:Function) WHERE c.name = 'fan' RETURN f.name",
     )
     .unwrap();
     assert!(
@@ -1409,7 +1408,7 @@ fn exec_optional_match_is_null_finds_orphans() {
     // The canonical orphan query: fan calls leaf_a/leaf_b; nobody calls fan.
     with_fan(|g| {
         let q = parse(
-            "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) WHERE c IS NULL RETURN f.name",
+            "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) WITH f, c WHERE c IS NULL RETURN f.name",
         )
         .unwrap();
         let r = execute(&q, g, None, Path::new(".")).unwrap();
@@ -1422,7 +1421,7 @@ fn exec_optional_match_is_null_finds_orphans() {
 fn exec_optional_match_is_not_null_finds_called() {
     with_fan(|g| {
         let q = parse(
-            "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) WHERE c IS NOT NULL RETURN f.name ORDER BY f.name",
+            "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) WITH f, c WHERE c IS NOT NULL RETURN f.name ORDER BY f.name",
         )
         .unwrap();
         let r = execute(&q, g, None, Path::new(".")).unwrap();
@@ -2282,33 +2281,30 @@ fn exec_inline_prop_kind_filters_correctly() {
 // -----------------------------------------------------------------------
 
 #[test]
-fn eval_exists_var_len_range_respects_depth_bounds() {
-    // chain a→b→c: paths into c are b→c (depth 1) and a→b→c (depth 2).
+fn test_parse_exists_var_len_minimum_above_one_is_refused() {
+    for range in ["*2..3", "*3..4", "*2..2"] {
+        let error = parse(&format!(
+            "MATCH (f:Function {{name: 'c'}}) WHERE EXISTS((x)-[:Calls{range}]->(f)) RETURN f.name"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("minimum above 1"), "{range}: {error}");
+    }
+}
+
+#[test]
+fn eval_exists_var_len_range_respects_upper_bound() {
+    // chain a→b→c: c is two hops from a, so *1..1 does not see a but *1..2 does.
     with_three(|g| {
-        let q = parse(
-            "MATCH (f:Function {name: 'c'}) WHERE EXISTS((x)-[:Calls*2..3]->(f)) RETURN f.name",
-        )
-        .unwrap();
-        let r = execute(&q, g, None, Path::new(".")).unwrap();
-        assert_eq!(r.rows.len(), 1, "a→b→c is a depth-2 path into c");
-
-        let q = parse(
-            "MATCH (f:Function {name: 'c'}) WHERE EXISTS((x)-[:Calls*3..4]->(f)) RETURN f.name",
-        )
-        .unwrap();
-        let r = execute(&q, g, None, Path::new(".")).unwrap();
-        assert!(
-            r.rows.is_empty(),
-            "no depth-3 path into c — *3..4 must not match the depth-1/2 paths"
-        );
-
-        // b has only the depth-1 edge a→b: *2..2 must NOT degrade to single-hop.
-        let q = parse(
-            "MATCH (f:Function {name: 'b'}) WHERE EXISTS((x)-[:Calls*2..2]->(f)) RETURN f.name",
-        )
-        .unwrap();
-        let r = execute(&q, g, None, Path::new(".")).unwrap();
-        assert!(r.rows.is_empty(), "only a depth-1 edge reaches b");
+        let run = |range: &str| {
+            let q = parse(&format!(
+                "MATCH (f:Function {{name: 'c'}}) WHERE EXISTS((a {{name: 'a'}})-[:Calls{range}]->(f)) RETURN f.name"
+            ))
+            .unwrap();
+            execute(&q, g, None, Path::new(".")).unwrap().rows.len()
+        };
+        assert_eq!(run("*1..2"), 1, "a→b→c is a depth-2 path into c");
+        assert_eq!(run("*0..1"), 0, "no depth-1 edge a→c");
     });
 }
 
@@ -2834,7 +2830,7 @@ fn test_far_end_name_seeds_ineligible_shapes_return_none() {
     for query in [
         "MATCH (a {name:'zeta'})-[:Calls]->(b {name:'parse'}) RETURN a.name",
         "MATCH (a)-[:Calls]-(b {name:'parse'}) RETURN a.name",
-        "MATCH (a)-[:Calls*1..2]->(b {name:'parse'}) RETURN a.name",
+        "MATCH (a)-[:Calls*1..2]->(b {name:'parse'}) RETURN DISTINCT a.name",
         "MATCH (a)-[:Calls]->(b {name:''}) RETURN a.name",
         "MATCH (a)-[:Calls]->(b {name:1}) RETURN a.name",
         "MATCH (a)-[:Calls]->(b:Function) RETURN a.name",

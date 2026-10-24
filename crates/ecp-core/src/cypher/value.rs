@@ -50,6 +50,12 @@ impl Value {
         self.write_key(buf, true);
     }
 
+    /// Key of a node by identity; the same bytes as a `NodeRef` with that index.
+    pub(super) fn write_node_key(idx: u32, buf: &mut Vec<u8>) {
+        buf.push(6);
+        buf.extend_from_slice(&idx.to_le_bytes());
+    }
+
     fn write_key(&self, buf: &mut Vec<u8>, include_edge_reason: bool) {
         match self {
             Value::Null => buf.push(0),
@@ -77,10 +83,7 @@ impl Value {
                     item.write_key(buf, include_edge_reason);
                 }
             }
-            Value::NodeRef { idx, .. } => {
-                buf.push(6);
-                buf.extend_from_slice(&idx.to_le_bytes());
-            }
+            Value::NodeRef { idx, .. } => Self::write_node_key(*idx, buf),
             Value::EdgeRef {
                 src,
                 tgt,

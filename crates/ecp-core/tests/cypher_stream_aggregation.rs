@@ -33,7 +33,7 @@ fn test_execute_aggregate_queries_return_pinned_rows() {
         "MATCH (a)-[r]->(b) RETURN type(r) AS t, count(*) AS n ORDER BY n DESC SKIP 1 LIMIT 1",
         "MATCH (a:Function {name:'missing'}) RETURN count(*), sum(a.startLine), collect(a.name)",
         "MATCH (a)-[:Calls]->(b)-[:Calls]->(c) RETURN collect(a.name), count(*)",
-        "MATCH (a)-[:Calls*0..2]->(b) RETURN collect(b.name), count(*)",
+        "MATCH (a)-[:Calls*0..2]->(b) RETURN collect(DISTINCT b.name), count(DISTINCT b)",
         "MATCH (a:Function {name:'b'}) OPTIONAL MATCH (c)-[:Calls]->(a) RETURN count(c)",
         "MATCH (a:Function), (b:Function) RETURN count(a), count(b)",
         "MATCH (a)-[r]->(b) RETURN b, count(*)",
@@ -61,19 +61,12 @@ fn test_execute_aggregate_queries_return_pinned_rows() {
         vec![vec![text("References"), Int(1)]],
         vec![vec![Int(0), Int(0), List(vec![])]],
         vec![vec![List(vec![text("a"), text("a")]), Int(2)]],
-        vec![vec![
-            List(vec![
-                text("a"),
-                text("b"),
-                text("c"),
-                text("b"),
-                text("c"),
-                text("c"),
-            ]),
-            Int(6),
-        ]],
+        // Reachability within 0..2 hops, each node once (DISTINCT): a, b, c.
+        vec![vec![List(vec![text("a"), text("b"), text("c")]), Int(3)]],
         vec![vec![Int(2)]],
-        vec![vec![Int(3), Int(3)]],
+        // Comma patterns join: 3 functions x 3 functions = 9 rows, not the
+        // 3 + 3 rows of a union with null-filled columns.
+        vec![vec![Int(9), Int(9)]],
         vec![
             vec![text("b"), text("Function"), text("src/dirty.rs"), Int(2)],
             vec![text("c"), text("Function"), text("src/dirty.rs"), Int(2)],
@@ -181,7 +174,8 @@ fn test_execute_aggregate_groups_rows_by_file_path() {
 fn test_execute_later_where_error_precedes_projection_error() {
     let bytes = fixture();
     let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
-    let query = "MATCH (a:Function), (b:Function) WHERE EXISTS { (a)-[:Calls*0..1]->(x) } RETURN missing, count(*)";
+    let query =
+        "MATCH (a:Function) WHERE EXISTS { (x)-[:Calls*0..1]->(y) } RETURN missing, count(*)";
     let error =
         cypher::execute(&cypher::parse(query).unwrap(), graph, None, Path::new(".")).unwrap_err();
     assert!(error.to_string().contains("needs at least one"));

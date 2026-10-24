@@ -234,7 +234,7 @@ fn execute_inner(
         project_return(&query.return_.items, &bindings, graph, cache)?
     };
 
-    let rows = apply_order_by(&query.order_by, &columns, rows);
+    let rows = apply_order_by(&query.order_by, &columns, rows)?;
     let rows = apply_distinct(query.return_.distinct, rows);
     let rows = apply_skip_limit(query.skip, query.limit, rows);
     let rows = apply_union(
@@ -439,13 +439,21 @@ impl Aggregation {
                 slot
             }
         };
-        for (accum, (star, arg, _, _)) in self.groups[slot].1.iter_mut().zip(&self.specs) {
+        for (accum, (star, arg, _, distinct)) in self.groups[slot].1.iter_mut().zip(&self.specs) {
             let value = if *star {
                 Value::Null
             } else {
                 eval_expr(arg.as_ref().unwrap(), b, graph, cache)?
             };
-            accum.feed(value, *star);
+            // A bare node variable evaluates to its name, so DISTINCT would
+            // merge same-named nodes. Key it by node identity instead.
+            let node = match arg {
+                Some(Expr::Var(var)) if *distinct && !b.computed.contains_key(var) => {
+                    b.node_vars.get(var).copied()
+                }
+                _ => None,
+            };
+            accum.feed(value, *star, node);
         }
         Ok(())
     }
@@ -630,14 +638,51 @@ fn passes_where(
     }
 }
 
+/// Column an ORDER BY key sorts by. `Ok(None)`: an empty result keeps a bare
+/// variable as one unexpanded column, so `a.name` has no column but there are
+/// no rows to sort. A key that is not in the projection is an error: the rows
+/// no longer carry the value, and ignoring the key returned unsorted rows.
+fn order_key_index(
+    expr: &ReturnExpr,
+    col_index: &HashMap<String, usize>,
+    no_rows: bool,
+) -> Result<Option<usize>, CypherError> {
+    let exact = match expr {
+        ReturnExpr::Prop(var, prop) => format!("{var}.{prop}"),
+        ReturnExpr::Var(v) => v.clone(),
+        ReturnExpr::Star => "*".into(),
+        ReturnExpr::FunCall { name, .. } => format!("{name}(*)"),
+        ReturnExpr::Subscript(e) => subscript_col_name(e),
+    };
+    if let Some(&i) = col_index.get(&exact) {
+        return Ok(Some(i));
+    }
+    // A bare node variable evaluates to its name everywhere else in this engine.
+    if let ReturnExpr::Var(v) = expr {
+        if let Some(&i) = col_index.get(&format!("{v}.name")) {
+            return Ok(Some(i));
+        }
+    }
+    if let ReturnExpr::Prop(var, _) = expr {
+        if no_rows && col_index.contains_key(var.as_str()) {
+            return Ok(None);
+        }
+    }
+    Err(CypherError::Semantic {
+        msg: format!(
+            "ORDER BY '{exact}' is not in the RETURN projection; add it to RETURN (or alias it) to sort by it"
+        ),
+    })
+}
+
 /// ORDER BY stage: no-op when the clause is absent.
 fn apply_order_by(
     order_by: &[OrderItem],
     columns: &[String],
     mut rows: Vec<Vec<Value>>,
-) -> Vec<Vec<Value>> {
+) -> Result<Vec<Vec<Value>>, CypherError> {
     if order_by.is_empty() {
-        return rows;
+        return Ok(rows);
     }
     // Pre-build column index once rather than scanning per comparison.
     let col_index: HashMap<String, usize> = columns
@@ -645,27 +690,29 @@ fn apply_order_by(
         .enumerate()
         .map(|(i, c)| (c.clone(), i))
         .collect();
+    let keys: Vec<(Option<usize>, bool)> = order_by
+        .iter()
+        .map(|oi| {
+            Ok((
+                order_key_index(&oi.expr, &col_index, rows.is_empty())?,
+                oi.desc,
+            ))
+        })
+        .collect::<Result<_, CypherError>>()?;
     rows.sort_by(|a, b| {
-        for oi in order_by {
-            let col_name = match &oi.expr {
-                ReturnExpr::Prop(var, prop) => format!("{var}.{prop}"),
-                ReturnExpr::Var(v) => v.clone(),
-                ReturnExpr::Star => "*".into(),
-                ReturnExpr::FunCall { name, .. } => format!("{name}(*)"),
-                ReturnExpr::Subscript(e) => subscript_col_name(e),
-            };
-            let col_idx = col_index.get(&col_name).copied();
-            let av = col_idx.and_then(|i| a.get(i));
-            let bv = col_idx.and_then(|i| b.get(i));
-            let ord = cmp_values(av, bv);
-            let ord = if oi.desc { ord.reverse() } else { ord };
+        for &(col_idx, desc) in &keys {
+            let ord = cmp_values(
+                col_idx.and_then(|i| a.get(i)),
+                col_idx.and_then(|i| b.get(i)),
+            );
+            let ord = if desc { ord.reverse() } else { ord };
             if ord != std::cmp::Ordering::Equal {
                 return ord;
             }
         }
         std::cmp::Ordering::Equal
     });
-    rows
+    Ok(rows)
 }
 
 /// DISTINCT stage.
@@ -1060,9 +1107,9 @@ fn is_aggregate_fn(name: &str) -> bool {
 /// Evaluate a scalar (non-aggregate) function call. Single dispatch point
 /// shared by WHERE, plain RETURN, and rich-RETURN (WITH group-key) — a new
 /// scalar function is wired here once and all three evaluators pick it up.
-/// Returns `Value::Null` for unknown functions rather than erroring —
-/// matches the OpenCypher convention that missing-data scalars degrade
-/// gracefully (see graph_query rel-type `matches!` path). Supports the three
+/// The parser refuses any other function name (`SCALAR_FUNCTIONS`), so the
+/// `Value::Null` arms below are for a known function applied to an unbound or
+/// wrong-kind variable (missing data), never for an unknown name. Supports the three
 /// functions LLM agents reach for most: `type(r)` → edge rel-type as Str;
 /// `id(n)` → node index as Int; `labels(n)` → single-element list of
 /// node-kind Str.
@@ -1174,7 +1221,9 @@ impl Accumulator {
 
     /// Feed one row's projected value into this accumulator.
     /// `is_count_star`: if true this is `COUNT(*)` — value is ignored, row itself counts.
-    fn feed(&mut self, v: Value, is_count_star: bool) {
+    /// `node`: the node index when the argument is a bare node variable; the
+    /// DISTINCT accumulators key on it instead of on the displayed name.
+    fn feed(&mut self, v: Value, is_count_star: bool, node: Option<u32>) {
         match self {
             Accumulator::Counter(n) => {
                 if is_count_star || !matches!(v, Value::Null) {
@@ -1184,7 +1233,10 @@ impl Accumulator {
             Accumulator::CounterDistinct(seen, key) => {
                 if !matches!(v, Value::Null) {
                     key.clear();
-                    v.write_aggregate_key(key);
+                    match node {
+                        Some(idx) => Value::write_node_key(idx, key),
+                        None => v.write_aggregate_key(key),
+                    }
                     if !seen.contains(key.as_slice()) {
                         seen.insert(key.clone());
                     }
@@ -1238,7 +1290,10 @@ impl Accumulator {
             Accumulator::CollectorDistinct(items, seen, key) => {
                 if !matches!(v, Value::Null) {
                     key.clear();
-                    v.write_aggregate_key(key);
+                    match node {
+                        Some(idx) => Value::write_node_key(idx, key),
+                        None => v.write_aggregate_key(key),
+                    }
                     if !seen.contains(key.as_slice()) {
                         seen.insert(key.clone());
                         items.push(v);
@@ -1295,15 +1350,29 @@ fn exec_match_clause(
     graph: MergedGraph<'_>,
 ) -> Result<Vec<Binding>, CypherError> {
     let mut out = Vec::new();
-    for pat in &mc.patterns {
-        for b in prior {
-            let extended = exec_pattern(pat, b, graph)?;
-            if mc.optional && extended.is_empty() {
-                // Left-join: keep left binding, vars from this pattern stay unset.
-                out.push(b.clone());
-            } else {
-                out.extend(extended);
+    for b in prior {
+        // Comma patterns are one join: each pattern extends the rows the
+        // previous one produced, so a variable shared between them pins both
+        // and unrelated patterns multiply (cartesian product).
+        let joined = match mc.patterns.as_slice() {
+            [only] => exec_pattern(only, b, graph)?,
+            patterns => {
+                let mut rows = vec![b.clone()];
+                for pat in patterns {
+                    let mut next = Vec::new();
+                    for row in &rows {
+                        next.extend(exec_pattern(pat, row, graph)?);
+                    }
+                    rows = next;
+                }
+                rows
             }
+        };
+        if mc.optional && joined.is_empty() {
+            // Left-join: keep left binding, vars from this clause stay unset.
+            out.push(b.clone());
+        } else {
+            out.extend(joined);
         }
     }
     Ok(out)
@@ -1456,12 +1525,11 @@ fn visit_matches(
 ) -> Result<(), CypherError> {
     let mut depth = 0;
     for mc in clauses {
-        depth += 1 + mc
+        depth += mc
             .patterns
             .iter()
-            .map(|pat| pat.rels.len())
-            .max()
-            .unwrap_or(0);
+            .map(|pat| 1 + pat.rels.len())
+            .sum::<usize>();
         if depth > MAX_STREAM_DEPTH {
             let mut bindings = vec![Binding::default()];
             for mc in clauses {
@@ -1476,7 +1544,7 @@ fn visit_matches(
     visit_matches_inner(clauses, graph, emit)
 }
 
-/// Pattern-major order matches materialization, including OPTIONAL null rows.
+/// Row order matches materialization, including OPTIONAL null rows.
 fn visit_matches_inner(
     clauses: &[MatchClause],
     graph: MergedGraph<'_>,
@@ -1485,40 +1553,33 @@ fn visit_matches_inner(
     let Some((mc, prior)) = clauses.split_last() else {
         return emit(&Binding::default());
     };
-    // Retain the prefix once: replaying it for each comma pattern compounds
-    // across clauses even when that prefix produces no bindings.
-    let prefix = if mc.patterns.len() > 1 && !prior.is_empty() {
-        let mut rows = Vec::new();
-        visit_matches_inner(prior, graph, &mut |b| {
-            rows.push(b.clone());
-            Ok(())
+    visit_matches_inner(prior, graph, &mut |base: &Binding| {
+        let mut matched = false;
+        visit_patterns(&mc.patterns, base, graph, &mut |b: &Binding| {
+            matched = true;
+            emit(b)
         })?;
-        Some(rows)
-    } else {
-        None
-    };
-    for pat in &mc.patterns {
-        let mut visit = |base: &Binding| {
-            let mut matched = false;
-            visit_pattern(pat, base, graph, &mut |b| {
-                matched = true;
-                emit(b)
-            })?;
-            if mc.optional && !matched {
-                emit(base)?;
-            }
-            Ok(())
-        };
-        match &prefix {
-            Some(rows) => {
-                for b in rows {
-                    visit(b)?;
-                }
-            }
-            None => visit_matches_inner(prior, graph, &mut visit)?,
+        if mc.optional && !matched {
+            emit(base)?;
         }
+        Ok(())
+    })
+}
+
+/// One MATCH clause's comma patterns as a join: every row of a pattern is the
+/// base of the next, mirroring `exec_match_clause`.
+fn visit_patterns(
+    patterns: &[Pattern],
+    base: &Binding,
+    graph: MergedGraph<'_>,
+    emit: &mut dyn FnMut(&Binding) -> Result<(), CypherError>,
+) -> Result<(), CypherError> {
+    match patterns.split_first() {
+        None => emit(base),
+        Some((pat, rest)) => visit_pattern(pat, base, graph, &mut |b| {
+            visit_patterns(rest, b, graph, emit)
+        }),
     }
-    Ok(())
 }
 
 #[inline]
@@ -1741,8 +1802,11 @@ fn exec_pattern(
     Ok(frontier.into_iter().map(|(b, _)| b).collect())
 }
 
-/// BFS for variable-length relationships `*min..max`.
-/// Returns `(target_node_idx, last_edge_idx_option)` pairs reachable within depth range.
+/// BFS for variable-length relationships `*min..max`, `min <= 1` (the parser
+/// refuses a larger minimum). Returns `(target_node_idx, last_edge_idx_option)`
+/// pairs reachable within the depth range. For a node other than `start`, a
+/// shortest walk is a path, so reachability equals "a trail exists". `start`
+/// itself needs a closed trail, checked by `closed_trail_exists`.
 fn bfs_var_len(
     start: u32,
     rel: &RelPat,
@@ -1772,7 +1836,82 @@ fn bfs_var_len(
             }
         });
     }
+    if min == 1
+        && !out.iter().any(|&(n, _)| n == start)
+        && closed_trail_exists(start, rel, graph, max)
+    {
+        out.push((start, None));
+    }
     out
+}
+
+/// Is there a trail (no relationship repeated) of 1..=`max` hops from `start`
+/// back to `start`? A node-visited BFS never revisits `start`, so `*1..n`
+/// would miss a cycle or a self-loop. The DFS only enters nodes that can still
+/// reach `start` in the hops left (`back` holds their distances), so an acyclic
+/// neighbourhood costs one reverse BFS and no forward search.
+fn closed_trail_exists(start: u32, rel: &RelPat, graph: MergedGraph<'_>, max: u32) -> bool {
+    if max == 0 {
+        return false;
+    }
+    let reverse = RelPat {
+        dir: invert_dir(rel.dir),
+        ..rel.clone()
+    };
+    let mut back: HashMap<u32, u32> = HashMap::from([(start, 0)]);
+    let mut frontier = vec![start];
+    for depth in 1..max {
+        let mut next = Vec::new();
+        for &n in &frontier {
+            walk_rel(n, &reverse, graph, |src, _| {
+                if let std::collections::hash_map::Entry::Vacant(e) = back.entry(src) {
+                    e.insert(depth);
+                    next.push(src);
+                }
+            });
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+
+    struct Search<'a> {
+        start: u32,
+        rel: &'a RelPat,
+        graph: MergedGraph<'a>,
+        max: u32,
+        back: HashMap<u32, u32>,
+    }
+    fn dfs(cx: &Search<'_>, node: u32, hops: u32, used: &mut Vec<u32>) -> bool {
+        let mut steps = Vec::new();
+        walk_rel(node, cx.rel, cx.graph, |tgt, edge| steps.push((tgt, edge)));
+        for (tgt, edge) in steps {
+            if used.contains(&edge) {
+                continue;
+            }
+            if tgt == cx.start {
+                return true;
+            }
+            let left = cx.max - (hops + 1);
+            if cx.back.get(&tgt).is_some_and(|&d| d <= left) {
+                used.push(edge);
+                if dfs(cx, tgt, hops + 1, used) {
+                    return true;
+                }
+                used.pop();
+            }
+        }
+        false
+    }
+    let cx = Search {
+        start,
+        rel,
+        graph,
+        max,
+        back,
+    };
+    dfs(&cx, start, 0, &mut Vec::new())
 }
 
 /// Merged-space node filter: `node_idx` may be a base or virtual index.
@@ -2142,13 +2281,18 @@ fn pattern_exists(
         let rel = &pattern.rels[0];
         let bound0 = n0.var.as_deref().and_then(|v| b.node_vars.get(v)).copied();
         let bound1 = n1.var.as_deref().and_then(|v| b.node_vars.get(v)).copied();
-        let (anchor, target_pat, dir) = match (bound0, bound1) {
-            (Some(idx), _) => (idx, n1, rel.dir),
-            (None, Some(idx)) => (idx, n0, invert_dir(rel.dir)),
+        // `pinned_target`: the far endpoint is bound too, so the edge must reach
+        // exactly that node, not just any node the far pattern accepts.
+        let (anchor, anchor_pat, target_pat, pinned_target, dir) = match (bound0, bound1) {
+            (Some(idx), far) => (idx, n0, n1, far, rel.dir),
+            (None, Some(idx)) => (idx, n1, n0, None, invert_dir(rel.dir)),
             (None, None) => {
                 return Ok(edge_scan_exists(n0, n1, rel, graph));
             }
         };
+        if !node_matches(anchor, anchor_pat, graph) {
+            return Ok(false);
+        }
         let probe = RelPat {
             var: rel.var.clone(),
             types: rel.types.clone(),
@@ -2160,7 +2304,7 @@ fn pattern_exists(
             if found {
                 return;
             }
-            if node_matches(tgt, target_pat, graph) {
+            if pinned_target.is_none_or(|p| p == tgt) && node_matches(tgt, target_pat, graph) {
                 found = true;
             }
         });

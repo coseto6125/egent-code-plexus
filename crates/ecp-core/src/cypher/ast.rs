@@ -91,9 +91,9 @@ pub enum Expr {
     EndsWith(Box<Expr>, String),
     Contains(Box<Expr>, String),
     /// OpenCypher label-test predicate: `n:Label` or `n:A|B|C`.
-    /// Labels are kept as raw strings (not `NodeKind`) so unknown labels
-    /// fall through to `false` instead of erroring at parse time — matches
-    /// how MATCH pattern handles unknown kinds.
+    /// Labels are kept as kind-name strings (not `NodeKind`) so eval is a plain
+    /// per-row string compare. The parser resolves every label (category labels
+    /// expand to member kinds) and refuses an unknown one, as the MATCH pattern does.
     HasLabel(String, Vec<String>),
     /// `EXISTS { pattern }` / `NOT EXISTS (pattern)` WHERE predicate.
     /// `negated` folds a leading NOT so the executor short-circuits on the
