@@ -60,12 +60,130 @@ fn extract_string_args(s: &str) -> Vec<String> {
     args
 }
 
-/// The HTTP verb a decorator names, read from its name token only: the path
-/// and keyword arguments may contain verb substrings (`@PostMapping("/get-token")`,
-/// `@RequestMapping("/api/target")`). Class-level `@RequestMapping` without an
-/// explicit `RequestMethod.X` names no verb, so it yields `None`.
-fn decorator_verb(decorator: &str) -> Option<&'static str> {
-    let trimmed = decorator.trim().trim_start_matches(['@', '[']).trim_start();
+/// The text after `method =` / `methods:` in a decorator's argument list.
+/// The scan skips quoted spans, so a path such as `"/method=get"` never
+/// matches, and requires the key to start an argument (after `(` or `,`), so
+/// `RequestMethod.method` cannot match either.
+fn method_argument(decorator: &str) -> Option<&str> {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut prev = None;
+    let mut chars = decorator.char_indices().peekable();
+    while let Some((start, c)) = chars.next() {
+        if let Some(q) = quote {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, _) if c == q => quote = None,
+                _ => {}
+            }
+            continue;
+        }
+        if c == '"' || c == '\'' {
+            quote = Some(c);
+        } else if c.is_alphabetic() || c == '_' {
+            let mut end = start + c.len_utf8();
+            while let Some(&(i, next)) = chars.peek() {
+                if !(next.is_alphanumeric() || next == '_') {
+                    break;
+                }
+                end = i + next.len_utf8();
+                chars.next();
+            }
+            let key = &decorator[start..end];
+            if matches!(prev, Some('(' | ','))
+                && (key.eq_ignore_ascii_case("method") || key.eq_ignore_ascii_case("methods"))
+            {
+                let rest = decorator[end..].trim_start();
+                if let Some(value) = rest.strip_prefix(['=', ':']) {
+                    return Some(value);
+                }
+            }
+            prev = Some('a');
+            continue;
+        }
+        if !c.is_whitespace() {
+            prev = Some(c);
+        }
+    }
+    None
+}
+
+/// The verbs in one `method` argument value, in source order: identifiers
+/// (`RequestMethod.GET`, `HttpMethod.Post`) and quoted strings (`'GET'`),
+/// alone or inside `[..]` / `{..}`. The value ends at the first `,` or
+/// unmatched `)` outside brackets.
+fn verbs_in_method_value(value: &str) -> Vec<&'static str> {
+    fn flush(token: &mut String, verbs: &mut Vec<&'static str>) {
+        let name = token.rsplit('.').next().unwrap_or("").to_lowercase();
+        token.clear();
+        if let Some(verb) = HTTP_METHODS.iter().copied().find(|&m| m == name) {
+            if !verbs.contains(&verb) {
+                verbs.push(verb);
+            }
+        }
+    }
+
+    let mut verbs = Vec::new();
+    let mut token = String::new();
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for c in value.chars() {
+        if let Some(q) = quote {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, _) if c == q => {
+                    quote = None;
+                    flush(&mut token, &mut verbs);
+                }
+                _ => token.push(c),
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => {
+                flush(&mut token, &mut verbs);
+                quote = Some(c);
+            }
+            '[' | '{' | '(' => {
+                flush(&mut token, &mut verbs);
+                depth += 1;
+            }
+            ']' | '}' | ')' => {
+                flush(&mut token, &mut verbs);
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+            }
+            ',' => {
+                flush(&mut token, &mut verbs);
+                if depth == 0 {
+                    break;
+                }
+            }
+            c if c.is_alphanumeric() || c == '_' || c == '.' => token.push(c),
+            _ => flush(&mut token, &mut verbs),
+        }
+    }
+    flush(&mut token, &mut verbs);
+    verbs
+}
+
+/// The HTTP verbs a decorator names, in source order. A verb-named decorator
+/// (`@GetMapping`, `[HttpPost]`, `@router.delete`) reads it from the name token
+/// only: the path and keyword arguments may contain verb substrings
+/// (`@PostMapping("/get-token")`). A generic route decorator (`@RequestMapping`,
+/// Flask `@app.route`, Symfony `#[Route]`) reads it from its `method` /
+/// `methods` argument, outside string literals; without one it names no verb,
+/// so a class-level `@RequestMapping("/api")` yields none.
+fn decorator_verbs(decorator: &str) -> Vec<&'static str> {
+    let trimmed = decorator
+        .trim()
+        .trim_start_matches(['#', '@', '['])
+        .trim_start();
     let name_end = trimmed
         .find(|c: char| c == '(' || c == ']' || c.is_whitespace())
         .unwrap_or(trimmed.len());
@@ -74,29 +192,46 @@ fn decorator_verb(decorator: &str) -> Option<&'static str> {
         .next()
         .unwrap_or("")
         .to_lowercase();
-    if name == "requestmapping" {
-        let lower = decorator.to_lowercase();
-        let after = &lower[lower.find("requestmethod.")? + "requestmethod.".len()..];
-        let end = after
-            .find(|c: char| !c.is_ascii_alphabetic())
-            .unwrap_or(after.len());
-        return HTTP_METHODS.iter().copied().find(|&m| m == &after[..end]);
+    if matches!(name.as_str(), "requestmapping" | "route" | "api_route") {
+        return method_argument(trimmed)
+            .map(verbs_in_method_value)
+            .unwrap_or_default();
     }
     let verb = name.strip_prefix("http").unwrap_or(&name);
     let verb = verb.strip_suffix("mapping").unwrap_or(verb);
-    HTTP_METHODS.iter().copied().find(|&m| m == verb)
+    HTTP_METHODS
+        .iter()
+        .copied()
+        .find(|&m| m == verb)
+        .into_iter()
+        .collect()
 }
 
+/// One route per verb a decorator names (`method = {GET, POST}` is two).
+pub fn detect_all_from_decorator(decorator: &str) -> Vec<DetectedRoute> {
+    let verbs = decorator_verbs(decorator);
+    if verbs.is_empty() {
+        return Vec::new();
+    }
+    let Some(path) = extract_string_args(decorator)
+        .into_iter()
+        .find(|s| looks_like_path(s))
+    else {
+        return Vec::new();
+    };
+    verbs
+        .into_iter()
+        .map(|verb| DetectedRoute {
+            method: verb.to_uppercase(),
+            path: path.clone(),
+        })
+        .collect()
+}
+
+/// The first route [`detect_all_from_decorator`] finds. Both callers
+/// (`builder.rs` pass 1.5, `entry_points.rs`) take one route per decorator.
 pub fn detect_from_decorator(decorator: &str) -> Option<DetectedRoute> {
-    let method = decorator_verb(decorator)?;
-
-    let string_args = extract_string_args(decorator);
-    let path = string_args.iter().find(|s| looks_like_path(s))?;
-
-    Some(DetectedRoute {
-        method: method.to_uppercase(),
-        path: path.clone(),
-    })
+    detect_all_from_decorator(decorator).into_iter().next()
 }
 
 pub fn detect_from_call(raw: &RawRoute) -> Option<DetectedRoute> {
@@ -405,6 +540,134 @@ mod tests {
     #[test]
     fn detect_from_decorator_non_route_decorator_with_verb_in_path_yields_none() {
         assert_eq!(dec("@Autowired(\"/get\")"), None);
+    }
+
+    // -- one case per decorator style this function serves ---------------------
+    //
+    // `detect_from_decorator` serves Java/Kotlin Spring, C# attributes, PHP
+    // attributes, TypeScript NestJS and Python decorators (the callers read
+    // `RawNode.decorators`). Go, Rust, Ruby, Swift, C, C++ and Dart route
+    // detection goes through `detect_from_call`, not this function.
+
+    #[test]
+    fn test_detect_from_decorator_spring_request_mapping_verb_word_in_path_keeps_method() {
+        assert_eq!(
+            dec("@RequestMapping(value=\"/RequestMethod.GET\", method=RequestMethod.POST)"),
+            some("POST", "/RequestMethod.GET")
+        );
+        assert_eq!(
+            dec("@RequestMapping(method = RequestMethod.post, value = \"/post\")"),
+            some("POST", "/post")
+        );
+    }
+
+    #[test]
+    fn test_detect_from_decorator_spring_method_array_yields_one_route_per_verb() {
+        let routes = detect_all_from_decorator(
+            "@RequestMapping(value = \"/x\", method = {RequestMethod.GET, RequestMethod.POST})",
+        );
+        let got: Vec<_> = routes
+            .iter()
+            .map(|r| (r.method.as_str(), r.path.as_str()))
+            .collect();
+        assert_eq!(got, [("GET", "/x"), ("POST", "/x")]);
+        assert_eq!(
+            dec(
+                "@RequestMapping(value = \"/x\", method = {RequestMethod.GET, RequestMethod.POST})"
+            ),
+            some("GET", "/x")
+        );
+    }
+
+    #[test]
+    fn test_detect_from_decorator_kotlin_method_array_and_get_mapping_verb_word_in_path() {
+        assert_eq!(
+            dec("@RequestMapping(\"/x\", method = [RequestMethod.DELETE])"),
+            some("DELETE", "/x")
+        );
+        assert_eq!(
+            dec("@GetMapping(\"/get-token\")"),
+            some("GET", "/get-token")
+        );
+        assert_eq!(
+            dec("@GetMapping(value = [\"/post\"])"),
+            some("GET", "/post")
+        );
+    }
+
+    #[test]
+    fn test_detect_from_decorator_csharp_http_attribute_verb_word_in_path_keeps_method() {
+        assert_eq!(dec("[HttpGet(\"/x\")]"), some("GET", "/x"));
+        assert_eq!(dec("[HttpDelete(\"/post\")]"), some("DELETE", "/post"));
+        assert_eq!(dec("[HttpGet(\"/get-token\")]"), some("GET", "/get-token"));
+    }
+
+    #[test]
+    fn test_detect_from_decorator_php_symfony_attribute_reads_methods_argument() {
+        assert_eq!(dec("#[Route('/x', methods: ['GET'])]"), some("GET", "/x"));
+        assert_eq!(dec("#[Route(\"/x\", methods: \"PUT\")]"), some("PUT", "/x"));
+        assert_eq!(
+            dec("#[Route('/x', name: 'x', methods: ['post', 'GET'])]"),
+            some("POST", "/x")
+        );
+        let verbs: Vec<_> = detect_all_from_decorator("#[Route('/x', methods: ['GET', 'HEAD'])]")
+            .into_iter()
+            .map(|r| r.method)
+            .collect();
+        assert_eq!(verbs, ["GET", "HEAD"]);
+    }
+
+    #[test]
+    fn test_detect_from_decorator_php_symfony_attribute_verb_word_in_path_or_empty_methods() {
+        assert_eq!(
+            dec("#[Route('/get-token', methods: ['POST'])]"),
+            some("POST", "/get-token")
+        );
+        assert_eq!(
+            dec("#[Route('/post', methods: ['DELETE'])]"),
+            some("DELETE", "/post")
+        );
+        assert_eq!(dec("#[Route('/get-token')]"), None);
+        assert_eq!(dec("#[Route('/get-token', methods: [])]"), None);
+        assert_eq!(dec("#[Route('/methods: GET')]"), None);
+    }
+
+    #[test]
+    fn test_detect_from_decorator_nestjs_verb_word_in_path_keeps_method() {
+        assert_eq!(dec("@Get('/x')"), some("GET", "/x"));
+        assert_eq!(dec("@Get('/post')"), some("GET", "/post"));
+        assert_eq!(dec("@Post('/get-token')"), some("POST", "/get-token"));
+    }
+
+    #[test]
+    fn test_detect_from_decorator_python_shorthand_and_route_methods() {
+        assert_eq!(dec("@app.get(\"/x\")"), some("GET", "/x"));
+        assert_eq!(dec("@app.get(\"/post\")"), some("GET", "/post"));
+        assert_eq!(
+            dec("@app.route(\"/x\", methods=[\"POST\"])"),
+            some("POST", "/x")
+        );
+        assert_eq!(
+            dec("@app.route('/get-token', methods=['PUT'])"),
+            some("PUT", "/get-token")
+        );
+        assert_eq!(dec("@app.route(\"/get-token\")"), None);
+        assert_eq!(dec("@app.route(\"/x\", methods=[])"), None);
+    }
+
+    #[test]
+    fn test_detect_from_decorator_escaped_quote_and_bare_name_edges() {
+        // Verb only: path extraction does not honour escapes, and this test
+        // must not freeze that.
+        assert_eq!(
+            decorator_verbs(
+                "@RequestMapping(value=\"/a\\\"method=GET\", method=RequestMethod.PUT)"
+            ),
+            ["put"]
+        );
+        assert_eq!(dec("@RequestMapping"), None);
+        assert_eq!(dec("#[Route]"), None);
+        assert_eq!(dec("@RequestMapping(method)"), None);
     }
 
     // -- lax helper: per-framework bare-path support -------------------------

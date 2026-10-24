@@ -204,6 +204,30 @@ def _git_head(repo: Path) -> str | None:
     return proc.stdout.strip() if proc.returncode == 0 else None
 
 
+def _restore_file(
+    target: Path, original: bytes, written: bytes, times_ns: tuple[int, int]
+) -> bool:
+    """Put `original` back unless the file no longer holds what the script wrote.
+
+    A save by the user (or a deletion) while the benchmark runs is newer than
+    the script's copy, so the file stays as it is and a warning names it.
+    """
+    try:
+        current = target.read_bytes()
+    except OSError as e:
+        print(f"warning: {target} left as is, cannot read it: {e}", file=sys.stderr)
+        return False
+    if current != written:
+        print(
+            f"warning: {target} changed while the benchmark ran; not restoring it",
+            file=sys.stderr,
+        )
+        return False
+    target.write_bytes(original)
+    os.utime(target, ns=times_ns)
+    return True
+
+
 def _bench_dirty(
     binary: Path, repo: Path, rel_file: str, query: str, mode: str | None, append: str, runs: int
 ) -> list[Sample]:
@@ -214,7 +238,8 @@ def _bench_dirty(
     later query in that same session and dirty state; (d) the dirty state with
     every session variable cleared (the no-session case). Pair 0 is a discarded
     warm-up. The file's bytes and mtime are restored before every pair and on
-    any exit, so git sees the tree clean again.
+    any exit, so git sees the tree clean again; a file the user changed or
+    deleted meanwhile is left alone with a warning.
     """
     target = repo / rel_file
     original = target.read_bytes()
@@ -232,19 +257,33 @@ def _bench_dirty(
     samples = [Sample(name=name, cmd=cmd, cwd=str(repo)) for name in phases]
     tag = f"{os.getpid()}-{time.time_ns()}"
 
-    def restore() -> None:
-        target.write_bytes(original)
-        os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    # What the script itself last put on disk: a save by the user in between
+    # makes the file differ, and `_restore_file` then leaves it alone.
+    written = original
+    abandoned = False
+
+    def restore() -> bool:
+        nonlocal written, abandoned
+        if abandoned:
+            return False
+        if not _restore_file(target, original, written, (stat.st_atime_ns, stat.st_mtime_ns)):
+            abandoned = True
+            return False
+        written = original
+        return True
 
     try:
         for i in range(runs + 1):
-            restore()
+            if not restore():
+                samples[0].err = f"{rel_file} changed during the run; benchmark stopped"
+                return samples
             clean_sid = f"bench-clean-{tag}-{i}"
             dirty_sid = f"bench-dirty-{tag}-{i}"
             pair: list[float] = []
             for phase, sid in enumerate((clean_sid, dirty_sid, dirty_sid, None)):
                 if phase == 1:
                     target.write_bytes(edited)
+                    written = edited
                 elapsed, rc, _out, stderr = _run(cmd, repo, env=_session_env(sid))
                 if rc != 0:
                     tail = stderr.strip().splitlines()[-1] if stderr.strip() else f"exit {rc}"
@@ -258,6 +297,15 @@ def _bench_dirty(
     finally:
         restore()
     return samples
+
+
+def _dirty_exit_code(samples: list[Sample], dirty: object) -> int:
+    """0 only when every phase has runs and no round recorded an error.
+
+    A failure in a later round keeps the runs of the rounds before it, so
+    "every sample has a run" alone would report success after a failed run.
+    """
+    return 0 if dirty and all(s.runs for s in samples) and not any(s.err for s in samples) else 3
 
 
 def _print_dirty_deltas(samples: list[Sample]) -> None:
@@ -510,7 +558,7 @@ def main() -> int:
             payload["samples"] = [asdict(s) for s in samples]
             args.json.write_text(json.dumps(payload, indent=2))
             print(f"\n→ wrote {args.json}")
-        return 0 if dirty and all(s.runs for s in samples) else 3
+        return _dirty_exit_code(samples, dirty)
     if not args.repo.is_dir():
         print(f"error: repo {args.repo} not found", file=sys.stderr)
         return 1
@@ -788,7 +836,7 @@ def main() -> int:
         args.json.write_text(json.dumps(payload, indent=2))
         print(f"\n→ wrote {args.json}")
 
-    return 0 if all(s.runs for s in samples) else 3
+    return 0 if all(s.runs for s in samples) and not any(s.err for s in samples) else 3
 
 
 if __name__ == "__main__":

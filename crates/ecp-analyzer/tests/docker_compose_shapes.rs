@@ -50,6 +50,34 @@ fn test_build_mapping_imports_context_only() {
 }
 
 #[test]
+fn test_build_flow_mapping_imports_context_like_block_form() {
+    let flow =
+        parse("services:\n  web:\n    build: {context: ./app, dockerfile: Dockerfile.dev}\n");
+    let block = parse(
+        "services:\n  web:\n    build:\n      context: ./app\n      dockerfile: Dockerfile.dev\n",
+    );
+    let scalar = parse("services:\n  web:\n    build: ./app\n");
+    assert_eq!(build_sources(&flow), vec!["./app"]);
+    assert_eq!(build_sources(&flow), build_sources(&block));
+    assert_eq!(build_sources(&flow), build_sources(&scalar));
+    assert_eq!(unread(&flow), 0);
+}
+
+#[test]
+fn test_build_flow_mapping_without_context_is_blind_spot_not_raw_text_import() {
+    let g = parse("services:\n  web:\n    build: {dockerfile: Dockerfile.dev}\n");
+    assert!(build_sources(&g).is_empty(), "{:?}", g.imports);
+    assert_eq!(unread(&g), 1);
+}
+
+#[test]
+fn test_depends_on_flow_mapping_reads_service_names() {
+    let g = parse("services:\n  web:\n    depends_on: {db: {condition: service_healthy}}\n");
+    assert_eq!(calls_of(&g, "web"), ["db"]);
+    assert_eq!(unread(&g), 0);
+}
+
+#[test]
 fn test_build_mapping_without_context_is_blind_spot_not_raw_text_import() {
     let g = parse("services:\n  web:\n    build:\n      dockerfile: Dockerfile.dev\n");
     assert!(build_sources(&g).is_empty(), "{:?}", g.imports);

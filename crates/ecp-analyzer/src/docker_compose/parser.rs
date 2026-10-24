@@ -42,25 +42,28 @@ fn node_text<'s>(node: Node, source: &'s [u8]) -> &'s str {
     std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).unwrap_or("")
 }
 
-/// Walk a `block_mapping` and collect (key_text, value_node) pairs.
-/// Returns an empty vec if the node is not a block_mapping.
+/// Walk a block or flow mapping (`{context: ./app}`) and collect
+/// (key_node, value_node) pairs. Returns an empty vec for any other node.
 fn mapping_pairs<'tree>(node: Node<'tree>) -> Vec<(Node<'tree>, Node<'tree>)> {
-    let target = if node.kind() == "block_mapping" {
-        node
-    } else if node.kind() == "block_node" {
-        // block_node wraps a block_mapping
+    // block_node / flow_node wrap the mapping itself
+    let target = if matches!(node.kind(), "block_node" | "flow_node") {
         match node.child(0) {
-            Some(c) if c.kind() == "block_mapping" => c,
-            _ => return vec![],
+            Some(c) => c,
+            None => return vec![],
         }
     } else {
-        return vec![];
+        node
+    };
+    let pair_kind = match target.kind() {
+        "block_mapping" => "block_mapping_pair",
+        "flow_mapping" => "flow_pair",
+        _ => return vec![],
     };
 
     let mut pairs = Vec::new();
     let mut cursor = target.walk();
     for child in target.children(&mut cursor) {
-        if child.kind() == "block_mapping_pair" {
+        if child.kind() == pair_kind {
             let key = child.child_by_field_name("key");
             let val = child.child_by_field_name("value");
             if let (Some(k), Some(v)) = (key, val) {
