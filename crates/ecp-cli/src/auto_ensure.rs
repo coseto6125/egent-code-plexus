@@ -12,6 +12,11 @@
 //!   then L1 overlay fragment write under `<repo>/sessions/<sid>/`.
 //! - Ready → noop.
 
+use ecp_core::analyzer::pipeline::AnalyzerPipeline;
+use ecp_core::contracts::dirty_event::{
+    ClassifiedPath, DirtyEvent, DirtySet, DuplicatePath, PathClass, RepoPath, SkipReason,
+};
+use ecp_core::contracts::routing::{FileRouter, SizeCap};
 use ecp_core::session::SessionMeta;
 use ignore::WalkBuilder;
 use std::collections::HashMap;
@@ -36,6 +41,9 @@ pub mod test_counters {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     pub static REANALYZE_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+    /// The number of paths `ensure_fresh` handed to `reanalyze_files`,
+    /// summed over calls: shows that "other" paths never reach the parse.
+    pub static REANALYZE_PATH_COUNT: AtomicUsize = AtomicUsize::new(0);
     pub static BUILD_L2_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
     /// FU-2026-05-23-047: incremented every time `ensure_fresh` synchronously
     /// joins the background tantivy writer because `~/.ecp/` resolves to a
@@ -66,6 +74,7 @@ pub mod test_counters {
 
     pub fn reset() {
         REANALYZE_CALL_COUNT.store(0, Ordering::Relaxed);
+        REANALYZE_PATH_COUNT.store(0, Ordering::Relaxed);
         BUILD_L2_CALL_COUNT.store(0, Ordering::Relaxed);
         TANTIVY_JOIN_COUNT.store(0, Ordering::Relaxed);
         TANTIVY_EXIT_JOIN_COUNT.store(0, Ordering::Relaxed);
@@ -77,6 +86,10 @@ pub mod test_counters {
 
     pub fn reanalyze_calls() -> usize {
         REANALYZE_CALL_COUNT.load(Ordering::Relaxed)
+    }
+
+    pub fn reanalyze_paths() -> usize {
+        REANALYZE_PATH_COUNT.load(Ordering::Relaxed)
     }
 
     pub fn build_l2_calls() -> usize {
@@ -113,15 +126,16 @@ pub enum EnsureResult {
     /// (which drops the old graph.bin) rather than an incremental L1 overlay,
     /// because the overlay path leaves stale-convention nodes in place.
     /// `dirty_files`: when the staleness was decided by the git porcelain
-    /// shortcut, the exact changed paths it already parsed (absolute) — lets
-    /// `ensure_fresh` skip the whole-tree mtime walk in `collect_dirty_files`
-    /// (O(changed) vs O(tree): ~0.86s → ~0.02s on a 14k-file repo). `None` when
-    /// the decision came from the mtime walk (no path list available) or a
-    /// full-rebuild drift (dirty set is irrelevant).
+    /// shortcut, the classified dirty set it already parsed, "other" events
+    /// and ecp's own artifacts dropped — lets `ensure_fresh` skip the
+    /// whole-tree mtime walk in `collect_dirty_files` (O(changed) vs O(tree):
+    /// ~0.86s → ~0.02s on a 14k-file repo). `None` when the decision came
+    /// from the mtime walk (no path list available) or a full-rebuild drift
+    /// (dirty set is irrelevant).
     Stale {
         age_seconds: u64,
         needs_full_rebuild: bool,
-        dirty_files: Option<Vec<PathBuf>>,
+        dirty_files: Option<DirtySet<ClassifiedPath>>,
     },
 }
 
@@ -396,12 +410,15 @@ fn slot_built_below_root(graph_path: &Path, worktree_root: &Path) -> bool {
 
 /// Try to decide Ready vs Stale via the cheap git fingerprint.
 /// - Returns `Some(Ready)` when HEAD matches the sidecar or the commit dir
-///   name AND `git status --porcelain -uall` is empty.
+///   name AND `git status --porcelain -uall` names no change but "other"
+///   paths and ecp's own artifacts.
 /// - Returns `Some(Stale)` when HEAD matches but the working tree has
-///   uncommitted changes (skip walk; let L1 overlay collect dirty files).
+///   uncommitted source or config changes (skip walk; let L1 overlay collect
+///   dirty files).
 /// - Returns `None` when the fingerprint check is inconclusive (not a git
-///   repo, HEAD matches neither the sidecar nor the commit dir, or git
-///   command failed) so the caller falls back to the full mtime walk.
+///   repo, HEAD matches neither the sidecar nor the commit dir, git command
+///   failed, or its output is not porcelain v1) so the caller falls back to
+///   the full mtime walk.
 fn git_fingerprint_shortcut(
     graph_path: &Path,
     worktree_root: &Path,
@@ -430,19 +447,41 @@ fn git_fingerprint_shortcut(
     if porcelain.stdout.is_empty() {
         return Some(EnsureResult::Ready);
     }
-    // git already listed the exact changed paths here — carry them so
-    // ensure_fresh skips the whole-tree mtime walk in collect_dirty_files.
+    // Output that is not porcelain v1 proves nothing about the tree: take
+    // the mtime walk, as for a failed status.
+    let dirty = DirtySet::from_porcelain_z(&porcelain.stdout).ok()?;
+    let unreadable = dirty
+        .skipped()
+        .iter()
+        .filter(|entry| entry.reason != SkipReason::Directory)
+        .count();
+    if unreadable > 0 {
+        eprintln!(
+            "dirty.skipped entries={unreadable} (paths git printed that are not UTF-8 or not repo-relative)"
+        );
+    }
+    // "Other" events leave before any syscall: 12,000 untracked `.csv` files
+    // must not send every query down the refresh path (freshness F6).
+    let mut dirty = classify_dirty(dirty).without_other();
+    if dirty.events().is_empty() {
+        return Some(EnsureResult::Ready);
+    }
     // ecp's own artifacts are filtered out (mirroring `any_source_newer_than`):
     // with `--untracked-files=all` they would otherwise keep porcelain
     // non-empty forever and downgrade every query from the Ready shortcut to
-    // the Stale/reanalyze path.
+    // the Stale/reanalyze path. A rename keeps its removed half's tombstone,
+    // so only a lone worktree half can be an artifact.
     let home_ecp_canonical = fs::canonicalize(&home_ecp).ok();
     let graph_canonical = fs::canonicalize(graph_path).ok();
-    let dirty_files: Vec<PathBuf> = parse_porcelain_paths(&porcelain.stdout, worktree_root)
-        .into_iter()
-        .filter(|p| !is_ecp_artifact(p, graph_canonical.as_deref(), home_ecp_canonical.as_deref()))
-        .collect();
-    if dirty_files.is_empty() {
+    dirty.retain(|event| match event {
+        DirtyEvent::Added(half) | DirtyEvent::Modified(half) => !is_ecp_artifact(
+            &worktree_root.join(half.path.as_str()),
+            graph_canonical.as_deref(),
+            home_ecp_canonical.as_deref(),
+        ),
+        DirtyEvent::Deleted(_) | DirtyEvent::Renamed { .. } | DirtyEvent::Unmerged(_) => true,
+    });
+    if dirty.events().is_empty() {
         return Some(EnsureResult::Ready);
     }
     let age = SystemTime::now()
@@ -452,7 +491,20 @@ fn git_fingerprint_shortcut(
     Some(EnsureResult::Stale {
         age_seconds: age,
         needs_full_rebuild: false,
-        dirty_files: Some(dirty_files),
+        dirty_files: Some(dirty),
+    })
+}
+
+/// C5 routing, or the provider table `reanalyze_files` dispatches on today
+/// (C3 open point 2): the overlay keeps every input it parses today, so the
+/// builder fingerprint stays. Area 6 deletes the second term. No syscall.
+fn classify_dirty(dirty: DirtySet) -> DirtySet<ClassifiedPath> {
+    const ROUTER: FileRouter = FileRouter::new(SizeCap::BUILT_IN);
+    dirty.classify_with(|path| {
+        let class = PathClass::classify(path, &ROUTER, None);
+        let legacy_source = !class.is_source()
+            && AnalyzerPipeline::provider_name_for_path(Path::new(path.as_str())).is_some();
+        class.union(PathClass::new(legacy_source, false))
     })
 }
 
@@ -485,29 +537,6 @@ pub(crate) fn is_ecp_artifact(
             (Some(pf), Some(gf)) => pf.starts_with(gf),
             _ => false,
         }
-}
-
-/// Parse `git status --porcelain -z` stdout into absolute paths under `root`.
-///
-/// In `-z` mode entries are NUL-terminated and paths are NOT quoted, so a
-/// filename with spaces or non-ASCII bytes round-trips intact. A status entry
-/// is `XY <path>` (2-char code + space); a rename emits the new path in that
-/// entry and the old path as a separate trailing NUL segment with no status
-/// prefix. We keep every segment that carries the `XY ` prefix (the new path
-/// for renames — the one that now exists on disk) and skip prefix-less old-path
-/// segments. Any spurious path still degrades to "not reanalyzed" because
-/// `reanalyze_files` skips paths that don't exist on disk.
-pub(crate) fn parse_porcelain_paths(stdout: &[u8], root: &Path) -> Vec<PathBuf> {
-    stdout
-        .split(|&b| b == 0)
-        // Keep only segments shaped like `XY <path>`: ≥4 bytes with a space in
-        // the status separator slot. Prefix-less rename old-paths fail this and
-        // are dropped.
-        .filter(|seg| seg.len() >= 4 && seg[2] == b' ')
-        .map(|seg| String::from_utf8_lossy(&seg[3..]).into_owned())
-        .filter(|p| !p.is_empty())
-        .map(|p| root.join(p))
-        .collect()
 }
 
 /// Ensure the graph exists and is fresher than the working tree.
@@ -611,23 +640,40 @@ fn ensure_fresh_with_rebuild(
                 // Prefer the dirty set git already produced in the porcelain
                 // shortcut (O(changed)); only fall back to the whole-tree mtime
                 // walk when the staleness came from the mtime path itself.
-                let dirty_abs = match dirty_files {
-                    Some(paths) => paths,
+                let dirty = match dirty_files {
+                    Some(dirty) => dirty,
                     None => {
                         let graph_mtime = fs::metadata(graph_path)
                             .and_then(|m| m.modified())
                             .unwrap_or(std::time::UNIX_EPOCH);
-                        collect_dirty_files(graph_path, worktree_root, graph_mtime)
-                            .unwrap_or_default()
+                        let walked = collect_dirty_files(graph_path, worktree_root, graph_mtime)
+                            .unwrap_or_default();
+                        // Forward slashes throughout: the overlay writer
+                        // normalizes manifest keys to `/`, so the gate's
+                        // lookups must match on Windows too.
+                        let events: Vec<_> = walked
+                            .iter()
+                            .filter_map(|p| p.strip_prefix(worktree_root).ok()?.to_str())
+                            .filter_map(|rel| RepoPath::new(rel.replace('\\', "/")).ok())
+                            .map(DirtyEvent::Modified)
+                            .collect();
+                        let walked =
+                            DirtySet::from_events(events).map_err(|DuplicatePath(p)| {
+                                format!("mtime walk named {} twice", p.as_str())
+                            })?;
+                        classify_dirty(walked)
                     }
                 };
-                // Forward slashes throughout: the overlay writer normalizes
-                // manifest keys to `/`, so the gate's lookups must match on
-                // Windows too (joins accept `/` on every platform).
-                let rel_paths: Vec<String> = dirty_abs
+                // Every source half reaches the gate and the parse, removed
+                // halves too, as today's ` D` entries did: `reanalyze_files`
+                // stats each path once and skips a missing one. Config-only
+                // halves stay in the set for areas 4 and 5.
+                let rel_paths: Vec<String> = dirty
+                    .events()
                     .iter()
-                    .filter_map(|p| p.strip_prefix(worktree_root).ok())
-                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .flat_map(|event| event.halves())
+                    .filter(|(_, half)| half.class.is_source())
+                    .map(|(_, half)| half.path.as_str().to_owned())
                     .collect();
                 // Freshness gate (FU-2026-06-10-f92cecba3daa): each fragment
                 // records its source file's mtime_ns in `dirty_files.json`, so
@@ -671,6 +717,8 @@ fn ensure_fresh_with_rebuild(
                 );
                 test_counters::REANALYZE_CALL_COUNT
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                test_counters::REANALYZE_PATH_COUNT
+                    .fetch_add(gate.rel_paths.len(), std::sync::atomic::Ordering::Relaxed);
 
                 apply_l1_overlay_updates(
                     worktree_root,
@@ -1745,26 +1793,123 @@ mod fingerprint_drift_tests {
         }));
     }
 
+    /// Re-runs `test_name` alone in a child process; returns false inside the
+    /// child. The child sets `ECP_HOME` / `ECP_SESSION_ID` and reads the
+    /// process-wide counters, which no sibling test may share.
+    fn rerun_in_child(child_env: &str, test_name: &str) -> bool {
+        if std::env::var_os(child_env).is_some() {
+            return false;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env(child_env, "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "isolated test process failed: {status}");
+        true
+    }
+
+    /// A repo at HEAD with one committed `app.py`, and a graph outside it
+    /// whose sidecar names HEAD, so the porcelain shortcut decides. Returns
+    /// the worktree and the graph path.
+    fn repo_and_graph_at_head(tmp: &Path) -> (PathBuf, PathBuf) {
+        let worktree = tmp.join("repo");
+        fs::create_dir_all(&worktree).unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(&worktree)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "test"]);
+        fs::write(worktree.join("app.py"), "def app(): pass\n").unwrap();
+        git(&["add", "app.py"]);
+        git(&["commit", "-qm", "base"]);
+        let graph_path = tmp.join("cache").join("graph.bin");
+        fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
+        let bytes = ecp_core::graph_fixture::GraphFixture::new().into_bytes();
+        fs::write(&graph_path, &bytes).unwrap();
+        write_head_sha_sidecar_with_sha(&graph_path, &git_head_sha(&worktree).unwrap());
+        (worktree, graph_path)
+    }
+
+    /// `ensure_fresh` on `repo_and_graph_at_head` with `untracked` written
+    /// after the commit. Returns the `reanalyze_files` calls and the paths
+    /// they received.
+    fn ensure_fresh_beside_untracked(session_id: &str, untracked: &[&str]) -> (usize, usize) {
+        let tmp = tempdir().unwrap();
+        let (worktree, graph_path) = repo_and_graph_at_head(tmp.path());
+        std::env::set_var("ECP_HOME", tmp.path().join("ecp-home"));
+        std::env::set_var("ECP_SESSION_ID", session_id);
+        for name in untracked {
+            fs::write(worktree.join(name), "x = 1\n").unwrap();
+        }
+
+        test_counters::reset();
+        // The overlay write may fail in a bare temp dir; the counters move
+        // before it.
+        let _ = ensure_fresh(IndexNeed::NearCurrent, &graph_path, &worktree);
+        (
+            test_counters::reanalyze_calls(),
+            test_counters::reanalyze_paths(),
+        )
+    }
+
     #[test]
-    fn parse_porcelain_z_handles_spaces_and_renames() {
-        let root = Path::new("/repo");
-        // modified file with a space in its name + a rename (new\0old).
-        let stdout = b" M src/a b.ts\0R  src/new.ts\0src/old.ts\0 M src/c.ts\0";
-        let got = parse_porcelain_paths(stdout, root);
-        // new path of the rename is kept; the prefix-less old path is dropped.
+    fn test_ensure_fresh_only_untracked_csv_skips_reanalyze() {
+        if rerun_in_child(
+            "ECP_AUTO_ENSURE_CSV_ONLY_CHILD",
+            "auto_ensure::fingerprint_drift_tests::test_ensure_fresh_only_untracked_csv_skips_reanalyze",
+        ) {
+            return;
+        }
         assert_eq!(
-            got,
-            vec![
-                PathBuf::from("/repo/src/a b.ts"),
-                PathBuf::from("/repo/src/new.ts"),
-                PathBuf::from("/repo/src/c.ts"),
-            ]
+            ensure_fresh_beside_untracked("csv-only-test", &["a.csv", "b.csv", "c.csv"]),
+            (0, 0),
+            "untracked .csv files alone must not reach reanalyze_files"
         );
     }
 
     #[test]
-    fn parse_porcelain_z_empty_is_empty() {
-        assert!(parse_porcelain_paths(b"", Path::new("/repo")).is_empty());
+    fn test_ensure_fresh_csv_beside_py_reanalyzes_py_only() {
+        if rerun_in_child(
+            "ECP_AUTO_ENSURE_CSV_PY_CHILD",
+            "auto_ensure::fingerprint_drift_tests::test_ensure_fresh_csv_beside_py_reanalyzes_py_only",
+        ) {
+            return;
+        }
+        assert_eq!(
+            ensure_fresh_beside_untracked("csv-py-test", &["a.csv", "new.py"]),
+            (1, 1),
+            "only the .py file may reach reanalyze_files"
+        );
+    }
+
+    /// A `.json` file is source, so it survives `without_other`; under an
+    /// `ECP_HOME` inside the worktree it is ecp's own file and must not make
+    /// the graph stale.
+    #[test]
+    fn test_ensure_index_json_under_ecp_home_inside_worktree_returns_ready() {
+        if rerun_in_child(
+            "ECP_AUTO_ENSURE_ARTIFACT_CHILD",
+            "auto_ensure::fingerprint_drift_tests::test_ensure_index_json_under_ecp_home_inside_worktree_returns_ready",
+        ) {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (worktree, graph_path) = repo_and_graph_at_head(tmp.path());
+        let home = worktree.join("ecp-home");
+        fs::create_dir_all(home.join("repo")).unwrap();
+        fs::write(home.join("repo/session_meta.json"), "{}\n").unwrap();
+        std::env::set_var("ECP_HOME", &home);
+        assert_eq!(
+            ensure_index(&graph_path, &worktree).unwrap(),
+            EnsureResult::Ready
+        );
     }
 
     fn write_sidecar(graph_path: &Path, fp: &str) {

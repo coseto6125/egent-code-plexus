@@ -10,8 +10,9 @@
 //! Paths are relative to the worktree top and follow the path rule of C2:
 //! `/`-separated, no leading `./`, no trailing `/`, no `.` or `..` segment,
 //! no `\`. Everything here is pure: nothing reads the file system or runs
-//! git, so a deleted path is classified like a present one. No production
-//! code calls these types yet.
+//! git, so a deleted path is classified like a present one. The freshness
+//! gate (`ecp-cli` `auto_ensure.rs`) and the build's clean check
+//! (`orchestrator.rs`) read porcelain through these types.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -259,6 +260,9 @@ pub struct SkippedEntry {
 pub enum SkipReason {
     NotUtf8,
     NotRepoRelative,
+    /// `?? sub/`: git names an untracked nested repository as a directory.
+    /// The gate stays quiet about it; the build still counts it as dirty.
+    Directory,
 }
 
 /// Two events name one path.
@@ -325,6 +329,11 @@ impl<P: AsRef<RepoPath>> DirtySet<P> {
     pub fn is_empty(&self) -> bool {
         self.events.is_empty() && self.skipped.is_empty()
     }
+
+    /// Keep the events `keep` accepts. Order and skipped entries are kept.
+    pub fn retain(&mut self, keep: impl FnMut(&DirtyEvent<P>) -> bool) {
+        self.events.retain(keep);
+    }
 }
 
 impl DirtySet<RepoPath> {
@@ -388,12 +397,22 @@ impl DirtySet<RepoPath> {
         router: &FileRouter,
         facts: Option<&WorkspaceFacts>,
     ) -> DirtySet<ClassifiedPath> {
+        self.classify_with(|path| PathClass::classify(path, router, facts))
+    }
+
+    /// Classify every path with `class_of`. Order and skipped entries are
+    /// kept. Until area 6, the freshness gate adds the legacy provider table
+    /// to [`PathClass::classify`] here (C3 open point 2).
+    pub fn classify_with(
+        self,
+        mut class_of: impl FnMut(&RepoPath) -> PathClass,
+    ) -> DirtySet<ClassifiedPath> {
         let events = self
             .events
             .into_iter()
             .map(|event| {
                 event.map(|path| {
-                    let class = PathClass::classify(&path, router, facts);
+                    let class = class_of(&path);
                     ClassifiedPath { path, class }
                 })
             })
@@ -493,6 +512,13 @@ impl PorcelainParse {
             });
             return None;
         };
+        if text.ends_with('/') {
+            self.skipped.push(SkippedEntry {
+                path_lossy: text.to_owned(),
+                reason: SkipReason::Directory,
+            });
+            return None;
+        }
         let Ok(path) = RepoPath::new(text) else {
             self.skipped.push(SkippedEntry {
                 path_lossy: text.to_owned(),
@@ -1016,8 +1042,8 @@ mod tests {
 
     #[test]
     fn test_from_porcelain_z_rename_source_with_space_at_third_byte_keeps_source() {
-        // Today's `parse_porcelain_paths` reads any segment with a space at
-        // byte 2 as an entry, so this source became the path `c.py`.
+        // The deleted `parse_porcelain_paths` read any segment with a space
+        // at byte 2 as an entry, so this source became the path `c.py`.
         assert_eq!(
             parse(b"R  new.py\0ab c.py\0"),
             vec![DirtyEvent::Renamed {
@@ -1089,6 +1115,14 @@ mod tests {
         assert_eq!(set.events(), &[DirtyEvent::Modified(path("ok.py"))]);
         assert_eq!(set.skipped().len(), 1);
         assert_eq!(set.skipped()[0].reason, SkipReason::NotUtf8);
+    }
+
+    #[test]
+    fn test_from_porcelain_z_untracked_nested_repo_records_directory_skip() {
+        let set = DirtySet::from_porcelain_z(b"?? sub/\0 M ok.py\0").unwrap();
+        assert_eq!(set.events(), &[DirtyEvent::Modified(path("ok.py"))]);
+        assert_eq!(set.skipped().len(), 1);
+        assert_eq!(set.skipped()[0].reason, SkipReason::Directory);
     }
 
     #[test]
@@ -1293,6 +1327,35 @@ mod tests {
                 PathClass::SOURCE
             ))]
         );
+    }
+
+    #[test]
+    fn test_classify_with_custom_class_keeps_order_and_skipped() {
+        let set = DirtySet::from_porcelain_z(b"?? b.csv\0 M a.py\0?? c\\d\0")
+            .unwrap()
+            .classify_with(|path| PathClass::new(path.as_str() == "b.csv", false));
+        assert_eq!(
+            set.events(),
+            &[
+                DirtyEvent::Modified(classified("a.py", PathClass::OTHER)),
+                DirtyEvent::Added(classified("b.csv", PathClass::SOURCE)),
+            ]
+        );
+        assert_eq!(set.skipped().len(), 1);
+    }
+
+    #[test]
+    fn test_dirty_set_retain_drops_rejected_keeps_order_and_skipped() {
+        let mut set = DirtySet::from_porcelain_z(b"?? c.py\0 M a.py\0?? b.py\0?? c\\d\0").unwrap();
+        set.retain(|event| event.worktree_path().map(RepoPath::as_str) != Some("b.py"));
+        assert_eq!(
+            set.events(),
+            &[
+                DirtyEvent::Modified(path("a.py")),
+                DirtyEvent::Added(path("c.py")),
+            ]
+        );
+        assert_eq!(set.skipped().len(), 1);
     }
 
     #[test]

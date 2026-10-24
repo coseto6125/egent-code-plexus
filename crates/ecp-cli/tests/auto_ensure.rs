@@ -1,9 +1,10 @@
 use ecp_cli::auto_ensure::{
     ensure_index, head_sha_sidecar_path, write_head_sha_sidecar_with_sha, EnsureResult,
 };
+use ecp_core::contracts::dirty_event::{ClassifiedPath, DirtyEvent, DirtySet, PathClass, RepoPath};
 use ecp_core::graph_fixture::GraphFixture;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -229,14 +230,11 @@ fn test_ensure_index_head_sha_sidecar_lost_graph_at_head_reports_prior_edits_sta
         }
         match ensure_index(&graph_path, wt.path()).unwrap() {
             EnsureResult::Stale {
-                dirty_files: Some(paths),
+                dirty_files: Some(set),
                 ..
             } => {
                 for file in ["untracked.rs", "src.rs"] {
-                    assert!(
-                        paths.iter().any(|p| p.ends_with(file)),
-                        "{sidecar:?} {file}: {paths:?}"
-                    );
+                    assert!(names_path(&set, file), "{sidecar:?} {file}: {set:?}");
                 }
             }
             other => panic!("{sidecar:?}: prior edits must reach the overlay, got {other:?}"),
@@ -290,12 +288,9 @@ fn test_ensure_index_head_sha_sidecar_other_sha_graph_at_head_reports_untracked_
     filetime::set_file_mtime(wt.path().join("untracked.rs"), past).unwrap();
     match ensure_index(&graph_path, wt.path()).unwrap() {
         EnsureResult::Stale {
-            dirty_files: Some(paths),
+            dirty_files: Some(set),
             ..
-        } => assert!(
-            paths.iter().any(|p| p.ends_with("untracked.rs")),
-            "{paths:?}"
-        ),
+        } => assert!(names_path(&set, "untracked.rs"), "{set:?}"),
         other => panic!("untracked file must reach the overlay, got {other:?}"),
     }
 }
@@ -323,4 +318,208 @@ fn shortcut_falls_through_when_sidecar_sha_mismatch() {
         "expected Ready via walk fallback, got {:?}",
         result
     );
+}
+
+// ── C3 behaviour slice: classified dirty set at the porcelain shortcut ──────
+
+fn git(p: &Path, args: &[&str]) -> std::process::Output {
+    Command::new("git")
+        .arg("-C")
+        .arg(p)
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+fn git_ok(p: &Path, args: &[&str]) {
+    let out = git(p, args);
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+}
+
+/// The repo of `git_init_with_commit` plus `files`, committed; then an
+/// in-tree graph whose sidecar names HEAD, as
+/// `shortcut_returns_stale_when_tree_dirty_even_with_matching_sidecar` builds
+/// it. The graph and its sidecar show as untracked "other" paths.
+fn repo_with_graph_at_head(p: &Path, files: &[&str]) -> PathBuf {
+    git_init_with_commit(p);
+    for file in files {
+        fs::write(p.join(file), "x = 1\n").unwrap();
+    }
+    if !files.is_empty() {
+        git_ok(p, &["add", "."]);
+        git_ok(p, &["commit", "-qm", "files"]);
+    }
+    graph_at_head(p)
+}
+
+fn graph_at_head(p: &Path) -> PathBuf {
+    let head = String::from_utf8(git(p, &["rev-parse", "HEAD"]).stdout).unwrap();
+    let graph_path = p.join("graph.bin");
+    write_valid_empty_graph(&graph_path);
+    write_head_sha_sidecar_with_sha(&graph_path, head.trim());
+    graph_path
+}
+
+fn stale_set(graph_path: &Path, worktree: &Path) -> DirtySet<ClassifiedPath> {
+    match ensure_index(graph_path, worktree).unwrap() {
+        EnsureResult::Stale {
+            dirty_files: Some(set),
+            ..
+        } => set,
+        other => panic!("expected Stale with a dirty set, got {other:?}"),
+    }
+}
+
+fn names_path(set: &DirtySet<ClassifiedPath>, file: &str) -> bool {
+    set.events()
+        .iter()
+        .flat_map(|event| event.halves())
+        .any(|(_, half)| half.path.as_str() == file)
+}
+
+fn classified(path: &str, class: PathClass) -> ClassifiedPath {
+    ClassifiedPath {
+        path: RepoPath::new(path).unwrap(),
+        class,
+    }
+}
+
+#[test]
+fn test_ensure_index_only_untracked_csv_returns_ready() {
+    let tmp = TempDir::new().unwrap();
+    let graph_path = repo_with_graph_at_head(tmp.path(), &[]);
+    for i in 0..50 {
+        fs::write(tmp.path().join(format!("data{i}.csv")), "a,b\n").unwrap();
+    }
+    let result = ensure_index(&graph_path, tmp.path()).unwrap();
+    assert_eq!(result, EnsureResult::Ready);
+}
+
+#[test]
+fn test_ensure_index_untracked_csv_and_py_returns_stale_with_py_only() {
+    let tmp = TempDir::new().unwrap();
+    let graph_path = repo_with_graph_at_head(tmp.path(), &[]);
+    fs::write(tmp.path().join("data.csv"), "a,b\n").unwrap();
+    fs::write(tmp.path().join("new.py"), "x = 1\n").unwrap();
+    assert_eq!(
+        stale_set(&graph_path, tmp.path()).events(),
+        &[DirtyEvent::Added(classified("new.py", PathClass::SOURCE))]
+    );
+}
+
+/// A resolution config file stays in the set for areas 4 and 5, though
+/// nothing parses it.
+#[test]
+fn test_ensure_index_modified_cargo_toml_returns_stale_with_config_path() {
+    let tmp = TempDir::new().unwrap();
+    let graph_path = repo_with_graph_at_head(tmp.path(), &["Cargo.toml"]);
+    fs::write(tmp.path().join("Cargo.toml"), "[package]\n").unwrap();
+    assert_eq!(
+        stale_set(&graph_path, tmp.path()).events(),
+        &[DirtyEvent::Modified(classified(
+            "Cargo.toml",
+            PathClass::RESOLUTION_CONFIG
+        ))]
+    );
+}
+
+#[test]
+fn test_ensure_index_modified_tsconfig_returns_source_and_config() {
+    let tmp = TempDir::new().unwrap();
+    let graph_path = repo_with_graph_at_head(tmp.path(), &["tsconfig.json"]);
+    fs::write(tmp.path().join("tsconfig.json"), "{}\n").unwrap();
+    assert_eq!(
+        stale_set(&graph_path, tmp.path()).events(),
+        &[DirtyEvent::Modified(classified(
+            "tsconfig.json",
+            PathClass::new(true, true)
+        ))]
+    );
+}
+
+#[test]
+fn test_ensure_index_git_mv_returns_renamed_both_halves() {
+    let tmp = TempDir::new().unwrap();
+    let graph_path = repo_with_graph_at_head(tmp.path(), &["a.py"]);
+    git_ok(tmp.path(), &["mv", "a.py", "b.py"]);
+    assert_eq!(
+        stale_set(&graph_path, tmp.path()).events(),
+        &[DirtyEvent::Renamed {
+            from: classified("a.py", PathClass::SOURCE),
+            to: classified("b.py", PathClass::SOURCE),
+        }]
+    );
+}
+
+/// The source segment `ab c.py` has a space at byte 2, the shape of a status
+/// entry; a path with a newline needs `-z` to survive.
+#[cfg(unix)]
+#[test]
+fn test_ensure_index_git_mv_source_with_space_and_newline_path_returns_both() {
+    let tmp = TempDir::new().unwrap();
+    let graph_path = repo_with_graph_at_head(tmp.path(), &["ab c.py"]);
+    git_ok(tmp.path(), &["mv", "ab c.py", "d e.py"]);
+    fs::write(tmp.path().join("x\ny.py"), "x = 1\n").unwrap();
+    assert_eq!(
+        stale_set(&graph_path, tmp.path()).events(),
+        &[
+            DirtyEvent::Renamed {
+                from: classified("ab c.py", PathClass::SOURCE),
+                to: classified("d e.py", PathClass::SOURCE),
+            },
+            DirtyEvent::Added(classified("x\ny.py", PathClass::SOURCE)),
+        ]
+    );
+}
+
+/// The event keeps the path that no longer exists. Only a lone worktree half
+/// meets the artifact check, so the gate never stats the missing path.
+#[test]
+fn test_ensure_index_deleted_source_returns_deleted_event() {
+    let tmp = TempDir::new().unwrap();
+    let graph_path = repo_with_graph_at_head(tmp.path(), &[]);
+    fs::remove_file(tmp.path().join("src.rs")).unwrap();
+    assert_eq!(
+        stale_set(&graph_path, tmp.path()).events(),
+        &[DirtyEvent::Deleted(classified("src.rs", PathClass::SOURCE))]
+    );
+}
+
+/// Git's `UU` describes the index stages, not the file: removed by hand, the
+/// path is neither proven present nor proven absent.
+#[test]
+fn test_ensure_index_conflicted_file_deleted_by_hand_returns_unmerged() {
+    let tmp = TempDir::new().unwrap();
+    let wt = tmp.path();
+    git_init_with_commit(wt);
+    git_ok(wt, &["checkout", "-q", "-b", "side"]);
+    fs::write(wt.join("src.rs"), "fn side() {}").unwrap();
+    git_ok(wt, &["commit", "-qam", "side"]);
+    git_ok(wt, &["checkout", "-q", "-"]);
+    fs::write(wt.join("src.rs"), "fn main_line() {}").unwrap();
+    git_ok(wt, &["commit", "-qam", "main"]);
+    assert!(!git(wt, &["merge", "-q", "side"]).status.success());
+    fs::remove_file(wt.join("src.rs")).unwrap();
+    let graph_path = graph_at_head(wt);
+    assert_eq!(
+        stale_set(&graph_path, wt).events(),
+        &[DirtyEvent::Unmerged(classified(
+            "src.rs",
+            PathClass::SOURCE
+        ))]
+    );
+}
+
+/// A path git prints that names no file ecp can read is a skipped entry,
+/// counted on stderr; with no event left the graph is Ready.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_ensure_index_non_utf8_untracked_path_returns_ready() {
+    use std::os::unix::ffi::OsStrExt;
+    let tmp = TempDir::new().unwrap();
+    let graph_path = repo_with_graph_at_head(tmp.path(), &[]);
+    let name = std::ffi::OsStr::from_bytes(b"bad\xff.py");
+    fs::write(tmp.path().join(name), "x = 1\n").unwrap();
+    let result = ensure_index(&graph_path, tmp.path()).unwrap();
+    assert_eq!(result, EnsureResult::Ready);
 }
