@@ -67,9 +67,11 @@ pub struct FindEventMirrorsArgs {
     #[arg(long, value_name = "PATTERN")]
     pub topic: Option<String>,
 
-    /// Output format: text (default) | json | toon
+    /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
+    /// toon. `json`: full-fidelity JSON. `text`: a mirror table without the JSON
+    /// envelope.
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 }
 
 // ── Tier helper ───────────────────────────────────────────────────────────────
@@ -311,7 +313,7 @@ fn row_to_json(graph: &ArchivedZeroCopyGraph, row: &MirrorRow) -> Value {
 
 pub fn run(args: FindEventMirrorsArgs, engine: &Engine) -> Result<(), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
 
     let (rows, filtered_out) = collect_mirrors(
         graph,

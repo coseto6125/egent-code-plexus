@@ -14,12 +14,12 @@ mod store;
 pub use audit::{AuditEvent, AuditLog};
 pub use commit_meta::{CommitBuildMeta, EmbeddingStatus, RefRecord, BUILDER_FINGERPRINT};
 pub use dirname::{CommitDirName, Generation, ParseError as DirNameParseError, SourceType};
-pub use fs_safe::{rename_with_retry, replace_file, retire_dir, retire_dir_async};
+pub use fs_safe::{rename_with_retry, replace_file, retire_dir, retire_dir_async, sync_dir};
 pub use io::{atomic_write_bytes, atomic_write_bytes_no_fsync, atomic_write_json};
 /// Internal implementation detail. Not part of public API.
 /// Use only within ecp-core or in tests.
 #[doc(hidden)]
-pub use lock::{lock_exclusive_within, FileLock};
+pub use lock::{is_lock_contended, lock_exclusive_within, lock_owner_pid, FileLock};
 pub use path::{
     derive_repo_name, home_dir, resolve_home_ecp, sanitize_segment, uid_path,
     validate_cache_component, PathError,

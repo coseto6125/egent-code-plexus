@@ -131,9 +131,10 @@ pub struct ImpactArgs {
     #[arg(long, default_value_t = false)]
     pub explain_confidence: bool,
 
-    /// Output format (mostly internal — agent doesn't set this).
+    /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
+    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON.
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 
     /// List sites of a path-shaped string literal by exact value.
     /// Mutually exclusive with --target/--baseline/<name>. Returns JSON
@@ -238,7 +239,7 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
     if args.batch {
         return run_batch(args, engine);
     }
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
     if args.literal_coherence {
         let payload = build_literal_coherence_payload(engine)?;
         return emit_with_caveat(&payload, format, engine.caveat());
@@ -309,7 +310,7 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
 fn run_batch(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
     use std::io::BufRead;
 
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
 
     let stdin = std::io::stdin();
     let targets: Vec<String> = stdin
@@ -349,7 +350,7 @@ fn run_batch(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
             no_heuristic: args.no_heuristic,
             confidence_threshold: args.confidence_threshold,
             explain_confidence: args.explain_confidence,
-            format: args.format.clone(),
+            format: args.format,
             literal: None,
             literal_coherence: false,
             batch: false,
@@ -371,10 +372,16 @@ fn run_batch(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
                 p
             }
             Err(e) => {
+                // An agent branches on `status`; a name with several
+                // definitions is not a missing name.
+                let status = match e {
+                    EcpError::AmbiguousSymbol { .. } => "ambiguous",
+                    _ => "not_found",
+                };
                 serde_json::json!({
                     "error": e.to_string(),
                     "target": target_name,
-                    "status": "not_found",
+                    "status": status,
                 })
             }
         };

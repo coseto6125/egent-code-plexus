@@ -248,6 +248,35 @@ fn spring_decorator_route_emits_entrypoint() {
     assert!((entry_edges[0].confidence - 1.0).abs() < 1e-5);
 }
 
+/// `method = {GET, POST}` names two verbs on one handler: the builder emits
+/// one Route per verb, and the handler stays one entry point.
+#[test]
+fn test_build_spring_request_mapping_method_array_one_route_per_verb() {
+    let lg = mk_local_graph(
+        "src/main/java/UserController.java",
+        vec![mk_raw_node(
+            "users",
+            NodeKind::Method,
+            vec!["@RequestMapping(value = \"/users\", method = {RequestMethod.GET, RequestMethod.POST})".into()],
+        )],
+        vec![],
+        vec![],
+    );
+    let mut builder = GraphBuilder::new();
+    builder.add_graph(lg);
+    let graph = builder.build();
+
+    let mut routes: Vec<&str> = graph
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Route)
+        .map(|n| n.name.resolve(&graph.string_pool))
+        .collect();
+    routes.sort_unstable();
+    assert_eq!(routes, vec!["GET /users", "POST /users"]);
+    assert_eq!(entry_point_node_indices(&graph).len(), 1);
+}
+
 /// Go `func main()` — same Function + "main" name as Rust. Smoke test
 /// for the Go column flip; the scorer doesn't actually inspect language
 /// at all, but the README cell claim is "Go Entry ✓" so we pin the

@@ -298,7 +298,8 @@ fn load(engine: &mut Engine<'_>, i: usize) -> Result<Option<Tree>, String> {
     );
     engine.roots[i] = Some(root);
     if truncated {
-        engine.truncated = true;
+        // Not the `truncated` latch: that marker is for budgets the whole run
+        // shares, while a cut file only limits the slices that reach it.
         engine.boundary(
             root,
             "ast_budget",
@@ -450,7 +451,11 @@ pub fn analyze(files: &[SourceFile], request: &FlowRequest) -> Result<FlowReport
             .collect();
     }
     if anchors.is_empty() {
-        if engine.truncated {
+        let anchor_file_cut = engine
+            .boundaries
+            .iter()
+            .any(|b| b.kind == "ast_budget" && b.file == request.file);
+        if engine.truncated || anchor_file_cut {
             return Err(format!(
                 "Analysis budget truncated the graph before locating {}:{}:{}",
                 request.file, request.line, request.column

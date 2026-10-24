@@ -1,5 +1,5 @@
 use ecp_cli::admin::gc::{sweep_retired_dirs, sweep_sessions, sweep_stale_generations};
-use ecp_core::registry::{CommitBuildMeta, EmbeddingStatus, SourceType};
+use ecp_core::registry::{CommitBuildMeta, EmbeddingStatus, FileLock, SourceType};
 use ecp_core::session::SessionMeta;
 use std::process::Command;
 
@@ -161,6 +161,18 @@ fn sweep_stale_generations_keeps_newest_per_sha() {
         .exists());
 }
 
+/// An older ecp builds in `<name>.building/` and holds `.build.lock` inside
+/// it until just before its rename. Returns the held lock. The dir is fresh,
+/// which is what gc goes by; it never probes that lock.
+fn hold_legacy_build(commits: &std::path::Path, name: &str) -> FileLock {
+    let building = commits.join(format!("{name}.building"));
+    std::fs::create_dir_all(&building).unwrap();
+    FileLock::acquire_exclusive(&building.join(".build.lock")).unwrap()
+}
+
+/// Contract: while an older ecp may be mid-build for a SHA (its legacy
+/// staging dir was written within the 7-day grace), gc converges none of
+/// that SHA's generations. This one stages under a generation-shaped name.
 #[test]
 fn sweep_stale_generations_skips_building() {
     let tmp = tempfile::tempdir().unwrap();
@@ -170,18 +182,18 @@ fn sweep_stale_generations_skips_building() {
     make_named_commit_dir(&commits, &format!("branch_main__{sha}.gen.1000.10.0"));
     let older = format!("branch_main__{sha}.gen.500.5.0");
     make_named_commit_dir(&commits, &older);
-    // Build the `.building` sibling at EXACTLY the path the impl checks.
-    let building = commits.join(&older).with_extension("building");
-    std::fs::create_dir_all(&building).unwrap();
+    let _held = hold_legacy_build(&commits, &older);
 
     let stats = ecp_cli::admin::gc::sweep_stale_generations(tmp.path(), false).unwrap();
     assert_eq!(
         stats.removed, 0,
-        "older dir guarded by .building sibling must stay"
+        "older dir guarded by a recent legacy build dir must stay"
     );
     assert!(commits.join(&older).exists());
 }
 
+/// Same contract as `sweep_stale_generations_skips_building`, for the
+/// base-shaped `<base>.building` that older ecp versions wrote.
 #[test]
 fn sweep_stale_generations_skips_when_sha_has_active_building() {
     let tmp = tempfile::tempdir().unwrap();
@@ -190,15 +202,74 @@ fn sweep_stale_generations_skips_when_sha_has_active_building() {
     let sha = "e".repeat(40);
     make_named_commit_dir(&commits, &format!("branch_main__{sha}.gen.1000.10.0"));
     make_named_commit_dir(&commits, &format!("branch_main__{sha}.gen.500.5.0"));
-    // REAL append-style building marker for this SHA's base dir (no .gen suffix),
-    // matching orchestrator.rs:682 `branch_main__{sha}.building`.
-    std::fs::create_dir_all(commits.join(format!("branch_main__{sha}.building"))).unwrap();
+    let _held = hold_legacy_build(&commits, &format!("branch_main__{sha}"));
 
     let stats = ecp_cli::admin::gc::sweep_stale_generations(tmp.path(), false).unwrap();
     assert_eq!(
         stats.removed, 0,
         "no gen deleted while a build for this SHA is active"
     );
+}
+
+/// A `.building` dir a crashed older ecp left used to block the SHA's
+/// convergence for ever. Once nothing wrote to it for the 7-day grace, the
+/// SHA converges, and the leftover itself stays: gc never removes old-style
+/// staging (doctor reports it).
+#[test]
+fn test_sweep_stale_generations_idle_legacy_leftover_converges_and_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let commits = tmp.path().join("commits");
+    std::fs::create_dir_all(&commits).unwrap();
+    let sha = "f".repeat(40);
+    let old = commits.join(format!("branch_main__{sha}.gen.500.5.0"));
+    let new = commits.join(format!("branch_main__{sha}.gen.1000.10.0"));
+    make_named_commit_dir(&commits, old.file_name().unwrap().to_str().unwrap());
+    make_named_commit_dir(&commits, new.file_name().unwrap().to_str().unwrap());
+    let leftover = commits.join(format!("branch_main__{sha}.building"));
+    std::fs::create_dir_all(&leftover).unwrap();
+    std::fs::write(leftover.join("graph.bin"), b"half").unwrap();
+    let idle = filetime::FileTime::from_system_time(
+        std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 86_400),
+    );
+    filetime::set_file_mtime(leftover.join("graph.bin"), idle).unwrap();
+    filetime::set_file_mtime(&leftover, idle).unwrap();
+
+    let stats = ecp_cli::admin::gc::sweep_stale_generations(tmp.path(), false).unwrap();
+    let staging = ecp_cli::admin::gc::sweep_abandoned_staging(tmp.path(), false).unwrap();
+
+    assert_eq!(stats.removed, 1);
+    assert!(!old.exists() && new.exists());
+    assert_eq!(staging.marked, 0);
+    assert!(leftover.join("graph.bin").exists());
+}
+
+/// Readers of an old-binary layout (two bare names of one SHA under two
+/// refs, equal generation) pick by mtime; gc keeps that same dir.
+#[test]
+fn test_sweep_stale_generations_bare_tie_keeps_scan_choice() {
+    let tmp = tempfile::tempdir().unwrap();
+    let commits = tmp.path().join("commits");
+    std::fs::create_dir_all(&commits).unwrap();
+    let sha = "9".repeat(40);
+    let older = format!("branch_a__{sha}");
+    let newer = format!("branch_b__{sha}");
+    make_named_commit_dir(&commits, &older);
+    make_named_commit_dir(&commits, &newer);
+    let at = |secs| filetime::FileTime::from_unix_time(secs, 0);
+    filetime::set_file_mtime(commits.join(&older).join("graph.bin"), at(1_000_000_000)).unwrap();
+    filetime::set_file_mtime(commits.join(&newer).join("graph.bin"), at(1_000_000_500)).unwrap();
+    let mut sha_bytes = [0u8; 20];
+    hex::decode_to_slice(&sha, &mut sha_bytes).unwrap();
+    let chosen = ecp_cli::commit_lookup::CommitIndex::scan(&commits)
+        .unwrap()
+        .find(&sha_bytes)
+        .map(str::to_string);
+    assert_eq!(chosen.as_deref(), Some(newer.as_str()));
+
+    let stats = sweep_stale_generations(tmp.path(), false).unwrap();
+
+    assert_eq!(stats.removed, 1);
+    assert!(commits.join(&newer).exists() && !commits.join(&older).exists());
 }
 
 #[test]
@@ -473,6 +544,24 @@ fn test_sweep_unreachable_commits_recently_built_old_mtime_graph_kept() {
     assert!(recent.exists());
 }
 
+/// A builder holds the SHA lock from its existence check through its
+/// publish; gc must not retire the SHA's graph inside that span.
+#[test]
+fn test_sweep_unreachable_commits_sha_lock_held_kept() {
+    let fx = CommitFixture::new();
+    let sha = "a".repeat(40);
+    let orphan = fx.graph(&sha, 30);
+    let mut sha_bytes = [0u8; 20];
+    hex::decode_to_slice(&sha, &mut sha_bytes).unwrap();
+    let lock = ecp_cli::commit_lookup::sha_lock_path(&fx.repo_root.join("commits"), &sha_bytes);
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    let held = FileLock::acquire_exclusive(&lock).unwrap();
+    assert_eq!(fx.sweep().removed, 0);
+    assert!(orphan.exists());
+    drop(held);
+    assert_eq!(fx.sweep().removed, 1);
+}
+
 /// An attach back-fills sidecars into a dir built long ago; that recent write
 /// marks the graph as in use, whatever `built_at` says.
 #[test]
@@ -587,10 +676,10 @@ fn test_sweep_unreachable_commits_missing_repo_meta_removes_nothing() {
     assert!(graph.exists());
 }
 
-/// A `.building` dir is never a candidate, however old its mtime and its
-/// `built_at`. The generation-shaped name parses as a commit dir, so the
-/// name filter alone keeps it; the base-shaped one is what the orchestrator
-/// writes today.
+/// Contract: gc never removes old-style staging (`<name>.building`) on its
+/// own, however old its mtime and its `built_at`; an older ecp may still own
+/// it, and `ecp admin doctor` reports it instead. The generation-shaped name
+/// parses as a commit dir, so the name filter alone keeps it.
 #[test]
 fn test_sweep_unreachable_commits_building_dir_kept() {
     let fx = CommitFixture::new();
@@ -1493,10 +1582,14 @@ fn test_admin_gc_legacy_last_gc_stamp_removed_dry_run_kept() {
     assert!(!legacy.exists(), "the retired stamp outlived gc");
 }
 
+/// Directories only: `commits/` also holds the per-SHA lock files, which are
+/// not generations.
 fn gen_dirs(commits: &std::path::Path) -> std::collections::BTreeSet<String> {
     std::fs::read_dir(commits)
         .map(|it| {
             it.flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .filter(|e| e.file_name() != ecp_cli::commit_lookup::LOCKS_DIR)
                 .map(|e| e.file_name().to_string_lossy().to_string())
                 .collect()
         })
@@ -1598,7 +1691,9 @@ fn test_sweep_stale_generations_dry_run_building_and_fresh_dirs_not_listed() {
         &commits,
         &format!("branch_main__{building_sha}.gen.2000.20.0"),
     );
-    std::fs::create_dir_all(commits.join(format!("branch_main__{building_sha}.building"))).unwrap();
+    // Contract: a dry run applies the eligibility of a real run, and a
+    // recent legacy build dir is what keeps a SHA from converging.
+    let _held = hold_legacy_build(&commits, &format!("branch_main__{building_sha}"));
     let fresh_sha = "d".repeat(40);
     for gen in ["1000.10.0", "2000.20.0"] {
         make_named_commit_dir(&commits, &format!("branch_main__{fresh_sha}.gen.{gen}"));

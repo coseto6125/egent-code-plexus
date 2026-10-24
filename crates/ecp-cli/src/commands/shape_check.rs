@@ -35,9 +35,10 @@ pub struct ShapeCheckArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format: text (default) | json | toon
+    /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
+    /// toon. `json`: full-fidelity JSON. `text`: a line report.
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 
     /// Filter: only report drift for routes whose path matches this substring.
     /// When None (default), all routes with extracted shape are checked.
@@ -119,6 +120,22 @@ fn build_payload_with_hints(
         if !matches!(&edge.rel_type, ArchivedRelType::Fetches) {
             continue;
         }
+        // Filter before any counter moves, so a matching route without a shape
+        // is reported as "no shape" and never as "no route matches".
+        if let Some(route_filter) = &args.route {
+            let route_name = graph.nodes[edge.target.to_native() as usize]
+                .name
+                .resolve(&graph.string_pool);
+            // Route name format: "METHOD /path" or "/path".
+            let route_path = route_name
+                .split_once(' ')
+                .map(|(_, p)| p)
+                .unwrap_or(route_name);
+            if !route_path.contains(route_filter.as_str()) {
+                continue;
+            }
+            filter_matched_count += 1;
+        }
         total_fetches += 1;
 
         let reason_str = edge.reason.resolve(&graph.string_pool);
@@ -142,21 +159,6 @@ fn build_payload_with_hints(
             }
             continue;
         };
-
-        // Apply route filter if provided.
-        if let Some(ref route_filter) = args.route {
-            let route_node = &graph.nodes[target_idx as usize];
-            let route_name = route_node.name.resolve(&graph.string_pool);
-            // Extract path from route name (format: "METHOD /path" or "/path")
-            let route_path = route_name
-                .split_once(' ')
-                .map(|(_, p)| p)
-                .unwrap_or(route_name);
-            if !route_path.contains(route_filter) {
-                continue;
-            }
-            filter_matched_count += 1;
-        }
 
         // `known` is response_keys ∪ error_keys. We iterate parsed.keys and
         // collect any that aren't present.
@@ -280,7 +282,7 @@ fn render_text(value: &serde_json::Value, hints: &ShapeCheckHints) -> serde_json
 }
 
 pub fn run(args: ShapeCheckArgs, engine: &crate::engine::Engine) -> Result<(), ecp_core::EcpError> {
-    let format = crate::output::OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
     let (value, hints) = build_payload_with_hints(&args, engine)?;
     if let Some(filter) = &hints.unmatched_route_filter {
         eprintln!("No routes match `{filter}` in the graph.");

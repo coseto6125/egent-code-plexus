@@ -41,16 +41,14 @@ pub struct SummaryArgs {
     #[arg(long, default_value_t = false)]
     pub detailed: bool,
 
-    /// Output format. Omit for the LLM-tuned default (toon-encoded, lossy
-    /// confidence rounding + compact timestamps). `--format toon` is the
-    /// neutral toon encoding of the full payload; `--format json` is the
-    /// full-fidelity JSON; `--format text` is the human-friendly fallback.
+    /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
+    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON.
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 }
 
 pub fn run(args: SummaryArgs, _graph_arg: &Path) -> Result<(), EcpError> {
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
     let payload = build_payload(&args, _graph_arg)?;
     emit(&payload, format)
 }

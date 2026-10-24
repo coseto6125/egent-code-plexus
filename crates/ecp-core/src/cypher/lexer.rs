@@ -223,16 +223,29 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, CypherError> {
                 }
                 let b = bytes[i];
                 if b == b'\\' && i + 1 < bytes.len() {
-                    s.push(bytes[i + 1] as char);
-                    i += 2;
+                    // Only `\\` and the quote characters unescape. Any other
+                    // escape keeps its backslash so `=~ '\d+'` reaches the
+                    // regex engine as `\d+` (dropping it matched a literal `d`).
+                    let next = input[i + 1..]
+                        .chars()
+                        .next()
+                        .expect("byte follows backslash");
+                    if !matches!(next, '\\' | '\'' | '"') {
+                        s.push('\\');
+                    }
+                    s.push(next);
+                    i += 1 + next.len_utf8();
                     continue;
                 }
                 if b == quote {
                     i += 1;
                     break;
                 }
-                s.push(b as char);
-                i += 1;
+                // Decode whole chars: pushing raw bytes turned `→` into mojibake,
+                // so a non-ASCII literal could never equal the stored name.
+                let ch = input[i..].chars().next().expect("in-bounds index");
+                s.push(ch);
+                i += ch.len_utf8();
             }
             out.push(Token::Str(s));
             continue;
@@ -442,6 +455,21 @@ mod tests {
         assert_eq!(lex("'hello'"), vec![Token::Str("hello".into())]);
         assert_eq!(lex(r#""hi""#), vec![Token::Str("hi".into())]);
         assert_eq!(lex(r"'it\'s'"), vec![Token::Str("it's".into())]);
+    }
+
+    #[test]
+    fn test_tokenize_regex_escape_keeps_backslash() {
+        // `\d` is not an escape the lexer owns: it must reach the regex engine.
+        assert_eq!(lex(r"'\d+'"), vec![Token::Str(r"\d+".into())]);
+        assert_eq!(lex(r"'a\.b'"), vec![Token::Str(r"a\.b".into())]);
+        // `\\` stays the Neo4j spelling of one literal backslash.
+        assert_eq!(lex(r"'\\d'"), vec![Token::Str(r"\d".into())]);
+    }
+
+    #[test]
+    fn test_tokenize_non_ascii_literal_keeps_chars() {
+        assert_eq!(lex("'Main → é'"), vec![Token::Str("Main → é".into())]);
+        assert_eq!(lex(r"'\é'"), vec![Token::Str(r"\é".into())]);
     }
 
     #[test]

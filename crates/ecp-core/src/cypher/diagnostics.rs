@@ -224,7 +224,7 @@ pub const CALLS_LOWER_BOUND_CAVEAT: &str =
      or `ecp impact --target <name>` before acting.";
 
 /// True when the query treats the ABSENCE of a Calls edge as signal — the
-/// orphan-hunting shapes: `OPTIONAL MATCH (c)-[:Calls]->(f) … WHERE c IS NULL`
+/// orphan-hunting shapes: `OPTIONAL MATCH (c)-[:Calls]->(f) WITH f, c WHERE c IS NULL`
 /// or `WHERE NOT EXISTS((c)-[:Calls]->(f))`. Calls edges are a lower bound
 /// (the resolver suppresses ambiguous bare calls at index time), so these
 /// results over-report and the caller deserves a caveat. Untyped rels
@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn absence_caveat_fires_on_optional_match_is_null() {
         let q = parse(
-            "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) WHERE c IS NULL RETURN f.name",
+            "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) WITH f, c WHERE c IS NULL RETURN f.name",
         )
         .unwrap();
         assert!(absence_over_calls(&q));
@@ -294,8 +294,10 @@ mod tests {
 
     #[test]
     fn absence_caveat_fires_on_untyped_rel() {
-        let q = parse("MATCH (f:Function) OPTIONAL MATCH (c)-->(f) WHERE c IS NULL RETURN f.name")
-            .unwrap();
+        let q = parse(
+            "MATCH (f:Function) OPTIONAL MATCH (c)-->(f) WITH f, c WHERE c IS NULL RETURN f.name",
+        )
+        .unwrap();
         assert!(absence_over_calls(&q));
     }
 
@@ -304,7 +306,7 @@ mod tests {
         let q = parse("MATCH (c)-[:Calls]->(f) RETURN c.name, f.name").unwrap();
         assert!(!absence_over_calls(&q));
         let q = parse(
-            "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) WHERE c IS NOT NULL RETURN f.name",
+            "MATCH (f:Function) OPTIONAL MATCH (c)-[:Calls]->(f) WITH f, c WHERE c IS NOT NULL RETURN f.name",
         )
         .unwrap();
         assert!(

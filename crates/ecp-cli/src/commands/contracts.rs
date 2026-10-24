@@ -63,13 +63,14 @@ pub struct ContractsArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format: toon (default) | json.
+    /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
+    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON.
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 }
 
 pub fn run(args: ContractsArgs) -> Result<(), EcpError> {
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
 
     // 1. Load registry and resolve selector.
     let home_ecp = resolve_home_ecp();

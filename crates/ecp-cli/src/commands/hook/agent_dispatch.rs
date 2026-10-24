@@ -21,7 +21,7 @@
 //! - non-exploration agent types (reviewers, planners, …)
 //! - text-domain work (string literals, config, docs, CI yaml, fs layout)
 
-use super::common::HookInput;
+use super::common::{hook_specific_output, HookInput};
 use ecp_core::EcpError;
 use std::sync::OnceLock;
 
@@ -87,13 +87,16 @@ pub fn handle(input: &HookInput) -> Result<(), EcpError> {
     let text = format!("{prompt} {description}");
 
     if should_deny(agent_type, &text) {
-        let payload = serde_json::json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": "Structural code query detected — query the code graph first instead of dispatching an agent: `ecp find <name>` (definition), `ecp impact --target <name> --direction upstream` (callers / blast radius), `ecp inspect --name <name>` (full context), `ecp cypher` (arbitrary graph questions). If ecp cannot answer (repo unindexed, non-code text, or you need file CONTENT rather than structure), re-dispatch this agent and say so in the prompt — mentioning ecp bypasses this gate."
-            }
-        });
+        let payload = hook_specific_output(
+            "PreToolUse",
+            &[
+                ("permissionDecision", "deny"),
+                (
+                    "permissionDecisionReason",
+                    "Structural code query detected — query the code graph first instead of dispatching an agent: `ecp find <name>` (definition), `ecp impact --target <name> --direction upstream` (callers / blast radius), `ecp inspect --name <name>` (full context), `ecp cypher` (arbitrary graph questions). If ecp cannot answer (repo unindexed, non-code text, or you need file CONTENT rather than structure), re-dispatch this agent and say so in the prompt — mentioning ecp bypasses this gate.",
+                ),
+            ],
+        );
         println!("{payload}");
     }
     // Silent exit 0 = pass-through (Claude Code treats empty stdout as no-op).

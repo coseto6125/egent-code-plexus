@@ -15,10 +15,7 @@ const MECHANISMS: &[menu::Item<'_>] = &[
     ("Claude Code", "install hooks, MCP server, and skills"),
     ("Codex CLI", "install native tools and skills"),
     ("Gemini CLI", "install native skill and MCP server"),
-    (
-        "Other Code Agents",
-        "Cursor, Windsurf, Cline, Copilot, generic MCP host",
-    ),
+    ("Other Code Agents", "Codex CLI in MCP mode"),
     ("← Back", ""),
 ];
 

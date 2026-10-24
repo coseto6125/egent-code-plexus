@@ -11,10 +11,11 @@ use std::path::{Path, PathBuf};
 
 #[derive(Args, Debug, Clone)]
 pub struct UninstallHookArgs {
-    /// Target agent host. Exactly one host flag must be set.
+    /// Remove the Claude Code hook entries from settings.json. Omit to remove
+    /// the git `reference-transaction` hook an older ecp installed in this repo.
     #[arg(long, default_value_t = false)]
     pub claude_code: bool,
-    /// CSV of events to uninstall. Omit to remove all.
+    /// CSV of events to uninstall (with --claude-code). Omit to remove all.
     #[arg(long)]
     pub events: Option<String>,
     /// Override path to settings.json (default `~/.claude/settings.json`).
@@ -69,7 +70,12 @@ pub fn run_install_claude_code(
 
 pub fn run_uninstall(args: UninstallHookArgs) -> Result<(), EcpError> {
     if !args.claude_code {
-        return Err(EcpError::InvalidArgument("--claude-code required".into()));
+        if args.events.is_some() {
+            return Err(EcpError::InvalidArgument(
+                "--events applies only with --claude-code".into(),
+            ));
+        }
+        return crate::commands::uninstall::remove_git_hook();
     }
     let events = match &args.events {
         Some(s) => parse_events(s)?,

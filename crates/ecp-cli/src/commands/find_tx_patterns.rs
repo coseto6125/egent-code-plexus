@@ -70,9 +70,10 @@ pub struct FindTxPatternsArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format.
+    /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
+    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON.
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 }
 
 // ── Tier helpers ──────────────────────────────────────────────────────────────
@@ -439,7 +440,7 @@ fn outbox_pattern_to_json(p: &OutboxPattern) -> Value {
 
 pub fn run(args: FindTxPatternsArgs, engine: &Engine) -> Result<(), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
 
     let saga_pairs: Vec<Value> = if args.outbox_only {
         Vec::new()

@@ -2,7 +2,7 @@
 //! files, then unlink them so each event fires only once. Failure takes
 //! priority over success because it is more actionable.
 
-use super::common::{ecp_state_dir, emit_additional_context, lookup_index_dir, HookInput};
+use super::common::{ecp_state_dir, hook_specific_output, lookup_index_dir, HookInput};
 use ecp_core::EcpError;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -50,13 +50,33 @@ pub fn handle(input: &HookInput) -> Result<(), EcpError> {
     if let Some(peer) = super::common::drain_and_render_peer_payload() {
         sections.push(peer);
     }
-    if let Some(update) = drain_update_notice() {
-        sections.push(update);
-    }
-    if !sections.is_empty() {
-        emit_additional_context("UserPromptSubmit", &sections.join("\n\n"));
+    if let Some(payload) = render_output(&sections, drain_update_notice()) {
+        println!("{payload}");
     }
     Ok(())
+}
+
+/// The update notice tells the reader to run `ecp update`, an action the model
+/// must not take. It goes to `systemMessage` (shown to the human), never to
+/// `additionalContext` (read by the model). One object: Claude Code parses a
+/// single JSON value from stdout.
+fn render_output(sections: &[String], update: Option<String>) -> Option<serde_json::Value> {
+    let mut out = serde_json::Map::new();
+    if !sections.is_empty() {
+        out.extend(
+            hook_specific_output(
+                "UserPromptSubmit",
+                &[("additionalContext", &sections.join("\n\n"))],
+            )
+            .as_object()
+            .cloned()
+            .expect("the envelope is an object"),
+        );
+    }
+    if let Some(update) = update {
+        out.insert("systemMessage".into(), update.into());
+    }
+    (!out.is_empty()).then_some(serde_json::Value::Object(out))
 }
 
 /// Read and consume the global `<home_ecp>/.update-available` marker written by
@@ -125,4 +145,37 @@ fn read_stats(index_dir: &Path) -> String {
         .map(|n| n.to_string())
         .unwrap_or_else(|| "?".into());
     format!("{nodes} symbols, {edges} rels")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_render_output_update_notice_goes_to_system_message_not_model_context() {
+        let notice = "ecp 9.9.9 available. Run `ecp update`.".to_string();
+        let sections = vec!["ecp index rebuild complete.".to_string()];
+        let v = render_output(&sections, Some(notice.clone())).unwrap();
+        assert_eq!(v["systemMessage"], notice);
+        let ctx = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(
+            !ctx.contains("ecp update"),
+            "model context carries the notice: {ctx}"
+        );
+        assert_eq!(ctx, "ecp index rebuild complete.");
+    }
+
+    #[test]
+    fn test_render_output_update_only_has_no_additional_context() {
+        let v = render_output(&[], Some("new version".into())).unwrap();
+        assert!(v.get("hookSpecificOutput").is_none());
+        assert_eq!(v["systemMessage"], "new version");
+    }
+
+    #[test]
+    fn test_render_output_nothing_to_say_emits_nothing() {
+        assert!(render_output(&[], None).is_none());
+    }
 }

@@ -58,9 +58,10 @@ pub struct FindSchemaBindingsArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format: toon (default) | json | text
+    /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
+    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON.
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 }
 
 /// Tier label derived from edge confidence.
@@ -187,7 +188,7 @@ fn build_blind_spot_entry(graph: &ArchivedZeroCopyGraph, node_idx: usize) -> ser
 
 pub fn run(args: FindSchemaBindingsArgs, engine: &Engine) -> Result<(), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
 
     let (owner_filter, bare_name) = split_fqn_target(&args.field);
 
@@ -224,9 +225,13 @@ pub fn run(args: FindSchemaBindingsArgs, engine: &Engine) -> Result<(), EcpError
             "blind_spot_candidates": [],
             "summary": { "mirrors_count": 0, "blind_spot_count": 0 },
         });
-        // Non-zero exit for "not found" — caller can detect programmatically.
+        // Err (not process::exit) so `main` still records telemetry and joins
+        // the tantivy writers; `main` turns it into the non-zero exit.
         emit(&result, format)?;
-        std::process::exit(1);
+        return Err(EcpError::InvalidArgument(format!(
+            "no SchemaField named '{}'; check the spelling or use the `Class.field` form",
+            args.field
+        )));
     }
 
     let mut mirrors: Vec<serde_json::Value> = Vec::new();

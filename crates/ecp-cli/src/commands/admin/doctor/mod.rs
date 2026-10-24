@@ -34,9 +34,10 @@ pub struct DoctorArgs {
     /// scripted host integrations. Config / version findings are report-only.
     #[arg(long)]
     pub fix: bool,
-    /// Output format: text (default) / json / toon.
+    /// Output format. Absent, `llm` or `text`: a check table. `toon`: uncompressed toon.
+    /// `json`: full-fidelity JSON.
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -117,9 +118,11 @@ pub fn run(args: DoctorArgs) -> Result<(), EcpError> {
     }
     if want(CheckTarget::Config) {
         results.extend(checks::config::check());
+        results.extend(checks::git_hook::check());
     }
     if want(CheckTarget::Registry) {
         results.extend(checks::registry::check(fix));
+        results.extend(checks::staging::check());
     }
     if want(CheckTarget::Version) {
         results.push(checks::version::check());
@@ -130,7 +133,7 @@ pub fn run(args: DoctorArgs) -> Result<(), EcpError> {
         .filter(|r| r.status == CheckStatus::Fail)
         .count();
 
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
     match format {
         OutputFormat::Json | OutputFormat::Toon => {
             emit(&serde_json::json!({ "checks": results }), format)?;

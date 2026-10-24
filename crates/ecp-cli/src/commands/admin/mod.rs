@@ -21,11 +21,11 @@ pub(crate) mod skill_source;
 pub mod update_check;
 #[derive(Subcommand, Debug)]
 pub enum AdminCommands {
-    /// Install git ref-transaction hook for branch tracking (or Claude Code hooks with --claude-code).
-    /// Deprecated: prefer `ecp admin claude install hooks` (for Claude Code hooks).
+    /// Install Claude Code hooks (requires --claude-code). Without it, refuses: the git hook it once installed does nothing.
+    /// Deprecated: prefer `ecp admin claude install hooks`.
     InstallHook(install_hook::InstallHookArgs),
-    /// Remove Claude Code hook entries from settings.json.
-    /// Deprecated: prefer `ecp admin claude uninstall hooks`.
+    /// Remove the git reference-transaction hook that older releases installed; with --claude-code, remove Claude Code hook entries instead.
+    /// Deprecated for Claude Code: prefer `ecp admin claude uninstall hooks`.
     UninstallHook(claude_code::UninstallHookArgs),
     /// Show hook install status (bare: all hosts; --claude-code: Claude Code only).
     /// Deprecated: prefer `ecp admin claude status` / `ecp admin codex status` / `ecp admin gemini status`.

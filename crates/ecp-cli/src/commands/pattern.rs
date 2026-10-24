@@ -66,12 +66,14 @@ pub struct PatternArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
+    /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
+    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON.
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 }
 
 pub fn run(args: PatternArgs, engine: &Engine) -> Result<(), EcpError> {
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
     let payload = build_payload(&args, engine)?;
     emit(&payload, format)
 }

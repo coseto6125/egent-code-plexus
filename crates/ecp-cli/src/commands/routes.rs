@@ -41,9 +41,11 @@ pub struct RoutesArgs {
     #[arg(long)]
     pub include_tests: bool,
 
-    /// Output format (toon / json / text).
+    /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
+    /// toon. `json`: full-fidelity JSON. `text`: one compact JSON line per route. Absent,
+    /// `llm` and `toon` join the middleware names of a route into one string.
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 }
 
 pub fn run(args: RoutesArgs, engine: &Engine) -> Result<(), EcpError> {
@@ -52,14 +54,14 @@ pub fn run(args: RoutesArgs, engine: &Engine) -> Result<(), EcpError> {
             engine,
             args.method.as_deref(),
             args.include_tests,
-            args.format.as_deref(),
+            args.format.unwrap_or_default(),
         ),
         Some(path) => inspect_route(
             engine,
             path,
             args.method.as_deref(),
             args.depth,
-            args.format.as_deref(),
+            args.format.unwrap_or_default(),
         ),
     }
 }
@@ -68,10 +70,9 @@ fn list_routes(
     engine: &Engine,
     method_filter: Option<&str>,
     include_tests: bool,
-    format: Option<&str>,
+    fmt: OutputFormat,
 ) -> Result<(), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
-    let fmt = OutputFormat::parse(format);
     let wanted_method = method_filter.map(|m| m.to_ascii_uppercase());
 
     let mut results = Vec::new();
@@ -297,10 +298,9 @@ fn inspect_route(
     wanted_path: &str,
     method_filter: Option<&str>,
     depth: usize,
-    format: Option<&str>,
+    fmt: OutputFormat,
 ) -> Result<(), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
-    let fmt = OutputFormat::parse(format);
     let wanted_method = method_filter.map(|m| m.to_ascii_uppercase());
 
     // Step 1: find Route node(s) matching path (and optional method).

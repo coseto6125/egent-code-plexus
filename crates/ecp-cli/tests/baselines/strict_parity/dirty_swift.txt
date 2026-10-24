@@ -1,0 +1,4 @@
+# owner: lane F (incremental overlay: builder edges of dirty files)
+edge full-only x1 Defines File Sources/Acme/Lib.swift:1 Lib.swift #cc01c90c53b89b81 -> Function Sources/Acme/Lib.swift:5 extra #feaad1a6d8795004 conf=1.0
+parent full-only x1 Function Sources/Acme/Lib.swift:5 extra #feaad1a6d8795004 owner=- <- Defines File Sources/Acme/Lib.swift:1 Lib.swift #cc01c90c53b89b81
+parent overlay-only x1 Function Sources/Acme/Lib.swift:5 extra #feaad1a6d8795004 owner=- <- none

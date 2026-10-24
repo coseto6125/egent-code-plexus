@@ -4,14 +4,15 @@
 //! (bindings / routes / contracts / all). See spec
 //! `docs/superpowers/specs/2026-05-16-tier-b-surface-and-diff-design.md` §5.
 
+use crate::output::OutputFormat;
 use clap::{Args, ValueEnum};
 use ecp_core::EcpError;
 use std::path::PathBuf;
 
 pub mod baseline;
+pub mod baseline_checkout;
 pub mod bindings;
 pub mod contracts;
-pub mod git_guard;
 pub mod output;
 pub mod routes;
 pub mod symbols;
@@ -62,10 +63,11 @@ pub struct DiffArgs {
     #[arg(long, requires = "baseline_graph")]
     pub current_graph: Option<PathBuf>,
 
-    /// Output format. Omit for the LLM-tuned default; pass
-    /// `--format text|json|toon` for the alternative renderings.
+    /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
+    /// toon. `json`: full-fidelity JSON. `text`: per-section change counts and up to 10
+    /// changes per kind (all with `--verbose`).
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 
     /// List every change (text format only). Default truncates to top-10 per section.
     #[arg(long, default_value_t = false)]
@@ -78,8 +80,7 @@ pub struct DiffArgs {
 
 pub fn run(args: DiffArgs) -> Result<(), EcpError> {
     let payload = build_payload(&args)?;
-    let format = args.format.as_deref().unwrap_or("");
-    output::emit(&payload, format)
+    output::emit(&payload, args.format.unwrap_or_default())
 }
 
 pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, EcpError> {
@@ -181,12 +182,12 @@ pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, EcpError> {
     // both the resolver JSONL (for bindings) and graph.bin (for routes /
     // contracts / symbols) as side effects of one analyze pass — so we run
     // it ONCE per state regardless of which sections are requested.
-    let current_jsonl =
-        std::env::temp_dir().join(format!("ecp-diff-current-{}.jsonl", std::process::id()));
-    let baseline_jsonl =
-        std::env::temp_dir().join(format!("ecp-diff-baseline-{baseline_sha}.jsonl"));
-    let baseline_graph_tmp =
-        std::env::temp_dir().join(format!("ecp-diff-graph-baseline-{baseline_sha}.bin"));
+    // Built from a scratch checkout, never from the user's tree: stashing and
+    // checking out there loses staged state and races a second `ecp diff`.
+    let baseline_checkout = baseline_checkout::BaselineCheckout::create(&repo_dir, &baseline_sha)?;
+    let current_jsonl = baseline_checkout.scratch().join("current.jsonl");
+    let baseline_jsonl = baseline_checkout.scratch().join("baseline.jsonl");
+    let baseline_graph_tmp = baseline_checkout.scratch().join("baseline-graph.bin");
 
     bindings::dump(&repo_dir, &current_jsonl)?;
     // Current side: full ensure (ecp-version fingerprint → rebuild; dirty
@@ -195,21 +196,22 @@ pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, EcpError> {
     let current_graph = ensure_graph_synchronously(&repo_dir, None, "current")?;
 
     {
-        let _guard = git_guard::GitGuard::enter(&repo_dir, &baseline_sha)?;
-        bindings::dump(&repo_dir, &baseline_jsonl)?;
-        // Baseline side: ensure under the checked-out baseline SHA so both
-        // snapshots are produced by the SAME ecp binary — a fingerprint drift
-        // here means the cached baseline graph was built by an older ecp, which
-        // would surface as a phantom diff. Rebuild it before the copy.
-        let baseline_graph =
-            ensure_graph_synchronously(&repo_dir, Some(&baseline_sha), "baseline")?;
+        let baseline_dir = baseline_checkout.path();
+        bindings::dump(&baseline_dir, &baseline_jsonl)?;
+        // Baseline side: attach only to a graph of the baseline SHA that this
+        // ecp built — a fingerprint drift here means the cached baseline graph
+        // was built by an older ecp, which would surface as a phantom diff —
+        // else rebuild it before the copy.
+        let user_root = crate::build::orchestrator::worktree_toplevel(&repo_dir)
+            .unwrap_or_else(|| repo_dir.clone());
+        let baseline_graph = ensure_baseline_graph(&baseline_dir, &user_root, &baseline_sha)?;
         std::fs::copy(&baseline_graph, &baseline_graph_tmp).map_err(|e| {
             EcpError::Output(format!(
                 "copy baseline graph {}: {e}",
                 baseline_graph.display()
             ))
         })?;
-    } // _guard drops — branch + stash restored
+    }
 
     if want_bindings {
         let baseline_map = bindings::load_jsonl(&baseline_jsonl)?;
@@ -235,9 +237,7 @@ pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, EcpError> {
         symbols_diff = Some(symbols::diff(&baseline_snap, &current_snap)?);
     }
 
-    let _ = std::fs::remove_file(&current_jsonl);
-    let _ = std::fs::remove_file(&baseline_jsonl);
-    let _ = std::fs::remove_file(&baseline_graph_tmp);
+    drop(baseline_checkout);
 
     Ok(DiffPayload {
         bindings: bindings_diff,
@@ -255,9 +255,9 @@ pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, EcpError> {
 /// Ensure the graph for the currently-checked-out tree is published and
 /// synchronously on disk, then return its resolved path.
 ///
-/// `sha` is `Some` for the baseline side (built under a GitGuard checkout) and
-/// `None` for the current side (HEAD). The path is resolved *after* the ensure
-/// so a freshly published commit dir wins over the legacy `.ecp/graph.bin`.
+/// `sha` is `None` for the current side (HEAD). The path is resolved *after*
+/// the ensure so a freshly published commit dir wins over the legacy
+/// `.ecp/graph.bin`.
 fn ensure_graph_synchronously(
     repo_dir: &std::path::Path,
     sha: Option<&str>,
@@ -272,4 +272,25 @@ fn ensure_graph_synchronously(
     )
     .map_err(|e| EcpError::Output(format!("ensure {label} graph: {e}")))?;
     Ok(crate::graph_path::resolve(legacy_default, repo_dir))
+}
+
+/// The baseline side's `graph.bin`: the published graph of `sha` when this
+/// ecp built it, else a build from `checkout`. The checkout is deleted when
+/// the diff ends, so the build records `user_root` as its worktree; the next
+/// diff of the same baseline then attaches instead of indexing it again.
+fn ensure_baseline_graph(
+    checkout: &std::path::Path,
+    user_root: &std::path::Path,
+    sha: &str,
+) -> Result<std::path::PathBuf, EcpError> {
+    let start = std::time::Instant::now();
+    let mut built = crate::build::orchestrator::build_l2_recorded(checkout, user_root, sha)
+        .map_err(|e| EcpError::Output(format!("ensure baseline graph: {e}")))?;
+    if built.tantivy_handle.is_some() {
+        eprintln!("l2.built elapsed={:.2}s", start.elapsed().as_secs_f32());
+    }
+    // Joined here: nothing else keeps this process alive for the writer, and
+    // a writer cut off at exit leaves its temp dir in the published graph.
+    built.join_background();
+    Ok(built.commit_dir.join("graph.bin"))
 }

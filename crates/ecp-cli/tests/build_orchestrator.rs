@@ -51,9 +51,16 @@ fn first_build_writes_commit_dir_atomically() {
     );
     assert!(result.commit_dir.join("graph.bin").exists());
     assert!(result.commit_dir.join("meta.json").exists());
-    let building = result.commit_dir.with_extension("building");
+    // Contract: a successful build leaves no staging dir of either shape
+    // (`<base>.building`, `<base>.building.<pid>.<n>`) beside what it published.
+    let leftovers: Vec<String> = std::fs::read_dir(result.commit_dir.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".building"))
+        .collect();
     assert!(
-        !building.exists(),
-        "building suffix must be gone after atomic rename"
+        leftovers.is_empty(),
+        "staging must be gone after atomic rename: {leftovers:?}"
     );
 }

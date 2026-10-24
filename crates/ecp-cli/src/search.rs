@@ -125,8 +125,8 @@ impl TantivyEngine {
     /// Returns `Err` instead of panicking so the caller can degrade
     /// gracefully — `graph.bin` is the primary artifact and exact-name
     /// resolution still works when BM25 build fails (writer lock held
-    /// by zombie, prior commit corrupt, FS full). The next `ecp analyze`
-    /// rebuilds from scratch via the `remove_dir_all` step below.
+    /// by zombie, prior commit corrupt, FS full). The next build sweeps the
+    /// leftover staging dir and builds the index again.
     pub fn build_index(index_dir: &Path, graph: &ZeroCopyGraph) -> Result<(), String> {
         let final_dir = index_dir.join("tantivy");
         // Build beside the final dir and rename in after `commit()`: a reader
@@ -135,7 +135,11 @@ impl TantivyEngine {
         // build are swept first.
         sweep_building_dirs(index_dir);
         let index_dir = index_dir.join(format!("{BUILDING_PREFIX}{}", std::process::id()));
-        fs::create_dir_all(&index_dir).map_err(|e| format!("create tantivy dir: {e}"))?;
+        // `create_dir`, never `create_dir_all`: the parent is a published
+        // commit dir, and gc may have retired it since the build. Creating
+        // the parent again would bring back a dir name gc just removed, with
+        // an index and no graph.
+        fs::create_dir(&index_dir).map_err(|e| format!("create tantivy dir: {e}"))?;
 
         let mut schema_builder = Schema::builder();
         let uid_field = schema_builder.add_text_field("uid", STRING | STORED);
@@ -182,9 +186,9 @@ impl TantivyEngine {
         drop(index_writer);
         if final_dir.exists() {
             // Move stale Tantivy state outside the build dir before async
-            // cleanup. On Windows, a background delete under `<sha>.building/`
-            // can keep a handle open and make the later `.building -> <sha>`
-            // publish fail with os error 5.
+            // cleanup. On Windows, a background delete under a staging dir
+            // can keep a handle open and make the later staging rename
+            // fail with os error 5.
             let dead_path = stale_tantivy_path(&final_dir);
             fs::rename(&final_dir, &dead_path)
                 .map_err(|e| format!("move stale tantivy dir aside: {e}"))?;
@@ -365,6 +369,21 @@ mod tests {
         let dir = TempDir::new().unwrap();
         super::TantivyEngine::build_index(dir.path(), graph).unwrap();
         dir
+    }
+
+    /// The writer thread starts after the publish; gc can retire the
+    /// published dir first. The writer must fail and create nothing, not
+    /// bring the retired name back.
+    #[test]
+    fn test_build_index_retired_parent_creates_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let published = tmp.path().join("commit__x");
+        std::fs::create_dir(&published).unwrap();
+        std::fs::rename(&published, tmp.path().join("commit__x.dead.1.2.3")).unwrap();
+        let graph = build_graph_with_names(&["parseConfig"]);
+
+        assert!(super::TantivyEngine::build_index(&published, &graph).is_err());
+        assert!(!published.exists(), "the retired dir name was recreated");
     }
 
     #[test]

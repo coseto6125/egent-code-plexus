@@ -6,6 +6,37 @@ use crate::graph::{NodeKind, RelType};
 /// Function names RETURN / WITH treat as aggregates.
 const AGGREGATES: &[&str] = &["COUNT", "SUM", "AVG", "MIN", "MAX", "COLLECT"];
 
+/// Scalar functions the executor evaluates (`eval_scalar_funcall`). Any other
+/// name is refused at parse time: evaluating it as null made a typo or an
+/// unsupported function look like missing data.
+const SCALAR_FUNCTIONS: &[&str] = &["TYPE", "ID", "LABELS"];
+
+fn check_function_known(name: &str) -> Result<(), CypherError> {
+    let upper = name.to_ascii_uppercase();
+    if AGGREGATES.contains(&upper.as_str()) || SCALAR_FUNCTIONS.contains(&upper.as_str()) {
+        return Ok(());
+    }
+    // Built from the two lists so the message cannot drift from what is accepted.
+    let supported = SCALAR_FUNCTIONS
+        .iter()
+        .chain(AGGREGATES)
+        .map(|f| f.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(CypherError::Semantic {
+        msg: format!("unknown function '{name}' (supported: {supported})"),
+    })
+}
+
+/// Hint for a SQL `JOIN` written where a Cypher clause belongs.
+const SQL_JOIN_HINT: &str = "SQL syntax detected; for left-join semantics use `MATCH (a) OPTIONAL MATCH (a)-[r]->(b) WITH a, r WHERE r IS NULL RETURN a`";
+
+fn unsupported(construct: &str) -> CypherError {
+    CypherError::Semantic {
+        msg: format!("unsupported construct: {construct}"),
+    }
+}
+
 pub struct Cursor<'a> {
     tokens: &'a [Token],
     pos: usize,
@@ -76,10 +107,10 @@ fn hint_for_unsupported(tokens: &[Token], pos: usize) -> Option<String> {
             if matches!(a.as_str(), "LEFT" | "RIGHT" | "INNER" | "FULL")
                 && ident_at(i + 1).as_deref() == Some("JOIN")
             {
-                return Some("SQL syntax detected; Cypher uses OPTIONAL MATCH (a)-[r]->(b) WHERE r IS NULL for left-join semantics".into());
+                return Some(SQL_JOIN_HINT.into());
             }
             if a == "JOIN" {
-                return Some("SQL syntax detected; Cypher uses OPTIONAL MATCH (a)-[r]->(b) WHERE r IS NULL for left-join semantics".into());
+                return Some(SQL_JOIN_HINT.into());
             }
             if a == "CALL" {
                 return Some("stored procedures (CALL \u{2026} YIELD) are unsupported; for a node's edge types use `ecp inspect --name X`".into());
@@ -113,15 +144,50 @@ fn parse_single_query(c: &mut Cursor) -> Result<Query, CypherError> {
     let mut where_: Option<Expr> = None;
 
     loop {
+        // The query model holds one WHERE and one WITH, evaluated in a fixed
+        // order (MATCH, WHERE, WITH, RETURN). A clause that does not fit that
+        // order would be reordered or overwritten, so it is refused instead.
         if c.check(&Token::With) {
+            if with.is_some() {
+                return Err(unsupported(
+                    "a second WITH clause (only one WITH per query part; fold the stages into one WITH or run two queries)",
+                ));
+            }
             with = Some(parse_with(c)?);
             continue;
         }
         if c.check(&Token::Where) {
-            where_ = Some(parse_where(c)?);
+            if with.is_some() {
+                return Err(unsupported(
+                    "a WHERE after WITH that is not part of the WITH (put the WHERE right after WITH, or run two queries)",
+                ));
+            }
+            if matches.last().is_some_and(|m| m.optional) {
+                return Err(unsupported(
+                    "WHERE directly after OPTIONAL MATCH (openCypher scopes it to the optional pattern; this engine filters after all MATCH clauses. Filter rows with `WITH a, b WHERE ...`, or test absence with `WHERE NOT EXISTS((c)-[:Calls]->(f))`)",
+                ));
+            }
+            let next = parse_where(c)?;
+            // Without OPTIONAL MATCH, filtering after all MATCH clauses equals
+            // filtering after each, so `MATCH .. WHERE p MATCH .. WHERE q` is
+            // `p AND q`. Overwriting kept only the last predicate.
+            where_ = Some(match where_.take() {
+                None => next,
+                Some(_) if matches.iter().any(|m| m.optional) => {
+                    return Err(unsupported(
+                        "a second WHERE clause in a query with OPTIONAL MATCH (the WHERE would filter the optional rows; combine the predicates with AND in one WHERE)",
+                    ));
+                }
+                Some(prev) => Expr::BinOp(Op::And, Box::new(prev), Box::new(next)),
+            });
             continue;
         }
         if c.check(&Token::Match) || c.check(&Token::Optional) {
+            if with.is_some() {
+                return Err(unsupported(
+                    "MATCH after WITH (all MATCH clauses run before the WITH; move the MATCH above it or run two queries)",
+                ));
+            }
             matches.push(parse_match_clause(c)?);
             continue;
         }
@@ -145,7 +211,7 @@ fn parse_single_query(c: &mut Cursor) -> Result<Query, CypherError> {
         (None, false)
     };
 
-    Ok(Query {
+    let query = Query {
         matches,
         where_,
         with,
@@ -155,7 +221,108 @@ fn parse_single_query(c: &mut Cursor) -> Result<Query, CypherError> {
         limit,
         union,
         union_all,
-    })
+    };
+    validate_variable_length(&query)?;
+    Ok(query)
+}
+
+fn is_variable_length(rel: &RelPat) -> bool {
+    matches!(rel.range, Some(r) if r != (1, 1))
+}
+
+fn range_text(rel: &RelPat) -> String {
+    let (min, max) = rel.range.unwrap_or((1, 1));
+    if max == u32::MAX {
+        format!("*{min}..")
+    } else {
+        format!("*{min}..{max}")
+    }
+}
+
+fn exists_patterns<'a>(e: &'a Expr, out: &mut Vec<&'a Pattern>) {
+    match e {
+        Expr::ExistsPattern { pattern, .. } => out.push(pattern),
+        Expr::BinOp(_, l, r) => {
+            exists_patterns(l, out);
+            exists_patterns(r, out);
+        }
+        Expr::UnaryOp(_, inner) => exists_patterns(inner, out),
+        _ => {}
+    }
+}
+
+/// The executor answers a variable-length hop with reachability: every node
+/// within the depth range once, and the hop's edge variable bound to the last
+/// edge only. openCypher returns one row per path and binds a list of edges, so
+/// the shapes below would return a different count with no signal. Refuse
+/// those. Reachability is exact when the result is a set (DISTINCT) and the
+/// edge variable is not read.
+fn validate_variable_length(q: &Query) -> Result<(), CypherError> {
+    let mut exists = Vec::new();
+    for e in q
+        .where_
+        .iter()
+        .chain(q.with.iter().filter_map(|w| w.where_.as_ref()))
+    {
+        exists_patterns(e, &mut exists);
+    }
+    let match_rels = q
+        .matches
+        .iter()
+        .flat_map(|m| &m.patterns)
+        .flat_map(|p| &p.rels)
+        .filter(|r| is_variable_length(r));
+    let exists_rels = exists
+        .iter()
+        .copied()
+        .flat_map(|p| &p.rels)
+        .filter(|r| is_variable_length(r));
+    for rel in match_rels.clone().chain(exists_rels) {
+        let (min, max) = rel.range.unwrap_or((1, 1));
+        if min > 1 {
+            return Err(unsupported(&format!(
+                "variable-length pattern [{}] with a minimum above 1 (openCypher never repeats a relationship in a path; this engine cannot enforce that for a minimum above 1. Use *1..{max_text} and filter, or chain fixed hops)",
+                range_text(rel),
+                max_text = if max == u32::MAX { "n".to_string() } else { max.to_string() }
+            )));
+        }
+    }
+    let mut var_len = match_rels.peekable();
+    let Some(first) = var_len.peek().copied() else {
+        return Ok(());
+    };
+    if let Some(rel) = var_len.clone().find(|r| r.var.is_some()) {
+        return Err(unsupported(&format!(
+            "relationship variable '{}' on variable-length pattern [{}] (it would bind a list of edges, which this engine does not model; drop the variable)",
+            rel.var.as_deref().unwrap_or_default(),
+            range_text(rel)
+        )));
+    }
+    let safe = |items: &[ReturnItem]| {
+        items.iter().all(|i| match &i.expr {
+            ReturnExpr::FunCall { name, distinct, .. } if AGGREGATES.contains(&name.as_str()) => {
+                *distinct || name == "MIN" || name == "MAX"
+            }
+            _ => true,
+        })
+    };
+    let has_agg = |items: &[ReturnItem]| {
+        items.iter().any(|i| {
+            matches!(&i.expr, ReturnExpr::FunCall { name, .. } if AGGREGATES.contains(&name.as_str()))
+        })
+    };
+    let set_valued = match &q.with {
+        Some(w) if has_agg(&w.items) => safe(&w.items),
+        _ if has_agg(&q.return_.items) => safe(&q.return_.items),
+        _ => q.return_.distinct,
+    };
+    if set_valued {
+        return Ok(());
+    }
+    Err(unsupported(&format!(
+        "variable-length pattern [{}] without DISTINCT (it returns each reachable node once, not one row per path; use RETURN DISTINCT or count(DISTINCT x) to ask for reachability)",
+        range_text(first)
+    )))
 }
 
 pub fn parse_match_clause(c: &mut Cursor) -> Result<MatchClause, CypherError> {
@@ -315,26 +482,29 @@ pub fn parse_rel_pat(c: &mut Cursor) -> Result<RelPat, CypherError> {
     })
 }
 
-/// One label segment → one concrete kind, or a category super-label
+/// One label name → its concrete kind, or a category super-label
 /// (`Callable` / `Type` / `Data`) expanded to its member kinds.
-fn parse_node_kinds_into(c: &mut Cursor, kinds: &mut Vec<NodeKind>) -> Result<(), CypherError> {
-    let name = match c.advance() {
-        Some(Token::Ident(s)) => s.clone(),
-        _ => return Err(c.err("NodeKind ident")),
-    };
+fn resolve_node_label(name: &str) -> Result<Vec<NodeKind>, CypherError> {
     if let Ok(k) = name.parse::<NodeKind>() {
-        kinds.push(k);
-        return Ok(());
+        return Ok(vec![k]);
     }
-    if let Some(set) = NodeKind::expand_category_label(&name) {
-        kinds.extend_from_slice(set);
-        return Ok(());
+    if let Some(set) = NodeKind::expand_category_label(name) {
+        return Ok(set.to_vec());
     }
     Err(CypherError::Semantic {
         msg: format!(
             "unknown NodeKind '{name}' (concrete kinds like Function/Class, or the category labels Callable/Type/Data)"
         ),
     })
+}
+
+fn parse_node_kinds_into(c: &mut Cursor, kinds: &mut Vec<NodeKind>) -> Result<(), CypherError> {
+    let name = match c.advance() {
+        Some(Token::Ident(s)) => s.clone(),
+        _ => return Err(c.err("NodeKind ident")),
+    };
+    kinds.extend(resolve_node_label(&name)?);
+    Ok(())
 }
 
 fn parse_rel_type(c: &mut Cursor) -> Result<RelType, CypherError> {
@@ -433,6 +603,7 @@ fn parse_return_item(c: &mut Cursor) -> Result<ReturnItem, CypherError> {
             let distinct = c.eat(&Token::Distinct);
             if c.eat(&Token::Star) {
                 c.expect(&Token::RParen)?;
+                check_function_known(&name)?;
                 ReturnExpr::FunCall {
                     name: name.to_ascii_uppercase(),
                     distinct: false,
@@ -449,6 +620,7 @@ fn parse_return_item(c: &mut Cursor) -> Result<ReturnItem, CypherError> {
                     }
                 }
                 c.expect(&Token::RParen)?;
+                check_function_known(&name)?;
                 let name = name.to_ascii_uppercase();
                 if args.is_empty() && AGGREGATES.contains(&name.as_str()) {
                     return Err(c.err("aggregate argument"));
@@ -716,33 +888,36 @@ fn parse_atom(c: &mut Cursor) -> Result<Expr, CypherError> {
         // level so WHERE clauses can disjoin labels (the `WHERE n:A OR n:B`
         // form is illegal in OpenCypher; pipe is the correct disjunction).
         if c.eat(&Token::Colon) {
-            // Category labels (`Callable`/`Type`/`Data`) normalize to their
-            // member kind names HERE, same eager altitude as the MATCH-pattern
-            // path — eval stays a plain per-row string compare. Unknown labels
-            // pass through unchanged and fall through to `false` at eval.
+            // Labels resolve at parse time, like the MATCH-pattern path: a
+            // category label expands to its member kind names, so eval stays a
+            // plain per-row string compare, and an unknown label is an error
+            // (it used to evaluate to false, so a typo returned zero rows).
             let mut labels = Vec::new();
-            let push_label =
-                |lab: String, labels: &mut Vec<String>| match NodeKind::expand_category_label(&lab)
-                {
-                    Some(set) => labels.extend(set.iter().map(|k| k.as_str().to_string())),
-                    None => labels.push(lab),
-                };
+            let mut push_label = |lab: &str| -> Result<(), CypherError> {
+                labels.extend(
+                    resolve_node_label(lab)?
+                        .iter()
+                        .map(|k| k.as_str().to_string()),
+                );
+                Ok(())
+            };
             let first = match c.advance() {
                 Some(Token::Ident(s)) => s.clone(),
                 _ => return Err(c.err("label name after :")),
             };
-            push_label(first, &mut labels);
+            push_label(&first)?;
             while c.eat(&Token::Pipe) {
                 let lab = match c.advance() {
                     Some(Token::Ident(s)) => s.clone(),
                     _ => return Err(c.err("label name after |")),
                 };
-                push_label(lab, &mut labels);
+                push_label(&lab)?;
             }
             return Ok(Expr::HasLabel(name, labels));
         }
         if c.eat(&Token::LParen) {
             let distinct = c.eat(&Token::Distinct);
+            check_function_known(&name)?;
             if c.eat(&Token::Star) {
                 // COUNT(*): zero args sentinel via Null literal.
                 c.expect(&Token::RParen)?;
@@ -1138,11 +1313,21 @@ mod tests {
     #[test]
     fn query_optional_match_and_with() {
         let q = q(
-            "MATCH (a) WITH a, COUNT(*) AS n WHERE n > 0 OPTIONAL MATCH (a)-->(b) RETURN a.name, n",
+            "MATCH (a) OPTIONAL MATCH (a)-->(b) WITH a, COUNT(*) AS n WHERE n > 0 RETURN a.name, n",
         );
         assert_eq!(q.matches.len(), 2);
         assert!(q.matches[1].optional);
         assert!(q.with.is_some());
+    }
+
+    #[test]
+    fn test_parse_query_match_after_with_is_refused() {
+        let toks = tokenize(
+            "MATCH (a) WITH a, COUNT(*) AS n WHERE n > 0 OPTIONAL MATCH (a)-->(b) RETURN a.name, n",
+        )
+        .unwrap();
+        let error = parse_query(&toks).unwrap_err().to_string();
+        assert!(error.contains("MATCH after WITH"), "{error}");
     }
 
     #[test]
@@ -1470,5 +1655,16 @@ mod tests {
         let query = qr("MATCH (n) WHERE n.name IN ['a','b'] RETURN n.name").unwrap();
         assert!(matches!(query.where_, Some(Expr::In(..))));
         assert!(qr("MATCH (n) WHERE 'x' IN n.decorators RETURN n.name").is_ok());
+    }
+
+    #[test]
+    fn test_check_function_known_message_lists_every_accepted_name() {
+        let message = check_function_known("frobnicate").unwrap_err().to_string();
+        for name in AGGREGATES.iter().chain(SCALAR_FUNCTIONS) {
+            assert!(
+                message.contains(&name.to_ascii_lowercase()),
+                "{name}: {message}"
+            );
+        }
     }
 }

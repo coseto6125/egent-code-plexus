@@ -110,9 +110,11 @@ pub struct FindArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format: text (default) | json | toon.
+    /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
+    /// toon. `json`: full-fidelity JSON. `text`: one `[kind] file:line (name)` line per
+    /// match.
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 
     /// Read patterns from stdin (`bm25` mode only — one per line, lines
     /// starting with `#` or empty are skipped). Engines are loaded once
@@ -273,7 +275,7 @@ fn run_bm25(args: FindArgs, engine: Option<&Engine>) -> Result<(), EcpError> {
         return run_batch(args, engine);
     }
 
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
     let pattern = args.pattern.clone().ok_or_else(|| {
         EcpError::InvalidArgument("pattern is required (or use --batch to read from stdin)".into())
     })?;
@@ -570,7 +572,7 @@ fn base_candidates(
 
 fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result<(), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
     let pattern = args.pattern.as_deref().ok_or_else(|| {
         EcpError::InvalidArgument("pattern is required in exact / fuzzy mode".into())
     })?;
@@ -719,7 +721,7 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
 fn run_batch(args: FindArgs, engine: Option<&Engine>) -> Result<(), EcpError> {
     use std::io::BufRead;
 
-    let format = OutputFormat::parse(args.format.as_deref());
+    let format = args.format.unwrap_or_default();
     let targets = resolve_targets(args.repo.as_deref())?;
     let cwd = if targets.is_empty() {
         Some(cwd_engine(engine)?)
@@ -1047,6 +1049,21 @@ fn compute_single(
     engine: &Engine,
     repo_label: Option<String>,
 ) -> Result<(Vec<Hit>, u64), EcpError> {
+    compute_single_limited(pattern, mode, kind_filter, engine, repo_label, usize::MAX)
+}
+
+/// [`compute_single`] that builds at most `limit` rows. The rows are the first
+/// `limit` of the unlimited result, in the same order: a `Hit` owns its callers
+/// and callees, so a consumer that shows five of a hundred should not build
+/// the other ninety-five.
+fn compute_single_limited(
+    pattern: &str,
+    mode: &FindMode,
+    kind_filter: Option<&str>,
+    engine: &Engine,
+    repo_label: Option<String>,
+    limit: usize,
+) -> Result<(Vec<Hit>, u64), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let index_dir = engine.index_dir();
 
@@ -1060,6 +1077,7 @@ fn compute_single(
         &kind_set,
         &repo_label,
         index_dir,
+        limit,
     ))
 }
 
@@ -1073,13 +1091,14 @@ fn bm25_hits_from_graph(
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
     index_dir: Option<&std::path::Path>,
+    limit: usize,
 ) -> (Vec<Hit>, u64) {
     if let Some(dir) = index_dir {
         if dir.join("tantivy").exists() {
-            return tantivy_hits(graph, pattern, kind_set, repo_label, dir);
+            return tantivy_hits(graph, pattern, kind_set, repo_label, dir, limit);
         }
     }
-    substring_hits(graph, pattern, kind_set, repo_label)
+    substring_hits(graph, pattern, kind_set, repo_label, limit)
 }
 
 /// Build a `uid -> node_idx` map restricted to `wanted`, in a single pass over
@@ -1116,13 +1135,14 @@ fn tantivy_hits(
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
     index_dir: &std::path::Path,
+    limit: usize,
 ) -> (Vec<Hit>, u64) {
     let (scored, tantivy_total) =
         match crate::search::TantivyEngine::search(index_dir, pattern, MULTI_CAP) {
             Some(s) => s,
             // Index unavailable / corrupt / parse error — fall through so
             // hook context isn't silently empty.
-            None => return substring_hits(graph, pattern, kind_set, repo_label),
+            None => return substring_hits(graph, pattern, kind_set, repo_label, limit),
         };
     // Index ran cleanly. An empty scored vec means BM25 ruled out every
     // symbol; we MUST NOT fall back to substring scan, since that would
@@ -1140,8 +1160,11 @@ fn tantivy_hits(
         .collect();
     let uid_to_idx = index_wanted_uids(graph.nodes.iter().map(|n| n.uid.to_native()), &wanted);
 
-    let mut hits = Vec::with_capacity(scored.len());
+    let mut hits = Vec::with_capacity(scored.len().min(limit));
     for (score, uid) in scored {
+        if hits.len() >= limit {
+            break;
+        }
         let Ok(uid_u64) = uid.parse::<u64>() else {
             continue;
         };
@@ -1164,6 +1187,7 @@ fn substring_hits(
     pattern: &str,
     kind_set: &Option<Vec<String>>,
     repo_label: &Option<String>,
+    limit: usize,
 ) -> (Vec<Hit>, u64) {
     let pattern_lower = pattern.to_lowercase();
     // A symbol name never contains whitespace, so a multi-word pattern (the
@@ -1200,8 +1224,9 @@ fn substring_hits(
     // callers and callees as owned Strings, and building thousands to keep
     // a hundred was the peak allocation of this path.
     let total_before_truncate = scored.len() as u64;
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(MULTI_CAP);
+    // `build_hit` re-checks the eligibility the scan already applied, so every
+    // scored row becomes a hit and only the first `limit` are read.
+    keep_top_ranked(&mut scored, limit.min(MULTI_CAP));
     let hits = scored
         .into_iter()
         .filter_map(|(score, idx)| {
@@ -1214,8 +1239,24 @@ fn substring_hits(
                 repo_label,
             )
         })
+        .take(limit)
         .collect();
     (hits, total_before_truncate)
+}
+
+/// Keep the `keep` best `(score, node index)` rows, best first. Ties order by
+/// node index, the order a stable sort of the scan gave. Selecting before the
+/// sort makes the cost linear in the hit count plus `keep log keep`, where a
+/// full sort paid `n log n` to read five rows.
+fn keep_top_ranked(scored: &mut Vec<(f32, usize)>, keep: usize) {
+    let by_rank = |a: &(f32, usize), b: &(f32, usize)| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1));
+    if keep < scored.len() {
+        if let Some(last_kept) = keep.checked_sub(1) {
+            scored.select_nth_unstable_by(last_kept, by_rank);
+        }
+        scored.truncate(keep);
+    }
+    scored.sort_unstable_by(by_rank);
 }
 
 /// Legacy 1.0 / 0.7 / 0.4 substring score. ASCII names compare in place;
@@ -1434,6 +1475,7 @@ pub fn compute_multi_with_engines(
                             &kind_set,
                             &repo_label,
                             engine.index_dir(),
+                            usize::MAX,
                         );
                         hits
                     }),
@@ -1529,13 +1571,31 @@ pub fn run_for_repo(
 /// the JSON payload. Batch mode is not exposed here — hooks always run
 /// one pattern at a time.
 pub fn compute_hits(args: FindArgs, engine: &Engine) -> Result<Vec<Hit>, EcpError> {
+    compute_hits_limited(args, engine, usize::MAX)
+}
+
+/// [`compute_hits`] returning only the first `limit` rows, identical to the
+/// head of the unlimited result. The PreToolUse hook shows five of up to a
+/// hundred; building the rest is wasted latency on every search tool call.
+pub fn compute_hits_limited(
+    args: FindArgs,
+    engine: &Engine,
+    limit: usize,
+) -> Result<Vec<Hit>, EcpError> {
     let pattern = args.pattern.as_deref().ok_or_else(|| {
         EcpError::InvalidArgument("compute_hits requires a pattern (--batch not supported)".into())
     })?;
     let targets = resolve_targets(args.repo.as_deref())?;
     if targets.is_empty() {
-        compute_single(pattern, &args.mode, args.kind.as_deref(), engine, None)
-            .map(|(hits, _truncated)| hits)
+        compute_single_limited(
+            pattern,
+            &args.mode,
+            args.kind.as_deref(),
+            engine,
+            None,
+            limit,
+        )
+        .map(|(hits, _truncated)| hits)
     } else if targets.len() == 1 {
         let target = targets.into_iter().next().unwrap();
         let local_engine = crate::auto_ensure::load_ensured(
@@ -1543,19 +1603,20 @@ pub fn compute_hits(args: FindArgs, engine: &Engine) -> Result<Vec<Hit>, EcpErro
             &target.worktree_root(),
         )
         .map_err(|e| EcpError::Rkyv(format!("{}: {e}", target.display_name)))?;
-        compute_single(
+        compute_single_limited(
             pattern,
             &args.mode,
             args.kind.as_deref(),
             &local_engine,
             Some(target.display_name),
+            limit,
         )
         .map(|(hits, _truncated)| hits)
     } else {
         let loaded = load_engines_lossy(&targets);
         let (hits, _summary) =
             compute_multi_with_engines(pattern, &args.mode, args.kind.as_deref(), &loaded);
-        Ok(hits)
+        Ok(hits.into_iter().take(limit).collect())
     }
 }
 
@@ -2168,5 +2229,27 @@ mod tests {
         let got = index_wanted_uids(nodes.iter().copied(), &wanted);
         assert_eq!(got.get(&7).copied(), Some(3));
         assert_eq!(full_insert(&nodes).get(&7).copied(), Some(3));
+    }
+
+    /// Contract: selecting before sorting returns the rows a full stable sort
+    /// by score (ties in node order) and truncate returned. Many ties, a limit
+    /// of 0, one, below, at and above the row count.
+    #[test]
+    fn test_keep_top_ranked_matches_full_stable_sort_with_ties() {
+        let scores = [1.0f32, 0.7, 0.4];
+        let rows: Vec<(f32, usize)> = (0..50usize)
+            .map(|idx| (scores[(idx * 7 + idx / 3) % 3], idx))
+            .collect();
+        for keep in [0usize, 1, 5, 17, 49, 50, 51, 500] {
+            let mut expected = rows.clone();
+            expected.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            expected.truncate(keep);
+            let mut got = rows.clone();
+            keep_top_ranked(&mut got, keep);
+            assert_eq!(got, expected, "keep {keep}");
+        }
+        let mut empty: Vec<(f32, usize)> = Vec::new();
+        keep_top_ranked(&mut empty, 5);
+        assert!(empty.is_empty());
     }
 }

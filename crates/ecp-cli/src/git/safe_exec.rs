@@ -3,6 +3,8 @@
 //! escalate to code execution. See spec §8 H4.
 
 use ecp_core::EcpError;
+use std::ffi::OsString;
+use std::io;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -19,14 +21,16 @@ use std::time::{Duration, Instant};
 ///   scanned repository's `.git/hooks/post-checkout` (and the rest) cannot run
 ///   during ecp's own bookkeeping. This one needs no config at all from the
 ///   attacker: an executable dropped in `.git/hooks/` is enough, and
-///   `ecp diff --baseline` checks out and stashes on the user's behalf.
+///   `ecp diff --baseline` adds a worktree and checks a commit out into it.
 ///
 /// Three execution vectors are not covered by these flags, because the
 /// program's name comes from `.gitattributes` rather than from config: an
 /// external diff driver, a textconv driver, and a filter driver. Diff-family
 /// callers pass [`DIFF_HARDENING`] for the first two. Commands that convert
-/// worktree content — `checkout`, `stash`, `archive` — pass the overrides from
-/// [`filter_overrides`] for the third.
+/// content — `checkout`, `reset --hard`, `stash`, `archive`, and `status` and
+/// a `diff` against the worktree, which run the clean filter over every racily
+/// clean or stat-dirty file — pass the overrides from [`filter_overrides`] for
+/// the third.
 ///
 /// `-c diff.external=` is deliberately NOT set here — git treats the empty
 /// value as a command to run and dies with `cannot run : No such file or
@@ -63,14 +67,20 @@ pub fn git_at(program: &Path) -> Command {
 ///   can pre-empt because the driver name comes from `.gitattributes`.
 pub const DIFF_HARDENING: [&str; 2] = ["--no-ext-diff", "--no-textconv"];
 
-/// `-c` settings that neutralise every filter driver visible to git in
+/// Overrides that neutralise every filter driver visible to git in
 /// `repo_dir`. Pair with [`git_with_overrides`].
 ///
-/// `checkout`, `stash` and `archive` all convert content, so a `.gitattributes`
-/// line naming `filter=<driver>` runs that driver's program. `core.hooksPath`
-/// does not touch it, none of the three commands has a `--no-filters`, and the
-/// driver name lives in the repository's own attributes file — so the names
-/// have to be read out of the config before they can be overridden.
+/// `checkout`, `reset --hard`, `stash`, `archive` and `status` all convert
+/// content, so a `.gitattributes` line naming `filter=<driver>` runs that
+/// driver's program. `core.hooksPath` does not touch it, none of these
+/// commands has a `--no-filters`, and the driver name lives in the
+/// repository's own attributes file — so the names have to be read out of the
+/// config before they can be overridden.
+///
+/// Call it with the directory the converting command runs in. The config is
+/// read as git sees it there, and a linked worktree can see drivers its main
+/// worktree cannot: an `includeIf "gitdir:**/worktrees/**"` section applies
+/// only inside the linked one.
 ///
 /// The enumeration deliberately asks for the *effective* config rather than a
 /// scope. Scoping it to `--local` looked tighter and was leaky: a driver in
@@ -86,58 +96,159 @@ pub const DIFF_HARDENING: [&str; 2] = ["--no-ext-diff", "--no-textconv"];
 /// own config shadows the global value for that same name, so the allowlist
 /// would wave through exactly the program it exists to stop — measured, and it
 /// ran. The cost is that git-lfs does not smudge inside ecp's window, so an
-/// LFS-tracked file is read as its pointer stub. ecp parses source and LFS
+/// LFS-tracked file is read as its pointer stub, and `status` lists a racily
+/// clean LFS-tracked file as modified. ecp parses source and LFS
 /// holds binary assets, so this buys a complete boundary for a case that
 /// barely arises.
 ///
-/// All three keys need overriding. `process` takes precedence over `smudge` and
-/// `clean`, so a repository that sets it keeps executing when only those two
-/// are covered. `cat` is the passthrough: it returns the content unchanged,
-/// which is what an absent filter does. It is not a valid long-running filter,
-/// so the `process` override makes git log an initialisation failure and fall
-/// back to the content as stored, and `required=false` is what keeps that a
-/// fallback rather than a hard error. Those lines land in captured stderr,
-/// which the success path discards.
-pub fn filter_overrides(repo_dir: &Path) -> Vec<String> {
-    let Ok(out) = git()
-        .args(["config", "--name-only", "--get-regexp", "^filter\\."])
+/// `process` takes precedence over `smudge` and `clean`, so a repository that
+/// sets it keeps executing when only those two are covered. An empty value
+/// starts no program: git 2.43 `apply_filter` (`convert.c`) runs a command
+/// only when it is non-empty, and a set `process` also stops the other two
+/// from being consulted. Nothing runs, so the content passes through as an
+/// absent filter would. `required=false` keeps a driver the repository marks
+/// required from turning that into a hard error.
+///
+/// A failure to read the config is an error, never "no drivers": the command
+/// the overrides guard would otherwise run unguarded. The read runs with
+/// ecp's own environment; a caller whose command runs under another builds
+/// the read itself with [`FILTER_KEYS_ARGS`].
+pub fn filter_overrides(repo_dir: &Path) -> io::Result<FilterOverrides> {
+    let out = git()
+        .args(FILTER_KEYS_ARGS)
         .current_dir(repo_dir)
-        .output()
-    else {
-        return Vec::new();
-    };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut names: Vec<&str> = text
-        .lines()
-        .filter_map(|key| key.strip_prefix("filter."))
-        // Driver names may themselves contain dots, so split off the leaf.
-        .filter_map(|rest| rest.rsplit_once('.'))
-        .filter(|(_, leaf)| matches!(*leaf, "smudge" | "clean" | "process"))
-        .map(|(name, _)| name)
-        .collect();
-    names.sort_unstable();
-    names.dedup();
-    names
-        .into_iter()
-        .flat_map(|n| {
-            [
-                format!("filter.{n}.smudge=cat"),
-                format!("filter.{n}.clean=cat"),
-                format!("filter.{n}.process=cat"),
-                format!("filter.{n}.required=false"),
-            ]
-        })
-        .collect()
+        .output()?;
+    FilterOverrides::from_config_output(&out)
 }
 
-/// [`git`] plus `-c` overrides, rooted at `repo_dir`. Kept separate from
+/// `git config` arguments that list the key of every filter setting git
+/// resolves in its directory, NUL-terminated. A subsection name may hold any
+/// byte but newline and NUL.
+pub const FILTER_KEYS_ARGS: [&str; 5] =
+    ["config", "-z", "--name-only", "--get-regexp", "^filter\\."];
+
+/// The variables that hold the empty value and `false` for the
+/// `--config-env` form of an override.
+const FILTER_OFF_ENV: &str = "ECP_GIT_FILTER_OFF";
+const FILTER_OPTIONAL_ENV: &str = "ECP_GIT_FILTER_OPTIONAL";
+
+/// The filter driver names git can resolve in one or more directories, each
+/// rendered as overrides that neutralise it. Built by [`filter_overrides`] or
+/// [`FilterOverrides::from_config_output`]; applied by [`git_with_overrides`]
+/// or [`FilterOverrides::apply`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct FilterOverrides {
+    names: Vec<OsString>,
+}
+
+impl FilterOverrides {
+    /// Parses the output of `git config` run with [`FILTER_KEYS_ARGS`].
+    pub fn from_config_output(out: &Output) -> io::Result<Self> {
+        match out.status.code() {
+            Some(0) => {}
+            // `--get-regexp` exits 1, silently, when no key matches.
+            Some(1) if out.stdout.is_empty() => return Ok(Self::default()),
+            _ => {
+                return Err(io::Error::other(format!(
+                    "git config could not list the filter drivers ({}): {}",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )))
+            }
+        }
+        let mut names = out
+            .stdout
+            .split(|&b| b == 0)
+            .filter_map(|key| key.strip_prefix(b"filter."))
+            // Driver names may themselves contain dots, so split off the leaf.
+            .filter_map(|rest| {
+                rest.iter()
+                    .rposition(|&b| b == b'.')
+                    .map(|dot| &rest[..dot])
+            })
+            .map(|name| os_string_from_git(name.to_vec()))
+            .collect::<io::Result<Vec<_>>>()?;
+        names.sort_unstable();
+        names.dedup();
+        Ok(Self { names })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
+    /// Adds `other`'s drivers, so one set guards commands that read the config
+    /// of several directories.
+    pub fn merge(&mut self, other: Self) {
+        self.names.extend(other.names);
+        self.names.sort_unstable();
+        self.names.dedup();
+    }
+
+    /// Adds the overrides to `cmd`, ahead of the subcommand.
+    ///
+    /// `-c` splits its argument at the first `=`, so for a driver named `x=y`
+    /// it sets `filter.x` and leaves the driver live — measured, and it ran.
+    /// `--config-env` splits at the last `=` instead, but needs git 2.31, so it
+    /// is kept to the names that need it and older gits still work everywhere
+    /// else.
+    pub fn apply<'a>(&self, cmd: &'a mut Command) -> &'a mut Command {
+        let mut via_env = false;
+        for name in &self.names {
+            let needs_env = name.as_encoded_bytes().contains(&b'=');
+            via_env |= needs_env;
+            for (leaf, value, var) in [
+                ("clean", "", FILTER_OFF_ENV),
+                ("smudge", "", FILTER_OFF_ENV),
+                ("process", "", FILTER_OFF_ENV),
+                ("required", "false", FILTER_OPTIONAL_ENV),
+            ] {
+                let mut key = OsString::from("filter.");
+                key.push(name);
+                key.push(".");
+                key.push(leaf);
+                key.push("=");
+                if needs_env {
+                    let mut arg = OsString::from("--config-env=");
+                    arg.push(&key);
+                    arg.push(var);
+                    cmd.arg(arg);
+                } else {
+                    key.push(value);
+                    cmd.arg("-c").arg(key);
+                }
+            }
+        }
+        if via_env {
+            cmd.env(FILTER_OFF_ENV, "")
+                .env(FILTER_OPTIONAL_ENV, "false");
+        }
+        cmd
+    }
+}
+
+/// Bytes git printed for a name or path. git on Windows speaks UTF-8, so
+/// anything else there cannot be passed back to it and is an error.
+pub fn os_string_from_git(bytes: Vec<u8>) -> io::Result<OsString> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Ok(OsString::from_vec(bytes))
+    }
+    #[cfg(not(unix))]
+    {
+        String::from_utf8(bytes)
+            .map(OsString::from)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+}
+
+/// [`git`] plus the filter overrides, rooted at `repo_dir`. Kept separate from
 /// [`filter_overrides`] so a caller that runs several commands over
 /// one repository enumerates the drivers once.
-pub fn git_with_overrides(repo_dir: &Path, overrides: &[String]) -> Command {
+pub fn git_with_overrides(repo_dir: &Path, overrides: &FilterOverrides) -> Command {
     let mut cmd = git();
-    for kv in overrides {
-        cmd.arg("-c").arg(kv);
-    }
+    overrides.apply(&mut cmd);
     cmd.current_dir(repo_dir);
     cmd
 }

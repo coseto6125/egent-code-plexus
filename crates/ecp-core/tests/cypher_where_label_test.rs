@@ -66,15 +66,21 @@ fn where_label_three_way_disjunction_covers_all() {
 }
 
 #[test]
-fn where_label_unknown_label_matches_nothing() {
-    let names = names_returned("MATCH (n) WHERE n:DoesNotExist RETURN n.name");
-    assert!(names.is_empty(), "unknown label must produce zero rows");
+fn test_parse_where_label_unknown_label_names_the_label() {
+    let error = cypher::parse("MATCH (n) WHERE n:DoesNotExist RETURN n.name").unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unknown NodeKind 'DoesNotExist'"),
+        "got: {error}"
+    );
+    // One unknown label inside a disjunction refuses the whole query.
+    let error = cypher::parse("MATCH (n) WHERE n:Function|Funtcion RETURN n.name").unwrap_err();
+    assert!(error.to_string().contains("'Funtcion'"), "got: {error}");
 }
 
 /// Label that IS a real `NodeKind` variant but no node in the fixture
-/// carries it — must still return empty.  Pins the behaviour separately
-/// from the bogus-label case in case a future change starts validating
-/// label names against the enum at parse time.
+/// carries it: zero rows, not an error.
 #[test]
 fn where_label_valid_kind_absent_in_fixture() {
     let names = names_returned("MATCH (n) WHERE n:Trait RETURN n.name");

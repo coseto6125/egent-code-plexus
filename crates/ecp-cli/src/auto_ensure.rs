@@ -16,7 +16,7 @@ use ecp_core::session::SessionMeta;
 use ignore::WalkBuilder;
 use std::collections::HashMap;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
@@ -146,8 +146,8 @@ pub enum IndexNeed<'a> {
     /// The staleness probe underneath is HEAD-relative — it compares the
     /// sidecar against `git_head_sha` and walks mtimes — so this does **not**
     /// verify that HEAD is already the requested commit. Callers passing
-    /// `Some(sha)` are expected to hold a checkout guard, as `diff` does with
-    /// `GitGuard`.
+    /// `Some(sha)` must point it at a checkout of that commit, as `diff` does
+    /// with its `BaselineCheckout` worktree.
     ExactSha(Option<&'a str>),
 }
 
@@ -264,9 +264,8 @@ pub fn write_head_sha_sidecar(graph_path: &Path, worktree_root: &Path) {
 }
 
 /// Same as `write_head_sha_sidecar` but takes an already-known SHA, avoiding
-/// a second `git rev-parse`. Synchronous for the reason
-/// `write_builder_fingerprint_sidecar` gives: a short-lived CLI process exits
-/// before a detached write lands. A failed write (permissions, full disk) is
+/// a second `git rev-parse`. Synchronous because a short-lived CLI process
+/// exits before a detached write lands. A failed write (permissions, full disk) is
 /// covered for a graph in a commit dir, whose name `git_fingerprint_shortcut`
 /// falls back to. A graph outside one falls back to the mtime walk, which
 /// misses edits made before the build.
@@ -285,16 +284,15 @@ pub fn compatible_version_sidecar_path(graph_path: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
-/// Write the current `GRAPH_FORMAT_VERSION` next to `graph_path`. Detached so
-/// the build wall-clock isn't bumped; failure is silently dropped because
-/// `attach_latest_sibling_sha` falls back to `header_compatible` when the
-/// sidecar is missing — perf hint, not a correctness requirement.
-pub fn write_compatible_version_sidecar(graph_path: &Path) {
-    let sidecar = compatible_version_sidecar_path(graph_path);
-    let content = format!("{}\n", ecp_core::graph::GRAPH_FORMAT_VERSION);
-    std::thread::spawn(move || {
-        let _ = fs::write(&sidecar, content);
-    });
+/// Write the current `GRAPH_FORMAT_VERSION` next to `graph_path`. The build
+/// writes it inside its staging dir before the rename, so the sidecar is
+/// published with `graph.bin` and no process exit can lose it. A reader that
+/// finds none (a graph from an older binary) falls back to `header_compatible`.
+pub fn write_compatible_version_sidecar(graph_path: &Path) -> io::Result<()> {
+    fs::write(
+        compatible_version_sidecar_path(graph_path),
+        format!("{}\n", ecp_core::graph::GRAPH_FORMAT_VERSION),
+    )
 }
 
 pub(crate) fn read_compatible_version_sidecar(graph_path: &Path) -> Option<u32> {
@@ -317,20 +315,18 @@ pub fn builder_fingerprint_sidecar_path(graph_path: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
-/// Write the current `BUILDER_FINGERPRINT` next to `graph_path`. Unlike the
-/// compatible-version sidecar — a pure read-side perf hint whose miss merely
-/// falls back to `header_compatible` — a stale or
-/// missing fingerprint sidecar makes `fingerprint_drifted` report drift and
-/// triggers a full `build_l2` (the most expensive fallback, not a cheap one).
-/// So this write is synchronous: on return the sidecar reflects the running
-/// binary and drift is cleared. Detaching the ~20-byte write to a spawned
-/// thread risks the process exiting before the flush lands — the next
-/// invocation would then rebuild an already-current graph — and the spawn
-/// itself costs more than the write it would defer.
-pub fn write_builder_fingerprint_sidecar(graph_path: &Path) {
-    let sidecar = builder_fingerprint_sidecar_path(graph_path);
-    let content = format!("{}\n", ecp_core::registry::BUILDER_FINGERPRINT);
-    let _ = fs::write(&sidecar, content);
+/// Write `fingerprint`, the builder fingerprint of the build that produced
+/// `graph_path`, next to it. The value comes from the build's own data (its
+/// `meta.json`), never from the running binary: a back-fill by another binary
+/// must not certify a graph it did not build. A stale or missing fingerprint
+/// sidecar makes `fingerprint_drifted` fall back to `meta.json`, so the build
+/// writes this one inside its staging dir and it is published with
+/// `graph.bin`.
+pub fn write_builder_fingerprint_sidecar(graph_path: &Path, fingerprint: &str) -> io::Result<()> {
+    fs::write(
+        builder_fingerprint_sidecar_path(graph_path),
+        format!("{fingerprint}\n"),
+    )
 }
 
 /// True when the cached graph's builder fingerprint differs from the running
@@ -558,11 +554,11 @@ fn ensure_fresh_with_rebuild(
             // do and from spawning a background rebuild it does not need.
             if matches!(need, IndexNeed::NearCurrent) {
                 if let Some(sibling) = attach_latest_sibling_sha(worktree_root) {
-                    spawn_background_rebuild(worktree_root);
+                    let note = spawn_background_rebuild(worktree_root);
                     test_counters::WARM_ATTACH_COUNT
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     eprintln!(
-                        "l2.warm-attach sibling={} rebuild=background",
+                        "l2.warm-attach sibling={} rebuild=background{note}",
                         sibling.display()
                     );
                     return Ok((
@@ -574,8 +570,8 @@ fn ensure_fresh_with_rebuild(
                 }
             }
             let start = std::time::Instant::now();
-            // build_l2 → build_inside_locked writes the HEAD-SHA sidecar in
-            // the background as its final step; no extra write needed here.
+            // build_l2 → build_inside_locked writes the HEAD-SHA sidecar right
+            // after its publish; no extra write needed here.
             let mut result = crate::build::orchestrator::build_l2(worktree_root, target_sha)
                 .map_err(|e| format!("build_l2: {e}"))?;
             park_tantivy_writer(&mut result, worktree_root);
@@ -735,8 +731,8 @@ pub fn load_ensured(
             {
                 test_counters::BEHIND_HEAD_HEAL_COUNT
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                eprintln!("l2.behind-head rebuild=background");
-                spawn_background_rebuild(worktree_root);
+                let note = spawn_background_rebuild(worktree_root);
+                eprintln!("l2.behind-head rebuild=background{note}");
             }
             Ok(engine)
         }
@@ -920,35 +916,95 @@ fn sibling_graph_compatible(graph_path: &Path) -> bool {
     }
 }
 
-/// Fire-and-forget background rebuild for `worktree_root`.
+/// Fire-and-forget background rebuild for `worktree_root`. Returns the
+/// suffix for the stderr line announcing it: ` last=failed log=<path>` while
+/// the previous background rebuild's failure stands, else empty.
 ///
 /// Uses the same `spawn_bg` + `flock -n` pattern as `post_tool_use`'s
 /// `spawn_background_reindex`. Concurrent triggers no-op because `flock -n`
 /// exits immediately if another builder holds the lock.
-fn spawn_background_rebuild(worktree_root: &Path) {
+fn spawn_background_rebuild(worktree_root: &Path) -> String {
     // Integration tests exercise the warm-attach outcome + counter but have no
     // use for the detached rebuild; skipping it avoids a leaked `sh` subprocess
     // that nextest flags as LEAK on Windows (the rebuild outlives the test).
     if std::env::var_os("ECP_SKIP_BG_REBUILD").is_some() {
-        return;
+        return String::new();
     }
-    let home_ecp = ecp_core::registry::resolve_home_ecp();
     let Ok(repo_dir_name) = crate::repo_identity::repo_dir_name_for_cwd(worktree_root) else {
-        return;
+        return String::new();
     };
-    let lock = home_ecp
-        .join(&repo_dir_name)
-        .join(".warm-attach-rebuild.lock");
+    let markers =
+        RebuildMarkers::under(&ecp_core::registry::resolve_home_ecp().join(repo_dir_name));
+    spawn_background_rebuild_with(worktree_root, &markers, crate::background::spawn_bg);
+    markers.last_failed_note()
+}
+
+/// The background rebuild's lock and outcome files, all under
+/// `~/.ecp/<repo>/`: a query path writes nothing into the user's worktree.
+struct RebuildMarkers {
+    lock: PathBuf,
+    log: PathBuf,
+    complete: PathBuf,
+    failed: PathBuf,
+}
+
+impl RebuildMarkers {
+    fn under(repo_root: &Path) -> Self {
+        Self {
+            lock: repo_root.join(".warm-attach-rebuild.lock"),
+            log: repo_root.join(".warm-attach-rebuild.log"),
+            complete: repo_root.join(".warm-attach-rebuild-complete"),
+            failed: repo_root.join(".warm-attach-rebuild-failed"),
+        }
+    }
+
+    /// Without this, a rebuild that never lands leaves every later query on
+    /// the warm-attached or behind-HEAD graph with no sign of why.
+    fn last_failed_note(&self) -> String {
+        if self.failed.exists() {
+            format!(" last=failed log={}", self.log.display())
+        } else {
+            String::new()
+        }
+    }
+
+    /// The job writes the failed marker itself, so a launcher that never
+    /// started must write it here.
+    fn record_launch_failure(&self) {
+        let _ = std::fs::remove_file(&self.complete);
+        let _ = std::fs::write(&self.failed, b"");
+        if let Ok(mut log) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.log)
+        {
+            let _ = writeln!(log, "rebuild launcher did not start");
+        }
+    }
+}
+
+fn spawn_background_rebuild_with(
+    worktree_root: &Path,
+    markers: &RebuildMarkers,
+    spawn: impl FnOnce(crate::background::BgJob<'_>) -> bool,
+) {
     let repo_str = worktree_root.to_string_lossy();
     let args = ["admin", "index", "--repo", repo_str.as_ref()];
-    let _ = crate::background::spawn_bg(crate::background::BgJob {
+    let started = spawn(crate::background::BgJob {
         args: &args,
-        lock: &lock,
+        lock: &markers.lock,
         cwd: worktree_root,
         retry: (1, 0),
-        markers: None,
+        markers: Some(crate::background::BgMarkers {
+            log: &markers.log,
+            complete: &markers.complete,
+            failed: &markers.failed,
+        }),
         then_args: None,
     });
+    if !started {
+        markers.record_launch_failure();
+    }
 }
 
 /// A binary upgrade (format or fingerprint change) is when the old caches
@@ -1927,5 +1983,64 @@ mod session_heartbeat_tests {
             stamp,
             "the query path must not pay a write per invocation"
         );
+    }
+}
+
+#[cfg(test)]
+mod rebuild_marker_tests {
+    use super::*;
+
+    /// F10: `spawn_bg` returning false used to be dropped on the floor; the
+    /// next announcement now says the last rebuild failed and where its log is.
+    #[test]
+    fn test_spawn_background_rebuild_with_launcher_not_started_failed_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let markers = RebuildMarkers::under(tmp.path());
+        std::fs::write(&markers.complete, b"").unwrap();
+        spawn_background_rebuild_with(tmp.path(), &markers, |_| false);
+        assert!(markers.failed.exists());
+        assert!(!markers.complete.exists());
+        let log = std::fs::read_to_string(&markers.log).unwrap();
+        assert!(log.contains("rebuild launcher did not start"), "{log}");
+        assert_eq!(
+            markers.last_failed_note(),
+            format!(" last=failed log={}", markers.log.display())
+        );
+    }
+
+    /// The job gets all three markers, under the repo root and never in the
+    /// worktree it rebuilds.
+    #[test]
+    fn test_spawn_background_rebuild_with_markers_under_repo_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_root = tmp.path().join("home").join("repo");
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        let markers = RebuildMarkers::under(&repo_root);
+        let mut seen = Vec::new();
+        spawn_background_rebuild_with(&worktree, &markers, |job| {
+            let m = job.markers.as_ref().expect("the job reports its outcome");
+            seen = vec![
+                job.lock.to_path_buf(),
+                m.log.to_path_buf(),
+                m.complete.to_path_buf(),
+                m.failed.to_path_buf(),
+            ];
+            true
+        });
+        assert_eq!(seen.len(), 4);
+        assert!(
+            seen.iter().all(|p| p.parent() == Some(repo_root.as_path())),
+            "{seen:?}"
+        );
+        assert!(!markers.failed.exists());
+        assert_eq!(std::fs::read_dir(&worktree).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn test_last_failed_note_no_failed_marker_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(RebuildMarkers::under(tmp.path()).last_failed_note(), "");
     }
 }

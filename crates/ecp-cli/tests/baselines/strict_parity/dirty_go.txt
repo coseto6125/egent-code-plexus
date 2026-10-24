@@ -1,0 +1,4 @@
+# owner: lane F (incremental overlay: builder edges of dirty files)
+edge full-only x1 Defines File lib.go:1 lib.go #7edf082ebf8c34d4 -> Function lib.go:7 extra #41f122c91e7c9826 conf=1.0
+parent full-only x1 Function lib.go:7 extra #41f122c91e7c9826 owner=- <- Defines File lib.go:1 lib.go #7edf082ebf8c34d4
+parent overlay-only x1 Function lib.go:7 extra #41f122c91e7c9826 owner=- <- none

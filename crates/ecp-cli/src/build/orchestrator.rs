@@ -1,23 +1,39 @@
 //! L2 build orchestrator: src resolution → analyzer pipeline → atomic publish.
 //!
-//! Build lock at `<dirname>.building/.build.lock` (fs2 exclusive non-blocking).
-//! Concurrent builders for the same SHA attach instead of duplicating work.
+//! One lock per repo and SHA stripe, `commits/.locks/<xx>.lock`
+//! ([`crate::commit_lookup::sha_lock_path`]), held from the last check for an
+//! existing build through the publish rename and the fsync of `commits/`.
+//! Under it the builder picks a name above every existing build of the SHA
+//! and builds in a staging dir of its own; a second builder of the SHA waits
+//! and then attaches to what the first published.
 
 use crate::build::dirname_picker::pick_dirname;
-use crate::commit_lookup::CommitIndex;
+use crate::commit_lookup::{
+    record_sha_lock_owner, sha_lock_path, staging_dir_name, CommitDirListing, CommitIndex,
+    StagingShape, LOCKS_DIR,
+};
 use crate::git::safe_exec;
 use crate::repo_identity::repo_dir_name_for_cwd;
 use ecp_core::registry::{
-    resolve_home_ecp, CommitBuildMeta, CommitDirName, EmbeddingStatus, Generation, RefRecord,
+    resolve_home_ecp, CommitBuildMeta, EmbeddingStatus, FileLock, Generation, RefRecord,
     RegistryFile, RepoAlias, RepoMeta, SourceType, BUILDER_FINGERPRINT,
 };
-use fs2::FileExt;
-use std::fs::{self, File, OpenOptions};
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 static GENERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
+static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// The one wait budget for every builder of a SHA another builder holds.
+/// A holder can spend up to 120 s waiting for a machine-wide build slot
+/// (`semaphore::acquire`) before it builds, so the 5 s of the old completion
+/// poll timed out on a healthy holder. The largest corpus measured here
+/// (14882 files) cold-indexes in 5.3 s median and 7.5 s worst. A wedged
+/// holder surfaces as an error naming it, never as a hang.
+pub(crate) const BUILD_LOCK_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub struct BuildResult {
     pub commit_dir: PathBuf,
@@ -49,6 +65,17 @@ impl BuildResult {
     }
 }
 
+/// The SHA as bytes. Every name and path a build derives from it is the
+/// lowercase hex of these bytes, so `ABC…` and `abc…` share one lock and one
+/// set of dirs.
+pub(crate) fn parse_sha(text: &str) -> io::Result<[u8; 20]> {
+    let mut sha = [0u8; 20];
+    if text.len() != 40 || hex::decode_to_slice(text, &mut sha).is_err() {
+        return Err(io::Error::other(format!("invalid sha: {text}")));
+    }
+    Ok(sha)
+}
+
 pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildResult> {
     // The commit slot is keyed by sha alone. A build started from a
     // subdirectory would publish that subtree as the commit's graph, and every
@@ -56,23 +83,53 @@ pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildRe
     // nothing else. Resolve to the worktree root before anything is keyed.
     let toplevel = worktree_toplevel(worktree);
     let worktree = toplevel.as_deref().unwrap_or(worktree);
-    let sha_hex = match target_sha {
-        Some(s) => s.to_string(),
-        None => head_sha_hex(worktree)?,
+    let sha = match target_sha {
+        Some(s) => parse_sha(s)?,
+        None => parse_sha(&head_sha_hex(worktree)?)?,
     };
-    if sha_hex.len() != 40 || !sha_hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(io::Error::other(format!("invalid sha: {sha_hex}")));
-    }
+    let repo_root = resolve_home_ecp().join(repo_dir_name_for_cwd(worktree)?);
+    build_l2_at(worktree, &sha, &repo_root, report_wait)
+}
 
-    let home_ecp = resolve_home_ecp();
-    let repo_dir_name = repo_dir_name_for_cwd(worktree)?;
-    let repo_root = home_ecp.join(&repo_dir_name);
-    fs::create_dir_all(repo_root.join("commits"))?;
+/// [`build_l2`] for a resolved worktree root, SHA and repo root. `on_wait`
+/// runs once if another builder holds the SHA.
+pub(crate) fn build_l2_at(
+    worktree: &Path,
+    sha: &[u8; 20],
+    repo_root: &Path,
+    on_wait: impl FnOnce(&Holder),
+) -> io::Result<BuildResult> {
+    build_l2_recorded_at(worktree, worktree, sha, repo_root, on_wait)
+}
 
-    let dirname = pick_dirname(worktree, &sha_hex)?;
+/// [`build_l2`] of `sha` from `checkout`, a checkout of that commit that the
+/// caller deletes afterwards (`ecp diff`'s baseline worktree). The build
+/// records `recorded_root`, the user's repository root, as the worktree it
+/// was built from. Recording the checkout made every later lookup reject the
+/// slot as built below a root that no longer exists, so each diff indexed
+/// its baseline again and left one more generation behind.
+pub(crate) fn build_l2_recorded(
+    checkout: &Path,
+    recorded_root: &Path,
+    sha_hex: &str,
+) -> io::Result<BuildResult> {
+    let sha = parse_sha(sha_hex)?;
+    let repo_root = resolve_home_ecp().join(repo_dir_name_for_cwd(checkout)?);
+    build_l2_recorded_at(checkout, recorded_root, &sha, &repo_root, report_wait)
+}
+
+/// [`build_l2_at`] that records `recorded_root` as the worktree the build
+/// came from; see [`build_l2_recorded`].
+pub(crate) fn build_l2_recorded_at(
+    worktree: &Path,
+    recorded_root: &Path,
+    sha: &[u8; 20],
+    repo_root: &Path,
+    on_wait: impl FnOnce(&Holder),
+) -> io::Result<BuildResult> {
+    let sha_hex = hex::encode(sha);
     let commits_dir = repo_root.join("commits");
-    let commit_dir = commits_dir.join(&dirname);
-    let building = commits_dir.join(format!("{dirname}.building"));
+    fs::create_dir_all(&commits_dir)?;
 
     // Fast path: same SHA already built by a binary with a matching
     // fingerprint → reuse without touching the analyzer pipeline.
@@ -81,215 +138,536 @@ pub fn build_l2(worktree: &Path, target_sha: Option<&str>) -> io::Result<BuildRe
     if let Some(attached) = attach_latest_if_fingerprint_matches(&commits_dir, &sha_hex, worktree) {
         return Ok(attached);
     }
-
-    // Acquire build lock; attach pattern if locked
-    fs::create_dir_all(&building)?;
-    let lock_path = building.join(".build.lock");
-    let lock = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)?;
-    if lock.try_lock_exclusive().is_err() {
-        // Windows/WSL: Must drop the open file handle before waiting, otherwise the winning
-        // builder will get Access Denied (os error 5) when trying to rename the building dir.
-        drop(lock);
-        // Another builder owns this dir — wait for completion + return
-        return wait_for_completion(&building, &commit_dir);
+    let base = pick_dirname(worktree, &sha_hex)?;
+    let sha_lock = acquire_sha_lock(&commits_dir, sha, BUILD_LOCK_TIMEOUT, on_wait)?;
+    // Checked again under the lock: a builder that held it may have
+    // published exactly this build while this one waited.
+    if let Some(attached) = attach_latest_if_fingerprint_matches(&commits_dir, &sha_hex, worktree) {
+        return Ok(attached);
     }
-
-    build_inside_locked(worktree, &sha_hex, &repo_root, &building, &commit_dir, lock)
+    build_inside_locked(
+        worktree,
+        recorded_root,
+        sha,
+        repo_root,
+        &base,
+        sha_lock,
+        &DurablePublish,
+    )
 }
 
-/// Run the analyzer pipeline, write metadata, atomic-publish.
-///
-/// Pre-conditions (caller's responsibility):
-/// - `building` dir exists
-/// - exclusive build lock is held by the caller for the full call duration
-/// - `repo_root.join("commits")` exists
-///
-/// Shared between `build_l2` (first build / SHA drift) and
-/// `force_rebuild_l2` (after L1 invalidate + L2 drop). Both paths land in
-/// the same atomic publish + repo_meta update.
-///
-/// `lock_guard` is the open `File` for `.build.lock` inside `building/`.
-/// It is dropped (fd closed) immediately before the atomic rename so that
-/// Windows does not reject the rename with os error 5 (Access Denied) due
-/// to an open handle inside the directory being renamed.
-pub(crate) fn build_inside_locked(
-    worktree: &Path,
-    sha_hex: &str,
-    repo_root: &Path,
-    building: &Path,
-    commit_dir: &Path,
-    lock_guard: File,
-) -> io::Result<BuildResult> {
-    // Machine-wide build throttle. The caller already holds this repo's
-    // `.build.lock` (no duplicate work for one SHA); this additionally bounds how
-    // many *different* repos rebuild at once, since each build issues ~180 MB of
-    // I/O and concurrent builds saturate the WSL2 vhdx and hang the host. Covers
-    // both rebuild entry points (`build_l2` and `force_rebuild_l2`). Held for the
-    // whole build; degrades open (unthrottled) if the slot machinery errors.
-    let _build_slot = crate::build::semaphore::acquire(&resolve_home_ecp());
+/// Who holds a SHA lock, read when a builder starts to wait for it and again
+/// when the wait ends in a timeout.
+pub(crate) struct Holder {
+    sha8: String,
+    pid: Option<u32>,
+    role: Option<String>,
+    phase: HolderPhase,
+}
 
-    let mut lock_guard = Some(lock_guard);
-    let result = (|| {
-        let prof = std::env::var("ECP_PROF").is_ok();
-        let t_src_root = std::time::Instant::now();
-        let src_root = if worktree_clean_and_head_matches(worktree, sha_hex)? {
-            worktree.to_path_buf()
-        } else {
-            let src = building.join("_src");
-            fs::create_dir_all(&src)?;
-            git_archive_to(worktree, sha_hex, &src)?;
-            src
+enum HolderPhase {
+    /// The owner sidecar names no SHA: a holder between taking the lock and
+    /// naming itself, or an ecp that writes its PID only.
+    Unknown,
+    /// The stripe is held for another SHA with the same first byte. That
+    /// holder is not building this SHA; this build waits only for the stripe.
+    OtherSha(String),
+    Gc,
+    /// A builder of this SHA that has no staging dir yet: it waits for a
+    /// build slot.
+    SlotWait,
+    /// A builder of this SHA, in its own staging dir for `age` seconds.
+    Building {
+        staging: String,
+        age: u64,
+    },
+}
+
+impl Holder {
+    fn read(commits_dir: &Path, sha: &[u8; 20], lock_path: &Path) -> Self {
+        let owner = FileLock::owner(lock_path);
+        let pid = owner.as_ref().map(|(pid, _)| *pid);
+        let mut words = owner
+            .as_ref()
+            .map_or("", |(_, rest)| rest)
+            .split_whitespace();
+        let role = words.next().map(str::to_string);
+        let phase = match words.next().and_then(|key| parse_sha(key).ok()) {
+            None => HolderPhase::Unknown,
+            Some(key) if key != *sha => HolderPhase::OtherSha(hex::encode(key)[..8].to_string()),
+            Some(_) if role.as_deref() == Some("gc") => HolderPhase::Gc,
+            Some(_) => pid
+                .and_then(|pid| own_staging(commits_dir, sha, pid))
+                .map_or(HolderPhase::SlotWait, |(staging, age)| {
+                    HolderPhase::Building { staging, age }
+                }),
         };
-        if prof {
-            eprintln!(
-                "prof orchestrator.src_root: {:.3}s",
-                t_src_root.elapsed().as_secs_f32()
-            );
+        Self {
+            sha8: hex::encode(sha)[..8].to_string(),
+            pid,
+            role,
+            phase,
         }
+    }
+}
 
-        // Analyzer pipeline. `repo_root` doubles as the persistent parse_cache
-        // root — cache entries live in `<repo_root>/parse_cache/<fp>/` and
-        // survive across L2 commit_dirs as long as the file content (and binary
-        // build) is unchanged.
-        //
-        // CI-B: receives `(node_count, global_graph)`; tantivy is built on a
-        // background thread AFTER the rename below so the writer targets the
-        // final publish_dir, not the soon-to-be-renamed `building/`.
-        let (node_count, global_graph) = crate::commands::admin::index::run_analyzer_for_paths(
-            &src_root,
-            building,
-            Some(repo_root),
-            None,
-        )?;
+/// The staging dir builder `pid` keeps for `sha`, and its age in seconds.
+fn own_staging(commits_dir: &Path, sha: &[u8; 20], pid: u32) -> Option<(String, u64)> {
+    let listing = CommitDirListing::read(commits_dir).ok()?;
+    let dir = listing.staging.into_iter().find(|s| {
+        s.sha == *sha && matches!(s.shape, StagingShape::PerAttempt { pid: p, .. } if p == pid)
+    })?;
+    let age = fs::metadata(commits_dir.join(&dir.name))
+        .and_then(|m| m.created().or_else(|_| m.modified()))
+        .ok()
+        .and_then(|t| SystemTime::now().duration_since(t).ok())
+        .map_or(0, |d| d.as_secs());
+    Some((dir.name, age))
+}
 
-        let t_refs = std::time::Instant::now();
-        let refs_at_build = collect_refs(worktree, sha_hex)?;
-        let source_type = source_type_from_refs(&refs_at_build);
-        let source_id = source_id_from_refs(&refs_at_build);
-        let parent = parent_sha(worktree, sha_hex).ok();
-        if prof {
-            eprintln!(
-                "prof orchestrator.refs+parent: {:.3}s",
-                t_refs.elapsed().as_secs_f32()
-            );
-        }
-
-        let meta = CommitBuildMeta {
-            version: 1,
-            sha: sha_hex.to_string(),
-            source_type,
-            source_id,
-            built_from_worktree: worktree.to_string_lossy().into(),
-            built_at: chrono::Utc::now().to_rfc3339(),
-            parent_sha: parent,
-            node_count: node_count as u32,
-            embedding_status: EmbeddingStatus::None,
-            refs_at_build,
-            refs_seen_since: vec![],
-            builder_fingerprint: Some(BUILDER_FINGERPRINT.to_string()),
-            binary_commit_sha: Some(env!("ECP_GIT_SHA").to_string()),
+/// `key=value` fields, so an agent reading stderr can split them. A holder
+/// of the stripe for another SHA is `stripe_holder`, never `holder`: it is
+/// not this SHA's builder.
+impl std::fmt::Display for Holder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let key = match self.phase {
+            HolderPhase::OtherSha(_) => "stripe_holder",
+            _ => "holder",
         };
-        let t_meta = std::time::Instant::now();
-        CommitBuildMeta::write_atomic(&building.join("meta.json"), &meta)?;
-        if prof {
-            eprintln!(
-                "prof orchestrator.meta_write: {:.3}s",
-                t_meta.elapsed().as_secs_f32()
-            );
+        write!(f, "sha={} {key}=", self.sha8)?;
+        match self.pid {
+            Some(pid) => write!(f, "{pid}")?,
+            None => f.write_str("?")?,
         }
-
-        // fsync + atomic publish. If an L2 for the same SHA already exists,
-        // publish to a generation dir instead of touching the old reader-visible
-        // directory. CommitIndex resolves same-SHA generations to the newest one.
-        let t_sync = std::time::Instant::now();
-        sync_all_files(building)?;
-        if prof {
-            eprintln!(
-                "prof orchestrator.sync_all_files: {:.3}s",
-                t_sync.elapsed().as_secs_f32()
-            );
-        }
-        // Windows refuses to rename a directory that contains any open file
-        // handles (os error 5). Drop the lock fd now — the rename is the
-        // publication event, so the lock is no longer needed after this point.
-        let publish_dir = publish_dir_for(commit_dir);
-        drop(lock_guard.take());
-        let t_rename = std::time::Instant::now();
-        ecp_core::registry::rename_with_retry(building, &publish_dir)?;
-        if prof {
-            eprintln!(
-                "prof orchestrator.rename: {:.3}s",
-                t_rename.elapsed().as_secs_f32()
-            );
-        }
-        let _ = ecp_core::registry::retire_dir_async(&publish_dir.join("_src"));
-
-        // CI-B: tantivy index build, deferred to background thread NOW that
-        // publish_dir is the final location. `ecp find` falls back to
-        // substring scan when tantivy is missing (see find.rs), so a slow
-        // bm25 query immediately after build is the worst-case degradation.
-        // global_graph moves into the thread; the main path needs only the
-        // node_count (already extracted).
-        //
-        // CI-M: handle is returned in `BuildResult.tantivy_handle` so the
-        // CLI `admin index` path joins before exit. Without joining, a
-        // subprocess invocation (e.g. a test driving `ecp admin index` then
-        // dropping its TempDir) would race with the still-writing tantivy
-        // thread → `tantivy/.tmpXXX: No such file or directory`. Long-lived
-        // callers (MCP, auto_ensure) can drop the handle to keep
-        // fire-and-forget semantics.
-        let tantivy_dir = publish_dir.clone();
-        let tantivy_handle = std::thread::spawn(move || {
-            if let Err(e) = crate::search::TantivyEngine::build_index(&tantivy_dir, &global_graph) {
-                tracing::warn!(
-                    "Full-text index build failed for {:?}: {}; exact-name queries still work",
-                    tantivy_dir,
-                    e
-                );
+        write!(f, " role={}", self.role.as_deref().unwrap_or("?"))?;
+        match &self.phase {
+            HolderPhase::Unknown => f.write_str(" phase=unknown"),
+            HolderPhase::OtherSha(other) => write!(f, " phase=other-sha held_for={other}"),
+            HolderPhase::Gc => f.write_str(" phase=gc"),
+            HolderPhase::SlotWait => f.write_str(" phase=slot-wait"),
+            HolderPhase::Building { staging, age } => {
+                write!(f, " phase=building staging={staging} age={age}s")
             }
-        });
-
-        let t_repo_meta = std::time::Instant::now();
-        update_repo_meta(repo_root, worktree, sha_hex)?;
-        if prof {
-            eprintln!(
-                "prof orchestrator.update_repo_meta: {:.3}s",
-                t_repo_meta.elapsed().as_secs_f32()
-            );
         }
+    }
+}
 
-        // Write the HEAD-SHA fingerprint next to the freshly published graph.bin
-        // so subsequent read commands can short-circuit `auto_ensure::ensure_index`
-        // without walking the working tree.
-        let graph_bin = publish_dir.join("graph.bin");
-        crate::auto_ensure::write_head_sha_sidecar_with_sha(&graph_bin, sha_hex);
-        // Version sidecar lets `attach_latest_sibling_sha` skip the 10-50ms
-        // mmap + rkyv::access validation on warm-attach. Detached: a lost write
-        // only costs that validation.
-        crate::auto_ensure::write_compatible_version_sidecar(&graph_bin);
-        // Builder-fingerprint sidecar lets `ensure_index` detect convention
-        // drift (analyzer / path-normalization change at the same HEAD) and
-        // force a full rebuild instead of serving stale nodes. FU-2026-05-25-005.
-        crate::auto_ensure::write_builder_fingerprint_sidecar(&graph_bin);
+/// The production `on_wait`: one stderr line when a build starts to wait.
+pub(crate) fn report_wait(holder: &Holder) {
+    eprintln!("l2.wait {holder}");
+}
 
-        Ok(BuildResult {
-            commit_dir: publish_dir,
-            sha_hex: sha_hex.to_string(),
-            source_type,
-            tantivy_handle: Some(tantivy_handle),
-        })
-    })();
+/// Take the SHA's stripe lock and name this process its builder. When it is
+/// busy: call `on_wait` once with the holder, and wait up to `budget`.
+/// Fairness is not promised (`flock` / `LockFileEx` give none), only the
+/// bound. The caller checks the publish state of its SHA again once it holds
+/// the lock.
+pub(crate) fn acquire_sha_lock(
+    commits_dir: &Path,
+    sha: &[u8; 20],
+    budget: Duration,
+    on_wait: impl FnOnce(&Holder),
+) -> io::Result<FileLock> {
+    let lock_path = sha_lock_path(commits_dir, sha);
+    fs::create_dir_all(commits_dir.join(LOCKS_DIR))?;
+    match FileLock::try_exclusive(&lock_path) {
+        Ok(lock) => {
+            record_sha_lock_owner(&lock_path, "build", sha);
+            return Ok(lock);
+        }
+        Err(e) if !ecp_core::registry::is_lock_contended(&e) => return Err(e),
+        Err(_) => {}
+    }
+    on_wait(&Holder::read(commits_dir, sha, &lock_path));
+    match FileLock::acquire_exclusive_within(&lock_path, budget) {
+        Ok(lock) => {
+            record_sha_lock_owner(&lock_path, "build", sha);
+            Ok(lock)
+        }
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            format!(
+                "l2.wait timeout {} waited={}s",
+                Holder::read(commits_dir, sha, &lock_path),
+                budget.as_secs()
+            ),
+        )),
+        Err(e) => Err(e),
+    }
+}
 
-    if result.is_err() {
-        drop(lock_guard.take());
-        let _ = ecp_core::registry::retire_dir_async(building);
+/// The filesystem steps of a publish, so a test can fail one or record their
+/// order.
+pub(crate) trait Publish {
+    fn sync_file(&self, path: &Path) -> io::Result<()>;
+    fn sync_dir(&self, path: &Path) -> io::Result<()>;
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
+}
+
+pub(crate) struct DurablePublish;
+
+impl Publish for DurablePublish {
+    fn sync_file(&self, path: &Path) -> io::Result<()> {
+        sync_file(path)
     }
 
-    result
+    fn sync_dir(&self, path: &Path) -> io::Result<()> {
+        ecp_core::registry::sync_dir(path)
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        ecp_core::registry::rename_with_retry(from, to)
+    }
+}
+
+/// The name this build publishes under: bare `base` when the SHA has no dir,
+/// else `<base>.gen.<ts>.<pid>.<counter>` with `ts` strictly above every
+/// same-SHA timestamp, whatever the clock says. `Err` when that would
+/// overflow (`u64::MAX` already used), which refuses the publish.
+pub(crate) fn next_publish_name(
+    base: &str,
+    same_sha: &[Option<Generation>],
+    now_ms: u64,
+    pid: u32,
+    counter: u32,
+) -> io::Result<String> {
+    if same_sha.is_empty() {
+        return Ok(base.to_string());
+    }
+    let newest = same_sha
+        .iter()
+        .flatten()
+        .map(|g| g.timestamp_ms)
+        .max()
+        .unwrap_or(0);
+    let floor = newest
+        .checked_add(1)
+        .ok_or_else(|| io::Error::other(format!("generation timestamps exhausted for {base}")))?;
+    let generation = Generation {
+        timestamp_ms: now_ms.max(floor),
+        pid,
+        counter,
+    };
+    Ok(format!("{base}{}", generation.format_suffix()))
+}
+
+/// [`next_publish_name`] over a listing, which must be complete: a missed
+/// entry could hide the newest generation and let this build rank below it.
+pub(crate) fn choose_publish_name(
+    listing: &CommitDirListing,
+    sha: &[u8; 20],
+    base: &str,
+    now_ms: u64,
+) -> io::Result<String> {
+    if !listing.complete {
+        return Err(io::Error::other(format!(
+            "commits listing incomplete; refusing to name a build of {base}"
+        )));
+    }
+    let same_sha: Vec<Option<Generation>> =
+        listing.same_sha(sha).map(|d| d.parsed.generation).collect();
+    // Wrap-around at u32::MAX of the process-local counter is safe: the
+    // timestamp already rises above every existing generation.
+    next_publish_name(
+        base,
+        &same_sha,
+        now_ms,
+        std::process::id(),
+        GENERATION_COUNTER.fetch_add(1, Ordering::Relaxed) as u32,
+    )
+}
+
+fn now_ms() -> u64 {
+    chrono::Utc::now().timestamp_millis().max(0) as u64
+}
+
+/// Retire the per-attempt staging dirs of `sha`. Only a holder of the SHA lock
+/// calls this, and a builder keeps a staging dir only while it holds that
+/// lock, so every one found is abandoned. The PID in the name proves nothing;
+/// PIDs are reused.
+pub(crate) fn retire_abandoned_staging(
+    listing: &CommitDirListing,
+    sha: &[u8; 20],
+    commits_dir: &Path,
+) {
+    for staging in listing
+        .staging
+        .iter()
+        .filter(|s| s.sha == *sha && matches!(s.shape, StagingShape::PerAttempt { .. }))
+    {
+        if let Err(e) = ecp_core::registry::retire_dir_async(&commits_dir.join(&staging.name)) {
+            eprintln!("l2: retire abandoned staging {}: {e}", staging.name);
+        }
+    }
+}
+
+/// A staging dir this attempt owns: `create_dir` fails when the name exists,
+/// so success proves no other attempt uses it.
+fn create_staging(commits_dir: &Path, base: &str) -> io::Result<PathBuf> {
+    let pid = std::process::id();
+    let mut last = None;
+    for _ in 0..64 {
+        let attempt = STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = commits_dir.join(staging_dir_name(base, pid, attempt));
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            // A dir a crashed process with this PID left behind.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| io::Error::other("no free staging name")))
+}
+
+/// Build the SHA under the held `sha_lock` and publish it. Shared between
+/// `build_l2` (first build / SHA drift) and `force_rebuild_l2`.
+/// `recorded_root` is the worktree `meta.json` names as the build's source:
+/// `worktree` itself, except for a checkout the caller deletes afterwards.
+///
+/// Order, all under the SHA lock: complete listing → choose the name → retire
+/// abandoned staging → build slot → own staging dir → analyzer, `meta.json`
+/// and the build-time sidecars into staging → fsync files and dirs bottom-up
+/// → rename → fsync `commits/` → drop this process's scan cache →
+/// `.head_sha`. Then the slot and the lock go, and `_src` retirement,
+/// tantivy and the repo meta follow. gc retires a previous generation only
+/// under the same lock, so never before the `commits/` fsync.
+///
+/// Once the rename happened every step after it runs, even when the fsync of
+/// `commits/` failed: the dir is published, and readers use it. That fsync
+/// error returns last.
+///
+/// The lock file sits in `commits/.locks/`, outside the renamed dir, so
+/// Windows can rename while it stays held.
+pub(crate) fn build_inside_locked(
+    worktree: &Path,
+    recorded_root: &Path,
+    sha: &[u8; 20],
+    repo_root: &Path,
+    base: &str,
+    sha_lock: FileLock,
+    publish: &dyn Publish,
+) -> io::Result<BuildResult> {
+    let sha_hex = hex::encode(sha);
+    let commits_dir = repo_root.join("commits");
+    let listing = CommitDirListing::read(&commits_dir)?;
+    let name = choose_publish_name(&listing, sha, base, now_ms())?;
+    retire_abandoned_staging(&listing, sha, &commits_dir);
+
+    // Machine-wide build throttle. The SHA lock already prevents duplicate
+    // work for one SHA; this additionally bounds how many *different* repos
+    // rebuild at once, since each build issues ~180 MB of I/O and concurrent
+    // builds saturate the WSL2 vhdx and hang the host. Degrades open
+    // (unthrottled) if the slot machinery errors. `repo_root`'s parent is the
+    // ecp home the caller resolved.
+    let build_slot = crate::build::semaphore::acquire(repo_root.parent().unwrap_or(repo_root));
+    let staging = create_staging(&commits_dir, base)?;
+
+    let prof = std::env::var("ECP_PROF").is_ok();
+    let published = build_into_staging(worktree, recorded_root, &sha_hex, repo_root, &staging)
+        .and_then(|(graph, source_type)| {
+            let t_publish = std::time::Instant::now();
+            let dir = publish_staging(&staging, &commits_dir, &name, publish)?;
+            if prof {
+                eprintln!(
+                    "prof orchestrator.publish: {:.3}s",
+                    t_publish.elapsed().as_secs_f32()
+                );
+            }
+            Ok((graph, source_type, dir))
+        });
+    let (
+        global_graph,
+        source_type,
+        Published {
+            dir: publish_dir,
+            sync_error,
+        },
+    ) = match published {
+        Ok(published) => published,
+        Err(e) => {
+            // Still under the SHA lock, so this attempt's dir is retired
+            // before anyone else may judge it abandoned. After a successful
+            // rename the staging path is gone and this is a no-op.
+            let _ = ecp_core::registry::retire_dir_async(&staging);
+            drop(build_slot);
+            drop(sha_lock);
+            return Err(e);
+        }
+    };
+    // Write the HEAD-SHA fingerprint next to the freshly published graph.bin
+    // so subsequent read commands can short-circuit `auto_ensure::ensure_index`
+    // without walking the working tree.
+    crate::auto_ensure::write_head_sha_sidecar_with_sha(&publish_dir.join("graph.bin"), &sha_hex);
+    drop(build_slot);
+    drop(sha_lock);
+
+    let _ = ecp_core::registry::retire_dir_async(&publish_dir.join("_src"));
+
+    // CI-B: tantivy index build, deferred to background thread NOW that
+    // publish_dir is the final location. `ecp find` falls back to
+    // substring scan when tantivy is missing (see find.rs), so a slow
+    // bm25 query immediately after build is the worst-case degradation.
+    // global_graph moves into the thread.
+    //
+    // CI-M: handle is returned in `BuildResult.tantivy_handle` so the
+    // CLI `admin index` path joins before exit. Without joining, a
+    // subprocess invocation (e.g. a test driving `ecp admin index` then
+    // dropping its TempDir) would race with the still-writing tantivy
+    // thread → `tantivy/.tmpXXX: No such file or directory`. Long-lived
+    // callers (MCP, auto_ensure) can drop the handle to keep
+    // fire-and-forget semantics.
+    let tantivy_dir = publish_dir.clone();
+    let tantivy_handle = std::thread::spawn(move || {
+        if let Err(e) = crate::search::TantivyEngine::build_index(&tantivy_dir, &global_graph) {
+            tracing::warn!(
+                "Full-text index build failed for {:?}: {}; exact-name queries still work",
+                tantivy_dir,
+                e
+            );
+        }
+    });
+
+    let t_repo_meta = std::time::Instant::now();
+    let repo_meta = update_repo_meta(repo_root, worktree, &sha_hex);
+    if prof {
+        eprintln!(
+            "prof orchestrator.update_repo_meta: {:.3}s",
+            t_repo_meta.elapsed().as_secs_f32()
+        );
+    }
+    if let Some(e) = sync_error {
+        // A caller that gets an error may exit at once, and a tantivy writer
+        // cut off mid-index leaves its temp dir in the published graph.
+        if let Err(panic) = tantivy_handle.join() {
+            tracing::warn!("tantivy background thread panicked: {panic:?}");
+        }
+        return Err(e);
+    }
+    repo_meta?;
+
+    Ok(BuildResult {
+        commit_dir: publish_dir,
+        sha_hex,
+        source_type,
+        tantivy_handle: Some(tantivy_handle),
+    })
+}
+
+/// Analyzer pipeline, `meta.json` and the build-time sidecars, all into
+/// `staging`. Returns the graph for the tantivy writer and the source type.
+fn build_into_staging(
+    worktree: &Path,
+    recorded_root: &Path,
+    sha_hex: &str,
+    repo_root: &Path,
+    staging: &Path,
+) -> io::Result<(ecp_core::graph::ZeroCopyGraph, SourceType)> {
+    let prof = std::env::var("ECP_PROF").is_ok();
+    let t_src_root = std::time::Instant::now();
+    let src_root = if worktree_clean_and_head_matches(worktree, sha_hex)? {
+        worktree.to_path_buf()
+    } else {
+        let src = staging.join("_src");
+        fs::create_dir(&src)?;
+        git_archive_to(worktree, sha_hex, &src)?;
+        src
+    };
+    if prof {
+        eprintln!(
+            "prof orchestrator.src_root: {:.3}s",
+            t_src_root.elapsed().as_secs_f32()
+        );
+    }
+
+    // Analyzer pipeline. `repo_root` doubles as the persistent parse_cache
+    // root — cache entries live in `<repo_root>/parse_cache/<fp>/` and
+    // survive across L2 commit_dirs as long as the file content (and binary
+    // build) is unchanged.
+    //
+    // CI-B: receives `(node_count, global_graph)`; tantivy is built on a
+    // background thread AFTER the rename so the writer targets the final
+    // publish dir, not the staging dir.
+    let (node_count, global_graph) = crate::commands::admin::index::run_analyzer_for_paths(
+        &src_root,
+        staging,
+        Some(repo_root),
+        None,
+    )?;
+
+    let t_refs = std::time::Instant::now();
+    let refs_at_build = collect_refs(worktree, sha_hex)?;
+    let source_type = source_type_from_refs(&refs_at_build);
+    let source_id = source_id_from_refs(&refs_at_build);
+    let parent = parent_sha(worktree, sha_hex).ok();
+    if prof {
+        eprintln!(
+            "prof orchestrator.refs+parent: {:.3}s",
+            t_refs.elapsed().as_secs_f32()
+        );
+    }
+
+    let fingerprint = BUILDER_FINGERPRINT;
+    let meta = CommitBuildMeta {
+        version: 1,
+        sha: sha_hex.to_string(),
+        source_type,
+        source_id,
+        built_from_worktree: recorded_root.to_string_lossy().into(),
+        built_at: chrono::Utc::now().to_rfc3339(),
+        parent_sha: parent,
+        node_count: node_count as u32,
+        embedding_status: EmbeddingStatus::None,
+        refs_at_build,
+        refs_seen_since: vec![],
+        builder_fingerprint: Some(fingerprint.to_string()),
+        binary_commit_sha: Some(env!("ECP_GIT_SHA").to_string()),
+    };
+    CommitBuildMeta::write_atomic(&staging.join("meta.json"), &meta)?;
+    // Inside staging, so the rename publishes them with graph.bin: a reader
+    // never sees this graph without them, and no process exit can lose them.
+    // The fingerprint sidecar lets `ensure_index` detect convention drift
+    // (FU-2026-05-25-005); the version sidecar spares warm-attach the
+    // `rkyv::access` validation.
+    let graph_bin = staging.join("graph.bin");
+    crate::auto_ensure::write_builder_fingerprint_sidecar(&graph_bin, fingerprint)?;
+    crate::auto_ensure::write_compatible_version_sidecar(&graph_bin)?;
+    Ok((global_graph, source_type))
+}
+
+/// A publish whose rename happened.
+pub(crate) struct Published {
+    pub dir: PathBuf,
+    /// The fsync of `commits/` after the rename failed. The dir is published
+    /// all the same (gc keeps the previous generation until its own fsync of
+    /// `commits/` succeeds), so the caller finishes the publish and returns
+    /// this error last.
+    pub sync_error: Option<io::Error>,
+}
+
+/// fsync every file and dir in `staging` bottom-up → rename to `name` →
+/// fsync `commits_dir` → drop this process's scan cache. The rename is the
+/// publication: `Err` means nothing was published.
+pub(crate) fn publish_staging(
+    staging: &Path,
+    commits_dir: &Path,
+    name: &str,
+    publish: &dyn Publish,
+) -> io::Result<Published> {
+    sync_tree(staging, publish)?;
+    let dir = commits_dir.join(name);
+    publish.rename(staging, &dir)?;
+    let sync_error = publish.sync_dir(commits_dir).err().map(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "published {} but the fsync of {} failed: {e}",
+                dir.display(),
+                commits_dir.display()
+            ),
+        )
+    });
+    CommitIndex::invalidate(commits_dir);
+    Ok(Published { dir, sync_error })
 }
 
 pub(crate) fn attach_latest_if_fingerprint_matches(
@@ -297,7 +675,7 @@ pub(crate) fn attach_latest_if_fingerprint_matches(
     sha_hex: &str,
     worktree: &Path,
 ) -> Option<BuildResult> {
-    let sha = sha_bytes(sha_hex)?;
+    let sha = parse_sha(sha_hex).ok()?;
     let idx = CommitIndex::scan(commits_dir).ok()?;
     let dir = idx.find(&sha)?;
     attach_if_fingerprint_matches(&commits_dir.join(dir), worktree)
@@ -323,9 +701,9 @@ pub(crate) fn built_below_worktree_root(built: &Path, sha: &str, worktree: &Path
 /// Cheap pre-build check: if `commit_dir/meta.json` exists and its
 /// `builder_fingerprint` matches the current binary, the published L2 at
 /// this SHA was made by an equivalent build — return it instead of
-/// rebuilding. Shared between `build_l2` (skip-if-exists fast path) and
-/// `force_rebuild_l2` (after `wait_for_completion`, lets N concurrent
-/// `--force` callers attach to one winner instead of each rebuilding).
+/// rebuilding. Shared between `build_l2` (skip-if-exists fast path and the
+/// re-check under the SHA lock) and `admin index` (reuse only what
+/// `build_l2` would reuse).
 pub(crate) fn attach_if_fingerprint_matches(
     commit_dir: &Path,
     worktree: &Path,
@@ -344,73 +722,22 @@ pub(crate) fn attach_if_fingerprint_matches(
     {
         return None;
     }
+    let graph_bin = commit_dir.join("graph.bin");
     // Back-fill the HEAD-SHA sidecar for graphs published by binaries that
     // pre-date the auto_ensure shortcut. One-shot until the next rebuild.
-    crate::auto_ensure::write_head_sha_sidecar_with_sha(&commit_dir.join("graph.bin"), &meta.sha);
-    // Back-fill the fingerprint sidecar too: this attach only happens when the
-    // meta.json fingerprint already matches the current binary, so the sidecar
-    // can record the current fingerprint and let `ensure_index` skip the
-    // meta.json read on subsequent queries.
-    crate::auto_ensure::write_builder_fingerprint_sidecar(&commit_dir.join("graph.bin"));
+    crate::auto_ensure::write_head_sha_sidecar_with_sha(&graph_bin, &meta.sha);
+    // Back-fill the fingerprint sidecar from the build's own meta.json, so
+    // `ensure_index` can skip the meta.json read on later queries. A lost
+    // write only costs that read.
+    if let Some(fingerprint) = meta.builder_fingerprint.as_deref() {
+        let _ = crate::auto_ensure::write_builder_fingerprint_sidecar(&graph_bin, fingerprint);
+    }
     Some(BuildResult {
         commit_dir: commit_dir.to_path_buf(),
         sha_hex: meta.sha,
         source_type: meta.source_type,
         tantivy_handle: None,
     })
-}
-
-fn publish_dir_for(base_commit_dir: &Path) -> PathBuf {
-    let name = base_commit_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("commit");
-    // Readers rank a bare name below every `.gen` dir of the same SHA, and two
-    // bare names by mtime. Once a sweep has kept a generation and dropped the
-    // bare dir, a build published under the bare name would be shadowed by the
-    // older dir it replaces.
-    if !has_same_sha_dir(base_commit_dir, name) {
-        return base_commit_dir.to_path_buf();
-    }
-    // `Generation::format_suffix` is the single source of truth for the
-    // on-disk suffix shape, mirrored by `parse_generation_suffix` in
-    // `ecp-core/src/registry/dirname.rs`. Wrap-around at u32::MAX of the
-    // process-local counter is safe — the (timestamp_ms, pid) prefix still
-    // disambiguates across the wrap window.
-    let gen = Generation {
-        timestamp_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
-        pid: std::process::id(),
-        counter: GENERATION_COUNTER.fetch_add(1, Ordering::Relaxed) as u32,
-    };
-    base_commit_dir.with_file_name(format!("{name}{}", gen.format_suffix()))
-}
-
-/// Whether any published dir of this SHA, under any prefix, already exists.
-/// An unreadable parent or entry counts as yes: a fresh `.gen` name is always safe.
-fn has_same_sha_dir(base_commit_dir: &Path, name: &str) -> bool {
-    if base_commit_dir.exists() {
-        return true;
-    }
-    let Ok(base) = CommitDirName::parse(name) else {
-        return false;
-    };
-    let Some(Ok(entries)) = base_commit_dir.parent().map(fs::read_dir) else {
-        return base_commit_dir.parent().is_some_and(Path::exists);
-    };
-    entries.into_iter().any(|entry| match entry {
-        Err(_) => true,
-        Ok(entry) => entry
-            .file_name()
-            .to_str()
-            .and_then(|n| CommitDirName::parse(n).ok())
-            .is_some_and(|dir| dir.sha == base.sha),
-    })
-}
-
-fn sha_bytes(sha_hex: &str) -> Option<[u8; 20]> {
-    let mut sha = [0u8; 20];
-    hex::decode_to_slice(sha_hex, &mut sha).ok()?;
-    Some(sha)
 }
 
 /// `None` outside a git worktree; callers then keep the directory they were given.
@@ -478,7 +805,12 @@ pub(crate) fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io:
     // filter. Two definitions of "clean" that disagree is what let this
     // through. The plain command rather than the private index: a wrong
     // "clean" here poisons that shared slot, and a build costs seconds anyway.
-    let out = crate::git::status::plain(worktree)?;
+    // A status that cannot run (its filter guard failed, or git rejects the
+    // index) means "not known clean": the archive path reads only HEAD's tree
+    // and guards its own filters.
+    let Ok(out) = crate::git::status::plain(worktree) else {
+        return Ok(false);
+    };
     if !out.status.success() {
         return Ok(false);
     }
@@ -499,7 +831,7 @@ pub(crate) fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io:
 pub(crate) fn git_archive_to(worktree: &Path, sha: &str, dest: &Path) -> io::Result<()> {
     use std::io::Read;
 
-    let overrides = safe_exec::filter_overrides(worktree);
+    let overrides = safe_exec::filter_overrides(worktree)?;
     // git's stdout is tar's stdin, so the kernel pipe holds the archive rather
     // than this process. `.output()` used to buffer the whole tar first, which
     // made peak memory a function of what the repository tracks: a 200 MB blob
@@ -676,19 +1008,30 @@ pub(crate) fn parent_sha(worktree: &Path, sha: &str) -> io::Result<String> {
         .trim()
         .to_string())
 }
-
-pub(crate) fn sync_all_files(dir: &Path) -> io::Result<()> {
+/// fsync every regular file and every directory under `dir`, children before
+/// their parent and `dir` itself last, so the rename publishes nothing a crash
+/// can lose. `_src` is skipped: it is retired right after the publish and
+/// never read from the published dir. Every walk error fails the publish; a
+/// file left unsynced would otherwise be published as if it were durable.
+pub(crate) fn sync_tree(dir: &Path, publish: &dyn Publish) -> io::Result<()> {
+    // Pre-order, not `contents_first`: with `contents_first` walkdir yields a
+    // directory's children before `filter_entry` sees the directory, so `_src`
+    // would still be walked. Reversed pre-order puts children before parents.
+    let mut dirs = Vec::new();
     for entry in walkdir::WalkDir::new(dir)
         .into_iter()
-        .filter_entry(|entry| entry.file_name() != "_src")
-        .filter_map(Result::ok)
+        .filter_entry(|entry| !(entry.depth() == 1 && entry.file_name() == "_src"))
     {
-        if entry.file_type().is_file() {
-            if entry.file_name() == ".build.lock" {
-                continue;
-            }
-            sync_file(entry.path())?;
+        let entry = entry.map_err(io::Error::from)?;
+        let file_type = entry.file_type();
+        if file_type.is_file() {
+            publish.sync_file(entry.path())?;
+        } else if file_type.is_dir() {
+            dirs.push(entry.into_path());
         }
+    }
+    for path in dirs.iter().rev() {
+        publish.sync_dir(path)?;
     }
     Ok(())
 }
@@ -696,10 +1039,10 @@ pub(crate) fn sync_all_files(dir: &Path) -> io::Result<()> {
 fn sync_file(path: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
-        OpenOptions::new().write(true).open(path)?.sync_all()
+        fs::OpenOptions::new().write(true).open(path)?.sync_all()
     }
     #[cfg(not(windows))]
-    File::open(path)?.sync_all()
+    fs::File::open(path)?.sync_all()
 }
 
 pub(crate) fn update_repo_meta(repo_root: &Path, worktree: &Path, sha: &str) -> io::Result<()> {
@@ -813,243 +1156,918 @@ fn dir_size(dir: &Path) -> io::Result<u64> {
     Ok(total)
 }
 
-pub(crate) fn wait_for_completion(building: &Path, commit_dir: &Path) -> io::Result<BuildResult> {
-    let start = std::time::Instant::now();
-    while building.exists() {
-        if start.elapsed() > std::time::Duration::from_secs(5) {
-            return Err(io::Error::other("build attach timeout"));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
+/// A one-commit git worktree and an ecp repo root beside it, both in one
+/// temp dir. Builds run through the `_at` entry points with this root, so no
+/// test here reads or sets `HOME` / `ECP_HOME`.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    pub(crate) struct Fx {
+        pub tmp: tempfile::TempDir,
+        pub wt: PathBuf,
+        pub repo_root: PathBuf,
+        pub commits: PathBuf,
+        pub sha: [u8; 20],
+        pub base: String,
     }
-    let parent = commit_dir
-        .parent()
-        .ok_or_else(|| io::Error::other("commit dir has no parent"))?;
-    let parsed = commit_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|name| ecp_core::registry::CommitDirName::parse(name).ok())
-        .ok_or_else(|| io::Error::other("attached builder target dirname is invalid"))?;
-    let idx = CommitIndex::scan(parent)?;
-    let Some(name) = idx.find(&parsed.sha) else {
-        return Err(io::Error::other("attached builder failed to publish"));
-    };
-    let commit_dir = parent.join(name);
-    let meta_path = commit_dir.join("meta.json");
-    let meta = CommitBuildMeta::read(&meta_path)?;
-    Ok(BuildResult {
-        commit_dir: commit_dir.to_path_buf(),
-        sha_hex: meta.sha,
-        source_type: meta.source_type,
-        tantivy_handle: None,
-    })
+
+    pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "init.defaultBranch=main",
+            ])
+            .args(args)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .expect("git available");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    pub(crate) fn fx() -> Fx {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let wt = tmp.path().join("wt");
+        fs::create_dir_all(&wt).unwrap();
+        git(&wt, &["init", "-q"]);
+        fs::write(wt.join("a.py"), "def a():\n    return 1\n").unwrap();
+        git(&wt, &["add", "-A"]);
+        git(&wt, &["commit", "-qm", "one"]);
+        let sha = parse_sha(&git(&wt, &["rev-parse", "HEAD"])).unwrap();
+        let repo_root = tmp.path().join("home").join("repo");
+        let commits = repo_root.join("commits");
+        fs::create_dir_all(&commits).unwrap();
+        let base = pick_dirname(&wt, &hex::encode(sha)).unwrap();
+        Fx {
+            tmp,
+            wt,
+            repo_root,
+            commits,
+            sha,
+            base,
+        }
+    }
+
+    pub(crate) fn no_wait(_: &Holder) {
+        panic!("nothing else holds this SHA");
+    }
+
+    /// `build_l2_at` with the tantivy writer joined, so the temp dir can go.
+    pub(crate) fn build_at(fx: &Fx, repo_root: &Path) -> BuildResult {
+        let mut r = build_l2_at(&fx.wt, &fx.sha, repo_root, no_wait).unwrap();
+        r.join_background();
+        r
+    }
+
+    pub(crate) fn meta(sha_hex: &str, worktree: &Path, fingerprint: &str) -> CommitBuildMeta {
+        CommitBuildMeta {
+            version: 1,
+            sha: sha_hex.to_string(),
+            source_type: SourceType::Branch,
+            source_id: Some("main".to_string()),
+            built_from_worktree: worktree.to_string_lossy().into(),
+            built_at: "2026-10-25T00:00:00Z".to_string(),
+            parent_sha: None,
+            node_count: 0,
+            embedding_status: EmbeddingStatus::None,
+            refs_at_build: vec![],
+            refs_seen_since: vec![],
+            builder_fingerprint: Some(fingerprint.to_string()),
+            binary_commit_sha: None,
+        }
+    }
+
+    /// A dir an older binary published: a stale fingerprint, so nothing
+    /// attaches to it.
+    pub(crate) fn stale_build(fx: &Fx, name: &str) -> PathBuf {
+        let dir = fx.commits.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        CommitBuildMeta::write_atomic(
+            &dir.join("meta.json"),
+            &meta(&hex::encode(fx.sha), &fx.wt, "v0.0.0+stale"),
+        )
+        .unwrap();
+        fs::write(dir.join("graph.bin"), b"old").unwrap();
+        dir
+    }
+
+    pub(crate) fn current_name(fx: &Fx) -> Option<String> {
+        CommitIndex::scan(&fx.commits)
+            .unwrap()
+            .find(&fx.sha)
+            .map(str::to_string)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::*;
     use super::*;
-    use ecp_core::registry::{CommitBuildMeta, EmbeddingStatus, RefRecord, SourceType};
-    use tempfile::TempDir;
+    use crate::commit_lookup::StagingDir;
+    use ecp_core::registry::CommitDirName;
+    use std::cell::RefCell;
 
-    /// A sweep after a forced build keeps the `.gen` dir and drops the bare
-    /// one. Readers rank the bare name below every generation, so the next
-    /// build must not reuse it: it would be shadowed by the older dir it
-    /// replaces, and the following gc would delete it.
+    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn listing(names: &[String]) -> CommitDirListing {
+        CommitDirListing::from_entries(
+            Path::new("commits"),
+            names.iter().map(|n| Ok((n.clone(), true))),
+        )
+    }
+
     #[test]
-    fn test_publish_dir_for_bare_name_free_with_generation_sibling_ranks_above_it() {
-        let tmp = TempDir::new().unwrap();
-        let parent = tmp.path().join("commits");
-        let sha_hex = "0123456789abcdef0123456789abcdef01234567";
-        let base = parent.join(format!("branch_main__{sha_hex}"));
-        let older = format!("branch_main__{sha_hex}.gen.1730000000000.42.7");
-        fs::create_dir_all(parent.join(&older)).unwrap();
-        fs::create_dir_all(parent.join("branch_main__ffffffffffffffffffffffffffffffffffffffff"))
-            .unwrap();
-
-        let published = publish_dir_for(&base);
-        let name = |p: &Path| {
-            ecp_core::registry::CommitDirName::parse(p.file_name().unwrap().to_str().unwrap())
-                .unwrap()
-        };
-        let older = name(&parent.join(older));
-        assert_eq!(name(&published).sha, older.sha);
-        assert!(
-            name(&published).generation > older.generation,
-            "{published:?} must outrank the existing generation"
+    fn test_next_publish_name_no_same_sha_bare() {
+        assert_eq!(
+            next_publish_name("commit__x", &[], 5, 1, 0).unwrap(),
+            "commit__x"
         );
     }
 
-    /// `commit__<sha>` was built before a branch pointed at the SHA. Two bare
-    /// names rank by mtime, so the branch build takes a generation instead.
+    /// The clock stepped back below the newest generation: the name still
+    /// rises. Equal clock and newest rise by one.
     #[test]
-    fn test_publish_dir_for_other_prefix_bare_sibling_gets_generation() {
-        let tmp = TempDir::new().unwrap();
-        let parent = tmp.path().join("commits");
-        let sha_hex = "0123456789abcdef0123456789abcdef01234567";
-        fs::create_dir_all(parent.join(format!("commit__{sha_hex}"))).unwrap();
-        let base = parent.join(format!("branch_main__{sha_hex}"));
-        let published = publish_dir_for(&base);
-        let name = published.file_name().unwrap().to_str().unwrap();
+    fn test_next_publish_name_now_behind_newest_rises() {
+        let gen = |ts| {
+            Some(Generation {
+                timestamp_ms: ts,
+                pid: 9,
+                counter: 9,
+            })
+        };
+        assert_eq!(
+            next_publish_name("b", &[gen(2_000_000), None], 1_000, 1, 0).unwrap(),
+            "b.gen.2000001.1.0"
+        );
+        assert_eq!(
+            next_publish_name("b", &[gen(1_000)], 1_000, 1, 0).unwrap(),
+            "b.gen.1001.1.0"
+        );
+        assert_eq!(
+            next_publish_name("b", &[None], 1_000, 1, 0).unwrap(),
+            "b.gen.1000.1.0",
+            "a bare sibling only forces a generation"
+        );
+    }
+
+    #[test]
+    fn test_next_publish_name_u64_max_refuses() {
+        let full = Some(Generation {
+            timestamp_ms: u64::MAX,
+            pid: 0,
+            counter: 0,
+        });
+        assert!(next_publish_name("b", &[full], 1_000, 1, 0).is_err());
+    }
+
+    /// Moved from `publish_dir_for`: a sweep that kept the `.gen` dir and
+    /// dropped the bare one must not hand the bare name out again, or the new
+    /// build ranks below the older dir it replaces.
+    #[test]
+    fn test_choose_publish_name_generation_sibling_ranks_above_it() {
+        let older = format!("branch_main__{SHA}.gen.1730000000000.42.7");
+        let other = format!("branch_main__{}", "f".repeat(40));
+        let l = listing(&[older.clone(), other]);
+        let sha = parse_sha(SHA).unwrap();
+        let name = choose_publish_name(&l, &sha, &format!("branch_main__{SHA}"), 5).unwrap();
+        let parsed = CommitDirName::parse(&name).unwrap();
+        assert_eq!(parsed.sha, sha);
+        assert!(parsed.generation > CommitDirName::parse(&older).unwrap().generation);
+    }
+
+    /// Moved from `publish_dir_for`: `commit__<sha>` exists from before a
+    /// branch pointed at the SHA; the branch build takes a generation.
+    #[test]
+    fn test_choose_publish_name_other_prefix_bare_sibling_gets_generation() {
+        let l = listing(&[format!("commit__{SHA}")]);
+        let name = choose_publish_name(
+            &l,
+            &parse_sha(SHA).unwrap(),
+            &format!("branch_main__{SHA}"),
+            5,
+        )
+        .unwrap();
         assert!(
-            ecp_core::registry::CommitDirName::parse(name)
-                .unwrap()
-                .generation
-                .is_some(),
+            CommitDirName::parse(&name).unwrap().generation.is_some(),
             "{name}"
         );
     }
 
+    #[test]
+    fn test_choose_publish_name_no_same_sha_dir_bare() {
+        let l = listing(&[format!("branch_main__{}.gen.1.2.3", "f".repeat(40))]);
+        let base = format!("branch_main__{SHA}");
+        assert_eq!(
+            choose_publish_name(&l, &parse_sha(SHA).unwrap(), &base, 5).unwrap(),
+            base
+        );
+    }
+
+    /// Replaces `publish_dir_for`'s "unreadable parent gets a generation":
+    /// a listing that missed an entry may have missed the newest generation,
+    /// so no name is chosen at all.
+    #[test]
+    fn test_choose_publish_name_incomplete_listing_refuses() {
+        let l = CommitDirListing::from_entries(
+            Path::new("commits"),
+            [Err(io::Error::other("entry vanished"))],
+        );
+        let err = choose_publish_name(&l, &parse_sha(SHA).unwrap(), "b", 5).unwrap_err();
+        assert!(err.to_string().contains("incomplete"), "{err}");
+    }
+
+    #[test]
+    fn test_parse_sha_uppercase_same_bytes_and_lock_path() {
+        let lower = parse_sha(SHA).unwrap();
+        let upper = parse_sha(&SHA.to_uppercase()).unwrap();
+        assert_eq!(lower, upper);
+        let commits = Path::new("commits");
+        assert_eq!(
+            sha_lock_path(commits, &upper),
+            sha_lock_path(commits, &lower)
+        );
+        assert!(parse_sha("xyz").is_err());
+        assert!(parse_sha(&"g".repeat(40)).is_err());
+    }
+
+    /// Two refs at one SHA used to take two locks (one per ref-derived dir
+    /// name). Both entries now key the lock by the SHA only.
+    #[test]
+    fn test_acquire_sha_lock_two_refs_same_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sha = parse_sha(SHA).unwrap();
+        let held = acquire_sha_lock(tmp.path(), &sha, Duration::ZERO, no_wait).unwrap();
+        let err = acquire_sha_lock(tmp.path(), &sha, Duration::ZERO, |_| {})
+            .err()
+            .expect("the second builder of one SHA must wait, whatever its ref");
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        drop(held);
+    }
+
+    /// `SHA` with its first byte kept and the rest changed: the same stripe.
+    fn same_stripe(sha: &[u8; 20]) -> [u8; 20] {
+        let mut other = *sha;
+        other[1..].iter_mut().for_each(|b| *b ^= 0xff);
+        other
+    }
+
+    #[test]
+    fn test_acquire_sha_lock_busy_reports_holder_slot_phase() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sha = parse_sha(SHA).unwrap();
+        let held = acquire_sha_lock(tmp.path(), &sha, Duration::ZERO, no_wait).unwrap();
+        let mut calls = Vec::new();
+        let err = acquire_sha_lock(tmp.path(), &sha, Duration::ZERO, |h| {
+            calls.push(h.to_string())
+        })
+        .err()
+        .expect("a held lock with no budget ends in an error");
+        let pid = std::process::id();
+        assert_eq!(
+            calls,
+            vec![format!(
+                "sha=01234567 holder={pid} role=build phase=slot-wait"
+            )]
+        );
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        let text = err.to_string();
+        assert!(
+            text.starts_with("l2.wait timeout sha=01234567")
+                && text.contains(&format!("holder={pid}"))
+                && text.contains("phase=slot-wait"),
+            "{text}"
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn test_acquire_sha_lock_busy_reports_holder_building_phase() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sha = parse_sha(SHA).unwrap();
+        let staging = staging_dir_name(&format!("branch_main__{SHA}"), std::process::id(), 0);
+        fs::create_dir_all(tmp.path().join(&staging)).unwrap();
+        let held = acquire_sha_lock(tmp.path(), &sha, Duration::ZERO, no_wait).unwrap();
+        let mut seen = String::new();
+        let err = acquire_sha_lock(tmp.path(), &sha, Duration::ZERO, |h| seen = h.to_string())
+            .err()
+            .unwrap();
+        assert!(
+            seen.contains(&format!("phase=building staging={staging} age=")),
+            "{seen}"
+        );
+        assert!(err.to_string().contains("phase=building"), "{err}");
+        drop(held);
+    }
+
+    /// Two SHAs of one stripe build one after the other. The waiter learns
+    /// that the stripe is held for another SHA, and never reads that PID as
+    /// its own SHA's builder.
+    #[test]
+    fn test_acquire_sha_lock_same_stripe_other_sha_waits_names_other_sha() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sha = parse_sha(SHA).unwrap();
+        let other = same_stripe(&sha);
+        assert_eq!(
+            sha_lock_path(tmp.path(), &sha),
+            sha_lock_path(tmp.path(), &other)
+        );
+        let held = acquire_sha_lock(tmp.path(), &other, Duration::ZERO, no_wait).unwrap();
+        let mut seen = String::new();
+        let err = acquire_sha_lock(tmp.path(), &sha, Duration::ZERO, |h| seen = h.to_string())
+            .err()
+            .expect("one stripe, one holder");
+        let pid = std::process::id();
+        let other8 = &hex::encode(other)[..8];
+        assert_eq!(
+            seen,
+            format!(
+                "sha=01234567 stripe_holder={pid} role=build phase=other-sha held_for={other8}"
+            )
+        );
+        assert!(!seen.contains(" holder="), "{seen}");
+        assert!(err.to_string().contains("phase=other-sha"), "{err}");
+        drop(held);
+        drop(acquire_sha_lock(tmp.path(), &sha, Duration::ZERO, no_wait).unwrap());
+    }
+
+    /// Two stripes are two locks: SHAs with different first bytes build at
+    /// once.
+    #[test]
+    fn test_acquire_sha_lock_two_stripes_held_at_once() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sha = parse_sha(SHA).unwrap();
+        let mut other = sha;
+        other[0] ^= 0xff;
+        let first = acquire_sha_lock(tmp.path(), &sha, Duration::ZERO, no_wait).unwrap();
+        let second = acquire_sha_lock(tmp.path(), &other, Duration::ZERO, no_wait).unwrap();
+        drop((first, second));
+    }
+
+    /// A holder that goes away frees the stripe and leaves its file: the
+    /// lock file is never deleted, so no waiter holds a descriptor of an
+    /// unlinked inode.
+    #[test]
+    fn test_acquire_sha_lock_holder_gone_lock_free_file_kept() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sha = parse_sha(SHA).unwrap();
+        let path = sha_lock_path(tmp.path(), &sha);
+        drop(acquire_sha_lock(tmp.path(), &sha, Duration::ZERO, no_wait).unwrap());
+        assert!(path.is_file());
+        assert!(FileLock::try_existing(&path).unwrap().is_some());
+        drop(acquire_sha_lock(tmp.path(), &sha, Duration::ZERO, no_wait).unwrap());
+    }
+
+    /// However many SHAs a repo builds, `.locks` holds one lock and one owner
+    /// sidecar per first byte: 512 files at most.
+    #[test]
+    fn test_acquire_sha_lock_many_shas_locks_dir_bounded() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        for i in 0..1024u32 {
+            let mut sha = [0u8; 20];
+            sha[..4].copy_from_slice(&i.wrapping_mul(2_654_435_761).to_be_bytes());
+            sha[19] = i as u8;
+            drop(acquire_sha_lock(tmp.path(), &sha, Duration::ZERO, no_wait).unwrap());
+        }
+        let files = fs::read_dir(tmp.path().join(LOCKS_DIR)).unwrap().count();
+        assert!(files <= 512, "{files} files in .locks");
+        let listing = CommitDirListing::read(tmp.path()).unwrap();
+        assert!(listing.dirs.is_empty() && listing.unparsed.is_empty());
+    }
+
+    #[test]
+    fn test_sync_tree_children_before_parent_src_skipped() {
+        #[derive(Default)]
+        struct Order(RefCell<Vec<PathBuf>>);
+        impl Publish for Order {
+            fn sync_file(&self, path: &Path) -> io::Result<()> {
+                self.0.borrow_mut().push(path.to_path_buf());
+                Ok(())
+            }
+            fn sync_dir(&self, path: &Path) -> io::Result<()> {
+                self.0.borrow_mut().push(path.to_path_buf());
+                Ok(())
+            }
+            fn rename(&self, _: &Path, _: &Path) -> io::Result<()> {
+                unreachable!()
+            }
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        let staging = tmp.path().join("s");
+        fs::create_dir_all(staging.join("tantivy")).unwrap();
+        fs::create_dir_all(staging.join("_src").join("pkg")).unwrap();
+        fs::write(staging.join("graph.bin"), b"g").unwrap();
+        fs::write(staging.join("tantivy").join("seg"), b"t").unwrap();
+        fs::write(staging.join("_src").join("pkg").join("a.py"), b"a").unwrap();
+        let order = Order::default();
+        sync_tree(&staging, &order).unwrap();
+        let seen = order.0.into_inner();
+        assert_eq!(
+            seen.last(),
+            Some(&staging),
+            "the staging dir is synced last"
+        );
+        let at = |p: PathBuf| seen.iter().position(|s| *s == p).unwrap();
+        assert!(at(staging.join("tantivy").join("seg")) < at(staging.join("tantivy")));
+        assert!(seen.iter().all(|p| !p.starts_with(staging.join("_src"))));
+        assert!(seen.contains(&staging.join("graph.bin")));
+    }
+
     #[cfg(unix)]
     #[test]
-    fn test_publish_dir_for_unreadable_parent_gets_generation() {
+    fn test_sync_tree_unreadable_subdir_publish_fails() {
         use std::os::unix::fs::PermissionsExt;
-        let tmp = TempDir::new().unwrap();
-        let parent = tmp.path().join("commits");
-        fs::create_dir_all(&parent).unwrap();
-        fs::set_permissions(&parent, fs::Permissions::from_mode(0o300)).unwrap();
-        // Root ignores mode bits, so the parent stays readable and the case is unreachable.
-        if fs::read_dir(&parent).is_ok() {
-            fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let locked = tmp.path().join("s").join("locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        // Root ignores mode bits, so the walk succeeds and the case is unreachable.
+        let unreachable = fs::read_dir(&locked).is_ok();
+        let result = sync_tree(&tmp.path().join("s"), &DurablePublish);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        if unreachable {
             return;
         }
-        let base = parent.join("branch_main__0123456789abcdef0123456789abcdef01234567");
-        let published = publish_dir_for(&base);
-        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
-        assert_ne!(published, base);
+        assert!(
+            result.is_err(),
+            "an unwalkable subdir was published unsynced"
+        );
     }
 
+    #[derive(Debug, Clone, PartialEq)]
+    enum Op {
+        File(PathBuf),
+        Dir(PathBuf),
+        Rename { from: PathBuf, sidecars: bool },
+        Commits { lock_busy: bool },
+    }
+
+    /// Records each publish step, and can fail a file fsync, the rename or
+    /// the fsync of `commits/`.
+    struct Recorder {
+        ops: RefCell<Vec<Op>>,
+        commits: PathBuf,
+        lock: PathBuf,
+        fail_sync_file: bool,
+        fail_rename: bool,
+        fail_commits_sync: bool,
+    }
+
+    impl Recorder {
+        fn new(fx: &Fx) -> Self {
+            Self {
+                ops: RefCell::default(),
+                commits: fx.commits.clone(),
+                lock: sha_lock_path(&fx.commits, &fx.sha),
+                fail_sync_file: false,
+                fail_rename: false,
+                fail_commits_sync: false,
+            }
+        }
+    }
+
+    impl Publish for Recorder {
+        fn sync_file(&self, path: &Path) -> io::Result<()> {
+            self.ops.borrow_mut().push(Op::File(path.to_path_buf()));
+            if self.fail_sync_file {
+                return Err(io::Error::other("injected file fsync failure"));
+            }
+            DurablePublish.sync_file(path)
+        }
+
+        fn sync_dir(&self, path: &Path) -> io::Result<()> {
+            if path != self.commits {
+                self.ops.borrow_mut().push(Op::Dir(path.to_path_buf()));
+                return DurablePublish.sync_dir(path);
+            }
+            let lock_busy = matches!(
+                FileLock::try_existing(&self.lock),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock
+            );
+            self.ops.borrow_mut().push(Op::Commits { lock_busy });
+            if self.fail_commits_sync {
+                return Err(io::Error::other("injected fsync failure"));
+            }
+            DurablePublish.sync_dir(path)
+        }
+
+        fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+            let graph = from.join("graph.bin");
+            let sidecars = crate::auto_ensure::builder_fingerprint_sidecar_path(&graph).is_file()
+                && crate::auto_ensure::compatible_version_sidecar_path(&graph).is_file()
+                && from.join("meta.json").is_file();
+            self.ops.borrow_mut().push(Op::Rename {
+                from: from.to_path_buf(),
+                sidecars,
+            });
+            if self.fail_rename {
+                // EIO on Unix; ERROR_ACCESS_DENIED, an open handle, on Windows.
+                return Err(io::Error::from_raw_os_error(5));
+            }
+            DurablePublish.rename(from, to)
+        }
+    }
+
+    fn locked(fx: &Fx) -> FileLock {
+        acquire_sha_lock(&fx.commits, &fx.sha, Duration::ZERO, no_wait).unwrap()
+    }
+
+    fn lock_is_free(fx: &Fx) -> bool {
+        FileLock::try_existing(&sha_lock_path(&fx.commits, &fx.sha))
+            .is_ok_and(|probe| probe.is_some())
+    }
+
+    /// Files, then their dirs bottom-up, the staging dir last, the rename,
+    /// then `commits/` while the SHA lock is still held. The build-time
+    /// sidecars are in staging when it is renamed.
     #[test]
-    fn test_publish_dir_for_no_same_sha_dir_uses_bare_name() {
-        let tmp = TempDir::new().unwrap();
-        let parent = tmp.path().join("commits");
-        fs::create_dir_all(
-            parent.join("branch_main__ffffffffffffffffffffffffffffffffffffffff.gen.1.2.3"),
+    fn test_build_inside_locked_publish_order() {
+        let fx = fx();
+        let rec = Recorder::new(&fx);
+        let mut r = build_inside_locked(
+            &fx.wt,
+            &fx.wt,
+            &fx.sha,
+            &fx.repo_root,
+            &fx.base,
+            locked(&fx),
+            &rec,
         )
         .unwrap();
-        let base = parent.join("branch_main__0123456789abcdef0123456789abcdef01234567");
-        assert_eq!(publish_dir_for(&base), base);
-    }
-
-    #[test]
-    fn wait_for_completion_prefers_latest_generation_for_same_sha() {
-        let tmp = TempDir::new().unwrap();
-        let parent = tmp.path().join("commits");
-        fs::create_dir_all(&parent).unwrap();
-
-        let sha_hex = "0123456789abcdef0123456789abcdef01234567";
-        let base = parent.join(format!("branch_main__{sha_hex}"));
-        let gen_dir = parent.join(format!("branch_main__{sha_hex}.gen.1.2.3"));
-        fs::create_dir_all(&base).unwrap();
-        fs::create_dir_all(&gen_dir).unwrap();
-
-        let meta = CommitBuildMeta {
-            version: 1,
-            sha: sha_hex.to_string(),
-            source_type: SourceType::Branch,
-            source_id: Some("main".to_string()),
-            built_from_worktree: "repo".to_string(),
-            built_at: "2026-05-20T00:00:00Z".to_string(),
-            parent_sha: None,
-            node_count: 1,
-            embedding_status: EmbeddingStatus::None,
-            refs_at_build: vec![RefRecord {
-                ref_name: "refs/heads/main".to_string(),
-                seen_at: "2026-05-20T00:00:00Z".to_string(),
-            }],
-            refs_seen_since: vec![],
-            builder_fingerprint: Some(BUILDER_FINGERPRINT.to_string()),
-            binary_commit_sha: Some(env!("ECP_GIT_SHA").to_string()),
+        r.join_background();
+        let ops = rec.ops.into_inner();
+        let at = ops
+            .iter()
+            .position(|o| matches!(o, Op::Rename { .. }))
+            .expect("a rename");
+        let Op::Rename {
+            from: staging,
+            sidecars,
+        } = ops[at].clone()
+        else {
+            unreachable!()
         };
-        CommitBuildMeta::write_atomic(&base.join("meta.json"), &meta).unwrap();
-        CommitBuildMeta::write_atomic(&gen_dir.join("meta.json"), &meta).unwrap();
-
-        let building = parent.join(format!("branch_main__{sha_hex}.building"));
-        let result = wait_for_completion(&building, &base).unwrap();
-
-        assert_eq!(result.commit_dir, gen_dir);
-        assert_eq!(result.sha_hex, sha_hex);
-    }
-
-    /// FU-2026-05-23-045 regression: the tie-breaker MUST prefer the
-    /// generation dir for the same SHA even when filesystem mtime favours
-    /// the base (e.g. base was just `touch`ed by an `auto_ensure` sidecar
-    /// write while gen_dir's `meta.json` ages in place).
-    ///
-    /// Pre-fix behaviour used raw mtime as the tie-breaker, which would
-    /// pick base here and silently shadow the newer generation. Post-fix
-    /// the generation tuple takes precedence over mtime.
-    #[test]
-    fn wait_for_completion_prefers_generation_dir_even_when_base_mtime_is_newer() {
-        use std::time::{Duration, SystemTime};
-
-        let tmp = TempDir::new().unwrap();
-        let parent = tmp.path().join("commits");
-        fs::create_dir_all(&parent).unwrap();
-
-        let sha_hex = "0123456789abcdef0123456789abcdef01234567";
-        let base = parent.join(format!("branch_main__{sha_hex}"));
-        let gen_dir = parent.join(format!("branch_main__{sha_hex}.gen.1730000000000.42.7"));
-        fs::create_dir_all(&base).unwrap();
-        fs::create_dir_all(&gen_dir).unwrap();
-
-        let meta = CommitBuildMeta {
-            version: 1,
-            sha: sha_hex.to_string(),
-            source_type: SourceType::Branch,
-            source_id: Some("main".to_string()),
-            built_from_worktree: "repo".to_string(),
-            built_at: "2026-05-20T00:00:00Z".to_string(),
-            parent_sha: None,
-            node_count: 1,
-            embedding_status: EmbeddingStatus::None,
-            refs_at_build: vec![RefRecord {
-                ref_name: "refs/heads/main".to_string(),
-                seen_at: "2026-05-20T00:00:00Z".to_string(),
-            }],
-            refs_seen_since: vec![],
-            builder_fingerprint: Some(BUILDER_FINGERPRINT.to_string()),
-            binary_commit_sha: Some(env!("ECP_GIT_SHA").to_string()),
-        };
-        CommitBuildMeta::write_atomic(&base.join("meta.json"), &meta).unwrap();
-        CommitBuildMeta::write_atomic(&gen_dir.join("meta.json"), &meta).unwrap();
-
-        // Force the WRONG mtime ordering: base.meta.json is 1 hour AHEAD of
-        // gen_dir.meta.json. Pre-FU-045 the tie-breaker would pick base
-        // (newer mtime wins). Post-fix, generation tuple dominates and
-        // gen_dir still wins despite older mtime.
-        //
-        // Windows requires FILE_WRITE_ATTRIBUTES on the handle for SetFileTime
-        // (rust-lang/rust#95558); a read-only handle from `File::open` returns
-        // os error 5 (Access Denied). Opening with `write(true)` yields a
-        // GENERIC_WRITE handle that grants the attribute right; on Linux the
-        // futimens path is unaffected. No truncate so file content is preserved.
-        let now = SystemTime::now();
-        let open_writable = |p: &std::path::Path| {
-            OpenOptions::new()
-                .write(true)
-                .open(p)
-                .unwrap_or_else(|e| panic!("open writable {}: {e}", p.display()))
-        };
-        open_writable(&gen_dir.join("meta.json"))
-            .set_modified(now - Duration::from_secs(3600))
-            .unwrap();
-        open_writable(&base.join("meta.json"))
-            .set_modified(now)
-            .unwrap();
-
-        let building = parent.join(format!("branch_main__{sha_hex}.building"));
-        let result = wait_for_completion(&building, &base).unwrap();
-
+        assert!(sidecars, "sidecars must publish with graph.bin");
         assert_eq!(
-            result.commit_dir, gen_dir,
-            "generation tuple must dominate mtime; base.mtime > gen_dir.mtime here \
-             but gen_dir must still win"
+            ops[at - 1],
+            Op::Dir(staging.clone()),
+            "staging is synced last"
         );
+        assert_eq!(&ops[at + 1..], &[Op::Commits { lock_busy: true }][..]);
+        for (i, op) in ops[..at].iter().enumerate() {
+            let Op::File(file) = op else { continue };
+            for (j, later) in ops[..at].iter().enumerate() {
+                if let Op::Dir(dir) = later {
+                    if file.starts_with(dir) {
+                        assert!(j > i, "{dir:?} synced before its file {file:?}");
+                    }
+                }
+            }
+        }
+        assert!(ops.contains(&Op::File(staging.join("graph.bin"))));
+        assert_eq!(
+            r.commit_dir,
+            fx.commits.join(&fx.base),
+            "first build is bare"
+        );
+        assert!(lock_is_free(&fx), "the SHA lock is released on return");
+    }
+
+    /// A rename refused (an open handle on Windows): the error returns, the
+    /// previous build stays current, the attempt's staging is retired and the
+    /// SHA lock is free.
+    #[test]
+    fn test_build_inside_locked_rename_fails_previous_current_lock_free() {
+        let fx = fx();
+        stale_build(&fx, &fx.base);
+        let mut rec = Recorder::new(&fx);
+        rec.fail_rename = true;
+        let result = build_inside_locked(
+            &fx.wt,
+            &fx.wt,
+            &fx.sha,
+            &fx.repo_root,
+            &fx.base,
+            locked(&fx),
+            &rec,
+        );
+        assert!(result.is_err());
+        assert_eq!(current_name(&fx), Some(fx.base.clone()));
+        let listing = CommitDirListing::read(&fx.commits).unwrap();
+        assert!(listing.staging.is_empty(), "{:?}", listing.staging);
+        assert_eq!(listing.dirs.len(), 1);
+        assert!(lock_is_free(&fx));
+    }
+
+    /// The rename happened and the fsync of `commits/` failed: the caller
+    /// hears of it, and the published dir is not taken back (gc keeps the
+    /// previous generation until its own fsync succeeds). Every step after
+    /// the rename still ran: `_src` is gone, `.head_sha` and the repo meta
+    /// are written.
+    #[test]
+    fn test_build_inside_locked_commits_fsync_fails_error_published_kept() {
+        let fx = fx();
+        let old = stale_build(&fx, &fx.base);
+        // An untracked file makes the build read the commit from `_src`.
+        fs::write(fx.wt.join("untracked.py"), "x = 1\n").unwrap();
+        let mut rec = Recorder::new(&fx);
+        rec.fail_commits_sync = true;
+        let err = build_inside_locked(
+            &fx.wt,
+            &fx.wt,
+            &fx.sha,
+            &fx.repo_root,
+            &fx.base,
+            locked(&fx),
+            &rec,
+        )
+        .err()
+        .expect("the failed fsync is reported");
+        assert!(err.to_string().contains("fsync"), "{err}");
+        let current = current_name(&fx).unwrap();
+        assert_ne!(current, fx.base, "the new generation is current");
+        assert!(old.exists());
+        assert!(lock_is_free(&fx));
+        let published = fx.commits.join(&current);
+        assert!(!published.join("_src").exists(), "_src was not retired");
+        let head_sha = crate::auto_ensure::head_sha_sidecar_path(&published.join("graph.bin"));
+        assert_eq!(
+            fs::read_to_string(head_sha).unwrap().trim(),
+            hex::encode(fx.sha)
+        );
+        assert!(
+            fx.repo_root.join("meta.json").is_file(),
+            "repo meta not updated"
+        );
+    }
+
+    /// A publish step fails while the lock is held: the error returns, the
+    /// attempt's staging is retired, nothing is published and the SHA lock is
+    /// free.
+    #[test]
+    fn test_build_inside_locked_sync_file_fails_lock_free_no_staging() {
+        let fx = fx();
+        let mut rec = Recorder::new(&fx);
+        rec.fail_sync_file = true;
+        let err = build_inside_locked(
+            &fx.wt,
+            &fx.wt,
+            &fx.sha,
+            &fx.repo_root,
+            &fx.base,
+            locked(&fx),
+            &rec,
+        )
+        .err()
+        .expect("the failed fsync is reported");
+        assert!(err.to_string().contains("injected"), "{err}");
+        let listing = CommitDirListing::read(&fx.commits).unwrap();
+        assert!(
+            listing.staging.is_empty() && listing.dirs.is_empty(),
+            "{listing:?}"
+        );
+        assert!(lock_is_free(&fx));
+    }
+
+    /// The wall clock steps back an hour between two publishes of one SHA.
+    /// The second name still rises above the first (`max(now, newest + 1)`),
+    /// so readers take the second build.
+    #[test]
+    fn test_choose_publish_name_clock_steps_back_second_publish_ranks_above_first() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let commits = tmp.path();
+        let sha = parse_sha(SHA).unwrap();
+        let base = format!("commit__{SHA}");
+        fs::create_dir(commits.join(&base)).unwrap();
+        let publish_at = |now_ms| {
+            let listing = CommitDirListing::read(commits).unwrap();
+            let name = choose_publish_name(&listing, &sha, &base, now_ms).unwrap();
+            fs::create_dir(commits.join(&name)).unwrap();
+            name
+        };
+        let first = publish_at(5_000_000);
+        let second = publish_at(5_000_000 - 3_600_000);
+        let ts = |name: &str| {
+            CommitDirName::parse(name)
+                .unwrap()
+                .generation
+                .unwrap()
+                .timestamp_ms
+        };
+        assert_eq!(ts(&first), 5_000_000);
+        assert_eq!(ts(&second), 5_000_001);
+        assert_eq!(
+            CommitIndex::scan(commits).unwrap().find(&sha),
+            Some(second.as_str())
+        );
+    }
+
+    /// The process stopped after the rename and before `.head_sha` and the
+    /// repo meta. The next build of the SHA attaches to the published dir,
+    /// back-fills `.head_sha`, and builds nothing.
+    #[test]
+    fn test_build_l2_at_published_without_head_sha_attaches_and_backfills() {
+        let fx = fx();
+        let first = build_at(&fx, &fx.repo_root);
+        let head_sha =
+            crate::auto_ensure::head_sha_sidecar_path(&first.commit_dir.join("graph.bin"));
+        fs::remove_file(&head_sha).unwrap();
+        fs::remove_file(fx.repo_root.join("meta.json")).unwrap();
+
+        let second = build_l2_at(&fx.wt, &fx.sha, &fx.repo_root, no_wait).unwrap();
+
+        assert_eq!(second.commit_dir, first.commit_dir);
+        assert!(second.tantivy_handle.is_none(), "attached, not built");
+        assert_eq!(
+            fs::read_to_string(&head_sha).unwrap().trim(),
+            hex::encode(fx.sha)
+        );
+        assert_eq!(CommitDirListing::read(&fx.commits).unwrap().dirs.len(), 1);
+    }
+
+    /// gc holds the stripe: a builder of the SHA waits and reports gc as the
+    /// holder. gc retires the SHA's only dir and lets go; the builder checks
+    /// the publish state again under the lock, finds nothing and builds.
+    #[test]
+    fn test_build_l2_at_gc_holds_builder_waits_then_rechecks_and_builds() {
+        use crate::admin::gc::{sweep_sha_lock, ShaLock};
+        let fx = fx();
+        let old = stale_build(&fx, &fx.base);
+        let ShaLock::Held(gc) = sweep_sha_lock(&fx.commits, &fx.sha, false) else {
+            panic!("nothing else holds the stripe");
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|s| {
+            let waiter = s.spawn(|| {
+                build_l2_at(&fx.wt, &fx.sha, &fx.repo_root, move |h: &Holder| {
+                    tx.send(h.to_string()).unwrap()
+                })
+            });
+            let line = rx.recv().expect("the builder reports its wait");
+            assert!(line.ends_with("role=gc phase=gc"), "{line}");
+            ecp_core::registry::retire_dir(&old).unwrap();
+            drop(gc);
+            let mut r = waiter.join().unwrap().unwrap();
+            assert!(r.tantivy_handle.is_some(), "built, not attached");
+            r.join_background();
+            assert_eq!(
+                r.commit_dir,
+                fx.commits.join(&fx.base),
+                "nothing of the SHA was left, so the name is bare"
+            );
+        });
+    }
+
+    /// Crash before the rename: the previous build stays current and the
+    /// abandoned per-attempt staging is never a candidate. The next build of
+    /// the SHA retires the staging and publishes above the previous build.
+    #[test]
+    fn test_build_l2_at_abandoned_new_staging_old_build_current_then_retired() {
+        let fx = fx();
+        let old = stale_build(&fx, &fx.base);
+        let junk = fx.commits.join(staging_dir_name(&fx.base, 999_999, 0));
+        fs::create_dir_all(&junk).unwrap();
+        fs::write(junk.join("graph.bin"), b"junk").unwrap();
+        assert_eq!(current_name(&fx), Some(fx.base.clone()));
+
+        let r = build_at(&fx, &fx.repo_root);
+
+        assert!(!junk.exists(), "abandoned staging must be retired");
+        let listing = CommitDirListing::read(&fx.commits).unwrap();
+        assert!(listing.staging.is_empty());
+        let new_name = r.commit_dir.file_name().unwrap().to_str().unwrap();
+        assert_eq!(current_name(&fx).as_deref(), Some(new_name));
+        assert!(old.exists(), "the previous build is left to gc");
+    }
+
+    fn tree(dir: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+        walkdir::WalkDir::new(dir)
+            .sort_by_file_name()
+            .into_iter()
+            .map(|e| {
+                let e = e.unwrap();
+                let rel = e.path().strip_prefix(dir).unwrap().to_path_buf();
+                // A held lock file cannot be read on Windows; its presence is enough.
+                let body = (e.file_type().is_file() && e.file_name() != ".build.lock")
+                    .then(|| fs::read(e.path()).unwrap());
+                (rel, body)
+            })
+            .collect()
+    }
+
+    /// An older binary is mid-build in `<base>.building/`. A current build of
+    /// the SHA neither opens, reuses nor removes it.
+    #[test]
+    fn test_build_l2_at_old_style_staging_untouched() {
+        let fx = fx();
+        let legacy = fx.commits.join(format!("{}.building", fx.base));
+        fs::create_dir_all(legacy.join("_src")).unwrap();
+        fs::write(legacy.join("graph.bin"), b"half").unwrap();
+        fs::write(legacy.join("_src").join("x.py"), b"x = 1\n").unwrap();
+        let held = FileLock::acquire_exclusive(&legacy.join(".build.lock")).unwrap();
+        let before = tree(&legacy);
+
+        build_at(&fx, &fx.repo_root);
+
+        assert_eq!(tree(&legacy), before);
+        drop(held);
+    }
+
+    /// A builder waiting on the SHA attaches to what the holder published
+    /// during the wait instead of building it again.
+    #[test]
+    fn test_build_l2_at_waiter_attaches_after_holder_publishes() {
+        let fx = fx();
+        let elsewhere = fx.tmp.path().join("home").join("elsewhere");
+        let built = build_at(&fx, &elsewhere);
+        let held = locked(&fx);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|s| {
+            let waiter = s.spawn(|| {
+                build_l2_at(&fx.wt, &fx.sha, &fx.repo_root, move |h: &Holder| {
+                    tx.send(h.to_string()).unwrap()
+                })
+            });
+            let line = rx.recv().expect("the waiter reports its wait");
+            assert!(
+                line.contains(&format!("holder={}", std::process::id())),
+                "{line}"
+            );
+            let published = fx.commits.join(built.commit_dir.file_name().unwrap());
+            fs::rename(&built.commit_dir, &published).unwrap();
+            drop(held);
+            let r = waiter.join().unwrap().unwrap();
+            assert_eq!(r.commit_dir, published);
+            assert!(r.tantivy_handle.is_none(), "attached, not built");
+        });
+        assert_eq!(CommitDirListing::read(&fx.commits).unwrap().dirs.len(), 1);
+    }
+
+    /// Two refs at one SHA: the second build finds the first and publishes
+    /// nothing.
+    #[test]
+    fn test_build_l2_at_two_refs_same_sha_one_publish() {
+        let fx = fx();
+        git(&fx.wt, &["branch", "other"]);
+        let first = build_at(&fx, &fx.repo_root);
+        git(&fx.wt, &["checkout", "-q", "other"]);
+        let second = build_at(&fx, &fx.repo_root);
+        assert_eq!(first.commit_dir, second.commit_dir);
+        assert_eq!(CommitDirListing::read(&fx.commits).unwrap().dirs.len(), 1);
+    }
+
+    #[test]
+    fn test_staging_dir_name_parses_back() {
+        let name = staging_dir_name(&format!("commit__{SHA}"), 7, 3);
+        let StagingDir { sha, shape, .. } =
+            crate::commit_lookup::parse_staging_name(&name).unwrap();
+        assert_eq!(sha, parse_sha(SHA).unwrap());
+        assert_eq!(shape, StagingShape::PerAttempt { pid: 7, attempt: 3 });
+    }
+
+    /// The publishing process must see its own build on its next lookup. A
+    /// coarse-mtime filesystem can leave `commits/` with the mtime the cache
+    /// stored, so only the explicit drop after the rename guarantees that.
+    #[test]
+    fn test_publish_staging_drops_scan_cache() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let commits = tmp.path().join("commits");
+        fs::create_dir(&commits).unwrap();
+        let sha = parse_sha(SHA).unwrap();
+        let base = format!("commit__{SHA}");
+        let settled =
+            filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(60));
+        filetime::set_file_mtime(&commits, settled).unwrap();
+        let (wall, mono) = (SystemTime::now(), std::time::Instant::now());
+        let before = CommitIndex::scan_cached_at(&commits, wall, mono).unwrap();
+        assert!(before.find(&sha).is_none());
+
+        let staging = commits.join(staging_dir_name(&base, 1, 0));
+        fs::create_dir(&staging).unwrap();
+        fs::write(staging.join("graph.bin"), b"g").unwrap();
+        publish_staging(&staging, &commits, &base, &DurablePublish).unwrap();
+        filetime::set_file_mtime(&commits, settled).unwrap();
+
+        let after = CommitIndex::scan_cached_at(&commits, wall, mono).unwrap();
+        assert_eq!(after.find(&sha), Some(base.as_str()));
     }
 }
 
 /// `git_archive_to` is the widest path a scanned repository's filter driver
 /// can reach, so it gets its own guard rather than relying on the one over
-/// `GitGuard`. `process` is set alongside `smudge` on purpose: it takes
+/// `BaselineCheckout`. `process` is set alongside `smudge` on purpose: it takes
 /// precedence, so a fix covering only `smudge` and `clean` leaves this red.
 #[cfg(all(test, unix))]
 mod archive_filter_tests {

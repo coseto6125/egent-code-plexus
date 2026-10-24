@@ -68,7 +68,13 @@ Options:
           Emit explain_confidence block with threshold + per-tier filtered counts
 
       --format <FORMAT>
-          Output format (mostly internal — agent doesn't set this)
+          Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON
+
+          Possible values:
+          - llm:  Default output: per-command LLM-tuned payload (token compression, rounded floats, trimmed timestamps, etc.) rendered through the toon encoder. Commands without command-specific tuning fall through to the same output as `Toon`
+          - toon: Neutral toon: the json payload encoded as toon, no lossy compression. Use when you want round-trippable structure but tighter than JSON
+          - json: Full-fidelity JSON. Always round-trippable; pick this when piping to another tool / asserting in tests
+          - text
 
       --literal <VALUE>
           List sites of a path-shaped string literal by exact value. Mutually exclusive with --target/--baseline/<name>. Returns JSON with each site's file, line, enclosing fn, and sink classification (`sink:read` / `sink:write` / `sink:open-read` / `sink:join` / etc). Designed for LLM split-brain queries: `ecp impact --literal session_meta.json` answers "where is this file read or written?" without writing cypher
@@ -80,6 +86,9 @@ Options:
           Read target symbol names from stdin (one per line; `#` and blank lines skipped). The graph is loaded once and N symbols are resolved sequentially — amortises mmap + process spawn across queries. Each result is prefixed by `=== target: <name> ===` so callers can split the stream unambiguously. Flags like --direction / --depth / --exclude-tests apply uniformly to all targets.
           
           Symbol-mode only: `--batch` combined with `--baseline` or `--literal` is rejected as an invalid argument. A positional name is also rejected — stdin is the single source of targets, so a positional would be silently ignored otherwise.
+
+      --ambiguous-callers
+          List the call sites the graph could not attribute: when the target's name has two or more same-named definitions, the resolver drops bare calls to it as ambiguous, so the caller set is a lower bound. This runs one `git grep` over tracked files in the definitions' language family (`.ts` also searches `.tsx`) and reports, under `ambiguous_callers`, each `name(` / `.name(` / `->name(` / `::name(` site outside the definitions and outside functions already listed as callers (at most 50 sites; `total` counts every call). A site whose line holds several calls carries `count`; it is omitted when 1. Sites are text-match candidates, never merged into the caller list or counts. Ruby calls without parentheses are not matched. Upstream walks only: ignored with `--direction down`
 
       --graph <GRAPH>
           Path to the graph.bin file

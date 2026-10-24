@@ -9,12 +9,13 @@ pub struct IndexArgs {
     #[arg(long)]
     pub repo: String,
 
-    /// Force-rebuild L2 at the target SHA. Drops the existing L2 dir and any
-    /// orphan `.building/`, invalidates L1 sessions that have overlays for
-    /// this SHA (clean sessions kept), drops the per-file `parse_cache/` so
-    /// cached parser outputs from earlier binaries don't replay, then
-    /// rebuilds. Without `--force`, an existing L2 is reused. Use after
-    /// analyzer/grammar upgrade or to recover from L2 corruption.
+    /// Force-rebuild L2 at the target SHA. Invalidates L1 sessions that have
+    /// overlays for this SHA (clean sessions kept), drops the per-file
+    /// `parse_cache/` so cached parser outputs from earlier binaries don't
+    /// replay, publishes a new generation beside the existing L2, then removes
+    /// the superseded ones. Without `--force`, an existing L2 built by this
+    /// ecp version is reused and one built by another version is rebuilt. Use
+    /// after an analyzer/grammar change or to recover from L2 corruption.
     #[arg(long, default_value_t = false)]
     pub force: bool,
 
@@ -370,10 +371,22 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
     let start = std::time::Instant::now();
     let sha = crate::build::orchestrator::head_sha_hex(&worktree)
         .map_err(|e| format!("git rev-parse HEAD: {e}"))?;
-    let commit_dir =
-        locate_commit_dir(&worktree, &sha).map_err(|e| format!("locate commit dir: {e}"))?;
+    // Reuse only what `build_l2` would reuse. A graph built by another ecp
+    // version reported `l2.exists` here, while every query path rejected it on
+    // its fingerprint and rebuilt. `--force` rebuilds whatever exists.
+    let reusable = if args.force {
+        None
+    } else {
+        let root = crate::build::orchestrator::worktree_toplevel(&worktree)
+            .unwrap_or_else(|| worktree.clone());
+        locate_commit_dir(&worktree, &sha)
+            .map_err(|e| format!("locate commit dir: {e}"))?
+            .filter(|dir| {
+                crate::build::orchestrator::attach_if_fingerprint_matches(dir, &root).is_some()
+            })
+    };
 
-    match (args.force, commit_dir) {
+    match (args.force, reusable) {
         (false, Some(existing)) => {
             // Self-heal: if commit_dir was published by a pre-fix binary that
             // wrote per-repo meta but never touched the global registry, an
@@ -411,6 +424,8 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
             // from exiting while tantivy still has open temp segments under
             // the publish dir (which raced with TempDir cleanup in tests).
             r.join_background();
+            // A stale-fingerprint graph of this SHA is now superseded.
+            drop_superseded_generations(&r.commit_dir);
             Ok(())
         }
         (true, _) => {
@@ -435,8 +450,9 @@ pub fn run(args: IndexArgs) -> Result<(), String> {
     }
 }
 
-/// A forced rebuild publishes a new `.gen.*` dir beside the old one, which
-/// stays for readers already attached (see `force_rebuild_l2`). Once the build
+/// A forced rebuild, or the rebuild of a graph another ecp version built,
+/// publishes a new `.gen.*` dir beside the old one, which stays for readers
+/// already attached (see `force_rebuild_l2`). Once the build
 /// returns, converge the repo's same-SHA generations now instead of leaving
 /// ~100 MB per forced build until the next gc. A failed sweep never fails the
 /// index.

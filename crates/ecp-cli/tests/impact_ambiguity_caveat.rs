@@ -88,12 +88,12 @@ fn impact_on_collision_name_flags_incomplete_callers() {
     let repo = tmp.path();
     setup_collision_repo(repo, home_tmp.path());
 
-    // --kind narrows past the ambiguous-target error; the graph still holds
+    // --file narrows past the ambiguous-target error; the graph still holds
     // 2 same-named defs, so the upstream caller set must self-flag.
     let json = run_impact(
         repo,
         home_tmp.path(),
-        &["process", "--kind", "function", "--direction", "up"],
+        &["process", "--file", "src/alpha.py", "--direction", "up"],
     );
     let caveat = json
         .get("result")
@@ -108,9 +108,9 @@ fn impact_on_collision_name_flags_incomplete_callers() {
         "caveat must count the same-named definitions: {caveat}"
     );
     // The contract: the caveat names a command the agent can run as-is,
-    // carrying the --kind that made the colliding name resolvable.
+    // carrying the --file that made the colliding name resolvable.
     assert!(
-        caveat.contains("ecp impact --target process --kind function --ambiguous-callers"),
+        caveat.contains("ecp impact --target process --file src/alpha.py --ambiguous-callers"),
         "caveat must name the runnable command: {caveat}"
     );
     assert!(
@@ -130,7 +130,7 @@ fn test_ambiguous_callers_json_format_parses_and_lists_suppressed_bare_call() {
     let json = run_impact(
         repo,
         home_tmp.path(),
-        &["process", "--kind", "function", "--ambiguous-callers"],
+        &["process", "--file", "src/alpha.py", "--ambiguous-callers"],
     );
     let field = &json["ambiguous_callers"];
     let sites = field["sites"]
@@ -206,9 +206,13 @@ fn test_ambiguous_callers_batch_targets_each_get_own_field() {
         })
         .collect();
     assert_eq!(blocks.len(), 2, "one block per target: {stdout}");
+    // Batch lines carry no per-target --file, so a name with two definitions
+    // is refused with its candidates instead of merging two blast radii.
+    assert_eq!(blocks[0].1["status"], "ambiguous", "{stdout}");
+    let error = blocks[0].1["error"].as_str().unwrap_or_default();
     assert!(
-        blocks[0].1["ambiguous_callers"]["sites"].is_array(),
-        "colliding target carries its own sites: {stdout}"
+        error.contains("src/alpha.py") && error.contains("src/beta.py"),
+        "the refusal lists both candidates: {stdout}"
     );
     assert!(
         blocks[1].1.get("ambiguous_callers").is_none(),
@@ -246,10 +250,37 @@ fn downstream_impact_on_collision_name_stays_caveat_free() {
     let json = run_impact(
         repo,
         home_tmp.path(),
-        &["process", "--kind", "function", "--direction", "down"],
+        &["process", "--file", "src/alpha.py", "--direction", "down"],
     );
     assert!(
         json.get("result").is_none(),
         "downstream walk must not carry the caller-set caveat: {json}"
+    );
+}
+
+/// cli F4: a narrowing flag that still leaves two definitions must refuse with
+/// the candidates. Merging the two blast radii reads as one symbol's callers.
+#[test]
+fn test_impact_by_name_kind_leaving_two_matches_refuses_with_candidates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    setup_collision_repo(repo, home_tmp.path());
+
+    let out = Command::new(ecp_bin())
+        .args([
+            "impact", "process", "--kind", "function", "--repo", ".", "--format", "json",
+        ])
+        .current_dir(repo)
+        .env("HOME", home_tmp.path())
+        .output()
+        .expect("impact failed to spawn");
+    assert!(!out.status.success(), "two matches must not resolve");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("ambiguous")
+            && stderr.contains("src/alpha.py")
+            && stderr.contains("src/beta.py"),
+        "the refusal lists both candidates: {stderr}"
     );
 }

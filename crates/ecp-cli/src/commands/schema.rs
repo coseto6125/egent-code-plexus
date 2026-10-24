@@ -1,3 +1,4 @@
+use crate::output::OutputFormat;
 use clap::{Args, Subcommand};
 use ecp_core::graph::RelType;
 use ecp_core::EcpError;
@@ -35,7 +36,7 @@ pub enum SchemaCommands {
 pub struct FormatArgs {
     /// Output format. Default `json`; `text` is a human-readable table.
     #[arg(long, default_value = "json")]
-    pub format: String,
+    pub format: OutputFormat,
 }
 
 /// Detection status for a per-lang capability. Append-only enum (string
@@ -193,7 +194,7 @@ fn blindspots(args: FormatArgs) -> Result<(), EcpError> {
     let report = BlindspotsReport {
         languages: LANGUAGES,
     };
-    emit(&args.format, &report, print_blindspots_text)
+    emit(args.format, &report, print_blindspots_text)
 }
 
 fn print_blindspots_text(report: &BlindspotsReport) {
@@ -219,18 +220,24 @@ fn print_blindspots_text(report: &BlindspotsReport) {
 }
 
 /// Generic JSON/text dispatcher — keeps each subcommand's run-fn trivial.
-fn emit<T: Serialize>(format: &str, payload: &T, text_printer: fn(&T)) -> Result<(), EcpError> {
+fn emit<T: Serialize>(
+    format: OutputFormat,
+    payload: &T,
+    text_printer: fn(&T),
+) -> Result<(), EcpError> {
     match format {
-        "json" => {
+        OutputFormat::Json => {
             let s = serde_json::to_string_pretty(payload)
                 .map_err(|e| EcpError::Serialization(format!("schema report: {e}")))?;
             println!("{}", s);
         }
-        "text" => text_printer(payload),
+        OutputFormat::Text => text_printer(payload),
         other => {
+            let name = clap::ValueEnum::to_possible_value(&other)
+                .map(|v| v.get_name().to_string())
+                .unwrap_or_default();
             return Err(EcpError::InvalidArgument(format!(
-                "unknown --format `{}`; expected `json` or `text`",
-                other
+                "unknown --format `{name}`; expected `json` or `text`"
             )));
         }
     }
@@ -250,9 +257,6 @@ struct RelTypeEntry {
     /// `B` = node coverage (LLM falls back to grep);
     /// `C` = edge semantics (ambiguous without distinct kind).
     utility: &'static str,
-    /// Heuristic edges are shown by default in a separate `heuristic_callers`
-    /// bucket tagged `requires_verification`; pass `--no-heuristic` to suppress.
-    heuristic: bool,
     note: &'static str,
 }
 
@@ -267,6 +271,8 @@ struct RelTypeEntry {
 struct RelTypeView {
     name: &'static str,
     utility: &'static str,
+    /// Heuristic edges are shown by default in a separate `heuristic_callers`
+    /// bucket tagged `requires_verification`; pass `--no-heuristic` to suppress.
     heuristic: bool,
     impact_traversal: bool,
     note: &'static str,
@@ -281,46 +287,51 @@ struct ReltypesReport {
 /// `ecp_core::graph::RelType` — kept aligned so the JSON output's index
 /// matches the rkyv ordinal.
 const RELTYPES: &[RelTypeEntry] = &[
-    RelTypeEntry { rel: RelType::Defines, name: "Defines", utility: "A", heuristic: false, note: "File/Namespace/Module → contained symbol. Drives scope-containment queries." },
-    RelTypeEntry { rel: RelType::Imports, name: "Imports", utility: "A", heuristic: false, note: "File → imported module/symbol. Source of cross-file resolution." },
-    RelTypeEntry { rel: RelType::Calls, name: "Calls", utility: "A", heuristic: false, note: "Caller → callee. Carries CallMeta flags for indirect dispatch." },
-    RelTypeEntry { rel: RelType::Extends, name: "Extends", utility: "A", heuristic: false, note: "Subclass/subtrait → base type. Class-level hierarchy edge." },
-    RelTypeEntry { rel: RelType::Implements, name: "Implements", utility: "A", heuristic: false, note: "Concrete type → interface/trait/protocol. Powers impl-enumeration for refactors." },
-    RelTypeEntry { rel: RelType::HasMethod, name: "HasMethod", utility: "A", heuristic: false, note: "Class/Trait/Struct → method. Container relationship for method-level dispatch." },
-    RelTypeEntry { rel: RelType::HasProperty, name: "HasProperty", utility: "A", heuristic: false, note: "Class/Struct → field/property. Schema-aware queries hang here." },
-    RelTypeEntry { rel: RelType::Accesses, name: "Accesses", utility: "C", heuristic: false, note: "Reader/writer → variable / property. Distinct from Calls so reads are queryable." },
-    RelTypeEntry { rel: RelType::HandlesRoute, name: "HandlesRoute", utility: "A", heuristic: false, note: "Function/Method → Route. Materialised even for arrow / lambda handlers." },
-    RelTypeEntry { rel: RelType::StepInProcess, name: "StepInProcess", utility: "B", heuristic: false, note: "Workflow / Saga step linkage. Process node ↔ step function." },
-    RelTypeEntry { rel: RelType::References, name: "References", utility: "C", heuristic: false, note: "Generic reference fallback (entry-point scoring, type-annotation linkage). Reason field carries provenance." },
-    RelTypeEntry { rel: RelType::Fetches, name: "Fetches", utility: "A", heuristic: false, note: "HTTP-client call site → Route. URL-match across files; reason encodes accessed keys + per-file count." },
-    RelTypeEntry { rel: RelType::MirrorsField, name: "MirrorsField", utility: "A", heuristic: true, note: "Heuristic ORM-field linkage from in-memory struct to SchemaField. Shown by default in heuristic_callers; --no-heuristic suppresses." },
-    RelTypeEntry { rel: RelType::Publishes, name: "Publishes", utility: "A", heuristic: false, note: "Producer (kafka.send / SNS publish / RabbitMQ basicPublish) → EventTopic." },
-    RelTypeEntry { rel: RelType::Subscribes, name: "Subscribes", utility: "A", heuristic: false, note: "Consumer (@KafkaListener / SQS receive) → EventTopic. Pair with Publishes for cross-service event flow." },
-    RelTypeEntry { rel: RelType::EventTopicMirror, name: "EventTopicMirror", utility: "B", heuristic: true, note: "Heuristic: EventTopic → SchemaField when payload shape inferable. Confidence < 0.85." },
-    RelTypeEntry { rel: RelType::OpensTxScope, name: "OpensTxScope", utility: "A", heuristic: false, note: "Opener Function/Method → its TransactionScope node. Query as (f)-[:OpensTxScope]->(s:TransactionScope); same forward convention as Publishes/Subscribes." },
-    RelTypeEntry { rel: RelType::Overrides, name: "Overrides", utility: "A", heuristic: false, note: "Method-level override (Java @Override, Kotlin override fun, C# override, C++ virtual-match). Distinct from class-level Extends." },
-    RelTypeEntry { rel: RelType::Decorates, name: "Decorates", utility: "A", heuristic: false, note: "Decorator/attribute → decorated symbol (Python @decorator, Java/Kotlin @annotation, C# attribute, Rust attribute macro). 10-language emission." },
-    RelTypeEntry { rel: RelType::UsesPathLiteral, name: "UsesPathLiteral", utility: "A", heuristic: false, note: "Function/Method → PathLiteral. Drives `ecp impact --literal <value>` to find every read/write site touching a filesystem path or config key. 14-language emission." },
-    RelTypeEntry { rel: RelType::CompensatedBy, name: "CompensatedBy", utility: "C", heuristic: true, note: "Heuristic Saga compensation: compensator → operation it rolls back. reason encodes evidence (saga:calls-back 0.8 / saga:name-only 0.6). Shown by default in heuristic_callers; --no-heuristic suppresses." },
-    RelTypeEntry { rel: RelType::QueriesTable, name: "QueriesTable", utility: "A", heuristic: false, note: "Function/Method → database table (Class node) via raw SQL string literal. reason encodes 'read' (SELECT) or 'write' (INSERT/UPDATE/DELETE). ecp impact <table> --upstream surfaces every raw-SQL caller for schema-migration blast radius." },
+    RelTypeEntry { rel: RelType::Defines, name: "Defines", utility: "A", note: "File/Namespace/Module → contained symbol. Drives scope-containment queries." },
+    RelTypeEntry { rel: RelType::Imports, name: "Imports", utility: "A", note: "File → imported module/symbol. Source of cross-file resolution." },
+    RelTypeEntry { rel: RelType::Calls, name: "Calls", utility: "A", note: "Caller → callee. Carries CallMeta flags for indirect dispatch." },
+    RelTypeEntry { rel: RelType::Extends, name: "Extends", utility: "A", note: "Subclass/subtrait → base type. Class-level hierarchy edge." },
+    RelTypeEntry { rel: RelType::Implements, name: "Implements", utility: "A", note: "Concrete type → interface/trait/protocol. Powers impl-enumeration for refactors." },
+    RelTypeEntry { rel: RelType::HasMethod, name: "HasMethod", utility: "A", note: "Class/Trait/Struct → method. Container relationship for method-level dispatch." },
+    RelTypeEntry { rel: RelType::HasProperty, name: "HasProperty", utility: "A", note: "Class/Struct → field/property. Schema-aware queries hang here." },
+    RelTypeEntry { rel: RelType::Accesses, name: "Accesses", utility: "C", note: "Reader/writer → variable / property. Distinct from Calls so reads are queryable." },
+    RelTypeEntry { rel: RelType::HandlesRoute, name: "HandlesRoute", utility: "A", note: "Function/Method → Route. Materialised even for arrow / lambda handlers." },
+    RelTypeEntry { rel: RelType::StepInProcess, name: "StepInProcess", utility: "B", note: "Workflow / Saga step linkage. Process node ↔ step function." },
+    RelTypeEntry { rel: RelType::References, name: "References", utility: "C", note: "Generic reference fallback (entry-point scoring, type-annotation linkage). Reason field carries provenance." },
+    RelTypeEntry { rel: RelType::Fetches, name: "Fetches", utility: "A", note: "HTTP-client call site → Route. URL-match across files; reason encodes accessed keys + per-file count." },
+    RelTypeEntry { rel: RelType::MirrorsField, name: "MirrorsField", utility: "A", note: "Heuristic ORM-field linkage from in-memory struct to SchemaField. Shown by default in heuristic_callers; --no-heuristic suppresses." },
+    RelTypeEntry { rel: RelType::Publishes, name: "Publishes", utility: "A", note: "Producer (kafka.send / SNS publish / RabbitMQ basicPublish) → EventTopic." },
+    RelTypeEntry { rel: RelType::Subscribes, name: "Subscribes", utility: "A", note: "Consumer (@KafkaListener / SQS receive) → EventTopic. Pair with Publishes for cross-service event flow." },
+    RelTypeEntry { rel: RelType::EventTopicMirror, name: "EventTopicMirror", utility: "B", note: "Heuristic: EventTopic → SchemaField when payload shape inferable. Confidence < 0.85." },
+    RelTypeEntry { rel: RelType::OpensTxScope, name: "OpensTxScope", utility: "A", note: "Opener Function/Method → its TransactionScope node. Query as (f)-[:OpensTxScope]->(s:TransactionScope); same forward convention as Publishes/Subscribes." },
+    RelTypeEntry { rel: RelType::Overrides, name: "Overrides", utility: "A", note: "Method-level override (Java @Override, Kotlin override fun, C# override, C++ virtual-match). Distinct from class-level Extends." },
+    RelTypeEntry { rel: RelType::Decorates, name: "Decorates", utility: "A", note: "Decorator/attribute → decorated symbol (Python @decorator, Java/Kotlin @annotation, C# attribute, Rust attribute macro). 10-language emission." },
+    RelTypeEntry { rel: RelType::UsesPathLiteral, name: "UsesPathLiteral", utility: "A", note: "Function/Method → PathLiteral. Drives `ecp impact --literal <value>` to find every read/write site touching a filesystem path or config key. 14-language emission." },
+    RelTypeEntry { rel: RelType::CompensatedBy, name: "CompensatedBy", utility: "C", note: "Heuristic Saga compensation: compensator → operation it rolls back. reason encodes evidence (saga:calls-back 0.8 / saga:name-only 0.6). Shown by default in heuristic_callers; --no-heuristic suppresses." },
+    RelTypeEntry { rel: RelType::QueriesTable, name: "QueriesTable", utility: "A", note: "Function/Method → database table (Class node) via raw SQL string literal. reason encodes 'read' (SELECT) or 'write' (INSERT/UPDATE/DELETE). ecp impact <table> --upstream surfaces every raw-SQL caller for schema-migration blast radius." },
 ];
 
-fn reltypes(args: FormatArgs) -> Result<(), EcpError> {
-    // Derive impact_traversal from the live predicate rather than a hand-kept
-    // column: `is_scope_containment()` is the exact gate the upstream BFS
-    // applies in impact.rs, so the schema output stays truthful by construction.
-    let reltypes = RELTYPES
+fn reltype_views() -> Vec<RelTypeView> {
+    // Derive both flags from the live predicates rather than hand-kept
+    // columns: `is_scope_containment()` is the exact gate the upstream BFS
+    // applies in impact.rs, `is_heuristic()` the one that buckets heuristic edges.
+    RELTYPES
         .iter()
         .map(|r| RelTypeView {
             name: r.name,
             utility: r.utility,
-            heuristic: r.heuristic,
+            heuristic: r.rel.is_heuristic(),
             impact_traversal: !r.rel.is_scope_containment(),
             note: r.note,
         })
-        .collect();
-    let report = ReltypesReport { reltypes };
-    emit(&args.format, &report, print_reltypes_text)
+        .collect()
+}
+
+fn reltypes(args: FormatArgs) -> Result<(), EcpError> {
+    let report = ReltypesReport {
+        reltypes: reltype_views(),
+    };
+    emit(args.format, &report, print_reltypes_text)
 }
 
 fn print_reltypes_text(report: &ReltypesReport) {
@@ -398,7 +409,7 @@ fn node_kinds(args: FormatArgs) -> Result<(), EcpError> {
         node_kinds: NODE_KINDS,
         variant_count: ecp_core::graph::NodeKind::VARIANT_COUNT,
     };
-    emit(&args.format, &report, print_node_kinds_text)
+    emit(args.format, &report, print_node_kinds_text)
 }
 
 fn print_node_kinds_text(report: &NodeKindsReport) {
@@ -445,7 +456,7 @@ fn graph_version(args: FormatArgs) -> Result<(), EcpError> {
         current_version: ecp_core::graph::GRAPH_FORMAT_VERSION,
         history: VERSION_HISTORY,
     };
-    emit(&args.format, &report, print_graph_version_text)
+    emit(args.format, &report, print_graph_version_text)
 }
 
 fn print_graph_version_text(report: &GraphVersionReport) {
@@ -581,7 +592,7 @@ mod tests {
 
     #[test]
     fn heuristic_reltypes_are_the_documented_ones() {
-        let heuristics: Vec<&str> = RELTYPES
+        let heuristics: Vec<&str> = reltype_views()
             .iter()
             .filter(|r| r.heuristic)
             .map(|r| r.name)
@@ -592,6 +603,15 @@ mod tests {
             heuristics,
             vec!["MirrorsField", "EventTopicMirror", "CompensatedBy"]
         );
+    }
+
+    #[test]
+    fn test_reltype_views_heuristic_column_equals_is_heuristic_for_every_variant() {
+        let views = reltype_views();
+        for r in RELTYPES {
+            let view = views.iter().find(|v| v.name == r.name).unwrap();
+            assert_eq!(view.heuristic, r.rel.is_heuristic(), "{}", r.name);
+        }
     }
 
     // ── node-kinds invariants ───────────────────────────────────────────

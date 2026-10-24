@@ -16,7 +16,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, FileTimes};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -26,8 +26,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use xxhash_rust::xxh3::xxh3_64;
 
-use super::{plain_in, with_env, EnvOverrides, PRIVATE_INDEX_DIR, STATUS_ARGS};
-use crate::git::safe_exec;
+use super::{
+    config_mentions, env_var, gitlink_free, plain_with, split_index_present, with_env,
+    EnvOverrides, IndexRead, LAYOUT_ENV, PRIVATE_INDEX_DIR, STATUS_ARGS,
+};
+use crate::git::safe_exec::{self, FilterOverrides};
 
 /// git uses the untracked cache only when the mode it recorded matches the
 /// effective `status.showUntrackedFiles`, and the `-uall` flag alone leaves
@@ -43,22 +46,18 @@ const UNTRACKED_CACHE_CONFIG: [&str; 6] = [
     "core.splitIndex=false",
 ];
 
-/// A caller's `GIT_INDEX_FILE` (ecp run from a git hook) names the index the
-/// plain command must read, so it is honoured by not overriding it. Config
-/// passed through the environment is invisible to the config identity, and
-/// `GIT_CONFIG_NOSYSTEM` drops a file the identity reads. The last four
-/// redirect git away from the on-disk layout `git_layout_unchecked` reads;
-/// they are checked here, through the env seam, rather than in the process env.
-const BLOCKING_ENV: [&str; 9] = [
-    "GIT_INDEX_FILE",
+/// Config passed through the environment is invisible to the config
+/// identity, and `GIT_CONFIG_NOSYSTEM` drops a file the identity reads. The
+/// variables in [`LAYOUT_ENV`] block too: a caller's `GIT_INDEX_FILE` (ecp run
+/// from a git hook) names the index the plain command must read, so it is
+/// honoured by not overriding it, and the rest redirect git away from the
+/// on-disk layout `git_layout_unchecked` reads. All are checked through the
+/// env seam rather than in the process env.
+const BLOCKING_ENV: [&str; 4] = [
     "GIT_CONFIG_PARAMETERS",
     "GIT_CONFIG_COUNT",
     "GIT_CONFIG_NOSYSTEM",
     "GIT_ATTR_NOSYSTEM",
-    "GIT_DIR",
-    "GIT_COMMON_DIR",
-    "GIT_WORK_TREE",
-    "GIT_CEILING_DIRECTORIES",
 ];
 
 const LOCK_FILE: &str = "lock";
@@ -68,14 +67,23 @@ const FAILED_SUFFIX: &str = ".failed";
 const MOUNTINFO: &str = "/proc/self/mountinfo";
 
 /// The private copy's answer for `worktree`, or `None` for the caller to run
-/// the plain command.
-pub(super) fn status(worktree: &Path, cache_root: &Path, env: &EnvOverrides) -> Option<Output> {
+/// the plain command. `overrides` guard both git runs here, the fallback's
+/// included. `index` is the real index as the overrides scan read it; a copy
+/// is written only from those bytes, so the index is read once.
+pub(super) fn status(
+    worktree: &Path,
+    cache_root: &Path,
+    env: &EnvOverrides,
+    overrides: &FilterOverrides,
+    index: Option<&IndexRead>,
+) -> Option<Output> {
     let repo = eligible(worktree, env)?;
+    let index = index.filter(|index| index.gitdir == repo.gitdir)?;
     // git resolves `GIT_INDEX_FILE` against the worktree it runs in, not
     // ecp's cwd, and a path that names no file reads as an empty index with
     // success.
     let root = std::path::absolute(cache_root).ok()?;
-    status_on_private_index(worktree, &repo, &root)
+    status_on_private_index(worktree, &repo, &root, overrides, index)
 }
 
 /// What the private copy needs from a worktree that passed every check.
@@ -96,7 +104,11 @@ struct Repo<'a> {
 /// them).
 fn eligible<'a>(worktree: &Path, env: &'a EnvOverrides) -> Option<Repo<'a>> {
     let var = |key: &str| env_var(env, key);
-    if BLOCKING_ENV.iter().any(|key| var(key).is_some()) {
+    if BLOCKING_ENV
+        .iter()
+        .chain(&LAYOUT_ENV)
+        .any(|key| var(key).is_some())
+    {
         return None;
     }
     let (top, gitdir, common) = crate::git_cache::git_layout_unchecked(worktree)?;
@@ -116,14 +128,6 @@ fn eligible<'a>(worktree: &Path, env: &'a EnvOverrides) -> Option<Repo<'a>> {
         config_id,
         env,
     })
-}
-
-/// `key` as the git this module spawns sees it.
-fn env_var(env: &EnvOverrides, key: &str) -> Option<OsString> {
-    match env.iter().rev().find(|(k, _)| k == key) {
-        Some((_, value)) => value.clone(),
-        None => std::env::var_os(key),
-    }
 }
 
 /// The `git` a `Command` would run. The fast path spawns this binary by its
@@ -249,35 +253,19 @@ fn config_identity(config: &[PathBuf], attributes: &[PathBuf]) -> Option<u64> {
 /// - `extensions.objectFormat` may widen the object names past the 20 bytes
 ///   the gitlink scan steps over;
 /// - `core.attributesFile` names an attributes file the identity does not read.
-///
-/// Keys are matched by name in any section, which only ever over-matches. git
-/// skips a UTF-8 byte order mark at the start of the file.
 fn blocks_copy(config: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(config);
-    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-    text.lines().any(|line| {
-        let line = line.trim_start().to_ascii_lowercase();
-        let rest = match line.strip_prefix('[') {
-            Some(header) if header.starts_with("include") => return true,
-            Some(header) => header.split_once(']').map_or("", |(_, rest)| rest),
-            None => line.as_str(),
-        };
-        let key = rest
-            .trim_start()
-            .split(|c: char| c == '=' || c.is_ascii_whitespace())
-            .next()
-            .unwrap_or("");
-        matches!(
-            key,
-            "worktree"
-                | "sparsecheckout"
-                | "sparsecheckoutcone"
-                | "trustctime"
-                | "checkstat"
-                | "objectformat"
-                | "attributesfile"
-        )
-    })
+    config_mentions(
+        config,
+        &[
+            "worktree",
+            "sparsecheckout",
+            "sparsecheckoutcone",
+            "trustctime",
+            "checkstat",
+            "objectformat",
+            "attributesfile",
+        ],
+    )
 }
 
 /// True when `mountinfo` was read and lists no mount point strictly below
@@ -331,7 +319,13 @@ fn copy_dir(cache_root: &Path, gitdir: &str) -> PathBuf {
 /// copy until it has stamped and pruned; a copy unlinked while git opens it
 /// reads as an empty index and lists every tracked file as deleted, with
 /// success, and the lock is what rules that out.
-fn status_on_private_index(worktree: &Path, repo: &Repo, cache_root: &Path) -> Option<Output> {
+fn status_on_private_index(
+    worktree: &Path,
+    repo: &Repo,
+    cache_root: &Path,
+    overrides: &FilterOverrides,
+    index: &IndexRead,
+) -> Option<Output> {
     let gitdir = repo.gitdir.to_str()?;
     let dir = copy_dir(cache_root, gitdir);
     fs::create_dir_all(&dir).ok()?;
@@ -341,14 +335,8 @@ fn status_on_private_index(worktree: &Path, repo: &Repo, cache_root: &Path) -> O
     }
     let lock = lock_dir(&dir)?;
 
-    let mut real = File::open(repo.gitdir.join("index")).ok()?;
-    let real_meta = real.metadata().ok()?;
-    let real_mtime = real_meta.modified().ok()?;
-    let name = format!(
-        "{}-{:016x}",
-        copy_name(&mut real, &real_meta)?,
-        repo.config_id
-    );
+    let real_mtime = index.meta.modified().ok()?;
+    let name = format!("{}-{:016x}", copy_name(index)?, repo.config_id);
     let copy = dir.join(&name);
     if fs::symlink_metadata(marker(&copy, FAILED_SUFFIX)).is_ok() {
         return None;
@@ -371,22 +359,21 @@ fn status_on_private_index(worktree: &Path, repo: &Repo, cache_root: &Path) -> O
             return None;
         }
         fs::write(dir.join(GITDIR_RECORD), gitdir).ok()?;
-        let mut body = Vec::new();
-        real.read_to_end(&mut body).ok()?;
         // git passes the `-c` settings on to the status it runs in each
         // submodule, where they override the submodule's own config.
-        if !gitlink_free(&body) {
+        if !gitlink_free(&index.body) {
             let _ = File::create(marker(&copy, FAILED_SUFFIX));
             prune(&dir, &name);
             return None;
         }
-        write_copy(&body, real_mtime, &copy).ok()?;
+        write_copy(&index.body, real_mtime, &copy).ok()?;
     }
-    drop(real);
 
     lock.set_len(1).ok()?;
     let started = SystemTime::now();
-    let out = with_env(&mut safe_exec::git_at(&repo.git), repo.env)
+    let mut git = safe_exec::git_at(&repo.git);
+    overrides.apply(&mut git);
+    let out = with_env(&mut git, repo.env)
         .args(UNTRACKED_CACHE_CONFIG)
         .args(STATUS_ARGS)
         .env("GIT_INDEX_FILE", &copy)
@@ -394,7 +381,7 @@ fn status_on_private_index(worktree: &Path, repo: &Repo, cache_root: &Path) -> O
         .output()
         .ok()?;
     if !out.status.success() {
-        let plain = plain_in(worktree, repo.env).ok()?;
+        let plain = plain_with(worktree, repo.env, overrides).ok()?;
         // Marked rather than retried: the marker keeps later queries on this
         // index off a copy git has refused once. A git killed by a signal, or
         // a repository the plain command refuses too, says nothing against
@@ -455,86 +442,21 @@ fn marker(copy: &Path, suffix: &str) -> PathBuf {
 /// because `index.skipHash` writes it as zeros; the stat triple alone is not
 /// enough because a reused inode written within one timestamp tick at the same
 /// size would collide.
-fn copy_name(real: &mut File, meta: &fs::Metadata) -> Option<String> {
+fn copy_name(index: &IndexRead) -> Option<String> {
+    let meta = &index.meta;
     let mtime_ns = meta
         .modified()
         .ok()?
         .duration_since(UNIX_EPOCH)
         .ok()?
         .as_nanos();
-    let mut checksum = [0u8; 20];
-    real.seek(SeekFrom::End(-(checksum.len() as i64))).ok()?;
-    real.read_exact(&mut checksum).ok()?;
-    real.rewind().ok()?;
+    let checksum = &index.body[index.body.len().checked_sub(20)?..];
     Some(format!(
         "{COPY_PREFIX}{mtime_ns:x}-{:x}-{:x}-{}",
         meta.len(),
         meta.ino(),
         hex::encode(checksum)
     ))
-}
-
-fn split_index_present(gitdir: &Path) -> bool {
-    let Ok(entries) = fs::read_dir(gitdir) else {
-        return true;
-    };
-    entries.flatten().any(|e| {
-        e.file_name()
-            .as_encoded_bytes()
-            .starts_with(b"sharedindex.")
-    })
-}
-
-/// True when the index's entries were walked and none is a gitlink. Entries
-/// follow a 12-byte header; each holds stat data with the mode at byte 24, a
-/// 20-byte object name, 16 bits of flags (32 with the extended bit), and the
-/// path. Versions 2 and 3 NUL-pad the entry to a multiple of eight bytes;
-/// version 4 prefixes the path with a varint and ends it with one NUL.
-fn gitlink_free(index: &[u8]) -> bool {
-    const GITLINK: u32 = 0o160_000;
-    const EXTENDED: u16 = 0x4000;
-    const FLAGS_AT: usize = 40 + 20;
-    let u32_at = |at: usize| {
-        let bytes = index.get(at..at.checked_add(4)?)?;
-        Some(u32::from_be_bytes(bytes.try_into().ok()?))
-    };
-    let (Some(b"DIRC"), Some(version @ 2..=4), Some(count)) =
-        (index.get(..4), u32_at(4), u32_at(8))
-    else {
-        return false;
-    };
-    let mut at = 12;
-    for _ in 0..count {
-        let (Some(mode), Some(&[hi, lo])) =
-            (u32_at(at + 24), index.get(at + FLAGS_AT..at + FLAGS_AT + 2))
-        else {
-            return false;
-        };
-        if mode & 0o170_000 == GITLINK {
-            return false;
-        }
-        let mut path = at + FLAGS_AT + 2;
-        if u16::from_be_bytes([hi, lo]) & EXTENDED != 0 {
-            path += 2;
-        }
-        if version == 4 {
-            while index.get(path).is_some_and(|b| b & 0x80 != 0) {
-                path += 1;
-            }
-            path += 1;
-        }
-        let Some(len) = index
-            .get(path..)
-            .and_then(|rest| rest.iter().position(|&b| b == 0))
-        else {
-            return false;
-        };
-        at = match version {
-            4 => path + len + 1,
-            _ => at + ((path - at + len + 8) & !7),
-        };
-    }
-    true
 }
 
 /// Writes the real index's bytes to `copy` through a temporary name, so a
@@ -696,7 +618,7 @@ fn reliable_magic(magic: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::porcelain_all_in;
+    use super::super::{plain_in, porcelain_all_in, status_overrides, top_index};
     use super::*;
     use tempfile::TempDir;
 
@@ -877,7 +799,9 @@ mod tests {
     fn serve(worktree: &Path, repo: &Repo, cache: &Path) -> Vec<u8> {
         for _ in 0..200 {
             let expected = plain_in(worktree, repo.env).unwrap();
-            if let Some(got) = status_on_private_index(worktree, repo, cache) {
+            let overrides = status_overrides(worktree, repo.env).unwrap();
+            let index = top_index(worktree, repo.env).unwrap();
+            if let Some(got) = status_on_private_index(worktree, repo, cache, &overrides, &index) {
                 assert_eq!(got.status.code(), expected.status.code());
                 assert_eq!(
                     got.stdout,
@@ -1040,18 +964,36 @@ mod tests {
         assert_eq!(assert_matches_plain(&f.repo, &f.cache), b"?? new.rs\0");
     }
 
+    /// The overrides are built before `HEAD` breaks: once it is broken, git
+    /// no longer sees a repository and no status runs at all.
     #[test]
     fn test_status_on_private_index_plain_also_fails_writes_no_marker() {
         let Some(f) = served_fixture() else {
             return;
         };
         fast(&f.repo, &f.cache);
+        let env = isolated_env();
+        let repo = served_repo(&f.repo, &env);
+        let overrides = status_overrides(&f.repo, &env).unwrap();
         fs::write(f.repo.join(".git/HEAD"), b"not a ref\n").unwrap();
         assert!(
-            !plain_out(&f.repo).status.success(),
+            !plain_with(&f.repo, &env, &overrides)
+                .unwrap()
+                .status
+                .success(),
             "fixture must break git"
         );
-        fast(&f.repo, &f.cache);
+        let index = top_index(&f.repo, &env).unwrap();
+        let got = (0..200)
+            .find_map(|_| {
+                let got = status_on_private_index(&f.repo, &repo, &f.cache, &overrides, &index);
+                if got.is_none() {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                got
+            })
+            .expect("the private copy never ran");
+        assert!(!got.status.success());
         assert_eq!(markers(&f.cache), 0, "a refusal plain shares must not mark");
     }
 
@@ -1082,23 +1024,31 @@ mod tests {
     }
 
     #[test]
-    fn test_porcelain_all_index_shorter_than_checksum_matches_plain_without_copy() {
+    fn test_porcelain_all_index_shorter_than_checksum_fails_like_plain_without_copy() {
+        // git rejects a truncated index ("index file smaller than expected"),
+        // so both entry points fail; neither may report a clean tree.
+        let failed = |r: io::Result<std::process::Output>| r.map_or(true, |o| !o.status.success());
         for body in [&b""[..], &b"DIRC\0\0\0\x02\0\0"[..]] {
             let f = fixture();
             fs::write(f.repo.join(".git/index"), body).unwrap();
-            assert_matches_plain(&f.repo, &f.cache);
+            let env = isolated_env();
+            assert!(failed(plain_in(&f.repo, &env)), "plain");
+            assert!(
+                failed(porcelain_all_in(&f.repo, &f.cache, &env)),
+                "porcelain_all"
+            );
             assert!(copies(&f.cache).is_empty(), "{} bytes copied", body.len());
         }
     }
 
+    /// Outside a repository the gitlinks cannot be listed, so neither entry
+    /// point runs a status.
     #[test]
-    fn test_porcelain_all_not_a_repo_matches_plain_failure() {
+    fn test_porcelain_all_not_a_repo_errors_like_plain() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = fs::canonicalize(tmp.path()).unwrap();
-        let got = porcelain_all_in(&dir, &dir.join("cache"), &isolated_env()).unwrap();
-        let expected = plain_out(&dir);
-        assert_eq!(got.status.code(), expected.status.code());
-        assert_eq!(got.stdout, expected.stdout);
+        assert!(porcelain_all_in(&dir, &dir.join("cache"), &isolated_env()).is_err());
+        assert!(plain_in(&dir, &isolated_env()).is_err());
     }
 
     #[test]
@@ -1780,7 +1730,9 @@ mod tests {
         let env = isolated_env();
         let repo = served_repo(&f.repo, &env);
         git(&f.repo, &["config", "core.ignorecase", "false"]);
-        assert!(status_on_private_index(&f.repo, &repo, &f.cache).is_none());
+        let none = FilterOverrides::default();
+        let index = top_index(&f.repo, &env).unwrap();
+        assert!(status_on_private_index(&f.repo, &repo, &f.cache, &none, &index).is_none());
         assert!(copies(&f.cache).is_empty());
     }
 
@@ -1816,7 +1768,9 @@ mod tests {
     fn assert_falls_back(worktree: &Path, cache: &Path) {
         let env = isolated_env();
         let repo = served_repo(worktree, &env);
-        assert!(status_on_private_index(worktree, &repo, cache).is_none());
+        let overrides = status_overrides(worktree, &env).unwrap();
+        let index = top_index(worktree, &env).unwrap();
+        assert!(status_on_private_index(worktree, &repo, cache, &overrides, &index).is_none());
         assert!(copies(cache).is_empty());
     }
 
@@ -1955,5 +1909,509 @@ mod tests {
             }
         }
         assert!(!left_in_place, "gc left a half-deleted directory in place");
+    }
+
+    /// Where a repository can define the driver its attributes name.
+    #[derive(Clone, Copy, Debug)]
+    enum Placement {
+        Local,
+        IncludePath,
+        WorktreeConfig,
+        /// A benign driver of the same name in the global config, shadowed by
+        /// the repository's own: an allowlist keyed on global names would
+        /// wave the repository's program through.
+        GlobalShadowed,
+    }
+
+    /// A driver program that records it ran, then passes the content through.
+    fn plant_script(root: &Path, marker: &Path) -> PathBuf {
+        let script = root.join("filter.sh");
+        fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf ran > '{}'\ncat\n", marker.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    /// A config section defining driver `name` with every program key set to
+    /// `program`, and `required`, so a failed program would stop git.
+    fn driver_section(name: &[u8], program: &Path) -> Vec<u8> {
+        let program = program.as_os_str().as_bytes();
+        [
+            &b"[filter \""[..],
+            name,
+            b"\"]\n\tclean = ",
+            program,
+            b"\n\tsmudge = ",
+            program,
+            b"\n\tprocess = ",
+            program,
+            b"\n\trequired = true\n",
+        ]
+        .concat()
+    }
+
+    fn append(path: &Path, body: &[u8]) {
+        let mut file = File::options()
+            .append(true)
+            .create(true)
+            .open(path)
+            .unwrap();
+        file.write_all(body).unwrap();
+    }
+
+    /// Moves `rel`'s mtime to a past time no earlier call used, so its stat no
+    /// longer matches the index and git compares its content through the
+    /// filter.
+    fn restat(repo: &Path, rel: &str) {
+        static TICK: AtomicU64 = AtomicU64::new(0);
+        let at =
+            SystemTime::now() - Duration::from_secs(1000 + TICK.fetch_add(1, Ordering::Relaxed));
+        File::options()
+            .write(true)
+            .open(repo.join(rel))
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(at))
+            .unwrap();
+    }
+
+    /// Runs the hardened git without filter overrides, the status ecp ran
+    /// before, and requires the planted driver to fire. Without it a fixture
+    /// that never reaches the driver passes every guarded assertion.
+    fn assert_attack_fires(worktree: &Path, rel: &str, env: &EnvOverrides, marker: &Path) {
+        restat(worktree, rel);
+        let _ = with_env(&mut safe_exec::git(), env)
+            .args(STATUS_ARGS)
+            .current_dir(worktree)
+            .output()
+            .unwrap();
+        assert!(
+            marker.exists(),
+            "control: a status without overrides did not run the driver"
+        );
+        fs::remove_file(marker).unwrap();
+    }
+
+    /// Both entry points, each after a fresh stat change on `rel`: no marker,
+    /// and the porcelain the content alone decides.
+    fn assert_guarded(
+        worktree: &Path,
+        rel: &str,
+        cache: &Path,
+        env: &EnvOverrides,
+        marker: &Path,
+        dirty: &[u8],
+    ) {
+        restat(worktree, rel);
+        let got = porcelain_all_in(worktree, cache, env).unwrap();
+        assert!(!marker.exists(), "porcelain_all ran the driver");
+        assert!(
+            got.status.success(),
+            "{}",
+            String::from_utf8_lossy(&got.stderr)
+        );
+        assert_eq!(
+            got.stdout,
+            dirty,
+            "{}",
+            String::from_utf8_lossy(&got.stdout)
+        );
+        restat(worktree, rel);
+        let got = plain_in(worktree, env).unwrap();
+        assert!(!marker.exists(), "plain ran the driver");
+        assert_eq!(
+            got.stdout,
+            dirty,
+            "{}",
+            String::from_utf8_lossy(&got.stdout)
+        );
+    }
+
+    /// The fixture with `lib.rs` naming driver `name`, the attributes
+    /// committed before any driver exists, so the blob holds the raw bytes.
+    fn attributed_fixture(name: &[u8]) -> (Fixture, PathBuf, PathBuf) {
+        let f = fixture();
+        let root = f.repo.parent().unwrap().to_path_buf();
+        let marker = root.join("filter-ran");
+        let script = plant_script(&root, &marker);
+        fs::write(
+            f.repo.join(".gitattributes"),
+            [&b"lib.rs filter="[..], name, b"\n"].concat(),
+        )
+        .unwrap();
+        git(&f.repo, &["add", ".gitattributes"]);
+        git(&f.repo, &["commit", "-qm", "attrs"]);
+        (f, marker, script)
+    }
+
+    fn assert_driver_neutralised(placement: Placement, name: &[u8]) {
+        let (f, marker, script) = attributed_fixture(name);
+        let section = driver_section(name, &script);
+        let git_dir = f.repo.join(".git");
+        let mut env = isolated_env();
+        match placement {
+            Placement::Local => append(&git_dir.join("config"), &section),
+            Placement::IncludePath => {
+                fs::write(git_dir.join("extra.cfg"), &section).unwrap();
+                append(&git_dir.join("config"), b"[include]\n\tpath = extra.cfg\n");
+            }
+            Placement::WorktreeConfig => {
+                git(&f.repo, &["config", "extensions.worktreeConfig", "true"]);
+                fs::write(git_dir.join("config.worktree"), &section).unwrap();
+            }
+            Placement::GlobalShadowed => {
+                let global = f.repo.parent().unwrap().join("global.gitconfig");
+                fs::write(&global, driver_section(name, Path::new("cat"))).unwrap();
+                env.push(("GIT_CONFIG_GLOBAL".into(), Some(global.into())));
+                append(&git_dir.join("config"), &section);
+            }
+        }
+        assert_attack_fires(&f.repo, "lib.rs", &env, &marker);
+        assert_guarded(&f.repo, "lib.rs", &f.cache, &env, &marker, b"");
+    }
+
+    #[test]
+    fn test_porcelain_all_filter_driver_each_config_source_never_runs() {
+        for placement in [
+            Placement::Local,
+            Placement::IncludePath,
+            Placement::WorktreeConfig,
+            Placement::GlobalShadowed,
+        ] {
+            assert_driver_neutralised(placement, b"evil");
+        }
+    }
+
+    #[test]
+    fn test_porcelain_all_filter_driver_name_with_dots_never_runs() {
+        assert_driver_neutralised(Placement::Local, b"a.b.evil");
+    }
+
+    /// `-c` splits at the first `=`, so `-c filter.x=y.clean=` sets `filter.x`
+    /// and leaves this driver live.
+    #[test]
+    fn test_porcelain_all_filter_driver_name_with_equals_never_runs() {
+        assert_driver_neutralised(Placement::Local, b"x=y");
+    }
+
+    #[test]
+    fn test_porcelain_all_filter_driver_non_utf8_name_never_runs() {
+        assert_driver_neutralised(Placement::Local, b"ev\xffil");
+    }
+
+    /// The copy is corrupted after it was written under the planted config,
+    /// so the private run fails and the fallback runs the plain command over
+    /// the real index, where the driver would run unguarded.
+    #[test]
+    fn test_status_on_private_index_failed_copy_fallback_never_runs_driver() {
+        let Some(f) = served_fixture() else {
+            return;
+        };
+        let root = f.repo.parent().unwrap().to_path_buf();
+        let marker = root.join("filter-ran");
+        let script = plant_script(&root, &marker);
+        write(&f.repo, ".gitattributes", "lib.rs filter=evil\n");
+        git(&f.repo, &["add", ".gitattributes"]);
+        git(&f.repo, &["commit", "-qm", "attrs"]);
+        settle(&f.repo);
+        append(
+            &f.repo.join(".git/config"),
+            &driver_section(b"evil", &script),
+        );
+        fast(&f.repo, &f.cache);
+        assert!(!marker.exists(), "the guarded run that wrote the copy");
+        fs::write(only_copy(&f.cache), b"garbage").unwrap();
+        let env = isolated_env();
+        assert_attack_fires(&f.repo, "lib.rs", &env, &marker);
+        // A sibling test's spawn can hold the lock and send a run to plain,
+        // which never touches the copy.
+        for _ in 0..200 {
+            restat(&f.repo, "lib.rs");
+            let got = porcelain_all_in(&f.repo, &f.cache, &env).unwrap();
+            assert!(!marker.exists(), "the fallback ran the driver");
+            assert_eq!(got.stdout, b"", "{}", String::from_utf8_lossy(&got.stdout));
+            if markers(&f.cache) == 1 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("the private copy never failed over to the fallback");
+    }
+
+    /// A `git` first on `PATH` under `root/bin` that appends `<cwd>\t<args>`
+    /// to the returned log, runs the shell `prelude`, and hands the call to
+    /// the real git. Returns the environment that puts it there.
+    fn logging_git(root: &Path, prelude: &str) -> (Vec<(OsString, Option<OsString>)>, PathBuf) {
+        let bin = root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        let log = root.join("git-calls");
+        let path = std::env::var_os("PATH").unwrap();
+        let real = git_on_path(&path).expect("git on PATH");
+        let wrapper = bin.join("git");
+        fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nprintf '%s\\t%s\\n' \"$(pwd -P)\" \"$*\" >> '{}'\n\
+                 {prelude}exec '{}' \"$@\"\n",
+                log.display(),
+                real.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut search = bin.into_os_string();
+        search.push(":");
+        search.push(&path);
+        let mut env = isolated_env();
+        env.push(("PATH".into(), Some(search)));
+        (env, log)
+    }
+
+    /// The directories the logged git ran `subcommand` in, in call order.
+    fn logged_dirs(log: &Path, subcommand: &str) -> Vec<PathBuf> {
+        fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .filter(|(_, args)| args.split(' ').any(|word| word == subcommand))
+            .map(|(dir, _)| PathBuf::from(dir))
+            .collect()
+    }
+
+    /// The overrides for exactly the drivers `names`.
+    fn driver_overrides(names: &[&str]) -> FilterOverrides {
+        use std::os::unix::process::ExitStatusExt;
+        let stdout = names
+            .iter()
+            .flat_map(|name| format!("filter.{name}.clean\0").into_bytes())
+            .collect();
+        FilterOverrides::from_config_output(&Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout,
+            stderr: Vec::new(),
+        })
+        .unwrap()
+    }
+
+    /// A wrapper that fails every `config` call.
+    #[test]
+    fn test_porcelain_all_config_read_fails_runs_no_status() {
+        let f = fixture();
+        let (env, log) = logging_git(
+            f.repo.parent().unwrap(),
+            "for arg; do [ \"$arg\" = config ] && exit 3; done\n",
+        );
+
+        let err = porcelain_all_in(&f.repo, &f.cache, &env).unwrap_err();
+        assert!(err.to_string().contains("filter drivers"), "{err}");
+        assert!(plain_in(&f.repo, &env).is_err());
+        assert!(
+            !logged_dirs(&log, "config").is_empty(),
+            "the wrapper must stand in for git"
+        );
+        assert_eq!(
+            logged_dirs(&log, "status"),
+            Vec::<PathBuf>::new(),
+            "a status ran without its overrides"
+        );
+    }
+
+    /// The fixture's index lists no gitlink, so reading the index file stands
+    /// in for `git ls-files`.
+    #[test]
+    fn test_status_overrides_no_gitlink_spawns_no_ls_files() {
+        let f = fixture();
+        let (env, log) = logging_git(f.repo.parent().unwrap(), "");
+        assert_eq!(
+            status_overrides(&f.repo, &env).unwrap(),
+            FilterOverrides::default()
+        );
+        assert_eq!(
+            logged_dirs(&log, "config"),
+            vec![f.repo.clone()],
+            "the wrapper must stand in for git"
+        );
+        assert_eq!(
+            porcelain_all_in(&f.repo, &f.cache, &env).unwrap().stdout,
+            b""
+        );
+        assert_eq!(logged_dirs(&log, "ls-files"), Vec::<PathBuf>::new());
+    }
+
+    /// An index the scan cannot parse is not "no gitlinks": `git ls-files`
+    /// lists them, and here fails as the status would.
+    #[test]
+    fn test_status_overrides_unparsable_index_runs_ls_files() {
+        let f = fixture();
+        fs::write(f.repo.join(".git/index"), b"DIRC\0\0\0\x02\0\0").unwrap();
+        let (env, log) = logging_git(f.repo.parent().unwrap(), "");
+        assert!(status_overrides(&f.repo, &env).is_err());
+        assert_eq!(logged_dirs(&log, "ls-files"), vec![f.repo.clone()]);
+    }
+
+    /// The submodule's index lists no gitlink, so only the parent runs
+    /// `ls-files`; once that index is gone, the submodule runs it too.
+    #[test]
+    fn test_status_overrides_submodule_index_missing_falls_back_to_ls_files() {
+        let (f, _source, _marker) = submodule_driver_fixture();
+        let sub = f.repo.join("sub");
+        let (env, log) = logging_git(f.repo.parent().unwrap(), "");
+        let child = driver_overrides(&["child"]);
+        assert_eq!(status_overrides(&f.repo, &env).unwrap(), child);
+        assert_eq!(
+            logged_dirs(&log, "config"),
+            vec![f.repo.clone(), sub.clone()]
+        );
+        assert_eq!(logged_dirs(&log, "ls-files"), vec![f.repo.clone()]);
+
+        fs::remove_file(f.repo.join(".git/modules/sub/index")).unwrap();
+        fs::write(&log, "").unwrap();
+        assert_eq!(status_overrides(&f.repo, &env).unwrap(), child);
+        assert_eq!(logged_dirs(&log, "ls-files"), vec![f.repo.clone(), sub]);
+    }
+
+    /// After a split, the gitlink sits in `sharedindex.*` and the index file
+    /// itself walks clean, so the scan must not trust that file alone.
+    #[test]
+    fn test_porcelain_all_split_index_submodule_driver_never_runs() {
+        let (f, _source, marker) = submodule_driver_fixture();
+        git(&f.repo, &["update-index", "--split-index"]);
+        assert!(
+            gitlink_free(&fs::read(f.repo.join(".git/index")).unwrap()),
+            "fixture: the gitlink must sit in the shared index"
+        );
+        write(&f.repo, "sub/lib.rs", "pub fn b() {}\n");
+        let env = isolated_env();
+        assert_eq!(
+            status_overrides(&f.repo, &env).unwrap(),
+            driver_overrides(&["child"])
+        );
+        assert_attack_fires(&f.repo, "sub/lib.rs", &env, &marker);
+        assert_guarded(&f.repo, "sub/lib.rs", &f.cache, &env, &marker, b" M sub\0");
+    }
+
+    /// SHA-256 object names are 32 bytes; a walk that steps 20 lands inside
+    /// them and, for these entries, never meets the gitlink's mode.
+    #[test]
+    fn test_gitlink_free_sha256_index_with_gitlink_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = fs::canonicalize(tmp.path()).unwrap().join("repo");
+        fs::create_dir(&repo).unwrap();
+        git(
+            &repo,
+            &["init", "-q", "-b", "main", "--object-format=sha256"],
+        );
+        for (name, body) in [("a.rs", "1\n"), ("b.rs", "2\n"), ("c.rs", "3\n")] {
+            write(&repo, name, body);
+        }
+        git(&repo, &["add", "."]);
+        let link = format!("160000,{},zz", "1".repeat(64));
+        git(&repo, &["update-index", "--add", "--cacheinfo", &link]);
+        assert!(!gitlink_free(&fs::read(repo.join(".git/index")).unwrap()));
+        let index = top_index(&repo, &isolated_env()).unwrap();
+        assert!(!index.lists_no_gitlink());
+    }
+
+    /// A parent repository whose submodule `sub` names driver `child` in its
+    /// `.gitattributes` and defines it only in its own config, with a program
+    /// that writes the returned marker. The source fixture is returned to keep
+    /// its directory alive.
+    fn submodule_driver_fixture() -> (Fixture, Fixture, PathBuf) {
+        let f = fixture();
+        let source = fixture_named("source");
+        write(&source.repo, ".gitattributes", "lib.rs filter=child\n");
+        git(&source.repo, &["add", ".gitattributes"]);
+        git(&source.repo, &["commit", "-qm", "attrs"]);
+        git(
+            &f.repo,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                source.repo.to_str().unwrap(),
+                "sub",
+            ],
+        );
+        git(&f.repo, &["commit", "-qm", "sub"]);
+        let root = f.repo.parent().unwrap().to_path_buf();
+        let marker = root.join("filter-ran");
+        let script = plant_script(&root, &marker);
+        let sub = f.repo.join("sub");
+        let program = script.to_str().unwrap();
+        for key in ["clean", "smudge", "process"] {
+            git(&sub, &["config", &format!("filter.child.{key}"), program]);
+        }
+        git(&sub, &["config", "filter.child.required", "true"]);
+        (f, source, marker)
+    }
+
+    /// The driver lives only in the submodule's own config, where the parent's
+    /// config read never sees it; the parent's status runs a status in the
+    /// submodule that reads it.
+    #[test]
+    fn test_porcelain_all_submodule_driver_never_runs_and_modification_reported() {
+        let (f, _source, marker) = submodule_driver_fixture();
+        let sub = f.repo.join("sub");
+        // Same size as the committed `pub fn a() {}`: a size change alone marks
+        // the file modified without reading it through the driver.
+        write(&sub, "lib.rs", "pub fn b() {}\n");
+        let env = isolated_env();
+        assert!(
+            status_overrides(&f.repo, &env).unwrap() != FilterOverrides::default(),
+            "the submodule's driver must be among the overrides"
+        );
+
+        restat(&sub, "lib.rs");
+        let _ = with_env(&mut safe_exec::git(), &env)
+            .args(STATUS_ARGS)
+            .current_dir(&f.repo)
+            .output()
+            .unwrap();
+        assert!(
+            marker.exists(),
+            "control: the parent's status without overrides did not reach the driver"
+        );
+        fs::remove_file(&marker).unwrap();
+        restat(&sub, "lib.rs");
+        let got = porcelain_all_in(&f.repo, &f.cache, &env).unwrap();
+        assert!(!marker.exists(), "porcelain_all ran the submodule's driver");
+        assert_eq!(got.stdout, b" M sub\0");
+        restat(&sub, "lib.rs");
+        let got = plain_in(&f.repo, &env).unwrap();
+        assert!(!marker.exists(), "plain ran the submodule's driver");
+        assert_eq!(got.stdout, b" M sub\0");
+    }
+
+    /// git skips a gitlink whose `.git` is gone as not checked out, so its
+    /// absence must not fail the overrides.
+    #[test]
+    fn test_status_overrides_uninitialized_submodule_skipped() {
+        let f = fixture();
+        let source = fixture_named("source");
+        git(
+            &f.repo,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                source.repo.to_str().unwrap(),
+                "sub",
+            ],
+        );
+        git(&f.repo, &["commit", "-qm", "sub"]);
+        git(&f.repo, &["submodule", "deinit", "-q", "-f", "sub"]);
+        assert!(!f.repo.join("sub/.git").exists());
+        let env = isolated_env();
+        assert_eq!(
+            status_overrides(&f.repo, &env).unwrap(),
+            FilterOverrides::default()
+        );
+        assert_eq!(plain_in(&f.repo, &env).unwrap().stdout, b"");
     }
 }

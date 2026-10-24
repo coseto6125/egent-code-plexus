@@ -162,17 +162,21 @@ fn remove_gemini_mcp() -> Result<(), EcpError> {
 
 // ─── git hook removal (gap A) ────────────────────────────────────────────────
 
-fn remove_git_hook() -> Result<(), EcpError> {
+/// Removes every ecp `reference-transaction` hook of the repository at the
+/// working directory. Outside a repository it reports a skip.
+pub(crate) fn remove_git_hook() -> Result<(), EcpError> {
     let cwd = std::env::current_dir().map_err(|e| EcpError::InvalidArgument(e.to_string()))?;
-    let git_dir = match crate::git_cache::common_dir(&cwd) {
-        Ok(d) => d,
+    let hook_paths = match reference_transaction_hook_paths(&cwd) {
+        Ok(paths) => paths,
         Err(e) => {
             println!("git-hook: {e}, skip");
             return Ok(());
         }
     };
-    let hook_path = git_dir.join("hooks").join("reference-transaction");
-    remove_git_hook_at(&hook_path)
+    for hook_path in hook_paths {
+        remove_git_hook_at(&hook_path)?;
+    }
+    Ok(())
 }
 
 /// Core of git hook removal; split so tests can exercise it with a tmpdir path
@@ -187,7 +191,7 @@ pub fn remove_git_hook_at(hook_path: &Path) -> Result<(), EcpError> {
     // a foreign hook (which read_to_string().unwrap_or_default() would do).
     let body = std::fs::read_to_string(hook_path)
         .map_err(|e| EcpError::InvalidArgument(format!("read git hook: {e}")))?;
-    if !body.contains("ecp hook-handle") && !body.contains("hook-handle") {
+    if !is_ecp_reference_transaction_hook(&body) {
         println!(
             "git-hook: {} is not ecp-managed, left untouched",
             hook_path.display()
@@ -205,6 +209,93 @@ pub fn remove_git_hook_at(hook_path: &Path) -> Result<(), EcpError> {
     }
     report_stale_backups(hook_path);
     Ok(())
+}
+
+/// The marker comment that each release name (gnx, cgn, ecp) wrote as the
+/// hook's second line.
+const HOOK_MARKERS: [&str; 3] = [
+    "# ecp-managed reference-transaction hook",
+    "# cgn-managed reference-transaction hook",
+    "# gnx-managed reference-transaction hook",
+];
+
+/// True when `body` is a `reference-transaction` hook that some ecp release
+/// wrote: it holds a marker line, or the `exec "<binary>" hook-handle "$@"`
+/// line every release ended the hook with. A script that only mentions
+/// `hook-handle` is someone else's.
+pub fn is_ecp_reference_transaction_hook(body: &str) -> bool {
+    body.lines().map(str::trim).any(|line| {
+        HOOK_MARKERS.contains(&line)
+            || line
+                .strip_prefix("exec \"")
+                .and_then(|rest| rest.strip_suffix("\" hook-handle \"$@\""))
+                .is_some_and(|binary| !binary.is_empty())
+    })
+}
+
+/// Every place an ecp `reference-transaction` hook can sit for the repository
+/// at `cwd`: the hooks dir git runs, which honours `core.hooksPath`, then
+/// `<common dir>/hooks`, the only dir `install-hook` wrote to. A linked
+/// worktree resolves to the same common dir. Errs outside a repository.
+pub(crate) fn reference_transaction_hook_paths(cwd: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let common = crate::git_cache::common_dir(cwd)?;
+    let mut dirs = Vec::with_capacity(2);
+    if let Some(configured) = configured_hooks_path(cwd) {
+        dirs.push(if configured.is_absolute() {
+            configured
+        } else {
+            hooks_run_dir(cwd, &common).join(configured)
+        });
+    }
+    dirs.push(common.join("hooks"));
+    let mut seen = Vec::with_capacity(dirs.len());
+    dirs.retain(|dir| {
+        let key = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone());
+        let fresh = !seen.contains(&key);
+        seen.push(key);
+        fresh
+    });
+    Ok(dirs
+        .into_iter()
+        .map(|dir| dir.join("reference-transaction"))
+        .collect())
+}
+
+/// The repository's own `core.hooksPath`, `~` expanded. `safe_exec::git` pins
+/// `core.hooksPath=/dev/null` in the `command` scope, so the value git would
+/// use without ecp is the last one from any other scope. `None` when unset, or
+/// when git predates `--show-scope` (2.26).
+fn configured_hooks_path(cwd: &Path) -> Option<PathBuf> {
+    let out = crate::git::safe_exec::git()
+        .args([
+            "config",
+            "--show-scope",
+            "--type=path",
+            "--get-all",
+            "core.hooksPath",
+        ])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines()
+        .rev()
+        .filter_map(|line| line.split_once('\t'))
+        .find(|(scope, value)| *scope != "command" && !value.is_empty())
+        .map(|(_, value)| PathBuf::from(value))
+}
+
+/// The dir a relative `core.hooksPath` resolves against: the worktree top
+/// level, or the git dir in a bare repository.
+fn hooks_run_dir(cwd: &Path, common: &Path) -> PathBuf {
+    crate::git::safe_exec::git()
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .output()
+        .ok()
+        .filter(|out| out.status.success() && !out.stdout.is_empty())
+        .map(|out| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim_end_matches('\n')))
+        .unwrap_or_else(|| common.to_path_buf())
 }
 
 /// Surface `reference-transaction.bak.<timestamp>` files left by past

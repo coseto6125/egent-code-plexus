@@ -21,9 +21,11 @@ impl SourceType {
 }
 
 /// Parsed generation suffix from a commit dir name. The producer
-/// (`orchestrator::publish_dir_for`) writes
+/// (`orchestrator::next_publish_name`) writes
 /// `<base>.gen.<timestamp_ms>.<pid>.<counter>` — a deterministic 3-tuple total
-/// order. Same-SHA tie-breakers MUST use this tuple, never raw filesystem
+/// order. Under the SHA lock the producer takes `timestamp_ms` above every
+/// existing generation of the SHA, so a new build outranks every older one
+/// whatever the clock does. Same-SHA tie-breakers MUST use this tuple, never raw filesystem
 /// mtime, because the mtime resolution of ext4 / APFS can be coarser than the
 /// publish cadence (see FU-2026-05-23-045).
 ///
@@ -46,7 +48,7 @@ pub struct Generation {
 impl Generation {
     /// `.gen.<timestamp_ms>.<pid>.<counter>` — the on-disk suffix shape.
     /// Single source of truth for the wire format; both
-    /// [`CommitDirName::format`] and `orchestrator::publish_dir_for`
+    /// [`CommitDirName::format`] and `orchestrator::next_publish_name`
     /// concatenate this onto the base dir name so a future format change
     /// (e.g. a fourth field) touches one site, not three.
     pub fn format_suffix(&self) -> String {

@@ -4,12 +4,13 @@
 use ecp_core::EcpError;
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum OutputFormat {
     /// Default output: per-command LLM-tuned payload (token compression,
     /// rounded floats, trimmed timestamps, etc.) rendered through the toon
     /// encoder. Commands without command-specific tuning fall through to the
     /// same output as `Toon`.
+    #[default]
     Llm,
     /// Neutral toon: the json payload encoded as toon, no lossy compression.
     /// Use when you want round-trippable structure but tighter than JSON.
@@ -18,17 +19,6 @@ pub enum OutputFormat {
     /// another tool / asserting in tests.
     Json,
     Text,
-}
-
-impl OutputFormat {
-    pub fn parse(s: Option<&str>) -> Self {
-        match s {
-            Some("json") => OutputFormat::Json,
-            Some("toon") => OutputFormat::Toon,
-            Some("text") => OutputFormat::Text,
-            _ => OutputFormat::Llm, // default
-        }
-    }
 }
 
 /// Format `value` per `format` and return the rendered string. Does NOT
@@ -59,7 +49,10 @@ pub fn emit_to_string(value: &Value, format: OutputFormat) -> Result<String, Ecp
             if let Some(results) = value.get("results").and_then(|v| v.as_array()) {
                 Ok(results
                     .iter()
-                    .filter_map(|r| r.as_str())
+                    .map(|r| match r {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    })
                     .collect::<Vec<_>>()
                     .join("\n"))
             } else {
@@ -129,12 +122,29 @@ pub fn emit_with_caveat(
 pub fn compress_for_llm(v: &mut Value) {
     match v {
         Value::Object(map) => {
-            // `uid` is a deterministic `<kind>:<filePath>:<name>` triple of
-            // fields that already co-reside in every emit-row, so it's pure
-            // redundancy. `handlerUid` looks similar but points at a
-            // *different* node (the handler) than the row's own filePath/name
-            // — keep it; the LLM has no other handle to link route → handler.
-            map.remove("uid");
+            // Drop `uid` only when it is literally the `<kind>:<filePath>:<name>`
+            // triple of fields already in the row. The graph's real uid is a
+            // u64 hash that no field reproduces, and it is the agent's handle
+            // for cypher; keep it. `handlerUid` points at a *different* node
+            // (the handler) than the row's own filePath/name — keep it too.
+            let derivable = match (
+                map.get("uid").and_then(Value::as_str),
+                map.get("kind").and_then(Value::as_str),
+                map.get("filePath").and_then(Value::as_str),
+                map.get("name").and_then(Value::as_str),
+            ) {
+                (Some(uid), Some(kind), Some(path), Some(name)) => {
+                    uid.strip_prefix(kind)
+                        .and_then(|r| r.strip_prefix(':'))
+                        .and_then(|r| r.strip_prefix(path))
+                        .and_then(|r| r.strip_prefix(':'))
+                        == Some(name)
+                }
+                _ => false,
+            };
+            if derivable {
+                map.remove("uid");
+            }
             for child in map.values_mut() {
                 compress_for_llm(child);
             }
@@ -375,11 +385,24 @@ mod tests {
     }
 
     #[test]
-    fn emit_to_string_text_silently_drops_non_string_results_entries() {
+    fn emit_to_string_text_renders_every_results_entry_on_its_own_line() {
+        // Contract: text mode prints one line per result. Dropping non-string
+        // entries made `routes` / `processes` print nothing, which reads as
+        // "no results".
         let value = json!({"results": [123, "hello", true, "world"]});
         let out = emit_to_string(&value, OutputFormat::Text).expect("ok");
-        // Non-string entries are filtered out — only strings remain, joined by \n.
-        assert_eq!(out, "hello\nworld");
+        assert_eq!(out, "123\nhello\ntrue\nworld");
+    }
+
+    #[test]
+    fn emit_to_string_text_object_results_render_as_compact_json_lines() {
+        let value =
+            json!({"results": [{"method": "GET", "path": "/a"}, {"method": "POST", "path": "/b"}]});
+        let out = emit_to_string(&value, OutputFormat::Text).expect("ok");
+        assert_eq!(
+            out,
+            "{\"method\":\"GET\",\"path\":\"/a\"}\n{\"method\":\"POST\",\"path\":\"/b\"}"
+        );
     }
 
     #[test]
@@ -480,15 +503,6 @@ mod tests {
     }
 
     #[test]
-    fn output_format_parse_routes_each_flag() {
-        assert_eq!(OutputFormat::parse(None), OutputFormat::Llm);
-        assert_eq!(OutputFormat::parse(Some("")), OutputFormat::Llm); // unknown falls through
-        assert_eq!(OutputFormat::parse(Some("toon")), OutputFormat::Toon);
-        assert_eq!(OutputFormat::parse(Some("json")), OutputFormat::Json);
-        assert_eq!(OutputFormat::parse(Some("text")), OutputFormat::Text);
-    }
-
-    #[test]
     fn compact_iso_handles_iso_variants() {
         // Standard chrono-style UTC with subsecond
         assert_eq!(
@@ -540,6 +554,26 @@ mod tests {
         assert_eq!(row["kind"], json!("Route"));
         assert_eq!(row["filePath"], json!("src/api.py"));
         assert_eq!(row["name"], json!("GET /users"));
+    }
+
+    #[test]
+    fn test_compress_for_llm_keeps_hash_uid_and_uid_without_row_fields() {
+        let mut v = json!({
+            "results": [
+                { "kind": "Function", "filePath": "a.py", "name": "f", "uid": "9876543210123456789" },
+                { "kind": "Function", "filePath": "a.py", "name": "f", "uid": 9876543210123456789_u64 },
+                { "uid": "Function:a.py:f" },
+                { "kind": "Function", "filePath": "a.py", "name": "g", "uid": "Function:a.py:f" },
+                { "kind": "Function", "filePath": "a.py", "name": "", "uid": "" }
+            ]
+        });
+        compress_for_llm(&mut v);
+        for i in 0..5 {
+            assert!(
+                v["results"][i].get("uid").is_some(),
+                "row {i} lost its uid: {v}"
+            );
+        }
     }
 
     #[test]

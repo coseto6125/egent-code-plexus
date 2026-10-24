@@ -240,8 +240,9 @@ fn test_impact_caveat_edit_adds_second_def_fires() {
         template,
     );
     fx.write(&fx.path("d"), &def_source(template, NAME, "D"));
+    let c_file = format!("c.{ext}");
     let json = fx.impact_ok(
-        &["--target", NAME, "--kind", "function", "--direction", "up"],
+        &["--target", NAME, "--file", &c_file, "--direction", "up"],
         true,
     );
     assert!(has_ambiguity_caveat(&json), "{json}");

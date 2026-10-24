@@ -116,9 +116,8 @@ fn scan_cached_invalidates_on_mtime_bump() {
     std::fs::create_dir(commits.join(dir_a)).unwrap();
     let first = CommitIndex::scan_cached(&commits).unwrap();
     assert_eq!(first.len(), 1);
-    // Sleep so the dir mtime can roundtrip past filesystem timestamp granularity
-    // (most filesystems carry second-resolution mtime; some sub-second).
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    // No sleep: a dir mtime less than two seconds old is never cached, since
+    // a second publish in the same timestamp tick would leave it unchanged.
     let dir_b = "branch_b__11ee22dd33cc44bb55aa66998877665544332211";
     std::fs::create_dir(commits.join(dir_b)).unwrap();
     let second = CommitIndex::scan_cached(&commits).unwrap();

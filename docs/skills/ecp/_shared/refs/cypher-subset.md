@@ -16,7 +16,7 @@ RETURN a.name, b.filePath
 - **Category labels** expand to member kinds in both MATCH and WHERE: `:Callable` = Function|Method|Constructor, `:Type` = Class|Interface|Struct|Enum|Typedef|Trait, `:Data` = Property|Variable|Const|EnumVariant|SchemaField. Prefer `:Callable` over bare `:Function` — the latter silently skips methods.
 
 ## Predicates
-- `IS NULL` / `IS NOT NULL` — pair with `OPTIONAL MATCH` for left-join absence checks.
+- `IS NULL` / `IS NOT NULL` — for a left-join absence check, filter after a `WITH`: `MATCH (f) OPTIONAL MATCH (c)-[:Calls]->(f) WITH f, c WHERE c IS NULL RETURN f.name`. A `WHERE` directly after `OPTIONAL MATCH` is refused.
 - `EXISTS((a)-[:Rel]->(b))` / `NOT EXISTS(...)` — pattern existence; supports multi-hop and `*min..max` ranges; multi-hop needs at least one variable bound by an outer MATCH.
 - Canonical orphan query: `MATCH (f:Callable) WHERE NOT EXISTS((c)-[:Calls]->(f)) RETURN f.name`. Absence-of-Calls over-reports (Calls is a lower bound; ambiguous bare calls are suppressed at index time) — the output carries a `result` caveat; cross-check before deleting "dead" code.
 - SQL shapes (`LEFT JOIN`, `CALL ... YIELD`, `COUNT((pattern))`) are unsupported; the parse error includes the equivalent Cypher form.

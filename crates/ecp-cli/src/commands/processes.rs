@@ -42,9 +42,10 @@ pub struct ProcessesArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format (toon / json / text).
+    /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
+    /// toon. `json`: full-fidelity JSON. `text`: one compact JSON line per result.
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 
     /// Filter the list view to a single community ID.
     #[arg(long)]
@@ -77,9 +78,10 @@ pub struct TraceArgs {
     #[arg(long)]
     pub repo: Option<String>,
 
-    /// Output format (toon / json / text).
+    /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
+    /// toon. `json`: full-fidelity JSON. `text`: one compact JSON line per result.
     #[arg(long)]
-    pub format: Option<String>,
+    pub format: Option<OutputFormat>,
 
     /// Cap on matched Processes shown (default 5).
     #[arg(long, default_value = "5")]
@@ -106,7 +108,7 @@ fn process_range(graph: &ArchivedZeroCopyGraph) -> (u32, u32) {
 }
 
 fn list_processes(graph: &ArchivedZeroCopyGraph, args: ProcessesArgs) -> Result<(), EcpError> {
-    let fmt = OutputFormat::parse(args.format.as_deref());
+    let fmt = args.format.unwrap_or_default();
     let (process_start, process_end) = process_range(graph);
     let total_processes = process_end - process_start;
 
@@ -194,7 +196,7 @@ fn list_processes(graph: &ArchivedZeroCopyGraph, args: ProcessesArgs) -> Result<
 }
 
 fn trace_processes(graph: &ArchivedZeroCopyGraph, args: TraceArgs) -> Result<(), EcpError> {
-    let fmt = OutputFormat::parse(args.format.as_deref());
+    let fmt = args.format.unwrap_or_default();
     let pattern_lower = args.pattern.to_lowercase();
     let (process_start, process_end) = process_range(graph);
 

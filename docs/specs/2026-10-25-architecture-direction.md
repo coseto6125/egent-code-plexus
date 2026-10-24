@@ -506,7 +506,7 @@ Work runs in lanes. Two slices run at the same time only when their file lists s
 | Lane | Work | Files |
 |---|---|---|
 | 0a | area 11: the strict harness, the baseline files with owners, the dirty-event fixtures | `ecp-cli/tests/`; `scripts/benchmark/benchmark_ecp.py` (the dirty-file scenario) |
-| 0b | area 3: the SHA lock, the rising name, sidecars inside `building/`, one snapshot rule | `build/orchestrator.rs`, `commit_lookup.rs`, `admin/gc.rs`, sidecar code in `auto_ensure.rs` |
+| 0b | area 3: the SHA lock, the rising name, sidecars inside `building/`. The one snapshot rule is deferred to FU-2026-10-25-8aae9b180d81 | `build/orchestrator.rs`, `commit_lookup.rs`, `admin/gc.rs`, sidecar code in `auto_ensure.rs` |
 | 0c | area 9: the refusals | `ecp-core/src/cypher/`; `ecp-core/tests/cypher_stream_aggregation.rs` |
 | 0d | the small local fixes of the review page that use only today's identity and error semantics, such as cli F4's ambiguity error. flow F8 (handler-bound response shapes) waits for C1 and C4 and moves to lane P; freshness F6 moves to phase 1 | per fix; a fix in `auto_ensure.rs` runs after 0b's edits there |
 
@@ -544,12 +544,16 @@ A-E needs a shared contract and tests for implicit `this` and lexical precedence
 | Identifier | Changes when | Changes planned |
 |---|---|---|
 | `graph.bin` (`GRAPH_FORMAT_VERSION`) | the archived layout changes | B's first round: the C2 Rust crate table. A: lexical parents. Area 8: only if it adds a route table. Area 4's other languages add rows to the C2 facts, not layout, if C2 is designed for that |
-| parse cache (`BUILDER_FINGERPRINT`, archived `LocalGraph`) | parser output, raw-record layout (C4), uid assignment (A-A), routing (C5), or graph-building semantics (B3b) | per slice; slices in one release share one change |
+| parse cache (`BUILDER_FINGERPRINT`, archived `LocalGraph`) | parser output, raw-record layout (C4), uid assignment (A-A), routing (C5), or graph-building semantics (B3b) | per slice |
 | L1 fragment encoding (V5 today, `overlay_reader.rs:75`) | the overlay replays new raw records | the incremental overlay |
 | dirty manifest | C3 adds the event class and deletions | C3's behaviour slice |
 | view cache key (`view_cache.rs:40`) | any of the above | follows them |
 
-A and B keep separate releases. Each migration names its slice and ships with a test that reads data the previous release wrote.
+Phases 0 to 3 ship in one release. One value of an identifier maps to one data contract:
+
+- Each slice that makes stored data incompatible bumps every identifier that guards that data, also between two slices of one release.
+- Each migration names its slice.
+- Before the release, one test upgrades data that the previous release wrote. Further tests combine data that different slices left in one cache: a graph, a parse cache, a manifest and a fragment. Each test asserts what a query returns after the refusal or the rebuild, not only that the read succeeds.
 
 **Gates for every slice:** the area's own proof of done (Certainty table), the latency rule (no regression; absolute thresholds after C3's slice), and the harness with no difference outside the baselines.
 

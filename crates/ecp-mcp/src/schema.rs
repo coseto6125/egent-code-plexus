@@ -87,6 +87,9 @@ pub fn ecp_tools(root: &Command) -> Vec<DerivedTool> {
     // A model must not swap the binary every later call runs on; `ecp update`
     // stays a command the user types.
     tools.retain(|t| t.name != "ecp_update");
+    // `uninstall` with no flags wipes `~/.ecp` and the binary; `usage` reads the
+    // user's own telemetry. Neither is a code-intelligence query.
+    tools.retain(|t| !matches!(t.name.as_str(), "ecp_uninstall" | "ecp_usage"));
     tools.extend(crate::peers::peer_tools());
     tools.extend(crate::group::group_tools());
     tools.retain(|t| t.name != "ecp_schema");
@@ -235,6 +238,36 @@ mod tests {
         /// Integer option.
         #[arg(long, default_value_t = 5usize)]
         depth: usize,
+    }
+
+    #[derive(Parser)]
+    struct HostCli {
+        #[command(subcommand)]
+        cmd: HostCmds,
+    }
+
+    #[derive(Subcommand)]
+    enum HostCmds {
+        /// Query.
+        Find,
+        /// Wipes the install.
+        Uninstall,
+        /// Telemetry dashboard.
+        Usage,
+        /// Self-update.
+        Update,
+    }
+
+    #[test]
+    fn test_ecp_tools_destructive_and_telemetry_commands_are_not_exposed() {
+        let names: Vec<String> = ecp_tools(&HostCli::command())
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        for gone in ["ecp_uninstall", "ecp_usage", "ecp_update"] {
+            assert!(!names.iter().any(|n| n == gone), "{gone} leaked: {names:?}");
+        }
+        assert!(names.iter().any(|n| n == "ecp_find"));
     }
 
     #[test]

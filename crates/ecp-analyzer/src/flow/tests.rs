@@ -752,10 +752,18 @@ fn test_analyze_changes_ast_cut_in_a_sibling_keeps_edited_file_entry_points() {
         },
     )
     .unwrap();
-    assert!(report.truncated, "big.js must be cut by the AST budget");
-    // The cut lives in big.js, which the slice never reaches, so its boundary
-    // is only counted.
-    assert_eq!(report.boundaries_omitted, 1, "{:?}", report.boundaries);
+    // The cut lives in big.js, which the slice never reaches: the answer is
+    // complete, and the cut stays visible as a boundary rather than a count.
+    assert!(!report.truncated, "{:?}", report.boundaries);
+    assert_eq!(report.boundaries_omitted, 0, "{:?}", report.boundaries);
+    assert!(
+        report
+            .boundaries
+            .iter()
+            .any(|b| b.kind == "ast_budget" && b.file == "big.js"),
+        "{:?}",
+        report.boundaries
+    );
     assert!(
         report.consumers.iter().any(|id| report
             .nodes

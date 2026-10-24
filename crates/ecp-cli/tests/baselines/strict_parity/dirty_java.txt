@@ -1,0 +1,7 @@
+# owner: lane F (incremental overlay: builder edges of dirty files)
+edge full-only x1 Defines File src/main/java/com/acme/Lib.java:1 Lib.java #5a60ce96d0abd5ec -> Class src/main/java/com/acme/Lib.java:9 Extra #5796f7f91f1cdbec conf=1.0
+edge full-only x1 HasMethod Class src/main/java/com/acme/Lib.java:9 Extra #5796f7f91f1cdbec -> Method src/main/java/com/acme/Lib.java:10 extra #7d3fc07f41691ffa conf=1.0
+parent full-only x1 Class src/main/java/com/acme/Lib.java:9 Extra #5796f7f91f1cdbec owner=- <- Defines File src/main/java/com/acme/Lib.java:1 Lib.java #5a60ce96d0abd5ec
+parent full-only x1 Method src/main/java/com/acme/Lib.java:10 extra #7d3fc07f41691ffa owner=Extra <- HasMethod Class src/main/java/com/acme/Lib.java:9 Extra #5796f7f91f1cdbec
+parent overlay-only x1 Class src/main/java/com/acme/Lib.java:9 Extra #5796f7f91f1cdbec owner=- <- none
+parent overlay-only x1 Method src/main/java/com/acme/Lib.java:10 extra #7d3fc07f41691ffa owner=Extra <- none

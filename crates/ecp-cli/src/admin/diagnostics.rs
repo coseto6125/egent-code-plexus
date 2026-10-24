@@ -147,7 +147,10 @@ pub(crate) fn registry_health(home_ecp: &Path) -> Result<RegistryHealth, EcpErro
     for dir_name in registry.repos.keys() {
         let commits_dir = home_ecp.join(dir_name).join("commits");
         if let Ok(entries) = std::fs::read_dir(&commits_dir) {
-            for entry in entries.flatten().filter(|e| e.path().is_dir()) {
+            for entry in entries
+                .flatten()
+                .filter(|e| e.path().is_dir() && e.file_name() != crate::commit_lookup::LOCKS_DIR)
+            {
                 let index_dir = entry.path();
                 let graph = index_dir.join("graph.bin");
                 if !graph.is_file() {
@@ -294,5 +297,48 @@ mod tests {
         // orphan_commit is under a dir NOT in registry → it's an orphan
         assert_eq!(health.orphan_index_dirs, vec![orphan_commit]);
         assert!(health.missing_index_dirs.is_empty());
+    }
+
+    #[test]
+    fn test_registry_health_locks_dir_not_reported_missing_graph() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        let dir_name = "repo__aabbccdd";
+        let locks = home
+            .join(dir_name)
+            .join("commits")
+            .join(crate::commit_lookup::LOCKS_DIR);
+        std::fs::create_dir_all(&locks).expect("locks dir");
+        std::fs::write(locks.join("ab.lock"), b"").expect("lock file");
+        let mut repos = BTreeMap::new();
+        repos.insert(
+            dir_name.into(),
+            RepoAlias {
+                dir_name: dir_name.into(),
+                common_dir: "/work/repo/.git".into(),
+                remote_url: None,
+                aliases: vec!["repo".into()],
+                last_touched: "2026-10-25T00:00:00Z".into(),
+                groups: vec![],
+            },
+        );
+        RegistryFile::write_atomic(
+            &home.join("registry.json"),
+            &RegistryFile {
+                version: 2,
+                repos,
+                groups: vec![],
+            },
+        )
+        .expect("write registry");
+
+        let health = registry_health(home).expect("health");
+
+        assert!(
+            health.missing_graphs.is_empty(),
+            "{:?}",
+            health.missing_graphs
+        );
+        assert!(health.missing_meta.is_empty(), "{:?}", health.missing_meta);
     }
 }

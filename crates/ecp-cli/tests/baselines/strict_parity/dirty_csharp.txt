@@ -1,0 +1,13 @@
+# owner: lane F (incremental overlay: builder edges of dirty files)
+edge full-only x1 Defines File src/Lib.cs:1 Lib.cs #c4e216348a0ecde8 -> Namespace src/Lib.cs:1 Acme #1f3ccea32da31f9f conf=1.0
+edge full-only x1 Defines Namespace src/Lib.cs:1 Acme #1f3ccea32da31f9f -> Class src/Lib.cs:14 Extra #cd4c2bf6825ed40e conf=1.0
+edge full-only x1 HasMethod Class src/Lib.cs:14 Extra #cd4c2bf6825ed40e -> Method src/Lib.cs:16 Twice #c9315fb57c1a5005 conf=1.0
+identity full-only x1 Namespace src/Lib.cs:12  #e0c3315cd25ce060
+identity overlay-only x1 Namespace src/Lib.cs:12 Acme #1f3ccea32da31f9f
+parent full-only x1 Class src/Lib.cs:14 Extra #cd4c2bf6825ed40e owner=Acme <- Defines Namespace src/Lib.cs:1 Acme #1f3ccea32da31f9f
+parent full-only x1 Method src/Lib.cs:16 Twice #c9315fb57c1a5005 owner=Extra <- HasMethod Class src/Lib.cs:14 Extra #cd4c2bf6825ed40e
+parent full-only x1 Namespace src/Lib.cs:1 Acme #1f3ccea32da31f9f owner=- <- Defines File src/Lib.cs:1 Lib.cs #c4e216348a0ecde8
+parent full-only x1 Namespace src/Lib.cs:12  #e0c3315cd25ce060 owner=- <- none
+parent overlay-only x1 Class src/Lib.cs:14 Extra #cd4c2bf6825ed40e owner=Acme <- none
+parent overlay-only x1 Method src/Lib.cs:16 Twice #c9315fb57c1a5005 owner=Extra <- none
+parent overlay-only x1 Namespace src/Lib.cs:12 Acme #1f3ccea32da31f9f owner=- <- none

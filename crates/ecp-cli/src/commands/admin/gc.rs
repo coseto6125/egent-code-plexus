@@ -55,6 +55,7 @@ fn sweep_repos(repo_roots: &[std::path::PathBuf], dry_run: bool) -> SweepStats {
         for stats in [
             sweep_retired_dirs(repo_root, dry_run),
             sweep_stale_generations(repo_root, dry_run),
+            sweep_abandoned_staging(repo_root, dry_run),
             sweep_subtree_builds(repo_root, dry_run),
             sweep_sessions(repo_root, dry_run),
             sweep_stale_parse_caches(repo_root, dry_run),

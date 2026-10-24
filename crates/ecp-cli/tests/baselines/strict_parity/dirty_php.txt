@@ -1,0 +1,8 @@
+# owner: lane F (incremental overlay: builder edges of dirty files)
+edge full-only x1 Defines File src/Lib.php:1 Lib.php #d0e0f0702a5cd802 -> Function src/Lib.php:8 extra #78d714f627e5d510 conf=1.0
+identity full-only x1 PathLiteral src/main.php:4 /Lib.php #825047a92486279c
+identity overlay-only x1 PathLiteral src/main.php:3 /Lib.php #825047a92486279c
+parent full-only x1 Function src/Lib.php:8 extra #78d714f627e5d510 owner=- <- Defines File src/Lib.php:1 Lib.php #d0e0f0702a5cd802
+parent full-only x1 PathLiteral src/main.php:4 /Lib.php #825047a92486279c owner=- <- none
+parent overlay-only x1 Function src/Lib.php:8 extra #78d714f627e5d510 owner=- <- none
+parent overlay-only x1 PathLiteral src/main.php:3 /Lib.php #825047a92486279c owner=- <- none

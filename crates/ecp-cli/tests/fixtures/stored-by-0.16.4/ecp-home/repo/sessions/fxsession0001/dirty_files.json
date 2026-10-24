@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "entries": {
+    "lib.rs": {
+      "mtime_ns": 1792866109397498640,
+      "content_hash": "920cf5403de07ab2",
+      "fragment_id": "920cf5403de07ab2",
+      "tantivy_delta_segment": null,
+      "parse_failed": false,
+      "dirty_symbols": [
+        {
+          "name": "helper",
+          "kind": "function",
+          "file": "lib.rs",
+          "line_start": 1,
+          "line_end": 3
+        },
+        {
+          "name": "run",
+          "kind": "function",
+          "file": "lib.rs",
+          "line_start": 5,
+          "line_end": 7
+        }
+      ],
+      "format": 5
+    },
+    "pkg/core.py": {
+      "mtime_ns": 1792866109397498640,
+      "content_hash": "339d025bf804a507",
+      "fragment_id": "339d025bf804a507",
+      "tantivy_delta_segment": null,
+      "parse_failed": false,
+      "dirty_symbols": [
+        {
+          "name": "compute",
+          "kind": "function",
+          "file": "pkg/core.py",
+          "line_start": 1,
+          "line_end": 2
+        },
+        {
+          "name": "helper",
+          "kind": "function",
+          "file": "pkg/core.py",
+          "line_start": 5,
+          "line_end": 6
+        },
+        {
+          "name": "fresh_only",
+          "kind": "function",
+          "file": "pkg/core.py",
+          "line_start": 9,
+          "line_end": 10
+        }
+      ],
+      "format": 5
+    }
+  },
+  "builder_fingerprint": "v0.16.4+schema20"
+}
