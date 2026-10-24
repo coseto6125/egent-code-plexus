@@ -19,7 +19,7 @@
 #                                  which hands off to release.yml
 #
 # Usage:
-#   scripts/release/cut-release.sh [--bump auto|patch|minor|major] [--dry-run] [--pr] [--tag]
+#   scripts/release/cut-release.sh [--bump auto|patch|minor|major] [--dry-run] [--pr] [--tag] [--no-push]
 #
 #   --bump   how to derive the next version (default: auto — feat ⇒ minor,
 #            otherwise fix/perf ⇒ patch; breaking change footer ⇒ major).
@@ -27,6 +27,8 @@
 #   --pr     create the bump commit on a release branch + open the Release PR.
 #   --tag    push the v{version} git tag for the CURRENT Cargo.toml version
 #            (run after the Release PR is merged to main).
+#   --no-push  with --pr or --tag: stop after the local commit or tag, and print
+#            the push (and `gh pr create`) commands to run yourself.
 
 set -euo pipefail
 
@@ -39,6 +41,7 @@ TAG_PREFIX="v"
 
 BUMP="auto"
 ACTION="dry-run"
+PUSH=1
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -46,6 +49,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run) ACTION="dry-run"; shift ;;
     --pr) ACTION="pr"; shift ;;
     --tag) ACTION="tag"; shift ;;
+    --no-push) PUSH=0; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -166,8 +170,12 @@ if [[ "$ACTION" == "tag" ]]; then
   if git rev-parse "$TAG" >/dev/null 2>&1; then
     echo "tag $TAG already exists — nothing to do" >&2; exit 0
   fi
-  echo "Pushing tag $TAG for current version $CUR (hands off to release.yml)…"
   git tag -a "$TAG" -m "Release $TAG"
+  if [[ "$PUSH" == 0 ]]; then
+    echo "Tagged $TAG locally. Push it with: git push origin $TAG"
+    exit 0
+  fi
+  echo "Pushing tag $TAG for current version $CUR (hands off to release.yml)…"
   git push origin "$TAG"
   echo "Pushed $TAG."
   exit 0
@@ -221,18 +229,30 @@ fi
 
 git add "$CARGO_TOML" "$CHANGELOG" Cargo.lock 2>/dev/null || git add "$CARGO_TOML" "$CHANGELOG"
 git commit -m "release: ${CUR} -> ${NEW} — bump workspace + internal dep versions"
-git push -u origin "$BRANCH"
 
-gh pr create \
-  --base main --head "$BRANCH" \
-  --title "release: ${CUR} -> ${NEW}" \
-  --label release \
-  --body "Automated release bump by \`scripts/release/cut-release.sh\`.
+PR_BODY="Automated release bump by \`scripts/release/cut-release.sh\`.
 
 - workspace + ecp-core/ecp-analyzer/ecp-mcp version: \`${CUR}\` → \`${NEW}\` (${LEVEL})
 - CHANGELOG.md updated from conventional commits since ${LAST:-repo start}
 
 On merge, run \`scripts/release/cut-release.sh --tag\` on main to push \`v${NEW}\`,
 which triggers release.yml (5-platform build + GitHub Release + npm/PyPI publish)."
+
+if [[ "$PUSH" == 0 ]]; then
+  BODY_FILE="$(git rev-parse --absolute-git-dir)/RELEASE_PR_BODY.md"
+  printf '%s\n' "$PR_BODY" >"$BODY_FILE"
+  echo "Committed the bump on $BRANCH. Push and open the Release PR with:"
+  echo "  git push -u origin $BRANCH"
+  echo "  gh pr create --base main --head $BRANCH --title \"release: ${CUR} -> ${NEW}\" --label release --body-file $BODY_FILE"
+  exit 0
+fi
+
+git push -u origin "$BRANCH"
+
+gh pr create \
+  --base main --head "$BRANCH" \
+  --title "release: ${CUR} -> ${NEW}" \
+  --label release \
+  --body "$PR_BODY"
 
 echo "Opened Release PR for v${NEW}. Merge it, then run: scripts/release/cut-release.sh --tag"
