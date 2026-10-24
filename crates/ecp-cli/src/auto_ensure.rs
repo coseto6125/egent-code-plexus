@@ -12,9 +12,8 @@
 //!   then L1 overlay fragment write under `<repo>/sessions/<sid>/`.
 //! - Ready → noop.
 
-use ecp_core::analyzer::pipeline::AnalyzerPipeline;
 use ecp_core::contracts::dirty_event::{
-    ClassifiedPath, DirtyEvent, DirtySet, DuplicatePath, PathClass, RepoPath, SkipReason,
+    ClassifiedPath, DirtyEvent, DirtySet, DuplicatePath, RepoPath, SkipReason,
 };
 use ecp_core::contracts::routing::{FileRouter, SizeCap};
 use ecp_core::session::SessionMeta;
@@ -495,17 +494,10 @@ fn git_fingerprint_shortcut(
     })
 }
 
-/// C5 routing, or the provider table `reanalyze_files` dispatches on today
-/// (C3 open point 2): the overlay keeps every input it parses today, so the
-/// builder fingerprint stays. Area 6 deletes the second term. No syscall.
+/// C5 routing, the same table `reanalyze_files` dispatches on. No syscall.
 fn classify_dirty(dirty: DirtySet) -> DirtySet<ClassifiedPath> {
     const ROUTER: FileRouter = FileRouter::new(SizeCap::BUILT_IN);
-    dirty.classify_with(|path| {
-        let class = PathClass::classify(path, &ROUTER, None);
-        let legacy_source = !class.is_source()
-            && AnalyzerPipeline::provider_name_for_path(Path::new(path.as_str())).is_some();
-        class.union(PathClass::new(legacy_source, false))
-    })
+    dirty.classify(&ROUTER, None)
 }
 
 /// True when `path` is one of ecp's own files and must not count as dirty
