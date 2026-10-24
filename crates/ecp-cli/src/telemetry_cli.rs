@@ -253,6 +253,9 @@ mod tests {
                 name: "Foo".into(),
                 count: 3,
                 candidates: None,
+                file_given: false,
+                kind_given: false,
+                owner_form: false,
             }),
             "no-such-symbol"
         );
@@ -333,6 +336,9 @@ mod tests {
             name: "check".into(),
             count: 8,
             candidates: Some("a.rs,Function,9\nb.rs,Function,20".into()),
+            file_given: false,
+            kind_given: false,
+            owner_form: false,
         };
         assert_eq!(classify_error(&e), "no-such-symbol");
     }

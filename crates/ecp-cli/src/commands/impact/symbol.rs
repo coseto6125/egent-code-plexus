@@ -175,10 +175,20 @@ pub(super) fn impact_by_name(
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let merged = MergedGraph::new(graph, view);
+        let owner_form = owner_filter.is_none()
+            && matches.iter().any(|&i| {
+                merged
+                    .node(i as u32)
+                    .is_some_and(|n| n.owner_class(&merged).is_some())
+            });
         return Err(EcpError::AmbiguousSymbol {
             name: fqn_label.to_string(),
             count: matches.len(),
             candidates: Some(candidate_lines),
+            file_given: file_needle.is_some(),
+            kind_given: kind_needle.is_some(),
+            owner_form,
         });
     }
 

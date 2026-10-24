@@ -19,7 +19,10 @@
 
 use crate::commands::graph_csr::iter_incoming_edges_filtered;
 use crate::engine::Engine;
-use ecp_core::graph::{ArchivedNodeKind, ArchivedRelType, CallMeta, FunctionMeta, NodeKind};
+use ecp_core::graph::{
+    render_hint, ArchivedNodeKind, ArchivedRelType, ArchivedZeroCopyGraph, CallMeta, FunctionMeta,
+    NodeKind,
+};
 use ecp_core::EcpError;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
@@ -214,6 +217,35 @@ fn kind_str(k: &ArchivedNodeKind) -> &'static str {
     NodeKind::from(k).as_str()
 }
 
+/// Non-test blind spots grouped by file. The stored hint of a uid collision is
+/// separator-joined for `uid_audit::parse_hint`; `render_hint` makes it the
+/// readable form `inspect` shows, so no unit-separator byte reaches the diff
+/// output or the review verdicts built from these refs.
+fn blindspot_refs(graph: &ArchivedZeroCopyGraph) -> FxHashMap<String, Vec<BlindSpotRef>> {
+    let mut blindspots: FxHashMap<String, Vec<BlindSpotRef>> = FxHashMap::default();
+    for bs in graph.blind_spots.iter() {
+        // FU-001 is_test-field: drop test-region BlindSpots from the
+        // diff-region warning surface. Test fixtures legitimately use
+        // eval / reflection / dlsym to exercise prod code; surfacing them
+        // as "blindspot in diff" creates noise on every test-touching PR.
+        if bs.is_test {
+            continue;
+        }
+        let path = bs.file_path.resolve(&graph.string_pool).to_string();
+        let line = bs.start_row.to_native();
+        blindspots
+            .entry(path.clone())
+            .or_default()
+            .push(BlindSpotRef {
+                path,
+                line,
+                kind: bs.kind.resolve(&graph.string_pool).to_string(),
+                hint: render_hint(bs.hint.resolve(&graph.string_pool), line),
+            });
+    }
+    blindspots
+}
+
 fn collect_snapshot(graph_path: &Path) -> Result<(Snapshot, Engine), EcpError> {
     let engine = Engine::load(graph_path)
         .map_err(|e| EcpError::Output(format!("load graph {}: {e}", graph_path.display())))?;
@@ -257,26 +289,7 @@ fn collect_snapshot(graph_path: &Path) -> Result<(Snapshot, Engine), EcpError> {
         files.insert(path, category);
     }
 
-    let mut blindspots: FxHashMap<String, Vec<BlindSpotRef>> = FxHashMap::default();
-    for bs in graph.blind_spots.iter() {
-        // FU-001 is_test-field: drop test-region BlindSpots from the
-        // diff-region warning surface. Test fixtures legitimately use
-        // eval / reflection / dlsym to exercise prod code; surfacing them
-        // as "blindspot in diff" creates noise on every test-touching PR.
-        if bs.is_test {
-            continue;
-        }
-        let path = bs.file_path.resolve(&graph.string_pool).to_string();
-        blindspots
-            .entry(path.clone())
-            .or_default()
-            .push(BlindSpotRef {
-                path,
-                line: bs.start_row.to_native(),
-                kind: bs.kind.resolve(&graph.string_pool).to_string(),
-                hint: bs.hint.resolve(&graph.string_pool).to_string(),
-            });
-    }
+    let blindspots = blindspot_refs(graph);
 
     // `function_metas` is sorted by node_idx (graph.rs invariant) — build a
     // direct map for O(log n) is_test lookup. FxHashMap is overkill here
@@ -682,5 +695,49 @@ mod tests {
         assert!(is_diffable_kind(NodeKind::Const));
         assert!(is_diffable_kind(NodeKind::SchemaField));
         assert!(is_diffable_kind(NodeKind::EventTopic));
+    }
+
+    fn collision_side(path: &str) -> ecp_core::graph::HintFields<'_> {
+        ecp_core::graph::HintFields {
+            kind: "Function",
+            path,
+            owner: "",
+            name: "dup",
+        }
+    }
+
+    #[test]
+    fn test_blindspot_refs_uid_collision_hint_has_no_field_separator() {
+        use ecp_core::graph::{format_hint, HINT_FIELD_SEP};
+        use ecp_core::graph_fixture::GraphFixture;
+        let collision = format_hint(
+            "uid-collision",
+            collision_side("a.rs"),
+            collision_side("b.rs"),
+        );
+        assert!(
+            collision.contains(HINT_FIELD_SEP),
+            "fixture must carry the separator"
+        );
+        let mut fx = GraphFixture::new();
+        fx.blind_spot("uid-collision", "b.rs", (7, 0, 7, 3), &collision);
+        fx.blind_spot("eval", "b.rs", (9, 0, 9, 3), "eval(x)");
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&fx.build()).unwrap();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+
+        let refs = blindspot_refs(graph);
+
+        let hints: Vec<&str> = refs["b.rs"].iter().map(|b| b.hint.as_str()).collect();
+        assert!(
+            hints.iter().all(|h| !h.contains(HINT_FIELD_SEP)),
+            "{hints:?}"
+        );
+        assert_eq!(
+            hints,
+            [
+                "uid-collision: first=Function a.rs dup second=Function b.rs:7 dup",
+                "eval(x)"
+            ]
+        );
     }
 }

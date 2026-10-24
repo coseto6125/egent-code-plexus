@@ -82,7 +82,7 @@ fn mtime_ns(path: &Path) -> Option<u64> {
 }
 
 #[test]
-fn shadow_fragment_mtime_matches_baseline() {
+fn test_accepted_fragments_shadow_cascade_mtime_matches_baseline() {
     let repo = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     write(

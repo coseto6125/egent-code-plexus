@@ -159,7 +159,7 @@ fn bless_mode() -> bool {
 }
 
 #[test]
-fn every_test_dimension_covers_the_14_languages_or_is_exempted() {
+fn test_mismatches_repo_test_dimensions_equal_the_exemption_list() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
     let stems = fs::read_dir(&dir).unwrap().flatten().filter_map(|entry| {
         let path = entry.path();
@@ -185,7 +185,7 @@ fn every_test_dimension_covers_the_14_languages_or_is_exempted() {
 }
 
 #[test]
-fn classify_reads_leading_trailing_and_aliased_languages() {
+fn test_classify_leading_trailing_and_aliased_languages_returns_dimension_and_langs() {
     let owned =
         |dimension: &str, langs: &[&'static str]| Some((dimension.to_string(), langs.to_vec()));
     assert_eq!(classify("go_frameworks"), owned("frameworks", &["go"]));
@@ -207,7 +207,7 @@ fn classify_reads_leading_trailing_and_aliased_languages() {
 }
 
 #[test]
-fn gaps_and_stale_exemptions_both_fail() {
+fn test_mismatches_missing_and_stale_exemptions_return_both_reports() {
     let cov = coverage(
         LANGS
             .iter()
@@ -241,7 +241,7 @@ fn gaps_and_stale_exemptions_both_fail() {
 }
 
 #[test]
-fn bless_keeps_existing_reasons() {
+fn test_render_existing_exemption_keeps_reason_and_new_gap_gets_default() {
     let gaps: BTreeSet<(String, String)> = [("d", "go"), ("d", "rust")]
         .iter()
         .map(|(d, l)| (d.to_string(), l.to_string()))

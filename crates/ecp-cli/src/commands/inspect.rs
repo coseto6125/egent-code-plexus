@@ -88,6 +88,14 @@ fn parse_csv_lower(s: Option<&str>) -> Option<Vec<String>> {
     }
 }
 
+/// The sections of an inspect block that map a relation type to its edges.
+const EDGE_SECTIONS: [&str; 4] = [
+    "incoming",
+    "outgoing",
+    "heuristic_incoming",
+    "heuristic_outgoing",
+];
+
 /// Strip constant-across-all-edges boilerplate from an edge-section map for
 /// toon/llm output. Operates on the `incoming`, `outgoing`,
 /// `heuristic_incoming`, and `heuristic_outgoing` sections of the inspect
@@ -102,13 +110,7 @@ fn parse_csv_lower(s: Option<&str>) -> Option<Vec<String>> {
 ///
 /// Affects only the toon/llm path; json format uses the unstripped block.
 fn strip_edge_boilerplate(result: &mut serde_json::Value) {
-    // Collect which edge-section keys exist in this result.
-    let section_keys = [
-        "incoming",
-        "outgoing",
-        "heuristic_incoming",
-        "heuristic_outgoing",
-    ];
+    let section_keys = EDGE_SECTIONS;
 
     // First pass: determine whether any entry has a non-null ownerClass.
     // If so, keep the column so callers can see method ownership.
@@ -170,12 +172,7 @@ fn edge_defaults() -> serde_json::Value {
 
 fn hoist_edge_defaults(block: &mut serde_json::Value) {
     let defaults = edge_defaults();
-    for key in [
-        "incoming",
-        "outgoing",
-        "heuristic_incoming",
-        "heuristic_outgoing",
-    ] {
+    for key in EDGE_SECTIONS {
         let Some(section) = block.get_mut(key).and_then(|s| s.as_object_mut()) else {
             continue;
         };
@@ -196,6 +193,24 @@ fn hoist_edge_defaults(block: &mut serde_json::Value) {
     }
 }
 
+/// An ambiguous result repeats a block per match, so a match keeps only the
+/// sections that hold something; the result's message says an absent section is
+/// empty. The unambiguous result keeps every key, so a caller reading one symbol
+/// finds a stable shape.
+fn drop_empty_sections(block: &mut serde_json::Value) {
+    let Some(obj) = block.as_object_mut() else {
+        return;
+    };
+    obj.retain(|key, value| {
+        key == "symbol"
+            || match value {
+                serde_json::Value::Array(a) => !a.is_empty(),
+                serde_json::Value::Object(o) => !o.is_empty(),
+                _ => true,
+            }
+    });
+}
+
 /// Ambiguous result: every match as a full block. `--file` / `--kind` filter a
 /// block's neighbours, not the match list, so the hint names what does narrow it.
 fn ambiguous_result(
@@ -207,7 +222,8 @@ fn ambiguous_result(
     let message = format!(
         "Found {} symbols matching '{}'. --file and --kind filter neighbours, not the match. \
          Re-run `ecp inspect --name Owner.{}` using matches[].symbol.ownerClass, \
-         or pick a match by matches[].symbol.filePath and startLine.",
+         or pick a match by matches[].symbol.filePath and startLine. \
+         A section a match omits is empty.",
         blocks.len(),
         name,
         name
@@ -218,6 +234,7 @@ fn ambiguous_result(
         } else {
             strip_edge_boilerplate(block);
         }
+        drop_empty_sections(block);
     }
     let mut result = serde_json::json!({
         "status": "ambiguous",
@@ -271,6 +288,7 @@ fn build_inspect_block(
         true
     };
 
+    let defaults = edge_defaults();
     let mut incoming: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
     let mut outgoing: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
     let mut heuristic_incoming: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
@@ -304,8 +322,8 @@ fn build_inspect_block(
             // `checks` an object of per-check results. Until T4-7 computes them,
             // tier is the explicit `unresolved` sentinel and checks is empty —
             // both type-stable (T4-7 only fills values, never restructures).
-            "tier": "unresolved",
-            "checks": {},
+            "tier": defaults["tier"],
+            "checks": defaults["checks"],
         });
         if rel.is_heuristic() {
             heuristic_outgoing.entry(rel_str).or_default().push(entry);
@@ -352,8 +370,8 @@ fn build_inspect_block(
                 "confidence": edge.confidence(),
                 // See the outgoing-edge note above: `tier`/`checks` mirror
                 // find-schema-bindings; unresolved sentinel + empty object pre-T4-7.
-                "tier": "unresolved",
-                "checks": {},
+                "tier": defaults["tier"],
+                "checks": defaults["checks"],
             });
             if let Some(ctor) = via_constructor {
                 entry["viaConstructor"] = serde_json::Value::from(ctor);
@@ -1281,5 +1299,43 @@ mod tests {
             false,
         );
         assert!(r.get("edge_defaults").is_none());
+    }
+
+    /// Contract: an ambiguous match lists what it has. An empty section carries
+    /// no fact an agent can use, and the message tells the reader that an absent
+    /// section is empty.
+    #[test]
+    fn test_ambiguous_result_match_omits_empty_sections_and_says_so() {
+        let mut block = block_with_edge("Foo");
+        block["blind_spots"] = serde_json::json!([]);
+        block["impact_upstream_1hop"] = serde_json::json!([{"name": "c"}]);
+        block["contained_methods"] = serde_json::json!([]);
+        for json in [true, false] {
+            let r = ambiguous_result(vec![block.clone()], "validate", Default::default(), json);
+            let m = r["matches"][0].as_object().unwrap();
+            for gone in ["outgoing", "blind_spots", "contained_methods"] {
+                assert!(!m.contains_key(gone), "json={json} {gone}: {m:?}");
+            }
+            for kept in ["symbol", "incoming", "impact_upstream_1hop"] {
+                assert!(m.contains_key(kept), "json={json} {kept}: {m:?}");
+            }
+            assert!(
+                r["message"].as_str().unwrap().contains("omits is empty"),
+                "{r}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_sections_are_the_keys_hoisting_and_stripping_visit() {
+        let mut block = serde_json::json!({});
+        for key in EDGE_SECTIONS {
+            block[key] =
+                serde_json::json!({"calls": [{"name": "c", "tier": "unresolved", "checks": {}}]});
+        }
+        hoist_edge_defaults(&mut block);
+        for key in EDGE_SECTIONS {
+            assert!(block[key]["calls"][0].get("tier").is_none(), "{key}");
+        }
     }
 }

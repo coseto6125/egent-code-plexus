@@ -5,7 +5,7 @@
 //! `tests/baselines/strict_parity/<scenario>.txt`; see `common/baseline.rs`
 //! for the exact-match and `ECP_BLESS=1` rules.
 //!
-//! The `harness_*` tests prove the comparison itself: an injected duplicate
+//! The `test_diff_*` tests prove the comparison itself: an injected duplicate
 //! edge, a changed confidence, a wrong parent or a missing node each fail.
 
 #[path = "common/baseline.rs"]
@@ -45,7 +45,7 @@ fn blank_after_first_line(source: &str) -> String {
 // ── TS / JS scenarios ────────────────────────────────────────────────────────
 
 #[test]
-fn strict_parity_ts_deleted_file_matches_baseline() {
+fn test_check_ts_deleted_file_matches_baseline() {
     check(&Scenario {
         name: "ts_deleted",
         owner: LANE_F_DELETED,
@@ -59,7 +59,7 @@ fn strict_parity_ts_deleted_file_matches_baseline() {
 }
 
 #[test]
-fn strict_parity_ts_renamed_file_matches_baseline() {
+fn test_check_ts_renamed_file_matches_baseline() {
     check(&Scenario {
         name: "ts_renamed",
         owner: LANE_F_RENAMED,
@@ -77,7 +77,7 @@ fn strict_parity_ts_renamed_file_matches_baseline() {
 /// and the clean importer `main.js` must end on the same target as a full
 /// index.
 #[test]
-fn strict_parity_js_ts_shadowed_file_matches_baseline() {
+fn test_check_js_ts_shadowed_file_matches_baseline() {
     check(&Scenario {
         name: "js_ts_shadowed",
         owner: LANE_F_SHADOW,
@@ -96,7 +96,7 @@ fn strict_parity_js_ts_shadowed_file_matches_baseline() {
 }
 
 #[test]
-fn strict_parity_ts_emptied_file_matches_baseline() {
+fn test_check_ts_emptied_file_matches_baseline() {
     check(&Scenario {
         name: "ts_emptied",
         owner: LANE_F_INCREMENTAL,
@@ -106,7 +106,7 @@ fn strict_parity_ts_emptied_file_matches_baseline() {
 }
 
 #[test]
-fn strict_parity_ts_new_empty_file_matches_baseline() {
+fn test_check_ts_new_empty_file_matches_baseline() {
     check(&Scenario {
         name: "ts_new_empty_file",
         owner: LANE_F_INCREMENTAL,
@@ -116,7 +116,7 @@ fn strict_parity_ts_new_empty_file_matches_baseline() {
 }
 
 #[test]
-fn strict_parity_ts_whitespace_only_edit_matches_baseline() {
+fn test_check_ts_whitespace_only_edit_matches_baseline() {
     let shifted = blank_after_first_line(TS_LIB);
     check(&Scenario {
         name: "ts_whitespace_only",
@@ -129,7 +129,7 @@ fn strict_parity_ts_whitespace_only_edit_matches_baseline() {
 /// `helper` is called twice from one function: each side's `Calls`
 /// multiplicity must agree, which a deduplicating comparison cannot see.
 #[test]
-fn strict_parity_ts_doubled_edge_matches_baseline() {
+fn test_check_ts_doubled_edge_matches_baseline() {
     let main = "import { helper } from './lib';\n\nexport function run(): number {\n  return helper() + helper();\n}\n";
     let shifted = blank_after_first_line(main);
     check(&Scenario {
@@ -143,7 +143,7 @@ fn strict_parity_ts_doubled_edge_matches_baseline() {
 /// Two files declare `dup`; the dirty caller switches its import from one
 /// to the other.
 #[test]
-fn strict_parity_ts_same_name_in_two_files_matches_baseline() {
+fn test_check_ts_same_name_in_two_files_matches_baseline() {
     let main = |from: &str| {
         format!(
             "import {{ dup }} from './{from}';\n\nexport function run(): number {{\n  return dup();\n}}\n"
@@ -172,7 +172,7 @@ fn strict_parity_ts_same_name_in_two_files_matches_baseline() {
 /// call ambiguous in a full index; the overlay never re-resolves a clean
 /// file (`session/view.rs` module doc).
 #[test]
-fn strict_parity_js_candidate_added_matches_baseline() {
+fn test_check_js_candidate_added_matches_baseline() {
     check(&Scenario {
         name: "js_candidate_added",
         owner: LANE_F_CLEAN_CALLERS,
@@ -222,9 +222,9 @@ fn check_dirty(lang: &str, fx: &LangFixture) {
 }
 
 macro_rules! dirty_matrix {
-    ($($lang:ident => $fixture:expr;)*) => {$(
+    ($($lang:ident => $test:ident, $fixture:expr;)*) => {$(
         #[test]
-        fn $lang() {
+        fn $test() {
             check_dirty(stringify!($lang), &$fixture);
         }
     )*};
@@ -234,7 +234,7 @@ mod strict_parity_dirty_file {
     use super::{check_dirty, LangFixture};
 
     dirty_matrix! {
-        typescript => LangFixture {
+        typescript => test_check_dirty_typescript_matches_baseline, LangFixture {
             files: &[
                 ("src/lib.ts", "export function helper(): number {\n  return 1;\n}\n"),
                 ("src/main.ts", "import { helper } from './lib';\n\nexport function run(): number {\n  return helper();\n}\n"),
@@ -243,7 +243,7 @@ mod strict_parity_dirty_file {
             caller_file: "src/main.ts",
             appended: "\nexport function extra(): number {\n  return helper();\n}\n",
         };
-        javascript => LangFixture {
+        javascript => test_check_dirty_javascript_matches_baseline, LangFixture {
             files: &[
                 ("src/lib.js", "export function helper() {\n  return 1;\n}\n"),
                 ("src/main.js", "import { helper } from './lib.js';\n\nexport function run() {\n  return helper();\n}\n"),
@@ -252,7 +252,7 @@ mod strict_parity_dirty_file {
             caller_file: "src/main.js",
             appended: "\nexport function extra() {\n  return helper();\n}\n",
         };
-        python => LangFixture {
+        python => test_check_dirty_python_matches_baseline, LangFixture {
             files: &[
                 ("pkg/__init__.py", ""),
                 ("pkg/lib.py", "def helper():\n    return 1\n"),
@@ -262,7 +262,7 @@ mod strict_parity_dirty_file {
             caller_file: "pkg/main.py",
             appended: "\n\ndef extra():\n    return helper()\n",
         };
-        java => LangFixture {
+        java => test_check_dirty_java_matches_baseline, LangFixture {
             files: &[
                 ("src/main/java/com/acme/Lib.java", "package com.acme;\n\npublic class Lib {\n    public static int helper() {\n        return 1;\n    }\n}\n"),
                 ("src/main/java/com/acme/Main.java", "package com.acme;\n\npublic class Main {\n    public int run() {\n        return Lib.helper();\n    }\n}\n"),
@@ -271,7 +271,7 @@ mod strict_parity_dirty_file {
             caller_file: "src/main/java/com/acme/Main.java",
             appended: "\nclass Extra {\n    int extra() {\n        return Lib.helper();\n    }\n}\n",
         };
-        kotlin => LangFixture {
+        kotlin => test_check_dirty_kotlin_matches_baseline, LangFixture {
             files: &[
                 ("src/main/kotlin/acme/Lib.kt", "package acme\n\nfun helper(): Int {\n    return 1\n}\n"),
                 ("src/main/kotlin/acme/Main.kt", "package acme\n\nfun run(): Int {\n    return helper()\n}\n"),
@@ -280,7 +280,7 @@ mod strict_parity_dirty_file {
             caller_file: "src/main/kotlin/acme/Main.kt",
             appended: "\nfun extra(): Int {\n    return helper()\n}\n",
         };
-        csharp => LangFixture {
+        csharp => test_check_dirty_csharp_matches_baseline, LangFixture {
             files: &[
                 ("src/Lib.cs", "namespace Acme\n{\n    public static class Lib\n    {\n        public static int Helper()\n        {\n            return 1;\n        }\n    }\n}\n"),
                 ("src/App.cs", "namespace Acme\n{\n    public class App\n    {\n        public int Run()\n        {\n            return Lib.Helper();\n        }\n    }\n}\n"),
@@ -289,7 +289,7 @@ mod strict_parity_dirty_file {
             caller_file: "src/App.cs",
             appended: "\nnamespace Acme\n{\n    public static class Extra\n    {\n        public static int Twice()\n        {\n            return Lib.Helper();\n        }\n    }\n}\n",
         };
-        go => LangFixture {
+        go => test_check_dirty_go_matches_baseline, LangFixture {
             files: &[
                 ("lib.go", "package main\n\nfunc helper() int {\n\treturn 1\n}\n"),
                 ("main.go", "package main\n\nfunc run() int {\n\treturn helper()\n}\n"),
@@ -298,7 +298,7 @@ mod strict_parity_dirty_file {
             caller_file: "main.go",
             appended: "\nfunc extra() int {\n\treturn helper()\n}\n",
         };
-        rust => LangFixture {
+        rust => test_check_dirty_rust_matches_baseline, LangFixture {
             files: &[
                 ("Cargo.toml", "[package]\nname = \"acme\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
                 ("src/lib.rs", "mod util;\n\npub fn run() -> i32 {\n    util::helper()\n}\n"),
@@ -308,7 +308,7 @@ mod strict_parity_dirty_file {
             caller_file: "src/lib.rs",
             appended: "\npub fn extra() -> i32 {\n    helper()\n}\n",
         };
-        php => LangFixture {
+        php => test_check_dirty_php_matches_baseline, LangFixture {
             files: &[
                 ("src/Lib.php", "<?php\n\nfunction helper()\n{\n    return 1;\n}\n"),
                 ("src/main.php", "<?php\n\nrequire_once __DIR__ . '/Lib.php';\n\nfunction run()\n{\n    return helper();\n}\n"),
@@ -317,7 +317,7 @@ mod strict_parity_dirty_file {
             caller_file: "src/main.php",
             appended: "\nfunction extra()\n{\n    return helper();\n}\n",
         };
-        ruby => LangFixture {
+        ruby => test_check_dirty_ruby_matches_baseline, LangFixture {
             files: &[
                 ("lib/acme.rb", "def helper()\n  1\nend\n"),
                 ("lib/main.rb", "require_relative 'acme'\n\ndef run()\n  helper()\nend\n"),
@@ -326,7 +326,7 @@ mod strict_parity_dirty_file {
             caller_file: "lib/main.rb",
             appended: "\ndef extra()\n  helper()\nend\n",
         };
-        swift => LangFixture {
+        swift => test_check_dirty_swift_matches_baseline, LangFixture {
             files: &[
                 ("Sources/Acme/Lib.swift", "func helper() -> Int {\n    return 1\n}\n"),
                 ("Sources/Acme/App.swift", "func run() -> Int {\n    return helper()\n}\n"),
@@ -335,7 +335,7 @@ mod strict_parity_dirty_file {
             caller_file: "Sources/Acme/App.swift",
             appended: "\nfunc extra() -> Int {\n    return helper()\n}\n",
         };
-        c => LangFixture {
+        c => test_check_dirty_c_matches_baseline, LangFixture {
             files: &[
                 ("src/lib.c", "int helper(void) {\n    return 1;\n}\n"),
                 ("src/main.c", "int helper(void);\n\nint run(void) {\n    return helper();\n}\n"),
@@ -344,7 +344,7 @@ mod strict_parity_dirty_file {
             caller_file: "src/main.c",
             appended: "\nint extra(void) {\n    return helper();\n}\n",
         };
-        cpp => LangFixture {
+        cpp => test_check_dirty_cpp_matches_baseline, LangFixture {
             files: &[
                 ("src/lib.cpp", "int helper() {\n    return 1;\n}\n"),
                 ("src/main.cpp", "int helper();\n\nint run() {\n    return helper();\n}\n"),
@@ -353,7 +353,7 @@ mod strict_parity_dirty_file {
             caller_file: "src/main.cpp",
             appended: "\nint extra() {\n    return helper();\n}\n",
         };
-        dart => LangFixture {
+        dart => test_check_dirty_dart_matches_baseline, LangFixture {
             files: &[
                 ("lib/lib.dart", "int helper() {\n  return 1;\n}\n"),
                 ("lib/main.dart", "import 'lib.dart';\n\nint run() {\n  return helper();\n}\n"),
@@ -420,12 +420,12 @@ fn in_section<'a>(lines: &'a BTreeSet<String>, prefix: &str) -> Vec<&'a str> {
 }
 
 #[test]
-fn harness_identical_graphs_have_no_difference() {
+fn test_diff_identical_graphs_returns_no_difference() {
     assert_eq!(fixture_diff(Inject::default()), BTreeSet::new());
 }
 
 #[test]
-fn harness_injected_duplicate_edge_is_a_difference() {
+fn test_diff_injected_duplicate_edge_returns_overlay_only_edge() {
     let lines = fixture_diff(Inject {
         duplicate_call: true,
         ..Inject::default()
@@ -436,7 +436,7 @@ fn harness_injected_duplicate_edge_is_a_difference() {
 }
 
 #[test]
-fn harness_changed_confidence_is_a_difference() {
+fn test_diff_changed_confidence_returns_both_edge_sides() {
     let lines = fixture_diff(Inject {
         call_confidence: Some(0.95),
         ..Inject::default()
@@ -458,7 +458,7 @@ fn harness_changed_confidence_is_a_difference() {
 }
 
 #[test]
-fn harness_wrong_parent_fails_parent_but_not_identity() {
+fn test_diff_wrong_parent_returns_parent_lines_not_identity() {
     let lines = fixture_diff(Inject {
         wrong_parent: true,
         ..Inject::default()
@@ -477,7 +477,7 @@ fn harness_wrong_parent_fails_parent_but_not_identity() {
 }
 
 #[test]
-fn harness_missing_node_fails_identity() {
+fn test_diff_missing_node_returns_identity_line() {
     let lines = fixture_diff(Inject {
         drop_node: true,
         ..Inject::default()
@@ -488,7 +488,7 @@ fn harness_missing_node_fails_identity() {
 }
 
 #[test]
-fn baseline_new_and_stale_lines_are_both_mismatches() {
+fn test_mismatches_new_and_stale_lines_returns_both_as_mismatches() {
     let set =
         |lines: &[&str]| -> BTreeSet<String> { lines.iter().map(|l| l.to_string()).collect() };
     let expected = set(&["edge full-only x1 a", "identity overlay-only x1 b"]);
@@ -518,7 +518,7 @@ fn baseline_new_and_stale_lines_are_both_mismatches() {
 }
 
 #[test]
-fn baseline_render_reads_back_with_its_owner() {
+fn test_render_then_read_returns_owner_and_lines() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("x.txt");
     let lines: BTreeSet<String> = ["edge full-only x1 z", "edge full-only x1 a"]

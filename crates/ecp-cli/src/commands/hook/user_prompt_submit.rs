@@ -2,7 +2,7 @@
 //! files, then unlink them so each event fires only once. Failure takes
 //! priority over success because it is more actionable.
 
-use super::common::{ecp_state_dir, lookup_index_dir, HookInput};
+use super::common::{ecp_state_dir, hook_specific_output, lookup_index_dir, HookInput};
 use ecp_core::EcpError;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -63,12 +63,14 @@ pub fn handle(input: &HookInput) -> Result<(), EcpError> {
 fn render_output(sections: &[String], update: Option<String>) -> Option<serde_json::Value> {
     let mut out = serde_json::Map::new();
     if !sections.is_empty() {
-        out.insert(
-            "hookSpecificOutput".into(),
-            serde_json::json!({
-                "hookEventName": "UserPromptSubmit",
-                "additionalContext": sections.join("\n\n"),
-            }),
+        out.extend(
+            hook_specific_output(
+                "UserPromptSubmit",
+                &[("additionalContext", &sections.join("\n\n"))],
+            )
+            .as_object()
+            .cloned()
+            .expect("the envelope is an object"),
         );
     }
     if let Some(update) = update {

@@ -74,7 +74,9 @@ fn owner_matches(actual: Option<&str>, requested: &str, file: &str) -> bool {
 ///
 /// `name` takes the bare symbol or the `Owner.Method` FQN form. `kind_needle`
 /// matches the node kind case-insensitively; `file_needle` is a substring of
-/// the file path.
+/// the file path. When a substring leaves several matches, the ones whose path
+/// is the needle or ends with `/needle` win (see `narrow_to_path_suffix`), so
+/// `cmd/main.go` can pick itself over `tools/cmd/main.go`.
 ///
 /// Shared by `ecp impact` and `ecp path` so both land on the same node for the
 /// same argument: a path whose endpoints disagree with impact's target would
@@ -88,10 +90,14 @@ pub fn resolve_candidates(
 ) -> (Vec<usize>, usize) {
     let (owner_filter, bare_name) = split_fqn_target(name);
     let kind_needle = kind_needle.map(|s| s.to_ascii_lowercase());
+    // Graph paths are `/`-separated and repo-relative; a Windows-style or `./`
+    // needle would otherwise match nothing.
+    let file_needle = file_needle.map(normalize_file_needle);
+    let file_needle = file_needle.as_deref();
 
     let mut base_defs = 0usize;
     let mut disk_defs = 0usize;
-    let mut matches: Vec<usize> = Vec::new();
+    let mut matches: Vec<(usize, &str)> = Vec::new();
     // Ascending like the full scan, so the candidate list keeps node order.
     for idx in graph.name_candidates(bare_name) {
         let (idx, node) = (idx as usize, &graph.nodes[idx as usize]);
@@ -138,10 +144,16 @@ pub fn resolve_candidates(
         }
         // A replaced base node enters the merged space as its virtual twin
         // (on-disk spans; masked stale adjacency handled by run_bfs).
-        matches.push(match view {
-            Some(v) => v.redirect(idx as u32).expect("suppressed filtered above") as usize,
-            None => idx,
-        });
+        let file = graph.files[node.file_idx.to_native() as usize]
+            .path
+            .resolve(&graph.string_pool);
+        matches.push((
+            match view {
+                Some(v) => v.redirect(idx as u32).expect("suppressed filtered above") as usize,
+                None => idx,
+            },
+            file,
+        ));
     }
     // Symbols that only exist in the working tree (new functions in dirty
     // files) — base-replacing twins are excluded: they arrived via redirect.
@@ -166,10 +178,42 @@ pub fn resolve_candidates(
                     continue;
                 }
             }
-            matches.push(v.base_len() as usize + i);
+            matches.push((v.base_len() as usize + i, &*vn.rel_path));
         }
     }
-    (matches, base_defs.max(disk_defs))
+    if let Some(needle) = file_needle {
+        narrow_to_path_suffix(&mut matches, needle);
+    }
+    (
+        matches.into_iter().map(|(idx, _)| idx).collect(),
+        base_defs.max(disk_defs),
+    )
+}
+
+fn normalize_file_needle(needle: &str) -> String {
+    let needle = needle.replace('\\', "/");
+    needle.strip_prefix("./").unwrap_or(&needle).to_string()
+}
+
+/// Every substring of a shorter path is a substring of a longer one that
+/// contains it, so `--file cmd/main.go` alone cannot choose `cmd/main.go` over
+/// `tools/cmd/main.go`. Keep the matches whose path is the needle or ends with
+/// `/needle`. Keep the substring set when none does (a directory or partial
+/// needle) or when the needle is empty.
+fn narrow_to_path_suffix(matches: &mut Vec<(usize, &str)>, needle: &str) {
+    let needle = needle.trim_end_matches('/');
+    if matches.len() < 2 || needle.is_empty() {
+        return;
+    }
+    let exact = |path: &str| {
+        path == needle
+            || path
+                .strip_suffix(needle)
+                .is_some_and(|head| head.ends_with('/'))
+    };
+    if matches.iter().any(|&(_, path)| exact(path)) {
+        matches.retain(|&(_, path)| exact(path));
+    }
 }
 
 #[cfg(test)]
@@ -326,6 +370,72 @@ mod tests {
                 "{name:?} kind={kind:?} file={file:?} overlay={overlay}"
             );
         }
+    }
+
+    fn matched_paths(g: ZeroCopyGraph, name: &str, file: Option<&str>) -> Vec<String> {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&g).unwrap();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        resolve_candidates(graph, None, name, None, file)
+            .0
+            .into_iter()
+            .map(|idx| {
+                graph.files[graph.nodes[idx].file_idx.to_native() as usize]
+                    .path
+                    .resolve(&graph.string_pool)
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn nested_path_pair_graph() -> ZeroCopyGraph {
+        let mut fx = GraphFixture::new();
+        for path in [
+            "cmd/main.go",
+            "tools/cmd/main.go",
+            "src/index.ts",
+            "packages/a/src/index.ts",
+        ] {
+            fx.func(path, "main");
+        }
+        fx.build()
+    }
+
+    /// Contract: `--file` naming the shorter of two nested paths selects it,
+    /// instead of failing as ambiguous because the longer path contains it.
+    #[test]
+    fn test_resolve_candidates_file_needle_prefers_path_suffix_over_substring() {
+        for (needle, want) in [
+            ("cmd/main.go", vec!["cmd/main.go"]),
+            ("tools/cmd/main.go", vec!["tools/cmd/main.go"]),
+            ("src/index.ts", vec!["src/index.ts"]),
+            ("packages/a/src/index.ts", vec!["packages/a/src/index.ts"]),
+            ("./cmd/main.go", vec!["cmd/main.go"]),
+            ("cmd\\main.go", vec!["cmd/main.go"]),
+            ("main.go", vec!["cmd/main.go", "tools/cmd/main.go"]),
+        ] {
+            assert_eq!(
+                matched_paths(nested_path_pair_graph(), "main", Some(needle)),
+                want,
+                "needle {needle:?}"
+            );
+        }
+    }
+
+    /// A needle that is no path suffix (a directory, a fragment) keeps the
+    /// substring set, so the narrowing never turns a hit into a miss.
+    #[test]
+    fn test_resolve_candidates_file_needle_without_suffix_match_keeps_substring_set() {
+        for needle in ["cmd/", "cmd", "ools/cmd", "/"] {
+            assert_eq!(
+                matched_paths(nested_path_pair_graph(), "main", Some(needle))
+                    .iter()
+                    .filter(|p| p.ends_with("main.go"))
+                    .count(),
+                if needle == "ools/cmd" { 1 } else { 2 },
+                "needle {needle:?}"
+            );
+        }
+        assert!(matched_paths(nested_path_pair_graph(), "main", Some("nope.go")).is_empty());
     }
 
     #[test]

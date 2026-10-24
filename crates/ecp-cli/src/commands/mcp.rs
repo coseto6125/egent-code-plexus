@@ -4,6 +4,7 @@
 //! `ecp-mcp::schema`). Every visible non-hidden subcommand
 //! becomes one MCP tool. Dispatch is spawn-only.
 
+use crate::output::OutputFormat;
 use clap::{Args, Command, Subcommand};
 use ecp_core::EcpError;
 use ecp_mcp::server::{serve_stdio, EcpMcpServer};
@@ -23,7 +24,7 @@ pub enum McpAction {
         /// Output format. Omit for the LLM-tuned default (text-tab); pass
         /// `--format json|toon` for the structured shapes.
         #[arg(long)]
-        format: Option<crate::output::OutputFormat>,
+        format: Option<OutputFormat>,
     },
 }
 
@@ -47,7 +48,6 @@ pub fn run(args: McpArgs, root_cmd: Command) -> Result<(), EcpError> {
         McpAction::Tools { format } => {
             let tools = server.list_tools();
 
-            use crate::output::OutputFormat;
             match format {
                 Some(OutputFormat::Json | OutputFormat::Toon) => {
                     if format == Some(OutputFormat::Toon) {

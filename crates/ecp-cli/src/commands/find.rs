@@ -1224,8 +1224,9 @@ fn substring_hits(
     // callers and callees as owned Strings, and building thousands to keep
     // a hundred was the peak allocation of this path.
     let total_before_truncate = scored.len() as u64;
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(MULTI_CAP);
+    // `build_hit` re-checks the eligibility the scan already applied, so every
+    // scored row becomes a hit and only the first `limit` are read.
+    keep_top_ranked(&mut scored, limit.min(MULTI_CAP));
     let hits = scored
         .into_iter()
         .filter_map(|(score, idx)| {
@@ -1241,6 +1242,21 @@ fn substring_hits(
         .take(limit)
         .collect();
     (hits, total_before_truncate)
+}
+
+/// Keep the `keep` best `(score, node index)` rows, best first. Ties order by
+/// node index, the order a stable sort of the scan gave. Selecting before the
+/// sort makes the cost linear in the hit count plus `keep log keep`, where a
+/// full sort paid `n log n` to read five rows.
+fn keep_top_ranked(scored: &mut Vec<(f32, usize)>, keep: usize) {
+    let by_rank = |a: &(f32, usize), b: &(f32, usize)| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1));
+    if keep < scored.len() {
+        if let Some(last_kept) = keep.checked_sub(1) {
+            scored.select_nth_unstable_by(last_kept, by_rank);
+        }
+        scored.truncate(keep);
+    }
+    scored.sort_unstable_by(by_rank);
 }
 
 /// Legacy 1.0 / 0.7 / 0.4 substring score. ASCII names compare in place;
@@ -2213,5 +2229,27 @@ mod tests {
         let got = index_wanted_uids(nodes.iter().copied(), &wanted);
         assert_eq!(got.get(&7).copied(), Some(3));
         assert_eq!(full_insert(&nodes).get(&7).copied(), Some(3));
+    }
+
+    /// Contract: selecting before sorting returns the rows a full stable sort
+    /// by score (ties in node order) and truncate returned. Many ties, a limit
+    /// of 0, one, below, at and above the row count.
+    #[test]
+    fn test_keep_top_ranked_matches_full_stable_sort_with_ties() {
+        let scores = [1.0f32, 0.7, 0.4];
+        let rows: Vec<(f32, usize)> = (0..50usize)
+            .map(|idx| (scores[(idx * 7 + idx / 3) % 3], idx))
+            .collect();
+        for keep in [0usize, 1, 5, 17, 49, 50, 51, 500] {
+            let mut expected = rows.clone();
+            expected.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            expected.truncate(keep);
+            let mut got = rows.clone();
+            keep_top_ranked(&mut got, keep);
+            assert_eq!(got, expected, "keep {keep}");
+        }
+        let mut empty: Vec<(f32, usize)> = Vec::new();
+        keep_top_ranked(&mut empty, 5);
+        assert!(empty.is_empty());
     }
 }

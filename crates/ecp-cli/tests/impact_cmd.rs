@@ -302,11 +302,13 @@ fn impact_hidden_edges_footer_emitted_to_stderr() {
 }
 
 #[test]
-#[ignore = "baseline mode requires L2 build for baseline SHA after git_guard checkout; needs auto_ensure inside the guard scope (Phase 5+ rewire)"]
 fn impact_baseline_ref_runs_diff_mode() {
     let tmp = tempfile::tempdir().unwrap();
     init_repo_and_analyze(tmp.path());
 
+    // HOME is the repo here, so the index cache lands inside the work tree;
+    // keep it out of the commit and out of the `git diff` the baseline reads.
+    std::fs::write(tmp.path().join(".gitignore"), ".ecp/\n").unwrap();
     // Add a new commit so HEAD~1 is valid.
     std::fs::write(
         tmp.path().join("src/core/lib.ts"),

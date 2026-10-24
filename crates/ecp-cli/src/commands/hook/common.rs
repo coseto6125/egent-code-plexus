@@ -54,18 +54,26 @@ pub fn read_stdin_envelope() -> Result<HookInput, EcpError> {
         .map_err(|e| EcpError::InvalidArgument(format!("hook stdin parse: {e}")))
 }
 
+/// The `{"hookSpecificOutput": {"hookEventName": event, ..fields}}` envelope
+/// every hook response shares. Caller passes the canonical Claude Code event
+/// name (CamelCase: "PreToolUse", "UserPromptSubmit", "PostToolUse",
+/// "SessionStart") and the event's own string fields.
+pub fn hook_specific_output(event: &str, fields: &[(&str, &str)]) -> serde_json::Value {
+    let mut inner = serde_json::Map::new();
+    inner.insert("hookEventName".into(), event.into());
+    for &(key, value) in fields {
+        inner.insert(key.into(), value.into());
+    }
+    serde_json::json!({ "hookSpecificOutput": inner })
+}
+
 /// Emit `{"hookSpecificOutput": {"hookEventName": ..., "additionalContext": ...}}`
-/// to stdout. Caller passes the canonical Claude Code event name
-/// (CamelCase: "PreToolUse", "UserPromptSubmit", "PostToolUse",
-/// "SessionStart").
+/// to stdout.
 pub fn emit_additional_context(event: &str, context: &str) {
-    let payload = serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": event,
-            "additionalContext": context,
-        }
-    });
-    println!("{}", payload);
+    println!(
+        "{}",
+        hook_specific_output(event, &[("additionalContext", context)])
+    );
 }
 
 /// Hook-local state dir at `<cwd>/.ecp/`. Used only for marker files
@@ -268,4 +276,36 @@ pub fn resolve_within_repo(path: &Path, repo_root: &Path) -> Option<PathBuf> {
 /// repository decide how much this process allocates, on the hook path.
 pub fn read_within_repo(path: &Path, repo_root: &Path) -> Option<String> {
     std::fs::read_to_string(resolve_within_repo(path, repo_root)?).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Contract: Claude Code reads these keys, so the helper keeps the
+    /// envelope key names and puts every field under `hookSpecificOutput`.
+    #[test]
+    fn test_hook_specific_output_nests_event_name_and_fields_in_the_envelope() {
+        assert_eq!(
+            hook_specific_output("UserPromptSubmit", &[("additionalContext", "a \"b\"\n")]),
+            serde_json::json!({"hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": "a \"b\"\n",
+            }})
+        );
+        assert_eq!(
+            hook_specific_output(
+                "PreToolUse",
+                &[
+                    ("permissionDecision", "deny"),
+                    ("permissionDecisionReason", "r")
+                ]
+            ),
+            serde_json::json!({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": "r",
+            }})
+        );
+    }
 }
