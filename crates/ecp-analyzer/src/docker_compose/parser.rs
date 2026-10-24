@@ -12,7 +12,7 @@
 ///   top-level version/networks/volumes → ignored
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{LocalGraph, RawImport, RawNode};
+use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode};
 use ecp_core::graph::NodeKind;
 use std::path::Path;
 use tree_sitter::{Node, Parser, Query};
@@ -116,6 +116,23 @@ fn scalar_str<'s>(val_node: Node, source: &'s [u8]) -> Option<&'s str> {
     }
 }
 
+/// A scalar value only: `scalar_str` falls back to the raw text of any leaf, so
+/// a mapping or sequence would otherwise be read as one long string.
+fn plain_scalar_str<'s>(val_node: Node, source: &'s [u8]) -> Option<&'s str> {
+    let mut n = val_node;
+    while matches!(n.kind(), "block_node" | "flow_node") {
+        n = n.child(0)?;
+    }
+    if matches!(
+        n.kind(),
+        "plain_scalar" | "double_quote_scalar" | "single_quote_scalar"
+    ) {
+        scalar_str(n, source).filter(|s| !s.is_empty())
+    } else {
+        None
+    }
+}
+
 /// Collect items from a block_sequence (YAML list) as text strings.
 fn sequence_items<'s>(val_node: Node, source: &'s [u8]) -> Vec<&'s str> {
     // Navigate: block_node → block_sequence → block_sequence_item → block_node → …
@@ -144,6 +161,23 @@ fn sequence_items<'s>(val_node: Node, source: &'s [u8]) -> Vec<&'s str> {
     items
 }
 
+const BLIND_UNREAD_SHAPE: &str = "compose-unread-shape";
+
+/// Whether the value is an empty flow collection (`[]` or `{}`), which holds nothing to read.
+fn is_empty_flow(val_node: Node, source: &[u8]) -> bool {
+    matches!(node_text(val_node, source).trim(), "[]" | "{}")
+}
+
+fn unread_shape(node: Node, path: &Path, is_test_file: bool, hint: &str) -> BlindSpot {
+    BlindSpot {
+        kind: BLIND_UNREAD_SHAPE.to_string(),
+        file_path: path.to_path_buf(),
+        span: crate::framework_helpers::node_span(&node),
+        hint: hint.to_string(),
+        is_test: is_test_file,
+    }
+}
+
 // ── LanguageProvider impl ─────────────────────────────────────────────────────
 
 impl LanguageProvider for DockerComposeProvider {
@@ -163,6 +197,9 @@ impl LanguageProvider for DockerComposeProvider {
         let root = tree.root_node();
         let mut nodes: Vec<RawNode> = Vec::new();
         let mut imports: Vec<RawImport> = Vec::new();
+        let mut blind_spots: Vec<BlindSpot> = Vec::new();
+        let is_test_file = ecp_core::file_category::determine_category(path.to_str().unwrap_or(""))
+            == ecp_core::graph::FileCategory::Test;
 
         // Navigate: stream → document → block_node → block_mapping
         let doc = {
@@ -254,23 +291,67 @@ impl LanguageProvider for DockerComposeProvider {
                             }
                         }
                         "build" => {
-                            if let Some(build_path) = scalar_str(*fld_val_node, source) {
-                                imports.push(RawImport {
+                            // `build: ./dir` or `build: {context: ./dir, ...}`.
+                            let build_pairs = mapping_pairs(*fld_val_node);
+                            let context = if build_pairs.is_empty() {
+                                plain_scalar_str(*fld_val_node, source)
+                            } else {
+                                build_pairs
+                                    .iter()
+                                    .find(|(k, _)| key_str(*k, source) == "context")
+                                    .and_then(|(_, v)| plain_scalar_str(*v, source))
+                            };
+                            match context {
+                                Some(build_path) => imports.push(RawImport {
                                     alias: Some(svc_name.clone()),
                                     imported_name: build_path.to_string(),
                                     source: build_path.to_string(),
                                     binding_kind: None,
-                                });
+                                }),
+                                None => blind_spots.push(unread_shape(
+                                    *fld_val_node,
+                                    path,
+                                    is_test_file,
+                                    "build has no readable `context` string",
+                                )),
                             }
                         }
                         "depends_on" => {
-                            for dep in sequence_items(*fld_val_node, source) {
-                                calls.push(dep.to_string());
+                            // List form names the services directly; the long
+                            // form is a mapping keyed by service name.
+                            let dep_pairs = mapping_pairs(*fld_val_node);
+                            if dep_pairs.is_empty() {
+                                let deps = sequence_items(*fld_val_node, source);
+                                if deps.is_empty() && !is_empty_flow(*fld_val_node, source) {
+                                    blind_spots.push(unread_shape(
+                                        *fld_val_node,
+                                        path,
+                                        is_test_file,
+                                        "depends_on is neither a block list nor a mapping",
+                                    ));
+                                }
+                                calls.extend(deps.into_iter().map(str::to_string));
+                            } else {
+                                calls.extend(
+                                    dep_pairs
+                                        .iter()
+                                        .map(|(k, _)| key_str(*k, source))
+                                        .filter(|name| !name.is_empty())
+                                        .map(str::to_string),
+                                );
                             }
                         }
                         "environment" => {
                             // environment can be a mapping (KEY: val) or a sequence (KEY=val)
                             let env_pairs = mapping_pairs(*fld_val_node);
+                            if env_pairs.is_empty() && !is_empty_flow(*fld_val_node, source) {
+                                blind_spots.push(unread_shape(
+                                    *fld_val_node,
+                                    path,
+                                    is_test_file,
+                                    "environment is not a block mapping; list-form entries are not read",
+                                ));
+                            }
                             for (env_key_node, env_val_node) in env_pairs {
                                 let env_name = key_str(env_key_node, source).to_string();
                                 if env_name.is_empty() {
@@ -333,7 +414,7 @@ impl LanguageProvider for DockerComposeProvider {
             documents: vec![],
             framework_refs: vec![],
             fanout_refs: vec![],
-            blind_spots: vec![],
+            blind_spots,
             schema_fields: None,
             event_topics: None,
             tx_scopes: None,

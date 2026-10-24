@@ -153,6 +153,25 @@ fn action_name(uses_value: &str) -> String {
     }
 }
 
+/// The command text of a `run:` value. A block scalar (`run: |`, `>-`, `|2`)
+/// starts with a header line that is not part of the command; a mapping or
+/// sequence is not a command at all.
+fn run_scalar_content<'a>(value: Node<'a>, source: &'a [u8]) -> Option<&'a str> {
+    let scalar = match value.kind() {
+        "block_node" | "flow_node" => value.named_child(0)?,
+        _ => value,
+    };
+    let text = node_text(scalar, source)?;
+    match scalar.kind() {
+        "block_scalar" => Some(text.split_once('\n').map_or("", |(_, body)| body)),
+        "plain_scalar" => Some(text),
+        "double_quote_scalar" | "single_quote_scalar" => {
+            Some(text.trim_matches(|c| c == '"' || c == '\''))
+        }
+        _ => None,
+    }
+}
+
 /// Parse the first word of a `run:` command as the "command name".
 fn run_command_name(run_value: &str) -> Option<String> {
     let first_word = run_value.split_whitespace().next()?;
@@ -466,7 +485,7 @@ fn walk_steps(
                     uses_val = scalar_text(*v, source);
                 }
                 "run" => {
-                    run_val = node_text(*v, source);
+                    run_val = run_scalar_content(*v, source);
                 }
                 _ => {}
             }

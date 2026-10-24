@@ -23,7 +23,11 @@ pub(super) fn resolve(files: &[SourceFile], importer: usize, module: &str) -> Op
     let importer = &files[importer].path;
     let parent = importer.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
     let module = if is_python(importer) {
-        module.replace('.', "/")
+        // Leading dots are the relative level: one dot is the importer's own
+        // package, each further dot climbs one directory.
+        let name = module.trim_start_matches('.');
+        let climb = (module.len() - name.len()).saturating_sub(1);
+        format!("{}{}", "../".repeat(climb), name.replace('.', "/"))
     } else {
         module.into()
     };
@@ -223,14 +227,21 @@ impl Engine<'_> {
             files
         });
         let total = self.boundaries.len();
+        let in_slice = |b: &Boundary| {
+            reached
+                .as_ref()
+                .is_none_or(|r| index.get(b.file.as_str()).is_some_and(|i| r.contains(i)))
+        };
+        // A cut file stays visible whether or not the slice reaches it, but only
+        // a cut inside the slice makes this answer incomplete.
+        let ast_cut_in_slice = self
+            .boundaries
+            .iter()
+            .any(|b| b.kind == "ast_budget" && in_slice(b));
         let boundaries: Vec<Boundary> = self
             .boundaries
             .into_iter()
-            .filter(|b| {
-                reached
-                    .as_ref()
-                    .is_none_or(|r| index.get(b.file.as_str()).is_some_and(|i| r.contains(i)))
-            })
+            .filter(|b| b.kind == "ast_budget" || in_slice(b))
             .collect();
         let boundaries_omitted = total - boundaries.len();
         let consumers = nodes
@@ -285,7 +296,7 @@ impl Engine<'_> {
             consumers,
             boundaries,
             boundaries_omitted,
-            truncated: self.truncated,
+            truncated: self.truncated || ast_cut_in_slice,
             coverage: "Bounded, path-insensitive source analysis with call-site expansion. Boundaries cover the files the selected slice reaches; boundaries_omitted counts the rest. Empty slices do not prove absence beyond supported semantics.".into(),
         }
     }

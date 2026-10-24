@@ -60,9 +60,35 @@ fn extract_string_args(s: &str) -> Vec<String> {
     args
 }
 
+/// The HTTP verb a decorator names, read from its name token only: the path
+/// and keyword arguments may contain verb substrings (`@PostMapping("/get-token")`,
+/// `@RequestMapping("/api/target")`). Class-level `@RequestMapping` without an
+/// explicit `RequestMethod.X` names no verb, so it yields `None`.
+fn decorator_verb(decorator: &str) -> Option<&'static str> {
+    let trimmed = decorator.trim().trim_start_matches(['@', '[']).trim_start();
+    let name_end = trimmed
+        .find(|c: char| c == '(' || c == ']' || c.is_whitespace())
+        .unwrap_or(trimmed.len());
+    let name = trimmed[..name_end]
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    if name == "requestmapping" {
+        let lower = decorator.to_lowercase();
+        let after = &lower[lower.find("requestmethod.")? + "requestmethod.".len()..];
+        let end = after
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(after.len());
+        return HTTP_METHODS.iter().copied().find(|&m| m == &after[..end]);
+    }
+    let verb = name.strip_prefix("http").unwrap_or(&name);
+    let verb = verb.strip_suffix("mapping").unwrap_or(verb);
+    HTTP_METHODS.iter().copied().find(|&m| m == verb)
+}
+
 pub fn detect_from_decorator(decorator: &str) -> Option<DetectedRoute> {
-    let lower = decorator.to_lowercase();
-    let method = HTTP_METHODS.iter().find(|&&m| lower.contains(m))?;
+    let method = decorator_verb(decorator)?;
 
     let string_args = extract_string_args(decorator);
     let path = string_args.iter().find(|s| looks_like_path(s))?;
@@ -319,6 +345,66 @@ mod tests {
         // A malformed gRPC path without the wire-format leading slash is not a
         // valid endpoint — reject rather than emit a junk Route.
         assert!(detect_from_call(&raw("GRPC", "Greeter/SayHello")).is_none());
+    }
+
+    // -- decorator verb comes from the name token, not the whole text --------
+
+    fn dec(d: &str) -> Option<(String, String)> {
+        detect_from_decorator(d).map(|r| (r.method, r.path))
+    }
+
+    fn some(m: &str, p: &str) -> Option<(String, String)> {
+        Some((m.to_string(), p.to_string()))
+    }
+
+    #[test]
+    fn detect_from_decorator_spring_post_mapping_path_has_get_substring() {
+        assert_eq!(
+            dec("@PostMapping(\"/get-token\")"),
+            some("POST", "/get-token")
+        );
+        assert_eq!(dec("@GetMapping(\"/post-it\")"), some("GET", "/post-it"));
+    }
+
+    #[test]
+    fn detect_from_decorator_class_level_request_mapping_yields_none() {
+        assert_eq!(dec("@RequestMapping(\"/api/target\")"), None);
+        assert_eq!(dec("@RequestMapping(value = \"/api/target\")"), None);
+    }
+
+    #[test]
+    fn detect_from_decorator_request_mapping_with_method_uses_request_method() {
+        assert_eq!(
+            dec("@RequestMapping(value = \"/x/get\", method = RequestMethod.POST)"),
+            some("POST", "/x/get")
+        );
+    }
+
+    #[test]
+    fn detect_from_decorator_kotlin_nest_python_csharp_use_name_token() {
+        assert_eq!(dec("@PutMapping(\"/budget\")"), some("PUT", "/budget"));
+        assert_eq!(dec("@Post('/get-token')"), some("POST", "/get-token"));
+        assert_eq!(
+            dec("@router.delete(\"/target\")"),
+            some("DELETE", "/target")
+        );
+        assert_eq!(
+            dec("[HttpPost(\"/get-token\")]"),
+            some("POST", "/get-token")
+        );
+        assert_eq!(dec("[Route(\"/api/get\")]"), None);
+    }
+
+    #[test]
+    fn detect_from_decorator_empty_or_whitespace_yields_none() {
+        assert_eq!(dec(""), None);
+        assert_eq!(dec("   "), None);
+        assert_eq!(dec("@"), None);
+    }
+
+    #[test]
+    fn detect_from_decorator_non_route_decorator_with_verb_in_path_yields_none() {
+        assert_eq!(dec("@Autowired(\"/get\")"), None);
     }
 
     // -- lax helper: per-framework bare-path support -------------------------
