@@ -201,7 +201,7 @@ The tests `test_route_path_ledger_matches_today_readers` and `test_to_legacy_eve
 
 | Identifier | Changes when |
 |---|---|
-| `BUILDER_FINGERPRINT` (`registry/commit_meta.rs:76`) | the slice that switches the cold index to `FileRouter` and routes generic and OpenAPI YAML (new nodes); the slice that gives the overlay the full provider set and one `SizeCap`. An old manifest marks a `.sh` file `parse_failed`; only a fingerprint mismatch makes the next refresh re-parse it (`session/overlay.rs:13-18`, `:101-103`). |
+| `BUILDER_FINGERPRINT` (`registry/commit_meta.rs:79`) | the slice that switches the cold index to `FileRouter` and routes generic and OpenAPI YAML (new nodes); the slice that gives the overlay the full provider set and one `SizeCap`. An old manifest marks a `.sh` file `parse_failed`; only a fingerprint mismatch makes the next refresh re-parse it (`session/overlay.rs:13-18`, `:101-103`). |
 | `GRAPH_FORMAT_VERSION` (`graph.rs:36`, now 15) | only if `ParsedLanguage` is stored per file (open point 7): one `file` and one `resolution` byte per file record |
 | L1 fragment encoding (`FRAGMENT_FORMAT_V5`, `session/overlay.rs:57`) | same condition as `GRAPH_FORMAT_VERSION` |
 | Dirty manifest | no format change. Its entries become stale through the fingerprint. |

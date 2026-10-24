@@ -184,7 +184,7 @@ Must stop:
 | Identifier | B's first round (Rust rows) | Area 4 (other ecosystems) | Area 5 (dirty config) |
 |---|---|---|---|
 | `GRAPH_FORMAT_VERSION` (`graph.rs:36`, now 15) | +1: one field `workspace: WorkspaceFacts`, appended after `route_middleware` (`graph.rs:1277`). Take the next free number at merge time; A-B also bumps. | none: rows only. A new `Ecosystem` variant is no layout change. | none |
-| `BUILDER_FINGERPRINT` (`registry/commit_meta.rs:76`, now `schema20`) | bump: new stored data | bump: rows change edges | none |
+| `BUILDER_FINGERPRINT` (`registry/commit_meta.rs:79`, now `schema21`) | bump: new stored data | bump: rows change edges | none |
 | L1 fragment encoding (`overlay_writer.rs:119-123`) | none | none | none with Open point 6, option (a) |
 | Dirty manifest | none | none | Config paths must enter the dirty set. C3 owns that record. |
 | View cache key (`session/view_cache.rs:35-48`) | none: the overlay reads the base rows only | none | `inputs_hash` must include the content hash of each dirty config file. |
