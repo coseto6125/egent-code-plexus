@@ -107,6 +107,7 @@ use crate::analyzer::import_binding::{
     import_member_fallback, owner_path_agrees, retry_name, DeclaredType, MemberOwner,
 };
 use crate::analyzer::lexical::LexicalFunctions;
+use crate::analyzer::outcome::Tier;
 use crate::analyzer::path_aliases::PathAliases;
 use crate::analyzer::reexport::{
     self, export_filter_applies, is_ecmascript, ExportAliasTable, Fact, FileImports, ImportRef,
@@ -269,13 +270,13 @@ pub struct ViewEdge {
 }
 
 /// Tier confidences mirroring index-time Pass-2 resolution.
-const CONF_SAME_FILE: f32 = 1.0;
-const CONF_IMPORT_SCOPED: f32 = 0.95;
-const CONF_QUALIFIER_SCOPED: f32 = 0.85;
-const CONF_HERITAGE: f32 = 0.8;
-const CONF_GLOBAL_UNIQUE: f32 = 0.7;
+const CONF_SAME_FILE: f32 = Tier::SameFile.confidence();
+const CONF_IMPORT_SCOPED: f32 = Tier::ImportScoped.confidence();
+const CONF_QUALIFIER_SCOPED: f32 = Tier::QualifierScoped.confidence();
+const CONF_HERITAGE: f32 = Tier::HeritageScoped.confidence();
+const CONF_GLOBAL_UNIQUE: f32 = Tier::Global.confidence();
 /// The index's Tier 3.5 (`try_module_tree_resolve`).
-const CONF_MODULE_TREE: f32 = 1.0;
+const CONF_MODULE_TREE: f32 = Tier::ModuleTree.confidence();
 
 #[derive(Debug, Default, PartialEq)]
 pub struct OverlayView {
@@ -3247,13 +3248,7 @@ impl<'a> OverlayFacts<'a> {
 /// The edge a receiver-typing ladder verdict emits, at the index's
 /// confidence for its tier.
 fn ladder_edge(verdict: LadderMember) -> Option<(u32, f32)> {
-    match verdict {
-        LadderMember::Owned(id) => Some((id, CONF_QUALIFIER_SCOPED)),
-        LadderMember::Inherited(id) => Some((id, CONF_HERITAGE)),
-        LadderMember::Candidate(id) => Some((id, CONF_GLOBAL_UNIQUE)),
-        LadderMember::NearestCopy(id) => Some((id, NEAREST_COPY_CONFIDENCE)),
-        LadderMember::Ambiguous | LadderMember::NoEdge => None,
-    }
+    Tier::of_member(verdict).map(|(id, tier)| (id, tier.confidence()))
 }
 
 impl PickFacts for OverlayFacts<'_> {

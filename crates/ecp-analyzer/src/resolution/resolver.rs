@@ -41,6 +41,7 @@ use ecp_core::analyzer::import_binding::{
     extension_retry, fqn_extension, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
     import_family, import_member_fallback, may_suppress, module_head, retry_name,
 };
+use ecp_core::analyzer::outcome::Tier;
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::reexport::{
     self, is_ecmascript, probe_rust_module, ExportAliasTable, Fact, FileImports, ImportRef,
@@ -1008,17 +1009,17 @@ impl<'a> Resolver<'a> {
             }
         };
         let target = call_target(source_file, CallSite::UntypedMember(member));
-        let (id, tier) =
-            match type_ladder::member_via_type(st, candidates, callee_file, member, target, true) {
-                LadderMember::Owned(id) => (id, ResolutionTier::QualifierScoped),
-                LadderMember::Inherited(id) => (id, ResolutionTier::HeritageScoped),
-                LadderMember::Candidate(id) => (id, ResolutionTier::Global),
-                LadderMember::NearestCopy(id) => (id, ResolutionTier::NearestCopy),
-                LadderMember::Ambiguous | LadderMember::NoEdge => {
-                    return type_ladder::ChainOutcome::Conclusive;
-                }
-            };
-        type_ladder::ChainOutcome::Bound((id, tier.base_confidence().min(inner_confidence)))
+        let Some((id, tier)) = Tier::of_member(type_ladder::member_via_type(
+            st,
+            candidates,
+            callee_file,
+            member,
+            target,
+            true,
+        )) else {
+            return type_ladder::ChainOutcome::Conclusive;
+        };
+        type_ladder::ChainOutcome::Bound((id, tier.confidence().min(inner_confidence)))
     }
 
     /// Whether a bare `m()` that the constructor fallback would read as a
@@ -1863,7 +1864,7 @@ impl<'a> Resolver<'a> {
                 if let Some(node_id) =
                     self.try_module_tree_resolve(&source_file_str, symbol_name, member, target)
                 {
-                    const MT_CONF: f32 = 1.0;
+                    const MT_CONF: f32 = Tier::ModuleTree.confidence();
                     results.push((node_id, MT_CONF));
                     self.record(
                         &source_file_str,
@@ -2745,7 +2746,6 @@ impl<'a> Resolver<'a> {
         {
             return TypeMember::NoEdge;
         }
-        let confidence = |tier: ResolutionTier| tier.base_confidence();
         let candidates = self.type_candidates(source_file, source_file_str, qualifier, raw_imports);
         match type_ladder::member_via_type(
             self.symbol_table,
@@ -2755,25 +2755,23 @@ impl<'a> Resolver<'a> {
             target,
             call,
         ) {
-            LadderMember::Owned(id) => TypeMember::Edge(
-                id,
-                DecisionTier::TypeOwned,
-                confidence(ResolutionTier::QualifierScoped),
-            ),
+            LadderMember::Owned(id) => {
+                TypeMember::Edge(id, DecisionTier::TypeOwned, Tier::TypeOwned.confidence())
+            }
             LadderMember::Inherited(id) => TypeMember::Edge(
                 id,
                 DecisionTier::TypeHeritage,
-                confidence(ResolutionTier::HeritageScoped),
+                Tier::TypeHeritage.confidence(),
             ),
             LadderMember::Candidate(id) => TypeMember::Edge(
                 id,
                 DecisionTier::TypeCandidates,
-                confidence(ResolutionTier::Global),
+                Tier::TypeCandidates.confidence(),
             ),
             LadderMember::NearestCopy(id) => TypeMember::Edge(
                 id,
                 DecisionTier::NearestCopy,
-                confidence(ResolutionTier::NearestCopy),
+                Tier::NearestCopy.confidence(),
             ),
             LadderMember::Ambiguous => TypeMember::Ambiguous,
             LadderMember::NoEdge => TypeMember::NoEdge,
