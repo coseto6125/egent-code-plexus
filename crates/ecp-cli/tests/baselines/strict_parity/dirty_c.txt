@@ -1,0 +1,4 @@
+# owner: lane F (incremental overlay: builder edges of dirty files)
+edge full-only x1 Defines File src/lib.c:1 lib.c #30fc792e5bbf3ec8 -> Function src/lib.c:5 extra #de6720dab48f5c20 conf=1.0
+parent full-only x1 Function src/lib.c:5 extra #de6720dab48f5c20 owner=- <- Defines File src/lib.c:1 lib.c #30fc792e5bbf3ec8
+parent overlay-only x1 Function src/lib.c:5 extra #de6720dab48f5c20 owner=- <- none

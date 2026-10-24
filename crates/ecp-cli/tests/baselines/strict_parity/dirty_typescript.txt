@@ -1,0 +1,4 @@
+# owner: lane F (incremental overlay: builder edges of dirty files)
+edge full-only x1 Defines File src/lib.ts:1 lib.ts #ceed54604cd63cf5 -> Function src/lib.ts:5 extra #a97a8ec0c1ddc9e6 conf=1.0
+parent full-only x1 Function src/lib.ts:5 extra #a97a8ec0c1ddc9e6 owner=- <- Defines File src/lib.ts:1 lib.ts #ceed54604cd63cf5
+parent overlay-only x1 Function src/lib.ts:5 extra #a97a8ec0c1ddc9e6 owner=- <- none
