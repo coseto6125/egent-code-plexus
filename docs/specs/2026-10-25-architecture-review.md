@@ -301,7 +301,7 @@ Each fix stands alone. The ids come from the area map; the size is the reviewer'
 | flow F1 | Keep the Python relative level when the import is resolved. | `crates/ecp-analyzer/src/flow/module.rs:21-40` | not stated for this part; flow F1 as a whole is M |
 | flow F3 | Scope the truncation marker to the slice. Keep the boundaries of cut files in the output. | `crates/ecp-analyzer/src/flow/mod.rs:292-307`; `flow/module.rs:226-235` | M |
 | flow F7 | Filter routes first, then count. Say "no shape" when a matching route has no shape. | `crates/ecp-cli/src/commands/shape_check.rs:131-159,286` | S |
-| flow F8 | Extract the response shape from the handler span, not from the file text. | `crates/ecp-analyzer/src/resolution/builder.rs:1812-1840` | M |
+| flow F8 | Moved to lane P after C1 and C4: extract the response shape from the handler span, not from the file text. | `crates/ecp-analyzer/src/resolution/builder.rs:1812-1840` | M |
 | cli F2 | Change the `inspect` ambiguity hint so it does not point to flags that filter neighbours. | `crates/ecp-cli/src/commands/inspect.rs:740` | S |
 | cli F4 | Count the matches left after narrowing, not whether a narrowing flag exists. | `crates/ecp-cli/src/commands/impact/symbol.rs:153` | S |
 | cli F7 | Use the `clap` `ValueEnum` for `--format` so an unknown value is rejected. | `crates/ecp-cli/src/output.rs:24-31` | S |
@@ -319,7 +319,7 @@ Each fix stands alone. The ids come from the area map; the size is the reviewer'
 | agent A7 | Remove the git hook calls to `rename-branch` and `prune`. | `crates/ecp-cli/src/commands/hook_watcher.rs:55-60` | S |
 | agent A8 | Show the update notice to the human channel, not to `additionalContext`. | `crates/ecp-cli/src/commands/hook/user_prompt_submit.rs` | S |
 | agent A10 | Remove the five stub hosts from the menu. | `crates/ecp-cli/src/admin/host_integration/mcp/mod.rs:17-116` | S |
-| freshness F6 | Moved to lane F: classify porcelain paths (contract C3) and skip per-path syscalls only for paths that are neither source nor resolution config. A filter on "has a provider" would drop `tsconfig.json`, `go.mod` and `Cargo.toml` changes. | `crates/ecp-cli/src/auto_ensure.rs:443-451,631-665` | S |
+| freshness F6 | Moved to phase 1 (C3's behaviour slice): classify porcelain paths (contract C3) and skip per-path syscalls only for paths that are neither source nor resolution config. A filter on "has a provider" would drop `tsconfig.json`, `go.mod` and `Cargo.toml` changes. | `crates/ecp-cli/src/auto_ensure.rs:443-451,631-665` | S |
 | freshness F10 | Write a failed marker for warm-attach and behind-head rebuilds. | `crates/ecp-cli/src/auto_ensure.rs:928-952` | S |
 | types-session A5 | Match `Interface` in the Kotlin enclosing-class lookup, after a Kotlin query confirms the defect. | `crates/ecp-analyzer/src/kotlin/receiver_types.rs:477` | S |
 | index F11 | Make `ecp admin index` check the builder fingerprint, like `build_l2`. | `crates/ecp-cli/src/commands/admin/index.rs:376-394,481-495` | S |

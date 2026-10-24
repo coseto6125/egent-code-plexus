@@ -56,14 +56,15 @@ Measured on vscode on 2026-10-25, one run each, with one session id, using the i
 | first `ecp find` after one edit | 363 ms | at most 363 ms |
 | later `ecp find`, same dirty state | 164 ms | within 10% of the clean query |
 
-These single runs set the direction, not the gate values. Lane 0a turns them into a protocol before any gate binds:
+These single runs are the starting targets. Lane 0a turns them into a protocol and fixes the final thresholds and the regression tolerance before any gate binds:
 
 - Pin the corpus commit, the release build of the slice, the command and its find mode, and the edit (one exported function appended to `src/vs/base/common/strings.ts`).
-- Run with `ECP_SESSION_ID` set, and measure once more with no session id, since §5 keeps that case open.
-- Discard one warm-up run, take 10 paired runs (baseline binary, slice binary), and compare medians.
+- Record the machine, the exact commands, both binary revisions and the cache preparation.
+- Each first-after-edit sample starts with a new session id, so its L1 state is fresh; the later-query samples reuse that session. Measure the no-session case once more with all five session variables cleared (`session/resolver.rs:19-23`).
+- Discard one warm-up run, take 10 paired runs (baseline binary, slice binary), and compare medians against the declared tolerance.
 - Add the dirty-file scenario to `scripts/benchmark/benchmark_ecp.py`; today it measures BM25 `find` on a clean tree only.
 
-One rule applies to every slice: no regression against the measured baseline of the previous slice. The absolute thresholds above bind only after the C3 classification slice lands (phase 1), because no earlier slice removes the per-path syscalls that cost today's 164 ms.
+One rule applies to every slice: no regression beyond the declared tolerance against the previous slice. The final thresholds bind only after the C3 classification slice lands (phase 1), because no earlier slice removes the per-path syscalls that cost today's 164 ms.
 
 ## Certainty
 
@@ -138,9 +139,11 @@ GitNexus and codegraph avoid this with one pipeline and one store that they rewr
 
 | Mode | Passes and generated nodes | Work per refresh |
 |---|---|---|
-| per file | path literals, SQL references, function meta, scope `Defines`, decorator edges, transaction scopes, route detection inside one file | the dirty files only |
-| incremental | call resolution, `Imports`, `Overrides`, class membership, route prefix composition and handler binding (area 8) | the dirty files, plus the clean files whose candidates, exports, heritage, return types or scope config changed |
-| index-time, with a caveat | communities, processes, and the name-paired heuristics: schema-field mirrors, event-topic mirrors, saga pairs (all tagged heuristic today) | none; the answer names the pass as index-time |
+| per file | raw extraction of every pass; path literals; function meta; scope `Defines`; enum containment; transaction scopes; route detection inside one file; `SchemaField` and `EventTopic` nodes with their `HasProperty` and publish or subscribe edges | the dirty files only |
+| incremental | call resolution, `Imports`, `Overrides`, class membership, decorator targets (`decorates_edges.rs:105-123` resolves through imports), SQL table targets (`sql_table_edges.rs:30-36` indexes every `Class`), route prefix composition and handler binding (area 8) | the dirty files, plus the clean files whose candidates, exports, heritage, return types, tables or scope config changed |
+| index-time, with a caveat | communities, processes, and the name-paired heuristic edges: schema-field mirrors, event-topic mirrors, saga pairs | none; the answer names the pass as index-time |
+
+Shared `Annotation` nodes (`decorates_edges.rs:133-155`) are deduplicated across files: such a node lives while one file still references it.
 
 Every production pass in `resolution/builder.rs` (`:662` to `:829`) and every generated node kind has one row. A pass added later gets a row in the same change.
 
@@ -148,7 +151,7 @@ The incremental passes read the global tables from L2 through the facts adapters
 
 The incremental overlay needs areas 4, 7 and 8 for the facts it replays. Until each lands, the overlay keeps that edge kind index-time and says so in the caveat. L1 fragments carry symbols, imports and export aliases only today (`session/overlay_writer.rs:119-123`), so the overlay needs a new fragment encoding for the raw records it replays.
 
-**Proof of done.** Node and edge multisets of the dirty view equal those of a fresh build of the same tree, for these cases: a candidate added in another file, a candidate deleted, an export changed, a supertype changed, a return type changed, and a scope config changed. Each case keeps the caller's bytes unchanged.
+**Proof of done.** For every output in the per-file and incremental rows, the node and edge multisets of the dirty view equal those of a fresh build of the same tree, in these cases: a candidate added in another file, a candidate deleted, an export changed, a supertype changed, a return type changed, a table definition changed, and a scope config changed. Each case keeps the caller's bytes unchanged. The index-time outputs are listed apart, and the test asserts their caveat instead of their value. A temporary exclusion, such as an edge kind waiting for area 4, 7 or 8, names its owner and the slice that removes it.
 
 **Measured on 2026-10-25** (`ECP_PROF=1 ecp admin index --force`, one run each):
 
@@ -186,8 +189,8 @@ M3 is a string built by separate AST walks, for example `enclosing_function_path
 |---|---|---|
 | Lexical scope of a nested function | a string, built by 5 writers | a node index, built by 1 function |
 | Nested-function uid | can collide with a same-named outer function | distinct: hashes the parent uid |
-| `graph.bin` | v15 | v16, with one sparse sorted table of parent links |
-| Old data | — | a v15 graph rebuilds on the format bump; overlay fragments of another builder are skipped and re-parsed; old cache dirs age out through gc (A §5.4) |
+| `graph.bin` | v15 | the version after B's crate-table version (see Stored formats in Order), with one sparse sorted table of parent links |
+| Old data | — | a graph of the release before A rebuilds on the format bump; the previous-release fixture is that release's layout, not v15; overlay fragments of another builder are skipped and re-parsed; old cache dirs age out through gc (A §5.4) |
 | Display (`Foo.validate`) | from `owner_class` | M1/M2 nodes unchanged; a scoped node prints through its parent, e.g. `A::fmt` for `pad` inside `impl Display for A { fn fmt }` |
 
 **Risk.** Slice A-C combines a uid change, a stored-data migration and a semantic change of the Rust lexical tier. Its test must read a session written by the previous binary (repo `CLAUDE.md`, "What counts as having tested a change to stored data").
@@ -430,7 +433,7 @@ The largest copies are the `RawNode` literal (43 copies, 793 lines), the `RawImp
 
 - `overlay_resolver_parity.rs` (143 tests) compares targets by file, name, owner and rounded confidence after a sort and dedup, and its main path finds the caller by name only. A closure helper in the same file compares uid and line (`:64`, `:108`). The default wrapper in `tests/common/parity.rs` supplies no aliases or repo root. The configurable harness accepts caller-supplied builders and already tests aliases.
 - `overlay_differential_parity.rs` covers outgoing `Calls` edges only. Separate tests compare `References` edges (`overlay_variant_ref_parity.rs`). No test compares node sets, incoming edges, deleted files or renames, and a comprehensive node-and-edge matrix remains unestablished. This is how area 5's deleted-file defect stayed hidden.
-- The JS and TS shadow cascade runs, but fragments whose recorded mtime is zero (`auto_ensure.rs:1232`) fail the reader's freshness check, which needs an exact mtime. No test noticed.
+- The JS and TS shadow cascade runs, but fragments whose recorded mtime is zero (`auto_ensure.rs:1232`) fail the reader's freshness check, which needs an exact mtime. No test noticed. Area 11 adds the regression fixture; lane F repairs the mtime capture and removes that fixture's baseline.
 - `incremental_full_parity.rs` compares the overlay pipeline with itself, both with 19 providers, and pins the divergence of area 6.
 - The stored-data fixtures only assert a rejection, and the newest `graph.bin` fixture is v13 while the format is 15.
 - No mechanical gate enforces the 14-language rule; several test dimensions cover 3 to 5 languages.
@@ -452,9 +455,9 @@ Five contracts are shared by several areas. Each is a short design note plus its
 | C2 workspace facts | resolution scope per file, scope root, effective config, dependency map; stored once, read by index, overlay, flow and the `Imports` pass | 1 (the Rust subset in B's first round), 4, 5 (the invalidation closure) |
 | C3 dirty event | one record per changed path: added, modified, deleted, renamed (both halves); class source, resolution config or other. Only "other" skips the per-path syscalls | 1, 4, 5, 6 |
 | C4 raw records | the parser phases (collect captures, finalize nodes, bind raw records), the raw index to global node mapping, the endpoint of a raw record (node, file or unresolved), and the evidence classes exact, ambiguous, heuristic and unresolved | 2, 4, 5 (the records the overlay replays), 7, 8, 10 |
-| C5 routing result | file format, provider, language after parse, capability set, effective size cap; extension defaults plus ordered path rules | 1, 2, 5 (source or config class), 6, 10 |
+| C5 routing result | file format, provider, language after parse, capability set, effective size cap; extension defaults plus ordered path rules | 1, 2, 4 (`imports_edges.rs:152`), 5 (source or config class), 6, 7 (`scope_defines.rs:101`), 10 |
 
-Area 11 verifies all five. A lane's slice starts only after every contract in its row is in phase 1's done state.
+Area 11 verifies all five. A lane needs every contract that one of its areas uses, and all five reach phase 1's done state before phase 2 starts.
 
 ## Cross-area conflicts
 
@@ -502,20 +505,20 @@ Work runs in lanes. Two slices run at the same time only when their file lists s
 
 | Lane | Work | Files |
 |---|---|---|
-| 0a | area 11: the strict harness, the baseline files with owners, the dirty-event fixtures | `ecp-cli/tests/` only |
+| 0a | area 11: the strict harness, the baseline files with owners, the dirty-event fixtures | `ecp-cli/tests/`; `scripts/benchmark/benchmark_ecp.py` (the dirty-file scenario) |
 | 0b | area 3: the SHA lock, the rising name, sidecars inside `building/`, one snapshot rule | `build/orchestrator.rs`, `commit_lookup.rs`, `admin/gc.rs`, sidecar code in `auto_ensure.rs` |
-| 0c | area 9: the refusals | `ecp-core/src/cypher/` |
-| 0d | the small local fixes of the review page, except freshness F6, which waits for C3 and moves to lane F | per fix; a fix in `auto_ensure.rs` runs after 0b's edits there |
+| 0c | area 9: the refusals | `ecp-core/src/cypher/`; `ecp-core/tests/cypher_stream_aggregation.rs` |
+| 0d | the small local fixes of the review page that use only today's identity and error semantics, such as cli F4's ambiguity error. flow F8 (handler-bound response shapes) waits for C1 and C4 and moves to lane P; freshness F6 moves to phase 1 | per fix; a fix in `auto_ensure.rs` runs after 0b's edits there |
 
-**Phase 1: the five contracts.** Each one is a design note, a review, then its types. They do not change behaviour, so their slices land in any order. C1 and C2 come first, because the first rounds of A and B need them. C3 ships with one behaviour slice: the classification of porcelain paths that replaces freshness F6. It is the slice that lets the absolute latency gates bind.
+**Phase 1: the five contracts.** Each one is a design note, a review, then its types. C1 and C2 come first, because the first rounds of A and B need them. The contract slices change no behaviour and land in any order, with one exception: C3 ships with one behaviour slice, the classification of porcelain paths that replaces freshness F6. That slice lands after C2 and C5, because it decides the source and config classes from them, and it is the slice that lets the latency thresholds bind.
 
 **Phase 2: three implementation lanes.**
 
 | Lane | Slices, in order | Needs |
 |---|---|---|
-| R (resolution) | B's first round; A-A; the parent identity; A-B, A-C, A-D interleaved with B5 and B8 as the pair table below says; B7b's ladder half; area 4 for the other languages on the C2 facts | C1, C2, phase 0a, 0b |
-| F (freshness) | area 5 (read context, worktree top, dirty events, caveat in the payload); then the incremental overlay | C1, C3, phase 0b; the incremental overlay also needs B5 |
-| P (parse output) | area 6; area 7; area 8 | C4, C5; area 7 also needs the raw index mapping of C4 |
+| R (resolution) | B's first round; A-A; the parent identity; A-B, A-C, A-D interleaved with B5 and B8 as the pair table below says; B7b's ladder half; area 4 for the other languages on the C2 facts | C1 to C5, phase 0a, 0b |
+| F (freshness) | area 5 (read context, worktree top, dirty events, caveat in the payload, the shadow-cascade mtime); then the incremental overlay | C1 to C5, phase 0b; the incremental overlay also needs B5 |
+| P (parse output) | area 6, including the `Language` lookups in `session/view.rs:1770`, `:2828` and `resolver.rs:730`; area 7; area 8, with flow F8 | C1, C3, C4, C5; area 7 also needs the raw index mapping of C4 |
 
 Before a slice is dispatched, its inventory lists the production files, the tests, the baseline files, the stored payloads and the compatibility identifiers it touches. Slices that share a file run one at a time. Slices that share stored data are coordinated even when their files differ. Known shared points between lanes:
 
@@ -524,7 +527,7 @@ Before a slice is dispatched, its inventory lists the production files, the test
 | R, F | `session/view.rs`; `session/overlay_reader.rs` (A-A changes uid assignment, F changes which deleted and renamed inputs it accepts); the view cache key |
 | R, P | `resolution/builder.rs`, `resolution/index.rs`; the `graph.bin` they both produce |
 | F, P | the fragment payload and the manifest (F replays the raw records that P changes); `reanalyze.rs` |
-| R, F, P | `BUILDER_FINGERPRINT`, the parse cache, the parity baselines |
+| R, F, P | `BUILDER_FINGERPRINT`, the parse cache, the parity baselines; the C5 language lookups in `view.rs` and `resolver.rs` (P edits them one at a time with R and F, and the language after parse goes live only when every lookup reads C5) |
 
 | Shared code | Order |
 |---|---|
