@@ -80,7 +80,9 @@ fn assert_rejected_at_parse(out: &Output, label: &str) {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "{label}: expected non-zero exit");
     assert!(
-        stderr.contains("invalid value") && stderr.contains("json") && stderr.contains("toon"),
+        // clap words an empty and an unknown value differently; both list the
+        // valid values, which is what an agent needs to retry.
+        stderr.contains("possible values") && stderr.contains("json") && stderr.contains("toon"),
         "{label}: stderr must list the valid values: {stderr}"
     );
     assert!(

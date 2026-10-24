@@ -26,13 +26,37 @@ fn production_text(source: &str) -> &str {
     let mut from = 0;
     while let Some(at) = source[from..].find(marker) {
         let end = from + at;
-        let rest = source[end + marker.len()..].trim_start();
-        if rest.starts_with("mod ") || rest.starts_with("pub mod ") {
+        let rest = without_visibility(source[end + marker.len()..].trim_start());
+        if rest.starts_with("mod ") {
             return &source[..end];
         }
         from = end + 1;
     }
     source
+}
+
+/// `pub`, `pub(crate)`, `pub(super)` and `pub(in path)` all prefix a test module.
+fn without_visibility(item: &str) -> &str {
+    match item.strip_prefix("pub") {
+        Some(rest) if rest.starts_with('(') => rest
+            .find(')')
+            .map_or(rest, |close| rest[close + 1..].trim_start()),
+        Some(rest) => rest.trim_start(),
+        None => item,
+    }
+}
+
+#[test]
+fn test_production_text_restricted_visibility_test_module_cut() {
+    for module in [
+        "mod t",
+        "pub mod t",
+        "pub(crate) mod t",
+        "pub(in crate::x) mod t",
+    ] {
+        let source = format!("fn a() {{}}\n#[cfg(test)]\n{module} {{ git }}");
+        assert_eq!(production_text(&source), "fn a() {}\n", "{module}");
+    }
 }
 
 /// `Command::new("git")` however it is spaced, ignoring `//` comments.

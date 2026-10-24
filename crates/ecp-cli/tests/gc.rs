@@ -1576,10 +1576,13 @@ fn test_admin_gc_legacy_last_gc_stamp_removed_dry_run_kept() {
     assert!(!legacy.exists(), "the retired stamp outlived gc");
 }
 
+/// Directories only: `commits/` also holds the per-SHA lock files, which are
+/// not generations.
 fn gen_dirs(commits: &std::path::Path) -> std::collections::BTreeSet<String> {
     std::fs::read_dir(commits)
         .map(|it| {
             it.flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
                 .map(|e| e.file_name().to_string_lossy().to_string())
                 .collect()
         })
