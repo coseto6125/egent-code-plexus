@@ -440,7 +440,10 @@ mod tests {
             let RouteOutcome::Routed(route) = router.route(path) else {
                 panic!("{path} is routed");
             };
-            route.providers().next()
+            route
+                .candidates()
+                .first()
+                .map(|language| language.provider())
         };
         // Plain `.yaml`/`.yml` → kubernetes (content-sniffed inside the provider).
         assert_eq!(first("k8s/deploy.yaml"), Some("kubernetes"));

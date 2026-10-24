@@ -303,9 +303,21 @@ fn mapping_pairs<'t>(node: Node<'t>, source: &'t [u8]) -> Vec<((&'t str, Span), 
                 .and_then(|t| t.strip_suffix('"'))
                 .or_else(|| text.strip_prefix('\'').and_then(|t| t.strip_suffix('\'')))
                 .unwrap_or(text);
-            Some(((text, node_span(&pair)), value))
+            Some(((text, pair_span(&pair)), value))
         })
         .collect()
+}
+
+/// The span of a mapping pair. A block pair that ends the document ends past
+/// its trailing newline, at column 0 of the next row; that row holds none of
+/// the pair, so the span ends on the row before.
+fn pair_span(pair: &Node) -> Span {
+    let (start_row, start_col, end_row, end_col) = node_span(pair);
+    if end_col == 0 && end_row > start_row {
+        (start_row, start_col, end_row - 1, end_col)
+    } else {
+        (start_row, start_col, end_row, end_col)
+    }
 }
 
 /// Return `(FrameworkId, Option<schema map>)` for the document.
