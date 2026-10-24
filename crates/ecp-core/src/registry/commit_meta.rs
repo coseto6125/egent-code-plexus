@@ -73,7 +73,10 @@ use std::path::Path;
 /// routes' list, and a group's controller reaches an included route file.
 /// schema20: functions read named constants and reference callbacks; imports
 /// persist for every language, and chained calls use callee return types.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema20");
+/// schema21: a decorator that names several HTTP verbs gives one Route per
+/// verb, read from the method argument; a docker-compose flow-mapping `build`
+/// is read; the Cargo / pyproject package alias comes from the TOML table.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema21");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
