@@ -198,8 +198,10 @@ impl Engine {
 
     /// Attach an L1 session overlay dir (`~/.ecp/<repo>/sessions/<sid>/`) so
     /// query paths can surface dirty graph fragments over the L2 base. Wired
-    /// from `main.rs` after the engine loads (when a session overlay resolves).
-    /// `worktree_root` anchors fragment mtime validation for `overlay_view`.
+    /// from `read_context` after the engine loads (when a session overlay
+    /// resolves). `worktree_root` anchors fragment mtime validation for
+    /// `overlay_view`; it must be the worktree top the fragment paths are
+    /// relative to.
     pub fn with_overlay(mut self, dir: PathBuf, worktree_root: PathBuf) -> Self {
         self.overlay_dir = Some(dir);
         self.worktree_root = Some(worktree_root);

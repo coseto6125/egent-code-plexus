@@ -1065,20 +1065,116 @@ fn compute_single_limited(
     limit: usize,
 ) -> Result<(Vec<Hit>, u64), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
-    let index_dir = engine.index_dir();
 
     let kind_set: Option<Vec<String>> =
         kind_filter.map(|s| s.split(',').map(|k| k.trim().to_lowercase()).collect());
 
     let _ = mode;
-    Ok(bm25_hits_from_graph(
+    Ok(engine_bm25_hits(
+        engine,
         graph,
         pattern,
         &kind_set,
         &repo_label,
-        index_dir,
         limit,
     ))
+}
+
+/// [`bm25_hits_from_graph`] for `engine`, plus the symbols only its session
+/// overlay holds. Neither the base graph nor its tantivy index can hold a
+/// symbol added after the build, so without these rows a bm25 query answered
+/// "no match" for code on disk. A clean query builds no overlay view.
+fn engine_bm25_hits(
+    engine: &Engine,
+    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
+    pattern: &str,
+    kind_set: &Option<Vec<String>>,
+    repo_label: &Option<String>,
+    limit: usize,
+) -> (Vec<Hit>, u64) {
+    let (mut hits, total) = bm25_hits_from_graph(
+        graph,
+        pattern,
+        kind_set,
+        repo_label,
+        engine.index_dir(),
+        limit,
+    );
+    let overlay = overlay_bm25_hits(engine, pattern, kind_set, repo_label);
+    if overlay.is_empty() {
+        return (hits, total);
+    }
+    let total = total + overlay.len() as u64;
+    hits.extend(overlay);
+    // Stable, so the base rows keep their order among equal scores.
+    hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+    hits.truncate(limit);
+    (hits, total)
+}
+
+/// The overlay's new symbols, scored like the substring fallback (its 1.0 /
+/// 0.7 / 0.4 buckets, `score_source: substring`). A symbol the overlay only
+/// moved keeps answering through its base row. As in `overlay_matches`, a
+/// new symbol's caller and callee counts are not computed and read 0.
+fn overlay_bm25_hits(
+    engine: &Engine,
+    pattern: &str,
+    kind_set: &Option<Vec<String>>,
+    repo_label: &Option<String>,
+) -> Vec<Hit> {
+    let Some(view) = engine.overlay_dir().and_then(|_| engine.overlay_view()) else {
+        return Vec::new();
+    };
+    let pattern_lower = pattern.to_lowercase();
+    let terms = query_terms(&pattern_lower);
+    view.virtual_nodes()
+        .iter()
+        .filter(|h| h.replaced_base.is_none())
+        .filter(|h| {
+            kind_set.as_ref().is_none_or(|ks| {
+                let kind = format!("{:?}", h.kind).to_lowercase();
+                ks.iter().any(|k| k == &kind)
+            })
+        })
+        .filter_map(|h| {
+            let score = terms
+                .iter()
+                .filter_map(|term| substring_score(&h.name, term))
+                .reduce(f32::max)?;
+            let kind = crate::commands::format::node_kind_to_str(&h.kind).to_string();
+            let category = match ecp_core::file_category::is_test_path(&h.rel_path) {
+                true => FileCategory::Test,
+                false => FileCategory::Source,
+            };
+            Some(Hit {
+                repo: repo_label.clone(),
+                score,
+                score_source: ScoreSource::Substring,
+                signature: format!("{kind} {}", h.name),
+                kind,
+                file: h.rel_path.to_string(),
+                language: Language::from_path(&h.rel_path).as_str().to_string(),
+                line: h.start_line,
+                name: h.name.clone(),
+                caller_count: 0,
+                callers: Vec::new(),
+                callee_count: 0,
+                callees: Vec::new(),
+                category,
+            })
+        })
+        .collect()
+}
+
+/// A symbol name never contains whitespace, so a multi-word pattern (the
+/// hook's `pub struct HookInput`) is scored one term at a time and a name
+/// takes its best term; the whole string would match nothing.
+fn query_terms(pattern_lower: &str) -> Vec<&str> {
+    if pattern_lower.trim().is_empty() {
+        vec![""]
+    } else {
+        pattern_lower.split_whitespace().collect()
+    }
 }
 
 /// Primary BM25 path: queries the persisted Tantivy index when present,
@@ -1190,14 +1286,7 @@ fn substring_hits(
     limit: usize,
 ) -> (Vec<Hit>, u64) {
     let pattern_lower = pattern.to_lowercase();
-    // A symbol name never contains whitespace, so a multi-word pattern (the
-    // hook's `pub struct HookInput`) is scored one term at a time and a name
-    // takes its best term; the whole string would match nothing.
-    let terms: Vec<&str> = if pattern_lower.trim().is_empty() {
-        vec![""]
-    } else {
-        pattern_lower.split_whitespace().collect()
-    };
+    let terms = query_terms(&pattern_lower);
     let mut scored: Vec<(f32, usize)> = graph
         .nodes
         .iter()
@@ -1469,12 +1558,12 @@ pub fn compute_multi_with_engines(
                         // Multi-repo path: cross-repo top-K merging handles its
                         // own truncation, so the substring-fallback truncate
                         // signal from per-repo bm25 is discarded here.
-                        let (hits, _truncated_total) = bm25_hits_from_graph(
+                        let (hits, _truncated_total) = engine_bm25_hits(
+                            engine,
                             graph,
                             pattern,
                             &kind_set,
                             &repo_label,
-                            engine.index_dir(),
                             usize::MAX,
                         );
                         hits

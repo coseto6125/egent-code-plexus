@@ -1,8 +1,8 @@
 use clap::{CommandFactory, Parser};
 use ecp_cli::cli::{Cli, Commands};
 use ecp_cli::commands;
-use ecp_cli::engine::Engine;
-use ecp_cli::{admin, auto_ensure, graph_path};
+use ecp_cli::read_context::{ReadContext, ReadContextError};
+use ecp_cli::{admin, graph_path};
 
 // mimalloc as global allocator: heavily parallel build path
 // (16-thread rayon par_iter on 22k file parses + cache puts + edge
@@ -184,82 +184,54 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
                 )));
             }
         }
-        let cwd = cli
+        let dir = cli
             .command
             .repo()
             .map(std::path::PathBuf::from)
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let mut graph_path = graph_path::resolve(&cli.graph, &cwd);
 
         // An explicit `--graph <path>` is taken literally. If it does not exist,
         // error rather than warm-attaching to cwd's graph — answering a directed
         // query against the wrong graph is worse than an honest failure.
-        if graph_path::is_custom(&cli.graph) && !graph_path.exists() {
+        if graph_path::is_custom(&cli.graph) && !cli.graph.exists() {
             return Err(ecp_core::EcpError::InvalidArgument(format!(
                 "Error: --graph path does not exist: {}",
-                graph_path.display()
+                cli.graph.display()
             )));
         }
 
-        let engine =
-            match auto_ensure::ensure_fresh(auto_ensure::IndexNeed::NearCurrent, &graph_path, &cwd)
-            {
-                Err(err) => {
-                    return Err(ecp_core::EcpError::InvalidArgument(format!(
-                        "Error preparing index for {}: {err}",
-                        cwd.display()
-                    )));
+        // The worktree top, the ensured graph and this session's L1 overlay
+        // (uncommitted edits the L2 graph has not absorbed). Agent hosts inject
+        // a stable session id (ECP_SESSION_ID / CLAUDE_CODE_SESSION_ID); a bare
+        // CLI invocation falls back to a per-process id, so the fragments the
+        // gate just wrote are still read back by this same process.
+        let ctx = ReadContext::for_dir(&dir, &cli.graph).map_err(|err| {
+            ecp_core::EcpError::InvalidArgument(match err {
+                ReadContextError::Ensure(err) => {
+                    format!("Error preparing index for {}: {err}", dir.display())
                 }
-                Ok(auto_ensure::EnsureFreshOutcome::WarmAttach { sibling_graph_path }) => {
-                    // The sibling passed auto_ensure's distance gate (≤1 commit behind),
-                    // so it serves silently while the background rebuild runs. No "may be
-                    // stale" note: a per-invocation apology for a near-current graph is
-                    // context noise the LLM can't act on, and a too-stale sibling never
-                    // reaches this arm. The actionable hint is reserved for load failure.
-                    match Engine::load_warm(&sibling_graph_path) {
-                        Ok(e) => e,
-                        Err(err) => {
-                            return Err(ecp_core::EcpError::InvalidArgument(format!(
-                                "warm-attach graph load failed ({}): {err}. \
-                             Rebuild the index with `ecp admin index --force --repo .`",
-                                sibling_graph_path.display(),
-                            )));
-                        }
-                    }
-                }
-                Ok(auto_ensure::EnsureFreshOutcome::Ready) => {
-                    graph_path = graph_path::resolve(&cli.graph, &cwd);
-                    match Engine::load(&graph_path) {
-                        Ok(e) => e,
-                        Err(err) => {
-                            return Err(ecp_core::EcpError::InvalidArgument(format!(
-                                "Error loading graph from {}: {}",
-                                graph_path.display(),
-                                err
-                            )));
-                        }
-                    }
-                }
-            };
-
-        // Attach the session's L1 overlay dir (if one resolves) so query commands
-        // can surface uncommitted working-tree edits the L2 graph hasn't absorbed.
-        // Agent hosts inject a stable session id (ECP_SESSION_ID /
-        // CLAUDE_CODE_SESSION_ID); a bare CLI invocation falls back to a
-        // per-process id, so the fragments `ensure_fresh` just wrote above are
-        // still read back by this same process. Empty/absent overlay = zero
-        // query-path cost.
-        // The overlay's symbols and edges belong to cwd's own graph, so
-        // merging them into a foreign graph answers a directed query with
-        // rows that graph does not contain. `--graph` pointing at the very
-        // file cwd would have resolved is not foreign, and keeps it.
-        let foreign_graph =
-            graph_path::is_custom(&cli.graph) && !graph_path::is_cwd_graph(&graph_path, &cwd);
-        let engine = match auto_ensure::resolve_session_overlay_dir(&cwd) {
-            Some(dir) if dir.is_dir() && !foreign_graph => engine.with_overlay(dir, cwd.clone()),
-            _ => engine,
-        };
+                // A near-current sibling serves silently while the background
+                // rebuild runs; the actionable hint is reserved for load failure.
+                ReadContextError::Load {
+                    graph_path,
+                    warm_attach: true,
+                    error,
+                } => format!(
+                    "warm-attach graph load failed ({}): {error}. \
+                     Rebuild the index with `ecp admin index --force --repo .`",
+                    graph_path.display(),
+                ),
+                ReadContextError::Load {
+                    graph_path,
+                    warm_attach: false,
+                    error,
+                } => format!("Error loading graph from {}: {error}", graph_path.display()),
+            })
+        })?;
+        let ReadContext {
+            engine, graph_path, ..
+        } = ctx;
 
         (Some(engine), Some(graph_path))
     } else {

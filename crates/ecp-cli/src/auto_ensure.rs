@@ -554,18 +554,48 @@ pub fn ensure_fresh(
     graph_path: &Path,
     worktree_root: &Path,
 ) -> Result<EnsureFreshOutcome, String> {
-    ensure_fresh_with_rebuild(need, graph_path, worktree_root).map(|(outcome, _)| outcome)
+    ensure_fresh_with_rebuild(need, graph_path, worktree_root).map(|ensured| ensured.outcome)
 }
 
-/// `ensure_fresh` plus the `graph.bin` a synchronous build published. A
-/// rebuild lands in a new `.gen` commit dir and leaves the probed file in
-/// place, so a caller that loads `graph_path` after a build reads the stale
-/// graph (or nothing, when `graph_path` was the never-built legacy default).
-fn ensure_fresh_with_rebuild(
+/// What `ensure_fresh_with_rebuild` did, for the read context.
+pub(crate) struct Ensured {
+    pub(crate) outcome: EnsureFreshOutcome,
+    /// The `graph.bin` a synchronous build published. A rebuild lands in a
+    /// new `.gen` commit dir and leaves the probed file in place, so a caller
+    /// that loads `graph_path` after a build reads the stale graph (or
+    /// nothing, when `graph_path` was the never-built legacy default).
+    pub(crate) rebuilt: Option<PathBuf>,
+    /// The source and config changes the gate saw; empty when it saw none.
+    /// `None` when a build or a warm attach answered and no gate named paths.
+    pub(crate) dirty: Option<DirtySet<ClassifiedPath>>,
+}
+
+impl Ensured {
+    fn built(rebuilt: PathBuf) -> Self {
+        Self {
+            outcome: EnsureFreshOutcome::Ready,
+            rebuilt: Some(rebuilt),
+            dirty: None,
+        }
+    }
+
+    fn current(dirty: Option<DirtySet<ClassifiedPath>>) -> Self {
+        Self {
+            outcome: EnsureFreshOutcome::Ready,
+            rebuilt: None,
+            dirty,
+        }
+    }
+}
+
+/// `ensure_fresh` plus the build it published and the dirty set it read.
+/// `worktree_root` must be the worktree top: porcelain paths are relative to
+/// it (`read_context::worktree_top`).
+pub(crate) fn ensure_fresh_with_rebuild(
     need: IndexNeed<'_>,
     graph_path: &Path,
     worktree_root: &Path,
-) -> Result<(EnsureFreshOutcome, Option<PathBuf>), String> {
+) -> Result<Ensured, String> {
     beat_session_heartbeat(worktree_root);
     let state =
         ensure_index(graph_path, worktree_root).map_err(|e| format!("ensure_index probe: {e}"))?;
@@ -575,7 +605,8 @@ fn ensure_fresh_with_rebuild(
         IndexNeed::NearCurrent => None,
     };
     match state {
-        EnsureResult::Ready => Ok((EnsureFreshOutcome::Ready, None)),
+        // Ready proves no source or config change, so the set is empty.
+        EnsureResult::Ready => Ok(Ensured::current(DirtySet::from_events(Vec::new()).ok())),
         EnsureResult::Missing => {
             // A sibling is a different commit, so it is only ever an answer to
             // `NearCurrent`. Deciding here rather than unwinding a warm-attach
@@ -590,12 +621,13 @@ fn ensure_fresh_with_rebuild(
                         "l2.warm-attach sibling={} rebuild=background{note}",
                         sibling.display()
                     );
-                    return Ok((
-                        EnsureFreshOutcome::WarmAttach {
+                    return Ok(Ensured {
+                        outcome: EnsureFreshOutcome::WarmAttach {
                             sibling_graph_path: sibling,
                         },
-                        None,
-                    ));
+                        rebuilt: None,
+                        dirty: None,
+                    });
                 }
             }
             let start = std::time::Instant::now();
@@ -605,10 +637,7 @@ fn ensure_fresh_with_rebuild(
                 .map_err(|e| format!("build_l2: {e}"))?;
             park_tantivy_writer(&mut result, worktree_root);
             eprintln!("l2.built elapsed={:.2}s", start.elapsed().as_secs_f32());
-            Ok((
-                EnsureFreshOutcome::Ready,
-                Some(result.commit_dir.join("graph.bin")),
-            ))
+            Ok(Ensured::built(result.commit_dir.join("graph.bin")))
         }
         EnsureResult::Stale {
             needs_full_rebuild,
@@ -630,10 +659,7 @@ fn ensure_fresh_with_rebuild(
                     .map_err(|e| format!("build_l2 (incompatible schema): {e}"))?;
                 park_tantivy_writer(&mut result, worktree_root);
                 eprintln!("l2.rebuilt elapsed={:.2}s", start.elapsed().as_secs_f32());
-                return Ok((
-                    EnsureFreshOutcome::Ready,
-                    Some(result.commit_dir.join("graph.bin")),
-                ));
+                Ok(Ensured::built(result.commit_dir.join("graph.bin")))
             } else {
                 // Header-compatible + dirty files: incremental refresh path.
                 //
@@ -686,7 +712,7 @@ fn ensure_fresh_with_rebuild(
                 if gate.rel_paths.is_empty() {
                     test_counters::FRESH_GATE_SKIP_COUNT
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    return Ok((EnsureFreshOutcome::Ready, None));
+                    return Ok(Ensured::current(Some(dirty)));
                 }
                 // Stat BEFORE parsing: the manifest mtime must belong to the
                 // content that was parsed. Statting after the parse would let
@@ -732,14 +758,15 @@ fn ensure_fresh_with_rebuild(
                 // working tree is now consistent with the indexed state of the
                 // current HEAD — refresh the fingerprint as the very last step.
                 write_head_sha_sidecar(graph_path, worktree_root);
+                Ok(Ensured::current(Some(dirty)))
             }
-            Ok((EnsureFreshOutcome::Ready, None))
         }
     }
 }
 
 /// Version-checked graph load for every path that loads a graph by repo
-/// (find multi-repo, group, diff) rather than by explicit `--graph`.
+/// (find multi-repo, group, peers plan) rather than by explicit `--graph`:
+/// the engine of [`crate::read_context::ReadContext::for_graph`].
 ///
 /// Runs `ensure_fresh` first so the two-tier staleness contract applies
 /// uniformly: a header/fingerprint drift forces a full `build_l2` before the
@@ -747,6 +774,8 @@ fn ensure_fresh_with_rebuild(
 /// parser bug already fixed upstream), and a dirty working tree triggers the
 /// incremental path. On `WarmAttach` (current SHA has no graph yet) it loads
 /// the sibling graph and flags it stale so the caller can surface a note.
+/// The session overlay is attached, so uncommitted symbols answer here as
+/// they do through `main.rs`.
 ///
 /// `--graph <path>` is the one documented opt-out and must NOT route through
 /// here: it loads the named graph verbatim via `Engine::load`, since the user
@@ -755,43 +784,36 @@ pub fn load_ensured(
     graph_path: &Path,
     worktree_root: &Path,
 ) -> Result<crate::engine::Engine, String> {
-    match ensure_fresh_with_rebuild(IndexNeed::NearCurrent, graph_path, worktree_root)? {
-        (EnsureFreshOutcome::Ready, rebuilt) => {
-            let graph_path = rebuilt.as_deref().unwrap_or(graph_path);
-            let mut engine = crate::engine::Engine::load(graph_path)
-                .map_err(|e| format!("load graph {}: {e}", graph_path.display()))?;
-            // Callers resolve `graph_path` as the latest *published* graph,
-            // which lags committed-but-unindexed work. `ensure_fresh` then
-            // reports Ready because the L1 overlay absorbed the delta — but
-            // queries read L2 only, so the engine must self-flag or a
-            // `found:false` would read as a definitive "does not exist".
-            engine.behind_head = graph_behind_head(graph_path, worktree_root);
-            // Self-heal: every L1 overlay refresh rewrites the `.head_sha`
-            // sidecar to the current HEAD, so `ensure_index` keeps answering
-            // Ready and a behind-HEAD L2 never rebuilds on its own (observed:
-            // 15 days stale before a manual --force). Reuse the warm-attach
-            // spawn — flock-deduped, skipped under ECP_SKIP_BG_REBUILD. The
-            // once-per-process guard matters for long-lived MCP processes,
-            // which would otherwise fork a probe `sh` on every query for the
-            // whole rebuild window; CLI one-shots pay one spawn either way.
-            if engine.behind_head
-                && !BEHIND_HEAD_SPAWNED.swap(true, std::sync::atomic::Ordering::Relaxed)
-            {
-                test_counters::BEHIND_HEAD_HEAL_COUNT
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let note = spawn_background_rebuild(worktree_root);
-                eprintln!("l2.behind-head rebuild=background{note}");
-            }
-            Ok(engine)
-        }
-        (EnsureFreshOutcome::WarmAttach { sibling_graph_path }, _) => {
-            crate::engine::Engine::load_warm(&sibling_graph_path).map_err(|e| {
-                format!(
-                    "load warm-attach graph {}: {e}",
-                    sibling_graph_path.display()
-                )
-            })
-        }
+    crate::read_context::ReadContext::for_graph(graph_path, worktree_root)
+        .map(|ctx| ctx.engine)
+        .map_err(|e| e.to_string())
+}
+
+/// Flag a by-repo graph that predates HEAD and start its rebuild.
+///
+/// Callers resolve `graph_path` as the latest *published* graph, which lags
+/// committed-but-unindexed work. `ensure_fresh` then reports Ready because
+/// the L1 overlay absorbed the delta — but the overlay holds only uncommitted
+/// files, so the engine must self-flag or a `found:false` would read as a
+/// definitive "does not exist".
+pub(crate) fn flag_behind_head(
+    engine: &mut crate::engine::Engine,
+    graph_path: &Path,
+    worktree_root: &Path,
+) {
+    engine.behind_head = graph_behind_head(graph_path, worktree_root);
+    // Self-heal: every L1 overlay refresh rewrites the `.head_sha`
+    // sidecar to the current HEAD, so `ensure_index` keeps answering
+    // Ready and a behind-HEAD L2 never rebuilds on its own (observed:
+    // 15 days stale before a manual --force). Reuse the warm-attach
+    // spawn — flock-deduped, skipped under ECP_SKIP_BG_REBUILD. The
+    // once-per-process guard matters for long-lived MCP processes,
+    // which would otherwise fork a probe `sh` on every query for the
+    // whole rebuild window; CLI one-shots pay one spawn either way.
+    if engine.behind_head && !BEHIND_HEAD_SPAWNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        test_counters::BEHIND_HEAD_HEAL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let note = spawn_background_rebuild(worktree_root);
+        eprintln!("l2.behind-head rebuild=background{note}");
     }
 }
 
@@ -1159,7 +1181,8 @@ pub fn join_pending_tantivy_writers() {
     }
 }
 
-/// Resolve the L1 session overlay dir for `worktree_root`, matching exactly the
+/// Resolve the L1 session overlay dir for `worktree_root` (the worktree top,
+/// which keys the fragments' paths), matching exactly the
 /// path `apply_l1_overlay_updates` writes to: `<home_ecp>/<repo_dir>/sessions/
 /// <session_id>`. Returns `None` when the repo identity can't be resolved. The
 /// dir may not exist yet (no overlay written this session) — the caller checks.

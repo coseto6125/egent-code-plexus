@@ -19,6 +19,7 @@ pub mod output;
 pub mod parse_cache;
 pub mod peer;
 pub mod provider_registry;
+pub mod read_context;
 pub mod reanalyze;
 pub mod repo_identity;
 pub mod repo_selector;
