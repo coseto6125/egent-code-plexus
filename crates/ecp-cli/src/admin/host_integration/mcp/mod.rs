@@ -1,37 +1,18 @@
-//! "Other Code Agents" sub-menu — agents without a host-first entry, plus
-//! the Codex CLI MCP-mode path (distinct from its native-tools patch). Claude
-//! Code and Gemini CLI are fully covered by host-first scriptable commands
-//! and no longer appear here.
+//! "Other Code Agents" sub-menu — the Codex CLI MCP-mode path (distinct from
+//! its native-tools patch). Claude Code and Gemini CLI are fully covered by
+//! host-first scriptable commands and no longer appear here. Cursor, Windsurf,
+//! Cline/Roo, Copilot and generic hosts were print-only stubs and are gone.
 
 pub(crate) mod claude_code;
-pub mod cline_roo;
 pub mod codex;
-pub mod copilot;
-pub mod cursor;
 pub(crate) mod gemini;
-pub mod generic;
-pub mod windsurf;
 
 use crate::admin::menu::{self, select};
 use dialoguer::theme::ColorfulTheme;
 use ecp_core::EcpError;
 
 const HOSTS: &[menu::Item<'_>] = &[
-    ("Cursor", "Cursor editor — ~/.cursor/mcp.json"),
-    (
-        "Windsurf",
-        "Windsurf editor — ~/.codeium/windsurf/mcp_config.json",
-    ),
-    (
-        "Cline / Roo Code",
-        "VS Code extensions — cline_mcp_settings.json",
-    ),
     ("Codex CLI (MCP mode)", "Codex CLI — ~/.codex/config.toml"),
-    ("Copilot", "GitHub Copilot — VS Code settings.json"),
-    (
-        "Generic (any MCP host)",
-        "print stdio command + JSON snippet to paste",
-    ),
     ("← Back", ""),
 ];
 
@@ -49,47 +30,12 @@ pub fn run(theme: &ColorfulTheme) -> Result<(), EcpError> {
         match choice {
             Some(0) => host_menu(
                 theme,
-                "Cursor",
-                cursor::install,
-                cursor::uninstall,
-                cursor::status,
-            )?,
-            Some(1) => host_menu(
-                theme,
-                "Windsurf",
-                windsurf::install,
-                windsurf::uninstall,
-                windsurf::status,
-            )?,
-            Some(2) => host_menu(
-                theme,
-                "Cline / Roo Code",
-                cline_roo::install,
-                cline_roo::uninstall,
-                cline_roo::status,
-            )?,
-            Some(3) => host_menu(
-                theme,
                 "Codex CLI (MCP mode)",
                 codex::install,
                 codex::uninstall,
                 codex::status,
             )?,
-            Some(4) => host_menu(
-                theme,
-                "Copilot",
-                copilot::install,
-                copilot::uninstall,
-                copilot::status,
-            )?,
-            Some(5) => host_menu(
-                theme,
-                "Generic MCP host",
-                generic::install,
-                generic::uninstall,
-                generic::status,
-            )?,
-            Some(6) | None => return Ok(()),
+            Some(1) | None => return Ok(()),
             _ => unreachable!(),
         }
     }
@@ -112,5 +58,16 @@ fn host_menu(
             Some(3) | None => return Ok(()),
             _ => unreachable!(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hosts_menu_lists_only_working_installers() {
+        let labels: Vec<&str> = HOSTS.iter().map(|(label, _)| *label).collect();
+        assert_eq!(labels, ["Codex CLI (MCP mode)", "← Back"]);
     }
 }

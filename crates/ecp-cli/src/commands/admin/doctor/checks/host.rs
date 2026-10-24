@@ -30,11 +30,6 @@ pub(crate) fn check(fix: bool) -> Vec<CheckResult> {
         ),
         ("host:codex-mcp", mcp::codex::status(), Some(codex_mcp_fix)),
         ("host:codex-native", native::codex::status(), None),
-        ("host:cursor-mcp", mcp::cursor::status(), None),
-        ("host:copilot-mcp", mcp::copilot::status(), None),
-        ("host:windsurf-mcp", mcp::windsurf::status(), None),
-        ("host:cline-roo-mcp", mcp::cline_roo::status(), None),
-        ("host:generic-mcp", mcp::generic::status(), None),
     ];
 
     hosts

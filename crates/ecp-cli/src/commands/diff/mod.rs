@@ -181,12 +181,12 @@ pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, EcpError> {
     // both the resolver JSONL (for bindings) and graph.bin (for routes /
     // contracts / symbols) as side effects of one analyze pass — so we run
     // it ONCE per state regardless of which sections are requested.
-    let current_jsonl =
-        std::env::temp_dir().join(format!("ecp-diff-current-{}.jsonl", std::process::id()));
-    let baseline_jsonl =
-        std::env::temp_dir().join(format!("ecp-diff-baseline-{baseline_sha}.jsonl"));
-    let baseline_graph_tmp =
-        std::env::temp_dir().join(format!("ecp-diff-graph-baseline-{baseline_sha}.bin"));
+    // Built from a scratch checkout, never from the user's tree: stashing and
+    // checking out there loses staged state and races a second `ecp diff`.
+    let baseline_checkout = git_guard::BaselineCheckout::create(&repo_dir, &baseline_sha)?;
+    let current_jsonl = baseline_checkout.scratch().join("current.jsonl");
+    let baseline_jsonl = baseline_checkout.scratch().join("baseline.jsonl");
+    let baseline_graph_tmp = baseline_checkout.scratch().join("baseline-graph.bin");
 
     bindings::dump(&repo_dir, &current_jsonl)?;
     // Current side: full ensure (ecp-version fingerprint → rebuild; dirty
@@ -195,21 +195,21 @@ pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, EcpError> {
     let current_graph = ensure_graph_synchronously(&repo_dir, None, "current")?;
 
     {
-        let _guard = git_guard::GitGuard::enter(&repo_dir, &baseline_sha)?;
-        bindings::dump(&repo_dir, &baseline_jsonl)?;
-        // Baseline side: ensure under the checked-out baseline SHA so both
-        // snapshots are produced by the SAME ecp binary — a fingerprint drift
-        // here means the cached baseline graph was built by an older ecp, which
-        // would surface as a phantom diff. Rebuild it before the copy.
+        let baseline_dir = baseline_checkout.path();
+        bindings::dump(&baseline_dir, &baseline_jsonl)?;
+        // Baseline side: ensure under the baseline SHA so both snapshots are
+        // produced by the SAME ecp binary — a fingerprint drift here means the
+        // cached baseline graph was built by an older ecp, which would surface
+        // as a phantom diff. Rebuild it before the copy.
         let baseline_graph =
-            ensure_graph_synchronously(&repo_dir, Some(&baseline_sha), "baseline")?;
+            ensure_graph_synchronously(&baseline_dir, Some(&baseline_sha), "baseline")?;
         std::fs::copy(&baseline_graph, &baseline_graph_tmp).map_err(|e| {
             EcpError::Output(format!(
                 "copy baseline graph {}: {e}",
                 baseline_graph.display()
             ))
         })?;
-    } // _guard drops — branch + stash restored
+    }
 
     if want_bindings {
         let baseline_map = bindings::load_jsonl(&baseline_jsonl)?;
@@ -235,9 +235,7 @@ pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, EcpError> {
         symbols_diff = Some(symbols::diff(&baseline_snap, &current_snap)?);
     }
 
-    let _ = std::fs::remove_file(&current_jsonl);
-    let _ = std::fs::remove_file(&baseline_jsonl);
-    let _ = std::fs::remove_file(&baseline_graph_tmp);
+    drop(baseline_checkout);
 
     Ok(DiffPayload {
         bindings: bindings_diff,
@@ -255,7 +253,7 @@ pub fn build_payload(args: &DiffArgs) -> Result<DiffPayload, EcpError> {
 /// Ensure the graph for the currently-checked-out tree is published and
 /// synchronously on disk, then return its resolved path.
 ///
-/// `sha` is `Some` for the baseline side (built under a GitGuard checkout) and
+/// `sha` is `Some` for the baseline side (built from a `BaselineCheckout` worktree) and
 /// `None` for the current side (HEAD). The path is resolved *after* the ensure
 /// so a freshly published commit dir wins over the legacy `.ecp/graph.bin`.
 fn ensure_graph_synchronously(

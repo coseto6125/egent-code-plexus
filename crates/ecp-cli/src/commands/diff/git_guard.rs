@@ -1,124 +1,219 @@
-//! RAII git workspace guard for `ecp diff`.
+//! Scratch checkout of the baseline commit for `ecp diff`.
 //!
-//! On `enter`:
-//!   1. Stash dirty tree (if any), recording whether stash was created.
-//!   2. Detach HEAD to target SHA.
+//! The baseline graph is built from a detached `git worktree` of the baseline
+//! SHA in a unique temp dir. The user's working tree, index and stash list are
+//! never touched, so no path (error, panic, concurrent second `ecp diff`)
+//! can lose or reshape their uncommitted work.
 //!
-//! On drop:
-//!   3. Checkout the original ref.
-//!   4. `git stash pop` if a stash was created in step 1.
+//! On drop the worktree is removed with `git worktree remove --force` and the
+//! temp dir deleted by the exact path this guard created. A SIGINT skips
+//! `Drop`: the temp dir and one prunable `.git/worktrees/<name>` entry stay,
+//! and the user's tree is still untouched.
 //!
-//! Errors during drop are logged to stderr (we cannot return from Drop).
-//!
-//! All git invocations go through `safe_exec::git()` per security spec §8 H4.
-//! The three that write the worktree — `stash push`, `checkout`, `stash pop` —
-//! additionally carry `safe_exec::filter_overrides`, because content
-//! conversion is what runs a repository's own filter driver.
+//! The `worktree add` writes files, so it carries `safe_exec::filter_overrides`:
+//! content conversion is what runs a repository's own filter driver.
 
 use crate::git::safe_exec;
 use ecp_core::EcpError;
 use std::path::{Path, PathBuf};
+use tempfile::TempDir;
 
-pub struct GitGuard {
+pub struct BaselineCheckout {
     repo_dir: PathBuf,
-    original_ref: String,
-    stash_created: bool,
+    checkout_root: PathBuf,
+    /// `repo_dir` relative to the repository top level, so a diff run from a
+    /// subdirectory indexes the same subdirectory of the baseline.
+    prefix: PathBuf,
+    scratch: TempDir,
     filter_overrides: Vec<String>,
 }
 
-impl GitGuard {
-    pub fn enter(repo_dir: &Path, target_sha: &str) -> Result<Self, EcpError> {
+impl BaselineCheckout {
+    pub fn create(repo_dir: &Path, target_sha: &str) -> Result<Self, EcpError> {
         let filter_overrides = safe_exec::filter_overrides(repo_dir);
-        let original_ref = current_head_ref(repo_dir)?;
-        let stash_created = stash_if_dirty(repo_dir, &filter_overrides)?;
+        let scratch = tempfile::Builder::new()
+            .prefix("ecp-diff-baseline-")
+            .tempdir()
+            .map_err(|e| EcpError::Output(format!("create baseline scratch dir: {e}")))?;
+        let checkout_root = scratch.path().join("checkout");
+        let prefix = show_prefix(repo_dir)?;
 
         let out = safe_exec::git_with_overrides(repo_dir, &filter_overrides)
-            .args(["checkout", "--detach", target_sha])
+            .args(["worktree", "add", "--detach"])
+            .arg(&checkout_root)
+            .arg(target_sha)
             .output()
-            .map_err(|e| EcpError::Output(format!("git checkout failed to spawn: {e}")))?;
+            .map_err(|e| EcpError::Output(format!("git worktree add failed to spawn: {e}")))?;
         if !out.status.success() {
-            // Best-effort restore stash before bailing.
-            if stash_created {
-                let _ = safe_exec::git_with_overrides(repo_dir, &filter_overrides)
-                    .args(["stash", "pop"])
-                    .output();
-            }
             return Err(EcpError::Output(format!(
-                "git checkout {target_sha} failed: {}",
+                "git worktree add {target_sha} failed: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
             )));
         }
 
-        Ok(GitGuard {
+        Ok(Self {
             repo_dir: repo_dir.to_path_buf(),
-            original_ref,
-            stash_created,
+            checkout_root,
+            prefix,
+            scratch,
             filter_overrides,
         })
     }
+
+    /// Directory to index: the baseline counterpart of the user's `repo_dir`.
+    pub fn path(&self) -> PathBuf {
+        self.checkout_root.join(&self.prefix)
+    }
+
+    /// Private temp dir for intermediate files; removed with the checkout.
+    pub fn scratch(&self) -> &Path {
+        self.scratch.path()
+    }
 }
 
-impl Drop for GitGuard {
+impl Drop for BaselineCheckout {
     fn drop(&mut self) {
-        let restore = safe_exec::git_with_overrides(&self.repo_dir, &self.filter_overrides)
-            .args(["checkout", &self.original_ref])
+        let removed = safe_exec::git_with_overrides(&self.repo_dir, &self.filter_overrides)
+            .args(["worktree", "remove", "--force"])
+            .arg(&self.checkout_root)
             .output();
-        match restore {
-            Err(e) => eprintln!("GitGuard drop: git checkout failed: {e}"),
+        match removed {
+            Err(e) => eprintln!("BaselineCheckout drop: git worktree remove failed: {e}"),
             Ok(out) if !out.status.success() => eprintln!(
-                "GitGuard drop: git checkout {} stderr: {}",
-                self.original_ref,
+                "BaselineCheckout drop: git worktree remove stderr: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
             ),
             Ok(_) => {}
         }
-        if self.stash_created {
-            let pop = safe_exec::git_with_overrides(&self.repo_dir, &self.filter_overrides)
-                .args(["stash", "pop"])
-                .output();
-            if let Err(e) = pop {
-                eprintln!("GitGuard drop: git stash pop failed: {e}");
-            }
-        }
     }
 }
 
-fn current_head_ref(repo_dir: &Path) -> Result<String, EcpError> {
+fn show_prefix(repo_dir: &Path) -> Result<PathBuf, EcpError> {
     let out = safe_exec::git()
-        .args(["symbolic-ref", "--short", "HEAD"])
+        .args(["rev-parse", "--show-prefix"])
         .current_dir(repo_dir)
         .output()
-        .map_err(|e| EcpError::Output(format!("git symbolic-ref failed: {e}")))?;
-    if out.status.success() {
-        return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
-    }
-    let out = safe_exec::git()
-        .args(["rev-parse", "HEAD"])
-        .current_dir(repo_dir)
-        .output()
-        .map_err(|e| EcpError::Output(format!("git rev-parse HEAD failed: {e}")))?;
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-fn stash_if_dirty(repo_dir: &Path, filter_overrides: &[String]) -> Result<bool, EcpError> {
-    // Overridden here too: `status` compares content through the clean filter
-    // whenever the stat cache cannot settle the question on its own.
-    let out = safe_exec::git_with_overrides(repo_dir, filter_overrides)
-        .args(["status", "--porcelain"])
-        .output()
-        .map_err(|e| EcpError::Output(format!("git status failed: {e}")))?;
-    if out.stdout.is_empty() {
-        return Ok(false);
-    }
-    let stash = safe_exec::git_with_overrides(repo_dir, filter_overrides)
-        .args(["stash", "push", "-u", "-m", "ecp-diff-auto-stash"])
-        .output()
-        .map_err(|e| EcpError::Output(format!("git stash failed: {e}")))?;
-    if !stash.status.success() {
+        .map_err(|e| EcpError::Output(format!("git rev-parse failed: {e}")))?;
+    if !out.status.success() {
         return Err(EcpError::Output(format!(
-            "git stash push failed: {}",
-            String::from_utf8_lossy(&stash.stderr).trim()
+            "git rev-parse --show-prefix failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
-    Ok(true)
+    Ok(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// Everything a stash/checkout would disturb, as bytes.
+    fn snapshot(repo: &Path) -> Vec<String> {
+        vec![
+            git(repo, &["status", "--porcelain=v2", "--branch", "-uall"]),
+            git(repo, &["diff"]),
+            git(repo, &["diff", "--cached"]),
+            git(repo, &["stash", "list", "--format=%H %gs"]),
+            git(repo, &["rev-parse", "HEAD"]),
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            std::fs::read_to_string(repo.join("untracked.txt")).unwrap(),
+        ]
+    }
+
+    fn dirty_repo() -> (TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "v1\n").unwrap();
+        git(repo, &["add", "-A"]);
+        git(repo, &["commit", "-qm", "v1"]);
+        let baseline = git(repo, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(repo.join("a.txt"), "v2\n").unwrap();
+        git(repo, &["commit", "-qam", "v2"]);
+        std::fs::write(repo.join("a.txt"), "stashed\n").unwrap();
+        git(repo, &["stash", "push", "-qm", "users-own-stash"]);
+        // Staged edit + further unstaged edit on the same file + untracked file.
+        std::fs::write(repo.join("a.txt"), "staged\n").unwrap();
+        git(repo, &["add", "a.txt"]);
+        std::fs::write(repo.join("a.txt"), "dirty on top\n").unwrap();
+        std::fs::write(repo.join("untracked.txt"), "untracked\n").unwrap();
+        (dir, baseline)
+    }
+
+    #[test]
+    fn test_create_dirty_tree_leaves_tree_index_and_stash_byte_identical() {
+        let (dir, baseline) = dirty_repo();
+        let before = snapshot(dir.path());
+        {
+            let checkout = BaselineCheckout::create(dir.path(), &baseline).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(checkout.path().join("a.txt")).unwrap(),
+                "v1\n"
+            );
+            assert!(!checkout.path().join("untracked.txt").exists());
+            assert_eq!(
+                snapshot(dir.path()),
+                before,
+                "tree disturbed while checkout is live"
+            );
+        }
+        assert_eq!(snapshot(dir.path()), before, "tree disturbed after drop");
+    }
+
+    #[test]
+    fn test_create_unknown_sha_errors_and_leaves_tree_untouched() {
+        let (dir, _) = dirty_repo();
+        let before = snapshot(dir.path());
+        let bogus = "0123456789abcdef0123456789abcdef01234567";
+        assert!(BaselineCheckout::create(dir.path(), bogus).is_err());
+        assert_eq!(snapshot(dir.path()), before);
+    }
+
+    #[test]
+    fn test_drop_removes_worktree_registration_and_scratch_dir() {
+        let (dir, baseline) = dirty_repo();
+        let scratch;
+        {
+            let checkout = BaselineCheckout::create(dir.path(), &baseline).unwrap();
+            scratch = checkout.scratch().to_path_buf();
+            assert!(git(dir.path(), &["worktree", "list"]).lines().count() == 2);
+        }
+        assert!(!scratch.exists());
+        assert_eq!(git(dir.path(), &["worktree", "list"]).lines().count(), 1);
+    }
+
+    #[test]
+    fn test_create_two_checkouts_at_once_use_distinct_dirs() {
+        let (dir, baseline) = dirty_repo();
+        let a = BaselineCheckout::create(dir.path(), &baseline).unwrap();
+        let b = BaselineCheckout::create(dir.path(), &baseline).unwrap();
+        assert_ne!(a.path(), b.path());
+    }
+
+    #[test]
+    fn test_create_from_subdirectory_indexes_the_matching_baseline_subdirectory() {
+        let (dir, baseline) = dirty_repo();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("s.txt"), "x").unwrap();
+        // Untracked in the user's tree, absent from the baseline checkout.
+        let checkout = BaselineCheckout::create(&sub, &baseline).unwrap();
+        assert!(checkout.path().ends_with("checkout/sub"));
+    }
 }

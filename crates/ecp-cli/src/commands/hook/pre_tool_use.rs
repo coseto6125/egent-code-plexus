@@ -4,7 +4,7 @@
 //! at 5 hits or ~2 KB serialized to keep the token cost bounded.
 
 use super::common::{emit_additional_context, lookup_index_dir, HookInput};
-use crate::commands::find::{compute_hits, FindArgs, FindMode, Hit};
+use crate::commands::find::{compute_hits_limited, FindArgs, FindMode, Hit};
 use crate::engine::Engine;
 use ecp_core::EcpError;
 use std::borrow::Cow;
@@ -67,7 +67,7 @@ fn compute_search_hits(input: &HookInput) -> Option<String> {
         format: None,
         batch: false,
     };
-    let hits = compute_hits(args, &engine).ok()?;
+    let hits = compute_hits_limited(args, &engine, MAX_HITS).ok()?;
     if hits.is_empty() {
         return None;
     }
