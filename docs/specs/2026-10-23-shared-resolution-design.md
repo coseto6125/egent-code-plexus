@@ -320,7 +320,7 @@ Write the criterion before the run: **the index edge multiset must be identical;
 
    These fixtures pin today's behaviour before any slice changes the type.
 4. **Index edge diff on 4 corpora.** The corpora are `.sample_repo`, this repo, a Go repo with nested `go.mod`, and `.vscode_source`. Compare the old and the new binary, serially. Any differing edge fails the slice.
-5. **Overlay self-parity.** Mark K files dirty with unchanged content. The overlay edges must equal the base edges. On this repo this check catches R14 (dirty `resolver.rs` loses its cross-crate calls) until B7b lands. Record that as an expected failure with a pointer to B7b, not as a pass.
+5. **Overlay self-parity.** Mark K files dirty with unchanged content. The overlay edges must equal the base edges. On this repo this check catches R14 (dirty `resolver.rs` loses its cross-crate calls) until B7b lands. Record that as a baseline file that lists exactly the R14 edge diff, with a pointer to B7b. The check passes only when the diff equals the baseline: any other differing edge fails, and so does a baseline edge that no longer differs. B7b deletes the baseline.
 6. **Name what the sample cannot show.** The corpora cover few dirty-file Go selectors through a module-root import, few cross-directory chained returns, and almost no Kotlin typed receivers through an external import. The fixtures in item 3 cover those.
 
 ## 5. Performance

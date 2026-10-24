@@ -251,7 +251,7 @@ impl ArchivedZeroCopyGraph { pub fn lexical_parent(&self, node_idx: u32) -> Opti
 
 | Reader | Needs | Without a table |
 |---|---|---|
-| overlay global tier and `is_lexically_scoped` for a clean base node | bit | recompute the plain uid and compare (I4 makes that exact), 0 bytes |
+| overlay global tier and `is_lexically_scoped` for a clean base node | bit | recompute the uid I4 gives an unscoped node and compare: `compute(...)` for the first of a name, `overload(first, ordinal)` for a later overload. The ordinal needs the file's same-name nodes in order, so a reader without them reads the table. 0 bytes |
 | `display_owner`, `rename`, diff identity, FQN targets | parent | span scan over the file's nodes; `graph.bin` has no per-file node range |
 
 Cost: 8 B per scoped node; the root grows by one vector header and stays within `GRAPH_ROOT_TAIL_BYTES = 4096` (cross-check §3). The builder maps a tombstoned parent to its surviving twin.

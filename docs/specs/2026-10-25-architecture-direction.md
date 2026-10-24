@@ -137,7 +137,7 @@ The build lock is `<dir>.building/.build.lock`. It is released before the rename
 
 Still open (FU-2026-10-24-266b8622508e): the lock is released before the rename, and a new generation's timestamp is not compared with the newest existing generation, so a clock step can rank a new build below an old one.
 
-**Target.** Every reader ranks same-SHA dirs by one key, the dir name, and the builder can only publish a name above every existing one.
+**Target.** Every reader ranks same-SHA dirs by one key, the dir name. When every builder on the machine takes the new lock, a builder can only publish a name above every existing one. An old binary that builds at the same time is outside this guarantee (last row of the state table).
 
 - **A lock per repo and SHA, held from the name choice through the rename.** The commits dir is per repo (`~/.ecp/<repo>/commits/`, `graph_path.rs:47`), so `<commits dir>/<sha>.build.lock` is keyed by repo and SHA. Today's lock `<dir>.building/.build.lock` is keyed by the ref-derived name, and `dirname_picker.rs:12` puts the branch in that name: two refs at one SHA take two locks. Outside `.building/`, Windows can rename while the lock stays held.
 - **A strictly rising name.** Under the lock, the builder sets `timestamp_ms = max(now, newest same-SHA timestamp + 1)`. `has_same_sha_dir` (`orchestrator.rs:390`) already lists those dirs. A clock step no longer reorders builds.
@@ -173,6 +173,7 @@ The target must keep these results:
 1. `scan_cached` (`commit_lookup.rs:123-137`) reuses its scan while the commits dir mtime is unchanged. Each publish renames into that dir and updates the mtime, but a filesystem with coarse timestamps can hide a second publish in the same tick. State the granularity this needs, or add a second check.
 2. Decide whether the cross-SHA lookup by `graph.bin` mtime stays as it is.
 3. State the lock order between a builder and `gc`.
+4. Decide whether the mixed-version window is allowed. An old binary that builds beside a new one can publish a name below the new build. If the window is not allowed, state how a rollout closes it.
 
 ## 4. Resolve an import in the caller's workspace scope
 
