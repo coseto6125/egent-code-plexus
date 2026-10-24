@@ -101,10 +101,30 @@ fn worktree(tmp: &TempDir) -> PathBuf {
     let root = tmp.path().join("worktree");
     copy_tree(&fixture().join("source/committed"), &root);
     copy_tree(&fixture().join("source/uncommitted"), &root);
-    let manifest = DirtyFiles::read(&session_dir(tmp).join("dirty_files.json")).unwrap();
+    let manifest_path = session_dir(tmp).join("dirty_files.json");
+    let manifest = DirtyFiles::read(&manifest_path).unwrap();
+    let mut text = fs::read_to_string(&manifest_path).unwrap();
     for (rel, entry) in &manifest.entries {
-        set_mtime(&root.join(rel), entry.mtime_ns);
+        let path = root.join(rel);
+        set_mtime(&path, entry.mtime_ns);
+        let held = fs::metadata(&path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        // The writer stat'ed its own filesystem; NTFS keeps 100 ns, so the
+        // recorded stamp cannot be set here. Restate only that number in the
+        // copy, as this filesystem holds it; every other byte stays as written.
+        if held != entry.mtime_ns {
+            text = text.replace(
+                &format!("\"mtime_ns\": {}", entry.mtime_ns),
+                &format!("\"mtime_ns\": {held}"),
+            );
+        }
     }
+    fs::write(&manifest_path, text).unwrap();
     root
 }
 
