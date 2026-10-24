@@ -6,7 +6,8 @@
 //! for the exact-match and `ECP_BLESS=1` rules.
 //!
 //! The `test_diff_*` tests prove the comparison itself: an injected duplicate
-//! edge, a changed confidence, a wrong parent or a missing node each fail.
+//! edge, a changed confidence, a wrong parent, a missing node, a kept deleted file or a missing
+//! provider each fail.
 
 #[path = "common/baseline.rs"]
 mod baseline;
@@ -373,6 +374,10 @@ struct Inject {
     call_confidence: Option<f32>,
     wrong_parent: bool,
     drop_node: bool,
+    /// A file the scenario deleted whose nodes and edge the overlay still shows.
+    keep_deleted_file: bool,
+    /// The overlay lost every node of the Python provider.
+    drop_provider: bool,
 }
 
 /// `K.m` (with its `HasMethod`), a second class `Other`, `run` calling `K.m`,
@@ -391,6 +396,15 @@ fn fixture(inject: Inject) -> rkyv::util::AlignedVec {
         m,
         RelType::HasMethod,
     );
+    if !inject.drop_provider {
+        let py_main = fx.func("src/tool.py", "py_main");
+        let py_helper = fx.func("src/tool.py", "py_helper");
+        fx.edge_with(py_main, py_helper, RelType::Calls, 1.0, "ast-call");
+    }
+    if inject.keep_deleted_file {
+        let gone = fx.func("src/gone.ts", "gone");
+        fx.edge_with(gone, m, RelType::Calls, 1.0, "ast-call");
+    }
     let confidence = inject.call_confidence.unwrap_or(1.0);
     fx.edge_with(run, m, RelType::Calls, confidence, "ast-call");
     if inject.duplicate_call {
@@ -485,6 +499,45 @@ fn test_diff_missing_node_returns_identity_line() {
     let missing = in_section(&lines, "identity full-only x1 Function src/main.ts:");
     assert_eq!(missing.len(), 1, "{lines:#?}");
     assert!(missing[0].contains(" spare #"), "{lines:#?}");
+}
+
+#[test]
+fn test_diff_kept_deleted_file_returns_overlay_only_node_and_edge() {
+    let lines = fixture_diff(Inject {
+        keep_deleted_file: true,
+        ..Inject::default()
+    });
+    let nodes = in_section(&lines, "identity overlay-only x1 Function src/gone.ts:");
+    assert_eq!(nodes.len(), 1, "{lines:#?}");
+    assert!(nodes[0].contains(" gone #"), "{lines:#?}");
+    assert_eq!(
+        in_section(&lines, "edge overlay-only x1 Calls Function src/gone.ts:").len(),
+        1,
+        "the stale caller edge is reported too: {lines:#?}"
+    );
+    assert!(
+        lines.iter().all(|l| !l.contains("full-only")),
+        "nothing the full index has is missing: {lines:#?}"
+    );
+}
+
+#[test]
+fn test_diff_missing_provider_returns_every_provider_node_and_edge() {
+    let lines = fixture_diff(Inject {
+        drop_provider: true,
+        ..Inject::default()
+    });
+    let nodes = in_section(&lines, "identity full-only x1 Function src/tool.py:");
+    assert_eq!(nodes.len(), 2, "both Python nodes are reported: {lines:#?}");
+    assert_eq!(
+        in_section(&lines, "edge full-only x1 Calls Function src/tool.py:").len(),
+        1,
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().all(|l| !l.contains("overlay-only")),
+        "the overlay invents nothing: {lines:#?}"
+    );
 }
 
 #[test]
