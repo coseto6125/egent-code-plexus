@@ -130,7 +130,9 @@ pub(crate) fn install_skills(
         // (repo tree or embedded copy) and read ECP.md from it.
         let ecp_src = source_skill_dir_at(ClaudeSkillTarget::Ecp, &cwd)?;
         let ecp_md_src = ecp_src.path().join("ECP.md");
-        inject_ecp_import_at(&claude_home, &ecp_md_src, dry_run)?;
+        for line in inject_ecp_import_at(&claude_home, &ecp_md_src, dry_run)? {
+            println!("{line}");
+        }
     }
     Ok(())
 }
@@ -180,7 +182,8 @@ fn uninstall_skills(target: ClaudeSkillTarget) -> Result<(), EcpError> {
 }
 
 /// Copy `ecp_md_src` to `<claude_home>/ECP.md` and append `@ECP.md` to
-/// `<claude_home>/CLAUDE.md` if the line is not already present.
+/// `<claude_home>/CLAUDE.md` if the line is not already present. Returns
+/// the report lines.
 ///
 /// Explicit `claude_home` parameter makes this testable without mutating
 /// process-global HOME (matches the `install_skills_at` pattern).
@@ -188,21 +191,43 @@ pub(crate) fn inject_ecp_import_at(
     claude_home: &Path,
     ecp_md_src: &Path,
     dry_run: bool,
-) -> Result<(), EcpError> {
+) -> Result<Vec<String>, EcpError> {
     let dest_ecp_md = claude_home.join("ECP.md");
     let dest_claude_md = claude_home.join("CLAUDE.md");
+    let existing = if dest_claude_md.exists() {
+        fs::read_to_string(&dest_claude_md)?
+    } else {
+        String::new()
+    };
+    let import_present = has_ecp_import(&existing);
 
     if dry_run {
-        println!(
-            "  [dry-run] would copy {} → {}",
-            ecp_md_src.display(),
-            dest_ecp_md.display()
-        );
-        println!(
-            "  [dry-run] would add @ECP.md import to {}",
-            dest_claude_md.display()
-        );
-        return Ok(());
+        let ecp_md_current = fs::read(ecp_md_src)
+            .is_ok_and(|src| fs::read(&dest_ecp_md).is_ok_and(|dest| dest == src));
+        let copy = if ecp_md_current {
+            format!(
+                "  [dry-run] {} already matches source",
+                dest_ecp_md.display()
+            )
+        } else {
+            format!(
+                "  [dry-run] would copy {} → {}",
+                ecp_md_src.display(),
+                dest_ecp_md.display()
+            )
+        };
+        let import = if import_present {
+            format!(
+                "  [dry-run] @ECP.md already present in {}",
+                dest_claude_md.display()
+            )
+        } else {
+            format!(
+                "  [dry-run] would add @ECP.md import to {}",
+                dest_claude_md.display()
+            )
+        };
+        return Ok(vec![copy, import]);
     }
 
     // Managed file — always overwrite so it tracks the bundled source.
@@ -214,28 +239,22 @@ pub(crate) fn inject_ecp_import_at(
         ))
     })?;
 
-    // Idempotent: only append when the import line is absent.
-    let existing = if dest_claude_md.exists() {
-        fs::read_to_string(&dest_claude_md)?
-    } else {
-        String::new()
-    };
-    if !has_ecp_import(&existing) {
-        let separator = if existing.ends_with('\n') || existing.is_empty() {
-            ""
-        } else {
-            "\n"
-        };
-        let updated = format!("{existing}{separator}@ECP.md\n");
-        fs::write(&dest_claude_md, updated)?;
-        println!("  added @ECP.md import to {}", dest_claude_md.display());
-    } else {
-        println!(
+    if import_present {
+        return Ok(vec![format!(
             "  @ECP.md already present in {} — skipped",
             dest_claude_md.display()
-        );
+        )]);
     }
-    Ok(())
+    let separator = if existing.ends_with('\n') || existing.is_empty() {
+        ""
+    } else {
+        "\n"
+    };
+    fs::write(&dest_claude_md, format!("{existing}{separator}@ECP.md\n"))?;
+    Ok(vec![format!(
+        "  added @ECP.md import to {}",
+        dest_claude_md.display()
+    )])
 }
 
 pub(crate) fn has_ecp_import(claude_md: &str) -> bool {
@@ -514,6 +533,49 @@ mod tests {
         assert!(
             !home.path().join("CLAUDE.md").exists(),
             "dry-run must not write CLAUDE.md"
+        );
+    }
+
+    #[test]
+    fn test_inject_ecp_import_at_dry_run_installed_reports_no_change() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = fake_repo_with_ecp_guidance("guidance\n");
+        let src = cwd
+            .path()
+            .join("docs")
+            .join("skills")
+            .join("ecp")
+            .join("ECP.md");
+        std::fs::write(home.path().join("CLAUDE.md"), "# My rules\n@ECP.md\n").unwrap();
+        inject_ecp_import_at(home.path(), &src, false).unwrap();
+
+        let lines = inject_ecp_import_at(home.path(), &src, true).unwrap();
+
+        assert!(
+            !lines.iter().any(|l| l.contains("would")),
+            "an installed, current ECP.md and import need no change: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn test_inject_ecp_import_at_dry_run_stale_and_missing_reports_both_changes() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = fake_repo_with_ecp_guidance("guidance\n");
+        let src = cwd
+            .path()
+            .join("docs")
+            .join("skills")
+            .join("ecp")
+            .join("ECP.md");
+        std::fs::write(home.path().join("ECP.md"), "old guidance\n").unwrap();
+        std::fs::write(home.path().join("CLAUDE.md"), "# My rules\n").unwrap();
+
+        let lines = inject_ecp_import_at(home.path(), &src, true).unwrap();
+
+        assert!(lines.iter().any(|l| l.contains("would copy")), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("would add @ECP.md import")),
+            "{lines:?}"
         );
     }
 
