@@ -117,6 +117,9 @@ impl std::error::Error for PhaseError {}
 pub struct RawIdx(pub u32);
 
 impl RawIdx {
+    /// Largest raw index a 24-bit packed field holds (`RawTxScope`).
+    pub const PACKED24_MAX: u32 = (1 << 24) - 1;
+
     pub fn index(self) -> usize {
         self.0 as usize
     }
@@ -129,16 +132,50 @@ impl RawIdx {
             .filter(|_| idx < node_count)
             .map(RawIdx)
     }
+
+    /// The index for a 24-bit packed field. `None` above
+    /// [`Self::PACKED24_MAX`]. The check runs in every build: a release
+    /// build that packs `2^24` with `<< 8` shifts the high bits out and
+    /// stores `0`, the file's first node. On `None` the producer drops the
+    /// record and records a `BlindSpot`.
+    pub fn to_packed24(self) -> Option<u32> {
+        (self.0 <= Self::PACKED24_MAX).then_some(self.0)
+    }
+}
+
+/// A name as the source writes it: trimmed and not empty. The field is
+/// private, so [`SourceName::new`] is the only constructor outside this
+/// module. [`RawEndpoint::validate`] checks a value read back from an
+/// archive.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[rkyv(derive(Debug))]
+pub struct SourceName(Box<str>);
+
+impl SourceName {
+    /// The trimmed `name`; `None` when nothing is left.
+    pub fn new(name: &str) -> Option<SourceName> {
+        let name = name.trim();
+        (!name.is_empty()).then(|| SourceName(name.into()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether the invariant holds. Only an archived value can break it.
+    pub fn is_valid(&self) -> bool {
+        !self.0.is_empty() && self.0.trim().len() == self.0.len()
+    }
 }
 
 /// Why an endpoint binds no node.
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash)]
 #[rkyv(derive(Debug))]
 pub enum Unbound {
-    /// The source names a declaration that no node of this file is. The
-    /// spelling is kept verbatim, so a later pass can bind it across files
-    /// (a Laravel `Ctrl@method` action, an imported handler).
-    Named(Box<str>),
+    /// The source names a declaration that no visible node of this file is.
+    /// The spelling is kept, so a later pass can bind it across files (a
+    /// Laravel `Ctrl@method` action, an imported handler).
+    Named(SourceName),
     /// Code with no name and no node, such as an inline handler that the
     /// parser emits no closure node for. The record's own span gives the
     /// line.
@@ -162,8 +199,7 @@ impl RawEndpoint {
     /// An endpoint that names `name`, before any binding. `None` for an
     /// empty or whitespace-only name: the producer saw no reference.
     pub fn named(name: &str) -> Option<RawEndpoint> {
-        let name = name.trim();
-        (!name.is_empty()).then(|| RawEndpoint::Unresolved(Unbound::Named(name.into())))
+        SourceName::new(name).map(|name| RawEndpoint::Unresolved(Unbound::Named(name)))
     }
 
     pub fn node(&self) -> Option<RawIdx> {
@@ -174,15 +210,15 @@ impl RawEndpoint {
     }
 
     /// `Ok` when a `Node` endpoint is below `node_count`, the node count of
-    /// the file the record belongs to.
+    /// the file the record belongs to, and a name is trimmed and not empty.
     pub fn validate(&self, node_count: usize) -> Result<(), EndpointError> {
         match self {
             RawEndpoint::Node(idx) if idx.index() >= node_count => Err(EndpointError::OutOfRange {
                 idx: *idx,
                 node_count,
             }),
-            RawEndpoint::Unresolved(Unbound::Named(name)) if name.trim().is_empty() => {
-                Err(EndpointError::EmptyName)
+            RawEndpoint::Unresolved(Unbound::Named(name)) if !name.is_valid() => {
+                Err(EndpointError::BadName)
             }
             _ => Ok(()),
         }
@@ -192,8 +228,12 @@ impl RawEndpoint {
 /// A [`RawEndpoint`] that breaks its invariant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EndpointError {
-    OutOfRange { idx: RawIdx, node_count: usize },
-    EmptyName,
+    OutOfRange {
+        idx: RawIdx,
+        node_count: usize,
+    },
+    /// A name that is empty or not trimmed.
+    BadName,
 }
 
 impl fmt::Display for EndpointError {
@@ -204,7 +244,9 @@ impl fmt::Display for EndpointError {
                 "raw index {} is out of range for a file with {node_count} nodes",
                 idx.0
             ),
-            EndpointError::EmptyName => f.write_str("an unresolved endpoint has an empty name"),
+            EndpointError::BadName => {
+                f.write_str("an unresolved endpoint has an empty or untrimmed name")
+            }
         }
     }
 }
@@ -232,10 +274,81 @@ pub fn bind_enclosing(nodes: &[RawNode], site: Span, accept: &[NodeKind]) -> Opt
         .and_then(|(i, _)| RawIdx::checked(i, nodes.len()))
 }
 
-/// Bind a name the source writes (a route handler, a framework target) to
-/// the nodes of the same file whose kind is in `accept`.
+/// Kinds whose span opens a scope that can hide a nested declaration.
+const SCOPE_CONTAINERS: &[NodeKind] = &[
+    NodeKind::Function,
+    NodeKind::Method,
+    NodeKind::Constructor,
+    NodeKind::Class,
+    NodeKind::Struct,
+    NodeKind::Interface,
+    NodeKind::Trait,
+    NodeKind::Enum,
+    NodeKind::Impl,
+    NodeKind::Module,
+    NodeKind::Namespace,
+];
+
+/// Scope containers whose members a bare name does not reach in every
+/// language: Python needs `self.`, Java an implicit `this`. Visibility
+/// through them is never proven here; area 1's resolver owns those rules.
+const TYPE_SCOPES: &[NodeKind] = &[
+    NodeKind::Class,
+    NodeKind::Struct,
+    NodeKind::Interface,
+    NodeKind::Trait,
+    NodeKind::Enum,
+    NodeKind::Impl,
+];
+
+/// The scope that declares `nodes[candidate]`, when `site` provably sees
+/// it: `Some(None)` for a declaration at file top level, `Some(Some(c))`
+/// for one whose innermost scope container is `c`. `None` when a container
+/// of the candidate does not contain the site, or is a type scope.
+fn visible_scope(nodes: &[RawNode], candidate: usize, site: Span) -> Option<Option<usize>> {
+    let span = nodes[candidate].span;
+    let mut innermost: Option<usize> = None;
+    for (i, n) in nodes.iter().enumerate() {
+        let encloses = i != candidate
+            && n.span != span
+            && SCOPE_CONTAINERS.contains(&n.kind)
+            && span_contains(n.span, span);
+        if !encloses {
+            continue;
+        }
+        if TYPE_SCOPES.contains(&n.kind) || !span_contains(n.span, site) {
+            return None;
+        }
+        innermost = match innermost {
+            Some(c) if scope_depth(nodes, Some(c)) >= scope_depth(nodes, Some(i)) => Some(c),
+            _ => Some(i),
+        };
+    }
+    Some(innermost)
+}
+
+/// Orders scopes that contain one site from outer to inner: file top level
+/// first, then by later start, then by earlier end.
+fn scope_depth(
+    nodes: &[RawNode],
+    scope: Option<usize>,
+) -> Option<((u32, u32), Reverse<(u32, u32)>)> {
+    scope.map(|c| {
+        let (r1, c1, r2, c2) = nodes[c].span;
+        ((r1, c1), Reverse((r2, c2)))
+    })
+}
+
+/// Bind a name the source writes at `site` (a route handler, a framework
+/// target) to the nodes of the same file whose kind is in `accept`.
 ///
-/// | Matches | Endpoint | Evidence |
+/// A candidate counts only when `site` provably sees it: every scope
+/// container around the candidate also contains the site, and none of them
+/// is a type scope. Among the visible candidates the innermost scope
+/// shadows the outer ones. A candidate the site cannot be proven to see
+/// never binds; its raw index is kept in [`Bound::out_of_scope`].
+///
+/// | Visible matches in the innermost scope | Endpoint | Evidence |
 /// |---|---|---|
 /// | 1 | `Node` | `Exact` |
 /// | 2 or more | `Unresolved(Named)` | `Ambiguous` with the true count |
@@ -243,42 +356,52 @@ pub fn bind_enclosing(nodes: &[RawNode], site: Span, accept: &[NodeKind]) -> Opt
 /// | empty name | `Unresolved(Anonymous)` | `Unresolved` |
 ///
 /// Two matches never bind the first.
-pub fn bind_name(nodes: &[RawNode], name: &str, accept: &[NodeKind]) -> Bound {
-    let name = name.trim();
-    let Some(named) = RawEndpoint::named(name) else {
+pub fn bind_name(nodes: &[RawNode], site: Span, name: &str, accept: &[NodeKind]) -> Bound {
+    let Some(source) = SourceName::new(name) else {
         return Bound {
             endpoint: RawEndpoint::Unresolved(Unbound::Anonymous),
             evidence: Evidence::Unresolved,
+            out_of_scope: Box::default(),
         };
     };
-    let mut matches = nodes
+    let mut visible: Vec<(RawIdx, Option<usize>)> = Vec::new();
+    let mut hidden: Vec<RawIdx> = Vec::new();
+    for (i, n) in nodes.iter().enumerate() {
+        if n.name != source.as_str() || !accept.contains(&n.kind) {
+            continue;
+        }
+        let Some(idx) = RawIdx::checked(i, nodes.len()) else {
+            continue;
+        };
+        match visible_scope(nodes, i, site) {
+            Some(scope) => visible.push((idx, scope)),
+            None => hidden.push(idx),
+        }
+    }
+    let innermost = visible
         .iter()
-        .enumerate()
-        .filter(|(_, n)| n.name == name && accept.contains(&n.kind))
-        .map(|(i, _)| i);
-    let first = matches.next();
-    let rest = matches.count();
-    match (first, rest) {
-        (Some(i), 0) => match RawIdx::checked(i, nodes.len()) {
-            Some(idx) => Bound {
-                endpoint: RawEndpoint::Node(idx),
-                evidence: Evidence::Exact,
+        .map(|&(_, scope)| scope_depth(nodes, scope))
+        .max();
+    let winners: Vec<RawIdx> = visible
+        .iter()
+        .filter(|&&(_, scope)| Some(scope_depth(nodes, scope)) == innermost)
+        .map(|&(idx, _)| idx)
+        .collect();
+    let named = RawEndpoint::Unresolved(Unbound::Named(source));
+    let (endpoint, evidence) = match winners.as_slice() {
+        [only] => (RawEndpoint::Node(*only), Evidence::Exact),
+        [] => (named, Evidence::Unresolved),
+        several => (
+            named,
+            Evidence::Ambiguous {
+                candidates: u32::try_from(several.len()).unwrap_or(u32::MAX),
             },
-            None => Bound {
-                endpoint: named,
-                evidence: Evidence::Unresolved,
-            },
-        },
-        (Some(_), more) => Bound {
-            endpoint: named,
-            evidence: Evidence::Ambiguous {
-                candidates: u32::try_from(more + 1).unwrap_or(u32::MAX),
-            },
-        },
-        (None, _) => Bound {
-            endpoint: named,
-            evidence: Evidence::Unresolved,
-        },
+        ),
+    };
+    Bound {
+        endpoint,
+        evidence,
+        out_of_scope: hidden.into_boxed_slice(),
     }
 }
 
@@ -287,10 +410,11 @@ pub fn bind_name(nodes: &[RawNode], name: &str, accept: &[NodeKind]) -> Bound {
 pub struct Bound {
     endpoint: RawEndpoint,
     evidence: Evidence,
+    out_of_scope: Box<[RawIdx]>,
 }
 
 impl Bound {
-    /// `Ok` when the pair is coherent:
+    /// `Ok` when the pair is coherent and a name is trimmed and not empty:
     ///
     /// | Endpoint | Evidence allowed |
     /// |---|---|
@@ -298,6 +422,11 @@ impl Bound {
     /// | `File` | `Exact` |
     /// | `Unresolved` | `Ambiguous` (2 or more), `Unresolved` |
     pub fn new(endpoint: RawEndpoint, evidence: Evidence) -> Result<Bound, EvidenceError> {
+        if let RawEndpoint::Unresolved(Unbound::Named(name)) = &endpoint {
+            if !name.is_valid() {
+                return Err(EvidenceError::BadName);
+            }
+        }
         let coherent = match (&endpoint, evidence) {
             (_, Evidence::Ambiguous { candidates }) if candidates < 2 => {
                 return Err(EvidenceError::TooFewCandidates(candidates));
@@ -308,7 +437,11 @@ impl Bound {
             _ => false,
         };
         match coherent {
-            true => Ok(Bound { endpoint, evidence }),
+            true => Ok(Bound {
+                endpoint,
+                evidence,
+                out_of_scope: Box::default(),
+            }),
             false => Err(EvidenceError::EndpointMismatch(evidence)),
         }
     }
@@ -319,6 +452,13 @@ impl Bound {
 
     pub fn evidence(&self) -> Evidence {
         self.evidence
+    }
+
+    /// Same-name candidates of the file, of an accepted kind, that the site
+    /// cannot be proven to see (a nested function, a class member). No pass
+    /// binds the record to them; they back a caveat or a `BlindSpot` hint.
+    pub fn out_of_scope(&self) -> &[RawIdx] {
+        &self.out_of_scope
     }
 }
 
@@ -405,6 +545,8 @@ pub enum EvidenceError {
     TooFewCandidates(u32),
     /// The evidence class does not fit the endpoint variant.
     EndpointMismatch(Evidence),
+    /// An unresolved name that is empty or not trimmed.
+    BadName,
 }
 
 impl fmt::Display for EvidenceError {
@@ -437,6 +579,7 @@ impl fmt::Display for EvidenceError {
             EvidenceError::EndpointMismatch(e) => {
                 write!(f, "evidence {e:?} does not fit this endpoint")
             }
+            EvidenceError::BadName => f.write_str("an unresolved name is empty or not trimmed"),
         }
     }
 }
@@ -707,7 +850,9 @@ pub enum RecordKind {
     /// `RawFunctionMeta`; its endpoint is the function it describes.
     FunctionMeta,
     /// An HTTP client call site. No record exists today: pass 1.6 reads
-    /// the file again at build time (Open point 4).
+    /// the file again at build time (Open point 4). Until the overlay
+    /// replays this record, an answer over a dirty route or fetch file
+    /// names `Fetches` as stale.
     FetchSite,
 }
 
@@ -822,6 +967,10 @@ mod tests {
         (row, col, row, col)
     }
 
+    fn named(name: &str) -> RawEndpoint {
+        RawEndpoint::named(name).expect("non-blank name")
+    }
+
     // ── ParsePhase ──
 
     #[test]
@@ -887,7 +1036,9 @@ mod tests {
     fn test_named_text_returns_unresolved_named() {
         assert_eq!(
             RawEndpoint::named(" login "),
-            Some(RawEndpoint::Unresolved(Unbound::Named("login".into())))
+            Some(RawEndpoint::Unresolved(Unbound::Named(SourceName(
+                "login".into()
+            ))))
         );
     }
 
@@ -919,11 +1070,38 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_empty_name_returns_error() {
+    fn test_validate_untrimmed_or_empty_name_returns_error() {
+        for raw in ["", " ", " x ", "x\t"] {
+            let endpoint = RawEndpoint::Unresolved(Unbound::Named(SourceName(raw.into())));
+            assert_eq!(endpoint.validate(0), Err(EndpointError::BadName), "{raw:?}");
+        }
+        assert_eq!(named("x").validate(0), Ok(()));
+    }
+
+    #[test]
+    fn test_source_name_new_trims_and_rejects_blank() {
         assert_eq!(
-            RawEndpoint::Unresolved(Unbound::Named(" ".into())).validate(0),
-            Err(EndpointError::EmptyName)
+            SourceName::new(" x ").map(|n| n.as_str().to_string()),
+            Some("x".into())
         );
+        assert!(SourceName::new(" x ").is_some_and(|n| n.is_valid()));
+        assert_eq!(SourceName::new(""), None);
+        assert_eq!(SourceName::new(" \t\n"), None);
+    }
+
+    #[test]
+    fn test_to_packed24_at_max_returns_index() {
+        assert_eq!(
+            RawIdx(RawIdx::PACKED24_MAX).to_packed24(),
+            Some(RawIdx::PACKED24_MAX)
+        );
+        assert_eq!(RawIdx(0).to_packed24(), Some(0));
+    }
+
+    #[test]
+    fn test_to_packed24_above_max_returns_none() {
+        assert_eq!(RawIdx(1 << 24).to_packed24(), None);
+        assert_eq!(RawIdx(u32::MAX).to_packed24(), None);
     }
 
     #[test]
@@ -1012,7 +1190,7 @@ mod tests {
             node("helper", NodeKind::Function, (0, 0, 1, 0)),
             node("login", NodeKind::Function, (2, 0, 3, 0)),
         ];
-        let bound = bind_name(&nodes, "login", CALLABLE);
+        let bound = bind_name(&nodes, point(9, 0), "login", CALLABLE);
         assert_eq!(bound.endpoint(), &RawEndpoint::Node(RawIdx(1)));
         assert_eq!(bound.evidence(), Evidence::Exact);
     }
@@ -1024,22 +1202,16 @@ mod tests {
             node("fmt", NodeKind::Method, (2, 0, 3, 0)),
             node("fmt", NodeKind::Method, (4, 0, 5, 0)),
         ];
-        let bound = bind_name(&nodes, "fmt", CALLABLE);
-        assert_eq!(
-            bound.endpoint(),
-            &RawEndpoint::Unresolved(Unbound::Named("fmt".into()))
-        );
+        let bound = bind_name(&nodes, point(9, 0), "fmt", CALLABLE);
+        assert_eq!(bound.endpoint(), &named("fmt"));
         assert_eq!(bound.evidence(), Evidence::Ambiguous { candidates: 3 });
     }
 
     #[test]
     fn test_bind_name_missing_returns_unresolved_named() {
         let nodes = [node("a", NodeKind::Function, (0, 0, 1, 0))];
-        let bound = bind_name(&nodes, "Ctrl@index", CALLABLE);
-        assert_eq!(
-            bound.endpoint(),
-            &RawEndpoint::Unresolved(Unbound::Named("Ctrl@index".into()))
-        );
+        let bound = bind_name(&nodes, point(9, 0), "Ctrl@index", CALLABLE);
+        assert_eq!(bound.endpoint(), &named("Ctrl@index"));
         assert_eq!(bound.evidence(), Evidence::Unresolved);
     }
 
@@ -1049,7 +1221,7 @@ mod tests {
             node("login", NodeKind::Property, (0, 0, 0, 9)),
             node("login", NodeKind::Function, (2, 0, 3, 0)),
         ];
-        let bound = bind_name(&nodes, "login", CALLABLE);
+        let bound = bind_name(&nodes, point(9, 0), "login", CALLABLE);
         assert_eq!(bound.endpoint(), &RawEndpoint::Node(RawIdx(1)));
         assert_eq!(bound.evidence(), Evidence::Exact);
     }
@@ -1057,12 +1229,67 @@ mod tests {
     #[test]
     fn test_bind_name_empty_returns_anonymous_unresolved() {
         let nodes = [node("a", NodeKind::Function, (0, 0, 1, 0))];
-        let bound = bind_name(&nodes, " ", CALLABLE);
+        let bound = bind_name(&nodes, point(9, 0), " ", CALLABLE);
         assert_eq!(
             bound.endpoint(),
             &RawEndpoint::Unresolved(Unbound::Anonymous)
         );
         assert_eq!(bound.evidence(), Evidence::Unresolved);
+    }
+
+    #[test]
+    fn test_bind_name_nested_candidate_from_module_site_returns_unresolved_with_index() {
+        // `from x import handler` at module level; `setup` holds its own
+        // `handler`; the route registration sits at module level.
+        let nodes = [
+            node("setup", NodeKind::Function, (0, 0, 5, 0)),
+            node("handler", NodeKind::Function, (1, 4, 3, 0)),
+        ];
+        let bound = bind_name(&nodes, point(7, 0), "handler", CALLABLE);
+        assert_eq!(bound.endpoint(), &named("handler"));
+        assert_eq!(bound.evidence(), Evidence::Unresolved);
+        assert_eq!(bound.out_of_scope(), &[RawIdx(1)]);
+    }
+
+    #[test]
+    fn test_bind_name_nested_candidate_from_its_scope_returns_exact() {
+        let nodes = [
+            node("setup", NodeKind::Function, (0, 0, 5, 0)),
+            node("handler", NodeKind::Function, (1, 4, 3, 0)),
+        ];
+        let bound = bind_name(&nodes, point(4, 4), "handler", CALLABLE);
+        assert_eq!(bound.endpoint(), &RawEndpoint::Node(RawIdx(1)));
+        assert_eq!(bound.evidence(), Evidence::Exact);
+        assert!(bound.out_of_scope().is_empty());
+    }
+
+    #[test]
+    fn test_bind_name_inner_scope_shadows_outer_returns_inner() {
+        let nodes = [
+            node("handler", NodeKind::Function, (0, 0, 1, 0)),
+            node("setup", NodeKind::Function, (2, 0, 8, 0)),
+            node("handler", NodeKind::Function, (3, 4, 5, 0)),
+        ];
+        let inside = bind_name(&nodes, point(6, 4), "handler", CALLABLE);
+        assert_eq!(inside.endpoint(), &RawEndpoint::Node(RawIdx(2)));
+        assert_eq!(inside.evidence(), Evidence::Exact);
+        let outside = bind_name(&nodes, point(10, 0), "handler", CALLABLE);
+        assert_eq!(outside.endpoint(), &RawEndpoint::Node(RawIdx(0)));
+        assert_eq!(outside.evidence(), Evidence::Exact);
+        assert_eq!(outside.out_of_scope(), &[RawIdx(2)]);
+    }
+
+    #[test]
+    fn test_bind_name_class_member_returns_unresolved_with_index() {
+        let nodes = [
+            node("C", NodeKind::Class, (0, 0, 10, 0)),
+            node("handler", NodeKind::Method, (1, 4, 3, 0)),
+            node("init", NodeKind::Method, (4, 4, 8, 0)),
+        ];
+        let bound = bind_name(&nodes, point(5, 8), "handler", CALLABLE);
+        assert_eq!(bound.endpoint(), &named("handler"));
+        assert_eq!(bound.evidence(), Evidence::Unresolved);
+        assert_eq!(bound.out_of_scope(), &[RawIdx(1)]);
     }
 
     // ── Bound ──
@@ -1072,9 +1299,21 @@ mod tests {
         assert!(Bound::new(RawEndpoint::Node(RawIdx(0)), Evidence::Exact).is_ok());
         assert!(Bound::new(RawEndpoint::Node(RawIdx(0)), Evidence::Heuristic).is_ok());
         assert!(Bound::new(RawEndpoint::File, Evidence::Exact).is_ok());
-        let named = RawEndpoint::Unresolved(Unbound::Named("f".into()));
-        assert!(Bound::new(named.clone(), Evidence::Ambiguous { candidates: 2 }).is_ok());
-        assert!(Bound::new(named, Evidence::Unresolved).is_ok());
+        let f = named("f");
+        assert!(Bound::new(f.clone(), Evidence::Ambiguous { candidates: 2 }).is_ok());
+        assert!(Bound::new(f, Evidence::Unresolved).is_ok());
+    }
+
+    #[test]
+    fn test_bound_new_bad_name_returns_error() {
+        for raw in ["", " f", "f "] {
+            let endpoint = RawEndpoint::Unresolved(Unbound::Named(SourceName(raw.into())));
+            assert_eq!(
+                Bound::new(endpoint, Evidence::Unresolved),
+                Err(EvidenceError::BadName),
+                "{raw:?}"
+            );
+        }
     }
 
     #[test]

@@ -4,7 +4,7 @@ Status: contract, phase 1. Types: `crates/ecp-core/src/contracts/raw_records.rs`
 
 Plan row (`docs/specs/2026-10-25-architecture-direction.md`, "Contracts before code"): the parser phases (collect captures, finalize nodes, bind raw records), the raw index to global node mapping, the endpoint of a raw record (node, file or unresolved), and the evidence classes exact, ambiguous, heuristic and unresolved. Consumers: areas 2, 4, 5 (the records the overlay replays), 7, 8, 10.
 
-Every `file:line` below was read on branch `feat/arch-p1-contracts` at `1d267693`. Paths without a crate prefix are under `crates/ecp-analyzer/src/`.
+Every `file:line` below was read on branch `feat/arch-p1-contracts` at `f23bce5a`. Paths without a crate prefix are under `crates/ecp-analyzer/src/`.
 
 ## Defines
 
@@ -25,11 +25,12 @@ Every `file:line` below was read on branch `feat/arch-p1-contracts` at `1d267693
 |---|---|---|
 | `ParsePhase` | enum | `CollectCaptures`, `FinalizeNodes`, `BindRecords`, in that order. |
 | `PhaseError` | result | A transition that skips a phase or goes back. |
-| `RawIdx` | stored `u32` | A raw index. |
+| `RawIdx` | stored `u32` | A raw index. `to_packed24` checks that it fits a 24-bit field (Open point 9). |
 | `RawEndpoint` | stored enum | `Node(RawIdx)`, `File`, `Unresolved(Unbound)`. |
-| `Unbound` | stored enum | `Named(spelling)` or `Anonymous`. |
-| `EndpointError` | result | A `Node` out of range, or an empty name. |
-| `Bound` | value | One endpoint and the evidence that bound it. |
+| `SourceName` | stored string | A source spelling, trimmed and not empty. Its field is private; `SourceName::new` is the only constructor outside the module. |
+| `Unbound` | stored enum | `Named(SourceName)` or `Anonymous`. |
+| `EndpointError` | result | A `Node` out of range, or a name that is empty or not trimmed. |
+| `Bound` | value | One endpoint, the evidence that bound it, and the same-name candidates that the site cannot be proven to see. |
 | `Evidence` | enum | `Exact`, `Ambiguous { candidates }`, `Heuristic`, `Unresolved`. |
 | `EvidenceError` | result | An evidence class that does not fit its endpoint or its edge. |
 | `HEURISTIC_CEILING` | const `0.7` | The confidence that separates a guess from a fact. |
@@ -55,11 +56,11 @@ Every `file:line` below was read on branch `feat/arch-p1-contracts` at `1d267693
 |---|---|
 | `RawEndpoint::Node(i)` | `i` is below the node count of the record's own file (`validate`). |
 | `RawEndpoint::File` | The record belongs to the whole file, or sits at module top level. The builder maps it to the file's `File` node. |
-| `Unbound::Named(s)` | `s` is the trimmed source spelling and is not empty. A later pass can bind it across files. |
+| `Unbound::Named(s)` | `s` is the trimmed source spelling and is not empty. `SourceName::new` trims and returns `None` for a blank name. `RawEndpoint::named` and `bind_name` build it only through `SourceName::new`. `validate` and `Bound::new` reject a value that breaks the rule, such as one read back from an archive. A later pass can bind it across files. |
 | `Unbound::Anonymous` | Code with no name and no node, such as an inline handler with no closure node. The line comes from the record's site. |
 | `bind_enclosing(nodes, site, accept)` | The innermost node of an accepted kind whose span contains the site. Between identical spans the lower index wins, as in `innermost_enclosing` (`ecp-core/src/analyzer/types.rs:40`). |
-| `bind_name(nodes, name, accept)` | 1 match: `Node`, `Exact`. 2 or more: `Unresolved(Named)`, `Ambiguous` with the true count. 0: `Unresolved(Named)`, `Unresolved`. Empty name: `Unresolved(Anonymous)`, `Unresolved`. It never picks the first of several. |
-| `Bound::new` | `Node` takes `Exact` or `Heuristic`. `File` takes `Exact`. `Unresolved` takes `Ambiguous` (2 or more) or `Unresolved`. |
+| `bind_name(nodes, site, name, accept)` | A same-name node of an accepted kind is a candidate only when the site provably sees it. Every scope container around the candidate (callable, type, `Impl`, `Module`, `Namespace`) must also contain the site, and none of them may be a type scope. Member visibility (`self.`, an implicit `this`) belongs to area 1. Among the visible candidates, the innermost scope shadows the outer ones. In that scope: 1 match gives `Node`, `Exact`. 2 or more give `Unresolved(Named)`, `Ambiguous` with the true count. 0 gives `Unresolved(Named)`, `Unresolved`. An empty name gives `Unresolved(Anonymous)`, `Unresolved`. A candidate that the site cannot be proven to see never binds. `Bound::out_of_scope` keeps its raw index, so a caller can record a `BlindSpot` or a caveat. The rule ignores declaration order: a declaration after the site in a visible scope counts. It never picks the first of several. |
+| `Bound::new` | `Node` takes `Exact` or `Heuristic`. `File` takes `Exact`. `Unresolved` takes `Ambiguous` (2 or more) or `Unresolved`. A `Named` endpoint with a blank or untrimmed name is `BadName`. |
 
 ### Evidence classes
 
@@ -100,7 +101,7 @@ The map reads node counts only, never uids. A tombstone keeps its slot. Nodes th
 | `TxScope` | `RawTxScope` | `Enclosing` | callable | no | `OpensTxScope` |
 | `CallMeta` | `RawCallMeta` | `Enclosing` | callable | no | `Calls` |
 | `FunctionMeta` | `RawFunctionMeta` | `Enclosing` | callable | no | none |
-| `FetchSite` | none (Open point 4) | `FileOnly` | — | — | `Fetches` |
+| `FetchSite` | none (Open point 4; the overlay caveat applies until it exists) | `FileOnly` | — | — | `Fetches` |
 
 Callable is `Function`, `Method`, `Constructor`. Type is `Class`, `Struct`, `Interface`, `Trait`. With no container and no file fallback, `RecordKind::bind_site` returns `None`: the record has no owner, and the producer drops it with a count, never with a guess. Facts inside a `RawNode` (`calls`, `field_reads`, `heritage`, `decorators`) start at that node by construction and need no endpoint.
 
@@ -113,14 +114,14 @@ Callable is `Function`, `Method`, `Constructor`. Type is `Class`, `Struct`, `Int
 | Phase order is per parser | Python collects in the match loop (`python/parser.rs:827`) and keeps tx sites as rows and columns (`:825`, `:979`). It binds them at `:1430`, then promotes `Class` to `Interface` (`:1432-1440`) and stamps owners (`:1482-1483`). Binding happens before finalizing ends. |
 | Dedup after collect | Dart dedups nodes (`dart/parser.rs:483`) before it binds tx scopes (`:541`). The order is right by convention. |
 | Bind after the last push | Go pushes nodes up to `go/parser.rs:949` and binds at `:1044`. |
-| Innermost rule | `enclosing_fn_idx_by_span` (`framework_helpers.rs:208-221`) takes the smallest area; Go, Ruby, Dart and the fan-out source use it. Python's `resolve_tx_scopes` takes the first containing node (`python/parser.rs:1601-1613`), so a decorated function nested in another function binds the outer one. |
+| Innermost rule | `enclosing_fn_idx_by_span` (`framework_helpers.rs:208-221`) takes the smallest area. Go, Ruby, Dart, Python (`resolve_tx_scopes`, `python/parser.rs:1604`) and the fan-out source use it. |
 | Concatenation | Vue joins the node lists of its `<script>` blocks (`vue/parser.rs:231`). It emits no indexed record, so nothing shifts today. |
 
 ### Raw index and the global mapping
 
 | Fact | Produced | Read |
 |---|---|---|
-| A record with a raw index | `RawTxScope`: 24-bit node index plus `FrameworkId` (`ecp-core/src/analyzer/types.rs:944-981`, limit `:954`). Producers: `go/parser.rs:259`, `python/parser.rs:1613`, `ruby/parser.rs:289`, `dart/parser.rs:590`, `framework_helpers.rs:902`, `:930`, `:955`, `:984`, `:1010`. | `post_process/tx_scope_edges.rs:56-118` |
+| A record with a raw index | `RawTxScope`: 24-bit node index plus `FrameworkId` (`ecp-core/src/analyzer/types.rs:945-982`, limit `:955`). Producers: `go/parser.rs:259`, `python/parser.rs:1604`, `ruby/parser.rs:289`, `dart/parser.rs:590`, `framework_helpers.rs:902`, `:930`, `:955`, `:984`, `:1010`. | `post_process/tx_scope_edges.rs:56-118` |
 | Other raw-index users | Decorator routes take the decorated node (`resolution/builder.rs:1403`). Overrides take the candidate's own index (`post_process/overrides.rs:166`). Closure references use `innermost_enclosing` (`builder.rs:2166-2179`). | same |
 | Prefix sum of node counts | Rebuilt in 13 places: `builder.rs:1398`, `:1712`, `:1880`, `:2160`, `:2219`, `:2325`, `:2902`; `tx_scope_edges.rs:66`, `:70`, `:118`; `overrides.rs:128`, `:182`, `:217`; `decorates_edges.rs:174`; `php/laravel_routes.rs:1653`. | each pass |
 | Slot alignment | Pass 1 pushes a tombstone for a uid collision so that `nodes.len()` stays equal to the slot count (`builder.rs:1108-1118`, `:1198-1223`). An overload gets its own uid and slot (`:1123-1137`). The survivor is the first occurrence (`uid_seen`, `:1119`, `:1228`). | every prefix sum |
@@ -133,17 +134,17 @@ Callable is `Function`, `Method`, `Constructor`. Type is `Class`, `Struct`, `Int
 
 | Record or edge | Field read | Lookup | Effect |
 |---|---|---|---|
-| `UsesPathLiteral` | `RawPathLiteral.enclosing_symbol`, `enclosing_owner` (`types.rs:599`, `:603`) | `post_process/path_literal_nodes.rs:77` | the first same-name node. A module-top literal gets no edge (`:74-76`), although the type doc says it starts at the `File` node (`types.rs:584`). |
-| `QueriesTable` | `RawSqlRef.enclosing_symbol` (`types.rs:646`) | `post_process/sql_table_edges.rs:57` | the first same-name node. Module-top SQL gets no edge (`:53-56`). |
-| `Publishes`, `Subscribes` | `RawEventTopic.enclosing_fn`, empty when the detector has no capture (`types.rs:927-929`) | `post_process/event_topic_mirrors.rs:113` | the first same-name node, or no edge |
-| `HasProperty` to `SchemaField` | `RawSchemaField.owner_class` (`types.rs:906`) | `post_process/schema_field_mirrors.rs:96` | the first same-name node |
+| `UsesPathLiteral` | `RawPathLiteral.enclosing_symbol`, `enclosing_owner` (`types.rs:600`, `:604`) | `post_process/path_literal_nodes.rs:77` | the first same-name node. A module-top literal gets no edge (`:74-76`; type doc `types.rs:584-585`). |
+| `QueriesTable` | `RawSqlRef.enclosing_symbol` (`types.rs:647`) | `post_process/sql_table_edges.rs:57` | the first same-name node. Module-top SQL gets no edge (`:53-56`). |
+| `Publishes`, `Subscribes` | `RawEventTopic.enclosing_fn`, empty when the detector has no capture (`types.rs:928-930`) | `post_process/event_topic_mirrors.rs:113` | the first same-name node, or no edge |
+| `HasProperty` to `SchemaField` | `RawSchemaField.owner_class` (`types.rs:907`) | `post_process/schema_field_mirrors.rs:96` | the first same-name node |
 | `Defines` | the raw node itself | `post_process/scope_defines.rs:45`, `:80` | two same-name nodes both resolve to the first |
 | `HandlesRoute` (call form) | `RawRoute.handler: Option<String>` (`types.rs:507`) | `builder.rs:1508` | the first same-name node |
 | entry point `References` | `ep.uid` (a handler name) | `builder.rs:2058` | the first same-name node |
-| framework `References` | `RawFrameworkRef.source_name` (`types.rs:662`) | `builder.rs:2784` | `<module>` (`framework_helpers.rs:39`) never matches, so a module-level ref is dropped (`builder.rs:2785`) |
+| framework `References` | `RawFrameworkRef.source_name` (`types.rs:663`) | `builder.rs:2784` | `<module>` (`framework_helpers.rs:39`) never matches, so a module-level ref is dropped (`builder.rs:2785`) |
 | fan-out `References` | `RawFanoutRef.source_name` | `enclosing_fn_idx_by_span` filtered by name, then a name lookup (`builder.rs:2818-2828`) | mostly raw index already |
 | `Fetches` | none | first raw node of the file (`builder.rs:1864-1883`); the client calls come from a second disk read (`:1914-1916`) | the edge starts at an unrelated declaration |
-| `CallMeta` | `RawCallMeta.caller_name`, `caller_span`, `call_index` (`types.rs:1044-1059`) | key `(caller_span, call_index)` (`builder.rs:117-125`, `:2971`) | pairs by span |
+| `CallMeta` | `RawCallMeta.caller_name`, `caller_span`, `call_index` (`types.rs:1045-1060`) | key `(caller_span, call_index)` (`builder.rs:117-125`, `:2971`) | pairs by span |
 | `FunctionMeta` | `RawFunctionMeta.span` (`types.rs:376-378`) | span lookup (`builder.rs:2110-2160`) | pairs by span |
 
 ### Confidence today and the class each value maps to
@@ -171,13 +172,13 @@ Values with no mapping:
 
 | Value | Why |
 |---|---|
-| `enclosing_owner` (`types.rs:603`, `:648`) | The bound node carries its own `owner_class`. A PathLiteral uid hashes this field (`path_literal_nodes.rs:49-58`); see Stored data. |
+| `enclosing_owner` (`types.rs:604`, `:649`) | The bound node carries its own `owner_class`. A PathLiteral uid hashes this field (`path_literal_nodes.rs:49-58`); see Stored data. |
 | `enclosing_symbol`, `enclosing_fn`, `source_name`, `caller_name`, `owner_class` of a schema field | Replaced by `RawEndpoint`. |
-| `RawExportAlias.local` (`types.rs:1068-1071`) | An export table that area 1's import tiers read by name. It is not an endpoint. |
+| `RawExportAlias.local` (`types.rs:1069-1072`) | An export table that area 1's import tiers read by name. It is not an endpoint. |
 | entry-point `ep.score` (`builder.rs:2091`) | A score, not a binding. Area 8 keeps it. |
 | `Decorates` to a synthetic `Annotation`, 0.8 (`post_process/decorates_edges.rs:123-166`) | An unresolved target stored as a name node. Open point 8. |
-| `RawDocumentBlock` (`types.rs:653`) | Not wired into the graph (`builder.rs:1269-1272`). |
-| `BlindSpot` (`types.rs:1020`) | Metadata with its own path and span. |
+| `RawDocumentBlock` (`types.rs:654`) | Not wired into the graph (`builder.rs:1269-1272`). |
+| `BlindSpot` (`types.rs:1021`) | Metadata with its own path and span. |
 
 ### Overlay today
 
@@ -199,7 +200,7 @@ Must stop: emitting a guessed module match at 0.9 with the exact reason (`import
 
 ### Area 5: one read path (the records the overlay replays)
 
-Reads: `RawIndexMap::new(base_len, …)` for overlay slots, and `RecordKind::rel_types` for the stale-edge caveat.
+Reads: `RawIndexMap::new(base_len, …)` for overlay slots, and `RecordKind::rel_types` for the stale-edge caveat. Until the four conditions of Open point 4 hold, the caveat names `Fetches` for a dirty set that holds a route file or a file with fetch calls.
 
 Must stop:
 
@@ -225,13 +226,14 @@ Must stop:
 
 Reads: `RawEndpoint` for the handler, `bind_name`, `Evidence`.
 
-Maps to C1 `HandlerRef` (`ecp-core/src/contracts/identity.rs:1178-1188`):
+Maps to C1 `HandlerRef` (`ecp-core/src/contracts/identity.rs:1312-1327`; C1 Open point 13, `C1-identity.md:212`):
 
 | C4 | C1 |
 |---|---|
-| `Node(i)` | `Declaration { uid }` of `RawIndexMap::node` |
+| `Node(i)` whose node is a closure: a `Function` whose name starts with `<anonymous:` (`is_anonymous_closure`, `builder.rs:2183-2185`) | `Closure { uid }` of `RawIndexMap::node`; prints `inline_anonymous` |
+| any other `Node(i)` | `Declaration { uid }` of `RawIndexMap::node` |
 | `Unresolved(Named(s))`, after every cross-file pass | `Unresolved { name: s }` |
-| `Unresolved(Anonymous)` | `Inline { line }`, line = site start row + 1 |
+| `Unresolved(Anonymous)` | `Inline { line }`, line = site start row + 1; prints `inline_anonymous` |
 | no endpoint | `Absent` |
 
 Must stop: `RawRoute.handler` as `Option<String>` (`types.rs:507`); binding the first of two same-name handlers (`builder.rs:1508`).
@@ -243,7 +245,6 @@ Reads: `ParsePhase`, `RecordKind::endpoint_rule`, `bind_enclosing`, `bind_name`.
 Must stop:
 
 - Binding before the node list is final (`python/parser.rs:1430` before `:1432-1483`).
-- A per-language binding rule (`python/parser.rs:1601-1613` against `framework_helpers.rs:208`).
 
 A driver extraction keeps raw records identical, as plan §10 requires. A change of a binding rule is a capability change with an approved difference.
 
@@ -254,18 +255,18 @@ A driver extraction keeps raw records identical, as plan §10 requires. A change
 | 2, 7 | Raw slots kept in pass 1 (`builder.rs:1198`). Area 7 waits for the index mapping, not for A-A. | Satisfied. `RawIndexMap` reads node counts only. The tombstone-to-survivor pairs are an optional input that A-A can shrink. |
 | 4, 7 | `Imports` guesses at 0.9 (`imports_edges.rs:391`). | Satisfied by `Evidence::Heuristic` and `HEURISTIC_CEILING`. |
 | 7, 8 | `Fetches` source (`builder.rs:1871`) and `RawRoute.handler` as a string (`types.rs:507`). | Satisfied. `Fetches` takes `RawEndpoint::File`; the handler takes `RawEndpoint` with `Unbound::Named` for a cross-file name. |
-| 7, 10 and 8, 10 | Raw indexes (`types.rs:935`, the `RawTxScope` doc; the type is at `:944`) and route producers rewritten by a later driver. | Satisfied by `ParsePhase`, the per-kind `EndpointRule` and the concatenation rule. |
+| 7, 10 and 8, 10 | Raw indexes (`types.rs:936`, the `RawTxScope` doc; the type is at `:945`) and route producers rewritten by a later driver. | Satisfied by `ParsePhase`, the per-kind `EndpointRule` and the concatenation rule. |
 | 5, 7 and 5, 8 | The overlay masks only some edge kinds (`view.rs:995`) and skips builder nodes (`:1297`). | Partly. `RecordKind::rel_types` names the stale kinds for the caveat. Replay itself is the incremental overlay's work. |
 
 ## Stored data
 
 | Identifier | Change |
 |---|---|
-| `BUILDER_FINGERPRINT` (`ecp-core/src/registry/commit_meta.rs:76`, now `schema20`) | Bump in each slice that changes a `LocalGraph` field (area 7, area 8's handler, a binding rule of area 10). The parse cache dir is keyed by it (`ecp-cli/src/parse_cache.rs:3-7`, `:31-36`), so old entries are never read. |
-| `GRAPH_FORMAT_VERSION` (`ecp-core/src/graph.rs:36`, now 15) | None. `LocalGraph` lives in the parse cache, not in `graph.bin` (`parse_cache.rs:96-99`). Evidence is stored as confidence (Open point 1, option a). |
+| `BUILDER_FINGERPRINT` (`ecp-core/src/registry/commit_meta.rs:80`, now `schema21`) | Bump it in each slice that changes what the build outputs for the same source. That covers a `LocalGraph` field (area 7, area 8's handler), a binding rule (area 10), an endpoint, a confidence or an evidence class. An `Imports` or `Overrides` confidence change counts, although it changes no `LocalGraph` field. The parse cache dir is keyed by it (`ecp-cli/src/parse_cache.rs:3-7`, `:31-36`), so old entries are never read. A stored graph with another fingerprint is rebuilt (`ecp-cli/src/auto_ensure.rs:346`, `meta.json` fallback `:355`). |
+| `GRAPH_FORMAT_VERSION` (`ecp-core/src/graph.rs:36`, now 15) | Only for a change of the archived `graph.bin` layout. None in this contract: `LocalGraph` lives in the parse cache, not in `graph.bin` (`parse_cache.rs:96-99`), and evidence is stored as confidence (Open point 1, option a). Condition 3 of Open point 4 is a layout change and bumps it. |
 | L1 fragment encoding (`FRAGMENT_FORMAT_V5`, `ecp-core/src/session/overlay.rs:57`) | None in this contract. The incremental overlay adds a format that stores records with `RawEndpoint`. |
 | Dirty manifest | None. |
-| View cache key (`ecp-cli/src/session/view_cache.rs:35-48`) | Follows `BUILDER_FINGERPRINT` (`:40`) and the fragment bytes (`overlay_reader.rs:90-91`). Nothing extra. |
+| View cache key (`ecp-cli/src/session/view_cache.rs:35-48`) | Follows `BUILDER_FINGERPRINT` (`:40`) and the fragment bytes (`overlay_reader.rs:90-91`), so a fingerprint bump also invalidates it. Nothing extra. |
 
 Uid effect: a PathLiteral uid hashes the record's `enclosing_owner` (`path_literal_nodes.rs:49-58`). When area 7 takes the owner from the bound node, the uid changes where the two spellings differ (plan §2: `Walk<'s, 't>` against `Walk`). That difference needs a baseline entry with owner area 7.
 
@@ -277,8 +278,17 @@ Proof per the repo `CLAUDE.md`: index with a parse cache that the previous binar
 2. **A record inside a tombstoned twin.** (a) Redirect to the survivor, as typed. (b) Drop the record. Recommendation: (a). Every name lookup already lands on the survivor, and an edge must not start at a node with an empty name. A-A removes most twins.
 3. **The `File` node index.** `File` nodes are appended after the path-literal and SQL passes (`builder.rs:723-737`, `:746-788`). (a) Append `File` nodes before the post passes; node order in `graph.bin` changes, the format does not. (b) Keep `GlobalEndpoint::File(FileOrd)` and emit those edges after the append. Recommendation: (b).
 4. **`FetchSite` has no record.** `fetch_urls::extract` reads text and returns no position (`fetch_shape/fetch_urls.rs:62`), and pass 1.6 reads the file from disk at build time (`builder.rs:1914-1916`). That read bypasses the parse cache and area 3's snapshot. (a) `File` endpoint from the current pass. (b) A parse-time record with a site, bound to the enclosing callable. Recommendation: (a) in the first area 7 or 8 slice, (b) in area 10.
-5. **Inline handler.** C1 `HandlerRef::Inline { line }` says no node exists. Some parsers emit `<anonymous:…>` closure nodes (`builder.rs:2183-2185`). (a) A closure node is a `Node` endpoint, and C1 prints it as inline by its name. (b) Always `Unbound::Anonymous`. Recommendation: (a). Settle it with C1's owner.
+
+   Until then the phase-2 overlay cannot replay URL and method facts. `view.rs:995` does not mask `Fetches`, so a base `Fetches` edge stays as the base commit matched it, also after a route rename. Caveat: when the dirty set holds a file that adds, removes or changes a `Route`, or a file with fetch calls, the answer names `Fetches` as stale (matched at the base commit). The caveat goes away only when all four conditions hold:
+
+   | # | Condition | Owner |
+   |---|---|---|
+   | 1 | `LocalGraph` carries a parse-time `FetchSite` record: method, URL text, templated flag, site, and a `RawEndpoint` from `bind_enclosing` with the `File` fallback. A `BUILDER_FINGERPRINT` bump. | area 10 |
+   | 2 | An L1 fragment format after V5 stores those records (`overlay.rs:57`, reader `overlay_reader.rs:76`). | area 5 |
+   | 3 | `graph.bin` keeps the fetch sites of clean files, or the route table they match against. A `GRAPH_FORMAT_VERSION` bump. | area 8 |
+   | 4 | The overlay masks the base `Fetches` edges of a dirty file, and re-matches every dirty route against all fetch sites and every dirty fetch site against all routes. | area 5 |
+5. **Inline handler.** Closed by C1 Open point 13: option (a). Some parsers emit `<anonymous:…>` closure nodes (`builder.rs:2183-2185`), and only when the body holds a call. A closure node is a `Node` endpoint and maps to `HandlerRef::Closure { uid }`. A handler with no node stays `Unbound::Anonymous` and maps to `Inline { line }`. Both print `inline_anonymous`, so `ecp routes` keeps its values, and the uid lets `impact` reach the calls inside the closure. See the Area 8 mapping table.
 6. **Call tiers and B's outcome type.** The `Global` tier is 0.7 (`resolution/heuristics.rs:49`), exactly at the ceiling, so it reads as `Exact`. B's `NoEdge::Ambiguous` carries no count (design B §3.1). Recommendation: B1 decides the `Global` class and adds the count, so `Evidence::Ambiguous` can take it. C4 does not reclassify call tiers.
-7. **Accepted kinds of a path literal or SQL literal.** The type doc names Function, Method and Const (`types.rs:595`). A literal in a module-level `Variable` binds `File`. Recommendation: keep; widen per language only with a test.
+7. **Accepted kinds of a path literal or SQL literal.** The type doc names Function, Method and Const (`types.rs:595`). A literal in a module-level `Variable` binds `File`. Recommendation: keep. The accepted kinds are one shared rule in `RecordKind`, so widening them changes every language. A change ships with tests for the 14 mainstream languages (repo `CLAUDE.md`), each with a literal in the newly accepted kind and one outside it.
 8. **`Decorates` to a synthetic node at 0.8** (`decorates_edges.rs:123-166`). (a) Keep: the synthetic node is the honest unresolved marker (`SYNTHETIC_FILE_IDX`). (b) Drop it below 0.7. Recommendation: (a); area 7 confirms.
-9. **`RawTxScope` packing.** Its 24-bit index (`types.rs:954`) is narrower than `RawIdx`. Recommendation: keep the packing; read it as `RawIdx(node_idx())`. A file with more than 16 M nodes is already a `debug_assert` failure.
+9. **`RawTxScope` packing.** Its 24-bit index (`types.rs:955`) is narrower than `RawIdx`. `RawTxScope::new` checks the limit with a `debug_assert` only (`types.rs:962-970`), so in a release build index `2^24` packs as `0` and the record binds the file's first node. Recommendation: keep the packing; read it as `RawIdx(node_idx())`. A producer packs only through `RawIdx::to_packed24`, which checks in every build. On `None` it drops the record and records a `BlindSpot` with the file and the site; it never packs a truncated index. Area 7 moves the check into a checked `RawTxScope` constructor that returns `Option`.
