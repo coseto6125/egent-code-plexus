@@ -581,7 +581,8 @@ pub enum RouteInclude {
 /// Path-shaped string literal extracted by a per-language `path_literals`
 /// walker. Promoted by `post_process::path_literal_nodes` into a
 /// `NodeKind::PathLiteral` plus a `UsesPathLiteral` edge from the resolved
-/// enclosing symbol (or the `File` node when the literal sits at module top-level).
+/// enclosing symbol. A literal at module top level gets the node and no edge
+/// (`path_literal_nodes.rs`); C4's `File` endpoint is the planned source.
 ///
 /// Captured at parse time; resolution to node indices happens in the
 /// post-process pass that has `SymbolTable` + global `nodes` available.

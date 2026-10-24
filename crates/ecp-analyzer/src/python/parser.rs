@@ -2,8 +2,8 @@ use super::receiver_types::{collect_local_types, extract_python_calls_and_path_l
 use super::spec::PythonSpec;
 use crate::framework_confidence;
 use crate::framework_helpers::{
-    enclosing_class, enclosing_function_name, enumerate_class_methods, has_import_from, node_span,
-    point_in_span, push_blind_spot, Span, MODULE_LEVEL_SOURCE,
+    enclosing_class, enclosing_fn_idx_by_span, enclosing_function_name, enumerate_class_methods,
+    has_import_from, node_span, push_blind_spot, Span, MODULE_LEVEL_SOURCE,
 };
 use crate::indirect_dispatch::{collect_python_param_names, detect_python_indirect};
 use crate::parse_budget::{parse_with_budget, ParseBudget};
@@ -1584,7 +1584,7 @@ impl LanguageProvider for PythonProvider {
 }
 
 /// Match each pending `(handler_row, handler_col, framework)` against the
-/// Function/Method/Constructor whose span contains that position and emit a
+/// innermost Function/Method/Constructor whose span contains that position and emit a
 /// packed `RawTxScope`. The captured identifier is `name: (identifier)` of a
 /// `function_definition`, so the handler position falls inside the function
 /// node's span (which is the surrounding `function_definition`).
@@ -1601,16 +1601,7 @@ fn resolve_tx_scopes(
     let scopes: Vec<RawTxScope> = pending_tx_scopes
         .iter()
         .filter_map(|&(row, col, framework)| {
-            nodes
-                .iter()
-                .enumerate()
-                .find(|(_, n)| {
-                    matches!(
-                        n.kind,
-                        NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-                    ) && point_in_span(n.span, row, col)
-                })
-                .map(|(idx, _)| RawTxScope::new(idx as u32, framework))
+            enclosing_fn_idx_by_span(nodes, row, col).map(|idx| RawTxScope::new(idx, framework))
         })
         .collect();
     (!scopes.is_empty()).then(|| scopes.into_boxed_slice())

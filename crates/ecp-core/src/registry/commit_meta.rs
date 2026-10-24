@@ -75,7 +75,8 @@ use std::path::Path;
 /// persist for every language, and chained calls use callee return types.
 /// schema21: a decorator that names several HTTP verbs gives one Route per
 /// verb, read from the method argument; a docker-compose flow-mapping `build`
-/// is read; the Cargo / pyproject package alias comes from the TOML table.
+/// is read; the Cargo / pyproject package alias comes from the TOML table; a
+/// Python transaction decorator binds the innermost function.
 pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema21");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
