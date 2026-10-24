@@ -68,7 +68,7 @@ pub fn parse_configs(repo_path: &Path) -> PathAliases {
         .as_ref()
         .and_then(|doc| toml_str(doc, &["package", "name"]))
     {
-        aliases.add(&format!("{name}/*"), vec!["src/*".to_string()]);
+        aliases.add(format!("{name}/*"), vec!["src/*".to_string()]);
         aliases.add(
             name,
             vec!["src/lib.rs".to_string(), "src/main.rs".to_string()],
@@ -84,7 +84,7 @@ pub fn parse_configs(repo_path: &Path) -> PathAliases {
         })
     {
         aliases.add(
-            &format!("{name}/*"),
+            format!("{name}/*"),
             vec![format!("src/{name}/*"), format!("{name}/*")],
         );
     }
