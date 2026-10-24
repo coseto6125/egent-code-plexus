@@ -139,19 +139,19 @@ GitNexus and codegraph avoid this with one pipeline and one store that they rewr
 
 | Mode | Passes and generated nodes | Work per refresh |
 |---|---|---|
-| per file | raw extraction of every pass; path literals; function meta; scope `Defines`; enum containment; transaction scopes; route detection inside one file; `SchemaField` and `EventTopic` nodes with their `HasProperty` and publish or subscribe edges | the dirty files only |
-| incremental | call resolution, `Imports`, `Overrides`, class membership, decorator targets (`decorates_edges.rs:105-123` resolves through imports), SQL table targets (`sql_table_edges.rs:30-36` indexes every `Class`), route prefix composition and handler binding (area 8) | the dirty files, plus the clean files whose candidates, exports, heritage, return types, tables or scope config changed |
+| per file | raw extraction of every pass; `File` nodes; `EntryPoint` nodes and their `References` (`builder.rs:1742-1758`, `:2073-2090`); path literals; function meta; scope `Defines`; enum containment; transaction scopes; route detection inside one file; `SchemaField` and `EventTopic` nodes with their `HasProperty` and publish or subscribe edges | the dirty files only |
+| incremental | call resolution; `Extends` and `Implements` (`builder.rs:2559-2583`); `Accesses` from type annotations (`:2660-2675`); `ReadsField` and the non-call `References` to names, enum variants and fields (`:2688-2765`); `Imports`; `Overrides`; class membership; decorator targets (`decorates_edges.rs:105-123`); SQL table targets (`sql_table_edges.rs:30-36`); route prefix composition and handler binding; `Fetches`, which a route added or renamed in another file rebinds (`builder.rs:1922-1971`) | the dirty files, plus the clean files whose candidates, exports, heritage, return types, tables, routes or scope config changed |
 | index-time, with a caveat | communities, processes, and the name-paired heuristic edges: schema-field mirrors, event-topic mirrors, saga pairs | none; the answer names the pass as index-time |
 
 Shared `Annotation` nodes (`decorates_edges.rs:133-155`) are deduplicated across files: such a node lives while one file still references it.
 
-Every production pass in `resolution/builder.rs` (`:662` to `:829`) and every generated node kind has one row. A pass added later gets a row in the same change.
+Every output of `GraphBuilder::build`, from pass 1 to the post-process passes (`resolution/builder.rs:313` to `:829`), and every generated node kind has one row. A pass added later gets a row in the same change. Lane F owns the integration; areas 1, 7 and 8 supply the facts each row replays.
 
 The incremental passes read the global tables from L2 through the facts adapters of design B. They never rebuild them. The invalidation closure (which clean files to resolve again) is owned by area 5, and areas 1 and 4 supply the dependency facts. Where the closure is not bounded, the answer carries a caveat that names the stale edge kinds.
 
 The incremental overlay needs areas 4, 7 and 8 for the facts it replays. Until each lands, the overlay keeps that edge kind index-time and says so in the caveat. L1 fragments carry symbols, imports and export aliases only today (`session/overlay_writer.rs:119-123`), so the overlay needs a new fragment encoding for the raw records it replays.
 
-**Proof of done.** For every output in the per-file and incremental rows, the node and edge multisets of the dirty view equal those of a fresh build of the same tree, in these cases: a candidate added in another file, a candidate deleted, an export changed, a supertype changed, a return type changed, a table definition changed, and a scope config changed. Each case keeps the caller's bytes unchanged. The index-time outputs are listed apart, and the test asserts their caveat instead of their value. A temporary exclusion, such as an edge kind waiting for area 4, 7 or 8, names its owner and the slice that removes it.
+**Proof of done.** For every output in the per-file and incremental rows, the node and edge multisets of the dirty view equal those of a fresh build of the same tree, in these cases: a candidate added in another file, a candidate deleted, an export changed, a supertype changed, a return type changed, a table definition changed, a route added or renamed, a field renamed, and a scope config changed. Each case keeps the caller's bytes unchanged. The index-time outputs are listed apart, and the test asserts their caveat instead of their value. A temporary exclusion, such as an edge kind waiting for area 4, 7 or 8, names its owner and the slice that removes it.
 
 **Measured on 2026-10-25** (`ECP_PROF=1 ecp admin index --force`, one run each):
 
@@ -455,7 +455,7 @@ Five contracts are shared by several areas. Each is a short design note plus its
 | C2 workspace facts | resolution scope per file, scope root, effective config, dependency map; stored once, read by index, overlay, flow and the `Imports` pass | 1 (the Rust subset in B's first round), 4, 5 (the invalidation closure) |
 | C3 dirty event | one record per changed path: added, modified, deleted, renamed (both halves); class source, resolution config or other. Only "other" skips the per-path syscalls | 1, 4, 5, 6 |
 | C4 raw records | the parser phases (collect captures, finalize nodes, bind raw records), the raw index to global node mapping, the endpoint of a raw record (node, file or unresolved), and the evidence classes exact, ambiguous, heuristic and unresolved | 2, 4, 5 (the records the overlay replays), 7, 8, 10 |
-| C5 routing result | file format, provider, language after parse, capability set, effective size cap; extension defaults plus ordered path rules | 1, 2, 4 (`imports_edges.rs:152`), 5 (source or config class), 6, 7 (`scope_defines.rs:101`), 10 |
+| C5 routing result | file format, provider, language after parse, capability set, effective size cap; extension defaults plus ordered path rules | 1, 2, 4 (`imports_edges.rs:152`), 5 (source or config class), 6, 7 (`scope_defines.rs:101`), 8 (response-shape language and consumer files, `builder.rs:1302`, `:1314`), 10 |
 
 Area 11 verifies all five. A lane needs every contract that one of its areas uses, and all five reach phase 1's done state before phase 2 starts.
 
