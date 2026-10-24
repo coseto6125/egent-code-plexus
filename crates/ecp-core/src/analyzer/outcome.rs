@@ -3,9 +3,10 @@
 //! The index (`resolver.rs`) and the overlay (`view.rs`) run the same tier
 //! ladder. Each of them held its own copy of the tier confidences and tested
 //! "did the ladder end, and may the call-level fallbacks still run" by hand.
-//! This module holds both facts once (B §3.1, §3.2). The ladders adopt
-//! [`Resolution`] in later slices; today only [`Tier::confidence`] and
-//! [`Tier::of_member`] have readers.
+//! This module holds both facts once (B §3.1, §3.2). Both call entries
+//! (`Resolver::resolve_call` and the overlay's call closure) carry one
+//! [`Resolution`] through their call-level fallbacks; the tiers inside the
+//! ladders adopt it in later slices.
 
 use super::type_ladder::TypeMember;
 use super::types::NEAREST_COPY_CONFIDENCE;
@@ -61,7 +62,9 @@ impl Tier {
 pub struct Hit {
     pub id: u32,
     pub confidence: f32,
-    pub tier: Tier,
+    /// `None`: a ladder tier that does not report its tier yet bound the
+    /// edge ([`Resolution::from_ladder`]); `confidence` is its own.
+    pub tier: Option<Tier>,
 }
 
 /// How far a [`NoEdge`] stops the resolution of one call.
@@ -118,18 +121,64 @@ pub enum Resolution {
 // `NoEdge` payload into fieldless variants; this assert fails first.
 const _: () = assert!(std::mem::size_of::<Resolution>() <= 12);
 
-/// Whether the call-level fallbacks (Kotlin extension retry, constructor
-/// fallback) may run after the ladder ended in `resolution`. The single
-/// reader of [`NoEdge::reach`] at the `resolve_call` boundary.
-///
-/// `Bound` answers `false`: a bound call needs no fallback. The constructor
-/// fallback that follows an emptied untyped post-filter is the caller's
-/// separate decision (B §3.2, row `Bound`).
-pub const fn call_fallbacks_allowed(resolution: &Resolution) -> bool {
-    match resolution {
-        Resolution::Bound(_) => false,
-        Resolution::NoEdge(reason) => matches!(reason.reach(), Reach::Ladder),
-        Resolution::Unknown | Resolution::Shadowed => true,
+impl Resolution {
+    /// An edge `tier` binds, at the tier's confidence.
+    pub const fn bound(id: u32, tier: Tier) -> Self {
+        Resolution::Bound(Hit {
+            id,
+            confidence: tier.confidence(),
+            tier: Some(tier),
+        })
+    }
+
+    /// The verdict of a ladder whose tiers still answer with an edge or none
+    /// (the index's `Vec`, the overlay's `Option`). They report neither the
+    /// tier nor the reason, so a miss is `NoEdge(Unresolved)`: its Ladder
+    /// reach keeps the call-level fallbacks, as an empty answer did.
+    pub const fn from_ladder(edge: Option<(u32, f32)>) -> Self {
+        match edge {
+            Some((id, confidence)) => Resolution::Bound(Hit {
+                id,
+                confidence,
+                tier: None,
+            }),
+            None => Resolution::NoEdge(NoEdge::Unresolved),
+        }
+    }
+
+    /// The `(target, confidence)` this resolution emits, once every
+    /// call-level step has read it.
+    pub const fn edge(&self) -> Option<(u32, f32)> {
+        match *self {
+            Resolution::Bound(hit) => Some((hit.id, hit.confidence)),
+            _ => None,
+        }
+    }
+
+    /// Whether the call-level fallbacks (Kotlin extension retry, constructor
+    /// fallback) may run after the ladder ended here. The single reader of
+    /// [`NoEdge::reach`] at the call boundary, on both sides.
+    ///
+    /// `Bound` answers `false`: a bound call needs no fallback. A bound edge
+    /// the untyped post-filter refuses becomes `Unknown` ([`Self::admit`]),
+    /// so the constructor fallback still runs after it (B §3.2, row `Bound`).
+    pub const fn call_fallbacks_allowed(&self) -> bool {
+        match self {
+            Resolution::Bound(_) => false,
+            Resolution::NoEdge(reason) => matches!(reason.reach(), Reach::Ladder),
+            Resolution::Unknown | Resolution::Shadowed => true,
+        }
+    }
+
+    /// The untyped-member post-filter (B §3.2 `admit`): a bound target that
+    /// `admits` refuses leaves the call `Unknown`, as an emptied result did.
+    pub fn admit(self, admits: impl FnOnce(u32) -> bool) -> Self {
+        if let Resolution::Bound(hit) = self {
+            if !admits(hit.id) {
+                return Resolution::Unknown;
+            }
+        }
+        self
     }
 }
 
@@ -184,15 +233,14 @@ mod tests {
         assert_eq!(Tier::of_member(TypeMember::NoEdge), None);
     }
 
-    /// `reach_call` here is the `reach()` call on the Ladder reasons: their
-    /// edge-less call keeps the call-level fallbacks (Kotlin retry,
-    /// constructor fallback), as the index does today.
+    /// A Ladder-reach reason's edge-less call keeps the call-level fallbacks
+    /// (Kotlin retry, constructor fallback), as the index does today.
     #[test]
-    fn test_noedge_reach_call_allows_fallbacks_true() {
+    fn test_call_fallbacks_allowed_ladder_reach_reasons_true() {
         for reason in LADDER_REASONS {
             assert_eq!(reason.reach(), Reach::Ladder, "{reason:?}");
             assert!(
-                call_fallbacks_allowed(&Resolution::NoEdge(reason)),
+                Resolution::NoEdge(reason).call_fallbacks_allowed(),
                 "{reason:?}"
             );
         }
@@ -201,37 +249,73 @@ mod tests {
     #[test]
     fn test_noedge_package_missing_allows_fallbacks_false() {
         assert_eq!(NoEdge::PackageMissing.reach(), Reach::Call);
-        assert!(!call_fallbacks_allowed(&Resolution::NoEdge(
-            NoEdge::PackageMissing
-        )));
+        assert!(!Resolution::NoEdge(NoEdge::PackageMissing).call_fallbacks_allowed());
     }
 
     #[test]
     fn test_noedge_declared_attribute_allows_fallbacks_false() {
         assert_eq!(NoEdge::DeclaredAttribute.reach(), Reach::Call);
-        assert!(!call_fallbacks_allowed(&Resolution::NoEdge(
-            NoEdge::DeclaredAttribute
-        )));
+        assert!(!Resolution::NoEdge(NoEdge::DeclaredAttribute).call_fallbacks_allowed());
     }
 
     #[test]
     fn test_noedge_chain_broken_allows_fallbacks_false() {
         assert_eq!(NoEdge::ChainBroken.reach(), Reach::Call);
-        assert!(!call_fallbacks_allowed(&Resolution::NoEdge(
-            NoEdge::ChainBroken
-        )));
+        assert!(!Resolution::NoEdge(NoEdge::ChainBroken).call_fallbacks_allowed());
     }
 
     #[test]
     fn test_call_fallbacks_allowed_unknown_and_shadowed_true_bound_false() {
-        let hit = Hit {
-            id: 1,
-            confidence: Tier::Global.confidence(),
-            tier: Tier::Global,
-        };
-        assert!(call_fallbacks_allowed(&Resolution::Unknown));
-        assert!(call_fallbacks_allowed(&Resolution::Shadowed));
-        assert!(!call_fallbacks_allowed(&Resolution::Bound(hit)));
+        assert!(Resolution::Unknown.call_fallbacks_allowed());
+        assert!(Resolution::Shadowed.call_fallbacks_allowed());
+        assert!(!Resolution::bound(1, Tier::Global).call_fallbacks_allowed());
+        assert!(!Resolution::from_ladder(Some((1, 0.7))).call_fallbacks_allowed());
+    }
+
+    /// An empty ladder answer reads as a Ladder-reach miss: the fallbacks
+    /// still run after it, as they ran after an empty `Vec` / `None`.
+    #[test]
+    fn test_from_ladder_none_allows_fallbacks_true() {
+        let missed = Resolution::from_ladder(None);
+        assert_eq!(missed, Resolution::NoEdge(NoEdge::Unresolved));
+        assert!(missed.call_fallbacks_allowed());
+        assert_eq!(missed.edge(), None);
+    }
+
+    /// The edge a ladder bound comes out unchanged, without a tier it did
+    /// not report.
+    #[test]
+    fn test_from_ladder_some_edge_returns_same_target_and_confidence() {
+        let bound = Resolution::from_ladder(Some((7, 0.85)));
+        assert_eq!(bound.edge(), Some((7, 0.85)));
+        assert!(matches!(bound, Resolution::Bound(Hit { tier: None, .. })));
+    }
+
+    #[test]
+    fn test_bound_tier_returns_tier_confidence() {
+        let bound = Resolution::bound(3, Tier::ImportScoped);
+        assert_eq!(bound.edge(), Some((3, 0.95)));
+        assert!(matches!(
+            bound,
+            Resolution::Bound(Hit {
+                tier: Some(Tier::ImportScoped),
+                ..
+            })
+        ));
+    }
+
+    /// A refused bound target leaves the call open to the constructor
+    /// fallback; an admitted one, or a call with no edge, is unchanged.
+    #[test]
+    fn test_admit_refused_bound_returns_unknown_admitted_unchanged() {
+        let bound = Resolution::from_ladder(Some((5, 0.7)));
+        let refused = bound.admit(|_| false);
+        assert_eq!(refused, Resolution::Unknown);
+        assert!(refused.call_fallbacks_allowed());
+        assert_eq!(bound.admit(|id| id == 5), bound);
+        let package_missing = Resolution::NoEdge(NoEdge::PackageMissing);
+        assert_eq!(package_missing.admit(|_| false), package_missing);
+        assert!(!package_missing.admit(|_| false).call_fallbacks_allowed());
     }
 
     #[test]

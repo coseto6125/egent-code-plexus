@@ -41,7 +41,7 @@ use ecp_core::analyzer::import_binding::{
     extension_retry, fqn_extension, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
     import_family, import_member_fallback, may_suppress, module_head, retry_name,
 };
-use ecp_core::analyzer::outcome::Tier;
+use ecp_core::analyzer::outcome::{NoEdge, Resolution, Tier};
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::reexport::{
     self, is_ecmascript, probe_rust_module, ExportAliasTable, Fact, FileImports, ImportRef,
@@ -729,12 +729,16 @@ impl<'a> Resolver<'a> {
         // resolves as the entry the parser wrote before chains.
         let mut site = site.fallback();
         let language = Language::from_normalized_path(&normalize_source_path(source_file));
+        // `targets` only holds the output buffer, so the ladder's allocation
+        // is reused; every step decides from `resolution` alone.
+        let mut targets = Vec::new();
+        let mut resolution = Resolution::Unknown;
         if let Some((node_id, import)) =
             self.python_submodule_member(source_file, language, site, raw_imports)
         {
-            return self.import_scoped(source_file, site.name(), import, node_id);
-        }
-        if let CallSite::FromReceiver { receiver, member } = site {
+            targets = self.import_scoped(source_file, site.name(), import, node_id);
+            resolution = Resolution::bound(node_id, Tier::ImportScoped);
+        } else if let CallSite::FromReceiver { receiver, member } = site {
             if language == Language::Go {
                 match reexport::go_package_lookup(
                     &IndexFacts(self),
@@ -744,32 +748,43 @@ impl<'a> Resolver<'a> {
                     raw_imports.iter().map(ImportRef::from),
                 ) {
                     reexport::GoPackageLookup::Resolved(target) => {
-                        return target
-                            .and_then(|(node_id, source)| {
-                                raw_imports
-                                    .iter()
-                                    .find(|import| import.source == source)
-                                    .map(|import| {
-                                        self.import_scoped(source_file, member, import, node_id)
-                                    })
-                            })
-                            .unwrap_or_default();
+                        let bound = target.and_then(|(node_id, source)| {
+                            raw_imports
+                                .iter()
+                                .find(|import| import.source == source)
+                                .map(|import| (node_id, import))
+                        });
+                        resolution = match bound {
+                            Some((node_id, import)) => {
+                                targets = self.import_scoped(source_file, member, import, node_id);
+                                Resolution::bound(node_id, Tier::ImportScoped)
+                            }
+                            None => Resolution::NoEdge(NoEdge::PackageMissing),
+                        };
                     }
                     reexport::GoPackageLookup::Unmapped => site = CallSite::Plain(member),
                     reexport::GoPackageLookup::Value => site = CallSite::UntypedMember(member),
                 }
             }
         }
-        let declared_python_attribute = matches!(site, CallSite::FromReceiver { receiver, .. }
-        if language == Language::Python
-            && receiver.contains('/')
-            && reexport::python_from_import_declared_attribute(
-                &IndexFacts(self),
-                &normalize_source_path(source_file),
-                receiver,
-                raw_imports.iter().map(ImportRef::from),
-            ));
-        let type_member = self.type_receiver(source_file, language, site, raw_imports);
+        // A call settled ahead of the ladder is neither typed nor
+        // re-classified: those rules only shape the ladder's lookup.
+        let open = matches!(resolution, Resolution::Unknown);
+        let declared_python_attribute = open
+            && matches!(site, CallSite::FromReceiver { receiver, .. }
+            if language == Language::Python
+                && receiver.contains('/')
+                && reexport::python_from_import_declared_attribute(
+                    &IndexFacts(self),
+                    &normalize_source_path(source_file),
+                    receiver,
+                    raw_imports.iter().map(ImportRef::from),
+                ));
+        let type_member = if open {
+            self.type_receiver(source_file, language, site, raw_imports)
+        } else {
+            None
+        };
         // A Swift receiver that names no type is a value the parser cannot
         // see (a global, an inherited property): an untyped member call.
         let site = match (site, &type_member) {
@@ -804,12 +819,19 @@ impl<'a> Resolver<'a> {
             )
         };
         let target = call_target(source_file, site);
-        let mut targets = resolve(type_member.as_deref().unwrap_or(site.name()), target, true);
-        if targets.is_empty() && type_member.is_some() && language == Language::Kotlin {
+        if open {
+            targets = resolve(type_member.as_deref().unwrap_or(site.name()), target, true);
+            resolution = ladder_resolution(&targets);
+        }
+        if resolution.call_fallbacks_allowed()
+            && type_member.is_some()
+            && language == Language::Kotlin
+        {
             // `fun Reg.ext()` is a top-level function no member lookup on
             // `Reg` finds.
             targets =
                 self.extension_fallback(source_file, site.name(), raw_imports, target, heritage);
+            resolution = ladder_resolution(&targets);
         }
         if !bind_import {
             // A Python module is a value: `api.helper()` on a receiver the
@@ -821,13 +843,19 @@ impl<'a> Resolver<'a> {
                     && self.symbol_table.is_top_level(id)
                     && self.symbol_table.file_of(id) != Some(source_file_str.as_ref())
             };
-            targets.retain(|&(id, _)| {
+            resolution = resolution.admit(|id| {
                 self.symbol_table.member_call_admits(id, caller_owner) || module_value(id)
             });
         }
-        if targets.is_empty() && !self.may_be_receiverless_member_call(source_file, site) {
-            targets.extend(self.resolve_instantiation(language, site, raw_imports, resolve));
+        if resolution.call_fallbacks_allowed()
+            && !self.may_be_receiverless_member_call(source_file, site)
+        {
+            if let Some(edge) = self.resolve_instantiation(language, site, raw_imports, resolve) {
+                resolution = Resolution::from_ladder(Some(edge));
+            }
         }
+        targets.clear();
+        targets.extend(resolution.edge());
         targets
     }
 
@@ -1102,23 +1130,6 @@ impl<'a> Resolver<'a> {
             return Vec::new();
         }
         let language = Language::from_normalized_path(&normalize_source_path(source_file));
-        if let Some((node_id, import)) =
-            self.python_submodule_member(source_file, language, site, raw_imports)
-        {
-            return self.import_scoped(source_file, site.name(), import, node_id);
-        }
-        if matches!(site, CallSite::FromReceiver { receiver, .. }
-        if language == Language::Python
-            && receiver.contains('/')
-            && reexport::python_from_import_declared_attribute(
-                &IndexFacts(self),
-                &normalize_source_path(source_file),
-                receiver,
-                raw_imports.iter().map(ImportRef::from),
-            ))
-        {
-            return Vec::new();
-        }
         let resolve = |name: &str, target, bind: bool| {
             self.resolve_import_tiers(
                 source_file,
@@ -1129,10 +1140,34 @@ impl<'a> Resolver<'a> {
                 &mut None,
             )
         };
-        let mut targets = resolve(site.name(), call_target(source_file, site), true);
-        if targets.is_empty() {
-            targets.extend(self.resolve_instantiation(language, site, raw_imports, resolve));
+        let mut targets = Vec::new();
+        let mut resolution = if let Some((node_id, import)) =
+            self.python_submodule_member(source_file, language, site, raw_imports)
+        {
+            targets = self.import_scoped(source_file, site.name(), import, node_id);
+            Resolution::bound(node_id, Tier::ImportScoped)
+        } else if matches!(site, CallSite::FromReceiver { receiver, .. }
+        if language == Language::Python
+            && receiver.contains('/')
+            && reexport::python_from_import_declared_attribute(
+                &IndexFacts(self),
+                &normalize_source_path(source_file),
+                receiver,
+                raw_imports.iter().map(ImportRef::from),
+            ))
+        {
+            Resolution::NoEdge(NoEdge::DeclaredAttribute)
+        } else {
+            targets = resolve(site.name(), call_target(source_file, site), true);
+            ladder_resolution(&targets)
+        };
+        if resolution.call_fallbacks_allowed() {
+            if let Some(edge) = self.resolve_instantiation(language, site, raw_imports, resolve) {
+                resolution = Resolution::from_ladder(Some(edge));
+            }
         }
+        targets.clear();
+        targets.extend(resolution.edge());
         targets
     }
 
@@ -2141,6 +2176,13 @@ fn qualifier_prefix_is_internal(full_callee: &str, qualifier: &str) -> bool {
 /// in scope through `.`. Paths use `::`, so a Rust callee holds `.` only
 /// when it was written with method syntax. Python / JS `obj.f()` can reach a
 /// module function, so other languages keep `Callable`.
+/// The index ladder's answer as a [`Resolution`]. Every tier answers with
+/// at most one target (B §3.4), so the first is the edge.
+fn ladder_resolution(targets: &[(NodeId, f32)]) -> Resolution {
+    debug_assert!(targets.len() <= 1, "a tier bound {targets:?}");
+    Resolution::from_ladder(targets.first().copied())
+}
+
 fn call_target(source_file: &Path, site: CallSite<'_>) -> ResolveTarget {
     if site.uses_method_syntax() && is_rust_source(source_file) {
         ResolveTarget::Method
