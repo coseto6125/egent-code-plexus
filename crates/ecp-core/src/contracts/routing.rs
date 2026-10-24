@@ -1427,11 +1427,7 @@ mod tests {
     // fails here instead of shipping unnoticed.
 
     #[test]
-    fn test_route_every_extension_table_row_matches_today_provider() {
-        for (ext, provider) in AnalyzerPipeline::EXTENSION_TABLE {
-            let path = format!("src/x.{ext}");
-            assert_eq!(routed(&path).providers().next(), Some(*provider), "{path}");
-        }
+    fn test_route_every_language_extension_matches_provider_name_for_path() {
         for &language in Language::ALL {
             for ext in language.extensions() {
                 let path = format!("src/x.{ext}");

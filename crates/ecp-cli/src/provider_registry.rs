@@ -2,8 +2,8 @@
 //! (incremental path) and `admin::index::detect_needed_providers` (cold-index path) both
 //! resolve against this table instead of each re-listing its own `match` over provider
 //! names — the two paths drifting out of sync silently dropped `.yaml` from being scanned
-//! until PR #595. `ecp_core::analyzer::pipeline::AnalyzerPipeline::EXTENSION_TABLE` stays
-//! the separate source of truth for extension → name; this table only maps name →
+//! until PR #595. `ecp_core::contracts::routing::FileRouter` stays
+//! the separate source of truth for path → name; this table only maps name →
 //! constructor and includes the two providers (markdown, yaml) that path resolution
 //! never names directly, since they're reached only via the GitHub-Actions/docker-compose
 //! path specials or explicit registration in `make_pipeline`.
@@ -94,20 +94,25 @@ pub fn make_provider(name: &str) -> Option<anyhow::Result<Box<dyn LanguageProvid
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ecp_core::analyzer::pipeline::AnalyzerPipeline;
+    use ecp_core::contracts::routing::{FileRouter, Language, RouteOutcome, SizeCap};
     use rustc_hash::FxHashSet;
 
-    /// Every name `provider_name_for_path` can produce must resolve to a
-    /// constructible provider — the extension table and the constructor
-    /// table must not drift out of sync (this repo has shipped two silent
-    /// dispatch-table drift bugs: PR #141/#142, PR #595).
+    /// Every name a route can list must resolve to a constructible provider —
+    /// the router and the constructor table must not drift out of sync (this
+    /// repo has shipped two silent dispatch-table drift bugs: PR #141/#142,
+    /// PR #595).
     #[test]
-    fn provider_constructors_test_every_extension_table_name_is_constructible() {
-        let mut names: FxHashSet<&str> = AnalyzerPipeline::EXTENSION_TABLE
-            .iter()
-            .map(|(_, name)| *name)
-            .collect();
-        // Path-based special-case names not present in EXTENSION_TABLE.
+    fn provider_constructors_test_every_routed_name_is_constructible() {
+        let router = FileRouter::new(SizeCap::BUILT_IN);
+        let mut names: FxHashSet<&str> = FxHashSet::default();
+        for &language in Language::ALL {
+            for ext in language.extensions() {
+                if let RouteOutcome::Routed(route) = router.route(&format!("src/x.{ext}")) {
+                    names.extend(route.providers());
+                }
+            }
+        }
+        // Path-rule names that no extension routes to.
         names.insert("docker-compose");
         names.insert("github-actions");
         names.insert("kubernetes");
