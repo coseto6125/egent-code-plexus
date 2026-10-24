@@ -28,7 +28,7 @@ Every area changes what an agent receives from ecp. Each section states that con
 
 The repo ranks three priorities: per-query latency, answers that do not mislead the agent, and signal density. Every area exists for the second priority: each one removes an answer that is wrong, missing, or stale with no marker. Latency is a constraint on every area, not a priority any area trades away:
 
-- A slice may move work from query time to index time. Cold index stays under 5 s per 25k files.
+- A slice may move work from query time to index time. Cold index stays under 5 s per 25k files. This bound is provisional: the only profile covers 12,737 files (vscode: parse 3.16 s, global build 0.92 s, write 0.18 s), and it binds once a 25k-file run is measured.
 - Clean-query latency of `find`, `impact`, `inspect` and `cypher` stays within benchmark noise. `scripts/benchmark/benchmark_ecp.py` runs before and after each slice. Measure newly supported dirty-file refreshes separately, and set their budgets before implementation.
 - Where the correct answer costs query time, the area names the cost and its bound.
 
@@ -440,7 +440,7 @@ The largest copies are the `RawNode` literal (43 copies, 793 lines), the `RawImp
 
 **Target.**
 
-- One parity harness with a strict key (uid, kind, line, edge type, confidence). It reuses the structure of `tests/common/parity.rs` but compares edge multisets: that helper dedups today (`:88`, `:178`), which hides a doubled edge. Identity and parent correctness are separate assertions. It runs over node sets and every edge kind, for dirty, deleted, renamed and shadowed files. A known difference lives in a baseline file that must match exactly, as B §4.3 item 5 states for R14.
+- One parity harness with a strict key (source uid, target uid, kind, line, edge type, confidence). It reuses the structure of `tests/common/parity.rs` but compares edge multisets: that helper dedups today (`:88`, `:178`), which hides a doubled edge. Identity and parent correctness are separate assertions. It runs over node sets and every edge kind, for dirty, deleted, renamed and shadowed files. A known difference lives in a baseline file that must match exactly, as B §4.3 item 5 states for R14.
 - Fixtures written by the previous release binary for every stored format, per the repo `CLAUDE.md`.
 - A test that lists the languages each test dimension covers, and fails when one of the 14 is missing without an exemption line.
 - A test that the routing table of area 6 agrees with every reader.
@@ -455,7 +455,7 @@ Five contracts are shared by several areas. Each is a short design note plus its
 | C2 workspace facts | resolution scope per file, scope root, effective config, dependency map; stored once, read by index, overlay, flow and the `Imports` pass | 1 (the Rust subset in B's first round), 4, 5 (the invalidation closure) |
 | C3 dirty event | one record per changed path: added, modified, deleted, renamed (both halves); class source, resolution config or other. Only "other" skips the per-path syscalls | 1, 4, 5, 6 |
 | C4 raw records | the parser phases (collect captures, finalize nodes, bind raw records), the raw index to global node mapping, the endpoint of a raw record (node, file or unresolved), and the evidence classes exact, ambiguous, heuristic and unresolved | 2, 4, 5 (the records the overlay replays), 7, 8, 10 |
-| C5 routing result | file format, provider, language after parse, capability set, effective size cap; extension defaults plus ordered path rules | 1, 2, 4 (`imports_edges.rs:152`), 5 (source or config class), 6, 7 (`scope_defines.rs:101`), 8 (response-shape language and consumer files, `builder.rs:1302`, `:1314`), 10 |
+| C5 routing result | file format, provider, language after parse, identifier finder, capability set, effective size cap; extension defaults plus ordered path rules | 1, 2, 4 (`imports_edges.rs:152`), 5 (source or config class), 6, 7 (`scope_defines.rs:101`), 8 (response-shape language and consumer files, `builder.rs:1302`, `:1314`), 10 |
 
 Area 11 verifies all five. A lane needs every contract that one of its areas uses, and all five reach phase 1's done state before phase 2 starts.
 
