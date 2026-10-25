@@ -17,7 +17,7 @@ use ecp_core::analyzer::types::{RawExportAlias, RawImport};
 use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::NodeKind;
 use ecp_core::session::layout;
-use ecp_core::session::{DirtyEvents, OverlayFileInput, OverlaySymbol, FRAGMENT_FORMAT_V6};
+use ecp_core::session::{DirtyEvents, OverlayFileInput, OverlaySymbol, FRAGMENT_FORMAT_V7};
 use rkyv::rancor::Error as RkyvError;
 use std::fs;
 use std::io;
@@ -140,7 +140,7 @@ pub fn view_inputs_under(
         let Some(fragment_id) = entry.fragment_id.as_deref() else {
             continue; // no bin, and no deletion either
         };
-        if entry.parse_failed || entry.format != FRAGMENT_FORMAT_V6 {
+        if entry.parse_failed || entry.format != FRAGMENT_FORMAT_V7 {
             continue;
         }
         if on_disk_mtime_ns() != Some(entry.mtime_ns) {
@@ -211,6 +211,7 @@ pub fn decode_view_inputs(accepted: &[AcceptedFragment]) -> Vec<OverlayFileInput
                             .collect(),
                         return_type: s.return_type.as_ref().map(|ty| ty.as_str().to_owned()),
                         generic_arity: s.generic_arity.to_native(),
+                        flags: s.flags.as_ref().map(|flags| flags.to_native()),
                     })
                     .collect(),
                 imports,

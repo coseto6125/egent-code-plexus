@@ -1328,7 +1328,7 @@ fn manifest_naming(fragment_id: &str) -> String {
             content_hash: Some(fragment_id.into()),
             parse_failed: false,
             dirty_symbols: vec![],
-            format: ecp_core::session::FRAGMENT_FORMAT_V6,
+            format: ecp_core::session::FRAGMENT_FORMAT_V7,
         },
     );
     serde_json::to_string(&manifest).unwrap()

@@ -190,6 +190,11 @@ pub struct OverlaySymbol {
     /// identity numbering reads it ([`file_identities`]), so a dirty C#
     /// `Conv<T>` beside `Conv` takes the full build's uid.
     pub generic_arity: u32,
+    /// `RawFunctionMeta.flags` of a function, method or constructor: static,
+    /// async, visibility and extension bits. `None` when the parse paired no
+    /// meta with the node, or the input does not carry it (a pre-V7
+    /// fragment). `Some(0)` is a real value (public instance), not absence.
+    pub flags: Option<u16>,
 }
 
 impl HeritageNode for OverlaySymbol {
@@ -226,36 +231,40 @@ pub struct OverlayFileInput {
 impl From<LocalGraph> for OverlayFileInput {
     fn from(local: LocalGraph) -> Self {
         // Paired by span, as the index's Pass 1.8 pairs them.
-        let return_types: FxHashMap<(u32, u32, u32, u32), String> = local
+        let metas: FxHashMap<(u32, u32, u32, u32), (String, u16)> = local
             .raw_function_metas
             .into_iter()
-            .filter(|meta| !meta.return_type.is_empty())
-            .map(|meta| (meta.span, meta.return_type))
+            .map(|meta| (meta.span, (meta.return_type, meta.flags)))
             .collect();
         Self {
             rel_path: local.file_path.to_string_lossy().replace('\\', "/"),
             symbols: local
                 .nodes
                 .into_iter()
-                .map(|n| OverlaySymbol {
-                    return_type: matches!(
+                .map(|n| {
+                    let is_callable = matches!(
                         n.kind,
                         NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-                    )
-                    .then(|| return_types.get(&n.span).cloned())
-                    .flatten(),
-                    generic_arity: n.generic_arity(),
-                    name: n.name,
-                    kind: n.kind,
-                    owner_class: n.owner_class,
-                    start_line: n.span.0 + 1,
-                    end_line: n.span.2 + 1,
-                    start_column: n.span.1,
-                    end_column: n.span.3,
-                    calls: n.calls,
-                    is_exported: n.is_exported,
-                    heritage: n.heritage,
-                    variant_refs: n.field_reads,
+                    );
+                    let meta = is_callable.then(|| metas.get(&n.span)).flatten();
+                    OverlaySymbol {
+                        return_type: meta
+                            .map(|(return_type, _)| return_type.clone())
+                            .filter(|return_type| !return_type.is_empty()),
+                        flags: meta.map(|&(_, flags)| flags),
+                        generic_arity: n.generic_arity(),
+                        name: n.name,
+                        kind: n.kind,
+                        owner_class: n.owner_class,
+                        start_line: n.span.0 + 1,
+                        end_line: n.span.2 + 1,
+                        start_column: n.span.1,
+                        end_column: n.span.3,
+                        calls: n.calls,
+                        is_exported: n.is_exported,
+                        heritage: n.heritage,
+                        variant_refs: n.field_reads,
+                    }
                 })
                 .collect(),
             imports: local.imports,
@@ -823,11 +832,11 @@ impl OverlayView {
                                 access,
                             )
                         };
-                        // A dirty method's flags are a guess
+                        // A dirty method with no flags of its own is a guess
                         // (`csharp_method_flags`): a verdict that the
                         // strictest flags would change rests on it.
                         let guessed = |id: u32| {
-                            id >= base_len
+                            !facts.csharp_flags_known(id)
                                 && !csharp_access::call_admits(
                                     &facts,
                                     id,
@@ -835,7 +844,9 @@ impl OverlayView {
                                     access,
                                 )
                         };
-                        if (picked != Some(idx) && idx >= base_len) || picked.is_some_and(guessed) {
+                        if (picked != Some(idx) && !facts.csharp_flags_known(idx))
+                            || picked.is_some_and(guessed)
+                        {
                             note_gap(facts.name_of(idx), GAP_CS_ACCESS_DIRTY_TARGET);
                         }
                         picked
@@ -1604,7 +1615,9 @@ impl OverlayView {
 /// 9 (P-part): a chain through a C# partial type binds; an 8 view lacks the edge.
 /// 10 (P-recv): a C# value receiver of unknown type binds no ladder tier; a
 /// 9 view kept those edges.
-pub const VIEW_CACHE_FORMAT: u32 = 10;
+/// 11 (P-flags): a dirty C# method carries its own flags; a 10 view read
+/// guessed ones and recorded a gap the 11 view does not.
+pub const VIEW_CACHE_FORMAT: u32 = 11;
 
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
@@ -2438,6 +2451,10 @@ struct OverlayFacts<'a> {
     /// Virtual idx → the return type the dirty function declares, as
     /// written ([`OverlaySymbol::return_type`]). Sparse.
     dirty_return_types: FxHashMap<u32, &'a str>,
+    /// Virtual idx → the `FunctionMeta::flags` the dirty method's own parse
+    /// carries ([`OverlaySymbol::flags`]). Sparse: a method with no meta is
+    /// absent, and its flags are unknown.
+    dirty_flags: FxHashMap<u32, u16>,
     /// Scoped virtual idx → its lexical parent's virtual idx, from the
     /// fresh parse as the index derives its table. A virtual node has no
     /// row in the graph's table. Sparse: empty while no language opts in.
@@ -2473,6 +2490,7 @@ impl<'a> OverlayFacts<'a> {
         let mut es_modules = Vec::with_capacity(files.len());
         let mut dirty_aliases = Vec::with_capacity(files.len());
         let mut dirty_return_types: FxHashMap<u32, &'a str> = FxHashMap::default();
+        let mut dirty_flags: FxHashMap<u32, u16> = FxHashMap::default();
         let mut dirty_lexical_parents: FxHashMap<u32, u32> = FxHashMap::default();
         let mut seen_uids: FxHashSet<u64> = FxHashSet::default();
         let mut offset = 0usize;
@@ -2496,6 +2514,9 @@ impl<'a> OverlayFacts<'a> {
                 exported.push(symbol.is_exported);
                 if let Some(return_type) = symbol.return_type.as_deref() {
                     dirty_return_types.insert(base_len + offset as u32, return_type);
+                }
+                if let Some(flags) = symbol.flags {
+                    dirty_flags.insert(base_len + offset as u32, flags);
                 }
                 offset += 1;
             }
@@ -2595,6 +2616,7 @@ impl<'a> OverlayFacts<'a> {
             dirty_supertypes: OnceCell::new(),
             dirty_impl_traits,
             dirty_return_types,
+            dirty_flags,
             dirty_lexical_parents,
             csharp_namespaces: OnceCell::new(),
         }
@@ -4285,15 +4307,26 @@ impl<'a> OverlayFacts<'a> {
     /// the base declaration it replaced, which the edit may have changed. A
     /// method with no such declaration (an overload, whose anchor repeats)
     /// reads as 0 (public, instance), and the rule admits a call to it. A
-    /// dirty method's flags are therefore never known: the caller reports a
-    /// verdict that rests on them ([`GAP_CS_ACCESS_DIRTY_TARGET`]).
+    /// dirty method's own parse carries its flags ([`OverlaySymbol::flags`]);
+    /// one without them is not known ([`Self::csharp_flags_known`]), and the
+    /// caller reports a verdict that rests on them
+    /// ([`GAP_CS_ACCESS_DIRTY_TARGET`]).
     fn csharp_method_flags(&self, id: u32) -> u16 {
+        if let Some(&flags) = self.dirty_flags.get(&id) {
+            return flags;
+        }
         let base = match id.checked_sub(self.base_len()) {
             Some(offset) => self.nodes[offset as usize].replaced_base,
             None => (!self.dirty_base.contains(&id)).then_some(id),
         };
         base.and_then(|base| base_function_meta(self.graph, base))
             .map_or(0, |meta| meta.flags.to_native())
+    }
+
+    /// Whether [`Self::csharp_method_flags`] reads `id`'s own flags: a clean
+    /// base method's, or a dirty method's from its fresh parse.
+    fn csharp_flags_known(&self, id: u32) -> bool {
+        id < self.base_len() || self.dirty_flags.contains_key(&id)
     }
 
     /// The namespaces the C# file `file` declares (`.`-joined), the index's
@@ -6491,6 +6524,7 @@ mod tests {
             variant_refs: Vec::new(),
             return_type: None,
             generic_arity: 0,
+            flags: None,
         }
     }
 
@@ -6572,6 +6606,7 @@ mod tests {
             start_column: 4,
             end_column: 5,
             generic_arity: arity,
+            flags: None,
             ..sym("Foo1", &[])
         };
         OverlayFileInput {
@@ -7167,6 +7202,7 @@ mod tests {
             variant_refs: Vec::new(),
             return_type: None,
             generic_arity: 0,
+            flags: None,
         };
         let multi = OverlayFileInput {
             export_aliases: Vec::new(),
@@ -7264,6 +7300,7 @@ mod tests {
             variant_refs: Vec::new(),
             return_type: None,
             generic_arity: 0,
+            flags: None,
         };
         let outer = OverlayFileInput {
             export_aliases: Vec::new(),

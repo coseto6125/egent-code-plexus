@@ -103,6 +103,10 @@ pub struct FragmentSymbol {
     /// arity, 0 for every other node. The overlay numbers a dirty `Conv<T>` beside `Conv`
     /// from it, as the full build does.
     pub generic_arity: u32,
+    /// `RawFunctionMeta::flags` of a function, method or constructor whose
+    /// span a meta carries; `None` otherwise. `Some(0)` is a real value
+    /// (public instance), so absence is not zero.
+    pub flags: Option<u16>,
 }
 
 /// The symbol shape of the v2 and v3 fragment bins (`FragmentSymbol` before
@@ -121,7 +125,7 @@ pub struct FragmentSymbolV3 {
 
 /// v5 fragment bin payload: the whole dirty file's fresh parse, including
 /// file-level imports and export aliases for query-time Tier-2
-/// (import-scoped) resolution. `DirtyEventEntry.format == FRAGMENT_FORMAT_V6`
+/// (import-scoped) resolution. `DirtyEventEntry.format == FRAGMENT_FORMAT_V7`
 /// marks bins of this shape — readers MUST dispatch on the manifest marker,
 /// not guess the encoding.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
@@ -176,32 +180,37 @@ pub struct FragmentFileV2 {
 }
 
 pub fn fragment_file_from_local_graph(graph: &LocalGraph) -> FragmentFile {
-    let return_types: std::collections::HashMap<_, _> = graph
+    let metas: std::collections::HashMap<_, _> = graph
         .raw_function_metas
         .iter()
-        .filter(|meta| !meta.return_type.is_empty())
-        .map(|meta| (meta.span, meta.return_type.clone()))
+        .map(|meta| (meta.span, meta))
         .collect();
     FragmentFile {
         symbols: graph
             .nodes
             .iter()
-            .map(|n| FragmentSymbol {
-                name: n.name.clone(),
-                kind: n.kind,
-                span: n.span,
-                owner_class: n.owner_class.clone(),
-                is_exported: n.is_exported,
-                calls: n.calls.clone(),
-                heritage: n.heritage.clone(),
-                variant_refs: n.field_reads.clone(),
-                return_type: matches!(
+            .map(|n| {
+                let meta = matches!(
                     n.kind,
                     NodeKind::Function | NodeKind::Method | NodeKind::Constructor
                 )
-                .then(|| return_types.get(&n.span).cloned())
-                .flatten(),
-                generic_arity: n.generic_arity(),
+                .then(|| metas.get(&n.span))
+                .flatten();
+                FragmentSymbol {
+                    name: n.name.clone(),
+                    kind: n.kind,
+                    span: n.span,
+                    owner_class: n.owner_class.clone(),
+                    is_exported: n.is_exported,
+                    calls: n.calls.clone(),
+                    heritage: n.heritage.clone(),
+                    variant_refs: n.field_reads.clone(),
+                    return_type: meta
+                        .map(|meta| meta.return_type.clone())
+                        .filter(|return_type| !return_type.is_empty()),
+                    generic_arity: n.generic_arity(),
+                    flags: meta.map(|meta| meta.flags),
+                }
             })
             .collect(),
         imports: graph.imports.clone(),
@@ -559,7 +568,7 @@ fn write_fragment_file(
         content_hash: Some(content_hash),
         parse_failed,
         dirty_symbols,
-        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V6,
+        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V7,
     };
 
     let outcome = FragmentOutcome {
@@ -638,7 +647,7 @@ fn write_fragment_from_graph(
         content_hash: Some(content_hash),
         parse_failed,
         dirty_symbols: symbols_from_graph(graph, &rel_path),
-        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V6,
+        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V7,
     };
     let outcome = FragmentOutcome {
         fragment_id,
@@ -794,7 +803,7 @@ impl OverlayWriter {
                 content_hash: Some(content_hash.to_string()),
                 parse_failed,
                 dirty_symbols,
-                format: ecp_core::session::overlay::FRAGMENT_FORMAT_V6,
+                format: ecp_core::session::overlay::FRAGMENT_FORMAT_V7,
             },
         );
         DirtyEvents::write_atomic(&manifest_path, &manifest)
@@ -942,5 +951,68 @@ mod hash_tests {
         let got = hash_worktree_file(Path::new(""), Path::new("Cargo.toml"));
 
         assert_eq!(got, 0);
+    }
+}
+
+#[cfg(test)]
+mod flags_tests {
+    use super::*;
+
+    const SOURCE: &[u8] = b"namespace Lib
+{
+    public class Svc
+    {
+        private int count;
+        public void M() {}
+        private static void S() {}
+    }
+}
+";
+
+    fn fragment_symbols() -> Vec<FragmentSymbol> {
+        let graph = parse_graph("Lib/Svc.cs", SOURCE, SizeCap::BUILT_IN).unwrap();
+        fragment_file_from_local_graph(&graph).symbols
+    }
+
+    /// Stands for: a fragment carries a method's real flags, and `Some(0)`
+    /// (public instance) stays distinct from the absence of a meta, which is
+    /// `None`. The overlay's C# access rule reads them.
+    #[test]
+    fn test_fragment_file_from_local_graph_method_carries_its_flags() {
+        let symbols = fragment_symbols();
+        let flags_of = |name: &str| {
+            symbols
+                .iter()
+                .find(|s| s.name == name && s.kind == NodeKind::Method)
+                .unwrap_or_else(|| panic!("{name} missing"))
+                .flags
+        };
+        assert_eq!(flags_of("M"), Some(0));
+        assert!(flags_of("S").is_some_and(|flags| flags != 0));
+    }
+
+    /// Stands for: a symbol the parser pairs with no function meta (a type,
+    /// a field) has flags `None`, never `Some(0)`: the overlay treats `None`
+    /// as unknown and reports the gap.
+    #[test]
+    fn test_fragment_file_from_local_graph_non_callable_has_no_flags() {
+        let symbols = fragment_symbols();
+        let non_callable: Vec<_> = symbols
+            .iter()
+            .filter(|s| {
+                !matches!(
+                    s.kind,
+                    NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+                )
+            })
+            .collect();
+        assert!(
+            non_callable.iter().any(|s| s.name == "Svc"),
+            "{non_callable:?}"
+        );
+        assert!(
+            non_callable.iter().all(|s| s.flags.is_none()),
+            "{non_callable:?}"
+        );
     }
 }

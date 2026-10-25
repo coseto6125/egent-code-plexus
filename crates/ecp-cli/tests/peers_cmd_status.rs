@@ -69,7 +69,7 @@ fn write_dirty_in(root: &std::path::Path, id: &str, file: &str, symbols: &[&str]
                     line_end: 2,
                 })
                 .collect(),
-            format: ecp_core::session::overlay::FRAGMENT_FORMAT_V6,
+            format: ecp_core::session::overlay::FRAGMENT_FORMAT_V7,
         },
     );
     DirtyEvents::write_atomic(

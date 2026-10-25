@@ -92,8 +92,10 @@ fn access_gaps(gaps: &[CallGap]) -> Vec<(&str, &str)> {
 
 /// A dirty caller over a clean `JToken`: the overlay reads the base flags
 /// and matches the reindex. `other.Count()` is an instance call to a method
-/// of the dirty file itself: the edit may have made `Count` static, so the
-/// overlay reports that call, and only that one.
+/// of the dirty file itself: the fragment carries `Count`'s own flags, so
+/// the overlay decides like the reindex and reports no gap. Stands for: a
+/// dirty method's real flags make the verdict known, so no gap is due (the
+/// 7ba3c0b6 guess reported one here).
 #[test]
 fn test_overlay_dirty_caller_private_static_of_base_matches_reindex() {
     let provider = CSharpProvider::new().unwrap();
@@ -107,8 +109,7 @@ fn test_overlay_dirty_caller_private_static_of_base_matches_reindex() {
     assert_eq!(calls_from(&parity.reindex, "UseOther"), ["Count"]);
     assert_eq!(parity.overlay, parity.reindex);
     let gaps = call_gaps_after_edit(&provider_parse(&provider), &[JTOKEN, JCONTAINER], &edits);
-    assert_eq!(access_gaps(&gaps), [("UseOther", "Count")], "{gaps:?}");
-    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert_eq!(gaps, Vec::<CallGap>::new());
 }
 
 const SVC: (&str, &str) = (
@@ -135,13 +136,11 @@ const CLIENT: (&str, &str) = (
 ",
 );
 
-/// Stands for: a dirty method's flags are never known to the overlay. The
-/// edit makes `M` private; the reindex refuses the outside call. The
-/// overlay judges `M` by the flags of the public base declaration it
-/// replaced, so it must report the call. Before the fix a paired dirty
-/// method read as known, and the stale edge stood silently.
+/// Stands for: the overlay reads a dirty method's own flags. The edit makes
+/// `M` private; the reindex refuses the outside call. The overlay refuses it
+/// too, so the edges are equal and no gap is due.
 #[test]
-fn test_overlay_dirty_target_made_private_reports_access_gap() {
+fn test_overlay_dirty_target_made_private_matches_reindex_without_gap() {
     let provider = CSharpProvider::new().unwrap();
     let svc = SVC.1.replace("public void M()", "private void M()");
     let client = shifted(CLIENT.1);
@@ -149,8 +148,26 @@ fn test_overlay_dirty_target_made_private_reports_access_gap() {
     let files = [SVC, CLIENT];
     let parity = calls_after_edit_in(&provider, &files, &edits, &|_, name| name == "Call");
     assert_eq!(calls_from(&parity.reindex, "Call"), Vec::<&str>::new());
+    assert_eq!(parity.overlay, parity.reindex);
     let gaps = call_gaps_after_edit(&provider_parse(&provider), &files, &edits);
-    assert_eq!(access_gaps(&gaps), [("Call", "M")], "{gaps:?}");
+    assert_eq!(gaps, Vec::<CallGap>::new());
+}
+
+/// The reverse edit: `M` goes from private to public. The outside caller's
+/// edge appears in the overlay as in the reindex, with no gap. The base
+/// declaration of `M` is private, so a guess from it would refuse the call.
+#[test]
+fn test_overlay_dirty_target_made_public_matches_reindex_without_gap() {
+    let provider = CSharpProvider::new().unwrap();
+    let private_svc = (SVC.0, SVC.1.replace("public void M()", "private void M()"));
+    let client = shifted(CLIENT.1);
+    let edits = [(SVC.0, SVC.1), (CLIENT.0, client.as_str())];
+    let files = [(private_svc.0, private_svc.1.as_str()), CLIENT];
+    let parity = calls_after_edit_in(&provider, &files, &edits, &|_, name| name == "Call");
+    assert_eq!(calls_from(&parity.reindex, "Call"), ["M"]);
+    assert_eq!(parity.overlay, parity.reindex);
+    let gaps = call_gaps_after_edit(&provider_parse(&provider), &files, &edits);
+    assert_eq!(gaps, Vec::<CallGap>::new());
 }
 
 /// Guard: a bare call from the method's own type is admitted under any
@@ -221,26 +238,29 @@ fn test_overlay_chained_call_private_first_overload_binds_public_overload() {
     assert_eq!(gaps, Vec::<CallGap>::new());
 }
 
-/// Both files dirty: the chain's overloads have no flags the overlay can
-/// read, so the overlay reports the chained call.
+/// Both files dirty: each overload carries its own flags, so the overlay
+/// refuses the private first overload like the reindex, binds the public
+/// one, and reports no gap.
 #[test]
-fn test_overlay_chained_call_dirty_overloads_reports_gap() {
+fn test_overlay_chained_call_dirty_overloads_matches_reindex_without_gap() {
     let provider = CSharpProvider::new().unwrap();
     let reader = shifted(READER.1);
     let user = shifted(CHAIN_USER.1);
     let edits = [(READER.0, reader.as_str()), (CHAIN_USER.0, user.as_str())];
-    let gaps = call_gaps_after_edit(&provider_parse(&provider), &[READER, CHAIN_USER], &edits);
-    assert!(access_gaps(&gaps).contains(&("Run", "Read")), "{gaps:?}");
+    let files = [READER, CHAIN_USER];
+    let parity = calls_after_edit_in(&provider, &files, &edits, &|_, name| name == "Run");
+    assert_eq!(parity.overlay, parity.reindex);
+    let gaps = call_gaps_after_edit(&provider_parse(&provider), &files, &edits);
+    assert_eq!(access_gaps(&gaps), Vec::<(&str, &str)>::new(), "{gaps:?}");
 }
 
-/// Both files dirty: the dirty `GetType` reads the flags of the base
-/// declaration it replaced. The overlay matches the reindex, and reports
-/// each refusal that rests on those flags, since the edit may change them.
-/// `content.GetType()` on an `object` is an untyped member (P-recv): no
+/// Both files dirty: the dirty `GetType` carries its own flags. The overlay
+/// matches the reindex and reports no access gap, since no refusal rests on
+/// a guess. `content.GetType()` on an `object` is an untyped member (P-recv): no
 /// target reaches the access rule, and the extension retry reports that a
 /// dirty file declares a `GetType` whose flags it cannot read.
 #[test]
-fn test_overlay_dirty_target_access_matches_reindex_and_reports_gap() {
+fn test_overlay_dirty_target_access_matches_reindex_without_access_gap() {
     let provider = CSharpProvider::new().unwrap();
     let token = shifted(JTOKEN.1);
     let container = shifted(JCONTAINER.1);
@@ -272,7 +292,7 @@ fn test_overlay_dirty_target_access_matches_reindex_and_reports_gap() {
             && gap.reason == GAP_CS_EXTENSION_DIRTY_DECLARATION),
         "{gaps:?}"
     );
-    assert!(refused.contains(&("Instance", "GetType")), "{gaps:?}");
+    assert!(!refused.contains(&("Instance", "GetType")), "{gaps:?}");
 }
 
 const TOK: (&str, &str) = (
@@ -323,27 +343,25 @@ fn test_overlay_dirty_caller_private_first_overload_binds_public_overload() {
     assert_eq!(parity.overlay, parity.reindex);
 }
 
-/// Both files dirty: an overload's anchor repeats, so neither dirty
-/// `WriteTo` pairs with a base declaration and the overlay has no flags to
-/// judge them by. The reindex binds the public overload; the overlay may
-/// bind either, and reports the call in `result`. The contract is the
-/// report, not the overlay's target.
+/// Both files dirty: each dirty `WriteTo` carries its own flags (an
+/// overload's span is its own, though its anchor repeats). The overlay binds
+/// the public overload like the reindex and reports no access gap.
 #[test]
-fn test_overlay_dirty_overloads_private_first_reports_gap() {
+fn test_overlay_dirty_overloads_private_first_matches_reindex_without_gap() {
     let provider = CSharpProvider::new().unwrap();
     let tok = shifted(TOK.1);
     let user = shifted(USER.1);
     let edits = [(TOK.0, tok.as_str()), (USER.0, user.as_str())];
     let parity = calls_after_edit_in(&provider, &[TOK, USER], &edits, &|_, name| name == "Use");
     assert_eq!(write_to_lines(&parity.reindex), [9]);
-    assert_eq!(write_to_lines(&parity.overlay).len(), 1);
+    assert_eq!(parity.overlay, parity.reindex);
     let gaps = call_gaps_after_edit(&provider_parse(&provider), &[TOK, USER], &edits);
     let refused: Vec<(&str, &str)> = gaps
         .iter()
         .filter(|gap| gap.reason == GAP_CS_ACCESS_DIRTY_TARGET)
         .map(|gap| (gap.caller.as_str(), gap.member.as_str()))
         .collect();
-    assert_eq!(refused, [("Use", "WriteTo")], "{gaps:?}");
+    assert_eq!(refused, Vec::<(&str, &str)>::new(), "{gaps:?}");
 }
 
 const VALUE_LIB: (&str, &str) = (

@@ -328,6 +328,7 @@ mod tests {
                         variant_refs: Vec::new(),
                         return_type: None,
                         generic_arity: 0,
+                        flags: None,
                     },
                     OverlaySymbol {
                         is_exported: false,
@@ -343,6 +344,7 @@ mod tests {
                         variant_refs: Vec::new(),
                         return_type: None,
                         generic_arity: 0,
+                        flags: None,
                     },
                 ],
                 imports: vec![],
