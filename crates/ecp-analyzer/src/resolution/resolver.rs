@@ -828,11 +828,12 @@ impl<'a> Resolver<'a> {
             // private member of an unrelated type (codex ruling P-ext2 C).
             let caller_file = normalize_source_path(source_file);
             let access = CallAccess::of(site, &caller_file, caller_owner.and_then(owner_key));
-            resolution = resolution.admit(|id| {
-                csharp_access::call_admits(
+            resolution = resolution.admit_or(|id| {
+                csharp_access::admitted_overload(
                     self.symbol_table,
                     id,
-                    self.symbol_table.csharp_method_flags(id),
+                    self.symbol_table.later_overloads(id),
+                    |id| self.symbol_table.csharp_method_flags(id),
                     access,
                 )
             });

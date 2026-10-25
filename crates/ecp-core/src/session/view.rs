@@ -367,10 +367,12 @@ pub const GAP_CS_EXTENSION_DIRTY_DECLARATION: &str = "cs-extension-dirty-declara
 /// overlay does not re-resolve a clean caller, so the edge may be stale.
 pub const GAP_CS_EXTENSION_STALE_EDGE: &str = "cs-extension-stale-edge";
 
-/// [`CallGap::reason`] of a dirty C# caller: the C# access rule refused a
+/// [`CallGap::reason`] of a dirty C# caller: the C# access rule judged a
 /// method of a dirty file by the flags of the base declaration it replaced
-/// ([`csharp_access`]). A dirty file's input carries no flags of its own,
-/// and the edit may have changed the method's modifiers.
+/// ([`csharp_access`]), and refused it, or admitted it with no flags at all.
+/// A dirty file's input carries no flags of its own, the edit may have
+/// changed the method's modifiers, and an overload pairs with no base
+/// declaration, since its anchor repeats.
 pub const GAP_CS_ACCESS_DIRTY_TARGET: &str = "cs-access-dirty-target";
 
 /// A call the overlay could not resolve as a full build would (codex ruling
@@ -1021,23 +1023,30 @@ impl OverlayView {
                                     // The index's C# access rule (codex ruling
                                     // P-ext2 C), after the ladder.
                                     let access = CallAccess::of(site, &file.rel_path, owner);
-                                    resolution = resolution.admit(|idx| {
-                                        let admits = csharp_access::call_admits(
+                                    resolution = resolution.admit_or(|idx| {
+                                        let picked = csharp_access::admitted_overload(
                                             &facts,
                                             idx,
-                                            facts.csharp_method_flags(idx),
+                                            &facts.later_overloads_of(idx),
+                                            |id| facts.csharp_method_flags(id),
                                             access,
                                         );
                                         // A dirty target's flags are its base
                                         // declaration's: the edit may have
-                                        // changed them.
-                                        if !admits && idx >= base_len {
+                                        // changed them, and an unpaired
+                                        // overload has none.
+                                        let guessed = |id: u32| {
+                                            id >= base_len && !facts.csharp_flags_known(id)
+                                        };
+                                        if (picked != Some(idx) && idx >= base_len)
+                                            || picked.is_some_and(guessed)
+                                        {
                                             note_gap(
                                                 facts.name_of(idx),
                                                 GAP_CS_ACCESS_DIRTY_TARGET,
                                             );
                                         }
-                                        admits
+                                        picked
                                     });
                                 }
                                 if resolution.call_fallbacks_allowed()
@@ -1504,7 +1513,8 @@ impl OverlayView {
 /// view lost that caveat on a cache hit.
 /// 7 (P-ext): a C# extension call adds edges and a reason; a 6 view lacks them.
 /// 8 (P-ext2): the view stores its C# call gaps; a 7 view lost them.
-pub const VIEW_CACHE_FORMAT: u32 = 8;
+/// 9 (P-part): a chain through a C# partial type binds; an 8 view lacks the edge.
+pub const VIEW_CACHE_FORMAT: u32 = 9;
 
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
@@ -4054,6 +4064,14 @@ impl<'a> OverlayFacts<'a> {
     /// the base declaration it replaced, which the edit may have changed. A
     /// method with no such declaration reads as 0 (public, instance), and
     /// the rule admits a call to it.
+    /// Whether [`Self::csharp_method_flags`] reads flags for `id`: a dirty
+    /// node that paired with no base declaration (an overload, whose anchor
+    /// repeats) has none.
+    fn csharp_flags_known(&self, id: u32) -> bool {
+        id.checked_sub(self.base_len())
+            .is_none_or(|offset| self.nodes[offset as usize].replaced_base.is_some())
+    }
+
     fn csharp_method_flags(&self, id: u32) -> u16 {
         let base = match id.checked_sub(self.base_len()) {
             Some(offset) => self.nodes[offset as usize].replaced_base,

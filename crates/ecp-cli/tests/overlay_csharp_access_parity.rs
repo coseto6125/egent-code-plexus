@@ -121,3 +121,74 @@ fn test_overlay_dirty_target_access_matches_reindex_and_reports_gap() {
     );
     assert!(refused.contains(&("Instance", "GetType")), "{gaps:?}");
 }
+
+const TOK: (&str, &str) = (
+    "Lib/Tok.cs",
+    "namespace Lib
+{
+    public class Writer {}
+    public class Conv {}
+    public class Tok
+    {
+        private void WriteTo(Writer w) {}
+        public void WriteTo(Writer w, params Conv[] c) {}
+    }
+}
+",
+);
+
+const USER: (&str, &str) = (
+    "Lib/User.cs",
+    "namespace Lib
+{
+    public class User
+    {
+        public void Use(Tok t, Writer w) { t.WriteTo(w); }
+    }
+}
+",
+);
+
+/// The 1-based callee lines of `Use` (the Linq/JToken.cs:449 shape): a private
+/// first `WriteTo` hands the outside call to the one public overload.
+fn write_to_lines(edges: &[CallEdge]) -> Vec<u32> {
+    edges
+        .iter()
+        .filter(|edge| edge.caller == "Use")
+        .map(|edge| edge.callee_line)
+        .collect()
+}
+
+/// A dirty caller: the overlay binds the public overload like the reindex.
+#[test]
+fn test_overlay_dirty_caller_private_first_overload_binds_public_overload() {
+    let provider = CSharpProvider::new().unwrap();
+    let user = shifted(USER.1);
+    let edits = [(USER.0, user.as_str())];
+    let parity = calls_after_edit_in(&provider, &[TOK, USER], &edits, &|_, name| name == "Use");
+    assert_eq!(write_to_lines(&parity.reindex), [8]);
+    assert_eq!(parity.overlay, parity.reindex);
+}
+
+/// Both files dirty: an overload's anchor repeats, so neither dirty
+/// `WriteTo` pairs with a base declaration and the overlay has no flags to
+/// judge them by. The reindex binds the public overload; the overlay may
+/// bind either, and reports the call in `result`. The contract is the
+/// report, not the overlay's target.
+#[test]
+fn test_overlay_dirty_overloads_private_first_reports_gap() {
+    let provider = CSharpProvider::new().unwrap();
+    let tok = shifted(TOK.1);
+    let user = shifted(USER.1);
+    let edits = [(TOK.0, tok.as_str()), (USER.0, user.as_str())];
+    let parity = calls_after_edit_in(&provider, &[TOK, USER], &edits, &|_, name| name == "Use");
+    assert_eq!(write_to_lines(&parity.reindex), [9]);
+    assert_eq!(write_to_lines(&parity.overlay).len(), 1);
+    let gaps = call_gaps_after_edit(&provider_parse(&provider), &[TOK, USER], &edits);
+    let refused: Vec<(&str, &str)> = gaps
+        .iter()
+        .filter(|gap| gap.reason == GAP_CS_ACCESS_DIRTY_TARGET)
+        .map(|gap| (gap.caller.as_str(), gap.member.as_str()))
+        .collect();
+    assert_eq!(refused, [("Use", "WriteTo")], "{gaps:?}");
+}

@@ -123,3 +123,109 @@ fn test_resolve_call_explicit_static_call_in_own_or_nested_type_binds() {
 fn test_resolve_call_instance_call_public_instance_method_binds() {
     assert_eq!(callees(&graph(), "UseOther"), ["Count"]);
 }
+
+/// The target line of every `Calls` edge out of `caller` to `callee`.
+fn target_lines(graph: &ZeroCopyGraph, caller: &str, callee: &str) -> Vec<u32> {
+    let pool = graph.string_pool.as_slice();
+    let mut lines: Vec<u32> = graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::Calls)
+        .filter(|e| graph.nodes[e.source as usize].name.resolve(pool) == caller)
+        .map(|e| &graph.nodes[e.target as usize])
+        .filter(|n| n.name.resolve(pool) == callee)
+        .map(|n| n.span.0)
+        .collect();
+    lines.sort_unstable();
+    lines
+}
+
+/// `Tok` declares `WriteTo` twice, on the two rows `rows` gives, in that
+/// order: `private` on `private_row`, `public` with a `params` array on the
+/// other. `User.Use` calls `t.WriteTo(w)`; `Tok.Own` calls `WriteTo(w)`.
+fn write_to_graph(private_first: bool) -> ZeroCopyGraph {
+    let private = "        private void WriteTo(Writer w) {}";
+    let public = "        public void WriteTo(Writer w, params Conv[] c) {}";
+    let (first, second) = if private_first {
+        (private, public)
+    } else {
+        (public, private)
+    };
+    let tok = format!(
+        "namespace Lib
+{{
+    public class Writer {{}}
+    public class Conv {{}}
+    public class Tok
+    {{
+{first}
+{second}
+        public void Own(Writer w) {{ WriteTo(w); }}
+    }}
+}}
+"
+    );
+    let user = "namespace Lib
+{
+    public class User
+    {
+        public void Use(Tok t, Writer w) { t.WriteTo(w); }
+    }
+}
+";
+    let provider = CSharpProvider::new().expect("CSharpProvider::new");
+    build(parse_all(
+        &provider,
+        &[("Lib/Tok.cs", &tok), ("Lib/User.cs", user)],
+    ))
+}
+
+/// Regression (Linq/JToken.cs:449): the first `WriteTo` is private, so a
+/// call from another type binds the one public overload, as C# does.
+#[test]
+fn test_resolve_call_private_first_overload_outside_type_binds_public_overload() {
+    assert_eq!(target_lines(&write_to_graph(true), "Use", "WriteTo"), [7]);
+}
+
+/// With the public overload first, the outside call binds it.
+#[test]
+fn test_resolve_call_public_first_overload_outside_type_binds_public_overload() {
+    assert_eq!(target_lines(&write_to_graph(false), "Use", "WriteTo"), [6]);
+}
+
+/// Inside its own type the private first overload stays reachable.
+#[test]
+fn test_resolve_call_private_first_overload_own_type_binds_private_overload() {
+    assert_eq!(target_lines(&write_to_graph(true), "Own", "WriteTo"), [6]);
+}
+
+/// Two reachable overloads after a private first one are not told apart:
+/// no edge.
+#[test]
+fn test_resolve_call_private_first_two_public_overloads_outside_type_emits_no_edge() {
+    let tok = "namespace Lib
+{
+    public class Writer {}
+    public class Tok
+    {
+        private void WriteTo(Writer w) {}
+        public void WriteTo(Writer w, int depth) {}
+        public void WriteTo(Writer w, string name) {}
+    }
+}
+";
+    let user = "namespace Lib
+{
+    public class User
+    {
+        public void Use(Tok t, Writer w) { t.WriteTo(w, 1); }
+    }
+}
+";
+    let provider = CSharpProvider::new().expect("CSharpProvider::new");
+    let graph = build(parse_all(
+        &provider,
+        &[("Lib/Tok.cs", tok), ("Lib/User.cs", user)],
+    ));
+    assert_eq!(target_lines(&graph, "Use", "WriteTo"), Vec::<u32>::new());
+}

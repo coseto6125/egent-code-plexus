@@ -174,12 +174,19 @@ impl Resolution {
     /// The untyped-member post-filter (B §3.2 `admit`): a bound target that
     /// `admits` refuses leaves the call `Unknown`, as an emptied result did.
     pub fn admit(self, admits: impl FnOnce(u32) -> bool) -> Self {
-        if let Resolution::Bound(hit) = self {
-            if !admits(hit.id) {
-                return Resolution::Unknown;
-            }
+        self.admit_or(|id| admits(id).then_some(id))
+    }
+
+    /// [`Self::admit`] with a substitute: `pick` returns the bound target,
+    /// another target that takes its edge at the same tier, or `None` to
+    /// leave the call `Unknown`.
+    pub fn admit_or(self, pick: impl FnOnce(u32) -> Option<u32>) -> Self {
+        match self {
+            Resolution::Bound(hit) => pick(hit.id).map_or(Resolution::Unknown, |id| {
+                Resolution::Bound(Hit { id, ..hit })
+            }),
+            other => other,
         }
-        self
     }
 }
 

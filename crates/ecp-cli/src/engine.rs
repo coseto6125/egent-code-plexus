@@ -501,8 +501,8 @@ fn call_gaps_line(gaps: &[CallGap]) -> Option<String> {
     }
     Some(format!(
         "results may be incomplete: the dirty overlay cannot resolve {} C# call(s) as \
-         a full index would: {}. A listed call may lack an edge or keep a stale \
-         one. Run `ecp admin index --repo .` and rerun.",
+         a full index would: {}. A listed call may lack an edge, or bind a stale \
+         or wrong target. Run `ecp admin index --repo .` and rerun.",
         gaps.len(),
         listed.join(", ")
     ))

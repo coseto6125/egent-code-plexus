@@ -84,6 +84,27 @@ pub fn call_admits<F: PickFacts + ?Sized>(
     }
 }
 
+/// The method `call` binds in place of `target`: `target` when C# admits
+/// it, else the one admitted overload among `later`, the later overloads of
+/// `target`. C# skips an overload the caller cannot reach (a private first
+/// `WriteTo(JsonWriter)` beside a public `WriteTo(JsonWriter, params ..)`).
+/// `None` when no overload, or more than one, is admitted.
+pub fn admitted_overload<F: PickFacts + ?Sized>(
+    facts: &F,
+    target: u32,
+    later: &[u32],
+    flags_of: impl Fn(u32) -> u16,
+    call: CallAccess<'_>,
+) -> Option<u32> {
+    let admits = |id: u32| call_admits(facts, id, flags_of(id), call);
+    if admits(target) {
+        return Some(target);
+    }
+    let mut admitted = later.iter().copied().filter(|&id| admits(id));
+    let first = admitted.next()?;
+    admitted.next().is_none().then_some(first)
+}
+
 /// Whether a type named `target_owner` is the caller's type or encloses it.
 /// Names compare, not ids, so a `partial` type declared across files
 /// counts as one. `None` when the caller's owner is no type `caller_file`
