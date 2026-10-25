@@ -310,6 +310,11 @@ impl LanguageProvider for CSharpProvider {
                         }
                     }
                 } else if Some(cap_idx) == idx_heritage {
+                    // `(base_list (_)*)` also matches the `#pragma` lines
+                    // that bracket an obsolete base.
+                    if cap.node.kind().starts_with("preproc_") {
+                        continue;
+                    }
                     if let Ok(text) =
                         std::str::from_utf8(&source[cap.node.start_byte()..cap.node.end_byte()])
                     {

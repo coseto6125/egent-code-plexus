@@ -79,3 +79,27 @@ fn test_overrides_csharp_parameter_type_differs_binds_grandparent() {
     }
     assert!(overrides_support::override_blind_spots(&graph).is_empty());
 }
+
+/// Stands for: a preprocessor line inside a base list (`#pragma warning
+/// disable 618` around an obsolete base) is no base. It yields no
+/// `override-base-unresolved` BlindSpot, and the real base still binds.
+#[test]
+fn test_overrides_csharp_pragma_in_base_list_is_no_base() {
+    let graph = overrides_support::graph_of(
+        &ecp_analyzer::c_sharp::parser::CSharpProvider::new().unwrap(),
+        &[(
+            "App/C.cs",
+            "namespace App {\n    public abstract class A {\n        public abstract void Run(int n);\n    }\n    public class C :\n#pragma warning disable 618\n        A\n#pragma warning restore 618\n    {\n        public override void Run(int n) {}\n    }\n}\n",
+        )],
+    );
+    assert_eq!(
+        overrides_support::override_rows(&graph),
+        [(9, 2)],
+        "C.Run -> A.Run"
+    );
+    assert!(
+        overrides_support::override_blind_spots(&graph).is_empty(),
+        "{:?}",
+        overrides_support::override_blind_spots(&graph)
+    );
+}
