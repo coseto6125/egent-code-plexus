@@ -63,12 +63,6 @@ fn rows(g: &ZeroCopyGraph) -> Vec<Row> {
     out
 }
 
-fn at(rows: &[Row], line: u32) -> &Row {
-    rows.iter()
-        .find(|r| r.line == line)
-        .unwrap_or_else(|| panic!("no node at line {line}: {rows:?}"))
-}
-
 fn uid_of(kind: NodeKind, owner: Option<&str>, name: &str) -> u64 {
     ecp_core::uid::compute(kind, PATH, owner, name)
 }
