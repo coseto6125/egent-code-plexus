@@ -296,6 +296,31 @@ fn go_func_main_emits_entrypoint() {
     assert_eq!(entries.len(), 1);
 }
 
+/// Stands for: Go's `package main` yields a Namespace node named `main`
+/// beside `func main`; the namespace is no handler, so the entry point binds
+/// the function instead of counting two candidates and binding none.
+#[test]
+fn test_build_go_package_main_beside_func_main_binds_function() {
+    let mut package = mk_raw_node("main", NodeKind::Namespace, vec![]);
+    package.span = (4, 0, 4, 12);
+    let mut func = mk_raw_node("main", NodeKind::Function, vec![]);
+    func.span = (23, 0, 34, 1);
+    let lg = mk_local_graph("cmd/gosh/main.go", vec![package, func], vec![], vec![]);
+    let mut builder = GraphBuilder::new();
+    builder.add_graph(lg);
+    let graph = builder.build();
+
+    let entries = entry_point_node_indices(&graph);
+    assert_eq!(entries.len(), 1, "one EntryPoint marker");
+    let targets: Vec<NodeKind> = graph
+        .edges
+        .iter()
+        .filter(|e| e.source as usize == entries[0] && matches!(e.rel_type, RelType::References))
+        .map(|e| graph.nodes[e.target as usize].kind)
+        .collect();
+    assert_eq!(targets, vec![NodeKind::Function]);
+}
+
 /// Kotlin top-level `fun main()` — Function kind, name "main".
 #[test]
 fn kotlin_main_emits_entrypoint() {

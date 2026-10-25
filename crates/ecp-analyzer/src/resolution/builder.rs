@@ -2255,6 +2255,8 @@ pub const BS_KIND_ENTRY_POINT_AMBIGUOUS: &str = "entry-point-ambiguous";
 /// The slot of the one node of `nodes` named `name` that no other node so
 /// named encloses: a class, not its own same-named constructor. Between two
 /// identical spans the lower index stays, as in `innermost_enclosing`.
+/// Only a declaration a handler can be counts: Go's `package main` is no
+/// rival to `func main`.
 /// `Err(n)` when `n` nodes remain, `Err(0)` for an absent or blank name.
 /// Never the first of several (C4 `bind_name`).
 fn outermost_named_slot(
@@ -2267,7 +2269,7 @@ fn outermost_named_slot(
         return Err(0);
     }
     let named: Vec<usize> = (0..nodes.len())
-        .filter(|&i| nodes[i].name == name)
+        .filter(|&i| nodes[i].name == name && can_handle(nodes[i].kind))
         .collect();
     let mut slots: Vec<u32> = Vec::new();
     for &i in &named {
@@ -2291,6 +2293,29 @@ fn outermost_named_slot(
         [only] => Ok(*only),
         several => Err(several.len() as u32),
     }
+}
+
+/// Whether a node of `kind` can be the handler of an entry point or the
+/// source of a framework ref: a declaration, not a namespace, an import or
+/// a synthetic marker.
+fn can_handle(kind: NodeKind) -> bool {
+    !matches!(
+        kind,
+        NodeKind::File
+            | NodeKind::Namespace
+            | NodeKind::Module
+            | NodeKind::Import
+            | NodeKind::Document
+            | NodeKind::Section
+            | NodeKind::Route
+            | NodeKind::Process
+            | NodeKind::EntryPoint
+            | NodeKind::Annotation
+            | NodeKind::EventTopic
+            | NodeKind::TransactionScope
+            | NodeKind::SchemaField
+            | NodeKind::PathLiteral
+    )
 }
 
 /// Pass 1.8: FunctionMeta collection.
