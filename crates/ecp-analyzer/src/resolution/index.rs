@@ -227,17 +227,24 @@ pub struct SymbolTable {
     /// [`SymbolTable::register_overload`]). Sparse: most ids have none.
     overloads: FxHashMap<u32, Vec<u32>>,
 
-    /// First declaration → the later C# types of its uid whose generic arity
-    /// differs (`Conv<T>` after `Conv`), in source order (see
+    /// First declaration → the later C# declarations of its uid that are
+    /// arity twins (`Conv<T>` after `Conv`, `Foo1<T>.foo` after
+    /// `Foo1.foo`), in source order (see
     /// [`SymbolTable::register_arity_sibling`]). Sparse: most ids have none.
     arity_siblings: FxHashMap<u32, Vec<u32>>,
 
-    /// The inverse of `arity_siblings`: later type → its first declaration.
+    /// The inverse of `arity_siblings`: later twin → its first declaration.
     arity_first: FxHashMap<u32, u32>,
 
-    /// C# type id → its declared generic arity, only where above 0 (see
-    /// [`SymbolTable::note_type_arity`]). Every other id declares none.
+    /// C# type or delegate id → its declared generic arity, only where
+    /// above 0 (see [`SymbolTable::note_type_arity`]). Every other id
+    /// declares none.
     type_arities: FxHashMap<u32, u32>,
+
+    /// Member of an arity-twin set → the span of the type that declares it
+    /// (see [`SymbolTable::note_declaring_scope`]). Only members: twin types
+    /// and delegates have none. Sparse: empty outside C#.
+    declaring_scopes: FxHashMap<u32, (u32, u32, u32, u32)>,
 
     /// Part → the first part (lowest id) of its C# `partial` type, for
     /// every part of a type declared in two parts or more (see
@@ -875,8 +882,8 @@ impl SymbolTable {
             .map(|first| (first, self.later_overloads(first)))
     }
 
-    /// Record the declared generic arity of the C# type `node_id`. An arity of
-    /// 0 records nothing: it is every id's default.
+    /// Record the declared generic arity of the C# type or delegate
+    /// `node_id`. An arity of 0 records nothing: it is every id's default.
     pub fn note_type_arity(&mut self, node_id: u32, arity: u32) {
         if arity > 0 {
             self.type_arities.insert(node_id, arity);
@@ -887,13 +894,15 @@ impl SymbolTable {
         self.type_arities.get(&node_id).copied().unwrap_or(0)
     }
 
-    /// Register the next id as a later C# type of `first`'s uid whose generic
-    /// arity differs (`Conv<T>` after `Conv`,
-    /// `ecp_core::analyzer::lexical::splits_by_arity`): a declaration of its
-    /// own in `file_path`, with `first`'s kind and owner, but in no name
-    /// table and no overload set. A name lookup still returns `first`, as
-    /// before the split, and [`Self::with_arity`] reaches the later type
-    /// from it. Returns the id.
+    /// Register the next id as a later C# declaration of `first`'s uid that
+    /// is an arity twin (`ecp_core::analyzer::lexical::later_is_arity_twin`):
+    /// a type or delegate of another generic arity (`Conv<T>` after
+    /// `Conv`), or a member such a type declares (`Foo1<T>.foo` after
+    /// `Foo1.foo`). A declaration of its own in `file_path`, with `first`'s
+    /// kind and owner, but in no name table and no overload set. A name
+    /// lookup still returns `first`, as before the split;
+    /// [`Self::with_arity`] reaches a later type from it, and
+    /// [`Self::twin_read_from`] a later member. Returns the id.
     pub fn register_arity_sibling(
         &mut self,
         first: u32,
@@ -925,6 +934,49 @@ impl SymbolTable {
                 .find(|&member| self.type_arity(member) == arity),
             None => (arity == 0 || self.type_arity(id) == arity).then_some(id),
         }
+    }
+
+    /// Whether any declaration has an arity twin
+    /// ([`Self::register_arity_sibling`]): a pass that finds twins by
+    /// re-numbering a file skips the work when none has.
+    pub fn has_arity_twins(&self) -> bool {
+        !self.arity_siblings.is_empty()
+    }
+
+    /// Whether any member has an arity twin ([`Self::note_declaring_scope`]):
+    /// a reader with no file path at hand skips [`Self::twin_read_from`]
+    /// when none has.
+    pub fn has_member_twins(&self) -> bool {
+        !self.declaring_scopes.is_empty()
+    }
+
+    /// Record `scope`, the span of the type that declares the member
+    /// `node_id` of an arity-twin set, for [`Self::twin_read_from`].
+    pub fn note_declaring_scope(&mut self, node_id: u32, scope: (u32, u32, u32, u32)) {
+        self.declaring_scopes.insert(node_id, scope);
+    }
+
+    /// The member a read at `reader` in `reader_file` means, from the id
+    /// `id` a name lookup returned. When `id` is the first of a member's
+    /// arity twins in that file, the twin whose declaring type most closely
+    /// encloses the reader: inside `Foo1<T>`, `foo` is `Foo1<T>.foo`
+    /// ([`ecp_core::analyzer::lexical::twin_enclosing`]). Otherwise, and
+    /// when no declaring type encloses the reader, `id` itself, as before
+    /// the split.
+    pub fn twin_read_from(&self, id: u32, reader_file: &str, reader: (u32, u32, u32, u32)) -> u32 {
+        if self.declaring_scopes.is_empty() {
+            return id;
+        }
+        let Some(twins) = self.arity_siblings.get(&id) else {
+            return id;
+        };
+        if self.file_of(id) != Some(reader_file) {
+            return id;
+        }
+        let candidates = std::iter::once(id)
+            .chain(twins.iter().copied())
+            .filter_map(|member| Some((member, *self.declaring_scopes.get(&member)?)));
+        ecp_core::analyzer::lexical::twin_enclosing(candidates, reader).unwrap_or(id)
     }
 
     /// Record the nodes `parts`, ascending, as the parts of one C#

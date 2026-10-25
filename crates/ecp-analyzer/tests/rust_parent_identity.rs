@@ -197,6 +197,7 @@ fn test_assign_file_sibling_blocks_same_name_marked_ambiguous() {
             parent,
             discriminator: None,
             arity: None,
+            arity_scope: None,
         })
         .collect();
     let scoped = assign_file(PATH, &decls).expect("scoped rows are valid");

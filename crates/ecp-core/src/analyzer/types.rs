@@ -447,9 +447,10 @@ pub struct RawNode {
     pub content_hash: u64,
 }
 
-/// The [`RawNode::decorators`] entry prefix that records a type's declared
-/// generic arity (`Conv<T>` is 1). Only the C# parser writes it, and only
-/// for an arity above 0. It rides in `decorators`, beside the
+/// The [`RawNode::decorators`] entry prefix that records a type's or a
+/// delegate's declared generic arity (`Conv<T>` is 1, `delegate R
+/// Func<T, R>(T a)` is 2). Only the C# parser writes it, and only for an
+/// arity above 0. It rides in `decorators`, beside the
 /// `__override__` marker, so the parse cache and every `RawNode` builder
 /// keep their shape; `post_process::decorates_edges` skips it.
 const GENERIC_ARITY_MARKER: &str = "__generic_arity__:";

@@ -119,7 +119,8 @@ use crate::analyzer::import_binding::{
     import_member_fallback, owner_path_agrees, retry_name, DeclaredType, MemberOwner,
 };
 use crate::analyzer::lexical::{
-    file_identities, lexical_scope_kinds, splits_by_arity, LexicalFunctions,
+    enclosing_types, file_identities, later_is_arity_twin, lexical_scope_kinds, splits_by_arity,
+    twin_enclosing, LexicalFunctions,
 };
 use crate::analyzer::outcome::{NoEdge, Resolution, Tier};
 use crate::analyzer::path_aliases::PathAliases;
@@ -445,8 +446,13 @@ impl OverlayView {
         // below has read them as its twin, then take the tombstone's shape.
         let mut tombstones: Vec<usize> = Vec::new();
         let mut unpaired_base: FxHashSet<u32> = FxHashSet::default();
+        // First virtual idx of a member with arity twins (`Foo1.foo` beside
+        // `Foo1<T>.foo`) → its file's input position, and the first and each
+        // twin with the span of the type that declares it: the index's
+        // `SymbolTable::twin_read_from`.
+        let mut member_twins: FxHashMap<u32, (usize, Vec<(u32, Span)>)> = FxHashMap::default();
 
-        for file in files {
+        for (file_ord, file) in files.iter().enumerate() {
             let rel: Arc<str> = Arc::from(file.rel_path.as_str());
             let file_start = base_len + nodes.len() as u32;
             // The index's numbering (`assign_file`), from the same fields.
@@ -470,13 +476,42 @@ impl OverlayView {
             );
             unpaired_base.extend(unpaired);
             let language = Language::from_path(&file.rel_path);
-            for ((sym, identity), replaced_base) in file.symbols.iter().zip(identities).zip(pairs) {
+            // The innermost type around each symbol, computed on the file's
+            // first member twin only.
+            let mut declaring_types: Option<Vec<Option<usize>>> = None;
+            for (offset, ((sym, identity), replaced_base)) in
+                file.symbols.iter().zip(identities).zip(pairs).enumerate()
+            {
                 let virt = base_len + nodes.len() as u32;
                 let later_overload = match identity.slot {
-                    // A C# type of another generic arity: like an overload,
-                    // the index binds it by id only, never by name, but it
-                    // joins no overload set (`register_arity_sibling`).
-                    UidSlot::Later { .. } if splits_by_arity(language, sym.kind) => true,
+                    // An arity twin: a C# type or delegate of another
+                    // generic arity, or a member such a type declares. Like
+                    // an overload, the index binds it by id only, never by
+                    // name, but it joins no overload set
+                    // (`register_arity_sibling`).
+                    UidSlot::Later { first, .. } if later_is_arity_twin(language, sym.kind) => {
+                        if !splits_by_arity(language, sym.kind) {
+                            let types = declaring_types.get_or_insert_with(|| {
+                                let rows: Vec<(NodeKind, Span)> = file
+                                    .symbols
+                                    .iter()
+                                    .map(|s| (s.kind, HeritageNode::span(s)))
+                                    .collect();
+                                enclosing_types(&rows)
+                            });
+                            let scope = |raw: usize| {
+                                types[raw].map(|ty| HeritageNode::span(&file.symbols[ty]))
+                            };
+                            let (_, set) =
+                                member_twins.entry(file_start + first).or_insert_with(|| {
+                                    let first_scope = scope(first as usize)
+                                        .map(|span| (file_start + first, span));
+                                    (file_ord, first_scope.into_iter().collect())
+                                });
+                            set.extend(scope(offset).map(|span| (virt, span)));
+                        }
+                        true
+                    }
                     UidSlot::Later { first, .. } => {
                         later_overloads
                             .entry(file_start + first)
@@ -644,6 +679,16 @@ impl OverlayView {
             // existed, and the same-file pick's hierarchy rule walks them.
             // Tier 3's memo reads no bases and stays.
             facts.qualified.borrow_mut().clear();
+            // A value read inside `Foo1<T>` reads `Foo1<T>.foo`, the arity
+            // twin of the `Foo1.foo` a lookup returns, when both sit in the
+            // reader's file (the index's `SymbolTable::twin_read_from`).
+            let twin_read_from =
+                |target: u32, file_ord: usize, reader: Span| match member_twins.get(&target) {
+                    Some((ord, set)) if *ord == file_ord => {
+                        twin_enclosing(set.iter().copied(), reader).unwrap_or(target)
+                    }
+                    _ => target,
+                };
             for (file_ord, file) in files.iter().enumerate() {
                 let first = (virt_cursor - base_len) as usize;
                 emit_closure_references(
@@ -1077,11 +1122,17 @@ impl OverlayView {
                             ) else {
                                 continue;
                             };
+                            let callable = facts.kind(target).is_callable();
+                            // The index's `SymbolTable::twin_read_from`.
+                            let target = match callable {
+                                true => target,
+                                false => twin_read_from(target, file_ord, HeritageNode::span(sym)),
+                            };
                             if target == source || name_edges.contains(&target) {
                                 continue;
                             }
                             name_edges.push(target);
-                            let (rel_type, reason) = if facts.kind(target).is_callable() {
+                            let (rel_type, reason) = if callable {
                                 (RelType::References, FUNCTION_REFERENCE_REASON)
                             } else {
                                 (RelType::ReadsField, VALUE_READ_REASON)
@@ -1155,6 +1206,7 @@ impl OverlayView {
                         ) else {
                             continue;
                         };
+                        let target = twin_read_from(target, file_ord, HeritageNode::span(sym));
                         if target == source || field_edges.contains(&target) {
                             continue;
                         }
@@ -5761,6 +5813,80 @@ mod tests {
                 .any(|(_, e)| e.target == closure && e.rel_type == RelType::References),
             "a clean caller of the base overload must reach the closure downstream"
         );
+    }
+
+    /// `class Foo1 { foo; Read() }` on lines 3-7, then `class Foo1<T> {
+    /// foo; Read2() }` on lines 8-13, in one dirty C# file; each method
+    /// reads `foo` (Newtonsoft `TestObjects/Foo1.cs`).
+    fn foo1_twins_input() -> OverlayFileInput {
+        let member = |name: &str, kind: NodeKind, line: u32, reads: &[&str]| OverlaySymbol {
+            owner_class: Some("Foo1".to_string()),
+            kind,
+            start_line: line,
+            end_line: line,
+            start_column: 8,
+            end_column: 50,
+            variant_refs: reads.iter().map(|r| r.to_string()).collect(),
+            ..sym(name, &[])
+        };
+        let class = |start: u32, end: u32, arity: u32| OverlaySymbol {
+            kind: NodeKind::Class,
+            start_line: start,
+            end_line: end,
+            start_column: 4,
+            end_column: 5,
+            generic_arity: arity,
+            ..sym("Foo1", &[])
+        };
+        OverlayFileInput {
+            export_aliases: Vec::new(),
+            rel_path: "N/Foo1.cs".into(),
+            symbols: vec![
+                class(3, 7, 0),
+                member("foo", NodeKind::Property, 5, &[]),
+                member("Read", NodeKind::Method, 6, &["foo"]),
+                class(8, 13, 1),
+                member("foo", NodeKind::Property, 10, &[]),
+                member("Read2", NodeKind::Method, 11, &["foo"]),
+            ],
+            imports: vec![],
+        }
+    }
+
+    /// Stands for: the overlay numbers a member of a C# type of another
+    /// generic arity as the full build does (codex ruling P-a2):
+    /// `Foo1<T>.foo` keeps its name under overload uid 1, binds by id only,
+    /// and joins no overload set; a read inside each class reads that
+    /// class's own `foo`. Before the fix the second `foo` was a tombstone
+    /// and both reads went to `Foo1.foo`.
+    #[test]
+    fn test_build_csharp_member_of_arity_twin_keeps_uid_and_reads_own_twin() {
+        let bytes = GraphFixture::new().into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let view = OverlayView::build(graph, &[foo1_twins_input()]).unwrap();
+        let path = "N/Foo1.cs";
+        let class = crate::uid::compute(NodeKind::Class, path, None, "Foo1");
+        let foo = crate::uid::compute(NodeKind::Property, path, Some("Foo1"), "foo");
+        let nodes = view.virtual_nodes();
+        assert_eq!(
+            [nodes[3].uid, nodes[4].uid],
+            [crate::uid::overload(class, 1), crate::uid::overload(foo, 1)]
+        );
+        assert_eq!(nodes[4].name, "foo", "the twin keeps its name");
+        assert!(nodes[3].later_overload && nodes[4].later_overload);
+        assert!(
+            !view.edges().iter().any(|e| e.reason == OVERLOAD_SET_REASON),
+            "{:?}",
+            view.edges()
+        );
+        let base = view.base_len();
+        let reads: Vec<(u32, u32)> = view
+            .edges()
+            .iter()
+            .filter(|e| e.rel_type == RelType::ReadsField)
+            .map(|e| (e.source - base, e.target - base))
+            .collect();
+        assert_eq!(reads, [(2, 1), (5, 4)], "each class reads its own foo");
     }
 
     fn dirty_input() -> OverlayFileInput {

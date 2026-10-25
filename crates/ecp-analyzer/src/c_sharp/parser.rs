@@ -66,8 +66,9 @@ const CSHARP_FRAMEWORKS: &[FrameworkPatternSpec] = &[
     },
 ];
 
-/// The number of type parameters a class, struct, interface or record
-/// declaration lists (`class Conv<T, U>` is 2); 0 for any other node.
+/// The number of type parameters a class, struct, interface, record or
+/// delegate declaration lists (`class Conv<T, U>` is 2,
+/// `delegate R Func<T, R>(T a)` is 2); 0 for any other node.
 fn generic_arity(decl: tree_sitter::Node<'_>) -> u32 {
     let mut cursor = decl.walk();
     let Some(list) = decl
@@ -661,9 +662,17 @@ impl LanguageProvider for CSharpProvider {
                             name_str.to_string()
                         };
                         let i = nodes.len();
-                        // `Conv<T>` beside `Conv` is a type of its own; the
-                        // identity numbering reads the arity off this marker.
-                        let arity = if k.is_type() { generic_arity(root) } else { 0 };
+                        // `Conv<T>` beside `Conv` is a type of its own, and
+                        // `Func<T, R>` beside `Func<R>` a delegate of its
+                        // own; the identity numbering reads the arity off
+                        // this marker. A delegate is the one `Function` that
+                        // carries it (`lexical::splits_by_arity`).
+                        let declares_arity = k.is_type() || root.kind() == "delegate_declaration";
+                        let arity = if declares_arity {
+                            generic_arity(root)
+                        } else {
+                            0
+                        };
                         let mut decorators = match arity {
                             0 => vec![],
                             arity => vec![RawNode::generic_arity_marker(arity)],

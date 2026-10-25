@@ -14,7 +14,7 @@ use crate::contracts::identity::{
 use crate::file_category::Language;
 use crate::graph::NodeKind;
 use crate::uid;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::Path;
 
 /// The kinds `language` scopes under their enclosing callable (design A
@@ -36,25 +36,81 @@ pub fn raw_decl(node: &RawNode) -> DeclFields<'_> {
         node.owner_class.as_deref(),
         node.name.as_str(),
         node.span,
-        match node.kind.is_type() {
+        match node.kind.is_type() || node.kind == NodeKind::Function {
             true => node.generic_arity(),
             false => 0,
         },
     )
 }
 
-/// Whether two same-named `kind` declarations of one `language` file are
-/// two types when their generic arity differs: C# `Conv` and `Conv<T>`.
-/// Restricted to C# types by codex ruling P-a; every other language keeps
-/// the duplicate rule.
+/// Whether a `kind` declaration of a `language` file declares a generic
+/// arity that keeps it apart from a same-named one of another arity: a C#
+/// type (`Conv` and `Conv<T>`) or a C# delegate (`Func<T, R>` beside
+/// `Func<T1, T2, R>`). The C# parser emits a delegate as a `Function` and
+/// writes the arity marker on no other `Function`, so every other C#
+/// function compares at arity 0 and keeps the duplicate rule. Restricted to
+/// C# by codex rulings P-a and P-a2; every other language keeps the
+/// duplicate rule.
 pub fn splits_by_arity(language: Language, kind: NodeKind) -> bool {
-    language == Language::CSharp && kind.is_type()
+    language == Language::CSharp && (kind.is_type() || kind == NodeKind::Function)
+}
+
+/// Whether a [`UidSlot::Later`] of a `kind` declaration in a `language`
+/// file is an arity twin, a declaration of its own beside its first rather
+/// than an overload: a C# type or delegate of another generic arity
+/// ([`splits_by_arity`]), or a member a type of another arity declares
+/// (`Foo1<T>.foo` beside `Foo1.foo`). A C# file scopes no kind lexically
+/// ([`lexical_scope_kinds`]), so a C# `Later` of a kind that keeps no
+/// overloads comes from the arity rule alone. A twin joins no overload set.
+pub fn later_is_arity_twin(language: Language, kind: NodeKind) -> bool {
+    language == Language::CSharp
+        && !uid::keeps_overloads(kind)
+        && !lexical_scope_kinds(language).contains(&kind)
+}
+
+/// For each declaration of one file, the index of the innermost type
+/// declaration ([`NodeKind::is_type`]) whose span contains it, by
+/// [`innermost_enclosing`]. A type's own entry is the type that encloses it.
+pub fn enclosing_types(rows: &[(NodeKind, Span)]) -> Vec<Option<usize>> {
+    let spans: Vec<Span> = rows.iter().map(|&(_, span)| span).collect();
+    let enclosing = innermost_enclosing(&spans);
+    (0..rows.len())
+        .map(|i| {
+            let mut up = enclosing[i];
+            while let Some(j) = up {
+                if rows[j].0.is_type() {
+                    break;
+                }
+                up = enclosing[j];
+            }
+            up
+        })
+        .collect()
+}
+
+/// Among `candidates`, a declaration and its arity twins
+/// ([`later_is_arity_twin`]) each with the span of the type that declares
+/// it, the one whose declaring type most closely encloses `reader`: a read
+/// of `foo` inside `Foo1<T>` reads `Foo1<T>.foo`, not `Foo1.foo`. `None`
+/// when no declaring type encloses `reader`. Spans of one file nest or are
+/// disjoint, so the innermost one starts last.
+pub fn twin_enclosing(
+    candidates: impl IntoIterator<Item = (u32, Span)>,
+    reader: Span,
+) -> Option<u32> {
+    candidates
+        .into_iter()
+        .filter(|&(_, scope)| span_contains(scope, reader))
+        .max_by_key(|&(_, scope)| ((scope.0, scope.1), std::cmp::Reverse((scope.2, scope.3))))
+        .map(|(id, _)| id)
 }
 
 /// The identity of each declaration of the file at `path`, in slice order:
 /// [`assign_file`] over the language's lexical parents, in a Rust file each
-/// impl member's [`Discriminator::ImplTrait`], and, where
-/// [`splits_by_arity`] holds, each type's generic arity. The full build,
+/// impl member's [`Discriminator::ImplTrait`], and, in a C# file, each
+/// declaration's generic arity ([`splits_by_arity`]; 0 for every other
+/// kind) and the type that encloses it ([`enclosing_types`]), so a member of
+/// `Foo1<T>` is no duplicate of the same member of `Foo1`. The full build,
 /// incremental mode and the overlay view (its dirty parse and its base
 /// nodes) all number a file through this one function, so a later overload
 /// or a same-uid redefinition gets the same uid, and a declaration the same
@@ -73,6 +129,24 @@ pub fn file_identities<'a, T>(
         lexical_parents(&spans, scoped)
     });
     let traits = (language == Language::Rust).then(|| impl_traits(&rows));
+    let arity_scopes = (language == Language::CSharp).then(|| {
+        // Two members of one uid share an owner name, so their arity paths
+        // can differ only inside two same-named types. A file without such
+        // a pair skips the span sweep: every scope is `None`, every member
+        // path equal, as the sweep would find.
+        let mut type_names = FxHashSet::default();
+        let twin_types = rows
+            .iter()
+            .filter(|r| r.0 .0.is_type())
+            .any(|r| !type_names.insert(r.0 .2));
+        match twin_types {
+            true => {
+                let spans: Vec<(NodeKind, Span)> = rows.iter().map(|r| (r.0 .0, r.0 .3)).collect();
+                enclosing_types(&spans)
+            }
+            false => vec![None; rows.len()],
+        }
+    });
     let decls: Vec<FileDecl<'a>> = rows
         .iter()
         .enumerate()
@@ -85,12 +159,23 @@ pub fn file_identities<'a, T>(
                 .as_ref()
                 .and_then(|t| t[i])
                 .map(Discriminator::ImplTrait),
-            arity: splits_by_arity(language, kind).then_some(arity),
+            arity: arity_scopes
+                .is_some()
+                .then_some(if splits_by_arity(language, kind) {
+                    arity
+                } else {
+                    0
+                }),
+            arity_scope: arity_scopes
+                .as_ref()
+                .and_then(|s| s[i])
+                .map(|scope| scope as u32),
         })
         .collect();
     // `canonical_path` removes every `\`, the one spelling `check_path`
-    // rejects; `impl_traits` never yields an empty text; and no parent is
-    // set while no language opts in: no `IdentityError` can arise.
+    // rejects; `impl_traits` never yields an empty text; no parent is set
+    // while no language opts in; and `enclosing_types` returns in-range
+    // indices: no `IdentityError` can arise.
     assign_file(&path, &decls).expect("a `/`-separated path and unscoped declarations")
 }
 
@@ -531,6 +616,119 @@ mod tests {
         }
         assert!(!splits_by_arity(Language::CSharp, NodeKind::Method));
         assert!(splits_by_arity(Language::CSharp, NodeKind::Struct));
+    }
+
+    /// Stands for: C# delegates (`Function` nodes) of arity 0, 1 and 3 in
+    /// one file are three declarations, in source order and reversed
+    /// (Newtonsoft `LinqBridge.cs` `Func` / `Action`, codex ruling P-a2).
+    /// Two of one arity still collide.
+    #[test]
+    fn test_file_uids_csharp_delegates_of_three_arities_both_orders_later_uids() {
+        let base = uid::compute(NodeKind::Function, "N/Linq.cs", None, "Func");
+        for arities in [[0, 1, 3], [3, 1, 0]] {
+            let rows: Vec<DeclFields<'static>> = arities
+                .iter()
+                .enumerate()
+                .map(|(i, &a)| {
+                    (
+                        NodeKind::Function,
+                        None,
+                        "Func",
+                        (i as u32, 0, i as u32, 40),
+                        a,
+                    )
+                })
+                .collect();
+            assert_eq!(
+                file_uids("N/Linq.cs", &rows, |d| *d),
+                [base, uid::overload(base, 1), uid::overload(base, 2)],
+                "{arities:?}"
+            );
+        }
+        let rows = two_types(NodeKind::Function, 2, 2);
+        let conv = uid::compute(NodeKind::Function, "N/Conv.cs", None, "Conv");
+        assert_eq!(file_uids("N/Conv.cs", &rows, |d| *d), [conv, !conv]);
+    }
+
+    /// `class Foo1` (arity `first`, lines 1-4) with property `foo` on line
+    /// 2, then `class Foo1` (arity `second`, lines 5-8) with property `foo`
+    /// on line 6, in `path`.
+    fn foo1_twins(first: u32, second: u32) -> [DeclFields<'static>; 4] {
+        [
+            (NodeKind::Class, None, "Foo1", (1, 4, 4, 5), first),
+            (NodeKind::Property, Some("Foo1"), "foo", (2, 8, 2, 40), 0),
+            (NodeKind::Class, None, "Foo1", (5, 4, 8, 5), second),
+            (NodeKind::Property, Some("Foo1"), "foo", (6, 8, 6, 40), 0),
+        ]
+    }
+
+    /// Stands for: `Foo1<T>.foo` beside `Foo1.foo` (Newtonsoft
+    /// `TestObjects/Foo1.cs`) is a declaration of its own: overload uid 1 of
+    /// the property's base uid, in either order, read off the spans alone,
+    /// so the full build and the overlay view number it alike. Members of
+    /// two classes of one arity stay the tombstoned duplicate.
+    #[test]
+    fn test_file_uids_csharp_member_of_arity_twin_both_orders_later_uid() {
+        let foo = uid::compute(NodeKind::Property, "N/Foo1.cs", Some("Foo1"), "foo");
+        for (first, second) in [(0, 1), (1, 0)] {
+            let uids = file_uids("N/Foo1.cs", &foo1_twins(first, second), |d| *d);
+            assert_eq!(
+                uids[3],
+                uid::overload(foo, 1),
+                "arity {first} then {second}"
+            );
+        }
+        let uids = file_uids("N/Foo1.cs", &foo1_twins(0, 0), |d| *d);
+        assert_eq!(uids[3], !foo, "one arity: the second foo is a tombstone");
+    }
+
+    /// Stands for: the member rule is C#'s alone. The same rows in a Java
+    /// file keep the duplicate rule, whatever arity is supplied.
+    #[test]
+    fn test_file_identities_non_csharp_member_of_arity_twin_duplicate() {
+        for path in ["N/Foo1.java", "n/foo1.ts", "n/foo1.hpp"] {
+            let ids = identities(path, &foo1_twins(0, 1));
+            assert!(
+                matches!(ids[3].slot, UidSlot::Duplicate { first: 1, .. }),
+                "{path}: {:?}",
+                ids[3].slot
+            );
+        }
+        assert!(!later_is_arity_twin(Language::Java, NodeKind::Property));
+        assert!(later_is_arity_twin(Language::CSharp, NodeKind::Property));
+        assert!(later_is_arity_twin(Language::CSharp, NodeKind::Function));
+        assert!(!later_is_arity_twin(Language::CSharp, NodeKind::Method));
+    }
+
+    #[test]
+    fn test_enclosing_types_skips_non_type_containers_returns_innermost_type() {
+        let rows = [
+            (NodeKind::Namespace, (0, 0, 20, 1)),
+            (NodeKind::Class, (1, 4, 10, 5)),
+            (NodeKind::Method, (2, 8, 5, 9)),
+            (NodeKind::Function, (3, 12, 4, 13)),
+            (NodeKind::Class, (6, 8, 9, 9)),
+            (NodeKind::Property, (7, 12, 7, 30)),
+            (NodeKind::Property, (12, 4, 12, 30)),
+        ];
+        assert_eq!(
+            enclosing_types(&rows),
+            [None, None, Some(1), Some(1), Some(1), Some(4), None]
+        );
+        assert!(enclosing_types(&[]).is_empty());
+    }
+
+    #[test]
+    fn test_twin_enclosing_reader_inside_one_scope_returns_innermost_else_none() {
+        let outer = (1, 0, 20, 1);
+        let inner = (5, 4, 9, 5);
+        let other = (21, 0, 30, 1);
+        let twins = [(10, outer), (11, inner), (12, other)];
+        assert_eq!(twin_enclosing(twins, (6, 8, 6, 20)), Some(11));
+        assert_eq!(twin_enclosing(twins, (2, 8, 2, 20)), Some(10));
+        assert_eq!(twin_enclosing(twins, (25, 8, 25, 20)), Some(12));
+        assert_eq!(twin_enclosing(twins, (40, 0, 40, 9)), None);
+        assert_eq!(twin_enclosing([], (6, 8, 6, 20)), None);
     }
 
     #[test]

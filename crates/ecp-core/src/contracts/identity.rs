@@ -321,13 +321,15 @@ pub enum UidSlot {
     /// A later declaration with an equal base uid, kept as its own node:
     /// `uid::overload(base, ordinal)`, `ordinal` 1-based among the later
     /// ones. Applies to kinds that keep overloads, to scoped nodes, and to a
-    /// type whose [`FileDecl::arity`] no earlier declaration of the base uid
-    /// has (C# `Conv<T>` after `Conv`).
+    /// declaration whose arity path ([`FileDecl::arity`]) no earlier
+    /// declaration of the base uid has (C# `Conv<T>` after `Conv`,
+    /// `Foo1<T>.foo` after `Foo1.foo`).
     Later { first: u32, ordinal: u32, uid: u64 },
     /// A later declaration of another kind with an equal base uid. The index
     /// tombstones it today; `uid` is the base uid it repeats. `first` is the
     /// first declaration of the base uid, or, for a declaration with an
-    /// arity, the first one of the same arity: the twin that survives it.
+    /// arity, the first one of the same arity path: the twin that survives
+    /// it.
     Duplicate { first: u32, uid: u64 },
 }
 
@@ -359,14 +361,44 @@ pub struct FileDecl<'a> {
     /// Index of the lexical parent in the same slice, from [`lexical_parents`].
     pub parent: Option<u32>,
     pub discriminator: Option<Discriminator<'a>>,
-    /// The declared generic arity of a type whose language keeps two
-    /// same-named types of different arity apart (C# `Conv` and `Conv<T>`,
-    /// see `analyzer::lexical::splits_by_arity`); `None` everywhere else.
-    /// A later unscoped declaration of an equal base uid whose arity no
-    /// earlier one has is a [`UidSlot::Later`]; an equal arity is still a
-    /// [`UidSlot::Duplicate`]. The arity enters neither the base uid nor
-    /// the anchor, so both declarations share one anchor.
+    /// The declared generic arity of a declaration whose language keeps two
+    /// same-named types of different arity apart (C#: a type's or a
+    /// delegate's arity, see `analyzer::lexical::splits_by_arity`, and 0
+    /// for every other declaration); `None` everywhere else. A later
+    /// unscoped declaration of an equal base uid repeats an earlier one only
+    /// when both have one arity path (this arity, then that of each
+    /// [`Self::arity_scope`] outward): `Conv<T>` after `Conv`, and
+    /// `Foo1<T>.foo` after `Foo1.foo`, are a [`UidSlot::Later`]; an equal
+    /// path is still a [`UidSlot::Duplicate`]. The arity enters neither the
+    /// base uid nor the anchor, so both declarations share one anchor.
     pub arity: Option<u32>,
+    /// Index, in the same slice, of the innermost type that encloses this
+    /// declaration, where [`Self::arity`] is set: the next step of the
+    /// arity path. `None` at the top level, wherever the arity is `None`,
+    /// and in a file where no two types share a name, since no two paths
+    /// of one base uid can differ there.
+    pub arity_scope: Option<u32>,
+}
+
+/// Whether declarations `a` and `b` have one arity path: an equal
+/// [`FileDecl::arity`], then an equal one for each enclosing
+/// [`FileDecl::arity_scope`] outward, until both reach the top level or one
+/// enclosing type. A walk longer than the slice is a cycle and has no path.
+fn same_arity_path(decls: &[FileDecl<'_>], mut a: usize, mut b: usize) -> bool {
+    for _ in 0..=decls.len() {
+        if a == b {
+            return true;
+        }
+        if decls[a].arity != decls[b].arity {
+            return false;
+        }
+        match (decls[a].arity_scope, decls[b].arity_scope) {
+            (None, None) => return true,
+            (Some(x), Some(y)) => (a, b) = (x as usize, y as usize),
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// The identity of one declaration of a file.
@@ -383,6 +415,12 @@ pub struct DeclIdentity {
 pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentity>, IdentityError> {
     check_path(path)?;
     let n = decls.len();
+    if let Some(decl) = decls
+        .iter()
+        .position(|d| d.arity_scope.is_some_and(|s| s as usize >= n))
+    {
+        return Err(IdentityError::BadParent { decl: decl as u32 });
+    }
     let mut anchors: Vec<Option<u64>> = vec![None; n];
     let mut base_uids = vec![0u64; n];
     let mut chain: Vec<usize> = Vec::new();
@@ -452,12 +490,12 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
                 let (first, later) = slot.get_mut();
                 // The earlier declaration this one repeats. An overload or a
                 // scoped node repeats none. A declaration with an arity
-                // repeats the first one of its arity, and makes a type of
-                // its own when no earlier one has that arity.
+                // repeats the first one of its arity path, and is a
+                // declaration of its own when no earlier one has that path.
                 let twin = match (uid::keeps_overloads(d.kind) || d.parent.is_some(), d.arity) {
                     (true, _) => None,
                     (false, Some(_)) => {
-                        (0..j).find(|&k| base_uids[k] == base && decls[k].arity == d.arity)
+                        (0..j).find(|&k| base_uids[k] == base && same_arity_path(decls, k, j))
                     }
                     (false, None) => Some(*first as usize),
                 };
@@ -1404,6 +1442,7 @@ mod tests {
             parent: None,
             discriminator: None,
             arity: None,
+            arity_scope: None,
         }
     }
 
@@ -1725,6 +1764,113 @@ mod tests {
                 first: 0,
                 uid: base
             }
+        );
+    }
+
+    /// `class Foo1` (arity `first`) holding property `foo`, then
+    /// `class Foo1` (arity `second`) holding property `foo`, each property's
+    /// arity scope its own class.
+    fn twin_members(first: u32, second: u32) -> Vec<DeclIdentity> {
+        let mut decls = vec![
+            decl(NodeKind::Class, None, "Foo1"),
+            decl(NodeKind::Property, Some("Foo1"), "foo"),
+            decl(NodeKind::Class, None, "Foo1"),
+            decl(NodeKind::Property, Some("Foo1"), "foo"),
+        ];
+        for (d, arity) in decls.iter_mut().zip([first, 0, second, 0]) {
+            d.arity = Some(arity);
+        }
+        decls[1].arity_scope = Some(0);
+        decls[3].arity_scope = Some(2);
+        assign_file("N/Foo1.cs", &decls).unwrap()
+    }
+
+    /// Stands for: a member of a type of another generic arity is a
+    /// declaration of its own (`Foo1<T>.foo` after `Foo1.foo`, codex ruling
+    /// P-a2): overload uid 1 of the member's base uid, in either order. A
+    /// member of a same-arity duplicate type stays the duplicate it was.
+    #[test]
+    fn test_assign_file_member_of_arity_twin_later_of_same_arity_duplicate() {
+        let foo = uid::compute(NodeKind::Property, "N/Foo1.cs", Some("Foo1"), "foo");
+        for (first, second) in [(0, 1), (1, 0)] {
+            let ids = twin_members(first, second);
+            assert_eq!(
+                ids[3].slot,
+                UidSlot::Later {
+                    first: 1,
+                    ordinal: 1,
+                    uid: uid::overload(foo, 1)
+                },
+                "arity {first} then {second}"
+            );
+            assert_eq!(ids[3].anchor, foo, "the arity enters no anchor");
+        }
+        assert_eq!(
+            twin_members(1, 1)[3].slot,
+            UidSlot::Duplicate { first: 1, uid: foo }
+        );
+    }
+
+    /// Stands for: the arity path runs outward through every enclosing
+    /// type. `Outer.Inner.x` and `Outer<T>.Inner.x` differ only in the
+    /// outer arity, yet each `Inner` and each `x` is a declaration of its
+    /// own; with equal outer arities both repeat.
+    #[test]
+    fn test_assign_file_nested_member_outer_arity_differs_later() {
+        let file = |outer: [u32; 2]| {
+            let mut decls = vec![
+                decl(NodeKind::Class, None, "Outer"),
+                decl(NodeKind::Class, Some("Outer"), "Inner"),
+                decl(NodeKind::Property, Some("Inner"), "x"),
+                decl(NodeKind::Class, None, "Outer"),
+                decl(NodeKind::Class, Some("Outer"), "Inner"),
+                decl(NodeKind::Property, Some("Inner"), "x"),
+            ];
+            for (d, arity) in decls.iter_mut().zip([outer[0], 0, 0, outer[1], 0, 0]) {
+                d.arity = Some(arity);
+            }
+            for (child, scope) in [(1, 0), (2, 1), (4, 3), (5, 4)] {
+                decls[child].arity_scope = Some(scope);
+            }
+            assign_file("N/Outer.cs", &decls).unwrap()
+        };
+        let split = file([0, 1]);
+        assert!(
+            matches!(split[4].slot, UidSlot::Later { first: 1, .. }),
+            "{:?}",
+            split[4]
+        );
+        assert!(
+            matches!(split[5].slot, UidSlot::Later { first: 2, .. }),
+            "{:?}",
+            split[5]
+        );
+        let same = file([1, 1]);
+        assert!(matches!(same[3].slot, UidSlot::Duplicate { first: 0, .. }));
+        assert!(matches!(same[4].slot, UidSlot::Duplicate { first: 1, .. }));
+        assert!(matches!(same[5].slot, UidSlot::Duplicate { first: 2, .. }));
+    }
+
+    /// Stands for: an arity scope outside the slice is rejected like a bad
+    /// parent, and a scope cycle (no caller builds one) has no arity path:
+    /// the walk ends and the repeat is a declaration of its own.
+    #[test]
+    fn test_assign_file_bad_or_cyclic_arity_scope_rejected_or_terminates() {
+        let mut decls = vec![decl(NodeKind::Property, Some("A"), "p"); 2];
+        decls[0].arity = Some(0);
+        decls[1].arity = Some(0);
+        decls[1].arity_scope = Some(7);
+        assert_eq!(
+            assign_file("A.cs", &decls),
+            Err(IdentityError::BadParent { decl: 1 })
+        );
+        decls[0].arity_scope = Some(1);
+        decls[1].arity_scope = Some(0);
+        let ids = assign_file("A.cs", &decls).unwrap();
+        assert!(
+            matches!(ids[1].slot, UidSlot::Later { first: 0, .. }),
+            "{:?}",
+            ids[1]
         );
     }
 

@@ -16,9 +16,11 @@
 //! routing rules.
 
 use crate::framework_helpers::{span_area, span_contains, Span};
-use crate::resolution::index::SymbolTable;
-use ecp_core::analyzer::lexical::{file_uids, raw_decl};
+use crate::resolution::index::{Language, SymbolTable};
+use ecp_core::analyzer::lexical::{file_identities, file_uids, later_is_arity_twin, raw_decl};
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
+use ecp_core::contracts::identity::UidSlot;
+use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::graph::{Edge, NodeKind, RelType};
 use ecp_core::pool::StringPool;
 use rayon::prelude::*;
@@ -35,8 +37,13 @@ use std::borrow::Cow;
 /// `symbol_skip_set` — T7-6 incremental skip data. When `Some`, files whose
 /// ALL symbols are in the skip set bypass both pass-1 span and pass-2 impl
 /// emission. `None` = full reanalyze for all files (default, full-build path).
+///
+/// `raw_map` is Pass 1's map over `local_graphs`, in the same order: a C#
+/// arity twin (`Foo1<T>`, `Foo1<T>.foo`) is in no name table, so its edge
+/// binds the node of its own raw slot.
 pub fn emit_edges(
     local_graphs: &[LocalGraph],
+    raw_map: &RawIndexMap,
     symbol_table: &SymbolTable,
     string_pool: &mut StringPool,
     edges_out: &mut Vec<Edge>,
@@ -50,7 +57,8 @@ pub fn emit_edges(
     // post_process::imports_edges.
     let chunk_results: Vec<(usize, Vec<Edge>)> = local_graphs
         .par_iter()
-        .map(|local_graph| {
+        .enumerate()
+        .map(|(file_ord, local_graph)| {
             let raws = &local_graph.nodes;
 
             // Forward-slash normalize once. Linux/macOS paths have no `\\`
@@ -87,18 +95,18 @@ pub fn emit_edges(
             // generic arity so C# `Conv<T>` owns its own members, not `Conv`.
             let mut owners: Vec<Owner<'_>> = Vec::new();
             let mut classes_by_name: FxHashMap<&str, Vec<Span>> = FxHashMap::default();
-            for n in raws {
+            for (i, n) in raws.iter().enumerate() {
                 if matches!(
                     n.kind,
                     NodeKind::Class | NodeKind::Struct | NodeKind::Trait | NodeKind::Interface
                 ) {
-                    owners.push((n.name.as_str(), n.kind, n.span, n.generic_arity()));
+                    owners.push((n.name.as_str(), n.kind, n.span, n.generic_arity(), i));
                     classes_by_name
                         .entry(n.name.as_str())
                         .or_default()
                         .push(n.span);
                 } else if n.kind == NodeKind::Enum {
-                    owners.push((n.name.as_str(), n.kind, n.span, 0));
+                    owners.push((n.name.as_str(), n.kind, n.span, 0, i));
                 }
             }
             if owners.is_empty() {
@@ -106,6 +114,13 @@ pub fn emit_edges(
             }
 
             let later = later_overload_ids(raws, path_str, symbol_table);
+            let twins = ArityTwins::of_file(
+                raws,
+                path_str,
+                symbol_table,
+                raw_map,
+                FileOrd(file_ord as u32),
+            );
             let mut local_edges: Vec<Edge> = Vec::new();
             let mut local_emitted = 0usize;
             local_emitted += emit_pass1_span(
@@ -114,6 +129,7 @@ pub fn emit_edges(
                 path_str,
                 symbol_table,
                 &later,
+                &twins,
                 reason,
                 &mut local_edges,
             );
@@ -138,9 +154,45 @@ pub fn emit_edges(
     emitted
 }
 
-/// A type that can own members: name, kind, span and declared generic arity
-/// (`RawNode::generic_arity`).
-type Owner<'a> = (&'a str, NodeKind, Span, u32);
+/// A type that can own members: name, kind, span, declared generic arity
+/// (`RawNode::generic_arity`) and raw index.
+type Owner<'a> = (&'a str, NodeKind, Span, u32, usize);
+
+/// The node of each C# arity twin of one file (`Conv<T>` after `Conv`,
+/// `Outer<T>.Inner` after `Outer.Inner`, `Foo1<T>.foo` after `Foo1.foo`),
+/// by raw index ([`later_is_arity_twin`]). A twin is in no name table, and
+/// the name lookups below return its first; the raw slot is the twin
+/// itself. Empty for every other file.
+struct ArityTwins(FxHashMap<usize, u32>);
+
+impl ArityTwins {
+    fn of_file(
+        raws: &[RawNode],
+        path_str: &str,
+        symbol_table: &SymbolTable,
+        raw_map: &RawIndexMap,
+        file: FileOrd,
+    ) -> Self {
+        let language = Language::from_normalized_path(path_str);
+        if !symbol_table.has_arity_twins() || language != Language::CSharp {
+            return Self(FxHashMap::default());
+        }
+        let twins = file_identities(path_str, raws, raw_decl)
+            .into_iter()
+            .enumerate()
+            .filter(|&(i, identity)| {
+                matches!(identity.slot, UidSlot::Later { .. })
+                    && later_is_arity_twin(language, raws[i].kind)
+            })
+            .filter_map(|(i, _)| Some((i, raw_map.node(file, RawIdx(i as u32))?)))
+            .collect();
+        Self(twins)
+    }
+
+    fn node(&self, raw: usize) -> Option<u32> {
+        self.0.get(&raw).copied()
+    }
+}
 
 /// Raw index → node id of each later overload in the file
 /// ([`ecp_core::uid::keeps_overloads`]). A name lookup returns the first
@@ -207,12 +259,14 @@ fn member_node(
 /// every Function/Method/Property in the same file. If that innermost Class is
 /// `c`, emit the corresponding `HasMethod` (Function|Method) or `HasProperty`
 /// (Property) edge from `c` to the member.
+#[allow(clippy::too_many_arguments)]
 fn emit_pass1_span(
     raws: &[RawNode],
     owners: &[Owner<'_>],
     path_str: &str,
     symbol_table: &SymbolTable,
     later: &FxHashMap<usize, u32>,
+    twins: &ArityTwins,
     reason: ecp_core::pool::StrRef,
     edges_out: &mut Vec<Edge>,
 ) -> usize {
@@ -230,13 +284,13 @@ fn emit_pass1_span(
 
         // Innermost enclosing class via smallest-area span. Scans the
         // pre-collected classes slice (K entries) instead of all raws.
-        let Some((class_name, _, _, arity)) = owners
+        let Some((class_name, _, _, arity, class_raw)) = owners
             .iter()
-            .filter(|(_, kind, span, _)| {
+            .filter(|(_, kind, span, _, _)| {
                 (member.kind == NodeKind::Const || *kind != NodeKind::Enum)
                     && span_contains(*span, member.span)
             })
-            .min_by_key(|(_, _, span, _)| span_area(*span))
+            .min_by_key(|(_, _, span, _, _)| span_area(*span))
             .copied()
         else {
             continue;
@@ -248,7 +302,7 @@ fn emit_pass1_span(
             && (member.owner_class.as_deref() != Some(class_name)
                 || owners
                     .iter()
-                    .filter(|(name, _, _, _)| *name == class_name)
+                    .filter(|(name, _, _, _, _)| *name == class_name)
                     .count()
                     != 1)
         {
@@ -256,14 +310,19 @@ fn emit_pass1_span(
         }
 
         // The name lookup returns the first of same-named C# types of
-        // different arity; the owner is the one of its own arity.
-        let Some(class_idx) = symbol_table
-            .lookup_in_file(path_str, class_name)
-            .map(|first| symbol_table.with_arity(first, arity).unwrap_or(first))
-        else {
+        // different arity; the owner is the one of its own arity, and a
+        // twin no arity tells apart (`Inner` in `Outer` and in `Outer<T>`)
+        // is its own raw slot.
+        let Some(class_idx) = twins.node(class_raw).or_else(|| {
+            symbol_table
+                .lookup_in_file(path_str, class_name)
+                .map(|first| symbol_table.with_arity(first, arity).unwrap_or(first))
+        }) else {
             continue;
         };
-        let Some(member_idx) = member_node(i, member, path_str, symbol_table, later, class_idx)
+        let Some(member_idx) = twins
+            .node(i)
+            .or_else(|| member_node(i, member, path_str, symbol_table, later, class_idx))
         else {
             continue;
         };
@@ -410,8 +469,10 @@ mod tests {
 
     fn run(local_graphs: Vec<LocalGraph>) -> Vec<Edge> {
         let (symbol_table, mut string_pool, mut edges) = build_setup(local_graphs.clone());
+        let raw_map = RawIndexMap::new(0, local_graphs.iter().map(|lg| lg.nodes.len())).unwrap();
         emit_edges(
             &local_graphs,
+            &raw_map,
             &symbol_table,
             &mut string_pool,
             &mut edges,

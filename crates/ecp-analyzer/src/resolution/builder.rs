@@ -10,7 +10,8 @@ use crate::resolution::index::{DeclaredBase, FileMeta, Language, ResolveTarget, 
 use crate::resolution::resolver::{ReexportIndex, Resolver};
 use crate::rust::module_tree::RustWorkspaceModTree;
 use ecp_core::analyzer::lexical::{
-    file_identities, file_uids, lexical_scope_kinds, raw_decl, splits_by_arity, LexicalFunctions,
+    enclosing_types, file_identities, file_uids, later_is_arity_twin, lexical_scope_kinds,
+    raw_decl, splits_by_arity, LexicalFunctions,
 };
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::reexport::{export_filter_applies, is_ecmascript, ImportRef};
@@ -699,6 +700,7 @@ impl GraphBuilder {
         let _t_class_mem = std::time::Instant::now();
         crate::post_process::class_membership::emit_edges(
             &self.local_graphs,
+            &raw_map,
             &symbol_table,
             &mut string_pool,
             &mut edges,
@@ -1223,24 +1225,52 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
         // repeats. Two `LocalGraph`s of one path do occur; their later
         // declarations then number against that earlier node, as one file.
         let mut repeats: FxHashMap<u32, u32> = FxHashMap::default();
+        // The innermost type around each node, computed on the first member
+        // twin of the file only.
+        let mut declaring_types: Option<Vec<Option<usize>>> = None;
         for (offset, (raw_node, identity)) in local_graph.nodes.iter().zip(identities).enumerate() {
             // The file's own numbering (`assign_file`), shared with incremental
             // mode and the overlay view.
             let uid_u64 = identity.slot.uid();
             let arity_splits = splits_by_arity(file_meta.language, raw_node.kind);
-            // A C# type of another generic arity than the earlier ones of its
-            // uid (`Conv<T>` after `Conv`): a node of its own under the
+            // An arity twin (`later_is_arity_twin`): a C# type or delegate
+            // of another generic arity than the earlier ones of its uid
+            // (`Conv<T>` after `Conv`), or a member such a type declares
+            // (`Foo1<T>.foo` after `Foo1.foo`). A node of its own under the
             // overload uid, with its name and owner, filed beside its first
             // instead of in a name table, so a lookup of the bare name still
-            // returns the first, as before the split (codex ruling P-a).
-            if let (UidSlot::Later { first, .. }, true) = (identity.slot, arity_splits) {
+            // returns the first, as before the split (codex rulings P-a and
+            // P-a2).
+            if let (UidSlot::Later { first, .. }, true) = (
+                identity.slot,
+                later_is_arity_twin(file_meta.language, raw_node.kind),
+            ) {
                 let first_idx = repeats.get(&first).copied().unwrap_or(graph_start + first);
-                symbol_table.register_arity_sibling(
+                let twin = symbol_table.register_arity_sibling(
                     first_idx,
                     &path_str,
                     file_meta,
                     raw_node.generic_arity(),
                 );
+                // A member twin: a read inside its declaring type means it
+                // (`SymbolTable::twin_read_from`). The first's type is known
+                // only when the first is a node of this graph.
+                if !arity_splits {
+                    let types = declaring_types.get_or_insert_with(|| {
+                        let rows: Vec<(NodeKind, Span)> =
+                            local_graph.nodes.iter().map(|n| (n.kind, n.span)).collect();
+                        enclosing_types(&rows)
+                    });
+                    let mut scoped = vec![(twin, offset)];
+                    if !repeats.contains_key(&first) {
+                        scoped.push((first_idx, first as usize));
+                    }
+                    for (id, raw) in scoped {
+                        if let Some(ty) = types[raw] {
+                            symbol_table.note_declaring_scope(id, local_graph.nodes[ty].span);
+                        }
+                    }
+                }
                 uid_seen.insert(uid_u64, current_node_idx);
                 let first_node: &Node = &nodes[first_idx as usize];
                 nodes.push(Node {
@@ -3203,13 +3233,14 @@ fn pass2_emit_node_edges(
     let mut variant_edges: Vec<(u32, bool)> = Vec::new();
     let mut name_edges: Vec<u32> = Vec::new();
     let mut name_file: Option<(String, Language)> = None;
+    let reader_file = || {
+        let file = local_graph.file_path.to_string_lossy().replace('\\', "/");
+        let language = Language::from_normalized_path(&file);
+        (file, language)
+    };
     for field_name in &raw_node.field_reads {
         if let Some(name_ref) = NameRef::parse(field_name) {
-            let (file, language) = name_file.get_or_insert_with(|| {
-                let file = local_graph.file_path.to_string_lossy().replace('\\', "/");
-                let language = Language::from_normalized_path(&file);
-                (file, language)
-            });
+            let (file, language) = name_file.get_or_insert_with(reader_file);
             let Some((target_id, confidence)) = resolve_name_ref(
                 resolver,
                 symbol_table,
@@ -3220,11 +3251,18 @@ fn pass2_emit_node_edges(
             ) else {
                 continue;
             };
+            let callable = symbol_table.node_kind(target_id).is_callable();
+            // A value read inside `Foo1<T>` reads `Foo1<T>.foo`, the arity
+            // twin of the `Foo1.foo` the lookup returns.
+            let target_id = match callable {
+                true => target_id,
+                false => symbol_table.twin_read_from(target_id, file.as_str(), raw_node.span),
+            };
             if target_id == current_node_idx || name_edges.contains(&target_id) {
                 continue;
             }
             name_edges.push(target_id);
-            let (rel_type, reason) = if symbol_table.node_kind(target_id).is_callable() {
+            let (rel_type, reason) = if callable {
                 (RelType::References, reason_name_ref.function)
             } else {
                 (RelType::ReadsField, reason_name_ref.value)
@@ -3271,6 +3309,14 @@ fn pass2_emit_node_edges(
             ResolveTarget::Field,
         );
         for (target_id, confidence) in targets {
+            // The arity twin the reader's declaring type holds, as above.
+            let target_id = match symbol_table.has_member_twins() {
+                true => {
+                    let (file, _) = name_file.get_or_insert_with(reader_file);
+                    symbol_table.twin_read_from(target_id, file.as_str(), raw_node.span)
+                }
+                false => target_id,
+            };
             if target_id == current_node_idx {
                 continue;
             }
