@@ -94,7 +94,7 @@ fn go_group_prefix(call: tree_sitter::Node<'_>, source: &[u8]) -> Option<String>
         before: usize,
         source: &[u8],
     ) -> Option<tree_sitter::Node<'a>> {
-        let mut found = None;
+        let mut found: Option<tree_sitter::Node<'a>> = None;
         let mut stack = vec![scope];
         while let Some(node) = stack.pop() {
             if node.start_byte() >= before {

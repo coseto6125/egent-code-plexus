@@ -78,6 +78,7 @@ fn spawn_subprocess_failure_returns_err_with_stderr() {
 /// re-runnable candidates and caveat on stdout before the non-zero exit, so
 /// the error an MCP client gets must carry them, beside stderr.
 #[test]
+#[cfg(unix)]
 fn test_run_spawn_nonzero_exit_with_stdout_payload_err_carries_payload() {
     let _guard = stub_guard();
     let dir = TempDir::new().unwrap();
