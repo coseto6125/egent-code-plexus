@@ -19,6 +19,7 @@ use crate::route_detector::{clean_route_path_lax, join_route_path};
 use ecp_core::analyzer::types::{
     LocalGraph, RawImport, RawRoute, RawRouteScope, RouteInclude, Span,
 };
+use ecp_core::contracts::routing::{FileRouter, Language};
 use ecp_core::graph::NodeKind;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tree_sitter::Node;
@@ -1651,9 +1652,12 @@ impl ControllerIndex {
         for (file_idx, graph) in local_graphs.iter().enumerate() {
             let base = start;
             start += graph.nodes.len() as u32;
-            let is_php = ecp_core::analyzer::pipeline::AnalyzerPipeline::provider_name_for_path(
-                &graph.file_path,
-            ) == Some("php");
+            let is_php = graph.file_path.to_str().is_some_and(|path| {
+                FileRouter::PATH_ONLY
+                    .route(path)
+                    .route()
+                    .is_some_and(|route| route.fixed_language() == Some(Language::Php))
+            });
             if !is_php {
                 continue;
             }

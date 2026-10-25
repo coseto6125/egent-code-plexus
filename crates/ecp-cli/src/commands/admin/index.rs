@@ -1,8 +1,8 @@
 use clap::Args;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::pipeline::AnalyzerPipeline;
+use ecp_core::contracts::routing::{FileRouter, RouteOutcome};
 use ignore::WalkBuilder;
-use rustc_hash::FxHashSet;
 
 #[derive(Args, Debug, Clone)]
 pub struct IndexArgs {
@@ -66,8 +66,10 @@ pub fn run_analyzer_for_paths(
     // Sequential `.build()` was ~100ms on .sample_repo's 22.7k entries —
     // parallel cuts the syscall-bound stat/readdir tax.
     // Per-file byte cap: `ECP_MAX_FILE_BYTES` env > `[index] max_file_bytes`
-    // in `.ecp/config.toml` > 1 MiB default. See `ecp_core::config`.
-    let max_file_size = ecp_core::config::resolve_max_file_bytes(src_root);
+    // in `.ecp/config.toml` > 1 MiB default. See `ecp_core::config`. The walk
+    // and the pipeline read this one value.
+    let size_cap = ecp_core::config::resolve_size_cap(src_root);
+    let max_file_size = size_cap.bytes();
     let (file_tx, file_rx) = std::sync::mpsc::channel::<(std::path::PathBuf, std::path::PathBuf)>();
     // Paths, not just a count. The count only ever reached a `tracing::warn!`
     // on stderr; the graph said nothing, so `ecp find` answered `found: false`
@@ -76,7 +78,9 @@ pub fn run_analyzer_for_paths(
     let skipped_large: std::sync::Mutex<Vec<(std::path::PathBuf, u64)>> =
         std::sync::Mutex::new(Vec::new());
     let skipped_large_ref = &skipped_large;
-    let max_file_size_ref = &max_file_size;
+    let skipped_not_utf8: std::sync::Mutex<Vec<std::path::PathBuf>> =
+        std::sync::Mutex::new(Vec::new());
+    let skipped_not_utf8_ref = &skipped_not_utf8;
     let src_root_ref = src_root;
     let mut walk_builder = WalkBuilder::new(src_root);
     walk_builder
@@ -94,19 +98,31 @@ pub fn run_analyzer_for_paths(
         Box::new(move |result| {
             if let Ok(entry) = result {
                 let path = entry.path();
-                if path.is_file() && should_analyze_path(path) {
-                    if let Ok(metadata) = entry.metadata() {
-                        if metadata.len() > *max_file_size_ref {
-                            let rel_path = path.strip_prefix(src_root_ref).unwrap_or(path);
+                let rel_path = path.strip_prefix(src_root_ref).unwrap_or(path);
+                // Route before the stat: the route is a pure string match, so
+                // an unrouted entry costs no stat.
+                if should_analyze_path(rel_path) {
+                    // One stat answers both the file check and the cap. It
+                    // follows symlinks as `is_file` does, so a linked file is
+                    // capped on its target's length.
+                    if let Some(metadata) = std::fs::metadata(path)
+                        .ok()
+                        .filter(std::fs::Metadata::is_file)
+                    {
+                        if size_cap.admits(metadata.len()) {
+                            let _ = tx.send((path.to_path_buf(), rel_path.to_path_buf()));
+                        } else {
                             skipped_large_ref
                                 .lock()
                                 .expect("skipped-large list is never held across a panic")
                                 .push((rel_path.to_path_buf(), metadata.len()));
-                            return ignore::WalkState::Continue;
                         }
                     }
-                    let rel_path = path.strip_prefix(src_root_ref).unwrap_or(path);
-                    let _ = tx.send((path.to_path_buf(), rel_path.to_path_buf()));
+                } else if routes_lossy_only(rel_path) && path.is_file() {
+                    skipped_not_utf8_ref
+                        .lock()
+                        .expect("skipped-not-utf8 list is never held across a panic")
+                        .push(rel_path.to_path_buf());
                 }
             }
             ignore::WalkState::Continue
@@ -118,6 +134,9 @@ pub fn run_analyzer_for_paths(
     let skipped_large_files = skipped_large
         .into_inner()
         .expect("skipped-large list is never held across a panic");
+    let skipped_not_utf8_files = skipped_not_utf8
+        .into_inner()
+        .expect("skipped-not-utf8 list is never held across a panic");
 
     if !skipped_large_files.is_empty() {
         tracing::warn!(
@@ -144,7 +163,11 @@ pub fn run_analyzer_for_paths(
     // concurrently via rayon — Query::new is CPU-bound + thread-safe;
     // construction order doesn't matter for runtime semantics (file
     // routing is keyed on the lowercase `name()` string, not ordering).
-    let needed = detect_needed_providers(&files_to_analyze);
+    let needed = crate::reanalyze::provider_names_for_paths(
+        files_to_analyze
+            .iter()
+            .filter_map(|(_, rel_path)| rel_path.to_str()),
+    );
     let needed_names: Vec<&'static str> = crate::provider_registry::PROVIDER_CONSTRUCTORS
         .iter()
         .map(|(name, _)| *name)
@@ -160,7 +183,7 @@ pub fn run_analyzer_for_paths(
                 .map_err(std::io::Error::other)
         })
         .collect::<std::io::Result<Vec<_>>>()?;
-    let mut pipeline = AnalyzerPipeline::new();
+    let mut pipeline = AnalyzerPipeline::new().with_size_cap(size_cap);
     for p in providers {
         pipeline.register_provider(p);
     }
@@ -288,6 +311,16 @@ pub fn run_analyzer_for_paths(
                  file is in the graph. Raise `[index] max_file_bytes` in `.ecp/config.toml`, or \
                  set `ECP_MAX_FILE_BYTES`, to include it."
             ),
+        ));
+    }
+    for rel_path in skipped_not_utf8_files {
+        local_graphs.push(ecp_core::analyzer::types::LocalGraph::omitted(
+            &rel_path,
+            "path-not-utf8",
+            "the file path is not valid UTF-8, and the graph stores paths as UTF-8, so \
+             nothing in this file is in the graph. Rename the file to a UTF-8 name to \
+             include it. The path shown is a lossy spelling."
+                .to_string(),
         ));
     }
 
@@ -516,160 +549,56 @@ fn detect_source_type(commit_dir: &std::path::Path) -> ecp_core::registry::Sourc
         .unwrap_or(ecp_core::registry::SourceType::Commit)
 }
 
-/// Walk the scanned file list and collect the registry name of every provider
-/// whose files we actually intend to parse. Resolves each
-/// path through the canonical `AnalyzerPipeline::provider_name_for_path` so
-/// this stays in sync with the single dispatch source of truth instead of
-/// re-deriving its own extension table (this repo has twice shipped drift
-/// bugs from hand-copied dispatch tables: PR #141/#142, PR #595).
-fn detect_needed_providers(
-    files: &[(std::path::PathBuf, std::path::PathBuf)],
-) -> FxHashSet<&'static str> {
-    let mut needed = FxHashSet::default();
-    for (path, _) in files {
-        // `md`/`txt`/`rst` route to markdown but are outside
-        // `provider_name_for_path` (markdown has no path-dispatch entry —
-        // see `reanalyze::make_pipeline`'s doc comment); handle here.
-        if matches!(
-            path.extension().and_then(|s| s.to_str()),
-            Some("md" | "txt" | "rst")
-        ) {
-            needed.insert("markdown");
-            continue;
-        }
-        if let Some(name) = AnalyzerPipeline::provider_name_for_path(path) {
-            needed.insert(name);
-            // `.yaml`/`.yml` route to "kubernetes", which content-gates on
-            // `apiVersion:`+`kind:`. The YamlProvider rides along for its
-            // document-block path — the one pairing the flag struct encoded.
-            if name == "kubernetes" {
-                needed.insert("yaml");
-            }
-        }
-    }
-    needed
+/// Whether the cold walk takes the repo-relative path `rel_path`: the router
+/// routes it. Template directories, interpolated components and every
+/// unrouted extension answer `false`, and so does a non-UTF-8 path: a lossy
+/// spelling would name no file on disk.
+pub fn should_analyze_path(rel_path: &std::path::Path) -> bool {
+    rel_path.to_str().is_some_and(routes)
 }
 
-fn should_analyze_path(path: &std::path::Path) -> bool {
-    // Skip mason brick templates — paths containing `__brick__/` are mustache
-    // template source, not real code. Parsing them produces only noise (every
-    // brick with the same template structure emits identical symbol names) and
-    // contributes ~511 Dart Annotation uid-collisions on the sample corpus.
-    // We also reject any path component containing `{{` or `}}` (mason
-    // interpolation expressions that appear in the path itself, e.g.
-    // `{{name.snakeCase()}}/widget.dart`).
-    if path.components().any(|c| {
-        if let std::path::Component::Normal(s) = c {
-            let s = s.to_string_lossy();
-            s == "__brick__" || s.contains("{{") || s.contains("}}")
-        } else {
-            false
-        }
-    }) {
-        return false;
-    }
+/// A non-UTF-8 path that would route under its lossy spelling. The walk
+/// records it as omitted rather than dropping it without a notice.
+fn routes_lossy_only(rel_path: &std::path::Path) -> bool {
+    rel_path.to_str().is_none() && routes(&rel_path.to_string_lossy())
+}
 
-    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    if matches!(file_name, "Dockerfile" | "dockerfile") {
-        return true;
-    }
-    if matches!(
-        file_name,
-        "docker-compose.yml" | "docker-compose.yaml" | "compose.yml" | "compose.yaml"
-    ) {
-        return true;
-    }
-    if is_github_actions_workflow(path) {
-        return true;
-    }
+fn routes(rel_path: &str) -> bool {
     matches!(
-        path.extension().and_then(|s| s.to_str()),
-        Some(
-            "ts" | "tsx"
-                | "py"
-                | "pyi"
-                | "go"
-                | "rs"
-                | "java"
-                | "js"
-                | "jsx"
-                | "mjs"
-                | "cjs"
-                | "php"
-                | "rb"
-                | "kt"
-                | "kts"
-                | "cs"
-                | "c"
-                | "h"
-                | "cpp"
-                | "hpp"
-                | "cc"
-                | "hh"
-                | "cxx"
-                | "hxx"
-                | "swift"
-                | "dart"
-                | "md"
-                | "txt"
-                | "rst"
-                | "sh"
-                | "bash"
-                | "lua"
-                | "luau"
-                | "cr"
-                | "sol"
-                | "move"
-                | "dockerfile"
-                | "nim"
-                | "tf"
-                | "tfvars"
-                | "hcl"
-                | "vy"
-                | "sql"
-                | "cairo"
-                | "v"
-                | "sv"
-                | "vh"
-                | "svh"
-                | "zig"
-                | "vue"
-                | "astro"
-                | "svelte"
-                | "proto"
-                | "json"
-                // `.yaml`/`.yml` are scanned so k8s manifests reach the
-                // content-sniffing Kubernetes provider; non-k8s YAML is gated
-                // out cheaply by the provider, not here.
-                | "yml"
-                | "yaml"
-        )
+        FileRouter::PATH_ONLY.route(rel_path),
+        RouteOutcome::Routed(_)
     )
-}
-
-fn is_github_actions_workflow(path: &std::path::Path) -> bool {
-    if !path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| matches!(e, "yml" | "yaml"))
-    {
-        return false;
-    }
-
-    let mut prev_is_github = false;
-    for component in path.components() {
-        if prev_is_github && component.as_os_str() == "workflows" {
-            return true;
-        }
-        prev_is_github = component.as_os_str() == ".github";
-    }
-    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::should_analyze_path;
+    use crate::reanalyze::provider_names_for_paths;
+    use ecp_core::contracts::routing::{Language, SizeCap};
     use std::path::Path;
+
+    #[cfg(unix)]
+    #[test]
+    fn test_should_analyze_path_non_utf8_name_with_routed_extension_rejected() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = Path::new(std::ffi::OsStr::from_bytes(b"src/caf\xe9.py"));
+        assert!(!should_analyze_path(path));
+        assert!(crate::reanalyze::pipeline_for_path(path, SizeCap::BUILT_IN).is_none());
+    }
+
+    /// The walk records a non-UTF-8 path as omitted only when its lossy
+    /// spelling routes: an unrouted name is not source, and a UTF-8 name is
+    /// walked normally.
+    #[cfg(unix)]
+    #[test]
+    fn test_routes_lossy_only_non_utf8_routed_name_true_others_false() {
+        use std::os::unix::ffi::OsStrExt;
+        let non_utf8 = |bytes: &[u8]| Path::new(std::ffi::OsStr::from_bytes(bytes)).to_path_buf();
+        assert!(super::routes_lossy_only(&non_utf8(b"src/caf\xe9.py")));
+        assert!(!super::routes_lossy_only(&non_utf8(b"docs/caf\xe9.md")));
+        assert!(!super::routes_lossy_only(Path::new("src/cafe.py")));
+        assert!(!super::routes_lossy_only(Path::new("")));
+    }
 
     #[test]
     fn skips_mason_brick_template_dir() {
@@ -690,31 +619,30 @@ mod tests {
         assert!(should_analyze_path(Path::new("lib/main.dart")));
     }
 
-    /// Every plain extension the canonical `EXTENSION_TABLE` routes must
-    /// produce a `NeededProviders` flag `detect_needed_providers` can derive
-    /// (a `set_needed_flag` arm exists for its provider name), pinning the
-    /// three-table sync invariant this refactor introduces. Exhaustively
-    /// covers the extension list the pre-refactor `detect_needed_providers`
-    /// hand-duplicated, so a dropped extension here fails loudly instead of
+    /// Every extension default of every routed language selects that
+    /// language's provider, so a dropped extension fails loudly instead of
     /// silently (this repo shipped that exact bug for `.yaml` in PR #595).
     #[test]
-    fn detect_needed_providers_test_every_extension_table_entry_sets_a_flag() {
-        for (ext, name) in ecp_core::analyzer::pipeline::AnalyzerPipeline::EXTENSION_TABLE {
-            let path = std::path::PathBuf::from(format!("f.{ext}"));
-            let needed = super::detect_needed_providers(&[(path.clone(), path)]);
-            assert!(
-                needed.contains(name),
-                "extension {ext:?} routes to provider {name:?} but no NeededProviders flag is set"
-            );
+    fn test_provider_names_for_paths_every_default_extension_selects_its_provider() {
+        for &language in Language::ALL {
+            for ext in language.extensions() {
+                let rel = format!("f.{ext}");
+                let needed = provider_names_for_paths([rel.as_str()]);
+                assert!(
+                    needed.contains(language.provider()),
+                    "extension {ext:?} routes to {:?} but its provider is not selected",
+                    language.provider()
+                );
+            }
         }
     }
 
     /// The special-case path dispatches (Dockerfile, docker-compose, GitHub
     /// Actions workflow, generic `.yaml`/`.yml` → kubernetes) must also set
-    /// their `NeededProviders` flag — these aren't in `EXTENSION_TABLE` so
-    /// the test above doesn't cover them.
+    /// their provider — these are path rules, so the extension sweep above
+    /// doesn't cover them.
     #[test]
-    fn detect_needed_providers_test_path_specials_set_flags() {
+    fn test_provider_names_for_paths_path_specials_select_their_provider() {
         let cases: &[(&str, &str)] = &[
             ("Dockerfile", "dockerfile"),
             ("docker-compose.yml", "docker-compose"),
@@ -722,65 +650,68 @@ mod tests {
             ("k8s/deployment.yaml", "kubernetes"),
         ];
         for (rel, name) in cases {
-            let path = std::path::PathBuf::from(rel);
-            let needed = super::detect_needed_providers(&[(path.clone(), path)]);
+            let needed = provider_names_for_paths([*rel]);
             assert!(
                 needed.contains(name),
-                "path {rel:?} should set the {name:?} NeededProviders flag"
+                "path {rel:?} should select the {name:?} provider"
             );
         }
     }
 
-    /// `md`/`txt`/`rst` route to markdown outside `provider_name_for_path`
-    /// (see `detect_needed_providers`'s doc comment) — pin that special case
-    /// too since it isn't covered by the extension-table sweep above.
+    /// `md`/`txt`/`rst` have no route: no provider parses them, so the cold
+    /// index neither walks them nor constructs the markdown provider for them.
     #[test]
-    fn detect_needed_providers_test_markdown_extensions_set_flag() {
+    fn test_provider_names_for_paths_markdown_extensions_select_nothing() {
         for ext in ["md", "txt", "rst"] {
-            let path = std::path::PathBuf::from(format!("f.{ext}"));
-            let needed = super::detect_needed_providers(&[(path.clone(), path)]);
+            let rel = format!("f.{ext}");
+            let needed = provider_names_for_paths([rel.as_str()]);
             assert!(
-                needed.contains("markdown"),
-                "extension {ext:?} should select the markdown provider"
+                needed.is_empty(),
+                "extension {ext:?} must select no provider, got {needed:?}"
             );
         }
     }
 
-    /// A generic `.yaml`/`.yml` selects TWO providers: `kubernetes` (which
-    /// content-gates on `apiVersion:`+`kind:`) and `yaml` (its document-block
-    /// path). The pairing is the one special case `detect_needed_providers`
-    /// carries by hand, so it needs a test of its own — the extension-table
-    /// sweep never reaches it, since no extension maps to the name `"yaml"`.
+    /// A generic `.yaml`/`.yml` selects `kubernetes` (which content-gates on
+    /// `apiVersion:`+`kind:`) and `openapi`. The `yaml` candidate has no graph
+    /// yet (C5 open point 6), so its provider is not built for a parse that
+    /// never runs it. No extension routes alone to these names, so the
+    /// extension sweep never reaches the pairing.
     #[test]
-    fn detect_needed_providers_test_generic_yaml_selects_kubernetes_and_yaml() {
+    fn test_provider_names_for_paths_generic_yaml_selects_kubernetes_and_openapi_only() {
         for rel in ["k8s/deployment.yaml", "config/app.yml"] {
-            let path = std::path::PathBuf::from(rel);
-            let needed = super::detect_needed_providers(&[(path.clone(), path)]);
+            let needed = provider_names_for_paths([rel]);
             assert!(
-                needed.contains("kubernetes") && needed.contains("yaml"),
-                "{rel:?} must select both kubernetes and yaml, got {needed:?}"
+                needed.contains("kubernetes") && needed.contains("openapi"),
+                "{rel:?} must select kubernetes and openapi, got {needed:?}"
+            );
+            assert!(
+                !needed.contains("yaml"),
+                "{rel:?} must not build the yaml provider, got {needed:?}"
             );
         }
     }
 
     /// Every name the canonical dispatch can produce must be constructible —
-    /// the set carries names straight from `provider_name_for_path` to
+    /// the set carries names straight from `FileRoute::providers` to
     /// `PROVIDER_CONSTRUCTORS`, so a name with no constructor is a silently
     /// skipped language.
     #[test]
-    fn detect_needed_providers_test_every_selected_name_is_constructible() {
+    fn test_provider_names_for_paths_every_selected_name_is_constructible() {
         let known: std::collections::HashSet<&str> =
             crate::provider_registry::PROVIDER_CONSTRUCTORS
                 .iter()
                 .map(|(name, _)| *name)
                 .collect();
-        for (ext, _) in ecp_core::analyzer::pipeline::AnalyzerPipeline::EXTENSION_TABLE {
-            let path = std::path::PathBuf::from(format!("f.{ext}"));
-            for name in super::detect_needed_providers(&[(path.clone(), path)]) {
-                assert!(
-                    known.contains(name),
-                    "extension {ext:?} selects provider {name:?}, which has no constructor"
-                );
+        for &language in Language::ALL {
+            for ext in language.extensions() {
+                let rel = format!("f.{ext}");
+                for name in provider_names_for_paths([rel.as_str()]) {
+                    assert!(
+                        known.contains(name),
+                        "extension {ext:?} selects provider {name:?}, which has no constructor"
+                    );
+                }
             }
         }
     }

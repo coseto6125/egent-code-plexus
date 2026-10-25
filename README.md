@@ -443,7 +443,7 @@ Parse → resolve → serialize runs through an MPSC channel into a single build
 
 | Env var | Default | Effect |
 |---|---|---|
-| `ECP_MAX_FILE_BYTES` | `16777216` (16 MiB) | Skip source files above this size during ingest. Caps worst-case worker RAM at `num_threads × MAX`. |
+| `ECP_MAX_FILE_BYTES` | `1048576` (1 MiB) | Skip source files above this size during ingest, in the cold index, incremental reanalysis, the session overlay and `impact --baseline`. The env var wins over `[index] max_file_bytes` in `<repo>/.ecp/config.toml`. Caps worst-case worker RAM at `num_threads × MAX`. |
 | `ECP_CSPROJ_MAX_DEPTH` | `4` | `*.csproj` discovery recursion depth. Raise for deeply-nested .NET monorepos. |
 
 ---

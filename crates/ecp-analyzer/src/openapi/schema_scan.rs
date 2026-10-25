@@ -19,11 +19,17 @@
 //! fields via `HasProperty`. Without this owner node the schema fields are
 //! dropped at `schema_field_mirrors` and never reach the graph.
 
+use crate::framework_helpers::node_span;
+use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::provider::LanguageProvider;
-use ecp_core::analyzer::types::{FrameworkId, LocalGraph, RawNode, RawSchemaField, SchemaType};
+use ecp_core::analyzer::types::{
+    FrameworkId, LocalGraph, RawNode, RawSchemaField, SchemaType, Span,
+};
 use ecp_core::graph::NodeKind;
+use rustc_hash::FxHashMap;
 use serde_json::Value;
 use std::path::Path;
+use tree_sitter::{Node, Parser};
 
 pub struct OpenApiProvider;
 
@@ -108,8 +114,7 @@ fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
 
 /// Dispatch on file extension to parse as YAML or JSON, then walk schema
 /// tree, collecting fields AND the owning schema as a `NodeKind::Struct`
-/// node in a single pass. `pub` so `YamlProvider` can call this after
-/// confirming the OpenAPI marker.
+/// node in a single pass.
 ///
 /// The Struct node is load-bearing: `schema_field_mirrors` resolves each
 /// `RawSchemaField.owner_class` against the SymbolTable to attach a
@@ -146,6 +151,11 @@ pub fn extract_fields(
     let Some(schemas_map) = schemas_map else {
         return Ok((Vec::new(), Vec::new()));
     };
+    let section: &[&str] = match framework {
+        FrameworkId::Swagger => &["definitions"],
+        _ => &["components", "schemas"],
+    };
+    let spans = key_spans(source, section);
 
     let mut out = Vec::new();
     let mut schemas = Vec::new();
@@ -158,18 +168,18 @@ pub fn extract_fields(
         }
         for (field_name, field_def) in props {
             let type_class = classify_openapi_type(field_def);
-            // Span (0,0,0,0) — serde_json/serde_norway Values carry no byte
-            // offsets; sentinel consistent with SQL and other non-tree-sitter
-            // extractors.
             out.push(RawSchemaField {
                 name: field_name.as_str().into(),
                 type_class,
                 owner_class: schema_name.as_str().into(),
                 framework,
-                span: (0, 0, 0, 0),
+                span: spans.field(schema_name, field_name),
             });
         }
-        schemas.push(schema_struct_node(schema_name.clone()));
+        schemas.push(schema_struct_node(
+            schema_name.clone(),
+            spans.schema(schema_name),
+        ));
     }
 
     Ok((out, schemas))
@@ -177,13 +187,12 @@ pub fn extract_fields(
 
 /// Build the `NodeKind::Struct` node for an OpenAPI/Swagger schema (the
 /// owner of its `RawSchemaField`s). `owner_class: None` — a top-level
-/// component schema is not nested in another type. Span (0,0,0,0) matches
-/// its fields — serde Values carry no byte offsets.
-fn schema_struct_node(name: String) -> RawNode {
+/// component schema is not nested in another type.
+fn schema_struct_node(name: String, span: Span) -> RawNode {
     RawNode {
         name,
         kind: NodeKind::Struct,
-        span: (0, 0, 0, 0),
+        span,
         is_exported: true,
         heritage: vec![],
         type_annotation: None,
@@ -192,6 +201,133 @@ fn schema_struct_node(name: String) -> RawNode {
         field_reads: vec![],
         owner_class: None,
         content_hash: 0,
+    }
+}
+
+/// The span of each schema pair and each of its `properties` pairs, read from
+/// the tree-sitter-yaml CST: serde Values carry no position, and YAML is a
+/// superset of JSON, so one walk serves both forms. A key the walk cannot
+/// place keeps the (0,0,0,0) sentinel of the other non-tree-sitter extractors.
+#[derive(Default)]
+struct KeySpans {
+    schemas: FxHashMap<String, Span>,
+    fields: FxHashMap<(String, String), Span>,
+}
+
+impl KeySpans {
+    fn schema(&self, schema: &str) -> Span {
+        self.schemas.get(schema).copied().unwrap_or((0, 0, 0, 0))
+    }
+
+    fn field(&self, schema: &str, field: &str) -> Span {
+        self.fields
+            .get(&(schema.to_owned(), field.to_owned()))
+            .copied()
+            .unwrap_or((0, 0, 0, 0))
+    }
+}
+
+fn key_spans(source: &[u8], section: &[&str]) -> KeySpans {
+    let mut spans = KeySpans::default();
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_yaml::LANGUAGE.into())
+        .is_err()
+    {
+        return spans;
+    }
+    let Some(tree) = parse_with_budget(&mut parser, source, ParseBudget::DEFAULT) else {
+        return spans;
+    };
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+    // A `%YAML` / `%TAG` directive or a comment can precede the root node.
+    let Some(mut node) = root
+        .children(&mut cursor)
+        .find(|child| child.kind() == "document")
+        .and_then(|doc| first_named_child(doc, |kind| matches!(kind, "block_node" | "flow_node")))
+    else {
+        return spans;
+    };
+    for key in section {
+        let Some((_, value)) = mapping_pairs(node, source)
+            .into_iter()
+            .find(|(name, _)| name.0 == *key)
+        else {
+            return spans;
+        };
+        node = value;
+    }
+    for ((schema, schema_span), schema_value) in mapping_pairs(node, source) {
+        spans.schemas.insert(schema.to_owned(), schema_span);
+        let properties = mapping_pairs(schema_value, source)
+            .into_iter()
+            .find(|(name, _)| name.0 == "properties");
+        if let Some((_, properties)) = properties {
+            for ((field, field_span), _) in mapping_pairs(properties, source) {
+                spans
+                    .fields
+                    .insert((schema.to_owned(), field.to_owned()), field_span);
+            }
+        }
+    }
+    spans
+}
+
+/// `((key text, pair span), value)` of each pair of a block or flow mapping;
+/// empty for any other node. The key text has its quotes removed.
+fn mapping_pairs<'t>(node: Node<'t>, source: &'t [u8]) -> Vec<((&'t str, Span), Node<'t>)> {
+    let mut target = node;
+    while matches!(target.kind(), "block_node" | "flow_node") {
+        // An anchor (`Pet: &pet`), a tag (`!!map`) or a comment can precede
+        // the node's content.
+        match first_named_child(target, |kind| !matches!(kind, "anchor" | "tag" | "comment")) {
+            Some(child) => target = child,
+            None => return Vec::new(),
+        }
+    }
+    let pair_kind = match target.kind() {
+        "block_mapping" => "block_mapping_pair",
+        "flow_mapping" => "flow_pair",
+        _ => return Vec::new(),
+    };
+    let mut cursor = target.walk();
+    target
+        .named_children(&mut cursor)
+        .filter(|pair| pair.kind() == pair_kind)
+        .filter_map(|pair| {
+            let key = pair.child_by_field_name("key")?;
+            let value = pair.child_by_field_name("value")?;
+            let text = std::str::from_utf8(&source[key.start_byte()..key.end_byte()]).ok()?;
+            let text = text.trim();
+            let text = text
+                .strip_prefix('"')
+                .and_then(|t| t.strip_suffix('"'))
+                .or_else(|| text.strip_prefix('\'').and_then(|t| t.strip_suffix('\'')))
+                .unwrap_or(text);
+            Some(((text, pair_span(&pair)), value))
+        })
+        .collect()
+}
+
+/// The first named child of `node` whose kind `keep` accepts.
+fn first_named_child<'t>(node: Node<'t>, keep: impl Fn(&str) -> bool) -> Option<Node<'t>> {
+    let mut cursor = node.walk();
+    let child = node
+        .named_children(&mut cursor)
+        .find(|child| keep(child.kind()));
+    child
+}
+
+/// The span of a mapping pair. A block pair that ends the document ends past
+/// its trailing newline, at column 0 of the next row; that row holds none of
+/// the pair, so the span ends on the row before.
+fn pair_span(pair: &Node) -> Span {
+    let (start_row, start_col, end_row, end_col) = node_span(pair);
+    if end_col == 0 && end_row > start_row {
+        (start_row, start_col, end_row - 1, end_col)
+    } else {
+        (start_row, start_col, end_row, end_col)
     }
 }
 

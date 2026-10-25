@@ -1,6 +1,7 @@
 pub mod algorithms;
 pub mod analyzer;
 pub mod config;
+pub mod contracts;
 pub mod cypher;
 pub mod daemon;
 pub mod error;

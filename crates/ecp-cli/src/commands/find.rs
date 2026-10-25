@@ -31,7 +31,7 @@
 use crate::commands::format::kind_to_str;
 use crate::commands::graph_csr::iter_incoming_edges_filtered;
 use crate::engine::Engine;
-use crate::output::{emit_with_caveat, OutputFormat};
+use crate::output::{emit_with_caveat, merge_caveats, OutputFormat};
 use clap::{Args, ValueEnum};
 use ecp_analyzer::resolution::index::Language;
 use ecp_core::graph::{
@@ -356,6 +356,19 @@ fn category_priority(cat: &ArchivedFileCategory) -> u8 {
     }
 }
 
+/// The archived form of a category computed from a path, so a new overlay
+/// symbol ranks and buckets through the same helpers as a base row.
+fn archived_category(cat: FileCategory) -> &'static ArchivedFileCategory {
+    match cat {
+        FileCategory::Source => &ArchivedFileCategory::Source,
+        FileCategory::Test => &ArchivedFileCategory::Test,
+        FileCategory::Reference => &ArchivedFileCategory::Reference,
+        FileCategory::Document => &ArchivedFileCategory::Document,
+        FileCategory::Config => &ArchivedFileCategory::Config,
+        FileCategory::Example => &ArchivedFileCategory::Example,
+    }
+}
+
 fn category_to_str(cat: &ArchivedFileCategory) -> &'static str {
     match cat {
         ArchivedFileCategory::Source => "Source",
@@ -468,10 +481,9 @@ fn overlay_matches(
                     &merged.files[node.file_idx.to_native() as usize].category,
                     count_incoming(merged, idx as usize, base_constructors(merged, idx)),
                 )
-            } else if ecp_core::file_category::is_test_path(&h.rel_path) {
-                (&ArchivedFileCategory::Test, 0)
             } else {
-                (&ArchivedFileCategory::Source, 0)
+                let category = ecp_core::file_category::determine_category(&h.rel_path);
+                (archived_category(category), 0)
             };
             let kind_str = crate::commands::format::node_kind_to_str(&h.kind).to_string();
             let signature = format!("{kind_str} {}", h.name);
@@ -655,13 +667,14 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
     match format {
         OutputFormat::Text => {
             // The JSON/toon paths carry the staleness caveat in the `result`
-            // field; text (the default format) must say it too, or a stale
-            // "no match" reads as a definitive "does not exist".
+            // field; text (the default format) prints it first on stdout, or
+            // a stale "no match" reads as a definitive "does not exist" to a
+            // stdout-only consumer such as MCP.
             if let Some(c) = merge_caveats(
                 engine.caveat(),
-                (!found).then(|| omitted_files_caveat(engine)),
+                (!found).then(|| omitted_files_caveat(engine)).flatten(),
             ) {
-                eprintln!("note: {c}");
+                println!("{c}");
             }
             if !found {
                 println!("no match for: {pattern}");
@@ -700,7 +713,7 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
                 format,
                 merge_caveats(
                     engine.caveat(),
-                    (!found).then(|| omitted_files_caveat(engine)),
+                    (!found).then(|| omitted_files_caveat(engine)).flatten(),
                 ),
             )
         }
@@ -828,8 +841,9 @@ impl ScoreSource {
 pub struct Hit {
     pub repo: Option<String>,
     pub score: f32,
-    /// Which ranker produced `score`. Annotation only — does not change
-    /// the score value or the sort order.
+    /// Which ranker produced `score`. An exact-name `Substring` row (score
+    /// 1.0) sorts ahead of every other row ([`exact_substring`]); otherwise
+    /// the score orders.
     pub score_source: ScoreSource,
     pub kind: String,
     pub file: String,
@@ -865,6 +879,9 @@ const HOP_EXPANSION_LIMIT: usize = 3;
 /// [0,1]-ish range).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct OrderedHit {
+    /// Leads the derived `Ord`, so the cross-repo heap keeps the rows
+    /// [`exact_substring`] ranks first.
+    exact_substring: bool,
     score_bits: u32,
     repo: Option<String>,
     file: String,
@@ -884,6 +901,7 @@ struct OrderedHit {
 impl OrderedHit {
     fn from(h: Hit) -> Self {
         Self {
+            exact_substring: exact_substring(&h),
             score_bits: h.score.to_bits(),
             repo: h.repo,
             file: h.file,
@@ -929,12 +947,15 @@ impl BucketedResults {
     }
 
     fn partition(mut hits: Vec<Hit>) -> Self {
-        // Sort overall by descending score before partitioning so each bucket
-        // gets the best representatives across repos.
+        // Sort exact-name substring rows first, then by descending score,
+        // before partitioning so each bucket gets the best representatives
+        // across repos.
         hits.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            exact_substring_first(a, b).then_with(|| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
         });
 
         let mut source = Vec::new();
@@ -989,7 +1010,9 @@ fn run_single(
     // on the miss path, so a hit pays nothing.
     let caveat = merge_caveats(
         caveat,
-        (!buckets.is_any_hit()).then(|| omitted_files_caveat(engine)),
+        (!buckets.is_any_hit())
+            .then(|| omitted_files_caveat(engine))
+            .flatten(),
     );
     let summary = if truncated_total > (MULTI_CAP as u64) {
         eprintln!("note: search truncated — {truncated_total} matches found, {MULTI_CAP} kept");
@@ -1000,17 +1023,6 @@ fn run_single(
         None
     };
     emit_bucketed_with_metadata(&buckets, format, summary, truncated_total, caveat)
-}
-
-/// Join a staleness caveat with an omission caveat, keeping whichever exist.
-/// The inner `Option` lets a caller say "not applicable here" without
-/// evaluating the second one.
-fn merge_caveats(base: Option<String>, extra: Option<Option<String>>) -> Option<String> {
-    match (base, extra.flatten()) {
-        (Some(a), Some(b)) => Some(format!("{a}; {b}")),
-        (Some(a), None) => Some(a),
-        (None, b) => b,
-    }
 }
 
 /// How many files the index left out, phrased for a model that just got a
@@ -1026,7 +1038,7 @@ fn omitted_files_caveat(engine: &Engine) -> Option<String> {
         .filter(|b| {
             matches!(
                 b.kind.resolve(&graph.string_pool),
-                "file-too-large" | "file-unreadable" | "parse-failed"
+                "file-too-large" | "file-unreadable" | "parse-failed" | "path-not-utf8"
             )
         })
         .count();
@@ -1065,20 +1077,128 @@ fn compute_single_limited(
     limit: usize,
 ) -> Result<(Vec<Hit>, u64), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
-    let index_dir = engine.index_dir();
 
     let kind_set: Option<Vec<String>> =
         kind_filter.map(|s| s.split(',').map(|k| k.trim().to_lowercase()).collect());
 
     let _ = mode;
-    Ok(bm25_hits_from_graph(
+    Ok(engine_bm25_hits(
+        engine,
         graph,
         pattern,
         &kind_set,
         &repo_label,
-        index_dir,
         limit,
     ))
+}
+
+/// [`bm25_hits_from_graph`] for `engine`, plus the symbols only its session
+/// overlay holds. Neither the base graph nor its tantivy index can hold a
+/// symbol added after the build, so without these rows a bm25 query answered
+/// "no match" for code on disk. A clean query builds no overlay view.
+fn engine_bm25_hits(
+    engine: &Engine,
+    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
+    pattern: &str,
+    kind_set: &Option<Vec<String>>,
+    repo_label: &Option<String>,
+    limit: usize,
+) -> (Vec<Hit>, u64) {
+    let (mut hits, total) = bm25_hits_from_graph(
+        graph,
+        pattern,
+        kind_set,
+        repo_label,
+        engine.index_dir(),
+        limit,
+    );
+    let overlay = overlay_bm25_hits(engine, pattern, kind_set, repo_label);
+    if overlay.is_empty() {
+        return (hits, total);
+    }
+    let total = total + overlay.len() as u64;
+    hits.extend(overlay);
+    // Stable, so the base rows keep their order among equal scores.
+    hits.sort_by(|a, b| exact_substring_first(a, b).then_with(|| b.score.total_cmp(&a.score)));
+    hits.truncate(limit);
+    (hits, total)
+}
+
+/// A substring row whose name equals the query (score 1.0): a symbol only the
+/// session overlay holds, or a hit from a repo with no tantivy index. Tantivy
+/// BM25 scores (often 3-15) and substring scores (1.0 / 0.7 / 0.4) share no
+/// scale, so by score alone such a row sorts under every BM25 row and the
+/// limit or the per-bucket cut drops it. Its displayed score stays 1.0.
+fn exact_substring(h: &Hit) -> bool {
+    h.score_source == ScoreSource::Substring && h.score >= 1.0
+}
+
+/// Orders [`exact_substring`] rows ahead of the rest; `Equal` otherwise, so
+/// each caller's score order decides.
+fn exact_substring_first(a: &Hit, b: &Hit) -> std::cmp::Ordering {
+    exact_substring(b).cmp(&exact_substring(a))
+}
+
+/// The overlay's new symbols, scored like the substring fallback (its 1.0 /
+/// 0.7 / 0.4 buckets, `score_source: substring`). A symbol the overlay only
+/// moved keeps answering through its base row. As in `overlay_matches`, a
+/// new symbol's caller and callee counts are not computed and read 0.
+fn overlay_bm25_hits(
+    engine: &Engine,
+    pattern: &str,
+    kind_set: &Option<Vec<String>>,
+    repo_label: &Option<String>,
+) -> Vec<Hit> {
+    let Some(view) = engine.overlay_dir().and_then(|_| engine.overlay_view()) else {
+        return Vec::new();
+    };
+    let pattern_lower = pattern.to_lowercase();
+    let terms = query_terms(&pattern_lower);
+    view.virtual_nodes()
+        .iter()
+        .filter(|h| h.replaced_base.is_none())
+        .filter(|h| {
+            kind_set.as_ref().is_none_or(|ks| {
+                let kind = format!("{:?}", h.kind).to_lowercase();
+                ks.iter().any(|k| k == &kind)
+            })
+        })
+        .filter_map(|h| {
+            let score = terms
+                .iter()
+                .filter_map(|term| substring_score(&h.name, term))
+                .reduce(f32::max)?;
+            let kind = crate::commands::format::node_kind_to_str(&h.kind).to_string();
+            let category = ecp_core::file_category::determine_category(&h.rel_path);
+            Some(Hit {
+                repo: repo_label.clone(),
+                score,
+                score_source: ScoreSource::Substring,
+                signature: format!("{kind} {}", h.name),
+                kind,
+                file: h.rel_path.to_string(),
+                language: Language::from_path(&h.rel_path).as_str().to_string(),
+                line: h.start_line,
+                name: h.name.clone(),
+                caller_count: 0,
+                callers: Vec::new(),
+                callee_count: 0,
+                callees: Vec::new(),
+                category,
+            })
+        })
+        .collect()
+}
+
+/// A symbol name never contains whitespace, so a multi-word pattern (the
+/// hook's `pub struct HookInput`) is scored one term at a time and a name
+/// takes its best term; the whole string would match nothing.
+fn query_terms(pattern_lower: &str) -> Vec<&str> {
+    if pattern_lower.trim().is_empty() {
+        vec![""]
+    } else {
+        pattern_lower.split_whitespace().collect()
+    }
 }
 
 /// Primary BM25 path: queries the persisted Tantivy index when present,
@@ -1190,14 +1310,7 @@ fn substring_hits(
     limit: usize,
 ) -> (Vec<Hit>, u64) {
     let pattern_lower = pattern.to_lowercase();
-    // A symbol name never contains whitespace, so a multi-word pattern (the
-    // hook's `pub struct HookInput`) is scored one term at a time and a name
-    // takes its best term; the whole string would match nothing.
-    let terms: Vec<&str> = if pattern_lower.trim().is_empty() {
-        vec![""]
-    } else {
-        pattern_lower.split_whitespace().collect()
-    };
+    let terms = query_terms(&pattern_lower);
     let mut scored: Vec<(f32, usize)> = graph
         .nodes
         .iter()
@@ -1413,12 +1526,16 @@ fn run_multi(
 }
 
 /// Caveat for a single resolved target: HEAD-mismatch staleness names the
-/// repo; otherwise the engine's own warm-attach caveat (if any) applies.
-/// `behind_head` is judged on the graph `load_ensured` actually loaded, which
-/// after a synchronous rebuild is not the commit dir the target picked.
+/// repo, joined with the engine's unreadable-path caveat; otherwise the
+/// engine's own caveat applies whole. `behind_head` is judged on the graph
+/// `load_ensured` actually loaded, which after a synchronous rebuild is not
+/// the commit dir the target picked.
 fn single_target_caveat(target: &RepoTarget, engine: &Engine) -> Option<String> {
     if engine.behind_head {
-        stale_graph_caveat(&[target.display_name.as_str()])
+        merge_caveats(
+            stale_graph_caveat(&[target.display_name.as_str()]),
+            engine.unreadable_changes_caveat(),
+        )
     } else {
         engine.caveat()
     }
@@ -1469,12 +1586,12 @@ pub fn compute_multi_with_engines(
                         // Multi-repo path: cross-repo top-K merging handles its
                         // own truncation, so the substring-fallback truncate
                         // signal from per-repo bm25 is discarded here.
-                        let (hits, _truncated_total) = bm25_hits_from_graph(
+                        let (hits, _truncated_total) = engine_bm25_hits(
+                            engine,
                             graph,
                             pattern,
                             &kind_set,
                             &repo_label,
-                            engine.index_dir(),
                             usize::MAX,
                         );
                         hits
@@ -1509,9 +1626,9 @@ pub fn compute_multi_with_engines(
         }
     }
 
-    // Drain heap in descending score order.
+    // Drain heap: exact-name substring rows first, then descending score.
     let mut ordered: Vec<OrderedHit> = heap.into_iter().map(|r| r.0).collect();
-    ordered.sort_by_key(|b| std::cmp::Reverse(b.score_bits));
+    ordered.sort_by_key(|b| std::cmp::Reverse((b.exact_substring, b.score_bits)));
 
     let hits: Vec<Hit> = ordered
         .into_iter()
@@ -1860,22 +1977,32 @@ fn stale_graph_caveat(names: &[&str]) -> Option<String> {
 }
 
 /// Cross-repo staleness sweep: a repo is stale when its loaded graph is
-/// behind HEAD or its engine warm-attached a sibling SHA.
+/// behind HEAD or its engine warm-attached a sibling SHA. Each repo with
+/// changed paths its dirty set could not name adds its own line.
 fn stale_repos_caveat(
     targets: &[RepoTarget],
     loaded: &[(String, Result<Engine, String>)],
 ) -> Option<String> {
-    let stale: Vec<&str> = targets
+    let engines = targets
         .iter()
         .zip(loaded)
-        .filter(|(_, (_, result))| {
-            result
-                .as_ref()
-                .is_ok_and(|engine| engine.behind_head || engine.is_stale_for_sha)
-        })
-        .map(|(target, _)| target.display_name.as_str())
+        .filter_map(|(target, (_, result))| {
+            Some((target.display_name.as_str(), result.as_ref().ok()?))
+        });
+    let stale: Vec<&str> = engines
+        .clone()
+        .filter(|(_, engine)| engine.behind_head || engine.is_stale_for_sha)
+        .map(|(name, _)| name)
         .collect();
-    stale_graph_caveat(&stale)
+    engines
+        .filter_map(|(name, engine)| {
+            engine
+                .unreadable_changes_caveat()
+                .map(|c| format!("{name}: {c}"))
+        })
+        .fold(stale_graph_caveat(&stale), |acc, line| {
+            merge_caveats(acc, Some(line))
+        })
 }
 
 /// Same as `emit_bucketed` but threads the substring-fallback pre-truncate
@@ -2153,6 +2280,7 @@ mod tests {
         let scores = [0.4_f32, 0.9, 0.2, 0.8, 0.7];
         for (i, &s) in scores.iter().enumerate() {
             let h = OrderedHit {
+                exact_substring: false,
                 score_bits: s.to_bits(),
                 repo: None,
                 file: "f".into(),

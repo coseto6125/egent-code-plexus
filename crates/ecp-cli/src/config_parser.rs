@@ -64,45 +64,29 @@ pub fn parse_configs(repo_path: &Path) -> PathAliases {
     }
 
     // 4. Cargo.toml
-    if let Ok(content) = std::fs::read_to_string(repo_path.join("Cargo.toml")) {
-        let mut in_package = false;
-        for line in content.lines() {
-            let line = line.trim();
-            if line.starts_with("[package]") {
-                in_package = true;
-            } else if line.starts_with('[') {
-                in_package = false;
-            } else if in_package && line.starts_with("name") {
-                let parts: Vec<&str> = line.split('=').collect();
-                if parts.len() >= 2 {
-                    let name = parts[1].trim().trim_matches('"').trim_matches('\'').trim();
-                    let pattern = format!("{}/*", name);
-                    aliases.add(&pattern, vec!["src/*".to_string()]);
-                    aliases.add(
-                        name,
-                        vec!["src/lib.rs".to_string(), "src/main.rs".to_string()],
-                    );
-                }
-            }
-        }
+    if let Some(name) = read_toml(&repo_path.join("Cargo.toml"))
+        .as_ref()
+        .and_then(|doc| toml_str(doc, &["package", "name"]))
+    {
+        aliases.add(format!("{name}/*"), vec!["src/*".to_string()]);
+        aliases.add(
+            name,
+            vec!["src/lib.rs".to_string(), "src/main.rs".to_string()],
+        );
     }
 
-    // 5. pyproject.toml
-    if let Ok(content) = std::fs::read_to_string(repo_path.join("pyproject.toml")) {
-        for line in content.lines() {
-            let line = line.trim();
-            if line.starts_with("name") {
-                let parts: Vec<&str> = line.split('=').collect();
-                if parts.len() >= 2 {
-                    let name = parts[1].trim().trim_matches('"').trim_matches('\'').trim();
-                    let pattern = format!("{}/*", name);
-                    aliases.add(
-                        &pattern,
-                        vec![format!("src/{}/*", name), format!("{}/*", name)],
-                    );
-                }
-            }
-        }
+    // 5. pyproject.toml: PEP 621 `[project]`, else Poetry's `[tool.poetry]`.
+    if let Some(name) = read_toml(&repo_path.join("pyproject.toml"))
+        .as_ref()
+        .and_then(|doc| {
+            toml_str(doc, &["project", "name"])
+                .or_else(|| toml_str(doc, &["tool", "poetry", "name"]))
+        })
+    {
+        aliases.add(
+            format!("{name}/*"),
+            vec![format!("src/{name}/*"), format!("{name}/*")],
+        );
     }
 
     // 6. jsconfig.json — identical schema to tsconfig.json `compilerOptions.paths`,
@@ -190,6 +174,19 @@ pub fn parse_configs(repo_path: &Path) -> PathAliases {
     }
 
     aliases
+}
+
+fn read_toml(path: &Path) -> Option<toml::Table> {
+    std::fs::read_to_string(path).ok()?.parse().ok()
+}
+
+fn toml_str<'a>(doc: &'a toml::Table, keys: &[&str]) -> Option<&'a str> {
+    let (last, parents) = keys.split_last()?;
+    let mut table = doc;
+    for key in parents {
+        table = table.get(*key)?.as_table()?;
+    }
+    table.get(*last)?.as_str().filter(|name| !name.is_empty())
 }
 
 // ─── Jest / Webpack helpers ──────────────────────────────────────────────────
@@ -1146,5 +1143,62 @@ module.exports = {
             vec!["src/api/client"],
             "webpack.config.js path.resolve alias must resolve (capturing literal arg, __dirname substituted)"
         );
+    }
+
+    fn expansions(aliases: &PathAliases, specifier: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        aliases.expand(specifier, |c| {
+            found.push(c.to_string());
+            true
+        });
+        found
+    }
+
+    #[test]
+    fn test_parse_configs_pyproject_other_name_keys_no_alias() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[project]\nname = \"pkg\"\nnamespace_packages = true\n\n[[tool.poetry.source]]\nname = \"pypi\"\n",
+        )
+        .unwrap();
+
+        let aliases = parse_configs(dir.path());
+        assert!(
+            expansions(&aliases, "pkg/mod")
+                .iter()
+                .any(|c| c.starts_with("src/pkg")),
+            "[project] name registers the package alias"
+        );
+        assert!(expansions(&aliases, "pypi/mod").is_empty());
+        assert!(expansions(&aliases, "true/mod").is_empty());
+    }
+
+    #[test]
+    fn test_parse_configs_pyproject_poetry_name_registers_alias() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[tool.poetry]\nname = \"poetrypkg\"\n",
+        )
+        .unwrap();
+
+        let aliases = parse_configs(dir.path());
+        assert!(expansions(&aliases, "poetrypkg/mod")
+            .iter()
+            .any(|c| c.starts_with("src/poetrypkg")));
+    }
+
+    #[test]
+    fn test_parse_configs_cargo_name_with_trailing_comment_registers_clean_name() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"mycrate\" # the crate\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let aliases = parse_configs(dir.path());
+        assert!(expansions(&aliases, "mycrate").contains(&"src/lib.rs".to_string()));
     }
 }

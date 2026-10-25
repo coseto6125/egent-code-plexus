@@ -1,12 +1,8 @@
-/// Heuristics for resolving symbols to global nodes.
-/// Ports the exact ResolutionTier and confidence scoring from original GitNexus.
+//! Heuristics for resolving symbols to global nodes.
+//! Ports the exact ResolutionTier and confidence scoring from original GitNexus.
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum FallbackReason {
-    ImplicitSelf,
-    VueComponent,
-    Unknown,
-}
+use ecp_core::analyzer::outcome::Tier;
+pub use ecp_core::analyzer::types::{NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ResolutionTier {
@@ -33,26 +29,41 @@ pub enum ResolutionTier {
     /// taken. Path proximity is a heuristic, so the edge stays below the
     /// Global tier and carries its own reason ([`NEAREST_COPY_REASON`]).
     NearestCopy,
-    Fallback(FallbackReason),
 }
 
-pub use ecp_core::analyzer::types::{NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON};
-
 impl ResolutionTier {
-    /// Returns the base confidence score for the resolution tier.
+    /// Returns the base confidence score for the resolution tier. A tier
+    /// the overlay shares reads [`Tier::confidence`], so the index and the
+    /// overlay hold each value once.
     pub fn base_confidence(&self) -> f32 {
         match self {
-            ResolutionTier::SameFile => 1.0,
-            ResolutionTier::ImportScoped => 0.95,
-            ResolutionTier::QualifierScoped => 0.85,
-            ResolutionTier::HeritageScoped => 0.8,
-            ResolutionTier::Global => 0.7,
-            ResolutionTier::NearestCopy => NEAREST_COPY_CONFIDENCE,
-            ResolutionTier::Fallback(reason) => match reason {
-                FallbackReason::ImplicitSelf => 0.8,
-                FallbackReason::VueComponent => 0.8,
-                FallbackReason::Unknown => 0.4,
-            },
+            ResolutionTier::SameFile => Tier::SameFile.confidence(),
+            ResolutionTier::ImportScoped => Tier::ImportScoped.confidence(),
+            ResolutionTier::QualifierScoped => Tier::QualifierScoped.confidence(),
+            ResolutionTier::HeritageScoped => Tier::HeritageScoped.confidence(),
+            ResolutionTier::Global => Tier::Global.confidence(),
+            ResolutionTier::NearestCopy => Tier::NearestCopy.confidence(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each shared tier keeps the literal it held before it read [`Tier`].
+    #[test]
+    fn test_base_confidence_shared_tiers_returns_unchanged_values() {
+        let unchanged = [
+            (ResolutionTier::SameFile, 1.0),
+            (ResolutionTier::ImportScoped, 0.95),
+            (ResolutionTier::QualifierScoped, 0.85),
+            (ResolutionTier::HeritageScoped, 0.8),
+            (ResolutionTier::Global, 0.7),
+            (ResolutionTier::NearestCopy, 0.6),
+        ];
+        for (tier, confidence) in unchanged {
+            assert_eq!(tier.base_confidence(), confidence, "{tier:?}");
         }
     }
 }

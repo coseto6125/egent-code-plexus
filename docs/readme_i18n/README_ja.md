@@ -386,7 +386,7 @@ crates/
 
 | 環境変数 | デフォルト | 効果 |
 |---|---|---|
-| `ECP_MAX_FILE_BYTES` | `16777216`（16 MiB） | インジェスト中にこのサイズを超えるソースファイルをスキップ。ワーカー RAM の最悪ケースを `num_threads × MAX` に制限。 |
+| `ECP_MAX_FILE_BYTES` | `1048576`（1 MiB） | インジェスト中にこのサイズを超えるソースファイルをスキップ。コールドインデックス、増分再解析、セッションオーバーレイ、`impact --baseline` のすべてに適用。環境変数は `<repo>/.ecp/config.toml` の `[index] max_file_bytes` より優先。ワーカー RAM の最悪ケースを `num_threads × MAX` に制限。 |
 | `ECP_CSPROJ_MAX_DEPTH` | `4` | `*.csproj` 検出の再帰深度。深くネストされた .NET モノリポの場合は増やしてください。 |
 
 ---

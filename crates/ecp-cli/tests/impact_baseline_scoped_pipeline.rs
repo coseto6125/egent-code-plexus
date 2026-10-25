@@ -4,11 +4,11 @@
 //! `impact --baseline` used to build the full 20-provider `make_pipeline()`
 //! regardless of which languages the diff touched, paying ~0.65s of
 //! tree-sitter `Query` compilation for a diff that might parse in ~8ms. The
-//! fix scopes the pipeline to `provider_name_for_path` names derived from
-//! `parsed_paths`. These tests assert the JSON payload is unchanged by that
+//! fix scopes the pipeline to the provider names that the routes of
+//! `parsed_paths` list. These tests assert the JSON payload is unchanged by that
 //! swap — a diff still yields its `changed_symbols`, and a markdown file in
 //! the diff behaves exactly as it did under the old full pipeline (which
-//! could never route `.md` through `provider_name_for_path` either, so it
+//! could never route `.md` through the router either, so it
 //! contributed zero symbols before and must still contribute zero now).
 
 use serde_json::Value;
@@ -172,7 +172,7 @@ fn multi_language_diff_yields_symbols_for_every_touched_language() {
 /// Guards the markdown/yaml caveat: a markdown file changing alongside code
 /// must still surface in `changed_paths` (unfiltered git-diff list), and
 /// must NOT contribute to `changed_symbols` — matching the pre-fix full
-/// pipeline, which also never dispatches `.md` through `provider_name_for_path`
+/// pipeline, which also never routes `.md` to a provider
 /// (no extension entry exists for markdown; confirmed dead in `make_pipeline()`
 /// too). If a future fix wires real markdown dispatch, this assertion is the
 /// one to update alongside it.
@@ -217,5 +217,53 @@ fn markdown_file_in_diff_reports_path_but_contributes_no_symbols() {
             .iter()
             .all(|s| s["filePath"].as_str() != Some("NOTES.md")),
         "markdown must not contribute changed_symbols (matches pre-fix dead-dispatch behavior); got {symbols:?}"
+    );
+}
+
+/// Python source of `funcs` small functions, padded with a trailing comment
+/// to exactly `len` bytes.
+fn padded_python(funcs: usize, len: usize) -> String {
+    let mut src: String = (0..funcs)
+        .map(|i| format!("def func_{i}():\n    return {i}\n\n"))
+        .collect();
+    src.push('#');
+    src.push_str(&"x".repeat(len - src.len() - 1));
+    src
+}
+
+/// A changed file whose new side crosses the 1 MiB built-in size cap parses
+/// to an omission with no symbols. Compared with the old side, every one of
+/// its functions read as `removed` (a fabricated blast radius) and the payload
+/// said nothing. The file is now left out of the comparison and named in the
+/// `result` caveat.
+#[test]
+fn test_impact_baseline_file_crosses_size_cap_not_compared_caveat_names_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    run_git(repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("big.py"), padded_python(50, 1_040_000)).unwrap();
+    std::fs::write(repo.join("small.py"), PY_V1).unwrap();
+    git_commit(repo, "v1");
+    std::fs::write(repo.join("big.py"), padded_python(50, 1_050_000)).unwrap();
+    std::fs::write(repo.join("small.py"), PY_V2).unwrap();
+    git_commit(repo, "v2");
+    ecp_index(repo);
+
+    let payload = run_impact_baseline(repo);
+    let changed = payload["changed_symbols"]
+        .as_array()
+        .expect("changed_symbols");
+    assert!(
+        changed.iter().all(|s| s["filePath"] != "big.py"),
+        "an over-cap file must not be diffed: {changed:?}"
+    );
+    assert!(
+        changed.iter().any(|s| s["name"] == "helper"),
+        "the under-cap file is still diffed: {changed:?}"
+    );
+    let caveat = payload["result"].as_str().unwrap_or_default();
+    assert!(
+        caveat.contains("big.py"),
+        "caveat must name the file: {payload}"
     );
 }

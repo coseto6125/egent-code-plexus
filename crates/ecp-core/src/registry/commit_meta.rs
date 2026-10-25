@@ -73,7 +73,24 @@ use std::path::Path;
 /// routes' list, and a group's controller reaches an included route file.
 /// schema20: functions read named constants and reference callbacks; imports
 /// persist for every language, and chained calls use callee return types.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema20");
+/// schema21: a decorator that names several HTTP verbs gives one Route per
+/// verb, read from the method argument; a docker-compose flow-mapping `build`
+/// is read; the Cargo / pyproject package alias comes from the TOML table; a
+/// Python transaction decorator binds the innermost function.
+/// schema22: every path routes through the C5 `FileRouter`: one size cap
+/// (1 MiB default) on the cold and incremental paths alike, a sniffed OpenAPI
+/// YAML reaches the openapi provider, template paths and non-UTF-8 names are
+/// never parsed.
+/// schema23: the session overlay parses each dirty path with the providers
+/// its route lists, as the cold index does (bash, lua, crystal, nim, zig,
+/// move, solidity, vyper, cairo, verilog, sql, hcl, protobuf, dockerfile,
+/// docker-compose and github-actions fragments now exist), and routes by the
+/// repo-relative path rather than the basename.
+/// schema24: OpenAPI schema and field nodes carry the line of their key
+/// instead of line 1, past YAML anchors, tags, comments and directives.
+/// schema25: a non-UTF-8 path that would route is a `path-not-utf8` omission
+/// instead of vanishing; the walk applies the size cap to a symlink's target.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema25");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

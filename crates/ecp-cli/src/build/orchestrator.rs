@@ -14,6 +14,7 @@ use crate::commit_lookup::{
 };
 use crate::git::safe_exec;
 use crate::repo_identity::repo_dir_name_for_cwd;
+use ecp_core::contracts::dirty_event::DirtySet;
 use ecp_core::registry::{
     resolve_home_ecp, CommitBuildMeta, EmbeddingStatus, FileLock, Generation, RefRecord,
     RegistryFile, RepoAlias, RepoMeta, SourceType, BUILDER_FINGERPRINT,
@@ -815,10 +816,32 @@ pub(crate) fn worktree_clean_and_head_matches(worktree: &Path, sha: &str) -> io:
         return Ok(false);
     }
     let home_ecp_canonical = fs::canonicalize(resolve_home_ecp()).ok();
-    let dirty = crate::auto_ensure::parse_porcelain_paths(&out.stdout, worktree)
-        .into_iter()
-        .any(|p| !crate::auto_ensure::is_ecp_artifact(&p, None, home_ecp_canonical.as_deref()));
-    Ok(!dirty)
+    Ok(porcelain_clean(
+        &out.stdout,
+        worktree,
+        home_ecp_canonical.as_deref(),
+    ))
+}
+
+/// No path but ecp's own artifacts in `git status --porcelain -z` stdout.
+/// Unlike the freshness gate, "other" paths count: the build also reads
+/// config and ignore files. Output that is not porcelain v1 is "not clean".
+fn porcelain_clean(stdout: &[u8], worktree: &Path, home_ecp_canonical: Option<&Path>) -> bool {
+    let Ok(dirty) = DirtySet::from_porcelain_z(stdout) else {
+        return false;
+    };
+    let artifact = |rel: &str| {
+        crate::auto_ensure::is_ecp_artifact(&worktree.join(rel), None, home_ecp_canonical)
+    };
+    dirty
+        .events()
+        .iter()
+        .flat_map(|event| event.halves())
+        .all(|(_, half)| artifact(half.as_str()))
+        && dirty
+            .skipped()
+            .iter()
+            .all(|entry| artifact(&entry.path_lossy))
 }
 
 /// Extract `sha`'s tree into `dest`.
@@ -2062,6 +2085,44 @@ mod tests {
 
         let after = CommitIndex::scan_cached_at(&commits, wall, mono).unwrap();
         assert_eq!(after.find(&sha), Some(base.as_str()));
+    }
+
+    /// The freshness gate drops "other" paths; the build must not, because it
+    /// reads config and ignore files from the worktree too.
+    #[test]
+    fn test_worktree_clean_and_head_matches_untracked_csv_returns_false() {
+        let fx = fx();
+        let sha = hex::encode(fx.sha);
+        assert!(worktree_clean_and_head_matches(&fx.wt, &sha).unwrap());
+        fs::write(fx.wt.join("data.csv"), "a,b\n").unwrap();
+        assert!(!worktree_clean_and_head_matches(&fx.wt, &sha).unwrap());
+    }
+
+    #[test]
+    fn test_porcelain_clean_empty_status_returns_true() {
+        assert!(porcelain_clean(
+            b"",
+            Path::new("/nonexistent-worktree"),
+            None
+        ));
+    }
+
+    /// Real git never prints malformed porcelain, so this drives the parse
+    /// step `worktree_clean_and_head_matches` hands its status stdout to.
+    #[test]
+    fn test_porcelain_clean_malformed_status_returns_false() {
+        let wt = Path::new("/nonexistent-worktree");
+        for malformed in [
+            b"garbage\0".as_slice(),
+            b"?? a.py".as_slice(),
+            b"R  new.py\0".as_slice(),
+        ] {
+            assert!(
+                !porcelain_clean(malformed, wt, None),
+                "{:?}",
+                String::from_utf8_lossy(malformed)
+            );
+        }
     }
 }
 

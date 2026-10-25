@@ -228,11 +228,12 @@ struct ImpactHints {
     hidden_heuristic_edges: u64,
     /// Test-file callers dropped by `--exclude-tests`.
     hidden_test_callers: u64,
-    /// Payload caveat: the target name collides with other definitions, so
-    /// bare calls were Tier-3-suppressed at index time and the caller set is
-    /// a lower bound. Merged with `Engine::caveat()` into the `result` field
-    /// by `run`.
-    ambiguity_caveat: Option<String>,
+    /// Payload caveat, merged with `Engine::caveat()` into the `result`
+    /// field by `run`. Symbol mode: the target name collides with other
+    /// definitions, so bare calls were Tier-3-suppressed at index time and
+    /// the caller set is a lower bound. Baseline mode: changed files over
+    /// the size cap were not compared.
+    payload_caveat: Option<String>,
 }
 
 pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
@@ -255,7 +256,7 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
                 "→ \"{name}\" has no non-test callers; its {} test callers are hidden by --exclude-tests",
                 hints.hidden_test_callers
             );
-        } else if hints.ambiguity_caveat.is_some() {
+        } else if hints.payload_caveat.is_some() {
             let action = match args.ambiguous_callers {
                 true => "check `ambiguous_callers`",
                 false => "rerun with --ambiguous-callers to list the candidate call sites",
@@ -290,7 +291,7 @@ pub fn run(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
     emit_with_caveat(
         &payload,
         format,
-        merge_caveats(engine.caveat(), hints.ambiguity_caveat),
+        merge_caveats(engine.caveat(), hints.payload_caveat),
     )
 }
 
@@ -361,7 +362,7 @@ fn run_batch(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
         let payload = match build_payload_with_hints(&per_target_args, engine) {
             Ok((p, hints)) => {
                 emit_hidden_edges_footer(hints.hidden_edges);
-                let merged = merge_caveats(caveat.clone(), hints.ambiguity_caveat);
+                let merged = merge_caveats(caveat.clone(), hints.payload_caveat);
                 // Inline the caveat into the payload so per-target output is
                 // self-contained (same contract as single-target mode's
                 // `emit_with_caveat`).
@@ -408,9 +409,15 @@ fn build_payload_with_hints(
     let has_name = args.name.is_some() || args.target.is_some();
     match (has_name, args.baseline.as_ref()) {
         (true, None) => symbol::impact_by_name(args, engine),
-        (false, Some(_)) => {
-            baseline::impact_with_baseline(args, engine).map(|v| (v, ImpactHints::default()))
-        }
+        (false, Some(_)) => baseline::impact_with_baseline(args, engine).map(|(v, caveat)| {
+            (
+                v,
+                ImpactHints {
+                    payload_caveat: caveat,
+                    ..ImpactHints::default()
+                },
+            )
+        }),
         (false, None) => Err(EcpError::InvalidArgument(
             "impact requires a symbol (positional <name> or --target <name>) or --baseline <ref>"
                 .into(),

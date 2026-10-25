@@ -386,7 +386,7 @@ crates/
 
 | 環境變數 | 預設 | 效果 |
 |---|---|---|
-| `ECP_MAX_FILE_BYTES` | `16777216`（16 MiB） | 攝取時跳過大於此大小的原始碼檔。將最壞情況下的 worker RAM 上限定在 `num_threads × MAX`。 |
+| `ECP_MAX_FILE_BYTES` | `1048576`（1 MiB） | 攝取時跳過大於此大小的原始碼檔；冷索引、增量重新分析、會話疊加層和 `impact --baseline` 都適用。環境變數優先於 `<repo>/.ecp/config.toml` 中的 `[index] max_file_bytes`。將最壞情況下的 worker RAM 上限定在 `num_threads × MAX`。 |
 | `ECP_CSPROJ_MAX_DEPTH` | `4` | `*.csproj` 探索的目錄遞迴深度。深層巢狀的 .NET monorepo 可調高。 |
 
 ---

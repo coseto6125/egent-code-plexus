@@ -386,7 +386,7 @@ crates/
 
 | 환경 변수 | 기본값 | 효과 |
 |---|---|---|
-| `ECP_MAX_FILE_BYTES` | `16777216` (16 MiB) | 인제스트 중 이 크기를 초과하는 소스 파일 건너뜀. 최악의 경우 워커 RAM을 `num_threads × MAX`로 제한. |
+| `ECP_MAX_FILE_BYTES` | `1048576` (1 MiB) | 인제스트 중 이 크기를 초과하는 소스 파일 건너뜀. 콜드 인덱스, 증분 재분석, 세션 오버레이, `impact --baseline`에 모두 적용. 환경 변수가 `<repo>/.ecp/config.toml`의 `[index] max_file_bytes`보다 우선. 최악의 경우 워커 RAM을 `num_threads × MAX`로 제한. |
 | `ECP_CSPROJ_MAX_DEPTH` | `4` | `*.csproj` 발견 재귀 깊이. 깊게 중첩된 .NET 모노리포의 경우 올리세요. |
 
 ---

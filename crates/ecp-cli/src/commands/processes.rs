@@ -23,7 +23,7 @@
 
 use crate::commands::format::kind_to_str;
 use crate::engine::Engine;
-use crate::output::{emit, OutputFormat};
+use crate::output::{emit_with_caveat, OutputFormat};
 use clap::{Args, Subcommand};
 use ecp_core::graph::ArchivedZeroCopyGraph;
 use ecp_core::EcpError;
@@ -43,7 +43,9 @@ pub struct ProcessesArgs {
     pub repo: Option<String>,
 
     /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
-    /// toon. `json`: full-fidelity JSON. `text`: one compact JSON line per result.
+    /// toon. `json`: full-fidelity JSON. `text`: one compact JSON line per result. A
+    /// `result` field appears only when the answer carries a caveat (stale or
+    /// warm-attached graph, unreadable uncommitted paths); absent means current.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 
@@ -79,7 +81,9 @@ pub struct TraceArgs {
     pub repo: Option<String>,
 
     /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
-    /// toon. `json`: full-fidelity JSON. `text`: one compact JSON line per result.
+    /// toon. `json`: full-fidelity JSON. `text`: one compact JSON line per result. A
+    /// `result` field appears only when the answer carries a caveat (stale or
+    /// warm-attached graph, unreadable uncommitted paths); absent means current.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 
@@ -89,10 +93,9 @@ pub struct TraceArgs {
 }
 
 pub fn run(args: ProcessesArgs, engine: &Engine) -> Result<(), EcpError> {
-    let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     match args.command.clone() {
-        None => list_processes(graph, args),
-        Some(ProcessesCommands::Trace(t)) => trace_processes(graph, t),
+        None => list_processes(engine, args),
+        Some(ProcessesCommands::Trace(t)) => trace_processes(engine, t),
     }
 }
 
@@ -107,7 +110,8 @@ fn process_range(graph: &ArchivedZeroCopyGraph) -> (u32, u32) {
     (start, start + count)
 }
 
-fn list_processes(graph: &ArchivedZeroCopyGraph, args: ProcessesArgs) -> Result<(), EcpError> {
+fn list_processes(engine: &Engine, args: ProcessesArgs) -> Result<(), EcpError> {
+    let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let fmt = args.format.unwrap_or_default();
     let (process_start, process_end) = process_range(graph);
     let total_processes = process_end - process_start;
@@ -192,10 +196,11 @@ fn list_processes(graph: &ArchivedZeroCopyGraph, args: ProcessesArgs) -> Result<
         "community_filter": args.community,
         "results": results,
     });
-    emit(&payload, fmt)
+    emit_with_caveat(&payload, fmt, engine.caveat())
 }
 
-fn trace_processes(graph: &ArchivedZeroCopyGraph, args: TraceArgs) -> Result<(), EcpError> {
+fn trace_processes(engine: &Engine, args: TraceArgs) -> Result<(), EcpError> {
+    let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let fmt = args.format.unwrap_or_default();
     let pattern_lower = args.pattern.to_lowercase();
     let (process_start, process_end) = process_range(graph);
@@ -250,7 +255,7 @@ fn trace_processes(graph: &ArchivedZeroCopyGraph, args: TraceArgs) -> Result<(),
             "pattern": args.pattern,
             "candidates": [],
         });
-        return emit(&payload, fmt);
+        return emit_with_caveat(&payload, fmt, engine.caveat());
     }
 
     let payload = serde_json::json!({
@@ -259,5 +264,5 @@ fn trace_processes(graph: &ArchivedZeroCopyGraph, args: TraceArgs) -> Result<(),
         "matched": matches.len(),
         "results": matches,
     });
-    emit(&payload, fmt)
+    emit_with_caveat(&payload, fmt, engine.caveat())
 }

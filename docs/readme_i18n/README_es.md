@@ -386,7 +386,7 @@ Parseo → resolución → serialización fluye a través de un canal MPSC hacia
 
 | Variable de entorno | Predeterminado | Efecto |
 |---|---|---|
-| `ECP_MAX_FILE_BYTES` | `16777216` (16 MiB) | Omitir archivos fuente por encima de este tamaño durante la ingesta. Limita la RAM máxima del trabajador a `num_threads × MAX`. |
+| `ECP_MAX_FILE_BYTES` | `1048576` (1 MiB) | Omitir archivos fuente por encima de este tamaño durante la ingesta, en el índice en frío, el reanálisis incremental, la superposición de sesión y `impact --baseline`. La variable de entorno prevalece sobre `[index] max_file_bytes` en `<repo>/.ecp/config.toml`. Limita la RAM máxima del trabajador a `num_threads × MAX`. |
 | `ECP_CSPROJ_MAX_DEPTH` | `4` | Profundidad de recursión para descubrir `*.csproj`. Aumentar para monorepos .NET profundamente anidados. |
 
 ---

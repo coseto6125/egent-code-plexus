@@ -41,6 +41,7 @@ use ecp_core::analyzer::import_binding::{
     extension_retry, fqn_extension, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
     import_family, import_member_fallback, may_suppress, module_head, retry_name,
 };
+use ecp_core::analyzer::outcome::{NoEdge, Resolution, Tier};
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::reexport::{
     self, is_ecmascript, probe_rust_module, ExportAliasTable, Fact, FileImports, ImportRef,
@@ -287,7 +288,7 @@ fn normalize_source_path(path: &Path) -> Cow<'_, str> {
 
 /// Resolver outcome tier captured per `resolve_symbol` call when the dump
 /// is enabled. Distinct from [`ResolutionTier`] because that enum models
-/// only resolution *successes* (and has the unused `Fallback(...)` arm),
+/// only resolution *successes*,
 /// whereas the dump also needs to record the `Unresolved` outcome to let
 /// the verification harness compute false negatives.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -728,12 +729,15 @@ impl<'a> Resolver<'a> {
         // resolves as the entry the parser wrote before chains.
         let mut site = site.fallback();
         let language = Language::from_normalized_path(&normalize_source_path(source_file));
+        // `targets` only holds the output buffer, so the ladder's allocation
+        // is reused; every step decides from `resolution` alone.
+        let mut targets = Vec::new();
+        let mut resolution = Resolution::Unknown;
         if let Some((node_id, import)) =
             self.python_submodule_member(source_file, language, site, raw_imports)
         {
-            return self.import_scoped(source_file, site.name(), import, node_id);
-        }
-        if let CallSite::FromReceiver { receiver, member } = site {
+            resolution = self.import_scoped(source_file, site.name(), import, node_id);
+        } else if let CallSite::FromReceiver { receiver, member } = site {
             if language == Language::Go {
                 match reexport::go_package_lookup(
                     &IndexFacts(self),
@@ -743,32 +747,42 @@ impl<'a> Resolver<'a> {
                     raw_imports.iter().map(ImportRef::from),
                 ) {
                     reexport::GoPackageLookup::Resolved(target) => {
-                        return target
-                            .and_then(|(node_id, source)| {
-                                raw_imports
-                                    .iter()
-                                    .find(|import| import.source == source)
-                                    .map(|import| {
-                                        self.import_scoped(source_file, member, import, node_id)
-                                    })
-                            })
-                            .unwrap_or_default();
+                        let bound = target.and_then(|(node_id, source)| {
+                            raw_imports
+                                .iter()
+                                .find(|import| import.source == source)
+                                .map(|import| (node_id, import))
+                        });
+                        resolution = match bound {
+                            Some((node_id, import)) => {
+                                self.import_scoped(source_file, member, import, node_id)
+                            }
+                            None => Resolution::NoEdge(NoEdge::PackageMissing),
+                        };
                     }
                     reexport::GoPackageLookup::Unmapped => site = CallSite::Plain(member),
                     reexport::GoPackageLookup::Value => site = CallSite::UntypedMember(member),
                 }
             }
         }
-        let declared_python_attribute = matches!(site, CallSite::FromReceiver { receiver, .. }
-        if language == Language::Python
-            && receiver.contains('/')
-            && reexport::python_from_import_declared_attribute(
-                &IndexFacts(self),
-                &normalize_source_path(source_file),
-                receiver,
-                raw_imports.iter().map(ImportRef::from),
-            ));
-        let type_member = self.type_receiver(source_file, language, site, raw_imports);
+        // A call settled ahead of the ladder is neither typed nor
+        // re-classified: those rules only shape the ladder's lookup.
+        let open = matches!(resolution, Resolution::Unknown);
+        let declared_python_attribute = open
+            && matches!(site, CallSite::FromReceiver { receiver, .. }
+            if language == Language::Python
+                && receiver.contains('/')
+                && reexport::python_from_import_declared_attribute(
+                    &IndexFacts(self),
+                    &normalize_source_path(source_file),
+                    receiver,
+                    raw_imports.iter().map(ImportRef::from),
+                ));
+        let type_member = if open {
+            self.type_receiver(source_file, language, site, raw_imports)
+        } else {
+            None
+        };
         // A Swift receiver that names no type is a value the parser cannot
         // see (a global, an inherited property): an untyped member call.
         let site = match (site, &type_member) {
@@ -803,12 +817,19 @@ impl<'a> Resolver<'a> {
             )
         };
         let target = call_target(source_file, site);
-        let mut targets = resolve(type_member.as_deref().unwrap_or(site.name()), target, true);
-        if targets.is_empty() && type_member.is_some() && language == Language::Kotlin {
+        if open {
+            targets = resolve(type_member.as_deref().unwrap_or(site.name()), target, true);
+            resolution = ladder_resolution(&targets);
+        }
+        if resolution.call_fallbacks_allowed()
+            && type_member.is_some()
+            && language == Language::Kotlin
+        {
             // `fun Reg.ext()` is a top-level function no member lookup on
             // `Reg` finds.
             targets =
                 self.extension_fallback(source_file, site.name(), raw_imports, target, heritage);
+            resolution = ladder_resolution(&targets);
         }
         if !bind_import {
             // A Python module is a value: `api.helper()` on a receiver the
@@ -820,13 +841,19 @@ impl<'a> Resolver<'a> {
                     && self.symbol_table.is_top_level(id)
                     && self.symbol_table.file_of(id) != Some(source_file_str.as_ref())
             };
-            targets.retain(|&(id, _)| {
+            resolution = resolution.admit(|id| {
                 self.symbol_table.member_call_admits(id, caller_owner) || module_value(id)
             });
         }
-        if targets.is_empty() && !self.may_be_receiverless_member_call(source_file, site) {
-            targets.extend(self.resolve_instantiation(language, site, raw_imports, resolve));
+        if resolution.call_fallbacks_allowed()
+            && !self.may_be_receiverless_member_call(source_file, site)
+        {
+            if let Some(edge) = self.resolve_instantiation(language, site, raw_imports, resolve) {
+                resolution = Resolution::from_ladder(Some(edge));
+            }
         }
+        targets.clear();
+        targets.extend(resolution.edge());
         targets
     }
 
@@ -1008,17 +1035,17 @@ impl<'a> Resolver<'a> {
             }
         };
         let target = call_target(source_file, CallSite::UntypedMember(member));
-        let (id, tier) =
-            match type_ladder::member_via_type(st, candidates, callee_file, member, target, true) {
-                LadderMember::Owned(id) => (id, ResolutionTier::QualifierScoped),
-                LadderMember::Inherited(id) => (id, ResolutionTier::HeritageScoped),
-                LadderMember::Candidate(id) => (id, ResolutionTier::Global),
-                LadderMember::NearestCopy(id) => (id, ResolutionTier::NearestCopy),
-                LadderMember::Ambiguous | LadderMember::NoEdge => {
-                    return type_ladder::ChainOutcome::Conclusive;
-                }
-            };
-        type_ladder::ChainOutcome::Bound((id, tier.base_confidence().min(inner_confidence)))
+        let Some((id, tier)) = Tier::of_member(type_ladder::member_via_type(
+            st,
+            candidates,
+            callee_file,
+            member,
+            target,
+            true,
+        )) else {
+            return type_ladder::ChainOutcome::Conclusive;
+        };
+        type_ladder::ChainOutcome::Bound((id, tier.confidence().min(inner_confidence)))
     }
 
     /// Whether a bare `m()` that the constructor fallback would read as a
@@ -1101,23 +1128,6 @@ impl<'a> Resolver<'a> {
             return Vec::new();
         }
         let language = Language::from_normalized_path(&normalize_source_path(source_file));
-        if let Some((node_id, import)) =
-            self.python_submodule_member(source_file, language, site, raw_imports)
-        {
-            return self.import_scoped(source_file, site.name(), import, node_id);
-        }
-        if matches!(site, CallSite::FromReceiver { receiver, .. }
-        if language == Language::Python
-            && receiver.contains('/')
-            && reexport::python_from_import_declared_attribute(
-                &IndexFacts(self),
-                &normalize_source_path(source_file),
-                receiver,
-                raw_imports.iter().map(ImportRef::from),
-            ))
-        {
-            return Vec::new();
-        }
         let resolve = |name: &str, target, bind: bool| {
             self.resolve_import_tiers(
                 source_file,
@@ -1128,10 +1138,33 @@ impl<'a> Resolver<'a> {
                 &mut None,
             )
         };
-        let mut targets = resolve(site.name(), call_target(source_file, site), true);
-        if targets.is_empty() {
-            targets.extend(self.resolve_instantiation(language, site, raw_imports, resolve));
+        let mut targets = Vec::new();
+        let mut resolution = if let Some((node_id, import)) =
+            self.python_submodule_member(source_file, language, site, raw_imports)
+        {
+            self.import_scoped(source_file, site.name(), import, node_id)
+        } else if matches!(site, CallSite::FromReceiver { receiver, .. }
+        if language == Language::Python
+            && receiver.contains('/')
+            && reexport::python_from_import_declared_attribute(
+                &IndexFacts(self),
+                &normalize_source_path(source_file),
+                receiver,
+                raw_imports.iter().map(ImportRef::from),
+            ))
+        {
+            Resolution::NoEdge(NoEdge::DeclaredAttribute)
+        } else {
+            targets = resolve(site.name(), call_target(source_file, site), true);
+            ladder_resolution(&targets)
+        };
+        if resolution.call_fallbacks_allowed() {
+            if let Some(edge) = self.resolve_instantiation(language, site, raw_imports, resolve) {
+                resolution = Resolution::from_ladder(Some(edge));
+            }
         }
+        targets.clear();
+        targets.extend(resolution.edge());
         targets
     }
 
@@ -1287,6 +1320,9 @@ impl<'a> Resolver<'a> {
             MemberHit::Bound(node_id, import, via) => {
                 *barrel = via;
                 self.import_scoped(source_file, symbol_name, import, node_id)
+                    .edge()
+                    .into_iter()
+                    .collect()
             }
             MemberHit::Unbound { .. } => Vec::new(),
         }
@@ -1324,7 +1360,10 @@ impl<'a> Resolver<'a> {
                     symbol_name,
                     &raw_imports[hit.position],
                     hit.decl,
-                ),
+                )
+                .edge()
+                .into_iter()
+                .collect(),
                 hit.barrel,
             ),
             None => (Vec::new(), None),
@@ -1453,8 +1492,8 @@ impl<'a> Resolver<'a> {
         symbol_name: &str,
         import: &RawImport,
         node_id: NodeId,
-    ) -> Vec<(NodeId, f32)> {
-        let confidence = ResolutionTier::ImportScoped.base_confidence();
+    ) -> Resolution {
+        let resolution = Resolution::bound(node_id, Tier::ImportScoped);
         self.record(
             &normalize_source_path(source_file),
             symbol_name,
@@ -1462,9 +1501,9 @@ impl<'a> Resolver<'a> {
             DecisionTier::ImportScoped,
             Some(node_id),
             0,
-            Some(confidence),
+            resolution.edge().map(|(_, confidence)| confidence),
         );
-        vec![(node_id, confidence)]
+        resolution
     }
 
     /// The bare-member retry of a Kotlin call through a class binding
@@ -1679,7 +1718,11 @@ impl<'a> Resolver<'a> {
             ) {
                 MemberHit::Bound(node_id, import, via) => {
                     *barrel = via;
-                    return self.import_scoped(source_file, symbol_name, import, node_id);
+                    return self
+                        .import_scoped(source_file, symbol_name, import, node_id)
+                        .edge()
+                        .into_iter()
+                        .collect();
                 }
                 MemberHit::Unbound { bound } => wildcard_open = !bound && fqn_language(language),
             }
@@ -1863,7 +1906,7 @@ impl<'a> Resolver<'a> {
                 if let Some(node_id) =
                     self.try_module_tree_resolve(&source_file_str, symbol_name, member, target)
                 {
-                    const MT_CONF: f32 = 1.0;
+                    const MT_CONF: f32 = Tier::ModuleTree.confidence();
                     results.push((node_id, MT_CONF));
                     self.record(
                         &source_file_str,
@@ -2009,7 +2052,11 @@ impl<'a> Resolver<'a> {
                 true,
             ) {
                 *barrel = via;
-                return self.import_scoped(source_file, symbol_name, import, node_id);
+                return self
+                    .import_scoped(source_file, symbol_name, import, node_id)
+                    .edge()
+                    .into_iter()
+                    .collect();
             }
         }
 
@@ -2133,6 +2180,13 @@ fn qualifier_prefix_is_internal(full_callee: &str, qualifier: &str) -> bool {
         || preceding
             .split("::")
             .all(|s| matches!(s, "crate" | "self" | "super"))
+}
+
+/// The index ladder's answer as a [`Resolution`]. Every tier answers with
+/// at most one target (B §3.4), so the first is the edge.
+fn ladder_resolution(targets: &[(NodeId, f32)]) -> Resolution {
+    debug_assert!(targets.len() <= 1, "a tier bound {targets:?}");
+    Resolution::from_ladder(targets.first().copied())
 }
 
 /// The kinds a call site may reach. Rust method syntax (`x.f()`, recorded as
@@ -2745,7 +2799,6 @@ impl<'a> Resolver<'a> {
         {
             return TypeMember::NoEdge;
         }
-        let confidence = |tier: ResolutionTier| tier.base_confidence();
         let candidates = self.type_candidates(source_file, source_file_str, qualifier, raw_imports);
         match type_ladder::member_via_type(
             self.symbol_table,
@@ -2755,25 +2808,23 @@ impl<'a> Resolver<'a> {
             target,
             call,
         ) {
-            LadderMember::Owned(id) => TypeMember::Edge(
-                id,
-                DecisionTier::TypeOwned,
-                confidence(ResolutionTier::QualifierScoped),
-            ),
+            LadderMember::Owned(id) => {
+                TypeMember::Edge(id, DecisionTier::TypeOwned, Tier::TypeOwned.confidence())
+            }
             LadderMember::Inherited(id) => TypeMember::Edge(
                 id,
                 DecisionTier::TypeHeritage,
-                confidence(ResolutionTier::HeritageScoped),
+                Tier::TypeHeritage.confidence(),
             ),
             LadderMember::Candidate(id) => TypeMember::Edge(
                 id,
                 DecisionTier::TypeCandidates,
-                confidence(ResolutionTier::Global),
+                Tier::TypeCandidates.confidence(),
             ),
             LadderMember::NearestCopy(id) => TypeMember::Edge(
                 id,
                 DecisionTier::NearestCopy,
-                confidence(ResolutionTier::NearestCopy),
+                Tier::NearestCopy.confidence(),
             ),
             LadderMember::Ambiguous => TypeMember::Ambiguous,
             LadderMember::NoEdge => TypeMember::NoEdge,

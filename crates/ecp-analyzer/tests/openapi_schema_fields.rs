@@ -1,12 +1,11 @@
 //! T4-6: OpenAPI 3.x / Swagger 2.0 schema-field extraction tests.
 //!
-//! All tests call `OpenApiProvider::parse_file` or the lower-level
-//! `YamlProvider::parse_file` to verify end-to-end field emission.
+//! All tests call `OpenApiProvider::parse_file`, the provider a sniffed
+//! OpenAPI YAML routes to (C5), to verify end-to-end field emission.
 //! String content is verified via the provider interface by round-tripping
 //! through `parse_file`, then checking `schema_fields`.
 
 use ecp_analyzer::openapi::OpenApiProvider;
-use ecp_analyzer::yaml::parser::YamlProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{FrameworkId, SchemaType};
 
@@ -24,14 +23,7 @@ fn parse_openapi(filename: &str, src: &str) -> Vec<ecp_core::analyzer::types::Ra
 }
 
 fn parse_yaml(src: &str) -> Vec<ecp_core::analyzer::types::RawSchemaField> {
-    let provider = YamlProvider::new().expect("provider init");
-    let local = provider
-        .parse_file("openapi.yaml".as_ref(), src.as_bytes())
-        .expect("parse_file");
-    local
-        .schema_fields
-        .map(|b| b.into_vec())
-        .unwrap_or_default()
+    parse_openapi("openapi.yaml", src)
 }
 
 // ── Positive: OpenAPI 3.x YAML ────────────────────────────────────────────────
@@ -261,4 +253,90 @@ components:
         .collect();
     assert_eq!(user_fields.len(), 1);
     assert_eq!(addr_fields.len(), 2);
+}
+
+// ── Source lines: each schema and field carries the line of its key ─────────
+
+/// `(start_row, end_row)` of the Struct node `name` in an OpenAPI parse.
+fn struct_rows(filename: &str, src: &str, name: &str) -> (u32, u32) {
+    let local = OpenApiProvider::new()
+        .unwrap()
+        .parse_file(filename.as_ref(), src.as_bytes())
+        .unwrap();
+    let node = local.nodes.iter().find(|n| n.name == name).unwrap();
+    (node.span.0, node.span.2)
+}
+
+fn field_row(fields: &[ecp_core::analyzer::types::RawSchemaField], owner: &str, name: &str) -> u32 {
+    fields
+        .iter()
+        .find(|f| f.owner_class.as_ref() == owner && f.name.as_ref() == name)
+        .unwrap()
+        .span
+        .0
+}
+
+#[test]
+fn test_extract_fields_yaml_schema_and_field_carry_key_rows() {
+    // `id` also appears nested under `address` before `Pet.id`: the field row
+    // must come from the `properties` level, not the first `id:` text.
+    let src = "openapi: 3.0.0\ninfo:\n  title: t\n  version: \"1\"\ncomponents:\n  schemas:\n    Pet:\n      type: object\n      properties:\n        address:\n          type: object\n          properties:\n            id:\n              type: string\n        id:\n          type: integer\n    Owner:\n      properties:\n        name:\n          type: string\n";
+    assert_eq!(struct_rows("openapi.yaml", src, "Pet"), (6, 15));
+    assert_eq!(struct_rows("openapi.yaml", src, "Owner"), (16, 19));
+    let fields = parse_openapi("openapi.yaml", src);
+    assert_eq!(field_row(&fields, "Pet", "address"), 9);
+    assert_eq!(field_row(&fields, "Pet", "id"), 14);
+    assert_eq!(field_row(&fields, "Owner", "name"), 18);
+}
+
+#[test]
+fn test_extract_fields_json_schema_and_field_carry_key_rows() {
+    let src = "{\n  \"openapi\": \"3.0.0\",\n  \"info\": {\"title\": \"t\", \"version\": \"1\"},\n  \"components\": {\n    \"schemas\": {\n      \"Pet\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"id\": {\"type\": \"integer\"}\n        }\n      }\n    }\n  }\n}\n";
+    assert_eq!(struct_rows("openapi.json", src, "Pet"), (5, 10));
+    let fields = parse_openapi("openapi.json", src);
+    assert_eq!(field_row(&fields, "Pet", "id"), 8);
+}
+
+#[test]
+fn test_extract_fields_swagger_definitions_carry_key_rows() {
+    let src = "swagger: \"2.0\"\ninfo:\n  title: t\n  version: \"1\"\ndefinitions:\n  Tag:\n    properties:\n      label:\n        type: string\n";
+    assert_eq!(struct_rows("swagger.yaml", src, "Tag"), (5, 8));
+    let fields = parse_openapi("swagger.yaml", src);
+    assert_eq!(field_row(&fields, "Tag", "label"), 7);
+}
+
+// Each row puts YAML syntax between a key and its mapping, or before the
+// root mapping. A walk that takes the first child for the mapping loses the
+// row, and the node falls back to the (0, 0, 0, 0) sentinel (line 1).
+
+#[test]
+fn test_extract_fields_anchor_before_schema_mapping_carries_key_rows() {
+    let src = "openapi: 3.0.0\ncomponents:\n  schemas:\n    Pet: &pet\n      properties: &pet_props\n        id:\n          type: integer\n";
+    assert_eq!(struct_rows("openapi.yaml", src, "Pet"), (3, 6));
+    let fields = parse_openapi("openapi.yaml", src);
+    assert_eq!(field_row(&fields, "Pet", "id"), 5);
+}
+
+#[test]
+fn test_extract_fields_tag_before_schema_mapping_carries_key_rows() {
+    let src = "openapi: 3.0.0\ncomponents:\n  schemas:\n    Pet: !!map\n      properties:\n        id:\n          type: integer\n";
+    assert_eq!(struct_rows("openapi.yaml", src, "Pet"), (3, 6));
+    let fields = parse_openapi("openapi.yaml", src);
+    assert_eq!(field_row(&fields, "Pet", "id"), 5);
+}
+
+#[test]
+fn test_extract_fields_comment_after_document_start_carries_key_rows() {
+    let src = "---\n# Pet store\nopenapi: 3.0.0\ncomponents:\n  schemas:\n    Pet:\n      # the pet\n      properties:\n        id:\n          type: integer\n";
+    assert_eq!(struct_rows("openapi.yaml", src, "Pet"), (5, 9));
+    let fields = parse_openapi("openapi.yaml", src);
+    assert_eq!(field_row(&fields, "Pet", "id"), 8);
+}
+
+#[test]
+fn test_extract_fields_yaml_directive_before_root_carries_key_rows() {
+    let src = "%YAML 1.2\n---\nopenapi: 3.0.0\ncomponents:\n  schemas:\n    Pet:\n      properties:\n        id:\n          type: integer\n";
+    assert_eq!(struct_rows("openapi.yaml", src, "Pet"), (5, 8));
+    let fields = parse_openapi("openapi.yaml", src);
+    assert_eq!(field_row(&fields, "Pet", "id"), 7);
 }

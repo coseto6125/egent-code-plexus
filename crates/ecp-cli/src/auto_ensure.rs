@@ -12,6 +12,10 @@
 //!   then L1 overlay fragment write under `<repo>/sessions/<sid>/`.
 //! - Ready → noop.
 
+use ecp_core::contracts::dirty_event::{
+    ClassifiedPath, DirtyEvent, DirtySet, NotRepoRelative, RepoPath, SkipReason, SkippedEntry,
+};
+use ecp_core::contracts::routing::FileRouter;
 use ecp_core::session::SessionMeta;
 use ignore::WalkBuilder;
 use std::collections::HashMap;
@@ -36,6 +40,9 @@ pub mod test_counters {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     pub static REANALYZE_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+    /// The number of paths `ensure_fresh` handed to `reanalyze_files`,
+    /// summed over calls: shows that "other" paths never reach the parse.
+    pub static REANALYZE_PATH_COUNT: AtomicUsize = AtomicUsize::new(0);
     pub static BUILD_L2_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
     /// FU-2026-05-23-047: incremented every time `ensure_fresh` synchronously
     /// joins the background tantivy writer because `~/.ecp/` resolves to a
@@ -66,6 +73,7 @@ pub mod test_counters {
 
     pub fn reset() {
         REANALYZE_CALL_COUNT.store(0, Ordering::Relaxed);
+        REANALYZE_PATH_COUNT.store(0, Ordering::Relaxed);
         BUILD_L2_CALL_COUNT.store(0, Ordering::Relaxed);
         TANTIVY_JOIN_COUNT.store(0, Ordering::Relaxed);
         TANTIVY_EXIT_JOIN_COUNT.store(0, Ordering::Relaxed);
@@ -77,6 +85,10 @@ pub mod test_counters {
 
     pub fn reanalyze_calls() -> usize {
         REANALYZE_CALL_COUNT.load(Ordering::Relaxed)
+    }
+
+    pub fn reanalyze_paths() -> usize {
+        REANALYZE_PATH_COUNT.load(Ordering::Relaxed)
     }
 
     pub fn build_l2_calls() -> usize {
@@ -113,15 +125,16 @@ pub enum EnsureResult {
     /// (which drops the old graph.bin) rather than an incremental L1 overlay,
     /// because the overlay path leaves stale-convention nodes in place.
     /// `dirty_files`: when the staleness was decided by the git porcelain
-    /// shortcut, the exact changed paths it already parsed (absolute) — lets
-    /// `ensure_fresh` skip the whole-tree mtime walk in `collect_dirty_files`
-    /// (O(changed) vs O(tree): ~0.86s → ~0.02s on a 14k-file repo). `None` when
-    /// the decision came from the mtime walk (no path list available) or a
-    /// full-rebuild drift (dirty set is irrelevant).
+    /// shortcut, the classified dirty set it already parsed, "other" events
+    /// and ecp's own artifacts dropped — lets `ensure_fresh` skip the
+    /// whole-tree mtime walk in `collect_dirty_files` (O(changed) vs O(tree):
+    /// ~0.86s → ~0.02s on a 14k-file repo). `None` when the decision came
+    /// from the mtime walk (no path list available) or a full-rebuild drift
+    /// (dirty set is irrelevant).
     Stale {
         age_seconds: u64,
         needs_full_rebuild: bool,
-        dirty_files: Option<Vec<PathBuf>>,
+        dirty_files: Option<DirtySet<ClassifiedPath>>,
     },
 }
 
@@ -171,9 +184,20 @@ pub enum EnsureFreshOutcome {
 }
 
 pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<EnsureResult> {
+    probe_index(graph_path, worktree_root).map(|(result, _)| result)
+}
+
+type Probe = (EnsureResult, Option<DirtySet<ClassifiedPath>>);
+
+/// [`ensure_index`] plus the dirty set a `Ready` verdict still saw. Its events
+/// are empty (nothing changed that a source or config reader needs) but its
+/// skipped entries survive, so a caller can still report the paths git printed
+/// that the set cannot name. `EnsureResult::Ready` stays a unit variant for the
+/// doctor, summary and hook matches that never read the set.
+pub(crate) fn probe_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Probe> {
     let graph_mtime = match fs::metadata(graph_path) {
         Ok(m) => m.modified()?,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(EnsureResult::Missing),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((EnsureResult::Missing, None)),
         Err(e) => return Err(e),
     };
 
@@ -183,11 +207,14 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
     // rebuilds.
     if !crate::engine::header_compatible(graph_path) {
         spawn_upgrade_gc();
-        return Ok(EnsureResult::Stale {
-            age_seconds: 0,
-            needs_full_rebuild: true,
-            dirty_files: None,
-        });
+        return Ok((
+            EnsureResult::Stale {
+                age_seconds: 0,
+                needs_full_rebuild: true,
+                dirty_files: None,
+            },
+            None,
+        ));
     }
 
     // Convention-drift gate (FU-2026-05-25-005). `header_compatible` only
@@ -201,11 +228,14 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
     // or build_l2 branch.
     if fingerprint_drifted(graph_path) {
         spawn_upgrade_gc();
-        return Ok(EnsureResult::Stale {
-            age_seconds: 0,
-            needs_full_rebuild: true,
-            dirty_files: None,
-        });
+        return Ok((
+            EnsureResult::Stale {
+                age_seconds: 0,
+                needs_full_rebuild: true,
+                dirty_files: None,
+            },
+            None,
+        ));
     }
 
     // A slot built from a subdirectory answers `found:false` for everything
@@ -213,11 +243,14 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
     // the fingerprint gate: the sidecar match would otherwise return Ready for
     // ever. One small JSON read per query buys back the core promise.
     if slot_built_below_root(graph_path, worktree_root) {
-        return Ok(EnsureResult::Stale {
-            age_seconds: 0,
-            needs_full_rebuild: true,
-            dirty_files: None,
-        });
+        return Ok((
+            EnsureResult::Stale {
+                age_seconds: 0,
+                needs_full_rebuild: true,
+                dirty_files: None,
+            },
+            None,
+        ));
     }
 
     // Fast path: if the working tree is a git repo, the indexed HEAD matches
@@ -233,15 +266,18 @@ pub fn ensure_index(graph_path: &Path, worktree_root: &Path) -> io::Result<Ensur
             .duration_since(graph_mtime)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        return Ok(EnsureResult::Stale {
-            age_seconds: age,
-            needs_full_rebuild: false,
-            // mtime walk only answers "is anything newer", not "which files";
-            // ensure_fresh falls back to collect_dirty_files for the path list.
-            dirty_files: None,
-        });
+        return Ok((
+            EnsureResult::Stale {
+                age_seconds: age,
+                needs_full_rebuild: false,
+                // mtime walk only answers "is anything newer", not "which files";
+                // ensure_fresh falls back to collect_dirty_files for the path list.
+                dirty_files: None,
+            },
+            None,
+        ));
     }
-    Ok(EnsureResult::Ready)
+    Ok((EnsureResult::Ready, None))
 }
 
 /// Path of the HEAD-SHA sidecar written next to `graph.bin`. One line, 40 hex
@@ -396,17 +432,20 @@ fn slot_built_below_root(graph_path: &Path, worktree_root: &Path) -> bool {
 
 /// Try to decide Ready vs Stale via the cheap git fingerprint.
 /// - Returns `Some(Ready)` when HEAD matches the sidecar or the commit dir
-///   name AND `git status --porcelain -uall` is empty.
+///   name AND `git status --porcelain -uall` names no change but "other"
+///   paths and ecp's own artifacts.
 /// - Returns `Some(Stale)` when HEAD matches but the working tree has
-///   uncommitted changes (skip walk; let L1 overlay collect dirty files).
+///   uncommitted source or config changes (skip walk; let L1 overlay collect
+///   dirty files).
 /// - Returns `None` when the fingerprint check is inconclusive (not a git
-///   repo, HEAD matches neither the sidecar nor the commit dir, or git
-///   command failed) so the caller falls back to the full mtime walk.
+///   repo, HEAD matches neither the sidecar nor the commit dir, git command
+///   failed, or its output is not porcelain v1) so the caller falls back to
+///   the full mtime walk.
 fn git_fingerprint_shortcut(
     graph_path: &Path,
     worktree_root: &Path,
     graph_mtime: SystemTime,
-) -> Option<EnsureResult> {
+) -> Option<Probe> {
     // A short-lived process can exit before the detached sidecar write lands,
     // leaving the file missing or empty. The commit dir's name is published
     // with graph.bin, so a graph built at HEAD still takes this path; the
@@ -428,31 +467,85 @@ fn git_fingerprint_shortcut(
         return None;
     }
     if porcelain.stdout.is_empty() {
-        return Some(EnsureResult::Ready);
+        return Some((EnsureResult::Ready, None));
     }
-    // git already listed the exact changed paths here — carry them so
-    // ensure_fresh skips the whole-tree mtime walk in collect_dirty_files.
+    // Output that is not porcelain v1 proves nothing about the tree: take
+    // the mtime walk, as for a failed status.
+    let dirty = DirtySet::from_porcelain_z(&porcelain.stdout).ok()?;
+    let unreadable = dirty
+        .skipped()
+        .iter()
+        .filter(|entry| entry.reason != SkipReason::Directory)
+        .count();
+    if unreadable > 0 {
+        eprintln!(
+            "dirty.skipped entries={unreadable} (paths git printed that are not UTF-8 or not repo-relative)"
+        );
+    }
+    // "Other" events leave before any syscall: 12,000 untracked `.csv` files
+    // must not send every query down the refresh path (freshness F6).
+    let mut dirty = classify_dirty(dirty).without_other();
+    if dirty.events().is_empty() {
+        return Some((EnsureResult::Ready, Some(dirty)));
+    }
     // ecp's own artifacts are filtered out (mirroring `any_source_newer_than`):
     // with `--untracked-files=all` they would otherwise keep porcelain
     // non-empty forever and downgrade every query from the Ready shortcut to
-    // the Stale/reanalyze path.
+    // the Stale/reanalyze path. A rename keeps its removed half's tombstone,
+    // so only a lone worktree half can be an artifact.
     let home_ecp_canonical = fs::canonicalize(&home_ecp).ok();
     let graph_canonical = fs::canonicalize(graph_path).ok();
-    let dirty_files: Vec<PathBuf> = parse_porcelain_paths(&porcelain.stdout, worktree_root)
-        .into_iter()
-        .filter(|p| !is_ecp_artifact(p, graph_canonical.as_deref(), home_ecp_canonical.as_deref()))
-        .collect();
-    if dirty_files.is_empty() {
-        return Some(EnsureResult::Ready);
+    dirty.retain(|event| match event {
+        DirtyEvent::Added(half) | DirtyEvent::Modified(half) => !is_ecp_artifact(
+            &worktree_root.join(half.path.as_str()),
+            graph_canonical.as_deref(),
+            home_ecp_canonical.as_deref(),
+        ),
+        DirtyEvent::Deleted(_) | DirtyEvent::Renamed { .. } | DirtyEvent::Unmerged(_) => true,
+    });
+    if dirty.events().is_empty() {
+        return Some((EnsureResult::Ready, Some(dirty)));
     }
     let age = SystemTime::now()
         .duration_since(graph_mtime)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    Some(EnsureResult::Stale {
-        age_seconds: age,
-        needs_full_rebuild: false,
-        dirty_files: Some(dirty_files),
+    Some((
+        EnsureResult::Stale {
+            age_seconds: age,
+            needs_full_rebuild: false,
+            dirty_files: Some(dirty),
+        },
+        None,
+    ))
+}
+
+/// C5 routing, the same table `reanalyze_files` dispatches on. No syscall.
+fn classify_dirty(dirty: DirtySet) -> DirtySet<ClassifiedPath> {
+    dirty.classify(&FileRouter::PATH_ONLY, None)
+}
+
+/// The repo path of a file the mtime walk found under `worktree_root`, or
+/// the skipped entry the porcelain parse records for a path it cannot name.
+fn walked_repo_path(path: &Path, worktree_root: &Path) -> Result<RepoPath, SkippedEntry> {
+    let rel = path.strip_prefix(worktree_root).unwrap_or(path);
+    let Some(text) = rel.to_str() else {
+        return Err(SkippedEntry {
+            path_lossy: rel.to_string_lossy().into_owned(),
+            reason: SkipReason::NotUtf8,
+        });
+    };
+    // The overlay writer keys its manifest by `/`, so a Windows separator
+    // becomes `/`. On Unix `\` is a file-name byte: mapping it would merge
+    // `a\b.py` into `a/b.py`.
+    let text = if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text.to_owned()
+    };
+    RepoPath::new(text).map_err(|NotRepoRelative(path_lossy)| SkippedEntry {
+        path_lossy,
+        reason: SkipReason::NotRepoRelative,
     })
 }
 
@@ -487,29 +580,6 @@ pub(crate) fn is_ecp_artifact(
         }
 }
 
-/// Parse `git status --porcelain -z` stdout into absolute paths under `root`.
-///
-/// In `-z` mode entries are NUL-terminated and paths are NOT quoted, so a
-/// filename with spaces or non-ASCII bytes round-trips intact. A status entry
-/// is `XY <path>` (2-char code + space); a rename emits the new path in that
-/// entry and the old path as a separate trailing NUL segment with no status
-/// prefix. We keep every segment that carries the `XY ` prefix (the new path
-/// for renames — the one that now exists on disk) and skip prefix-less old-path
-/// segments. Any spurious path still degrades to "not reanalyzed" because
-/// `reanalyze_files` skips paths that don't exist on disk.
-pub(crate) fn parse_porcelain_paths(stdout: &[u8], root: &Path) -> Vec<PathBuf> {
-    stdout
-        .split(|&b| b == 0)
-        // Keep only segments shaped like `XY <path>`: ≥4 bytes with a space in
-        // the status separator slot. Prefix-less rename old-paths fail this and
-        // are dropped.
-        .filter(|seg| seg.len() >= 4 && seg[2] == b' ')
-        .map(|seg| String::from_utf8_lossy(&seg[3..]).into_owned())
-        .filter(|p| !p.is_empty())
-        .map(|p| root.join(p))
-        .collect()
-}
-
 /// Ensure the graph exists and is fresher than the working tree.
 ///
 /// - Missing → warm-attach most-recent sibling SHA (background rebuild for new
@@ -520,33 +590,74 @@ pub(crate) fn parse_porcelain_paths(stdout: &[u8], root: &Path) -> Vec<PathBuf> 
 ///   file set (T7-4), followed by L1 overlay fragment write (T7-5 will replace
 ///   the overlay write with a zero-copy in-place merge).
 /// - Ready → noop.
+///
+/// `worktree_root` may be any directory of the worktree: `diff`, doctor,
+/// summary and the post-tool hook pass the cwd.
 pub fn ensure_fresh(
     need: IndexNeed<'_>,
     graph_path: &Path,
     worktree_root: &Path,
 ) -> Result<EnsureFreshOutcome, String> {
-    ensure_fresh_with_rebuild(need, graph_path, worktree_root).map(|(outcome, _)| outcome)
+    // Normalized here, not in `ensure_fresh_with_rebuild`: its read-context
+    // callers already hold the top, and the query path should not pay a
+    // second `canonicalize` for it.
+    let top = crate::read_context::worktree_top(worktree_root);
+    ensure_fresh_with_rebuild(need, graph_path, &top).map(|ensured| ensured.outcome)
 }
 
-/// `ensure_fresh` plus the `graph.bin` a synchronous build published. A
-/// rebuild lands in a new `.gen` commit dir and leaves the probed file in
-/// place, so a caller that loads `graph_path` after a build reads the stale
-/// graph (or nothing, when `graph_path` was the never-built legacy default).
-fn ensure_fresh_with_rebuild(
+/// What `ensure_fresh_with_rebuild` did, for the read context.
+pub(crate) struct Ensured {
+    pub(crate) outcome: EnsureFreshOutcome,
+    /// The `graph.bin` a synchronous build published. A rebuild lands in a
+    /// new `.gen` commit dir and leaves the probed file in place, so a caller
+    /// that loads `graph_path` after a build reads the stale graph (or
+    /// nothing, when `graph_path` was the never-built legacy default).
+    pub(crate) rebuilt: Option<PathBuf>,
+    /// The source and config changes the gate saw; empty when it saw none.
+    /// `None` when a build or a warm attach answered and no gate named paths.
+    pub(crate) dirty: Option<DirtySet<ClassifiedPath>>,
+}
+
+impl Ensured {
+    fn built(rebuilt: PathBuf) -> Self {
+        Self {
+            outcome: EnsureFreshOutcome::Ready,
+            rebuilt: Some(rebuilt),
+            dirty: None,
+        }
+    }
+
+    fn current(dirty: Option<DirtySet<ClassifiedPath>>) -> Self {
+        Self {
+            outcome: EnsureFreshOutcome::Ready,
+            rebuilt: None,
+            dirty,
+        }
+    }
+}
+
+/// `ensure_fresh` plus the build it published and the dirty set it read.
+/// `worktree_root` must be the worktree top: porcelain paths are relative to
+/// it (`read_context::worktree_top`).
+pub(crate) fn ensure_fresh_with_rebuild(
     need: IndexNeed<'_>,
     graph_path: &Path,
     worktree_root: &Path,
-) -> Result<(EnsureFreshOutcome, Option<PathBuf>), String> {
+) -> Result<Ensured, String> {
     beat_session_heartbeat(worktree_root);
-    let state =
-        ensure_index(graph_path, worktree_root).map_err(|e| format!("ensure_index probe: {e}"))?;
+    let (state, ready_dirty) =
+        probe_index(graph_path, worktree_root).map_err(|e| format!("ensure_index probe: {e}"))?;
     // `ExactSha` carries the commit to build; `NearCurrent` builds HEAD.
     let target_sha = match need {
         IndexNeed::ExactSha(sha) => sha,
         IndexNeed::NearCurrent => None,
     };
     match state {
-        EnsureResult::Ready => Ok((EnsureFreshOutcome::Ready, None)),
+        // Ready proves no source or config change, so the events are empty;
+        // the probe's set still names the entries it skipped.
+        EnsureResult::Ready => Ok(Ensured::current(
+            ready_dirty.or_else(|| DirtySet::from_events(Vec::new()).ok()),
+        )),
         EnsureResult::Missing => {
             // A sibling is a different commit, so it is only ever an answer to
             // `NearCurrent`. Deciding here rather than unwinding a warm-attach
@@ -561,12 +672,13 @@ fn ensure_fresh_with_rebuild(
                         "l2.warm-attach sibling={} rebuild=background{note}",
                         sibling.display()
                     );
-                    return Ok((
-                        EnsureFreshOutcome::WarmAttach {
+                    return Ok(Ensured {
+                        outcome: EnsureFreshOutcome::WarmAttach {
                             sibling_graph_path: sibling,
                         },
-                        None,
-                    ));
+                        rebuilt: None,
+                        dirty: None,
+                    });
                 }
             }
             let start = std::time::Instant::now();
@@ -576,10 +688,7 @@ fn ensure_fresh_with_rebuild(
                 .map_err(|e| format!("build_l2: {e}"))?;
             park_tantivy_writer(&mut result, worktree_root);
             eprintln!("l2.built elapsed={:.2}s", start.elapsed().as_secs_f32());
-            Ok((
-                EnsureFreshOutcome::Ready,
-                Some(result.commit_dir.join("graph.bin")),
-            ))
+            Ok(Ensured::built(result.commit_dir.join("graph.bin")))
         }
         EnsureResult::Stale {
             needs_full_rebuild,
@@ -601,33 +710,46 @@ fn ensure_fresh_with_rebuild(
                     .map_err(|e| format!("build_l2 (incompatible schema): {e}"))?;
                 park_tantivy_writer(&mut result, worktree_root);
                 eprintln!("l2.rebuilt elapsed={:.2}s", start.elapsed().as_secs_f32());
-                return Ok((
-                    EnsureFreshOutcome::Ready,
-                    Some(result.commit_dir.join("graph.bin")),
-                ));
+                Ok(Ensured::built(result.commit_dir.join("graph.bin")))
             } else {
                 // Header-compatible + dirty files: incremental refresh path.
                 //
                 // Prefer the dirty set git already produced in the porcelain
                 // shortcut (O(changed)); only fall back to the whole-tree mtime
                 // walk when the staleness came from the mtime path itself.
-                let dirty_abs = match dirty_files {
-                    Some(paths) => paths,
+                let walked = dirty_files.is_none();
+                let dirty = match dirty_files {
+                    Some(dirty) => dirty,
                     None => {
                         let graph_mtime = fs::metadata(graph_path)
                             .and_then(|m| m.modified())
                             .unwrap_or(std::time::UNIX_EPOCH);
-                        collect_dirty_files(graph_path, worktree_root, graph_mtime)
-                            .unwrap_or_default()
+                        let mut skipped = Vec::new();
+                        let paths: Vec<RepoPath> =
+                            collect_dirty_files(graph_path, worktree_root, graph_mtime)
+                                .unwrap_or_default()
+                                .iter()
+                                .filter_map(|p| match walked_repo_path(p, worktree_root) {
+                                    Ok(path) => Some(path),
+                                    Err(entry) => {
+                                        skipped.push(entry);
+                                        None
+                                    }
+                                })
+                                .collect();
+                        classify_dirty(DirtySet::from_modified(paths, skipped))
                     }
                 };
-                // Forward slashes throughout: the overlay writer normalizes
-                // manifest keys to `/`, so the gate's lookups must match on
-                // Windows too (joins accept `/` on every platform).
-                let rel_paths: Vec<String> = dirty_abs
+                // Every source half reaches the gate and the parse, removed
+                // halves too, as today's ` D` entries did: `reanalyze_files`
+                // stats each path once and skips a missing one. Config-only
+                // halves stay in the set for areas 4 and 5.
+                let rel_paths: Vec<String> = dirty
+                    .events()
                     .iter()
-                    .filter_map(|p| p.strip_prefix(worktree_root).ok())
-                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .flat_map(|event| event.halves())
+                    .filter(|(_, half)| half.class.is_source())
+                    .map(|(_, half)| half.path.as_str().to_owned())
                     .collect();
                 // Freshness gate (FU-2026-06-10-f92cecba3daa): each fragment
                 // records its source file's mtime_ns in `dirty_files.json`, so
@@ -640,7 +762,14 @@ fn ensure_fresh_with_rebuild(
                 if gate.rel_paths.is_empty() {
                     test_counters::FRESH_GATE_SKIP_COUNT
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    return Ok((EnsureFreshOutcome::Ready, None));
+                    // A walk that found only "other" files, or sources whose
+                    // fragments are current, leaves the sidecar behind HEAD;
+                    // every later query would repeat the walk until a
+                    // rebuild. A porcelain verdict already matched HEAD.
+                    if walked {
+                        write_head_sha_sidecar(graph_path, worktree_root);
+                    }
+                    return Ok(Ensured::current(Some(dirty)));
                 }
                 // Stat BEFORE parsing: the manifest mtime must belong to the
                 // content that was parsed. Statting after the parse would let
@@ -671,6 +800,8 @@ fn ensure_fresh_with_rebuild(
                 );
                 test_counters::REANALYZE_CALL_COUNT
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                test_counters::REANALYZE_PATH_COUNT
+                    .fetch_add(gate.rel_paths.len(), std::sync::atomic::Ordering::Relaxed);
 
                 apply_l1_overlay_updates(
                     worktree_root,
@@ -684,14 +815,15 @@ fn ensure_fresh_with_rebuild(
                 // working tree is now consistent with the indexed state of the
                 // current HEAD — refresh the fingerprint as the very last step.
                 write_head_sha_sidecar(graph_path, worktree_root);
+                Ok(Ensured::current(Some(dirty)))
             }
-            Ok((EnsureFreshOutcome::Ready, None))
         }
     }
 }
 
 /// Version-checked graph load for every path that loads a graph by repo
-/// (find multi-repo, group, diff) rather than by explicit `--graph`.
+/// (find multi-repo, group, peers plan) rather than by explicit `--graph`:
+/// the engine of [`crate::read_context::ReadContext::for_graph`].
 ///
 /// Runs `ensure_fresh` first so the two-tier staleness contract applies
 /// uniformly: a header/fingerprint drift forces a full `build_l2` before the
@@ -699,6 +831,8 @@ fn ensure_fresh_with_rebuild(
 /// parser bug already fixed upstream), and a dirty working tree triggers the
 /// incremental path. On `WarmAttach` (current SHA has no graph yet) it loads
 /// the sibling graph and flags it stale so the caller can surface a note.
+/// The session overlay is attached, so uncommitted symbols answer here as
+/// they do through `main.rs`.
 ///
 /// `--graph <path>` is the one documented opt-out and must NOT route through
 /// here: it loads the named graph verbatim via `Engine::load`, since the user
@@ -707,43 +841,36 @@ pub fn load_ensured(
     graph_path: &Path,
     worktree_root: &Path,
 ) -> Result<crate::engine::Engine, String> {
-    match ensure_fresh_with_rebuild(IndexNeed::NearCurrent, graph_path, worktree_root)? {
-        (EnsureFreshOutcome::Ready, rebuilt) => {
-            let graph_path = rebuilt.as_deref().unwrap_or(graph_path);
-            let mut engine = crate::engine::Engine::load(graph_path)
-                .map_err(|e| format!("load graph {}: {e}", graph_path.display()))?;
-            // Callers resolve `graph_path` as the latest *published* graph,
-            // which lags committed-but-unindexed work. `ensure_fresh` then
-            // reports Ready because the L1 overlay absorbed the delta — but
-            // queries read L2 only, so the engine must self-flag or a
-            // `found:false` would read as a definitive "does not exist".
-            engine.behind_head = graph_behind_head(graph_path, worktree_root);
-            // Self-heal: every L1 overlay refresh rewrites the `.head_sha`
-            // sidecar to the current HEAD, so `ensure_index` keeps answering
-            // Ready and a behind-HEAD L2 never rebuilds on its own (observed:
-            // 15 days stale before a manual --force). Reuse the warm-attach
-            // spawn — flock-deduped, skipped under ECP_SKIP_BG_REBUILD. The
-            // once-per-process guard matters for long-lived MCP processes,
-            // which would otherwise fork a probe `sh` on every query for the
-            // whole rebuild window; CLI one-shots pay one spawn either way.
-            if engine.behind_head
-                && !BEHIND_HEAD_SPAWNED.swap(true, std::sync::atomic::Ordering::Relaxed)
-            {
-                test_counters::BEHIND_HEAD_HEAL_COUNT
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let note = spawn_background_rebuild(worktree_root);
-                eprintln!("l2.behind-head rebuild=background{note}");
-            }
-            Ok(engine)
-        }
-        (EnsureFreshOutcome::WarmAttach { sibling_graph_path }, _) => {
-            crate::engine::Engine::load_warm(&sibling_graph_path).map_err(|e| {
-                format!(
-                    "load warm-attach graph {}: {e}",
-                    sibling_graph_path.display()
-                )
-            })
-        }
+    crate::read_context::ReadContext::for_graph(graph_path, worktree_root)
+        .map(|ctx| ctx.engine)
+        .map_err(|e| e.to_string())
+}
+
+/// Flag a by-repo graph that predates HEAD and start its rebuild.
+///
+/// Callers resolve `graph_path` as the latest *published* graph, which lags
+/// committed-but-unindexed work. `ensure_fresh` then reports Ready because
+/// the L1 overlay absorbed the delta — but the overlay holds only uncommitted
+/// files, so the engine must self-flag or a `found:false` would read as a
+/// definitive "does not exist".
+pub(crate) fn flag_behind_head(
+    engine: &mut crate::engine::Engine,
+    graph_path: &Path,
+    worktree_root: &Path,
+) {
+    engine.behind_head = graph_behind_head(graph_path, worktree_root);
+    // Self-heal: every L1 overlay refresh rewrites the `.head_sha`
+    // sidecar to the current HEAD, so `ensure_index` keeps answering
+    // Ready and a behind-HEAD L2 never rebuilds on its own (observed:
+    // 15 days stale before a manual --force). Reuse the warm-attach
+    // spawn — flock-deduped, skipped under ECP_SKIP_BG_REBUILD. The
+    // once-per-process guard matters for long-lived MCP processes,
+    // which would otherwise fork a probe `sh` on every query for the
+    // whole rebuild window; CLI one-shots pay one spawn either way.
+    if engine.behind_head && !BEHIND_HEAD_SPAWNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        test_counters::BEHIND_HEAD_HEAL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let note = spawn_background_rebuild(worktree_root);
+        eprintln!("l2.behind-head rebuild=background{note}");
     }
 }
 
@@ -1063,8 +1190,16 @@ fn drain_tantivy_if_inside_worktree(
     result: &mut crate::build::orchestrator::BuildResult,
     worktree_root: &Path,
 ) -> bool {
-    let cache_root = ecp_core::registry::resolve_home_ecp();
-    if cache_root.starts_with(worktree_root) {
+    // `worktree_root` is git's top, with symlinks resolved (macOS `/var` is
+    // `/private/var`); the cache root keeps `$HOME` as spelled. Compare both
+    // resolved. This runs once per build, never on the query path.
+    let resolved = |path: &Path| {
+        fs::canonicalize(path).map_or_else(
+            |_| path.to_path_buf(),
+            |p| dunce::simplified(&p).to_path_buf(),
+        )
+    };
+    if resolved(&ecp_core::registry::resolve_home_ecp()).starts_with(resolved(worktree_root)) {
         result.join_background();
         test_counters::TANTIVY_JOIN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return true;
@@ -1111,7 +1246,8 @@ pub fn join_pending_tantivy_writers() {
     }
 }
 
-/// Resolve the L1 session overlay dir for `worktree_root`, matching exactly the
+/// Resolve the L1 session overlay dir for `worktree_root` (the worktree top,
+/// which keys the fragments' paths), matching exactly the
 /// path `apply_l1_overlay_updates` writes to: `<home_ecp>/<repo_dir>/sessions/
 /// <session_id>`. Returns `None` when the repo identity can't be resolved. The
 /// dir may not exist yet (no overlay written this session) — the caller checks.
@@ -1582,12 +1718,7 @@ mod fingerprint_drift_tests {
             "auto_ensure::fingerprint_drift_tests::test_retain_stale_fragments_current_v5_skips_reparse";
 
         if std::env::var_os(CHILD_ENV).is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", TEST_NAME, "--nocapture"])
-                .env(CHILD_ENV, "1")
-                .status()
-                .unwrap();
-            assert!(status.success(), "isolated test process failed: {status}");
+            run_child_test(TEST_NAME, CHILD_ENV, "1");
             return;
         }
 
@@ -1628,12 +1759,7 @@ mod fingerprint_drift_tests {
             "auto_ensure::fingerprint_drift_tests::test_retain_stale_fragments_corrupt_v5_reparses";
 
         if std::env::var_os(CHILD_ENV).is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", TEST_NAME, "--nocapture"])
-                .env(CHILD_ENV, "1")
-                .status()
-                .unwrap();
-            assert!(status.success(), "isolated test process failed: {status}");
+            run_child_test(TEST_NAME, CHILD_ENV, "1");
             return;
         }
 
@@ -1660,15 +1786,7 @@ mod fingerprint_drift_tests {
         const TEST_NAME: &str = "auto_ensure::fingerprint_drift_tests::test_retain_stale_fragments_native_v4_refresh_restores_call_edge";
         if std::env::var_os(CHILD_ENV).is_none() {
             for fingerprint in ["current", "released"] {
-                let status = std::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", TEST_NAME, "--nocapture"])
-                    .env(CHILD_ENV, fingerprint)
-                    .status()
-                    .unwrap();
-                assert!(
-                    status.success(),
-                    "{fingerprint}: isolated test process failed: {status}"
-                );
+                run_child_test(TEST_NAME, CHILD_ENV, fingerprint);
             }
             return;
         }
@@ -1745,26 +1863,336 @@ mod fingerprint_drift_tests {
         }));
     }
 
+    /// Re-runs `test_name` alone in a child process; returns false inside the
+    /// child. The child sets `ECP_HOME` / `ECP_SESSION_ID` and reads the
+    /// process-wide counters, which no sibling test may share.
+    fn rerun_in_child(child_env: &str, test_name: &str) -> bool {
+        if std::env::var_os(child_env).is_some() {
+            return false;
+        }
+        run_child_test(test_name, child_env, "1");
+        true
+    }
+
+    /// Runs `test_name` alone in a child test process with `child_env` set to
+    /// `value`. A drifted name makes libtest run no test and still exit 0, so
+    /// the child must also report one passed test: libtest's summary line
+    /// stands for "the named test ran and passed".
+    fn run_child_test(test_name: &str, child_env: &str, value: &str) {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env(child_env, value)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("test result: ok. 1 passed;"),
+            "isolated test process {child_env}={value}: {}\n{stdout}\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A repo at HEAD with one committed `app.py`, and a graph outside it
+    /// whose sidecar names HEAD, so the porcelain shortcut decides. Returns
+    /// the worktree and the graph path.
+    fn repo_and_graph_at_head(tmp: &Path) -> (PathBuf, PathBuf) {
+        let worktree = tmp.join("repo");
+        fs::create_dir_all(&worktree).unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(&worktree)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "test"]);
+        fs::write(worktree.join("app.py"), "def app(): pass\n").unwrap();
+        git(&["add", "app.py"]);
+        git(&["commit", "-qm", "base"]);
+        let graph_path = tmp.join("cache").join("graph.bin");
+        fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
+        let bytes = ecp_core::graph_fixture::GraphFixture::new().into_bytes();
+        fs::write(&graph_path, &bytes).unwrap();
+        write_head_sha_sidecar_with_sha(&graph_path, &git_head_sha(&worktree).unwrap());
+        (worktree, graph_path)
+    }
+
+    /// `ensure_fresh` on `repo_and_graph_at_head` with `untracked` written
+    /// after the commit. Returns the probe's verdict before `ensure_fresh`,
+    /// the `reanalyze_files` calls and the paths they received.
+    fn ensure_fresh_beside_untracked(
+        session_id: &str,
+        untracked: &[&str],
+    ) -> (EnsureResult, usize, usize) {
+        let tmp = tempdir().unwrap();
+        let (worktree, graph_path) = repo_and_graph_at_head(tmp.path());
+        std::env::set_var("ECP_HOME", tmp.path().join("ecp-home"));
+        std::env::set_var("ECP_SESSION_ID", session_id);
+        for name in untracked {
+            fs::write(worktree.join(name), "x = 1\n").unwrap();
+        }
+
+        // The verdict proves the gate decided: a probe error would also leave
+        // the counters at zero.
+        let probe = ensure_index(&graph_path, &worktree).unwrap();
+        test_counters::reset();
+        // The overlay write may fail in a bare temp dir; the counters move
+        // before it.
+        let _ = ensure_fresh(IndexNeed::NearCurrent, &graph_path, &worktree);
+        (
+            probe,
+            test_counters::reanalyze_calls(),
+            test_counters::reanalyze_paths(),
+        )
+    }
+
     #[test]
-    fn parse_porcelain_z_handles_spaces_and_renames() {
-        let root = Path::new("/repo");
-        // modified file with a space in its name + a rename (new\0old).
-        let stdout = b" M src/a b.ts\0R  src/new.ts\0src/old.ts\0 M src/c.ts\0";
-        let got = parse_porcelain_paths(stdout, root);
-        // new path of the rename is kept; the prefix-less old path is dropped.
+    fn test_ensure_fresh_only_untracked_csv_skips_reanalyze() {
+        if rerun_in_child(
+            "ECP_AUTO_ENSURE_CSV_ONLY_CHILD",
+            "auto_ensure::fingerprint_drift_tests::test_ensure_fresh_only_untracked_csv_skips_reanalyze",
+        ) {
+            return;
+        }
+        let (probe, calls, paths) =
+            ensure_fresh_beside_untracked("csv-only-test", &["a.csv", "b.csv", "c.csv"]);
+        assert_eq!(probe, EnsureResult::Ready);
         assert_eq!(
-            got,
-            vec![
-                PathBuf::from("/repo/src/a b.ts"),
-                PathBuf::from("/repo/src/new.ts"),
-                PathBuf::from("/repo/src/c.ts"),
-            ]
+            (calls, paths),
+            (0, 0),
+            "untracked .csv files alone must not reach reanalyze_files"
         );
     }
 
     #[test]
-    fn parse_porcelain_z_empty_is_empty() {
-        assert!(parse_porcelain_paths(b"", Path::new("/repo")).is_empty());
+    fn test_ensure_fresh_csv_beside_py_reanalyzes_py_only() {
+        if rerun_in_child(
+            "ECP_AUTO_ENSURE_CSV_PY_CHILD",
+            "auto_ensure::fingerprint_drift_tests::test_ensure_fresh_csv_beside_py_reanalyzes_py_only",
+        ) {
+            return;
+        }
+        let (probe, calls, paths) =
+            ensure_fresh_beside_untracked("csv-py-test", &["a.csv", "new.py"]);
+        assert!(
+            matches!(
+                probe,
+                EnsureResult::Stale {
+                    dirty_files: Some(_),
+                    ..
+                }
+            ),
+            "{probe:?}"
+        );
+        assert_eq!(
+            (calls, paths),
+            (1, 1),
+            "only the .py file may reach reanalyze_files"
+        );
+    }
+
+    /// `repo_and_graph_at_head` without its sidecar, so the mtime walk
+    /// decides, with `files` written after the graph. Returns the dirty set
+    /// `ensure_fresh_with_rebuild` saw.
+    fn walked_dirty_set(session_id: &str, files: &[&std::ffi::OsStr]) -> DirtySet<ClassifiedPath> {
+        let tmp = tempdir().unwrap();
+        let (worktree, graph_path) = repo_and_graph_at_head(tmp.path());
+        fs::remove_file(head_sha_sidecar_path(&graph_path)).unwrap();
+        std::env::set_var("ECP_HOME", tmp.path().join("ecp-home"));
+        std::env::set_var("ECP_SESSION_ID", session_id);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        for name in files {
+            let path = worktree.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "x = 1\n").unwrap();
+        }
+        let probe = ensure_index(&graph_path, &worktree).unwrap();
+        assert!(
+            matches!(
+                probe,
+                EnsureResult::Stale {
+                    dirty_files: None,
+                    ..
+                }
+            ),
+            "the mtime walk must decide: {probe:?}"
+        );
+        ensure_fresh_with_rebuild(IndexNeed::NearCurrent, &graph_path, &worktree)
+            .unwrap()
+            .dirty
+            .expect("the gate returns the set it saw")
+    }
+
+    /// On Unix `\` is a file-name byte: `a\b.py` is no repo path, and must
+    /// neither merge into `a/b.py` nor fail the query as a duplicate.
+    #[cfg(unix)]
+    #[test]
+    fn test_ensure_fresh_with_rebuild_walk_backslash_name_beside_same_path_skips_it() {
+        if rerun_in_child(
+            "ECP_AUTO_ENSURE_BACKSLASH_CHILD",
+            "auto_ensure::fingerprint_drift_tests::test_ensure_fresh_with_rebuild_walk_backslash_name_beside_same_path_skips_it",
+        ) {
+            return;
+        }
+        use ecp_core::contracts::dirty_event::PathClass;
+        use std::ffi::OsStr;
+        let set = walked_dirty_set(
+            "backslash-test",
+            &[OsStr::new("a/b.py"), OsStr::new("a\\b.py")],
+        );
+        assert_eq!(
+            set.events(),
+            &[DirtyEvent::Modified(ClassifiedPath {
+                path: RepoPath::new("a/b.py").unwrap(),
+                class: PathClass::SOURCE,
+            })]
+        );
+        assert_eq!(
+            set.skipped(),
+            &[SkippedEntry {
+                path_lossy: "a\\b.py".into(),
+                reason: SkipReason::NotRepoRelative,
+            }]
+        );
+    }
+
+    /// The read context counts skipped entries into its caveat; a walk that
+    /// dropped the path would report a clean tree.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_ensure_fresh_with_rebuild_walk_non_utf8_name_records_skipped() {
+        if rerun_in_child(
+            "ECP_AUTO_ENSURE_WALK_NOT_UTF8_CHILD",
+            "auto_ensure::fingerprint_drift_tests::test_ensure_fresh_with_rebuild_walk_non_utf8_name_records_skipped",
+        ) {
+            return;
+        }
+        use std::os::unix::ffi::OsStrExt;
+        let set = walked_dirty_set(
+            "walk-not-utf8-test",
+            &[std::ffi::OsStr::from_bytes(b"bad\xff.py")],
+        );
+        assert!(set.events().is_empty(), "{set:?}");
+        assert_eq!(
+            set.skipped(),
+            &[SkippedEntry {
+                path_lossy: "bad\u{FFFD}.py".into(),
+                reason: SkipReason::NotUtf8,
+            }]
+        );
+    }
+
+    /// The newest commit touched only an "other" file, so the walk finds
+    /// nothing to parse. The sidecar must still move to HEAD, or every later
+    /// query repeats the whole-tree walk.
+    #[test]
+    fn test_ensure_fresh_graph_behind_other_only_commit_writes_head_sidecar() {
+        if rerun_in_child(
+            "ECP_AUTO_ENSURE_OTHER_COMMIT_CHILD",
+            "auto_ensure::fingerprint_drift_tests::test_ensure_fresh_graph_behind_other_only_commit_writes_head_sidecar",
+        ) {
+            return;
+        }
+        use ecp_core::contracts::dirty_event::PathClass;
+        assert!(
+            PathClass::classify(
+                &RepoPath::new("README.md").unwrap(),
+                &FileRouter::PATH_ONLY,
+                None
+            )
+            .is_other(),
+            "the fixture needs an \"other\" file"
+        );
+        let tmp = tempdir().unwrap();
+        let (worktree, graph_path) = repo_and_graph_at_head(tmp.path());
+        std::env::set_var("ECP_HOME", tmp.path().join("ecp-home"));
+        std::env::set_var("ECP_SESSION_ID", "other-commit-test");
+        let built_at = git_head_sha(&worktree).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(worktree.join("README.md"), "# readme\n").unwrap();
+        for args in [&["add", "README.md"][..], &["commit", "-qm", "readme"][..]] {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(&worktree)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let head = git_head_sha(&worktree).unwrap();
+        assert_ne!(head, built_at);
+
+        test_counters::reset();
+        ensure_fresh(IndexNeed::NearCurrent, &graph_path, &worktree).unwrap();
+        assert_eq!(test_counters::reanalyze_calls(), 0);
+        assert_eq!(
+            fs::read_to_string(head_sha_sidecar_path(&graph_path))
+                .unwrap()
+                .trim(),
+            head
+        );
+        assert_eq!(
+            ensure_index(&graph_path, &worktree).unwrap(),
+            EnsureResult::Ready,
+            "the second query takes the porcelain shortcut"
+        );
+    }
+
+    /// `diff`, doctor, summary and the post-tool hook pass the cwd. Rooted at
+    /// `pkg/`, the walk would key the fragment `a.py`, a path no reader asks
+    /// for.
+    #[test]
+    fn test_ensure_fresh_from_subdirectory_keys_overlay_by_top_relative_path() {
+        if rerun_in_child(
+            "ECP_AUTO_ENSURE_SUBDIR_CHILD",
+            "auto_ensure::fingerprint_drift_tests::test_ensure_fresh_from_subdirectory_keys_overlay_by_top_relative_path",
+        ) {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (worktree, graph_path) = repo_and_graph_at_head(tmp.path());
+        fs::remove_file(head_sha_sidecar_path(&graph_path)).unwrap();
+        std::env::set_var("ECP_HOME", tmp.path().join("ecp-home"));
+        std::env::set_var("ECP_SESSION_ID", "subdir-test");
+        let pkg = worktree.join("pkg");
+        fs::create_dir_all(&pkg).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(pkg.join("a.py"), "def a(): pass\n").unwrap();
+
+        test_counters::reset();
+        ensure_fresh(IndexNeed::NearCurrent, &graph_path, &pkg).unwrap();
+        assert_eq!(test_counters::reanalyze_paths(), 1);
+        let session_dir = resolve_session_overlay_dir(&worktree).unwrap();
+        let manifest =
+            ecp_core::session::DirtyFiles::read(&session_dir.join("dirty_files.json")).unwrap();
+        let keys: Vec<&str> = manifest.entries.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["pkg/a.py"]);
+    }
+
+    /// A `.json` file is source, so it survives `without_other`; under an
+    /// `ECP_HOME` inside the worktree it is ecp's own file and must not make
+    /// the graph stale.
+    #[test]
+    fn test_ensure_index_json_under_ecp_home_inside_worktree_returns_ready() {
+        if rerun_in_child(
+            "ECP_AUTO_ENSURE_ARTIFACT_CHILD",
+            "auto_ensure::fingerprint_drift_tests::test_ensure_index_json_under_ecp_home_inside_worktree_returns_ready",
+        ) {
+            return;
+        }
+        let tmp = tempdir().unwrap();
+        let (worktree, graph_path) = repo_and_graph_at_head(tmp.path());
+        let home = worktree.join("ecp-home");
+        fs::create_dir_all(home.join("repo")).unwrap();
+        fs::write(home.join("repo/session_meta.json"), "{}\n").unwrap();
+        std::env::set_var("ECP_HOME", &home);
+        assert_eq!(
+            ensure_index(&graph_path, &worktree).unwrap(),
+            EnsureResult::Ready
+        );
     }
 
     fn write_sidecar(graph_path: &Path, fp: &str) {

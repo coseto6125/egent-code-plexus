@@ -107,6 +107,7 @@ use crate::analyzer::import_binding::{
     import_member_fallback, owner_path_agrees, retry_name, DeclaredType, MemberOwner,
 };
 use crate::analyzer::lexical::LexicalFunctions;
+use crate::analyzer::outcome::{NoEdge, Resolution, Tier};
 use crate::analyzer::path_aliases::PathAliases;
 use crate::analyzer::reexport::{
     self, export_filter_applies, is_ecmascript, ExportAliasTable, Fact, FileImports, ImportRef,
@@ -269,13 +270,13 @@ pub struct ViewEdge {
 }
 
 /// Tier confidences mirroring index-time Pass-2 resolution.
-const CONF_SAME_FILE: f32 = 1.0;
-const CONF_IMPORT_SCOPED: f32 = 0.95;
-const CONF_QUALIFIER_SCOPED: f32 = 0.85;
-const CONF_HERITAGE: f32 = 0.8;
-const CONF_GLOBAL_UNIQUE: f32 = 0.7;
+const CONF_SAME_FILE: f32 = Tier::SameFile.confidence();
+const CONF_IMPORT_SCOPED: f32 = Tier::ImportScoped.confidence();
+const CONF_QUALIFIER_SCOPED: f32 = Tier::QualifierScoped.confidence();
+const CONF_HERITAGE: f32 = Tier::HeritageScoped.confidence();
+const CONF_GLOBAL_UNIQUE: f32 = Tier::Global.confidence();
 /// The index's Tier 3.5 (`try_module_tree_resolve`).
-const CONF_MODULE_TREE: f32 = 1.0;
+const CONF_MODULE_TREE: f32 = Tier::ModuleTree.confidence();
 
 #[derive(Debug, Default, PartialEq)]
 pub struct OverlayView {
@@ -589,38 +590,128 @@ impl OverlayView {
                                 let mut base_metas = chain_metas.borrow_mut();
                                 if let Some(targets) = lexical.targets(span_of(sym), parsed.name())
                                 {
-                                    break 'hit targets.first().copied().or_else(|| {
-                                        if matches!(parsed, CallSite::UntypedMember(_)) {
-                                            return None;
-                                        }
+                                    if let Some(&hit) = targets.first() {
+                                        break 'hit Some(hit);
+                                    }
+                                    // The index's `Resolver::resolve_imported_call`:
+                                    // the import tiers alone, for the callee and
+                                    // then for the type it constructs.
+                                    let site = parsed.fallback();
+                                    if matches!(site, CallSite::UntypedMember(_)) {
+                                        break 'hit None;
+                                    }
+                                    let import_scoped = |name: &str, target: ResolveTarget| {
                                         facts
-                                            .named_import(
-                                                file_ord,
-                                                &file.imports,
-                                                parsed.name(),
-                                                callables.target,
-                                            )
+                                            .named_import(file_ord, &file.imports, name, target)
                                             .map(|decl| (decl, CONF_IMPORT_SCOPED))
-                                    });
+                                    };
+                                    let mut resolution = Resolution::from_ladder(import_scoped(
+                                        site.name(),
+                                        callables.target,
+                                    ));
+                                    if resolution.call_fallbacks_allowed() {
+                                        // `named_import` memoizes per file, so the
+                                        // retry reads the file's own imports: only
+                                        // TS / JS has a lexical scope, and neither
+                                        // drops them for the last segment.
+                                        if let Some((ty, confidence)) = resolve_constructed_type(
+                                            graph,
+                                            site,
+                                            caller.language,
+                                            &file.imports,
+                                            &types,
+                                            &nodes,
+                                            |name, _| import_scoped(name, ResolveTarget::Type),
+                                        ) {
+                                            let target = *construction_targets
+                                                .entry(ty)
+                                                .or_insert_with(|| {
+                                                    construction_target(
+                                                        graph,
+                                                        &nodes,
+                                                        &type_ctors,
+                                                        ty,
+                                                    )
+                                                });
+                                            resolution =
+                                                Resolution::from_ladder(Some((target, confidence)));
+                                        }
+                                    }
+                                    break 'hit resolution.edge();
                                 }
-                                // The index's `Resolver::resolve_call`: a C#, Swift,
-                                // Kotlin or Dart receiver that names a type resolves
-                                // as `Receiver.member`; a Swift one that names none
-                                // is an untyped member call.
-                                let type_member = facts.type_receiver(
-                                    &file.rel_path,
-                                    caller.language,
-                                    parsed,
-                                    &file.imports,
-                                );
-                                let site = match (parsed, &type_member) {
+                                // The index's `Resolver::resolve_call`. A Python
+                                // from-imported submodule and a mapped Go package
+                                // settle the call ahead of the ladder; a Go value
+                                // or unmapped package re-classifies the site.
+                                let mut resolution = Resolution::Unknown;
+                                let mut site = parsed;
+                                if let CallSite::FromReceiver { receiver, member } = parsed {
+                                    match caller.language {
+                                        Language::Python => {
+                                            if let Some((target, _)) =
+                                                reexport::python_submodule_member(
+                                                    &facts,
+                                                    &file.rel_path,
+                                                    (receiver, member),
+                                                    file.imports.iter().map(ImportRef::from),
+                                                    callables.target,
+                                                )
+                                            {
+                                                resolution =
+                                                    Resolution::bound(target, Tier::ImportScoped);
+                                            }
+                                        }
+                                        Language::Go => match reexport::go_package_lookup(
+                                            &facts,
+                                            &file.rel_path,
+                                            receiver,
+                                            member,
+                                            file.imports.iter().map(ImportRef::from),
+                                        ) {
+                                            reexport::GoPackageLookup::Resolved(target) => {
+                                                resolution = target.map_or(
+                                                    Resolution::NoEdge(NoEdge::PackageMissing),
+                                                    |(target, _)| {
+                                                        Resolution::bound(
+                                                            target,
+                                                            Tier::ImportScoped,
+                                                        )
+                                                    },
+                                                );
+                                            }
+                                            reexport::GoPackageLookup::Unmapped => {
+                                                site = CallSite::Plain(member);
+                                            }
+                                            reexport::GoPackageLookup::Value => {
+                                                site = CallSite::UntypedMember(member);
+                                            }
+                                        },
+                                        _ => {}
+                                    }
+                                }
+                                let open = matches!(resolution, Resolution::Unknown);
+                                // A C#, Swift, Kotlin or Dart receiver that names a
+                                // type resolves as `Receiver.member`; a Swift one
+                                // that names none is an untyped member call.
+                                let type_member = if open {
+                                    facts.type_receiver(
+                                        &file.rel_path,
+                                        caller.language,
+                                        site,
+                                        &file.imports,
+                                    )
+                                } else {
+                                    None
+                                };
+                                let site = match (site, &type_member) {
                                     (CallSite::FromReceiver { member, .. }, None)
                                         if caller.language == Language::Swift =>
                                     {
                                         CallSite::UntypedMember(member)
                                     }
                                     (CallSite::FromReceiver { receiver, member }, None)
-                                        if caller.language == Language::Python
+                                        if open
+                                            && caller.language == Language::Python
                                             && receiver.contains('/')
                                             && reexport::python_from_import_declared_attribute(
                                                 &facts,
@@ -631,7 +722,7 @@ impl OverlayView {
                                     {
                                         CallSite::UntypedMember(member)
                                     }
-                                    _ => parsed,
+                                    _ => site,
                                 };
                                 let untyped = matches!(site, CallSite::UntypedMember(_));
                                 // An untyped receiver is no `this`: no tier reaches
@@ -671,63 +762,68 @@ impl OverlayView {
                                 // then the receiver-typing ladder.
                                 // No Rust receiver is typed by `type_receiver`, so
                                 // `site` is the lookup here.
-                                let mut hit = if caller.language == Language::Rust
-                                    && site.name().contains("::")
-                                {
-                                    let name = site.name();
-                                    *module_calls
-                                        .entry((name, owner, heritage.as_ptr()))
-                                        .or_insert_with(|| {
-                                            resolve(site, &file.imports, scope)
-                                                .or_else(|| {
-                                                    let (modules, chain) = rust_tree?;
-                                                    resolve_rust_module_callee(
-                                                        graph,
-                                                        name,
-                                                        &callables,
-                                                        &nodes,
-                                                        &dirty_base,
-                                                        modules,
-                                                        chain,
-                                                    )
-                                                })
-                                                .or_else(|| {
-                                                    let (qualifier, member) =
-                                                        split_qualifier(name)?;
-                                                    ladder_edge(facts.receiver_ladder(
-                                                        &file.rel_path,
-                                                        &file.imports,
-                                                        (name, qualifier, member),
-                                                        callables.target,
-                                                        true,
-                                                    ))
-                                                })
-                                        })
-                                } else {
-                                    resolve(lookup, &file.imports, scope)
-                                };
-                                if hit.is_none()
+                                if open {
+                                    let hit = if caller.language == Language::Rust
+                                        && site.name().contains("::")
+                                    {
+                                        let name = site.name();
+                                        *module_calls
+                                            .entry((name, owner, heritage.as_ptr()))
+                                            .or_insert_with(|| {
+                                                resolve(site, &file.imports, scope)
+                                                    .or_else(|| {
+                                                        let (modules, chain) = rust_tree?;
+                                                        resolve_rust_module_callee(
+                                                            graph,
+                                                            name,
+                                                            &callables,
+                                                            &nodes,
+                                                            &dirty_base,
+                                                            modules,
+                                                            chain,
+                                                        )
+                                                    })
+                                                    .or_else(|| {
+                                                        let (qualifier, member) =
+                                                            split_qualifier(name)?;
+                                                        ladder_edge(facts.receiver_ladder(
+                                                            &file.rel_path,
+                                                            &file.imports,
+                                                            (name, qualifier, member),
+                                                            callables.target,
+                                                            true,
+                                                        ))
+                                                    })
+                                            })
+                                    } else {
+                                        resolve(lookup, &file.imports, scope)
+                                    };
+                                    resolution = Resolution::from_ladder(hit);
+                                }
+                                if resolution.call_fallbacks_allowed()
                                     && type_member.is_some()
                                     && caller.language == Language::Kotlin
                                 {
                                     // `fun Reg.ext()` is a top-level function no
                                     // member lookup on `Reg` finds.
-                                    hit = resolve(
-                                        CallSite::Plain(site.name()),
-                                        &file.imports,
-                                        Scope {
-                                            call: None,
-                                            heritage: scope.heritage,
-                                            type_lookup: false,
-                                        },
-                                    )
-                                    .filter(|&(idx, _)| is_free(&facts, idx));
+                                    resolution = Resolution::from_ladder(
+                                        resolve(
+                                            CallSite::Plain(site.name()),
+                                            &file.imports,
+                                            Scope {
+                                                call: None,
+                                                heritage: scope.heritage,
+                                                type_lookup: false,
+                                            },
+                                        )
+                                        .filter(|&(idx, _)| is_free(&facts, idx)),
+                                    );
                                 }
                                 if untyped {
                                     // A Python module is a value: `api.helper()` on
                                     // an untyped receiver may call another module's
                                     // function, never one of the caller's own module.
-                                    hit = hit.filter(|&(idx, _)| {
+                                    resolution = resolution.admit(|idx| {
                                         member_call_admits(&facts, idx, owner)
                                             || (caller.language == Language::Python
                                                 && is_free(&facts, idx)
@@ -735,31 +831,44 @@ impl OverlayView {
                                                     != Some(file.rel_path.as_str()))
                                     });
                                 }
-                                hit.or_else(|| {
-                                    if facts.may_be_receiverless_member_call(site, caller) {
-                                        return None;
-                                    }
-                                    let (ty, confidence) = resolve_constructed_type(
+                                if resolution.call_fallbacks_allowed()
+                                    && !facts.may_be_receiverless_member_call(site, caller)
+                                {
+                                    if let Some((ty, confidence)) = resolve_constructed_type(
                                         graph,
                                         site,
-                                        file_ord,
+                                        caller.language,
                                         &file.imports,
-                                        caller,
-                                        &mut base_metas,
                                         &types,
-                                        &qualifiers,
                                         &nodes,
-                                        &replaced,
-                                        &dirty_base,
-                                        &facts,
-                                        scope,
-                                    )?;
-                                    let target =
-                                        *construction_targets.entry(ty).or_insert_with(|| {
-                                            construction_target(graph, &nodes, &type_ctors, ty)
-                                        });
-                                    Some((target, confidence))
-                                })
+                                        |name, imports| {
+                                            resolve_callee(
+                                                graph,
+                                                CallSite::Plain(name),
+                                                file_ord,
+                                                imports,
+                                                caller,
+                                                &mut base_metas,
+                                                &types,
+                                                &types,
+                                                &qualifiers,
+                                                &nodes,
+                                                &replaced,
+                                                &dirty_base,
+                                                &facts,
+                                                scope,
+                                            )
+                                        },
+                                    ) {
+                                        let target =
+                                            *construction_targets.entry(ty).or_insert_with(|| {
+                                                construction_target(graph, &nodes, &type_ctors, ty)
+                                            });
+                                        resolution =
+                                            Resolution::from_ladder(Some((target, confidence)));
+                                    }
+                                }
+                                resolution.edge()
                             },
                             |inner, member| {
                                 if chain_failed {
@@ -1057,7 +1166,7 @@ impl OverlayView {
 
 /// Layout version of [`OverlayView::to_cache_bytes`]. Bump it whenever the
 /// cached layout changes shape; cache keys include it.
-pub const VIEW_CACHE_FORMAT: u32 = 3;
+pub const VIEW_CACHE_FORMAT: u32 = 4;
 
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
@@ -2942,23 +3051,14 @@ impl<'a> OverlayFacts<'a> {
             return None;
         };
         let typed = match language {
-            // The index binds a submodule receiver before it types one.
-            Language::Python => {
-                reexport::python_submodule_member(
-                    self,
-                    source,
-                    (receiver, member),
-                    imports.iter().map(ImportRef::from),
-                    ResolveTarget::Callable,
-                )
-                .is_none()
-                    && reexport::python_imported_type(
-                        self,
-                        source,
-                        receiver,
-                        imports.iter().map(ImportRef::from),
-                    )
-            }
+            // The call closure in `build` binds a submodule receiver
+            // first and types only a site it left open, as the index does.
+            Language::Python => reexport::python_imported_type(
+                self,
+                source,
+                receiver,
+                imports.iter().map(ImportRef::from),
+            ),
             Language::CSharp | Language::Swift | Language::Kotlin | Language::Dart => !matches!(
                 self.type_candidates(source, receiver, imports),
                 TypeCandidates::None
@@ -3247,13 +3347,7 @@ impl<'a> OverlayFacts<'a> {
 /// The edge a receiver-typing ladder verdict emits, at the index's
 /// confidence for its tier.
 fn ladder_edge(verdict: LadderMember) -> Option<(u32, f32)> {
-    match verdict {
-        LadderMember::Owned(id) => Some((id, CONF_QUALIFIER_SCOPED)),
-        LadderMember::Inherited(id) => Some((id, CONF_HERITAGE)),
-        LadderMember::Candidate(id) => Some((id, CONF_GLOBAL_UNIQUE)),
-        LadderMember::NearestCopy(id) => Some((id, NEAREST_COPY_CONFIDENCE)),
-        LadderMember::Ambiguous | LadderMember::NoEdge => None,
-    }
+    Tier::of_member(verdict).map(|(id, tier)| (id, tier.confidence()))
 }
 
 impl PickFacts for OverlayFacts<'_> {
@@ -3616,8 +3710,9 @@ fn resolve_overlay_name_ref(
 /// Method eligibility is a post-filter, like index-time `lookup_call_in_file`:
 /// removing free functions before uniqueness checks would invent a winner.
 ///
-/// A Python call on a from-imported submodule binds first, as in the index
-/// ([`reexport::python_submodule_member`]).
+/// A Python from-imported submodule and a Go package selector are settled
+/// by the call closure in `build` before this runs, as the index's
+/// `Resolver::resolve_call` settles them.
 /// Tier 1 — same file: the dirty file was FULLY re-parsed, so its own
 /// callable set is authoritative. The first match ([`reexport::pick_call`]),
 /// narrowed at a call site by [`prefer_owned`] → confidence 1.0; several
@@ -3667,38 +3762,9 @@ fn resolve_callee<'s>(
     replaced: &FxHashMap<u32, u32>,
     dirty_base: &FxHashSet<u32>,
     facts: &OverlayFacts<'_>,
-    mut scope: Scope<'_>,
+    scope: Scope<'_>,
 ) -> Option<(u32, f32)> {
     let importer = facts.scope.dirty()[file_ord].rel_path.as_str();
-    let site = if let CallSite::FromReceiver { receiver, member } = site {
-        if caller.language == Language::Go {
-            let normalized = match reexport::go_package_lookup(
-                facts,
-                importer,
-                receiver,
-                member,
-                imports.iter().map(ImportRef::from),
-            ) {
-                reexport::GoPackageLookup::Resolved(target) => {
-                    return target.map(|(target, _)| (target, CONF_IMPORT_SCOPED));
-                }
-                reexport::GoPackageLookup::Unmapped => CallSite::Plain(member),
-                reexport::GoPackageLookup::Value => CallSite::UntypedMember(member),
-            };
-            if let Some(call) = scope.call.as_mut() {
-                call.untyped = matches!(normalized, CallSite::UntypedMember(_));
-                call.free_only = normalized.reaches_free_only(caller.language);
-                if call.untyped {
-                    scope.heritage = &[];
-                }
-            }
-            normalized
-        } else {
-            site
-        }
-    } else {
-        site
-    };
     let callee = site.name();
     let call = scope.call;
     let is_method = |idx: u32| match idx.checked_sub(graph.nodes.len() as u32) {
@@ -3720,19 +3786,6 @@ fn resolve_callee<'s>(
                         )
                     })))
     };
-    if let CallSite::FromReceiver { receiver, member } = site {
-        if caller.language == Language::Python {
-            if let Some((target, _)) = reexport::python_submodule_member(
-                facts,
-                importer,
-                (receiver, member),
-                imports.iter().map(ImportRef::from),
-                names.target,
-            ) {
-                return accepts(target).then_some((target, CONF_IMPORT_SCOPED));
-            }
-        }
-    }
     // Tier 1: same-file, the index's `lookup_call_in_file`. At a call site
     // the pick narrows by owner (`prefer_owned`); when the file holds
     // several unrelated owners of the name it binds nothing and the later
@@ -4445,31 +4498,26 @@ fn resolve_rust_module_callee(
         .then_some((target, CONF_MODULE_TREE))
 }
 
-/// Mirror of the index-time constructor fallback (`Resolver::resolve_call`)
-/// up to the constructed type: a site the callable tiers left empty resolves
-/// the Class / Struct it constructs; [`construction_target`] then picks the
-/// edge's target. The whole type path resolves first, as the index does:
-/// `u.Widget()` binds through `import pkg as u`, `Outer.Inner()` through
-/// the qualifier tier. A qualified path that does not resolve retries its
-/// last segment only where [`CallSite::constructed_type`] allows that
-/// fallback.
-#[allow(clippy::too_many_arguments)]
+/// Mirror of the index-time constructor fallback
+/// (`Resolver::resolve_instantiation`) up to the constructed type: a site the
+/// callable tiers left empty resolves the Class / Struct it constructs;
+/// [`construction_target`] then picks the edge's target. `resolve` looks a
+/// type name up under the given imports, as the index's caller does: the
+/// whole ladder from `resolve_call`, the import tiers alone after a lexical
+/// shadow. The whole type path resolves first: `u.Widget()` binds through
+/// `import pkg as u`, `Outer.Inner()` through the qualifier tier. A qualified
+/// path that does not resolve retries its last segment only where
+/// [`CallSite::constructed_type`] allows that fallback.
 fn resolve_constructed_type<'s>(
     graph: &ArchivedZeroCopyGraph,
     site: CallSite<'s>,
-    file_ord: usize,
+    language: Language,
     imports: &'s [RawImport],
-    caller: FileMeta,
-    base_metas: &mut FxHashMap<usize, FileMeta>,
     types: &OverlayNames<'_>,
-    qualifiers: &OverlayNames<'_>,
     nodes: &[ViewNode],
-    replaced: &FxHashMap<u32, u32>,
-    dirty_base: &FxHashSet<u32>,
-    facts: &OverlayFacts<'_>,
-    scope: Scope<'_>,
+    mut resolve: impl FnMut(&'s str, &'s [RawImport]) -> Option<(u32, f32)>,
 ) -> Option<(u32, f32)> {
-    let (type_path, last_segment_fallback) = site.constructed_type(caller.language)?;
+    let (type_path, last_segment_fallback) = site.constructed_type(language)?;
     let type_name = type_path
         .rsplit(['.', ':', '\\'])
         .next()
@@ -4493,31 +4541,9 @@ fn resolve_constructed_type<'s>(
     {
         return None;
     }
-    let mut resolve = |name: &'s str, imports: &'s [RawImport]| {
-        resolve_callee(
-            graph,
-            CallSite::Plain(name),
-            file_ord,
-            imports,
-            caller,
-            base_metas,
-            types,
-            types,
-            qualifiers,
-            nodes,
-            replaced,
-            dirty_base,
-            facts,
-            scope,
-        )
-    };
     // A qualified type path (`new \App\User()`) never names its type
     // through a `use` of its last segment.
-    let retry_imports: &'s [RawImport] = if fqn_language(caller.language) {
-        &[]
-    } else {
-        imports
-    };
+    let retry_imports: &'s [RawImport] = if fqn_language(language) { &[] } else { imports };
     let (ty, confidence) = resolve(type_path, imports).or_else(|| {
         (qualified && last_segment_fallback).then(|| resolve(type_name, retry_imports))?
     })?;

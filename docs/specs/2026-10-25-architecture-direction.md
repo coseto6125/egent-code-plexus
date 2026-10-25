@@ -113,7 +113,7 @@ At `ff75103a`, B counted 33 rules (a historical inventory, not re-measured on `m
 | | Today | Target |
 |---|---|---|
 | Ladder code | two copies (`resolver.rs`, `view.rs`) | one, in `ecp-core` |
-| "No edge" vs "not decided" | the same empty value | two named states |
+| "No edge" vs "not decided" | the same empty value in the tiers; two named states at the call entries since R1b | two named states in every tier |
 | A new language rule | two edits | one edit |
 | Parity check | per-bug tests | one 14-language parity harness, built before the first refactor slice |
 | Stored data | — | refactor slices change nothing. B3b adds `Calls` edges for some chained calls. B7b adds a workspace crate table to `graph.bin` (format bump) so the overlay resolves cross-crate Rust calls (B §4.1). |
@@ -123,8 +123,10 @@ At `ff75103a`, B counted 33 rules (a historical inventory, not re-measured on `m
 **First round.** Commit to the shared ladder as the end state, not to all ~7,000 lines now. The first round is smaller:
 
 1. **The parity harness.** It compares target identity, edge kind and confidence per call site, and it lists edges that must not exist. An edge count passes when both sides are wrong in the same way. Cases: a dirty file with no change, a deleted file, a renamed file, a cross-file import, and every stop and fallback row of B §3.2.
-2. **`Resolution` on both sides, with one stop-and-fallback decision.** Today the index runs the constructor fallback when its result is empty (`resolver.rs:827`), and the overlay decides inside a `hit.or_else` closure (`view.rs:738`). A slice that turns `Resolution` back into an `Option` or an empty `Vec` inside a tier adds a wrapper and fixes nothing.
+2. **`Resolution` on both sides, with one stop-and-fallback decision (landed: R1a `393f52ae`, R1b `759cfc0a`).** Before R1b, the index ran the constructor fallback when its result was empty, and the overlay decided inside a `hit.or_else` closure. A slice that turns `Resolution` back into an `Option` or an empty `Vec` inside a tier adds a wrapper and fixes nothing.
 3. **The Rust cross-crate gap, as its own slice.** The overlay lacks the facts: `RustModules` (`view.rs:4234`) holds the graph, the dirty files and the roots, and no crate table. A shared ladder does not supply those facts. This slice is the Rust subset of contract C2: it stores the crate table in `graph.bin`, which is the persistence half of B7b, moved into the first round with its format change. B7b keeps the half that moves the module-tree rule into the shared ladder.
+
+**Landed on this branch.** R1a adds `Tier`, `Tier::confidence`, `NoEdge` (with the true count in `NoEdge::Ambiguous(u32)`) and `Resolution` in `ecp-core/src/analyzer/outcome.rs`. R1b makes both call entries carry one `Resolution` through the call-level fallbacks, gated by `Resolution::call_fallbacks_allowed` (`outcome.rs:166`): `Resolver::resolve_call` (`resolver.rs:719`, `:735`, `:824`, `:848`) and the overlay call closure (`view.rs:646`, `:692`). **Remaining.** The tiers inside both ladders still answer with a `Vec` or an `Option`, and enter through `Resolution::from_ladder` (`ladder_resolution`, `resolver.rs:2187-2189`); the ladder code is still two copies. First-round items 1 (the parity harness) and 3 (the Rust crate table) are not in this branch's slices.
 
 B9 and the R30 helper cleanup stay out of the first round. After each slice, decide whether the next one still pays. Watch every method of the facts trait: a method that hides a pick policy, such as `global_pick`, leaves two rule sets behind one ladder.
 
@@ -149,7 +151,7 @@ Every output of `GraphBuilder::build`, from pass 1 to the post-process passes (`
 
 The incremental passes read the global tables from L2 through the facts adapters of design B. They never rebuild them. The invalidation closure (which clean files to resolve again) is owned by area 5, and areas 1 and 4 supply the dependency facts. Where the closure is not bounded, the answer carries a caveat that names the stale edge kinds.
 
-The incremental overlay needs areas 4, 7 and 8 for the facts it replays. Until each lands, the overlay keeps that edge kind index-time and says so in the caveat. L1 fragments carry symbols, imports and export aliases only today (`session/overlay_writer.rs:119-123`), so the overlay needs a new fragment encoding for the raw records it replays.
+The incremental overlay needs areas 4, 7 and 8 for the facts it replays. Until each lands, the overlay keeps that edge kind index-time and says so in the caveat. L1 fragments carry symbols, imports and export aliases only today (`session/overlay_writer.rs:120-124`), so the overlay needs a new fragment encoding for the raw records it replays.
 
 **Proof of done.** For every output in the per-file and incremental rows, the node and edge multisets of the dirty view equal those of a fresh build of the same tree, in these cases: a candidate added in another file, a candidate deleted, an export changed, a supertype changed, a return type changed, a table definition changed, a route added or renamed, a field renamed, and a scope config changed. Each case keeps the caller's bytes unchanged. The index-time outputs are listed apart, and the test asserts their caveat instead of their value. A temporary exclusion, such as an edge kind waiting for area 4, 7 or 8, names its owner and the slice that removes it.
 
@@ -317,10 +319,10 @@ Target: both read the workspace facts of this area, and a guessed match carries 
 | Name to node | seven resolvers, one per command family | `ecp find Engine.load` returns `found:false`. `ecp rename base_visible … --dry-run` reports no occurrences for a method at `merged.rs:136`. `ecp inspect load --kind method` still reports an ambiguity and suggests `--kind`. `ecp impact --target load --kind method` merges rows from 4 unrelated files into one blast radius. |
 | Ambiguity | `rename` picks every match | `ecp rename parse parse_config` with `a.py:parse` and `b.py:parse` rewrites both files, with no ambiguity error |
 | Overlay | attached in `main.rs` for some commands; `load_ensured` engines (bm25 `find`, `group`, `peers plan`) never attach it | with an uncommitted `beta_dirty`, `find` finds it and `rename beta_dirty … --dry-run` reports "No occurrences"; `pattern --callers-of alpha` scans 1 file and misses an untracked caller |
-| Dirty set | `git status --porcelain` paths are relative to the repo top, but `auto_ensure.rs:504-515` joins them onto the cwd | after `def bar()` is added to `pkg/sub/a.py`, `ecp find bar --repo .` from `pkg/sub` returns `found:false`; from the root it returns `found:true` |
-| Deleted and renamed files | no tombstone; the old half of a rename is dropped (`auto_ensure.rs:510`) | after `rm other/b.py`, `ecp find baz` returns `other/b.py` |
-| Stale marker | `Engine::caveat()` (`engine.rs:144`) reaches 6 of about 15 graph commands; `routes`, `rename`, `pattern`, `processes` and `review` print none | on a warm-attached graph, `ecp rename zed zed2 --dry-run` reports `No occurrences` with no caveat (reviewer repro) |
-| MCP | `ecp-mcp/src/spawn.rs:15-33` returns stdout only, so a caveat printed on stderr never reaches an MCP client | code read |
+| Dirty set (landed in F1 `6a59c3d9` and the C3 slice) | Before F1, `git status --porcelain` paths were relative to the repo top, but the old porcelain parse joined them onto the cwd. Now `ReadContext` roots every query at the worktree top (`read_context.rs:20-31`) and `DirtySet::from_porcelain_z` gives repo-relative paths | after `def bar()` is added to `pkg/sub/a.py`, `ecp find bar --repo .` from `pkg/sub` returns `found:false`; from the root it returns `found:true` |
+| Deleted and renamed files (partly landed in the C3 slice) | no tombstone. The dirty set now keeps `Deleted` events and both halves of a `Renamed` event (`dirty_event.rs`). No reader applies a tombstone to the view yet | after `rm other/b.py`, `ecp find baz` returns `other/b.py` |
+| Stale marker (landed in F6 `9dd47bf9`, `cff3a437`) | Before F6, `Engine::caveat()` reached 6 of about 15 graph commands; `routes`, `rename`, `pattern`, `processes` and `review` printed none. Now `Engine::caveat()` (`engine.rs:149`) carries the warm-attach or behind-HEAD reason and the unreadable-path count, and all 11 commands that lacked it print it in the payload `result` field | on a warm-attached graph, `ecp rename zed zed2 --dry-run` reports `No occurrences` with no caveat (reviewer repro) |
+| MCP | `ecp-mcp/src/spawn.rs:15-33` returns stdout only, so a caveat printed on stderr never reached an MCP client. Since F6 the caveat is in the stdout payload | code read |
 | Name index | a failed background tantivy build leaves no index, and `find` answers by substring for the life of that commit, with no marker | code read |
 
 **Consequence for the agent.** One question gets different answers by command and by working directory. The worst case is `rename`: a command that writes files acts on a graph that lacks the symbol, or on two targets the agent did not choose.
@@ -343,19 +345,23 @@ The resolver accepts the parent-aware target of §2 once A lands, so the two are
 | Deleted file | still answered | suppressed |
 | Stale marker | 6 of about 15 commands, stderr only in MCP | every command, in the payload |
 
+**Landed on this branch.** F1 (`6a59c3d9`): the worktree top and the read context (`ReadContext`). The C3 slice (`96b877e8`, `91f65ef0`): one classification of porcelain paths, with both rename halves. F6 (`9dd47bf9`, `cff3a437`): the caveat in the payload of every graph command. **Remaining.** One name resolver for all commands, the typed ambiguity, `rename` binding only the chosen declaration, applying tombstones to the view, the invalidation closure, and the check of which commands still bypass the overlay.
+
 **Cost.** Commands that skip the overlay today pay the L1 refresh, which the L1 gate caches per session. Two fixes bound it. First, classify every porcelain path once (contract C3) and skip the per-path syscalls only for paths that are neither source nor resolution config: with 12,000 untracked `.csv` files, one `ecp find` costs 88 ms against 15 ms clean (reviewer measurement). Config files such as `tsconfig.json`, `go.mod` and `Cargo.toml` have no provider, so a filter on "has a provider" would hide their changes from area 4. Second, a host that exports no session id makes every query a new session, so nothing is cached (`session/resolver.rs:18-31`). Choosing a stable fallback key, such as the worktree path, is a product decision: two shells in one worktree would then share an overlay. The latency gates above bound the result.
 
 **Also owned here: the invalidation closure.** Area 5 decides which clean files a dirty event makes stale; see "Beyond calls" in §1.
 
 ## 6. One routing fact: path, language, provider
 
-**Today.** The facts that route a file live in five distinct hand-synced mappings: `EXTENSION_TABLE` (`ecp-core/src/analyzer/pipeline.rs:91`), `file_category::Language` (`ecp-core/src/file_category.rs:261-322`; `resolution::index` re-exports it), the identifier finder match (`identifier_finder/mod.rs:54-86`), the pattern finder, and `should_analyze_path` (`commands/admin/index.rs:537`, with its extension match at `:569-630`). The comment at `pipeline.rs:84-87` says the walk allowlist derives from `EXTENSION_TABLE`; it does not, and no test pins it. The tables disagree:
+**Before P1.** The facts that route a file lived in five hand-synced mappings: `EXTENSION_TABLE` in `pipeline.rs`, `file_category::Language` (`ecp-core/src/file_category.rs:261-322`; `resolution::index` re-exports it), the identifier finder match (`identifier_finder/mod.rs:54-86`), the pattern finder, and `should_analyze_path` with its own extension list. The comment on `EXTENSION_TABLE` said the walk allowlist derived from it; it did not, and no test pinned it. The tables disagreed:
 
-- The cold index constructs 37 providers. The overlay, reanalysis and `impact --baseline` run the 19 in `reanalyze.rs` `ALL_PROVIDER_NAMES`. The overlay lacks 18 registered providers, 16 of them routed (markdown and generic YAML are never routed). Bash, SQL, HCL, Dockerfile, Solidity, protobuf, GitHub Actions, Compose and 8 more never reach the overlay. Reproduced: in a committed `run.sh`, rename `old_fn` to `new_fn` and leave it uncommitted. `ecp find new_fn` returns `found:false`, and `ecp find old_fn` returns `found:true`. `tests/incremental_full_parity.rs:322-345` freezes this divergence.
-- `Language` has no Vue, Svelte, Astro or protobuf variant, so those files are `Unknown`, and the Tier-3 barrier cuts them off from TS and JS targets (code read).
-- The identifier finder returns an empty list for `.vue`, `.svelte` and `.astro` (`identifier_finder/mod.rs:87`), and `rename` drops an empty list (`commands/rename.rs:411`). A rename leaves those call sites unchanged, with no notice.
-- OpenAPI YAML is routed to the Kubernetes provider. The Markdown and generic YAML providers are never routed.
-- Two size caps disagree: 1 MiB (`ecp-core/src/config.rs:174`) and 16 MiB (`pipeline.rs:15-20`). A file between them is missing from the index but parsed in the overlay.
+- The cold index constructed 37 providers. The overlay, reanalysis and `impact --baseline` ran the 19 in `ALL_PROVIDER_NAMES`. Bash, SQL, HCL, Dockerfile, Solidity, protobuf, GitHub Actions, Compose and 8 more never reached the overlay. Reproduced: in a committed `run.sh`, rename `old_fn` to `new_fn` and leave it uncommitted. `ecp find new_fn` returned `found:false`. **Landed in P1 and P2:** reanalysis and the baseline (P1) and the overlay (P2) construct the providers of each path's route (`reanalyze.rs:33-43`, `:49`). The test `test_reanalyze_files_bash_script_yields_same_graph_as_full_pipeline` (`tests/incremental_full_parity.rs`) now pins the parity. Markdown and generic YAML stay unrouted to a graph: `FileRoute::providers()` leaves out `Language::Yaml` (`routing.rs:712-717`) until C5 open point 6 lands.
+- `Language` has no Vue, Svelte, Astro or protobuf variant, so those files are `Unknown`, and the Tier-3 barrier cuts them off from TS and JS targets (code read). **Remaining.** `file_category::Language` is still the language lookup (`file_category.rs:261`). C5's `Language` and `ParsedLanguage` exist (`routing.rs`) but the readers have not adopted them.
+- The identifier finder returns an empty list for `.vue`, `.svelte` and `.astro` (`identifier_finder/mod.rs:87`), and `rename` drops an empty list (`commands/rename.rs:411`). A rename leaves those call sites unchanged, with no notice. **Remaining.**
+- OpenAPI YAML was routed to the Kubernetes provider. **Landed in P1:** a sniffed YAML route lists `[Kubernetes, OpenApi, Yaml]` (`routing.rs:144`, `:940`). The Markdown provider is still never routed.
+- Two size caps disagreed: 1 MiB and 16 MiB. A file between them was missing from the index but parsed in the overlay. **Landed in P1:** one `SizeCap`, default 1 MiB, from `ECP_MAX_FILE_BYTES`, then `[index] max_file_bytes`, then the default (`config.rs:165-186`). The cap is not yet an input of the dirty manifest or the view cache key (`FU-2026-10-25-77fc8cac8067`).
+
+**Landed on this branch.** P1 (`6e888477`): `FileRouter` decides the cold walk, the provider choice and the size cap. P2 (`fef7dc24`): the overlay runs the cold index's provider set and routes by the repo-relative path. `EXTENSION_TABLE`, `provider_name_for_path`, `ALL_PROVIDER_NAMES` and the walk's own extension list are deleted. **Remaining.** The `file_category` lookups, the finder and flow grammars, the capability table of `schema.rs`, and the `ParsedLanguage` adoption in `view.rs` and `resolver.rs`.
 
 **Consequence for the agent.** In 16 languages, an uncommitted edit is invisible to every query. A rename across a Vue app reports success and misses the components.
 
@@ -434,7 +440,7 @@ The largest copies are the `RawNode` literal (43 copies, 793 lines), the `RawImp
 - `overlay_resolver_parity.rs` (143 tests) compares targets by file, name, owner and rounded confidence after a sort and dedup, and its main path finds the caller by name only. A closure helper in the same file compares uid and line (`:64`, `:108`). The default wrapper in `tests/common/parity.rs` supplies no aliases or repo root. The configurable harness accepts caller-supplied builders and already tests aliases.
 - `overlay_differential_parity.rs` covers outgoing `Calls` edges only. Separate tests compare `References` edges (`overlay_variant_ref_parity.rs`). No test compares node sets, incoming edges, deleted files or renames, and a comprehensive node-and-edge matrix remains unestablished. This is how area 5's deleted-file defect stayed hidden.
 - The JS and TS shadow cascade runs, but fragments whose recorded mtime is zero (`auto_ensure.rs:1232`) fail the reader's freshness check, which needs an exact mtime. No test noticed. Area 11 adds the regression fixture; lane F repairs the mtime capture and removes that fixture's baseline.
-- `incremental_full_parity.rs` compares the overlay pipeline with itself, both with 19 providers, and pins the divergence of area 6.
+- Before P2, `incremental_full_parity.rs` compared the overlay pipeline with itself, both with 19 providers, and pinned the divergence of area 6. P2 replaced that pin with `test_reanalyze_files_bash_script_yields_same_graph_as_full_pipeline`.
 - The stored-data fixtures only assert a rejection, and the newest `graph.bin` fixture is v13 while the format is 15.
 - No mechanical gate enforces the 14-language rule; several test dimensions cover 3 to 5 languages.
 
@@ -470,11 +476,11 @@ Two areas conflict when they change one function, one stored format or one piece
 | 1, 5 | dirty symbols and call resolution in `OverlayView::build` (`view.rs:369`, `:587`) | C3 first; a deleted file is a whole-file tombstone, never "keep base" |
 | 1, 6 and 2, 6 | `Language` decides call normalization (`resolver.rs:730`), global admission (`file_category.rs:400`) and Rust owners | C5 first; areas 1, 2 and 6 read one language value and one compatibility rule |
 | 1, 7 | heritage: the overlay pre-pass (`view.rs:521`) and `Overrides` (`overrides.rs:153`) | `Overrides` reads the shared heritage facts |
-| 2, 5 | the target resolver reads the owner (`symbol_id.rs:135`); rename treats an empty owner as top level (`rename.rs:333`) | C1 first; rename's scoped exclusion ships with A's opt-in |
+| 2, 5 | the target resolver reads the owner (`symbol_id.rs:135`); rename treats an empty owner as top level (`rename.rs:333`) | C1 first. One target resolver reads the qualified path. A bare name matches top-level and scoped declarations; a tie is an ambiguity that `rename` refuses. `::name` selects the top-level declaration. The resolver ships before A's opt-in (C1 Open point 5) |
 | 2, 7 | raw slots kept in pass 1 (`builder.rs:1198`) | C4's index mapping; area 7 waits for that mapping, not for A-A |
 | 2, 8 | Route uids made in two places (`builder.rs:1411`, `:1481`) | C1's route and handler identity |
 | 3, 4 and 3, 6 | the source snapshot (`orchestrator.rs:139`) feeds config reads and file filters | area 3 defines the snapshot; areas 4 and 6 read from it |
-| 3, 5 | freshness sidecars and the view cache key (`view_cache.rs:35`); one function, `git_fingerprint_shortcut` (`auto_ensure.rs:409-451`) | the read context takes the confirmed build handle and keeps the graph stamp in the cache key; area 3 lands first |
+| 3, 5 | freshness sidecars and the view cache key (`view_cache.rs:35`); one function, `git_fingerprint_shortcut` (`auto_ensure.rs:444-521`) | the read context takes the confirmed build handle and keeps the graph stamp in the cache key; area 3 lands first |
 | 4, 5 and 4, 6 | config files have no provider (`pipeline.rs:146` routes only OpenAPI JSON) | C3's "resolution config" class; a config change widens the invalidation scope |
 | 4, 7 | `Imports` guesses at 0.9 (`imports_edges.rs:391`) | C4's evidence classes |
 | 5, 7 and 5, 8 | the overlay masks only some edge kinds (`view.rs:995`) and skips builder nodes (`:1297`) | the incremental overlay above; until then, a caveat that names the stale edge kinds |
@@ -520,6 +526,14 @@ Work runs in lanes. Two slices run at the same time only when their file lists s
 | F (freshness) | area 5 (read context, worktree top, dirty events, caveat in the payload, the shadow-cascade mtime); then the incremental overlay | C1 to C5, phase 0b; the incremental overlay also needs B5 |
 | P (parse output) | area 6, including the `Language` lookups in `session/view.rs:1770`, `:2828` and `resolver.rs:730`; area 7; area 8, with flow F8 | C1, C3, C4, C5; area 7 also needs the raw index mapping of C4 |
 
+**Status on `feat/arch-p1-contracts`.** Phase 1 landed: the design notes and types of C1 to C5, and the C3 behaviour slice (`96b877e8`, `91f65ef0`), which replaced freshness F6's per-path cost. From the lanes:
+
+| Lane | Landed | Remaining |
+|---|---|---|
+| R | B's first round, item 2: R1a `393f52ae` (`Resolution`, `Tier`, the `NoEdge::Ambiguous` count) and R1b `759cfc0a` (both call entries) | the parity harness; the Rust crate table; the shared ladder; A-A to A-E; B5, B8 |
+| F | area 5: F1 `6a59c3d9` (read context, worktree top); the dirty set with both rename halves (C3 slice); F6 `9dd47bf9` and `cff3a437` (caveat in every payload) | one name resolver; tombstones in the view; the shadow-cascade mtime; the incremental overlay |
+| P | area 6: P1 `6e888477` (`FileRouter`, one `SizeCap`), P2 `fef7dc24` (the overlay's provider set) | the `Language` lookups in `session/view.rs` and `resolver.rs`; the finder and flow grammars; areas 7, 8 |
+
 Before a slice is dispatched, its inventory lists the production files, the tests, the baseline files, the stored payloads and the compatibility identifiers it touches. Slices that share a file run one at a time. Slices that share stored data are coordinated even when their files differ. Known shared points between lanes:
 
 | Lanes | Shared file or data |
@@ -543,11 +557,11 @@ A-E needs a shared contract and tests for implicit `this` and lexical precedence
 
 | Identifier | Changes when | Changes planned |
 |---|---|---|
-| `graph.bin` (`GRAPH_FORMAT_VERSION`) | the archived layout changes | B's first round: the C2 Rust crate table. A: lexical parents. Area 8: only if it adds a route table. Area 4's other languages add rows to the C2 facts, not layout, if C2 is designed for that |
-| parse cache (`BUILDER_FINGERPRINT`, archived `LocalGraph`) | parser output, raw-record layout (C4), uid assignment (A-A), routing (C5), or graph-building semantics (B3b) | per slice |
-| L1 fragment encoding (V5 today, `overlay_reader.rs:75`) | the overlay replays new raw records | the incremental overlay |
-| dirty manifest | C3 adds the event class and deletions | C3's behaviour slice |
-| view cache key (`view_cache.rs:40`) | any of the above | follows them |
+| `graph.bin` (`GRAPH_FORMAT_VERSION`) | the archived layout changes | B's first round: the C2 Rust crate table. A: lexical parents, and C1's discriminator table when a Signature or Tag discriminator is first stored. Area 8: only if it adds a route table. Area 4's other languages add rows to the C2 facts, not layout, if C2 is designed for that |
+| parse cache (`BUILDER_FINGERPRINT`, archived `LocalGraph`; `registry/commit_meta.rs:93`) | parser output, raw-record layout (C4), uid assignment (A-A), routing (C5), or graph-building semantics (B3b) | per slice. Landed on this branch: schema22 (P1 routing through `FileRouter`: one size cap, sniffed OpenAPI YAML, template and non-UTF-8 paths never parsed), schema23 (P2: the overlay provider set and repo-relative routing), schema24 (OpenAPI schema and field nodes carry the line of their key), schema25 (a non-UTF-8 path that would route is a `path-not-utf8` omission; the walk caps a symlink's target). The value is now `+schema25` |
+| L1 fragment encoding (V5 today, `overlay_reader.rs:75`; `FRAGMENT_FORMAT_V5`, `ecp-core/src/session/overlay.rs:57`) | the overlay replays new raw records; the fragment id gains C5's route key, because two dirty files with equal bytes and different providers share one bin today (FU-2026-10-25-f21cfea445d0) | area 5 (the route key, V6); the incremental overlay |
+| dirty manifest | the overlay reads tombstones and per-path classes: a new namespace `<session>/l1/dirty_events.json` (`DIRTY_EVENTS_FORMAT = 1`, required `change` and `class` fields) with bins in `<session>/l1/fragments/`; `dirty_files.json` and `graph_overlay/` are no longer read, so an older writer cannot strip the new fields | the first area-5 slice that reads tombstones, writer and reader together; C3's behaviour slice changes no stored data |
+| view cache key (`view_cache.rs:40`; `VIEW_CACHE_FORMAT` in `ecp-core/src/session/view.rs:1169`) | any of the above | follows them. Landed: `VIEW_CACHE_FORMAT` 3 to 4 in R1b (the overlay view changes for the call sites that now carry `Resolution`). The key does not yet hash the size cap (`FU-2026-10-25-77fc8cac8067`) |
 
 Phases 0 to 3 ship in one release. One value of an identifier maps to one data contract:
 

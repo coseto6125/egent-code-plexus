@@ -3,6 +3,7 @@ pub mod import_binding;
 pub mod lang_spec;
 pub mod lexical;
 pub mod name_ref;
+pub mod outcome;
 pub mod path_aliases;
 pub mod pipeline;
 pub mod provider;

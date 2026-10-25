@@ -134,3 +134,19 @@ class Service:
     assert!(scopes(&g).is_empty());
     assert!(g.tx_scopes.is_none());
 }
+
+#[test]
+fn test_resolve_tx_scopes_decorated_nested_function_binds_inner() {
+    let src = r#"
+from django.db import transaction
+
+def outer():
+    @transaction.atomic
+    def inner():
+        pass
+    return inner
+"#;
+    let g = parse(src);
+    assert_eq!(scopes(&g).len(), 1);
+    assert_eq!(fn_name_of(&g, 0), "inner");
+}

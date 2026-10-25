@@ -6,7 +6,7 @@
 //! rewrite happens after the fragment rename, in the same `atomic_write_json`
 //! style — readers always see a consistent snapshot.
 //!
-//! Several items below (`OverlayWriter` struct + impl, `PIPELINE` / `pipeline()` /
+//! Several items below (`OverlayWriter` struct + impl, `pipeline_for_path` /
 //! `map_node_kind` helpers, `relativise`, `extract_symbols`) are the
 //! write-time symbol-extraction surface spec'd by
 //! `docs/superpowers/specs/2026-05-17-multi-agent-peer-sync-design.md:152`
@@ -21,6 +21,7 @@
 use ecp_core::analyzer::types::{
     LocalGraph, RawEventTopic, RawExportAlias, RawImport, RawSchemaField, RawTxScope,
 };
+use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::NodeKind;
 use ecp_core::registry::{atomic_write_json, replace_file, FileLock};
 use ecp_core::session::overlay::{SymbolKind, SymbolRef};
@@ -253,13 +254,21 @@ pub fn write_dirty_fragments_batch(
     let overlay_dir = session_dir.join("graph_overlay");
     fs::create_dir_all(&overlay_dir)?;
     let batch_seq = WRITE_BATCH_SEQ.fetch_add(1, Ordering::Relaxed);
+    // The cap of the worktree this session overlays, resolved once per batch.
+    // An unreadable meta fails the commit below; until then the env or
+    // built-in cap stands.
+    let size_cap = SessionMeta::read(&session_dir.join("session_meta.json"))
+        .map(|sm| ecp_core::config::resolve_size_cap(Path::new(&sm.source_worktree)))
+        .unwrap_or_else(|_| ecp_core::config::env_size_cap(None));
 
     // Parallelise fragment writes: hashing and parsing (CPU) + atomic file write (IO).
     // Coalesces the per-file IO while keeping the final manifest commit atomic.
     let results: Vec<io::Result<StagedFragment>> = inputs
         .par_iter()
         .enumerate()
-        .map(|(idx, input)| write_fragment_file(&overlay_dir, batch_seq, idx as u64, input))
+        .map(|(idx, input)| {
+            write_fragment_file(&overlay_dir, batch_seq, idx as u64, input, size_cap)
+        })
         .collect();
 
     commit_fragment_results(session_dir, &overlay_dir, results)
@@ -391,6 +400,7 @@ fn write_fragment_file(
     batch_seq: u64,
     input_idx: u64,
     input: &FragmentInput,
+    size_cap: SizeCap,
 ) -> io::Result<StagedFragment> {
     let content_hash = content_hash_hex(&input.content);
     let fragment_id = content_hash.clone();
@@ -401,7 +411,7 @@ fn write_fragment_file(
     // combined `parse_to_fragment`: an rkyv failure marks the entry
     // `parse_failed` like a parse failure does, rather than aborting the whole
     // batch write.
-    let parsed = parse_graph(&input.rel_path, &input.content)
+    let parsed = parse_graph(&input.rel_path, &input.content, size_cap)
         .and_then(|graph| archive_fragments(&graph).map(|bytes| (graph, bytes)));
     let (tmp, dirty_symbols) = match parsed {
         Ok((graph, archive_bytes)) => (
@@ -441,9 +451,10 @@ fn write_fragment_file(
     })
 }
 
-fn parse_graph(rel_path: &str, content: &[u8]) -> io::Result<LocalGraph> {
+fn parse_graph(rel_path: &str, content: &[u8], size_cap: SizeCap) -> io::Result<LocalGraph> {
     let path = std::path::Path::new(rel_path);
-    pipeline()
+    pipeline_for_path(path, size_cap)
+        .ok_or_else(|| io::Error::other(format!("no provider for {rel_path:?}")))?
         .parse_file_raw(path, content)
         .map_err(io::Error::other)
 }
@@ -516,9 +527,9 @@ fn content_hash_hex(bytes: &[u8]) -> String {
 
 static WRITE_BATCH_SEQ: AtomicU64 = AtomicU64::new(0);
 
-// Process-wide pipeline — built once, shared across all consumers (both
-// overlay writes and reanalyze hot path) via `crate::reanalyze::pipeline()`.
-use crate::reanalyze::pipeline;
+// One pipeline per distinct provider set, built on first use and shared by
+// every overlay write: a path gets the providers the cold index would build.
+use crate::reanalyze::pipeline_for_path;
 
 /// `None` for nodes that are not a declaration two sessions can both edit —
 /// File, Import, Route, Process, Document, Section, EntryPoint, PathLiteral and
@@ -689,10 +700,21 @@ fn symbols_from_graph(graph: &LocalGraph, file_str: &str) -> Vec<SymbolRef> {
 /// pipeline has no provider for the extension or returns no graph.
 fn extract_symbols(path: &Path, file_str: &str) -> (Vec<SymbolRef>, bool) {
     let abs = path.to_path_buf();
-    // Use the file name as the rel_path so the pipeline selects on extension.
-    let rel = PathBuf::from(path.file_name().unwrap_or(path.as_os_str()));
+    // Route by the repo-relative path, not the basename: path rules (a
+    // workflow directory, a template directory) decide the provider.
+    let rel = PathBuf::from(file_str.replace('\\', "/"));
+    // `path` ends in `rel`, so the ancestor `rel` deep is the root whose
+    // `.ecp/config.toml` holds the cap.
+    let root = abs
+        .ancestors()
+        .nth(rel.components().count())
+        .unwrap_or(abs.as_path());
+    let size_cap = ecp_core::config::resolve_size_cap(root);
 
-    let graphs = pipeline().analyze(vec![(abs, rel)]);
+    let Some(pipeline) = pipeline_for_path(&rel, size_cap) else {
+        return (vec![], true);
+    };
+    let graphs = pipeline.analyze(vec![(abs, rel)]);
     match graphs.into_iter().next() {
         None => (vec![], true),
         Some(graph) => (symbols_from_graph(&graph, file_str), false),

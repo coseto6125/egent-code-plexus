@@ -1,23 +1,10 @@
 use super::provider::LanguageProvider;
 use super::types::LocalGraph;
+use crate::contracts::routing::{FileRoute, FileRouter, RouteOutcome, SizeCap};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
-
-/// Skip source files larger than this cap. A 100 MiB minified JS bundle or a
-/// pathological generated source can otherwise materialise straight into
-/// memory via `std::fs::read` and OOM the process. 16 MiB is well above any
-/// hand-written source we've seen while still bounding worst-case RAM at
-/// `num_threads * 16 MiB`. Override at runtime via `ECP_MAX_FILE_BYTES`.
-const MAX_FILE_BYTES_DEFAULT: u64 = 16 * 1024 * 1024;
-
-fn resolve_max_file_bytes() -> u64 {
-    std::env::var("ECP_MAX_FILE_BYTES")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(MAX_FILE_BYTES_DEFAULT)
-}
 
 /// Holds the bytes for one parsed file. `Mmap` is the zero-copy fast path;
 /// `Owned` is the `fs::read` fallback for small files or filesystems lacking
@@ -37,16 +24,36 @@ impl SourceBuf {
     }
 }
 
-#[derive(Default)]
 pub struct AnalyzerPipeline {
     providers: Vec<Box<dyn LanguageProvider>>,
+    /// Routes every path and holds the one per-file byte cap. A file over the
+    /// cap would otherwise materialise straight into memory via `fs::read`
+    /// (a 100 MiB minified bundle), bounding worst-case RAM at
+    /// `num_threads * cap`.
+    router: FileRouter,
+}
+
+impl Default for AnalyzerPipeline {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AnalyzerPipeline {
+    /// The cap is `ECP_MAX_FILE_BYTES`, else the built-in default. A caller
+    /// that knows the repo config passes it with [`Self::with_size_cap`].
     pub fn new() -> Self {
         Self {
             providers: Vec::new(),
+            router: FileRouter::new(crate::config::env_size_cap(None)),
         }
+    }
+
+    /// Replace the cap, so the parse step and the walk that fed it read the
+    /// same one.
+    pub fn with_size_cap(mut self, size_cap: SizeCap) -> Self {
+        self.router = FileRouter::new(size_cap);
+        self
     }
 
     pub fn register_provider(&mut self, provider: Box<dyn LanguageProvider>) {
@@ -60,137 +67,88 @@ impl AnalyzerPipeline {
     }
 
     /// Parse a single file from in-memory bytes without touching disk.
-    /// The `rel_path` is used only for provider selection (extension lookup)
-    /// and is stored verbatim in the returned `LocalGraph.file_path`.
+    /// The `rel_path` is used only for routing and is stored verbatim in the
+    /// returned `LocalGraph.file_path`. Source over the cap returns the same
+    /// `file-too-large` omission that [`Self::analyze`] records.
     pub fn parse_file_raw(
         &self,
         rel_path: &std::path::Path,
         source: &[u8],
     ) -> anyhow::Result<LocalGraph> {
-        let provider = self
-            .find_provider(rel_path)
-            .ok_or_else(|| anyhow::anyhow!("no provider for {:?}", rel_path))?;
-        provider.parse_file(rel_path, source)
+        let Some(route) = self.route(rel_path) else {
+            return Err(anyhow::anyhow!("no provider for {:?}", rel_path));
+        };
+        let chain = self.provider_chain(&route);
+        if !chain.is_empty() && !route.size_cap().admits(source.len() as u64) {
+            return Ok(Self::too_large(
+                rel_path,
+                source.len() as u64,
+                route.size_cap(),
+            ));
+        }
+        Self::parse_chain(&chain, rel_path, source)
+            .map(|(_, result)| result)
+            .unwrap_or_else(|| Err(anyhow::anyhow!("no provider for {:?}", rel_path)))
     }
 
-    fn find_provider(&self, path: &std::path::Path) -> Option<&dyn LanguageProvider> {
-        let name = Self::provider_name_for_path(path)?;
-        self.providers
-            .iter()
-            .find(|p| p.name() == name)
-            .map(|p| p.as_ref())
+    fn too_large(rel_path: &std::path::Path, len: u64, size_cap: SizeCap) -> LocalGraph {
+        LocalGraph::omitted(
+            rel_path,
+            "file-too-large",
+            format!(
+                "{len} bytes exceeds the {}-byte per-file cap, so nothing in this file is in \
+                 the graph. Raise `[index] max_file_bytes` or `ECP_MAX_FILE_BYTES` to include it.",
+                size_cap.bytes()
+            ),
+        )
     }
 
-    /// Plain-extension → provider-`name` table, data-driven so it is the
-    /// single place that lists this mapping — every other extension-based
-    /// consumer (needed-provider detection, path-filter allowlists) derives
-    /// from this instead of re-listing the arms. Path-based special cases
-    /// (Dockerfile, docker-compose, GitHub Actions, `.yaml`/`.yml` content
-    /// sniffing) are NOT extension-derivable and stay in
-    /// `provider_name_for_path` below.
-    pub const EXTENSION_TABLE: &'static [(&'static str, &'static str)] = &[
-        ("ts", "typescript"),
-        ("tsx", "typescript"),
-        ("py", "python"),
-        ("pyi", "python"),
-        ("go", "go"),
-        ("rs", "rust"),
-        ("java", "java"),
-        ("js", "javascript"),
-        ("jsx", "javascript"),
-        ("mjs", "javascript"),
-        ("cjs", "javascript"),
-        ("php", "php"),
-        ("rb", "ruby"),
-        ("kt", "kotlin"),
-        ("kts", "kotlin"),
-        ("cs", "c_sharp"),
-        ("c", "c"),
-        // `.h` routes to C++ (near-superset of C); see the indexing-pipeline
-        // note that made this the load-bearing dispatch.
-        ("cpp", "cpp"),
-        ("hpp", "cpp"),
-        ("cc", "cpp"),
-        ("hh", "cpp"),
-        ("cxx", "cpp"),
-        ("hxx", "cpp"),
-        ("h", "cpp"),
-        ("swift", "swift"),
-        ("dart", "dart"),
-        ("sh", "bash"),
-        ("bash", "bash"),
-        ("lua", "lua"),
-        ("luau", "lua"),
-        ("dockerfile", "dockerfile"),
-        ("cr", "crystal"),
-        ("move", "move"),
-        ("sol", "solidity"),
-        ("tf", "hcl"),
-        ("tfvars", "hcl"),
-        ("hcl", "hcl"),
-        ("nim", "nim"),
-        ("sql", "sql"),
-        ("vy", "vyper"),
-        ("cairo", "cairo"),
-        ("v", "verilog"),
-        ("sv", "verilog"),
-        ("vh", "verilog"),
-        ("svh", "verilog"),
-        ("zig", "zig"),
-        ("vue", "vue"),
-        ("astro", "astro"),
-        ("svelte", "svelte"),
-        ("proto", "protobuf"),
-        // `.json` routes to the OpenAPI provider; it applies a cheap
-        // 200-byte prefix gate so non-OpenAPI JSON costs near-zero.
-        ("json", "openapi"),
-    ];
+    // A non-UTF-8 path is skipped, never routed through a lossy spelling:
+    // the lossy name names no file on disk (C3 `SkipReason::NotUtf8`).
+    fn route(&self, rel_path: &std::path::Path) -> Option<FileRoute> {
+        match self.router.route(rel_path.to_str()?) {
+            RouteOutcome::Routed(route) => Some(route),
+            RouteOutcome::Excluded(_) | RouteOutcome::Unrouted => None,
+        }
+    }
 
-    /// The single source of truth mapping a file path to the provider `name`
-    /// that should parse it. `find_provider` resolves this name against the
-    /// registered providers; the incremental path (`reanalyze`) uses it to
-    /// build a pipeline holding ONLY the providers a dirty set needs, instead
-    /// of paying the full 20-provider tree-sitter `Query` compile (~0.65s) to
-    /// reparse one changed file (~8ms). Path-based special cases (Dockerfile,
-    /// docker-compose, GitHub Actions workflows) are resolved before the
-    /// extension table; remaining `.yaml`/`.yml` route to the content-sniffing
-    /// Kubernetes provider. `.h` routes to C++ (near-superset of C); see the
-    /// indexing-pipeline note that made this the load-bearing dispatch.
-    pub fn provider_name_for_path(path: &std::path::Path) -> Option<&'static str> {
-        let file_name = path.file_name()?.to_str()?;
-        if matches!(file_name, "Dockerfile" | "dockerfile") {
-            return Some("dockerfile");
-        }
-        if matches!(
-            file_name,
-            "docker-compose.yml" | "docker-compose.yaml" | "compose.yml" | "compose.yaml"
-        ) {
-            return Some("docker-compose");
-        }
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            if matches!(ext, "yml" | "yaml") {
-                let is_gha = path
-                    .components()
-                    .collect::<Vec<_>>()
-                    .windows(2)
-                    .any(|w| w[0].as_os_str() == ".github" && w[1].as_os_str() == "workflows");
-                if is_gha {
-                    return Some("github-actions");
-                }
-                // Any other `.yaml`/`.yml` routes to the Kubernetes provider,
-                // which applies a cheap ≤1KB `apiVersion:`+`kind:` content gate
-                // (mirrors `.json` → "openapi"). Non-k8s YAML returns empty at
-                // near-zero cost — path alone can't tell a k8s manifest from
-                // arbitrary YAML.
-                return Some("kubernetes");
+    /// The registered providers to try for `route`, in the order of
+    /// [`FileRoute::providers`].
+    fn provider_chain(&self, route: &FileRoute) -> Vec<&dyn LanguageProvider> {
+        route
+            .providers()
+            .filter_map(|name| {
+                self.providers
+                    .iter()
+                    .find(|provider| provider.name() == name)
+                    .map(|provider| provider.as_ref())
+            })
+            .collect()
+    }
+
+    /// Run the chain until a provider accepts: its graph holds a node or a
+    /// blind spot. Every provider content-gates by returning an empty graph,
+    /// so an empty result hands the file to the next candidate, and the first
+    /// result stands when none accepts (today's single-provider answer). An
+    /// error ends the chain. `None` when the chain is empty.
+    fn parse_chain(
+        chain: &[&dyn LanguageProvider],
+        rel_path: &std::path::Path,
+        source: &[u8],
+    ) -> Option<(&'static str, anyhow::Result<LocalGraph>)> {
+        let mut fallback = None;
+        for provider in chain {
+            let result = provider.parse_file(rel_path, source);
+            let accepted = !matches!(
+                &result,
+                Ok(graph) if graph.nodes.is_empty() && graph.blind_spots.is_empty()
+            );
+            if accepted {
+                return Some((provider.name(), result));
             }
+            fallback.get_or_insert((provider.name(), result));
         }
-
-        let ext = path.extension()?.to_str()?;
-        Self::EXTENSION_TABLE
-            .iter()
-            .find(|(e, _)| *e == ext)
-            .map(|(_, name)| *name)
+        fallback
     }
 
     /// Analyze files concurrently using a Multi-Producer Single-Consumer architecture
@@ -219,7 +177,6 @@ impl AnalyzerPipeline {
     {
         let (tx, rx) = crossbeam_channel::unbounded::<LocalGraph>();
         let cache_lookup = &cache_lookup;
-        let max_file_bytes = resolve_max_file_bytes();
         let prof = std::env::var("ECP_PROF").is_ok();
         // Per-provider (count, total_ns) when ECP_PROF=1. Mutex is fine —
         // critical section is just a HashMap update, negligible vs the
@@ -237,12 +194,13 @@ impl AnalyzerPipeline {
                 files
                     .into_par_iter()
                     .for_each_with(tx, |sender, (abs_path, rel_path)| {
-                        // Single `find_provider` lookup, reused below — avoids
-                        // the double-lookup the original `is_none()` gate +
-                        // re-`match` pattern paid per file.
-                        let Some(provider) = self.find_provider(&rel_path) else {
+                        let Some(route) = self.route(&rel_path) else {
                             return;
                         };
+                        let chain = self.provider_chain(&route);
+                        if chain.is_empty() {
+                            return;
+                        }
                         // Skip oversized files before reading to keep the
                         // worker thread from materialising a multi-GiB blob
                         // into memory. metadata() is one fstat — cheap.
@@ -252,16 +210,11 @@ impl AnalyzerPipeline {
                         // `found: false` for a symbol that is in the tree.
                         let file_len = match std::fs::metadata(&abs_path) {
                             Ok(meta) => {
-                                if meta.len() > max_file_bytes {
-                                    let _ = sender.send(LocalGraph::omitted(
+                                if !route.size_cap().admits(meta.len()) {
+                                    let _ = sender.send(Self::too_large(
                                         &rel_path,
-                                        "file-too-large",
-                                        format!(
-                                            "{} bytes exceeds the {max_file_bytes}-byte per-file cap, \
-                                             so nothing in this file is in the graph. Raise \
-                                             `[index] max_file_bytes` or `ECP_MAX_FILE_BYTES` to include it.",
-                                            meta.len()
-                                        ),
+                                        meta.len(),
+                                        route.size_cap(),
                                     ));
                                     return;
                                 }
@@ -334,11 +287,15 @@ impl AnalyzerPipeline {
 
                         // Cache miss / no cache: regular parse path.
                         let t_parse = std::time::Instant::now();
-                        let result = provider.parse_file(&rel_path, source);
+                        let Some((provider_name, result)) =
+                            Self::parse_chain(&chain, &rel_path, source)
+                        else {
+                            return;
+                        };
                         let parse_ns = t_parse.elapsed().as_nanos() as u64;
                         if let Some(t) = times {
                             let mut m = t.lock().unwrap();
-                            let entry = m.entry(provider.name()).or_insert((0u64, 0u64));
+                            let entry = m.entry(provider_name).or_insert((0u64, 0u64));
                             entry.0 += 1;
                             entry.1 += parse_ns;
                         }
@@ -351,7 +308,7 @@ impl AnalyzerPipeline {
                                 let _ = sender.send(LocalGraph::omitted(
                                     &rel_path,
                                     "parse-failed",
-                                    format!("the {} parser returned an error: {e}", provider.name()),
+                                    format!("the {provider_name} parser returned an error: {e}"),
                                 ));
                             }
                         }
@@ -486,18 +443,54 @@ mod tests {
         unsafe { std::env::remove_var("ECP_MAX_FILE_BYTES") };
     }
 
+    /// The raw path (overlay writer, `impact --baseline`) and the walk path
+    /// agree on the cap: over it, both return the `file-too-large` omission.
+    /// Failed before this change: `parse_file_raw` parsed any length.
     #[test]
-    fn yaml_routes_to_kubernetes_provider() {
-        use std::path::Path;
-        let pn = AnalyzerPipeline::provider_name_for_path;
-        // Plain `.yaml`/`.yml` → kubernetes (content-sniffed inside the provider).
-        assert_eq!(pn(Path::new("k8s/deploy.yaml")), Some("kubernetes"));
-        assert_eq!(pn(Path::new("manifest.yml")), Some("kubernetes"));
-        // Filename/path specials still win over the kubernetes fallback.
-        assert_eq!(pn(Path::new("docker-compose.yml")), Some("docker-compose"));
+    fn test_parse_file_raw_over_cap_returns_file_too_large_omission() {
+        let mut pipeline =
+            AnalyzerPipeline::new().with_size_cap(SizeCap::resolve(Some("10"), None));
+        pipeline.register_provider(Box::new(TypeScriptProvider));
+
+        let big = pipeline
+            .parse_file_raw(std::path::Path::new("big.ts"), b"AAAAAAAAAAAAAAAAA")
+            .expect("an oversized routed file is an omission, not an error");
+        assert!(big.nodes.is_empty());
         assert_eq!(
-            pn(Path::new(".github/workflows/ci.yml")),
-            Some("github-actions")
+            big.blind_spots
+                .iter()
+                .map(|b| b.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["file-too-large"]
         );
+        assert_eq!(big.content_hash, [0u8; 8]);
+
+        let at_cap = pipeline
+            .parse_file_raw(std::path::Path::new("at_cap.ts"), b"let a = 1;")
+            .expect("a file of exactly the cap is parsed");
+        assert!(at_cap.blind_spots.is_empty());
+
+        assert!(pipeline
+            .parse_file_raw(std::path::Path::new("notes.txt"), b"AAAAAAAAAAAAAAAAA")
+            .is_err());
+    }
+
+    #[test]
+    fn test_route_yaml_candidates_put_kubernetes_first() {
+        let first = |path: &str| {
+            let RouteOutcome::Routed(route) = FileRouter::PATH_ONLY.route(path) else {
+                panic!("{path} is routed");
+            };
+            route
+                .candidates()
+                .first()
+                .map(|language| language.provider())
+        };
+        // Plain `.yaml`/`.yml` → kubernetes (content-sniffed inside the provider).
+        assert_eq!(first("k8s/deploy.yaml"), Some("kubernetes"));
+        assert_eq!(first("manifest.yml"), Some("kubernetes"));
+        // Filename/path specials still win over the kubernetes fallback.
+        assert_eq!(first("docker-compose.yml"), Some("docker-compose"));
+        assert_eq!(first(".github/workflows/ci.yml"), Some("github-actions"));
     }
 }

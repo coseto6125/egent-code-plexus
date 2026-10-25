@@ -386,7 +386,7 @@ Parse → resolve → serialize एक MPSC channel के माध्यम �
 
 | Env var | Default | Effect |
 |---|---|---|
-| `ECP_MAX_FILE_BYTES` | `16777216` (16 MiB) | Ingest के दौरान इस size से बड़ी source files को skip करें। Worst-case worker RAM को `num_threads × MAX` पर cap करता है। |
+| `ECP_MAX_FILE_BYTES` | `1048576` (1 MiB) | Ingest के दौरान इस size से बड़ी source files को skip करें; यह cold index, incremental reanalysis, session overlay और `impact --baseline` सब पर लागू होता है। Env var, `<repo>/.ecp/config.toml` के `[index] max_file_bytes` पर प्राथमिकता रखता है। Worst-case worker RAM को `num_threads × MAX` पर cap करता है। |
 | `ECP_CSPROJ_MAX_DEPTH` | `4` | `*.csproj` discovery recursion depth। Deeply-nested .NET monorepos के लिए बढ़ाएं। |
 
 ---

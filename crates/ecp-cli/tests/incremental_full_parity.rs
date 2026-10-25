@@ -321,34 +321,38 @@ fn parity_gate_heavy() {
     run_parity_cases(200);
 }
 
-/// Regression for the provider-registry refactor: `reanalyze_files` must not
-/// gain coverage the full pipeline lacks. `.sh` resolves to the `"bash"`
-/// provider via `provider_name_for_path`, but `"bash"` is not in
-/// `reanalyze::ALL_PROVIDER_NAMES` (not yet wired into the incremental path)
-/// — `pipeline().analyze(...)` therefore returns no graph for a `.sh` file,
-/// and `reanalyze_files` must match that, not silently start producing one
-/// just because `provider_registry::PROVIDER_CONSTRUCTORS` can construct a
-/// `BashProvider` by name.
+/// Contract: the incremental path runs the cold index's provider set. `.sh`
+/// routes to the `bash` provider, and `reanalyze_files` builds the providers
+/// the route lists, so it yields the graph the full pipeline yields. This
+/// test used to pin the opposite (both returned nothing, because a hand list
+/// of 19 names left `bash` out).
+///
+/// Fails on the old code: `reanalyze_files` returned no graph for `script.sh`.
 #[test]
-fn test_reanalyze_files_nonsubset_extension_yields_no_graph_matching_full_pipeline() {
+fn test_reanalyze_files_bash_script_yields_same_graph_as_full_pipeline() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let rel = "script.sh";
-    std::fs::write(tmp.path().join(rel), "#!/bin/sh\necho hi\n").expect("write fixture");
+    std::fs::write(tmp.path().join(rel), "#!/bin/sh\ngreet() {\n  echo hi\n}\n")
+        .expect("write fixture");
 
     let direct = ecp_cli::reanalyze::pipeline()
         .analyze(vec![(tmp.path().join(rel), std::path::PathBuf::from(rel))]);
     let incremental =
         ecp_cli::reanalyze::reanalyze_files(tmp.path(), &DiffScope::All, &[rel.to_owned()]);
 
+    let names = |graphs: &[ecp_core::analyzer::types::LocalGraph]| -> BTreeSet<String> {
+        graphs
+            .iter()
+            .flat_map(|g| g.nodes.iter().map(|n| n.name.clone()))
+            .collect()
+    };
     assert!(
-        direct.is_empty(),
-        "full pipeline unexpectedly produced a graph for {rel} — bash must not be in ALL_PROVIDER_NAMES for this test to be meaningful"
+        names(&direct).contains("greet"),
+        "premise: the full pipeline parses a bash function"
     );
     assert_eq!(
-        incremental.len(),
-        direct.len(),
-        "reanalyze_files produced {} graph(s) for {rel} but the full pipeline produced {} — incremental/full parity broken",
-        incremental.len(),
-        direct.len()
+        names(&incremental),
+        names(&direct),
+        "incremental/full parity broken for {rel}"
     );
 }

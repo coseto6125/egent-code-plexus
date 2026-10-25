@@ -6,6 +6,7 @@
 //!
 //! All fields default if absent so partial configs are valid.
 
+use crate::contracts::routing::SizeCap;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -167,20 +168,21 @@ fn default_max_file_bytes() -> u64 {
     DEFAULT_MAX_FILE_BYTES
 }
 
-/// Resolve the indexing file cap with precedence: `ECP_MAX_FILE_BYTES` env
-/// var > `[index] max_file_bytes` in `<repo>/.ecp/config.toml` > the 1 MiB
-/// default. A malformed env value or an unreadable config falls through to
-/// the next source.
-pub fn resolve_max_file_bytes(repo_root: &Path) -> u64 {
-    if let Some(bytes) = std::env::var("ECP_MAX_FILE_BYTES")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        return bytes;
-    }
-    load(repo_root)
-        .map(|cfg| cfg.index.max_file_bytes)
-        .unwrap_or(DEFAULT_MAX_FILE_BYTES)
+/// The indexing file cap with precedence: `ECP_MAX_FILE_BYTES` env var >
+/// `repo_config` > the 1 MiB default. A malformed or empty env value falls
+/// through to the next source. The one place that reads the env var.
+pub fn env_size_cap(repo_config: Option<u64>) -> SizeCap {
+    SizeCap::resolve(
+        std::env::var("ECP_MAX_FILE_BYTES").ok().as_deref(),
+        repo_config,
+    )
+}
+
+/// [`env_size_cap`] with `[index] max_file_bytes` of
+/// `<repo>/.ecp/config.toml` as the repo value. An unreadable config falls
+/// through to the default.
+pub fn resolve_size_cap(repo_root: &Path) -> SizeCap {
+    env_size_cap(load(repo_root).ok().map(|cfg| cfg.index.max_file_bytes))
 }
 
 /// Repo-relative config path. `.ecp/config.toml` is hook-local state
@@ -254,7 +256,7 @@ mod tests {
         assert_eq!(cfg.confidence, ConfidenceConfig::default());
     }
 
-    // The three `resolve_max_file_bytes` tests mutate the shared
+    // The `resolve_size_cap` tests mutate the shared
     // `ECP_MAX_FILE_BYTES` env var, so they must not run concurrently.
     // Serialize them through one mutex rather than pulling in `serial_test`.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -264,7 +266,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let dir = tempdir().unwrap();
         unsafe { std::env::remove_var("ECP_MAX_FILE_BYTES") };
-        assert_eq!(resolve_max_file_bytes(dir.path()), 1024 * 1024);
+        assert_eq!(resolve_size_cap(dir.path()).bytes(), 1024 * 1024);
     }
 
     #[test]
@@ -275,7 +277,7 @@ mod tests {
         std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
         std::fs::write(&cfg_path, "[index]\nmax_file_bytes = 2097152\n").unwrap();
         unsafe { std::env::remove_var("ECP_MAX_FILE_BYTES") };
-        assert_eq!(resolve_max_file_bytes(dir.path()), 2 * 1024 * 1024);
+        assert_eq!(resolve_size_cap(dir.path()).bytes(), 2 * 1024 * 1024);
     }
 
     #[test]
@@ -286,9 +288,25 @@ mod tests {
         std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
         std::fs::write(&cfg_path, "[index]\nmax_file_bytes = 2097152\n").unwrap();
         unsafe { std::env::set_var("ECP_MAX_FILE_BYTES", "4096") };
-        let resolved = resolve_max_file_bytes(dir.path());
+        let resolved = resolve_size_cap(dir.path()).bytes();
         unsafe { std::env::remove_var("ECP_MAX_FILE_BYTES") };
         assert_eq!(resolved, 4096);
+    }
+
+    #[test]
+    fn max_file_bytes_whitespace_or_malformed_env_falls_through_to_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let cfg_path = config_path(dir.path());
+        std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+        std::fs::write(&cfg_path, "[index]\nmax_file_bytes = 2097152\n").unwrap();
+        let mut resolved = Vec::new();
+        for value in [" ", "", "12 ", "1MiB"] {
+            unsafe { std::env::set_var("ECP_MAX_FILE_BYTES", value) };
+            resolved.push(resolve_size_cap(dir.path()).bytes());
+        }
+        unsafe { std::env::remove_var("ECP_MAX_FILE_BYTES") };
+        assert_eq!(resolved, vec![2 * 1024 * 1024; 4]);
     }
 
     #[test]

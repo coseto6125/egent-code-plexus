@@ -8,7 +8,7 @@
 
 use crate::commands::format::kind_to_str;
 use crate::engine::Engine;
-use crate::output::{emit, OutputFormat};
+use crate::output::{emit_with_caveat, OutputFormat};
 use clap::Args;
 use ecp_core::graph::{ArchivedFileCategory, ArchivedNodeKind, ArchivedRelType};
 use ecp_core::EcpError;
@@ -43,7 +43,9 @@ pub struct RoutesArgs {
 
     /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
     /// toon. `json`: full-fidelity JSON. `text`: one compact JSON line per route. Absent,
-    /// `llm` and `toon` join the middleware names of a route into one string.
+    /// `llm` and `toon` join the middleware names of a route into one string. A
+    /// `result` field appears only when the answer carries a caveat (stale or
+    /// warm-attached graph, unreadable uncommitted paths); absent means current.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 }
@@ -145,7 +147,7 @@ fn list_routes(
         result["test_results"] = serde_json::json!(test_results);
     }
 
-    emit(&result, fmt)
+    emit_with_caveat(&result, fmt, engine.caveat())
 }
 
 /// Whether a route of `method` answers a `--method` filter. An `ANY` route
@@ -364,7 +366,7 @@ fn inspect_route(
             "shown": shown,
             "zero_score_omitted": zero_score_omitted,
         });
-        return emit(&result, fmt);
+        return emit_with_caveat(&result, fmt, engine.caveat());
     }
 
     // For each matched Route: find handler via incoming HandlesRoute edge,
@@ -501,7 +503,7 @@ fn inspect_route(
         "handlers": handlers_out,
         "callers": callers_out,
     });
-    emit(&result, fmt)
+    emit_with_caveat(&result, fmt, engine.caveat())
 }
 
 /// The controller action, as the route file writes it, of a Laravel Route

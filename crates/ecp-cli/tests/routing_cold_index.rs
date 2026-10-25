@@ -1,0 +1,336 @@
+//! The cold index walk, the provider choice and the size cap read one
+//! `FileRouter::route` outcome (C5 routing contract, consumer area 6).
+//!
+//! Each test names the contract it stands for, so a deliberate change of the
+//! contract is not mistaken for a regression.
+
+use ecp_cli::commands::admin::index::{run_analyzer_for_paths, should_analyze_path};
+use ecp_cli::provider_registry::make_provider;
+use ecp_core::analyzer::pipeline::AnalyzerPipeline;
+use ecp_core::contracts::routing::{
+    Dispatch, FileRouter, Language, PathRule, RouteOutcome, SizeCap,
+};
+use ecp_core::graph::{NodeKind, ZeroCopyGraph};
+use std::path::{Path, PathBuf};
+
+const ONE_MIB: usize = 1024 * 1024;
+
+fn router() -> FileRouter {
+    FileRouter::PATH_ONLY
+}
+
+fn write(root: &Path, rel: &str, content: &[u8]) {
+    let path = root.join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, content).unwrap();
+}
+
+/// A Python file of `bytes` bytes that defines `name` first and pads with comments.
+fn python_of_size(name: &str, bytes: usize) -> Vec<u8> {
+    let mut source = format!("def {name}():\n    return 1\n").into_bytes();
+    source.resize(bytes, b'#');
+    if let Some(last) = source.last_mut() {
+        *last = b'\n';
+    }
+    source
+}
+
+fn cold_index(src: &Path) -> ZeroCopyGraph {
+    let out = tempfile::tempdir().unwrap();
+    run_analyzer_for_paths(src, out.path(), None, None)
+        .expect("cold index")
+        .1
+}
+
+fn node_names(graph: &ZeroCopyGraph, kind: NodeKind) -> Vec<String> {
+    let pool = graph.string_pool.as_slice();
+    graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == kind)
+        .map(|node| node.name.resolve(pool).to_string())
+        .collect()
+}
+
+/// `(kind, file_path)` of every blind spot in the graph.
+fn blind_spots(graph: &ZeroCopyGraph) -> Vec<(String, String)> {
+    let pool = graph.string_pool.as_slice();
+    graph
+        .blind_spots
+        .iter()
+        .map(|spot| {
+            (
+                spot.kind.resolve(pool).to_string(),
+                spot.file_path.resolve(pool).to_string(),
+            )
+        })
+        .collect()
+}
+
+fn has_blind_spot(graph: &ZeroCopyGraph, kind: &str, file: &str) -> bool {
+    blind_spots(graph)
+        .iter()
+        .any(|(k, f)| k == kind && f == file)
+}
+
+/// Contract: the walk's "is this source" answer is the router's `Routed`
+/// answer, for every extension default of every language (the 14 mainstream
+/// languages and the DSL and config languages), and the route's first provider
+/// is its language's provider.
+///
+/// Failed before this change: `should_analyze_path` was private to the binary
+/// module, and it accepted `md`/`txt`/`rst`, which the router leaves
+/// unrouted.
+#[test]
+fn test_should_analyze_path_agrees_with_route_every_default_extension() {
+    let mut covered_mainstream = 0;
+    for &language in Language::ALL {
+        for ext in language.extensions() {
+            let rel = format!("src/sample.{ext}");
+            let outcome = router().route(&rel);
+            let RouteOutcome::Routed(route) = outcome else {
+                panic!("{rel}: the router must route a default extension, got {outcome:?}");
+            };
+            assert_eq!(route.dispatch(), Dispatch::Fixed(language), "{rel}");
+            assert!(
+                should_analyze_path(Path::new(&rel)),
+                "{rel}: the walk must accept what the router routes"
+            );
+            assert_eq!(
+                route.providers().next(),
+                Some(language.provider()),
+                "{rel}: the provider name comes from the route"
+            );
+        }
+        if Language::MAINSTREAM.contains(&language) && !language.extensions().is_empty() {
+            covered_mainstream += 1;
+        }
+    }
+    assert_eq!(
+        covered_mainstream,
+        Language::MAINSTREAM.len(),
+        "every mainstream language must be exercised by an extension"
+    );
+}
+
+/// Contract: a path the router does not route is not walked, whatever the
+/// old extension list said. `md`, `txt` and `rst` have no provider today
+/// (the router leaves them unrouted), upper-case extensions are
+/// unrouted, and the template rules exclude by repo-relative path.
+///
+/// Failed before this change: `should_analyze_path` was private, and it
+/// accepted `README.md`.
+#[test]
+fn test_should_analyze_path_unrouted_and_excluded_paths_rejected() {
+    for rel in [
+        "README.md",
+        "notes.txt",
+        "docs/guide.rst",
+        "src/UPPER.RS",
+        "src/.py",
+        "src/no_extension",
+        "bricks/feature/__brick__/lib/widget.dart",
+        "bricks/{{name.snakeCase()}}/widget.dart",
+        "",
+    ] {
+        assert!(
+            !should_analyze_path(Path::new(rel)),
+            "{rel:?} must not be walked"
+        );
+        assert!(
+            ecp_cli::reanalyze::pipeline_for_path(Path::new(rel), SizeCap::BUILT_IN).is_none(),
+            "{rel:?} must have no provider"
+        );
+    }
+}
+
+/// Contract: path rules decide before extensions, and the YAML and JSON
+/// content-sniffed routes list `kubernetes` or `openapi` as the first
+/// candidate.
+#[test]
+fn test_route_first_provider_path_rules_and_sniffed_routes_keep_first_candidate() {
+    for (rel, provider) in [
+        ("Dockerfile", "dockerfile"),
+        ("svc/dockerfile", "dockerfile"),
+        ("docker-compose.yml", "docker-compose"),
+        ("deploy/compose.yaml", "docker-compose"),
+        (".github/workflows/ci.yml", "github-actions"),
+        ("k8s/deployment.yaml", "kubernetes"),
+        ("api/openapi.yaml", "kubernetes"),
+        ("api/spec.json", "openapi"),
+    ] {
+        assert_eq!(
+            router()
+                .route(rel)
+                .route()
+                .and_then(|route| route.providers().next()),
+            Some(provider),
+            "{rel}"
+        );
+        assert!(should_analyze_path(Path::new(rel)), "{rel}");
+    }
+    assert_eq!(
+        router().route("api/openapi.yaml"),
+        router().route("api/other.yml"),
+        "a path alone cannot tell an OpenAPI yaml from another yaml"
+    );
+}
+
+/// Contract (C5 Open point 1): the cold walk drops a file over the one
+/// `SizeCap` (1 MiB by default) and the graph records it as a `file-too-large`
+/// blind spot, never silently. A 2 MiB file lies between the 1 MiB walk cap
+/// and the 16 MiB parse cap that existed before the one `SizeCap`.
+///
+/// Guards the cold walk's 1 MiB default: the omission stays a blind spot and
+/// the small neighbour stays indexed.
+#[test]
+fn test_cold_index_file_between_1mib_and_16mib_omitted_with_blind_spot() {
+    let src = tempfile::tempdir().unwrap();
+    write(src.path(), "ok.py", &python_of_size("ok_fn", 64));
+    write(src.path(), "big.py", &python_of_size("big_fn", 2 * ONE_MIB));
+
+    let graph = cold_index(src.path());
+
+    assert!(
+        has_blind_spot(&graph, "file-too-large", "big.py"),
+        "the omitted file must surface as a blind spot, got {:?}",
+        blind_spots(&graph)
+    );
+    let functions = node_names(&graph, NodeKind::Function);
+    assert!(functions.contains(&"ok_fn".to_string()), "{functions:?}");
+    assert!(!functions.contains(&"big_fn".to_string()), "{functions:?}");
+}
+
+/// Contract: one `SizeCap` reaches the parse step. `AnalyzerPipeline::analyze`
+/// (the overlay, reanalysis and baseline path) omits a 2 MiB file with a
+/// `file-too-large` blind spot and parses nothing of it.
+///
+/// Failed before this change: the pipeline had its own 16 MiB default, so it
+/// parsed the 2 MiB file.
+#[test]
+fn test_analyze_file_between_1mib_and_16mib_omitted_with_blind_spot() {
+    let src = tempfile::tempdir().unwrap();
+    write(src.path(), "big.py", &python_of_size("big_fn", 2 * ONE_MIB));
+
+    let mut pipeline = AnalyzerPipeline::new();
+    pipeline.register_provider(make_provider("python").unwrap().unwrap());
+    let graphs = pipeline.analyze(vec![(src.path().join("big.py"), PathBuf::from("big.py"))]);
+
+    assert_eq!(graphs.len(), 1);
+    let graph = &graphs[0];
+    assert!(graph.nodes.is_empty(), "nothing of the file is parsed");
+    assert_eq!(
+        graph
+            .blind_spots
+            .iter()
+            .map(|spot| spot.kind.as_str())
+            .collect::<Vec<_>>(),
+        vec!["file-too-large"]
+    );
+}
+
+/// Contract: a repo-config cap raises the cap for the walk and for the parse
+/// step alike. Guards the plumbing: a pipeline that reads only the built-in
+/// default would omit the file that the walk admitted.
+///
+/// Guards the cold index's own plumbing: `run_analyzer_for_paths` resolves
+/// the repo cap once and hands it to both the walk and the pipeline
+/// (`with_size_cap`). The incremental, overlay and baseline paths have their
+/// own guards in `size_cap_paths.rs`.
+#[test]
+fn test_cold_index_repo_config_raises_cap_file_indexed() {
+    let src = tempfile::tempdir().unwrap();
+    write(
+        src.path(),
+        ".ecp/config.toml",
+        b"[index]\nmax_file_bytes = 4194304\n",
+    );
+    write(src.path(), "big.py", &python_of_size("big_fn", 2 * ONE_MIB));
+
+    let graph = cold_index(src.path());
+
+    let functions = node_names(&graph, NodeKind::Function);
+    assert!(functions.contains(&"big_fn".to_string()), "{functions:?}");
+    assert!(
+        !has_blind_spot(&graph, "file-too-large", "big.py"),
+        "{:?}",
+        blind_spots(&graph)
+    );
+}
+
+/// Contract (C5 Open point 6, the chain ends at OpenAPI): an OpenAPI YAML
+/// reaches the OpenAPI provider, not only the Kubernetes provider whose
+/// content gate rejects it. The consumer reads the schema as a `Struct` node.
+/// A generic YAML still gets no graph from this slice.
+///
+/// Failed before this change: every `.yaml` went to `kubernetes` alone, so the
+/// OpenAPI schema `Pet` was missing from the index.
+#[test]
+fn test_route_openapi_yaml_not_kubernetes_provider() {
+    let rule = match router().route("api/openapi.yaml") {
+        RouteOutcome::Routed(route) => route.rule(),
+        other => panic!("a yaml path must route, got {other:?}"),
+    };
+    assert_eq!(rule, PathRule::YamlContent);
+
+    let src = tempfile::tempdir().unwrap();
+    write(
+        src.path(),
+        "api/openapi.yaml",
+        b"openapi: 3.0.0\ninfo:\n  title: Pets\n  version: 1.0.0\npaths: {}\ncomponents:\n  schemas:\n    Pet:\n      type: object\n      properties:\n        name:\n          type: string\n",
+    );
+    write(
+        src.path(),
+        "config/app.yaml",
+        b"name: plain\nvalues:\n  - 1\n  - 2\n",
+    );
+
+    let graph = cold_index(src.path());
+
+    assert_eq!(
+        node_names(&graph, NodeKind::Struct),
+        vec!["Pet".to_string()],
+        "the OpenAPI schema is indexed and the generic yaml adds no Struct"
+    );
+}
+
+/// Contract (C3 `SkipReason::NotUtf8`): a non-UTF-8 file name that would route
+/// under its lossy spelling is not parsed (the lossy name opens no file), and
+/// the graph records it as a `path-not-utf8` blind spot, so `ecp find` can say
+/// why the file is missing. A non-UTF-8 name that would not route is not
+/// source and records nothing.
+///
+/// Failed before this change: the walk dropped the file with no record.
+/// Linux only: APFS refuses a non-UTF-8 name (`EILSEQ`).
+#[cfg(target_os = "linux")]
+#[test]
+fn test_cold_index_non_utf8_routed_path_omitted_with_blind_spot() {
+    use std::os::unix::ffi::OsStrExt;
+    let src = tempfile::tempdir().unwrap();
+    write(src.path(), "ok.py", &python_of_size("ok_fn", 64));
+    let routed = std::ffi::OsStr::from_bytes(b"caf\xe9.py");
+    std::fs::write(src.path().join(routed), python_of_size("hidden_fn", 64)).unwrap();
+    let unrouted = std::ffi::OsStr::from_bytes(b"caf\xe9.md");
+    std::fs::write(src.path().join(unrouted), b"# title\n").unwrap();
+
+    let graph = cold_index(src.path());
+
+    let not_utf8: Vec<(String, String)> = blind_spots(&graph)
+        .into_iter()
+        .filter(|(kind, _)| kind == "path-not-utf8")
+        .collect();
+    assert_eq!(
+        not_utf8,
+        vec![(
+            "path-not-utf8".to_string(),
+            Path::new(routed).to_string_lossy().into_owned()
+        )],
+        "one record, for the routed name only"
+    );
+    let functions = node_names(&graph, NodeKind::Function);
+    assert!(functions.contains(&"ok_fn".to_string()), "{functions:?}");
+    assert!(
+        !functions.contains(&"hidden_fn".to_string()),
+        "{functions:?}"
+    );
+}
