@@ -60,12 +60,15 @@ pub struct ImpactArgs {
     #[arg(long, conflicts_with_all = ["name", "batch"])]
     pub baseline: Option<String>,
 
-    /// Disambiguate when name has multiple matches: substring on file path.
+    /// Select the declaration in this file. A file path that equals the value
+    /// ranks first, then one that ends with it, then one that contains it.
+    /// An ambiguous name returns candidates that you can re-run.
     /// `--file_path` / `--file-path` stay as aliases for back-compat.
     #[arg(long = "file", alias = "file_path", alias = "file-path")]
     pub file: Option<String>,
 
-    /// Disambiguate by kind (function | method | class | route | ...).
+    /// Select the declaration of one node kind (function | method | class | ...).
+    /// The kind filter applies before `--file` ranks the declarations.
     #[arg(long)]
     pub kind: Option<String>,
 

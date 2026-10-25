@@ -105,12 +105,14 @@ pub struct FindArgs {
     #[arg(long)]
     pub include_tests: bool,
 
-    /// Filter by node kinds (csv: function,method,class,...).
+    /// Select declarations of these node kinds (csv: function,method,class,...).
+    /// The kind filter applies before `--file` ranks the declarations.
     #[arg(long)]
     pub kind: Option<String>,
 
-    /// Disambiguate when name has multiple matches: substring on file path.
-    /// Same matching rule as `ecp impact --file`.
+    /// Select the declaration in this file. A file path that equals the value
+    /// ranks first, then one that ends with it, then one that contains it.
+    /// An ambiguous name returns candidates that you can re-run.
     #[arg(long)]
     pub file: Option<String>,
 
@@ -592,16 +594,17 @@ fn exact_candidates(
     request: &TargetRequest,
     kinds: Option<&[String]>,
 ) -> (Vec<Row>, Option<serde_json::Value>) {
-    let named = named_declarations(merged, request.name());
-    let picked: Vec<usize> = select(request, &named)
-        .into_iter()
-        .filter(|&i| {
-            kinds.is_none_or(|kinds| {
-                let kind = crate::commands::format::node_kind_to_str(&named[i].kind);
-                kinds.iter().any(|want| want.eq_ignore_ascii_case(kind))
-            })
-        })
-        .collect();
+    // The kind set narrows the declarations before `--file` ranks them, so a
+    // better file tier of another kind never hides a declaration of the kind
+    // asked for (C1: `--kind` and `--file` both constrain the target).
+    let mut named = named_declarations(merged, request.name());
+    if let Some(kinds) = kinds {
+        named.retain(|c| {
+            let kind = crate::commands::format::node_kind_to_str(&c.kind);
+            kinds.iter().any(|want| want.eq_ignore_ascii_case(kind))
+        });
+    }
+    let picked: Vec<usize> = select(request, &named);
 
     let mut constructors = ConstructorLookup::new(graph);
     let base_len = merged.base_len();

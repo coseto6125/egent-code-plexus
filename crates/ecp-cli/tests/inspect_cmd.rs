@@ -164,7 +164,7 @@ fn test_inspect_kind_selects_target_keeps_all_neighbours() {
 }
 
 #[test]
-fn inspect_kind_filter_drops_non_matching_edges() {
+fn test_inspect_neighbor_kind_function_drops_class_edges() {
     // `caller()` calls `Helper` (Class), `Helper().assist()` (Function), and
     // `target_fn` (Function). `--neighbor-kind function` must drop the Class
     // target. Contract: `function` stands for a neighbour kind here.
@@ -326,7 +326,7 @@ fn test_inspect_file_selects_target_keeps_cross_file_neighbours() {
 }
 
 #[test]
-fn inspect_file_path_filter_keeps_substring_matches() {
+fn test_inspect_neighbor_file_keeps_substring_edges() {
     // `caller` calls into both `src/auth/util.ts` and `src/billing/util.ts`.
     // `--neighbor-file src/auth/` must keep only the auth edges. Contract:
     // `src/auth/` stands for a neighbour path here.

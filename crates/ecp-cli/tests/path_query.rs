@@ -606,3 +606,52 @@ fn path_test_file_endpoint_is_found_from_either_end() {
     assert_eq!(down["found"].as_bool(), Some(true), "{down}");
     assert_eq!(up["found"].as_bool(), Some(true), "{up}");
 }
+
+/// Stands for: `path` and `impact` agree on the parts of a C# partial type.
+/// `Reader.Async.cs` is a non-representative part; `TextReader : Reader`
+/// gives an `Extends` edge that lands on the representative part. `impact` joins the parts at zero
+/// steps, so `path` from the async part reaches `TextReader` at one hop.
+/// Failed before: `shortest_path` did not join the parts and answered
+/// `found: false`.
+#[test]
+fn path_partial_type_non_representative_part_reaches_base_class() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "Lib/TextReader.cs",
+        "namespace Lib { public class TextReader : Reader { } }\n",
+    );
+    write(
+        tmp.path(),
+        "Lib/Reader.cs",
+        "namespace Lib { public partial class Reader { public int Read() { return 1; } } }\n",
+    );
+    write(
+        tmp.path(),
+        "Lib/Reader.Async.cs",
+        "namespace Lib { public partial class Reader { public int ReadAsync() { return 2; } } }\n",
+    );
+    init_and_analyze(tmp.path());
+
+    let out = run_path(
+        tmp.path(),
+        &[
+            "Reader",
+            "TextReader",
+            "--from-file",
+            "Reader.Async.cs",
+            "--direction",
+            "up",
+            "--depth",
+            "1",
+        ],
+    );
+
+    assert_eq!(out["found"].as_bool(), Some(true), "{out}");
+    let names = step_names(&out);
+    assert_eq!(
+        names.last().map(String::as_str),
+        Some("TextReader"),
+        "{out}"
+    );
+}

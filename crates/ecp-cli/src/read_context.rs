@@ -377,7 +377,7 @@ pub(crate) fn shell_word(word: &str) -> String {
     if !word.is_empty() && word.chars().all(safe) {
         return word.to_string();
     }
-    format!("'{}'", word.replace('\'', r"'\''"))
+    crate::background::shell_quote(word)
 }
 
 fn load(path: &Path, warm_attach: bool) -> Result<Engine, ReadContextError> {

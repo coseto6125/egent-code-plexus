@@ -2,7 +2,7 @@ use super::Direction;
 use crate::commands::format::{kind_to_str, node_kind_to_str, rel_type_to_str};
 use ecp_core::file_category::is_test_path;
 use ecp_core::file_category::Language;
-use ecp_core::graph::{ArchivedFileCategory, NodeKind, RelType};
+use ecp_core::graph::{ArchivedFileCategory, RelType};
 use ecp_core::session::{MergedEdge, MergedGraph, OverlayView};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{json, Value};
@@ -232,6 +232,22 @@ pub(crate) fn shortest_path<'g>(
             reached = Some(curr_idx);
             break;
         }
+        // The parts of a C# partial type are one type: they join at this
+        // depth, as `run_bfs` joins them, so `path` and `impact` agree.
+        for part in csharp_partial_parts(&merged, curr_idx) {
+            if let std::collections::hash_map::Entry::Vacant(slot) = pred.entry(part as usize) {
+                slot.insert(Some(Hop {
+                    from: curr_idx,
+                    via: PathEdge {
+                        rel: rel_type_to_str(RelType::PartOf),
+                        reason: rel_type_to_str(RelType::PartOf),
+                        confidence: 1.0,
+                        heuristic: false,
+                    },
+                }));
+                queue.push_front((part as usize, curr_depth));
+            }
+        }
         if curr_depth >= opts.depth {
             continue;
         }
@@ -294,6 +310,23 @@ pub(crate) fn shortest_path<'g>(
     }
     chain.reverse();
     Some(chain)
+}
+
+/// The other parts of the C# `partial` type that `idx` is a part of, or none
+/// for any other node. Only a C# type can have parts; the kind and path test
+/// spares every other node the edge scan.
+fn csharp_partial_parts(merged: &MergedGraph<'_>, idx: usize) -> Vec<u32> {
+    let is_csharp_type = merged.node(idx as u32).is_some_and(|node| {
+        node.kind().is_type()
+            && node
+                .file_path(merged)
+                .is_some_and(|f| Language::from_normalized_path(f) == Language::CSharp)
+    });
+    if is_csharp_type {
+        merged.partial_parts(idx as u32)
+    } else {
+        Vec::new()
+    }
 }
 
 /// Constructors an upstream walk from a Class / Struct start treats as the
@@ -390,14 +423,13 @@ pub(super) fn run_bfs<'g>(
 
     while let Some((curr_idx, curr_depth, via, via_heuristic)) = queue.pop_front() {
         // ── node emission (merged space: < base_len = base, else virtual) ──
-        let (uid, name, owner_class, kind_str, file_path, line, is_test, is_type): (
+        let (uid, name, owner_class, kind_str, file_path, line, is_test): (
             u64,
             String,
             Option<String>,
             &'static str,
             String,
             u32,
-            bool,
             bool,
         );
         if curr_idx < base_len {
@@ -420,7 +452,6 @@ pub(super) fn run_bfs<'g>(
                 .display_owner(curr_idx as u32)
                 .map(std::borrow::Cow::into_owned);
             kind_str = kind_to_str(&curr_node.kind);
-            is_type = NodeKind::from(&curr_node.kind).is_type();
             file_path = graph.files[file_idx]
                 .path
                 .resolve(&graph.string_pool)
@@ -441,7 +472,6 @@ pub(super) fn run_bfs<'g>(
             name = vn.name.clone();
             owner_class = vn.owner_class.clone();
             kind_str = node_kind_to_str(&vn.kind);
-            is_type = vn.kind.is_type();
             file_path = vn.rel_path.to_string();
             line = vn.start_line;
         }
@@ -477,18 +507,14 @@ pub(super) fn run_bfs<'g>(
         // The parts of a C# partial type are one type: every other part
         // joins the walk at this depth, in any direction and under any
         // relation filter, so a walk from any part reaches the same nodes.
-        // Only a C# type can have parts; the kind and path test spares every
-        // other node the edge scan.
-        if is_type && Language::from_normalized_path(&file_path) == Language::CSharp {
-            for part in merged.partial_parts(curr_idx as u32) {
-                if visited.insert(part as usize) {
-                    queue.push_front((
-                        part as usize,
-                        curr_depth,
-                        Some((rel_type_to_str(RelType::PartOf), 1.0)),
-                        via_heuristic,
-                    ));
-                }
+        for part in csharp_partial_parts(&merged, curr_idx) {
+            if visited.insert(part as usize) {
+                queue.push_front((
+                    part as usize,
+                    curr_depth,
+                    Some((rel_type_to_str(RelType::PartOf), 1.0)),
+                    via_heuristic,
+                ));
             }
         }
 
@@ -567,7 +593,7 @@ pub(super) fn run_bfs<'g>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ecp_core::graph::ArchivedZeroCopyGraph;
+    use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind};
     use ecp_core::graph_fixture::GraphFixture;
 
     /// nodes: 0 Reader (Reader.cs, the representative) · 1 Reader

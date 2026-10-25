@@ -680,8 +680,7 @@ pub(crate) fn ensure_fresh_with_rebuild(
         // the probe's set still names the entries it skipped.
         EnsureResult::Ready => {
             if let (Some(dir), Some(manifest)) = (&session_dir, &manifest) {
-                retire_unclaimed_entries(dir, manifest, &[])
-                    .map_err(|e| format!("L1 overlay retire: {e}"))?;
+                retire_unclaimed_best_effort(dir, manifest, &[]);
             }
             Ok(Ensured::current(
                 ready_dirty.or_else(|| DirtySet::from_events(Vec::new()).ok()),
@@ -804,8 +803,7 @@ pub(crate) fn ensure_fresh_with_rebuild(
                         write_head_sha_sidecar(graph_path, worktree_root);
                     }
                     if let (Some(dir), Some(manifest)) = (&session_dir, &manifest) {
-                        retire_unclaimed_entries(dir, manifest, &rel_paths)
-                            .map_err(|e| format!("L1 overlay retire: {e}"))?;
+                        retire_unclaimed_best_effort(dir, manifest, &rel_paths);
                     }
                     return Ok(Ensured::refreshed(dirty, size_cap));
                 }
@@ -898,8 +896,7 @@ pub(crate) fn ensure_fresh_with_rebuild(
                 )
                 .map_err(|e| format!("L1 overlay refresh: {e}"))?;
                 if let (Some(dir), Some(manifest)) = (&session_dir, &manifest) {
-                    retire_unclaimed_entries(dir, manifest, &rel_paths)
-                        .map_err(|e| format!("L1 overlay retire: {e}"))?;
+                    retire_unclaimed_best_effort(dir, manifest, &rel_paths);
                 }
                 // L1 overlay only touches dirty fragments under
                 // `<repo>/sessions/<sid>/` and does not rewrite graph.bin, but the
@@ -1544,6 +1541,20 @@ fn retire_unclaimed_entries(
         return Ok(());
     }
     crate::session::overlay_writer::retire_entries(session_dir, &stale).map(drop)
+}
+
+/// Retire is cleanup: the reader's mtime check already drops a stale entry.
+/// A lock timeout (`ecp admin gc` holds `overlay.lock`) or a read-only session
+/// dir must not turn a correct answer into `Error preparing index`, and must
+/// not skip the HEAD sidecar write that follows.
+fn retire_unclaimed_best_effort(
+    session_dir: &Path,
+    manifest: &ecp_core::session::DirtyEvents,
+    dirty_sources: &[String],
+) {
+    if let Err(e) = retire_unclaimed_entries(session_dir, manifest, dirty_sources) {
+        eprintln!("ecp: L1 overlay retire skipped: {e}");
+    }
 }
 
 /// The path up to the first `.` of its file name, without a trailing

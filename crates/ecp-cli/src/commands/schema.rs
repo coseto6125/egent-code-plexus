@@ -73,6 +73,8 @@ const CROSS_LANGUAGE_KINDS: &[&str] = &[
     ecp_analyzer::post_process::overrides::BS_KIND_OVERRIDE_BASE_AMBIGUOUS,
     ecp_analyzer::post_process::overrides::BS_KIND_OVERRIDE_HIERARCHY_INCOMPLETE,
     ecp_analyzer::resolution::builder::BS_KIND_ENTRY_POINT_AMBIGUOUS,
+    ecp_analyzer::route_detector::BS_KIND_ROUTE_UNBOUND_HANDLER,
+    ecp_analyzer::route_detector::BS_KIND_ROUTE_HANDLER_ABSENT,
 ];
 
 /// Per-lang inventory. Hardcoded because the per-parser `BLIND_SPEC`
@@ -99,7 +101,11 @@ const LANGUAGES: &[LangEntry] = &[
         name: "c_sharp",
         blindspot_emitter: Status::Implemented,
         indirect_dispatch: Status::None,
-        blind_kinds: &["cs-activator-create-instance", "cs-method-invoke"],
+        blind_kinds: &[
+            "cs-activator-create-instance",
+            "cs-method-invoke",
+            ecp_core::analyzer::csharp_extension::BS_KIND_UNRESOLVED,
+        ],
     },
     LangEntry {
         name: "dart",
@@ -320,7 +326,7 @@ const RELTYPES: &[RelTypeEntry] = &[
     RelTypeEntry { rel: RelType::HandlesRoute, name: "HandlesRoute", utility: "A", note: "Function/Method → Route. Materialised even for arrow / lambda handlers." },
     RelTypeEntry { rel: RelType::StepInProcess, name: "StepInProcess", utility: "B", note: "Workflow / Saga step linkage. Process node ↔ step function." },
     RelTypeEntry { rel: RelType::References, name: "References", utility: "C", note: "Generic reference fallback (entry-point scoring, type-annotation linkage). Reason field carries provenance." },
-    RelTypeEntry { rel: RelType::Fetches, name: "Fetches", utility: "A", note: "HTTP-client call site → Route. URL-match across files; reason encodes accessed keys + per-file count." },
+    RelTypeEntry { rel: RelType::Fetches, name: "Fetches", utility: "A", note: "consumer File → Route (URL match; the call site has no node). URL-match across files; reason encodes accessed keys + per-file count." },
     RelTypeEntry { rel: RelType::MirrorsField, name: "MirrorsField", utility: "A", note: "Heuristic ORM-field linkage from in-memory struct to SchemaField. Shown by default in heuristic_callers; --no-heuristic suppresses." },
     RelTypeEntry { rel: RelType::Publishes, name: "Publishes", utility: "A", note: "Producer (kafka.send / SNS publish / RabbitMQ basicPublish) → EventTopic." },
     RelTypeEntry { rel: RelType::Subscribes, name: "Subscribes", utility: "A", note: "Consumer (@KafkaListener / SQS receive) → EventTopic. Pair with Publishes for cross-service event flow." },

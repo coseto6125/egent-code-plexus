@@ -216,14 +216,14 @@ fn doc_text<'t>(text: &'t str, request: &TargetRequest) -> &'t str {
 }
 
 /// What the graph binds to the chosen declaration. An occurrence of the name
-/// is bound when it lies in the declaration's own span, when its innermost
-/// enclosing function refers to the declaration, or outside every function (imports,
-/// module-level code, class bodies). An occurrence inside any other function
+/// is bound when its innermost enclosing function refers to the declaration
+/// (the declaration itself and the constructors of a renamed type included),
+/// or outside every function (imports, module-level code, class bodies). The
+/// declaration's own span gets no exemption: a parameter named like the
+/// enclosing type shadows it. An occurrence inside any other function
 /// is another binding of the same spelling: a local, a parameter, a
 /// namesake.
 struct Binding<'a> {
-    target_file: &'a str,
-    target_lines: std::ops::RangeInclusive<u32>,
     /// The target's file and every file that holds a deterministic referrer.
     files: BTreeSet<&'a str>,
     /// Merged indices: the target and its deterministic referrers.
@@ -268,19 +268,30 @@ impl<'a> Binding<'a> {
                 }
             }
         }
+        let target_lines = node.start_line()..=node.end_line();
+        let callables = callable_spans(merged, &files);
+        // A constructor or destructor inside the target type is spelled like the type: its
+        // name is the declaration's own name, not a shadowing binding.
+        for &(start, end, idx) in callables.get(target_file).map_or(&[][..], Vec::as_slice) {
+            if target_lines.contains(&start)
+                && target_lines.contains(&end)
+                && merged.node(idx).is_some_and(|n| {
+                    let name = n.name(merged);
+                    (n.kind() == NodeKind::Constructor && name == target_name)
+                        || name.strip_prefix('~') == Some(target_name)
+                })
+            {
+                referrers.insert(idx);
+            }
+        }
         Self {
-            target_file,
-            target_lines: node.start_line()..=node.end_line(),
-            callables: callable_spans(merged, &files),
+            callables,
             files,
             referrers,
         }
     }
 
     fn binds(&self, file: &str, line: u32) -> bool {
-        if file == self.target_file && self.target_lines.contains(&line) {
-            return true;
-        }
         // The innermost enclosing function owns the occurrence: a nested
         // function's parameter shadows the name inside its referrer parent.
         let innermost = self

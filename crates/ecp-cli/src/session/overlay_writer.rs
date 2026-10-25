@@ -679,7 +679,34 @@ fn graph_content_hash(graph: &LocalGraph, worktree: &Path) -> u64 {
     if graph.content_hash != [0u8; 8] {
         return u64::from_le_bytes(graph.content_hash);
     }
-    xxh3_64(&fs::read(worktree.join(&graph.file_path)).unwrap_or_default())
+    hash_worktree_file(worktree, &graph.file_path)
+}
+
+/// The xxh3 of `rel` under `worktree`, streamed so an over-cap file is never
+/// loaded whole; the digest equals `xxh3_64` of the content. A file that is
+/// gone or unreadable hashes as empty. An unknown worktree root (an empty
+/// path) would resolve `rel` against the process cwd, so it yields the zero
+/// hash, which the promotion compare never matches.
+fn hash_worktree_file(worktree: &Path, rel: &Path) -> u64 {
+    use std::io::Read;
+    if worktree.as_os_str().is_empty() {
+        return 0;
+    }
+    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+    let mut buf = [0u8; 64 * 1024];
+    let Ok(mut file) = fs::File::open(worktree.join(rel)) else {
+        return xxh3_64(&[]);
+    };
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => return hasher.digest(),
+            Ok(n) => {
+                hasher.update(&buf[..n]);
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return xxh3_64(&[]),
+        }
+    }
 }
 
 static WRITE_BATCH_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -877,5 +904,43 @@ fn extract_symbols(path: &Path, file_str: &str) -> (Vec<SymbolRef>, bool) {
     match graphs.into_iter().next() {
         None => (vec![], true),
         Some(graph) => (symbols_from_graph(&graph, file_str), false),
+    }
+}
+
+#[cfg(test)]
+mod hash_tests {
+    use super::*;
+
+    /// Stands for: the streamed digest of an over-buffer file equals the
+    /// one-shot `xxh3_64` that `promotion.rs` compares with git's hash.
+    #[test]
+    fn test_hash_worktree_file_larger_than_buffer_matches_xxh3_64() {
+        let dir = tempfile::tempdir().unwrap();
+        let content: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        fs::write(dir.path().join("big.bin"), &content).unwrap();
+
+        let got = hash_worktree_file(dir.path(), Path::new("big.bin"));
+
+        assert_eq!(got, xxh3_64(&content));
+    }
+
+    /// Stands for: a file that is gone hashes as empty content, as before.
+    #[test]
+    fn test_hash_worktree_file_missing_hashes_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let got = hash_worktree_file(dir.path(), Path::new("gone.rs"));
+
+        assert_eq!(got, xxh3_64(&[]));
+    }
+
+    /// Stands for: an unknown worktree root never reads a cwd-relative path.
+    /// `Cargo.toml` exists in the test's cwd (the crate root); the hash is
+    /// the zero hash, not that file's digest.
+    #[test]
+    fn test_hash_worktree_file_unknown_root_returns_zero() {
+        let got = hash_worktree_file(Path::new(""), Path::new("Cargo.toml"));
+
+        assert_eq!(got, 0);
     }
 }

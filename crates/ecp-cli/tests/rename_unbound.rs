@@ -480,3 +480,66 @@ fn test_rename_unbound_zero_hits_refuses() {
     assert!(kept.status.success(), "{}", stderr(&kept));
     assert!(lists_unbound(&kept, "src/util.ts", 5), "{}", stdout(&kept));
 }
+
+const CS_SHADOW: &str =
+    "class Foo\n{\n    void M(int Foo)\n    {\n        System.Console.WriteLine(Foo);\n    }\n}\n";
+
+/// Stands for: the declaration's own span is no exemption. A parameter named
+/// like the enclosing type, and its use, are another binding: the rename
+/// refuses and lists lines 3 and 5. Failed before: any line inside the type's
+/// span counted as bound, so the parameter was rewritten silently.
+#[test]
+fn test_rename_unbound_param_shadowing_enclosing_type_refuses() {
+    let repo = Repo::indexed(&[("Foo.cs", CS_SHADOW)]);
+
+    let out = repo.ecp(&["rename", "Foo", "Bar"]);
+
+    assert_unbound_refusal(&out);
+    assert!(lists_unbound(&out, "Foo.cs", 3), "{}", stdout(&out));
+    assert!(lists_unbound(&out, "Foo.cs", 5), "{}", stdout(&out));
+    assert_eq!(repo.read("Foo.cs"), CS_SHADOW);
+}
+
+/// Stands for: `--leave-unbound` renames the type and keeps the shadowing
+/// parameter and its use byte-identical.
+#[test]
+fn test_rename_unbound_param_shadowing_leave_unbound_keeps_parameter() {
+    let repo = Repo::indexed(&[("Foo.cs", CS_SHADOW)]);
+
+    let out = repo.ecp(&["rename", "Foo", "Bar", "--leave-unbound"]);
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        repo.read("Foo.cs"),
+        CS_SHADOW.replacen("class Foo", "class Bar", 1)
+    );
+}
+
+/// Stands for: a constructor is spelled like its type, so renaming the type
+/// renames the constructor and does not refuse as an unbound namesake.
+#[test]
+fn test_rename_type_constructor_follows_type() {
+    let src = "class Foo\n{\n    public Foo()\n    {\n    }\n}\n";
+    let repo = Repo::indexed(&[("Foo.cs", src)]);
+
+    let out = repo.ecp(&["rename", "Foo", "Bar"]);
+
+    assert!(out.status.success(), "{} {}", stderr(&out), stdout(&out));
+    assert_eq!(
+        repo.read("Foo.cs"),
+        "class Bar\n{\n    public Bar()\n    {\n    }\n}\n"
+    );
+}
+
+/// Stands for: a recursive method's own call is bound through the method
+/// itself, so both the declaration and the recursive call are renamed.
+#[test]
+fn test_rename_recursive_method_renames_own_call() {
+    let src = "class C\n{\n    int Fact(int n)\n    {\n        return n <= 1 ? 1 : n * Fact(n - 1);\n    }\n}\n";
+    let repo = Repo::indexed(&[("C.cs", src)]);
+
+    let out = repo.ecp(&["rename", "Fact", "Fib"]);
+
+    assert!(out.status.success(), "{} {}", stderr(&out), stdout(&out));
+    assert_eq!(repo.read("C.cs"), src.replace("Fact", "Fib"));
+}
