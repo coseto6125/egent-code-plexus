@@ -424,8 +424,9 @@ mod tests {
 
     /// Stands for: the parts of one C# partial type are one target. `--kind
     /// class` selects the representative; `--file` still selects one part;
-    /// a constructor beside the parts keeps the bare name ambiguous; two
-    /// same-named types with no part relation stay ambiguous. Before the fix
+    /// the bare name selects the representative over its own constructor
+    /// (C1 bare-name rule); two same-named types with no part relation stay
+    /// ambiguous. Before the fix
     /// `--kind class` listed both parts as an ambiguity.
     #[test]
     fn test_resolve_target_partial_parts_resolve_to_representative() {
@@ -449,10 +450,7 @@ mod tests {
             )),
             Some(1)
         );
-        assert!(matches!(
-            resolve(&merged, "Reader", None, None),
-            TargetResolution::Ambiguous(a) if a.total() == 3
-        ));
+        assert_eq!(node(resolve(&merged, "Reader", None, None)), Some(0));
         assert!(matches!(
             resolve(&merged, "Writer", Some("class"), None),
             TargetResolution::Ambiguous(a) if a.total() == 2

@@ -257,8 +257,8 @@ fn test_overlay_chained_call_dirty_overloads_matches_reindex_without_gap() {
 /// Both files dirty: the dirty `GetType` carries its own flags. The overlay
 /// matches the reindex and reports no access gap, since no refusal rests on
 /// a guess. `content.GetType()` on an `object` is an untyped member (P-recv): no
-/// target reaches the access rule, and the extension retry reports that a
-/// dirty file declares a `GetType` whose flags it cannot read.
+/// target reaches the access rule, and the extension retry reports no gap:
+/// the dirty `GetType` carries flags that say it is no extension.
 #[test]
 fn test_overlay_dirty_target_access_matches_reindex_without_access_gap() {
     let provider = CSharpProvider::new().unwrap();
@@ -287,7 +287,7 @@ fn test_overlay_dirty_target_access_matches_reindex_without_access_gap() {
         "{gaps:?}"
     );
     assert!(
-        gaps.iter().any(|gap| gap.caller == "ValidateContent"
+        !gaps.iter().any(|gap| gap.caller == "ValidateContent"
             && gap.member == "GetType"
             && gap.reason == GAP_CS_EXTENSION_DIRTY_DECLARATION),
         "{gaps:?}"
