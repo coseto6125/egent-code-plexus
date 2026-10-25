@@ -2286,6 +2286,7 @@ mod tests {
         let scores = [0.4_f32, 0.9, 0.2, 0.8, 0.7];
         for (i, &s) in scores.iter().enumerate() {
             let h = OrderedHit {
+                exact_substring: false,
                 score_bits: s.to_bits(),
                 repo: None,
                 file: "f".into(),
