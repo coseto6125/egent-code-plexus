@@ -397,9 +397,9 @@ pub fn write_dirty_events(
 
 /// The lock a writer holds while it publishes fragment bins and commits the
 /// manifest that names them, and `admin gc` holds while it judges a bin
-/// orphan and deletes it. A bin's name is its content hash, so without the
-/// lock gc could delete a bin a writer had just re-published under the name
-/// gc judged orphan.
+/// orphan and deletes it. A bin's name derives from its route key and content
+/// hash alone, so without the lock gc could delete a bin a writer had just
+/// re-published under the name gc judged orphan.
 pub fn overlay_lock_path(session_dir: &Path) -> PathBuf {
     session_dir.join("overlay.lock")
 }

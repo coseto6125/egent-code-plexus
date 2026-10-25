@@ -1,6 +1,6 @@
 //! `admin gc` and the overlay writer meet at a session's fragment bins. A
-//! bin's name is its content hash, so a writer can re-publish the very bin gc
-//! judged orphan; the overlay lock orders the two, and the freshness gate
+//! bin's name derives from its route key and content hash alone, so a writer
+//! can re-publish the very bin gc judged orphan; the overlay lock orders the two, and the freshness gate
 //! re-parses a file whose bin is gone whatever removed it.
 
 use ecp_core::session::{layout, DirtyEvents, SessionMeta};
@@ -37,7 +37,19 @@ fn test_write_dirty_fragments_from_graphs_overlay_lock_held_publishes_after_rele
     )
     .unwrap();
     let hash = [7u8; 8];
-    let bin = layout::fragment_path(&session, &format!("{:016x}", u64::from_le_bytes(hash)));
+    let fragments = layout::fragment_path(&session, "x")
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let bins = || {
+        std::fs::read_dir(&fragments)
+            .map(|dir| {
+                dir.flatten()
+                    .filter(|e| e.path().extension().is_some_and(|x| x == "bin"))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
     let writer = {
         let session = session.clone();
         std::thread::spawn(move || {
@@ -54,17 +66,19 @@ fn test_write_dirty_fragments_from_graphs_overlay_lock_held_publishes_after_rele
         })
     };
     std::thread::sleep(std::time::Duration::from_millis(300));
-    assert!(
-        !bin.exists(),
-        "a bin was published while gc held the session"
-    );
+    assert_eq!(bins(), 0, "a bin was published while gc held the session");
     assert!(
         !layout::dirty_events_path(&session).exists(),
         "a manifest was committed while gc held the session"
     );
     drop(held);
     writer.join().unwrap().unwrap();
-    assert!(bin.exists(), "the writer never published after the release");
+    let manifest = DirtyEvents::read(&layout::dirty_events_path(&session)).unwrap();
+    let id = manifest.entries["a.py"].fragment_id.clone().unwrap();
+    assert!(
+        layout::fragment_path(&session, &id).exists(),
+        "the writer never published after the release"
+    );
 }
 
 fn run(cmd: &mut Command, label: &str) -> std::process::Output {
