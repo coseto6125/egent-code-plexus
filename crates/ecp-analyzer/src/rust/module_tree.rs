@@ -26,6 +26,10 @@
 //!   as BlindSpot if encountered.
 
 use ecp_core::analyzer::rust_paths::rust_module_dir;
+use ecp_core::contracts::workspace::{
+    ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Scope, ScopeId, ScopeName,
+    WorkspaceFacts,
+};
 use ecp_core::registry::uid_path;
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
@@ -165,6 +169,9 @@ pub struct RustWorkspaceModTree {
     /// Repo-relative file → each `(index into targets, mod_path)` that
     /// declares it. A module both the lib and a bin declare has two entries.
     file_targets: FxHashMap<String, Vec<(usize, Vec<String>)>>,
+    /// Contract C2's Cargo rows, from the manifest parse above: one scope
+    /// per workspace member, and the names that reach it.
+    workspace: WorkspaceFacts,
 }
 
 /// One Cargo target's modules, `mod_path → repo-relative file`.
@@ -190,6 +197,7 @@ impl RustWorkspaceModTree {
             file_to_crate: FxHashMap::default(),
             targets: Vec::new(),
             file_targets: FxHashMap::default(),
+            workspace: WorkspaceFacts::default(),
         };
         let root_toml = workspace_root.join("Cargo.toml");
         let Some(raw) = read_file(&root_toml) else {
@@ -203,6 +211,7 @@ impl RustWorkspaceModTree {
             members
         };
         let mut fallbacks = Vec::new();
+        let mut rows = CargoRows::default();
         for crate_dir in members {
             let manifest = if crate_dir == workspace_root {
                 Some(raw.clone())
@@ -218,7 +227,15 @@ impl RustWorkspaceModTree {
             };
             let (tree, reexports) = build_mod_tree_and_reexports(&entry_path);
             out.add_target(&tree);
-            for bin_root in bin_roots(&crate_dir, &entry_path) {
+            let bins = bin_roots(&crate_dir, &entry_path);
+            rows.add_member(
+                &out.workspace_canon,
+                &crate_dir,
+                crate_dir != workspace_root,
+                std::iter::once(&entry_path).chain(&bins),
+                &manifest,
+            );
+            for bin_root in bins {
                 let bin_scope = build_mod_tree_and_reexports(&bin_root);
                 let index = out.add_target(&bin_scope.0);
                 out.targets[index].bin_scope = Some(bin_scope);
@@ -251,8 +268,15 @@ impl RustWorkspaceModTree {
         for (alias, entry) in fallbacks {
             out.crates.entry(alias).or_insert(entry);
         }
+        out.workspace = rows.finish();
 
         out
+    }
+
+    /// Contract C2's Cargo rows of this workspace, for `graph.bin`. Empty
+    /// without a root `Cargo.toml`.
+    pub fn workspace_facts(&self) -> &WorkspaceFacts {
+        &self.workspace
     }
 
     /// Resolve a Rust FQN call to the file path (repo-relative) of the
@@ -1005,6 +1029,122 @@ fn parse_workspace_members(cargo_toml: &str, workspace_root: &Path) -> Vec<PathB
     members
 }
 
+/// The C2 rows [`RustWorkspaceModTree::build`] collects, in member order:
+/// each registered member's scope, the name code writes for it, and the
+/// package-name spellings it claims first.
+#[derive(Default)]
+struct CargoRows {
+    members: Vec<(Scope, String, Vec<String>)>,
+}
+
+impl CargoRows {
+    /// Record a member the module tree registers. `entries` are its target
+    /// roots, the lib entry first. A member outside the workspace root
+    /// (`members = ["../x"]`), or a second listing of one directory, gets no
+    /// row: the table holds repo-relative paths, one scope per root.
+    fn add_member<'p>(
+        &mut self,
+        workspace_canon: &Path,
+        crate_dir: &Path,
+        under_workspace_manifest: bool,
+        mut entries: impl Iterator<Item = &'p PathBuf>,
+        manifest: &CrateManifest,
+    ) {
+        let rel = |path: &Path| {
+            let canon = path.canonicalize().ok()?;
+            uid_path(&canon, workspace_canon)
+                .ok()
+                .filter(|rel| !rel.contains('\\'))
+        };
+        let Some(root) = rel(crate_dir) else {
+            return;
+        };
+        let Some(lib_entry) = entries.next().and_then(|entry| rel(entry.as_path())) else {
+            return;
+        };
+        if self.members.iter().any(|(scope, ..)| scope.root == root) {
+            return;
+        }
+        let entry_files: Vec<String> = std::iter::once(lib_entry)
+            .chain(entries.filter_map(|entry| rel(entry.as_path())))
+            .collect();
+        let manifest_path = if root.is_empty() {
+            "Cargo.toml".to_string()
+        } else {
+            format!("{root}/Cargo.toml")
+        };
+        let read = |path: String| ConfigRead {
+            path,
+            presence: ConfigPresence::Read,
+        };
+        let mut config_files = vec![read(manifest_path)];
+        if under_workspace_manifest {
+            config_files.push(read("Cargo.toml".to_string()));
+        }
+        // The same keys `build` gives `crates`: the code name, then the
+        // package spellings that no earlier member claimed.
+        let package_norm = manifest.name.replace('-', "_");
+        let code_name = manifest
+            .lib_name
+            .clone()
+            .unwrap_or_else(|| package_norm.clone());
+        let mut alternates = Vec::new();
+        for alias in [manifest.name.clone(), package_norm] {
+            if alias != code_name
+                && !alternates.contains(&alias)
+                && !self
+                    .members
+                    .iter()
+                    .any(|(_, _, taken)| taken.contains(&alias))
+            {
+                alternates.push(alias);
+            }
+        }
+        let scope = Scope {
+            ecosystem: Ecosystem::Cargo,
+            root,
+            config_files,
+            membership: Membership::Subtree,
+            entry_files,
+            aliases: Vec::new(),
+            search_roots: Vec::new(),
+            dependencies: Vec::new(),
+        };
+        self.members.push((scope, code_name, alternates));
+    }
+
+    /// The table. Two members with one code name keep both `Primary` rows,
+    /// so a reader sees the name as ambiguous.
+    fn finish(self) -> WorkspaceFacts {
+        let mut members = self.members;
+        members.sort_by(|a, b| a.0.root.cmp(&b.0.root));
+        let mut names: Vec<ScopeName> = Vec::new();
+        for (id, (_, primary, alternates)) in members.iter().enumerate() {
+            let scope = ScopeId(id as u32);
+            let ranked = std::iter::once((primary, NameRank::Primary))
+                .chain(alternates.iter().map(|alias| (alias, NameRank::Alternate)));
+            names.extend(
+                ranked
+                    .filter(|(name, _)| !name.trim().is_empty())
+                    .map(|(name, rank)| ScopeName {
+                        ecosystem: Ecosystem::Cargo,
+                        name: name.clone(),
+                        rank,
+                        scope,
+                    }),
+            );
+        }
+        names.sort_by(|a, b| {
+            (a.ecosystem, &a.name, a.rank, a.scope).cmp(&(b.ecosystem, &b.name, b.rank, b.scope))
+        });
+        names.dedup();
+        let scopes = members.into_iter().map(|(scope, ..)| scope).collect();
+        // Every reader refuses a table that breaks C2's invariants, so store
+        // none rather than rows nobody may read.
+        WorkspaceFacts::new(scopes, names).unwrap_or_default()
+    }
+}
+
 struct CrateManifest {
     name: String,
     lib_name: Option<String>,
@@ -1079,6 +1219,7 @@ fn read_file(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ecp_core::contracts::workspace::NameLookup;
     use std::fs;
     use tempfile::TempDir;
 
@@ -1506,5 +1647,177 @@ mod tests {
         let dir = make_tree(&[("src/lib.rs", "pub mod a;\n"), ("src/a.rs", "")]);
         let tree = RustWorkspaceModTree::build(dir.path());
         assert_eq!(tree.anchored_module_file("src/a.rs", "crate"), None);
+    }
+
+    /// `(name, rank, scope root)` of every name row, in table order.
+    fn name_rows(facts: &WorkspaceFacts) -> Vec<(&str, NameRank, &str)> {
+        facts
+            .names
+            .iter()
+            .map(|entry| {
+                (
+                    entry.name.as_str(),
+                    entry.rank,
+                    facts.scopes[entry.scope.index()].root.as_str(),
+                )
+            })
+            .collect()
+    }
+
+    fn config_paths(scope: &Scope) -> Vec<&str> {
+        scope
+            .config_files
+            .iter()
+            .map(|config| {
+                assert_eq!(config.presence, ConfigPresence::Read, "{}", config.path);
+                config.path.as_str()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_workspace_facts_members_mirror_crates_map_keys() {
+        let dir = make_tree(&[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"crates/b\", \"crates/a\", \"crates/b\", \"crates/nolib\"]\n",
+            ),
+            ("crates/a/Cargo.toml", "[package]\nname = \"a-core\"\n"),
+            ("crates/a/src/lib.rs", ""),
+            ("crates/a/src/main.rs", "fn main() {}\n"),
+            ("crates/a/src/bin/tool.rs", "fn main() {}\n"),
+            (
+                "crates/b/Cargo.toml",
+                "[package]\nname = \"b\"\n\n[lib]\nname = \"other\"\n",
+            ),
+            ("crates/b/src/lib.rs", ""),
+            ("crates/nolib/Cargo.toml", "[package]\nname = \"nolib\"\n"),
+        ]);
+        let tree = RustWorkspaceModTree::build(dir.path());
+        let facts = tree.workspace_facts();
+        assert_eq!(facts.validate(), Ok(()));
+        let scopes: Vec<(&str, Vec<&str>, Vec<&str>)> = facts
+            .scopes
+            .iter()
+            .map(|scope| {
+                assert_eq!(scope.ecosystem, Ecosystem::Cargo);
+                assert_eq!(scope.membership, Membership::Subtree);
+                (
+                    scope.root.as_str(),
+                    config_paths(scope),
+                    scope.entry_files.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            scopes,
+            vec![
+                (
+                    "crates/a",
+                    vec!["crates/a/Cargo.toml", "Cargo.toml"],
+                    vec![
+                        "crates/a/src/lib.rs",
+                        "crates/a/src/main.rs",
+                        "crates/a/src/bin/tool.rs",
+                    ],
+                ),
+                (
+                    "crates/b",
+                    vec!["crates/b/Cargo.toml", "Cargo.toml"],
+                    vec!["crates/b/src/lib.rs"],
+                ),
+            ],
+            "sorted by root; the repeated member once; the member without a target none"
+        );
+        assert_eq!(
+            name_rows(facts),
+            vec![
+                ("a-core", NameRank::Alternate, "crates/a"),
+                ("a_core", NameRank::Primary, "crates/a"),
+                ("b", NameRank::Alternate, "crates/b"),
+                ("other", NameRank::Primary, "crates/b"),
+            ]
+        );
+        // Every name the table answers is a key the index resolves through.
+        for name in ["a-core", "a_core", "b", "other"] {
+            assert!(tree.crates.contains_key(name), "{name}");
+        }
+        assert_eq!(
+            facts.lookup_name(Ecosystem::Cargo, "nolib"),
+            NameLookup::Missing
+        );
+    }
+
+    #[test]
+    fn test_workspace_facts_single_package_root_scope_is_repo_root() {
+        let dir = make_tree(&[
+            ("Cargo.toml", "[package]\nname = \"tool\"\n"),
+            ("src/lib.rs", ""),
+        ]);
+        let tree = RustWorkspaceModTree::build(dir.path());
+        let facts = tree.workspace_facts();
+        assert_eq!(facts.validate(), Ok(()));
+        assert_eq!(facts.scopes.len(), 1);
+        assert_eq!(facts.scopes[0].root, "");
+        assert_eq!(config_paths(&facts.scopes[0]), vec!["Cargo.toml"]);
+        assert_eq!(facts.scopes[0].entry_files, vec!["src/lib.rs".to_string()]);
+        assert_eq!(name_rows(facts), vec![("tool", NameRank::Primary, "")]);
+    }
+
+    #[test]
+    fn test_workspace_facts_duplicate_code_name_keeps_both_rows() {
+        let dir = make_tree(&[
+            ("Cargo.toml", "[workspace]\nmembers = [\"x1\", \"x2\"]\n"),
+            ("x1/Cargo.toml", "[package]\nname = \"dup\"\n"),
+            ("x1/src/lib.rs", ""),
+            ("x2/Cargo.toml", "[package]\nname = \"dup\"\n"),
+            ("x2/src/lib.rs", ""),
+        ]);
+        let tree = RustWorkspaceModTree::build(dir.path());
+        let facts = tree.workspace_facts();
+        assert_eq!(
+            name_rows(facts),
+            vec![
+                ("dup", NameRank::Primary, "x1"),
+                ("dup", NameRank::Primary, "x2"),
+            ]
+        );
+        assert_eq!(
+            facts.lookup_name(Ecosystem::Cargo, "dup"),
+            NameLookup::Ambiguous { count: 2 }
+        );
+    }
+
+    #[test]
+    fn test_workspace_facts_outside_member_and_blank_name_get_no_row() {
+        let dir = make_tree(&[
+            (
+                "ws/Cargo.toml",
+                "[workspace]\nmembers = [\"../ext\", \"blank\", \"ok\"]\n",
+            ),
+            ("ext/Cargo.toml", "[package]\nname = \"ext\"\n"),
+            ("ext/src/lib.rs", ""),
+            ("ws/blank/Cargo.toml", "[package]\nname = \" \"\n"),
+            ("ws/blank/src/lib.rs", ""),
+            ("ws/ok/Cargo.toml", "[package]\nname = \"ok\"\n"),
+            ("ws/ok/src/lib.rs", ""),
+        ]);
+        let tree = RustWorkspaceModTree::build(&dir.path().join("ws"));
+        let facts = tree.workspace_facts();
+        assert_eq!(facts.validate(), Ok(()));
+        let roots: Vec<&str> = facts.scopes.iter().map(|s| s.root.as_str()).collect();
+        assert_eq!(
+            roots,
+            vec!["blank", "ok"],
+            "`../ext` has no repo-relative root"
+        );
+        assert_eq!(name_rows(facts), vec![("ok", NameRank::Primary, "ok")]);
+    }
+
+    #[test]
+    fn test_workspace_facts_without_manifest_is_empty() {
+        let dir = make_tree(&[("src/lib.rs", ""), ("pkg/m.py", "")]);
+        let tree = RustWorkspaceModTree::build(dir.path());
+        assert_eq!(tree.workspace_facts(), &WorkspaceFacts::default());
     }
 }

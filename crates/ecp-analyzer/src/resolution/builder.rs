@@ -359,6 +359,11 @@ impl GraphBuilder {
         let mod_tree: Option<RustWorkspaceModTree> =
             self.repo_root.as_deref().map(RustWorkspaceModTree::build);
         let mod_tree_ctx = mod_tree.as_ref().zip(self.repo_root.as_deref());
+        // The overlay's crate heads: the rows the tree's manifest parse made.
+        let workspace = mod_tree
+            .as_ref()
+            .map(|tree| tree.workspace_facts().clone())
+            .unwrap_or_default();
         let reexports = ReexportIndex::build(&self.local_graphs, &symbol_table, &self.path_aliases);
 
         let _t_pass19 = std::time::Instant::now();
@@ -872,6 +877,7 @@ impl GraphBuilder {
             module_facts,
             alias_table,
             supertype_table,
+            workspace,
         }
         .finish();
 

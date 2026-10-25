@@ -4280,14 +4280,18 @@ struct Scope<'c> {
 }
 
 /// File-backed Rust modules use the same crate/self/super layout as Pass 2.
-/// Unknown heads stay unresolved: stripping a path would bind external
-/// calls such as `std::fs::read` to unrelated project functions.
+/// A `<crate_name>::` head starts at that crate's entry file from the
+/// index's crate table. Other heads stay unresolved: stripping a path would
+/// bind external calls such as `std::fs::read` to unrelated project
+/// functions.
 /// File-layout evidence shared by all qualified lookups in one overlay build.
 /// Dirty declarations replace archived declarations, including deletion.
 struct RustModules<'a> {
     graph: &'a ArchivedZeroCopyGraph,
     dirty: FxHashMap<&'a str, &'a OverlayFileInput>,
     roots: Vec<&'a str>,
+    /// The `graph.bin` workspace facts, read once per view.
+    crates: crate::contracts::workspace::WorkspaceFacts,
 }
 
 impl<'a> RustModules<'a> {
@@ -4327,7 +4331,24 @@ impl<'a> RustModules<'a> {
             graph,
             dirty,
             roots,
+            crates: graph.workspace_facts(),
         }
+    }
+
+    /// The entry file of the workspace crate that code names `head`: the
+    /// index module tree's `<crate_name>::` head. `None` for a head the index
+    /// treats as external, for a name no member carries, and for a name two
+    /// members carry: the table keeps both rows and none is picked.
+    fn crate_head(&self, head: &str) -> Option<&'a str> {
+        use crate::contracts::workspace::{Ecosystem, NameLookup};
+        if matches!(head, "std" | "core" | "alloc" | "proc_macro" | "test") {
+            return None;
+        }
+        let NameLookup::Unique(id) = self.crates.lookup_name(Ecosystem::Cargo, head) else {
+            return None;
+        };
+        let entry = self.crates.scope(id)?.entry_files.first()?;
+        self.file(std::path::Path::new(entry))
     }
 
     fn file(&self, path: &std::path::Path) -> Option<&'a str> {
@@ -4440,13 +4461,15 @@ impl<'a> RustModules<'a> {
                 chain[at]
             }
             _ if !module.contains("::") => {
-                let child = self.child(chain[at], head)?;
+                let Some(child) = self.child(chain[at], head) else {
+                    return self.crate_head(head);
+                };
                 // The full resolver handles simple declared heads through its
-                // file-stem tier; nested unanchored paths remain unresolved.
+                // file-stem tier.
                 return (std::path::Path::new(child).file_stem()?.to_str()? == head)
                     .then_some(child);
             }
-            _ => return None,
+            _ => self.crate_head(head)?,
         };
         for part in parts {
             file = self.child(file, part)?;

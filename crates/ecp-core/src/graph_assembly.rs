@@ -13,6 +13,7 @@
 //! `CallMeta::edge_idx`. Callers hand over what they know; the invariants
 //! are applied once, here.
 
+use crate::contracts::workspace::WorkspaceFacts;
 use crate::graph::{
     BlindSpotRecord, CallMeta, Edge, ExportAliasFact, File, FunctionMeta, ImportFact,
     NameIndexEntry, Node, NodeKind, PathAliasFact, RouteMiddleware, RouteShape, SupertypeFact,
@@ -67,6 +68,8 @@ pub struct GraphAssembly {
     /// Any order. Sorted by `node_idx` by `finish`, which keeps the first
     /// entry of a repeated Route.
     pub route_middleware: Vec<RouteMiddleware>,
+    /// Contract C2's workspace facts; stored as given.
+    pub workspace: WorkspaceFacts,
 }
 
 /// The import / export facts of each file and node, as the builder records
@@ -107,6 +110,7 @@ impl Default for GraphAssembly {
             alias_table: Vec::new(),
             supertype_table: Vec::new(),
             route_middleware: Vec::new(),
+            workspace: WorkspaceFacts::default(),
         }
     }
 }
@@ -133,6 +137,7 @@ impl GraphAssembly {
             alias_table,
             mut supertype_table,
             mut route_middleware,
+            workspace,
         } = self;
 
         assert!(
@@ -294,6 +299,7 @@ impl GraphAssembly {
             alias_table,
             supertype_table,
             route_middleware,
+            workspace,
         }
     }
 }

@@ -1275,6 +1275,14 @@ pub struct ZeroCopyGraph {
     /// Sparse, sorted by `node_idx`: one entry per Route with at least one
     /// middleware.
     pub route_middleware: Vec<RouteMiddleware>,
+
+    // ── Schema v16 additions ─────────────────────────────────────────
+    /// Contract C2's workspace facts: one Cargo scope per workspace member
+    /// and the crate names that reach it, from the manifest parse the
+    /// index's module tree ran. The overlay reads it to resolve a
+    /// `<crate_name>::path::f()` head like the index's module-tree tier.
+    /// Empty for a repo with no root `Cargo.toml`.
+    pub workspace: crate::contracts::workspace::WorkspaceFacts,
 }
 
 impl ZeroCopyGraph {
@@ -1471,6 +1479,19 @@ impl ArchivedZeroCopyGraph {
             .unwrap_or_default()
     }
 
+    /// The stored workspace facts, owned. A table that fails
+    /// [`WorkspaceFacts::validate`](crate::contracts::workspace::WorkspaceFacts::validate)
+    /// reads as empty: a reader must not resolve through rows that break
+    /// the contract's invariants.
+    pub fn workspace_facts(&self) -> crate::contracts::workspace::WorkspaceFacts {
+        rkyv::deserialize::<crate::contracts::workspace::WorkspaceFacts, rkyv::rancor::Error>(
+            &self.workspace,
+        )
+        .ok()
+        .filter(|facts| facts.validate().is_ok())
+        .unwrap_or_default()
+    }
+
     pub fn is_es_module_file(&self, file_idx: u32) -> bool {
         self.file_flags
             .get(file_idx as usize)
@@ -1564,6 +1585,7 @@ impl Default for ZeroCopyGraph {
             alias_table: Vec::new(),
             supertype_table: Vec::new(),
             route_middleware: Vec::new(),
+            workspace: Default::default(),
         }
     }
 }
