@@ -1,6 +1,5 @@
 use super::Direction;
 use crate::commands::format::{kind_to_str, node_kind_to_str, rel_type_to_str};
-use crate::commands::symbol_id::resolve_owner_class;
 use ecp_core::file_category::is_test_path;
 use ecp_core::graph::ArchivedFileCategory;
 use ecp_core::session::{MergedEdge, MergedGraph, OverlayView};
@@ -405,7 +404,9 @@ pub(super) fn run_bfs<'g>(
             }
             uid = curr_node.uid.to_native();
             name = curr_node.name.resolve(&graph.string_pool).to_string();
-            owner_class = resolve_owner_class(graph, curr_idx).map(str::to_owned);
+            owner_class = merged
+                .display_owner(curr_idx as u32)
+                .map(std::borrow::Cow::into_owned);
             kind_str = kind_to_str(&curr_node.kind);
             file_path = graph.files[file_idx]
                 .path

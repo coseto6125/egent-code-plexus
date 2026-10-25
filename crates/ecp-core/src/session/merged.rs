@@ -130,6 +130,21 @@ impl<'a> MergedGraph<'a> {
         }
     }
 
+    /// The owner text a reader prints for merged-space `idx` (design A 4.5):
+    /// [`ArchivedZeroCopyGraph::display_owner`] for a base node, the stored
+    /// owner for a virtual node (the overlay carries no lexical parents).
+    /// Matching reads [`MergedNode::owner_class`] instead.
+    #[inline]
+    pub fn display_owner(&self, idx: u32) -> Option<std::borrow::Cow<'a, str>> {
+        if idx < self.base_len() {
+            self.graph.display_owner(idx)
+        } else {
+            self.node(idx)?
+                .owner_class(self)
+                .map(std::borrow::Cow::Borrowed)
+        }
+    }
+
     /// Scan visibility of a BASE index: false when the view suppressed it
     /// (deleted on disk) or replaced it (its virtual twin scans instead).
     #[inline]

@@ -282,7 +282,7 @@ fn build_inspect_block(
 
         let entry = serde_json::json!({
             "name": target_node.name(merged),
-            "ownerClass": target_node.owner_class(merged),
+            "ownerClass": merged.display_owner(edge.target),
             "kind": target_kind,
             "filePath": target_file_path,
             "reason": edge.reason(merged),
@@ -333,7 +333,7 @@ fn build_inspect_block(
 
             let mut entry = serde_json::json!({
                 "name": source_node.name(merged),
-                "ownerClass": source_node.owner_class(merged),
+                "ownerClass": merged.display_owner(edge.source),
                 "kind": source_kind,
                 "filePath": source_file_path,
                 "reason": edge.reason(merged),
@@ -410,7 +410,7 @@ fn build_inspect_block(
     let mut block = serde_json::json!({
         "symbol": {
             "name": node.name(merged),
-            "ownerClass": node.owner_class(merged),
+            "ownerClass": merged.display_owner(idx),
             "kind": node_kind_to_str(&kind),
             "filePath": file_path_str,
             "startLine": node.start_line(),

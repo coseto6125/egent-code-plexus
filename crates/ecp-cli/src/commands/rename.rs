@@ -2,7 +2,7 @@
 //!
 //! Pipeline:
 //! 1. **Plan (graph)**: resolve the target through the one target resolver
-//!    (`read_context::resolve_target`), with the overlay, collect inbound-edge
+//!    (`resolve_rename_target`), with the overlay, collect inbound-edge
 //!    source files + the target's own file. Refuses an ambiguous target, and
 //!    refuses to write from a warm-attached graph.
 //! 2. **Verify (AST)**: tree-sitter parse each affected file, find every
@@ -25,11 +25,13 @@
 //! 6. **Pre-flight collision detection**: warn if new name already exists in
 //!    the graph before the rename runs (especially in dry-run).
 
-use crate::read_context::{ambiguity_candidates, resolve_target, target_request};
+use crate::read_context::{ambiguity_candidates, named_declarations, target_request};
 use clap::Args;
 use ecp_analyzer::identifier_finder::{find_identifier_occurrences, has_identifier_finder};
 use ecp_core::analyzer::types::IdentifierRange;
-use ecp_core::contracts::identity::{Candidate, Qualifier, TargetRequest, TargetResolution};
+use ecp_core::contracts::identity::{
+    resolve_target, Candidate, Qualifier, TargetRequest, TargetResolution,
+};
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::{FileCategory, NodeKind};
 use ecp_core::registry::atomic_write_bytes;
@@ -479,6 +481,21 @@ fn apply_markdown_rename(
 // Main entry point
 // ---------------------------------------------------------------------------
 
+/// The declaration a rename target names. A bare name leaves out the
+/// lexically scoped nodes (invariant I5), as does the root form `::name`
+/// (no owner and no lexical parent), so renaming a top-level `helper` never
+/// edits a `helper` nested in a function. A path request keeps them.
+pub fn resolve_rename_target(
+    merged: &MergedGraph<'_>,
+    request: &TargetRequest,
+) -> TargetResolution {
+    let mut named = named_declarations(merged, request.name());
+    if matches!(request.qualifier(), Qualifier::Any | Qualifier::Root) {
+        named.retain(|c| !merged.is_lexically_scoped(c.node));
+    }
+    resolve_target(request, &named)
+}
+
 pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     // Graph paths are relative to the worktree top, so a run from a
@@ -539,7 +556,7 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
     // declaration is found and a dirty file is read at its on-disk spans.
     let view = engine.overlay_dir().and_then(|_| engine.overlay_view());
     let merged = MergedGraph::new(graph, view);
-    let target = match resolve_target(&merged, &request) {
+    let target = match resolve_rename_target(&merged, &request) {
         TargetResolution::Unique(c) => Some(c),
         TargetResolution::NotFound { .. } => None,
         TargetResolution::Ambiguous(a) => {

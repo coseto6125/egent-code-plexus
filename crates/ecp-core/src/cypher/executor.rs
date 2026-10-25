@@ -2150,8 +2150,8 @@ fn node_prop_no_cache(node_idx: u32, prop: &str, graph: MergedGraph<'_>) -> Valu
     let fm = m.meta_idx(node_idx);
     match prop {
         "filePath" => Value::Str(m.file_path(&graph).unwrap_or("").into()),
-        "ownerClass" => match m.owner_class(&graph) {
-            Some(oc) => Value::Str(oc.into()),
+        "ownerClass" => match graph.display_owner(node_idx) {
+            Some(oc) => Value::Str(oc.as_ref().into()),
             None => Value::Null,
         },
         "line" | "startLine" => Value::Int(m.start_line() as i64),
@@ -2814,8 +2814,8 @@ fn node_prop_value(
         "name" => Value::Str(m.name(&graph).into()),
         // u64 uid stored as i64 bits — no allocation per row.
         "uid" => Value::Int(m.uid() as i64),
-        "ownerClass" => match m.owner_class(&graph) {
-            Some(oc) => Value::Str(oc.into()),
+        "ownerClass" => match graph.display_owner(node_idx) {
+            Some(oc) => Value::Str(oc.as_ref().into()),
             None => Value::Null,
         },
         "kind" => Value::Str(m.kind().as_str().into()),

@@ -12,10 +12,11 @@
 //! - `unknown` — BlindSpotRecord entries falling inside the diff region.
 //!   "Honest no-data" rather than fabricated coverage.
 //!
-//! Symbol identity = `(file_path, owner_class, name, kind)`. Overloads of
-//! the same `(name, kind)` inside the same class collapse — that limitation
-//! is accepted; the alternative (signature hash) requires per-language
-//! parser changes that don't ship with this PR.
+//! Symbol identity = `(file_path, display_owner, name, kind, ordinal)`. The
+//! ordinal counts the earlier nodes of the same first four fields in node
+//! order, so overloads stay apart. It pairs the n-th overload of a snapshot
+//! with the n-th of the other; a signature hash would pair them exactly but
+//! needs per-language parser changes.
 
 use crate::commands::graph_csr::iter_incoming_edges_filtered;
 use crate::engine::Engine;
@@ -45,15 +46,18 @@ fn is_diffable_kind(k: NodeKind) -> bool {
     )
 }
 
-/// Symbol identity inside a single file. owner_class disambiguates methods
-/// on different classes that share a name; kind disambiguates a Function
-/// vs Class with identical names (legal in some langs).
+/// Symbol identity inside a single file. The display owner disambiguates
+/// methods on different classes that share a name, and nested functions of
+/// different callables; kind disambiguates a Function vs Class with
+/// identical names (legal in some langs); the ordinal disambiguates
+/// overloads.
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
 struct SymbolKey {
     path: String,
-    owner_class: String,
+    display_owner: String,
     name: String,
     kind: &'static str,
+    ordinal: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -266,20 +270,29 @@ fn collect_snapshot(graph_path: &Path) -> Result<(Snapshot, Engine), EcpError> {
             .path
             .resolve(&graph.string_pool)
             .to_string();
-        let owner_class = node.owner_class.resolve(&graph.string_pool).to_string();
+        let display_owner = graph
+            .display_owner(idx as u32)
+            .map(std::borrow::Cow::into_owned)
+            .unwrap_or_default();
         let name = node.name.resolve(&graph.string_pool).to_string();
-        let key = SymbolKey {
+        let mut key = SymbolKey {
             path,
-            owner_class,
+            display_owner,
             name,
             kind: kind_str(&node.kind),
+            ordinal: 0,
         };
-        // Overload collision: keep the first occurrence. (See module doc.)
-        symbols.entry(key).or_insert(SymbolInfo {
-            content_hash: node.content_hash.to_native(),
-            line: node.start_line(),
-            node_idx: idx as u32,
-        });
+        while symbols.contains_key(&key) {
+            key.ordinal += 1;
+        }
+        symbols.insert(
+            key,
+            SymbolInfo {
+                content_hash: node.content_hash.to_native(),
+                line: node.start_line(),
+                node_idx: idx as u32,
+            },
+        );
     }
 
     let mut files = FxHashMap::default();
@@ -516,7 +529,7 @@ pub fn diff(
                     // File still exists but symbol gone → genuine remove.
                     out.certain.symbols_removed.push(SymbolRef {
                         path: key.path.clone(),
-                        owner_class: key.owner_class.clone(),
+                        owner_class: key.display_owner.clone(),
                         name: key.name.clone(),
                         kind: key.kind.to_string(),
                         line: b_info.line,
@@ -527,7 +540,7 @@ pub fn diff(
             Some(c_info) if c_info.content_hash != b_info.content_hash => {
                 changed.push(SymbolChange {
                     path: key.path.clone(),
-                    owner_class: key.owner_class.clone(),
+                    owner_class: key.display_owner.clone(),
                     name: key.name.clone(),
                     kind: key.kind.to_string(),
                     line: c_info.line,
@@ -545,7 +558,7 @@ pub fn diff(
             // otherwise files_added covers it.
             out.certain.symbols_added.push(SymbolRef {
                 path: key.path.clone(),
-                owner_class: key.owner_class.clone(),
+                owner_class: key.display_owner.clone(),
                 name: key.name.clone(),
                 kind: key.kind.to_string(),
                 line: c_info.line,
@@ -559,6 +572,7 @@ pub fn diff(
             .cmp(&b.path)
             .then(a.owner_class.cmp(&b.owner_class))
             .then(a.name.cmp(&b.name))
+            .then(a.line.cmp(&b.line))
     });
 
     // ── Callers of changed symbols (current graph only) ──────────────────
@@ -617,6 +631,7 @@ fn symref_cmp(a: &SymbolRef, b: &SymbolRef) -> std::cmp::Ordering {
         .then(a.owner_class.cmp(&b.owner_class))
         .then(a.name.cmp(&b.name))
         .then(a.kind.cmp(&b.kind))
+        .then(a.line.cmp(&b.line))
 }
 
 #[cfg(test)]
@@ -626,9 +641,10 @@ mod tests {
     fn sk(path: &str, name: &str, kind: &'static str) -> SymbolKey {
         SymbolKey {
             path: path.into(),
-            owner_class: String::new(),
+            display_owner: String::new(),
             name: name.into(),
             kind,
+            ordinal: 0,
         }
     }
 
