@@ -14,6 +14,7 @@
 
 use ecp_analyzer::post_process::tx_scope_edges;
 use ecp_core::analyzer::types::{FrameworkId, LocalGraph, RawTxScope};
+use ecp_core::contracts::raw_records::RawIndexMap;
 use ecp_core::graph::{NodeKind, RelType};
 use ecp_core::pool::StringPool;
 
@@ -34,7 +35,8 @@ fn run_tx_scope_emit(local_graph: LocalGraph) -> (usize, usize) {
     let mut sp = StringPool::new();
     let mut nodes: Vec<ecp_core::graph::Node> = Vec::new();
     let mut edges: Vec<ecp_core::graph::Edge> = Vec::new();
-    tx_scope_edges::emit_edges(&lgs, &mut sp, &mut nodes, &mut edges);
+    let raw_map = RawIndexMap::new(0, lgs.iter().map(|g| g.nodes.len())).unwrap();
+    tx_scope_edges::emit_edges(&lgs, &raw_map, &mut sp, &mut nodes, &mut edges);
     let scope_nodes = nodes
         .iter()
         .filter(|n| n.kind == NodeKind::TransactionScope)
@@ -590,7 +592,8 @@ public class OrderService {
     let mut sp = StringPool::new();
     let mut nodes: Vec<ecp_core::graph::Node> = Vec::new();
     let mut edges: Vec<ecp_core::graph::Edge> = Vec::new();
-    tx_scope_edges::emit_edges(&lgs, &mut sp, &mut nodes, &mut edges);
+    let raw_map = RawIndexMap::new(0, lgs.iter().map(|g| g.nodes.len())).unwrap();
+    tx_scope_edges::emit_edges(&lgs, &raw_map, &mut sp, &mut nodes, &mut edges);
 
     let scope_node = nodes
         .iter()

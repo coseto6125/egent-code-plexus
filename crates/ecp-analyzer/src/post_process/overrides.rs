@@ -40,6 +40,7 @@
 use crate::framework_helpers::{span_area, span_contains};
 use crate::resolution::index::SymbolTable;
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
+use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::graph::{Edge, NodeKind, RelType};
 use ecp_core::pool::StringPool;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -75,6 +76,7 @@ fn is_override_candidate(raw_node: &RawNode) -> bool {
 /// Returns the number of edges appended.
 pub fn emit_edges(
     local_graphs: &[LocalGraph],
+    raw_map: &RawIndexMap,
     _symbol_table: &SymbolTable,
     string_pool: &mut StringPool,
     edges_out: &mut Vec<Edge>,
@@ -103,14 +105,14 @@ pub fn emit_edges(
             }
         }
     }
-    let ancestor_methods = build_ancestor_method_index(local_graphs);
+    let ancestor_methods = build_ancestor_method_index(local_graphs, raw_map);
 
     let reason = string_pool.add("post_process:overrides");
 
     let mut emitted = 0usize;
 
-    let mut graph_base_idx = 0u32;
-    for lg in local_graphs {
+    for (file_idx, lg) in local_graphs.iter().enumerate() {
+        let file = FileOrd(file_idx as u32);
         // Collect override candidates in this file.
         let candidates: Vec<(usize, &RawNode)> = lg
             .nodes
@@ -125,7 +127,6 @@ pub fn emit_edges(
             .collect();
 
         if candidates.is_empty() {
-            graph_base_idx += lg.nodes.len() as u32;
             continue;
         }
 
@@ -163,7 +164,10 @@ pub fn emit_edges(
                 // Candidate's own node index is the graph-local base plus
                 // raw-node index. Looking it up by name is ambiguous for
                 // overloads and same-name methods in sibling classes.
-                let candidate_idx = graph_base_idx + candidate_raw_idx as u32;
+                let Some(candidate_idx) = raw_map.slot(file, RawIdx(candidate_raw_idx as u32))
+                else {
+                    continue;
+                };
 
                 if candidate_idx == ancestor_idx {
                     continue; // self-loop guard
@@ -179,16 +183,15 @@ pub fn emit_edges(
                 emitted += 1;
             }
         }
-        graph_base_idx += lg.nodes.len() as u32;
     }
 
     emitted
 }
 
-fn build_ancestor_method_index(local_graphs: &[LocalGraph]) -> MethodIndex {
+fn build_ancestor_method_index(local_graphs: &[LocalGraph], raw_map: &RawIndexMap) -> MethodIndex {
     let mut out = FxHashMap::default();
-    let mut graph_base_idx = 0u32;
-    for lg in local_graphs {
+    for (file_idx, lg) in local_graphs.iter().enumerate() {
+        let file = FileOrd(file_idx as u32);
         let classes: Vec<ClassEntry<'_>> = lg
             .nodes
             .iter()
@@ -211,10 +214,12 @@ fn build_ancestor_method_index(local_graphs: &[LocalGraph]) -> MethodIndex {
             let Some(class_name) = innermost_class(node.span, &classes) else {
                 continue;
             };
+            let Some(slot) = raw_map.slot(file, RawIdx(raw_idx as u32)) else {
+                continue;
+            };
             out.entry((class_name.to_string(), node.name.clone()))
-                .or_insert(graph_base_idx + raw_idx as u32);
+                .or_insert(slot);
         }
-        graph_base_idx += lg.nodes.len() as u32;
     }
     out
 }

@@ -19,6 +19,7 @@ use crate::route_detector::{clean_route_path_lax, join_route_path};
 use ecp_core::analyzer::types::{
     LocalGraph, RawImport, RawRoute, RawRouteScope, RouteInclude, Span,
 };
+use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::contracts::routing::{FileRouter, Language};
 use ecp_core::graph::NodeKind;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1274,7 +1275,7 @@ impl CappedIncludes {
 }
 
 impl LaravelRoutes {
-    pub fn build(local_graphs: &[LocalGraph]) -> Self {
+    pub fn build(local_graphs: &[LocalGraph], raw_map: &RawIndexMap) -> Self {
         let routes = || local_graphs.iter().flat_map(|graph| &graph.routes);
         let has_includes = routes().any(|route| route.method == RawRoute::INCLUDE);
         let has_actions = routes().any(|route| {
@@ -1292,7 +1293,7 @@ impl LaravelRoutes {
             include_scopes,
             capped,
             controllers: if has_actions {
-                ControllerIndex::build(local_graphs)
+                ControllerIndex::build(local_graphs, raw_map)
             } else {
                 ControllerIndex::default()
             },
@@ -1644,14 +1645,11 @@ fn is_framework(fqn: &str) -> bool {
 }
 
 impl ControllerIndex {
-    /// Node indices are the builder's: each file's raw nodes in file order,
-    /// one after another from 0.
-    fn build(local_graphs: &[LocalGraph]) -> Self {
+    /// Node indices are the builder's, read from `raw_map`.
+    fn build(local_graphs: &[LocalGraph], raw_map: &RawIndexMap) -> Self {
         let mut index = Self::default();
-        let mut start = 0u32;
         for (file_idx, graph) in local_graphs.iter().enumerate() {
-            let base = start;
-            start += graph.nodes.len() as u32;
+            let file = FileOrd(file_idx as u32);
             let is_php = graph.file_path.to_str().is_some_and(|path| {
                 FileRouter::PATH_ONLY
                     .route(path)
@@ -1686,7 +1684,9 @@ impl ControllerIndex {
                 }
                 .to_ascii_lowercase();
                 let slot = index.types.len();
-                let node_idx = base + local_idx as u32;
+                let Some(node_idx) = raw_map.slot(file, RawIdx(local_idx as u32)) else {
+                    continue;
+                };
                 index.by_node.insert(node_idx, slot);
                 if !is_trait {
                     index
@@ -1728,10 +1728,13 @@ impl ControllerIndex {
                     owner.has_constructor = true;
                     continue;
                 }
+                let Some(method_idx) = raw_map.slot(file, RawIdx(local_idx as u32)) else {
+                    continue;
+                };
                 owner
                     .methods
                     .entry(node.name.to_ascii_lowercase())
-                    .or_insert(base + local_idx as u32);
+                    .or_insert(method_idx);
             }
             for record in graph
                 .routes

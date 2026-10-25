@@ -10,6 +10,7 @@
 use ecp_analyzer::post_process::overrides;
 use ecp_analyzer::resolution::index::SymbolTable;
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
+use ecp_core::contracts::raw_records::RawIndexMap;
 use ecp_core::graph::RelType;
 use ecp_core::pool::StringPool;
 
@@ -30,7 +31,8 @@ pub fn run_overrides(local_graphs: &[LocalGraph]) -> Vec<(u32, u32)> {
     let st = build_symbol_table(local_graphs);
     let mut sp = StringPool::new();
     let mut edges = Vec::new();
-    overrides::emit_edges(local_graphs, &st, &mut sp, &mut edges);
+    let raw_map = RawIndexMap::new(0, local_graphs.iter().map(|g| g.nodes.len())).unwrap();
+    overrides::emit_edges(local_graphs, &raw_map, &st, &mut sp, &mut edges);
     edges
         .into_iter()
         .filter(|e| matches!(e.rel_type, RelType::Overrides))

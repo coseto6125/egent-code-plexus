@@ -18,6 +18,7 @@ pub use ecp_core::analyzer::types::{
     FUNCTION_REFERENCE_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
 };
 use ecp_core::contracts::identity::UidSlot;
+use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::contracts::routing::{FileRouter, Language as RouteLanguage};
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::{
@@ -95,7 +96,7 @@ type PerGraphPass2 = (Vec<Edge>, Vec<(usize, u8, String)>);
 /// Pass 2's stitched whole-build output. Same shape as [`PerGraphPass2`], but
 /// named apart because it is the aggregate across every graph, not one graph's
 /// share — `pass2_resolve_edges` does whole-build setup (mod-tree build,
-/// `start_indices` prefix-sum, reason interning) before it fans out, so it is
+/// reason interning) before it fans out, so it is
 /// called once, not once per file.
 type Pass2Output = (Vec<Edge>, Vec<(usize, u8, String)>);
 
@@ -264,6 +265,10 @@ impl GraphBuilder {
             files,
             collision_blind_spots,
         } = pass1_register_nodes(&self.local_graphs);
+        // Pass 1 gives every raw node a slot (a collision keeps a tombstone),
+        // so the map reads node counts only and holds for the whole build.
+        let raw_map = RawIndexMap::new(0, self.local_graphs.iter().map(|lg| lg.nodes.len()))
+            .expect("total RawNode count exceeds u32::MAX — graph node ID scheme would overflow");
         // Maps forward-slashed file_path → File node index. Populated by the
         // File-node loop after Pass 4, consumed by `post_process::imports_edges`
         // to wire (File)-[:Imports]->(symbol) edges. File nodes are deliberately
@@ -300,6 +305,7 @@ impl GraphBuilder {
             &self.local_graphs,
             &files,
             &symbol_table,
+            &raw_map,
             &mut string_pool,
             &mut nodes,
         );
@@ -317,6 +323,7 @@ impl GraphBuilder {
             self.repo_root.as_deref(),
             &emitted_routes,
             &nodes,
+            &raw_map,
             &mut string_pool,
         );
 
@@ -343,8 +350,12 @@ impl GraphBuilder {
         }
         let _t_pass18 = std::time::Instant::now();
         // Pass 1.8: FunctionMeta collection.
-        let function_metas =
-            pass1_8_function_metas(&self.local_graphs, &mut string_pool, &mut symbol_table);
+        let function_metas = pass1_8_function_metas(
+            &self.local_graphs,
+            &raw_map,
+            &mut string_pool,
+            &mut symbol_table,
+        );
         if prof {
             eprintln!(
                 "prof build.pass18_function_meta: {:.3}s  count={}",
@@ -374,6 +385,7 @@ impl GraphBuilder {
             &self.path_aliases,
             mod_tree_ctx,
             &reexports,
+            &raw_map,
         );
         symbol_table.build_supertypes(declared_supertypes);
         let supertype_table = record_supertypes(&symbol_table);
@@ -383,6 +395,7 @@ impl GraphBuilder {
             &self.local_graphs,
             &files,
             &symbol_table,
+            &raw_map,
             &entry_edges,
             &mut string_pool,
             &mut nodes,
@@ -408,6 +421,7 @@ impl GraphBuilder {
             &self.path_aliases,
             mod_tree_ctx,
             &reexports,
+            &raw_map,
             self.resolver_dump_path.as_deref(),
             self.symbol_skip_set.as_ref(),
         );
@@ -417,7 +431,13 @@ impl GraphBuilder {
         edges.extend(action_edges);
         edges.extend(fetches_edges);
 
-        emit_closure_references(&self.local_graphs, &nodes, &mut string_pool, &mut edges);
+        emit_closure_references(
+            &self.local_graphs,
+            &raw_map,
+            &nodes,
+            &mut string_pool,
+            &mut edges,
+        );
         emit_overload_references(&symbol_table, &mut string_pool, &mut edges);
 
         if prof {
@@ -660,6 +680,7 @@ impl GraphBuilder {
         // the new edges land in out_offsets / in_offsets.
         crate::post_process::overrides::emit_edges(
             &self.local_graphs,
+            &raw_map,
             &symbol_table,
             &mut string_pool,
             &mut edges,
@@ -702,6 +723,7 @@ impl GraphBuilder {
         // traversal from function nodes.
         crate::post_process::tx_scope_edges::emit_edges(
             &self.local_graphs,
+            &raw_map,
             &mut string_pool,
             &mut nodes,
             &mut edges,
@@ -716,6 +738,7 @@ impl GraphBuilder {
             .with_reexports(&reexports);
         crate::post_process::decorates_edges::emit_edges(
             &self.local_graphs,
+            &raw_map,
             &decorates_resolver,
             &mut string_pool,
             &mut nodes,
@@ -1016,6 +1039,15 @@ fn followed_by_reexport(local_graph: &LocalGraph, import: &RawImport) -> bool {
 }
 
 /// Forward-slash path → file index, as Pass 1 numbers the files.
+/// First global node index of file `file_idx`. `file_idx` always comes from
+/// enumerating the `local_graphs` the map was built from, so the `end()`
+/// fallback is unreachable.
+fn file_base(raw_map: &RawIndexMap, file_idx: u32) -> u32 {
+    raw_map
+        .range(FileOrd(file_idx))
+        .map_or_else(|| raw_map.end(), |range| range.start)
+}
+
 fn file_indices(local_graphs: &[LocalGraph]) -> FxHashMap<String, u32> {
     local_graphs
         .iter()
@@ -1125,10 +1157,10 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
             // loop (builder.rs:1549).
             //
             // However, `nodes` MUST still receive a placeholder entry to preserve
-            // position alignment: Pass 2's `start_indices` prefix-sums over
+            // position alignment: the build's `RawIndexMap` counts
             // `lg.nodes.len()` (all raw nodes, including collision ones). If we
-            // skip the `nodes.push` without also adjusting `start_indices`, every
-            // subsequent file's node IDs in `start_indices` are off by the collision
+            // skip the `nodes.push` without also adjusting the map, every
+            // subsequent file's node IDs in the map are off by the collision
             // count, producing wrong `current_node_idx` values and broken edges.
             //
             // Solution: push a tombstone Node (kind=File is reused as the most
@@ -1399,18 +1431,18 @@ fn pass1_5_extract_routes(
     local_graphs: &[LocalGraph],
     files: &[File],
     symbol_table: &SymbolTable,
+    raw_map: &RawIndexMap,
     string_pool: &mut StringPool,
     nodes: &mut Vec<Node>,
 ) -> ExtractedRoutes {
     let mut route_edges = Vec::new();
-    let mut current_handler_idx = 0;
     let mut emitted_routes: Vec<EmittedRoute> = Vec::new();
     let mut route_middleware: Vec<RouteMiddleware> = Vec::new();
     let mut actions: Vec<PendingAction> = Vec::new();
     // Route groups reach across files (a provider's `->group(base_path(
     // 'routes/admin.php'))` prefixes every route of `admin.php`), so the
     // per-file view alone cannot name a Laravel route's path or handler.
-    let laravel = LaravelRoutes::build(local_graphs);
+    let laravel = LaravelRoutes::build(local_graphs, raw_map);
     for (file_idx, local_graph) in local_graphs.iter().enumerate() {
         let file_idx = file_idx as u32;
         let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
@@ -1424,19 +1456,17 @@ fn pass1_5_extract_routes(
         // would pollute the production-route surface. Reads the
         // category already computed in Pass 1 (line 229) — avoids
         // re-running `determine_category` (~36 string scans per file).
-        // `current_handler_idx` still advances by the file's node count
-        // so downstream alignment stays correct.
         let is_non_production = matches!(
             files[file_idx as usize].category,
             FileCategory::Test | FileCategory::Reference
         );
         if is_non_production {
-            current_handler_idx += local_graph.nodes.len() as u32;
             continue;
         }
 
-        for raw_node in &local_graph.nodes {
-            let handler_idx = current_handler_idx;
+        let file_start = file_base(raw_map, file_idx);
+        for (raw_idx, raw_node) in local_graph.nodes.iter().enumerate() {
+            let handler_idx = file_start + raw_idx as u32;
 
             for dec in &raw_node.decorators {
                 for detected in crate::route_detector::detect_all_from_decorator(dec) {
@@ -1470,7 +1500,6 @@ fn pass1_5_extract_routes(
                     ));
                 }
             }
-            current_handler_idx += 1;
         }
 
         for raw_route in &local_graph.routes {
@@ -1624,6 +1653,7 @@ fn pass1_95_controller_actions(
     local_graphs: &[LocalGraph],
     files: &[File],
     symbol_table: &SymbolTable,
+    raw_map: &RawIndexMap,
     entry_edges: &[Edge],
     string_pool: &mut StringPool,
     nodes: &mut Vec<Node>,
@@ -1740,15 +1770,6 @@ fn pass1_95_controller_actions(
         return edges;
     }
     let marked: FxHashSet<u32> = entry_edges.iter().map(|edge| edge.target).collect();
-    let mut next_start = 0u32;
-    let starts: Vec<u32> = local_graphs
-        .iter()
-        .map(|graph| {
-            let start = next_start;
-            next_start += graph.nodes.len() as u32;
-            start
-        })
-        .collect();
     let kind = crate::entry_points::EntryKind::HttpRoute;
     for (handler, score, routes) in entries {
         if marked.contains(&handler) {
@@ -1756,7 +1777,7 @@ fn pass1_95_controller_actions(
         }
         let file_idx = nodes[handler as usize].file_idx;
         let graph = &local_graphs[file_idx as usize];
-        let raw = &graph.nodes[(handler - starts[file_idx as usize]) as usize];
+        let raw = &graph.nodes[(handler - file_base(raw_map, file_idx)) as usize];
         let path_str = graph.file_path.to_string_lossy().replace('\\', "/");
         let mut reason = routes
             .iter()
@@ -1825,6 +1846,7 @@ fn pass1_6_fetch_shapes(
     repo_root: Option<&std::path::Path>,
     emitted_routes: &[EmittedRoute],
     nodes: &[Node],
+    raw_map: &RawIndexMap,
     string_pool: &mut StringPool,
 ) -> (Vec<RouteShape>, Vec<Edge>) {
     let mut route_shapes_out: Vec<RouteShape> = Vec::new();
@@ -1904,19 +1926,9 @@ fn pass1_6_fetch_shapes(
         // top-level function/class) so the edge has a real `source`.
         // When a file has no nodes we skip it — there's nothing to
         // attach the edge to.
-        let file_first_node: Vec<Option<u32>> = {
-            let mut v = Vec::with_capacity(local_graphs.len());
-            let mut acc: u32 = 0;
-            for lg in local_graphs {
-                if lg.nodes.is_empty() {
-                    v.push(None);
-                } else {
-                    v.push(Some(acc));
-                }
-                acc += lg.nodes.len() as u32;
-            }
-            v
-        };
+        let file_first_node: Vec<Option<u32>> = (0..local_graphs.len() as u32)
+            .map(|file| raw_map.slot(FileOrd(file), RawIdx(0)))
+            .collect();
 
         // Files that themselves emit a Route are handlers, not
         // consumers — skip them on the consumer pass to avoid
@@ -2145,15 +2157,15 @@ fn pass1_7_entry_points(
 /// types the receiver of a chained call (`make().bar()`) by it.
 fn pass1_8_function_metas(
     local_graphs: &[LocalGraph],
+    raw_map: &RawIndexMap,
     string_pool: &mut StringPool,
     symbol_table: &mut SymbolTable,
 ) -> Vec<FunctionMeta> {
     let mut function_metas: Vec<FunctionMeta> = Vec::new();
     {
-        let mut node_offset: u32 = 0;
-        for local_graph in local_graphs {
+        for (file_idx, local_graph) in local_graphs.iter().enumerate() {
             if !local_graph.raw_function_metas.is_empty() {
-                let base = node_offset;
+                let base = file_base(raw_map, file_idx as u32);
                 // Sorted index → binary_search per node, so the inner loop
                 // is O(N log F) instead of O(N*F).
                 let mut meta_idx: Vec<(Span, usize)> = local_graph
@@ -2193,7 +2205,6 @@ fn pass1_8_function_metas(
                     });
                 }
             }
-            node_offset += local_graph.nodes.len() as u32;
         }
     }
     function_metas
@@ -2244,15 +2255,15 @@ fn emit_overload_references(
 
 fn emit_closure_references(
     local_graphs: &[LocalGraph],
+    raw_map: &RawIndexMap,
     nodes: &[Node],
     string_pool: &mut StringPool,
     edges: &mut Vec<Edge>,
 ) {
     let reason = string_pool.add(ecp_core::analyzer::types::CLOSURE_REFERENCE_REASON);
-    let mut start_index = 0u32;
-    for graph in local_graphs {
+    for (file_idx, graph) in local_graphs.iter().enumerate() {
+        let start_index = file_base(raw_map, file_idx as u32);
         emit_file_closure_references(graph, start_index, nodes, reason, edges);
-        start_index += graph.nodes.len() as u32;
     }
 }
 
@@ -2352,21 +2363,13 @@ fn pass1_9_supertypes(
     path_aliases: &PathAliases,
     mod_tree_ctx: Option<(&RustWorkspaceModTree, &std::path::Path)>,
     reexports: &ReexportIndex<'_>,
+    raw_map: &RawIndexMap,
 ) -> Vec<(u32, Option<u32>)> {
-    let mut next_start = 0u32;
-    let starts: Vec<u32> = local_graphs
-        .iter()
-        .map(|lg| {
-            let start = next_start;
-            next_start += lg.nodes.len() as u32;
-            start
-        })
-        .collect();
-
     let per_graph: Vec<Vec<(u32, Option<u32>)>> = local_graphs
         .par_iter()
-        .zip(starts.par_iter())
-        .map(|(lg, &start)| {
+        .enumerate()
+        .map(|(file_idx, lg)| {
+            let start = file_base(raw_map, file_idx as u32);
             if lg.nodes.iter().all(|n| n.heritage.is_empty()) {
                 return Vec::new();
             }
@@ -2925,9 +2928,9 @@ fn skipped_nodes(
 /// To enable parallelism we pre-compute two artifacts serially before
 /// the par_iter so the inner closure only needs read-only access to
 /// the resolver + symbol_table:
-///   1. `start_indices[graph_idx]` — base `current_node_idx` for each
-///      `local_graph` (prefix-sum of node counts). Replaces the
-///      `current_node_idx += 1` accumulator that previously coupled
+///   1. `file_base(raw_map, graph_idx)` — base `current_node_idx` for each
+///      `local_graph`, read from the build's one `RawIndexMap`. Replaces
+///      the `current_node_idx += 1` accumulator that previously coupled
 ///      graphs sequentially.
 ///   2. `reason_cache` — every unique `framework_refs.reason` /
 ///      `fanout_refs.reason` interned into `string_pool` up front.
@@ -2941,28 +2944,10 @@ fn pass2_resolve_edges(
     path_aliases: &PathAliases,
     mod_tree_ctx: Option<(&RustWorkspaceModTree, &std::path::Path)>,
     reexports: &ReexportIndex<'_>,
+    raw_map: &RawIndexMap,
     resolver_dump_path: Option<&std::path::Path>,
     symbol_skip_set: Option<&FxHashMap<String, FxHashSet<u64>>>,
 ) -> Pass2Output {
-    let mut start_indices: Vec<u32> = Vec::with_capacity(local_graphs.len());
-    {
-        // Precompute as u64 so we detect overflow before the lossy cast
-        // would corrupt indices. Hitting this means >4.29B total RawNodes
-        // — not currently observed in any real repo, but a single int
-        // truncation would silently misalign every downstream index.
-        let total: u64 = local_graphs.iter().map(|lg| lg.nodes.len() as u64).sum();
-        assert!(
-            total <= u32::MAX as u64,
-            "total RawNode count {} exceeds u32::MAX — graph node ID scheme would overflow",
-            total
-        );
-        let mut acc: u32 = 0;
-        for lg in local_graphs {
-            start_indices.push(acc);
-            acc += lg.nodes.len() as u32;
-        }
-    }
-
     let reason_heritage = string_pool.add("heritage");
     let reason_implements = string_pool.add("pass2:implements");
     let reason_type = string_pool.add("type_annotation");
@@ -3049,7 +3034,8 @@ fn pass2_resolve_edges(
         let mut current_node_idx = 0u32;
         for (graph_idx, local_graph) in local_graphs.iter().enumerate() {
             let lookup = &indirect_lookups[graph_idx];
-            let lexical_lookup = lexical_functions(local_graph, start_indices[graph_idx]);
+            let lexical_lookup =
+                lexical_functions(local_graph, file_base(raw_map, graph_idx as u32));
             let skipped = skipped_nodes(local_graph, symbol_skip_ref);
             for (node_offset, raw_node) in local_graph.nodes.iter().enumerate() {
                 if skipped.as_ref().is_some_and(|skipped| skipped[node_offset]) {
@@ -3084,7 +3070,7 @@ fn pass2_resolve_edges(
                     resolver,
                     symbol_table_ref,
                     local_graph,
-                    start_indices[graph_idx],
+                    file_base(raw_map, graph_idx as u32),
                     reason_cache_ref,
                     &mut edges,
                 );
@@ -3111,7 +3097,7 @@ fn pass2_resolve_edges(
                 if let Some((mt, root)) = mod_tree_ctx {
                     resolver = resolver.with_mod_tree(mt, root.to_path_buf());
                 }
-                let start_idx = start_indices[graph_idx];
+                let start_idx = file_base(raw_map, graph_idx as u32);
                 let lookup = &indirect_lookups[graph_idx];
                 let lexical_lookup = lexical_functions(local_graph, start_idx);
                 let mut local_edges: Vec<Edge> = Vec::new();
@@ -3502,7 +3488,7 @@ mod tests {
         assert_eq!(
             names,
             vec!["alpha", "beta", "gamma"],
-            "input order is load-bearing: UIDs and start_indices are derived from it"
+            "input order is load-bearing: UIDs and the RawIndexMap are derived from it"
         );
     }
 
@@ -3511,7 +3497,7 @@ mod tests {
     /// — C `#ifdef` redefinitions and overloads reach this path for real.
     ///
     /// The second one is dropped, but a tombstone takes its slot: `nodes.len()`
-    /// has to stay equal to the raw-node count or every later `start_indices`
+    /// has to stay equal to the raw-node count or every later `RawIndexMap`
     /// offset shifts and edges land on the wrong symbols.
     #[test]
     fn pass1_tombstones_a_uid_collision_without_shifting_indices() {
@@ -3640,6 +3626,10 @@ mod tests {
         }
     }
 
+    fn raw_map_of(graphs: &[LocalGraph]) -> RawIndexMap {
+        RawIndexMap::new(0, graphs.iter().map(|g| g.nodes.len())).unwrap()
+    }
+
     /// Pass 1 plus the supertypes pre-pass. `graphs` must already be sorted
     /// by path, as `build()` sorts them before Pass 1.
     fn table_with_supertypes(graphs: &[LocalGraph]) -> SymbolTable {
@@ -3650,6 +3640,7 @@ mod tests {
             &PathAliases::default(),
             None,
             &ReexportIndex::default(),
+            &raw_map_of(graphs),
         );
         st.build_supertypes(declared);
         st
@@ -3844,6 +3835,78 @@ mod tests {
             owner_class: None,
             content_hash: 0,
         }
+    }
+
+    /// Contract: a raw node's global index is the sum of the node counts of
+    /// the files before it in path order. The expected indices below come
+    /// from that definition, stated by hand for fixtures of 2, 0 and 2 nodes
+    /// (file `c.py` starts at 2), not from `RawIndexMap`. A route, a
+    /// `Decorates` source, an `Overrides` pair and a `Calls` edge are not in
+    /// the fixture; the two passes it covers read the map through
+    /// pass 1.9 (`Extends`) and the tx-scope post-process (`OpensTxScope`).
+    #[test]
+    fn test_build_edge_multiset_unchanged_after_raw_index_map() {
+        use ecp_core::analyzer::types::{FrameworkId, RawTxScope};
+        use std::collections::BTreeSet;
+
+        let class = |name: &str, row: u32, heritage: &[&str]| RawNode {
+            kind: NodeKind::Class,
+            heritage: heritage.iter().map(|h| h.to_string()).collect(),
+            ..raw_fn(name, row)
+        };
+        let a = LocalGraph {
+            file_path: "a.py".into(),
+            content_hash: [0; 8],
+            nodes: vec![raw_fn("a_one", 0), raw_fn("a_two", 4)],
+            ..Default::default()
+        };
+        let empty = LocalGraph {
+            file_path: "b.py".into(),
+            content_hash: [0; 8],
+            ..Default::default()
+        };
+        let c = LocalGraph {
+            file_path: "c.py".into(),
+            content_hash: [0; 8],
+            nodes: vec![class("Base", 0, &[]), class("Child", 4, &["Base"])],
+            tx_scopes: Some(Box::new([RawTxScope::new(
+                1,
+                FrameworkId::SpringTransactional,
+            )])),
+            ..Default::default()
+        };
+        let mut builder = GraphBuilder::new();
+        // Added out of path order: `build()` sorts before Pass 1.
+        builder.add_graph(c);
+        builder.add_graph(empty);
+        builder.add_graph(a);
+        let graph = builder.build();
+
+        let pairs = |rel: RelType| -> BTreeSet<(u32, u32)> {
+            graph
+                .edges
+                .iter()
+                .filter(|e| e.rel_type == rel)
+                .map(|e| (e.source, e.target))
+                .collect()
+        };
+        let child_global = 3;
+        let base_global = 2;
+        assert_eq!(
+            pairs(RelType::Extends),
+            BTreeSet::from([(child_global, base_global)]),
+            "Child (raw 1 of c.py) extends Base (raw 0): c.py starts at 2 after a.py's 2 nodes and the empty b.py"
+        );
+        let tx: Vec<_> = pairs(RelType::OpensTxScope).into_iter().collect();
+        assert_eq!(tx.len(), 1);
+        assert_eq!(
+            tx[0].0, child_global,
+            "the tx scope opens at Child, raw 1 of c.py"
+        );
+        assert_eq!(
+            graph.nodes[tx[0].1 as usize].kind,
+            NodeKind::TransactionScope
+        );
     }
 
     #[test]

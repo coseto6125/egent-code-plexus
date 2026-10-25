@@ -29,6 +29,7 @@ use crate::framework_helpers::normalize_decorator;
 use crate::resolution::index::ResolveTarget;
 use crate::resolution::resolver::Resolver;
 use ecp_core::analyzer::types::LocalGraph;
+use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::graph::{Edge, Node, NodeKind, RelType};
 use ecp_core::pool::StringPool;
 use ecp_core::uid;
@@ -41,6 +42,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 /// edges appended.
 pub fn emit_edges(
     local_graphs: &[LocalGraph],
+    raw_map: &RawIndexMap,
     resolver: &Resolver<'_>,
     string_pool: &mut StringPool,
     nodes: &mut Vec<Node>,
@@ -59,8 +61,8 @@ pub fn emit_edges(
     // parsers may emit duplicates; FxHashSet is cheaper than Vec contains).
     let mut edge_dedup: FxHashSet<(u32, u32)> = FxHashSet::default();
 
-    let mut graph_base_idx = 0u32;
-    for local_graph in local_graphs {
+    for (file_idx, local_graph) in local_graphs.iter().enumerate() {
+        let file = FileOrd(file_idx as u32);
         for (raw_idx, raw_node) in local_graph.nodes.iter().enumerate() {
             if raw_node.decorators.is_empty() {
                 continue;
@@ -81,7 +83,9 @@ pub fn emit_edges(
                 continue;
             }
 
-            let source_idx = graph_base_idx + raw_idx as u32;
+            let Some(source_idx) = raw_map.slot(file, RawIdx(raw_idx as u32)) else {
+                continue;
+            };
 
             for raw_dec in &raw_node.decorators {
                 // Skip the override sentinel injected by the Kotlin/C#/C++ parsers —
@@ -170,8 +174,6 @@ pub fn emit_edges(
                 }
             }
         }
-
-        graph_base_idx += local_graph.nodes.len() as u32;
     }
 
     emitted
