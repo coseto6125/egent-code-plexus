@@ -58,9 +58,13 @@ pub const FRAGMENT_FORMAT_V2: u32 = 2;
 pub const FRAGMENT_FORMAT_V3: u32 = 3;
 /// v4 adds heritage and enum-variant references.
 pub const FRAGMENT_FORMAT_V4: u32 = 4;
-/// Current fragment bin encoding version written by `overlay_writer`; it
-/// persists every `RawNode.field_reads` entry and function return type.
+/// v5 persists every `RawNode.field_reads` entry and function return type.
+/// Its fragment id hashes the content alone, so one content under two
+/// routes shared one bin.
 pub const FRAGMENT_FORMAT_V5: u32 = 5;
+/// Current fragment bin encoding version written by `overlay_writer`: the
+/// v5 bin, under a fragment id that hashes the route key and the content.
+pub const FRAGMENT_FORMAT_V6: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolRef {
@@ -158,7 +162,7 @@ pub struct DirtyEventEntry {
     pub parse_failed: bool,
     #[serde(default)]
     pub dirty_symbols: Vec<SymbolRef>,
-    /// The fragment bin encoding (`FRAGMENT_FORMAT_V5`). Readers dispatch on
+    /// The fragment bin encoding (`FRAGMENT_FORMAT_V6`). Readers dispatch on
     /// it, as for [`DirtyEntry::format`].
     pub format: u32,
 }
@@ -174,7 +178,7 @@ impl DirtyEventEntry {
             content_hash: None,
             parse_failed: false,
             dirty_symbols: Vec::new(),
-            format: FRAGMENT_FORMAT_V5,
+            format: FRAGMENT_FORMAT_V6,
         }
     }
 

@@ -117,7 +117,7 @@ pub struct FragmentSymbolV3 {
 
 /// v5 fragment bin payload: the whole dirty file's fresh parse, including
 /// file-level imports and export aliases for query-time Tier-2
-/// (import-scoped) resolution. `DirtyEventEntry.format == FRAGMENT_FORMAT_V5`
+/// (import-scoped) resolution. `DirtyEventEntry.format == FRAGMENT_FORMAT_V6`
 /// marks bins of this shape — readers MUST dispatch on the manifest marker,
 /// not guess the encoding.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
@@ -554,7 +554,7 @@ fn write_fragment_file(
         content_hash: Some(content_hash),
         parse_failed,
         dirty_symbols,
-        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V5,
+        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V6,
     };
 
     let outcome = FragmentOutcome {
@@ -633,7 +633,7 @@ fn write_fragment_from_graph(
         content_hash: Some(content_hash),
         parse_failed,
         dirty_symbols: symbols_from_graph(graph, &rel_path),
-        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V5,
+        format: ecp_core::session::overlay::FRAGMENT_FORMAT_V6,
     };
     let outcome = FragmentOutcome {
         fragment_id,
@@ -762,7 +762,7 @@ impl OverlayWriter {
                 content_hash: Some(content_hash.to_string()),
                 parse_failed,
                 dirty_symbols,
-                format: ecp_core::session::overlay::FRAGMENT_FORMAT_V5,
+                format: ecp_core::session::overlay::FRAGMENT_FORMAT_V6,
             },
         );
         DirtyEvents::write_atomic(&manifest_path, &manifest)

@@ -17,7 +17,7 @@ use ecp_core::analyzer::types::{RawExportAlias, RawImport};
 use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::NodeKind;
 use ecp_core::session::layout;
-use ecp_core::session::{DirtyEvents, OverlayFileInput, OverlaySymbol, FRAGMENT_FORMAT_V5};
+use ecp_core::session::{DirtyEvents, OverlayFileInput, OverlaySymbol, FRAGMENT_FORMAT_V6};
 use rkyv::rancor::Error as RkyvError;
 use std::fs;
 use std::io;
@@ -37,7 +37,7 @@ pub struct AcceptedFragment {
 ///
 /// The freshness gate uses this same check before it skips a re-parse. A
 /// regular file alone is not enough: the view reader ignores malformed bins.
-pub(crate) fn valid_v5_fragment(bytes: &[u8]) -> bool {
+pub(crate) fn valid_fragment(bytes: &[u8]) -> bool {
     rkyv::access::<ArchivedFragmentFile, RkyvError>(bytes).is_ok()
 }
 
@@ -140,7 +140,7 @@ pub fn view_inputs_under(
         let Some(fragment_id) = entry.fragment_id.as_deref() else {
             continue; // no bin, and no deletion either
         };
-        if entry.parse_failed || entry.format != FRAGMENT_FORMAT_V5 {
+        if entry.parse_failed || entry.format != FRAGMENT_FORMAT_V6 {
             continue;
         }
         if on_disk_mtime_ns() != Some(entry.mtime_ns) {
@@ -149,7 +149,7 @@ pub fn view_inputs_under(
         let Ok(bytes) = fs::read(layout::fragment_path(session_dir, fragment_id)) else {
             continue;
         };
-        if !valid_v5_fragment(&bytes) {
+        if !valid_fragment(&bytes) {
             continue;
         }
         super::view_cache::hash_part(&mut hasher, rel_path.as_bytes());
