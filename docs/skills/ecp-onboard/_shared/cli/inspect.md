@@ -23,10 +23,16 @@ Options:
           - text
 
       --kind <KIND>
-          Comma-separated list of node kinds (lowercase, e.g. `function,method`) to keep on the *target* side of incoming/outgoing edges
+          The kind of the declaration to inspect, one kind only (for example `function`, `method`, `impl`). The command selects only the declarations of this kind. A comma-separated list is an error. To keep only neighbours of some kinds, use `--neighbor-kind`
 
       --file <FILE_PATH>
-          Substring filter applied to the target file path of incoming/outgoing edges. Case-sensitive substring match (not glob)
+          The file of the declaration to inspect: a path or a part of a path. The command selects the declarations in the best match: the equal path, then a path that ends with `/<FILE>`, then a path that holds `<FILE>`. To keep only neighbours in some files, use `--neighbor-file`
+
+      --neighbor-kind <NEIGHBOR_KIND>
+          Comma-separated node kinds (lowercase, for example `function,method`). The output keeps only the edges whose other end has one of these kinds. This flag does not change which declaration the command selects
+
+      --neighbor-file <NEIGHBOR_FILE>
+          A part of a path (case-sensitive, not a glob). The output keeps only the edges whose other end is in a file whose path holds this text. This flag does not change which declaration the command selects
 
       --relation_types <RELATION_TYPES>
           Comma-separated list of relation types (lowercase, e.g. `calls,imports`)

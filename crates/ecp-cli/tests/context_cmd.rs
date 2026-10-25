@@ -1,5 +1,6 @@
-//! Integration tests for `ecp inspect` flag surface (UID resolution,
-//! kind / file_path / relation_types / include_tests filtering). The flags
+//! Integration tests for `ecp inspect` flag surface (`--file_path` target
+//! selection, neighbor-kind / neighbor-file / relation_types / include_tests
+//! filtering). The flags
 //! exist so the global CLAUDE.md GitNexus Workflow examples actually run.
 //! (renamed from `ecp context` in the CLI redesign)
 
@@ -32,10 +33,12 @@ fn run_json(repo: &Path, args: &[&str]) -> Value {
 }
 
 #[test]
-fn context_ambiguous_name_returns_matches_array() {
+fn context_ambiguous_name_returns_candidates_array() {
     // Two functions named `handler` in different files — `--name handler`
-    // is ambiguous; the response must include a `matches` array with both.
+    // is ambiguous; the response must include a `candidates` array with both.
     // Use `--file_path` to disambiguate (replaces old `--uid` flow).
+    // Contract: `src/auth/login.ts` stands for the declaration `--file_path`
+    // selects (C1 target filter).
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
     write(
@@ -53,18 +56,19 @@ fn context_ambiguous_name_returns_matches_array() {
     let ambig = run_json(repo, &["inspect", "--name", "handler", "--format", "json"]);
     assert_eq!(ambig["status"], "ambiguous", "expected ambiguous: {ambig}");
 
-    // New API: ambiguous response carries `matches`, each a full inspect block.
-    let matches = ambig["matches"]
+    let candidates = ambig["candidates"]
         .as_array()
-        .unwrap_or_else(|| panic!("expected matches array in ambiguous response: {ambig}"));
-    assert_eq!(matches.len(), 2, "expected 2 matches: {ambig}");
-    let has_auth = matches.iter().any(|m| {
-        m["symbol"]["filePath"]
-            .as_str()
-            .unwrap_or("")
-            .contains("src/auth/login.ts")
-    });
-    assert!(has_auth, "auth handler not found in matches: {ambig}");
+        .unwrap_or_else(|| panic!("expected candidates array in ambiguous response: {ambig}"));
+    let mut files: Vec<&str> = candidates
+        .iter()
+        .map(|c| c["filePath"].as_str().unwrap())
+        .collect();
+    files.sort_unstable();
+    assert_eq!(
+        files,
+        ["src/auth/login.ts", "src/billing/charge.ts"],
+        "{ambig}"
+    );
 
     // Disambiguate with --file_path — should resolve to a single found result.
     let exact = run_json(
@@ -79,28 +83,17 @@ fn context_ambiguous_name_returns_matches_array() {
             "json",
         ],
     );
-    let status = exact["status"].as_str().unwrap_or("");
-    assert!(
-        status == "found" || status == "ambiguous",
-        "unexpected status: {exact}"
-    );
-    if status == "found" {
-        assert!(
-            exact["symbol"]["filePath"]
-                .as_str()
-                .unwrap_or("")
-                .contains("src/auth/login.ts"),
-            "wrong file resolved: {exact}"
-        );
-    }
+    assert_eq!(exact["status"], "found", "{exact}");
+    assert_eq!(exact["symbol"]["filePath"], "src/auth/login.ts", "{exact}");
 }
 
 #[test]
 fn context_kind_filter_drops_non_matching_edges() {
     // `caller()` does three things: constructs `Helper` (resolves to Class
     // kind), calls `Helper().assist()` (Function kind), and calls
-    // `target_fn` (Function kind). `--kind function` must keep only the two
-    // function targets and drop the Class target.
+    // `target_fn` (Function kind). `--neighbor-kind function` must keep only
+    // the two function targets and drop the Class target. Contract:
+    // `function` stands for a neighbour kind here.
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
     write(
@@ -140,7 +133,13 @@ def caller():
     let filtered = run_json(
         repo,
         &[
-            "inspect", "--name", "caller", "--kind", "function", "--format", "json",
+            "inspect",
+            "--name",
+            "caller",
+            "--neighbor-kind",
+            "function",
+            "--format",
+            "json",
         ],
     );
     assert_eq!(filtered["status"], "found");
@@ -171,7 +170,8 @@ def caller():
 #[test]
 fn context_file_path_filter_keeps_substring_matches() {
     // `caller` calls into both `src/auth/util.ts` and `src/billing/util.ts`.
-    // `--file_path src/auth/` must keep only the auth edges.
+    // `--neighbor-file src/auth/` must keep only the auth edges. Contract:
+    // `src/auth/` stands for a neighbour path here.
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
     write(
@@ -204,7 +204,7 @@ export function caller() {
             "inspect",
             "--name",
             "caller",
-            "--file_path",
+            "--neighbor-file",
             "src/auth/",
             "--format",
             "json",

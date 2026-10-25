@@ -119,32 +119,14 @@ edition = "2021"
     );
     init_and_analyze(repo);
 
-    let result = run_json(repo, &["inspect", "--name", "read", "--format", "json"]);
-    if result["status"] != "found" {
-        // Ambiguous if multiple `read` symbols exist; check each match block.
-        let matches = result["matches"].as_array().cloned().unwrap_or_default();
-        for m in matches {
-            let fp = m["symbol"]["filePath"].as_str().unwrap_or("");
-            if !fp.ends_with("src/fs.rs") {
-                continue;
-            }
-            let callers: Vec<&str> = m["incoming"]["calls"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|e| e["name"].as_str())
-                .collect();
-            assert!(
-                !callers.contains(&"caller_fn"),
-                "workspace fs.rs::read must not bind to std::fs::read caller; callers={callers:?}"
-            );
-        }
-        return;
-    }
-    let fp = result["symbol"]["filePath"].as_str().unwrap_or("");
-    if !fp.ends_with("src/fs.rs") {
-        return;
-    }
+    // Contract: `caller_fn` stands for "the external `std::fs::read` call
+    // does not bind to the workspace `read`".
+    let result = run_json(
+        repo,
+        &["inspect", "read", "--file", "src/fs.rs", "--format", "json"],
+    );
+    assert_eq!(result["status"], "found", "{result}");
+    assert_eq!(result["symbol"]["filePath"], "src/fs.rs", "{result}");
     let callers: Vec<&str> = result["incoming"]["calls"]
         .as_array()
         .into_iter()
@@ -216,35 +198,24 @@ edition = "2021"
     write(repo, "crates/b/src/lib.rs", "pub fn unused_b() {}\n");
     init_and_analyze(repo);
 
-    let result = run_json(repo, &["inspect", "--name", "ping", "--format", "json"]);
-    let blocks: Vec<serde_json::Value> = if result["status"] == "found" {
-        vec![result.clone()]
-    } else {
-        result["matches"].as_array().cloned().unwrap_or_default()
+    // Contract: `caller_a` stands for "a module-qualified call binds inside
+    // its own crate": crate a's `ping` lists it, crate b's does not.
+    let callers_of = |file: &str| -> Vec<String> {
+        let result = run_json(
+            repo,
+            &["inspect", "ping", "--file", file, "--format", "json"],
+        );
+        assert_eq!(result["status"], "found", "{file}: {result}");
+        assert_eq!(result["symbol"]["filePath"], file, "{result}");
+        result["incoming"]["calls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e["name"].as_str().map(str::to_string))
+            .collect()
     };
-
-    let mut crate_a_callers: Vec<String> = Vec::new();
-    let mut crate_b_callers: Vec<String> = Vec::new();
-    for block in &blocks {
-        let symbol_file = block
-            .get("symbol")
-            .and_then(|s| s["filePath"].as_str())
-            .unwrap_or("");
-        let callers = block
-            .get("incoming")
-            .and_then(|i| i["calls"].as_array())
-            .cloned()
-            .unwrap_or_default();
-        for entry in &callers {
-            let name = entry["name"].as_str().unwrap_or("").to_string();
-            let symbol_file = symbol_file.replace('\\', "/");
-            if symbol_file.contains("crates/a/") {
-                crate_a_callers.push(name);
-            } else if symbol_file.contains("crates/b/") {
-                crate_b_callers.push(name);
-            }
-        }
-    }
+    let crate_a_callers = callers_of("crates/a/src/auto_ensure.rs");
+    let crate_b_callers = callers_of("crates/b/src/auto_ensure.rs");
 
     assert!(
         crate_a_callers.iter().any(|n| n == "caller_a"),

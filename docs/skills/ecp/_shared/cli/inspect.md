@@ -10,11 +10,15 @@ ecp inspect --name <SYMBOL_NAME> [--repo <PATH>]
 ## Options
 - `--name X`: The name of the symbol to inspect.
 - `--repo PATH`: Path to the repository (default: `.`).
-- `--kind KIND`: Filter target side of edges by kind.
-- `--file_path SUBSTR`: Filter target side of edges by file path substring.
+- `--kind KIND`: Select the declaration of this one kind (`function`, `method`, `impl`, ...). A list is an error. `--kind impl` selects the `Impl` node that is otherwise omitted beside a struct of the same name.
+- `--file PATH` (aliases `--file_path`, `--file-path`): Select the declaration in this file (equal path, then path suffix, then substring).
+- `--neighbor-kind K1,K2`: Keep only the edges whose other end has one of these kinds.
+- `--neighbor-file SUBSTR`: Keep only the edges whose other end is in a path that holds this text.
 - `--format`: `toon` (default), `json`.
 
 ## Output fields (JSON)
+- `status` — `found`, `ambiguous` or `error` (not found).
+- `candidates` — on `ambiguous` only: each with `filePath`, `kind`, `line` and `target`. Run `ecp inspect <target>` to inspect one. A null `target` means no target text or filter selects it alone. An ambiguous answer has no neighbour sections: they are not evaluated, not empty.
 - `symbol.decorators` — flat string list (`@` prefix stripped), e.g. `["staticmethod", "functools.cached_property"]`. Empty for undecorated nodes.
 - `contained_methods` / `contained_properties` — for Class / Struct / Trait / Interface / Enum.
 - `contained_variants` — for `Enum`: the EnumVariant children with their `name`, `filePath`, `line`.
