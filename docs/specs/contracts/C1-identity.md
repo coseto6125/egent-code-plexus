@@ -76,6 +76,19 @@ Example: one function holds two blocks, and each block declares `h`. Both `h` ro
 
 A dirty declaration replaces a base declaration of the same file only when their anchor occurs exactly once on each side. Every other dirty declaration is unpaired. An unpaired base declaration is suppressed in the dirty view, as a deleted one is.
 
+A `Duplicate` row takes no part in pairing. The index keeps its first as the one node of that anchor, so the merged representative node pairs. The pairing cannot prove which `#[cfg]` variant that node stands for when two twins swap places. This is a limit of the tombstone model that Open point 4 owns; R-PI does not add it.
+
+**Caveat rule.** A base declaration `b` of a dirty (not removed) path is hidden by ambiguity when all of these hold:
+
+- `b` is unpaired.
+- `b` has a non-empty name, so it is not a tombstone.
+- Its anchor occurs at least once among that path's dirty identities.
+- Its anchor occurs more than once on the base side or more than once on the dirty side.
+
+A base declaration whose anchor is absent from the dirty side was deleted by the edit and does not count. A removed path and a tombstone never count. `OverlayView` stores the hidden declarations grouped by (path, kind, owner, name) with a count, and the view cache keeps them (`VIEW_CACHE_FORMAT` 6). Every graph command that reads the view puts one line in the payload's `result` field. The line says that the overlay could not pair N base declaration(s), names up to five groups (`Method K.save x2 (src/K.java)`), and then says `and N more`. N counts hidden declarations, never callers. The line says that an empty result is no proof of no callers, and it gives `ecp admin index --repo .` as the next step. `Engine::dirty_set_caveat` builds the line; `find` by repo adds the repo name to it.
+
+No slice is assigned yet to remove the caveat. A `Signature` or `content_hash` slice (Open points 2 and 3) would pair an overload set, and the caveat would then shrink to the rest. FU-2026-10-25-337ab66d0277 tracks it.
+
 ### Lexical parent: `lexical_parents(decls, scoped_kinds)`
 
 | Rule | Statement |

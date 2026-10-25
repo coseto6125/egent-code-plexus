@@ -1,6 +1,7 @@
 use crate::session::view_cache;
 use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::{ArchivedZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
+use ecp_core::session::view::HiddenDecl;
 use ecp_core::session::OverlayView;
 use memmap2::Mmap;
 use rkyv::rancor::Error;
@@ -146,12 +147,12 @@ impl Engine {
 
     /// The single caveat string for query output, one reason per line, or
     /// `None` when results are trustworthy: warm-attach staleness or a
-    /// behind-HEAD graph, then changed paths the dirty set could not name.
+    /// behind-HEAD graph, then the dirty-set lines of [`Engine::dirty_set_caveat`].
     /// Routed into the payload's `result` field by `output::emit_with_caveat`,
     /// so a `found:false` under a stale graph is no longer indistinguishable
     /// from a definitive "does not exist".
     pub fn caveat(&self) -> Option<String> {
-        crate::output::merge_caveats(self.graph_caveat(), self.unreadable_changes_caveat())
+        crate::output::merge_caveats(self.graph_caveat(), self.dirty_set_caveat(None))
     }
 
     fn graph_caveat(&self) -> Option<String> {
@@ -177,8 +178,24 @@ impl Engine {
 
     /// The part of [`Engine::caveat`] that the dirty set gives, for callers
     /// that word the graph's staleness themselves (a by-repo `find` names the
-    /// stale repo).
-    pub fn unreadable_changes_caveat(&self) -> Option<String> {
+    /// stale repo): changed paths the dirty set could not name, then the base
+    /// declarations the overlay could not pair. `repo` prefixes each line on a
+    /// multi-repo answer. It builds the overlay view when it is not built yet,
+    /// because `find` takes the caveat before it runs the query; with no
+    /// overlay input that is a single `OnceLock` read.
+    pub fn dirty_set_caveat(&self, repo: Option<&str>) -> Option<String> {
+        let label = |line: String| match repo {
+            Some(name) => format!("{name}: {line}"),
+            None => line,
+        };
+        let unreadable = self.unreadable_changes_line();
+        let ambiguous = self
+            .overlay_view()
+            .and_then(|view| unpaired_declarations_line(view.hidden_declarations()));
+        crate::output::merge_caveats(unreadable.map(&label), ambiguous.map(&label))
+    }
+
+    fn unreadable_changes_line(&self) -> Option<String> {
         let n = self.unreadable_changes;
         (n > 0).then(|| {
             format!(
@@ -392,4 +409,98 @@ fn validate_header(bytes: &[u8]) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Most groups the unpaired-declarations line names; the rest fold into a count.
+const UNPAIRED_GROUPS_SHOWN: usize = 5;
+
+/// The caveat line for base declarations the overlay hid for lack of an
+/// identity to pair them by, or `None` when it hid none. Effect first, then
+/// the groups, then what the hiding does not mean. The counts are hidden
+/// declarations, never callers: a hidden declaration may have none.
+fn unpaired_declarations_line(hidden: &[HiddenDecl]) -> Option<String> {
+    if hidden.is_empty() {
+        return None;
+    }
+    let total: u32 = hidden.iter().map(|d| d.count).sum();
+    let mut groups: Vec<String> = hidden
+        .iter()
+        .take(UNPAIRED_GROUPS_SHOWN)
+        .map(|d| {
+            let owner = if d.owner.is_empty() {
+                String::new()
+            } else {
+                format!("{}.", d.owner)
+            };
+            format!(
+                "{} {owner}{} x{} ({})",
+                d.kind.as_str(),
+                d.name,
+                d.count,
+                d.path
+            )
+        })
+        .collect();
+    let shown: u32 = hidden
+        .iter()
+        .take(UNPAIRED_GROUPS_SHOWN)
+        .map(|d| d.count)
+        .sum();
+    if total > shown {
+        groups.push(format!("and {} more", total - shown));
+    }
+    Some(format!(
+        "results may be incomplete: the dirty overlay could not pair {total} base \
+         declaration(s) by identity, so they and their edges are hidden: {}. This does \
+         not mean they or their callers were deleted; an empty result is no proof of no \
+         callers. Run `ecp admin index --repo .` and rerun.",
+        groups.join(", ")
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ecp_core::graph::NodeKind;
+
+    fn hidden(owner: &str, name: &str, path: &str, count: u32) -> HiddenDecl {
+        HiddenDecl {
+            path: path.to_string(),
+            kind: NodeKind::Method,
+            owner: owner.to_string(),
+            name: name.to_string(),
+            count,
+        }
+    }
+
+    /// Stands for: the line names the hidden declarations and their count in
+    /// the effect-first shape consumers parse; an empty list gives no line.
+    #[test]
+    fn test_unpaired_declarations_line_one_group_names_declaration_and_count() {
+        assert_eq!(unpaired_declarations_line(&[]), None);
+
+        let line = unpaired_declarations_line(&[hidden("K", "save", "src/K.java", 2)]).unwrap();
+
+        assert!(line.starts_with(
+            "results may be incomplete: the dirty overlay could not pair 2 base declaration(s)"
+        ));
+        assert!(line.contains("hidden: Method K.save x2 (src/K.java). This does not mean"));
+        assert!(line.contains("`ecp admin index --repo .`"));
+        assert!(!line.contains('\n'), "one reason per line");
+    }
+
+    /// Stands for: at most 5 groups are named, and "and N more" counts the
+    /// hidden declarations of the rest, not the groups.
+    #[test]
+    fn test_unpaired_declarations_line_over_five_groups_counts_declarations_in_more() {
+        let hidden: Vec<HiddenDecl> = (0..7)
+            .map(|i| hidden("", &format!("f{i}"), "a.cpp", if i >= 5 { 3 } else { 2 }))
+            .collect();
+
+        let line = unpaired_declarations_line(&hidden).unwrap();
+
+        assert!(line.contains("could not pair 16 base declaration(s)"));
+        assert!(line.contains("Method f4 x2 (a.cpp), and 6 more."));
+        assert!(!line.contains("f5"), "the sixth group folds into the count");
+    }
 }

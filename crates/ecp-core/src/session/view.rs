@@ -318,6 +318,26 @@ pub struct OverlayView {
     /// whose [`owner_key`] is its name, in source order. Types with none have
     /// no entry.
     type_ctors: FxHashMap<u32, Vec<u32>>,
+    /// Base declarations of a dirty (not removed) path that the pairing left
+    /// unpaired although the parse still names their anchor, grouped by
+    /// (path, kind, owner, name) in graph order. Their nodes are suppressed,
+    /// so every edge into them is gone from the merged graph. A deleted
+    /// declaration is not in it: its anchor is absent from the parse.
+    hidden: Vec<HiddenDecl>,
+}
+
+/// A group of base declarations the overlay could not pair by identity: the
+/// same (path, kind, owner, name) with no `Signature` discriminator to tell
+/// the members apart. See [`OverlayView::hidden_declarations`].
+#[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct HiddenDecl {
+    pub path: String,
+    pub kind: NodeKind,
+    /// Empty when the declaration has no owner.
+    pub owner: String,
+    pub name: String,
+    /// How many base declarations the group hides; at least 1.
+    pub count: u32,
 }
 
 impl OverlayView {
@@ -418,6 +438,7 @@ impl OverlayView {
         // tombstones. They keep their first's uid and name until every pass
         // below has read them as its twin, then take the tombstone's shape.
         let mut tombstones: Vec<usize> = Vec::new();
+        let mut unpaired_base: FxHashSet<u32> = FxHashSet::default();
 
         for file in files {
             let rel: Arc<str> = Arc::from(file.rel_path.as_str());
@@ -431,7 +452,7 @@ impl OverlayView {
                     HeritageNode::span(sym),
                 )
             });
-            let pairs = pair_with_base(
+            let (pairs, unpaired) = pair_with_base(
                 graph,
                 &file.rel_path,
                 dirty_base_by_path
@@ -440,6 +461,7 @@ impl OverlayView {
                     .unwrap_or_default(),
                 &identities,
             );
+            unpaired_base.extend(unpaired);
             for ((sym, identity), replaced_base) in file.symbols.iter().zip(identities).zip(pairs) {
                 let virt = base_len + nodes.len() as u32;
                 let later_overload = match identity.slot {
@@ -480,6 +502,14 @@ impl OverlayView {
             .copied()
             .filter(|idx| !replaced.contains_key(idx))
             .collect();
+        // Two inputs of one path can pair different halves of its base, so
+        // the unpaired set is final only once `replaced` is.
+        let mut hidden_base: Vec<u32> = unpaired_base
+            .into_iter()
+            .filter(|idx| !replaced.contains_key(idx))
+            .collect();
+        hidden_base.sort_unstable();
+        let hidden = hidden_declarations(graph, &hidden_base);
 
         let type_ctors = virtual_constructors(files, &nodes, base_len);
 
@@ -1148,11 +1178,19 @@ impl OverlayView {
             out_adj,
             in_adj,
             type_ctors,
+            hidden,
         })
     }
 
     pub fn base_len(&self) -> u32 {
         self.base_len
+    }
+
+    /// The base declarations of a re-parsed path that the pairing could not
+    /// match by identity and so suppressed, grouped by (path, kind, owner,
+    /// name). Empty for a normal deletion, a removed path and a tombstone.
+    pub fn hidden_declarations(&self) -> &[HiddenDecl] {
+        &self.hidden
     }
 
     /// All virtual nodes; index `i` here is merged index `base_len + i`.
@@ -1247,7 +1285,9 @@ impl OverlayView {
 /// Layout version of [`OverlayView::to_cache_bytes`]. Bump it whenever the
 /// cached layout changes shape; cache keys include it.
 /// 5 (F2b): a removed file's base nodes are suppressed; a 4 view kept them.
-pub const VIEW_CACHE_FORMAT: u32 = 5;
+/// 6 (R-PI-b): the view stores the base declarations it could not pair; a 5
+/// view lost that caveat on a cache hit.
+pub const VIEW_CACHE_FORMAT: u32 = 6;
 
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
@@ -1285,6 +1325,7 @@ struct CachedView {
     dirty_base: Vec<u32>,
     edges: Vec<CachedEdge>,
     type_ctors: Vec<(u32, Vec<u32>)>,
+    hidden: Vec<HiddenDecl>,
 }
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -1410,6 +1451,7 @@ impl OverlayView {
                     .map(|(&ty, ctors)| (ty, ctors.clone()))
                     .collect(),
             ),
+            hidden: self.hidden.clone(),
         })
     }
 
@@ -1475,6 +1517,7 @@ impl OverlayView {
             out_adj,
             in_adj,
             type_ctors: cached.type_ctors.into_iter().collect(),
+            hidden: cached.hidden,
         })
     }
 }
@@ -1490,15 +1533,20 @@ impl OverlayView {
 /// A `Duplicate` row takes no part. The index tombstones it and keeps its
 /// first as the one node of that anchor, so the first still pairs. A base
 /// tombstone has an empty name, so its anchor matches no declaration.
+///
+/// The second value lists the base nodes left unpaired although the parse
+/// still names their anchor and they carry a name: with the anchor unique on
+/// both sides they would have paired, so each one sits in an ambiguous set.
+/// An anchor absent from the parse was deleted by the edit and is not listed.
 fn pair_with_base(
     graph: &ArchivedZeroCopyGraph,
     path: &str,
     base: &[u32],
     identities: &[DeclIdentity],
-) -> Vec<Option<u32>> {
+) -> (Vec<Option<u32>>, Vec<u32>) {
     let mut out = vec![None; identities.len()];
     if base.is_empty() {
-        return out;
+        return (out, Vec::new());
     }
     let pool = &graph.string_pool;
     let base_anchors: Vec<u64> = file_identities(path, base, |&i| {
@@ -1528,7 +1576,50 @@ fn pair_with_base(
     {
         out[j] = pair.map(|k| base[k as usize]);
     }
-    out
+    let paired: FxHashSet<u32> = out.iter().flatten().copied().collect();
+    let dirty_set: FxHashSet<u64> = dirty_anchors.into_iter().collect();
+    let unpaired = base
+        .iter()
+        .zip(&base_anchors)
+        .filter(|&(&idx, anchor)| {
+            !paired.contains(&idx)
+                && dirty_set.contains(anchor)
+                && !graph.nodes[idx as usize].name.resolve(pool).is_empty()
+        })
+        .map(|(&idx, _)| idx)
+        .collect();
+    (out, unpaired)
+}
+
+/// [`OverlayView::hidden_declarations`] for the base nodes `idxs`, which
+/// must be in ascending order: groups come out in graph order.
+fn hidden_declarations(graph: &ArchivedZeroCopyGraph, idxs: &[u32]) -> Vec<HiddenDecl> {
+    let pool = &graph.string_pool;
+    let mut group_of: FxHashMap<(&str, u8, &str, &str), usize> = FxHashMap::default();
+    let mut groups: Vec<HiddenDecl> = Vec::new();
+    for &idx in idxs {
+        let node = &graph.nodes[idx as usize];
+        let path = graph.files[node.file_idx.to_native() as usize]
+            .path
+            .resolve(pool);
+        let kind = NodeKind::from(&node.kind);
+        let owner = node.owner_class.resolve(pool);
+        let name = node.name.resolve(pool);
+        let group = *group_of
+            .entry((path, kind as u8, owner, name))
+            .or_insert_with(|| {
+                groups.push(HiddenDecl {
+                    path: path.to_string(),
+                    kind,
+                    owner: owner.to_string(),
+                    name: name.to_string(),
+                    count: 0,
+                });
+                groups.len() - 1
+            });
+        groups[group].count += 1;
+    }
+    groups
 }
 
 /// Whether a fresh parse (a fragment's `RawNode`s) can carry a node of
@@ -5848,6 +5939,134 @@ mod tests {
 
         assert!((0..view.base_len()).all(|idx| view.redirect(idx) == Some(idx)));
         assert!(OverlayView::build_with_removed(graph, &[], &[]).is_none());
+    }
+
+    /// Base `Method`s of owner `K`, one per name, 10 lines apart so no span
+    /// nests in another.
+    fn method_base(path: &str, names: &[&str]) -> Vec<u8> {
+        let mut fx = GraphFixture::new();
+        for (i, name) in names.iter().enumerate() {
+            let node = fx.method(path, "K", name);
+            let line = i as u32 * 10;
+            fx.span(node, (line, 0, line + 4, 0));
+        }
+        fx.into_bytes()
+    }
+
+    /// The parse of [`method_base`]'s shape: the same spans, one per name.
+    fn method_parse(path: &str, names: &[&str]) -> OverlayFileInput {
+        let symbols = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let mut s = sym(name, &[]);
+                s.kind = NodeKind::Method;
+                s.owner_class = Some("K".to_string());
+                s.start_line = i as u32 * 10 + 1;
+                s.end_line = i as u32 * 10 + 5;
+                s
+            })
+            .collect();
+        OverlayFileInput {
+            export_aliases: Vec::new(),
+            rel_path: path.to_string(),
+            symbols,
+            imports: vec![],
+        }
+    }
+
+    fn hidden(path: &str, name: &str, count: u32) -> HiddenDecl {
+        HiddenDecl {
+            path: path.to_string(),
+            kind: NodeKind::Method,
+            owner: "K".to_string(),
+            name: name.to_string(),
+            count,
+        }
+    }
+
+    /// Stands for: a comment-only edit of a file with an overload set hides
+    /// the set's base members, and the view names them so a caveat can.
+    #[test]
+    fn test_build_with_removed_shared_overloads_comment_edit_records_ambiguous() {
+        let bytes = method_base("K.java", &["save", "save"]);
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+
+        let view = OverlayView::build(graph, &[method_parse("K.java", &["save", "save"])]).unwrap();
+
+        assert_eq!(view.hidden_declarations(), [hidden("K.java", "save", 2)]);
+        assert_eq!(
+            (0..2).map(|i| view.redirect(i)).collect::<Vec<_>>(),
+            [None, None]
+        );
+    }
+
+    /// Stands for: the base side alone makes a set ambiguous, so deleting one
+    /// of two overloads still hides both base members.
+    #[test]
+    fn test_build_with_removed_base_two_dirty_one_records_ambiguous() {
+        let bytes = method_base("K.java", &["save", "save", "load"]);
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+
+        let view = OverlayView::build(graph, &[method_parse("K.java", &["save", "load"])]).unwrap();
+
+        assert_eq!(view.hidden_declarations(), [hidden("K.java", "save", 2)]);
+        assert_eq!(view.redirect(2), Some(view.base_len() + 1), "load pairs");
+    }
+
+    /// Stands for: a deleted member is not a pairing gap. Its anchor is gone
+    /// from the parse, so no caveat names it.
+    #[test]
+    fn test_build_with_removed_unique_method_deleted_records_nothing() {
+        let bytes = method_base("K.java", &["save", "load"]);
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+
+        let view = OverlayView::build(graph, &[method_parse("K.java", &["load"])]).unwrap();
+
+        assert_eq!(view.redirect(0), None, "save is suppressed");
+        assert!(view.hidden_declarations().is_empty());
+    }
+
+    /// Stands for: a removed path has no parse to pair with, and a base
+    /// tombstone (empty name) matches no declaration; neither is a gap.
+    #[test]
+    fn test_build_with_removed_removed_path_and_tombstone_record_nothing() {
+        let mut fx = GraphFixture::new();
+        for line in [0, 10] {
+            let node = fx.method("Gone.java", "K", "save");
+            fx.span(node, (line, 0, line + 4, 0));
+            let tombstone = fx.method("K.java", "K", "");
+            fx.span(tombstone, (line + 20, 0, line + 24, 0));
+        }
+        let kept = fx.method("K.java", "K", "load");
+        fx.span(kept, (0, 0, 4, 0));
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+
+        // The parse names the tombstone's empty name, so only the name
+        // check keeps its anchor out of the list.
+        let parse = method_parse("K.java", &["load", ""]);
+
+        let view =
+            OverlayView::build_with_removed(graph, &[parse], &["Gone.java".to_string()]).unwrap();
+
+        assert_eq!(view.redirect(0), None, "Gone.java save is suppressed");
+        assert!(view.hidden_declarations().is_empty());
+    }
+
+    /// Stands for: a cache hit carries the same caveat data as a fresh build.
+    #[test]
+    fn test_overlay_view_cache_round_trip_keeps_ambiguous() {
+        let bytes = method_base("K.java", &["save", "save"]);
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let view = OverlayView::build(graph, &[method_parse("K.java", &["save", "save"])]).unwrap();
+        assert!(!view.hidden_declarations().is_empty(), "fixture hides");
+
+        let decoded =
+            OverlayView::from_cache_bytes(&view.to_cache_bytes(), graph.nodes.len()).unwrap();
+
+        assert_eq!(decoded.hidden_declarations(), view.hidden_declarations());
+        assert_eq!(decoded, view);
     }
 
     #[test]

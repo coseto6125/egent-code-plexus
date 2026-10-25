@@ -1526,15 +1526,15 @@ fn run_multi(
 }
 
 /// Caveat for a single resolved target: HEAD-mismatch staleness names the
-/// repo, joined with the engine's unreadable-path caveat; otherwise the
-/// engine's own caveat applies whole. `behind_head` is judged on the graph
+/// repo, joined with the engine's dirty-set lines (unreadable paths, pairing
+/// gaps); otherwise the engine's own caveat applies whole. `behind_head` is judged on the graph
 /// `load_ensured` actually loaded, which after a synchronous rebuild is not
 /// the commit dir the target picked.
 fn single_target_caveat(target: &RepoTarget, engine: &Engine) -> Option<String> {
     if engine.behind_head {
         merge_caveats(
             stale_graph_caveat(&[target.display_name.as_str()]),
-            engine.unreadable_changes_caveat(),
+            engine.dirty_set_caveat(None),
         )
     } else {
         engine.caveat()
@@ -1977,8 +1977,9 @@ fn stale_graph_caveat(names: &[&str]) -> Option<String> {
 }
 
 /// Cross-repo staleness sweep: a repo is stale when its loaded graph is
-/// behind HEAD or its engine warm-attached a sibling SHA. Each repo with
-/// changed paths its dirty set could not name adds its own line.
+/// behind HEAD or its engine warm-attached a sibling SHA. Each repo whose
+/// dirty set has changed paths it could not name, or whose overlay hid base
+/// declarations it could not pair, adds its own labelled lines.
 fn stale_repos_caveat(
     targets: &[RepoTarget],
     loaded: &[(String, Result<Engine, String>)],
@@ -1995,11 +1996,7 @@ fn stale_repos_caveat(
         .map(|(name, _)| name)
         .collect();
     engines
-        .filter_map(|(name, engine)| {
-            engine
-                .unreadable_changes_caveat()
-                .map(|c| format!("{name}: {c}"))
-        })
+        .filter_map(|(name, engine)| engine.dirty_set_caveat(Some(name)))
         .fold(stale_graph_caveat(&stale), |acc, line| {
             merge_caveats(acc, Some(line))
         })
