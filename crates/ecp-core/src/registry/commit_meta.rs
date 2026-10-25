@@ -101,7 +101,10 @@ use std::path::Path;
 /// schema29: Fetches start at the File node; a module-level framework ref
 /// binds the File node; Overrides edges follow the stored supertypes per
 /// language rule.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema29");
+/// schema30: Overrides bind the nearest declaration along each language's
+/// lookup order and carry the base's resolver confidence; Swift records the
+/// override modifier; Dart heritage lists with-mixins.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema30");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
