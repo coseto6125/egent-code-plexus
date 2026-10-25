@@ -2,7 +2,7 @@
 //!
 //! Exercises the real end-to-end flow:
 //!   build L2 index → modify a source file (without committing) →
-//!   run a query → assert L1 fragments + dirty_files.json + session_meta
+//!   run a query → assert L1 fragments + l1/dirty_events.json + session_meta
 //!   materialise under <home>/.ecp/<repo>__<hash>/sessions/<sid>/.
 
 use std::ffi::OsStr;
@@ -116,6 +116,7 @@ fn stale_path_emits_l1_fragments_per_dirty_file() {
         .expect("ecp find spawn failed");
 
     // ── 5. Assert L1 fragment exists ──────────────────────────────────────
+    let fragments_tail = ecp_core::session::layout::fragments_dir(Path::new(""));
     let fragments: Vec<_> = WalkDir::new(&ecp_root)
         .max_depth(7)
         .into_iter()
@@ -123,14 +124,13 @@ fn stale_path_emits_l1_fragments_per_dirty_file() {
         .filter(|e| {
             e.path()
                 .parent()
-                .and_then(|d| d.file_name())
-                .is_some_and(|n| n == OsStr::new("graph_overlay"))
+                .is_some_and(|d| d.ends_with(&fragments_tail))
                 && e.path().extension() == Some(OsStr::new("bin"))
         })
         .collect();
     assert!(
         !fragments.is_empty(),
-        "expected at least one graph_overlay/*.bin under {ecp_root:?};\ntree:\n{:?}",
+        "expected at least one l1/fragments/*.bin under {ecp_root:?};\ntree:\n{:?}",
         WalkDir::new(&ecp_root)
             .max_depth(7)
             .into_iter()
@@ -159,22 +159,22 @@ fn stale_path_emits_l1_fragments_per_dirty_file() {
         "overlay_version should be ≥1; got: {sm_content}"
     );
 
-    // ── 7. Assert dirty_files.json references the mutated file ───────────
+    // ── 7. Assert l1/dirty_events.json references the mutated file ───────
     let dirty_files: Vec<_> = WalkDir::new(&ecp_root)
-        .max_depth(5)
+        .max_depth(6)
         .into_iter()
         .filter_map(Result::ok)
-        .filter(|e| e.file_name() == OsStr::new("dirty_files.json"))
+        .filter(|e| e.file_name() == OsStr::new("dirty_events.json"))
         .collect();
     assert!(
         !dirty_files.is_empty(),
-        "expected dirty_files.json under {ecp_root:?}"
+        "expected l1/dirty_events.json under {ecp_root:?}"
     );
     let dirty_content =
-        std::fs::read_to_string(dirty_files[0].path()).expect("read dirty_files.json");
+        std::fs::read_to_string(dirty_files[0].path()).expect("read dirty_events.json");
     assert!(
         dirty_content.contains("main.rs"),
-        "dirty_files.json should reference main.rs; got: {dirty_content}"
+        "dirty_events.json should reference main.rs; got: {dirty_content}"
     );
 
     // `ecp peers` classifies HARD and SOFT concerns off `dirty_symbols` and
@@ -182,7 +182,7 @@ fn stale_path_emits_l1_fragments_per_dirty_file() {
     // invisible. The pre-parsed write route left the field empty, which is
     // exactly the path this query takes.
     let manifest: serde_json::Value =
-        serde_json::from_str(&dirty_content).expect("dirty_files.json parses");
+        serde_json::from_str(&dirty_content).expect("dirty_events.json parses");
     let symbols: Vec<&str> = manifest["entries"]
         .as_object()
         .expect("entries object")

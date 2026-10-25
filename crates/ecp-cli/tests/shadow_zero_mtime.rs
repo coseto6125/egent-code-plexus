@@ -23,7 +23,7 @@ mod common;
 
 use common::{commit_all, ecp_bin, run_git, write};
 use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
-use ecp_core::session::DirtyFiles;
+use ecp_core::session::{layout, DirtyEvents};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -58,7 +58,7 @@ fn ecp(repo: &Path, home: &Path, args: &[&str]) {
     );
 }
 
-/// The session dir holding a `dirty_files.json`, found under `home`.
+/// The session dir holding a `l1/dirty_events.json`, found under `home`.
 fn session_dir(home: &Path) -> PathBuf {
     let mut stack = vec![home.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -66,10 +66,14 @@ fn session_dir(home: &Path) -> PathBuf {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if path.file_name().is_some_and(|n| n == "dirty_files.json")
-                && dir.file_name().is_some_and(|n| n == SESSION_ID)
+            } else if path.file_name().is_some_and(|n| n == "dirty_events.json")
+                && dir.file_name().is_some_and(|n| n == "l1")
+                && dir
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|n| n == SESSION_ID)
             {
-                return dir;
+                return dir.parent().unwrap().to_path_buf();
             }
         }
     }
@@ -111,7 +115,7 @@ fn test_accepted_fragments_shadow_cascade_mtime_matches_baseline() {
     );
 
     let session = session_dir(home.path());
-    let manifest = DirtyFiles::read(&session.join("dirty_files.json")).unwrap();
+    let manifest = DirtyEvents::read(&layout::dirty_events_path(&session)).unwrap();
     assert!(
         manifest.entries.contains_key("src/util.ts"),
         "the dirty file itself must have a fragment: {:?}",

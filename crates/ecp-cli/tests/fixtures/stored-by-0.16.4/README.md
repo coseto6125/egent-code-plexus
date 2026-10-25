@@ -6,6 +6,10 @@ Nothing here is written by code in this repository. The tests in
 `crates/ecp-cli/tests/stored_formats_prev_release.rs` read it with the current
 code.
 
+Today's reader opens `sessions/<id>/l1/` only. The `dirty_files.json` and
+`graph_overlay/` below are the legacy namespace: the tests read them as legacy
+data (and `admin gc` sweeps them), and never as the dirty set a query serves.
+
 Date: 2026-10-25 (files stamped 2026-10-24T18:21Z). Linux x86_64, little endian.
 
 ## What this sample cannot show

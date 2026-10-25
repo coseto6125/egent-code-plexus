@@ -2,7 +2,8 @@ use ecp_cli::session::overlay_writer::{
     write_dirty_fragment, write_dirty_fragments_batch, write_dirty_fragments_from_graphs,
     FragmentInput,
 };
-use ecp_core::session::{DirtyFiles, SessionMeta};
+use ecp_core::contracts::routing::SizeCap;
+use ecp_core::session::{layout, DirtyEvents, SessionMeta};
 
 fn make_session_dir(tmp: &std::path::Path, sid: &str) -> std::path::PathBuf {
     let session_dir = tmp.join("sessions").join(sid);
@@ -21,8 +22,8 @@ fn make_session_dir(tmp: &std::path::Path, sid: &str) -> std::path::PathBuf {
         agent_name: None,
     };
     SessionMeta::write_atomic(&session_dir.join("session_meta.json"), &sm).unwrap();
-    let df = DirtyFiles::empty();
-    DirtyFiles::write_atomic(&session_dir.join("dirty_files.json"), &df).unwrap();
+    let df = DirtyEvents::empty(SizeCap::BUILT_IN);
+    DirtyEvents::write_atomic(&layout::dirty_events_path(&session_dir), &df).unwrap();
     session_dir
 }
 
@@ -40,19 +41,22 @@ fn first_dirty_file_creates_fragment_and_manifest_entry() {
     assert!(!outcome.parse_failed);
 
     // Fragment file exists
-    let frags: Vec<_> = std::fs::read_dir(session_dir.join("graph_overlay"))
+    let frags: Vec<_> = std::fs::read_dir(layout::fragments_dir(&session_dir))
         .unwrap()
         .filter_map(Result::ok)
         .collect();
     assert_eq!(frags.len(), 1);
 
     // Manifest updated with this file
-    let df = DirtyFiles::read(&session_dir.join("dirty_files.json")).unwrap();
+    let df = DirtyEvents::read(&layout::dirty_events_path(&session_dir)).unwrap();
     assert!(df.entries.contains_key("src/a.rs"));
     let entry = &df.entries["src/a.rs"];
     assert_eq!(entry.mtime_ns, 1000);
     assert!(!entry.parse_failed);
-    assert_eq!(entry.fragment_id, outcome.fragment_id);
+    assert_eq!(
+        entry.fragment_id.as_deref(),
+        Some(outcome.fragment_id.as_str())
+    );
 }
 
 #[test]
@@ -139,14 +143,14 @@ fn batch_write_same_content_inputs_do_not_collide_on_tmp_files() {
     assert_eq!(outcomes.len(), 2);
     assert_eq!(outcomes[0].fragment_id, outcomes[1].fragment_id);
 
-    let df = DirtyFiles::read(&session_dir.join("dirty_files.json")).unwrap();
+    let df = DirtyEvents::read(&layout::dirty_events_path(&session_dir)).unwrap();
     assert!(df.entries.contains_key("a.rs"));
     assert!(df.entries.contains_key("b.rs"));
 
     let sm = SessionMeta::read(&session_dir.join("session_meta.json")).unwrap();
     assert_eq!(sm.overlay_version, 2);
 
-    let overlay_dir = session_dir.join("graph_overlay");
+    let overlay_dir = layout::fragments_dir(&session_dir);
     let frag_count = std::fs::read_dir(&overlay_dir)
         .unwrap()
         .filter_map(Result::ok)
@@ -202,9 +206,8 @@ fn from_graphs_matches_reparse_route_fragment_id() {
     );
 
     // The on-disk fragment archives must be byte-identical.
-    let frag = |sd: &std::path::Path, id: &str| {
-        std::fs::read(sd.join("graph_overlay").join(format!("{id}.bin"))).unwrap()
-    };
+    let frag =
+        |sd: &std::path::Path, id: &str| std::fs::read(layout::fragment_path(sd, id)).unwrap();
     assert_eq!(
         frag(&sd_a, &reparse[0].fragment_id),
         frag(&sd_b, &preparsed[0].fragment_id),

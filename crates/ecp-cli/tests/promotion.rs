@@ -1,5 +1,7 @@
 use ecp_cli::session::promotion::{promote_case_a, promote_case_b, promotion_case, PromotionCase};
-use ecp_core::session::{DirtyEntry, DirtyFiles, SessionMeta};
+use ecp_core::contracts::dirty_event::{PathChange, PathClass};
+use ecp_core::contracts::routing::SizeCap;
+use ecp_core::session::{layout, DirtyEventEntry, DirtyEvents, SessionMeta};
 use std::process::Command;
 
 fn git_init_with_commit(p: &std::path::Path) -> String {
@@ -57,7 +59,7 @@ fn make_session(
     std::fs::create_dir_all(&sessions).unwrap();
     let sid = sessions.join("test-sid");
     std::fs::create_dir(&sid).unwrap();
-    std::fs::create_dir(sid.join("graph_overlay")).unwrap();
+    std::fs::create_dir_all(layout::fragments_dir(&sid)).unwrap();
     let sm = SessionMeta {
         version: 1,
         session_id: "test-sid".into(),
@@ -72,7 +74,11 @@ fn make_session(
         agent_name: None,
     };
     SessionMeta::write_atomic(&sid.join("session_meta.json"), &sm).unwrap();
-    DirtyFiles::write_atomic(&sid.join("dirty_files.json"), &DirtyFiles::empty()).unwrap();
+    DirtyEvents::write_atomic(
+        &layout::dirty_events_path(&sid),
+        &DirtyEvents::empty(SizeCap::BUILT_IN),
+    )
+    .unwrap();
     sid
 }
 
@@ -158,28 +164,29 @@ fn case_a_drops_fragment_when_content_matches_new_l2() {
         xxhash_rust::xxh3::xxh3_64(new_content.as_bytes())
     );
     let frag_id = h.clone();
-    let frag_path = sid_dir.join("graph_overlay").join(format!("{frag_id}.bin"));
+    let frag_path = layout::fragment_path(&sid_dir, &frag_id);
     std::fs::write(&frag_path, b"stub fragment").unwrap();
-    let mut df = DirtyFiles::empty();
+    let mut df = DirtyEvents::empty(SizeCap::BUILT_IN);
     df.entries.insert(
         "a.rs".into(),
-        DirtyEntry {
+        DirtyEventEntry {
+            change: PathChange::Modified,
+            class: PathClass::SOURCE,
             mtime_ns: 0,
-            content_hash: h,
-            fragment_id: frag_id,
-            tantivy_delta_segment: None,
+            content_hash: Some(h),
+            fragment_id: Some(frag_id),
             parse_failed: false,
             dirty_symbols: vec![],
             format: 1,
         },
     );
-    DirtyFiles::write_atomic(&sid_dir.join("dirty_files.json"), &df).unwrap();
+    DirtyEvents::write_atomic(&layout::dirty_events_path(&sid_dir), &df).unwrap();
 
     let stats = promote_case_a(&sid_dir, wt_path, &new_sha).unwrap();
     assert_eq!(stats.dropped, 1);
     assert_eq!(stats.kept, 0);
     assert!(!frag_path.exists(), "fragment file should be removed");
-    let df2 = DirtyFiles::read(&sid_dir.join("dirty_files.json")).unwrap();
+    let df2 = DirtyEvents::read(&layout::dirty_events_path(&sid_dir)).unwrap();
     assert!(df2.entries.is_empty());
 
     let sm = SessionMeta::read(&sid_dir.join("session_meta.json")).unwrap();
@@ -212,22 +219,23 @@ fn case_a_keeps_fragment_when_content_diverges() {
     // L1 has a different content (not what was committed).
     let sid_dir = make_session(tmp_session_root.path(), &old_sha, wt_path);
     let frag_id = "abcdefgh12345678";
-    let frag_path = sid_dir.join("graph_overlay").join(format!("{frag_id}.bin"));
+    let frag_path = layout::fragment_path(&sid_dir, frag_id);
     std::fs::write(&frag_path, b"stub fragment").unwrap();
-    let mut df = DirtyFiles::empty();
+    let mut df = DirtyEvents::empty(SizeCap::BUILT_IN);
     df.entries.insert(
         "a.rs".into(),
-        DirtyEntry {
+        DirtyEventEntry {
+            change: PathChange::Modified,
+            class: PathClass::SOURCE,
             mtime_ns: 0,
-            content_hash: "0".repeat(64), // intentionally mismatched hash
-            fragment_id: frag_id.into(),
-            tantivy_delta_segment: None,
+            content_hash: Some("0".repeat(64)), // intentionally mismatched hash
+            fragment_id: Some(frag_id.into()),
             parse_failed: false,
             dirty_symbols: vec![],
             format: 1,
         },
     );
-    DirtyFiles::write_atomic(&sid_dir.join("dirty_files.json"), &df).unwrap();
+    DirtyEvents::write_atomic(&layout::dirty_events_path(&sid_dir), &df).unwrap();
 
     let stats = promote_case_a(&sid_dir, wt_path, &new_sha).unwrap();
     assert_eq!(stats.dropped, 0);
@@ -244,7 +252,7 @@ fn case_b_atomic_renames_to_stale_then_recreates() {
     let sid_dir = make_session(tmp.path(), &old_sha, wt.path());
 
     // Write some fragment files.
-    std::fs::write(sid_dir.join("graph_overlay").join("a.bin"), b"x").unwrap();
+    std::fs::write(layout::fragment_path(&sid_dir, "a"), b"x").unwrap();
 
     promote_case_b(&sid_dir, &old_sha, &new_sha).unwrap();
 
@@ -254,8 +262,12 @@ fn case_b_atomic_renames_to_stale_then_recreates() {
     assert_eq!(sm.base_sha, new_sha);
     assert_eq!(sm.overlay_version, 0);
 
-    let df = DirtyFiles::read(&sid_dir.join("dirty_files.json")).unwrap();
+    let df = DirtyEvents::read(&layout::dirty_events_path(&sid_dir)).unwrap();
     assert!(df.entries.is_empty());
+    assert!(
+        !layout::fragment_path(&sid_dir, "a").exists(),
+        "the fresh session must not inherit the old session's fragment bins"
+    );
 
     // Stale dir should exist (background GC hasn't run yet).
     let stale = sid_dir

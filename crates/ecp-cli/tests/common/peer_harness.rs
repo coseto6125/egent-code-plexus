@@ -112,17 +112,21 @@ impl PeerHarness {
     }
 
     pub fn write_dirty(&self, id: &str, path: &str, symbols: &[(&str, &str)]) {
-        use ecp_core::session::overlay::{DirtyEntry, DirtyFiles, SymbolKind, SymbolRef};
+        use ecp_core::contracts::dirty_event::{PathChange, PathClass};
+        use ecp_core::contracts::routing::SizeCap;
+        use ecp_core::session::layout;
+        use ecp_core::session::overlay::{DirtyEventEntry, DirtyEvents, SymbolKind, SymbolRef};
         use std::collections::BTreeMap;
         let sdir = self.session_dir(id);
         let mut entries = BTreeMap::new();
         entries.insert(
             path.to_string(),
-            DirtyEntry {
+            DirtyEventEntry {
+                change: PathChange::Modified,
+                class: PathClass::SOURCE,
                 mtime_ns: 1,
-                content_hash: "h".into(),
-                fragment_id: "f".into(),
-                tantivy_delta_segment: None,
+                content_hash: Some("h".into()),
+                fragment_id: Some("f".into()),
                 parse_failed: false,
                 format: 1,
                 dirty_symbols: symbols
@@ -137,15 +141,9 @@ impl PeerHarness {
                     .collect(),
             },
         );
-        DirtyFiles::write_atomic(
-            &sdir.join("dirty_files.json"),
-            &DirtyFiles {
-                builder_fingerprint: None,
-                version: 1,
-                entries,
-            },
-        )
-        .unwrap();
+        let mut manifest = DirtyEvents::empty(SizeCap::BUILT_IN);
+        manifest.entries = entries;
+        DirtyEvents::write_atomic(&layout::dirty_events_path(&sdir), &manifest).unwrap();
     }
 
     pub fn read_inbox(&self, id: &str) -> Vec<InboxEntry> {

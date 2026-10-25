@@ -1,5 +1,9 @@
 use ecp_cli::session::state::classify;
-use ecp_core::session::{DirtyEntry, DirtyFiles, SessionMeta, SessionState, StaleReason};
+use ecp_core::contracts::dirty_event::{PathChange, PathClass};
+use ecp_core::contracts::routing::SizeCap;
+use ecp_core::session::{
+    layout, DirtyEventEntry, DirtyEvents, DirtyFiles, SessionMeta, SessionState, StaleReason,
+};
 use std::fs;
 use std::path::Path;
 
@@ -25,7 +29,7 @@ fn setup_repo(tmp: &Path, sha: &str, dirname: &str) {
     ecp_core::registry::CommitBuildMeta::write_atomic(&commits.join("meta.json"), &cm).unwrap();
 }
 
-fn setup_session(tmp: &Path, sid: &str, base_sha: &str, dirty: DirtyFiles) {
+fn setup_session(tmp: &Path, sid: &str, base_sha: &str, dirty: DirtyEvents) {
     let sd = tmp.join("sessions").join(sid);
     fs::create_dir_all(&sd).unwrap();
     let sm = SessionMeta {
@@ -42,18 +46,19 @@ fn setup_session(tmp: &Path, sid: &str, base_sha: &str, dirty: DirtyFiles) {
         agent_name: None,
     };
     SessionMeta::write_atomic(&sd.join("session_meta.json"), &sm).unwrap();
-    DirtyFiles::write_atomic(&sd.join("dirty_files.json"), &dirty).unwrap();
+    DirtyEvents::write_atomic(&layout::dirty_events_path(&sd), &dirty).unwrap();
 }
 
-fn one_dirty_entry() -> DirtyFiles {
-    let mut df = DirtyFiles::empty();
+fn one_dirty_entry() -> DirtyEvents {
+    let mut df = DirtyEvents::empty(SizeCap::BUILT_IN);
     df.entries.insert(
         "src/a.rs".into(),
-        DirtyEntry {
+        DirtyEventEntry {
+            change: PathChange::Modified,
+            class: PathClass::SOURCE,
             mtime_ns: 1,
-            content_hash: "deadbeef".into(),
-            fragment_id: "frag1".into(),
-            tantivy_delta_segment: None,
+            content_hash: Some("deadbeef".into()),
+            fragment_id: Some("frag1".into()),
             parse_failed: false,
             dirty_symbols: vec![],
             format: 1,
@@ -69,7 +74,12 @@ const DIRNAME: &str = "branch_main__abc123def456789012345678901234567890abcd";
 fn classify_empty_dirty_returns_pure_reference() {
     let tmp = tempfile::tempdir().unwrap();
     setup_repo(tmp.path(), SHA, DIRNAME);
-    setup_session(tmp.path(), "sid1", SHA, DirtyFiles::empty());
+    setup_session(
+        tmp.path(),
+        "sid1",
+        SHA,
+        DirtyEvents::empty(SizeCap::BUILT_IN),
+    );
     match classify(tmp.path(), "sid1") {
         SessionState::PureReference {
             base_sha,
@@ -125,9 +135,14 @@ fn classify_missing_dirty_file_returns_pure_reference() {
 fn classify_corrupt_dirty_returns_stale_dirtycorrupt() {
     let tmp = tempfile::tempdir().unwrap();
     setup_repo(tmp.path(), SHA, DIRNAME);
-    setup_session(tmp.path(), "sid1", SHA, DirtyFiles::empty());
+    setup_session(
+        tmp.path(),
+        "sid1",
+        SHA,
+        DirtyEvents::empty(SizeCap::BUILT_IN),
+    );
     fs::write(
-        tmp.path().join("sessions/sid1/dirty_files.json"),
+        layout::dirty_events_path(&tmp.path().join("sessions/sid1")),
         b"{ not valid json",
     )
     .unwrap();
@@ -156,11 +171,51 @@ fn classify_missing_meta_returns_stale_metaunreadable() {
 fn classify_missing_l2_returns_stale_l2missing() {
     let tmp = tempfile::tempdir().unwrap();
     fs::create_dir_all(tmp.path().join("commits")).unwrap();
-    setup_session(tmp.path(), "sid1", SHA, DirtyFiles::empty());
+    setup_session(
+        tmp.path(),
+        "sid1",
+        SHA,
+        DirtyEvents::empty(SizeCap::BUILT_IN),
+    );
     assert!(matches!(
         classify(tmp.path(), "sid1"),
         SessionState::Stale {
             reason: StaleReason::L2Missing
         }
+    ));
+}
+
+#[test]
+fn classify_legacy_dirty_files_only_returns_pure_reference() {
+    // Contract: the legacy `dirty_files.json` is never read (`classify_with_meta`
+    // reads only `layout::dirty_events_path`), so a session that holds its dirty
+    // file there alone serves none of them.
+    let tmp = tempfile::tempdir().unwrap();
+    setup_repo(tmp.path(), SHA, DIRNAME);
+    setup_session(
+        tmp.path(),
+        "sid1",
+        SHA,
+        DirtyEvents::empty(SizeCap::BUILT_IN),
+    );
+    let sd = tmp.path().join("sessions/sid1");
+    fs::remove_file(layout::dirty_events_path(&sd)).unwrap();
+    let mut legacy = DirtyFiles::empty();
+    legacy.entries.insert(
+        "src/a.rs".into(),
+        ecp_core::session::DirtyEntry {
+            mtime_ns: 1,
+            content_hash: "deadbeef".into(),
+            fragment_id: "frag1".into(),
+            tantivy_delta_segment: None,
+            parse_failed: false,
+            dirty_symbols: vec![],
+            format: 1,
+        },
+    );
+    DirtyFiles::write_atomic(&layout::legacy_dirty_files_path(&sd), &legacy).unwrap();
+    assert!(matches!(
+        classify(tmp.path(), "sid1"),
+        SessionState::PureReference { .. }
     ));
 }

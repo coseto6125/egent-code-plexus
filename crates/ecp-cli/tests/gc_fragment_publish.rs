@@ -3,7 +3,7 @@
 //! judged orphan; the overlay lock orders the two, and the freshness gate
 //! re-parses a file whose bin is gone whatever removed it.
 
-use ecp_core::session::{DirtyFiles, SessionMeta};
+use ecp_core::session::{layout, DirtyEvents, SessionMeta};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -37,9 +37,7 @@ fn test_write_dirty_fragments_from_graphs_overlay_lock_held_publishes_after_rele
     )
     .unwrap();
     let hash = [7u8; 8];
-    let bin = session
-        .join("graph_overlay")
-        .join(format!("{:016x}.bin", u64::from_le_bytes(hash)));
+    let bin = layout::fragment_path(&session, &format!("{:016x}", u64::from_le_bytes(hash)));
     let writer = {
         let session = session.clone();
         std::thread::spawn(move || {
@@ -61,7 +59,7 @@ fn test_write_dirty_fragments_from_graphs_overlay_lock_held_publishes_after_rele
         "a bin was published while gc held the session"
     );
     assert!(
-        !session.join("dirty_files.json").exists(),
+        !layout::dirty_events_path(&session).exists(),
         "a manifest was committed while gc held the session"
     );
     drop(held);
@@ -132,12 +130,14 @@ fn find_json(repo: &Path, home: &Path, name: &str) -> serde_json::Value {
     })
 }
 
-fn overlay_dirs(home: &Path) -> Vec<PathBuf> {
+/// The session directories under `home` that hold a `l1/fragments` directory.
+fn session_dirs(home: &Path) -> Vec<PathBuf> {
     walkdir::WalkDir::new(home)
         .into_iter()
         .flatten()
-        .filter(|e| e.file_type().is_dir() && e.file_name() == "graph_overlay")
+        .filter(|e| e.file_type().is_dir())
         .map(|e| e.into_path())
+        .filter(|dir| layout::fragments_dir(dir).is_dir())
         .collect()
 }
 
@@ -167,15 +167,18 @@ fn test_find_fragment_bin_missing_under_current_manifest_reparsed() {
     let first = find_json(&repo, &home, "healed_probe");
     assert_eq!(first["found"], true, "overlay never served: {first}");
 
-    let overlays = overlay_dirs(&home);
-    assert_eq!(overlays.len(), 1, "{overlays:?}");
-    let overlay = &overlays[0];
-    let manifest = DirtyFiles::read(&overlay.parent().unwrap().join("dirty_files.json")).unwrap();
+    let sessions = session_dirs(&home);
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+    let session = &sessions[0];
+    let manifest = DirtyEvents::read(&layout::dirty_events_path(session)).unwrap();
     let entry = manifest
         .entries
         .get("src/a.rs")
         .expect("the dirty file has no manifest entry");
-    let bin = overlay.join(format!("{}.bin", entry.fragment_id));
+    let bin = layout::fragment_path(
+        session,
+        entry.fragment_id.as_deref().expect("the entry names a bin"),
+    );
     std::fs::remove_file(&bin).unwrap();
 
     let second = find_json(&repo, &home, "healed_probe");

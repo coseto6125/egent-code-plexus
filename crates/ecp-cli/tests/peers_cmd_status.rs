@@ -46,22 +46,35 @@ fn write_dirty(root: &std::path::Path, id: &str, symbols: &[&str]) {
 }
 
 fn write_dirty_in(root: &std::path::Path, id: &str, file: &str, symbols: &[&str]) {
-    let syms: Vec<String> = symbols
-        .iter()
-        .map(|s| {
-            format!(
-                r#"{{"name":"{s}","kind":"function","file":"{file}","line_start":1,"line_end":2}}"#
-            )
-        })
-        .collect();
-    let json = format!(
-        r#"{{"version":1,"entries":{{"{}":{{"mtime_ns":0,"content_hash":"h","fragment_id":"f","tantivy_delta_segment":null,"dirty_symbols":[{}]}}}}}}"#,
-        file,
-        syms.join(",")
+    use ecp_core::contracts::dirty_event::{PathChange, PathClass};
+    use ecp_core::contracts::routing::SizeCap;
+    use ecp_core::session::overlay::{DirtyEventEntry, DirtyEvents, SymbolKind, SymbolRef};
+    let mut manifest = DirtyEvents::empty(SizeCap::BUILT_IN);
+    manifest.entries.insert(
+        file.to_string(),
+        DirtyEventEntry {
+            change: PathChange::Modified,
+            class: PathClass::SOURCE,
+            mtime_ns: 0,
+            fragment_id: Some("f".into()),
+            content_hash: Some("h".into()),
+            parse_failed: false,
+            dirty_symbols: symbols
+                .iter()
+                .map(|s| SymbolRef {
+                    name: (*s).into(),
+                    kind: SymbolKind::Function,
+                    file: file.into(),
+                    line_start: 1,
+                    line_end: 2,
+                })
+                .collect(),
+            format: ecp_core::session::overlay::FRAGMENT_FORMAT_V5,
+        },
     );
-    std::fs::write(
-        root.join("sessions").join(id).join("dirty_files.json"),
-        json,
+    DirtyEvents::write_atomic(
+        &ecp_core::session::layout::dirty_events_path(&root.join("sessions").join(id)),
+        &manifest,
     )
     .unwrap();
 }

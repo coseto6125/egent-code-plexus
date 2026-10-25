@@ -40,9 +40,10 @@ use ecp_cli::git::DiffScope;
 use ecp_cli::reanalyze::reanalyze_files;
 use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
 use ecp_cli::session::overlay_writer::write_dirty_fragments_from_graphs;
+use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType, ZeroCopyGraph};
 use ecp_core::session::merged::MergedGraph;
-use ecp_core::session::{DirtyFiles, OverlayView, SessionMeta};
+use ecp_core::session::{layout, DirtyEvents, OverlayView, SessionMeta};
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -278,7 +279,11 @@ fn new_session_dir(root: &Path, worktree: &Path) -> PathBuf {
         agent_name: None,
     };
     SessionMeta::write_atomic(&dir.join("session_meta.json"), &meta).unwrap();
-    DirtyFiles::write_atomic(&dir.join("dirty_files.json"), &DirtyFiles::empty()).unwrap();
+    DirtyEvents::write_atomic(
+        &layout::dirty_events_path(&dir),
+        &DirtyEvents::empty(SizeCap::BUILT_IN),
+    )
+    .unwrap();
     dir
 }
 

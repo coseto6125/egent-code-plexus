@@ -1,8 +1,9 @@
 use chrono::Utc;
 use ecp_cli::peer::dispatch::dispatch_peer_dirty_event;
+use ecp_core::contracts::dirty_event::{PathChange, PathClass};
 use ecp_core::peer::concern::ImpactCache;
 use ecp_core::peer::inbox::{drain, InboxEntry};
-use ecp_core::session::overlay::{DirtyEntry, SymbolKind, SymbolRef};
+use ecp_core::session::overlay::{DirtyEventEntry, SymbolKind, SymbolRef};
 use rustc_hash::FxHashSet;
 use tempfile::tempdir;
 
@@ -20,12 +21,13 @@ fn sym_in(name: &str, file: &str) -> SymbolRef {
     }
 }
 
-fn entry_with(syms: Vec<SymbolRef>) -> DirtyEntry {
-    DirtyEntry {
+fn entry_with(syms: Vec<SymbolRef>) -> DirtyEventEntry {
+    DirtyEventEntry {
+        change: PathChange::Modified,
+        class: PathClass::SOURCE,
         mtime_ns: 1,
-        content_hash: "h".into(),
-        fragment_id: "f".into(),
-        tantivy_delta_segment: None,
+        content_hash: Some("h".into()),
+        fragment_id: Some("f".into()),
         parse_failed: false,
         dirty_symbols: syms,
         format: 1,
