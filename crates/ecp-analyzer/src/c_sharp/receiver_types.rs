@@ -530,6 +530,14 @@ fn csharp_callee(
             });
         }
     };
+    // `DeserializeObject<Foo>`: the declaration names the method, not its
+    // type arguments.
+    let method_node = match method_node.kind() {
+        "generic_name" => method_node
+            .named_child(0)
+            .filter(|id| id.kind() == "identifier")?,
+        _ => method_node,
+    };
     let method = method_node.utf8_text(source).ok()?;
     let entry = match classify_receiver(receiver, start_pos(inv), source, locals, nodes)? {
         Receiver::Typed(ty) => format!("{ty}.{method}"),

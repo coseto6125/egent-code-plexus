@@ -126,7 +126,8 @@ use std::path::Path;
 /// edges target; every other part links to it with `PartOf`.
 /// schema37: a C# value receiver of unknown type is an untyped member that
 /// binds only an applicable extension, at 0.5; a typed field or property
-/// receiver keeps its type. Overlay fragments of schema36 are ignored by
+/// receiver keeps its type; a generic method call records the method name
+/// without its type arguments. Overlay fragments of schema36 are ignored by
 /// their fingerprint.
 pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema37");
 

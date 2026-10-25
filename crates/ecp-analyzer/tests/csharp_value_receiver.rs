@@ -695,3 +695,41 @@ fn test_resolve_call_typed_receiver_proven_extension_keeps_owned_confidence() {
         .collect();
     assert_eq!(twice, [(0.85, "call".to_string())]);
 }
+
+/// Regression: a generic method call (`JsonConvert.DeserializeObject<Foo>(s)`,
+/// `t.Value<int>(k)`) records its method name without the type arguments.
+/// On HEAD the entry named `DeserializeObject<Foo>`, which no declaration
+/// matches: 876 such sites on Newtonsoft.Json bound 69 edges.
+#[test]
+fn test_resolve_call_generic_method_call_binds_by_method_name() {
+    let lib = "namespace Lib
+{
+    public static class JsonConvert
+    {
+        public static T DeserializeObject<T>(string value) { return default(T); }
+    }
+    public class Token
+    {
+        public T Value<T>(string key) { return default(T); }
+    }
+}
+";
+    let user = "namespace Lib
+{
+    public class Foo {}
+    public class User
+    {
+        public void Use(Token t, string s)
+        {
+            Foo f = JsonConvert.DeserializeObject<Foo>(s);
+            int n = t.Value<int>(\"k\");
+        }
+    }
+}
+";
+    let graph = graph(&[("Lib/Lib.cs", lib), ("Lib/User.cs", user)]);
+    assert_eq!(
+        targets(&graph, "Use"),
+        ["JsonConvert.DeserializeObject", "Token.Value"]
+    );
+}
