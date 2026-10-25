@@ -366,10 +366,11 @@ fn test_resolve_call_implicit_this_and_base_calls_still_bind() {
     }
 }
 ";
-    assert_eq!(
-        targets(&graph(&[("Lib/Zoo.cs", zoo)]), "Live"),
-        ["Animal.Breathe", "Animal.Eat", "Dog.Bark"]
-    );
+    // `Bark()` binds same-file and `this.Bark()` owned: two edges of
+    // different confidence to one target.
+    let mut live = targets(&graph(&[("Lib/Zoo.cs", zoo)]), "Live");
+    live.dedup();
+    assert_eq!(live, ["Animal.Breathe", "Animal.Eat", "Dog.Bark"]);
 }
 
 const PATHS: &str = "namespace Lib

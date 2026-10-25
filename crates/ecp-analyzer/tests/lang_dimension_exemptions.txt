@@ -1549,3 +1549,16 @@ partial_parts ruby only C# declares one type in partial parts across files
 partial_parts rust only C# declares one type in partial parts across files
 partial_parts swift only C# declares one type in partial parts across files
 partial_parts typescript only C# declares one type in partial parts across files
+value_receiver c the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver cpp the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver dart the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver go the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver java the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver javascript the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver kotlin the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver php the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver python the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver ruby the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver rust the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver swift the value-receiver call shape (field, var, ?., extension retry) is C#-specific
+value_receiver typescript the value-receiver call shape (field, var, ?., extension retry) is C#-specific

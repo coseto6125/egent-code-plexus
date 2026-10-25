@@ -1528,7 +1528,9 @@ impl OverlayView {
 /// 7 (P-ext): a C# extension call adds edges and a reason; a 6 view lacks them.
 /// 8 (P-ext2): the view stores its C# call gaps; a 7 view lost them.
 /// 9 (P-part): a chain through a C# partial type binds; an 8 view lacks the edge.
-pub const VIEW_CACHE_FORMAT: u32 = 9;
+/// 10 (P-recv): a C# value receiver of unknown type binds no ladder tier; a
+/// 9 view kept those edges.
+pub const VIEW_CACHE_FORMAT: u32 = 10;
 
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is

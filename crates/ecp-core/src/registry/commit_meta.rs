@@ -124,7 +124,11 @@ use std::path::Path;
 /// class. Overlay fragments of schema34 are ignored by their fingerprint.
 /// schema36: a C# partial type has one representative part, which heritage
 /// edges target; every other part links to it with `PartOf`.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema36");
+/// schema37: a C# value receiver of unknown type is an untyped member that
+/// binds only an applicable extension, at 0.5; a typed field or property
+/// receiver keeps its type. Overlay fragments of schema36 are ignored by
+/// their fingerprint.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema37");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
