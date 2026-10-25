@@ -97,6 +97,9 @@ fn test_fetch_shape_handler_without_other_json_calls_gives_no_file_union() {
     );
 }
 
+/// One route handler: `(function name, route path, function span)`.
+type Handler<'a> = (&'a str, &'a str, (u32, u32, u32, u32));
+
 fn graph_with_span(span: (u32, u32, u32, u32)) -> LocalGraph {
     graph_with_handlers(&[("getUsers", "/users", span)])
 }
@@ -104,7 +107,7 @@ fn graph_with_span(span: (u32, u32, u32, u32)) -> LocalGraph {
 /// `api.js` with one function node per `(name, path, span)`, and a route
 /// `GET <path>` served by it. Each route call sits on its own row past the
 /// nodes, so the handler binds by name.
-fn graph_with_handlers(handlers: &[(&str, &str, (u32, u32, u32, u32))]) -> LocalGraph {
+fn graph_with_handlers(handlers: &[Handler]) -> LocalGraph {
     let site = |row: u32| match handlers.len() {
         1 => (0, 0, 0, 0),
         _ => (100 + row, 0, 100 + row, 10),

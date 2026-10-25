@@ -190,14 +190,16 @@ fn blind_spot_kinds(g: &ZeroCopyGraph) -> Vec<String> {
         .collect()
 }
 
+/// What the overlay reports for a name: every `Calls` edge as `(caller,
+/// callee, callee display owner)`, and the display owner of each virtual node
+/// of that name.
+type CallsAndOwners = (Vec<(String, String, String)>, Vec<Option<String>>);
+
 /// The overlay view of `files` over their own full build, every file dirty
 /// with unchanged content: `(caller name, callee name, callee display
 /// owner)` of every `Calls` edge, sorted, plus the display owner of each
 /// virtual node named `name`, sorted.
-fn overlay_calls_and_owners(
-    files: &[(&str, &str)],
-    name: &str,
-) -> (Vec<(String, String, String)>, Vec<Option<String>>) {
+fn overlay_calls_and_owners(files: &[(&str, &str)], name: &str) -> CallsAndOwners {
     let full = build(files);
     let bytes = archive(&full);
     let base = access(&bytes);

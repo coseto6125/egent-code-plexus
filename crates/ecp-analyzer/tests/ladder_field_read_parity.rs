@@ -7,13 +7,25 @@
 //! (Tier 1, confidence 1.0), one that only another file declares (Tier 3,
 //! 0.7), and one that no file declares (no edge). Every file is dirty, so
 //! the overlay rebuilds each read from the fresh parse.
+//!
+//! Ruby is the one exemption among the 14 mainstream languages: `obj.attr`
+//! is a method call there, so the parser records no field read
+//! (`ruby/parser.rs` passes an empty field-access kind list to
+//! `extract_field_reads`), and `reads_field_all_langs.rs` pins that.
 
+use ecp_analyzer::c::parser::CProvider;
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
+use ecp_analyzer::cpp::parser::CppProvider;
+use ecp_analyzer::dart::parser::DartProvider;
 use ecp_analyzer::go::parser::GoProvider;
 use ecp_analyzer::java::parser::JavaProvider;
+use ecp_analyzer::javascript::parser::JavaScriptProvider;
+use ecp_analyzer::kotlin::parser::KotlinProvider;
+use ecp_analyzer::php::parser::PhpProvider;
 use ecp_analyzer::python::PythonProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::rust::parser::RustProvider;
+use ecp_analyzer::swift::parser::SwiftProvider;
 use ecp_analyzer::typescript::TypeScriptProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::graph::{ArchivedZeroCopyGraph, RelType, ZeroCopyGraph};
@@ -25,14 +37,15 @@ const FIELD_READ: &str = "field_read";
 /// One `ReadsField` edge: `(source uid, target uid, reason, confidence x 100)`.
 type ReadEdge = (u64, u64, String, u32);
 
+/// The three views of one fixture's reads: the full build's edges, the
+/// overlay's edges, and the full build's `(reader, field, confidence x 100)`.
+type FieldReadViews = (Vec<ReadEdge>, Vec<ReadEdge>, Vec<(String, String, u32)>);
+
 /// The `field_read` edges of the full build of `files` with every file
 /// shifted down one line, the overlay's edges over the unshifted base with
 /// the same shifted files dirty, and the full build's edges by name:
 /// `(reader, field, confidence x 100)`.
-fn field_read_edges(
-    provider: &dyn LanguageProvider,
-    files: &[(&str, &str)],
-) -> (Vec<ReadEdge>, Vec<ReadEdge>, Vec<(String, String, u32)>) {
+fn field_read_edges(provider: &dyn LanguageProvider, files: &[(&str, &str)]) -> FieldReadViews {
     let parse = |path: &str, source: &str| {
         provider
             .parse_file(Path::new(path), source.as_bytes())
@@ -232,5 +245,131 @@ fn test_ladder_field_read_binds_same_on_both_sides_csharp() {
             ),
         ],
         ("ReadLocal", "ReadRemote", "Timeout"),
+    );
+}
+
+#[test]
+fn test_ladder_field_read_binds_same_on_both_sides_javascript() {
+    assert_binds_same_on_both_sides(
+        &JavaScriptProvider::new().unwrap(),
+        &[
+            (
+                "src/config.js",
+                "class Config { timeout = 0; }\nfunction readLocal(c) { return c.timeout; }\n",
+            ),
+            (
+                "src/remote.js",
+                "function readRemote(c) { return c.timeout + c.missing; }\n",
+            ),
+        ],
+        ("readLocal", "readRemote", "timeout"),
+    );
+}
+
+#[test]
+fn test_ladder_field_read_binds_same_on_both_sides_kotlin() {
+    assert_binds_same_on_both_sides(
+        &KotlinProvider::new().unwrap(),
+        &[
+            (
+                "src/Config.kt",
+                "class Config { val timeout: Int = 0 }\nfun readLocal(c: Config): Int { return c.timeout }\n",
+            ),
+            (
+                "src/Remote.kt",
+                "fun readRemote(c: Config): Int { return c.timeout + c.missing }\n",
+            ),
+        ],
+        ("readLocal", "readRemote", "timeout"),
+    );
+}
+
+#[test]
+fn test_ladder_field_read_binds_same_on_both_sides_php() {
+    assert_binds_same_on_both_sides(
+        &PhpProvider::new().unwrap(),
+        &[
+            (
+                "src/Config.php",
+                "<?php\nclass Config { public int $timeout = 0; }\nfunction readLocal(Config $c): int { return $c->timeout; }\n",
+            ),
+            (
+                "src/Remote.php",
+                "<?php\nfunction readRemote(Config $c): int { return $c->timeout + $c->missing; }\n",
+            ),
+        ],
+        ("readLocal", "readRemote", "timeout"),
+    );
+}
+
+#[test]
+fn test_ladder_field_read_binds_same_on_both_sides_swift() {
+    assert_binds_same_on_both_sides(
+        &SwiftProvider::new().unwrap(),
+        &[
+            (
+                "src/Config.swift",
+                "class Config { var timeout: Int = 0 }\nfunc readLocal(c: Config) -> Int { return c.timeout }\n",
+            ),
+            (
+                "src/Remote.swift",
+                "func readRemote(c: Config) -> Int { return c.timeout + c.missing }\n",
+            ),
+        ],
+        ("readLocal", "readRemote", "timeout"),
+    );
+}
+
+#[test]
+fn test_ladder_field_read_binds_same_on_both_sides_c() {
+    assert_binds_same_on_both_sides(
+        &CProvider::new().unwrap(),
+        &[
+            (
+                "src/config.c",
+                "struct Config { int timeout; };\nint read_local(struct Config *c) { return c->timeout; }\n",
+            ),
+            (
+                "src/remote.c",
+                "int read_remote(struct Config *c) { return c->timeout + c->missing; }\n",
+            ),
+        ],
+        ("read_local", "read_remote", "timeout"),
+    );
+}
+
+#[test]
+fn test_ladder_field_read_binds_same_on_both_sides_cpp() {
+    assert_binds_same_on_both_sides(
+        &CppProvider::new().unwrap(),
+        &[
+            (
+                "src/config.cpp",
+                "struct Config { int timeout; };\nint read_local(Config* c) { return c->timeout; }\n",
+            ),
+            (
+                "src/remote.cpp",
+                "int read_remote(Config* c) { return c->timeout + c->missing; }\n",
+            ),
+        ],
+        ("read_local", "read_remote", "timeout"),
+    );
+}
+
+#[test]
+fn test_ladder_field_read_binds_same_on_both_sides_dart() {
+    assert_binds_same_on_both_sides(
+        &DartProvider::new().unwrap(),
+        &[
+            (
+                "lib/config.dart",
+                "class Config { int timeout = 0; }\nint readLocal(Config c) { return c.timeout; }\n",
+            ),
+            (
+                "lib/remote.dart",
+                "int readRemote(Config c) { return c.timeout + c.missing; }\n",
+            ),
+        ],
+        ("readLocal", "readRemote", "timeout"),
     );
 }
