@@ -128,19 +128,6 @@ fn inspect_at_group_redirects_to_group_help() {
 }
 
 #[test]
-fn rename_at_group_redirects_to_group_help() {
-    assert_redirects_to_group_help(&[
-        "rename",
-        "--symbol",
-        "old",
-        "--new-name",
-        "new",
-        "--repo",
-        "@demo",
-    ]);
-}
-
-#[test]
 fn cypher_at_group_redirects_to_group_help() {
     assert_redirects_to_group_help(&["cypher", "MATCH (n) RETURN n", "--repo", "@demo"]);
 }

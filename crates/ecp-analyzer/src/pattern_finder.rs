@@ -6,9 +6,8 @@
 //! pattern over the tree-sitter grammars ecp already vendors, so the caller
 //! keeps one parser stack instead of two.
 //!
-//! The C5 route of the path picks the grammar, as in
-//! [`crate::identifier_finder`]: extensions match case-sensitively, and the
-//! `.tsx` dialect gets the TSX grammar. A path whose route has no
+//! The C5 route of the path picks the grammar: extensions match
+//! case-sensitively, and the `.tsx` dialect gets the TSX grammar. A path whose route has no
 //! `Capability::PatternFinder` returns `None` and the caller skips the file.
 //!
 //! ## Metavariable escaping
@@ -121,8 +120,7 @@ pub fn lang_for_path(path: &str) -> Option<PatternLang> {
         (RouteLanguage::Ruby, _) => (tree_sitter_ruby::LANGUAGE.into(), MICRO),
         (RouteLanguage::Kotlin, _) => (tree_sitter_kotlin::LANGUAGE.into(), MICRO),
         (RouteLanguage::CSharp, _) => (tree_sitter_c_sharp::LANGUAGE.into(), MICRO),
-        // `LANGUAGE_PHP_ONLY`, not the HTML-mixing `LANGUAGE_PHP` that
-        // `identifier_finder` uses: a bare pattern carries no `<?php` opener,
+        // `LANGUAGE_PHP_ONLY`, not the HTML-mixing `LANGUAGE_PHP`: a bare pattern carries no `<?php` opener,
         // so the mixing grammar reads it as HTML text and matches nothing.
         (RouteLanguage::Php, _) => (tree_sitter_php::LANGUAGE_PHP_ONLY.into(), MICRO),
         (RouteLanguage::Swift, _) => (tree_sitter_swift::LANGUAGE.into(), MICRO),

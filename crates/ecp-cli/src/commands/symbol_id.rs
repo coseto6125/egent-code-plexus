@@ -1,6 +1,6 @@
 //! FQN (fully-qualified-name) helpers, the Tier-3 collision count, and the
-//! name→node resolution `ecp path` still uses. `ecp impact`, `ecp inspect`
-//! and `ecp rename` resolve through [`crate::read_context::resolve_target`].
+//! name→node resolution `ecp path` still uses. `ecp impact` and `ecp inspect`
+//! resolve through [`crate::read_context::resolve_target`].
 
 use crate::commands::format::{kind_to_str, node_kind_to_str};
 use ecp_core::contracts::identity::normalize_file_needle;

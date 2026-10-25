@@ -21,7 +21,6 @@ use std::path::Path;
 #[serde(rename_all = "snake_case")]
 pub enum ToolKind {
     Query,
-    Mutation,
     LongRunning,
     Hook,
 }
@@ -166,7 +165,6 @@ fn prefer_json_args(tool: &DerivedTool, args: Value) -> (Value, ToolResultFormat
 
 fn classify_tool(tool: &DerivedTool) -> ToolKind {
     match tool.subcommand.as_str() {
-        "rename" => ToolKind::Mutation,
         "watch" | "mcp" => ToolKind::LongRunning,
         "hook" | "hook-handle" | "hook-watcher" => ToolKind::Hook,
         _ => ToolKind::Query,

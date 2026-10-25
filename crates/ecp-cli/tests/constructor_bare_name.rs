@@ -46,10 +46,6 @@ impl Repo {
         fs::write(path, body).unwrap();
     }
 
-    fn read(&self, rel: &str) -> String {
-        fs::read_to_string(self.root.join(rel)).unwrap()
-    }
-
     fn ecp(&self, args: &[&str]) -> Output {
         Command::new(ecp_bin())
             .args(args)
@@ -317,38 +313,4 @@ fn test_impact_csharp_partial_attribute_part_lists_other_part_and_caller() {
         rows.iter().any(|r| r.0 == 1 && r.2 == "Use"),
         "the construction caller is at depth 1: {payload}"
     );
-}
-
-/// Stands for: `rename Foo Bar` on a class with a constructor renames the
-/// class, the constructor and the construction site in another file, and
-/// leaves an unrelated `Foo` in a third file alone. Failed before: `rename`
-/// refused the class-and-constructor ambiguity.
-#[test]
-fn test_rename_bare_type_csharp_renames_constructor_and_new_site() {
-    let repo = Repo::indexed(&[
-        (
-            "Foo.cs",
-            "class Foo\n{\n    public Foo()\n    {\n    }\n}\n",
-        ),
-        (
-            "Maker.cs",
-            "class Maker\n{\n    void Make()\n    {\n        var f = new Foo();\n    }\n}\n",
-        ),
-        ("other.py", "def Foo():\n    return 1\n"),
-    ]);
-
-    let out = repo.ecp(&["rename", "Foo", "Bar", "--file", "Foo.cs"]);
-
-    assert!(
-        out.status.success(),
-        "{} {}",
-        text(&out.stderr),
-        text(&out.stdout)
-    );
-    assert_eq!(
-        repo.read("Foo.cs"),
-        "class Bar\n{\n    public Bar()\n    {\n    }\n}\n"
-    );
-    assert!(repo.read("Maker.cs").contains("new Bar()"));
-    assert_eq!(repo.read("other.py"), "def Foo():\n    return 1\n");
 }

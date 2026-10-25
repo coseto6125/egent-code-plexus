@@ -1,4 +1,4 @@
-//! `ecp inspect` resolves its target as `impact` and `rename` do (C1 "Target
+//! `ecp inspect` resolves its target as `impact` does (C1 "Target
 //! request syntax", "Typed target result"): `--kind` and `--file` select the
 //! declaration, an explicit `--kind` wins over the `Impl`-beside-type rule
 //! (C1 Open point 12), and an ambiguity lists candidates with re-runnable

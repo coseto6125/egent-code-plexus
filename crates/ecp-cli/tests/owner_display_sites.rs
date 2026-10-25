@@ -1,5 +1,5 @@
-//! Slice R4b: the CLI prints an owner through the display owner and a rename
-//! by bare name leaves out lexically scoped nodes (design A §4.5, §4.4).
+//! Slice R4b: the CLI prints an owner through the display owner and the shared
+//! resolver keeps lexically scoped nodes as candidates (design A §4.5, §4.4).
 //!
 //! No language opts in yet, so a real build writes an empty lexical-parent
 //! table and the display owner of every node equals its stored owner. The
@@ -11,7 +11,6 @@ use ecp_analyzer::python::PythonProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::rust::parser::RustProvider;
 use ecp_analyzer::typescript::TypeScriptProvider;
-use ecp_cli::commands::rename::resolve_rename_target;
 use ecp_cli::read_context::{resolve_target, target_request};
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::contracts::identity::TargetResolution;
@@ -158,11 +157,11 @@ fn helper_graph(nested_only: bool) -> (rkyv::util::AlignedVec, u32, u32) {
     (archive(&fx.build()), top, nested)
 }
 
-/// Stands for: renaming the bare name `helper` binds the top-level `helper`
-/// and never the `helper` nested in a function. Through the shared resolver
-/// the same request is ambiguous, which is the HEAD behaviour.
+/// Stands for: a bare name shared by a top-level function and one nested in a
+/// function stays ambiguous through the shared resolver, so `impact` and
+/// `inspect` list both and never pick one silently.
 #[test]
-fn test_resolve_rename_target_bare_name_excludes_scoped_node() {
+fn test_resolve_target_bare_name_with_scoped_node_stays_ambiguous() {
     let (bytes, top, nested) = helper_graph(false);
     assert_ne!(top, nested, "setup: two `helper` nodes");
     let archived = access(&bytes);
@@ -175,33 +174,12 @@ fn test_resolve_rename_target_bare_name_excludes_scoped_node() {
 
     for text in ["helper", "::helper"] {
         let request = target_request(text, None, None).unwrap();
-        match resolve_rename_target(&merged, &request) {
-            TargetResolution::Unique(c) => assert_eq!(c.node, top, "{text} binds the top-level"),
-            other => panic!("{text}: expected the top-level helper alone, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                resolve_target(&merged, &request),
+                TargetResolution::Ambiguous(_)
+            ),
+            "{text} lists both declarations"
+        );
     }
-    // The shared resolver still lists both: only rename leaves the scoped node out.
-    let request = target_request("helper", None, None).unwrap();
-    assert!(matches!(
-        resolve_target(&merged, &request),
-        TargetResolution::Ambiguous(_)
-    ));
-}
-
-/// A bare name that only a scoped node carries finds nothing to rename,
-/// rather than editing the nested function.
-#[test]
-fn test_resolve_rename_target_only_scoped_node_returns_not_found() {
-    let (bytes, _, nested) = helper_graph(true);
-    let archived = access(&bytes);
-    let merged = MergedGraph::new(archived, None);
-    assert!(
-        archived.is_lexically_scoped(nested),
-        "setup: nested is scoped"
-    );
-    let request = target_request("helper", None, None).unwrap();
-    assert!(matches!(
-        resolve_rename_target(&merged, &request),
-        TargetResolution::NotFound { .. }
-    ));
 }

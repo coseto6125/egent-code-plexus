@@ -731,7 +731,7 @@ pub struct Node {
     /// Owning class/struct for methods and properties; `StrRef::default()` (len=0)
     /// means module-level symbol with no owner.  Appended at the END to preserve
     /// rkyv binary layout for v5 fields; format version bumped to 6.
-    /// Used by `ecp rename` to isolate `Foo.validate` from `Bar.validate` (T1-11).
+    /// Isolates `Foo.validate` from `Bar.validate` in target resolution (T1-11).
     pub owner_class: StrRef,
     /// xxh3-64 hash of the symbol's raw source bytes. Promoted from
     /// `RawNode.content_hash` by the builder. `0` for synthetic nodes
@@ -790,8 +790,7 @@ impl ArchivedNode {
 /// Hash collisions disambiguate by re-resolving the actual name from the
 /// string pool and string-comparing.
 ///
-/// Practical impact: `ecp find <name>`, `ecp rename <old> <new>` (collision
-/// detection), `ecp inspect <name>`, and cypher `MATCH {name: "..."}`
+/// Practical impact: `ecp find <name>`, `ecp inspect <name>`, and cypher `MATCH {name: "..."}`
 /// previously did O(N) linear scans through `graph.nodes`. With this index
 /// they become O(log N + collision_count).
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]

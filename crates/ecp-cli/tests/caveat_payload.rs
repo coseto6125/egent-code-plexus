@@ -1,6 +1,6 @@
 //! F6: a caveat (warm-attached graph, unreadable dirty-set paths) travels in
 //! the structured payload's `result` field for the commands that printed none
-//! before: `routes`, `rename`, `pattern`, `processes`, `review`, then
+//! before: `routes`, `pattern`, `processes`, `review`, then
 //! `shape-check`, `tool-map`, `heuristics` and the three deprecated `find-*`
 //! aliases.
 //!
@@ -81,46 +81,6 @@ fn assert_warm_attach_caveat(payload: &serde_json::Value, what: &str) {
         result.contains(WARM_ATTACH_NOTE),
         "{what}: payload `result` must name the warm-attach, got: {payload}"
     );
-}
-
-/// The reviewer repro: a symbol the new commit added is absent from the
-/// sibling graph, so the rename reports no occurrences. The payload must say
-/// the graph is a warm-attach. Failed before F6: the "No occurrences" branch
-/// printed plain text and no payload.
-#[test]
-fn test_rename_dry_run_warm_attached_graph_payload_has_caveat() {
-    let (repo, home) = fixture();
-    make_warm_attached(repo.path());
-    let out = run_ecp(
-        repo.path(),
-        home.path(),
-        &["rename", "beta", "beta2", "--dry-run"],
-    );
-    assert!(out.status.success());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("No occurrences"), "setup: {stdout}");
-    assert!(
-        stdout.contains("result") && stdout.contains(WARM_ATTACH_NOTE),
-        "the toon payload must carry `result`, got: {stdout}"
-    );
-}
-
-/// A rename that does find the symbol still ends in the verification payload,
-/// which must carry the caveat too. Failed before F6:
-/// `emit_verification_payload` had no caveat source.
-#[test]
-fn test_rename_dry_run_found_symbol_warm_attached_payload_has_caveat() {
-    let (repo, home) = fixture();
-    make_warm_attached(repo.path());
-    let out = run_ecp(
-        repo.path(),
-        home.path(),
-        &["rename", "alpha", "alpha2", "--dry-run"],
-    );
-    assert!(out.status.success());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("rename_count"), "setup: {stdout}");
-    assert!(stdout.contains(WARM_ATTACH_NOTE), "got: {stdout}");
 }
 
 #[test]

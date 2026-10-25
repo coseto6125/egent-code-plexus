@@ -1,9 +1,6 @@
 //! One target resolver (architecture direction, area 5; C1 "Target request
-//! syntax" and "Typed target result"): `impact`, `inspect` and `rename` turn
-//! the target text and its filters into one declaration or a typed ambiguity.
-//! A command that writes files refuses an ambiguity and a warm-attached graph,
-//! and `rename` edits only the occurrences the graph binds to the chosen
-//! declaration.
+//! syntax" and "Typed target result"): `impact` and `inspect` turn the target
+//! text and its filters into one declaration or a typed ambiguity.
 
 mod common;
 
@@ -53,10 +50,6 @@ impl Repo {
         fs::write(path, text).unwrap();
     }
 
-    fn read(&self, rel: &str) -> String {
-        fs::read_to_string(self.root.join(rel)).unwrap()
-    }
-
     fn ecp(&self, args: &[&str]) -> Output {
         self.ecp_in(&self.root, args)
     }
@@ -99,29 +92,36 @@ fn json_of(out: &Output) -> Value {
 const PARSE_A: &str = "def parse():\n    return 1\n";
 const PARSE_B: &str = "def parse():\n    return 2\n";
 
-/// Stands for: two declarations match a bare name, so `rename` cannot know
-/// which one the agent means. It refuses, names both, gives each a target
-/// that selects it alone, and writes nothing. Failed before: `rename`
-/// rewrote both files.
+/// Stands for: two declarations match a bare name, so `impact` cannot know
+/// which one the agent means. It answers `ambiguous`, names both files, and
+/// gives each a target that, run again, selects that declaration alone.
 #[test]
-fn test_rename_two_parse_functions_refuses_ambiguity() {
+fn test_impact_two_parse_functions_reports_ambiguity_with_selecting_targets() {
     let repo = Repo::indexed(&[("a.py", PARSE_A), ("b.py", PARSE_B)]);
 
-    let out = repo.ecp(&["rename", "parse", "parse_config"]);
+    let out = repo.ecp(&["impact", "parse", "--repo", ".", "--format", "json"]);
 
     assert!(!out.status.success(), "an ambiguity must exit non-zero");
-    let err = stderr(&out);
-    assert!(err.contains("ambiguous"), "{err}");
-    let payload = stdout(&out);
+    let payload = json_of(&out);
+    assert_eq!(payload["status"], "ambiguous", "{payload}");
+    let candidates = payload["candidates"].as_array().expect("candidates");
+    assert_eq!(candidates.len(), 2, "{payload}");
     for file in ["a.py", "b.py"] {
-        assert!(err.contains(file), "stderr must name {file}: {err}");
         assert!(
-            payload.contains(&format!("--file {file}")),
-            "stdout must give a target that selects {file}: {payload}"
+            candidates.iter().any(|c| c.to_string().contains(file)),
+            "candidates must name {file}: {payload}"
         );
     }
-    assert_eq!(repo.read("a.py"), PARSE_A, "a.py must stay unchanged");
-    assert_eq!(repo.read("b.py"), PARSE_B, "b.py must stay unchanged");
+    for candidate in candidates {
+        let target = candidate["target"]
+            .as_str()
+            .unwrap_or_else(|| panic!("each candidate has its own target: {payload}"));
+        let mut args = vec!["impact"];
+        args.extend(target.split_whitespace());
+        args.extend(["--repo", ".", "--format", "json"]);
+        let again = repo.ecp(&args);
+        assert!(again.status.success(), "{target}: {}", stderr(&again));
+    }
 }
 
 const K_OVERLOADS: &str = "class K {\n    void load(int n) {}\n    void load(String s) {}\n    void run() { load(1); }\n}\n";
@@ -184,29 +184,6 @@ fn test_impact_ambiguous_dirty_overloads_payload_carries_caveat() {
     );
 }
 
-const RUN_PY: &str = "def run():\n    return 1\n\n\ndef main():\n    return run()\n\n\ndef other():\n    run = 5\n    return run\n";
-const RUN_PY_RENAMED: &str = "def launch():\n    return 1\n\n\ndef main():\n    return launch()\n\n\ndef other():\n    run = 5\n    return run\n";
-
-/// Stands for: `rename` edits the occurrences the graph binds to the chosen
-/// declaration (its own name and its callers), not every identifier that
-/// spells the name. The local `run` in `other` is another binding. Failed
-/// before: the second stage rewrote every `run` in the file. `--leave-unbound`
-/// waives the refusal that the unbound local would otherwise cause.
-#[test]
-fn test_rename_unique_target_skips_unrelated_same_name_identifier() {
-    let repo = Repo::indexed(&[("lib.py", RUN_PY)]);
-
-    let out = repo.ecp(&["rename", "run", "launch", "--leave-unbound"]);
-
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(repo.read("lib.py"), RUN_PY_RENAMED);
-    assert!(
-        stdout(&out).contains("unbound"),
-        "the payload must list the occurrences it left: {}",
-        stdout(&out)
-    );
-}
-
 /// `::name` selects the declaration with no owner and no lexical parent; a
 /// bare name matches both; an owner form selects the method.
 #[test]
@@ -245,43 +222,6 @@ fn test_target_request_blank_filter_absent_bad_kind_error() {
     assert_eq!(request.file(), None);
     assert!(target_request("load", Some("function,method"), None).is_err());
     assert!(target_request("   ", None, None).is_err());
-}
-
-/// Stands for: a warm-attached graph is a sibling commit's, so a rename that
-/// writes files from it can miss or misplace occurrences. It refuses and names
-/// the reindex command, and writes nothing. The dry run still answers, with
-/// the caveat (`caveat_payload.rs`).
-#[test]
-fn test_rename_warm_attached_graph_refuses() {
-    let repo = Repo::indexed(&[("lib.rs", "pub fn alpha() {}\n")]);
-    repo.write("extra.rs", "pub fn beta() {}\n");
-    commit_all(&repo.root, "advance");
-
-    let out = repo.ecp(&["rename", "alpha", "alpha2"]);
-
-    assert!(!out.status.success(), "a warm-attached rename must refuse");
-    let err = stderr(&out);
-    assert!(
-        err.contains("warm-attach") && err.contains("ecp admin index --force --repo ."),
-        "{err}"
-    );
-    assert_eq!(repo.read("lib.rs"), "pub fn alpha() {}\n");
-}
-
-/// Stands for: graph paths are relative to the worktree top, so `rename` run
-/// from a subdirectory edits the files the graph names. Failed before: it
-/// joined them onto the cwd, read nothing and edited nothing.
-#[test]
-fn test_rename_from_subdirectory_edits_files_under_worktree_top() {
-    let repo = Repo::indexed(&[("pkg/lib.py", RUN_PY)]);
-
-    let out = repo.ecp_in(
-        &repo.root.join("pkg"),
-        &["rename", "run", "launch", "--leave-unbound"],
-    );
-
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(repo.read("pkg/lib.py"), RUN_PY_RENAMED, "{}", stdout(&out));
 }
 
 // ── find, path and pattern select through the same resolver (F5b) ───────────

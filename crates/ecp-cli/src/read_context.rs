@@ -192,7 +192,7 @@ pub fn worktree_top(dir: &Path) -> PathBuf {
 
 // ── The target resolver ─────────────────────────────────────────────────────
 //
-// `impact`, `inspect` and `rename` turn the target text and its filters into
+// `impact` and `inspect` turn the target text and its filters into
 // one declaration or a typed ambiguity here, and nowhere else (C1 "Target
 // request syntax", "Typed target result").
 

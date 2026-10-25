@@ -1,5 +1,5 @@
 //! C5 routing result: one definition of how a repo-relative path becomes a
-//! file format, a provider, a language, an identifier finder, a capability
+//! file format, a provider, a language, a capability
 //! set and a size cap. Design note: `docs/specs/contracts/C5-routing.md`.
 //!
 //! Every per-language fact is an exhaustive `match` on [`Language`] with no
@@ -93,24 +93,22 @@ listed_enum! {
     /// A capability that a reader dispatches on by language. A language that
     /// lacks one must make the reader say so, never return an empty answer.
     pub enum Capability {
-        /// `ecp rename` finds identifier occurrences in the file.
-        IdentifierFinder = 0,
         /// `ecp pattern` matches a metavariable pattern in the file.
-        PatternFinder = 1,
+        PatternFinder = 0,
         /// `ecp flow` lowers the file.
-        Flow = 2,
+        Flow = 1,
         /// The index extracts response shapes from HTTP handlers.
-        FetchShapes = 3,
+        FetchShapes = 2,
         /// The index extracts HTTP client call sites (`Fetches` sources).
-        FetchConsumer = 4,
+        FetchConsumer = 3,
         /// The parser emits function meta, which sets `is_test` on callers.
-        FunctionMeta = 5,
+        FunctionMeta = 4,
         /// The parser marks non-direct calls.
-        IndirectDispatch = 6,
+        IndirectDispatch = 5,
         /// `ecp tool-map` reads the file's package imports.
-        ToolMapImports = 7,
+        ToolMapImports = 6,
         /// The JS and TS lexical scope index covers the file.
-        LexicalIndex = 8,
+        LexicalIndex = 7,
     }
 }
 
@@ -329,7 +327,6 @@ impl Language {
         use Capability as K;
         match self {
             Self::TypeScript | Self::JavaScript => CapabilitySet::of(&[
-                K::IdentifierFinder,
                 K::PatternFinder,
                 K::Flow,
                 K::FetchShapes,
@@ -340,7 +337,6 @@ impl Language {
                 K::LexicalIndex,
             ]),
             Self::Python => CapabilitySet::of(&[
-                K::IdentifierFinder,
                 K::PatternFinder,
                 K::Flow,
                 K::FetchConsumer,
@@ -348,36 +344,23 @@ impl Language {
                 K::IndirectDispatch,
                 K::ToolMapImports,
             ]),
-            Self::Php => CapabilitySet::of(&[
-                K::IdentifierFinder,
-                K::PatternFinder,
-                K::Flow,
-                K::FetchShapes,
-                K::FunctionMeta,
-            ]),
-            Self::Rust => CapabilitySet::of(&[
-                K::IdentifierFinder,
-                K::PatternFinder,
-                K::FunctionMeta,
-                K::IndirectDispatch,
-                K::ToolMapImports,
-            ]),
-            Self::Go => CapabilitySet::of(&[
-                K::IdentifierFinder,
-                K::PatternFinder,
-                K::FunctionMeta,
-                K::ToolMapImports,
-            ]),
-            Self::C | Self::Cpp => CapabilitySet::of(&[
-                K::IdentifierFinder,
-                K::PatternFinder,
-                K::FunctionMeta,
-                K::IndirectDispatch,
-            ]),
-            Self::Java | Self::Kotlin | Self::CSharp | Self::Ruby | Self::Swift => {
-                CapabilitySet::of(&[K::IdentifierFinder, K::PatternFinder, K::FunctionMeta])
+            Self::Php => {
+                CapabilitySet::of(&[K::PatternFinder, K::Flow, K::FetchShapes, K::FunctionMeta])
             }
-            Self::Dart => CapabilitySet::of(&[K::IdentifierFinder, K::FunctionMeta]),
+            Self::Rust => CapabilitySet::of(&[
+                K::PatternFinder,
+                K::FunctionMeta,
+                K::IndirectDispatch,
+                K::ToolMapImports,
+            ]),
+            Self::Go => CapabilitySet::of(&[K::PatternFinder, K::FunctionMeta, K::ToolMapImports]),
+            Self::C | Self::Cpp => {
+                CapabilitySet::of(&[K::PatternFinder, K::FunctionMeta, K::IndirectDispatch])
+            }
+            Self::Java | Self::Kotlin | Self::CSharp | Self::Ruby | Self::Swift => {
+                CapabilitySet::of(&[K::PatternFinder, K::FunctionMeta])
+            }
+            Self::Dart => CapabilitySet::of(&[K::FunctionMeta]),
             Self::Bash
             | Self::Lua
             | Self::Crystal
@@ -389,8 +372,8 @@ impl Language {
             | Self::Vyper
             | Self::Verilog
             | Self::Cairo
-            | Self::Zig => CapabilitySet::of(&[K::IdentifierFinder]),
-            Self::Dockerfile
+            | Self::Zig
+            | Self::Dockerfile
             | Self::Vue
             | Self::Astro
             | Self::Svelte
@@ -570,18 +553,6 @@ pub enum Dispatch {
     Sniffed(&'static [Language]),
 }
 
-/// Which identifier finder `ecp rename` uses for a file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IdentifierFinder {
-    Supported {
-        language: Language,
-        dialect: Dialect,
-    },
-    /// No finder. The reader reports the file as not scanned; it never drops
-    /// the file without a notice.
-    Unsupported,
-}
-
 /// Where the effective size cap came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SizeCapSource {
@@ -726,22 +697,6 @@ impl FileRoute {
             })
     }
 
-    pub fn identifier_finder(&self) -> IdentifierFinder {
-        match self.fixed_language() {
-            Some(language)
-                if language
-                    .capabilities()
-                    .contains(Capability::IdentifierFinder) =>
-            {
-                IdentifierFinder::Supported {
-                    language,
-                    dialect: self.dialect,
-                }
-            }
-            _ => IdentifierFinder::Unsupported,
-        }
-    }
-
     /// The `file_category::Language` value of a file on this route: the fixed
     /// language's [`Language::to_legacy`]. A sniffed route has no language
     /// before the parse, so it gives the value the path alone gave before
@@ -809,8 +764,8 @@ pub struct ParsedLanguage {
 }
 
 impl ParsedLanguage {
-    /// The language whose provider parsed the file. Tool choice (identifier
-    /// finder, pattern grammar, capability set) reads this value.
+    /// The language whose provider parsed the file. Tool choice (pattern
+    /// grammar, capability set) reads this value.
     pub const fn file(self) -> Language {
         self.file
     }
@@ -1292,7 +1247,6 @@ mod tests {
             "the yaml candidate builds no provider until C5 open point 6 lands"
         );
         assert!(route.capabilities_before_parse().is_empty());
-        assert_eq!(route.identifier_finder(), IdentifierFinder::Unsupported);
     }
 
     #[test]
@@ -1303,32 +1257,10 @@ mod tests {
     }
 
     #[test]
-    fn test_route_tsx_dialect_and_identifier_finder() {
+    fn test_route_tsx_dialect_follows_extension() {
         let route = routed("ui/App.tsx");
         assert_eq!(route.dialect(), Dialect::Tsx);
-        assert_eq!(
-            route.identifier_finder(),
-            IdentifierFinder::Supported {
-                language: Language::TypeScript,
-                dialect: Dialect::Tsx
-            }
-        );
         assert_eq!(routed("ui/app.ts").dialect(), Dialect::Standard);
-    }
-
-    #[test]
-    fn test_identifier_finder_vue_unsupported_rust_supported() {
-        assert_eq!(
-            routed("App.vue").identifier_finder(),
-            IdentifierFinder::Unsupported
-        );
-        assert_eq!(
-            routed("src/lib.rs").identifier_finder(),
-            IdentifierFinder::Supported {
-                language: Language::Rust,
-                dialect: Dialect::Standard
-            }
-        );
     }
 
     #[test]

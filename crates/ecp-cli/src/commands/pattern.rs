@@ -5,7 +5,7 @@
 //! has no node to match. This command answers those by running an ast-grep
 //! pattern through [`ecp_analyzer::pattern_finder`].
 //!
-//! The pipeline mirrors `ecp rename`'s first two stages, minus the write:
+//! The pipeline has two stages:
 //!
 //! 1. **Plan (graph)** — pick candidate files. Default is every indexed file,
 //!    which already excludes ignored paths and unsupported languages.
