@@ -136,10 +136,11 @@ impl ReadContext {
             .then(|| auto_ensure::resolve_session_overlay_dir(&top))
             .flatten()
             .filter(|dir| dir.is_dir());
-        let engine = match overlay {
+        let mut engine = match overlay {
             Some(dir) => engine.with_overlay(dir, top.clone()),
             None => engine,
         };
+        engine.set_unreadable_changes(unreadable_changes(dirty.as_ref()));
         Self {
             worktree_top: top,
             graph_path,
@@ -147,28 +148,17 @@ impl ReadContext {
             dirty,
         }
     }
+}
 
-    /// Every reason the answer may be incomplete: the engine's staleness, and
-    /// changed paths git printed that the dirty set cannot name.
-    pub fn caveats(&self) -> Vec<String> {
-        let unreadable = self.dirty.as_ref().map_or(0, |dirty| {
-            dirty
-                .skipped()
-                .iter()
-                .filter(|entry| entry.reason != SkipReason::Directory)
-                .count()
-        });
-        self.engine
-            .caveat()
-            .into_iter()
-            .chain((unreadable > 0).then(|| {
-                format!(
-                    "{unreadable} changed path(s) are not UTF-8 or not repo-relative, so their \
-                     uncommitted edits are not in this answer"
-                )
-            }))
-            .collect()
-    }
+/// Changed paths git printed that the dirty set cannot name, directories aside.
+fn unreadable_changes(dirty: Option<&DirtySet<ClassifiedPath>>) -> usize {
+    dirty.map_or(0, |dirty| {
+        dirty
+            .skipped()
+            .iter()
+            .filter(|entry| entry.reason != SkipReason::Directory)
+            .count()
+    })
 }
 
 /// The worktree top of `dir`, from the process-wide git layout cache: no git

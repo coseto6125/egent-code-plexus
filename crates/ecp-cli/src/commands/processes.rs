@@ -92,11 +92,10 @@ pub struct TraceArgs {
     pub limit: usize,
 }
 
-pub fn run(args: ProcessesArgs, engine: &Engine, caveat: Option<String>) -> Result<(), EcpError> {
-    let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
+pub fn run(args: ProcessesArgs, engine: &Engine) -> Result<(), EcpError> {
     match args.command.clone() {
-        None => list_processes(graph, args, caveat),
-        Some(ProcessesCommands::Trace(t)) => trace_processes(graph, t, caveat),
+        None => list_processes(engine, args),
+        Some(ProcessesCommands::Trace(t)) => trace_processes(engine, t),
     }
 }
 
@@ -111,11 +110,8 @@ fn process_range(graph: &ArchivedZeroCopyGraph) -> (u32, u32) {
     (start, start + count)
 }
 
-fn list_processes(
-    graph: &ArchivedZeroCopyGraph,
-    args: ProcessesArgs,
-    caveat: Option<String>,
-) -> Result<(), EcpError> {
+fn list_processes(engine: &Engine, args: ProcessesArgs) -> Result<(), EcpError> {
+    let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let fmt = args.format.unwrap_or_default();
     let (process_start, process_end) = process_range(graph);
     let total_processes = process_end - process_start;
@@ -200,14 +196,11 @@ fn list_processes(
         "community_filter": args.community,
         "results": results,
     });
-    emit_with_caveat(&payload, fmt, caveat)
+    emit_with_caveat(&payload, fmt, engine.caveat())
 }
 
-fn trace_processes(
-    graph: &ArchivedZeroCopyGraph,
-    args: TraceArgs,
-    caveat: Option<String>,
-) -> Result<(), EcpError> {
+fn trace_processes(engine: &Engine, args: TraceArgs) -> Result<(), EcpError> {
+    let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let fmt = args.format.unwrap_or_default();
     let pattern_lower = args.pattern.to_lowercase();
     let (process_start, process_end) = process_range(graph);
@@ -262,7 +255,7 @@ fn trace_processes(
             "pattern": args.pattern,
             "candidates": [],
         });
-        return emit_with_caveat(&payload, fmt, caveat);
+        return emit_with_caveat(&payload, fmt, engine.caveat());
     }
 
     let payload = serde_json::json!({
@@ -271,5 +264,5 @@ fn trace_processes(
         "matched": matches.len(),
         "results": matches,
     });
-    emit_with_caveat(&payload, fmt, caveat)
+    emit_with_caveat(&payload, fmt, engine.caveat())
 }

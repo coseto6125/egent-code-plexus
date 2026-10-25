@@ -157,8 +157,7 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
     // index scan, background reindex spawn); graph-free commands must not pay
     // for it, so the whole load is skipped rather than run and discarded —
     // down to the `current_dir()` syscall.
-    let (engine, graph_path, caveat) = if cli.command.needs_graph(graph_path::is_custom(&cli.graph))
-    {
+    let (engine, graph_path) = if cli.command.needs_graph(graph_path::is_custom(&cli.graph)) {
         // `--repo` names the directory this invocation answers about. When it
         // is not one, the value used to flow on as a relative path, resolve to
         // nothing, and leave the cwd's own graph attached — so `ecp impact
@@ -212,8 +211,9 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
                 ReadContextError::Ensure(err) => {
                     format!("Error preparing index for {}: {err}", dir.display())
                 }
-                // A near-current sibling serves silently while the background
-                // rebuild runs; the actionable hint is reserved for load failure.
+                // A near-current sibling answers while the background rebuild
+                // runs, its staleness in the payload's `result` field; this
+                // actionable hint is reserved for load failure.
                 ReadContextError::Load {
                     graph_path,
                     warm_attach: true,
@@ -230,15 +230,13 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
                 } => format!("Error loading graph from {}: {error}", graph_path.display()),
             })
         })?;
-        // Read before the destructure: the caveats need the dirty set.
-        let caveat = ecp_cli::output::join_caveats(ctx.caveats());
         let ReadContext {
             engine, graph_path, ..
         } = ctx;
 
-        (Some(engine), Some(graph_path), caveat)
+        (Some(engine), Some(graph_path))
     } else {
-        (None, None, None)
+        (None, None)
     };
     let engine = engine.as_ref();
 
@@ -254,17 +252,17 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
             commands::impact::run(args, engine.expect("needs_graph() gates this arm"))
         }
         Commands::Rename(args) => {
-            commands::rename::run(args, engine.expect("needs_graph() gates this arm"), caveat)
+            commands::rename::run(args, engine.expect("needs_graph() gates this arm"))
         }
         Commands::Pattern(args) => {
-            commands::pattern::run(args, engine.expect("needs_graph() gates this arm"), caveat)
+            commands::pattern::run(args, engine.expect("needs_graph() gates this arm"))
         }
         Commands::Flow(args) => commands::flow::run(args),
         Commands::Cypher(args) => {
             commands::cypher::run(args, engine.expect("needs_graph() gates this arm"))
         }
         Commands::Routes(args) => {
-            commands::routes::run(args, engine.expect("needs_graph() gates this arm"), caveat)
+            commands::routes::run(args, engine.expect("needs_graph() gates this arm"))
         }
         Commands::ShapeCheck(args) => {
             commands::shape_check::run(args, engine.expect("needs_graph() gates this arm"))
@@ -273,7 +271,7 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
             commands::tool_map::run(args, engine.expect("needs_graph() gates this arm"))
         }
         Commands::Review(args) => {
-            commands::review::run(args, engine.expect("needs_graph() gates this arm"), caveat)
+            commands::review::run(args, engine.expect("needs_graph() gates this arm"))
         }
         Commands::Heuristics(args) => {
             commands::heuristics::run(args, engine.expect("needs_graph() gates this arm"))
@@ -291,7 +289,7 @@ fn dispatch(cli: Cli) -> Result<(), ecp_core::EcpError> {
             commands::path::run(args, engine.expect("needs_graph() gates this arm"))
         }
         Commands::Processes(args) => {
-            commands::processes::run(args, engine.expect("needs_graph() gates this arm"), caveat)
+            commands::processes::run(args, engine.expect("needs_graph() gates this arm"))
         }
         Commands::HookHandle(args) => commands::hook_handle::run(args),
         Commands::HookWatcher(args) => commands::hook_watcher::run(args),

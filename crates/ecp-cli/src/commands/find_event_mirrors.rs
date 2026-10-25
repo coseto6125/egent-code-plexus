@@ -37,7 +37,7 @@
 //! returns 0 rows; `--min-confidence 0.85` returns all.
 
 use crate::engine::Engine;
-use crate::output::{emit, OutputFormat};
+use crate::output::{emit_with_caveat, OutputFormat};
 use clap::Args;
 use ecp_core::graph::{ArchivedRelType, ArchivedZeroCopyGraph};
 use ecp_core::EcpError;
@@ -69,7 +69,9 @@ pub struct FindEventMirrorsArgs {
 
     /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
     /// toon. `json`: full-fidelity JSON. `text`: a mirror table without the JSON
-    /// envelope.
+    /// envelope, its first line the caveat when there is one. A
+    /// `result` field appears only when the answer carries a caveat (stale or
+    /// warm-attached graph, unreadable uncommitted paths); absent means current.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 }
@@ -326,6 +328,9 @@ pub fn run(args: FindEventMirrorsArgs, engine: &Engine) -> Result<(), EcpError> 
 
     // Text format: table to stdout directly (not wrapped in JSON envelope).
     if matches!(format, OutputFormat::Text) {
+        if let Some(caveat) = engine.caveat() {
+            println!("{caveat}");
+        }
         println!("{}", render_text(&mirrors));
         if filtered_out > 0 {
             eprintln!(
@@ -349,5 +354,5 @@ pub fn run(args: FindEventMirrorsArgs, engine: &Engine) -> Result<(), EcpError> 
         },
     });
 
-    emit(&result, format)
+    emit_with_caveat(&result, format, engine.caveat())
 }

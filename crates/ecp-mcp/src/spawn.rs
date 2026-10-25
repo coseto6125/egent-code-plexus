@@ -8,9 +8,11 @@ use std::path::Path;
 /// Invoke `<binary> <subcommand> [subcmd_arg?] [prefix_args...] [argv...]` and
 /// return captured stdout. If `tool.subcmd_arg` is set, the matching JSON key
 /// is peeled out and prepended as the first arg (sub-subcommand router).
-/// Non-zero exit → `Err` carrying stderr. A caveat (stale or warm-attached
-/// graph, unreadable dirty paths) rides in the payload's `result` field, so
-/// stdout alone is enough; stderr stays out of it to keep the payload parseable.
+/// Non-zero exit → `Err` carrying stderr. Every graph command prints its
+/// caveat (stale or warm-attached graph, unreadable dirty paths) on stdout: the
+/// payload's `result` field, or the first line of a `--format text` row list.
+/// So stdout alone is enough; stderr stays out of it to keep the payload
+/// parseable.
 pub fn run_spawn(binary: &Path, tool: &DerivedTool, args: &Value) -> Result<String> {
     let argv = build_argv(tool, args)?;
     let output = std::process::Command::new(binary)

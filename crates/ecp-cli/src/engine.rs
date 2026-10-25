@@ -81,6 +81,10 @@ pub struct Engine {
     /// L1 overlay absorbs the delta for freshness bookkeeping, but queries
     /// read L2 only, so results genuinely miss the newer commits.
     pub behind_head: bool,
+    /// Changed paths `git status` printed that the dirty set could not name
+    /// (not UTF-8, or not repo-relative): their uncommitted edits are in no
+    /// overlay. Set by `ReadContext` from the gate's dirty set.
+    unreadable_changes: usize,
 }
 
 /// Discriminated view over the L2 graph plus an optional L1 overlay.
@@ -123,6 +127,7 @@ impl Engine {
             view: GraphView::L2Only,
             is_stale_for_sha: false,
             behind_head: false,
+            unreadable_changes: 0,
         })
     }
 
@@ -135,13 +140,17 @@ impl Engine {
         Ok(eng)
     }
 
-    /// The single caveat string for query output, or `None` when results are
-    /// trustworthy. Sources today: warm-attach staleness and behind-HEAD
-    /// graphs; future caveats (blind-spot coverage, ambiguity-suppressed
-    /// edges) extend the chain. Routed into the payload's `result` field by
-    /// `output::emit_with_caveat`, so a `found:false` under a stale graph is
-    /// no longer indistinguishable from a definitive "does not exist".
+    /// The single caveat string for query output, one reason per line, or
+    /// `None` when results are trustworthy: warm-attach staleness or a
+    /// behind-HEAD graph, then changed paths the dirty set could not name.
+    /// Routed into the payload's `result` field by `output::emit_with_caveat`,
+    /// so a `found:false` under a stale graph is no longer indistinguishable
+    /// from a definitive "does not exist".
     pub fn caveat(&self) -> Option<String> {
+        crate::output::merge_caveats(self.graph_caveat(), self.unreadable_changes_caveat())
+    }
+
+    fn graph_caveat(&self) -> Option<String> {
         if self.is_stale_for_sha {
             Some(
                 "results may be incomplete: graph is a warm-attach from a sibling commit \
@@ -160,6 +169,23 @@ impl Engine {
         } else {
             None
         }
+    }
+
+    /// The part of [`Engine::caveat`] that the dirty set gives, for callers
+    /// that word the graph's staleness themselves (a by-repo `find` names the
+    /// stale repo).
+    pub fn unreadable_changes_caveat(&self) -> Option<String> {
+        let n = self.unreadable_changes;
+        (n > 0).then(|| {
+            format!(
+                "{n} changed path(s) are not UTF-8 or not repo-relative, so their \
+                 uncommitted edits are not in this answer"
+            )
+        })
+    }
+
+    pub(crate) fn set_unreadable_changes(&mut self, n: usize) {
+        self.unreadable_changes = n;
     }
 
     /// SessionState-driven constructor (spec §5.1). Classifies the session and

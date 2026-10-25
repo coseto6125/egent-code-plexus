@@ -356,6 +356,19 @@ fn category_priority(cat: &ArchivedFileCategory) -> u8 {
     }
 }
 
+/// The archived form of a category computed from a path, so a new overlay
+/// symbol ranks and buckets through the same helpers as a base row.
+fn archived_category(cat: FileCategory) -> &'static ArchivedFileCategory {
+    match cat {
+        FileCategory::Source => &ArchivedFileCategory::Source,
+        FileCategory::Test => &ArchivedFileCategory::Test,
+        FileCategory::Reference => &ArchivedFileCategory::Reference,
+        FileCategory::Document => &ArchivedFileCategory::Document,
+        FileCategory::Config => &ArchivedFileCategory::Config,
+        FileCategory::Example => &ArchivedFileCategory::Example,
+    }
+}
+
 fn category_to_str(cat: &ArchivedFileCategory) -> &'static str {
     match cat {
         ArchivedFileCategory::Source => "Source",
@@ -468,10 +481,9 @@ fn overlay_matches(
                     &merged.files[node.file_idx.to_native() as usize].category,
                     count_incoming(merged, idx as usize, base_constructors(merged, idx)),
                 )
-            } else if ecp_core::file_category::is_test_path(&h.rel_path) {
-                (&ArchivedFileCategory::Test, 0)
             } else {
-                (&ArchivedFileCategory::Source, 0)
+                let category = ecp_core::file_category::determine_category(&h.rel_path);
+                (archived_category(category), 0)
             };
             let kind_str = crate::commands::format::node_kind_to_str(&h.kind).to_string();
             let signature = format!("{kind_str} {}", h.name);
@@ -865,6 +877,9 @@ const HOP_EXPANSION_LIMIT: usize = 3;
 /// [0,1]-ish range).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct OrderedHit {
+    /// Leads the derived `Ord`, so the cross-repo heap keeps the rows
+    /// [`exact_substring`] ranks first.
+    exact_substring: bool,
     score_bits: u32,
     repo: Option<String>,
     file: String,
@@ -884,6 +899,7 @@ struct OrderedHit {
 impl OrderedHit {
     fn from(h: Hit) -> Self {
         Self {
+            exact_substring: exact_substring(&h),
             score_bits: h.score.to_bits(),
             repo: h.repo,
             file: h.file,
@@ -932,9 +948,11 @@ impl BucketedResults {
         // Sort overall by descending score before partitioning so each bucket
         // gets the best representatives across repos.
         hits.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            exact_substring_first(a, b).then_with(|| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
         });
 
         let mut source = Vec::new();
@@ -1107,9 +1125,24 @@ fn engine_bm25_hits(
     let total = total + overlay.len() as u64;
     hits.extend(overlay);
     // Stable, so the base rows keep their order among equal scores.
-    hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+    hits.sort_by(|a, b| exact_substring_first(a, b).then_with(|| b.score.total_cmp(&a.score)));
     hits.truncate(limit);
     (hits, total)
+}
+
+/// A substring row whose name equals the query (score 1.0): a symbol only the
+/// session overlay holds, or a hit from a repo with no tantivy index. Tantivy
+/// BM25 scores (often 3-15) and substring scores (1.0 / 0.7 / 0.4) share no
+/// scale, so by score alone such a row sorts under every BM25 row and the
+/// limit or the per-bucket cut drops it. Its displayed score stays 1.0.
+fn exact_substring(h: &Hit) -> bool {
+    h.score_source == ScoreSource::Substring && h.score >= 1.0
+}
+
+/// Orders [`exact_substring`] rows ahead of the rest; `Equal` otherwise, so
+/// each caller's score order decides.
+fn exact_substring_first(a: &Hit, b: &Hit) -> std::cmp::Ordering {
+    exact_substring(b).cmp(&exact_substring(a))
 }
 
 /// The overlay's new symbols, scored like the substring fallback (its 1.0 /
@@ -1142,10 +1175,7 @@ fn overlay_bm25_hits(
                 .filter_map(|term| substring_score(&h.name, term))
                 .reduce(f32::max)?;
             let kind = crate::commands::format::node_kind_to_str(&h.kind).to_string();
-            let category = match ecp_core::file_category::is_test_path(&h.rel_path) {
-                true => FileCategory::Test,
-                false => FileCategory::Source,
-            };
+            let category = ecp_core::file_category::determine_category(&h.rel_path);
             Some(Hit {
                 repo: repo_label.clone(),
                 score,
@@ -1502,12 +1532,16 @@ fn run_multi(
 }
 
 /// Caveat for a single resolved target: HEAD-mismatch staleness names the
-/// repo; otherwise the engine's own warm-attach caveat (if any) applies.
-/// `behind_head` is judged on the graph `load_ensured` actually loaded, which
-/// after a synchronous rebuild is not the commit dir the target picked.
+/// repo, joined with the engine's unreadable-path caveat; otherwise the
+/// engine's own caveat applies whole. `behind_head` is judged on the graph
+/// `load_ensured` actually loaded, which after a synchronous rebuild is not
+/// the commit dir the target picked.
 fn single_target_caveat(target: &RepoTarget, engine: &Engine) -> Option<String> {
     if engine.behind_head {
-        stale_graph_caveat(&[target.display_name.as_str()])
+        crate::output::merge_caveats(
+            stale_graph_caveat(&[target.display_name.as_str()]),
+            engine.unreadable_changes_caveat(),
+        )
     } else {
         engine.caveat()
     }
@@ -1600,7 +1634,7 @@ pub fn compute_multi_with_engines(
 
     // Drain heap in descending score order.
     let mut ordered: Vec<OrderedHit> = heap.into_iter().map(|r| r.0).collect();
-    ordered.sort_by_key(|b| std::cmp::Reverse(b.score_bits));
+    ordered.sort_by_key(|b| std::cmp::Reverse((b.exact_substring, b.score_bits)));
 
     let hits: Vec<Hit> = ordered
         .into_iter()
@@ -1949,22 +1983,32 @@ fn stale_graph_caveat(names: &[&str]) -> Option<String> {
 }
 
 /// Cross-repo staleness sweep: a repo is stale when its loaded graph is
-/// behind HEAD or its engine warm-attached a sibling SHA.
+/// behind HEAD or its engine warm-attached a sibling SHA. Each repo with
+/// changed paths its dirty set could not name adds its own line.
 fn stale_repos_caveat(
     targets: &[RepoTarget],
     loaded: &[(String, Result<Engine, String>)],
 ) -> Option<String> {
-    let stale: Vec<&str> = targets
+    let engines = targets
         .iter()
         .zip(loaded)
-        .filter(|(_, (_, result))| {
-            result
-                .as_ref()
-                .is_ok_and(|engine| engine.behind_head || engine.is_stale_for_sha)
-        })
-        .map(|(target, _)| target.display_name.as_str())
+        .filter_map(|(target, (_, result))| {
+            Some((target.display_name.as_str(), result.as_ref().ok()?))
+        });
+    let stale: Vec<&str> = engines
+        .clone()
+        .filter(|(_, engine)| engine.behind_head || engine.is_stale_for_sha)
+        .map(|(name, _)| name)
         .collect();
-    stale_graph_caveat(&stale)
+    engines
+        .filter_map(|(name, engine)| {
+            engine
+                .unreadable_changes_caveat()
+                .map(|c| format!("{name}: {c}"))
+        })
+        .fold(stale_graph_caveat(&stale), |acc, line| {
+            crate::output::merge_caveats(acc, Some(line))
+        })
 }
 
 /// Same as `emit_bucketed` but threads the substring-fallback pre-truncate

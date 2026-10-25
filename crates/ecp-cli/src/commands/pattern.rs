@@ -74,10 +74,10 @@ pub struct PatternArgs {
     pub format: Option<OutputFormat>,
 }
 
-pub fn run(args: PatternArgs, engine: &Engine, caveat: Option<String>) -> Result<(), EcpError> {
+pub fn run(args: PatternArgs, engine: &Engine) -> Result<(), EcpError> {
     let format = args.format.unwrap_or_default();
     let payload = build_payload(&args, engine)?;
-    emit_with_caveat(&payload, format, caveat)
+    emit_with_caveat(&payload, format, engine.caveat())
 }
 
 pub fn build_payload(args: &PatternArgs, engine: &Engine) -> Result<serde_json::Value, EcpError> {

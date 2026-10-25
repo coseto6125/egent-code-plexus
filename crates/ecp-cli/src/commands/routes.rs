@@ -50,14 +50,13 @@ pub struct RoutesArgs {
     pub format: Option<OutputFormat>,
 }
 
-pub fn run(args: RoutesArgs, engine: &Engine, caveat: Option<String>) -> Result<(), EcpError> {
+pub fn run(args: RoutesArgs, engine: &Engine) -> Result<(), EcpError> {
     match args.path.as_deref() {
         None => list_routes(
             engine,
             args.method.as_deref(),
             args.include_tests,
             args.format.unwrap_or_default(),
-            caveat,
         ),
         Some(path) => inspect_route(
             engine,
@@ -65,7 +64,6 @@ pub fn run(args: RoutesArgs, engine: &Engine, caveat: Option<String>) -> Result<
             args.method.as_deref(),
             args.depth,
             args.format.unwrap_or_default(),
-            caveat,
         ),
     }
 }
@@ -75,7 +73,6 @@ fn list_routes(
     method_filter: Option<&str>,
     include_tests: bool,
     fmt: OutputFormat,
-    caveat: Option<String>,
 ) -> Result<(), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let wanted_method = method_filter.map(|m| m.to_ascii_uppercase());
@@ -150,7 +147,7 @@ fn list_routes(
         result["test_results"] = serde_json::json!(test_results);
     }
 
-    emit_with_caveat(&result, fmt, caveat)
+    emit_with_caveat(&result, fmt, engine.caveat())
 }
 
 /// Whether a route of `method` answers a `--method` filter. An `ANY` route
@@ -304,7 +301,6 @@ fn inspect_route(
     method_filter: Option<&str>,
     depth: usize,
     fmt: OutputFormat,
-    caveat: Option<String>,
 ) -> Result<(), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let wanted_method = method_filter.map(|m| m.to_ascii_uppercase());
@@ -370,7 +366,7 @@ fn inspect_route(
             "shown": shown,
             "zero_score_omitted": zero_score_omitted,
         });
-        return emit_with_caveat(&result, fmt, caveat);
+        return emit_with_caveat(&result, fmt, engine.caveat());
     }
 
     // For each matched Route: find handler via incoming HandlesRoute edge,
@@ -507,7 +503,7 @@ fn inspect_route(
         "handlers": handlers_out,
         "callers": callers_out,
     });
-    emit_with_caveat(&result, fmt, caveat)
+    emit_with_caveat(&result, fmt, engine.caveat())
 }
 
 /// The controller action, as the route file writes it, of a Laravel Route

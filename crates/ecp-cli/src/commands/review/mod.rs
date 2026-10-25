@@ -57,7 +57,7 @@ pub struct ReviewArgs {
     pub verdicts: bool,
 }
 
-pub fn run(args: ReviewArgs, engine: &Engine, caveat: Option<String>) -> Result<(), EcpError> {
+pub fn run(args: ReviewArgs, engine: &Engine) -> Result<(), EcpError> {
     if args.verdicts && !args.include.is_empty() {
         return Err(EcpError::InvalidArgument(
             "--include flow cannot be combined with --verdicts".into(),
@@ -101,7 +101,7 @@ pub fn run(args: ReviewArgs, engine: &Engine, caveat: Option<String>) -> Result<
         payload["elapsed_ms"] = serde_json::json!(start.elapsed().as_millis() as u64);
     }
     let format = args.format.unwrap_or_default();
-    emit_with_caveat(&payload, format, caveat)
+    emit_with_caveat(&payload, format, engine.caveat())
 }
 
 fn run_verdicts(args: &ReviewArgs) -> Result<(), EcpError> {

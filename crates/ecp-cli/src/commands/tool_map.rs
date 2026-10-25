@@ -26,7 +26,7 @@
 //! one place. Languages covered: TS / JS, Python, Go, Rust.
 
 use crate::engine::Engine;
-use crate::output::{emit, OutputFormat};
+use crate::output::{emit_with_caveat, OutputFormat};
 use clap::Args;
 use ecp_core::graph::ArchivedFileCategory;
 use ecp_core::EcpError;
@@ -150,7 +150,9 @@ pub struct ToolMapArgs {
     pub repo: Option<String>,
 
     /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
-    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON.
+    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON. A
+    /// `result` field appears only when the answer carries a caveat (stale or
+    /// warm-attached graph, unreadable uncommitted paths); absent means current.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 }
@@ -158,7 +160,7 @@ pub struct ToolMapArgs {
 pub fn run(args: ToolMapArgs, engine: &Engine) -> Result<(), EcpError> {
     let format = args.format.unwrap_or_default();
     let payload = build_payload(&args, engine)?;
-    emit(&payload, format)
+    emit_with_caveat(&payload, format, engine.caveat())
 }
 
 pub fn build_payload(args: &ToolMapArgs, engine: &Engine) -> Result<serde_json::Value, EcpError> {

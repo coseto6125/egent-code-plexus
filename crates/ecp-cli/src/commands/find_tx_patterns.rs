@@ -46,7 +46,7 @@
 //! query-time name-scan and do not enter the graph.
 
 use crate::engine::Engine;
-use crate::output::{emit, OutputFormat};
+use crate::output::{emit_with_caveat, OutputFormat};
 use clap::Args;
 use ecp_core::graph::{ArchivedNodeKind, ArchivedRelType, ArchivedZeroCopyGraph};
 use ecp_core::EcpError;
@@ -71,7 +71,9 @@ pub struct FindTxPatternsArgs {
     pub repo: Option<String>,
 
     /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
-    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON.
+    /// toon. `json`: full-fidelity JSON. `text`: pretty-printed JSON. A
+    /// `result` field appears only when the answer carries a caveat (stale or
+    /// warm-attached graph, unreadable uncommitted paths); absent means current.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 }
@@ -468,5 +470,5 @@ pub fn run(args: FindTxPatternsArgs, engine: &Engine) -> Result<(), EcpError> {
         },
     });
 
-    emit(&result, format)
+    emit_with_caveat(&result, format, engine.caveat())
 }

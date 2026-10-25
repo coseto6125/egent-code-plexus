@@ -41,8 +41,9 @@ fn spawn_invokes_subcommand_and_captures_stdout() {
 // caveat in the stdout payload (`result`), and `run_spawn` returns stdout only.
 // The stub plants a payload with a `result` caveat on stdout and progress noise
 // on stderr; the MCP client must read the caveat and none of the noise, so a
-// machine-parsed payload stays intact. It passes on today's spawn.rs; the CLI
-// tests in `ecp-cli/tests/caveat_payload.rs` are the ones that fail before F6.
+// machine-parsed payload stays intact. It guards the stdout-only rule of
+// spawn.rs; the CLI tests in `ecp-cli/tests/caveat_payload.rs` check that each
+// graph command puts the caveat there.
 #[test]
 #[cfg(unix)]
 fn test_run_spawn_caveat_in_stdout_payload() {

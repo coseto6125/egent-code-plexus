@@ -47,12 +47,15 @@ pub fn emit_to_string(value: &Value, format: OutputFormat) -> Result<String, Ecp
             .map_err(|e| EcpError::Output(format!("json serialize: {e}"))),
         OutputFormat::Text => {
             if let Some(results) = value.get("results").and_then(|v| v.as_array()) {
-                Ok(results
-                    .iter()
-                    .map(|r| match r {
+                // The rows alone would drop the caveat, so it leads.
+                let caveat = value.get("result").and_then(Value::as_str);
+                Ok(caveat
+                    .map(str::to_owned)
+                    .into_iter()
+                    .chain(results.iter().map(|r| match r {
                         Value::String(s) => s.clone(),
                         other => other.to_string(),
-                    })
+                    }))
                     .collect::<Vec<_>>()
                     .join("\n"))
             } else {
@@ -91,12 +94,6 @@ pub fn merge_caveats(a: Option<String>, b: Option<String>) -> Option<String> {
         (Some(a), Some(b)) => Some(format!("{a}\n{b}")),
         (a, b) => a.or(b),
     }
-}
-
-/// The single `result` string of every caveat a read context reports, one per
-/// line like [`merge_caveats`]; `None` when there is none.
-pub fn join_caveats(caveats: Vec<String>) -> Option<String> {
-    (!caveats.is_empty()).then(|| caveats.join("\n"))
 }
 
 /// Like [`emit`] but injects an optional `result` caveat first. Commands with
@@ -351,15 +348,6 @@ mod tests {
     }
 
     #[test]
-    fn test_join_caveats_two_notes_one_line_each() {
-        assert_eq!(join_caveats(Vec::new()), None);
-        assert_eq!(
-            join_caveats(vec!["a".to_string(), "b".to_string()]),
-            Some("a\nb".to_string())
-        );
-    }
-
-    #[test]
     fn attach_caveat_none_leaves_payload_untouched() {
         let original = json!({"found": true, "matches": [1], "status": "success"});
         let mut value = original.clone();
@@ -379,6 +367,22 @@ mod tests {
         let value = json!({"results": ["line one", "line two"]});
         let out = emit_to_string(&value, OutputFormat::Text).expect("ok");
         assert_eq!(out, "line one\nline two");
+    }
+
+    /// Contract: in text mode the `result` caveat is the first line, then one
+    /// line per row; the rows alone read as a trustworthy answer.
+    #[test]
+    fn test_emit_to_string_text_results_with_caveat_caveat_first_line() {
+        let value = json!({"results": ["line one", "line two"], "result": "graph is stale"});
+        let out = emit_to_string(&value, OutputFormat::Text).expect("ok");
+        assert_eq!(out, "graph is stale\nline one\nline two");
+    }
+
+    #[test]
+    fn test_emit_to_string_text_empty_results_with_caveat_caveat_only() {
+        let value = json!({"results": [], "result": "graph is stale"});
+        let out = emit_to_string(&value, OutputFormat::Text).expect("ok");
+        assert_eq!(out, "graph is stale");
     }
 
     #[test]

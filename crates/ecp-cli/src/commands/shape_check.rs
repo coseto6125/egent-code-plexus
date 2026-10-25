@@ -20,7 +20,7 @@
 //! Output is human-readable text by default (this is a drift report
 //! agents read inline). JSON / TOON are for programmatic consumers.
 
-use crate::output::{emit, OutputFormat};
+use crate::output::{emit_with_caveat, OutputFormat};
 use clap::Args;
 use ecp_analyzer::fetch_shape::parse_reason;
 use ecp_core::graph::ArchivedRelType;
@@ -36,7 +36,9 @@ pub struct ShapeCheckArgs {
     pub repo: Option<String>,
 
     /// Output format. Absent or `llm`: the LLM-tuned toon payload. `toon`: uncompressed
-    /// toon. `json`: full-fidelity JSON. `text`: a line report.
+    /// toon. `json`: full-fidelity JSON. `text`: a line report. A
+    /// `result` field appears only when the answer carries a caveat (stale or
+    /// warm-attached graph, unreadable uncommitted paths); absent means current.
     #[arg(long)]
     pub format: Option<OutputFormat>,
 
@@ -292,5 +294,5 @@ pub fn run(args: ShapeCheckArgs, engine: &crate::engine::Engine) -> Result<(), e
     } else {
         value
     };
-    emit(&emit_value, format)
+    emit_with_caveat(&emit_value, format, engine.caveat())
 }

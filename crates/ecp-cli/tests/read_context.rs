@@ -104,10 +104,10 @@ fn ecp_json(cwd: &Path, home: &Path, args: &[&str]) -> Value {
         .unwrap_or_else(|e| panic!("non-JSON output of ecp {args:?} ({e}): {stdout}"))
 }
 
-/// Today: `found:false`. The gate ran `git status` in `pkg/sub`, joined
-/// `pkg/sub/a.py` onto `pkg/sub`, and the parse found no such file, so no
-/// overlay fragment held `bar`. From the worktree top the same query
-/// answered `found:true`.
+/// Failed before this change: `found:false`. The gate ran `git status` in
+/// `pkg/sub`, joined `pkg/sub/a.py` onto `pkg/sub`, and the parse found no such
+/// file, so no overlay fragment held `bar`. From the worktree top the same
+/// query answered `found:true`.
 #[test]
 fn test_read_context_from_subdir_dirty_set_rooted_at_worktree_top() {
     let fx = fixture();
@@ -125,10 +125,10 @@ fn test_read_context_from_subdir_dirty_set_rooted_at_worktree_top() {
     );
 }
 
-/// Today: the `source` bucket is empty. A registry selector loads its graph
-/// through `load_ensured`, which never attached the session overlay, and the
-/// bm25 ranker read the base graph and its tantivy index only, where a
-/// symbol added after the build cannot be.
+/// Failed before this change: the `source` bucket was empty. A registry
+/// selector loads its graph through `load_ensured`, which never attached the
+/// session overlay, and the bm25 ranker read the base graph and its tantivy
+/// index only, where a symbol added after the build cannot be.
 #[test]
 fn test_load_ensured_bm25_find_sees_uncommitted_symbol() {
     let fx = fixture();
@@ -170,10 +170,11 @@ fn test_load_ensured_bm25_find_sees_uncommitted_symbol() {
     );
 }
 
-/// Today: the first assertion fails (the subdirectory bug above), so the
-/// test never reaches the foreign graph. The second half guards the rule
-/// `main.rs` had and the read context now owns: the overlay holds this
-/// worktree's edits, so a `--graph` that names another graph reads none.
+/// Failed before this change: the first assertion failed (the subdirectory
+/// bug above), so the test never reached the foreign graph. The second half
+/// guards the rule `main.rs` had and the read context now owns: the overlay
+/// holds this worktree's edits, so a `--graph` that names another graph reads
+/// none.
 #[test]
 fn test_read_context_foreign_graph_keeps_no_overlay() {
     let fx = fixture();
@@ -207,4 +208,110 @@ fn test_read_context_foreign_graph_keeps_no_overlay() {
         leaked["found"], false,
         "this worktree's overlay leaked into a foreign graph: {leaked}"
     );
+}
+
+/// Two-letter suffix for the `i`-th generated name; letters only, so no name
+/// shares the query's `v2` tokens.
+fn letters(i: usize) -> String {
+    [b'a' + (i / 26) as u8, b'a' + (i % 26) as u8]
+        .iter()
+        .map(|&b| b as char)
+        .collect()
+}
+
+/// Base rows carry tantivy BM25 scores, overlay rows substring scores (1.0
+/// exact), and the per-bucket cut keeps the `TOP_K` (20) best. Failed before
+/// this change: 25 base `parse_config_*` rows outscored the exact-name overlay
+/// symbol and the cut dropped it from `source`.
+#[test]
+fn test_bm25_find_exact_overlay_symbol_ranks_ahead_of_base_rows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let matching: String = (0..25)
+        .map(|i| format!("def parse_config_{}():\n    return 1\n\n\n", letters(i)))
+        .collect();
+    // Unrelated symbols give `parse` and `config` an IDF that lifts the
+    // matching rows' BM25 scores above the substring scale.
+    let filler: String = (0..200)
+        .map(|i| format!("def filler_{}():\n    return 1\n\n\n", letters(i)))
+        .collect();
+    write(&repo, "pkg/parsers.py", &matching);
+    write(&repo, "pkg/filler.py", &filler);
+    run_git(&repo, &["init", "-q", "-b", "main"]);
+    commit_all(&repo, "init");
+    let index = ecp(&repo, &home, &["admin", "index", "--repo", "."]);
+    assert!(
+        index.status.success(),
+        "admin index: {}",
+        String::from_utf8_lossy(&index.stderr)
+    );
+    write(
+        &repo,
+        "pkg/parsers_v2.py",
+        "def parse_config_v2():\n    return 2\n",
+    );
+
+    let v = ecp_json(&repo, &home, &["find", "parse_config_v2", "--mode", "bm25"]);
+
+    let source = v["source"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        source.len(),
+        20,
+        "setup: the source bucket must be cut: {v}"
+    );
+    let others: Vec<&Value> = source
+        .iter()
+        .filter(|h| h["name"] != "parse_config_v2")
+        .collect();
+    assert!(
+        others
+            .iter()
+            .all(|h| h["score_source"] == "bm25" && h["score"].as_f64().unwrap_or(0.0) > 1.0),
+        "setup: every base row must outscore 1.0, or the test cannot tell the \
+         ranking apart from the score order: {v}"
+    );
+    let overlay = source
+        .iter()
+        .find(|h| h["name"] == "parse_config_v2")
+        .unwrap_or_else(|| panic!("the exact-name overlay symbol was cut: {v}"));
+    assert_eq!(overlay["file"], "pkg/parsers_v2.py", "{v}");
+    assert_eq!(
+        overlay["score_source"], "substring",
+        "the score must stay the substring score it is: {v}"
+    );
+    assert_eq!(overlay["score"].as_f64(), Some(1.0), "{v}");
+}
+
+/// A new overlay symbol under `examples/` takes the category its path gives,
+/// as a base row does. Failed before this change: the overlay knew only test
+/// and source paths, so the bm25 row landed in `source` and the exact match
+/// read `Source`.
+#[test]
+fn test_overlay_symbol_under_examples_categorised_example() {
+    let fx = fixture();
+    write(
+        &fx.repo,
+        "examples/demo.py",
+        "def demo_example_marker():\n    return 4\n",
+    );
+
+    let bm25 = ecp_json(
+        &fx.repo,
+        &fx.home,
+        &["find", "demo_example_marker", "--mode", "bm25"],
+    );
+    let examples = bm25["examples"].as_array().cloned().unwrap_or_default();
+    assert!(
+        examples
+            .iter()
+            .any(|h| h["name"] == "demo_example_marker" && h["file"] == "examples/demo.py"),
+        "the bm25 row must land in `examples`: {bm25}"
+    );
+
+    let exact = ecp_json(&fx.repo, &fx.home, &["find", "demo_example_marker"]);
+    assert_eq!(exact["found"], true, "{exact}");
+    assert_eq!(exact["matches"][0]["category"], "Example", "{exact}");
 }
