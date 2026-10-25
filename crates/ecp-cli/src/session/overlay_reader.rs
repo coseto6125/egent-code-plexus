@@ -79,6 +79,11 @@ pub fn accepted_fragments(
 ///   over another cap parsed to an omission). Treating its files as clean
 ///   (skip) is the conservative choice: the next `ensure_fresh` re-parses
 ///   every dirty file into a fresh manifest. Its tombstones are skipped too.
+/// - **an entry of another fragment format** — a fragment id is a hash of the
+///   route key and the content (V6); a V5 id is the content hash alone, so a
+///   V5 bin can hold the parse of another route. The format check drops such
+///   an entry and the freshness gate re-parses it, so the reader never serves
+///   it.
 /// - **mtime mismatch** — a file edited and then REVERTED keeps its (now
 ///   stale) manifest entry until the next `ensure_fresh` retires it
 ///   (`retire_unclaimed_entries`). Serving that fragment would beat fresh

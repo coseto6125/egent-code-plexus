@@ -23,7 +23,7 @@ use ecp_core::analyzer::types::{
     LocalGraph, RawEventTopic, RawExportAlias, RawImport, RawSchemaField, RawTxScope,
 };
 use ecp_core::contracts::dirty_event::{PathChange, PathClass};
-use ecp_core::contracts::routing::SizeCap;
+use ecp_core::contracts::routing::{FileRouter, RouteOutcome, SizeCap};
 use ecp_core::graph::NodeKind;
 use ecp_core::registry::{atomic_write_json, replace_file, FileLock};
 use ecp_core::session::layout;
@@ -36,6 +36,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use xxhash_rust::xxh3::xxh3_64;
 
 /// A single symbol span produced by `parse_to_fragment`.
 ///
@@ -370,13 +371,24 @@ pub fn write_dirty_events(
     let overlay_dir = layout::fragments_dir(session_dir);
     fs::create_dir_all(&overlay_dir)?;
     let batch_seq = WRITE_BATCH_SEQ.fetch_add(1, Ordering::Relaxed);
+    let worktree = SessionMeta::read(&session_dir.join("session_meta.json"))
+        .map(|sm| PathBuf::from(sm.source_worktree))
+        .unwrap_or_default();
 
     let results: Vec<io::Result<StagedFragment>> = graphs
         .par_iter()
         .zip(mtimes.par_iter())
         .enumerate()
         .map(|(idx, (graph, &mtime_ns))| {
-            write_fragment_from_graph(&overlay_dir, batch_seq, idx as u64, graph, mtime_ns, events)
+            write_fragment_from_graph(
+                &overlay_dir,
+                batch_seq,
+                idx as u64,
+                graph,
+                mtime_ns,
+                events,
+                &worktree,
+            )
         })
         .collect();
 
@@ -507,11 +519,11 @@ fn write_fragment_file(
     input: &FragmentInput,
     size_cap: SizeCap,
 ) -> io::Result<StagedFragment> {
-    let content_hash = content_hash_hex(&input.content);
-    let fragment_id = content_hash.clone();
-
+    let content_hash = xxh3_64(&input.content);
     // Same forward-slash invariant as `write_fragment_from_graph`.
     let rel_path = input.rel_path.replace('\\', "/");
+    let fragment_id = fragment_id_for(&rel_path, content_hash);
+    let content_hash = format!("{content_hash:016x}");
     // Parse and archive stay one fallible unit, as they were when this called a
     // combined `parse_to_fragment`: an rkyv failure marks the entry
     // `parse_failed` like a parse failure does, rather than aborting the whole
@@ -579,7 +591,7 @@ fn archive_fragments(graph: &LocalGraph) -> io::Result<Vec<u8>> {
 /// Pre-parsed twin of `write_fragment_file`: the dirty file was already parsed
 /// upstream (`reanalyze_files`), so this skips the tree-sitter re-parse and
 /// derives `fragment_id` from the graph's own `content_hash` (the `xxh3_64`
-/// LE bytes — `u64::from_le_bytes` + `{:016x}` reproduces `xxh3_hex16` exactly).
+/// LE bytes) and the path's route key, as `write_fragment_file` does.
 fn write_fragment_from_graph(
     overlay_dir: &Path,
     batch_seq: u64,
@@ -587,9 +599,16 @@ fn write_fragment_from_graph(
     graph: &LocalGraph,
     mtime_ns: u64,
     events: &HashMap<String, DirtyPathEvent>,
+    worktree: &Path,
 ) -> io::Result<StagedFragment> {
-    let content_hash = format!("{:016x}", u64::from_le_bytes(graph.content_hash));
-    let fragment_id = content_hash.clone();
+    // Manifest keys feed uid streams and graph-file matching, which both use
+    // forward slashes (the graph builder normalizes `File.path` that way) —
+    // a Windows PathBuf would leak backslashes here and silently kill every
+    // overlay↔base match.
+    let rel_path = graph.file_path.to_string_lossy().replace('\\', "/");
+    let content_hash = graph_content_hash(graph, worktree);
+    let fragment_id = fragment_id_for(&rel_path, content_hash);
+    let content_hash = format!("{content_hash:016x}");
 
     let tmp = match archive_fragments(graph) {
         Ok(archive_bytes) => Some(stage_archive(
@@ -603,11 +622,6 @@ fn write_fragment_from_graph(
     };
     let parse_failed = tmp.is_none();
 
-    // Manifest keys feed uid streams and graph-file matching, which both use
-    // forward slashes (the graph builder normalizes `File.path` that way) —
-    // a Windows PathBuf would leak backslashes here and silently kill every
-    // overlay↔base match.
-    let rel_path = graph.file_path.to_string_lossy().replace('\\', "/");
     let event = events
         .get(&rel_path)
         .map_or(DirtyPathEvent::PARSED_SOURCE, |event| event.parsed());
@@ -633,8 +647,34 @@ fn write_fragment_from_graph(
     })
 }
 
-fn content_hash_hex(bytes: &[u8]) -> String {
-    crate::repo_identity::xxh3_hex16(bytes)
+/// The fragment id: an xxh3 over the file's route key and its content hash.
+/// Two paths with one content and one route share a bin; one content under two
+/// routes (`deploy.yaml` against `.github/workflows/deploy.yaml`) parses to
+/// different graphs, so it gets two. Both writers call this with the xxh3 of
+/// the content, so the re-parse and the pre-parsed route stay byte-identical.
+fn fragment_id_for(rel_path: &str, content_hash: u64) -> String {
+    // A path no rule routes has no parse; it gets the all-ones key, which no
+    // routed path can produce (`RouteKey::SNIFFED` is only the language byte).
+    let route_key = match FileRouter::PATH_ONLY.route(rel_path) {
+        RouteOutcome::Routed(route) => route.key().to_bytes(),
+        RouteOutcome::Excluded(_) | RouteOutcome::Unrouted => [u8::MAX; 3],
+    };
+    let mut keyed = [0u8; 11];
+    keyed[..3].copy_from_slice(&route_key);
+    keyed[3..].copy_from_slice(&content_hash.to_le_bytes());
+    format!("{:016x}", xxh3_64(&keyed))
+}
+
+/// A graph's content hash. An omitted file (over the cap, unreadable at parse
+/// time) carries the zero hash on purpose, since the parse cache must not trust
+/// a hash of content nobody read. The fragment key needs the real content, so
+/// read the file from the session's worktree; a file that is gone hashes as
+/// empty.
+fn graph_content_hash(graph: &LocalGraph, worktree: &Path) -> u64 {
+    if graph.content_hash != [0u8; 8] {
+        return u64::from_le_bytes(graph.content_hash);
+    }
+    xxh3_64(&fs::read(worktree.join(&graph.file_path)).unwrap_or_default())
 }
 
 static WRITE_BATCH_SEQ: AtomicU64 = AtomicU64::new(0);
