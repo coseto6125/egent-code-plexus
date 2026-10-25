@@ -1,4 +1,5 @@
 pub mod import_scope;
+mod incremental;
 pub mod layout;
 pub mod merged;
 pub mod meta;
@@ -14,5 +15,6 @@ pub use overlay::{
 };
 pub use state::{SessionState, StaleReason};
 pub use view::{
-    OverlayFileInput, OverlaySymbol, OverlayView, ViewEdge, ViewNode, VIEW_CACHE_FORMAT,
+    OverlayFileInput, OverlaySymbol, OverlayView, ViewEdge, ViewFunctionMeta, ViewNode,
+    VIEW_CACHE_FORMAT,
 };

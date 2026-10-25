@@ -46,6 +46,15 @@
 //!   `enum_variant:pattern`), by the index's `resolve_variant_ref`.
 //! - **name references** — `ReadsField` for member and bare value reads,
 //!   and `References` for function values, using the shared name-ref policy.
+//! - **per-file outputs** — the outputs a build makes from one file's parse
+//!   alone, replayed by `session::incremental` with the index's own
+//!   derivations: a `File` node for a path `graph.files` lacks (a new file,
+//!   empty or not), scope `Defines` (`File` / `Namespace` / `Module` →
+//!   member) and enum containment (`Enum` → `EnumVariant`), both by
+//!   [`crate::analyzer::containment`], and each virtual function's meta
+//!   ([`OverlayView::function_meta`]). A re-parsed path that `graph.files`
+//!   holds keeps its base `File` node, which sources the file's rebuilt
+//!   `Defines`: the one overlay edge whose source is a base index.
 //!
 //! The merge replaces only the base references of dirty sources whose
 //! reason the overlay rebuilds (closure, overload set, enum variant, function value),
@@ -55,8 +64,9 @@
 //!
 //! A base edge whose **source** lies in a dirty file is masked ONLY when the
 //! overlay re-resolves that rel type from fragment data (`Calls`,
-//! `ReadsField`, plus the `References` reasons above) — for those the
-//! overlay adjacency is the file's truth. Rels the fragment carries no
+//! `ReadsField`, `Defines`, plus the `References` reasons above) — for
+//! those the overlay adjacency is the file's truth. `Defines` is masked at
+//! the file's `File` node too. Rels the fragment carries no
 //! inputs for (Extends, …) keep their base edges: slightly stale beats silently absent for a
 //! deterministic edge. A base edge whose **target** lies in a dirty file is
 //! redirected (replaced) or dropped (suppressed) regardless of rel.
@@ -68,9 +78,14 @@
 //! - `References` edges other than lexical closure, overload-set,
 //!   enum-variant, and function-reference edges are not re-resolved: a dirty file keeps the
 //!   base ones of its surviving symbols (stale) and gains none for new code.
-//! - Builder-made nodes of a re-parsed dirty file and their edges are as
-//!   indexed; a brand-new symbol gets no containment edge (`File -Defines->`,
-//!   …).
+//! - Builder-made nodes of a re-parsed dirty file other than `File` (routes,
+//!   entry points, path literals, detector nodes) and their edges are as
+//!   indexed. Class membership (`HasMethod` / `HasProperty`) is as indexed:
+//!   a brand-new member gets none. A path with two `LocalGraph`s keeps the
+//!   base's count of `File` nodes, whatever count its parse now has.
+//! - A function's meta in the view holds the flags and return type a
+//!   fragment carries; the parameters and decorators of a dirty function are
+//!   not in it.
 //! - A removed path still counts as a file for the passes over
 //!   `graph.files` (import-candidate probes, module and crate-root
 //!   discovery), and its archived import rows still serve a re-export hop.
@@ -114,6 +129,8 @@
 //!   custom `[lib] path` gets no `crate::` / `self::` / `super::` chain.
 
 use super::import_scope::{ImportScope, Module};
+use super::incremental::{self, ReplayInputs};
+use crate::analyzer::containment::{ENUM_VARIANT_DEFINES_REASON, SCOPE_DEFINES_REASON};
 use crate::analyzer::csharp_access::{self, CallAccess};
 use crate::analyzer::csharp_extension::{self, ReceiverSite};
 use crate::analyzer::heritage::{enclosing_class_heritage, holds_heritage, HeritageNode};
@@ -311,6 +328,19 @@ pub struct ViewEdge {
     pub reason: &'static str,
 }
 
+/// The function meta of a virtual node: the part of the index's
+/// `FunctionMeta` a fragment carries ([`OverlaySymbol::flags`],
+/// [`OverlaySymbol::return_type`]). See [`OverlayView::function_meta`].
+#[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct ViewFunctionMeta {
+    /// The virtual index of the function, method or constructor.
+    pub node: u32,
+    /// `FunctionMeta::flags`, bit for bit.
+    pub flags: u16,
+    /// The return type as written; `None` when the declaration writes none.
+    pub return_type: Option<String>,
+}
+
 /// Tier confidences mirroring index-time Pass-2 resolution.
 const CONF_IMPORT_SCOPED: f32 = Tier::ImportScoped.confidence();
 const CONF_QUALIFIER_SCOPED: f32 = Tier::QualifierScoped.confidence();
@@ -359,6 +389,14 @@ pub struct OverlayView {
     /// The calls the overlay could not resolve as a full build would, in
     /// discovery order, each once.
     gaps: Vec<CallGap>,
+    /// The base `File` node of each re-parsed path whose `Defines` the
+    /// per-file replay ([`incremental`]) rebuilt: its base `Defines` are
+    /// masked, and its overlay ones are the only overlay edges with a base
+    /// source.
+    defines_files: FxHashSet<u32>,
+    /// Each virtual function, method or constructor whose fragment paired a
+    /// meta, ascending by node ([`Self::function_meta`]).
+    function_metas: Vec<ViewFunctionMeta>,
 }
 
 /// A group of base declarations the overlay could not pair by identity: the
@@ -452,7 +490,9 @@ impl OverlayView {
     /// The shared import rules scan nothing: a TS / JS import probes its
     /// candidate paths by binary search over `graph.files`, reads one
     /// module's archived import rows per re-export hop, and looks
-    /// declarations up through the name index.
+    /// declarations up through the name index. The per-file replay
+    /// (`session::incremental`) costs O(dirty symbols) on top: the `File`
+    /// nodes it needs come from the node scan above.
     pub fn build(graph: &ArchivedZeroCopyGraph, files: &[OverlayFileInput]) -> Option<Self> {
         Self::build_with_removed(graph, files, &[])
     }
@@ -499,16 +539,21 @@ impl OverlayView {
         // can re-emit are collected: mask ⊆ rebuild applies to nodes too. A
         // removed file has no parse to re-emit anything, so all of its nodes
         // are collected; no parse names its path, so no virtual node
-        // replaces one.
+        // replaces one. The same scan keeps each re-parsed path's last
+        // `File` node, the source of the `Defines` the replay rebuilds.
         let mut dirty_base_by_path: FxHashMap<&str, Vec<u32>> = FxHashMap::default();
         let mut dirty_base: FxHashSet<u32> = FxHashSet::default();
+        let mut base_files: FxHashMap<&str, u32> = FxHashMap::default();
         if !dirty_file_idx.is_empty() || !removed_file_idx.is_empty() {
             for (i, node) in graph.nodes.iter().enumerate() {
                 let file_idx = node.file_idx.to_native();
                 if let Some(&path) = dirty_file_idx.get(&file_idx) {
-                    if fragment_emits(NodeKind::from(&node.kind)) {
+                    let kind = NodeKind::from(&node.kind);
+                    if fragment_emits(kind) {
                         dirty_base_by_path.entry(path).or_default().push(i as u32);
                         dirty_base.insert(i as u32);
+                    } else if kind == NodeKind::File {
+                        base_files.insert(path, i as u32);
                     }
                 } else if removed_file_idx.contains(&file_idx) {
                     dirty_base.insert(i as u32);
@@ -526,6 +571,9 @@ impl OverlayView {
         // tombstones. They keep their first's uid and name until every pass
         // below has read them as its twin, then take the tombstone's shape.
         let mut tombstones: Vec<usize> = Vec::new();
+        // Each tombstone's virtual idx with its survivor's: the slot pairs
+        // of the replay's `RawIndexMap`.
+        let mut survivors: Vec<(u32, u32)> = Vec::new();
         let mut unpaired_base: FxHashSet<u32> = FxHashSet::default();
         // First virtual idx of a member with arity twins (`Foo1.foo` beside
         // `Foo1<T>.foo`) → its file's input position, and the first and each
@@ -600,8 +648,9 @@ impl OverlayView {
                             .push(virt);
                         true
                     }
-                    UidSlot::Duplicate { .. } => {
+                    UidSlot::Duplicate { first, .. } => {
                         tombstones.push(nodes.len());
+                        survivors.push((virt, file_start + first));
                         false
                     }
                     UidSlot::First(_) => false,
@@ -679,6 +728,23 @@ impl OverlayView {
             node.owner_class = None;
         }
 
+        // ── per-file outputs: File nodes, scope Defines, enum containment,
+        // function meta ───────────────────────────────────────────────────
+        let replayed = incremental::replay(
+            ReplayInputs {
+                files,
+                base_len,
+                tombstones: survivors,
+                indexed: dirty_file_idx.values().copied().collect(),
+                base_files,
+                lexical_parents: &lexical_parents,
+            },
+            &mut nodes,
+            &mut edges,
+            &mut out_adj,
+            &mut in_adj,
+        );
+
         Some(Self {
             base_len,
             nodes,
@@ -692,6 +758,8 @@ impl OverlayView {
             lexical_parents,
             hidden,
             gaps,
+            defines_files: replayed.defines_files,
+            function_metas: replayed.function_metas,
         })
     }
 
@@ -738,9 +806,29 @@ impl OverlayView {
     /// ignored: the owning file was re-parsed or removed AND the overlay
     /// rebuilds this rel (`overlay_out` carries its truth). Masking a rel
     /// the overlay can't rebuild would silently drop deterministic edges —
-    /// keep mask ⊆ rebuild as fragment capabilities grow.
+    /// keep mask ⊆ rebuild as fragment capabilities grow. `Defines` is
+    /// rebuilt per file (`session::incremental`), so it is masked at the
+    /// dirty file's declarations and at its `File` node.
     pub fn masks_base_edge(&self, base_idx: u32, rel: RelType) -> bool {
-        matches!(rel, RelType::Calls | RelType::ReadsField) && self.dirty_base.contains(&base_idx)
+        match rel {
+            RelType::Calls | RelType::ReadsField => self.dirty_base.contains(&base_idx),
+            RelType::Defines => {
+                self.dirty_base.contains(&base_idx) || self.defines_files.contains(&base_idx)
+            }
+            _ => false,
+        }
+    }
+
+    /// The function meta of the virtual function, method or constructor
+    /// `idx`, as the index's `ArchivedZeroCopyGraph::function_metas` holds
+    /// it for a base node: `None` for a base index, for another kind, and
+    /// when the parse paired no meta with the node. Parameters and
+    /// decorators are not in a fragment, so the view has none.
+    pub fn function_meta(&self, idx: u32) -> Option<&ViewFunctionMeta> {
+        self.function_metas
+            .binary_search_by_key(&idx, |meta| meta.node)
+            .ok()
+            .map(|at| &self.function_metas[at])
     }
 
     /// Whether the overlay rebuilds the base `References` edge with `reason`
@@ -769,8 +857,9 @@ impl OverlayView {
         self.edges.get(overlay_edge_idx as usize)
     }
 
-    /// Overlay-resolved outgoing edges of `idx` (virtual sources only —
-    /// clean base nodes gain no new outgoing edges). Yields
+    /// Overlay-resolved outgoing edges of `idx`: virtual sources, plus the
+    /// base `File` node of a re-parsed path, which sources the file's
+    /// rebuilt `Defines`. A clean base node gains no outgoing edge. Yields
     /// `(overlay_edge_idx, edge)`.
     pub fn overlay_out(&self, idx: u32) -> impl Iterator<Item = (u32, &ViewEdge)> + '_ {
         self.out_adj
@@ -830,12 +919,15 @@ impl OverlayView {
 /// 12 (ctor-span): a virtual node carries its columns; an 11 view has none.
 /// 13 (R6 fix): the view stores each scoped virtual node's lexical parent; a
 /// 12 view has none.
-pub const VIEW_CACHE_FORMAT: u32 = 13;
+/// 14 (F7a-1): the view stores a new file's `File` node, the rebuilt
+/// `Defines` with two reasons, the `File` nodes they mask, and each virtual
+/// function's meta; a 13 view has none of them.
+pub const VIEW_CACHE_FORMAT: u32 = 14;
 
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
 /// never stored, so it costs a build per query as before the cache.
-const VIEW_EDGE_REASONS: [&str; 10] = [
+const VIEW_EDGE_REASONS: [&str; 12] = [
     OVERLOAD_SET_REASON,
     CLOSURE_REFERENCE_REASON,
     NEAREST_COPY_REASON,
@@ -846,9 +938,11 @@ const VIEW_EDGE_REASONS: [&str; 10] = [
     FUNCTION_REFERENCE_REASON,
     "field_read",
     csharp_extension::HEURISTIC_REASON,
+    SCOPE_DEFINES_REASON,
+    ENUM_VARIANT_DEFINES_REASON,
 ];
 
-fn reason_index(reason: &str) -> Option<u8> {
+pub(super) fn reason_index(reason: &str) -> Option<u8> {
     VIEW_EDGE_REASONS
         .iter()
         .position(|&r| r == reason)
@@ -872,6 +966,8 @@ struct CachedView {
     lexical_parents: Vec<(u32, u32)>,
     hidden: Vec<HiddenDecl>,
     gaps: Vec<CallGap>,
+    defines_files: Vec<u32>,
+    function_metas: Vec<ViewFunctionMeta>,
 }
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -924,10 +1020,15 @@ impl CachedView {
             && self.replaced.iter().all(|&(b, v)| base(b) && virt(v))
             && self.suppressed.iter().copied().all(base)
             && self.dirty_base.iter().copied().all(base)
-            && self
-                .edges
-                .iter()
-                .all(|e| virt(e.source) && merged(e.target))
+            && self.defines_files.iter().copied().all(base)
+            && self.defines_files.windows(2).all(|w| w[0] < w[1])
+            && self.edges.iter().all(|e| {
+                // A rebuilt `Defines` is the one edge a base node sources.
+                let source = virt(e.source)
+                    || (e.rel_type == RelType::Defines
+                        && self.defines_files.binary_search(&e.source).is_ok());
+                source && merged(e.target)
+            })
             && self
                 .type_ctors
                 .iter()
@@ -936,6 +1037,11 @@ impl CachedView {
                 .lexical_parents
                 .iter()
                 .all(|&(node, parent)| virt(node) && virt(parent))
+            && self.function_metas.iter().all(|meta| virt(meta.node))
+            && self
+                .function_metas
+                .windows(2)
+                .all(|w| w[0].node < w[1].node)
     }
 
     fn to_bytes(&self) -> Vec<u8> {
@@ -1013,6 +1119,8 @@ impl OverlayView {
             ),
             hidden: self.hidden.clone(),
             gaps: self.gaps.clone(),
+            defines_files: sorted(self.defines_files.iter().copied().collect()),
+            function_metas: self.function_metas.clone(),
         })
     }
 
@@ -1083,6 +1191,8 @@ impl OverlayView {
             lexical_parents: cached.lexical_parents.into_iter().collect(),
             hidden: cached.hidden,
             gaps: cached.gaps,
+            defines_files: cached.defines_files.into_iter().collect(),
+            function_metas: cached.function_metas,
         })
     }
 }
@@ -1280,6 +1390,9 @@ fn hidden_declarations(graph: &ArchivedZeroCopyGraph, idxs: &[u32]) -> Vec<Hidde
 /// `kind`. The graph builder makes the rest from whole-repo passes (File,
 /// routes, entry points, processes, detector and path-literal nodes), so a
 /// fragment never re-emits them: absence there says nothing about deletion.
+/// The per-file replay (`session::incremental`) makes the `File` node of a
+/// path the base never indexed; the base `File` node of a re-parsed path
+/// stays visible.
 /// Exhaustive on purpose — a new kind must decide which side it is on.
 fn fragment_emits(kind: NodeKind) -> bool {
     match kind {
@@ -2787,6 +2900,60 @@ mod tests {
         let mut view = OverlayView::build(graph, &[dirty_input()]).unwrap();
         view.edges[0].target = view.base_len() + view.virtual_nodes().len() as u32;
         assert!(OverlayView::from_cache_bytes(&view.to_cache_bytes(), graph.nodes.len()).is_none());
+    }
+
+    /// A base node sources an overlay edge only as a listed `File` node of a
+    /// rebuilt `Defines`; any other base source is a view `build` never
+    /// makes, and so is a function meta outside the virtual space.
+    #[test]
+    fn test_from_cache_bytes_base_sourced_edge_or_meta_outside_virtual_space_returns_none() {
+        let mut fx = GraphFixture::new();
+        let file = fx.node(NodeKind::File, "src/dirty.rs", "dirty.rs");
+        fx.func("src/dirty.rs", "keep_fn");
+        let bytes = fx.into_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let mut keep = sym("keep_fn", &[]);
+        keep.flags = Some(0);
+        let input = OverlayFileInput {
+            export_aliases: Vec::new(),
+            rel_path: "src/dirty.rs".to_string(),
+            symbols: vec![keep],
+            imports: vec![],
+        };
+        let view = OverlayView::build(graph, &[input]).unwrap();
+        assert_eq!(view.defines_files, FxHashSet::from_iter([file]));
+        assert!(view
+            .edges
+            .iter()
+            .any(|e| e.source == file && e.rel_type == RelType::Defines));
+        let decode = |view: &OverlayView| {
+            OverlayView::from_cache_bytes(&view.to_cache_bytes(), graph.nodes.len())
+        };
+        assert_eq!(decode(&view).as_ref(), Some(&view));
+
+        let mut unlisted = OverlayView::build(graph, &[dirty_input_at("src/dirty.rs")]).unwrap();
+        unlisted.defines_files.clear();
+        assert!(decode(&unlisted).is_none(), "a base source not listed");
+
+        let mut calls_from_file =
+            OverlayView::build(graph, &[dirty_input_at("src/dirty.rs")]).unwrap();
+        for edge in &mut calls_from_file.edges {
+            edge.rel_type = RelType::Calls;
+        }
+        assert!(decode(&calls_from_file).is_none(), "a base-sourced Calls");
+
+        let mut meta = view;
+        meta.function_metas[0].node = 0;
+        assert!(decode(&meta).is_none(), "a meta on a base node");
+    }
+
+    fn dirty_input_at(path: &str) -> OverlayFileInput {
+        OverlayFileInput {
+            export_aliases: Vec::new(),
+            rel_path: path.to_string(),
+            symbols: vec![sym("keep_fn", &[])],
+            imports: vec![],
+        }
     }
 
     #[test]

@@ -1,4 +1,1 @@
 # owner: lane F (incremental overlay: builder edges of dirty files)
-edge full-only x1 Defines File src/lib.js:1 lib.js #391d94e61d297f4c -> Function src/lib.js:5 extra #9904a85f5f62f605 conf=1.0
-parent full-only x1 Function src/lib.js:5 extra #9904a85f5f62f605 owner=- <- Defines File src/lib.js:1 lib.js #391d94e61d297f4c
-parent overlay-only x1 Function src/lib.js:5 extra #9904a85f5f62f605 owner=- <- none

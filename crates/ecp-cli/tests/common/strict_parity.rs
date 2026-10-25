@@ -45,7 +45,7 @@ use ecp_core::contracts::dirty_event::PathClass;
 use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType, ZeroCopyGraph};
 use ecp_core::session::merged::MergedGraph;
-use ecp_core::session::{layout, DirtyEvents, OverlayView, SessionMeta};
+use ecp_core::session::{layout, DirtyEvents, OverlayFileInput, OverlayView, SessionMeta};
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -289,9 +289,61 @@ fn new_session_dir(root: &Path, worktree: &Path) -> PathBuf {
     dir
 }
 
-/// The difference lines between the overlay view of `scenario` and a fresh
-/// full index of its edited tree.
-pub fn observe(scenario: &Scenario<'_>) -> BTreeSet<String> {
+/// The production outputs of one scenario: both indexes, archived, and the
+/// overlay inputs a query reads back from the session.
+pub struct Observed {
+    pub full_bytes: rkyv::util::AlignedVec,
+    pub base_bytes: rkyv::util::AlignedVec,
+    pub inputs: Vec<OverlayFileInput>,
+    pub tombstones: Vec<String>,
+    /// `input dropped <path>` for each written fragment or tombstone the
+    /// reader did not serve.
+    pub dropped: BTreeSet<String>,
+}
+
+impl Observed {
+    pub fn full(&self) -> &ArchivedZeroCopyGraph {
+        rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&self.full_bytes).unwrap()
+    }
+
+    pub fn base(&self) -> &ArchivedZeroCopyGraph {
+        rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&self.base_bytes).unwrap()
+    }
+
+    /// The overlay view a query builds, held to its cache round trip.
+    pub fn view(&self) -> Option<OverlayView> {
+        let base = self.base();
+        let view = OverlayView::build_with_removed(base, &self.inputs, &self.tombstones);
+        if let Some(view) = &view {
+            assert_eq!(
+                OverlayView::from_cache_bytes(&view.to_cache_bytes(), base.nodes.len()).as_ref(),
+                Some(view),
+                "view cache round trip"
+            );
+        }
+        view
+    }
+
+    /// The full index's snapshot and the overlay's.
+    pub fn snapshots(&self) -> (Snapshot, Snapshot) {
+        let view = self.view();
+        (
+            snapshot(&MergedGraph::new(self.full(), None)),
+            snapshot(&MergedGraph::new(self.base(), view.as_ref())),
+        )
+    }
+
+    /// The difference lines between the overlay and the full index.
+    pub fn lines(&self) -> BTreeSet<String> {
+        let (full, overlay) = self.snapshots();
+        let mut lines = self.dropped.clone();
+        lines.extend(diff(&full, &overlay));
+        lines
+    }
+}
+
+/// Run `scenario` through the production index, fragment write and read.
+pub fn run(scenario: &Scenario<'_>) -> Observed {
     let edited = edited_tree(scenario.files, scenario.edits);
     let full_bytes = full_index(edited.iter().map(|(p, s)| (p.as_str(), s.as_str())));
     let base_bytes = full_index(scenario.files.iter().copied());
@@ -340,7 +392,7 @@ pub fn observe(scenario: &Scenario<'_>) -> BTreeSet<String> {
     let read = view_inputs(&session, repo.path()).expect("fragment read");
     let inputs = decode_view_inputs(&read.fragments);
 
-    let mut lines = BTreeSet::new();
+    let mut dropped = BTreeSet::new();
     let read_back: BTreeSet<&str> = inputs
         .iter()
         .map(|i| i.rel_path.as_str())
@@ -352,24 +404,23 @@ pub fn observe(scenario: &Scenario<'_>) -> BTreeSet<String> {
         .chain(tombstones.iter().map(|(path, _)| path.clone()));
     for path in written {
         if !read_back.contains(path.as_str()) {
-            lines.insert(format!("input dropped {path}"));
+            dropped.insert(format!("input dropped {path}"));
         }
     }
-
-    let full = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&full_bytes).unwrap();
-    let base = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&base_bytes).unwrap();
-    let view = OverlayView::build_with_removed(base, &inputs, &read.tombstones);
-    if let Some(view) = &view {
-        assert_eq!(
-            OverlayView::from_cache_bytes(&view.to_cache_bytes(), base.nodes.len()).as_ref(),
-            Some(view),
-            "view cache round trip"
-        );
+    let tombstones = read.tombstones.clone();
+    Observed {
+        full_bytes,
+        base_bytes,
+        inputs,
+        tombstones,
+        dropped,
     }
-    let full_snap = snapshot(&MergedGraph::new(full, None));
-    let overlay_snap = snapshot(&MergedGraph::new(base, view.as_ref()));
-    lines.extend(diff(&full_snap, &overlay_snap));
-    lines
+}
+
+/// The difference lines between the overlay view of `scenario` and a fresh
+/// full index of its edited tree.
+pub fn observe(scenario: &Scenario<'_>) -> BTreeSet<String> {
+    run(scenario).lines()
 }
 
 /// `tests/baselines/strict_parity/<name>.txt`.

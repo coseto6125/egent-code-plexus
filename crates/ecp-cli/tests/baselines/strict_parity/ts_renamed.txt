@@ -1,10 +1,5 @@
 # owner: lane F (incremental overlay: builder edges of dirty files)
-edge full-only x1 Defines File src/moved.ts:1 moved.ts #1529540619cf9b28 -> Function src/moved.ts:3 extra #a6b03c00196f60c5 conf=1.0
 edge full-only x1 Imports File src/moved.ts:1 moved.ts #1529540619cf9b28 -> Function src/lib.ts:1 helper #d6bcf4444c1bd2fc conf=0.95
 edge full-only x1 UsesPathLiteral File src/moved.ts:1 moved.ts #1529540619cf9b28 -> PathLiteral src/moved.ts:1 ./lib #7eda608acd7b9460 conf=1.0
-identity full-only x1 File src/moved.ts:1 moved.ts #1529540619cf9b28
 identity full-only x1 PathLiteral src/moved.ts:1 ./lib #7eda608acd7b9460
-parent full-only x1 File src/moved.ts:1 moved.ts #1529540619cf9b28 owner=- <- none
-parent full-only x1 Function src/moved.ts:3 extra #a6b03c00196f60c5 owner=- <- Defines File src/moved.ts:1 moved.ts #1529540619cf9b28
 parent full-only x1 PathLiteral src/moved.ts:1 ./lib #7eda608acd7b9460 owner=- <- none
-parent overlay-only x1 Function src/moved.ts:3 extra #a6b03c00196f60c5 owner=- <- none
