@@ -810,12 +810,13 @@ pub fn has_import_from(imports: &[RawImport], modules: &[&str]) -> bool {
         //          under java), Kotlin (io.ktor.server.routing under io.ktor)
         //   `/`  — JS/TS scoped packages (@nestjs/common under @nestjs)
         //   `\\` — PHP namespaces (Illuminate\Support under Illuminate)
+        //   `::` — Rust paths (rdkafka::producer under rdkafka)
         // Zero-alloc byte compare avoids `format!()` per pair.
         let v = value.as_bytes();
         let m = module.as_bytes();
         v.len() > m.len()
             && v.starts_with(m)
-            && (v[m.len()] == b'.' || v[m.len()] == b'/' || v[m.len()] == b'\\')
+            && matches!(&v[m.len()..], [b'.' | b'/' | b'\\', ..] | [b':', b':', ..])
     }
     imports.iter().any(|imp| {
         modules
@@ -1097,6 +1098,33 @@ fn byte_to_row_col(text: &str, byte_pos: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn import(source: &str) -> RawImport {
+        RawImport {
+            source: source.into(),
+            imported_name: "x".into(),
+            alias: None,
+            binding_kind: None,
+        }
+    }
+
+    #[test]
+    fn test_has_import_from_rust_submodule_path_matches_crate() {
+        assert!(has_import_from(
+            &[import("rdkafka::producer")],
+            &["rdkafka"]
+        ));
+        assert!(has_import_from(&[import("axum::routing")], &["axum"]));
+        assert!(!has_import_from(
+            &[import("rdkafkax::producer")],
+            &["rdkafka"]
+        ));
+        assert!(!has_import_from(
+            &[import("rdkafka:producer")],
+            &["rdkafka"]
+        ));
+        assert!(!has_import_from(&[import("rdkafka:")], &["rdkafka"]));
+    }
 
     #[test]
     fn import_gate_matches_exact_and_submodule() {
