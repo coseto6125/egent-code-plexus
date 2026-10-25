@@ -82,8 +82,18 @@ fn calls_from<'e>(edges: &'e [CallEdge], caller: &str) -> Vec<&'e str> {
         .collect()
 }
 
+/// `(caller, member)` of every [`GAP_CS_ACCESS_DIRTY_TARGET`] gap.
+fn access_gaps(gaps: &[CallGap]) -> Vec<(&str, &str)> {
+    gaps.iter()
+        .filter(|gap| gap.reason == GAP_CS_ACCESS_DIRTY_TARGET)
+        .map(|gap| (gap.caller.as_str(), gap.member.as_str()))
+        .collect()
+}
+
 /// A dirty caller over a clean `JToken`: the overlay reads the base flags
-/// and matches the reindex, with no fallback to report.
+/// and matches the reindex. `other.Count()` is an instance call to a method
+/// of the dirty file itself: the edit may have made `Count` static, so the
+/// overlay reports that call, and only that one.
 #[test]
 fn test_overlay_dirty_caller_private_static_of_base_matches_reindex() {
     let provider = CSharpProvider::new().unwrap();
@@ -97,7 +107,130 @@ fn test_overlay_dirty_caller_private_static_of_base_matches_reindex() {
     assert_eq!(calls_from(&parity.reindex, "UseOther"), ["Count"]);
     assert_eq!(parity.overlay, parity.reindex);
     let gaps = call_gaps_after_edit(&provider_parse(&provider), &[JTOKEN, JCONTAINER], &edits);
+    assert_eq!(access_gaps(&gaps), [("UseOther", "Count")], "{gaps:?}");
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+}
+
+const SVC: (&str, &str) = (
+    "Lib/Svc.cs",
+    "namespace Lib
+{
+    public class Svc
+    {
+        public void M() {}
+    }
+}
+",
+);
+
+const CLIENT: (&str, &str) = (
+    "Lib/Client.cs",
+    "namespace Lib
+{
+    public class Client
+    {
+        public void Call(Svc s) { s.M(); }
+    }
+}
+",
+);
+
+/// Stands for: a dirty method's flags are never known to the overlay. The
+/// edit makes `M` private; the reindex refuses the outside call. The
+/// overlay judges `M` by the flags of the public base declaration it
+/// replaced, so it must report the call. Before the fix a paired dirty
+/// method read as known, and the stale edge stood silently.
+#[test]
+fn test_overlay_dirty_target_made_private_reports_access_gap() {
+    let provider = CSharpProvider::new().unwrap();
+    let svc = SVC.1.replace("public void M()", "private void M()");
+    let client = shifted(CLIENT.1);
+    let edits = [(SVC.0, svc.as_str()), (CLIENT.0, client.as_str())];
+    let files = [SVC, CLIENT];
+    let parity = calls_after_edit_in(&provider, &files, &edits, &|_, name| name == "Call");
+    assert_eq!(calls_from(&parity.reindex, "Call"), Vec::<&str>::new());
+    let gaps = call_gaps_after_edit(&provider_parse(&provider), &files, &edits);
+    assert_eq!(access_gaps(&gaps), [("Call", "M")], "{gaps:?}");
+}
+
+/// Guard: a bare call from the method's own type is admitted under any
+/// flags, so a dirty target of it reports nothing.
+#[test]
+fn test_overlay_dirty_target_bare_call_from_own_type_reports_no_gap() {
+    let provider = CSharpProvider::new().unwrap();
+    let svc = SVC.1.replace(
+        "public void M() {}",
+        "private static void M() {}\n        public void N() { M(); }",
+    );
+    let edits = [(SVC.0, svc.as_str())];
+    let files = [SVC, CLIENT];
+    let parity = calls_after_edit_in(&provider, &files, &edits, &|_, name| name == "N");
+    assert_eq!(calls_from(&parity.reindex, "N"), ["M"]);
+    assert_eq!(parity.overlay, parity.reindex);
+    let gaps = call_gaps_after_edit(&provider_parse(&provider), &files, &edits);
     assert_eq!(gaps, Vec::<CallGap>::new());
+}
+
+const READER: (&str, &str) = (
+    "Lib/R.cs",
+    "namespace Lib
+{
+    public class R
+    {
+        private void Read() {}
+        public void Read(int x) {}
+        public static R Make() { return new R(); }
+    }
+}
+",
+);
+
+const CHAIN_USER: (&str, &str) = (
+    "Lib/Use.cs",
+    "namespace Lib
+{
+    public class Use
+    {
+        public void Run() { R.Make().Read(1); }
+    }
+}
+",
+);
+
+/// Stands for: a chained member call obeys the C# access rule. `Read` on
+/// the `R` that `Make()` returns: the private first overload (line 5) is
+/// out of reach from `Use`, so both sides bind the public `Read(int)`
+/// (line 6). Before the fix the overlay's chain bound line 5.
+#[test]
+fn test_overlay_chained_call_private_first_overload_binds_public_overload() {
+    let provider = CSharpProvider::new().unwrap();
+    let user = shifted(CHAIN_USER.1);
+    let edits = [(CHAIN_USER.0, user.as_str())];
+    let files = [READER, CHAIN_USER];
+    let parity = calls_after_edit_in(&provider, &files, &edits, &|_, name| name == "Run");
+    let reads = |edges: &[CallEdge]| -> Vec<u32> {
+        edges
+            .iter()
+            .filter(|edge| edge.callee == "Read")
+            .map(|edge| edge.callee_line)
+            .collect()
+    };
+    assert_eq!(reads(&parity.reindex), [6]);
+    assert_eq!(parity.overlay, parity.reindex);
+    let gaps = call_gaps_after_edit(&provider_parse(&provider), &files, &edits);
+    assert_eq!(gaps, Vec::<CallGap>::new());
+}
+
+/// Both files dirty: the chain's overloads have no flags the overlay can
+/// read, so the overlay reports the chained call.
+#[test]
+fn test_overlay_chained_call_dirty_overloads_reports_gap() {
+    let provider = CSharpProvider::new().unwrap();
+    let reader = shifted(READER.1);
+    let user = shifted(CHAIN_USER.1);
+    let edits = [(READER.0, reader.as_str()), (CHAIN_USER.0, user.as_str())];
+    let gaps = call_gaps_after_edit(&provider_parse(&provider), &[READER, CHAIN_USER], &edits);
+    assert!(access_gaps(&gaps).contains(&("Run", "Read")), "{gaps:?}");
 }
 
 /// Both files dirty: the dirty `GetType` reads the flags of the base

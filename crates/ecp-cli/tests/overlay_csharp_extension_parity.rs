@@ -225,6 +225,39 @@ fn test_overlay_dirty_extension_loses_this_matches_or_reports_stale_edge() {
     assert_clean_caller_matches_or_reports(("Lib/WidgetExt.cs", &ext), &[]);
 }
 
+/// Stands for: `string.Wrap(..)` calls a static member of the predefined
+/// type `string`, not a method on a string value, so no extension of
+/// `string` binds it, on either side. Before the fix the overlay retried
+/// the extension with `string` as a named receiver.
+#[test]
+fn test_overlay_keyword_type_receiver_binds_no_extension() {
+    let provider = CSharpProvider::new().unwrap();
+    let ext = "namespace Lib\n{\n    public static class StrExt\n    {\n        public static string Wrap(this string s, string t) { return s + t; }\n    }\n}\n";
+    let app = "namespace Lib\n{\n    public class Runner\n    {\n        public void Run() { string.Wrap(\"a\"); }\n    }\n}\n";
+    let edited = app.replacen("    {\n", "    {\n\n", 1);
+    let files = [("Lib/StrExt.cs", ext), ("Lib/Runner.cs", app)];
+    let edits = [("Lib/Runner.cs", edited.as_str())];
+    let parity = calls_after_edit_in(&provider, &files, &edits, &named("Run"));
+    let wraps = |edges: &[parity::CallEdge]| edges.iter().filter(|e| e.callee == "Wrap").count();
+    assert_eq!(wraps(&parity.reindex), 0);
+    assert_eq!(parity.overlay, parity.reindex);
+}
+
+/// A call made twice reports one gap: `Run` calls `Spin` on `w` and on
+/// `Make()`, and both calls meet the dirty extension file.
+#[test]
+fn test_overlay_repeated_dirty_declaration_call_reports_one_gap() {
+    let provider = CSharpProvider::new().unwrap();
+    let ext = EXT.replacen("    {\n", "    {\n\n", 1);
+    let gaps = call_gaps_after_edit(
+        &provider_parse(&provider),
+        &[WIDGET, ("Lib/WidgetExt.cs", EXT), ("App.cs", APP)],
+        &[("Lib/WidgetExt.cs", &ext), ("App.cs", &edited_app())],
+    );
+    let want = gap("App.cs", 8, GAP_CS_EXTENSION_DIRTY_DECLARATION);
+    assert_eq!(gaps.iter().filter(|g| **g == want).count(), 1, "{gaps:?}");
+}
+
 /// Guard: a dirty C# file whose methods name no extension reports nothing.
 #[test]
 fn test_overlay_dirty_unrelated_method_reports_no_gap() {

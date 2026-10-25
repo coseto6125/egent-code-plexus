@@ -367,17 +367,33 @@ pub const GAP_CS_EXTENSION_DIRTY_DECLARATION: &str = "cs-extension-dirty-declara
 /// overlay does not re-resolve a clean caller, so the edge may be stale.
 pub const GAP_CS_EXTENSION_STALE_EDGE: &str = "cs-extension-stale-edge";
 
+/// The strictest `FunctionMeta::flags` the C# access rule reads: a
+/// `private static` method that is no extension (visibility code 2,
+/// `csharp_access::PRIVATE`, in bits 6-8). A call the rule admits under
+/// them, it admits under any flags.
+const CS_STRICTEST_FLAGS: u16 = crate::graph::FunctionMeta::FLAG_STATIC | (2 << 6);
+
 /// [`CallGap::reason`] of a dirty C# caller: the C# access rule judged a
-/// method of a dirty file by the flags of the base declaration it replaced
-/// ([`csharp_access`]), and refused it, or admitted it with no flags at all.
-/// A dirty file's input carries no flags of its own, the edit may have
-/// changed the method's modifiers, and an overload pairs with no base
-/// declaration, since its anchor repeats.
+/// method of a dirty file ([`csharp_access`]), and its verdict rests on
+/// flags the overlay cannot read. A dirty file's input carries no flags of
+/// its own: a method that replaced a base declaration is judged by that
+/// declaration's flags, which the edit may have changed, and an overload,
+/// whose anchor repeats and pairs with no base declaration, by none. A
+/// verdict that every flag value gives (a bare call from the method's own
+/// type) records no gap.
 pub const GAP_CS_ACCESS_DIRTY_TARGET: &str = "cs-access-dirty-target";
+
+/// [`CallGap::reason`] of a dirty C# caller: a bare call from a type the
+/// overlay shows no `partial` parts, while a C# type of the same name, kind
+/// and scope in another file owns or inherits the member. The overlay keeps
+/// the last index's grouping, so a part an edit added, or a type an edit
+/// made `partial`, stays a type of its own; a full build may merge them and
+/// bind the member at the partial-type tier.
+pub const GAP_CS_PARTIAL_BARE_CALL: &str = "cs-partial-bare-call";
 
 /// A call the overlay could not resolve as a full build would (codex ruling
 /// P-ext2 B and C). See [`OverlayView::call_gaps`].
-#[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct CallGap {
     /// The caller's repo-relative file.
     pub path: String,
@@ -388,7 +404,8 @@ pub struct CallGap {
     /// The member the call names.
     pub member: String,
     /// [`GAP_CS_EXTENSION_DIRTY_DECLARATION`],
-    /// [`GAP_CS_EXTENSION_STALE_EDGE`] or [`GAP_CS_ACCESS_DIRTY_TARGET`].
+    /// [`GAP_CS_EXTENSION_STALE_EDGE`], [`GAP_CS_ACCESS_DIRTY_TARGET`] or
+    /// [`GAP_CS_PARTIAL_BARE_CALL`].
     pub reason: String,
 }
 
@@ -778,18 +795,50 @@ impl OverlayView {
                         &[]
                     };
                     let owner = sym.owner_class.as_deref().and_then(owner_key);
+                    // Duplicates go once the list is whole (`dedup_gaps`).
                     let note_gap = |member: &str, reason: &str| {
-                        let gap = CallGap {
+                        gaps.borrow_mut().push(CallGap {
                             path: file.rel_path.clone(),
                             line: sym.start_line,
                             caller: sym.name.clone(),
                             member: member.to_owned(),
                             reason: reason.to_owned(),
+                        });
+                    };
+                    // The index's C# access rule (codex ruling P-ext2 C) on
+                    // the bound target `idx`: `idx`, the one later overload
+                    // C# admits in its place, or `None`.
+                    let csharp_admitted = |idx: u32, access: CallAccess<'_>| {
+                        let flags = |id: u32| facts.csharp_method_flags(id);
+                        // The overload list is read only for a refused target.
+                        let picked = if csharp_access::call_admits(&facts, idx, flags(idx), access)
+                        {
+                            Some(idx)
+                        } else {
+                            csharp_access::admitted_overload(
+                                &facts,
+                                idx,
+                                &facts.later_overloads_of(idx),
+                                flags,
+                                access,
+                            )
                         };
-                        let mut gaps = gaps.borrow_mut();
-                        if !gaps.contains(&gap) {
-                            gaps.push(gap);
+                        // A dirty method's flags are a guess
+                        // (`csharp_method_flags`): a verdict that the
+                        // strictest flags would change rests on it.
+                        let guessed = |id: u32| {
+                            id >= base_len
+                                && !csharp_access::call_admits(
+                                    &facts,
+                                    id,
+                                    CS_STRICTEST_FLAGS,
+                                    access,
+                                )
+                        };
+                        if (picked != Some(idx) && idx >= base_len) || picked.is_some_and(guessed) {
+                            note_gap(facts.name_of(idx), GAP_CS_ACCESS_DIRTY_TARGET);
                         }
+                        picked
                     };
                     for raw_callee in &sym.calls {
                         // The index's Pass 2 order in a JS / TS file: a bare
@@ -1020,7 +1069,27 @@ impl OverlayView {
                                                     })
                                             })
                                     } else {
-                                        resolve(lookup, &file.imports, scope)
+                                        let hit = resolve(lookup, &file.imports, scope);
+                                        // A hit in the caller's file came
+                                        // before the partial-type tier.
+                                        if caller.language == Language::CSharp
+                                            && hit.is_none_or(|(idx, _)| {
+                                                facts.node_file(idx) != Some(file.rel_path.as_str())
+                                            })
+                                        {
+                                            if let (CallSite::Plain(name), Some(owner)) =
+                                                (lookup, owner)
+                                            {
+                                                if facts.unseen_part_owns(
+                                                    &file.rel_path,
+                                                    name,
+                                                    owner,
+                                                ) {
+                                                    note_gap(name, GAP_CS_PARTIAL_BARE_CALL);
+                                                }
+                                            }
+                                        }
+                                        hit
                                     };
                                     resolution = Resolution::from_ladder(hit);
                                 }
@@ -1028,31 +1097,8 @@ impl OverlayView {
                                     // The index's C# access rule (codex ruling
                                     // P-ext2 C), after the ladder.
                                     let access = CallAccess::of(site, &file.rel_path, owner);
-                                    resolution = resolution.admit_or(|idx| {
-                                        let picked = csharp_access::admitted_overload(
-                                            &facts,
-                                            idx,
-                                            &facts.later_overloads_of(idx),
-                                            |id| facts.csharp_method_flags(id),
-                                            access,
-                                        );
-                                        // A dirty target's flags are its base
-                                        // declaration's: the edit may have
-                                        // changed them, and an unpaired
-                                        // overload has none.
-                                        let guessed = |id: u32| {
-                                            id >= base_len && !facts.csharp_flags_known(id)
-                                        };
-                                        if (picked != Some(idx) && idx >= base_len)
-                                            || picked.is_some_and(guessed)
-                                        {
-                                            note_gap(
-                                                facts.name_of(idx),
-                                                GAP_CS_ACCESS_DIRTY_TARGET,
-                                            );
-                                        }
-                                        picked
-                                    });
+                                    resolution =
+                                        resolution.admit_or(|idx| csharp_admitted(idx, access));
                                 }
                                 if resolution.call_fallbacks_allowed()
                                     && type_member.is_some()
@@ -1094,11 +1140,17 @@ impl OverlayView {
                                     && caller.language == Language::CSharp
                                 {
                                     if let Some((receiver, member)) = match site {
-                                        CallSite::Plain(callee) => {
-                                            callee.rsplit_once('.').map(|(receiver, member)| {
-                                                (ReceiverSite::Named(receiver), member)
+                                        // `string.Format(..)` calls a static
+                                        // member of a predefined type: no
+                                        // value receives an extension.
+                                        CallSite::Plain(callee) => callee
+                                            .rsplit_once('.')
+                                            .filter(|&(receiver, _)| {
+                                                !csharp_extension::is_keyword_type(receiver)
                                             })
-                                        }
+                                            .map(|(receiver, member)| {
+                                                (ReceiverSite::Named(receiver), member)
+                                            }),
                                         CallSite::UntypedMember(member) => {
                                             Some((ReceiverSite::Untyped, member))
                                         }
@@ -1167,12 +1219,37 @@ impl OverlayView {
                                     return Some(None);
                                 }
                                 let inner = (*inner)?;
-                                match facts.chained_member_outcome(
+                                let outcome = facts.chained_member_outcome(
                                     inner,
                                     member,
                                     caller.language,
                                     &types,
-                                ) {
+                                );
+                                // The index's chain access rule
+                                // (`Resolver::csharp_admitted_chain_member`):
+                                // the returned value is an instance, and a
+                                // member C# refuses leaves the type's lookup
+                                // empty, so the extension retry runs.
+                                let outcome = match (outcome, caller.language) {
+                                    (
+                                        type_ladder::ChainOutcome::Bound((id, confidence)),
+                                        Language::CSharp,
+                                    ) => {
+                                        let access = CallAccess {
+                                            instance: true,
+                                            caller_file: &file.rel_path,
+                                            caller_owner: owner,
+                                        };
+                                        match csharp_admitted(id, access) {
+                                            Some(id) => {
+                                                type_ladder::ChainOutcome::Bound((id, confidence))
+                                            }
+                                            None => type_ladder::ChainOutcome::Conclusive,
+                                        }
+                                    }
+                                    (outcome, _) => outcome,
+                                };
+                                match outcome {
                                     type_ladder::ChainOutcome::Unknown => None,
                                     type_ladder::ChainOutcome::Bound(target) => Some(Some(target)),
                                     type_ladder::ChainOutcome::Conclusive
@@ -1383,11 +1460,8 @@ impl OverlayView {
         }
 
         let mut gaps = gaps.into_inner();
-        for gap in stale_extension_gaps(graph, files, &dirty_base, &suppressed) {
-            if !gaps.contains(&gap) {
-                gaps.push(gap);
-            }
-        }
+        gaps.extend(stale_extension_gaps(graph, files, &dirty_base, &suppressed));
+        dedup_gaps(&mut gaps);
 
         // The index's tombstone (`pass1_register_nodes`): the slot stays,
         // with the bit-inverse uid and no name or owner.
@@ -1846,7 +1920,9 @@ fn pair_with_base(
 /// C# file declares. A dirty file may add an instance member of that name,
 /// or change or drop the extension, and the overlay does not re-resolve the
 /// clean caller. Cost: one name-index probe per dirty C# method name, plus
-/// the in-edges of the extension methods it finds.
+/// the in-edges of the extension methods it finds. One gap per edge, with
+/// no cap: `call_gaps_line` prints the total, so the list keeps every call
+/// site. The caller drops duplicates ([`dedup_gaps`]).
 fn stale_extension_gaps(
     graph: &ArchivedZeroCopyGraph,
     files: &[OverlayFileInput],
@@ -1889,20 +1965,28 @@ fn stale_extension_gaps(
                 let Some(path) = graph.files.get(caller.file_idx.to_native() as usize) else {
                     continue;
                 };
-                let gap = CallGap {
+                gaps.push(CallGap {
                     path: path.path.resolve(pool).to_owned(),
                     line: caller.start_line(),
                     caller: caller.name.resolve(pool).to_owned(),
                     member: name.to_owned(),
                     reason: GAP_CS_EXTENSION_STALE_EDGE.to_owned(),
-                };
-                if !gaps.contains(&gap) {
-                    gaps.push(gap);
-                }
+                });
             }
         }
     }
     gaps
+}
+
+/// Drop every gap equal to an earlier one, keeping discovery order: one
+/// hash probe per gap, where a scan of the list per gap was quadratic.
+fn dedup_gaps(gaps: &mut Vec<CallGap>) {
+    let keep: Vec<bool> = {
+        let mut seen: FxHashSet<&CallGap> = FxHashSet::default();
+        gaps.iter().map(|gap| seen.insert(gap)).collect()
+    };
+    let mut keep = keep.into_iter();
+    gaps.retain(|_| keep.next().unwrap_or(false));
 }
 
 /// The archived `FunctionMeta` of the base node `id`.
@@ -3515,6 +3599,121 @@ impl<'a> OverlayFacts<'a> {
         std::iter::once(representative).chain(others).collect()
     }
 
+    /// The caller's own type for the partial-type tier, with its
+    /// [`owner_key`]: the type `owner` that `file` declares, when the call
+    /// is a bare C# call `name()` of a callable. The conditions of the
+    /// index's `Resolver::partial_type_member`.
+    fn partial_caller_type<'o>(
+        &self,
+        file: &str,
+        name: &str,
+        owner: &'o str,
+        target: ResolveTarget,
+    ) -> Option<(u32, &'o str)> {
+        if Language::from_normalized_path(file) != Language::CSharp
+            || split_qualifier(name).is_some()
+            || !matches!(target, ResolveTarget::Callable | ResolveTarget::Method)
+        {
+            return None;
+        }
+        let owner = owner_key(owner)?;
+        let ty = self.first_in_file(file, owner, ResolveTarget::Type, None)?;
+        Some((ty, owner))
+    }
+
+    /// The index's `Resolver::partial_type_member`: the member a bare C#
+    /// call `name()` reaches in its caller's own type `owner` when that type
+    /// has `partial` parts ([`Self::partial_group`]). Only a member the type
+    /// owns in any part (0.85) or inherits (0.8) binds; `None` for any other
+    /// call or verdict.
+    fn partial_type_member(
+        &self,
+        file: &str,
+        name: &str,
+        owner: &str,
+        target: ResolveTarget,
+    ) -> Option<(u32, f32)> {
+        let (ty, owner) = self.partial_caller_type(file, name, owner, target)?;
+        if self.partial_group(ty).is_empty() {
+            return None;
+        }
+        owned_or_inherited(type_ladder::member_via_type(
+            self,
+            TypeCandidates::Unique(ty, owner),
+            file,
+            name,
+            target,
+            true,
+        ))
+    }
+
+    /// Whether the partial-type tier may bind a bare C# call `name()` that
+    /// the overlay cannot see ([`GAP_CS_PARTIAL_BARE_CALL`]): the overlay
+    /// shows the caller's type `owner` no parts, yet a C# type of the same
+    /// name, kind and scope in another file owns or inherits `name`. The
+    /// index merges an attribute class as a class, so an `Annotation`
+    /// compares as a `Class`.
+    fn unseen_part_owns(&self, file: &str, name: &str, owner: &str) -> bool {
+        let Some((ty, owner)) =
+            self.partial_caller_type(file, name, owner, ResolveTarget::Callable)
+        else {
+            return false;
+        };
+        let merge_kind = |kind: NodeKind| match kind {
+            NodeKind::Annotation => NodeKind::Class,
+            kind => kind,
+        };
+        // A file-scoped namespace stamps no owner: its name tells two
+        // scopes apart. A scope that stays unknown may match.
+        let namespace = |id: u32| {
+            self.node_file(id).and_then(|file| {
+                type_ladder::declared_namespace(
+                    self.owner_of(id),
+                    self.csharp_namespaces(file).iter().copied(),
+                )
+            })
+        };
+        let kind = merge_kind(self.kind_of(ty));
+        let scope = self.owner_of(ty);
+        // Read on the first namesake only: it builds the namespace table.
+        let my_namespace = OnceCell::new();
+        // Cheapest test first: most types have no namesake.
+        let namesakes: Vec<u32> = self
+            .global_named(owner)
+            .into_iter()
+            .filter(|&other| {
+                other != ty
+                    && merge_kind(self.kind_of(other)) == kind
+                    && self.owner_of(other) == scope
+                    && self.node_file(other).is_some_and(|other_file| {
+                        other_file != file
+                            && Language::from_normalized_path(other_file) == Language::CSharp
+                    })
+                    && match (
+                        *my_namespace.get_or_init(|| namespace(ty)),
+                        namespace(other),
+                    ) {
+                        (Some(mine), Some(theirs)) => mine == theirs,
+                        _ => true,
+                    }
+            })
+            .collect();
+        if namesakes.is_empty() || !self.partial_group(ty).is_empty() {
+            return false;
+        }
+        namesakes.into_iter().any(|other| {
+            owned_or_inherited(type_ladder::member_via_type(
+                self,
+                TypeCandidates::Unique(other, owner),
+                file,
+                name,
+                ResolveTarget::Callable,
+                true,
+            ))
+            .is_some()
+        })
+    }
+
     /// Whether the base `base` of the clean type `ty` names one of `traits`,
     /// the dirty files' archived trait impls for `ty`, and no clean file's
     /// `impl` block implements it for `ty`.
@@ -4084,16 +4283,10 @@ impl<'a> OverlayFacts<'a> {
     /// ([`csharp_access`]): a clean base method's archived flags. A dirty
     /// file's input carries no flags, so a dirty method reads the flags of
     /// the base declaration it replaced, which the edit may have changed. A
-    /// method with no such declaration reads as 0 (public, instance), and
-    /// the rule admits a call to it.
-    /// Whether [`Self::csharp_method_flags`] reads flags for `id`: a dirty
-    /// node that paired with no base declaration (an overload, whose anchor
-    /// repeats) has none.
-    fn csharp_flags_known(&self, id: u32) -> bool {
-        id.checked_sub(self.base_len())
-            .is_none_or(|offset| self.nodes[offset as usize].replaced_base.is_some())
-    }
-
+    /// method with no such declaration (an overload, whose anchor repeats)
+    /// reads as 0 (public, instance), and the rule admits a call to it. A
+    /// dirty method's flags are therefore never known: the caller reports a
+    /// verdict that rests on them ([`GAP_CS_ACCESS_DIRTY_TARGET`]).
     fn csharp_method_flags(&self, id: u32) -> u16 {
         let base = match id.checked_sub(self.base_len()) {
             Some(offset) => self.nodes[offset as usize].replaced_base,
@@ -4185,6 +4378,15 @@ impl<'a> OverlayFacts<'a> {
 /// confidence for its tier.
 fn ladder_edge(verdict: LadderMember) -> Option<(u32, f32)> {
     Tier::of_member(verdict).map(|(id, tier)| (id, tier.confidence()))
+}
+
+/// [`ladder_edge`] of a member the one candidate type owns or inherits; no
+/// edge for any other verdict.
+fn owned_or_inherited(verdict: LadderMember) -> Option<(u32, f32)> {
+    match verdict {
+        LadderMember::Owned(_) | LadderMember::Inherited(_) => ladder_edge(verdict),
+        _ => None,
+    }
 }
 
 impl PickFacts for OverlayFacts<'_> {
@@ -4570,6 +4772,9 @@ fn resolve_overlay_name_ref(
 /// callable set is authoritative. The first match ([`reexport::pick_call`]),
 /// narrowed at a call site by [`prefer_owned`] → confidence 1.0; several
 /// unrelated owners bind nothing here and fall through.
+/// Tier 1.5 — a bare C# call in a part of a `partial` type binds the
+/// member another part declares or inherits
+/// ([`OverlayFacts::partial_type_member`]) → 0.85 or 0.8.
 /// Tier 2 — import-scoped. In an [`import_member_fallback`] language,
 /// [`bind_import`] replays the index's import-member tier, a Python package
 /// re-export included. A TS / JS caller takes the index's named-import tier
@@ -4703,6 +4908,16 @@ fn resolve_callee<'s>(
         if let Some(idx) = hit.filter(|&idx| !free_only || !is_method(idx)) {
             return accepts(idx).then_some((idx, CONF_SAME_FILE));
         }
+    }
+
+    // The index's Tier 1 across the files of a C# partial type: a bare call
+    // in one part reaches what the caller's type owns in any part, or
+    // inherits (codex ruling P-d).
+    if let Some(hit) = call
+        .filter(|call| !call.untyped && !call.free_only)
+        .and_then(|call| facts.partial_type_member(importer, callee, call.owner?, call_target))
+    {
+        return Some(hit);
     }
 
     // The index binds no import for an untyped member call, and in these
@@ -7591,5 +7806,37 @@ mod tests {
             );
         }
         assert!(OverlayView::from_cache_bytes(&[0xAB; 512], nodes).is_none());
+    }
+
+    /// Stands for: the payload lists each call site once, in discovery
+    /// order, and its count (`call_gaps_line`) counts distinct calls.
+    #[test]
+    fn test_dedup_gaps_repeated_gaps_keep_first_of_each_in_order() {
+        let gap = |caller: &str, member: &str, reason: &str| CallGap {
+            path: "Lib/A.cs".to_owned(),
+            line: 3,
+            caller: caller.to_owned(),
+            member: member.to_owned(),
+            reason: reason.to_owned(),
+        };
+        let mut gaps = vec![
+            gap("Run", "Spin", GAP_CS_EXTENSION_DIRTY_DECLARATION),
+            gap("Run", "Spin", GAP_CS_ACCESS_DIRTY_TARGET),
+            gap("Run", "Spin", GAP_CS_EXTENSION_DIRTY_DECLARATION),
+            gap("Use", "Spin", GAP_CS_EXTENSION_STALE_EDGE),
+            gap("Run", "Spin", GAP_CS_ACCESS_DIRTY_TARGET),
+        ];
+        dedup_gaps(&mut gaps);
+        assert_eq!(
+            gaps,
+            [
+                gap("Run", "Spin", GAP_CS_EXTENSION_DIRTY_DECLARATION),
+                gap("Run", "Spin", GAP_CS_ACCESS_DIRTY_TARGET),
+                gap("Use", "Spin", GAP_CS_EXTENSION_STALE_EDGE),
+            ]
+        );
+        let mut empty: Vec<CallGap> = Vec::new();
+        dedup_gaps(&mut empty);
+        assert!(empty.is_empty());
     }
 }
