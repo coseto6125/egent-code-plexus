@@ -202,7 +202,9 @@ pub fn target_request(
     kind: Option<&str>,
     file: Option<&str>,
 ) -> Result<TargetRequest, EcpError> {
-    let present = |s: Option<&str>| s.map(str::trim).filter(|s| !s.is_empty());
+    fn present(s: Option<&str>) -> Option<&str> {
+        s.map(str::trim).filter(|s| !s.is_empty())
+    }
     TargetRequest::parse(text, present(kind), present(file)).map_err(|e| {
         EcpError::InvalidArgument(format!(
             "target {text:?}: {e}. Write a name that holds `.`, `::`, `<`, `>` or `@` \
