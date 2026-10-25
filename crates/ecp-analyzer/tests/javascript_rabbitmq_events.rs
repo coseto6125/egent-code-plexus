@@ -48,9 +48,9 @@ async function publishOrder(data) {
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Publish);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "orders");
 }
 
@@ -69,9 +69,9 @@ async function consumeOrders() {
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Subscribe);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "orders");
 }
 
@@ -90,9 +90,9 @@ async function setupQueue() {
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Subscribe);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "payments");
 }
 
@@ -111,9 +111,9 @@ function sendNotification() {
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Publish);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "email");
 }
 
@@ -167,8 +167,8 @@ function directSend() {
     assert_eq!(result.len(), 1, "expected 1 topic; got {:?}", result);
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "task/queue");
 }

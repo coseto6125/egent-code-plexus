@@ -980,10 +980,15 @@ impl RawSchemaField {
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(derive(Debug))]
 pub struct RawEventTopic {
+    /// The topic as the source spells it, string delimiters stripped.
     /// `None` when the topic string is dynamic (variable arg); emitter
-    /// records a `BlindSpot` instead. Already canonicalised by the
-    /// per-language detector via `event_topic::normalize::canonicalize`.
+    /// records a `BlindSpot` instead.
     pub topic_literal: Option<Box<str>>,
+    /// The pairing key: `topic_literal` run through
+    /// `event_topic::normalize::canonicalize` when the detector config asks
+    /// for it, else equal to `topic_literal`. `None` exactly when
+    /// `topic_literal` is `None`.
+    pub topic_key: Option<Box<str>>,
     pub direction: PubSub,
     pub lib: FrameworkId,
     /// Name of the enclosing function/method at the call site.
@@ -1468,6 +1473,7 @@ mod tests {
     fn event_topic(span: Span) -> RawEventTopic {
         RawEventTopic {
             topic_literal: Some("orders".into()),
+            topic_key: Some("orders".into()),
             direction: PubSub::Publish,
             lib: FrameworkId::Pydantic,
             enclosing_fn: "".into(),

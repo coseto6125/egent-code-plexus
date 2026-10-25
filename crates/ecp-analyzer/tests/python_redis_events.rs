@@ -54,9 +54,9 @@ def publish_order(r, data):
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "orders"
     );
 }
@@ -81,9 +81,9 @@ def listen_orders(pubsub):
     assert_eq!(result[0].direction, PubSub::Subscribe);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "orders"
     );
 }
@@ -114,9 +114,9 @@ def listen_pattern(pubsub):
     // see redis_python.rs schema gap note.
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "orders/*"
     );
 }
@@ -141,9 +141,9 @@ async def publish_payment(r, data):
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "payments"
     );
 }
@@ -168,9 +168,9 @@ async def listen_payments(pubsub):
     assert_eq!(result[0].direction, PubSub::Subscribe);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "payments"
     );
 }
@@ -235,9 +235,9 @@ def listen_multi(pubsub):
     assert_eq!(result[0].direction, PubSub::Subscribe);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "ch1"
     );
 }
@@ -264,9 +264,9 @@ async def listen_pattern(pubsub):
     // as psubscribe sync form; see redis_python.rs schema gap note.
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "events/*"
     );
 }
@@ -294,9 +294,9 @@ def send_event(producer):
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("kafka topic_literal must be Some"),
+            .expect("kafka topic_key must be Some"),
         "events"
     );
 }

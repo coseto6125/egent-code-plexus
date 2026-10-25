@@ -16,9 +16,9 @@
 //! For each `EventTopicMirror` edge `pub_et → sub_et`:
 //!   1. Resolve `publisher_fn` via incoming `Publishes` edge on `pub_et`.
 //!   2. Resolve `subscriber_fn` via incoming `Subscribes` edge on `sub_et`.
-//!   3. Read `canonical_topic` from `pub_et.name` (both nodes share the same
-//!      canonical topic string — guaranteed by the same-lib-keyed bucket in
-//!      `post_process::event_topic_mirrors`).
+//!   3. Read `topic` from `pub_et.name`, the publisher's source spelling (both
+//!      nodes share one canonical key — guaranteed by the same-lib-keyed bucket
+//!      in `post_process::event_topic_mirrors` — but may spell it differently).
 //!
 //! ## Lib column
 //!
@@ -26,7 +26,7 @@
 //! persisted on archived nodes or edges — it serves only as a bucket key
 //! during the post-process pass. The `lib` column is therefore `null` in
 //! all outputs. The `--lib` flag is accepted for forward-compatibility but
-//! cannot filter on a null value; use `--topic` to narrow by canonical topic
+//! cannot filter on a null value; use `--topic` to narrow by topic
 //! string instead. A future schema extension (T5-33-followup) that persists
 //! the framework on `EventTopic` nodes will make `--lib` functional.
 //!
@@ -62,8 +62,9 @@ pub struct FindEventMirrorsArgs {
     #[arg(long, value_name = "F", default_value = "0.0")]
     pub min_confidence: f32,
 
-    /// Glob pattern matched against the canonical topic name.
-    /// Example: `--topic 'orders/*'` matches `orders/created`, `orders/updated`.
+    /// Glob pattern matched against the topic's source spelling and its
+    /// canonical form. Example: `--topic 'orders/*'` matches `orders/created`
+    /// and a topic written `Orders.Created`.
     #[arg(long, value_name = "PATTERN")]
     pub topic: Option<String>,
 
@@ -267,7 +268,14 @@ fn collect_mirrors(
 
         // Topic glob filter.
         if let Some(pat) = topic_glob {
-            if !glob_matches(pat, topic_name) {
+            // The node name keeps the source spelling; the pattern may be written
+            // against either that spelling or the canonical pairing key.
+            if !glob_matches(pat, topic_name)
+                && !glob_matches(
+                    pat,
+                    &ecp_analyzer::event_topic::normalize::canonicalize(topic_name),
+                )
+            {
                 continue;
             }
         }

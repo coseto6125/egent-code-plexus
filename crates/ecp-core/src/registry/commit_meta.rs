@@ -96,7 +96,9 @@ use std::path::Path;
 /// schema27: path-literal, SQL, schema-field and event-topic records carry a
 /// bound endpoint; a module-top literal starts at the File node, and a
 /// PathLiteral owner is the bound node's owner (`Walk` for `Walk<'s, 't>`).
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema27");
+/// schema28: an EventTopic node keeps its source spelling; `RawEventTopic`
+/// carries the canonical pairing key apart (`topic_key`).
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema28");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

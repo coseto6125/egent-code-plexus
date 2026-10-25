@@ -111,7 +111,7 @@ pub fn extract_event_topics(
             // String literal nodes include their delimiters (e.g. `"order.created"`);
             // strip them so topic consumers receive the bare string value.
             let bare_topic = strip_string_delimiters(raw_topic);
-            let topic_text = if config.canonicalize {
+            let topic_key = if config.canonicalize {
                 canonicalize(bare_topic)
             } else {
                 bare_topic.to_string()
@@ -132,7 +132,8 @@ pub fn extract_event_topics(
             );
 
             out.push(RawEventTopic {
-                topic_literal: Some(topic_text.into_boxed_str()),
+                topic_literal: Some(bare_topic.into()),
+                topic_key: Some(topic_key.into_boxed_str()),
                 direction,
                 lib: config.framework,
                 enclosing_fn,

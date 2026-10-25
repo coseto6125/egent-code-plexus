@@ -38,7 +38,7 @@
 //! The #275 precedent (`SchemaField` as intermediary, not direct function→field
 //! edges) applies here. An intermediate `EventTopic` node lets LLMs query
 //! `MATCH (f1)-->(t:EventTopic)<--(f2)` without knowing which functions are
-//! producers vs consumers. The node also carries `name` (canonical topic) for
+//! producers vs consumers. The node also carries `name` (first source spelling) for
 //! direct cypher filtering.
 
 use super::path_literal_nodes::FILE_SOURCE_PENDING;
@@ -83,18 +83,42 @@ pub fn emit_edges(
         let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
         let file_idx = lg_idx as u32;
 
+        // The node of one pairing key is named by its earliest spelling in
+        // the file (smallest span), so two spellings in one file name one node.
+        let mut first_spelling: FxHashMap<&str, ((u32, u32, u32, u32), &str)> =
+            FxHashMap::default();
         for raw_et in event_topics.iter() {
-            let Some(ref canonical_topic) = raw_et.topic_literal else {
+            if let Some(literal) = raw_et.topic_literal.as_deref() {
+                let key = raw_et.topic_key.as_deref().unwrap_or(literal);
+                let slot = first_spelling.entry(key).or_insert((raw_et.span, literal));
+                if raw_et.span < slot.0 {
+                    *slot = (raw_et.span, literal);
+                }
+            }
+        }
+
+        for raw_et in event_topics.iter() {
+            let Some(ref source_topic) = raw_et.topic_literal else {
                 // Dynamic topic — no literal to key on; skip (BlindSpot
                 // emission for dynamic topics is the detector's responsibility).
                 continue;
             };
 
-            let topic_name = canonical_topic.as_ref();
+            // Records written before `topic_key` existed hold the canonical
+            // form in `topic_literal`; they key on it unchanged.
+            let canonical_topic = raw_et.topic_key.as_ref().unwrap_or(source_topic);
+            let topic_name = first_spelling
+                .get(canonical_topic.as_ref())
+                .map_or(source_topic.as_ref(), |&(_, spelling)| spelling);
             let lib_u8 = raw_et.lib as u8;
 
             // Emit the EventTopic node.
-            let node_uid = uid::compute(NodeKind::EventTopic, &path_str, None, topic_name);
+            let node_uid = uid::compute(
+                NodeKind::EventTopic,
+                &path_str,
+                None,
+                canonical_topic.as_ref(),
+            );
             let name_ref = string_pool.add(topic_name);
             let et_idx = nodes.len() as u32;
             nodes.push(Node {

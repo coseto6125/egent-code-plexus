@@ -54,9 +54,9 @@ fn publish_order(con: &mut redis::Connection) -> redis::RedisResult<()> {
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "orders"
     );
 }
@@ -84,9 +84,9 @@ fn listen_payments(con: &mut redis::Connection) -> redis::RedisResult<()> {
     assert_eq!(result[0].direction, PubSub::Subscribe);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "payments"
     );
 }
@@ -115,9 +115,9 @@ fn listen_pattern(con: &mut redis::Connection) -> redis::RedisResult<()> {
     // canonicalize: true converts "orders.*" → "orders/*"
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "orders/*"
     );
 }
@@ -144,9 +144,9 @@ async fn publish_event(con: &mut redis::aio::Connection) -> redis::RedisResult<(
     assert_eq!(result[0].direction, PubSub::Publish);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "events"
     );
 }
@@ -208,9 +208,9 @@ async fn listen_notifications(mut pubsub: redis::aio::PubSub) -> redis::RedisRes
     assert_eq!(result[0].direction, PubSub::Subscribe);
     assert_eq!(
         result[0]
-            .topic_literal
+            .topic_key
             .as_deref()
-            .expect("topic_literal must be Some"),
+            .expect("topic_key must be Some"),
         "notifications"
     );
 }

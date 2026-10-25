@@ -53,9 +53,9 @@ def publish_order(data):
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Publish);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "orders");
 }
 
@@ -78,9 +78,9 @@ def consume_orders():
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Subscribe);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "orders");
 }
 
@@ -106,9 +106,9 @@ async def send_payment(payload):
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Publish);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "payments");
 }
 
@@ -131,9 +131,9 @@ def emit_event(producer, body):
     assert_eq!(result[0].lib, FrameworkId::RabbitMq);
     assert_eq!(result[0].direction, PubSub::Publish);
     let lit = result[0]
-        .topic_literal
+        .topic_key
         .as_deref()
-        .expect("topic_literal must be Some");
+        .expect("topic_key must be Some");
     assert_eq!(lit, "events");
 }
 
@@ -199,12 +199,12 @@ def consume_orders():
     assert!(subscribe.is_some(), "must have a Subscribe event");
     let pub_lit = publish
         .unwrap()
-        .topic_literal
+        .topic_key
         .as_deref()
         .expect("publish topic must be Some");
     let sub_lit = subscribe
         .unwrap()
-        .topic_literal
+        .topic_key
         .as_deref()
         .expect("subscribe topic must be Some");
     assert_eq!(pub_lit, "orders");
@@ -232,7 +232,7 @@ def publish(data):
             .map(|r| (
                 r.lib,
                 r.direction,
-                r.topic_literal.as_ref().map(|t| t.to_string())
+                r.topic_key.as_ref().map(|t| t.to_string())
             ))
             .collect::<Vec<_>>()
     );
