@@ -14,7 +14,7 @@
 //! 6. Query-string stripping → 1 edge (matched)
 
 use ecp_analyzer::resolution::builder::GraphBuilder;
-use ecp_core::analyzer::types::{LocalGraph, RawNode};
+use ecp_core::analyzer::types::{LocalGraph, RawNode, RawRoute};
 use ecp_core::graph::{NodeKind, RelType};
 
 // ─── LocalGraph helpers ──────────────────────────────────────────────────────
@@ -47,7 +47,7 @@ fn route_graph(rel_path: &str, method: &str, route_path: &str, handler: &str) ->
         routes: vec![ecp_core::analyzer::types::RawRoute {
             method: method.into(),
             path: route_path.into(),
-            handler: Some(handler.into()),
+            handler: RawRoute::named_handler(Some(handler)),
             span: (0, 0, 0, 0),
             scope: None,
         }],

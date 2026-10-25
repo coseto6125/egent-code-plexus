@@ -181,7 +181,7 @@ fn fastapi_route_emits_entrypoint_at_score_1_0() {
         vec![RawRoute {
             method: "GET".into(),
             path: "/items".into(),
-            handler: Some("read_items".into()),
+            handler: RawRoute::named_handler(Some("read_items")),
             span: (0, 0, 0, 0),
             scope: None,
         }],

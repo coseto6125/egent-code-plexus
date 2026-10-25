@@ -1063,6 +1063,10 @@ round1_fix ruby pre-existing gap
 round1_fix rust pre-existing gap
 round1_fix swift pre-existing gap
 round1_fix typescript pre-existing gap
+route_identity c no route producer for this language
+route_identity cpp no route producer for this language
+route_identity dart no route producer: Dart annotations are stored without their arguments, so no route path is detected
+route_identity swift no route producer for this language
 send_literal c pre-existing gap
 send_literal cpp pre-existing gap
 send_literal csharp pre-existing gap

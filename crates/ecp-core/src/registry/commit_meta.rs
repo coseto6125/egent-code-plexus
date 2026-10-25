@@ -109,7 +109,10 @@ use std::path::Path;
 /// keeps its own node (an overload uid), and a C# generic base binds by
 /// arity; the parts of a C# partial type in one known project share one
 /// identity for heritage, Overrides and calls.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema31");
+/// schema32: one Route node per C1 route key; a route handler is an endpoint
+/// bound by scope or by its decorated declaration, a closure handler binds its
+/// anonymous node, and an unbound or absent handler is a BlindSpot.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema32");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
