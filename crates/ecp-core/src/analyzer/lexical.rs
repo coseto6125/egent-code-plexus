@@ -118,10 +118,27 @@ impl ImplNode for Row<'_> {
 /// heritage per node, and the dirty parse and the base nodes must derive
 /// one answer, or a member pairs with nothing. A member of an `impl` that
 /// has no `Impl` node (`impl T for &mut X`) therefore stays `None`.
+///
+/// A repeated block (`impl T for A<u8>` and `impl T for A<u16>` both write
+/// self type `A`, owner `T`) is a uid collision: the base keeps the second as
+/// a tombstone with no name and no owner. Its members take no trait on
+/// either side, the second block of the dirty parse included, or the two
+/// sides never agree on the member's anchor.
 fn impl_traits<'a>(rows: &[Row<'a>]) -> Vec<Option<&'a str>> {
+    let mut seen = rustc_hash::FxHashSet::default();
+    let first_block: Vec<bool> = rows
+        .iter()
+        .map(|row| {
+            row.kind() == NodeKind::Impl
+                && !row.name().is_empty()
+                && seen.insert((row.name(), row.owner_class()))
+        })
+        .collect();
     let mut traits = vec![None; rows.len()];
     rust_impl_members(rows, |member, block, _| {
-        traits[member] = rows[block].0 .1.filter(|t| !t.trim().is_empty());
+        if first_block[block] {
+            traits[member] = rows[block].0 .1.filter(|t| !t.trim().is_empty());
+        }
     });
     traits
 }

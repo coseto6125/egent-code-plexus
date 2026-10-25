@@ -782,3 +782,36 @@ overload_pairing_cases! {
     test_overlay_view_dart_overloads_no_signature_pair_nothing =>
         (DartProvider::new().unwrap(), "k.dart", DART_K);
 }
+
+/// Two `impl T for A<..>` blocks both write self type `A` and owner `T`, so
+/// the base tombstones the second block and clears its owner. A member of
+/// that block must take no trait on either side, or a comment-only edit
+/// unpairs it: its clean callers vanish and no caveat names it.
+#[test]
+fn test_overlay_repeated_impl_block_member_pairs_after_comment_edit() {
+    let provider = RustProvider::new().unwrap();
+    let path = "src/a.rs";
+    let source = "trait T {\n    fn a(&self);\n    fn b(&self);\n}\nstruct A<X>(X);\nimpl T for A<u8> {\n    fn a(&self) {}\n}\nimpl T for A<u16> {\n    fn b(&self) {}\n}\n";
+    let base = parse(&provider, path, source);
+    let base_bytes = archive(&full_build(base.clone()));
+    let base_graph = access(&base_bytes);
+    let b = base
+        .nodes
+        .iter()
+        .position(|n| n.name == "b" && n.span.0 == 9)
+        .expect("`b` of the second impl");
+    let base_b = base_indices(base_graph, &base)[b];
+
+    let edited = parse(&provider, path, &format!("{source}// edited\n"));
+    let view = OverlayView::build(base_graph, &[OverlayFileInput::from(edited)]).unwrap();
+
+    assert!(
+        view.redirect(base_b).is_some(),
+        "`b` keeps its base edges through the edit"
+    );
+    assert!(
+        view.hidden_declarations().is_empty(),
+        "nothing is ambiguous: {:?}",
+        view.hidden_declarations()
+    );
+}
