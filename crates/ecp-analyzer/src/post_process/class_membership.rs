@@ -312,10 +312,18 @@ fn emit_pass1_span(
         // The name lookup returns the first of same-named C# types of
         // different arity; the owner is the one of its own arity, and a
         // twin no arity tells apart (`Inner` in `Outer` and in `Outer<T>`)
-        // is its own raw slot.
+        // is its own raw slot. The class's own owner tells a nested type
+        // (`Outer.Employee`) from a same-name type of the file.
+        let class = &raws[class_raw];
         let Some(class_idx) = twins.node(class_raw).or_else(|| {
             symbol_table
-                .lookup_in_file(path_str, class_name)
+                .first_declaration(
+                    path_str,
+                    class_name,
+                    class.kind,
+                    class.owner_class.as_deref(),
+                )
+                .or_else(|| symbol_table.lookup_in_file(path_str, class_name))
                 .map(|first| symbol_table.with_arity(first, arity).unwrap_or(first))
         }) else {
             continue;
