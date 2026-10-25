@@ -26,10 +26,11 @@
 //! attempt failed; the message then carries the parser's own diagnostic. A scan
 //! that met no supported file returns an ordinary empty result.
 
-use crate::commands::path::ambiguity_candidates_with_flags;
 use crate::engine::Engine;
 use crate::output::{emit_with_caveat, OutputFormat};
-use crate::read_context::{resolve_target, shell_word, target_request};
+use crate::read_context::{
+    ambiguity_candidates_with_flags, resolve_target, shell_word, target_request,
+};
 use clap::Args;
 use ecp_analyzer::pattern_finder::{
     compile, lang_for_path, match_source, CompiledPattern, PatternError, PatternLang,

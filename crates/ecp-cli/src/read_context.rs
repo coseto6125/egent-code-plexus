@@ -275,10 +275,28 @@ pub fn resolve_target(merged: &MergedGraph<'_>, request: &TargetRequest) -> Targ
 /// The candidates of an ambiguity as a payload reads them. `target` is the
 /// command arguments that select that candidate alone, `null` when none can.
 pub fn ambiguity_candidates(ambiguity: &Ambiguity) -> Value {
+    ambiguity_candidates_with_flags(ambiguity, "", "--file", "--kind")
+}
+
+/// [`ambiguity_candidates`] for a command whose target and filters use other
+/// flags: `target` reads `text_prefix`, the target text, then `file_flag` and
+/// `kind_flag` when the request needs them.
+pub(crate) fn ambiguity_candidates_with_flags(
+    ambiguity: &Ambiguity,
+    text_prefix: &str,
+    file_flag: &str,
+    kind_flag: &str,
+) -> Value {
     ambiguity
         .candidates()
         .iter()
-        .map(|c| candidate_json(c, c.reusable.as_ref().map(target_args)))
+        .map(|c| {
+            let target = c
+                .reusable
+                .as_ref()
+                .map(|r| format!("{text_prefix}{}", request_args(r, file_flag, kind_flag)));
+            candidate_json(c, target)
+        })
         .collect()
 }
 
@@ -294,14 +312,19 @@ pub fn candidate_json(c: &Candidate, target: Option<String>) -> Value {
 /// A request as command arguments: the target text, then `--file` and
 /// `--kind` when the request needs them.
 pub fn target_args(request: &TargetRequest) -> String {
+    request_args(request, "--file", "--kind")
+}
+
+fn request_args(request: &TargetRequest, file_flag: &str, kind_flag: &str) -> String {
     let mut out = shell_word(&request.render());
     if let Some(file) = request.file() {
-        out.push_str(" --file ");
-        out.push_str(&shell_word(file));
+        out.push_str(&format!(" {file_flag} {}", shell_word(file)));
     }
     if let Some(kind) = request.kind() {
-        out.push_str(" --kind ");
-        out.push_str(&node_kind_to_str(&kind).to_ascii_lowercase());
+        out.push_str(&format!(
+            " {kind_flag} {}",
+            node_kind_to_str(&kind).to_ascii_lowercase()
+        ));
     }
     out
 }

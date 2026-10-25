@@ -20,15 +20,16 @@
 //! default answer is the one that is safe to act on, and the opt-in flag tags
 //! every inferred step it lets through.
 
-use crate::commands::format::node_kind_to_str;
 use crate::commands::impact::bfs::{shortest_path, PathStep, WalkOpts};
 use crate::commands::impact::{direction_str, parse_csv_lower, Direction};
 use crate::commands::symbol_id::same_name_def_count;
 use crate::engine::Engine;
 use crate::output::{emit_with_caveat, merge_caveats, OutputFormat};
-use crate::read_context::{candidate_json, resolve_target, shell_word, target_request};
+use crate::read_context::{
+    ambiguity_candidates_with_flags, resolve_target, shell_word, target_request,
+};
 use clap::Args;
-use ecp_core::contracts::identity::{Ambiguity, TargetRequest, TargetResolution};
+use ecp_core::contracts::identity::{TargetRequest, TargetResolution};
 use ecp_core::session::MergedGraph;
 use ecp_core::EcpError;
 use serde_json::{json, Value};
@@ -178,36 +179,6 @@ fn endpoint(
         }
         TargetResolution::NotFound { named } => Err(unresolved(&request, named)),
     }
-}
-
-/// The candidates of an ambiguity as `read_context::ambiguity_candidates`
-/// reads them, for a command whose filters are not `--file` and `--kind`.
-/// `target` is the arguments that select one candidate alone: `text_prefix`,
-/// the target text, then the file and kind flags the request needs.
-pub(crate) fn ambiguity_candidates_with_flags(
-    ambiguity: &Ambiguity,
-    text_prefix: &str,
-    file_flag: &str,
-    kind_flag: &str,
-) -> Value {
-    let args = |request: &TargetRequest| {
-        let mut out = format!("{text_prefix}{}", shell_word(&request.render()));
-        if let Some(file) = request.file() {
-            out.push_str(&format!(" {file_flag} {}", shell_word(file)));
-        }
-        if let Some(kind) = request.kind() {
-            out.push_str(&format!(
-                " {kind_flag} {}",
-                node_kind_to_str(&kind).to_ascii_lowercase()
-            ));
-        }
-        out
-    };
-    ambiguity
-        .candidates()
-        .iter()
-        .map(|c| candidate_json(c, c.reusable.as_ref().map(&args)))
-        .collect()
 }
 
 /// Kept apart from `run` so the caveat merging and the emit stay one readable
