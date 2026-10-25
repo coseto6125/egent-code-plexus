@@ -328,6 +328,9 @@ pub enum LexicalAdmission {
 #[derive(Default)]
 pub struct LexicalFunctions {
     by_name: FxHashMap<String, Vec<(Option<Span>, u32)>>,
+    /// The file's `Module` declarations. A module inside a callable's body
+    /// does not see that callable's own nested items.
+    modules: Vec<Span>,
     /// `None` for a file no lexical tier covers.
     admission: Option<LexicalAdmission>,
 }
@@ -385,8 +388,14 @@ impl LexicalFunctions {
                 LexicalAdmission::ScopedAndFileLevel => {}
             }
         }
+        let modules = symbols
+            .iter()
+            .filter(|&&(kind, ..)| kind == NodeKind::Module)
+            .map(|&(.., span)| span)
+            .collect();
         Self {
             by_name,
+            modules,
             admission: Some(admission),
         }
     }
@@ -395,6 +404,14 @@ impl LexicalFunctions {
         scope
             .map(|span| (span.2 - span.0, span.3 as i64 - span.1 as i64))
             .unwrap_or((u32::MAX, i64::MAX))
+    }
+
+    /// True when a module declared inside `scope` holds `caller`: the module
+    /// does not see the items `scope` declares.
+    fn walls_off(&self, scope: Span, caller: Span) -> bool {
+        self.modules
+            .iter()
+            .any(|&m| m != scope && span_contains(scope, m) && span_contains(m, caller))
     }
 
     /// The function a bare call to `callee` from `caller` binds, at 1.0.
@@ -412,7 +429,9 @@ impl LexicalFunctions {
         let mut best = None;
         let mut ambiguous = false;
         for &(scope, target) in candidates {
-            if scope.is_some_and(|span| !span_contains(span, caller)) {
+            if scope
+                .is_some_and(|span| !span_contains(span, caller) || self.walls_off(span, caller))
+            {
                 continue;
             }
             let size = Self::scope_size(scope);
@@ -506,6 +525,25 @@ mod tests {
         );
         assert_eq!(lex.targets((3, 2, 4, 3), "helper"), Some(vec![(12, 1.0)]));
         assert_eq!(lex.targets((6, 0, 6, 9), "helper"), Some(vec![(10, 1.0)]));
+    }
+
+    /// Stands for: a Rust `mod` inside a fn body is its own item namespace, so
+    /// a bare `helper()` inside it never binds the enclosing fn's nested
+    /// `helper`; outside the `mod` the nested one still wins.
+    #[test]
+    fn test_targets_rust_module_inside_fn_hides_outer_nested_fn_returns_none() {
+        let lex = index(
+            "src/a.rs",
+            &[
+                (NodeKind::Function, "outer", false, (0, 0, 7, 1)),
+                (NodeKind::Function, "helper", false, (1, 4, 1, 20)),
+                (NodeKind::Module, "m", false, (2, 4, 5, 5)),
+                (NodeKind::Function, "helper", false, (3, 8, 3, 24)),
+                (NodeKind::Function, "run", false, (4, 8, 4, 30)),
+            ],
+        );
+        assert_eq!(lex.targets((4, 20, 4, 28), "helper"), None, "inside `m`");
+        assert_eq!(lex.targets((6, 4, 6, 12), "helper"), Some(vec![(11, 1.0)]));
     }
 
     #[test]

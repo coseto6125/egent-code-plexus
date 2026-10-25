@@ -46,7 +46,8 @@ pub fn split_fqn_target(s: &str) -> (Option<&str>, &str) {
 /// defs) and the indexed world (every base def, including those the overlay
 /// suppressed): the index decided whether to drop bare calls from the indexed
 /// collision, which an uncommitted rename must not hide. A later overload is
-/// never bound by name, so it is no collision.
+/// never bound by name, and a lexically scoped def is never a Tier-3
+/// candidate (invariant I5), so neither is a collision.
 pub fn same_name_def_count(
     graph: &ArchivedZeroCopyGraph,
     view: Option<&OverlayView>,
@@ -59,6 +60,7 @@ pub fn same_name_def_count(
         if node.name.resolve(&graph.string_pool) != bare_name
             || !node.has_owning_file()
             || graph.is_later_overload(idx)
+            || graph.is_lexically_scoped(idx)
         {
             continue;
         }
@@ -68,10 +70,14 @@ pub fn same_name_def_count(
         }
     }
     if let Some(v) = view {
-        disk_defs += v
-            .virtual_nodes()
-            .iter()
-            .filter(|vn| vn.replaced_base.is_none() && !vn.later_overload && vn.name == bare_name)
+        disk_defs += (v.base_len()..)
+            .zip(v.virtual_nodes())
+            .filter(|&(idx, vn)| {
+                vn.replaced_base.is_none()
+                    && !vn.later_overload
+                    && vn.name == bare_name
+                    && v.lexical_parent(idx).is_none()
+            })
             .count();
     }
     base_defs.max(disk_defs)
@@ -109,6 +115,23 @@ mod tests {
             TargetResolution::Ambiguous(a) => a.total(),
             TargetResolution::NotFound { .. } => 0,
         }
+    }
+
+    /// Stands for: the Tier-3 collision counter skips a lexically scoped
+    /// namesake, in the index and in a dirty copy, since the ladder never
+    /// weighs it; a caveat built on it would send the agent after callers
+    /// that cannot exist.
+    #[test]
+    fn test_same_name_def_count_scoped_namesake_not_counted_base_and_overlay() {
+        let source = "fn helper() {}\nfn run() { fn helper() {} helper(); }\n";
+        let bytes = rust_graph_bytes(source);
+        let archived = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+        assert_eq!(same_name_def_count(archived, None, "helper"), 1);
+
+        let dirty: OverlayFileInput = parse_rust(&format!("\n{source}")).into();
+        let view = OverlayView::build(archived, &[dirty]).unwrap();
+        assert_eq!(same_name_def_count(archived, Some(&view), "helper"), 1);
+        assert_eq!(same_name_def_count(archived, Some(&view), "absent"), 0);
     }
 
     /// Stands for: a fn in a nested module is named by its innermost module
