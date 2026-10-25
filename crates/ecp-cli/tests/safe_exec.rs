@@ -111,6 +111,61 @@ mod filter_overrides {
         assert!(safe_exec::filter_overrides(repo).is_err());
     }
 
+    /// Runs `test` again in a child test process with `GIT_CONFIG=/dev/null`
+    /// (same pattern as `status_filter_guard.rs`). The variable redirects
+    /// `git config` alone, so a probe that inherits it lists no driver. The
+    /// child keeps the variable out of the other tests of this binary.
+    /// Returns true in the parent.
+    fn rerun_with_git_config_redirected(test: &str) -> bool {
+        if std::env::var_os("ECP_GIT_CONFIG_REDIRECT_CHILD").is_some() {
+            return false;
+        }
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--test-threads=1", "--nocapture"])
+            .env("ECP_GIT_CONFIG_REDIRECT_CHILD", "1")
+            .env("GIT_CONFIG", "/dev/null")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("test result: ok. 1 passed;"),
+            "child run failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        true
+    }
+
+    /// Red without `.env_remove("GIT_CONFIG")` in `filter_overrides`: the
+    /// probe then reads `/dev/null`, lists no driver, and the assertion on
+    /// the non-empty set fails in the child run.
+    #[test]
+    fn test_filter_overrides_git_config_env_redirect_lists_driver() {
+        if rerun_with_git_config_redirected(
+            "filter_overrides::test_filter_overrides_git_config_env_redirect_lists_driver",
+        ) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        git(repo, &["init", "-q"]);
+        // Written to the file directly: `git config` would honour the redirect.
+        let mut config = fs::read_to_string(repo.join(".git/config")).unwrap();
+        config.push_str("[filter \"x\"]\n\tsmudge = cat\n");
+        fs::write(repo.join(".git/config"), config).unwrap();
+        let overrides = safe_exec::filter_overrides(repo).unwrap();
+        assert!(!overrides.is_empty(), "the driver must be listed");
+        let mut cmd = Command::new("git");
+        overrides.apply(&mut cmd);
+        let rendered: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            rendered.iter().any(|a| a == "filter.x.smudge="),
+            "{rendered:?}"
+        );
+    }
+
     fn git(repo: &Path, args: &[&str]) {
         let out = Command::new("git")
             .args(["-c", "user.email=t@t", "-c", "user.name=t"])

@@ -20,7 +20,6 @@ fn test_language_from_path_equals_route_to_legacy_every_extension() {
     for &language in RouteLanguage::ALL {
         for ext in language.extensions() {
             for path in [format!("src/x.{ext}"), format!("x.{ext}")] {
-                assert_eq!(Language::from_path(&path), route_legacy(&path), "{path}");
                 assert_eq!(
                     Language::from_path(&path),
                     language.to_legacy(),

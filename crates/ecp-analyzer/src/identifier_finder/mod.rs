@@ -61,6 +61,47 @@ pub fn find_identifier_occurrences(
     let IdentifierFinder::Supported { language, dialect } = finder else {
         return None;
     };
+    find_for_language(language, dialect, source, target_name)
+}
+
+/// True when `find_identifier_occurrences` would return `Some` for `path`,
+/// decided from the path alone so a caller can skip reading a file that has
+/// no finder.
+pub fn has_identifier_finder(path: &str) -> bool {
+    match FileRouter::PATH_ONLY.route(path) {
+        RouteOutcome::Routed(route) => matches!(
+            route.identifier_finder(),
+            IdentifierFinder::Supported { language, .. } if language_has_finder(language)
+        ),
+        RouteOutcome::Unrouted => {
+            matches!(path.rsplit_once('.').map(|p| p.1), Some("nims" | "zon"))
+        }
+        RouteOutcome::Excluded(_) => false,
+    }
+}
+
+fn language_has_finder(language: Language) -> bool {
+    !matches!(
+        language,
+        Language::Dockerfile
+            | Language::Vue
+            | Language::Astro
+            | Language::Svelte
+            | Language::Protobuf
+            | Language::DockerCompose
+            | Language::GitHubActions
+            | Language::Kubernetes
+            | Language::OpenApi
+            | Language::Yaml
+    )
+}
+
+fn find_for_language(
+    language: Language,
+    dialect: Dialect,
+    source: &[u8],
+    target_name: &str,
+) -> Option<Vec<IdentifierRange>> {
     Some(match language {
         Language::Python => python::find_identifier_occurrences(source, target_name),
         Language::TypeScript => match dialect {
@@ -128,6 +169,28 @@ mod tests {
 
     fn spans(found: &[IdentifierRange]) -> Vec<(usize, usize)> {
         found.iter().map(|r| (r.start_byte, r.end_byte)).collect()
+    }
+
+    #[test]
+    fn test_has_identifier_finder_agrees_with_find_identifier_occurrences() {
+        for path in [
+            "a.py",
+            "src/App.vue",
+            "README.md",
+            "Makefile",
+            "src/A.RS",
+            "build.nims",
+            "build.zig.zon",
+            "__brick__/lib/a.py",
+            "ui/App.tsx",
+            "Dockerfile",
+        ] {
+            assert_eq!(
+                has_identifier_finder(path),
+                find_identifier_occurrences(path, b"", "foo").is_some(),
+                "{path}"
+            );
+        }
     }
 
     #[test]

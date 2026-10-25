@@ -211,7 +211,7 @@ Lane 0a's dirty-event fixtures (added, modified, deleted, renamed, unmerged, unt
 |---|---|---|
 | 1, 5 | C3 first; a deleted file is a whole-file tombstone, never "keep base". | Satisfied by the types: `Deleted` and `Renamed.from` are `removed_path()`, and the variant docs fix the tombstone semantics. The view change is lane F's (area 5) or lane R's; C3 changes no view code. |
 | 4, 5 | A config change widens the invalidation scope; C3's "resolution config" class. | Satisfied: `PathClass::resolution_config` from C2. A config path is never "other", so `without_other` never drops it. |
-| 4, 6 | Config files have no provider (C5 routes a `.json` file by `PathRule::JsonContent` to the OpenAPI provider only, `routing.rs:941-942`). | Satisfied: the class comes from C2 names and C5 routes, never from a provider. |
+| 4, 6 | Config files have no provider (C5 routes a `.json` file by `PathRule::JsonContent` to the OpenAPI provider only, `PathRule::JsonContent` in `routing.rs`). | Satisfied: the class comes from C2 names and C5 routes, never from a provider. |
 
 ### C2 and C5 proposals
 
@@ -257,7 +257,7 @@ Tests of that slice, written before the run with their pass criterion:
 | `test_dirty_events_old_writer_manifest_beside_new_namespace_keeps_tombstone` | `crates/ecp-cli/tests/stored_formats_prev_release.rs` | A session holds the 0.16.4 `dirty_files.json` and `graph_overlay/` of the existing fixture (`:50`, `tests/fixtures/stored-by-0.16.4`), rewritten after the new binary wrote a `lib.rs` tombstone to `l1/`. `ecp find` of a `lib.rs` symbol answers `found: false`; the old manifest's `lib.rs` entry is never served. |
 | `test_dirty_events_missing_format_reparses_every_dirty_file` | `crates/ecp-cli/tests/overlay_view_cache.rs` | `REANALYZE_CALL_COUNT` covers every dirty file; no entry of that manifest is served. |
 | `test_sweep_stale_fragments_bin_named_only_by_new_namespace_survives` | `crates/ecp-cli/src/admin/gc.rs` tests | The bin is still on disk after the sweep. |
-| `test_overlay_view_tombstone_changes_view_cache_key` | `crates/ecp-cli/tests/overlay_view_cache.rs` | Two views, before and after `rm`, have different keys. |
+| `test_overlay_view_tombstone_changes_view_cache_key` (deferred to F2b: the view does not read tombstones yet) | `crates/ecp-cli/tests/overlay_view_cache.rs` | Two views, before and after `rm`, have different keys. |
 
 ## The C3 behaviour slice
 

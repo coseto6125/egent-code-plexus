@@ -110,10 +110,13 @@ fn test_rename_vue_component_reports_unsupported() {
         !has_notice(&stdout, "src/util.ts"),
         "util.ts has a finder;\nstdout={stdout}"
     );
+    // Contract: the headline never claims `risk safe` while a caller file was
+    // not scanned (ruling D4 option A); K counts the unscanned files.
     assert!(
-        stdout.contains("files 1; usages 1"),
-        "only util.ts is planned;\nstdout={stdout}"
+        stdout.contains("risk partial; files 1; usages 1; not scanned 1"),
+        "only util.ts is planned and the headline counts App.vue;\nstdout={stdout}"
     );
+    assert!(!stdout.contains("risk safe"), "stdout={stdout}");
 }
 
 #[test]
@@ -141,8 +144,38 @@ fn test_rename_only_vue_file_zero_hits_still_reports_unsupported() {
     let repo = setup_repo(app, false);
     let out = rename(repo.path(), &["--dry-run"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("No occurrences"), "stdout={stdout}");
+    // Contract: a zero-hit answer says it covers scanned files only (D4 A).
+    assert!(
+        stdout.contains(
+            "No occurrences of \"helper\" found in scanned files; 1 affected file(s) not scanned."
+        ),
+        "stdout={stdout}"
+    );
     assert!(has_notice(&stdout, "src/App.vue"), "stdout={stdout}");
+}
+
+#[test]
+fn test_rename_missing_affected_file_reports_cannot_read() {
+    // The fixture graph names a caller file that is absent from disk.
+    let repo = tempfile::tempdir().expect("tempdir");
+    write(repo.path(), "src/util.ts", UTIL_TS);
+    init_and_analyze(repo.path());
+    let mut fx = GraphFixture::new();
+    let helper = fx.func("src/util.ts", "helper");
+    fx.span(helper, (0, 0, 2, 1));
+    let gone = fx.func("src/gone.ts", "caller");
+    fx.span(gone, (0, 0, 2, 1));
+    fx.edge(gone, helper, RelType::Calls);
+    std::fs::write(find_graph_bin(repo.path()), fx.into_bytes()).unwrap();
+    let out = rename(repo.path(), &["--dry-run"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("not_scanned"), "stdout={stdout}");
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.contains("src/gone.ts") && l.contains("cannot read file")),
+        "stdout={stdout}"
+    );
 }
 
 #[test]
@@ -157,6 +190,9 @@ fn test_rename_all_files_scanned_omits_not_scanned() {
     std::fs::write(find_graph_bin(repo.path()), fx.into_bytes()).unwrap();
     let out = rename(repo.path(), &["--dry-run"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("files 1; usages 1"), "stdout={stdout}");
+    assert!(
+        stdout.contains("risk safe; files 1; usages 1"),
+        "stdout={stdout}"
+    );
     assert!(!stdout.contains("not_scanned"), "stdout={stdout}");
 }

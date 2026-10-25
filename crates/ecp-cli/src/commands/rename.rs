@@ -19,7 +19,7 @@
 //!    the graph before the rename runs (especially in dry-run).
 
 use clap::Args;
-use ecp_analyzer::identifier_finder::find_identifier_occurrences;
+use ecp_analyzer::identifier_finder::{find_identifier_occurrences, has_identifier_finder};
 use ecp_core::analyzer::types::IdentifierRange;
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::FileCategory;
@@ -37,7 +37,9 @@ use std::path::{Path, PathBuf};
 /// a caveat (a warm-attached or behind-HEAD graph, or uncommitted paths that
 /// could not be read); its absence means the graph was current. It gains a
 /// `not_scanned` list (file, reason) when an affected file has no identifier
-/// finder or cannot be read; those files are left unchanged.
+/// finder or cannot be read; those files are left unchanged. The dry-run
+/// headline then reads `risk partial; files N; usages M; not scanned K`
+/// instead of `risk safe; files N; usages M`.
 #[derive(Args, Debug, Clone, Serialize)]
 pub struct RenameArgs {
     /// The symbol name to rename (equivalent to `--symbol` flag).
@@ -438,6 +440,10 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
 
         for file_idx in affected_file_idx {
             let rel_path = graph.files[file_idx].path.resolve(&graph.string_pool);
+            if !has_identifier_finder(rel_path) {
+                not_scanned.push(NotScanned::new(rel_path, NO_FINDER.to_string()));
+                continue;
+            }
             let abs_path = repo_root.join(rel_path);
             let bytes = match std::fs::read(&abs_path) {
                 Ok(bytes) => bytes,
@@ -459,7 +465,15 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
 
     // Zero-occurrence case: explicit message + suggestions.
     if target_indices.is_empty() || total_ast_hits == 0 {
-        println!("No occurrences of \"{}\" found.", target_symbol);
+        if not_scanned.is_empty() {
+            println!("No occurrences of \"{}\" found.", target_symbol);
+        } else {
+            println!(
+                "No occurrences of \"{}\" found in scanned files; {} affected file(s) not scanned.",
+                target_symbol,
+                not_scanned.len()
+            );
+        }
 
         // Check if the name exists in doc files even though not in graph.
         let doc_hits = if args.markdown {
@@ -503,7 +517,16 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
 
     // --- Stage 3a: dry-run — print summary + diff preview, then verification. ---
     if args.dry_run {
-        println!("risk safe; files {}; usages {}", hits.len(), total_ast_hits);
+        if not_scanned.is_empty() {
+            println!("risk safe; files {}; usages {}", hits.len(), total_ast_hits);
+        } else {
+            println!(
+                "risk partial; files {}; usages {}; not scanned {}",
+                hits.len(),
+                total_ast_hits,
+                not_scanned.len()
+            );
+        }
         println!();
         for (path, ranges) in &hits {
             let bytes = std::fs::read(path).map_err(EcpError::Io)?;
