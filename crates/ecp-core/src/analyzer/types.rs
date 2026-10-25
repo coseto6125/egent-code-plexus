@@ -97,16 +97,21 @@ pub enum CallSite<'a> {
     /// so does a PHP `$obj->m()` other than `$this`, which a `use function`
     /// import never names, a Java call on a computed receiver (`a.b().m()`),
     /// which no static import names, an untyped Swift, Ruby, C++ or Dart
-    /// receiver, and a JavaScript or TypeScript call or `new` receiver whose
+    /// receiver, a JavaScript or TypeScript call or `new` receiver whose
     /// type stays unknown (`fetch(u).json()`), which no import or base
-    /// class names.
+    /// class names, and a C# value whose type the parser cannot read
+    /// (`var x`, a field of a generic type, `x?.m()`), which only an
+    /// extension method may bind.
     UntypedMember(&'a str),
     /// A member call whose receiver may name a type. In Python the receiver
     /// is a name a `from` import binds (`from pkg import mod; mod.f()`): a
     /// submodule binds as a module import. In C#, Swift, Kotlin and Dart it
-    /// is an identifier that is no local, parameter or field. A receiver that
-    /// names a type (or a library one) resolves as `Plain("Type.member")`;
-    /// anywhere else the site resolves as `Plain(member)`.
+    /// is an identifier that is no local, parameter or field; in C# also the
+    /// last segment of a dotted name that may be a type path (`Outer.Inner`)
+    /// or a generic type's name (`Box<int>`). A receiver that names a type
+    /// (or a library one) resolves as `Plain("Type.member")`; anywhere else
+    /// the site resolves as `Plain(member)`, in Swift and C# as
+    /// `UntypedMember(member)`.
     FromReceiver { receiver: &'a str, member: &'a str },
     /// A member call whose receiver is itself a call (`Foo.create().bar()`,
     /// `make().bar()`, `new Foo().bar()`). `inner` is the receiver call's own

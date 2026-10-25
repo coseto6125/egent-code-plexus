@@ -3,10 +3,11 @@
 //! only from its own type and the types nested in it.
 //!
 //! The fixture mirrors Newtonsoft.Json: `JContainer : JToken` calls
-//! `content.GetType()` on an `object`, which the parser writes as a bare
-//! `GetType`. `JToken` declares `private static string GetType(JToken)`.
-//! Before P-ext2 the heritage tier bound the call to it, and the chain then
-//! typed `.IsSubclassOf(..)` on a `string` receiver.
+//! `content.GetType()` on an `object`. `JToken` declares `private static
+//! string GetType(JToken)`. Before P-ext2 the parser wrote a bare `GetType`,
+//! the heritage tier bound the call to it, and the chain then typed
+//! `.IsSubclassOf(..)` on a `string` receiver. Since P-recv the parser
+//! writes an untyped member, which binds no member by its name.
 
 mod receiver_typing_support;
 
@@ -85,9 +86,9 @@ fn callees(graph: &ZeroCopyGraph, caller: &str) -> Vec<String> {
     names
 }
 
-/// Regression (JContainer.cs:765): the bare `GetType` of a derived type
-/// never reaches the base's private static, and no `string` receiver types
-/// the rest of the chain.
+/// Regression (JContainer.cs:765): `GetType` on an `object` in a derived
+/// type never reaches the base's private static, and no `string` receiver
+/// types the rest of the chain.
 #[test]
 fn test_resolve_call_derived_type_bare_call_private_static_of_base_emits_no_edge() {
     let graph = graph();

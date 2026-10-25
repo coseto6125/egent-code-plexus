@@ -103,6 +103,11 @@ pub enum ReceiverSite<'a> {
     /// The value a call to this function returns (`Read().ToAsync()`); its
     /// type is read in the function's file, as the chained call reads it.
     Returned(u32),
+    /// A value whose type the parser could not read: a field of a library
+    /// or generic type, `var x`, `a[i]` (codex ruling P-recv Q2). Every
+    /// declaration in scope may accept it, so an edge binds only at
+    /// [`HEURISTIC_CONFIDENCE`].
+    Untyped,
 }
 
 /// The call site's side of the lookup.
@@ -118,10 +123,11 @@ pub struct CallerScope<'a> {
 
 /// The receiver: its type's name and the project types that name denotes
 /// at the call (none for a library type, several for the parts of one
-/// partial type or for namesakes).
+/// partial type or for namesakes). `name` is `None` for a receiver of
+/// unknown type ([`ReceiverSite::Untyped`]), which has no types.
 #[derive(Debug, Clone, Copy)]
 pub struct Receiver<'a> {
-    pub name: &'a str,
+    pub name: Option<&'a str>,
     pub types: &'a [u32],
 }
 
@@ -189,7 +195,9 @@ enum Fit {
 /// `this` type names that type or a resolved supertype, and the arguments
 /// fit its parameters. Every other single candidate binds at
 /// [`HEURISTIC_CONFIDENCE`]. Two candidates, overloads of one class
-/// included, are ambiguous.
+/// included, are ambiguous. A receiver of unknown type (`receiver.name` is
+/// `None`) may be any type: every declaration in scope and visible accepts
+/// it, the arguments still refuse, and a single candidate is never proven.
 pub fn resolve<F: TypeFacts + ?Sized>(
     facts: &F,
     decls: &[ExtensionDecl<'_>],
@@ -222,7 +230,7 @@ pub fn resolve<F: TypeFacts + ?Sized>(
                 .is_none_or(|(_, first_unresolved)| first_unresolved.is_none());
         }
     }
-    let receiver_key = canonical(receiver.name);
+    let receiver_key = receiver.name.map(canonical);
     let mut in_scope = false;
     let mut accepts_receiver = false;
     // (declaration, its fit, whether the arguments apply), one per
@@ -236,7 +244,10 @@ pub fn resolve<F: TypeFacts + ?Sized>(
         if (decl.flags >> 6) & 0b111 == PRIVATE && caller.owner != Some(decl.class) {
             continue;
         }
-        let fit = fit(facts, decl, receiver_key, &ancestors, closed, caller.file);
+        let fit = match receiver_key {
+            Some(key) => fit(facts, decl, key, &ancestors, closed, caller.file),
+            None => Fit::Maybe,
+        };
         if fit == Fit::Incompatible {
             continue;
         }

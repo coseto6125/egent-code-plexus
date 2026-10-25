@@ -4,8 +4,9 @@
 //! classes of one file that each declare `AreEqual` (Newtonsoft's
 //! `TestFixtureBase.cs`) left every call ambiguous. The receiver now reaches
 //! the resolver, which binds the member of the type it names, through a
-//! `using` alias too, and keeps the bare-member resolution for a receiver
-//! that names no type.
+//! `using` alias too. A receiver that names no project type is a library
+//! type or a value the parser cannot see: it binds no member by its name
+//! (codex ruling P-recv Q1, Q3).
 
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::provider::LanguageProvider;
@@ -216,9 +217,10 @@ fn test_resolve_call_csharp_using_alias_receiver_binds_aliased_type() {
     );
 }
 
-/// A property receiver keeps the bare member: `Run` is the only one.
+/// A property declared `Helper Tool` types the call as `Helper.Run`
+/// (codex ruling P-recv Q1); before, the bare `Run` bound by being unique.
 #[test]
-fn test_resolve_call_csharp_property_receiver_binds_bare_member() {
+fn test_resolve_call_csharp_property_receiver_binds_declared_type() {
     assert_binds(&build(&[ASSERTS, CALLERS]), "ViaProperty", "Run", "Helper");
 }
 
@@ -270,11 +272,12 @@ fn test_resolve_call_csharp_local_named_like_type_binds_local_member() {
     assert_binds(&graph, "ViaVarLocalShadow", "Run", "Helper");
 }
 
-/// The contract this pins: a receiver that names no project type keeps the
-/// bare-member resolution it had before. `WriteLine` is the project's only
-/// one, so that resolution binds it (a guess the global tier allows).
+/// A receiver that names no project type (`Console`) never binds a project
+/// member by its name, though `Printer.WriteLine` is the only one (codex
+/// ruling P-recv Q1, Q3: a unique name is no evidence). Before, the global
+/// tier bound it.
 #[test]
-fn test_resolve_call_csharp_unknown_type_receiver_keeps_bare_member() {
+fn test_resolve_call_csharp_unknown_type_receiver_binds_nothing() {
     let caller = (
         "App/Printer.cs",
         r#"namespace App
@@ -290,7 +293,7 @@ fn test_resolve_call_csharp_unknown_type_receiver_keeps_bare_member() {
 }
 "#,
     );
-    assert_binds(&build(&[caller]), "ViaConsole", "WriteLine", "Printer");
+    assert!(calls_from(&build(&[caller]), "ViaConsole").is_empty());
 }
 
 /// An alias to a type the project does not hold names a library type: no
@@ -324,15 +327,17 @@ namespace App
     );
 }
 
-/// Receivers other than a simple identifier keep the bare member: `Ping`
-/// and `Make` are unique, and the three `AreEqual` owners leave a
-/// `global::` path without an edge to a wrong owner.
+/// A dotted or generic receiver whose root is no value binds through the
+/// type its last segment names (codex ruling P-recv Q1: type-path
+/// evidence, never the bare member's uniqueness): `Outer.Inner.Ping()`,
+/// `Box<int>.Make()`, and a `global::` path to one of three `AreEqual`
+/// owners.
 #[test]
-fn test_resolve_call_csharp_non_identifier_receivers_keep_bare_member() {
+fn test_resolve_call_csharp_type_path_receivers_bind_through_type() {
     let graph = build(&[ASSERTS, CALLERS]);
     assert_binds(&graph, "ViaNested", "Ping", "Inner");
     assert_binds(&graph, "ViaGeneric", "Make", "Box");
-    assert_never_binds_other(&graph, "ViaGlobal", "AreEqual", "StringAssert");
+    assert_binds(&graph, "ViaGlobal", "AreEqual", "StringAssert");
 }
 
 #[test]

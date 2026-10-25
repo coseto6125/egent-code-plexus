@@ -785,10 +785,13 @@ impl<'a> Resolver<'a> {
         } else {
             None
         };
-        // A Swift receiver that names no type is a value the parser cannot
-        // see (a global, an inherited property): an untyped member call.
+        // A Swift or C# receiver that names no type is a value the parser
+        // cannot see (a global, an inherited property) or a library type:
+        // an untyped member call, never `this.m()` (codex ruling P-recv Q1).
         let site = match (site, &type_member) {
-            (CallSite::FromReceiver { member, .. }, None) if language == Language::Swift => {
+            (CallSite::FromReceiver { member, .. }, None)
+                if matches!(language, Language::Swift | Language::CSharp) =>
+            {
                 CallSite::UntypedMember(member)
             }
             (CallSite::FromReceiver { member, .. }, None) if declared_python_attribute => {
@@ -819,7 +822,23 @@ impl<'a> Resolver<'a> {
             )
         };
         let target = call_target(source_file, site);
-        if open {
+        // A C# value of unknown type reaches no member by its name alone:
+        // not the caller's, not one of the same file, not a unique one of
+        // the project (codex ruling P-recv Q3). Only the extension retry
+        // ([`Self::csharp_untyped_member`]) may bind it.
+        if open && language == Language::CSharp && !bind_import {
+            if self.decisions.is_some() {
+                self.record(
+                    &normalize_source_path(source_file),
+                    site.name(),
+                    None,
+                    DecisionTier::Unresolved,
+                    None,
+                    0,
+                    None,
+                );
+            }
+        } else if open {
             targets = resolve(type_member.as_deref().unwrap_or(site.name()), target, true);
             resolution = ladder_resolution(&targets);
         }
@@ -1096,7 +1115,8 @@ impl<'a> Resolver<'a> {
     /// ladder, and never by the bare member: `StringAssert.AreEqual()` must
     /// not land on `XUnitAssert.AreEqual`, nor Swift `Util.make()` on the
     /// caller's own `make`. A receiver that names no type is a member the
-    /// parser cannot see (an inherited property, a global): `None`.
+    /// parser cannot see (an inherited property, a global), or in C# also
+    /// a library type (`Console`): `None`.
     ///
     /// A Python `FromReceiver` that is no submodule
     /// ([`Self::python_submodule_member`] runs first) names a type only when
@@ -1128,6 +1148,27 @@ impl<'a> Resolver<'a> {
             _ => false,
         };
         typed.then(|| format!("{receiver}.{member}"))
+    }
+
+    /// The member a C# call reaches on a value of unknown type, which only
+    /// the extension retry ([`ReceiverSite::Untyped`]) may bind: an untyped
+    /// member site, or a `FromReceiver` whose receiver names no type
+    /// ([`Self::resolve_call`] reads it as untyped). `None` for any other
+    /// site. `site` is a C# call's.
+    pub(crate) fn csharp_untyped_member<'s>(
+        &self,
+        source_file: &Path,
+        site: CallSite<'s>,
+        raw_imports: &[RawImport],
+    ) -> Option<&'s str> {
+        match site.fallback() {
+            CallSite::UntypedMember(member) => Some(member),
+            site @ CallSite::FromReceiver { member, .. } => self
+                .type_receiver(source_file, Language::CSharp, site, raw_imports)
+                .is_none()
+                .then_some(member),
+            _ => None,
+        }
     }
 
     /// [`Self::resolve_call`] for a name a lexical scope of the file binds,
@@ -1552,7 +1593,8 @@ impl<'a> Resolver<'a> {
     /// a receiver whose own member lookup bound nothing. The receiver's type
     /// is read where [`ReceiverSite`] says: a named type in `source_file`
     /// with `raw_imports`, the type a call returns in the callee's file with
-    /// that file's imports. The candidates' scope is always the caller's:
+    /// that file's imports, or none for an untyped receiver. The candidates'
+    /// scope is always the caller's:
     /// `source_file`'s namespaces and `raw_imports`. `arguments` are the
     /// ones the call's entry records.
     #[allow(clippy::too_many_arguments)]
@@ -1572,7 +1614,7 @@ impl<'a> Resolver<'a> {
         }
         let caller_file = normalize_source_path(source_file);
         let (name, scope_file, scope_imports) = match receiver {
-            ReceiverSite::Named(name) => (name, &*caller_file, raw_imports),
+            ReceiverSite::Named(name) => (Some(name), &*caller_file, raw_imports),
             ReceiverSite::Returned(callee) => {
                 let (Some(name), Some(file)) =
                     (type_ladder::returned_type(st, callee), st.file_of(callee))
@@ -1583,22 +1625,27 @@ impl<'a> Resolver<'a> {
                     .reexports
                     .and_then(|index| index.modules.get(file))
                     .map_or(&[][..], |exports| exports.imports);
-                (name, file, imports)
+                (Some(name), file, imports)
+            }
+            ReceiverSite::Untyped => (None, &*caller_file, raw_imports),
+        };
+        let types: Vec<u32> = match name {
+            None => Vec::new(),
+            Some(name) => {
+                match st.lookup_in_file_with_kind(scope_file, name, ResolveTarget::Type) {
+                    Some(id) => vec![id],
+                    None => type_ladder::TypeFacts::global_candidates(
+                        st,
+                        name,
+                        ResolveTarget::Type,
+                        FileMeta::from_normalized_path(scope_file),
+                    )
+                    .into_iter()
+                    .filter(|&id| st.namespace_return_type_visible(id, scope_file, scope_imports))
+                    .collect(),
+                }
             }
         };
-        let types: Vec<u32> =
-            match st.lookup_in_file_with_kind(scope_file, name, ResolveTarget::Type) {
-                Some(id) => vec![id],
-                None => type_ladder::TypeFacts::global_candidates(
-                    st,
-                    name,
-                    ResolveTarget::Type,
-                    FileMeta::from_normalized_path(scope_file),
-                )
-                .into_iter()
-                .filter(|&id| st.namespace_return_type_visible(id, scope_file, scope_imports))
-                .collect(),
-            };
         let namespaces: Vec<&str> = st
             .csharp_namespaces(&caller_file)
             .iter()

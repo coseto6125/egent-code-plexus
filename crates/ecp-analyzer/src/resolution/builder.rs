@@ -3231,6 +3231,10 @@ fn pass2_emit_node_edges(
                     ReceiverSite::Returned(callee) => {
                         type_ladder::returned_type(symbol_table, callee).unwrap_or_default()
                     }
+                    // No type says the receiver lacks the member, so the
+                    // miss is no extension gap; as in every language, an
+                    // untyped call records none.
+                    ReceiverSite::Untyped => return Vec::new(),
                 };
                 extension_misses
                     .borrow_mut()
@@ -3265,19 +3269,30 @@ fn pass2_emit_node_edges(
                         Some(current_node_idx),
                     );
                     // The C# parser writes `Type.member` only for a receiver it
-                    // typed: `this`, `base`, a typed local or parameter.
+                    // typed: `this`, `base`, a typed local, parameter, field
+                    // or property, `new T()`, a keyword type. A value of
+                    // unknown type reaches only an extension (codex ruling
+                    // P-recv Q2).
+                    if !targets.is_empty() || language != Language::CSharp {
+                        return targets;
+                    }
                     match site {
-                        CallSite::Plain(callee)
-                            if targets.is_empty() && language == Language::CSharp =>
-                        {
-                            match callee.rsplit_once('.') {
-                                Some((receiver, member)) => {
-                                    extension(ReceiverSite::Named(receiver), member, arguments, 1.0)
-                                }
-                                None => targets,
+                        CallSite::Plain(callee) => match callee.rsplit_once('.') {
+                            Some((receiver, member)) => {
+                                extension(ReceiverSite::Named(receiver), member, arguments, 1.0)
                             }
-                        }
-                        _ => targets,
+                            None => targets,
+                        },
+                        site => match resolver.csharp_untyped_member(
+                            &local_graph.file_path,
+                            site,
+                            &local_graph.imports,
+                        ) {
+                            Some(member) => {
+                                extension(ReceiverSite::Untyped, member, arguments, 1.0)
+                            }
+                            None => targets,
+                        },
                     }
                 }
             };

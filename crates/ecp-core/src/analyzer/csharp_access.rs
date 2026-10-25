@@ -7,8 +7,9 @@
 //! the edge: the rule removes an edge only on proof. Index-time resolution
 //! and the session overlay read this one rule.
 //!
-//! Not modeled: `protected` and `internal`, and the receiver a parser
-//! dropped (`object o; o.M()` reaches the resolver as a bare `M`).
+//! Not modeled: `protected` and `internal`. A call on a value of unknown
+//! type (`object o; o.M()`) binds no ordinary target the rule could judge
+//! (codex ruling P-recv Q3); only an extension method, which it admits.
 
 use crate::analyzer::csharp_extension::EXTENSION_FLAG;
 use crate::analyzer::same_file_pick::PickFacts;

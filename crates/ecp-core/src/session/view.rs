@@ -910,8 +910,8 @@ impl OverlayView {
                                 }
                                 let open = matches!(resolution, Resolution::Unknown);
                                 // A C#, Swift, Kotlin or Dart receiver that names a
-                                // type resolves as `Receiver.member`; a Swift one
-                                // that names none is an untyped member call.
+                                // type resolves as `Receiver.member`; a Swift or C#
+                                // one that names none is an untyped member call.
                                 let type_member = if open {
                                     facts.type_receiver(
                                         &file.rel_path,
@@ -924,7 +924,10 @@ impl OverlayView {
                                 };
                                 let site = match (site, &type_member) {
                                     (CallSite::FromReceiver { member, .. }, None)
-                                        if caller.language == Language::Swift =>
+                                        if matches!(
+                                            caller.language,
+                                            Language::Swift | Language::CSharp
+                                        ) =>
                                     {
                                         CallSite::UntypedMember(member)
                                     }
@@ -980,8 +983,10 @@ impl OverlayView {
                                 // tier inside `resolve_callee`, then the module tree,
                                 // then the receiver-typing ladder.
                                 // No Rust receiver is typed by `type_receiver`, so
-                                // `site` is the lookup here.
-                                if open {
+                                // `site` is the lookup here. A C# untyped member
+                                // takes no tier (`Resolver::resolve_call`).
+                                let csharp_untyped = untyped && caller.language == Language::CSharp;
+                                if open && !csharp_untyped {
                                     let hit = if caller.language == Language::Rust
                                         && site.name().contains("::")
                                     {
@@ -1068,20 +1073,41 @@ impl OverlayView {
                                         .filter(|&(idx, _)| is_free(&facts, idx)),
                                     );
                                 }
+                                if untyped {
+                                    // A Python module is a value: `api.helper()` on
+                                    // an untyped receiver may call another module's
+                                    // function, never one of the caller's own module.
+                                    resolution = resolution.admit(|idx| {
+                                        member_call_admits(&facts, idx, owner)
+                                            || (caller.language == Language::Python
+                                                && is_free(&facts, idx)
+                                                && facts.node_file(idx)
+                                                    != Some(file.rel_path.as_str()))
+                                    });
+                                }
                                 // The index's C# extension retry of a receiver
-                                // the parser typed (`Type.member`).
+                                // the parser typed (`Type.member`) or left
+                                // untyped. It runs after `resolve_call` there, so
+                                // no rule above judges its target.
                                 if resolution.call_fallbacks_allowed()
                                     && type_member.is_none()
                                     && caller.language == Language::CSharp
                                 {
                                     if let Some((receiver, member)) = match site {
-                                        CallSite::Plain(callee) => callee.rsplit_once('.'),
+                                        CallSite::Plain(callee) => {
+                                            callee.rsplit_once('.').map(|(receiver, member)| {
+                                                (ReceiverSite::Named(receiver), member)
+                                            })
+                                        }
+                                        CallSite::UntypedMember(member) => {
+                                            Some((ReceiverSite::Untyped, member))
+                                        }
                                         _ => None,
                                     } {
                                         let hit = facts
                                             .csharp_extension_edge(
                                                 &file.rel_path,
-                                                ReceiverSite::Named(receiver),
+                                                receiver,
                                                 member,
                                                 arguments,
                                                 &file.imports,
@@ -1096,18 +1122,6 @@ impl OverlayView {
                                             });
                                         resolution = Resolution::from_ladder(hit);
                                     }
-                                }
-                                if untyped {
-                                    // A Python module is a value: `api.helper()` on
-                                    // an untyped receiver may call another module's
-                                    // function, never one of the caller's own module.
-                                    resolution = resolution.admit(|idx| {
-                                        member_call_admits(&facts, idx, owner)
-                                            || (caller.language == Language::Python
-                                                && is_free(&facts, idx)
-                                                && facts.node_file(idx)
-                                                    != Some(file.rel_path.as_str()))
-                                    });
                                 }
                                 if resolution.call_fallbacks_allowed()
                                     && !facts.may_be_receiverless_member_call(site, caller)
@@ -4001,8 +4015,8 @@ impl<'a> OverlayFacts<'a> {
             return Ok(None);
         }
         let held: Rc<[RawImport]>;
-        let (name, scope_file, scope_imports): (&str, &str, &[RawImport]) = match receiver {
-            ReceiverSite::Named(name) => (name, source, imports),
+        let (name, scope_file, scope_imports): (Option<&str>, &str, &[RawImport]) = match receiver {
+            ReceiverSite::Named(name) => (Some(name), source, imports),
             ReceiverSite::Returned(callee) => {
                 let (Some(name), Some(file)) = (
                     type_ladder::returned_type(self, callee),
@@ -4011,13 +4025,19 @@ impl<'a> OverlayFacts<'a> {
                     return Ok(None);
                 };
                 held = self.raw_imports(file);
-                (name, file, &held[..])
+                (Some(name), file, &held[..])
             }
+            ReceiverSite::Untyped => (None, source, imports),
         };
-        let types: Vec<u32> = match self.first_in_file(scope_file, name, ResolveTarget::Type, None)
-        {
-            Some(id) => vec![id],
-            None => TypeFacts::global_candidates(
+        let types: Vec<u32> = match name.map(|name| {
+            (
+                name,
+                self.first_in_file(scope_file, name, ResolveTarget::Type, None),
+            )
+        }) {
+            None => Vec::new(),
+            Some((_, Some(id))) => vec![id],
+            Some((name, None)) => TypeFacts::global_candidates(
                 self,
                 name,
                 ResolveTarget::Type,
