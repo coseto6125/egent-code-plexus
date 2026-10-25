@@ -106,9 +106,11 @@ impl Fixture {
     }
 
     fn engine(&self) -> Engine {
-        Engine::load(&self.graph_path)
-            .unwrap()
-            .with_overlay(self.session_dir.clone(), self.worktree.clone())
+        Engine::load(&self.graph_path).unwrap().with_overlay(
+            self.session_dir.clone(),
+            self.worktree.clone(),
+            None,
+        )
     }
 
     /// The inputs `Engine::overlay_view` builds from on a cache miss.
@@ -187,6 +189,39 @@ fn tmp_files(dir: &Path) -> Vec<String> {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|name| name.ends_with(".tmp"))
         .collect()
+}
+
+/// Stands for: the reader accepts the fragments this query's refresh just
+/// stamped. When the effective cap moves between the refresh and the read,
+/// the refresh's cap (`with_overlay`'s third argument) decides, not a second
+/// read of the config.
+#[test]
+fn test_overlay_view_refresh_cap_given_accepts_fragments_stamped_under_it() {
+    let f = Fixture::new();
+    f.edit(&["keep_fn", "added_fn"], 1_000);
+    let manifest_path = layout::dirty_events_path(&f.session_dir);
+    let mut manifest = DirtyEvents::read(&manifest_path).unwrap();
+    let refresh_cap = ecp_core::contracts::routing::SizeCap::resolve(Some("123457"), None);
+    manifest.size_cap_bytes = refresh_cap.bytes();
+    DirtyEvents::write_atomic(&manifest_path, &manifest).unwrap();
+
+    let without = Engine::load(&f.graph_path).unwrap().with_overlay(
+        f.session_dir.clone(),
+        f.worktree.clone(),
+        None,
+    );
+    let with = Engine::load(&f.graph_path).unwrap().with_overlay(
+        f.session_dir.clone(),
+        f.worktree.clone(),
+        Some(refresh_cap),
+    );
+
+    assert!(
+        without.overlay_view().is_none(),
+        "a foreign cap was accepted"
+    );
+    let view = with.overlay_view().expect("the refresh's cap was not used");
+    assert!(view.virtual_nodes().iter().any(|n| n.name == "added_fn"));
 }
 
 #[test]
@@ -361,9 +396,11 @@ fn test_overlay_view_clean_tree_returns_none_writes_no_cache() {
 fn test_overlay_view_missing_session_dir_returns_none_creates_nothing() {
     let f = Fixture::new();
     let missing = f.session_dir.with_file_name("no-such-sid");
-    let engine = Engine::load(&f.graph_path)
-        .unwrap()
-        .with_overlay(missing.clone(), f.worktree.clone());
+    let engine = Engine::load(&f.graph_path).unwrap().with_overlay(
+        missing.clone(),
+        f.worktree.clone(),
+        None,
+    );
 
     assert!(engine.overlay_view().is_none());
     assert!(!missing.exists());

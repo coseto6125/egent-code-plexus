@@ -14,6 +14,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use ecp_core::contracts::dirty_event::{ClassifiedPath, DirtySet, SkipReason};
+use ecp_core::contracts::routing::SizeCap;
 
 use crate::auto_ensure::{self, EnsureFreshOutcome, Ensured, IndexNeed};
 use crate::engine::Engine;
@@ -78,9 +79,13 @@ impl ReadContext {
     pub fn for_dir(dir: &Path, graph_arg: &Path) -> Result<Self, ReadContextError> {
         let top = worktree_top(dir);
         let resolved = graph_path::resolve(graph_arg, &top);
-        let Ensured { outcome, dirty, .. } =
-            auto_ensure::ensure_fresh_with_rebuild(IndexNeed::NearCurrent, &resolved, &top)
-                .map_err(ReadContextError::Ensure)?;
+        let Ensured {
+            outcome,
+            dirty,
+            size_cap,
+            ..
+        } = auto_ensure::ensure_fresh_with_rebuild(IndexNeed::NearCurrent, &resolved, &top)
+            .map_err(ReadContextError::Ensure)?;
         let (engine, graph_path) = match outcome {
             EnsureFreshOutcome::WarmAttach { sibling_graph_path } => {
                 (load(&sibling_graph_path, true)?, sibling_graph_path)
@@ -97,7 +102,9 @@ impl ReadContext {
         // foreign.
         let own_graph =
             !graph_path::is_custom(graph_arg) || graph_path::is_cwd_graph(&graph_path, &top);
-        Ok(Self::assemble(top, graph_path, engine, dirty, own_graph))
+        Ok(Self::assemble(
+            top, graph_path, engine, dirty, size_cap, own_graph,
+        ))
     }
 
     /// The context of a graph resolved by repository (a registry target, a
@@ -109,6 +116,7 @@ impl ReadContext {
             outcome,
             rebuilt,
             dirty,
+            size_cap,
         } = auto_ensure::ensure_fresh_with_rebuild(IndexNeed::NearCurrent, graph_path, &top)
             .map_err(ReadContextError::Ensure)?;
         let (engine, graph_path) = match outcome {
@@ -122,7 +130,9 @@ impl ReadContext {
                 (engine, path)
             }
         };
-        Ok(Self::assemble(top, graph_path, engine, dirty, true))
+        Ok(Self::assemble(
+            top, graph_path, engine, dirty, size_cap, true,
+        ))
     }
 
     fn assemble(
@@ -130,6 +140,7 @@ impl ReadContext {
         graph_path: PathBuf,
         engine: Engine,
         dirty: Option<DirtySet<ClassifiedPath>>,
+        size_cap: Option<SizeCap>,
         own_graph: bool,
     ) -> Self {
         let overlay = own_graph
@@ -137,7 +148,7 @@ impl ReadContext {
             .flatten()
             .filter(|dir| dir.is_dir());
         let mut engine = match overlay {
-            Some(dir) => engine.with_overlay(dir, top.clone()),
+            Some(dir) => engine.with_overlay(dir, top.clone(), size_cap),
             None => engine,
         };
         engine.set_unreadable_changes(unreadable_changes(dirty.as_ref()));

@@ -1,4 +1,5 @@
 use crate::session::view_cache;
+use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::{ArchivedZeroCopyGraph, GRAPH_FORMAT_VERSION, GRAPH_MAGIC};
 use ecp_core::session::OverlayView;
 use memmap2::Mmap;
@@ -66,6 +67,8 @@ pub struct Engine {
     /// Worktree root the overlay session belongs to — needed to validate
     /// fragment mtimes when materialising the [`OverlayView`].
     worktree_root: Option<PathBuf>,
+    /// The cap this query's L1 refresh stamped, set via `with_overlay`.
+    overlay_size_cap: Option<SizeCap>,
     /// Lazily built query-time overlay merge view. `None` inside the cell =
     /// clean tree (or no session): traversals take their original branch.
     overlay_view: OnceLock<Option<OverlayView>>,
@@ -123,6 +126,7 @@ impl Engine {
             graph_stamp,
             overlay_dir: None,
             worktree_root: None,
+            overlay_size_cap: None,
             overlay_view: OnceLock::new(),
             view: GraphView::L2Only,
             is_stale_for_sha: false,
@@ -228,8 +232,16 @@ impl Engine {
     /// resolves). `worktree_root` anchors fragment mtime validation for
     /// `overlay_view`; it must be the worktree top the fragment paths are
     /// relative to.
-    pub fn with_overlay(mut self, dir: PathBuf, worktree_root: PathBuf) -> Self {
+    /// `size_cap` is the cap this query's L1 refresh stamped, when one ran;
+    /// otherwise the reader resolves the effective cap itself.
+    pub fn with_overlay(
+        mut self,
+        dir: PathBuf,
+        worktree_root: PathBuf,
+        size_cap: Option<SizeCap>,
+    ) -> Self {
         self.overlay_dir = Some(dir);
+        self.overlay_size_cap = size_cap;
         self.worktree_root = Some(worktree_root);
         self.view = GraphView::L2WithOverlay;
         self
@@ -247,8 +259,11 @@ impl Engine {
                 let dir = self.overlay_dir.as_deref()?;
                 let root = self.worktree_root.as_deref()?;
                 let graph = self.graph().ok()?;
-                // Resolved once for this query's view, not re-read per call.
-                let size_cap = ecp_core::config::resolve_size_cap(root);
+                // The refresh's cap when one ran this query, so the reader
+                // accepts what the refresh just wrote.
+                let size_cap = self
+                    .overlay_size_cap
+                    .unwrap_or_else(|| ecp_core::config::resolve_size_cap(root));
                 let (accepted, inputs_hash) =
                     crate::session::overlay_reader::accepted_fragments_under(dir, root, size_cap)
                         .ok()?;

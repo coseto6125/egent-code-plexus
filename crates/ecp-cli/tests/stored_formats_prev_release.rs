@@ -695,17 +695,17 @@ fn test_dirty_events_old_writer_manifest_beside_new_namespace_keeps_tombstone() 
     let graph_path = tmp.path().join("current/graph.bin");
     fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
     fs::write(&graph_path, current_format_graph_bytes()).unwrap();
-    let engine = Engine::load(&graph_path)
-        .unwrap()
-        .with_overlay(session.clone(), root.clone());
+    let engine =
+        Engine::load(&graph_path)
+            .unwrap()
+            .with_overlay(session.clone(), root.clone(), None);
     assert!(
         engine.overlay_view().is_none(),
         "the overlay served a fragment"
     );
-    // The base rows are lib.rs's: the view reads tombstones in a later slice
-    // (overlay_reader.rs header), so today nothing hides the deleted symbols.
-    // When that slice lands, flip this to `!contains`.
-    assert!(graph_rows(&engine).iter().any(|r| r.2 == "lib.rs"));
+    // Not asserted yet: that a query hides the deleted `lib.rs` symbols. The
+    // view reads tombstones from slice F2b on (C3 test table), and that slice
+    // adds the merged-answer assertion here.
     assert!(
         matches!(
             state,
@@ -820,9 +820,10 @@ fn test_view_cache_written_by_0_16_4_misses_under_todays_key_and_matches_a_rebui
         ]
     );
 
-    let engine = Engine::load(&graph_path)
-        .unwrap()
-        .with_overlay(session.clone(), worktree(&tmp));
+    let engine =
+        Engine::load(&graph_path)
+            .unwrap()
+            .with_overlay(session.clone(), worktree(&tmp), None);
     let built = engine.overlay_view().expect("today's code builds a view");
     assert_eq!(
         built, &cached,

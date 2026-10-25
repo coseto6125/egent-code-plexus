@@ -618,6 +618,9 @@ pub(crate) struct Ensured {
     /// The source and config changes the gate saw; empty when it saw none.
     /// `None` when a build or a warm attach answered and no gate named paths.
     pub(crate) dirty: Option<DirtySet<ClassifiedPath>>,
+    /// The cap an L1 refresh gated and stamped under, so this query's reader
+    /// accepts what this query wrote. `None` when no refresh ran.
+    pub(crate) size_cap: Option<SizeCap>,
 }
 
 impl Ensured {
@@ -626,6 +629,7 @@ impl Ensured {
             outcome: EnsureFreshOutcome::Ready,
             rebuilt: Some(rebuilt),
             dirty: None,
+            size_cap: None,
         }
     }
 
@@ -634,6 +638,14 @@ impl Ensured {
             outcome: EnsureFreshOutcome::Ready,
             rebuilt: None,
             dirty,
+            size_cap: None,
+        }
+    }
+
+    fn refreshed(dirty: DirtySet<ClassifiedPath>, size_cap: SizeCap) -> Self {
+        Self {
+            size_cap: Some(size_cap),
+            ..Self::current(Some(dirty))
         }
     }
 }
@@ -680,6 +692,7 @@ pub(crate) fn ensure_fresh_with_rebuild(
                         },
                         rebuilt: None,
                         dirty: None,
+                        size_cap: None,
                     });
                 }
             }
@@ -775,7 +788,7 @@ pub(crate) fn ensure_fresh_with_rebuild(
                     if walked {
                         write_head_sha_sidecar(graph_path, worktree_root);
                     }
-                    return Ok(Ensured::current(Some(dirty)));
+                    return Ok(Ensured::refreshed(dirty, size_cap));
                 }
                 // Stat BEFORE parsing: the manifest mtime must belong to the
                 // content that was parsed. Statting after the parse would let
@@ -856,7 +869,7 @@ pub(crate) fn ensure_fresh_with_rebuild(
                 // working tree is now consistent with the indexed state of the
                 // current HEAD — refresh the fingerprint as the very last step.
                 write_head_sha_sidecar(graph_path, worktree_root);
-                Ok(Ensured::current(Some(dirty)))
+                Ok(Ensured::refreshed(dirty, size_cap))
             }
         }
     }
