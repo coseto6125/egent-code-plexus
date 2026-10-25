@@ -232,6 +232,8 @@ Lane 0a's dirty-event fixtures (added, modified, deleted, renamed, unmerged, unt
 
 ### Manifest isolation (the area-5 tombstone slice)
 
+Status: landed in F2a (`fc1f663c`). The types are `DirtyEvents` and `DirtyEventEntry` (`ecp-core/src/session/overlay.rs`); the paths come from `ecp-core/src/session/layout.rs`. The header also carries `size_cap_bytes` (C5 "Cache validity"). gc removes the old namespace once its newest file is older than the session idle limit. The view reads tombstones in F2b.
+
 A new field in today's `dirty_files.json` is not safe while an older binary of the same fingerprint can write the file. The older writer reads the whole manifest into its own `DirtyEntry`, which has no catch-all field (`ecp-core/src/session/overlay.rs:22-41`). It then writes the whole manifest back (`ecp-cli/src/session/overlay_writer.rs:371-387`). The unknown `change` and `class` fields are gone, and a new reader applies their defaults: a tombstone reads as `modified`, an "other" path reads as source. A format check that skips non-V5 entries (`overlay_reader.rs:75-77`) protects only the reader, not the data.
 
 | Option | Cost | Decision |

@@ -599,10 +599,11 @@ pub enum SizeCapSource {
 /// the cap is routed but not parsed, and the parse returns a graph that
 /// records it as omitted (`file-too-large`).
 ///
-/// The cap is not yet an input of the dirty manifest or of the view cache
-/// key, so a cap change reaches a file only when that file is parsed again.
-/// The overlay pipeline cache compares `bytes`, never `source`: one cap from
-/// two sources parses the same.
+/// The dirty manifest records `bytes` (`DirtyEvents::size_cap_bytes`), and a
+/// manifest under another cap is stale as a whole; the view cache key hashes
+/// the accepted fragments, so it follows. `graph.bin` does not record its
+/// cap: a cap change reaches a clean file at the next rebuild. Every cache
+/// compares `bytes`, never `source`: one cap from two sources parses the same.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SizeCap {
     bytes: u64,
