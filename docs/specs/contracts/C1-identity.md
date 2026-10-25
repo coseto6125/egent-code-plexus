@@ -233,7 +233,7 @@ line      := 1-based decimal start line
 
 ## Stored data
 
-| Change | `GRAPH_FORMAT_VERSION` (15, `graph.rs:36`) | `BUILDER_FINGERPRINT` (`schema21`, `registry/commit_meta.rs:80`) | L1 fragment (`FRAGMENT_FORMAT_V5`, `session/overlay.rs:57`) | dirty manifest | view cache key (`VIEW_CACHE_FORMAT` 3, `view.rs:1060`) |
+| Change | `GRAPH_FORMAT_VERSION` (15, `graph.rs:36`) | `BUILDER_FINGERPRINT` (`schema25`, `registry/commit_meta.rs:93`) | L1 fragment (`FRAGMENT_FORMAT_V5`, `session/overlay.rs:57`) | dirty manifest | view cache key (`VIEW_CACHE_FORMAT` 4 since R1b, `session/view.rs`) |
 |---|---|---|---|---|---|
 | adopt `DeclKey` for unscoped nodes, no discriminator, owner text as produced | none | none | none | none | none |
 | `assign_file` in the four paths that skip ordinals (A-A) | none | bump | none | none | follows |

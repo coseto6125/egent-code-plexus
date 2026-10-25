@@ -254,7 +254,7 @@ fn test_impact_baseline_file_crosses_size_cap_not_compared_caveat_names_it() {
         .as_array()
         .expect("changed_symbols");
     assert!(
-        changed.iter().all(|s| s["file_path"] != "big.py"),
+        changed.iter().all(|s| s["filePath"] != "big.py"),
         "an over-cap file must not be diffed: {changed:?}"
     );
     assert!(
