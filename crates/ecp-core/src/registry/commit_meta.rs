@@ -88,7 +88,9 @@ use std::path::Path;
 /// repo-relative path rather than the basename.
 /// schema24: OpenAPI schema and field nodes carry the line of their key
 /// instead of line 1, past YAML anchors, tags, comments and directives.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema24");
+/// schema25: a non-UTF-8 path that would route is a `path-not-utf8` omission
+/// instead of vanishing; the walk applies the size cap to a symlink's target.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema25");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
