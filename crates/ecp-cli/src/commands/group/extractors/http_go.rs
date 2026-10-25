@@ -1,5 +1,6 @@
 //! Go HTTP route extractor: net/http + gin + chi shapes via tree-sitter.
 
+use super::{capture_line, client_verb, compile_client_query, consumer_contract, http_url_path};
 use crate::commands::group::types::{ContractRole, ContractType, ExtractedContract, SymbolRef};
 use std::path::Path;
 use std::sync::LazyLock;
@@ -12,12 +13,34 @@ pub(super) const ROUTE_CONFIDENCE: f32 = 0.85;
 const QUERY_SRC: &str = r#"
 (call_expression
   function: (selector_expression
+              operand: (_) @recv
               field: (field_identifier) @method)
   arguments: (argument_list
                (interpreted_string_literal) @path
                .
                (_) @handler))
 "#;
+
+/// Client calls with a literal URL: `http.Get("/x")`, `client.Post("/x", ...)`.
+const CLIENT_QUERY_SRC: &str = r#"
+(call_expression
+  function: (selector_expression
+              operand: (_) @recv
+              field: (field_identifier) @method)
+  arguments: (argument_list . (interpreted_string_literal) @path)) @call
+"#;
+
+static CLIENT_QUERY: LazyLock<Option<Query>> = LazyLock::new(|| {
+    let lang: tree_sitter::Language = tree_sitter_go::LANGUAGE.into();
+    compile_client_query(&lang, CLIENT_QUERY_SRC, "http_go")
+});
+
+/// A receiver is an HTTP client when it is the `http` package or its name
+/// ends in `client`. `r.Get("/x", h)` (chi) has the same shape; the receiver
+/// tells it apart.
+fn is_client_receiver(recv: &str) -> bool {
+    recv == "http" || recv.to_ascii_lowercase().ends_with("client")
+}
 
 static QUERY: LazyLock<Query> = LazyLock::new(|| {
     let lang: tree_sitter::Language = tree_sitter_go::LANGUAGE.into();
@@ -53,6 +76,8 @@ pub fn extract_http(file_path: &Path, source: &[u8]) -> Vec<ExtractedContract> {
         None => return Vec::new(),
     };
 
+    let recv_idx = query.capture_index_for_name("recv");
+
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), source);
     let mut out: Vec<ExtractedContract> = Vec::new();
@@ -60,6 +85,9 @@ pub fn extract_http(file_path: &Path, source: &[u8]) -> Vec<ExtractedContract> {
     while let Some(m) = matches.next() {
         let method = super::capture_text(m, method_idx, source);
         if !is_route_register(method) {
+            continue;
+        }
+        if recv_idx.is_some_and(|i| is_client_receiver(super::capture_text(m, i, source))) {
             continue;
         }
         let raw_path = super::capture_text(m, path_idx, source);
@@ -81,7 +109,50 @@ pub fn extract_http(file_path: &Path, source: &[u8]) -> Vec<ExtractedContract> {
             meta: vec![("method".into(), http_method.into())],
         });
     }
+    extract_clients(file_path, source, &tree, &mut out);
     out
+}
+
+/// `Consumer` contracts for `http.Get("/x")` and `<name>Client.Post("/x", ...)`.
+fn extract_clients(
+    file_path: &Path,
+    source: &[u8],
+    tree: &tree_sitter::Tree,
+    out: &mut Vec<ExtractedContract>,
+) {
+    let Some(query) = CLIENT_QUERY.as_ref() else {
+        return;
+    };
+    let idx = |name: &str| query.capture_index_for_name(name);
+    let (Some(recv_idx), Some(method_idx), Some(path_idx), Some(call_idx)) =
+        (idx("recv"), idx("method"), idx("path"), idx("call"))
+    else {
+        return;
+    };
+
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, tree.root_node(), source);
+    while let Some(m) = matches.next() {
+        let recv = super::capture_text(m, recv_idx, source);
+        let method = super::capture_text(m, method_idx, source);
+        if !is_client_receiver(recv) {
+            continue;
+        }
+        let Some(verb) = client_verb(method) else {
+            continue;
+        };
+        let Some(path) = http_url_path(&unquote(super::capture_text(m, path_idx, source))) else {
+            continue;
+        };
+        out.push(consumer_contract(
+            file_path,
+            ContractType::Http,
+            format!("http:{verb}:{path}"),
+            &format!("{recv}.{method}"),
+            capture_line(m, call_idx),
+            vec![("method".into(), verb.into())],
+        ));
+    }
 }
 
 fn is_route_register(method: &str) -> bool {
