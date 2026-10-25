@@ -4115,6 +4115,9 @@ fn path_matches_segment(rel_path: &str, segment: &str) -> bool {
         })
 }
 
+/// The `member_twins` table [`super::OverlayView::build_with_removed`] fills.
+pub(super) type MemberTwins = FxHashMap<u32, (usize, Vec<(u32, Span)>)>;
+
 /// The overlay's edges for every dirty file: `Calls`, lexical closure
 /// `References`, name refs, enum-variant refs and field reads. Returns the
 /// lexical parent of each scoped virtual node.
@@ -4128,13 +4131,12 @@ pub(super) fn resolve_edges(
     dirty_base: &FxHashSet<u32>,
     type_ctors: &FxHashMap<u32, Vec<u32>>,
     later_overloads: &FxHashMap<u32, Vec<u32>>,
-    member_twins: &FxHashMap<u32, (usize, Vec<(u32, Span)>)>,
+    member_twins: &MemberTwins,
     edges: &mut Vec<ViewEdge>,
     out_adj: &mut FxHashMap<u32, Vec<u32>>,
     in_adj: &mut FxHashMap<u32, Vec<u32>>,
     gaps: &RefCell<Vec<CallGap>>,
 ) -> FxHashMap<u32, u32> {
-    let lexical_parents: FxHashMap<u32, u32>;
     let mut callables = OverlayNames::new(ResolveTarget::Callable);
     let mut values = OverlayNames::new(ResolveTarget::Value);
     let mut fields = OverlayNames::new(ResolveTarget::Field);
@@ -4193,15 +4195,8 @@ pub(super) fn resolve_edges(
         in_adj.entry(edge.target).or_default().push(ei);
     };
 
-    let facts = OverlayFacts::new(
-        graph,
-        files,
-        &nodes,
-        &dirty_base,
-        &replaced,
-        &later_overloads,
-    );
-    lexical_parents = facts.dirty_lexical_parents.clone();
+    let facts = OverlayFacts::new(graph, files, nodes, dirty_base, replaced, later_overloads);
+    let lexical_parents: FxHashMap<u32, u32> = facts.dirty_lexical_parents.clone();
 
     // The index's `emit_overload_references`, in the same order.
     let mut firsts: Vec<u32> = later_overloads.keys().copied().collect();
@@ -4236,12 +4231,12 @@ pub(super) fn resolve_edges(
     let _ = facts.dirty_supertypes.set(dirty_supertypes(
         graph,
         files,
-        &nodes,
+        nodes,
         &facts,
         (&types, &qualifiers),
         &mut base_metas,
-        &replaced,
-        &dirty_base,
+        replaced,
+        dirty_base,
         rust_modules.as_ref(),
     ));
     // The pre-pass's own qualified lookups ran before the dirty bases
@@ -4395,12 +4390,12 @@ pub(super) fn resolve_edges(
                                     caller.language,
                                     &file.imports,
                                     &types,
-                                    &nodes,
+                                    nodes,
                                     |name, _| import_scoped(name, ResolveTarget::Type),
                                 ) {
                                     let target =
                                         *construction_targets.entry(ty).or_insert_with(|| {
-                                            construction_target(graph, &nodes, &type_ctors, ty)
+                                            construction_target(graph, nodes, type_ctors, ty)
                                         });
                                     resolution =
                                         Resolution::from_ladder(Some((target, confidence)));
@@ -4515,9 +4510,9 @@ pub(super) fn resolve_edges(
                                 &callables,
                                 &types,
                                 &qualifiers,
-                                &nodes,
-                                &replaced,
-                                &dirty_base,
+                                nodes,
+                                replaced,
+                                dirty_base,
                                 &facts,
                                 scope,
                             )
@@ -4541,13 +4536,8 @@ pub(super) fn resolve_edges(
                                             .or_else(|| {
                                                 let (modules, chain) = rust_tree?;
                                                 resolve_rust_module_callee(
-                                                    graph,
-                                                    name,
-                                                    &callables,
-                                                    &nodes,
-                                                    &dirty_base,
-                                                    modules,
-                                                    chain,
+                                                    graph, name, &callables, nodes, dirty_base,
+                                                    modules, chain,
                                                 )
                                             })
                                             .or_else(|| {
@@ -4666,7 +4656,7 @@ pub(super) fn resolve_edges(
                                 caller.language,
                                 &file.imports,
                                 &types,
-                                &nodes,
+                                nodes,
                                 |name, imports| {
                                     resolve_callee(
                                         graph,
@@ -4678,16 +4668,16 @@ pub(super) fn resolve_edges(
                                         &types,
                                         &types,
                                         &qualifiers,
-                                        &nodes,
-                                        &replaced,
-                                        &dirty_base,
+                                        nodes,
+                                        replaced,
+                                        dirty_base,
                                         &facts,
                                         scope,
                                     )
                                 },
                             ) {
                                 let target = *construction_targets.entry(ty).or_insert_with(|| {
-                                    construction_target(graph, &nodes, &type_ctors, ty)
+                                    construction_target(graph, nodes, type_ctors, ty)
                                 });
                                 resolution = Resolution::from_ladder(Some((target, confidence)));
                             }
@@ -4758,9 +4748,9 @@ pub(super) fn resolve_edges(
                                         &callables,
                                         &types,
                                         &qualifiers,
-                                        &nodes,
-                                        &replaced,
-                                        &dirty_base,
+                                        nodes,
+                                        replaced,
+                                        dirty_base,
                                         &facts,
                                         Scope {
                                             call: None,
@@ -4828,9 +4818,9 @@ pub(super) fn resolve_edges(
                         &fields,
                         &types,
                         &qualifiers,
-                        &nodes,
-                        &replaced,
-                        &dirty_base,
+                        nodes,
+                        replaced,
+                        dirty_base,
                         &facts,
                     ) else {
                         continue;
@@ -4870,9 +4860,9 @@ pub(super) fn resolve_edges(
                         &mut base_metas,
                         (&types, &qualifiers),
                         &variants,
-                        &nodes,
-                        &replaced,
-                        &dirty_base,
+                        nodes,
+                        replaced,
+                        dirty_base,
                         &facts,
                         rust_tree,
                         &mut variant_cache,
@@ -4909,9 +4899,9 @@ pub(super) fn resolve_edges(
                         &fields,
                         &types,
                         &qualifiers,
-                        &nodes,
-                        &replaced,
-                        &dirty_base,
+                        nodes,
+                        replaced,
+                        dirty_base,
                         &facts,
                         Scope {
                             call: None,
@@ -4927,9 +4917,9 @@ pub(super) fn resolve_edges(
                         caller,
                         &mut base_metas,
                         &fields,
-                        &nodes,
-                        &replaced,
-                        &dirty_base,
+                        nodes,
+                        replaced,
+                        dirty_base,
                         &facts,
                         (None, false),
                         &OnceCell::new(),

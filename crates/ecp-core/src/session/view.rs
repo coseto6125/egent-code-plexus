@@ -531,7 +531,7 @@ impl OverlayView {
         // `Foo1<T>.foo`) → its file's input position, and the first and each
         // twin with the span of the type that declares it: the index's
         // `SymbolTable::twin_read_from`.
-        let mut member_twins: FxHashMap<u32, (usize, Vec<(u32, Span)>)> = FxHashMap::default();
+        let mut member_twins: resolution::MemberTwins = FxHashMap::default();
 
         for (file_ord, file) in files.iter().enumerate() {
             let rel: Arc<str> = Arc::from(file.rel_path.as_str());
