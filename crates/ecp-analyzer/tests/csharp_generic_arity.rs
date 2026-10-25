@@ -14,8 +14,10 @@
 
 mod overrides_support;
 
+use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::graph::{NodeKind, RelType, ZeroCopyGraph};
 use overrides_support::edge_ends;
+use std::path::Path;
 
 fn csharp_graph(source: &str) -> ZeroCopyGraph {
     overrides_support::graph_of(
@@ -379,4 +381,151 @@ fn test_function_meta_csharp_internal_markers_not_decorators() {
         overriding.iter().flatten().all(|d| !d.starts_with("__")),
         "no internal marker: {overriding:?}"
     );
+}
+
+const ATTRIBUTES: &str = "namespace N
+{
+    public class Attr : System.Attribute {}
+    public class Attr<T> : System.Attribute {}
+}
+";
+
+const ATTRIBUTES_REVERSED: &str = "namespace N
+{
+    public class Attr<T> : System.Attribute {}
+    public class Attr : System.Attribute {}
+}
+";
+
+/// Stands for: attribute classes of two generic arities in one file are two
+/// named `Annotation` nodes, in either declaration order, and the build
+/// records no uid collision for them. Before the fix the arity of `Attr<T>`
+/// read 0, so it was an empty-named tombstone with a `uid-collision`
+/// BlindSpot.
+#[test]
+fn test_build_csharp_attribute_classes_of_both_arities_both_orders_each_named() {
+    for source in [ATTRIBUTES, ATTRIBUTES_REVERSED] {
+        let graph = csharp_graph(source);
+        assert_eq!(
+            rows(&graph, NodeKind::Annotation),
+            named(&[(2, "Attr"), (3, "Attr")]),
+            "{source}"
+        );
+        let collisions = overrides_support::blind_spots(&graph, "uid-collision");
+        assert!(collisions.is_empty(), "{source}: {collisions:?}");
+    }
+}
+
+/// `(name, generic arity)` of every node of `kind` in one parsed C# file,
+/// as the parser states them before the build.
+fn parsed_arities(kind: NodeKind, source: &str) -> Vec<(String, u32)> {
+    let provider = ecp_analyzer::c_sharp::parser::CSharpProvider::new().unwrap();
+    let local = provider
+        .parse_file(Path::new("App/Shapes.cs"), source.as_bytes())
+        .unwrap();
+    local
+        .nodes
+        .iter()
+        .filter(|n| n.kind == kind)
+        .map(|n| (n.name.as_str().to_string(), n.generic_arity()))
+        .collect()
+}
+
+/// Stands for: an attribute class with no type parameter states arity 0, and
+/// `Attr<T, U>` states its two parameters, as a class does. Before the fix
+/// `Attr<T, U>` stated 0.
+#[test]
+fn test_parse_csharp_attribute_class_arity_follows_type_parameters() {
+    assert_eq!(
+        parsed_arities(
+            NodeKind::Annotation,
+            "namespace N
+{
+    public class Attr : System.Attribute {}
+    public class Attr<T, U> : System.Attribute {}
+}
+"
+        ),
+        [("Attr".to_string(), 0), ("Attr".to_string(), 2)]
+    );
+}
+
+/// Stands for: an attribute class nested in a generic class states its own
+/// type parameters, not the outer class's: here none, so arity 0.
+#[test]
+fn test_parse_csharp_attribute_nested_in_generic_class_arity_is_its_own() {
+    assert_eq!(
+        parsed_arities(
+            NodeKind::Annotation,
+            "namespace N
+{
+    public class Outer<T>
+    {
+        public class Attr : System.Attribute {}
+    }
+}
+"
+        ),
+        [("Attr".to_string(), 0)]
+    );
+}
+
+/// Stands for: properties of arity-twin attribute classes keep their own
+/// nodes. `Attr.foo` and `Attr<T>.foo` are two named properties, because the
+/// member's enclosing type is found among the arity-declaring kinds, which
+/// now include `Annotation`. Before the fix the second `foo` was a tombstone
+/// with a `uid-collision` BlindSpot.
+#[test]
+fn test_build_csharp_property_of_attribute_arity_twins_own_node() {
+    let graph = csharp_graph(
+        "namespace N
+{
+    public class Attr : System.Attribute
+    {
+        public object foo { get; set; }
+    }
+    public class Attr<T> : System.Attribute
+    {
+        public T foo { get; set; }
+    }
+}
+",
+    );
+    assert_eq!(
+        rows(&graph, NodeKind::Property),
+        named(&[(4, "foo"), (8, "foo")])
+    );
+    let collisions = overrides_support::blind_spots(&graph, "uid-collision");
+    assert!(collisions.is_empty(), "{collisions:?}");
+}
+
+/// Stands for: the parts of a `partial` attribute class of a generic arity
+/// are one type. The part that lists `System.Attribute` (`A<T>`, the
+/// representative as the base-list part) and the plain part `A<T>` join one
+/// group, in either file order. Before the fix the attribute part stated
+/// arity 0, so the two parts never grouped and no `PartOf` edge existed.
+#[test]
+fn test_build_csharp_partial_attribute_class_of_generic_arity_parts_group() {
+    let attribute = "namespace N\n{\n    public partial class A<T> : System.Attribute {}\n}\n";
+    let plain = "namespace N\n{\n    public partial class A<T> {}\n}\n";
+    for files in [
+        [("App/A.cs", plain), ("App/A.Attr.cs", attribute)],
+        [("App/A.Attr.cs", attribute), ("App/A.cs", plain)],
+    ] {
+        let graph = overrides_support::graph_of_projects(
+            &ecp_analyzer::c_sharp::parser::CSharpProvider::new().unwrap(),
+            &files,
+            &["App"],
+        );
+        let mut ends: Vec<(String, String)> = edge_ends(&graph, RelType::PartOf)
+            .into_iter()
+            .map(|(source, target)| (source.file, target.file))
+            .collect();
+        ends.sort();
+        assert_eq!(
+            ends,
+            [("App/A.cs".to_string(), "App/A.Attr.cs".to_string())],
+            "one PartOf edge from the plain part to the attribute part"
+        );
+    }
 }

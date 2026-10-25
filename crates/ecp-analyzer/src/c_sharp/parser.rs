@@ -8,6 +8,7 @@ use crate::framework_helpers::{
 use crate::function_meta::subtree_contains_kind;
 use crate::parse_budget::{parse_with_budget, ParseBudget};
 use ecp_core::analyzer::lang_spec::LangSpec;
+use ecp_core::analyzer::lexical::declares_arity;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{BlindSpot, LocalGraph, RawImport, RawNode};
 use ecp_core::graph::NodeKind;
@@ -667,8 +668,7 @@ impl LanguageProvider for CSharpProvider {
                         // own; the identity numbering reads the arity off
                         // this marker. A delegate is the one `Function` that
                         // carries it (`lexical::splits_by_arity`).
-                        let declares_arity = k.is_type() || root.kind() == "delegate_declaration";
-                        let arity = if declares_arity {
+                        let arity = if declares_arity(k) || root.kind() == "delegate_declaration" {
                             generic_arity(root)
                         } else {
                             0
