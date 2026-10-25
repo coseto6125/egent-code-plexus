@@ -103,7 +103,8 @@ use std::path::Path;
 /// language rule.
 /// schema30: Overrides bind the nearest declaration along each language's
 /// lookup order and carry the base's resolver confidence; Swift records the
-/// override modifier; Dart heritage lists with-mixins.
+/// override modifier; Dart heritage lists with-mixins; Java interface
+/// heritage lists its extends-list; a C# delegate carries its return type.
 pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema30");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

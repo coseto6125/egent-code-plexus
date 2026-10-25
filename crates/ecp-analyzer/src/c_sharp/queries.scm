@@ -84,7 +84,7 @@
 (delegate_declaration
   (attribute_list)* @decorator
   (modifier)* @export
-  returns: (_)? @type
+  type: (_)? @type
   name: (identifier) @name.function
 ) @function
 
