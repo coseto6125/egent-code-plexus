@@ -252,7 +252,39 @@ const GO_VALUE_RECEIVER_POST_FILTER: Row = Row {
     expected: &[("run", &[("Present", "util/util.go", IMPORT_SCOPED)])],
 };
 
-const ROWS: [&Row; 10] = [
+/// Row 11. The nested `function Widget` in `outer` is out of reach of `make`:
+/// the lexical lookup is `Shadowed`. The callable import tier misses (a class
+/// is no callable), so the constructor fallback runs through the import
+/// tiers alone and binds the imported class's constructor at 0.95, never the
+/// nested function.
+const TS_LEXICAL_SHADOWED_CONSTRUCTOR_FALLBACK: Row = Row {
+    name: "ts_lexical_shadowed_constructor_fallback",
+    files: &[
+        ("src/widget.ts", "export class Widget {\n  constructor() {}\n}\n"),
+        (
+            "src/main.ts",
+            "import { Widget } from './widget';\n\nfunction outer() {\n  function Widget() {}\n}\n\nfunction make() {\n  return new Widget();\n}\n",
+        ),
+    ],
+    caller_file: "src/main.ts",
+    expected: &[("make", &[("constructor", "src/widget.ts", IMPORT_SCOPED)])],
+};
+
+/// Row 12. Row 11 in JavaScript.
+const JS_LEXICAL_SHADOWED_CONSTRUCTOR_FALLBACK: Row = Row {
+    name: "js_lexical_shadowed_constructor_fallback",
+    files: &[
+        ("src/widget.js", "export class Widget {\n  constructor() {}\n}\n"),
+        (
+            "src/main.js",
+            "import { Widget } from './widget';\n\nfunction outer() {\n  function Widget() {}\n}\n\nfunction make() {\n  return new Widget();\n}\n",
+        ),
+    ],
+    caller_file: "src/main.js",
+    expected: &[("make", &[("constructor", "src/widget.js", IMPORT_SCOPED)])],
+};
+
+const ROWS: [&Row; 12] = [
     &KOTLIN_EXTERNAL_EXTENSION_RETRY,
     &PYTHON_AMBIGUOUS_CONSTRUCTOR_FALLBACK,
     &CPP_QUALIFIED_MISS_CONSTRUCTOR_FALLBACK,
@@ -263,6 +295,8 @@ const ROWS: [&Row; 10] = [
     &PYTHON_SUBMODULE_MEMBER_BOUND,
     &PYTHON_UNTYPED_POST_FILTER,
     &GO_VALUE_RECEIVER_POST_FILTER,
+    &TS_LEXICAL_SHADOWED_CONSTRUCTOR_FALLBACK,
+    &JS_LEXICAL_SHADOWED_CONSTRUCTOR_FALLBACK,
 ];
 
 /// `name` of a snapshot node line `<kind> <file>:<line> <name> #<uid>`, with its file.
@@ -431,10 +465,21 @@ fn test_resolve_call_go_value_receiver_post_filter_refuses_free_function() {
     pin_row(&GO_VALUE_RECEIVER_POST_FILTER);
 }
 
+#[test]
+fn test_resolve_imported_call_ts_lexical_shadowed_constructor_fallback_binds_constructor() {
+    pin_row(&TS_LEXICAL_SHADOWED_CONSTRUCTOR_FALLBACK);
+}
+
+#[test]
+fn test_resolve_imported_call_js_lexical_shadowed_constructor_fallback_binds_constructor() {
+    pin_row(&JS_LEXICAL_SHADOWED_CONSTRUCTOR_FALLBACK);
+}
+
 /// Both resolvers decide every row from one `Resolution`, so the overlay's
-/// `Calls` edges equal the index's on every row. Row 10 is the one where
-/// the overlay decided differently before R1b: its closure skipped the
-/// untyped post-filter for a Go value receiver.
+/// `Calls` edges equal the index's on every row. Rows 10, 11 and 12 are the
+/// ones where the overlay decided differently before R1b: its closure skipped
+/// the untyped post-filter for a Go value receiver, and its lexical-shadow
+/// branch skipped the constructor fallback.
 #[test]
 fn test_resolve_call_index_and_overlay_same_fallback_decision_all_rows() {
     let differing: Vec<(&str, BTreeSet<String>)> = ROWS

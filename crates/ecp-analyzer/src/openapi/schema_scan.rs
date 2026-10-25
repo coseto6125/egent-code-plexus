@@ -242,10 +242,11 @@ fn key_spans(source: &[u8], section: &[&str]) -> KeySpans {
     };
     let root = tree.root_node();
     let mut cursor = root.walk();
+    // A `%YAML` / `%TAG` directive or a comment can precede the root node.
     let Some(mut node) = root
         .children(&mut cursor)
         .find(|child| child.kind() == "document")
-        .and_then(|doc| doc.named_child(0))
+        .and_then(|doc| first_named_child(doc, |kind| matches!(kind, "block_node" | "flow_node")))
     else {
         return spans;
     };
@@ -279,7 +280,9 @@ fn key_spans(source: &[u8], section: &[&str]) -> KeySpans {
 fn mapping_pairs<'t>(node: Node<'t>, source: &'t [u8]) -> Vec<((&'t str, Span), Node<'t>)> {
     let mut target = node;
     while matches!(target.kind(), "block_node" | "flow_node") {
-        match target.named_child(0) {
+        // An anchor (`Pet: &pet`), a tag (`!!map`) or a comment can precede
+        // the node's content.
+        match first_named_child(target, |kind| !matches!(kind, "anchor" | "tag" | "comment")) {
             Some(child) => target = child,
             None => return Vec::new(),
         }
@@ -306,6 +309,15 @@ fn mapping_pairs<'t>(node: Node<'t>, source: &'t [u8]) -> Vec<((&'t str, Span), 
             Some(((text, pair_span(&pair)), value))
         })
         .collect()
+}
+
+/// The first named child of `node` whose kind `keep` accepts.
+fn first_named_child<'t>(node: Node<'t>, keep: impl Fn(&str) -> bool) -> Option<Node<'t>> {
+    let mut cursor = node.walk();
+    let child = node
+        .named_children(&mut cursor)
+        .find(|child| keep(child.kind()));
+    child
 }
 
 /// The span of a mapping pair. A block pair that ends the document ends past

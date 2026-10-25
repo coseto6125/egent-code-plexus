@@ -80,9 +80,10 @@ pub enum Reach {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NoEdge {
     Unresolved,
-    /// Several candidates fit; the count (saturating) tells a reader how
-    /// many, so a later slice can tag the "global ambiguous" edge-less call.
-    Ambiguous(u16),
+    /// Several candidates fit; the true count, as the C4 contract's
+    /// `Evidence::Ambiguous { candidates }` carries it, so a later slice can
+    /// tag the "global ambiguous" edge-less call.
+    Ambiguous(u32),
     External,
     Hidden,
     Rejected,

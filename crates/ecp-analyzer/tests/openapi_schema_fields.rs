@@ -312,3 +312,39 @@ fn test_extract_fields_swagger_definitions_carry_key_rows() {
     let fields = parse_openapi("swagger.yaml", src);
     assert_eq!(field_row(&fields, "Tag", "label"), 7);
 }
+
+// Each row puts YAML syntax between a key and its mapping, or before the
+// root mapping. A walk that takes the first child for the mapping loses the
+// row, and the node falls back to the (0, 0, 0, 0) sentinel (line 1).
+
+#[test]
+fn test_extract_fields_anchor_before_schema_mapping_carries_key_rows() {
+    let src = "openapi: 3.0.0\ncomponents:\n  schemas:\n    Pet: &pet\n      properties: &pet_props\n        id:\n          type: integer\n";
+    assert_eq!(struct_rows("openapi.yaml", src, "Pet"), (3, 6));
+    let fields = parse_openapi("openapi.yaml", src);
+    assert_eq!(field_row(&fields, "Pet", "id"), 5);
+}
+
+#[test]
+fn test_extract_fields_tag_before_schema_mapping_carries_key_rows() {
+    let src = "openapi: 3.0.0\ncomponents:\n  schemas:\n    Pet: !!map\n      properties:\n        id:\n          type: integer\n";
+    assert_eq!(struct_rows("openapi.yaml", src, "Pet"), (3, 6));
+    let fields = parse_openapi("openapi.yaml", src);
+    assert_eq!(field_row(&fields, "Pet", "id"), 5);
+}
+
+#[test]
+fn test_extract_fields_comment_after_document_start_carries_key_rows() {
+    let src = "---\n# Pet store\nopenapi: 3.0.0\ncomponents:\n  schemas:\n    Pet:\n      # the pet\n      properties:\n        id:\n          type: integer\n";
+    assert_eq!(struct_rows("openapi.yaml", src, "Pet"), (5, 9));
+    let fields = parse_openapi("openapi.yaml", src);
+    assert_eq!(field_row(&fields, "Pet", "id"), 8);
+}
+
+#[test]
+fn test_extract_fields_yaml_directive_before_root_carries_key_rows() {
+    let src = "%YAML 1.2\n---\nopenapi: 3.0.0\ncomponents:\n  schemas:\n    Pet:\n      properties:\n        id:\n          type: integer\n";
+    assert_eq!(struct_rows("openapi.yaml", src, "Pet"), (5, 8));
+    let fields = parse_openapi("openapi.yaml", src);
+    assert_eq!(field_row(&fields, "Pet", "id"), 7);
+}

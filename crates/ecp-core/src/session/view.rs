@@ -590,19 +590,54 @@ impl OverlayView {
                                 let mut base_metas = chain_metas.borrow_mut();
                                 if let Some(targets) = lexical.targets(span_of(sym), parsed.name())
                                 {
-                                    break 'hit targets.first().copied().or_else(|| {
-                                        if matches!(parsed, CallSite::UntypedMember(_)) {
-                                            return None;
-                                        }
+                                    if let Some(&hit) = targets.first() {
+                                        break 'hit Some(hit);
+                                    }
+                                    // The index's `Resolver::resolve_imported_call`:
+                                    // the import tiers alone, for the callee and
+                                    // then for the type it constructs.
+                                    let site = parsed.fallback();
+                                    if matches!(site, CallSite::UntypedMember(_)) {
+                                        break 'hit None;
+                                    }
+                                    let import_scoped = |name: &str, target: ResolveTarget| {
                                         facts
-                                            .named_import(
-                                                file_ord,
-                                                &file.imports,
-                                                parsed.name(),
-                                                callables.target,
-                                            )
+                                            .named_import(file_ord, &file.imports, name, target)
                                             .map(|decl| (decl, CONF_IMPORT_SCOPED))
-                                    });
+                                    };
+                                    let mut resolution = Resolution::from_ladder(import_scoped(
+                                        site.name(),
+                                        callables.target,
+                                    ));
+                                    if resolution.call_fallbacks_allowed() {
+                                        // `named_import` memoizes per file, so the
+                                        // retry reads the file's own imports: only
+                                        // TS / JS has a lexical scope, and neither
+                                        // drops them for the last segment.
+                                        if let Some((ty, confidence)) = resolve_constructed_type(
+                                            graph,
+                                            site,
+                                            caller.language,
+                                            &file.imports,
+                                            &types,
+                                            &nodes,
+                                            |name, _| import_scoped(name, ResolveTarget::Type),
+                                        ) {
+                                            let target = *construction_targets
+                                                .entry(ty)
+                                                .or_insert_with(|| {
+                                                    construction_target(
+                                                        graph,
+                                                        &nodes,
+                                                        &type_ctors,
+                                                        ty,
+                                                    )
+                                                });
+                                            resolution =
+                                                Resolution::from_ladder(Some((target, confidence)));
+                                        }
+                                    }
+                                    break 'hit resolution.edge();
                                 }
                                 // The index's `Resolver::resolve_call`. A Python
                                 // from-imported submodule and a mapped Go package
@@ -802,17 +837,28 @@ impl OverlayView {
                                     if let Some((ty, confidence)) = resolve_constructed_type(
                                         graph,
                                         site,
-                                        file_ord,
+                                        caller.language,
                                         &file.imports,
-                                        caller,
-                                        &mut base_metas,
                                         &types,
-                                        &qualifiers,
                                         &nodes,
-                                        &replaced,
-                                        &dirty_base,
-                                        &facts,
-                                        scope,
+                                        |name, imports| {
+                                            resolve_callee(
+                                                graph,
+                                                CallSite::Plain(name),
+                                                file_ord,
+                                                imports,
+                                                caller,
+                                                &mut base_metas,
+                                                &types,
+                                                &types,
+                                                &qualifiers,
+                                                &nodes,
+                                                &replaced,
+                                                &dirty_base,
+                                                &facts,
+                                                scope,
+                                            )
+                                        },
                                     ) {
                                         let target =
                                             *construction_targets.entry(ty).or_insert_with(|| {
@@ -4452,31 +4498,26 @@ fn resolve_rust_module_callee(
         .then_some((target, CONF_MODULE_TREE))
 }
 
-/// Mirror of the index-time constructor fallback (`Resolver::resolve_call`)
-/// up to the constructed type: a site the callable tiers left empty resolves
-/// the Class / Struct it constructs; [`construction_target`] then picks the
-/// edge's target. The whole type path resolves first, as the index does:
-/// `u.Widget()` binds through `import pkg as u`, `Outer.Inner()` through
-/// the qualifier tier. A qualified path that does not resolve retries its
-/// last segment only where [`CallSite::constructed_type`] allows that
-/// fallback.
-#[allow(clippy::too_many_arguments)]
+/// Mirror of the index-time constructor fallback
+/// (`Resolver::resolve_instantiation`) up to the constructed type: a site the
+/// callable tiers left empty resolves the Class / Struct it constructs;
+/// [`construction_target`] then picks the edge's target. `resolve` looks a
+/// type name up under the given imports, as the index's caller does: the
+/// whole ladder from `resolve_call`, the import tiers alone after a lexical
+/// shadow. The whole type path resolves first: `u.Widget()` binds through
+/// `import pkg as u`, `Outer.Inner()` through the qualifier tier. A qualified
+/// path that does not resolve retries its last segment only where
+/// [`CallSite::constructed_type`] allows that fallback.
 fn resolve_constructed_type<'s>(
     graph: &ArchivedZeroCopyGraph,
     site: CallSite<'s>,
-    file_ord: usize,
+    language: Language,
     imports: &'s [RawImport],
-    caller: FileMeta,
-    base_metas: &mut FxHashMap<usize, FileMeta>,
     types: &OverlayNames<'_>,
-    qualifiers: &OverlayNames<'_>,
     nodes: &[ViewNode],
-    replaced: &FxHashMap<u32, u32>,
-    dirty_base: &FxHashSet<u32>,
-    facts: &OverlayFacts<'_>,
-    scope: Scope<'_>,
+    mut resolve: impl FnMut(&'s str, &'s [RawImport]) -> Option<(u32, f32)>,
 ) -> Option<(u32, f32)> {
-    let (type_path, last_segment_fallback) = site.constructed_type(caller.language)?;
+    let (type_path, last_segment_fallback) = site.constructed_type(language)?;
     let type_name = type_path
         .rsplit(['.', ':', '\\'])
         .next()
@@ -4500,31 +4541,9 @@ fn resolve_constructed_type<'s>(
     {
         return None;
     }
-    let mut resolve = |name: &'s str, imports: &'s [RawImport]| {
-        resolve_callee(
-            graph,
-            CallSite::Plain(name),
-            file_ord,
-            imports,
-            caller,
-            base_metas,
-            types,
-            types,
-            qualifiers,
-            nodes,
-            replaced,
-            dirty_base,
-            facts,
-            scope,
-        )
-    };
     // A qualified type path (`new \App\User()`) never names its type
     // through a `use` of its last segment.
-    let retry_imports: &'s [RawImport] = if fqn_language(caller.language) {
-        &[]
-    } else {
-        imports
-    };
+    let retry_imports: &'s [RawImport] = if fqn_language(language) { &[] } else { imports };
     let (ty, confidence) = resolve(type_path, imports).or_else(|| {
         (qualified && last_segment_fallback).then(|| resolve(type_name, retry_imports))?
     })?;

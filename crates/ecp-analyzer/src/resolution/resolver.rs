@@ -736,8 +736,7 @@ impl<'a> Resolver<'a> {
         if let Some((node_id, import)) =
             self.python_submodule_member(source_file, language, site, raw_imports)
         {
-            targets = self.import_scoped(source_file, site.name(), import, node_id);
-            resolution = Resolution::bound(node_id, Tier::ImportScoped);
+            resolution = self.import_scoped(source_file, site.name(), import, node_id);
         } else if let CallSite::FromReceiver { receiver, member } = site {
             if language == Language::Go {
                 match reexport::go_package_lookup(
@@ -756,8 +755,7 @@ impl<'a> Resolver<'a> {
                         });
                         resolution = match bound {
                             Some((node_id, import)) => {
-                                targets = self.import_scoped(source_file, member, import, node_id);
-                                Resolution::bound(node_id, Tier::ImportScoped)
+                                self.import_scoped(source_file, member, import, node_id)
                             }
                             None => Resolution::NoEdge(NoEdge::PackageMissing),
                         };
@@ -1144,8 +1142,7 @@ impl<'a> Resolver<'a> {
         let mut resolution = if let Some((node_id, import)) =
             self.python_submodule_member(source_file, language, site, raw_imports)
         {
-            targets = self.import_scoped(source_file, site.name(), import, node_id);
-            Resolution::bound(node_id, Tier::ImportScoped)
+            self.import_scoped(source_file, site.name(), import, node_id)
         } else if matches!(site, CallSite::FromReceiver { receiver, .. }
         if language == Language::Python
             && receiver.contains('/')
@@ -1323,6 +1320,9 @@ impl<'a> Resolver<'a> {
             MemberHit::Bound(node_id, import, via) => {
                 *barrel = via;
                 self.import_scoped(source_file, symbol_name, import, node_id)
+                    .edge()
+                    .into_iter()
+                    .collect()
             }
             MemberHit::Unbound { .. } => Vec::new(),
         }
@@ -1360,7 +1360,10 @@ impl<'a> Resolver<'a> {
                     symbol_name,
                     &raw_imports[hit.position],
                     hit.decl,
-                ),
+                )
+                .edge()
+                .into_iter()
+                .collect(),
                 hit.barrel,
             ),
             None => (Vec::new(), None),
@@ -1489,8 +1492,8 @@ impl<'a> Resolver<'a> {
         symbol_name: &str,
         import: &RawImport,
         node_id: NodeId,
-    ) -> Vec<(NodeId, f32)> {
-        let confidence = ResolutionTier::ImportScoped.base_confidence();
+    ) -> Resolution {
+        let resolution = Resolution::bound(node_id, Tier::ImportScoped);
         self.record(
             &normalize_source_path(source_file),
             symbol_name,
@@ -1498,9 +1501,9 @@ impl<'a> Resolver<'a> {
             DecisionTier::ImportScoped,
             Some(node_id),
             0,
-            Some(confidence),
+            resolution.edge().map(|(_, confidence)| confidence),
         );
-        vec![(node_id, confidence)]
+        resolution
     }
 
     /// The bare-member retry of a Kotlin call through a class binding
@@ -1715,7 +1718,11 @@ impl<'a> Resolver<'a> {
             ) {
                 MemberHit::Bound(node_id, import, via) => {
                     *barrel = via;
-                    return self.import_scoped(source_file, symbol_name, import, node_id);
+                    return self
+                        .import_scoped(source_file, symbol_name, import, node_id)
+                        .edge()
+                        .into_iter()
+                        .collect();
                 }
                 MemberHit::Unbound { bound } => wildcard_open = !bound && fqn_language(language),
             }
@@ -2045,7 +2052,11 @@ impl<'a> Resolver<'a> {
                 true,
             ) {
                 *barrel = via;
-                return self.import_scoped(source_file, symbol_name, import, node_id);
+                return self
+                    .import_scoped(source_file, symbol_name, import, node_id)
+                    .edge()
+                    .into_iter()
+                    .collect();
             }
         }
 
@@ -2171,11 +2182,6 @@ fn qualifier_prefix_is_internal(full_callee: &str, qualifier: &str) -> bool {
             .all(|s| matches!(s, "crate" | "self" | "super"))
 }
 
-/// The kinds a call site may reach. Rust method syntax (`x.f()`, recorded as
-/// `T.f` or as an untyped member) calls only methods: a free `fn` is never
-/// in scope through `.`. Paths use `::`, so a Rust callee holds `.` only
-/// when it was written with method syntax. Python / JS `obj.f()` can reach a
-/// module function, so other languages keep `Callable`.
 /// The index ladder's answer as a [`Resolution`]. Every tier answers with
 /// at most one target (B §3.4), so the first is the edge.
 fn ladder_resolution(targets: &[(NodeId, f32)]) -> Resolution {
@@ -2183,6 +2189,11 @@ fn ladder_resolution(targets: &[(NodeId, f32)]) -> Resolution {
     Resolution::from_ladder(targets.first().copied())
 }
 
+/// The kinds a call site may reach. Rust method syntax (`x.f()`, recorded as
+/// `T.f` or as an untyped member) calls only methods: a free `fn` is never
+/// in scope through `.`. Paths use `::`, so a Rust callee holds `.` only
+/// when it was written with method syntax. Python / JS `obj.f()` can reach a
+/// module function, so other languages keep `Callable`.
 fn call_target(source_file: &Path, site: CallSite<'_>) -> ResolveTarget {
     if site.uses_method_syntax() && is_rust_source(source_file) {
         ResolveTarget::Method

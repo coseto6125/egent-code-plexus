@@ -1,12 +1,8 @@
-/// Heuristics for resolving symbols to global nodes.
-/// Ports the exact ResolutionTier and confidence scoring from original GitNexus.
+//! Heuristics for resolving symbols to global nodes.
+//! Ports the exact ResolutionTier and confidence scoring from original GitNexus.
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum FallbackReason {
-    ImplicitSelf,
-    VueComponent,
-    Unknown,
-}
+use ecp_core::analyzer::outcome::Tier;
+pub use ecp_core::analyzer::types::{NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ResolutionTier {
@@ -33,11 +29,7 @@ pub enum ResolutionTier {
     /// taken. Path proximity is a heuristic, so the edge stays below the
     /// Global tier and carries its own reason ([`NEAREST_COPY_REASON`]).
     NearestCopy,
-    Fallback(FallbackReason),
 }
-
-use ecp_core::analyzer::outcome::Tier;
-pub use ecp_core::analyzer::types::{NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON};
 
 impl ResolutionTier {
     /// Returns the base confidence score for the resolution tier. A tier
@@ -51,11 +43,6 @@ impl ResolutionTier {
             ResolutionTier::HeritageScoped => Tier::HeritageScoped.confidence(),
             ResolutionTier::Global => Tier::Global.confidence(),
             ResolutionTier::NearestCopy => Tier::NearestCopy.confidence(),
-            ResolutionTier::Fallback(reason) => match reason {
-                FallbackReason::ImplicitSelf => 0.8,
-                FallbackReason::VueComponent => 0.8,
-                FallbackReason::Unknown => 0.4,
-            },
         }
     }
 }
