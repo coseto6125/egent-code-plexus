@@ -35,7 +35,10 @@ pub const GRAPH_MAGIC: [u8; 8] = *b"ECP-RS\0\0";
 /// v15: `route_middleware` (each Route's middleware, outermost group first).
 /// v16: `workspace` (the C2 Cargo crate table: each member's root, entry
 ///     files and crate names), so the overlay resolves `other_crate::f()`.
-pub const GRAPH_FORMAT_VERSION: u32 = 16;
+/// v17: `lexical_parents` (each lexically scoped declaration's parent node,
+///     sorted by node), so a scoped declaration never answers a global or
+///     file-level name lookup and its display owner names its parent chain.
+pub const GRAPH_FORMAT_VERSION: u32 = 17;
 
 impl std::str::FromStr for NodeKind {
     type Err = ();
@@ -908,6 +911,19 @@ pub struct RouteMiddleware {
     pub middleware: Vec<StrRef>,
 }
 
+/// One scoped node (contract C1: a declaration whose lexical parent is a
+/// callable) and that parent, both indices into `ZeroCopyGraph.nodes`. A
+/// scoped node has no owner, so without this row a reader cannot tell a
+/// nested `helper` from a top-level one: the overlay's name tiers would
+/// bind it from another scope (invariant I5), and a display owner, rename
+/// or diff identity would print it as top level.
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+pub struct LexicalParentFact {
+    pub node_idx: u32,
+    pub parent_idx: u32,
+}
+
 /// File-level record of a truly unresolvable code pattern (eval/dynamic
 /// import/cross-object reflection/...). Persisted in the graph so that
 /// `ecp context` / `ecp admin index` can surface blind spots to the LLM,
@@ -1285,6 +1301,12 @@ pub struct ZeroCopyGraph {
     /// `<crate_name>::path::f()` head like the index's module-tree tier.
     /// Empty for a repo with no root `Cargo.toml`.
     pub workspace: crate::contracts::workspace::WorkspaceFacts,
+
+    // ── Schema v17 additions ─────────────────────────────────────────
+    /// Sparse, sorted by `node_idx`: one row per scoped node, see
+    /// [`LexicalParentFact`]. Empty while no language opts in
+    /// ([`crate::analyzer::lexical::lexical_scope_kinds`]).
+    pub lexical_parents: Vec<LexicalParentFact>,
 }
 
 impl ZeroCopyGraph {
@@ -1494,6 +1516,58 @@ impl ArchivedZeroCopyGraph {
         .unwrap_or_default()
     }
 
+    /// The lexical parent of `node_idx`: the callable that declares it.
+    /// `None` for an unscoped node, which is every node while no language
+    /// opts in, and for an index past `nodes`.
+    pub fn lexical_parent(&self, node_idx: u32) -> Option<u32> {
+        self.lexical_parents
+            .binary_search_by_key(&node_idx, |fact| fact.node_idx.to_native())
+            .ok()
+            .map(|at| self.lexical_parents[at].parent_idx.to_native())
+    }
+
+    /// Whether `node_idx` is scoped: only the lexical tier may bind it
+    /// (invariant I5), so every name-tier candidate source drops it.
+    pub fn is_lexically_scoped(&self, node_idx: u32) -> bool {
+        self.lexical_parent(node_idx).is_some()
+    }
+
+    /// The owner text a reader prints for `node_idx` (design A §4.5): its
+    /// `owner_class` when set; for a scoped node, the display owner of its
+    /// lexical parent and then the parent's name, joined by `::` (the
+    /// parent's name alone when the parent has none); else `None`.
+    ///
+    /// A nested `helper` in `impl A { fn new }` prints `A::new`. `None`
+    /// also for an index past `nodes` and for rows that form a cycle, which
+    /// only a corrupt table holds.
+    pub fn display_owner(&self, node_idx: u32) -> Option<std::borrow::Cow<'_, str>> {
+        let pool = &self.string_pool;
+        let mut segments: Vec<&str> = Vec::new();
+        let mut current = node_idx;
+        let head = loop {
+            let owner = self.nodes.get(current as usize)?.owner_class.resolve(pool);
+            if !owner.is_empty() {
+                break Some(owner);
+            }
+            let Some(parent) = self.lexical_parent(current) else {
+                break None;
+            };
+            // Each row is one step, so more steps than rows is a cycle.
+            if segments.len() >= self.lexical_parents.len() {
+                return None;
+            }
+            segments.push(self.nodes.get(parent as usize)?.name.resolve(pool));
+            current = parent;
+        };
+        segments.extend(head);
+        segments.reverse();
+        match segments.as_slice() {
+            [] => None,
+            [only] => Some(std::borrow::Cow::Borrowed(*only)),
+            _ => Some(std::borrow::Cow::Owned(segments.join("::"))),
+        }
+    }
+
     pub fn is_es_module_file(&self, file_idx: u32) -> bool {
         self.file_flags
             .get(file_idx as usize)
@@ -1588,6 +1662,7 @@ impl Default for ZeroCopyGraph {
             supertype_table: Vec::new(),
             route_middleware: Vec::new(),
             workspace: Default::default(),
+            lexical_parents: Vec::new(),
         }
     }
 }

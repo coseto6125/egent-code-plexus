@@ -7,7 +7,9 @@ use crate::resolution::heuristics::{ResolutionTier, NEAREST_COPY_CONFIDENCE, NEA
 use crate::resolution::index::{FileMeta, Language, ResolveTarget, SymbolTable};
 use crate::resolution::resolver::{ReexportIndex, Resolver};
 use crate::rust::module_tree::RustWorkspaceModTree;
-use ecp_core::analyzer::lexical::{file_identities, file_uids, raw_decl, LexicalFunctions};
+use ecp_core::analyzer::lexical::{
+    file_identities, file_uids, lexical_scope_kinds, raw_decl, LexicalFunctions,
+};
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::reexport::{export_filter_applies, is_ecmascript, ImportRef};
 use ecp_core::analyzer::type_ladder;
@@ -17,14 +19,14 @@ use ecp_core::analyzer::types::{
 pub use ecp_core::analyzer::types::{
     FUNCTION_REFERENCE_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
 };
-use ecp_core::contracts::identity::UidSlot;
+use ecp_core::contracts::identity::{lexical_parents, UidSlot};
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
 use ecp_core::contracts::routing::{FileRouter, Language as RouteLanguage};
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::{
     BlindSpotRecord, CallMeta, Edge, ExportAliasFact, File, FileCategory, FunctionMeta, ImportFact,
-    Node, NodeKind, PathAliasFact, RelType, RouteMiddleware, RouteShape, SupertypeFact,
-    ZeroCopyGraph, FILE_FLAG_ES_MODULE,
+    LexicalParentFact, Node, NodeKind, PathAliasFact, RelType, RouteMiddleware, RouteShape,
+    SupertypeFact, ZeroCopyGraph, FILE_FLAG_ES_MODULE,
 };
 use ecp_core::graph_assembly::{GraphAssembly, ModuleFactTables};
 use ecp_core::pool::{StrRef, StringPool};
@@ -276,6 +278,12 @@ impl GraphBuilder {
             .expect("total RawNode count exceeds u32::MAX — graph node ID scheme would overflow")
             .with_merged(merged)
             .expect("pass 1 pairs each tombstone with an earlier slot that is no tombstone");
+        // Before Pass 2: the name tiers must drop a scoped node (I5) from
+        // their first lookup on. The same rows become the v17 graph table.
+        let lexical_table = record_lexical_parents(&self.local_graphs, &raw_map);
+        for fact in &lexical_table {
+            symbol_table.note_lexical_parent(fact.node_idx, fact.parent_idx);
+        }
         // Edges from a record bound to `File`; the `File` nodes are appended
         // after the passes that emit them (C4 Open point 3, option b).
         let mut file_edges: Vec<(FileOrd, Edge)> = Vec::new();
@@ -922,6 +930,7 @@ impl GraphBuilder {
             alias_table,
             supertype_table,
             workspace,
+            lexical_parents: lexical_table,
         }
         .finish();
 
@@ -1066,6 +1075,44 @@ fn file_base(raw_map: &RawIndexMap, file_idx: u32) -> u32 {
     raw_map
         .range(FileOrd(file_idx))
         .map_or_else(|| raw_map.end(), |range| range.start)
+}
+
+/// The v17 lexical-parent table: one row per scoped node, from
+/// [`lexical_parents`] over each file's `(kind, span)`, as
+/// [`file_identities`] derives the parents for the uids. A parent that
+/// Pass 1 tombstoned maps to its surviving twin. A tombstoned scoped node
+/// gets no row: its twin owns the identity and gets its own. Empty while no
+/// language opts in ([`lexical_scope_kinds`]).
+fn record_lexical_parents(
+    local_graphs: &[LocalGraph],
+    raw_map: &RawIndexMap,
+) -> Vec<LexicalParentFact> {
+    let mut table = Vec::new();
+    for (file, local_graph) in local_graphs.iter().enumerate() {
+        let path = local_graph.file_path.to_string_lossy();
+        let scoped = lexical_scope_kinds(Language::from_path(&path));
+        if scoped.is_empty() {
+            continue;
+        }
+        let file = FileOrd(file as u32);
+        let decls: Vec<_> = local_graph.nodes.iter().map(|n| (n.kind, n.span)).collect();
+        for (raw, parent) in lexical_parents(&decls, scoped).into_iter().enumerate() {
+            let raw = RawIdx(raw as u32);
+            let (Some(node_idx), Some(parent_idx)) = (
+                raw_map.node(file, raw),
+                parent.and_then(|parent| raw_map.node(file, RawIdx(parent))),
+            ) else {
+                continue;
+            };
+            if raw_map.slot(file, raw) == Some(node_idx) {
+                table.push(LexicalParentFact {
+                    node_idx,
+                    parent_idx,
+                });
+            }
+        }
+    }
+    table
 }
 
 fn file_indices(local_graphs: &[LocalGraph]) -> FxHashMap<String, u32> {

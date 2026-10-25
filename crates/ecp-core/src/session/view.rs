@@ -118,7 +118,7 @@ use crate::analyzer::import_binding::{
     extension_retry, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
     import_member_fallback, owner_path_agrees, retry_name, DeclaredType, MemberOwner,
 };
-use crate::analyzer::lexical::{file_identities, LexicalFunctions};
+use crate::analyzer::lexical::{file_identities, lexical_scope_kinds, LexicalFunctions};
 use crate::analyzer::outcome::{NoEdge, Resolution, Tier};
 use crate::analyzer::path_aliases::PathAliases;
 use crate::analyzer::reexport::{
@@ -142,7 +142,7 @@ use crate::analyzer::types::{
     NEAREST_COPY_REASON, OVERLOAD_SET_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON,
     VARIANT_USE_REASON,
 };
-use crate::contracts::identity::{pair_by_anchor, DeclIdentity, UidSlot};
+use crate::contracts::identity::{lexical_parents, pair_by_anchor, DeclIdentity, UidSlot};
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -2024,6 +2024,10 @@ struct OverlayFacts<'a> {
     /// Virtual idx → the return type the dirty function declares, as
     /// written ([`OverlaySymbol::return_type`]). Sparse.
     dirty_return_types: FxHashMap<u32, &'a str>,
+    /// Scoped virtual idx → its lexical parent's virtual idx, from the
+    /// fresh parse as the index derives its table. A virtual node has no
+    /// row in the graph's table. Sparse: empty while no language opts in.
+    dirty_lexical_parents: FxHashMap<u32, u32>,
 }
 
 /// A base Rust `Impl` node: its span, its idx and the [`owner_key`] of the
@@ -2051,6 +2055,7 @@ impl<'a> OverlayFacts<'a> {
         let mut es_modules = Vec::with_capacity(files.len());
         let mut dirty_aliases = Vec::with_capacity(files.len());
         let mut dirty_return_types: FxHashMap<u32, &'a str> = FxHashMap::default();
+        let mut dirty_lexical_parents: FxHashMap<u32, u32> = FxHashMap::default();
         let mut seen_uids: FxHashSet<u64> = FxHashSet::default();
         let mut offset = 0usize;
         for (file_ord, file) in files.iter().enumerate() {
@@ -2090,6 +2095,21 @@ impl<'a> OverlayFacts<'a> {
                 for (offset, scope) in rust_lexical_scopes(&file.symbols).into_iter().enumerate() {
                     if let Some(scope) = scope {
                         dirty_rust_lexical_scopes.insert(start + offset as u32, scope);
+                    }
+                }
+            }
+            let scoped = lexical_scope_kinds(Language::from_path(&file.rel_path));
+            if !scoped.is_empty() {
+                let start = base_len + first as u32;
+                // The fields `file_identities` numbers the file from.
+                let decls: Vec<(NodeKind, Span)> = file
+                    .symbols
+                    .iter()
+                    .map(|s| (s.kind, HeritageNode::span(s)))
+                    .collect();
+                for (offset, parent) in lexical_parents(&decls, scoped).into_iter().enumerate() {
+                    if let Some(parent) = parent {
+                        dirty_lexical_parents.insert(start + offset as u32, start + parent);
                     }
                 }
             }
@@ -2157,6 +2177,17 @@ impl<'a> OverlayFacts<'a> {
             dirty_supertypes: OnceCell::new(),
             dirty_impl_traits,
             dirty_return_types,
+            dirty_lexical_parents,
+        }
+    }
+
+    /// Whether `idx` is scoped: a virtual node by the dirty parse, a base
+    /// node by the graph's lexical-parent table.
+    fn is_lexically_scoped(&self, idx: u32) -> bool {
+        if idx >= self.base_len() {
+            self.dirty_lexical_parents.contains_key(&idx)
+        } else {
+            self.graph.is_lexically_scoped(idx)
         }
     }
 
@@ -2818,6 +2849,7 @@ impl<'a> ModuleFacts for OverlayFacts<'a> {
                 .map_or_else(Vec::new, |virts| {
                     virts
                         .iter()
+                        .filter(|&&virt| !self.dirty_lexical_parents.contains_key(&virt))
                         .map(|&virt| (virt, self.nodes[(virt - base_len) as usize].kind))
                         .collect()
                 });
@@ -2833,6 +2865,7 @@ impl<'a> ModuleFacts for OverlayFacts<'a> {
             .filter(|&idx| {
                 self.graph.nodes[idx as usize].file_idx.to_native() == file_idx
                     && !self.graph.is_later_overload(idx)
+                    && !self.graph.is_lexically_scoped(idx)
             })
             .map(|idx| (idx, NodeKind::from(&self.graph.nodes[idx as usize].kind)))
             .filter(|&(_, kind)| fragment_emits(kind))
@@ -3668,6 +3701,10 @@ impl PickFacts for OverlayFacts<'_> {
         self.node_file(id)
     }
 
+    fn is_lexically_scoped(&self, id: u32) -> bool {
+        OverlayFacts::is_lexically_scoped(self, id)
+    }
+
     fn types_named(&self, owner: &str) -> Vec<u32> {
         let mut types = self.global_named(owner);
         types.retain(|&id| self.kind_of(id).is_type());
@@ -3773,7 +3810,11 @@ impl TypeFacts for OverlayFacts<'_> {
     fn global_candidates(&self, name: &str, target: ResolveTarget, caller: FileMeta) -> Vec<u32> {
         let wanted = target.kind_predicate();
         let mut ids = self.global_named(name);
-        ids.retain(|&id| wanted(self.kind_of(id)) && caller.admits(self.meta_of(id)));
+        ids.retain(|&id| {
+            wanted(self.kind_of(id))
+                && caller.admits(self.meta_of(id))
+                && !self.is_lexically_scoped(id)
+        });
         ids
     }
 
@@ -3996,15 +4037,17 @@ fn resolve_callee<'s>(
     // Read from the call site, never from `site`: a retry under the short
     // name (`ImportBinding::Retry`) is no receiverless call.
     let free_only = call.is_some_and(|call| call.free_only);
+    // I5: a scoped node is no global candidate.
     let admits = |&(idx, _): &(u32, FileMeta)| {
-        !free_only
-            || (!is_method(idx)
-                && (caller.language != Language::Rust
-                    || facts.node_file(idx).is_some_and(|file| {
-                        crate::analyzer::same_file_pick::rust_free_global_candidate(
-                            facts, file, idx,
-                        )
-                    })))
+        !facts.is_lexically_scoped(idx)
+            && (!free_only
+                || (!is_method(idx)
+                    && (caller.language != Language::Rust
+                        || facts.node_file(idx).is_some_and(|file| {
+                            crate::analyzer::same_file_pick::rust_free_global_candidate(
+                                facts, file, idx,
+                            )
+                        }))))
     };
     // Tier 1: same-file, the index's `lookup_call_in_file`. At a call site
     // the pick narrows by owner (`prefer_owned`); when the file holds

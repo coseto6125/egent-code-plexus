@@ -53,10 +53,10 @@ pub struct ImplMember<'a> {
 /// handles in the caller's id space; owners compare by [`owner_key`].
 pub trait PickFacts {
     /// `file`'s declarations of `name` as a name lookup sees them (the
-    /// first of each uid, no later overload), in source order, any kind.
-    /// Each is followed by its later overloads that a Rust `impl` block
-    /// declares: members of several ownerless blocks share one uid, so all
-    /// but the first are overloads.
+    /// first of each uid, no later overload, no scoped node), in source
+    /// order, any kind. Each is followed by its later overloads that a Rust
+    /// `impl` block declares: members of several ownerless blocks share one
+    /// uid, so all but the first are overloads.
     fn pick_candidates(&self, file: &str, name: &str) -> Cow<'_, [u32]>;
     fn kind(&self, id: u32) -> NodeKind;
     /// The [`owner_key`] of the type declaring `id`; `None` at top level.
@@ -91,6 +91,11 @@ pub trait PickFacts {
     fn file_of(&self, id: u32) -> Option<&str>;
     /// Every type declaration named `owner` across the project.
     fn types_named(&self, owner: &str) -> Vec<u32>;
+    /// Whether `id` is scoped (contract C1): only the lexical tier binds
+    /// it, so every name-tier candidate source drops it (invariant I5).
+    /// The index reads its sparse map; the overlay reads its dirty map for
+    /// a virtual node and the graph's table for a base node.
+    fn is_lexically_scoped(&self, id: u32) -> bool;
     /// The transitive resolved supertypes of the type `ty`, breadth-first,
     /// each type once, `ty` excluded.
     fn ancestors(&self, ty: u32) -> Vec<u32>;
@@ -135,9 +140,11 @@ pub fn type_receiver_is_closed(language: Language) -> bool {
     )
 }
 
-/// Whether `id` has no owner and no `impl` block either.
+/// Whether `id` has no owner and no `impl` block either, and is no scoped
+/// declaration: a nested function has no owner, yet only its enclosing
+/// callable reaches it (I5).
 pub fn is_free<F: PickFacts + ?Sized>(facts: &F, id: u32) -> bool {
-    facts.owner(id).is_none() && facts.impl_member(id).is_none()
+    facts.owner(id).is_none() && facts.impl_member(id).is_none() && !facts.is_lexically_scoped(id)
 }
 
 /// Whether a Rust bare call may reach `id` outside its lexical function.
@@ -317,6 +324,19 @@ pub fn prefer_owned<F: PickFacts + ?Sized>(
     target: ResolveTarget,
     scope: PickScope,
 ) -> Option<u32> {
+    // I5: a lookup that keeps scoped nodes (`lookup_in_file_with_kind`) may
+    // hand one over; the first unscoped candidate of `target`'s kinds then
+    // stands in for it.
+    let pick = if facts.is_lexically_scoped(pick) {
+        let predicate = target.kind_predicate();
+        facts
+            .pick_candidates(file, member)
+            .iter()
+            .copied()
+            .find(|&id| predicate(facts.kind(id)))?
+    } else {
+        pick
+    };
     let caller = scope.caller;
     let untyped = scope.untyped_receiver;
     let owner = owner.and_then(owner_key);
@@ -714,15 +734,20 @@ mod tests {
         namespaces: Vec<&'static str>,
         /// `(type id, ancestors)`.
         ancestors: Vec<(u32, Vec<u32>)>,
+        /// Scoped ids, as the lexical-parent table marks them.
+        scoped: Vec<u32>,
     }
 
     impl PickFacts for Decls {
         fn pick_candidates(&self, _file: &str, name: &str) -> Cow<'_, [u32]> {
             Cow::Owned(
                 (0..self.decls.len() as u32)
-                    .filter(|&id| self.decls[id as usize].0 == name)
+                    .filter(|&id| self.decls[id as usize].0 == name && !self.scoped.contains(&id))
                     .collect(),
             )
+        }
+        fn is_lexically_scoped(&self, id: u32) -> bool {
+            self.scoped.contains(&id)
         }
         fn kind(&self, id: u32) -> NodeKind {
             self.decls[id as usize].1
@@ -1036,5 +1061,63 @@ mod tests {
         assert!(member_call_admits(&facts, 2, None));
         assert!(!member_call_admits(&facts, 2, Some("A")));
         assert!(!member_call_admits(&facts, 3, None));
+    }
+
+    /// Two ownerless `helper` functions; `scoped` lists the ids the
+    /// lexical-parent table marks.
+    fn twin_helpers(scoped: Vec<u32>) -> Decls {
+        Decls {
+            decls: vec![
+                ("helper", NodeKind::Function, None, None),
+                ("helper", NodeKind::Function, None, None),
+            ],
+            scoped,
+            ..Decls::default()
+        }
+    }
+
+    #[test]
+    fn test_is_free_scoped_declaration_returns_false() {
+        let facts = twin_helpers(vec![0]);
+        assert!(!is_free(&facts, 0), "a nested function is not free (I5)");
+        assert!(is_free(&facts, 1));
+        assert!(is_free(&twin_helpers(vec![]), 0), "control: no row");
+    }
+
+    #[test]
+    fn test_prefer_free_scoped_declaration_skipped_returns_top_level() {
+        let pick = |scoped| prefer_free(&twin_helpers(scoped), "f", "helper", None, CALLABLE);
+        assert_eq!(pick(vec![0]), Some(1));
+        assert_eq!(pick(vec![]), Some(0), "control: the first in source order");
+        assert_eq!(pick(vec![0, 1]), None, "every candidate is scoped");
+    }
+
+    #[test]
+    fn test_prefer_owned_scoped_pick_returns_unscoped_twin() {
+        let pick = |scoped| {
+            prefer_owned(
+                &twin_helpers(scoped),
+                "f",
+                0,
+                "helper",
+                None,
+                &[],
+                CALLABLE,
+                PickScope::default(),
+            )
+        };
+        assert_eq!(pick(vec![0]), Some(1));
+        assert_eq!(pick(vec![]), Some(0), "control: the pick stays");
+        assert_eq!(pick(vec![0, 1]), None, "no unscoped candidate stands in");
+    }
+
+    #[test]
+    fn test_member_call_admits_scoped_declaration_returns_false() {
+        let facts = Decls {
+            decls: vec![("helper", NodeKind::Function, None, None)],
+            scoped: vec![0],
+            ..Decls::default()
+        };
+        assert!(!member_call_admits(&facts, 0, None));
     }
 }

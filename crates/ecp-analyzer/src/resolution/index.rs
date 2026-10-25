@@ -275,6 +275,11 @@ pub struct SymbolTable {
 
     /// The inverse of `return_type_ids`.
     return_type_keys: Vec<Box<str>>,
+
+    /// Scoped node id → its lexical parent, the rows of the graph's
+    /// lexical-parent table (see [`Self::note_lexical_parent`]). Sparse:
+    /// empty while no language opts in.
+    lexical_parents: FxHashMap<u32, u32>,
 }
 
 impl SymbolTable {
@@ -750,9 +755,25 @@ impl SymbolTable {
         self.rust_lexical_scopes.get(&id).map(Box::as_ref)
     }
 
-    /// Whether `id` has no owner and no `impl` block either.
+    /// Whether `id` has no owner and no `impl` block either, and is no
+    /// scoped declaration ([`same_file_pick::is_free`]).
     fn is_free(&self, id: u32) -> bool {
-        self.node_owner[id as usize] == NO_OWNER && !self.impl_members.contains_key(&id)
+        self.node_owner[id as usize] == NO_OWNER
+            && !self.impl_members.contains_key(&id)
+            && !self.is_lexically_scoped(id)
+    }
+
+    /// Record that `node` is scoped under the callable `parent` (contract
+    /// C1). From then on no name-tier lookup returns `node` (invariant I5):
+    /// only the lexical tier binds it. The builder notes every row of the
+    /// graph's lexical-parent table before Pass 2.
+    pub fn note_lexical_parent(&mut self, node: u32, parent: u32) {
+        self.lexical_parents.insert(node, parent);
+    }
+
+    /// Whether `id` is scoped ([`Self::note_lexical_parent`]).
+    pub fn is_lexically_scoped(&self, id: u32) -> bool {
+        !self.lexical_parents.is_empty() && self.lexical_parents.contains_key(&id)
     }
 
     /// Whether some declaration named `name` that `caller` admits is a
@@ -901,6 +922,7 @@ impl SymbolTable {
         let ids = self.file_scoped.get(file_path)?.get(node_name)?;
         pick_call(
             ids.iter()
+                .filter(|&&id| !self.is_lexically_scoped(id))
                 .map(|&id| (id, self.node_kinds[id as usize]))
                 .filter(|&(_, kind)| !free_only || kind != NodeKind::Method),
             target,
@@ -916,6 +938,7 @@ impl SymbolTable {
             .and_then(|names| names.get(node_name))
             .map_or_else(Vec::new, |ids| {
                 ids.iter()
+                    .filter(|&&id| !self.is_lexically_scoped(id))
                     .map(|&id| (id, self.node_kinds[id as usize]))
                     .collect()
             })
@@ -1071,7 +1094,7 @@ impl SymbolTable {
         let pick = pick_global(
             caller,
             raw.iter()
-                .filter(|&&id| field(self.node_kinds[id as usize]))
+                .filter(|&&id| field(self.node_kinds[id as usize]) && !self.is_lexically_scoped(id))
                 .filter(|&&id| {
                     !rust_free_only
                         || self.file_of(id).is_some_and(|file| {
@@ -1109,6 +1132,7 @@ impl SymbolTable {
             .filter(|&id| {
                 predicate(self.node_kinds[id as usize])
                     && caller.admits(self.node_file_meta[id as usize])
+                    && !self.is_lexically_scoped(id)
             })
             .collect()
     }
@@ -1220,6 +1244,7 @@ impl SymbolTable {
         for &id in self.global_scoped.get(node_name)? {
             if !field(self.node_kinds[id as usize])
                 || !caller.admits(self.node_file_meta[id as usize])
+                || self.is_lexically_scoped(id)
                 || (rust_free_only
                     && !self.file_of(id).is_some_and(|file| {
                         ecp_core::analyzer::same_file_pick::rust_free_global_candidate(
@@ -1521,11 +1546,16 @@ impl PickFacts for SymbolTable {
                 .copied()
                 .filter(|later| self.impl_members.contains_key(later))
         };
-        if ids.iter().all(|&id| impl_overloads(id).next().is_none()) {
+        let scoped = |id: u32| self.is_lexically_scoped(id);
+        if ids
+            .iter()
+            .all(|&id| !scoped(id) && impl_overloads(id).next().is_none())
+        {
             return Cow::Borrowed(ids);
         }
         Cow::Owned(
             ids.iter()
+                .filter(|&&id| !scoped(id))
                 .flat_map(|&id| std::iter::once(id).chain(impl_overloads(id)))
                 .collect(),
         )
@@ -1596,6 +1626,10 @@ impl PickFacts for SymbolTable {
 
     fn ancestors(&self, ty: u32) -> Vec<u32> {
         SymbolTable::ancestors(self, ty)
+    }
+
+    fn is_lexically_scoped(&self, id: u32) -> bool {
+        SymbolTable::is_lexically_scoped(self, id)
     }
 }
 
@@ -2454,6 +2488,68 @@ mod tests {
         assert!(st
             .global_candidates("Missing", ResolveTarget::Type, caller)
             .is_empty());
+    }
+
+    /// I5 over the file lookups and the nearest-copy tier: a scoped node is
+    /// in none of them, its unscoped same-file twin still is, and a
+    /// scoped copy no longer keeps two copies apart.
+    #[test]
+    fn test_file_lookups_and_nearest_copy_scoped_node_excluded_returns_twin() {
+        let rows = [
+            ("b.py", "outer", NodeKind::Function, None),
+            ("b.py", "helper", NodeKind::Function, None),
+            ("b.py", "helper", NodeKind::Function, None),
+        ];
+        let control = st_owned(&rows);
+        let mut st = st_owned(&rows);
+        st.note_lexical_parent(1, 0);
+        assert!(st.is_lexically_scoped(1) && !st.is_lexically_scoped(2));
+
+        assert_eq!(
+            control.lookup_call_in_file("b.py", "helper", CALL, true),
+            Some(1)
+        );
+        assert_eq!(
+            st.lookup_call_in_file("b.py", "helper", CALL, true),
+            Some(2)
+        );
+        assert_eq!(
+            st.decls_in_file("b.py", "helper"),
+            vec![(2, NodeKind::Function)]
+        );
+        assert_eq!(&*st.pick_candidates("b.py", "helper"), &[2]);
+        assert_eq!(&*control.pick_candidates("b.py", "helper"), &[1, 2]);
+        assert!(!st.is_top_level(1), "a nested function is no import target");
+        assert!(st.is_top_level(2));
+
+        // Two copies of `pkg/util.py`, one scoped: no copy set remains, and
+        // the unscoped copy is the unique global pick.
+        let copies = [
+            ("core/pkg/util.py", "helper", NodeKind::Function, None),
+            (
+                "android/core/pkg/util.py",
+                "helper",
+                NodeKind::Function,
+                None,
+            ),
+        ];
+        let caller = FileMeta::from_path("core/pkg/app.py");
+        let control = st_owned(&copies);
+        assert_eq!(
+            control.nearest_global_copy("core/pkg/app.py", caller, "helper", CALL, false),
+            Some(0),
+            "control: the copy in the caller's tree"
+        );
+        let mut st = st_owned(&copies);
+        st.note_lexical_parent(0, 1);
+        assert_eq!(
+            st.nearest_global_copy("core/pkg/app.py", caller, "helper", CALL, false),
+            None
+        );
+        assert_eq!(
+            st.lookup_global("helper", CALL, caller, false),
+            GlobalPick::Unique(1)
+        );
     }
 
     // ---- supertypes ----

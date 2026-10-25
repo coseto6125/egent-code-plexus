@@ -20,8 +20,10 @@
 //! to prove it against. A slice that changes what the bytes mean WITHOUT
 //! bumping the identifier turns the first arm red.
 
+use ecp_analyzer::python::PythonProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_analyzer::rust::parser::RustProvider;
+use ecp_analyzer::typescript::TypeScriptProvider;
 use ecp_cli::engine::{header_compatible, Engine};
 use ecp_cli::parse_cache::ParseCache;
 use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs};
@@ -330,6 +332,107 @@ fn test_graph_bin_written_by_0_16_4_returns_symbols_and_calls_or_is_refused() {
             call("go", "app.py", "compute", "pkg/core.py"),
             call("render", "web/util.ts", "helper", "web/util.ts"),
             call("run", "lib.rs", "helper", "lib.rs"),
+        ]
+    );
+}
+
+/// The graph format before the lexical-parent table (design A §4.3).
+const PRE_LEXICAL_TABLE_GRAPH_FORMAT: u32 = 16;
+
+/// Stands for: the writer's `graph.bin` has no lexical-parent table, so
+/// today's reader refuses it and the caller rebuilds, and the rebuilt graph
+/// carries the table. It is empty while no language opts in, so every node
+/// of the writer's sources reads as unscoped, and its display owner is its
+/// stored owner, as the writer printed it. The writer's sample holds no
+/// nested function, so it cannot show a table row (that is
+/// `lexical_parent_table.rs`).
+#[test]
+fn test_prev_release_graph_refused_and_rebuilt_lexical_table_present() {
+    assert!(
+        GRAPH_FORMAT_VERSION > PRE_LEXICAL_TABLE_GRAPH_FORMAT,
+        "the lexical-parent table changes the graph layout; GRAPH_FORMAT_VERSION {GRAPH_FORMAT_VERSION} must move past {PRE_LEXICAL_TABLE_GRAPH_FORMAT}"
+    );
+    let tmp = copy_repo();
+    let writer_graph = graph_in(&tmp);
+    assert!(
+        !header_compatible(&writer_graph),
+        "a format-{WRITER_GRAPH_FORMAT} graph has no lexical-parent table and must be refused"
+    );
+    let err = Engine::load(&writer_graph)
+        .err()
+        .expect("the writer's graph must not load");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+    // The rebuild path: a full build of the writer's committed sources.
+    let rust = RustProvider::new().unwrap();
+    let python = PythonProvider::new().unwrap();
+    let typescript = TypeScriptProvider::new().unwrap();
+    let sources: [(&str, &dyn LanguageProvider); 5] = [
+        ("app.py", &python),
+        ("pkg/__init__.py", &python),
+        ("pkg/core.py", &python),
+        ("web/util.ts", &typescript),
+        ("lib.rs", &rust),
+    ];
+    let mut builder = GraphBuilder::new();
+    for (rel, provider) in sources {
+        builder.add_graph(
+            provider
+                .parse_file(Path::new(rel), &committed(rel))
+                .unwrap(),
+        );
+    }
+    let graph_path = tmp.path().join("rebuilt/graph.bin");
+    fs::create_dir_all(graph_path.parent().unwrap()).unwrap();
+    fs::write(
+        &graph_path,
+        rkyv::to_bytes::<rkyv::rancor::Error>(&builder.build()).unwrap(),
+    )
+    .unwrap();
+    assert!(header_compatible(&graph_path));
+    let engine = Engine::load(&graph_path).expect("the rebuilt graph loads");
+    let graph = engine.graph().unwrap();
+    assert_eq!(graph.version.to_native(), GRAPH_FORMAT_VERSION);
+    assert!(graph.lexical_parents.is_empty(), "no language opts in yet");
+    let pool = graph.string_pool.as_slice();
+    for idx in 0..graph.nodes.len() as u32 {
+        assert_eq!(graph.lexical_parent(idx), None, "node {idx}");
+        let owner = graph.nodes[idx as usize].owner_class.resolve(pool);
+        assert_eq!(
+            graph.display_owner(idx).as_deref(),
+            (!owner.is_empty()).then_some(owner),
+            "node {idx}"
+        );
+    }
+
+    // The consumer still gets the writer's functions, each at the line
+    // that declares it.
+    let mut functions: Vec<(String, String)> = graph_rows(&engine)
+        .into_iter()
+        .filter(|r| r.1 == "Function")
+        .map(|(name, _, file, first, _)| {
+            let source = String::from_utf8(committed(&file)).unwrap();
+            let declaration = source.lines().nth(first as usize - 1).unwrap();
+            assert!(
+                declaration.contains(name.as_str()),
+                "{file}:{first} is `{declaration}`, not the declaration of {name}"
+            );
+            (name, file)
+        })
+        .collect();
+    functions.sort();
+    let function = |name: &str, file: &str| (name.to_string(), file.to_string());
+    assert_eq!(
+        functions,
+        vec![
+            function("compute", "pkg/core.py"),
+            function("go", "app.py"),
+            function("helper", "app.py"),
+            function("helper", "lib.rs"),
+            function("helper", "pkg/core.py"),
+            function("helper", "web/util.ts"),
+            function("render", "web/util.ts"),
+            function("run", "lib.rs"),
         ]
     );
 }
