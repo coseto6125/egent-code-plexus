@@ -481,6 +481,19 @@ gaps_audit ruby pre-existing gap
 gaps_audit rust pre-existing gap
 gaps_audit swift pre-existing gap
 gaps_audit typescript pre-existing gap
+generic_arity c only C# declares two same-name types that differ by generic arity
+generic_arity cpp only C# declares two same-name types that differ by generic arity
+generic_arity dart only C# declares two same-name types that differ by generic arity
+generic_arity go only C# declares two same-name types that differ by generic arity
+generic_arity java only C# declares two same-name types that differ by generic arity
+generic_arity javascript only C# declares two same-name types that differ by generic arity
+generic_arity kotlin only C# declares two same-name types that differ by generic arity
+generic_arity php only C# declares two same-name types that differ by generic arity
+generic_arity python only C# declares two same-name types that differ by generic arity
+generic_arity ruby only C# declares two same-name types that differ by generic arity
+generic_arity rust only C# declares two same-name types that differ by generic arity
+generic_arity swift only C# declares two same-name types that differ by generic arity
+generic_arity typescript only C# declares two same-name types that differ by generic arity
 grammar_073 c pre-existing gap
 grammar_073 cpp pre-existing gap
 grammar_073 csharp pre-existing gap

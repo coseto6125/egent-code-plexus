@@ -860,3 +860,69 @@ fn test_overlay_repeated_impl_block_member_pairs_after_comment_edit() {
         view.hidden_declarations()
     );
 }
+
+const CSHARP_DELEGATES: [&str; 2] = [
+    "namespace N {\n public delegate void Action();\n public delegate void Action<T>(T a);\n public delegate TResult Func<T, TResult>(T a);\n public delegate TResult Func<T1, T2, T3, TResult>(T1 a, T2 b, T3 c);\n}\n",
+    "namespace N {\n public delegate TResult Func<T1, T2, T3, TResult>(T1 a, T2 b, T3 c);\n public delegate TResult Func<T, TResult>(T a);\n public delegate void Action<T>(T a);\n public delegate void Action();\n}\n",
+];
+
+const CSHARP_FOO1: [&str; 2] = [
+    "namespace N {\n class Foo1 {\n  public object foo { get; set; }\n }\n class Foo1<T> : Foo1 {\n  public new T foo { get; set; }\n }\n}\n",
+    "namespace N {\n class Foo1<T> : Foo1 {\n  public new T foo { get; set; }\n }\n class Foo1 {\n  public object foo { get; set; }\n }\n}\n",
+];
+
+const CSHARP_NESTED: &str = "namespace N {\n class Outer {\n  class Inner {\n   public int x;\n  }\n }\n class Outer<T> {\n  class Inner {\n   public int x;\n  }\n }\n}\n";
+
+/// The uids of every `kind` node named `name`, in declaration order, as the
+/// full build stores them, and the base uid of the first.
+fn twin_uids(source: &str, kind: NodeKind, name: &str) -> (Vec<u64>, u64) {
+    let dirty = parse(&CSharpProvider::new().unwrap(), "N/Twins.cs", source);
+    let bytes = archive(&full_build(dirty.clone()));
+    let uids = stored_uids(access(&bytes), &dirty);
+    let hits: Vec<usize> = (0..dirty.nodes.len())
+        .filter(|&i| dirty.nodes[i].kind == kind && dirty.nodes[i].name == name)
+        .collect();
+    let first = &dirty.nodes[hits[0]];
+    let base = ecp_core::uid::compute(kind, "N/Twins.cs", first.owner_class.as_deref(), name);
+    (hits.iter().map(|&i| uids[i]).collect(), base)
+}
+
+/// Stands for: a C# delegate beside a same-name delegate of another arity,
+/// and a member of one arity twin beside the same member of the other, get
+/// one uid on all four paths, in either declaration order: the first keeps
+/// its base uid, each later twin `overload(base, ordinal)`. No twin is a
+/// tombstone.
+#[test]
+fn test_uid_assign_csharp_delegates_and_member_twins_four_paths_equal_uids() {
+    for source in CSHARP_DELEGATES
+        .into_iter()
+        .chain(CSHARP_FOO1)
+        .chain([CSHARP_NESTED])
+    {
+        assert_four_paths_equal(Case {
+            provider: Box::new(CSharpProvider::new().unwrap()),
+            path: "N/Twins.cs",
+            source,
+            overload_sets: 0,
+            redefinitions: Some(0),
+        });
+    }
+    for source in CSHARP_DELEGATES {
+        for name in ["Action", "Func"] {
+            let (uids, base) = twin_uids(source, NodeKind::Function, name);
+            assert_eq!(
+                uids,
+                [base, ecp_core::uid::overload(base, 1)],
+                "{name}: {source}"
+            );
+        }
+    }
+    for source in CSHARP_FOO1 {
+        let (uids, base) = twin_uids(source, NodeKind::Property, "foo");
+        assert_eq!(uids, [base, ecp_core::uid::overload(base, 1)], "{source}");
+    }
+    for (kind, name) in [(NodeKind::Class, "Inner"), (NodeKind::Property, "x")] {
+        let (uids, base) = twin_uids(CSHARP_NESTED, kind, name);
+        assert_eq!(uids, [base, ecp_core::uid::overload(base, 1)], "{name}");
+    }
+}

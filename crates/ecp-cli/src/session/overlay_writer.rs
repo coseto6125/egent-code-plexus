@@ -99,8 +99,8 @@ pub struct FragmentSymbol {
     pub heritage: Vec<String>,
     pub variant_refs: Vec<String>,
     pub return_type: Option<String>,
-    /// `RawNode::generic_arity`: a C# type's declared generic arity, 0 for
-    /// every other node. The overlay numbers a dirty `Conv<T>` beside `Conv`
+    /// `RawNode::generic_arity`: a C# type's or delegate's declared generic
+    /// arity, 0 for every other node. The overlay numbers a dirty `Conv<T>` beside `Conv`
     /// from it, as the full build does.
     pub generic_arity: u32,
 }

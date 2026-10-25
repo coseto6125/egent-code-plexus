@@ -112,7 +112,9 @@ use std::path::Path;
 /// schema32: one Route node per C1 route key; a route handler is an endpoint
 /// bound by scope or by its decorated declaration, a closure handler binds its
 /// anonymous node, and an unbound or absent handler is a BlindSpot.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema32");
+/// schema33: a C# delegate, or a member of a type beside a same-name type of
+/// another generic arity, is its own node.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema33");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
