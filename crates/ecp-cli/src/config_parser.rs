@@ -3,11 +3,23 @@
 // wave 串接。在 file 級先把 dead_code 改為 allow，等實際接上後再收掉。
 #![allow(dead_code)]
 
+use ecp_analyzer::c_sharp::partial::CsharpProjects;
 use ecp_analyzer::resolution::path_aliases::PathAliases;
 use std::path::Path;
 
 pub fn parse_configs(repo_path: &Path) -> PathAliases {
+    parse_repo_configs(repo_path).0
+}
+
+/// The path aliases of the repo's config files ([`parse_configs`]) and the
+/// C# projects the same `.csproj` scan found, which the builder reads to
+/// merge the parts of a `partial` type.
+pub fn parse_repo_configs(repo_path: &Path) -> (PathAliases, CsharpProjects) {
     let mut aliases = PathAliases::new();
+    // The walk reads `.csproj` files down to this entry depth, so every
+    // directory one level less deep was read whole.
+    let mut csharp_projects =
+        CsharpProjects::new(usize::from(resolve_csproj_max_depth()).saturating_sub(1));
 
     // 1. tsconfig.json
     if let Ok(content) = std::fs::read_to_string(repo_path.join("tsconfig.json")) {
@@ -145,6 +157,11 @@ pub fn parse_configs(repo_path: &Path) -> PathAliases {
 
     // 11. C# toolchain: *.csproj files
     for meta in parse_csproj_files(repo_path) {
+        let project_dir = Path::new(&meta.file_path)
+            .parent()
+            .map(|dir| dir.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        csharp_projects.add(&project_dir, meta.default_compile_items);
         // Register each ProjectReference as a path alias so the resolver can
         // follow cross-project symbol references within the same solution.
         for proj_ref in &meta.project_references {
@@ -173,7 +190,7 @@ pub fn parse_configs(repo_path: &Path) -> PathAliases {
         }
     }
 
-    aliases
+    (aliases, csharp_projects)
 }
 
 fn read_toml(path: &Path) -> Option<toml::Table> {
@@ -367,6 +384,11 @@ pub struct CsprojMeta {
     pub package_references: Vec<(String, String)>,
     /// Relative paths of `<ProjectReference Include="...">` entries.
     pub project_references: Vec<String>,
+    /// Whether the project compiles every `.cs` file below its directory:
+    /// an SDK-style project (`Sdk="…"`) that keeps its default compile
+    /// items and removes none (`<Compile Remove=…>`). Any other project
+    /// lists its files, which this parse does not read.
+    pub default_compile_items: bool,
 }
 
 /// Parsed metadata from `global.json` (Task F1).
@@ -503,6 +525,16 @@ fn parse_single_csproj(path: &Path, repo_root: &Path) -> Option<CsprojMeta> {
 
     let package_references = xml_attrs_pairs(&content, "PackageReference", "Include", "Version");
     let project_references = xml_attrs_single(&content, "ProjectReference", "Include");
+    let sdk_style = !xml_attrs_single(&content, "Project", "Sdk").is_empty()
+        || !xml_attrs_single(&content, "Import", "Sdk").is_empty()
+        || !xml_attrs_single(&content, "Sdk", "Name").is_empty();
+    let disabled = |property: &str| {
+        xml_first_text(&content, property).is_some_and(|value| value.eq_ignore_ascii_case("false"))
+    };
+    let default_compile_items = sdk_style
+        && !disabled("EnableDefaultItems")
+        && !disabled("EnableDefaultCompileItems")
+        && xml_attrs_single(&content, "Compile", "Remove").is_empty();
 
     Some(CsprojMeta {
         kind: "csproj",
@@ -511,6 +543,7 @@ fn parse_single_csproj(path: &Path, repo_root: &Path) -> Option<CsprojMeta> {
         assembly_name,
         package_references,
         project_references,
+        default_compile_items,
     })
 }
 

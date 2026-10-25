@@ -1,3 +1,4 @@
+use crate::c_sharp::partial::{partial_groups, CsharpProjects};
 use crate::fetch_shape::{
     consumer_keys, fetch_urls, format_reason, normalize_route_path, response_shapes,
 };
@@ -184,6 +185,10 @@ pub struct GraphBuilder {
     /// Value: UIDs to SKIP. An empty inner set means all symbols changed;
     /// a full inner set means the file is entirely unchanged.
     symbol_skip_set: Option<FxHashMap<String, FxHashSet<u64>>>,
+    /// The C# projects the `.csproj` scan found: the evidence that two
+    /// `partial` declarations compile into one type. Empty by default, so
+    /// no part merges.
+    csharp_projects: CsharpProjects,
 }
 
 impl Default for GraphBuilder {
@@ -201,7 +206,16 @@ impl GraphBuilder {
             path_aliases: PathAliases::new(),
             repo_root: None,
             symbol_skip_set: None,
+            csharp_projects: CsharpProjects::default(),
         }
+    }
+
+    /// Provide the C# projects of the repo, so the parts of a `partial`
+    /// type in one project merge (`c_sharp::partial`). Without them every
+    /// part stays a type of its own.
+    pub fn with_csharp_projects(mut self, projects: CsharpProjects) -> Self {
+        self.csharp_projects = projects;
+        self
     }
 
     pub fn with_path_aliases(mut self, aliases: PathAliases) -> Self {
@@ -286,6 +300,11 @@ impl GraphBuilder {
         let lexical_table = record_lexical_parents(&self.local_graphs, &raw_map);
         for fact in &lexical_table {
             symbol_table.note_lexical_parent(fact.node_idx, fact.parent_idx);
+        }
+        // Before the supertypes pre-pass: it, Pass 2 and the Overrides
+        // method index read the parts of a C# partial type as one type.
+        for parts in partial_groups(&self.local_graphs, &raw_map, &self.csharp_projects) {
+            symbol_table.note_partial_type(parts);
         }
         // Edges from a record bound to `File`; the `File` nodes are appended
         // after the passes that emit them (C4 Open point 3, option b).
@@ -2652,6 +2671,13 @@ fn pass1_9_supertypes(
 /// each candidate becomes the type of that arity
 /// ([`SymbolTable::with_arity`]). The arity keeps one candidate at most per
 /// declaring file, so candidates in two files stay ambiguous.
+///
+/// The parts of a C# `partial` type are one type, and a base names it by
+/// its first part ([`SymbolTable::partial_type`]), whichever part a tier
+/// found. The global tier refuses the parts as several same-named types;
+/// a bare name whose every global candidate is a part of one type binds it
+/// with the global tier's confidence ([`SymbolTable::partial_global_type`]),
+/// unless a `using` alias of the file claims the name.
 fn resolve_base(
     resolver: &Resolver<'_>,
     symbol_table: &SymbolTable,
@@ -2671,14 +2697,31 @@ fn resolve_base(
         return resolve(spelling);
     }
     let (name, arity) = csharp_base_arity(spelling);
-    let mut targets = resolve(name);
-    targets.retain_mut(|(id, _)| match symbol_table.with_arity(*id, arity) {
-        Some(typed) => {
-            *id = typed;
-            true
+    let mut targets: Vec<(u32, f32)> = Vec::new();
+    for (id, confidence) in resolve(name) {
+        let Some(id) = symbol_table.with_arity(id, arity) else {
+            continue;
+        };
+        let id = symbol_table.partial_type(id);
+        match targets.iter_mut().find(|(seen, _)| *seen == id) {
+            Some(target) => target.1 = target.1.max(confidence),
+            None => targets.push((id, confidence)),
         }
-        None => false,
-    });
+    }
+    let aliased = || {
+        local_graph
+            .imports
+            .iter()
+            .any(|import| import.alias.as_deref() == Some(name))
+    };
+    if targets.is_empty() && !aliased() {
+        let caller = FileMeta::from_path(&local_graph.file_path.to_string_lossy());
+        targets.extend(
+            symbol_table
+                .partial_global_type(name, arity, caller)
+                .map(|id| (id, ResolutionTier::Global.base_confidence())),
+        );
+    }
     targets
 }
 

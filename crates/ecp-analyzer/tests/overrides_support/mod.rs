@@ -7,6 +7,7 @@
 //! quiet across all dialects.
 #![allow(dead_code)]
 
+use ecp_analyzer::c_sharp::partial::CsharpProjects;
 use ecp_analyzer::post_process::overrides::BS_KINDS;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::provider::LanguageProvider;
@@ -41,15 +42,40 @@ pub fn has_decorator(node: &RawNode, d: &str) -> bool {
 
 /// The graph of `files`, each `(path, source)` parsed by `provider`.
 pub fn graph_of(provider: &dyn LanguageProvider, files: &[(&str, &str)]) -> ZeroCopyGraph {
-    let graphs: Vec<LocalGraph> = files
-        .iter()
-        .map(|(path, src)| {
+    graph_of_projects(provider, files, &[])
+}
+
+/// [`graph_of`] in a repo whose C# projects sit in `project_dirs`, each an
+/// SDK-style project that compiles its whole directory subtree. With no
+/// directory, every file's project is unknown, as in [`graph_of`].
+pub fn graph_of_projects(
+    provider: &dyn LanguageProvider,
+    files: &[(&str, &str)],
+    project_dirs: &[&str],
+) -> ZeroCopyGraph {
+    let mut projects = CsharpProjects::new(usize::MAX);
+    for dir in project_dirs {
+        projects.add(dir, true);
+    }
+    let mut builder = GraphBuilder::new().with_csharp_projects(projects);
+    for (path, src) in files {
+        builder.add_graph(
             provider
                 .parse_file(Path::new(path), src.as_bytes())
-                .expect("parse")
-        })
-        .collect();
-    build(&graphs)
+                .expect("parse"),
+        );
+    }
+    builder.build()
+}
+
+/// `(source, target)` of every edge of `rel_type`.
+pub fn edge_ends(graph: &ZeroCopyGraph, rel_type: RelType) -> Vec<(End, End)> {
+    graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == rel_type)
+        .map(|e| (end(graph, e.source), end(graph, e.target)))
+        .collect()
 }
 
 /// One endpoint of an edge as a reader of `ecp impact` sees it.

@@ -107,7 +107,8 @@ use std::path::Path;
 /// heritage lists its extends-list; a C# delegate carries its return type.
 /// schema31: a C# type beside a same-name type of another generic arity
 /// keeps its own node (an overload uid), and a C# generic base binds by
-/// arity.
+/// arity; the parts of a C# partial type in one known project share one
+/// identity for heritage, Overrides and calls.
 pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema31");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

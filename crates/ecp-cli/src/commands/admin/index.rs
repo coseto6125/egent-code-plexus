@@ -327,11 +327,12 @@ pub fn run_analyzer_for_paths(
     let t_step4 = std::time::Instant::now();
     // ── Step 4: Build global graph ────────────────────────────────────────
     let t_cfg = std::time::Instant::now();
-    let aliases = crate::config_parser::parse_configs(src_root);
+    let (aliases, csharp_projects) = crate::config_parser::parse_repo_configs(src_root);
     let cfg_elapsed = t_cfg.elapsed();
     let t_ingest = std::time::Instant::now();
     let mut builder = GraphBuilder::new()
         .with_path_aliases(aliases)
+        .with_csharp_projects(csharp_projects)
         .with_repo_root(src_root.to_path_buf())
         .with_resolver_dump(dump_resolver.map(std::path::Path::to_path_buf));
     for graph in local_graphs {

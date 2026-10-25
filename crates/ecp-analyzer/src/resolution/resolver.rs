@@ -1698,6 +1698,36 @@ impl<'a> Resolver<'a> {
             return results; // Highest precedence, return early
         }
 
+        // Tier 1 across the files of a C# partial type: a bare call in one
+        // part reaches what the caller's type owns, as `this.m()` does
+        // (codex ruling P-d). Only a member the type declares in any part,
+        // or inherits through the bases any part lists, binds.
+        if let Some((node_id, tier, decision)) = call
+            .filter(|scope| !scope.untyped_receiver && !scope.free_only)
+            .and_then(|scope| {
+                self.partial_type_member(
+                    &source_file_str,
+                    language,
+                    symbol_name,
+                    scope.owner?,
+                    target,
+                )
+            })
+        {
+            let conf = tier.confidence();
+            results.push((node_id, conf));
+            self.record(
+                &source_file_str,
+                symbol_name,
+                None,
+                decision,
+                Some(node_id),
+                0,
+                Some(conf),
+            );
+            return results;
+        }
+
         // Tier 2: ImportScoped.
         let legacy_type_import = target == ResolveTarget::Type && fqn_language(language);
         let has_imports = (bind_import || legacy_type_import)
@@ -2828,6 +2858,50 @@ impl<'a> Resolver<'a> {
             ),
             LadderMember::Ambiguous => TypeMember::Ambiguous,
             LadderMember::NoEdge => TypeMember::NoEdge,
+        }
+    }
+
+    /// The member a bare C# call `name()` reaches in its caller's own type,
+    /// `owner`, when that type is a `partial` type of several parts
+    /// (`SymbolTable::partial_parts`): the ladder from the caller's own part,
+    /// which reads every part's members and bases. Only an owned or an
+    /// inherited member binds; `None` for any other caller or verdict.
+    fn partial_type_member(
+        &self,
+        source_file_str: &str,
+        language: Language,
+        name: &str,
+        owner: &str,
+        target: ResolveTarget,
+    ) -> Option<(NodeId, Tier, DecisionTier)> {
+        if language != Language::CSharp
+            || split_qualifier(name).is_some()
+            || !matches!(target, ResolveTarget::Callable | ResolveTarget::Method)
+        {
+            return None;
+        }
+        let owner = owner_key(owner)?;
+        let ty = self.symbol_table.lookup_in_file_with_kind(
+            source_file_str,
+            owner,
+            ResolveTarget::Type,
+        )?;
+        if self.symbol_table.partial_parts(ty).is_empty() {
+            return None;
+        }
+        match type_ladder::member_via_type(
+            self.symbol_table,
+            TypeCandidates::Unique(ty, owner),
+            source_file_str,
+            name,
+            target,
+            true,
+        ) {
+            LadderMember::Owned(id) => Some((id, Tier::TypeOwned, DecisionTier::TypeOwned)),
+            LadderMember::Inherited(id) => {
+                Some((id, Tier::TypeHeritage, DecisionTier::TypeHeritage))
+            }
+            _ => None,
         }
     }
 

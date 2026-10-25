@@ -90,8 +90,12 @@ pub fn emit_edges(
             for raw_dec in &raw_node.decorators {
                 // Skip the override sentinel injected by the Kotlin/C#/C++ parsers —
                 // that's consumed by the Overrides post-process, not here —
-                // and the C# generic-arity marker, which identity reads.
-                if raw_dec == "__override__" || RawNode::is_generic_arity_marker(raw_dec) {
+                // the C# generic-arity marker, which identity reads, and the
+                // C# partial marker, which the partial-type merge reads.
+                if raw_dec == "__override__"
+                    || RawNode::is_generic_arity_marker(raw_dec)
+                    || RawNode::is_partial_marker(raw_dec)
+                {
                     continue;
                 }
 

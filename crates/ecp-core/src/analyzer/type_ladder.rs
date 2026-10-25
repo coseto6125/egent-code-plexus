@@ -150,6 +150,12 @@ pub trait TypeFacts: PickFacts {
     /// writes it or already reduced by [`return_type_key`]; `None` when it
     /// declares none or is no function.
     fn return_type_of(&self, callee: u32) -> Option<&str>;
+    /// Every part of `ty`'s C# `partial` type, `ty` included, when the
+    /// facts know the parts of one type; empty otherwise. A member another
+    /// part declares is the type's own.
+    fn partial_parts(&self, _ty: u32) -> &[u32] {
+        &[]
+    }
     /// The crate root of `path`: what precedes its last `/src/` or
     /// `/tests/` segment, else empty.
     fn crate_root<'p>(&self, path: &'p str) -> &'p str {
@@ -588,16 +594,25 @@ pub fn owned_member<F: TypeFacts + ?Sized>(
         ResolveTarget::Qualifier
     };
     let declares_owner = |file: &str| facts.count_in_file(file, ty_name, owner_target);
-    let in_file = facts.owned_in_file(ty_file, member, ty_name, target);
-    if let Some(&first) = in_file.first() {
-        // Several hits are overloads of the one type, unless the file
-        // declares two owners of that name (nested types, a type and a
-        // module); the owner index cannot tell those apart.
-        return if in_file.len() == 1 || declares_owner(ty_file) == 1 {
-            MemberLookup::Hit(first)
-        } else {
-            MemberLookup::Ambiguous
-        };
+    // The type's own file first, then the files of its other C# partial
+    // parts: a member any part declares is the type's own.
+    let part_files = facts
+        .partial_parts(ty)
+        .iter()
+        .filter_map(|&part| facts.file_of(part))
+        .filter(|&file| file != ty_file);
+    for file in std::iter::once(ty_file).chain(part_files) {
+        let in_file = facts.owned_in_file(file, member, ty_name, target);
+        if let Some(&first) = in_file.first() {
+            // Several hits are overloads of the one type, unless the file
+            // declares two owners of that name (nested types, a type and a
+            // module); the owner index cannot tell those apart.
+            return if in_file.len() == 1 || declares_owner(file) == 1 {
+                MemberLookup::Hit(first)
+            } else {
+                MemberLookup::Ambiguous
+            };
+        }
     }
     let elsewhere = facts.owned_global(member, ty_name, target, ty_file);
     let Some(&first) = elsewhere.first() else {

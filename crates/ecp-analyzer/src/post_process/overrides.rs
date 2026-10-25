@@ -13,6 +13,13 @@
 //! (`SymbolTable::declared_bases`), so another type that only shares a
 //! base's name is never reached.
 //!
+//! The parts of a C# `partial` type in one project are one type
+//! (`c_sharp::partial`): every part reads the bases any part lists, a base
+//! binds the type once, and the lookup weighs the methods of all parts, each
+//! edge ending at the method in the part that declares it. Parts whose
+//! project is unknown stay types of their own, and a base naming them stays
+//! [`BS_KIND_OVERRIDE_BASE_AMBIGUOUS`].
+//!
 //! # Evidence per language
 //!
 //! | Rule | Languages | Candidate | Edge |
@@ -546,7 +553,7 @@ pub fn emit_edges(
         .collect();
     let metas: Vec<Vec<Option<&RawFunctionMeta>>> =
         local_graphs.iter().map(metas_by_node).collect();
-    let methods = build_method_index(local_graphs, &owners, &metas, raw_map);
+    let methods = build_method_index(local_graphs, &owners, &metas, raw_map, symbol_table);
     let reasons = Reasons {
         exact: string_pool.add(EXACT_REASON),
         name: string_pool.add(NAME_MATCH_REASON),
@@ -630,7 +637,7 @@ pub fn emit_edges(
                         name,
                         stops: Vec::new(),
                         seen: FxHashMap::default(),
-                        path: vec![owner_slot],
+                        path: vec![symbol_table.partial_type(owner_slot)],
                     };
                     search.bases(owner_slot, 1.0, false);
                     search.stops
@@ -1179,11 +1186,16 @@ fn metas_by_node(lg: &LocalGraph) -> Vec<Option<&RawFunctionMeta>> {
         .collect()
 }
 
+/// The declarations of each method name per owner type. The parts of a C#
+/// `partial` type are one owner, keyed by its first part
+/// (`SymbolTable::partial_type`); each declaration keeps its own slot, so
+/// an edge targets the method in the part that declares it.
 fn build_method_index<'a>(
     local_graphs: &'a [LocalGraph],
     owners: &[Vec<Option<usize>>],
     metas: &[Vec<Option<&'a RawFunctionMeta>>],
     raw_map: &RawIndexMap,
+    symbol_table: &SymbolTable,
 ) -> MethodIndex<'a> {
     let mut out: MethodIndex<'a> = FxHashMap::default();
     for (file_idx, lg) in local_graphs.iter().enumerate() {
@@ -1203,7 +1215,9 @@ fn build_method_index<'a>(
                 continue;
             };
             // A tombstoned twin maps to the survivor: one method, not two.
-            let decls = out.entry((owner_slot, name)).or_default();
+            let decls = out
+                .entry((symbol_table.partial_type(owner_slot), name))
+                .or_default();
             if !decls.iter().any(|d| d.slot == slot) {
                 decls.push(Decl {
                     slot,

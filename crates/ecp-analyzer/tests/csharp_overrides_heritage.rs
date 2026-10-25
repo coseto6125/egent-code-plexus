@@ -295,3 +295,324 @@ fn test_overrides_csharp_same_arity_twins_second_tombstoned() {
         "the second Conv of arity 1 is a tombstone"
     );
 }
+
+// ── C# partial types (codex ruling P-d) ─────────────────────────────────
+
+/// One partial type, two files: `Writer.cs` declares `Flush`,
+/// `Writer.Async.cs` declares `FlushAsync` (Newtonsoft `JsonWriter.cs` /
+/// `JsonWriter.Async.cs`).
+const WRITER: &str = "namespace Lib\n{\n    public abstract partial class Writer\n    {\n        public virtual void Flush() {}\n    }\n}\n";
+const WRITER_ASYNC: &str = "namespace Lib\n{\n    public abstract partial class Writer\n    {\n        public virtual void FlushAsync() {}\n    }\n}\n";
+/// A subclass that overrides one method of each part (rows 4 and 5).
+const TEXT_WRITER: &str = "namespace Lib\n{\n    public class TextWriter : Writer\n    {\n        public override void Flush() {}\n        public override void FlushAsync() {}\n    }\n}\n";
+
+fn csharp() -> ecp_analyzer::c_sharp::parser::CSharpProvider {
+    ecp_analyzer::c_sharp::parser::CSharpProvider::new().unwrap()
+}
+
+/// `((file, name, row), (file, name, row))` of every `Overrides` edge,
+/// sorted: the source and the target a reader of `ecp impact` sees.
+type EndKey = (String, String, u32);
+fn override_ends(graph: &ecp_core::graph::ZeroCopyGraph) -> Vec<(EndKey, EndKey)> {
+    let key = |end: &overrides_support::End| (end.file.clone(), end.name.clone(), end.line);
+    let mut ends: Vec<(EndKey, EndKey)> = overrides_support::overrides(graph)
+        .iter()
+        .map(|(source, target, _, _)| (key(source), key(target)))
+        .collect();
+    ends.sort();
+    ends
+}
+
+fn end_key(file: &str, name: &str, row: u32) -> EndKey {
+    (file.to_string(), name.to_string(), row)
+}
+
+/// Asserts the BlindSpot of a base that names several unmerged types: no
+/// `Overrides` edge, and one `override-base-ambiguous` BlindSpot per
+/// overriding method of `TEXT_WRITER` in `child`, with the candidate count.
+fn assert_base_ambiguous(graph: &ecp_core::graph::ZeroCopyGraph, child: &str) {
+    use ecp_analyzer::post_process::overrides::BS_KIND_OVERRIDE_BASE_AMBIGUOUS;
+    assert_eq!(override_ends(graph), [], "no edge to either Writer");
+    let mut spots: Vec<(String, String, u32)> = overrides_support::override_blind_spots(graph)
+        .into_iter()
+        .map(|(kind, file, row, hint)| {
+            assert!(hint.contains("none of 2 candidate types"), "{hint}");
+            (kind, file, row)
+        })
+        .collect();
+    spots.sort();
+    assert_eq!(
+        spots,
+        [
+            (
+                BS_KIND_OVERRIDE_BASE_AMBIGUOUS.to_string(),
+                child.to_string(),
+                4
+            ),
+            (
+                BS_KIND_OVERRIDE_BASE_AMBIGUOUS.to_string(),
+                child.to_string(),
+                5
+            ),
+        ]
+    );
+}
+
+/// Stands for: the parts of one partial type in one project are one type.
+/// `TextWriter : Writer` binds it, and each override ends at the method in
+/// the part that declares it. Before the fix the base named two types, so
+/// both methods got `override-base-ambiguous` and no edge (326 Newtonsoft
+/// pairs).
+#[test]
+fn test_overrides_csharp_partial_parts_one_project_bind_declaring_part() {
+    let graph = overrides_support::graph_of_projects(
+        &csharp(),
+        &[
+            ("Lib/Writer.cs", WRITER),
+            ("Lib/Writer.Async.cs", WRITER_ASYNC),
+            ("Lib/TextWriter.cs", TEXT_WRITER),
+        ],
+        &["Lib"],
+    );
+    assert_eq!(
+        override_ends(&graph),
+        [
+            (
+                end_key("Lib/TextWriter.cs", "Flush", 4),
+                end_key("Lib/Writer.cs", "Flush", 4)
+            ),
+            (
+                end_key("Lib/TextWriter.cs", "FlushAsync", 5),
+                end_key("Lib/Writer.Async.cs", "FlushAsync", 4)
+            ),
+        ]
+    );
+    assert_eq!(
+        overrides_support::heritage_confidences(&graph, "TextWriter").len(),
+        1,
+        "Writer is one Extends edge"
+    );
+    assert!(
+        overrides_support::override_blind_spots(&graph).is_empty(),
+        "{:?}",
+        overrides_support::override_blind_spots(&graph)
+    );
+}
+
+/// Stands for: the bases one part lists are the type's. `partial class A :
+/// Base` and `partial class A` with the override: the override in the
+/// second part reaches `Base.Run`, with the evidence of the base the first
+/// part bound. (C# overrides only a class member, so the base is an
+/// abstract class, not an interface.) Before the fix the second part had no
+/// bases, and its method got no edge.
+#[test]
+fn test_overrides_csharp_partial_heritage_on_one_part_binds_from_other_part() {
+    let graph = overrides_support::graph_of_projects(
+        &csharp(),
+        &[
+            (
+                "Lib/A.cs",
+                "namespace Lib\n{\n    public abstract class Base\n    {\n        public abstract void Run();\n    }\n    public partial class A : Base\n    {\n    }\n}\n",
+            ),
+            (
+                "Lib/A.Run.cs",
+                "namespace Lib\n{\n    public partial class A\n    {\n        public override void Run() {}\n    }\n}\n",
+            ),
+        ],
+        &["Lib"],
+    );
+    assert_eq!(
+        override_ends(&graph),
+        [(
+            end_key("Lib/A.Run.cs", "Run", 4),
+            end_key("Lib/A.cs", "Run", 4)
+        )]
+    );
+    overrides_support::assert_evidence(&overrides_support::overrides(&graph)[0], Evidence::Exact);
+    assert!(overrides_support::override_blind_spots(&graph).is_empty());
+}
+
+/// Stands for: parts in two projects are two types (an unknown or another
+/// compilation is never a shared one). The base stays ambiguous, as before
+/// the fix. Guards the project field of the merge key; passes before the
+/// fix as well.
+#[test]
+fn test_overrides_csharp_partial_parts_two_projects_report_blindspot() {
+    let graph = overrides_support::graph_of_projects(
+        &csharp(),
+        &[
+            ("P1/Writer.cs", WRITER),
+            ("P2/Writer.Async.cs", WRITER_ASYNC),
+            ("P1/TextWriter.cs", TEXT_WRITER),
+        ],
+        &["P1", "P2"],
+    );
+    assert_base_ambiguous(&graph, "P1/TextWriter.cs");
+}
+
+/// Stands for: parts whose project the index does not know never merge.
+/// The fixture of the one-project test with no project: the base stays
+/// ambiguous. Guards the unknown-project rule; passes before the fix as
+/// well.
+#[test]
+fn test_overrides_csharp_partial_parts_unknown_project_report_blindspot() {
+    let graph = overrides_support::graph_of(
+        &csharp(),
+        &[
+            ("Lib/Writer.cs", WRITER),
+            ("Lib/Writer.Async.cs", WRITER_ASYNC),
+            ("Lib/TextWriter.cs", TEXT_WRITER),
+        ],
+    );
+    assert_base_ambiguous(&graph, "Lib/TextWriter.cs");
+}
+
+/// Stands for: the generic arity is part of the merge key. `partial class
+/// X` in two files is one type, `partial class X<T>` another: `Y : X`
+/// binds the first, its overrides reach both of its parts, and none reaches
+/// `X<T>.Run`. Before the fix `X` named three types and bound none.
+#[test]
+fn test_overrides_csharp_partial_and_generic_partial_do_not_merge() {
+    let graph = overrides_support::graph_of_projects(
+        &csharp(),
+        &[
+            (
+                "Lib/X.cs",
+                "namespace Lib\n{\n    public partial class X\n    {\n        public virtual void Run() {}\n    }\n}\n",
+            ),
+            (
+                "Lib/X.More.cs",
+                "namespace Lib\n{\n    public partial class X\n    {\n        public virtual void Stop() {}\n    }\n}\n",
+            ),
+            (
+                "Lib/XT.cs",
+                "namespace Lib\n{\n    public partial class X<T>\n    {\n        public virtual void Run() {}\n    }\n}\n",
+            ),
+            (
+                "Lib/Y.cs",
+                "namespace Lib\n{\n    public class Y : X\n    {\n        public override void Run() {}\n        public override void Stop() {}\n    }\n}\n",
+            ),
+        ],
+        &["Lib"],
+    );
+    assert_eq!(
+        override_ends(&graph),
+        [
+            (end_key("Lib/Y.cs", "Run", 4), end_key("Lib/X.cs", "Run", 4)),
+            (
+                end_key("Lib/Y.cs", "Stop", 5),
+                end_key("Lib/X.More.cs", "Stop", 4)
+            ),
+        ]
+    );
+    assert!(
+        overrides_support::override_blind_spots(&graph).is_empty(),
+        "{:?}",
+        overrides_support::override_blind_spots(&graph)
+    );
+}
+
+/// Stands for: only declarations that all carry `partial` merge. Two plain
+/// `class Writer`, and a `partial class Writer` beside a plain one, stay two
+/// types, and the base stays ambiguous. Guards the partial-modifier rule;
+/// passes before the fix as well.
+#[test]
+fn test_overrides_csharp_non_partial_same_name_pair_report_blindspot() {
+    let plain = WRITER.replace("abstract partial class", "abstract class");
+    let plain_async = WRITER_ASYNC.replace("abstract partial class", "abstract class");
+    for (first, second) in [
+        (plain.as_str(), plain_async.as_str()),
+        (WRITER, plain_async.as_str()),
+    ] {
+        let graph = overrides_support::graph_of_projects(
+            &csharp(),
+            &[
+                ("Lib/Writer.cs", first),
+                ("Lib/Writer.Async.cs", second),
+                ("Lib/TextWriter.cs", TEXT_WRITER),
+            ],
+            &["Lib"],
+        );
+        assert_base_ambiguous(&graph, "Lib/TextWriter.cs");
+    }
+}
+
+/// Stands for: Pass 2 reads the parts as one type. In `Writer.cs`, both
+/// `this.WriteAsync()` and a bare `WriteAsync()` bind the `WriteAsync` that
+/// `Writer.Async.cs` declares, never `Other.WriteAsync`. Before the fix the
+/// ladder found the member outside the caller's file under a type name two
+/// types share (ambiguous), and the bare name had two global candidates.
+#[test]
+fn test_resolve_call_csharp_partial_part_calls_other_part_binds_it() {
+    let graph = overrides_support::graph_of_projects(
+        &csharp(),
+        &[
+            (
+                "Lib/Writer.cs",
+                "namespace Lib\n{\n    public partial class Writer\n    {\n        public void ViaThis() { this.WriteAsync(); }\n        public void Bare() { WriteAsync(); }\n    }\n}\n",
+            ),
+            (
+                "Lib/Writer.Async.cs",
+                "namespace Lib\n{\n    public partial class Writer\n    {\n        public void WriteAsync() {}\n    }\n}\n",
+            ),
+            (
+                "Lib/Other.cs",
+                "namespace Lib\n{\n    public class Other\n    {\n        public void WriteAsync() {}\n    }\n}\n",
+            ),
+        ],
+        &["Lib"],
+    );
+    let mut calls: Vec<(String, String, String)> =
+        overrides_support::edge_ends(&graph, ecp_core::graph::RelType::Calls)
+            .into_iter()
+            .filter(|(source, _)| source.file == "Lib/Writer.cs")
+            .map(|(source, target)| (source.name, target.file, target.name))
+            .collect();
+    calls.sort();
+    let expected = |caller: &str| {
+        (
+            caller.to_string(),
+            "Lib/Writer.Async.cs".to_string(),
+            "WriteAsync".to_string(),
+        )
+    };
+    assert_eq!(calls, [expected("Bare"), expected("ViaThis")]);
+}
+
+/// The partial marker of every type in `source`: `(name, declaring scope)`
+/// for each `partial` type, `None` for the others.
+fn partial_scopes(source: &str) -> Vec<(String, Option<String>)> {
+    use ecp_core::analyzer::provider::LanguageProvider;
+    csharp()
+        .parse_file(std::path::Path::new("Lib/S.cs"), source.as_bytes())
+        .unwrap()
+        .nodes
+        .iter()
+        .filter(|n| n.kind.is_type())
+        .map(|n| (n.name.clone(), n.partial_scope().map(str::to_string)))
+        .collect()
+}
+
+/// Stands for: the declaring scope in the merge key is the namespace (a
+/// file-scoped one, or block namespaces through a preprocessor block) and
+/// each enclosing type with its generic arity. A type without `partial`
+/// carries no marker.
+#[test]
+fn test_parse_file_csharp_partial_type_records_declaring_scope() {
+    assert_eq!(
+        partial_scopes(
+            "namespace Lib.Json;\npublic partial class Outer<T>\n{\n    public partial class Inner {}\n}\npublic class Plain {}\n"
+        ),
+        [
+            ("Outer".to_string(), Some("Lib.Json".to_string())),
+            ("Inner".to_string(), Some("Lib.Json+Outer`1".to_string())),
+            ("Plain".to_string(), None),
+        ]
+    );
+    assert_eq!(
+        partial_scopes(
+            "#if HAVE_ASYNC\nnamespace Lib\n{\n    namespace Json\n    {\n        public partial struct W {}\n    }\n}\n#endif\n"
+        ),
+        [("W".to_string(), Some("Lib.Json".to_string()))]
+    );
+}

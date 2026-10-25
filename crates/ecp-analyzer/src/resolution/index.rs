@@ -239,6 +239,14 @@ pub struct SymbolTable {
     /// [`SymbolTable::note_type_arity`]). Every other id declares none.
     type_arities: FxHashMap<u32, u32>,
 
+    /// Part → the first part (lowest id) of its C# `partial` type, for
+    /// every part of a type declared in two parts or more (see
+    /// [`SymbolTable::note_partial_type`]). Sparse: most ids have none.
+    partial_first: FxHashMap<u32, u32>,
+
+    /// First part → every part of its type, ascending.
+    partial_parts: FxHashMap<u32, Box<[u32]>>,
+
     /// Declared supertypes per type id. Filled once by the builder's
     /// supertypes pre-pass, after Pass 1 and before Pass 2. Types with no
     /// declared heritage have no entry.
@@ -919,6 +927,59 @@ impl SymbolTable {
         }
     }
 
+    /// Record the nodes `parts`, ascending, as the parts of one C#
+    /// `partial` type (`c_sharp::partial::partial_groups`). Call it after
+    /// Pass 1 and before the supertypes pre-pass, which reads it.
+    pub fn note_partial_type(&mut self, parts: Vec<u32>) {
+        let Some(&first) = parts.first() else {
+            return;
+        };
+        for &part in &parts {
+            self.partial_first.insert(part, first);
+        }
+        self.partial_parts.insert(first, parts.into_boxed_slice());
+    }
+
+    /// The node that stands for `id`'s type: the first part of a C#
+    /// `partial` type, else `id` itself. A base that names the type binds
+    /// this node, and the type's declared bases and methods are keyed by it.
+    pub fn partial_type(&self, id: u32) -> u32 {
+        self.partial_first.get(&id).copied().unwrap_or(id)
+    }
+
+    /// Every part of `id`'s C# `partial` type, ascending, `id` included;
+    /// empty when `id` is no part of a type declared in two parts or more.
+    pub fn partial_parts(&self, id: u32) -> &[u32] {
+        self.partial_parts
+            .get(&self.partial_type(id))
+            .map_or(&[][..], |parts| &parts[..])
+    }
+
+    /// The one C# `partial` type of generic arity `arity` that the bare
+    /// name `name` names in the Tier-3 field of `caller`
+    /// ([`Self::global_candidates`]), when every candidate is one of its
+    /// parts. The global tier finds the parts ambiguous, as two types; they
+    /// are one. A candidate of another declared arity is another type
+    /// (`X<T>` beside `partial class X`). `None` when the candidates are no
+    /// parts, or the parts of two types.
+    pub fn partial_global_type(&self, name: &str, arity: u32, caller: FileMeta) -> Option<u32> {
+        let mut found = None;
+        for id in self.global_candidates(name, ResolveTarget::Type, caller) {
+            let Some(id) = self
+                .with_arity(id, arity)
+                .filter(|&id| self.type_arity(id) == arity)
+            else {
+                continue;
+            };
+            match (found, self.partial_type(id)) {
+                (None, ty) => found = Some(ty),
+                (Some(seen), ty) if seen == ty => {}
+                (Some(_), _) => return None,
+            }
+        }
+        found.filter(|&ty| !self.partial_parts(ty).is_empty())
+    }
+
     /// The first declaration in `file_path` named `node_name` with `kind` and
     /// `owner`: the id its later overloads hang off.
     pub fn first_declaration(
@@ -1559,10 +1620,15 @@ impl SymbolTable {
     /// with no candidate that way is dropped too, as `build_supertypes`
     /// drops it. A spelling repeated with the same candidates collapses to
     /// its first position.
+    ///
+    /// The parts of a C# `partial` type ([`Self::note_partial_type`]) are
+    /// one type: the rows of every part accumulate under the first part, in
+    /// row order, and each part then reads the whole list.
     pub fn build_declared_bases(&mut self, declared: Vec<(u32, DeclaredBase)>) {
         let mut pairs: Vec<(u32, Option<u32>)> = Vec::with_capacity(declared.len());
         let mut out: FxHashMap<u32, Vec<DeclaredBase>> = FxHashMap::default();
         for (ty, base) in declared {
+            let ty = self.partial_type(ty);
             if base.candidates.is_empty() {
                 pairs.push((ty, None));
             } else {
@@ -1588,6 +1654,19 @@ impl SymbolTable {
         }
         self.build_supertypes(pairs);
         self.declared_bases = out;
+        for parts in self.partial_parts.values() {
+            let (&first, rest) = parts.split_first().expect("a partial type has parts");
+            if let Some(bases) = self.declared_bases.get(&first).cloned() {
+                for &part in rest {
+                    self.declared_bases.insert(part, bases.clone());
+                }
+            }
+            if let Some(supertypes) = self.supertypes.get(&first).cloned() {
+                for &part in rest {
+                    self.supertypes.insert(part, supertypes.clone());
+                }
+            }
+        }
     }
 
     /// Declared bases of `type_id` in declared order; empty when it declares
@@ -1821,6 +1900,10 @@ impl TypeFacts for SymbolTable {
 
     fn return_type_of(&self, callee: u32) -> Option<&str> {
         SymbolTable::return_type_of(self, callee)
+    }
+
+    fn partial_parts(&self, ty: u32) -> &[u32] {
+        SymbolTable::partial_parts(self, ty)
     }
 }
 

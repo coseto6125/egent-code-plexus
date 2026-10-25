@@ -66,9 +66,6 @@ const CSHARP_FRAMEWORKS: &[FrameworkPatternSpec] = &[
     },
 ];
 
-/// Whether `node`'s subtree contains a C# `invocation_expression`. Gates
-/// emission of `<anonymous>` callback nodes so empty closures (e.g.
-/// `list.Select(x => x.Name)`) stay out of the graph.
 /// The number of type parameters a class, struct, interface or record
 /// declaration lists (`class Conv<T, U>` is 2); 0 for any other node.
 fn generic_arity(decl: tree_sitter::Node<'_>) -> u32 {
@@ -85,6 +82,77 @@ fn generic_arity(decl: tree_sitter::Node<'_>) -> u32 {
         .count() as u32
 }
 
+/// Whether a type declaration carries the `partial` modifier.
+fn is_partial(decl: tree_sitter::Node<'_>, source: &[u8]) -> bool {
+    let mut cursor = decl.walk();
+    let partial = decl
+        .children(&mut cursor)
+        .any(|child| child.kind() == "modifier" && child.utf8_text(source) == Ok("partial"));
+    partial
+}
+
+/// A declaration's `name` field text with the whitespace removed
+/// (`Lib . Json` is `Lib.Json`).
+fn name_text(decl: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
+    let name = decl.child_by_field_name("name")?.utf8_text(source).ok()?;
+    Some(name.chars().filter(|c| !c.is_whitespace()).collect())
+}
+
+/// The file-scoped namespace (`namespace Lib.Json;`) of a compilation unit,
+/// looked up through the preprocessor blocks that may wrap it. C# allows one
+/// per file, and no block namespace beside it.
+fn file_scoped_namespace(unit: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
+    let mut cursor = unit.walk();
+    let children: Vec<tree_sitter::Node<'_>> = unit.named_children(&mut cursor).collect();
+    children.into_iter().find_map(|child| match child.kind() {
+        "file_scoped_namespace_declaration" => name_text(child, source),
+        kind if kind.starts_with("preproc_") => file_scoped_namespace(child, source),
+        _ => None,
+    })
+}
+
+/// The scope that declares the type `decl`, as
+/// [`RawNode::partial_marker`] spells it: the namespace (block namespaces
+/// joined with `.`, or the file-scoped one), then each enclosing type as
+/// `+Name`, with a backtick and its generic arity when above 0. The
+/// preprocessor blocks and declaration lists between them add nothing.
+fn declaring_scope(decl: tree_sitter::Node<'_>, source: &[u8]) -> String {
+    let mut namespaces: Vec<String> = Vec::new();
+    let mut types: Vec<String> = Vec::new();
+    let mut unit = None;
+    let mut parent = decl.parent();
+    while let Some(node) = parent {
+        match node.kind() {
+            "namespace_declaration" => namespaces.extend(name_text(node, source)),
+            "class_declaration"
+            | "struct_declaration"
+            | "interface_declaration"
+            | "record_declaration" => {
+                if let Some(name) = name_text(node, source) {
+                    types.push(match generic_arity(node) {
+                        0 => name,
+                        arity => format!("{name}`{arity}"),
+                    });
+                }
+            }
+            "compilation_unit" => unit = Some(node),
+            _ => {}
+        }
+        parent = node.parent();
+    }
+    namespaces.extend(unit.and_then(|unit| file_scoped_namespace(unit, source)));
+    namespaces.reverse();
+    let mut scope = namespaces.join(".");
+    for ty in types.iter().rev() {
+        scope.push('+');
+        scope.push_str(ty);
+    }
+    scope
+}
+
+/// Whether `node`'s subtree contains a C# `invocation_expression`. Gates
+/// emission of `<anonymous>` callback nodes so empty closures (e.g.
+/// `list.Select(x => x.Name)`) stay out of the graph.
 fn body_has_call(node: tree_sitter::Node) -> bool {
     subtree_contains_kind(node, "invocation_expression")
 }
@@ -596,10 +664,16 @@ impl LanguageProvider for CSharpProvider {
                         // `Conv<T>` beside `Conv` is a type of its own; the
                         // identity numbering reads the arity off this marker.
                         let arity = if k.is_type() { generic_arity(root) } else { 0 };
-                        let decorators = match arity {
+                        let mut decorators = match arity {
                             0 => vec![],
                             arity => vec![RawNode::generic_arity_marker(arity)],
                         };
+                        // The parts of one `partial` type merge by this
+                        // scope (`c_sharp::partial`).
+                        if k.is_type() && is_partial(root, source) {
+                            decorators
+                                .push(RawNode::partial_marker(&declaring_scope(root, source)));
+                        }
                         nodes.push(RawNode {
                             decorators,
                             is_exported,

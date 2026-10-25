@@ -452,7 +452,35 @@ pub struct RawNode {
 /// keep their shape; `post_process::decorates_edges` skips it.
 const GENERIC_ARITY_MARKER: &str = "__generic_arity__:";
 
+/// The [`RawNode::decorators`] entry prefix that marks a C# type declared
+/// `partial`, followed by the scope that declares it: the namespace, then
+/// each enclosing type as `+Name`, with a backtick and the generic arity
+/// when that is above 0 (`Lib.Json+Outer`1`). The builder merges the parts
+/// of one type by this scope (`c_sharp::partial`). Only the C# parser
+/// writes it, beside [`GENERIC_ARITY_MARKER`], and
+/// `post_process::decorates_edges` skips it.
+const PARTIAL_MARKER: &str = "__partial__:";
+
 impl RawNode {
+    /// The [`RawNode::decorators`] entry for a `partial` type declared in
+    /// `scope`.
+    pub fn partial_marker(scope: &str) -> String {
+        format!("{PARTIAL_MARKER}{scope}")
+    }
+
+    /// Whether a decorator entry is a [`RawNode::partial_marker`].
+    pub fn is_partial_marker(decorator: &str) -> bool {
+        decorator.starts_with(PARTIAL_MARKER)
+    }
+
+    /// The declaring scope of a `partial` type, as the parser recorded it;
+    /// `None` when the node carries no partial marker.
+    pub fn partial_scope(&self) -> Option<&str> {
+        self.decorators
+            .iter()
+            .find_map(|d| d.strip_prefix(PARTIAL_MARKER))
+    }
+
     /// The [`RawNode::decorators`] entry for a declared generic arity.
     pub fn generic_arity_marker(arity: u32) -> String {
         format!("{GENERIC_ARITY_MARKER}{arity}")
