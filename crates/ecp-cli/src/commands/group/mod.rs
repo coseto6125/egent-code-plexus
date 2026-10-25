@@ -113,6 +113,16 @@ pub fn resolve_member_engines(
         .collect()
 }
 
+/// Prefix every line of `caveat` with `member`, so a multi-reason caveat
+/// names its repo on each line.
+pub fn member_prefixed(member: &str, caveat: &str) -> String {
+    caveat
+        .lines()
+        .map(|line| format!("{member}: {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// One caveat line per member whose engine self-flags untrustworthy results
 /// (warm-attach or behind-HEAD graph), prefixed with the member's display
 /// name so the consumer knows WHICH repo's rows to distrust — a blanket
@@ -121,7 +131,28 @@ pub fn resolve_member_engines(
 pub fn member_caveats(engines: &[(String, Engine)]) -> Option<String> {
     let lines: Vec<String> = engines
         .iter()
-        .filter_map(|(member, engine)| engine.caveat().map(|c| format!("{member}: {c}")))
+        .filter_map(|(member, engine)| engine.caveat().map(|c| member_prefixed(member, &c)))
         .collect();
     (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::member_prefixed;
+
+    #[test]
+    fn test_member_prefixed_two_line_caveat_prefixes_each_line() {
+        assert_eq!(
+            member_prefixed(
+                "api",
+                "graph is behind HEAD\n2 changed path(s) are not UTF-8"
+            ),
+            "api: graph is behind HEAD\napi: 2 changed path(s) are not UTF-8"
+        );
+    }
+
+    #[test]
+    fn test_member_prefixed_one_line_caveat_prefixes_once() {
+        assert_eq!(member_prefixed("api", "stale"), "api: stale");
+    }
 }

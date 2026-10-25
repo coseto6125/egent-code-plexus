@@ -1,12 +1,11 @@
 //! T4-6: OpenAPI 3.x / Swagger 2.0 schema-field extraction tests.
 //!
-//! All tests call `OpenApiProvider::parse_file` or the lower-level
-//! `YamlProvider::parse_file` to verify end-to-end field emission.
+//! All tests call `OpenApiProvider::parse_file`, the provider a sniffed
+//! OpenAPI YAML routes to (C5), to verify end-to-end field emission.
 //! String content is verified via the provider interface by round-tripping
 //! through `parse_file`, then checking `schema_fields`.
 
 use ecp_analyzer::openapi::OpenApiProvider;
-use ecp_analyzer::yaml::parser::YamlProvider;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{FrameworkId, SchemaType};
 
@@ -24,14 +23,7 @@ fn parse_openapi(filename: &str, src: &str) -> Vec<ecp_core::analyzer::types::Ra
 }
 
 fn parse_yaml(src: &str) -> Vec<ecp_core::analyzer::types::RawSchemaField> {
-    let provider = YamlProvider::new().expect("provider init");
-    let local = provider
-        .parse_file("openapi.yaml".as_ref(), src.as_bytes())
-        .expect("parse_file");
-    local
-        .schema_fields
-        .map(|b| b.into_vec())
-        .unwrap_or_default()
+    parse_openapi("openapi.yaml", src)
 }
 
 // ── Positive: OpenAPI 3.x YAML ────────────────────────────────────────────────

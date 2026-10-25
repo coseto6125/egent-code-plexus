@@ -1044,7 +1044,7 @@ fn omitted_files_caveat(engine: &Engine) -> Option<String> {
         .filter(|b| {
             matches!(
                 b.kind.resolve(&graph.string_pool),
-                "file-too-large" | "file-unreadable" | "parse-failed"
+                "file-too-large" | "file-unreadable" | "parse-failed" | "path-not-utf8"
             )
         })
         .count();

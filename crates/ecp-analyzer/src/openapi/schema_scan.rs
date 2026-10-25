@@ -114,8 +114,7 @@ fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
 
 /// Dispatch on file extension to parse as YAML or JSON, then walk schema
 /// tree, collecting fields AND the owning schema as a `NodeKind::Struct`
-/// node in a single pass. `pub` so `YamlProvider` can call this after
-/// confirming the OpenAPI marker.
+/// node in a single pass.
 ///
 /// The Struct node is load-bearing: `schema_field_mirrors` resolves each
 /// `RawSchemaField.owner_class` against the SymbolTable to attach a
