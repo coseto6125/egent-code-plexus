@@ -77,7 +77,7 @@ Run `ecp schema reltypes` for each edge's LLM-utility category and heuristic fla
 - **TransactionScope** + **OpensTxScope** — `MATCH (f:Function)-[:OpensTxScope]->(s:TransactionScope) RETURN f.name`. `s.name` carries the framework label (`tx_scope:{fn_name}#{spring-transactional|django-atomic|dotnet-transactional|symfony-transactional}`).
 - **PartOf** — a C# `partial` type part → its representative part: `MATCH (t:Class {name:'JsonReader'})<-[:PartOf]-(p) RETURN p.filePath`. `Extends` ends at the representative.
 - **Implements** — class→interface targets distinguished from class→class via target's NodeKind (Interface / Trait → Implements; else Extends).
-- **Fetches** — in-graph consumer file→handler (the call site has no node): `MATCH (f:File)-[:Fetches]->(r:Route) RETURN f.filePath, r.name`. Cross-repo misses NOT emitted (use `ecp contracts` for that).
+- **Fetches** — in-graph consumer file→handler (the call site has no node): `MATCH (f:File)-[:Fetches]->(r:Route) RETURN f.filePath, r.name`. Cross-repo misses NOT emitted (use `ecp group contracts` for that).
 - **File→Defines** — top-level containment: `MATCH (f:File)-[:Defines]->(s) WHERE f.filePath ENDS WITH 'lib.rs' RETURN s.name`. Does NOT duplicate `HasMethod` / `HasProperty` from Class members.
 
 ## BlindSpots

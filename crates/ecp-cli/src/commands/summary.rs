@@ -25,6 +25,7 @@ use ecp_analyzer::framework_confidence as fc;
 use ecp_core::graph::ArchivedZeroCopyGraph;
 use ecp_core::registry::{resolve_home_ecp, CommitBuildMeta, Registry, RegistryFile};
 use ecp_core::EcpError;
+use rustc_hash::FxHashMap;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -403,16 +404,17 @@ const FRAMEWORK_SIGNALS: &[FrameworkSignal] = &[
 ];
 
 /// Frameworks whose route detector writes `Route` nodes but no tagged edge:
-/// the file extension of the `Route` node is the evidence. Ruby lists
-/// Sinatra because the Ruby route query matches both.
+/// the file extension of the `Route` node is the evidence. The label stays
+/// neutral: the PHP and Ruby route queries also match Slim, Symfony, Sinatra,
+/// Hanami and Roda, so the extension cannot name one framework.
 const ROUTE_FILE_FRAMEWORKS: &[(&str, FrameworkSignal)] = &[
     (
         "php",
-        signal("PHP/Laravel", "route-node:*.php", fc::LARAVEL_ROUTE),
+        signal("PHP/routes", "route-node:*.php", fc::LARAVEL_ROUTE),
     ),
     (
         "rb",
-        signal("Ruby/Rails|Sinatra", "route-node:*.rb", fc::RAILS_ROUTE),
+        signal("Ruby/routes", "route-node:*.rb", fc::RAILS_ROUTE),
     ),
     (
         "cs",
@@ -454,9 +456,13 @@ fn classify_framework_reason(reason: &str) -> Option<&'static str> {
 /// whose file extension names the framework. `BTreeMap` keeps output stable.
 fn count_detected_frameworks(graph: &ArchivedZeroCopyGraph) -> Value {
     let mut counts: BTreeMap<&'static str, (u32, u32)> = BTreeMap::new();
+    // Edges share a few interned reasons: classify each distinct one once.
+    let mut class_of_reason: FxHashMap<u32, Option<&'static str>> = FxHashMap::default();
     for edge in graph.edges.iter() {
-        let reason = edge.reason.resolve(&graph.string_pool);
-        if let Some(fw) = classify_framework_reason(reason) {
+        let class = *class_of_reason
+            .entry(edge.reason.offset.to_native())
+            .or_insert_with(|| classify_framework_reason(edge.reason.resolve(&graph.string_pool)));
+        if let Some(fw) = class {
             counts.entry(fw).or_default().0 += 1;
         }
     }

@@ -60,7 +60,7 @@ Refresh evidence when source hashes change. A truncated result is not a complete
 |---|---|
 | `ecp summary` | Repo health + frameworks + blind spots |
 | `ecp routes <path>` | HTTP route → handler + caller chain |
-| `ecp contracts` | Cross-repo API contracts |
+| `ecp contracts` | HTTP route contracts: routes paired with fetch callers, across repos |
 | `ecp tool-map` | External HTTP / DB / Redis / queue calls |
 | `ecp shape-check` | HTTP consumer ↔ Route response shape drift |
 | `ecp processes` / `processes trace <pat>` | Execution-flow steps in real order — cleaner than `impact --direction down` |

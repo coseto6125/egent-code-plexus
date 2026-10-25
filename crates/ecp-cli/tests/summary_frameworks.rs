@@ -94,7 +94,9 @@ type FrameworkCase = (
 
 /// Stands for: before the fix `frameworks.detected` was `[]` for these four
 /// repos, so an agent concluded that ecp cannot see their routes. Each repo
-/// must list its own framework and count the route evidence.
+/// must list a row that counts the route evidence. The `.php` and `.rb` rows
+/// carry the neutral labels `PHP/routes` and `Ruby/routes`: the file extension
+/// cannot tell Laravel from Slim or Symfony, nor Rails from Sinatra or Hanami.
 #[test]
 fn test_summary_frameworks_detected_laravel_gin_rails_aspnet() {
     let cases: [FrameworkCase; 4] = [
@@ -107,7 +109,7 @@ fn test_summary_frameworks_detected_laravel_gin_rails_aspnet() {
                     LARAVEL_CONTROLLER,
                 ),
             ],
-            "PHP/Laravel",
+            "PHP/routes",
         ),
         ("Gin", vec![("main.go", GIN_MAIN)], "Go/Gin"),
         (
@@ -116,7 +118,7 @@ fn test_summary_frameworks_detected_laravel_gin_rails_aspnet() {
                 ("config/routes.rb", RAILS_ROUTES),
                 ("app/controllers/users_controller.rb", RAILS_CONTROLLER),
             ],
-            "Ruby/Rails|Sinatra",
+            "Ruby/routes",
         ),
         (
             "ASP.NET",
@@ -161,4 +163,21 @@ fn test_summary_frameworks_detected_names_are_in_supported_catalog() {
         let name = row["lang_framework"].as_str().unwrap();
         assert!(supported.contains(&name), "{name} not in supported");
     }
+}
+
+/// Stands for: a Sinatra app is a `.rb` route file, and the summary must not
+/// call it Rails. The label names the evidence (`Ruby/routes`), not a framework
+/// the extension cannot prove.
+#[test]
+fn test_summary_frameworks_sinatra_route_is_not_labelled_rails() {
+    let files = [(
+        "app.rb",
+        "require 'sinatra'\nget '/api/users' do\n  'ok'\nend\n",
+    )];
+    let found = names(&Repo::indexed(&files).detected());
+    assert!(found.iter().any(|n| n == "Ruby/routes"), "{found:?}");
+    assert!(
+        !found.iter().any(|n| n.contains("Rails")),
+        "a Sinatra route is not Rails: {found:?}"
+    );
 }

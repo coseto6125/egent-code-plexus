@@ -110,6 +110,37 @@ class Client {
     assert!(ids.contains(&"http:POST:/api/orders"), "got {ids:?}");
 }
 
+/// Stands for: the verb of `fetch(url, options)` comes from the `method` object
+/// key only. A URL or a string that holds the word `method` neither hides the
+/// real key nor invents one, and a quoted `"method"` key counts.
+#[test]
+fn test_group_extractors_http_node_fetch_verb_reads_the_method_key_only() {
+    let source = br#"
+async function load() {
+  await fetch("/api/method/list", { method: "POST" });
+  await fetch("/api/method");
+  await fetch("/api/quoted", { "method": "DELETE" });
+  await fetch("/api/text", { headers: { note: "method: PUT" } });
+  await fetch("/api/spread", { ...base, method: 'PATCH' });
+  await fetch("/api/dynamic", { method: verb });
+  await fetch("/api/empty", {});
+}
+"#;
+    let contracts = http_node::extract_http(Path::new("client.ts"), source);
+    let ids = consumer_ids(&contracts);
+    for want in [
+        "http:POST:/api/method/list",
+        "http:GET:/api/method",
+        "http:DELETE:/api/quoted",
+        "http:GET:/api/text",
+        "http:PATCH:/api/spread",
+        "http:GET:/api/dynamic",
+        "http:GET:/api/empty",
+    ] {
+        assert!(ids.contains(&want), "missing {want}; got {ids:?}");
+    }
+}
+
 #[test]
 fn test_group_extractors_emit_consumer_role_http_go() {
     let source = br#"package main
@@ -124,6 +155,25 @@ func run() {
     let contracts = http_go::extract_http(Path::new("client.go"), source);
     assert_eq!(consumer_ids(&contracts), vec!["http:GET:/api/users"]);
     assert_eq!(provider_ids(&contracts), vec!["http:GET:/api/health"]);
+}
+
+/// Stands for: `http` is the default mux for `HandleFunc` / `Handle` (a provider
+/// route) and the client package for the verbs (a consumer call, never a route).
+#[test]
+fn test_group_extractors_http_go_default_mux_registers_provider_routes() {
+    let source = br#"package main
+
+import "net/http"
+
+func run() {
+	http.HandleFunc("/x", h)
+	http.Handle("/y", hh)
+	http.Post("/z", "application/json", body)
+}
+"#;
+    let contracts = http_go::extract_http(Path::new("srv.go"), source);
+    assert_eq!(provider_ids(&contracts), vec!["http:ANY:/x", "http:ANY:/y"]);
+    assert_eq!(consumer_ids(&contracts), vec!["http:POST:/z"]);
 }
 
 #[test]

@@ -276,3 +276,50 @@ fn test_contracts_whitespace_repo_never_empty_success() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+/// Stands for: the `Fetches` edge starts at the file, so N identical calls in
+/// one file are one consumer, one pair, and the consumer carries no `line`.
+#[test]
+fn test_contracts_same_fetch_twice_in_one_file_is_one_pair_without_line() {
+    let w = World::new();
+    let twice = "async function a() { return fetch('/api/users'); }\nasync function b() { return fetch('/api/users'); }\n";
+    let a = w.repo("alpha", &[("server.js", SERVER_JS), ("client.js", twice)]);
+    let out = w.contracts(&a, ".", &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let v = json_of(&out);
+    let pairs = v["pairs"].as_array().unwrap();
+    assert_eq!(pairs.len(), 1, "{v}");
+    assert!(pairs[0]["consumer"].get("line").is_none(), "{v}");
+    assert!(pairs[0]["producer"]["line"].as_u64().unwrap() > 0, "{v}");
+}
+
+/// Stands for: a consumer pairs inside its own repo only with the route its
+/// `Fetches` edge names; a sibling route of another verb on the same path stays
+/// unmatched, and a repo with no client has no consumer to pair.
+#[test]
+fn test_contracts_own_repo_consumer_pairs_only_with_its_target_route() {
+    let w = World::new();
+    let server = "const app = require('express')();\napp.get('/api/users', list);\napp.post('/api/users', make);\napp.all('/api/users', any);\n";
+    let a = w.repo("alpha", &[("server.js", server), ("client.js", CLIENT_JS)]);
+    let out = w.contracts(&a, ".", &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let v = json_of(&out);
+    let pairs = v["pairs"].as_array().unwrap();
+    let from_client: Vec<&Value> = pairs
+        .iter()
+        .filter(|p| p["consumer"]["file"] == "client.js")
+        .collect();
+    let lines: std::collections::HashSet<u64> = from_client
+        .iter()
+        .map(|p| p["producer"]["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(
+        lines.len(),
+        from_client.len(),
+        "one consumer, one pair per target route: {v}"
+    );
+    assert!(
+        !from_client.iter().any(|p| p["method"] == "POST"),
+        "a GET fetch never pairs with the POST route: {v}"
+    );
+}

@@ -184,24 +184,56 @@ fn extract_clients(
 }
 
 /// The verb in `fetch(url, { method: "POST" })`; `GET` when the options do
-/// not name one literally.
+/// not name one literally. Only an object key counts: a `method` key follows
+/// `{` or `,`, bare or quoted. A `method` inside a string literal, such as the
+/// URL, is text.
 fn fetch_options_method(call_text: &str) -> &'static str {
-    let Some(at) = call_text.find("method") else {
-        return "GET";
-    };
-    let Some(rest) = call_text[at + "method".len()..]
-        .trim_start()
-        .strip_prefix(':')
-    else {
-        return "GET";
-    };
-    let word: String = rest
-        .trim_start()
-        .trim_start_matches(['"', '\'', '`'])
-        .chars()
-        .take_while(char::is_ascii_alphabetic)
-        .collect();
-    client_verb(&word).unwrap_or("GET")
+    let bytes = call_text.as_bytes();
+    let mut prev_significant: Option<u8> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        let token = if matches!(c, b'"' | b'\'' | b'`') {
+            let start = i + 1;
+            i = start;
+            while i < bytes.len() && bytes[i] != c {
+                i += if bytes[i] == b'\\' { 2 } else { 1 };
+            }
+            let end = i.min(bytes.len());
+            i = (end + 1).min(bytes.len());
+            &call_text[start..end]
+        } else if c.is_ascii_alphabetic() || matches!(c, b'_' | b'$') {
+            let start = i;
+            while i < bytes.len()
+                && (bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'_' | b'$'))
+            {
+                i += 1;
+            }
+            &call_text[start..i]
+        } else {
+            prev_significant = Some(c);
+            i += 1;
+            continue;
+        };
+        let is_key = token == "method" && matches!(prev_significant, Some(b'{' | b','));
+        if is_key {
+            if let Some(value) = call_text[i..].trim_start().strip_prefix(':') {
+                let word: String = value
+                    .trim_start()
+                    .trim_start_matches(['"', '\'', '`'])
+                    .chars()
+                    .take_while(char::is_ascii_alphabetic)
+                    .collect();
+                return client_verb(&word).unwrap_or("GET");
+            }
+        }
+        prev_significant = Some(b'a');
+    }
+    "GET"
 }
 
 /// Maps Express/Fastify method property name → HTTP method string.

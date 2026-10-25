@@ -87,7 +87,11 @@ pub fn extract_http(file_path: &Path, source: &[u8]) -> Vec<ExtractedContract> {
         if !is_route_register(method) {
             continue;
         }
-        if recv_idx.is_some_and(|i| is_client_receiver(super::capture_text(m, i, source))) {
+        let registers_on_default_mux = matches!(method, "HandleFunc" | "Handle");
+        if recv_idx.is_some_and(|i| {
+            let recv = super::capture_text(m, i, source);
+            is_client_receiver(recv) && !(recv == "http" && registers_on_default_mux)
+        }) {
             continue;
         }
         let raw_path = super::capture_text(m, path_idx, source);

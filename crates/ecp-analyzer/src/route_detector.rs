@@ -283,9 +283,68 @@ fn spring_class_prefixes(decorator: &str) -> Vec<String> {
     if name != "requestmapping" {
         return Vec::new();
     }
-    extract_string_args(trimmed)
+    spring_path_args(trimmed)
         .into_iter()
         .filter(|p| looks_like_path(p))
+        .collect()
+}
+
+/// The string literals of the `value` / `path` arguments of a Spring mapping,
+/// or of its first argument when that one has no key. `name = "x"`,
+/// `produces = "..."` and the other keyed arguments are not paths.
+fn spring_path_args(decorator: &str) -> Vec<String> {
+    let Some((_, args)) = decorator.split_once('(') else {
+        return Vec::new();
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    let (mut depth, mut start) = (0usize, 0usize);
+    let (mut quote, mut escaped) = (None::<char>, false);
+    for (i, c) in args.char_indices() {
+        if let Some(q) = quote {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, _) if c == q => quote = None,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth == 0 => {
+                parts.push(&args[start..i]);
+                start = args.len();
+                break;
+            }
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&args[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < args.len() {
+        parts.push(&args[start..]);
+    }
+    parts
+        .into_iter()
+        .enumerate()
+        .flat_map(|(position, part)| {
+            let part = part.trim();
+            let key_end = part
+                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(part.len());
+            let after_key = part[key_end..].trim_start();
+            let value = match (after_key.strip_prefix('='), &part[..key_end]) {
+                (Some(value), "value" | "path") => value,
+                (Some(_), _) => return Vec::new(),
+                (None, _) if position == 0 => part,
+                (None, _) => return Vec::new(),
+            };
+            extract_string_args(value)
+        })
         .collect()
 }
 
@@ -367,10 +426,12 @@ pub fn detect_all_from_decorator(decorator: &str) -> Vec<DetectedRoute> {
     if verbs.is_empty() {
         return Vec::new();
     }
-    let Some(path) = extract_string_args(decorator)
-        .into_iter()
-        .find(|s| looks_like_path(s))
-    else {
+    let (name, trimmed) = decorator_name(decorator);
+    let strings = match name.ends_with("mapping") {
+        true => spring_path_args(trimmed),
+        false => extract_string_args(decorator),
+    };
+    let Some(path) = strings.into_iter().find(|s| looks_like_path(s)) else {
         return Vec::new();
     };
     verbs
@@ -774,6 +835,50 @@ mod tests {
     }
 
     #[test]
+    fn test_spring_class_prefixes_keyed_arguments_other_than_value_and_path_are_no_prefix() {
+        assert_eq!(
+            spring_class_prefixes("@RequestMapping(name = \"/ctl\")"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            spring_class_prefixes("@RequestMapping(name = \"/ctl\", path = \"/api\")"),
+            vec!["/api".to_string()]
+        );
+        assert_eq!(
+            spring_class_prefixes(
+                "@RequestMapping(produces = \"/json\", value = {\"/a\", \"/b\"})"
+            ),
+            vec!["/a".to_string(), "/b".to_string()]
+        );
+        assert_eq!(
+            spring_class_prefixes("@RequestMapping(\"/api\", name = \"/ctl\")"),
+            vec!["/api".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_spring_class_prefixes_empty_blank_and_bare_mapping_yield_none() {
+        for d in [
+            "@RequestMapping",
+            "@RequestMapping()",
+            "@RequestMapping(\"\")",
+            "@RequestMapping(\"  \")",
+            "@RequestMapping(value = \"\")",
+        ] {
+            assert_eq!(spring_class_prefixes(d), Vec::<String>::new(), "{d}");
+        }
+    }
+
+    #[test]
+    fn test_detect_from_decorator_spring_name_argument_is_not_the_path() {
+        assert_eq!(
+            dec("@GetMapping(name = \"/label\", value = \"/real\")"),
+            some("GET", "/real")
+        );
+        assert_eq!(dec("@GetMapping(name = \"/label\")"), None);
+    }
+
+    #[test]
     fn detect_from_decorator_class_level_request_mapping_yields_none() {
         assert_eq!(dec("@RequestMapping(\"/api/target\")"), None);
         assert_eq!(dec("@RequestMapping(value = \"/api/target\")"), None);
@@ -1165,7 +1270,7 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_from_call_input_with_get_in_the_middle_returns_none() {
+    fn test_detect_from_call_verb_word_in_the_middle_returns_none() {
         assert_eq!(verb("MapDeleteAll"), None);
     }
 

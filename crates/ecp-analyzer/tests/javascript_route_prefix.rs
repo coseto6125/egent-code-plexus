@@ -212,3 +212,56 @@ fn test_route_express_mounted_route_keeps_its_handler_edge() {
         .collect();
     assert_eq!(handles, [("h".to_string(), "GET /api/x".to_string())]);
 }
+
+#[test]
+fn test_route_express_mount_named_import_of_a_non_router_composes_nothing() {
+    // Stands for: a route keeps its own path unless the mounted binding is
+    // proved to be its router. `auth` is a middleware exported next to the
+    // file's one router; mounting it must not give the router's route `/api`.
+    let feature = "const express = require('express');\nconst router = express.Router();\nfunction priv(req, res) { res.send('x'); }\nrouter.get('/private', priv);\nfunction auth(req, res, next) { next(); }\nmodule.exports = { auth, router };\n";
+    let app = "import express from 'express';\nimport { auth } from './feature';\nconst app = express();\napp.use('/api', auth);\n";
+    assert_eq!(
+        route_names(&build_files(&[
+            ("src/feature.js", feature),
+            ("src/app.js", app)
+        ])),
+        ["GET /private", "USE /api"],
+        "a named import that matches no router mounts no router"
+    );
+}
+
+#[test]
+fn test_route_express_mount_named_import_of_the_router_still_composes() {
+    // Stands for: the by-name match is unchanged by the named-import guard.
+    let feature = "const express = require('express');\nconst router = express.Router();\nfunction list(req, res) { res.json({}); }\nrouter.get('/list', list);\nmodule.exports = { router };\n";
+    let app = "import express from 'express';\nimport { router } from './feature';\nconst app = express();\napp.use('/api', router);\n";
+    assert_eq!(
+        route_names(&build_files(&[
+            ("src/feature.js", feature),
+            ("src/app.js", app)
+        ])),
+        ["GET /api/list", "USE /api"]
+    );
+}
+
+#[test]
+fn test_route_express_mount_without_router_argument_composes_nothing() {
+    assert_eq!(routes_of("app.use('/api');"), ["GET /x", "USE /api"]);
+}
+
+#[test]
+fn test_route_express_mount_past_the_prefix_cap_keeps_the_route() {
+    // Stands for: the cap bounds the composed paths (16) and never drops the
+    // endpoint: the route stays reachable at its own path as well.
+    let tail: String = (0..20)
+        .map(|i| format!("app.use('/m{i}', router);\n"))
+        .collect();
+    let names = routes_of(&tail);
+    let gets: Vec<&String> = names.iter().filter(|n| n.starts_with("GET ")).collect();
+    assert_eq!(
+        gets.len(),
+        17,
+        "16 composed paths and the route's own: {names:?}"
+    );
+    assert!(gets.iter().any(|n| n.as_str() == "GET /x"), "{names:?}");
+}

@@ -1681,6 +1681,9 @@ impl HandlerIdentity<'_> {
     }
 }
 
+/// A router as (file index, variable name).
+type RouterRef = (u32, String);
+
 /// The routers an Express `app.use("/api", router)` mounts, as far as the
 /// build shows them. A parser that reads Express mounts writes, for each
 /// route call, a `LocalGraph::route_receivers` entry (the call's span and its
@@ -1689,9 +1692,6 @@ impl HandlerIdentity<'_> {
 /// variable of the same file, or, through an import of the mounting file that
 /// the resolver resolves, to the router of the imported file. A mount that
 /// does not resolve is not recorded: its routes keep their own path.
-/// A router as (file index, variable name).
-type RouterRef = (u32, String);
-
 #[derive(Default)]
 struct RouteMounts {
     /// File and call span → the variable the call is made on.
@@ -1758,10 +1758,21 @@ impl RouteMounts {
                             let module = resolver.ecmascript_module(&path, import)?;
                             let target_file = *file_of_path.get(&*module)?;
                             let candidates = &routers[target_file as usize];
+                            let whole_module = import.imported_name == "*"
+                                || matches!(
+                                    import.binding_kind,
+                                    Some(
+                                        ecp_core::analyzer::types::BindingKind::EsDefault
+                                            | ecp_core::analyzer::types::BindingKind::EsDefaultReexport
+                                    )
+                                );
                             let router =
                                 match candidates.iter().find(|c| **c == import.imported_name) {
                                     Some(named) => named,
-                                    None if candidates.len() == 1 => &candidates[0],
+                                    // A default or whole-module binding is the module's one
+                                    // router. A named import that matches no router is some
+                                    // other export (a middleware): it mounts no router.
+                                    None if whole_module && candidates.len() == 1 => &candidates[0],
                                     None => return None,
                                 };
                             Some((target_file, router.to_string()))
@@ -1794,7 +1805,8 @@ impl RouteMounts {
             return vec![path.to_string()];
         };
         let mut paths: Vec<String> = Vec::new();
-        for prefix in self.prefixes_of(&(file, receiver.clone()), &mut Vec::new()) {
+        let mut capped = false;
+        for prefix in self.prefixes_of(&(file, receiver.clone()), &mut Vec::new(), &mut capped) {
             let composed = match prefix.trim().is_empty() {
                 true => path.to_string(),
                 false => crate::route_detector::join_route_segments([prefix.as_str(), path]),
@@ -1803,12 +1815,23 @@ impl RouteMounts {
                 paths.push(composed);
             }
         }
+        // Past the cap some mounts are not composed. The route stays reachable
+        // at its own path, so the cap never drops an endpoint.
+        if capped && !paths.iter().any(|p| p == path) {
+            paths.push(path.to_string());
+        }
         paths
     }
 
     /// The mount prefixes of a router, one per chain of mounts that reaches
-    /// it; the empty prefix for a router no mount attaches.
-    fn prefixes_of(&self, router: &(u32, String), chain: &mut Vec<(u32, String)>) -> Vec<String> {
+    /// it; the empty prefix for a router no mount attaches. `capped` is set
+    /// when [`MAX_MOUNT_PREFIXES`] left a prefix out.
+    fn prefixes_of(
+        &self,
+        router: &(u32, String),
+        chain: &mut Vec<(u32, String)>,
+        capped: &mut bool,
+    ) -> Vec<String> {
         let Some(mounts) = self.mounted_on.get(router) else {
             return vec![String::new()];
         };
@@ -1818,13 +1841,17 @@ impl RouteMounts {
             if chain.contains(parent) {
                 continue;
             }
-            for outer in self.prefixes_of(parent, chain) {
+            for outer in self.prefixes_of(parent, chain, capped) {
                 let prefix = crate::route_detector::join_route_segments([
                     outer.as_str(),
                     mount_path.as_str(),
                 ]);
-                if !prefixes.contains(&prefix) && prefixes.len() < MAX_MOUNT_PREFIXES {
-                    prefixes.push(prefix);
+                if prefixes.contains(&prefix) {
+                    continue;
+                }
+                match prefixes.len() < MAX_MOUNT_PREFIXES {
+                    true => prefixes.push(prefix),
+                    false => *capped = true,
                 }
             }
         }
@@ -2451,20 +2478,30 @@ fn pass1_95_controller_actions(
     edges
 }
 
+/// A source file's text with its line offsets, both built once per build.
+struct SourceText {
+    text: String,
+    lines: response_shapes::LineStarts,
+}
+
 /// The text of `file_idx` under `repo_root`, read once per build; `None`
 /// when the file cannot be read.
 fn cached_source<'c>(
-    cache: &'c mut FxHashMap<u32, Option<String>>,
+    cache: &'c mut FxHashMap<u32, Option<SourceText>>,
     repo_root: &std::path::Path,
     local_graphs: &[LocalGraph],
     file_idx: u32,
-) -> Option<&'c str> {
+) -> Option<&'c SourceText> {
     cache
         .entry(file_idx)
         .or_insert_with(|| {
-            std::fs::read_to_string(repo_root.join(&local_graphs[file_idx as usize].file_path)).ok()
+            let text =
+                std::fs::read_to_string(repo_root.join(&local_graphs[file_idx as usize].file_path))
+                    .ok()?;
+            let lines = response_shapes::LineStarts::new(&text);
+            Some(SourceText { text, lines })
         })
-        .as_deref()
+        .as_ref()
 }
 
 /// Pass 1.6: Fetch-shape extraction.
@@ -2512,7 +2549,7 @@ fn pass1_6_fetch_shapes(
         // Per-file content cache — multiple routes may share a handler file
         // (Express-style `router.get('/a')`/`router.get('/b')` in one file),
         // and consumer files re-read once even if they fetch many URLs.
-        let mut content_cache: FxHashMap<u32, Option<String>> = FxHashMap::default();
+        let mut content_cache: FxHashMap<u32, Option<SourceText>> = FxHashMap::default();
         let lang_of = |file_idx: u32| {
             lang_for_path(&local_graphs[file_idx as usize].file_path.to_string_lossy())
         };
@@ -2530,7 +2567,9 @@ fn pass1_6_fetch_shapes(
                 else {
                     continue;
                 };
-                if let Some(read) = response_shapes::extract_in_span(content, span, lang) {
+                if let Some(read) =
+                    response_shapes::extract_in_span(&content.text, &content.lines, span, lang)
+                {
                     shape.get_or_insert_with(Default::default).merge(read);
                 }
             }
@@ -2539,7 +2578,7 @@ fn pass1_6_fetch_shapes(
                     if let Some(content) =
                         cached_source(&mut content_cache, repo_root, local_graphs, *file_idx)
                     {
-                        shape = Some(response_shapes::extract(content, lang));
+                        shape = Some(response_shapes::extract(&content.text, lang));
                     }
                 }
             }

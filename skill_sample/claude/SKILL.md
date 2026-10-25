@@ -1,6 +1,6 @@
 ---
 name: ecp
-description: Symbol-level code analysis, blast-radius impact, cross-repo API contracts, route map. Defer to grep for string literals, config keys, vendored deps/generated code, fs layout.
+description: Symbol-level code analysis, blast-radius impact, HTTP route contracts across repos, route map. Defer to grep for string literals, config keys, vendored deps/generated code, fs layout.
 ---
 
 # ecp — egent-code-plexus-rs CLI

@@ -19,7 +19,7 @@ description: Detailed `ecp` command reference aligned with `ecp --help` and `ecp
 | Cypher query escape hatch | `ecp cypher "MATCH ... RETURN ..." --repo .` |
 | Rename a symbol | Find the sites with `ecp impact old --repo .` (and `ecp find old --repo .`), then rename with LSP or edit them |
 | HTTP route → handler → upstream callers | `ecp routes <path?> --repo .` |
-| Cross-repo API contracts inventory | `ecp contracts --repo @all` |
+| HTTP route contracts: routes paired with fetch callers, across repos | `ecp contracts --repo @all` |
 | Route / contract delta — edge view | `ecp diff --section all --baseline <ref> --repo .` |
 | Route response-shape drift detection | `ecp shape-check --route <path>? --repo .` |
 | External HTTP / DB / Redis / queue usage | `ecp tool-map` |

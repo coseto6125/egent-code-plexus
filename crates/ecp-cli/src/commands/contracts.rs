@@ -3,7 +3,10 @@
 //! **Producers** are the graph's `Route` nodes (test-category files left
 //! out, as in `ecp routes`). **Consumers** are its `Fetches` edges: each
 //! one is a client call site whose URL matched a `Route` in the same graph.
-//! A producer and a consumer pair when they share the verb and the path.
+//! Inside one repo a consumer pairs with the one `Route` its edge names. A
+//! producer of another repo pairs with it when they share the verb and the
+//! path. A consumer has no `line`: the edge starts at the file, and the graph
+//! keeps no call-site line. Identical calls in one file are one consumer.
 //! `scope` is `same_repo` for a consumer and a producer of one repo, and
 //! `cross_repo` for two repos.
 //!
@@ -27,7 +30,7 @@
 //!   "pairs": [
 //!     { "kind": "route", "method": "GET", "path": "/users/:id", "scope": "cross_repo",
 //!       "producer": { "repo": "api", "file": "...", "line": 12 },
-//!       "consumer": { "repo": "web", "file": "...", "line": 42 } }
+//!       "consumer": { "repo": "web", "file": "..." } }
 //!   ],
 //!   "unmatched_producer_count": 5,
 //!   "unmatched_consumer_count": 2,
@@ -44,11 +47,11 @@ use crate::output::{emit, OutputFormat};
 use crate::repo_selector;
 use clap::Args;
 use ecp_core::contracts::identity::RouteKey;
-use ecp_core::graph::{ArchivedFileCategory, ArchivedNodeKind, ArchivedRelType};
+use ecp_core::graph::{ArchivedFileCategory, ArchivedNodeKind, ArchivedRelType, NodeKind};
 use ecp_core::registry::{resolve_home_ecp, Registry};
 use ecp_core::EcpError;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Args, Debug, Clone)]
 pub struct ContractsArgs {
@@ -74,7 +77,6 @@ pub struct ContractsArgs {
 pub fn run(args: ContractsArgs) -> Result<(), EcpError> {
     let format = args.format.unwrap_or_default();
 
-    // 1. Load registry and resolve selector.
     let home_ecp = resolve_home_ecp();
     let registry = Registry::open(&home_ecp)
         .map_err(|e| EcpError::InvalidArgument(format!("registry open: {e}")))?;
@@ -99,7 +101,6 @@ pub fn run(args: ContractsArgs) -> Result<(), EcpError> {
         ));
     }
 
-    // 2. Per-repo extraction. A repo that fails is reported, not fatal.
     let kind_filter = parse_kind_filter(&args.kind);
     if !kind_filter.contains(&"route") {
         return Err(EcpError::Output(format!(
@@ -111,6 +112,7 @@ pub fn run(args: ContractsArgs) -> Result<(), EcpError> {
     let mut producers: Vec<Producer> = Vec::new();
     let mut consumers: Vec<Consumer> = Vec::new();
     let mut repo_errors: Vec<Value> = Vec::new();
+    // A repo that fails is reported, not fatal.
     for repo in &resolved {
         match extract_contracts_for_repo(repo, &home_ecp) {
             Ok((mut p, mut c)) => {
@@ -134,7 +136,6 @@ pub fn run(args: ContractsArgs) -> Result<(), EcpError> {
         )));
     }
 
-    // 3. Match producers and consumers by (kind, verb, path).
     let (pairs, matched_p, matched_c) = match_pairs(&producers, &consumers);
     let unmatched_p: Vec<&Producer> = producers
         .iter()
@@ -149,7 +150,6 @@ pub fn run(args: ContractsArgs) -> Result<(), EcpError> {
         .map(|(_, c)| c)
         .collect();
 
-    // 4. Build and emit payload.
     let mut payload = if args.unmatched_only {
         json!({
             "unmatched_producers": unmatched_p.iter().map(|p| json!({
@@ -166,7 +166,6 @@ pub fn run(args: ContractsArgs) -> Result<(), EcpError> {
                 "path": c.path,
                 "repo": c.repo,
                 "file": c.file,
-                "line": c.line,
             })).collect::<Vec<_>>(),
         })
     } else {
@@ -185,7 +184,6 @@ pub fn run(args: ContractsArgs) -> Result<(), EcpError> {
                 "consumer": {
                     "repo": m.consumer_repo,
                     "file": m.consumer_file,
-                    "line": m.consumer_line,
                 },
             })).collect::<Vec<_>>(),
             "unmatched_producer_count": unmatched_p.len(),
@@ -217,10 +215,13 @@ struct Producer {
     repo: String,
     file: String,
     line: u32,
+    /// The `Route` node's index in its repo's graph.
+    node: u32,
 }
 
 /// A client call site. `method` and `path` come from the `Route` its `Fetches`
-/// edge points at.
+/// edge points at. The edge starts at the file, so the graph holds no call-site
+/// line and a consumer carries none.
 #[derive(Debug, Clone)]
 struct Consumer {
     kind: String,
@@ -228,7 +229,8 @@ struct Consumer {
     path: String,
     repo: String,
     file: String,
-    line: u32,
+    /// Index of the `Route` node the `Fetches` edge names, in the consumer's repo graph.
+    target: u32,
 }
 
 struct Match {
@@ -240,7 +242,6 @@ struct Match {
     producer_line: u32,
     consumer_repo: String,
     consumer_file: String,
-    consumer_line: u32,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -311,46 +312,50 @@ fn extract_contracts_for_repo(
     };
 
     let mut producers = Vec::new();
-    for (idx, node) in graph.nodes.iter().enumerate() {
-        if !matches!(node.kind, ArchivedNodeKind::Route) || is_test(node) {
-            continue;
-        }
-        let Some((method, path)) = route_of(idx) else {
-            continue;
-        };
-        producers.push(Producer {
-            kind: "route".into(),
-            method,
-            path,
-            repo: name.clone(),
-            file: file_of(node),
-            line: node.start_line(),
-        });
-    }
-
     let mut consumers = Vec::new();
-    for edge in graph.edges.iter() {
-        if !matches!(edge.rel_type, ArchivedRelType::Fetches) {
-            continue;
-        }
-        let Some(source) = graph.nodes.get(edge.source.to_native() as usize) else {
+    for idx in graph.nodes_by_kind(NodeKind::Route) {
+        let node = &graph.nodes[idx as usize];
+        let Some((method, path)) = route_of(idx as usize) else {
             continue;
         };
-        let Some((method, path)) = route_of(edge.target.to_native() as usize) else {
-            continue;
-        };
-        if is_test(source) {
-            continue;
+        if !is_test(node) {
+            producers.push(Producer {
+                kind: "route".into(),
+                method: method.clone(),
+                path: path.clone(),
+                repo: name.clone(),
+                file: file_of(node),
+                line: node.start_line(),
+                node: idx,
+            });
         }
-        consumers.push(Consumer {
-            kind: "route".into(),
-            method,
-            path,
-            repo: name.clone(),
-            file: file_of(source),
-            line: source.start_line(),
-        });
+        let first = graph.in_offsets[idx as usize].to_native() as usize;
+        let last = graph.in_offsets[idx as usize + 1].to_native() as usize;
+        for slot in first..last {
+            let edge = &graph.edges[graph.in_edge_idx[slot].to_native() as usize];
+            if !matches!(edge.rel_type, ArchivedRelType::Fetches) {
+                continue;
+            }
+            let Some(source) = graph.nodes.get(edge.source.to_native() as usize) else {
+                continue;
+            };
+            if is_test(source) {
+                continue;
+            }
+            consumers.push(Consumer {
+                kind: "route".into(),
+                method: method.clone(),
+                path: path.clone(),
+                repo: name.clone(),
+                file: file_of(source),
+                target: idx,
+            });
+        }
     }
+    // The graph holds one Fetches edge per call site, all from the File node,
+    // so N identical calls in one file would be N identical pairs.
+    let mut seen = HashSet::new();
+    consumers.retain(|c| seen.insert((c.file.clone(), c.method.clone(), c.path.clone(), c.target)));
     Ok((producers, consumers))
 }
 
@@ -359,33 +364,45 @@ fn verbs_meet(a: &str, b: &str) -> bool {
     a == b || a == "ANY" || b == "ANY"
 }
 
-/// Pair each producer with every consumer that shares (kind, verb, path). One
-/// producer can match several consumers. Returns the pairs and the indices of
-/// the matched producers and consumers.
+/// Pair a consumer with the producers it meets. In the consumer's own repo its
+/// `Fetches` edge names one target, so only that producer pairs; a verb-less
+/// `ANY` route never fans out to its siblings. Producers of other repos pair by
+/// (kind, verb, path). Returns the pairs and the indices of the matched
+/// producers and consumers.
 fn match_pairs(
     producers: &[Producer],
     consumers: &[Consumer],
 ) -> (Vec<Match>, HashSet<usize>, HashSet<usize>) {
+    let mut by_path: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (pi, p) in producers.iter().enumerate() {
+        by_path.entry(p.path.as_str()).or_default().push(pi);
+    }
     let mut pairs = Vec::new();
     let mut matched_p = HashSet::new();
     let mut matched_c = HashSet::new();
-    for (pi, p) in producers.iter().enumerate() {
-        for (ci, c) in consumers.iter().enumerate() {
-            if p.kind == c.kind && p.path == c.path && verbs_meet(&p.method, &c.method) {
-                pairs.push(Match {
-                    kind: p.kind.clone(),
-                    method: c.method.clone(),
-                    path: p.path.clone(),
-                    producer_repo: p.repo.clone(),
-                    producer_file: p.file.clone(),
-                    producer_line: p.line,
-                    consumer_repo: c.repo.clone(),
-                    consumer_file: c.file.clone(),
-                    consumer_line: c.line,
-                });
-                matched_p.insert(pi);
-                matched_c.insert(ci);
+    for (ci, c) in consumers.iter().enumerate() {
+        for &pi in by_path.get(c.path.as_str()).into_iter().flatten() {
+            let p = &producers[pi];
+            let meets = if p.repo == c.repo {
+                p.node == c.target
+            } else {
+                p.kind == c.kind && verbs_meet(&p.method, &c.method)
+            };
+            if !meets {
+                continue;
             }
+            pairs.push(Match {
+                kind: p.kind.clone(),
+                method: c.method.clone(),
+                path: p.path.clone(),
+                producer_repo: p.repo.clone(),
+                producer_file: p.file.clone(),
+                producer_line: p.line,
+                consumer_repo: c.repo.clone(),
+                consumer_file: c.file.clone(),
+            });
+            matched_p.insert(pi);
+            matched_c.insert(ci);
         }
     }
     (pairs, matched_p, matched_c)

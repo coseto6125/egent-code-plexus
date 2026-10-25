@@ -185,3 +185,19 @@ fn test_route_fastapi_composed_route_keeps_its_handler_edge() {
         "the decorator route is dropped, so the handler edge points at the composed Route only"
     );
 }
+
+#[test]
+fn test_route_fastapi_includes_past_the_prefix_cap_keep_the_route() {
+    // Stands for: the cap bounds the composed paths (16) and never drops the
+    // endpoint: the route stays reachable at its own path as well.
+    let tail: String = (0..20)
+        .map(|i| format!("app.include_router(router, prefix=\"/v{i}\")\n"))
+        .collect();
+    let names = routes_of("", &tail);
+    assert_eq!(
+        names.len(),
+        17,
+        "16 composed paths and the route's own: {names:?}"
+    );
+    assert!(names.iter().any(|n| n == "GET /x"), "{names:?}");
+}

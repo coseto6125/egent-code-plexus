@@ -401,7 +401,13 @@ impl RouterPrefixes {
     /// outermost include first and its own prefix last, joined by the one
     /// prefix rule. A router no include in this file attaches has its own
     /// prefix alone (`""` for a name that is no router of the file).
-    fn of<'a>(&'a self, router: &'a str, chain: &mut Vec<&'a str>) -> Vec<String> {
+    /// `capped` is set when [`MAX_ROUTER_PREFIXES`] left a prefix out.
+    fn of<'a>(
+        &'a self,
+        router: &'a str,
+        chain: &mut Vec<&'a str>,
+        capped: &mut bool,
+    ) -> Vec<String> {
         let own = self.own.get(router).map_or("", String::as_str);
         let parents: Vec<_> = self
             .includes
@@ -418,14 +424,18 @@ impl RouterPrefixes {
             if chain.contains(&parent) {
                 continue;
             }
-            for outer in self.of(parent, chain) {
+            for outer in self.of(parent, chain, capped) {
                 let prefix = crate::route_detector::join_route_segments([
                     outer.as_str(),
                     include_prefix.as_str(),
                     own,
                 ]);
-                if !prefixes.contains(&prefix) && prefixes.len() < MAX_ROUTER_PREFIXES {
-                    prefixes.push(prefix);
+                if prefixes.contains(&prefix) {
+                    continue;
+                }
+                match prefixes.len() < MAX_ROUTER_PREFIXES {
+                    true => prefixes.push(prefix),
+                    false => *capped = true,
                 }
             }
         }
@@ -461,8 +471,9 @@ fn compose_router_prefixes(
         let Some(receiver) = receiver.as_deref() else {
             continue;
         };
+        let mut capped = false;
         let mut paths = prefixes
-            .of(receiver, &mut Vec::new())
+            .of(receiver, &mut Vec::new(), &mut capped)
             .into_iter()
             .map(|prefix| match prefix.trim().trim_matches('/').is_empty() {
                 true => route.path.clone(),
@@ -477,6 +488,11 @@ fn compose_router_prefixes(
             if !unique.contains(&path) {
                 unique.push(path);
             }
+        }
+        // Past the cap some includes are not composed: the route stays at its
+        // own path instead of being dropped.
+        if capped && !unique.contains(&route.path) {
+            unique.push(route.path.clone());
         }
         let mut paths = unique.into_iter();
         if let Some(first) = paths.next() {
