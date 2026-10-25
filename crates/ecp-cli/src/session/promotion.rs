@@ -202,7 +202,7 @@ mod tests {
             content_hash: Some(hash),
             parse_failed: false,
             dirty_symbols: Vec::new(),
-            format: ecp_core::session::FRAGMENT_FORMAT_V5,
+            format: ecp_core::session::FRAGMENT_FORMAT_V6,
         }
     }
 

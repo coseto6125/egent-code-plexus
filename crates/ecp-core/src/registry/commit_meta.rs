@@ -98,7 +98,10 @@ use std::path::Path;
 /// PathLiteral owner is the bound node's owner (`Walk` for `Walk<'s, 't>`).
 /// schema28: an EventTopic node keeps its source spelling; `RawEventTopic`
 /// carries the canonical pairing key apart (`topic_key`).
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema28");
+/// schema29: Fetches start at the File node; a module-level framework ref
+/// binds the File node; Overrides edges follow the stored supertypes per
+/// language rule.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema29");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
