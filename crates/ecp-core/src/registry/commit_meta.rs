@@ -138,7 +138,9 @@ use std::path::Path;
 /// dropped only on an HTTP client (`@FeignClient`, `@HttpExchange`); an
 /// annotation type (C# attribute class, Java `@interface`, Kotlin
 /// `annotation class`) owns its members.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema38");
+/// schema39: Kotlin and Swift `FunctionMeta.decorators` drop parser markers;
+/// a C# generic attribute class carries its arity in its uid.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema39");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {
