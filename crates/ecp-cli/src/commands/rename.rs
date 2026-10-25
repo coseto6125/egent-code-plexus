@@ -8,6 +8,11 @@
 //! 2. **Verify (AST)**: tree-sitter parse each affected file, find every
 //!    `identifier` byte-range whose text matches the target, and keep the
 //!    ones the graph binds to the declaration (see [`Binding`]).
+//!    An occurrence the graph does not bind is unbound. Without `--dry-run`
+//!    and `--leave-unbound`, one unbound occurrence refuses the whole rename
+//!    before any write (code and markdown). `--leave-unbound` waives only
+//!    this refusal. The dry-run headline reads `risk partial` while any file
+//!    is unscanned or any occurrence is unbound.
 //!    Supported languages: Python, TypeScript/TSX, JavaScript,
 //!    Rust, Java, Kotlin, C#, Go, PHP, Ruby, Swift, C, C++, Dart.
 //! 3. **Execute / Dry-run**: dry-run prints the count + a unified diff
@@ -41,8 +46,14 @@ use std::path::{Path, PathBuf};
 /// graph binds to one declaration via tree-sitter and rewrites them
 /// atomically, with optional dry-run preview.
 /// It edits the declaration's name, the occurrences inside its referrers, and
-/// the occurrences outside every function. It leaves an occurrence inside any
-/// other function, and lists each one in the payload's `unbound` field.
+/// the occurrences outside every function. An occurrence inside any other
+/// function is unbound: the graph does not link that function to the target.
+/// The payload's `unbound` field lists each one as `{file, line}`.
+/// Without `--dry-run` and without `--leave-unbound`, any unbound occurrence
+/// makes the command exit non-zero and write nothing. The refusal payload has
+/// `operation: refused` and `reason: unbound_occurrences`. `--dry-run` lists
+/// the unbound occurrences and exits 0. `--leave-unbound` writes the bound
+/// occurrences and leaves each unbound one unchanged.
 /// When the target matches several declarations, it exits non-zero, writes
 /// nothing, and lists each declaration under `candidates` with the arguments
 /// that select it alone.
@@ -53,8 +64,10 @@ use std::path::{Path, PathBuf};
 /// could not be read); its absence means the graph was current. It gains a
 /// `not_scanned` list (file, reason) when an affected file has no identifier
 /// finder or cannot be read; those files are left unchanged. The dry-run
-/// headline then reads `risk partial; files N; usages M; not scanned K`
-/// instead of `risk safe; files N; usages M`.
+/// headline reads `risk safe; files N; usages M` only when no file is unscanned
+/// and no occurrence is unbound. Otherwise it reads `risk partial; files N;
+/// usages M`, then `; not scanned K` when K is above 0, then `; unbound U`
+/// when U is above 0. `--leave-unbound` does not change the headline.
 #[derive(Args, Debug, Clone, Serialize)]
 pub struct RenameArgs {
     /// The declaration to rename (equivalent to `--symbol` flag): `name`,
@@ -112,6 +125,17 @@ pub struct RenameArgs {
     /// function, method, class, struct, and the other node kinds.
     #[arg(long)]
     pub kind: Option<String>,
+
+    /// Write the rename although some occurrences sit in functions the graph
+    /// does not link to the target. Those occurrences stay unchanged and the
+    /// payload still lists them. It never waives the ambiguity refusal or the
+    /// warm-attach refusal.
+    #[arg(
+        long = "leave-unbound",
+        alias = "leave_unbound",
+        default_value_t = false
+    )]
+    pub leave_unbound: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -586,6 +610,30 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
         not_scanned.sort_by(|a, b| a.file.cmp(&b.file));
     }
 
+    // Every candidate file is classified above, so this check runs before any
+    // write (code and markdown) and before the zero-hit early return.
+    if !args.dry_run && !args.leave_unbound && !unbound.is_empty() {
+        let mut payload = json!({
+            "operation": "refused",
+            "reason": "unbound_occurrences",
+            "old": target_symbol,
+            "new": target_new_name,
+        });
+        attach_unbound(&mut payload, &unbound);
+        attach_not_scanned(&mut payload, &not_scanned);
+        let _ = crate::output::emit_with_caveat(
+            &payload,
+            crate::output::OutputFormat::Toon,
+            engine.caveat(),
+        );
+        return Err(EcpError::InvalidArgument(format!(
+            "rename refuses to write files: {} occurrence(s) of the name sit in functions the \
+             graph does not link to the target. Run with `--dry-run` to list them, or with \
+             `--leave-unbound` to keep them unchanged and write the rest.",
+            unbound.len()
+        )));
+    }
+
     let total_ast_hits: usize = hits.iter().map(|(_, r)| r.len()).sum();
 
     // Zero-occurrence case: explicit message + suggestions.
@@ -643,15 +691,21 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
 
     // --- Stage 3a: dry-run — print summary + diff preview, then verification. ---
     if args.dry_run {
-        if not_scanned.is_empty() {
+        if not_scanned.is_empty() && unbound.is_empty() {
             println!("risk safe; files {}; usages {}", hits.len(), total_ast_hits);
         } else {
-            println!(
-                "risk partial; files {}; usages {}; not scanned {}",
+            let mut headline = format!(
+                "risk partial; files {}; usages {}",
                 hits.len(),
-                total_ast_hits,
-                not_scanned.len()
+                total_ast_hits
             );
+            if !not_scanned.is_empty() {
+                headline.push_str(&format!("; not scanned {}", not_scanned.len()));
+            }
+            if !unbound.is_empty() {
+                headline.push_str(&format!("; unbound {}", unbound.len()));
+            }
+            println!("{headline}");
         }
         println!();
         for (path, ranges) in &hits {

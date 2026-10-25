@@ -208,6 +208,7 @@ line      := 1-based decimal start line
 | ambiguity, `impact` | `matches.len() > 1` gives `EcpError::AmbiguousSymbol` (`commands/impact/symbol.rs:153-192`) | `peers plan` (`commands/peers_plan.rs:64`), telemetry (`telemetry_cli.rs:52`), batch (`impact/mod.rs:378`) | `Ambiguity::to_error`, equal fields |
 | ambiguity, `inspect` | returns every match as a full block (`inspect.rs:806`); an `Impl` beside a primary type is dropped first (`inspect.rs:703-740`) | agent | `Ambiguous`; the `Impl` rule becomes a kind filter the command applies before `resolve_target` |
 | ambiguity, `rename` | none: every match is renamed (review page, secondary RN1) | — | `Ambiguous`, refused |
+| unbound occurrence, `rename` | the rename edits the bound sites, leaves the rest, and exits 0 | — | A write run refuses and writes no file when any occurrence is unbound. `--dry-run` lists it. `--leave-unbound` writes the bound sites and leaves the rest. The flag never waives an ambiguity or a warm-attach refusal. |
 | not found | `InvalidArgument("No symbol named …")` (`impact/symbol.rs:143-148`); `inspect` `status: error` (`inspect.rs:695-701`) | agent | `NotFound { named }` |
 
 ### Route and handler identity

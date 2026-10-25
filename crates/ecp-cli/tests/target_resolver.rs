@@ -190,12 +190,13 @@ const RUN_PY_RENAMED: &str = "def launch():\n    return 1\n\n\ndef main():\n    
 /// Stands for: `rename` edits the occurrences the graph binds to the chosen
 /// declaration (its own name and its callers), not every identifier that
 /// spells the name. The local `run` in `other` is another binding. Failed
-/// before: the second stage rewrote every `run` in the file.
+/// before: the second stage rewrote every `run` in the file. `--leave-unbound`
+/// waives the refusal that the unbound local would otherwise cause.
 #[test]
 fn test_rename_unique_target_skips_unrelated_same_name_identifier() {
     let repo = Repo::indexed(&[("lib.py", RUN_PY)]);
 
-    let out = repo.ecp(&["rename", "run", "launch"]);
+    let out = repo.ecp(&["rename", "run", "launch", "--leave-unbound"]);
 
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(repo.read("lib.py"), RUN_PY_RENAMED);
@@ -274,7 +275,10 @@ fn test_rename_warm_attached_graph_refuses() {
 fn test_rename_from_subdirectory_edits_files_under_worktree_top() {
     let repo = Repo::indexed(&[("pkg/lib.py", RUN_PY)]);
 
-    let out = repo.ecp_in(&repo.root.join("pkg"), &["rename", "run", "launch"]);
+    let out = repo.ecp_in(
+        &repo.root.join("pkg"),
+        &["rename", "run", "launch", "--leave-unbound"],
+    );
 
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(repo.read("pkg/lib.py"), RUN_PY_RENAMED, "{}", stdout(&out));
