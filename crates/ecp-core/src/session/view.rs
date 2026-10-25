@@ -283,6 +283,9 @@ pub struct ViewNode {
     pub rel_path: Arc<str>,
     pub start_line: u32,
     pub end_line: u32,
+    /// 0-based, from the fragment: same-line containment needs them.
+    pub start_column: u32,
+    pub end_column: u32,
     /// `Some(base_idx)` when this node replaces a surviving base node —
     /// traversal reads the base CSR IN-edges of `base_idx` (clean callers)
     /// in addition to [`OverlayView::overlay_in`].
@@ -611,6 +614,8 @@ impl OverlayView {
                     rel_path: rel.clone(),
                     start_line: sym.start_line,
                     end_line: sym.end_line,
+                    start_column: sym.start_column,
+                    end_column: sym.end_column,
                     replaced_base,
                     later_overload,
                 });
@@ -1617,7 +1622,8 @@ impl OverlayView {
 /// 9 view kept those edges.
 /// 11 (P-flags): a dirty C# method carries its own flags; a 10 view read
 /// guessed ones and recorded a gap the 11 view does not.
-pub const VIEW_CACHE_FORMAT: u32 = 11;
+/// 12 (ctor-span): a virtual node carries its columns; an 11 view has none.
+pub const VIEW_CACHE_FORMAT: u32 = 12;
 
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
@@ -1670,6 +1676,8 @@ struct CachedNode {
     path: u32,
     start_line: u32,
     end_line: u32,
+    start_column: u32,
+    end_column: u32,
     replaced_base: Option<u32>,
     later_overload: bool,
 }
@@ -1752,6 +1760,8 @@ impl OverlayView {
                 }),
                 start_line: n.start_line,
                 end_line: n.end_line,
+                start_column: n.start_column,
+                end_column: n.end_column,
                 replaced_base: n.replaced_base,
                 later_overload: n.later_overload,
             })
@@ -1817,6 +1827,8 @@ impl OverlayView {
                 rel_path: paths[n.path as usize].clone(),
                 start_line: n.start_line,
                 end_line: n.end_line,
+                start_column: n.start_column,
+                end_column: n.end_column,
                 replaced_base: n.replaced_base,
                 later_overload: n.later_overload,
             })

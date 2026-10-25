@@ -224,26 +224,26 @@ fn test_impact_foo_dot_foo_two_overloads_stays_ambiguous() {
 /// Stands for: a C++ constructor defined outside its class is not owned by
 /// another same-named class of its file. Failed at 9aeb1dda: `impl.cpp`
 /// holds `A::Foo` and the definition `B::Foo::Foo()`, the constructor
-/// dropped, and the bare name selected `A::Foo` (codex counterexample).
+/// dropped, and the bare name selected `A::Foo`; failed at 15f1bbe1 with
+/// both on one line (codex counterexamples).
 #[test]
 fn test_impact_bare_type_cpp_out_of_class_constructor_stays_ambiguous() {
-    let repo = Repo::indexed(&[
-        (
-            "b.hpp",
-            "namespace B {\nclass Foo { public: Foo(); };\n}\n",
-        ),
-        (
-            "impl.cpp",
-            "#include \"b.hpp\"\nnamespace A {\nclass Foo {};\n}\nnamespace B {\nFoo::Foo() {}\n}\n",
-        ),
-    ]);
+    for impl_cpp in [
+        "#include \"b.hpp\"\nnamespace A {\nclass Foo {};\n}\nnamespace B {\nFoo::Foo() {}\n}\n",
+        "#include \"b.hpp\"\nnamespace A { class Foo {}; } namespace B { Foo::Foo() {} }\n",
+    ] {
+        let repo = Repo::indexed(&[
+            ("b.hpp", "namespace B {\nclass Foo { public: Foo(); };\n}\n"),
+            ("impl.cpp", impl_cpp),
+        ]);
 
-    let out = repo.ecp(&[
-        "impact", "Foo", "--file", "impl.cpp", "--repo", ".", "--format", "json",
-    ]);
+        let out = repo.ecp(&[
+            "impact", "Foo", "--file", "impl.cpp", "--repo", ".", "--format", "json",
+        ]);
 
-    let payload = json_of(&out);
-    assert_eq!(payload["status"], "ambiguous", "{payload}");
+        let payload = json_of(&out);
+        assert_eq!(payload["status"], "ambiguous", "{impl_cpp}: {payload}");
+    }
 }
 
 /// Stands for: `rename Foo Bar` on a class with a constructor renames the

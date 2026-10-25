@@ -383,6 +383,14 @@ impl<'a> MergedNode<'a> {
         }
     }
 
+    /// 0-based start and end columns.
+    pub fn columns(&self) -> (u32, u32) {
+        match self {
+            Self::Base(n) => (n.span.1.to_native(), n.span.3.to_native()),
+            Self::Virtual(n) => (n.start_column, n.end_column),
+        }
+    }
+
     /// Base index to consult for span-keyed side tables (function metas,
     /// content spans): the node itself when base, the uid-identical base twin
     /// when replaced, `None` for a brand-new symbol that has no metas yet.

@@ -779,6 +779,8 @@ pub struct CandidateFacts<'a> {
     pub line: u32,
     /// 1-based end line.
     pub end_line: u32,
+    /// 0-based start and end columns.
+    pub columns: (u32, u32),
     pub name: &'a str,
     /// Owner segments, then lexical parent names, outermost first. Empty
     /// for a root declaration.
@@ -1154,12 +1156,13 @@ pub fn select(request: &TargetRequest, candidates: &[CandidateFacts<'_>]) -> Vec
 /// A bare type name (`Foo`) selects the type over its own same-named
 /// constructors (`class Foo { Foo() {} }` in C#, Java, C++, Dart). A
 /// constructor drops only when its owner is exactly that name and exactly
-/// one type of the same name encloses its line: the stored owner of a
-/// constructor is the bare class name and never the enclosing path, so the
-/// enclosing span is the proof. A constructor declared outside its class
-/// (C++ `Foo::Foo() {}`) sits in no type's span and stays. A qualifier,
-/// `--kind` or `@line` in the request says the caller wants the
-/// constructor to compete.
+/// one type of the same name encloses its whole span, columns included:
+/// the stored owner of a constructor is the bare class name and never the
+/// enclosing path, so the enclosing declaration is the proof. A definition
+/// outside its class (C++ `Foo::Foo() {}`, even on the class's line) sits
+/// in no class's span and stays; a Kotlin or C# primary constructor sits
+/// inside its class's span on the class's line. A qualifier, `--kind` or
+/// `@line` in the request says the caller wants the constructor to compete.
 fn drop_owned_constructors(
     request: &TargetRequest,
     candidates: &[CandidateFacts<'_>],
@@ -1173,10 +1176,7 @@ fn drop_owned_constructors(
             && matches!(c.qualifier.as_slice(), [owner] if owner.name == c.name && owner.impl_trait.is_none())
             && {
                 let mut types = picked.iter().map(|&i| &candidates[i]).filter(|t| {
-                    t.kind.is_type()
-                        && t.name == c.name
-                        && t.file == c.file
-                        && (t.line..=t.end_line).contains(&c.line)
+                    t.kind.is_type() && t.name == c.name && t.file == c.file && encloses(t, c)
                 });
                 types.next().is_some() && types.next().is_none()
             }
@@ -1186,6 +1186,12 @@ fn drop_owned_constructors(
         .copied()
         .filter(|&i| !owned(&candidates[i]))
         .collect()
+}
+
+/// `outer`'s span holds `inner`'s, compared as (line, column) pairs.
+fn encloses(outer: &CandidateFacts<'_>, inner: &CandidateFacts<'_>) -> bool {
+    (outer.line, outer.columns.0) <= (inner.line, inner.columns.0)
+        && (inner.end_line, inner.columns.1) <= (outer.end_line, outer.columns.1)
 }
 
 /// One declaration a request named, as the answer reports it.
@@ -1503,6 +1509,7 @@ mod tests {
             file,
             line,
             end_line: line,
+            columns: (0, 0),
             name,
             qualifier,
         }
@@ -2699,6 +2706,52 @@ mod tests {
             ctor(1, "impl.cpp", 6),
         ];
         assert_eq!(select(&bare("Foo"), &named), vec![0, 1]);
+    }
+
+    fn spanned<'a>(
+        facts: CandidateFacts<'a>,
+        end_line: u32,
+        columns: (u32, u32),
+    ) -> CandidateFacts<'a> {
+        CandidateFacts {
+            end_line,
+            columns,
+            ..facts
+        }
+    }
+
+    /// Stands for: an out-of-class definition beside a same-named class on
+    /// one line is not that class's constructor. Failed at 15f1bbe1, which
+    /// compared lines only: `namespace A { class Foo {}; } namespace B {
+    /// Foo::Foo() {} }` on one line dropped the constructor (codex
+    /// counterexample).
+    #[test]
+    fn test_select_bare_out_of_class_constructor_on_type_line_stays() {
+        let named = [
+            spanned(class(0, "impl.cpp", (2, 2), vec![seg("A")]), 2, (14, 26)),
+            spanned(ctor(1, "impl.cpp", 2), 2, (44, 57)),
+        ];
+        assert_eq!(select(&bare("Foo"), &named), vec![0, 1]);
+    }
+
+    #[test]
+    fn test_select_bare_constructor_after_type_end_on_last_line_stays() {
+        let named = [
+            spanned(class(0, "a.cpp", (1, 3), vec![]), 3, (0, 2)),
+            spanned(ctor(1, "a.cpp", 3), 3, (4, 18)),
+        ];
+        assert_eq!(select(&bare("Foo"), &named), vec![0, 1]);
+    }
+
+    /// Stands for: a Kotlin or C# primary constructor sits on its class's
+    /// line, inside the class's span, and drops like any own constructor.
+    #[test]
+    fn test_select_bare_primary_constructor_on_type_line_selects_type() {
+        let named = [
+            spanned(class(0, "Foo.kt", (1, 4), vec![]), 4, (0, 1)),
+            spanned(ctor(1, "Foo.kt", 1), 1, (9, 21)),
+        ];
+        assert_eq!(select(&bare("Foo"), &named), vec![0]);
     }
 
     #[test]
