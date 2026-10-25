@@ -39,3 +39,32 @@ fn test_overrides_kotlin_grandparent_resolves_target() {
     overrides_support::assert_evidence(&edges[0], Evidence::Exact);
     assert_eq!(edges[0].2, 1.0);
 }
+
+/// Stands for: a marked Kotlin override whose signature the meta cannot
+/// compare (the extractor leaves a function-type parameter's type blank)
+/// gets no edge and an `override-ambiguous` BlindSpot, never a guessed
+/// `Exact` edge; a comparable sibling still binds `Exact` (codex ruling 2).
+#[test]
+fn test_overrides_kotlin_signature_not_comparable_records_ambiguous() {
+    use ecp_analyzer::post_process::overrides::BS_KIND_OVERRIDE_AMBIGUOUS;
+    let graph = overrides_support::graph_of(
+        &ecp_analyzer::kotlin::parser::KotlinProvider::new().unwrap(),
+        &[(
+            "K.kt",
+            "open class KA {\n    open fun run(cb: () -> Unit) {}\n    open fun walk(n: Int) {}\n}\nclass KB : KA() {\n    override fun run(cb: () -> Unit) {}\n    override fun walk(n: Int) {}\n}\n",
+        )],
+    );
+    let edges = overrides_support::overrides(&graph);
+    assert_eq!(edges.len(), 1, "KB.walk -> KA.walk only; got {edges:?}");
+    assert_eq!(edges[0].0.name, "walk");
+    assert_eq!((edges[0].0.line, edges[0].1.line), (6, 2), "{edges:?}");
+    overrides_support::assert_evidence(&edges[0], Evidence::Exact);
+    let spots = overrides_support::override_blind_spots(&graph);
+    assert_eq!(spots.len(), 1, "{spots:?}");
+    let (kind, _, row, hint) = &spots[0];
+    assert_eq!((kind.as_str(), *row), (BS_KIND_OVERRIDE_AMBIGUOUS, 5));
+    assert!(
+        hint.contains("signature not comparable") && hint.contains("`KA`"),
+        "{hint}"
+    );
+}

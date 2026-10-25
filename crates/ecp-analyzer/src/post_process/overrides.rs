@@ -1,5 +1,5 @@
-//! `Overrides` edge emission: a method → the nearest same-name declaration
-//! along the declared bases of its type.
+//! `Overrides` edge emission: a method → the nearest applicable declaration
+//! of its name along the declared bases of its type.
 //!
 //! # The declared base, not a same-named type
 //!
@@ -30,7 +30,7 @@
 //! # Nearest declaration
 //!
 //! The lookup climbs the resolved bases and stops at the nearest type that
-//! declares the name: for `C → B → A`, `C.m → A.m` when B lacks `m`, and
+//! declares an applicable method of the name (below): for `C → B → A`, `C.m → A.m` when B lacks `m`, and
 //! `C.m → B.m` when B declares it. Each language keeps its own order:
 //!
 //! | Order | Languages | Lookup |
@@ -44,6 +44,24 @@
 //! not lower the confidence; the weakest resolver confidence on the path
 //! does ([`evidence`]).
 //!
+//! # Applicable declaration
+//!
+//! A declaration of the name applies when its signature, read from the
+//! function meta paired by span, makes it the overridden one
+//! ([`Matcher::fit`]). An overload or a static is skipped and the lookup
+//! goes on past it; an undecided one ends the path with no edge:
+//!
+//! | Signature | Languages | Applies | Skipped | No edge |
+//! |---|---|---|---|---|
+//! | typed | Java, Kotlin, C#, C++, Swift | equal arity, equal parameter types (whitespace stripped, generics as text) | another arity, another type | a side without meta, a blank parameter type, a type difference through a base with type arguments; C++: a base method not declared virtual |
+//! | arity | TypeScript, PHP, Dart | equal arity, or a visible rest parameter (name only) | — | another arity |
+//! | lenient | Python, Ruby, JavaScript | equal arity; another arity or no meta by name only | — | — |
+//!
+//! Statics: Java, Kotlin, C#, C++ and Dart skip a static method on either
+//! side; Swift, TypeScript, JavaScript, PHP, Python and Ruby pair a static
+//! only with a static. A marker never makes a pair confirmed by name only
+//! `Exact`. Rust and Go read no signature.
+//!
 //! # BlindSpots
 //!
 //! The lookup never skips a gap to reach a farther ancestor. A gap ends its
@@ -53,14 +71,16 @@
 //! |---|---|
 //! | [`BS_KIND_OVERRIDE_BASE_UNRESOLVED`] | a declared base resolved to no project type (external, or a resolution failure) |
 //! | [`BS_KIND_OVERRIDE_BASE_AMBIGUOUS`] | a declared base names several project types, or one picked by path proximity alone |
-//! | [`BS_KIND_OVERRIDE_AMBIGUOUS`] | the nearest base declares the name more than once: the pass has no parameter types to pick one |
+//! | [`BS_KIND_OVERRIDE_AMBIGUOUS`] | the nearest declaring base has several applicable declarations, or one the signature leaves undecided (table above) |
 //! | [`BS_KIND_OVERRIDE_HIERARCHY_INCOMPLETE`] | a heritage cycle, more than [`MAX_OVERRIDE_DEPTH`] levels, or no consistent Python MRO |
 
 use crate::resolution::index::{DeclaredBase, FileMeta, Language, ResolveTarget, SymbolTable};
 use ecp_core::analyzer::heritage::holds_heritage;
-use ecp_core::analyzer::types::{span_contains, LocalGraph, RawNode, NEAREST_COPY_CONFIDENCE};
+use ecp_core::analyzer::types::{
+    span_contains, LocalGraph, RawFunctionMeta, RawNode, NEAREST_COPY_CONFIDENCE,
+};
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap, HEURISTIC_CEILING};
-use ecp_core::graph::{BlindSpotRecord, Edge, File, FileCategory, NodeKind, RelType};
+use ecp_core::graph::{BlindSpotRecord, Edge, File, FileCategory, FunctionMeta, NodeKind, RelType};
 use ecp_core::pool::{StrRef, StringPool};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cmp::Reverse;
@@ -70,8 +90,9 @@ use std::collections::hash_map::Entry;
 /// receiver embeds. Go has no override, so no `Overrides` edge exists.
 pub const BS_KIND_NO_OVERRIDE_CONCEPT: &str = "no-override-concept";
 
-/// BlindSpot kind: the nearest base on the lookup path declares the method
-/// name more than once.
+/// BlindSpot kind: the nearest declaring base on the lookup path has several
+/// applicable declarations of the name, or one whose signature leaves the
+/// override undecided.
 pub const BS_KIND_OVERRIDE_AMBIGUOUS: &str = "override-ambiguous";
 
 /// BlindSpot kind: a declared base on the lookup path resolved to no project
@@ -113,9 +134,16 @@ const BASE_BY_NAME_REASON: &str = "post_process:overrides:base-by-name";
 /// text); Kotlin / C# / C++ / Swift write this sentinel.
 const OVERRIDE_SENTINEL: &str = "__override__";
 
-/// `(type slot, method name)` → the slots of the methods so named that the
-/// type declares.
-type MethodIndex<'a> = FxHashMap<(u32, &'a str), Vec<u32>>;
+/// One declaration of a method name in a type: its slot, and the function
+/// meta the parser paired with it by span (as Pass 1.8 does).
+#[derive(Debug, Clone, Copy)]
+struct Decl<'a> {
+    slot: u32,
+    meta: Option<&'a RawFunctionMeta>,
+}
+
+/// `(type slot, method name)` → the methods so named that the type declares.
+type MethodIndex<'a> = FxHashMap<(u32, &'a str), Vec<Decl<'a>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OverrideRule {
@@ -139,22 +167,234 @@ enum Lookup {
     Mro,
 }
 
-/// The rule and lookup of the file at `path`; `None` for C, which has no
-/// override.
-fn rules_for(path: &str) -> Option<(OverrideRule, Lookup)> {
+/// How a language tells the declaration a method overrides from an
+/// overload of it ([`Matcher::fit`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Signature {
+    /// An overloading language: equal arity and equal parameter types.
+    /// `virtual_only` (C++) also requires a virtual base method.
+    Typed { virtual_only: bool },
+    /// No overloading, and the compiler checks the override: an arity
+    /// difference without a visible rest parameter is reported, not paired.
+    Arity,
+    /// No overloading, and the meta keeps no default value: an arity
+    /// difference pairs by name alone.
+    Lenient,
+    /// The pass reads no signature (Rust, Go, the rest).
+    Unchecked,
+}
+
+/// Whether a static method takes part in overriding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Statics {
+    /// A static method neither overrides nor is overridden.
+    Never,
+    /// A static method overrides only a static one (a class-side method).
+    Paired,
+    Ignored,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Rules {
+    rule: OverrideRule,
+    lookup: Lookup,
+    signature: Signature,
+    statics: Statics,
+}
+
+/// The rules of the file at `path`; `None` for C, which has no override.
+fn rules_for(path: &str) -> Option<Rules> {
     use OverrideRule::*;
-    Some(match Language::from_path(path) {
-        Language::TypeScript | Language::JavaScript | Language::Php | Language::Swift => {
-            (Inferred, Lookup::Chain(Chain::PerBase))
+    use Signature::*;
+    let per_base = Lookup::Chain(Chain::PerBase);
+    let typed = Typed {
+        virtual_only: false,
+    };
+    let (rule, lookup, signature, statics) = match Language::from_path(path) {
+        Language::Java | Language::Kotlin | Language::CSharp => {
+            (Marked, per_base, typed, Statics::Never)
         }
-        Language::Python => (Inferred, Lookup::Mro),
-        Language::Ruby => (Inferred, Lookup::Chain(Chain::Ancestors)),
-        Language::Dart => (Inferred, Lookup::Chain(Chain::Mixins)),
-        Language::Rust => (TraitImpl, Lookup::Chain(Chain::PerBase)),
-        Language::Go => (NoConcept, Lookup::Chain(Chain::PerBase)),
+        Language::Cpp => (
+            Marked,
+            per_base,
+            Typed { virtual_only: true },
+            Statics::Never,
+        ),
+        // `class func` carries the static flag, and it overrides.
+        Language::Swift => (Inferred, per_base, typed, Statics::Paired),
+        Language::TypeScript | Language::Php => (Inferred, per_base, Arity, Statics::Paired),
+        Language::JavaScript => (Inferred, per_base, Lenient, Statics::Paired),
+        Language::Python => (Inferred, Lookup::Mro, Lenient, Statics::Paired),
+        Language::Ruby => (
+            Inferred,
+            Lookup::Chain(Chain::Ancestors),
+            Lenient,
+            Statics::Paired,
+        ),
+        Language::Dart => (
+            Inferred,
+            Lookup::Chain(Chain::Mixins),
+            Arity,
+            Statics::Never,
+        ),
+        Language::Rust => (TraitImpl, per_base, Unchecked, Statics::Ignored),
+        Language::Go => (NoConcept, per_base, Unchecked, Statics::Ignored),
         Language::C => return None,
-        _ => (Marked, Lookup::Chain(Chain::PerBase)),
+        _ => (Marked, per_base, Unchecked, Statics::Ignored),
+    };
+    Some(Rules {
+        rule,
+        lookup,
+        signature,
+        statics,
     })
+}
+
+/// Why the nearest declaring type gives no edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ambiguity {
+    /// This many declarations apply.
+    Several(usize),
+    /// A side has no meta, or a parameter type the parser left blank, or a
+    /// type argument of a generic base may stand for a parameter type.
+    NotComparable,
+    /// A C++ base method not declared virtual: it may hide, not override.
+    NotVirtual,
+    /// A parameter count differs where the language has no overloading.
+    Arity { base: usize, own: usize },
+}
+
+/// Whether one declaration is the one the method overrides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fit {
+    /// Not a target: a static or an overload. The lookup goes on past it.
+    Skip,
+    /// The target. `confirmed` is false when the name alone pairs them.
+    Match { confirmed: bool },
+    /// Undecided: the lookup stops with no edge.
+    Unknown(Ambiguity),
+}
+
+fn is_static(meta: Option<&RawFunctionMeta>) -> bool {
+    meta.is_some_and(|m| m.flags & FunctionMeta::FLAG_STATIC != 0)
+}
+
+fn arity(meta: &RawFunctionMeta) -> usize {
+    meta.params.len() / 2
+}
+
+/// A rest parameter the meta shows: `...rest` (JavaScript, TypeScript),
+/// `*args` (Ruby).
+fn has_rest(meta: &RawFunctionMeta) -> bool {
+    meta.params
+        .iter()
+        .step_by(2)
+        .any(|name| name.starts_with("...") || name.starts_with('*'))
+}
+
+/// Type texts equal once whitespace is gone; generics compare as text.
+fn same_type(a: &str, b: &str) -> bool {
+    a.chars()
+        .filter(|c| !c.is_whitespace())
+        .eq(b.chars().filter(|c| !c.is_whitespace()))
+}
+
+/// The method being looked up, against the declarations of its name.
+#[derive(Debug, Clone, Copy)]
+struct Matcher<'a> {
+    own: Option<&'a RawFunctionMeta>,
+    signature: Signature,
+    statics: Statics,
+}
+
+impl Matcher<'_> {
+    /// A static method where statics take no part never overrides.
+    fn skips_method(&self) -> bool {
+        self.statics == Statics::Never && is_static(self.own)
+    }
+
+    /// `generic`: a base on the path was spelled with type arguments.
+    fn fit(&self, base: Option<&RawFunctionMeta>, generic: bool) -> Fit {
+        match self.statics {
+            Statics::Never if is_static(base) => return Fit::Skip,
+            Statics::Paired if is_static(self.own) != is_static(base) => return Fit::Skip,
+            _ => {}
+        }
+        let (own, base) = match (self.signature, self.own, base) {
+            (Signature::Unchecked, ..) => return Fit::Match { confirmed: true },
+            (_, Some(own), Some(base)) => (own, base),
+            (Signature::Typed { .. }, ..) => return Fit::Unknown(Ambiguity::NotComparable),
+            _ => return Fit::Match { confirmed: false },
+        };
+        let (own_arity, base_arity) = (arity(own), arity(base));
+        match self.signature {
+            Signature::Typed { virtual_only } => {
+                if own_arity != base_arity {
+                    return Fit::Skip;
+                }
+                let mut blank = false;
+                for (a, b) in own.params.iter().zip(&base.params).skip(1).step_by(2) {
+                    if a.trim().is_empty() || b.trim().is_empty() {
+                        blank = true;
+                    } else if !same_type(a, b) {
+                        return if generic {
+                            Fit::Unknown(Ambiguity::NotComparable)
+                        } else {
+                            Fit::Skip
+                        };
+                    }
+                }
+                if blank {
+                    Fit::Unknown(Ambiguity::NotComparable)
+                } else if virtual_only && base.flags & FunctionMeta::FLAG_VIRTUAL == 0 {
+                    Fit::Unknown(Ambiguity::NotVirtual)
+                } else {
+                    Fit::Match { confirmed: true }
+                }
+            }
+            _ if own_arity == base_arity => Fit::Match { confirmed: true },
+            Signature::Arity if !has_rest(own) && !has_rest(base) => {
+                Fit::Unknown(Ambiguity::Arity {
+                    base: base_arity,
+                    own: own_arity,
+                })
+            }
+            _ => Fit::Match { confirmed: false },
+        }
+    }
+
+    /// Where the declarations of the name in `ty` end the lookup; `None`
+    /// when none applies and the lookup goes on past `ty`.
+    fn stop<'b>(
+        &self,
+        ty: u32,
+        decls: &[Decl<'_>],
+        identity: f32,
+        generic: bool,
+    ) -> Option<Stop<'b>> {
+        let mut fits = decls
+            .iter()
+            .filter_map(|d| match self.fit(d.meta, generic) {
+                Fit::Skip => None,
+                Fit::Match { confirmed } => Some(Ok((d.slot, confirmed))),
+                Fit::Unknown(why) => Some(Err(why)),
+            });
+        let first = fits.next()?;
+        let more = fits.count();
+        Some(match first {
+            _ if more > 0 => Stop::Ambiguous {
+                ty,
+                why: Ambiguity::Several(more + 1),
+            },
+            Ok((target, confirmed)) => Stop::Found {
+                ty,
+                target,
+                identity,
+                confirmed,
+            },
+            Err(why) => Stop::Ambiguous { ty, why },
+        })
+    }
 }
 
 /// Java `@Override` (also fully qualified), Dart `@override`, Python
@@ -194,12 +434,19 @@ struct Incomplete {
 /// Where the lookup of one name ended on one path.
 #[derive(Debug, Clone, Copy)]
 enum Stop<'a> {
-    /// The declarations of the name in `ty`. `identity` is the weakest
-    /// resolver confidence on the path to `ty`.
+    /// The one declaration of the name in `ty` that applies. `identity` is
+    /// the weakest resolver confidence on the path to `ty`; `confirmed` is
+    /// false when the name alone pairs them.
     Found {
         ty: u32,
-        targets: &'a [u32],
+        target: u32,
         identity: f32,
+        confirmed: bool,
+    },
+    /// `ty` declares the name, and no one declaration of it applies.
+    Ambiguous {
+        ty: u32,
+        why: Ambiguity,
     },
     /// Declared base `index` of `owner` binds no one project type.
     Gap {
@@ -260,7 +507,9 @@ pub fn emit_edges(
         .iter()
         .map(|lg| owner_types(&lg.nodes))
         .collect();
-    let methods = build_method_index(local_graphs, &owners, raw_map);
+    let metas: Vec<Vec<Option<&RawFunctionMeta>>> =
+        local_graphs.iter().map(metas_by_node).collect();
+    let methods = build_method_index(local_graphs, &owners, &metas, raw_map);
     let reasons = Reasons {
         exact: string_pool.add(EXACT_REASON),
         name: string_pool.add(NAME_MATCH_REASON),
@@ -274,7 +523,13 @@ pub fn emit_edges(
     for (file_idx, lg) in local_graphs.iter().enumerate() {
         let file = FileOrd(file_idx as u32);
         let path = lg.file_path.to_string_lossy().replace('\\', "/");
-        let Some((rule, lookup)) = rules_for(&path) else {
+        let Some(Rules {
+            rule,
+            lookup,
+            signature,
+            statics,
+        }) = rules_for(&path)
+        else {
             continue;
         };
         let is_test = files
@@ -294,6 +549,14 @@ pub fn emit_edges(
                 OverrideRule::Inferred => marked,
                 OverrideRule::NoConcept => false,
             };
+            let matcher = Matcher {
+                own: metas[file_idx][raw_idx],
+                signature,
+                statics,
+            };
+            if matcher.skips_method() {
+                continue;
+            }
             let Some(owner) = owners[file_idx][raw_idx] else {
                 continue;
             };
@@ -308,31 +571,37 @@ pub fn emit_edges(
             }
             let stops = match (rule, lookup) {
                 (OverrideRule::NoConcept, _) => {
-                    embedded_namesakes(symbol_table, &methods, owner_slot, name)
+                    embedded_namesakes(symbol_table, &methods, matcher, owner_slot, name)
                 }
-                (OverrideRule::TraitImpl, _) => {
-                    named_trait(symbol_table, &methods, owner_slot, name, &node.heritage)
+                (OverrideRule::TraitImpl, _) => named_trait(
+                    symbol_table,
+                    &methods,
+                    matcher,
+                    owner_slot,
+                    name,
+                    &node.heritage,
+                ),
+                (_, Lookup::Mro) => {
+                    mro_lookup(symbol_table, &methods, matcher, owner_slot, name, &mut mros)
                 }
-                (_, Lookup::Mro) => mro_lookup(symbol_table, &methods, owner_slot, name, &mut mros),
                 (_, Lookup::Chain(chain)) => {
                     let mut search = Search {
                         table: symbol_table,
                         methods: &methods,
+                        matcher,
                         chain,
                         name,
                         stops: Vec::new(),
                         seen: FxHashMap::default(),
                         path: vec![owner_slot],
                     };
-                    search.bases(owner_slot, 1.0);
+                    search.bases(owner_slot, 1.0, false);
                     search.stops
                 }
             };
             for stop in stops {
                 let (key, kind, hint) = match stop {
-                    Stop::Found {
-                        targets: [only], ..
-                    } if *only == source => continue,
+                    Stop::Found { target, .. } if target == source => continue,
                     Stop::Found { ty, .. } if rule == OverrideRule::NoConcept => (
                         (source, 3, ty, 0),
                         BS_KIND_NO_OVERRIDE_CONCEPT,
@@ -342,12 +611,16 @@ pub fn emit_edges(
                         ),
                     ),
                     Stop::Found {
-                        targets: [target],
+                        target,
                         identity,
+                        confirmed,
                         ..
                     } => {
-                        let (confidence, reason) = evidence(exact_rule, identity, &reasons);
-                        match emitted.entry((source, *target)) {
+                        // A marker never makes a branch the signature did
+                        // not confirm `Exact`.
+                        let (confidence, reason) =
+                            evidence(exact_rule && confirmed, identity, &reasons);
+                        match emitted.entry((source, target)) {
                             Entry::Occupied(slot) => {
                                 let edge = &mut edges_out[*slot.get()];
                                 if confidence > edge.confidence {
@@ -359,7 +632,7 @@ pub fn emit_edges(
                                 slot.insert(edges_out.len());
                                 edges_out.push(Edge {
                                     source,
-                                    target: *target,
+                                    target,
                                     rel_type: RelType::Overrides,
                                     confidence,
                                     reason,
@@ -368,15 +641,27 @@ pub fn emit_edges(
                         }
                         continue;
                     }
-                    Stop::Found { ty, targets, .. } => (
-                        (source, 0, ty, 0),
-                        BS_KIND_OVERRIDE_AMBIGUOUS,
-                        format!(
-                            "{} methods named `{name}` in base `{}`; no Overrides edge",
-                            targets.len(),
-                            name_of(ty)
-                        ),
-                    ),
+                    Stop::Ambiguous { ty, why } => {
+                        let base = name_of(ty);
+                        (
+                            (source, 0, ty, 0),
+                            BS_KIND_OVERRIDE_AMBIGUOUS,
+                            match why {
+                                Ambiguity::Several(n) => format!(
+                                    "{n} methods named `{name}` in base `{base}`; no Overrides edge"
+                                ),
+                                Ambiguity::NotComparable => format!(
+                                    "`{name}` in base `{base}`: signature not comparable; no Overrides edge"
+                                ),
+                                Ambiguity::NotVirtual => format!(
+                                    "`{name}` in base `{base}` is not declared virtual; no Overrides edge"
+                                ),
+                                Ambiguity::Arity { base: theirs, own } => format!(
+                                    "`{name}` in base `{base}` takes {theirs} parameters, this `{name}` takes {own}; no Overrides edge"
+                                ),
+                            },
+                        )
+                    }
                     Stop::Gap { owner, index, base } => {
                         let (kind, gap) = gap_finding(symbol_table, owner, base);
                         (
@@ -464,21 +749,16 @@ fn gap_finding(table: &SymbolTable, owner: u32, base: &DeclaredBase) -> (&'stati
 /// Go: each embedded type that declares the name. No search beyond it.
 fn embedded_namesakes<'a>(
     table: &'a SymbolTable,
-    methods: &'a MethodIndex<'a>,
+    methods: &MethodIndex<'_>,
+    matcher: Matcher<'_>,
     owner: u32,
-    name: &'a str,
+    name: &str,
 ) -> Vec<Stop<'a>> {
     table
         .declared_bases(owner)
         .iter()
         .filter_map(bind)
-        .filter_map(|(ty, identity)| {
-            methods.get(&(ty, name)).map(|targets| Stop::Found {
-                ty,
-                targets,
-                identity,
-            })
-        })
+        .filter_map(|(ty, identity)| matcher.stop(ty, methods.get(&(ty, name))?, identity, false))
         .collect()
 }
 
@@ -486,9 +766,10 @@ fn embedded_namesakes<'a>(
 /// supertrait of it.
 fn named_trait<'a>(
     table: &'a SymbolTable,
-    methods: &'a MethodIndex<'a>,
+    methods: &MethodIndex<'_>,
+    matcher: Matcher<'_>,
     owner: u32,
-    name: &'a str,
+    name: &str,
     heritage: &[String],
 ) -> Vec<Stop<'a>> {
     table
@@ -501,11 +782,7 @@ fn named_trait<'a>(
         })
         .filter_map(|(index, base)| match bind(base) {
             None => Some(Stop::Gap { owner, index, base }),
-            Some((ty, identity)) => methods.get(&(ty, name)).map(|targets| Stop::Found {
-                ty,
-                targets,
-                identity,
-            }),
+            Some((ty, identity)) => matcher.stop(ty, methods.get(&(ty, name))?, identity, false),
         })
         .collect()
 }
@@ -514,43 +791,59 @@ fn named_trait<'a>(
 struct Search<'a> {
     table: &'a SymbolTable,
     methods: &'a MethodIndex<'a>,
+    matcher: Matcher<'a>,
     chain: Chain,
     name: &'a str,
     stops: Vec<Stop<'a>>,
-    /// The highest identity each searched type was searched with, and
-    /// whether its search settled the chain.
-    seen: FxHashMap<u32, (f32, bool)>,
+    /// The highest identity each searched type, reached through a generic
+    /// base or not, was searched with, and whether its search settled the
+    /// chain.
+    seen: FxHashMap<(u32, bool), (f32, bool)>,
     /// The types from the method's own type to the current one.
     path: Vec<u32>,
 }
 
 impl<'a> Search<'a> {
     /// Searches the bases of `ty`. True when a chain base settled: found
-    /// the name, or met a gap.
-    fn bases(&mut self, ty: u32, identity: f32) -> bool {
+    /// the name, or met a gap. `generic`: a base on the path so far was
+    /// spelled with type arguments.
+    fn bases(&mut self, ty: u32, identity: f32, generic: bool) -> bool {
         let table = self.table;
         let bases = table.declared_bases(ty);
         let (chain, branches) = lookup_order(self.chain, table, bases);
         let settled = chain
             .into_iter()
-            .any(|index| self.base(ty, index, &bases[index], identity));
+            .any(|index| self.base(ty, index, &bases[index], identity, generic));
         for index in branches {
-            self.base(ty, index, &bases[index], identity);
+            self.base(ty, index, &bases[index], identity, generic);
         }
         settled
     }
 
-    fn base(&mut self, owner: u32, index: usize, base: &'a DeclaredBase, identity: f32) -> bool {
+    fn base(
+        &mut self,
+        owner: u32,
+        index: usize,
+        base: &'a DeclaredBase,
+        identity: f32,
+        generic: bool,
+    ) -> bool {
         match bind(base) {
             None => {
                 self.stops.push(Stop::Gap { owner, index, base });
                 true
             }
-            Some((ty, confidence)) => self.visit(ty, identity.min(confidence)),
+            // The weakest hop of the path is the identity of every edge
+            // past it.
+            Some((ty, confidence)) => self.visit(
+                ty,
+                identity.min(confidence),
+                generic || base.spelling.contains('<'),
+            ),
         }
     }
 
-    fn visit(&mut self, ty: u32, identity: f32) -> bool {
+    fn visit(&mut self, ty: u32, identity: f32, generic: bool) -> bool {
         let why = if self.path.contains(&ty) {
             Some(Why::Cycle)
         } else if self.path.len() > MAX_OVERRIDE_DEPTH {
@@ -563,24 +856,23 @@ impl<'a> Search<'a> {
                 .push(Stop::Incomplete(Incomplete { at: ty, why }));
             return true;
         }
-        let methods = self.methods;
-        if let Some(targets) = methods.get(&(ty, self.name)) {
-            self.stops.push(Stop::Found {
-                ty,
-                targets,
-                identity,
-            });
+        let stop = self
+            .methods
+            .get(&(ty, self.name))
+            .and_then(|decls| self.matcher.stop(ty, decls, identity, generic));
+        if let Some(stop) = stop {
+            self.stops.push(stop);
             return true;
         }
-        if let Some(&(searched, settled)) = self.seen.get(&ty) {
+        if let Some(&(searched, settled)) = self.seen.get(&(ty, generic)) {
             if searched >= identity {
                 return settled;
             }
         }
         self.path.push(ty);
-        let settled = self.bases(ty, identity);
+        let settled = self.bases(ty, identity, generic);
         self.path.pop();
-        self.seen.insert(ty, (identity, settled));
+        self.seen.insert((ty, generic), (identity, settled));
         settled
     }
 }
@@ -633,13 +925,14 @@ enum MroEntry {
 
 type Mro = Result<Vec<MroEntry>, Incomplete>;
 
-/// Python: the first entry after the type in its C3 order that declares the
-/// name or is a gap.
+/// Python: the first entry after the type in its C3 order that declares an
+/// applicable method of the name, or is a gap.
 fn mro_lookup<'a>(
     table: &'a SymbolTable,
-    methods: &'a MethodIndex<'a>,
+    methods: &MethodIndex<'_>,
+    matcher: Matcher<'_>,
     owner: u32,
-    name: &'a str,
+    name: &str,
     mros: &mut FxHashMap<u32, Mro>,
 ) -> Vec<Stop<'a>> {
     let order = match mro(table, owner, mros, &mut Vec::new()) {
@@ -659,13 +952,12 @@ fn mro_lookup<'a>(
                 }]
             }
             MroEntry::Type(ty) => {
-                if let Some(targets) = methods.get(&(ty, name)) {
-                    let identity = widest_identity(table, owner, ty, &mut FxHashMap::default());
-                    return vec![Stop::Found {
-                        ty,
-                        targets,
-                        identity,
-                    }];
+                let Some(decls) = methods.get(&(ty, name)) else {
+                    continue;
+                };
+                let identity = widest_identity(table, owner, ty, &mut FxHashMap::default());
+                if let Some(stop) = matcher.stop(ty, decls, identity, false) {
+                    return vec![stop];
                 }
             }
         }
@@ -832,9 +1124,25 @@ fn owner_types(nodes: &[RawNode]) -> Vec<Option<usize>> {
         .collect()
 }
 
+/// Per raw node, the function meta whose span is the node's, as Pass 1.8
+/// pairs them; `None` for a non-callable or an unpaired node.
+fn metas_by_node(lg: &LocalGraph) -> Vec<Option<&RawFunctionMeta>> {
+    let mut by_span: Vec<&RawFunctionMeta> = lg.raw_function_metas.iter().collect();
+    by_span.sort_by_key(|m| m.span);
+    lg.nodes
+        .iter()
+        .map(|n| {
+            n.kind.is_callable().then_some(())?;
+            let i = by_span.binary_search_by_key(&n.span, |m| m.span).ok()?;
+            Some(by_span[i])
+        })
+        .collect()
+}
+
 fn build_method_index<'a>(
     local_graphs: &'a [LocalGraph],
     owners: &[Vec<Option<usize>>],
+    metas: &[Vec<Option<&'a RawFunctionMeta>>],
     raw_map: &RawIndexMap,
 ) -> MethodIndex<'a> {
     let mut out: MethodIndex<'a> = FxHashMap::default();
@@ -855,9 +1163,12 @@ fn build_method_index<'a>(
                 continue;
             };
             // A tombstoned twin maps to the survivor: one method, not two.
-            let slots = out.entry((owner_slot, name)).or_default();
-            if !slots.contains(&slot) {
-                slots.push(slot);
+            let decls = out.entry((owner_slot, name)).or_default();
+            if !decls.iter().any(|d| d.slot == slot) {
+                decls.push(Decl {
+                    slot,
+                    meta: metas[file_idx][raw_idx],
+                });
             }
         }
     }
@@ -992,6 +1303,184 @@ mod tests {
         assert_eq!(
             evidence(false, HEURISTIC_CEILING, &r),
             (NAME_MATCH_CONFIDENCE, r.base_by_name)
+        );
+    }
+
+    fn meta(flags: u16, params: &[&str]) -> RawFunctionMeta {
+        RawFunctionMeta {
+            span: (0, 0, 0, 0),
+            flags,
+            params: params.iter().map(|p| p.to_string()).collect(),
+            return_type: String::new(),
+            decorators: Vec::new(),
+        }
+    }
+
+    fn matcher(
+        signature: Signature,
+        statics: Statics,
+        own: Option<&RawFunctionMeta>,
+    ) -> Matcher<'_> {
+        Matcher {
+            own,
+            signature,
+            statics,
+        }
+    }
+
+    const TYPED: Signature = Signature::Typed {
+        virtual_only: false,
+    };
+
+    /// Stands for: in an overloading language the signature picks the
+    /// overridden declaration; an overload or a static is skipped.
+    #[test]
+    fn test_fit_typed_signature_skips_overload_and_static() {
+        let own = meta(0, &["n", "int"]);
+        let m = matcher(TYPED, Statics::Never, Some(&own));
+        assert_eq!(
+            m.fit(Some(&meta(0, &["x", " int "])), false),
+            Fit::Match { confirmed: true },
+            "whitespace is no difference"
+        );
+        assert_eq!(
+            m.fit(Some(&meta(0, &[])), false),
+            Fit::Skip,
+            "another arity"
+        );
+        assert_eq!(
+            m.fit(Some(&meta(0, &["s", "String"])), false),
+            Fit::Skip,
+            "another type"
+        );
+        assert_eq!(
+            m.fit(Some(&meta(FunctionMeta::FLAG_STATIC, &["n", "int"])), false),
+            Fit::Skip,
+            "a static is no target"
+        );
+        let own_static = meta(FunctionMeta::FLAG_STATIC, &["n", "int"]);
+        assert!(matcher(TYPED, Statics::Never, Some(&own_static)).skips_method());
+        assert!(!matcher(TYPED, Statics::Paired, Some(&own_static)).skips_method());
+    }
+
+    /// Stands for: a typed-language pair the meta cannot compare ends the
+    /// path with no edge, never a guessed `Exact` one.
+    #[test]
+    fn test_fit_typed_missing_meta_or_blank_type_returns_not_comparable() {
+        let own = meta(0, &["cb", ""]);
+        let m = matcher(TYPED, Statics::Never, Some(&own));
+        let not_comparable = Fit::Unknown(Ambiguity::NotComparable);
+        assert_eq!(m.fit(None, false), not_comparable, "base without meta");
+        assert_eq!(
+            matcher(TYPED, Statics::Never, None).fit(Some(&meta(0, &[])), false),
+            not_comparable,
+            "own method without meta"
+        );
+        assert_eq!(m.fit(Some(&meta(0, &["cb", ""])), false), not_comparable);
+        let typed = meta(0, &["n", "T"]);
+        let own_typed = meta(0, &["n", "String"]);
+        let m = matcher(TYPED, Statics::Never, Some(&own_typed));
+        assert_eq!(m.fit(Some(&typed), false), Fit::Skip);
+        assert_eq!(
+            m.fit(Some(&typed), true),
+            not_comparable,
+            "through a base with type arguments, `T` may stand for `String`"
+        );
+    }
+
+    /// Stands for: C++ binds a base method only when it is virtual.
+    #[test]
+    fn test_fit_cpp_non_virtual_base_returns_not_virtual() {
+        let own = meta(FunctionMeta::FLAG_VIRTUAL, &[]);
+        let m = matcher(
+            Signature::Typed { virtual_only: true },
+            Statics::Never,
+            Some(&own),
+        );
+        assert_eq!(
+            m.fit(Some(&meta(FunctionMeta::FLAG_VIRTUAL, &[])), false),
+            Fit::Match { confirmed: true }
+        );
+        assert_eq!(
+            m.fit(Some(&meta(0, &[])), false),
+            Fit::Unknown(Ambiguity::NotVirtual)
+        );
+    }
+
+    /// Stands for: without overloading, arity confirms a pair; a difference
+    /// is reported where the compiler checks the override, and pairs by
+    /// name alone where the meta keeps no default value.
+    #[test]
+    fn test_fit_arity_and_lenient_arity_difference() {
+        let own = meta(0, &["x", ""]);
+        let none = meta(0, &[]);
+        let rest = meta(0, &["...xs", ""]);
+        let arity = matcher(Signature::Arity, Statics::Paired, Some(&own));
+        assert_eq!(
+            arity.fit(Some(&meta(0, &["y", "number"])), false),
+            Fit::Match { confirmed: true }
+        );
+        assert_eq!(
+            arity.fit(Some(&none), false),
+            Fit::Unknown(Ambiguity::Arity { base: 0, own: 1 })
+        );
+        assert_eq!(
+            arity.fit(Some(&rest), false),
+            Fit::Match { confirmed: false }
+        );
+        assert_eq!(arity.fit(None, false), Fit::Match { confirmed: false });
+        let lenient = matcher(Signature::Lenient, Statics::Paired, Some(&own));
+        assert_eq!(
+            lenient.fit(Some(&none), false),
+            Fit::Match { confirmed: false }
+        );
+        let own_static = meta(FunctionMeta::FLAG_STATIC, &["x", ""]);
+        let paired = matcher(Signature::Lenient, Statics::Paired, Some(&own_static));
+        assert_eq!(
+            paired.fit(Some(&own), false),
+            Fit::Skip,
+            "static against instance"
+        );
+        assert_eq!(
+            paired.fit(Some(&own_static), false),
+            Fit::Match { confirmed: true },
+            "a class-side method overrides a class-side one"
+        );
+    }
+
+    fn decl(slot: u32, meta: &RawFunctionMeta) -> Decl<'_> {
+        Decl {
+            slot,
+            meta: Some(meta),
+        }
+    }
+
+    /// Stands for: several applicable declarations in the nearest type are
+    /// a reported ambiguity; an overload among them is not counted.
+    #[test]
+    fn test_matcher_stop_counts_applicable_declarations_only() {
+        let own = meta(0, &[]);
+        let (zero, one) = (meta(0, &[]), meta(0, &["n", "int"]));
+        let m = matcher(TYPED, Statics::Never, Some(&own));
+        assert!(matches!(
+            m.stop(7, &[decl(1, &zero), decl(2, &one)], 0.95, false),
+            Some(Stop::Found {
+                ty: 7,
+                target: 1,
+                confirmed: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            m.stop(7, &[decl(1, &zero), decl(2, &zero)], 1.0, false),
+            Some(Stop::Ambiguous {
+                why: Ambiguity::Several(2),
+                ..
+            })
+        ));
+        assert!(
+            m.stop(7, &[decl(2, &one)], 1.0, false).is_none(),
+            "an overload only: go on"
         );
     }
 

@@ -57,3 +57,33 @@ fn test_overrides_typescript_grandparent_emits_heuristic() {
         ecp_analyzer::post_process::overrides::NAME_MATCH_CONFIDENCE
     );
 }
+
+/// Stands for: TypeScript has no overloading and its compiler checks the
+/// override, so a parameter count that differs (with no rest parameter)
+/// gets no edge, and the reader gets an `override-ambiguous` BlindSpot that
+/// names both counts (codex ruling 2).
+#[test]
+fn test_overrides_typescript_arity_mismatch_emits_no_edge() {
+    use ecp_analyzer::post_process::overrides::BS_KIND_OVERRIDE_AMBIGUOUS;
+    let graph = graph_of(
+        &ecp_analyzer::typescript::TypeScriptProvider::new().unwrap(),
+        &[(
+            "b.ts",
+            "export class A {\n  run(x: number): void {}\n}\nexport class B extends A {\n  run(): void {}\n}\n",
+        )],
+    );
+    let edges = overrides(&graph);
+    assert!(edges.is_empty(), "{edges:?}");
+    let spots = overrides_support::override_blind_spots(&graph);
+    assert_eq!(spots.len(), 1, "{spots:?}");
+    let (kind, file, row, hint) = &spots[0];
+    assert_eq!(
+        (kind.as_str(), file.as_str(), *row),
+        (BS_KIND_OVERRIDE_AMBIGUOUS, "b.ts", 4),
+        "{spots:?}"
+    );
+    assert!(
+        hint.contains("`A` takes 1 parameters") && hint.contains("takes 0"),
+        "{hint}"
+    );
+}

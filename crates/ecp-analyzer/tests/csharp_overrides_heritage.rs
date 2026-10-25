@@ -56,3 +56,26 @@ fn test_overrides_csharp_ambiguous_base_reports_blindspot() {
         "{hint}"
     );
 }
+
+/// Stands for: C# overloads by parameter type, so a base method whose
+/// parameter type differs (`string` against `int`) is no target, and the
+/// lookup goes on to the grandparent's matching `Run(int)` (codex ruling 2).
+#[test]
+fn test_overrides_csharp_parameter_type_differs_binds_grandparent() {
+    let graph = overrides_support::graph_of(
+        &ecp_analyzer::c_sharp::parser::CSharpProvider::new().unwrap(),
+        &[(
+            "App/C.cs",
+            "namespace App {\n    public class A {\n        public virtual void Run(int n) {}\n    }\n    public class B : A {\n        public virtual void Run(string s) {}\n    }\n    public class C : B {\n        public override void Run(int n) {}\n    }\n}\n",
+        )],
+    );
+    assert_eq!(
+        overrides_support::override_rows(&graph),
+        [(8, 2)],
+        "C.Run(int) -> A.Run(int), past B.Run(string)"
+    );
+    for edge in overrides_support::overrides(&graph) {
+        overrides_support::assert_evidence(&edge, Evidence::Exact);
+    }
+    assert!(overrides_support::override_blind_spots(&graph).is_empty());
+}

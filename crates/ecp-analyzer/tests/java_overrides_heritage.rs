@@ -11,15 +11,15 @@ mod overrides_support;
 
 use ecp_analyzer::java::parser::JavaProvider;
 use ecp_analyzer::post_process::overrides::{
-    BS_KIND_OVERRIDE_AMBIGUOUS, BS_KIND_OVERRIDE_BASE_UNRESOLVED,
-    BS_KIND_OVERRIDE_HIERARCHY_INCOMPLETE, MAX_OVERRIDE_DEPTH, NAME_MATCH_CONFIDENCE,
+    BS_KIND_OVERRIDE_BASE_UNRESOLVED, BS_KIND_OVERRIDE_HIERARCHY_INCOMPLETE, MAX_OVERRIDE_DEPTH,
+    NAME_MATCH_CONFIDENCE,
 };
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::contracts::raw_records::Evidence as StoredEvidence;
 use ecp_core::graph::{NodeKind, RelType};
 use overrides_support::{
-    assert_binds_declared_base, assert_evidence, blind_spots, build, graph_of,
-    heritage_confidences, override_blind_spots, override_rows, overrides, Evidence,
+    assert_binds_declared_base, assert_evidence, build, graph_of, heritage_confidences,
+    override_blind_spots, override_rows, overrides, Evidence,
 };
 
 #[test]
@@ -143,8 +143,11 @@ fn test_overrides_java_class_and_interface_bases_emits_one_edge_each() {
     assert_eq!(targets, [1, 4], "Base.run (line 2) and Runner.run (line 5)");
 }
 
+/// Stands for: of two overloads in the base, the one with the overriding
+/// method's signature is the target (codex ruling 2: nearest applicable
+/// declaration); the other is no ambiguity.
 #[test]
-fn test_overrides_java_overloaded_base_method_records_ambiguous_blind_spot() {
+fn test_overrides_java_overloaded_base_method_binds_same_signature() {
     let graph = graph_of(
         &java(),
         &[(
@@ -152,19 +155,13 @@ fn test_overrides_java_overloaded_base_method_records_ambiguous_blind_spot() {
             "class Base {\n    public void run() {}\n    public void run(int n) {}\n}\nclass Child extends Base {\n    @Override\n    public void run() {}\n}\n",
         )],
     );
-    assert!(
-        overrides(&graph).is_empty(),
-        "two `run` overloads: no parameter types to pick one; got {:?}",
-        overrides(&graph)
-    );
-    let spots = blind_spots(&graph, BS_KIND_OVERRIDE_AMBIGUOUS);
-    assert_eq!(spots.len(), 1, "{spots:?}");
-    assert!((5..=6).contains(&spots[0].1), "at Child.run: {spots:?}");
-    assert!(
-        spots[0].2.starts_with("2 methods named `run`"),
-        "{}",
-        spots[0].2
-    );
+    let edges = overrides(&graph);
+    assert_eq!(edges.len(), 1, "Child.run -> Base.run(); got {edges:?}");
+    assert!((5..=6).contains(&edges[0].0.line), "{edges:?}");
+    assert_eq!(edges[0].1.line, 1, "the zero-parameter `run`: {edges:?}");
+    assert_evidence(&edges[0], Evidence::Exact);
+    let spots = override_blind_spots(&graph);
+    assert!(spots.is_empty(), "{spots:?}");
 }
 
 fn node(name: &str, kind: NodeKind, span: (u32, u32, u32, u32)) -> RawNode {
@@ -287,24 +284,46 @@ fn test_overrides_java_grandparent_tostring_binds_nearest() {
     );
 }
 
-/// Stands for: an overload in the nearest declaring base is a reported
-/// ambiguity, also two levels up, and the lookup never skips past it.
+/// Stands for: an overload in the base with another arity is no target;
+/// the lookup goes on past it to the grandparent's matching method.
 #[test]
-fn test_overrides_java_overload_in_grandparent_records_ambiguous_blind_spot() {
+fn test_overrides_java_overload_in_base_skipped_binds_grandparent() {
     let graph = graph_of(
         &java(),
         &[(
             "C.java",
-            "class A {\n    public void run() {}\n    public void run(int n) {}\n}\nclass B extends A {\n}\nclass C extends B {\n    @Override\n    public void run() {}\n}\n",
+            "class A {\n    public void run() {}\n}\nclass B extends A {\n    public void run(int n) {}\n}\nclass C extends B {\n    @Override\n    public void run() {}\n}\n",
         )],
     );
-    assert_one_blind_spot(
-        &graph,
-        BS_KIND_OVERRIDE_AMBIGUOUS,
-        "C.java",
-        7..=8,
-        &["2 methods named `run`", "`A`"],
+    let edges = overrides(&graph);
+    assert_eq!(
+        edges.len(),
+        1,
+        "C.run -> A.run, past B.run(int); got {edges:?}"
     );
+    assert!((7..=8).contains(&edges[0].0.line), "{edges:?}");
+    assert_eq!(edges[0].1.line, 1, "A's run, never B's: {edges:?}");
+    assert_evidence(&edges[0], Evidence::Exact);
+    assert!(override_blind_spots(&graph).is_empty());
+}
+
+/// Stands for: a static method neither overrides nor is overridden: the
+/// lookup goes on past a static base method, and a marked static method
+/// gets no edge.
+#[test]
+fn test_overrides_java_static_base_method_is_no_target() {
+    let graph = graph_of(
+        &java(),
+        &[(
+            "C.java",
+            "class A {\n    public void run() {}\n}\nclass B extends A {\n    public static void run() {}\n}\nclass C extends B {\n    @Override\n    public void run() {}\n}\nclass D extends A {\n    @Override\n    public static void run() {}\n}\n",
+        )],
+    );
+    let edges = overrides(&graph);
+    assert_eq!(edges.len(), 1, "C.run -> A.run only; got {edges:?}");
+    assert!((7..=8).contains(&edges[0].0.line), "C's run: {edges:?}");
+    assert_eq!(edges[0].1.line, 1, "A's run, never B's static: {edges:?}");
+    assert!(override_blind_spots(&graph).is_empty());
 }
 
 /// Stands for: a heritage cycle ends the lookup with a reported gap; the

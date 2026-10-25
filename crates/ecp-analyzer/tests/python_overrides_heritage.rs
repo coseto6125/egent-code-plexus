@@ -76,3 +76,71 @@ fn test_overrides_python_unresolved_base_first_blocks_later_base() {
     assert_eq!(overrides_support::override_rows(&reached), [(6, 1)]);
     assert!(overrides_support::override_blind_spots(&reached).is_empty());
 }
+
+/// Stands for: the chosen Python rule (codex ruling 2). The meta keeps
+/// neither a default value nor the `*` of a splat, so a parameter count
+/// that differs pairs by name alone: a `Heuristic` edge, even under
+/// `@override`. An equal count confirms the pair, and `@override` makes it
+/// `Exact`.
+#[test]
+fn test_overrides_python_default_arg_arity_difference_emits_heuristic() {
+    let graph = overrides_support::graph_of(
+        &python(),
+        &[(
+            "e.py",
+            "from typing import override\n\n\nclass A:\n    def run(self, x=1):\n        pass\n\n\nclass B(A):\n    @override\n    def run(self):\n        pass\n\n\nclass C(A):\n    @override\n    def run(self, x=2):\n        pass\n",
+        )],
+    );
+    let edges = overrides_support::overrides(&graph);
+    assert_eq!(edges.len(), 2, "B.run -> A.run, C.run -> A.run: {edges:?}");
+    for edge in &edges {
+        assert_eq!(edge.1.line, 4, "both bind A.run: {edges:?}");
+        let expected = if (9..=10).contains(&edge.0.line) {
+            Evidence::Heuristic
+        } else {
+            assert!((15..=16).contains(&edge.0.line), "{edges:?}");
+            Evidence::Exact
+        };
+        overrides_support::assert_evidence(edge, expected);
+    }
+    assert!(overrides_support::override_blind_spots(&graph).is_empty());
+}
+
+/// Stands for: an edge carries the weakest resolver confidence on the path
+/// it walked (codex ruling 2). `C` imports `B` (0.95); `B` names `A` by a
+/// bare name (the `Global` tier, 0.7). `C.run -> A.run` is a 0.6
+/// `base-by-name` edge even under `@override`, never the first hop's 0.95.
+#[test]
+fn test_overrides_python_path_minimum_confidence_binds_base_by_name() {
+    let graph = overrides_support::graph_of(
+        &python(),
+        &[
+            ("py/a.py", "class A:\n    def run(self):\n        pass\n"),
+            ("py/b.py", "class B(A):\n    pass\n"),
+            (
+                "py/c.py",
+                "from typing import override\nfrom b import B\n\n\nclass C(B):\n    @override\n    def run(self):\n        pass\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        (
+            overrides_support::heritage_confidences(&graph, "C"),
+            overrides_support::heritage_confidences(&graph, "B"),
+        ),
+        (vec![0.95], vec![0.7]),
+        "fixture premise: an imported hop, then a bare-name hop"
+    );
+    let edges = overrides_support::overrides(&graph);
+    assert_eq!(edges.len(), 1, "C.run -> A.run: {edges:?}");
+    let (source, target, confidence, reason) = &edges[0];
+    assert_eq!(
+        (source.file.as_str(), target.file.as_str()),
+        ("py/c.py", "py/a.py")
+    );
+    assert_eq!(
+        *confidence,
+        ecp_analyzer::post_process::overrides::NAME_MATCH_CONFIDENCE
+    );
+    assert_eq!(reason, "post_process:overrides:base-by-name");
+}

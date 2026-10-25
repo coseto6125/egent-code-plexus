@@ -53,3 +53,51 @@ fn test_overrides_swift_marked_grandparent_emits_exact() {
     assert_eq!((unmarked.0.line, unmarked.1.line), (12, 9), "{edges:?}");
     overrides_support::assert_evidence(unmarked, Evidence::Heuristic);
 }
+
+/// Stands for: a marked Swift override whose base method has no function
+/// meta (the extractor produced none for it) gets no edge and an
+/// `override-ambiguous` BlindSpot: the marker never makes an unconfirmed
+/// branch `Exact` (codex ruling 2). Every Swift method kind the parser
+/// emits gets a meta today, so the test removes the base's meta from the
+/// parsed file; with it in place the same source binds `Exact`.
+#[test]
+fn test_overrides_swift_base_without_meta_records_ambiguous() {
+    use ecp_analyzer::post_process::overrides::BS_KIND_OVERRIDE_AMBIGUOUS;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    let src = "class SA {\n    func run(n: Int) {}\n}\nclass SB: SA {\n    override func run(n: Int) {}\n}\n";
+    let parsed = ecp_analyzer::swift::parser::SwiftProvider::new()
+        .unwrap()
+        .parse_file(std::path::Path::new("S.swift"), src.as_bytes())
+        .expect("parse");
+    let with_meta = overrides_support::build(std::slice::from_ref(&parsed));
+    let edges = overrides_support::overrides(&with_meta);
+    assert_eq!(edges.len(), 1, "fixture premise: {edges:?}");
+    assert_eq!((edges[0].0.line, edges[0].1.line), (4, 1));
+    overrides_support::assert_evidence(&edges[0], Evidence::Exact);
+
+    let mut stripped = parsed;
+    let base_span = stripped
+        .nodes
+        .iter()
+        .find(|n| n.name == "run" && n.span.0 == 1)
+        .expect("SA.run")
+        .span;
+    let before = stripped.raw_function_metas.len();
+    stripped.raw_function_metas.retain(|m| m.span != base_span);
+    assert_eq!(
+        stripped.raw_function_metas.len(),
+        before - 1,
+        "SA.run had a meta"
+    );
+    let graph = overrides_support::build(&[stripped]);
+    let edges = overrides_support::overrides(&graph);
+    assert!(edges.is_empty(), "{edges:?}");
+    let spots = overrides_support::override_blind_spots(&graph);
+    assert_eq!(spots.len(), 1, "{spots:?}");
+    let (kind, _, row, hint) = &spots[0];
+    assert_eq!((kind.as_str(), *row), (BS_KIND_OVERRIDE_AMBIGUOUS, 4));
+    assert!(
+        hint.contains("signature not comparable") && hint.contains("`SA`"),
+        "{hint}"
+    );
+}

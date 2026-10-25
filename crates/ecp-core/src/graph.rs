@@ -552,8 +552,9 @@ pub enum RelType {
     OpensTxScope,
     /// Method-level override edge. Source is a concrete method
     /// (`Function` / `Method` / `Constructor`) on a subtype; target is the
-    /// nearest same-name declaration along the declared bases of the
-    /// source's type. Distinct from class-level `Extends` / `Implements`
+    /// nearest applicable declaration of its name along the declared bases
+    /// of the source's type: an overload or a static is skipped by the
+    /// signature in its function meta. Distinct from class-level `Extends` / `Implements`
     /// — those link `Class`/`Interface` nodes, while `Overrides` links method
     /// nodes. LLM-utility (A) Graph completeness: refactoring a base method
     /// must find every overriding implementation; without this edge the only
@@ -1135,7 +1136,8 @@ pub struct FunctionMeta {
     /// - bit 4: `is_generator` (yield / function* / iterator)
     /// - bit 5: `is_extern`   (FFI declared, no Rust/native body)
     /// - bits 6-8: visibility (0=public, 1=protected, 2=private, 3=crate/internal, 4=package, 5=fileprivate, 6-7=reserved)
-    /// - bits 9-15: reserved (zero)
+    /// - bit 9: `is_virtual`  (C++ only: declared `virtual`, or an `override` / `final` member)
+    /// - bits 10-15: reserved (zero)
     pub flags: u16,
     /// Parameter list, flat-encoded as alternating name/type StrRefs:
     /// `[name1, type1, name2, type2, ...]`. Empty Vec when zero params or
@@ -1158,6 +1160,9 @@ impl FunctionMeta {
     pub const FLAG_ABSTRACT: u16 = 0b0000_0000_0000_1000;
     pub const FLAG_GENERATOR: u16 = 0b0000_0000_0001_0000;
     pub const FLAG_EXTERN: u16 = 0b0000_0000_0010_0000;
+    /// Bit 9; bits 6-8 hold the visibility code. The `Overrides` pass reads
+    /// it: a C++ base method overrides only when it is virtual.
+    pub const FLAG_VIRTUAL: u16 = 0b0000_0010_0000_0000;
 
     pub const fn is_test(&self) -> bool {
         self.flags & Self::FLAG_TEST != 0

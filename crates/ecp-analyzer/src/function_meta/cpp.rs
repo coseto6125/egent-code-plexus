@@ -133,6 +133,10 @@ fn extract_one(
     if is_pure_virtual {
         flags |= FunctionMeta::FLAG_ABSTRACT;
     }
+    // An `override` / `final` member is itself virtual.
+    if has_virtual || is_pure_virtual || has_virtual_specifier(*fn_node) {
+        flags |= FunctionMeta::FLAG_VIRTUAL;
+    }
 
     // C++20 coroutine heuristic: body contains `co_await` / `co_return` / `co_yield`.
     // NOTE: no function-level marker exists; this is body-scan-based.
@@ -399,6 +403,18 @@ fn extract_params(fn_node: &Node<'_>, source: &[u8]) -> Vec<String> {
     result
 }
 
+/// True when the declarator carries `override` or `final` (a `virtual_specifier`).
+fn has_virtual_specifier(fn_node: Node<'_>) -> bool {
+    let Some(declarator) = find_function_declarator(fn_node) else {
+        return false;
+    };
+    let mut cursor = declarator.walk();
+    let found = declarator
+        .children(&mut cursor)
+        .any(|c| c.kind() == "virtual_specifier");
+    found
+}
+
 /// Walk a function definition / declaration node to find the inner `function_declarator`.
 fn find_function_declarator(node: Node<'_>) -> Option<Node<'_>> {
     let mut cursor = node.walk();
@@ -454,5 +470,54 @@ fn extract_declarator_name(decl: Node<'_>, source: &[u8]) -> String {
             String::new()
         }
         _ => node_text(&decl, source).to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::cpp::parser::CppProvider;
+    use ecp_core::analyzer::provider::LanguageProvider;
+    use ecp_core::graph::FunctionMeta;
+    use std::path::Path;
+
+    /// The FunctionMeta flags of every node named `name` that has a meta.
+    fn flags_of(src: &str, name: &str) -> Vec<u16> {
+        let graph = CppProvider::new()
+            .expect("provider")
+            .parse_file(Path::new("shapes.h"), src.as_bytes())
+            .expect("parse");
+        graph
+            .nodes
+            .iter()
+            .filter(|n| n.name == name)
+            .filter_map(|n| graph.raw_function_metas.iter().find(|m| m.span == n.span))
+            .map(|m| m.flags)
+            .collect()
+    }
+
+    /// Stands for: the `Overrides` pass binds a C++ base method only when
+    /// its meta says it is virtual, and an overrider is itself virtual.
+    #[test]
+    fn test_extract_virtual_override_final_sets_flag_virtual() {
+        let src = "struct A {\n    virtual void v();\n    virtual void p() = 0;\n    void o() override;\n    void f() final {}\n    virtual void b() {}\n    void plain();\n    static void s();\n};\n";
+        for (name, virtual_) in [
+            ("v", true),
+            ("p", true),
+            ("o", true),
+            ("f", true),
+            ("b", true),
+            ("plain", false),
+            ("s", false),
+        ] {
+            let flags = flags_of(src, name);
+            assert!(!flags.is_empty(), "`{name}` has a meta");
+            for f in flags {
+                assert_eq!(
+                    f & FunctionMeta::FLAG_VIRTUAL != 0,
+                    virtual_,
+                    "`{name}`: flags {f:#b}"
+                );
+            }
+        }
     }
 }
