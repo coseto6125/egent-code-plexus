@@ -17,6 +17,7 @@
 
 use crate::framework_helpers::{span_area, span_contains, Span};
 use crate::resolution::index::SymbolTable;
+use ecp_core::analyzer::lexical::{file_uids, raw_decl};
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
 use ecp_core::graph::{Edge, NodeKind, RelType};
 use ecp_core::pool::StringPool;
@@ -62,21 +63,14 @@ pub fn emit_edges(
             };
             let path_str: &str = &path_str_cow;
 
-            // T7-6: skip class_membership for files whose every symbol is unchanged.
-            if let Some(skip_map) = symbol_skip_set {
-                if let Some(skip_uids) = skip_map.get(path_str) {
-                    let all_unchanged = raws.iter().all(|n| {
-                        let uid = ecp_core::uid::compute(
-                            n.kind,
-                            path_str,
-                            n.owner_class.as_deref(),
-                            &n.name,
-                        );
-                        skip_uids.contains(&uid)
-                    });
-                    if all_unchanged {
-                        return (0, Vec::new());
-                    }
+            // T7-6: skip class_membership for files whose every symbol is
+            // unchanged, by Pass 1's uids (overloads numbered).
+            if let Some(skip_uids) = symbol_skip_set.and_then(|m| m.get(path_str)) {
+                if file_uids(path_str, raws, raw_decl)
+                    .iter()
+                    .all(|uid| skip_uids.contains(uid))
+                {
+                    return (0, Vec::new());
                 }
             }
 

@@ -7,7 +7,7 @@ use crate::resolution::heuristics::{ResolutionTier, NEAREST_COPY_CONFIDENCE, NEA
 use crate::resolution::index::{FileMeta, Language, ResolveTarget, SymbolTable};
 use crate::resolution::resolver::{ReexportIndex, Resolver};
 use crate::rust::module_tree::RustWorkspaceModTree;
-use ecp_core::analyzer::lexical::LexicalFunctions;
+use ecp_core::analyzer::lexical::{file_identities, file_uids, raw_decl, LexicalFunctions};
 use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::reexport::{export_filter_applies, is_ecmascript, ImportRef};
 use ecp_core::analyzer::type_ladder;
@@ -17,6 +17,7 @@ use ecp_core::analyzer::types::{
 pub use ecp_core::analyzer::types::{
     FUNCTION_REFERENCE_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
 };
+use ecp_core::contracts::identity::UidSlot;
 use ecp_core::contracts::routing::{FileRouter, Language as RouteLanguage};
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::{
@@ -1092,15 +1093,27 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
         });
 
         let graph_start = current_node_idx;
-        for raw_node in &local_graph.nodes {
-            // T1-5: canonical xxh3-64 UID — zero heap alloc, no string-pool entry.
-            // Canonical stream: kind_as_str \0 path \0 owner_class_or_empty \0 name
-            let uid_u64 = ecp_core::uid::compute(
-                raw_node.kind,
-                &path_str,
-                raw_node.owner_class.as_deref(),
-                &raw_node.name,
-            );
+        let identities = file_identities(&path_str, &local_graph.nodes, raw_decl);
+        // In-file first declaration → the node of another file whose uid it
+        // repeats. Two `LocalGraph`s of one path do occur; their later
+        // declarations then number against that earlier node, as one file.
+        let mut repeats: FxHashMap<u32, u32> = FxHashMap::default();
+        for (offset, (raw_node, identity)) in local_graph.nodes.iter().zip(identities).enumerate() {
+            // The file's own numbering (`assign_file`), shared with incremental
+            // mode and the overlay view.
+            let uid_u64 = identity.slot.uid();
+            let earlier = match identity.slot {
+                UidSlot::First(uid) => {
+                    let earlier = uid_seen.get(&uid).copied();
+                    if let Some(prev_idx) = earlier {
+                        repeats.insert(offset as u32, prev_idx);
+                    }
+                    earlier
+                }
+                UidSlot::Later { first, .. } | UidSlot::Duplicate { first, .. } => {
+                    Some(repeats.get(&first).copied().unwrap_or(graph_start + first))
+                }
+            };
 
             // D1 collision recovery: if two distinct symbol definitions hash to the
             // same u64, drop the second and record a BlindSpot for manual review.
@@ -1122,7 +1135,7 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
             // benign placeholder; it doesn't enter SymbolTable so it's unreachable
             // from any query) to occupy the position, keeping nodes.len() ≡
             // current_node_idx throughout Pass 1.
-            if let Some(&prev_idx) = uid_seen.get(&uid_u64) {
+            if let Some(prev_idx) = earlier {
                 // An overload is a real declaration: it keeps its name and
                 // owner (shared with the first, so already pooled) under a
                 // uid of its own, and loses nothing a BlindSpot would report.
@@ -1130,7 +1143,9 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
                     let ordinal = symbol_table.register_overload(prev_idx, file_meta);
                     let first: &Node = &nodes[prev_idx as usize];
                     nodes.push(Node {
-                        uid: ecp_core::uid::overload(uid_u64, ordinal),
+                        // Equal to the `UidSlot::Later` uid unless the file
+                        // repeats another file's declarations.
+                        uid: ecp_core::uid::overload(first.uid, ordinal),
                         name: first.name,
                         file_idx,
                         kind: raw_node.kind,
@@ -1217,7 +1232,7 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
                 // counter, and "" can never match a real symbol-name query.
                 symbol_table.register_tombstone(raw_node.kind, file_meta);
                 nodes.push(Node {
-                    uid: !uid_u64,
+                    uid: ecp_core::uid::tombstone(uid_u64),
                     name: StrRef::default(),
                     file_idx,
                     kind: raw_node.kind,
@@ -2863,6 +2878,30 @@ fn pass2_emit_framework_and_fanout(
     }
 }
 
+/// T7-6: per raw node of `local_graph`, whether its unchanged body skips
+/// resolver work. `None` when the skip data has no entry for the file: no
+/// diff data, or the file needs a full reanalyze. An empty inner set means
+/// every symbol changed. The uids are Pass 1's, overloads numbered.
+fn skipped_nodes(
+    local_graph: &LocalGraph,
+    symbol_skip: Option<&FxHashMap<String, FxHashSet<u64>>>,
+) -> Option<Vec<bool>> {
+    let symbol_skip = symbol_skip?;
+    let raw = local_graph.file_path.to_string_lossy();
+    let path: std::borrow::Cow<'_, str> = if raw.contains('\\') {
+        std::borrow::Cow::Owned(raw.replace('\\', "/"))
+    } else {
+        raw
+    };
+    let skip_uids = symbol_skip.get(path.as_ref())?;
+    Some(
+        file_uids(&path, &local_graph.nodes, raw_decl)
+            .iter()
+            .map(|uid| skip_uids.contains(uid))
+            .collect(),
+    )
+}
+
 /// Pass 2: Resolve imports and build edges
 ///
 /// Pass 2 strategy: dump-disabled path (production hot path) runs in
@@ -2998,31 +3037,9 @@ fn pass2_resolve_edges(
         for (graph_idx, local_graph) in local_graphs.iter().enumerate() {
             let lookup = &indirect_lookups[graph_idx];
             let lexical_lookup = lexical_functions(local_graph, start_indices[graph_idx]);
-            // T7-6: per-file skip set. `None` = no diff data → resolve all.
-            let file_skip = symbol_skip_ref.and_then(|m| {
-                let raw = local_graph.file_path.to_string_lossy();
-                let p: std::borrow::Cow<'_, str> = if raw.contains('\\') {
-                    std::borrow::Cow::Owned(raw.replace('\\', "/"))
-                } else {
-                    raw
-                };
-                m.get(p.as_ref())
-            });
-            for raw_node in &local_graph.nodes {
-                // T7-6: skip resolver work for symbols whose body hash is
-                // unchanged. `file_skip` being `None` means either no diff
-                // data or the file needs full reanalyze — always emit in
-                // both cases. An empty inner set means all symbols changed.
-                let skip = file_skip.is_some_and(|skip_uids| {
-                    let uid = ecp_core::uid::compute(
-                        raw_node.kind,
-                        &local_graph.file_path.to_string_lossy().replace('\\', "/"),
-                        raw_node.owner_class.as_deref(),
-                        &raw_node.name,
-                    );
-                    skip_uids.contains(&uid)
-                });
-                if skip {
+            let skipped = skipped_nodes(local_graph, symbol_skip_ref);
+            for (node_offset, raw_node) in local_graph.nodes.iter().enumerate() {
+                if skipped.as_ref().is_some_and(|skipped| skipped[node_offset]) {
                     current_node_idx += 1;
                     continue;
                 }
@@ -3049,18 +3066,7 @@ fn pass2_resolve_edges(
             // T7-6: skip framework/fanout edges when all symbols in this
             // file are in the skip set (import set unchanged → no new
             // resolution targets for framework refs either).
-            let all_skipped = file_skip.is_some_and(|skip_uids| {
-                local_graph.nodes.iter().all(|n| {
-                    let uid = ecp_core::uid::compute(
-                        n.kind,
-                        &local_graph.file_path.to_string_lossy().replace('\\', "/"),
-                        n.owner_class.as_deref(),
-                        &n.name,
-                    );
-                    skip_uids.contains(&uid)
-                })
-            });
-            if !all_skipped {
+            if !skipped.is_some_and(|skipped| skipped.iter().all(|&s| s)) {
                 pass2_emit_framework_and_fanout(
                     resolver,
                     symbol_table_ref,
@@ -3097,30 +3103,10 @@ fn pass2_resolve_edges(
                 let lexical_lookup = lexical_functions(local_graph, start_idx);
                 let mut local_edges: Vec<Edge> = Vec::new();
                 let mut local_pending: Vec<(usize, u8, String)> = Vec::new();
-                // T7-6: per-file skip set lookup (parallel path).
-                let file_path_str = {
-                    let raw = local_graph.file_path.to_string_lossy();
-                    if raw.contains('\\') {
-                        raw.replace('\\', "/")
-                    } else {
-                        raw.into_owned()
-                    }
-                };
-                let file_skip: Option<&FxHashSet<u64>> =
-                    symbol_skip_ref.and_then(|m| m.get(&file_path_str));
+                let skipped = skipped_nodes(local_graph, symbol_skip_ref);
                 for (node_offset, raw_node) in local_graph.nodes.iter().enumerate() {
                     let current_node_idx = start_idx + node_offset as u32;
-                    // T7-6: skip resolver work for unchanged-body symbols.
-                    let skip = file_skip.is_some_and(|skip_uids| {
-                        let uid = ecp_core::uid::compute(
-                            raw_node.kind,
-                            &file_path_str,
-                            raw_node.owner_class.as_deref(),
-                            &raw_node.name,
-                        );
-                        skip_uids.contains(&uid)
-                    });
-                    if skip {
+                    if skipped.as_ref().is_some_and(|skipped| skipped[node_offset]) {
                         continue;
                     }
                     pass2_emit_node_edges(
@@ -3144,18 +3130,7 @@ fn pass2_resolve_edges(
                 }
                 // T7-6: skip framework/fanout edges only when ALL symbols
                 // in this file are unchanged.
-                let all_skipped = file_skip.is_some_and(|skip_uids| {
-                    local_graph.nodes.iter().all(|n| {
-                        let uid = ecp_core::uid::compute(
-                            n.kind,
-                            &file_path_str,
-                            n.owner_class.as_deref(),
-                            &n.name,
-                        );
-                        skip_uids.contains(&uid)
-                    })
-                });
-                if !all_skipped {
+                if !skipped.is_some_and(|skipped| skipped.iter().all(|&s| s)) {
                     pass2_emit_framework_and_fanout(
                         &resolver,
                         symbol_table_ref,

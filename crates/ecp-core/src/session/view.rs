@@ -106,7 +106,7 @@ use crate::analyzer::import_binding::{
     extension_retry, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
     import_member_fallback, owner_path_agrees, retry_name, DeclaredType, MemberOwner,
 };
-use crate::analyzer::lexical::LexicalFunctions;
+use crate::analyzer::lexical::{file_identities, stored_uid, LexicalFunctions};
 use crate::analyzer::outcome::{NoEdge, Resolution, Tier};
 use crate::analyzer::path_aliases::PathAliases;
 use crate::analyzer::reexport::{
@@ -130,6 +130,7 @@ use crate::analyzer::types::{
     NEAREST_COPY_REASON, OVERLOAD_SET_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON,
     VARIANT_USE_REASON,
 };
+use crate::contracts::identity::UidSlot;
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -362,35 +363,47 @@ impl OverlayView {
         // ── virtual nodes + replaced mapping ──────────────────────────────
         let mut nodes: Vec<ViewNode> = Vec::new();
         let mut replaced: FxHashMap<u32, u32> = FxHashMap::default();
-        // Identity uid → first virtual idx, and first → its later overloads,
-        // as the index's `SymbolTable::register_overload` numbers them.
-        let mut first_of: FxHashMap<u64, u32> = FxHashMap::default();
+        // First virtual idx → its later overloads, as the index's
+        // `SymbolTable::register_overload` numbers them.
         let mut later_overloads: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+        // Virtual offsets of the later same-uid declarations the index
+        // tombstones. They keep their first's uid and name until every pass
+        // below has read them as its twin, then take the tombstone's shape.
+        let mut tombstones: Vec<usize> = Vec::new();
 
         for file in files {
             let rel: Arc<str> = Arc::from(file.rel_path.as_str());
-            for sym in &file.symbols {
-                let identity = crate::uid::compute(
+            let file_start = base_len + nodes.len() as u32;
+            // The index's numbering (`assign_file`), from the same fields.
+            let identities = file_identities(&file.rel_path, &file.symbols, |sym| {
+                (
                     sym.kind,
-                    &file.rel_path,
                     sym.owner_class.as_deref(),
-                    &sym.name,
-                );
+                    sym.name.as_str(),
+                    HeritageNode::span(sym),
+                )
+            });
+            for (sym, identity) in file.symbols.iter().zip(identities) {
                 let virt = base_len + nodes.len() as u32;
-                let first = *first_of.entry(identity).or_insert(virt);
-                let later_overload = first != virt && crate::uid::keeps_overloads(sym.kind);
-                let uid = if later_overload {
-                    let later = later_overloads.entry(first).or_default();
-                    later.push(virt);
-                    crate::uid::overload(identity, later.len() as u32)
-                } else {
-                    identity
+                let later_overload = match identity.slot {
+                    UidSlot::Later { first, .. } => {
+                        later_overloads
+                            .entry(file_start + first)
+                            .or_default()
+                            .push(virt);
+                        true
+                    }
+                    UidSlot::Duplicate { .. } => {
+                        tombstones.push(nodes.len());
+                        false
+                    }
+                    UidSlot::First(_) => false,
                 };
-                let replaced_base = dirty_base_by_uid.get(&uid).copied();
-                // First UID wins, as in full indexing: later twins are
-                // tombstones there, so base edges must reach the first one.
-                // A later overload has a uid of its own and maps to its own
-                // base node.
+                let uid = identity.slot.uid();
+                // Each virtual node replaces the base node that stores its
+                // uid: a later overload its own base twin, a tombstone the
+                // base tombstone. First match wins.
+                let replaced_base = dirty_base_by_uid.get(&stored_uid(identity.slot)).copied();
                 if let Some(base_idx) = replaced_base {
                     replaced.entry(base_idx).or_insert(virt);
                 }
@@ -1056,6 +1069,15 @@ impl OverlayView {
                     }
                 }
             }
+        }
+
+        // The index's tombstone (`pass1_register_nodes`): the slot stays,
+        // with the bit-inverse uid and no name or owner.
+        for offset in tombstones {
+            let node = &mut nodes[offset];
+            node.uid = crate::uid::tombstone(node.uid);
+            node.name.clear();
+            node.owner_class = None;
         }
 
         Some(Self {

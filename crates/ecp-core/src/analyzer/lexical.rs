@@ -1,11 +1,103 @@
 //! JS / TS lexical call scoping: a bare call binds the innermost named
 //! function in scope before any name tier. Full indexing (Pass 2) and the
 //! session overlay build this same index over one file's declarations.
+//!
+//! The same lexical facts feed declaration identity: [`file_identities`]
+//! numbers one file's declarations for every path that stores a uid.
 
-use crate::analyzer::types::{innermost_enclosing, span_contains, Span};
+use crate::analyzer::types::{innermost_enclosing, span_contains, RawNode, Span};
+use crate::contracts::identity::{
+    assign_file, canonical_path, lexical_parents, DeclIdentity, FileDecl, UidSlot,
+};
+use crate::file_category::Language;
 use crate::graph::NodeKind;
+use crate::uid;
 use rustc_hash::FxHashMap;
 use std::path::Path;
+
+/// The kinds `language` scopes under their enclosing callable (design A
+/// §4.2): such a node's uid hashes its parent's anchor instead of an owner.
+/// No language opts in yet; slices C to E add them.
+pub fn lexical_scope_kinds(_language: Language) -> &'static [NodeKind] {
+    &[]
+}
+
+/// One declaration as [`file_identities`] reads it: kind, owner, name and
+/// 0-based span.
+pub type DeclFields<'a> = (NodeKind, Option<&'a str>, &'a str, Span);
+
+/// The [`DeclFields`] of a parsed node.
+pub fn raw_decl(node: &RawNode) -> DeclFields<'_> {
+    (
+        node.kind,
+        node.owner_class.as_deref(),
+        node.name.as_str(),
+        node.span,
+    )
+}
+
+/// The identity of each declaration of the file at `path`, in slice order:
+/// [`assign_file`] over the language's lexical parents. The full build,
+/// incremental mode and the overlay view all number a file through this one
+/// function, so a later overload or a same-uid redefinition gets the same
+/// uid on every path.
+pub fn file_identities<'a, T>(
+    path: &str,
+    decls: &'a [T],
+    fields: impl Fn(&'a T) -> DeclFields<'a>,
+) -> Vec<DeclIdentity> {
+    let path = canonical_path(path);
+    let scoped = lexical_scope_kinds(Language::from_path(&path));
+    let parents = (!scoped.is_empty()).then(|| {
+        let spans: Vec<(NodeKind, Span)> = decls
+            .iter()
+            .map(|d| {
+                let (kind, _, _, span) = fields(d);
+                (kind, span)
+            })
+            .collect();
+        lexical_parents(&spans, scoped)
+    });
+    let decls: Vec<FileDecl<'a>> = decls
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
+            let (kind, owner, name, _) = fields(d);
+            FileDecl {
+                kind,
+                owner,
+                name,
+                parent: parents.as_ref().and_then(|p| p[i]),
+                discriminator: None,
+            }
+        })
+        .collect();
+    // `canonical_path` leaves at most a doubled `./` prefix, which neither
+    // the walk nor `git status` produces, and no parent is set while no
+    // language opts in: no other `IdentityError` can arise.
+    assign_file(&path, &decls).expect("a canonical path and unscoped declarations")
+}
+
+/// The uid a node stores for `slot`: a [`UidSlot::Duplicate`] keeps its
+/// position as a tombstone ([`uid::tombstone`]), any other slot its own uid.
+pub fn stored_uid(slot: UidSlot) -> u64 {
+    match slot {
+        UidSlot::Duplicate { uid, .. } => uid::tombstone(uid),
+        slot => slot.uid(),
+    }
+}
+
+/// [`stored_uid`] of each declaration of the file at `path`, in slice order.
+pub fn file_uids<'a, T>(
+    path: &str,
+    decls: &'a [T],
+    fields: impl Fn(&'a T) -> DeclFields<'a>,
+) -> Vec<u64> {
+    file_identities(path, decls, fields)
+        .into_iter()
+        .map(|id| stored_uid(id.slot))
+        .collect()
+}
 
 /// One file's lexical candidates. Parent discovery runs once, not once per
 /// call.
@@ -142,6 +234,65 @@ mod tests {
         let lex = index("a.ts", &[(NodeKind::Function, "f", false, (0, 0, 0, 9))]);
         assert_eq!(lex.targets((1, 0, 1, 9), "o.f"), None);
         assert_eq!(lex.targets((1, 0, 1, 9), "g"), None);
+    }
+
+    fn uids(path: &str, decls: &[(NodeKind, Option<&str>, &str)]) -> Vec<u64> {
+        file_uids(path, decls, |d| (d.0, d.1, d.2, (0, 0, 0, 0)))
+    }
+
+    #[test]
+    fn test_file_uids_overload_and_redefinition_returns_index_numbering() {
+        let decls = [
+            (NodeKind::Method, Some("A"), "save"),
+            (NodeKind::Method, Some("A"), "save"),
+            (NodeKind::Namespace, None, "Acme"),
+            (NodeKind::Namespace, None, "Acme"),
+        ];
+        let save = uid::compute(NodeKind::Method, "src/A.cs", Some("A"), "save");
+        let acme = uid::compute(NodeKind::Namespace, "src/A.cs", None, "Acme");
+        assert_eq!(
+            uids("src/A.cs", &decls),
+            [save, uid::overload(save, 1), acme, !acme],
+            "the second save is overload 1; the second Acme is the bit-inverse tombstone"
+        );
+    }
+
+    #[test]
+    fn test_file_uids_backslash_path_returns_forward_slash_uids() {
+        let decls = [(NodeKind::Function, None, "f")];
+        assert_eq!(
+            uids("src\\a.rs", &decls),
+            uids("src/a.rs", &decls),
+            "the builder hashes the `/` form of a path"
+        );
+    }
+
+    #[test]
+    fn test_file_uids_empty_file_returns_empty() {
+        let decls: [(NodeKind, Option<&str>, &str); 0] = [];
+        assert!(uids("src/a.rs", &decls).is_empty());
+    }
+
+    #[test]
+    fn test_lexical_scope_kinds_before_opt_in_returns_empty() {
+        for language in [
+            Language::TypeScript,
+            Language::JavaScript,
+            Language::Python,
+            Language::Java,
+            Language::Kotlin,
+            Language::CSharp,
+            Language::Go,
+            Language::Rust,
+            Language::Php,
+            Language::Ruby,
+            Language::Swift,
+            Language::C,
+            Language::Cpp,
+            Language::Dart,
+        ] {
+            assert!(lexical_scope_kinds(language).is_empty(), "{language:?}");
+        }
     }
 
     #[test]
