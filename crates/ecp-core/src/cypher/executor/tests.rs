@@ -3192,3 +3192,76 @@ fn test_first_node_name_with_overlay_matches_scan_and_hides_suppressed() {
     );
     assert!(rows_with_view(graph(), "MATCH (n {name:'gone_fn'}) RETURN n.filePath").is_empty());
 }
+
+/// Stands for: a dirty file's function reads the flags its own fragment
+/// paired, so `isAsync` finds a new async function and drops one an edit
+/// made sync, and a method's visibility is its parse's, never the base
+/// twin's stale flags. Decorators, which no fragment carries, stay the base
+/// twin's on both the pushdown and the generic read path.
+#[test]
+fn test_execute_virtual_function_meta_reads_fragment_flags() {
+    use crate::graph::FunctionMeta;
+    let bytes = build_function_meta_graph();
+    let graph = rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    let symbol = |kind, name: &str, line: u32, flags: Option<u16>| OverlaySymbol {
+        is_exported: false,
+        name: name.into(),
+        kind,
+        owner_class: None,
+        start_line: line,
+        end_line: line + 1,
+        start_column: 0,
+        end_column: 0,
+        calls: Vec::new(),
+        heritage: Vec::new(),
+        variant_refs: Vec::new(),
+        return_type: None,
+        generic_arity: 0,
+        flags,
+    };
+    let view = OverlayView::build(
+        graph,
+        &[OverlayFileInput {
+            export_aliases: Vec::new(),
+            rel_path: "src/x.ts".into(),
+            symbols: vec![
+                symbol(NodeKind::Function, "async_fn", 3, None),
+                symbol(NodeKind::Method, "override_method", 9, Some(0)),
+                symbol(
+                    NodeKind::Function,
+                    "fresh_async",
+                    13,
+                    Some(FunctionMeta::FLAG_ASYNC),
+                ),
+            ],
+            imports: vec![],
+        }],
+    )
+    .unwrap();
+    let column = |text: &str| -> Vec<String> {
+        let q = parse(text).unwrap_or_else(|err| panic!("parse {text:?}: {err:?}"));
+        let r = execute(&q, graph, Some(&view), Path::new(".")).unwrap();
+        r.rows.iter().map(|row| format!("{:?}", row[0])).collect()
+    };
+    let name = |n: &str| format!("{:?}", Value::Str(n.into()));
+
+    assert_eq!(
+        column("MATCH (f:Function) WHERE f.isAsync RETURN f.name"),
+        [name("fresh_async")]
+    );
+    assert_eq!(
+        column("MATCH (f:Method) RETURN f.visibility"),
+        [format!("{:?}", Value::Int(0))]
+    );
+    assert_eq!(
+        column("MATCH (f:Method) WHERE 'Override' IN f.decorators RETURN f.name"),
+        [name("override_method")]
+    );
+    assert_eq!(
+        column("MATCH (f:Method) WHERE f.name = 'override_method' RETURN f.decorators"),
+        [format!(
+            "{:?}",
+            Value::List(vec![Value::Str("Override".into())])
+        )]
+    );
+}

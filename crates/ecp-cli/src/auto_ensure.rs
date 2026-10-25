@@ -1980,6 +1980,7 @@ mod fingerprint_drift_tests {
             symbols: vec![],
             imports: vec![],
             export_aliases: vec![],
+            records: Default::default(),
         };
         rkyv::to_bytes::<rkyv::rancor::Error>(&fragment)
             .unwrap()

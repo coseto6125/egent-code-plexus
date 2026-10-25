@@ -15,8 +15,9 @@
 //!    is an index INTO the local graph's `nodes` slice; the map's slot for it is the
 //!    globally-unique node ID written into the `Edge.source` field.
 //!
-//! 2. **Emit `TransactionScope` node** — one synthetic node per `RawTxScope`.
-//!    Name: `tx_scope:{enclosing_fn_name}#{framework_as_str}` — deterministic
+//! 2. **Emit `TransactionScope` node** — one synthetic node per `RawTxScope`,
+//!    by [`record_nodes::tx_scope_node`], which the overlay's per-file replay
+//!    shares. Name: `tx_scope:{enclosing_fn_name}#{framework_as_str}` — deterministic
 //!    from the enclosing function name + framework label so the UID is stable
 //!    across re-indexes (assuming function names are stable, which they are for
 //!    decorator-annotated functions).
@@ -34,11 +35,11 @@
 //! patterns. The `TransactionScope` node carries `framework_as_str` in its
 //! name for direct `WHERE s.name CONTAINS 'spring'` filtering.
 
+use ecp_core::analyzer::record_nodes;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
-use ecp_core::graph::{Edge, Node, NodeKind, RelType};
+use ecp_core::graph::{Edge, Node, RelType};
 use ecp_core::pool::{StrRef, StringPool};
-use ecp_core::uid;
 
 /// Emit one `NodeKind::TransactionScope` node + one `OpensTxScope` edge per
 /// `RawTxScope` across all local graphs. Returns the count of emitted edges.
@@ -54,7 +55,7 @@ pub fn emit_edges(
     nodes: &mut Vec<Node>,
     edges: &mut Vec<Edge>,
 ) -> usize {
-    let reason = string_pool.add("post_process:tx_scope");
+    let reason = string_pool.add(record_nodes::TX_SCOPE_REASON);
     let mut emitted = 0usize;
 
     for (lg_idx, local_graph) in local_graphs.iter().enumerate() {
@@ -81,20 +82,21 @@ pub fn emit_edges(
             let Some(fn_global_id) = raw_map.node(FileOrd(file_idx), RawIdx(raw.node_idx())) else {
                 continue;
             };
-            let framework_str = raw.framework().as_str();
-
-            // Deterministic name: enclosing function name + framework label.
-            let scope_name = format!("tx_scope:{}#{}", enclosing_node.name, framework_str);
-            let scope_name_ref: StrRef = string_pool.add(&scope_name);
-            let scope_uid = uid::compute(NodeKind::TransactionScope, &path_str, None, &scope_name);
+            let scope = record_nodes::tx_scope_node(
+                &path_str,
+                *raw,
+                &enclosing_node.name,
+                enclosing_node.span,
+            );
+            let scope_name_ref: StrRef = string_pool.add(&scope.name);
 
             let tx_node_idx = nodes.len() as u32;
             nodes.push(Node {
-                uid: scope_uid,
+                uid: scope.uid,
                 name: scope_name_ref,
                 file_idx,
-                kind: NodeKind::TransactionScope,
-                span: enclosing_node.span,
+                kind: scope.kind,
+                span: scope.span,
                 community_id: 0,
                 owner_class: StrRef::default(),
                 content_hash: 0,

@@ -5,8 +5,10 @@
 //! `view_inputs` + `decode_view_inputs` build the per-file
 //! `OverlayFileInput`s (symbols + imports + calls + export flags and
 //! aliases) and the removed paths for the query-time `OverlayView` edge
-//! merge. The first pass validates the entries and hashes them into the
-//! view cache's input key; only a cache miss pays for the second.
+//! merge; `decode_view_inputs_with_records` adds each file's
+//! `OverlayFileRecords` for `OverlayView::build_with_records`. The first
+//! pass validates the entries and hashes them into the view cache's input
+//! key; only a cache miss pays for the second.
 //!
 //! Fragment bins with `parse_failed = true` are skipped. A tombstone (a
 //! deleted file, the old half of a rename) is a removed path while the file
@@ -17,6 +19,7 @@ use ecp_core::analyzer::types::{RawExportAlias, RawImport};
 use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::NodeKind;
 use ecp_core::session::layout;
+use ecp_core::session::view::{ArchivedOverlayFileRecords, OverlayFileRecords};
 use ecp_core::session::{DirtyEvents, OverlayFileInput, OverlaySymbol, FRAGMENT_FORMAT_V7};
 use rkyv::rancor::Error as RkyvError;
 use std::fs;
@@ -173,50 +176,139 @@ pub fn view_inputs_under(
 pub fn decode_view_inputs(accepted: &[AcceptedFragment]) -> Vec<OverlayFileInput> {
     accepted
         .iter()
-        .filter_map(|fragment| {
-            let archived = rkyv::access::<ArchivedFragmentFile, RkyvError>(&fragment.bytes).ok()?;
-            // Symbols copy straight off the archived view — a full
-            // `rkyv::deserialize` of the whole FragmentFile would allocate
-            // every string twice (once into FragmentFile, once into
-            // OverlaySymbol). Imports and export aliases keep the one-line
-            // deserialize: the `binding_kind` enum makes a manual field map
-            // noisier than the small allocation it saves.
-            let (Ok(imports), Ok(export_aliases)) = (
-                rkyv::deserialize::<Vec<RawImport>, RkyvError>(&archived.imports),
-                rkyv::deserialize::<Vec<RawExportAlias>, RkyvError>(&archived.export_aliases),
-            ) else {
-                return None;
-            };
-            Some(OverlayFileInput {
-                rel_path: fragment.rel_path.clone(),
-                symbols: archived
-                    .symbols
-                    .iter()
-                    .map(|s| OverlaySymbol {
-                        name: s.name.as_str().to_owned(),
-                        kind: NodeKind::from(&s.kind),
-                        owner_class: s.owner_class.as_ref().map(|o| o.as_str().to_owned()),
-                        // span rows are 0-based; Node line conventions are 1-based.
-                        start_line: s.span.0.to_native() + 1,
-                        end_line: s.span.2.to_native() + 1,
-                        start_column: s.span.1.to_native(),
-                        end_column: s.span.3.to_native(),
-                        calls: s.calls.iter().map(|c| c.as_str().to_owned()).collect(),
-                        is_exported: s.is_exported,
-                        heritage: s.heritage.iter().map(|h| h.as_str().to_owned()).collect(),
-                        variant_refs: s
-                            .variant_refs
-                            .iter()
-                            .map(|v| v.as_str().to_owned())
-                            .collect(),
-                        return_type: s.return_type.as_ref().map(|ty| ty.as_str().to_owned()),
-                        generic_arity: s.generic_arity.to_native(),
-                        flags: s.flags.as_ref().map(|flags| flags.to_native()),
-                    })
-                    .collect(),
-                imports,
-                export_aliases,
-            })
-        })
+        .filter_map(|fragment| decode_fragment(fragment).map(|(input, _)| input))
         .collect()
+}
+
+/// [`decode_view_inputs`] with each input's records, aligned with the
+/// inputs: `OverlayView::build_with_records`' `files` and `records`. A
+/// fragment whose records do not deserialize is dropped from both, by the
+/// same deterministic rule.
+pub fn decode_view_inputs_with_records(
+    accepted: &[AcceptedFragment],
+) -> (Vec<OverlayFileInput>, Vec<OverlayFileRecords>) {
+    accepted
+        .iter()
+        .filter_map(|fragment| {
+            let (input, records) = decode_fragment(fragment)?;
+            let records = rkyv::deserialize::<OverlayFileRecords, RkyvError>(records).ok()?;
+            Some((input, records))
+        })
+        .unzip()
+}
+
+/// One fragment's input, and its archived records.
+fn decode_fragment(
+    fragment: &AcceptedFragment,
+) -> Option<(OverlayFileInput, &ArchivedOverlayFileRecords)> {
+    let archived = rkyv::access::<ArchivedFragmentFile, RkyvError>(&fragment.bytes).ok()?;
+    // Symbols copy straight off the archived view — a full
+    // `rkyv::deserialize` of the whole FragmentFile would allocate every
+    // string twice (once into FragmentFile, once into OverlaySymbol).
+    // Imports and export aliases keep the one-line deserialize: the
+    // `binding_kind` enum makes a manual field map noisier than the small
+    // allocation it saves.
+    let (Ok(imports), Ok(export_aliases)) = (
+        rkyv::deserialize::<Vec<RawImport>, RkyvError>(&archived.imports),
+        rkyv::deserialize::<Vec<RawExportAlias>, RkyvError>(&archived.export_aliases),
+    ) else {
+        return None;
+    };
+    let input = OverlayFileInput {
+        rel_path: fragment.rel_path.clone(),
+        symbols: archived
+            .symbols
+            .iter()
+            .map(|s| OverlaySymbol {
+                name: s.name.as_str().to_owned(),
+                kind: NodeKind::from(&s.kind),
+                owner_class: s.owner_class.as_ref().map(|o| o.as_str().to_owned()),
+                // span rows are 0-based; Node line conventions are 1-based.
+                start_line: s.span.0.to_native() + 1,
+                end_line: s.span.2.to_native() + 1,
+                start_column: s.span.1.to_native(),
+                end_column: s.span.3.to_native(),
+                calls: s.calls.iter().map(|c| c.as_str().to_owned()).collect(),
+                is_exported: s.is_exported,
+                heritage: s.heritage.iter().map(|h| h.as_str().to_owned()).collect(),
+                variant_refs: s
+                    .variant_refs
+                    .iter()
+                    .map(|v| v.as_str().to_owned())
+                    .collect(),
+                return_type: s.return_type.as_ref().map(|ty| ty.as_str().to_owned()),
+                generic_arity: s.generic_arity.to_native(),
+                flags: s.flags.as_ref().map(|flags| flags.to_native()),
+            })
+            .collect(),
+        imports,
+        export_aliases,
+    };
+    Some((input, &archived.records))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::overlay_writer::{FragmentFile, FragmentSymbol};
+    use rkyv::{Archive, Serialize};
+
+    /// A `FragmentFile` as V7 bins held it before the records joined the
+    /// payload.
+    #[derive(Archive, Serialize)]
+    struct FragmentFileWithoutRecords {
+        symbols: Vec<FragmentSymbol>,
+        imports: Vec<RawImport>,
+        export_aliases: Vec<RawExportAlias>,
+    }
+
+    fn accepted(bytes: Vec<u8>) -> AcceptedFragment {
+        AcceptedFragment {
+            rel_path: "src/a.ts".into(),
+            bytes,
+        }
+    }
+
+    /// Stands for: a bin of the payload before the records is unreadable,
+    /// so the freshness gate re-parses it and the reader serves nothing of
+    /// it, never a half-decoded file with no records.
+    #[test]
+    fn test_valid_fragment_bin_without_records_rejected() {
+        let old = FragmentFileWithoutRecords {
+            symbols: Vec::new(),
+            imports: Vec::new(),
+            export_aliases: Vec::new(),
+        };
+        let bytes = rkyv::to_bytes::<RkyvError>(&old).unwrap().into_vec();
+        assert!(!valid_fragment(&bytes));
+        let current = rkyv::to_bytes::<RkyvError>(&FragmentFile::default())
+            .unwrap()
+            .into_vec();
+        assert!(valid_fragment(&current));
+    }
+
+    /// Stands for: both decoders serve the same inputs, and the records one
+    /// aligns one record set with each input.
+    #[test]
+    fn test_decode_view_inputs_with_records_aligns_records_with_inputs() {
+        let mut fragment = FragmentFile::default();
+        fragment
+            .records
+            .tx_scopes
+            .push(ecp_core::analyzer::types::RawTxScope::new(
+                0,
+                ecp_core::analyzer::types::FrameworkId::SpringTransactional,
+            ));
+        let bytes = rkyv::to_bytes::<RkyvError>(&fragment).unwrap().into_vec();
+        let fragments = [accepted(bytes.clone()), accepted(bytes)];
+        let (inputs, records) = decode_view_inputs_with_records(&fragments);
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().all(|r| r.tx_scopes.len() == 1));
+        let plain = decode_view_inputs(&fragments);
+        assert_eq!(
+            plain.iter().map(|i| &i.rel_path).collect::<Vec<_>>(),
+            inputs.iter().map(|i| &i.rel_path).collect::<Vec<_>>()
+        );
+    }
 }

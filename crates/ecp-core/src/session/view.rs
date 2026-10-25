@@ -21,9 +21,12 @@
 //!   parse: deleted or renamed. Traversal must neither expand into nor
 //!   report them — this is what kills phantom callers after a rename. In a
 //!   re-parsed file only kinds a fragment can carry are suppressed; nodes
-//!   the graph builder makes (File, Route, EntryPoint, Process, PathLiteral,
-//!   detector nodes) stay visible as indexed, and their edges into dirty
-//!   symbols redirect or drop like any other base edge. A removed file
+//!   the graph builder makes (File, Route, EntryPoint, Process, detector
+//!   nodes) stay visible as indexed, and their edges into dirty symbols
+//!   redirect or drop like any other base edge. With the file's records
+//!   ([`OverlayFileRecords`]) the replay rebuilds its record nodes
+//!   (`PathLiteral`, `TransactionScope`, `SchemaField`, `EventTopic`): a
+//!   base one pairs with its replayed twin or is suppressed. A removed file
 //!   (deleted, or the old half of a rename: a whole-file tombstone in the
 //!   manifest) has no parse at all: every base node of it is suppressed,
 //!   builder-made ones included, and so every base edge into or out of it
@@ -53,8 +56,15 @@
 //!   member) and enum containment (`Enum` → `EnumVariant`), both by
 //!   [`crate::analyzer::containment`], and each virtual function's meta
 //!   ([`OverlayView::function_meta`]). A re-parsed path that `graph.files`
-//!   holds keeps its base `File` node, which sources the file's rebuilt
-//!   `Defines`: the one overlay edge whose source is a base index.
+//!   holds keeps its base `File` nodes, which source the file's rebuilt
+//!   `Defines`: with the record edges below, the only overlay edges whose
+//!   source is a base index.
+//! - **record outputs** — given each file's [`OverlayFileRecords`]
+//!   ([`OverlayView::build_with_records`]), the replay rebuilds the record
+//!   nodes and their edges by the index's derivations
+//!   ([`crate::analyzer::record_nodes`]): `PathLiteral` + `UsesPathLiteral`,
+//!   `QueriesTable`, `TransactionScope` + `OpensTxScope`, `SchemaField` +
+//!   `HasProperty`, `EventTopic` + `Publishes` / `Subscribes`.
 //!
 //! The merge replaces only the base references of dirty sources whose
 //! reason the overlay rebuilds (closure, overload set, enum variant, function value),
@@ -64,9 +74,14 @@
 //!
 //! A base edge whose **source** lies in a dirty file is masked ONLY when the
 //! overlay re-resolves that rel type from fragment data (`Calls`,
-//! `ReadsField`, `Defines`, plus the `References` reasons above) — for
-//! those the overlay adjacency is the file's truth. `Defines` is masked at
-//! the file's `File` node too. Rels the fragment carries no
+//! `ReadsField`, `Defines`, plus the `References` reasons above, plus
+//! `UsesPathLiteral`, `QueriesTable`, `OpensTxScope`, `Publishes` and
+//! `Subscribes` when the records replayed) — for those the overlay
+//! adjacency is the file's truth. `Defines` and the record edges are masked
+//! at the file's `File` nodes too. `HasProperty` stays as indexed: it shares
+//! its kind with class membership, which the overlay does not rebuild, so a
+//! dirty file's base `SchemaField` nodes are suppressed instead and their
+//! base `HasProperty` drops with them. Rels the fragment carries no
 //! inputs for (Extends, …) keep their base edges: slightly stale beats silently absent for a
 //! deterministic edge. A base edge whose **target** lies in a dirty file is
 //! redirected (replaced) or dropped (suppressed) regardless of rel.
@@ -78,11 +93,19 @@
 //! - `References` edges other than lexical closure, overload-set,
 //!   enum-variant, and function-reference edges are not re-resolved: a dirty file keeps the
 //!   base ones of its surviving symbols (stale) and gains none for new code.
-//! - Builder-made nodes of a re-parsed dirty file other than `File` (routes,
-//!   entry points, path literals, detector nodes) and their edges are as
-//!   indexed. Class membership (`HasMethod` / `HasProperty`) is as indexed:
-//!   a brand-new member gets none. A path with two `LocalGraph`s keeps the
-//!   base's count of `File` nodes, whatever count its parse now has.
+//! - Builder-made nodes of a re-parsed dirty file other than `File` and the
+//!   record nodes (routes, entry points, processes) and their edges are as
+//!   indexed, and so are all record outputs when the view is built without
+//!   records. Class membership (`HasMethod` / `HasProperty` to a member) is
+//!   as indexed: a brand-new member gets none. A path with two `LocalGraph`s
+//!   keeps the base's count of `File` nodes, whatever count its parse now
+//!   has.
+//! - The heuristic mirror edges (`MirrorsField`, `EventTopicMirror`) are
+//!   index-time: an `EventTopic` that pairs with its replayed twin keeps its
+//!   base mirror edges, an unpaired or new one has none, and a dirty file's
+//!   `SchemaField` has none. A clean file's `QueriesTable` edge keeps the
+//!   table the index picked, even when a dirty file now declares an earlier
+//!   one.
 //! - A function's meta in the view holds the flags and return type a
 //!   fragment carries; the parameters and decorators of a dirty function are
 //!   not in it.
@@ -145,6 +168,10 @@ use crate::analyzer::lexical::{
 };
 use crate::analyzer::outcome::{NoEdge, Resolution, Tier};
 use crate::analyzer::path_aliases::PathAliases;
+use crate::analyzer::record_nodes::{
+    EVENT_TOPIC_PUBLISHES_REASON, EVENT_TOPIC_SUBSCRIBES_REASON, PATH_LITERAL_SINK_REASONS,
+    SCHEMA_FIELD_HAS_PROPERTY_REASON, TX_SCOPE_REASON,
+};
 use crate::analyzer::reexport::{
     self, export_filter_applies, is_ecmascript, ExportAliasTable, Fact, FileImports, ImportRef,
     ModuleFacts, PyModule, ResolveTarget,
@@ -161,10 +188,11 @@ use crate::analyzer::type_ladder::{
     self, TypeCandidates, TypeFacts, TypeMember as LadderMember, MAX_HERITAGE_DEPTH,
 };
 use crate::analyzer::types::{
-    innermost_enclosing, owner_key, CallArguments, CallSite, LocalGraph, NameRef, RawExportAlias,
-    RawImport, Span, VariantRef, CLOSURE_REFERENCE_REASON, FUNCTION_REFERENCE_REASON,
-    NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON, OVERLOAD_SET_REASON, VALUE_READ_REASON,
-    VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
+    innermost_enclosing, owner_key, CallArguments, CallSite, LocalGraph, NameRef, RawEventTopic,
+    RawExportAlias, RawImport, RawPathLiteral, RawSchemaField, RawSqlRef, RawTxScope, Span,
+    VariantRef, CLOSURE_REFERENCE_REASON, FUNCTION_REFERENCE_REASON, NEAREST_COPY_CONFIDENCE,
+    NEAREST_COPY_REASON, OVERLOAD_SET_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON,
+    VARIANT_USE_REASON,
 };
 use crate::contracts::identity::{lexical_parents, pair_by_anchor, DeclIdentity, UidSlot};
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
@@ -293,6 +321,72 @@ impl From<LocalGraph> for OverlayFileInput {
     }
 }
 
+/// One dirty file's raw records, the inputs of the record outputs the
+/// per-file replay rebuilds (`session::incremental`). Each record carries
+/// its endpoint, bound against the file's raw nodes when the fragment is
+/// written; [`OverlaySymbol`]s are those raw nodes in order, so a `Node`
+/// endpoint indexes [`OverlayFileInput::symbols`].
+#[derive(Debug, Clone, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[rkyv(derive(Debug))]
+pub struct OverlayFileRecords {
+    pub path_literals: Vec<RawPathLiteral>,
+    pub sql_refs: Vec<RawSqlRef>,
+    pub tx_scopes: Vec<RawTxScope>,
+    pub schema_fields: Vec<RawSchemaField>,
+    pub event_topics: Vec<RawEventTopic>,
+}
+
+impl OverlayFileRecords {
+    /// The records of `local`, each endpoint bound as the index binds it
+    /// (`endpoint_in`).
+    pub fn from_local(local: &LocalGraph) -> Self {
+        let nodes = &local.nodes;
+        Self {
+            path_literals: local
+                .path_literals
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|r| RawPathLiteral {
+                    endpoint: r.endpoint_in(nodes),
+                    ..r.clone()
+                })
+                .collect(),
+            sql_refs: local
+                .sql_refs
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|r| RawSqlRef {
+                    endpoint: r.endpoint_in(nodes),
+                    ..r.clone()
+                })
+                .collect(),
+            tx_scopes: local.tx_scopes.as_deref().unwrap_or_default().to_vec(),
+            schema_fields: local
+                .schema_fields
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|r| RawSchemaField {
+                    endpoint: r.endpoint_in(nodes),
+                    ..r.clone()
+                })
+                .collect(),
+            event_topics: local
+                .event_topics
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|r| RawEventTopic {
+                    endpoint: r.endpoint_in(nodes),
+                    ..r.clone()
+                })
+                .collect(),
+        }
+    }
+}
+
 /// A materialized overlay node. `rel_path` is shared per file via `Arc`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewNode {
@@ -355,6 +449,7 @@ pub struct OverlayView {
     /// ([`pair_with_base`]).
     replaced: FxHashMap<u32, u32>,
     /// base idxs of dirty-file symbols NOT re-emitted (deleted/renamed),
+    /// the base record nodes of a re-parsed file the replay did not pair,
     /// and every base idx of a removed file.
     suppressed: FxHashSet<u32>,
     /// every base idx of a re-parsed dirty file whose kind
@@ -397,6 +492,10 @@ pub struct OverlayView {
     /// Each virtual function, method or constructor whose fragment paired a
     /// meta, ascending by node ([`Self::function_meta`]).
     function_metas: Vec<ViewFunctionMeta>,
+    /// Whether the replay rebuilt the record outputs
+    /// ([`Self::build_with_records`]): the base record edges of the dirty
+    /// files are then masked.
+    records_replayed: bool,
 }
 
 /// A group of base declarations the overlay could not pair by identity: the
@@ -505,10 +604,26 @@ impl OverlayView {
     /// follows an edge into or out of it. A path that also has an entry in
     /// `files` exists on disk, and its parse wins. `None` when both lists
     /// are empty. Without a removed path the cost is [`Self::build`]'s: the
-    /// empty sets allocate nothing.
+    /// empty sets allocate nothing. The record outputs stay as indexed
+    /// ([`Self::build_with_records`] rebuilds them).
     pub fn build_with_removed(
         graph: &ArchivedZeroCopyGraph,
         files: &[OverlayFileInput],
+        removed: &[String],
+    ) -> Option<Self> {
+        Self::build_with_records(graph, files, &[], removed)
+    }
+
+    /// [`Self::build_with_removed`] that also rebuilds each dirty file's
+    /// record outputs from `records`, one per input of `files` in order
+    /// (`session::incremental`). Any other length rebuilds none of them, as
+    /// an empty `records` does. Cost on top: O(dirty records + base record
+    /// nodes of the dirty paths) and one name-index probe per distinct SQL
+    /// table name; the base record nodes come from the node scan below.
+    pub fn build_with_records(
+        graph: &ArchivedZeroCopyGraph,
+        files: &[OverlayFileInput],
+        records: &[OverlayFileRecords],
         removed: &[String],
     ) -> Option<Self> {
         if files.is_empty() && removed.is_empty() {
@@ -539,11 +654,13 @@ impl OverlayView {
         // can re-emit are collected: mask ⊆ rebuild applies to nodes too. A
         // removed file has no parse to re-emit anything, so all of its nodes
         // are collected; no parse names its path, so no virtual node
-        // replaces one. The same scan keeps each re-parsed path's last
-        // `File` node, the source of the `Defines` the replay rebuilds.
+        // replaces one. The same scan keeps each re-parsed path's `File`
+        // nodes, the sources of the `Defines` and record edges the replay
+        // rebuilds, and its record nodes, which the replay pairs.
         let mut dirty_base_by_path: FxHashMap<&str, Vec<u32>> = FxHashMap::default();
         let mut dirty_base: FxHashSet<u32> = FxHashSet::default();
-        let mut base_files: FxHashMap<&str, u32> = FxHashMap::default();
+        let mut base_files: FxHashMap<&str, Vec<u32>> = FxHashMap::default();
+        let mut base_records: Vec<u32> = Vec::new();
         if !dirty_file_idx.is_empty() || !removed_file_idx.is_empty() {
             for (i, node) in graph.nodes.iter().enumerate() {
                 let file_idx = node.file_idx.to_native();
@@ -553,7 +670,9 @@ impl OverlayView {
                         dirty_base_by_path.entry(path).or_default().push(i as u32);
                         dirty_base.insert(i as u32);
                     } else if kind == NodeKind::File {
-                        base_files.insert(path, i as u32);
+                        base_files.entry(path).or_default().push(i as u32);
+                    } else if incremental::replays_record_kind(kind) {
+                        base_records.push(i as u32);
                     }
                 } else if removed_file_idx.contains(&file_idx) {
                     dirty_base.insert(i as u32);
@@ -676,7 +795,7 @@ impl OverlayView {
                 });
             }
         }
-        let suppressed: FxHashSet<u32> = dirty_base
+        let mut suppressed: FxHashSet<u32> = dirty_base
             .iter()
             .copied()
             .filter(|idx| !replaced.contains_key(idx))
@@ -732,11 +851,15 @@ impl OverlayView {
         // function meta ───────────────────────────────────────────────────
         let replayed = incremental::replay(
             ReplayInputs {
+                graph,
                 files,
+                records,
                 base_len,
                 tombstones: survivors,
                 indexed: dirty_file_idx.values().copied().collect(),
                 base_files,
+                base_records,
+                dirty_base: &dirty_base,
                 lexical_parents: &lexical_parents,
             },
             &mut nodes,
@@ -744,6 +867,8 @@ impl OverlayView {
             &mut out_adj,
             &mut in_adj,
         );
+        replaced.extend(replayed.replaced);
+        suppressed.extend(replayed.suppressed);
 
         Some(Self {
             base_len,
@@ -760,6 +885,7 @@ impl OverlayView {
             gaps,
             defines_files: replayed.defines_files,
             function_metas: replayed.function_metas,
+            records_replayed: replayed.records_replayed,
         })
     }
 
@@ -808,13 +934,16 @@ impl OverlayView {
     /// the overlay can't rebuild would silently drop deterministic edges —
     /// keep mask ⊆ rebuild as fragment capabilities grow. `Defines` is
     /// rebuilt per file (`session::incremental`), so it is masked at the
-    /// dirty file's declarations and at its `File` node.
+    /// dirty file's declarations and at its `File` nodes; so are the record
+    /// edges when the records replayed. `HasProperty` is not: it shares its
+    /// kind with class membership (module doc).
     pub fn masks_base_edge(&self, base_idx: u32, rel: RelType) -> bool {
+        let per_file =
+            || self.dirty_base.contains(&base_idx) || self.defines_files.contains(&base_idx);
         match rel {
             RelType::Calls | RelType::ReadsField => self.dirty_base.contains(&base_idx),
-            RelType::Defines => {
-                self.dirty_base.contains(&base_idx) || self.defines_files.contains(&base_idx)
-            }
+            RelType::Defines => per_file(),
+            rel if self.records_replayed && replays_record_edge(rel) => per_file(),
             _ => false,
         }
     }
@@ -921,13 +1050,28 @@ impl OverlayView {
 /// 12 view has none.
 /// 14 (F7a-1): the view stores a new file's `File` node, the rebuilt
 /// `Defines` with two reasons, the `File` nodes they mask, and each virtual
-/// function's meta; a 13 view has none of them.
+/// function's meta; a 13 view has none of them. F7a-2 extends 14 unreleased:
+/// the view stores the replayed record nodes and edges, the base record
+/// nodes they pair or suppress, and whether the records replayed.
 pub const VIEW_CACHE_FORMAT: u32 = 14;
+
+/// The base edge kinds the record replay rebuilds, so masks at a re-parsed
+/// file's nodes. `HasProperty` is out (module doc).
+fn replays_record_edge(rel: RelType) -> bool {
+    matches!(
+        rel,
+        RelType::UsesPathLiteral
+            | RelType::QueriesTable
+            | RelType::OpensTxScope
+            | RelType::Publishes
+            | RelType::Subscribes
+    )
+}
 
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
 /// never stored, so it costs a build per query as before the cache.
-const VIEW_EDGE_REASONS: [&str; 12] = [
+const VIEW_EDGE_REASONS: [&str; 32] = [
     OVERLOAD_SET_REASON,
     CLOSURE_REFERENCE_REASON,
     NEAREST_COPY_REASON,
@@ -940,6 +1084,26 @@ const VIEW_EDGE_REASONS: [&str; 12] = [
     csharp_extension::HEURISTIC_REASON,
     SCOPE_DEFINES_REASON,
     ENUM_VARIANT_DEFINES_REASON,
+    PATH_LITERAL_SINK_REASONS[0],
+    PATH_LITERAL_SINK_REASONS[1],
+    PATH_LITERAL_SINK_REASONS[2],
+    PATH_LITERAL_SINK_REASONS[3],
+    PATH_LITERAL_SINK_REASONS[4],
+    PATH_LITERAL_SINK_REASONS[5],
+    PATH_LITERAL_SINK_REASONS[6],
+    PATH_LITERAL_SINK_REASONS[7],
+    PATH_LITERAL_SINK_REASONS[8],
+    PATH_LITERAL_SINK_REASONS[9],
+    PATH_LITERAL_SINK_REASONS[10],
+    PATH_LITERAL_SINK_REASONS[11],
+    PATH_LITERAL_SINK_REASONS[12],
+    PATH_LITERAL_SINK_REASONS[13],
+    "read",
+    "write",
+    TX_SCOPE_REASON,
+    SCHEMA_FIELD_HAS_PROPERTY_REASON,
+    EVENT_TOPIC_PUBLISHES_REASON,
+    EVENT_TOPIC_SUBSCRIBES_REASON,
 ];
 
 pub(super) fn reason_index(reason: &str) -> Option<u8> {
@@ -968,6 +1132,7 @@ struct CachedView {
     gaps: Vec<CallGap>,
     defines_files: Vec<u32>,
     function_metas: Vec<ViewFunctionMeta>,
+    records_replayed: bool,
 }
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -1023,10 +1188,12 @@ impl CachedView {
             && self.defines_files.iter().copied().all(base)
             && self.defines_files.windows(2).all(|w| w[0] < w[1])
             && self.edges.iter().all(|e| {
-                // A rebuilt `Defines` is the one edge a base node sources.
+                // A rebuilt `Defines` or record edge is the one edge a base
+                // node sources: the `File` node of a re-parsed path.
+                let base_source = e.rel_type == RelType::Defines
+                    || (self.records_replayed && replays_record_edge(e.rel_type));
                 let source = virt(e.source)
-                    || (e.rel_type == RelType::Defines
-                        && self.defines_files.binary_search(&e.source).is_ok());
+                    || (base_source && self.defines_files.binary_search(&e.source).is_ok());
                 source && merged(e.target)
             })
             && self
@@ -1121,6 +1288,7 @@ impl OverlayView {
             gaps: self.gaps.clone(),
             defines_files: sorted(self.defines_files.iter().copied().collect()),
             function_metas: self.function_metas.clone(),
+            records_replayed: self.records_replayed,
         })
     }
 
@@ -1193,6 +1361,7 @@ impl OverlayView {
             gaps: cached.gaps,
             defines_files: cached.defines_files.into_iter().collect(),
             function_metas: cached.function_metas,
+            records_replayed: cached.records_replayed,
         })
     }
 }

@@ -5,14 +5,17 @@
 //! referenced table's `Class` node (via a local name→idx index over `nodes`,
 //! because the table is a cross-language `sql` node the SymbolTable's language
 //! barrier would otherwise hide). Emits one `QueriesTable` edge per
-//! (endpoint, table) with `reason = verb`. A `File` endpoint's edges go to
-//! `file_edges`, as in `path_literal_nodes`.
+//! (endpoint, table) with `reason = verb`, by
+//! [`record_nodes::sql_table_refs`], which the overlay's per-file replay
+//! shares. A `File` endpoint's edges go to `file_edges`, as in
+//! `path_literal_nodes`.
 //!
 //! Honest-no-data: an unresolved ref or a table name with no matching `Class`
 //! node yields NO edge — never a fabricated source or sink. Returns the
 //! emitted-edge count for builder telemetry.
 
 use super::path_literal_nodes::FILE_SOURCE_PENDING;
+use ecp_core::analyzer::record_nodes;
 use ecp_core::analyzer::types::LocalGraph;
 use ecp_core::contracts::raw_records::{FileOrd, GlobalEndpoint, RawIndexMap};
 use ecp_core::graph::{Edge, Node, NodeKind, RelType};
@@ -49,10 +52,6 @@ pub fn emit_edges(
         let file = FileOrd(lg_idx as u32);
 
         for raw in refs.iter() {
-            if raw.unresolved {
-                // BlindSpot handled in a later task; no edge here.
-                continue;
-            }
             let Some(endpoint) = raw.endpoint_in(&lg.nodes) else {
                 continue;
             };
@@ -61,7 +60,9 @@ pub fn emit_edges(
                 Some(GlobalEndpoint::File(_)) => None,
                 Some(GlobalEndpoint::Unresolved(_)) | None => continue,
             };
-            for (table, verb) in raw.tables.iter() {
+            // An unresolved statement names no table (its BlindSpot is a
+            // later task's); no edge here.
+            for (table, reason) in record_nodes::sql_table_refs(raw) {
                 let Some(&tgt_idx) = table_idx.get(table) else {
                     // Unknown table → drop; no fabrication.
                     continue;
@@ -71,7 +72,7 @@ pub fn emit_edges(
                     target: tgt_idx,
                     rel_type: RelType::QueriesTable,
                     confidence: 1.0,
-                    reason: string_pool.add(verb.as_reason()),
+                    reason: string_pool.add(reason),
                 };
                 match source {
                     Some(_) => edges.push(edge),

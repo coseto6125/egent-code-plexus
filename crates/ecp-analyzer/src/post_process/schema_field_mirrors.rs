@@ -36,11 +36,11 @@
 //!   than a handful of cross-framework mirrors per identifier).
 //! - Offline-only — runs once at build time, never on `ecp` hot paths.
 
+use ecp_core::analyzer::record_nodes;
 use ecp_core::analyzer::types::{LocalGraph, SchemaType};
 use ecp_core::contracts::raw_records::{FileOrd, GlobalEndpoint, RawIndexMap};
-use ecp_core::graph::{Edge, Node, NodeKind, RelType};
+use ecp_core::graph::{Edge, Node, RelType};
 use ecp_core::pool::StringPool;
-use ecp_core::uid;
 use rustc_hash::FxHashMap;
 
 /// Promote `RawSchemaField`s to `SchemaField` Nodes + emit `HasProperty`
@@ -54,7 +54,7 @@ pub fn emit_edges(
     nodes: &mut Vec<Node>,
     edges: &mut Vec<Edge>,
 ) -> usize {
-    let reason_has_property = string_pool.add("post_process:schema_field:has_property");
+    let reason_has_property = string_pool.add(record_nodes::SCHEMA_FIELD_HAS_PROPERTY_REASON);
     let reason_mirror = string_pool.add("post_process:schema_field:mirrors_field");
 
     /// Bucket entry: (node_idx, owner_class, exact_name).
@@ -93,25 +93,19 @@ pub fn emit_edges(
                 continue;
             };
 
-            // UID: T1-5 canonical xxh3-64 over (kind, path, owner, name).
-            // owner_class is included so cross-framework mirrors with the same
-            // (owner, name) but different SchemaField nodes get distinct UIDs
-            // via path / owner disambiguation upstream.
-            let node_uid = uid::compute(
-                NodeKind::SchemaField,
-                &path_str,
-                Some(owner_name),
-                field_name,
-            );
-            let name_ref = string_pool.add(field_name);
-            let owner_ref = string_pool.add(owner_name);
+            // UID: T1-5 canonical xxh3-64 over (kind, path, owner, name), by
+            // `record_nodes::schema_field_node`, which the overlay's per-file
+            // replay shares.
+            let field = record_nodes::schema_field_node(&path_str, raw_sf);
+            let name_ref = string_pool.add(&field.name);
+            let owner_ref = string_pool.add(field.owner);
             let sf_idx = nodes.len() as u32;
             nodes.push(Node {
-                uid: node_uid,
+                uid: field.uid,
                 name: name_ref,
                 file_idx,
-                kind: NodeKind::SchemaField,
-                span: raw_sf.span,
+                kind: field.kind,
+                span: field.span,
                 community_id: 0,
                 owner_class: owner_ref,
                 content_hash: 0,

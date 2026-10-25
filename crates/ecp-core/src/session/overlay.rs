@@ -39,7 +39,9 @@ pub struct DirtyEntry {
     /// `FragmentFile` (symbols + imports + per-symbol calls) consumed by the
     /// query-time `OverlayView`; `3` adds the file's export aliases; `4` adds
     /// each symbol's heritage and enum-variant references; `5` preserves all
-    /// field reads and function return types; `6` keys the fragment id by route; `7` adds each function symbol's `RawFunctionMeta.flags`. Readers MUST
+    /// field reads and function return types; `6` keys the fragment id by
+    /// route; `7` adds each function symbol's `RawFunctionMeta.flags` and
+    /// the file's raw records (`OverlayFileRecords`). Readers MUST
     /// dispatch on this — decoding a bin as another version is
     /// undefined under rkyv.
     #[serde(default = "default_fragment_format")]
@@ -66,7 +68,11 @@ pub const FRAGMENT_FORMAT_V5: u32 = 5;
 /// content.
 pub const FRAGMENT_FORMAT_V6: u32 = 6;
 /// Current fragment bin encoding version written by `overlay_writer`: v6
-/// plus each symbol's `RawFunctionMeta.flags`.
+/// plus each symbol's `RawFunctionMeta.flags` and the file's raw records
+/// (path literals, SQL references, transaction scopes, schema fields, event
+/// topics: `OverlayFileRecords`), each endpoint bound. V7 is unreleased, so
+/// the records extend it in place: a V7 bin written before them fails the
+/// archive check, and the freshness gate re-parses its file.
 pub const FRAGMENT_FORMAT_V7: u32 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

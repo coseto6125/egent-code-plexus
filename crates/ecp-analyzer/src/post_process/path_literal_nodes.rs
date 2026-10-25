@@ -2,8 +2,9 @@
 //! endpoint, captured by per-language `path_literals` extractors.
 //!
 //! Promotes each `LocalGraph.path_literals` entry to:
-//!   - One `NodeKind::PathLiteral` Node with `name = literal value`,
-//!     `span = literal span`, `owner_class` = the bound node's owner.
+//!   - One `NodeKind::PathLiteral` Node, by
+//!     [`record_nodes::path_literal_node`], which the overlay's per-file
+//!     replay shares.
 //!   - One `UsesPathLiteral` Edge (endpoint → PathLiteral idx) with
 //!     `reason = pre-rendered sink_reason` from the extractor.
 //!
@@ -12,11 +13,11 @@
 //! `file_edges`: the builder appends `File` nodes after this pass and gives
 //! those edges their source then (C4 Open point 3, option b).
 
+use ecp_core::analyzer::record_nodes;
 use ecp_core::analyzer::types::LocalGraph;
-use ecp_core::contracts::raw_records::{FileOrd, GlobalEndpoint, RawEndpoint, RawIndexMap};
-use ecp_core::graph::{Edge, Node, NodeKind, RelType};
+use ecp_core::contracts::raw_records::{FileOrd, GlobalEndpoint, RawIndexMap};
+use ecp_core::graph::{Edge, Node, RelType};
 use ecp_core::pool::StringPool;
-use ecp_core::uid;
 
 /// The source of an edge in `file_edges` until the builder sets it to the
 /// file's `File` node.
@@ -47,42 +48,22 @@ pub fn emit_edges(
         let file = FileOrd(file_idx);
 
         for raw in literals.iter() {
-            let value = raw.value.as_str();
             let endpoint = raw.endpoint_in(&lg.nodes);
-            // The owner is the bound node's own owner, so two identical
-            // literals in same-name methods of two types get distinct UIDs.
-            // A literal with no bound node (a class-body field initializer
-            // binds File) keeps the class its walker found, or two classes
-            // of one file holding the same literal would share a uid.
-            let owner_name = match &endpoint {
-                Some(RawEndpoint::Node(idx)) => lg
-                    .nodes
+            let node = record_nodes::path_literal_node(&path_str, raw, endpoint.as_ref(), |idx| {
+                lg.nodes
                     .get(idx.index())
-                    .and_then(|n| n.owner_class.as_deref()),
-                _ => raw.enclosing_owner.as_deref(),
-            }
-            .unwrap_or("");
-
-            let node_uid = uid::compute(
-                NodeKind::PathLiteral,
-                &path_str,
-                if owner_name.is_empty() {
-                    None
-                } else {
-                    Some(owner_name)
-                },
-                value,
-            );
-            let name_ref = string_pool.add(value);
-            let owner_ref = string_pool.add(owner_name);
+                    .and_then(|n| n.owner_class.as_deref())
+            });
+            let name_ref = string_pool.add(&node.name);
+            let owner_ref = string_pool.add(node.owner);
 
             let lit_idx = nodes.len() as u32;
             nodes.push(Node {
-                uid: node_uid,
+                uid: node.uid,
                 name: name_ref,
                 file_idx,
-                kind: NodeKind::PathLiteral,
-                span: raw.span,
+                kind: node.kind,
+                span: node.span,
                 community_id: 0,
                 owner_class: owner_ref,
                 content_hash: 0,

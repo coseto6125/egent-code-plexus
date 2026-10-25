@@ -1,7 +1,1 @@
 # owner: lane F (incremental overlay: builder edges of dirty files)
-edge full-only x1 UsesPathLiteral File src/main.php:1 main.php #b26ef3e09a9796b4 -> PathLiteral src/main.php:4 /Lib.php #825047a92486279c conf=1.0
-edge overlay-only x1 UsesPathLiteral File src/main.php:1 main.php #b26ef3e09a9796b4 -> PathLiteral src/main.php:3 /Lib.php #825047a92486279c conf=1.0
-identity full-only x1 PathLiteral src/main.php:4 /Lib.php #825047a92486279c
-identity overlay-only x1 PathLiteral src/main.php:3 /Lib.php #825047a92486279c
-parent full-only x1 PathLiteral src/main.php:4 /Lib.php #825047a92486279c owner=- <- none
-parent overlay-only x1 PathLiteral src/main.php:3 /Lib.php #825047a92486279c owner=- <- none

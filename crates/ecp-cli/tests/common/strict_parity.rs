@@ -7,7 +7,8 @@
 //! The overlay side re-parses the dirty set with `reanalyze_files` (shadow
 //! cascade included), writes the fragments and tombstones with
 //! `write_dirty_events`, reads them back through `view_inputs` and
-//! `decode_view_inputs`, and builds `OverlayView`. The dirty set is the
+//! `decode_view_inputs_with_records`, and builds `OverlayView` with the
+//! records (`build_with_records`). The dirty set is the
 //! edited paths, as `git status --porcelain` lists them: a deleted path and
 //! both paths of a rename are dirty, `reanalyze_files` skips the ones
 //! missing on disk exactly as a query does, and each of those gets a
@@ -39,12 +40,13 @@ use crate::common::{commit_all, run_git};
 use ecp_cli::commands::admin::index::run_analyzer_for_paths;
 use ecp_cli::git::DiffScope;
 use ecp_cli::reanalyze::reanalyze_files;
-use ecp_cli::session::overlay_reader::{decode_view_inputs, view_inputs};
+use ecp_cli::session::overlay_reader::{decode_view_inputs_with_records, view_inputs};
 use ecp_cli::session::overlay_writer::write_dirty_events;
 use ecp_core::contracts::dirty_event::PathClass;
 use ecp_core::contracts::routing::SizeCap;
 use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType, ZeroCopyGraph};
 use ecp_core::session::merged::MergedGraph;
+use ecp_core::session::view::OverlayFileRecords;
 use ecp_core::session::{layout, DirtyEvents, OverlayFileInput, OverlayView, SessionMeta};
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -295,6 +297,8 @@ pub struct Observed {
     pub full_bytes: rkyv::util::AlignedVec,
     pub base_bytes: rkyv::util::AlignedVec,
     pub inputs: Vec<OverlayFileInput>,
+    /// One per input of `inputs`, in order.
+    pub records: Vec<OverlayFileRecords>,
     pub tombstones: Vec<String>,
     /// `input dropped <path>` for each written fragment or tombstone the
     /// reader did not serve.
@@ -313,7 +317,8 @@ impl Observed {
     /// The overlay view a query builds, held to its cache round trip.
     pub fn view(&self) -> Option<OverlayView> {
         let base = self.base();
-        let view = OverlayView::build_with_removed(base, &self.inputs, &self.tombstones);
+        let view =
+            OverlayView::build_with_records(base, &self.inputs, &self.records, &self.tombstones);
         if let Some(view) = &view {
             assert_eq!(
                 OverlayView::from_cache_bytes(&view.to_cache_bytes(), base.nodes.len()).as_ref(),
@@ -390,7 +395,7 @@ pub fn run(scenario: &Scenario<'_>) -> Observed {
     )
     .expect("fragment write");
     let read = view_inputs(&session, repo.path()).expect("fragment read");
-    let inputs = decode_view_inputs(&read.fragments);
+    let (inputs, records) = decode_view_inputs_with_records(&read.fragments);
 
     let mut dropped = BTreeSet::new();
     let read_back: BTreeSet<&str> = inputs
@@ -412,6 +417,7 @@ pub fn run(scenario: &Scenario<'_>) -> Observed {
         full_bytes,
         base_bytes,
         inputs,
+        records,
         tombstones,
         dropped,
     }

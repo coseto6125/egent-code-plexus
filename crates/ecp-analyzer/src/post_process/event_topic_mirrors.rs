@@ -42,11 +42,11 @@
 //! direct cypher filtering.
 
 use super::path_literal_nodes::FILE_SOURCE_PENDING;
+use ecp_core::analyzer::record_nodes;
 use ecp_core::analyzer::types::{LocalGraph, PubSub};
 use ecp_core::contracts::raw_records::{FileOrd, GlobalEndpoint, RawIndexMap};
-use ecp_core::graph::{Edge, Node, NodeKind, RelType};
+use ecp_core::graph::{Edge, Node, RelType};
 use ecp_core::pool::StringPool;
-use ecp_core::uid;
 use rustc_hash::FxHashMap;
 
 /// Promote `RawEventTopic`s → `EventTopic` Nodes, emit `Publishes`/`Subscribes`
@@ -61,8 +61,8 @@ pub fn emit_edges(
     edges: &mut Vec<Edge>,
     file_edges: &mut Vec<(FileOrd, Edge)>,
 ) -> usize {
-    let reason_publishes = string_pool.add("post_process:event_topic:publishes");
-    let reason_subscribes = string_pool.add("post_process:event_topic:subscribes");
+    let reason_publishes = string_pool.add(record_nodes::EVENT_TOPIC_PUBLISHES_REASON);
+    let reason_subscribes = string_pool.add(record_nodes::EVENT_TOPIC_SUBSCRIBES_REASON);
     let reason_mirror = string_pool.add("post_process:event_topic:mirror");
 
     // Phase 1 — promote RawEventTopics to EventTopic nodes + directional edges.
@@ -83,50 +83,21 @@ pub fn emit_edges(
         let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
         let file_idx = lg_idx as u32;
 
-        // The node of one pairing key is named by its earliest spelling in
-        // the file (smallest span), so two spellings in one file name one node.
-        let mut first_spelling: FxHashMap<&str, (ecp_core::analyzer::types::Span, &str)> =
-            FxHashMap::default();
-        for raw_et in event_topics.iter() {
-            if let Some(literal) = raw_et.topic_literal.as_deref() {
-                let key = raw_et.topic_key.as_deref().unwrap_or(literal);
-                let slot = first_spelling.entry(key).or_insert((raw_et.span, literal));
-                if raw_et.span < slot.0 {
-                    *slot = (raw_et.span, literal);
-                }
-            }
-        }
-
-        for raw_et in event_topics.iter() {
-            let Some(ref source_topic) = raw_et.topic_literal else {
-                // Dynamic topic — no literal to key on; skip (BlindSpot
-                // emission for dynamic topics is the detector's responsibility).
-                continue;
-            };
-
-            // Records written before `topic_key` existed hold the canonical
-            // form in `topic_literal`; they key on it unchanged.
-            let canonical_topic = raw_et.topic_key.as_ref().unwrap_or(source_topic);
-            let topic_name = first_spelling
-                .get(canonical_topic.as_ref())
-                .map_or(source_topic.as_ref(), |&(_, spelling)| spelling);
-            let lib_u8 = raw_et.lib as u8;
-
-            // Emit the EventTopic node.
-            let node_uid = uid::compute(
-                NodeKind::EventTopic,
-                &path_str,
-                None,
-                canonical_topic.as_ref(),
-            );
-            let name_ref = string_pool.add(topic_name);
+        // One node per literal topic, named by its key's earliest spelling
+        // in the file (`record_nodes::event_topic_nodes`, which the overlay's
+        // per-file replay shares). A dynamic topic has no literal to key on
+        // and gets none (BlindSpot emission for dynamic topics is the
+        // detector's responsibility).
+        record_nodes::event_topic_nodes(&path_str, event_topics, |i, topic| {
+            let raw_et = &event_topics[i];
+            let name_ref = string_pool.add(&topic.name);
             let et_idx = nodes.len() as u32;
             nodes.push(Node {
-                uid: node_uid,
+                uid: topic.uid,
                 name: name_ref,
                 file_idx,
-                kind: NodeKind::EventTopic,
-                span: raw_et.span,
+                kind: topic.kind,
+                span: topic.span,
                 community_id: 0,
                 owner_class: ecp_core::pool::StrRef::default(),
                 content_hash: 0,
@@ -154,13 +125,19 @@ pub fn emit_edges(
                 }
             }
 
-            // Index by (canonical_topic, lib) for mirror pairing.
-            let key: TopicKey = (canonical_topic.clone(), lib_u8);
+            // Index by (canonical_topic, lib) for mirror pairing. Records
+            // written before `topic_key` existed hold the canonical form in
+            // `topic_literal`; they key on it unchanged.
+            let Some(canonical_topic) = raw_et.topic_key.as_ref().or(raw_et.topic_literal.as_ref())
+            else {
+                return;
+            };
+            let key: TopicKey = (canonical_topic.clone(), raw_et.lib as u8);
             match raw_et.direction {
                 PubSub::Publish => publishers.entry(key).or_default().push(et_idx),
                 PubSub::Subscribe => subscribers.entry(key).or_default().push(et_idx),
             }
-        }
+        });
     }
 
     // Phase 2 — bidirectional top-1 EventTopicMirror edges.

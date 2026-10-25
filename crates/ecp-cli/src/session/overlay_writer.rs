@@ -28,6 +28,7 @@ use ecp_core::graph::NodeKind;
 use ecp_core::registry::{atomic_write_json, replace_file, FileLock};
 use ecp_core::session::layout;
 use ecp_core::session::overlay::{SymbolKind, SymbolRef};
+use ecp_core::session::view::OverlayFileRecords;
 use ecp_core::session::{DirtyEventEntry, DirtyEvents, SessionMeta};
 use rayon::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -125,15 +126,17 @@ pub struct FragmentSymbolV3 {
 
 /// v5 fragment bin payload: the whole dirty file's fresh parse, including
 /// file-level imports and export aliases for query-time Tier-2
-/// (import-scoped) resolution. `DirtyEventEntry.format == FRAGMENT_FORMAT_V7`
-/// marks bins of this shape — readers MUST dispatch on the manifest marker,
-/// not guess the encoding.
-#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
+/// (import-scoped) resolution, and the raw records the overlay's per-file
+/// replay rebuilds the record outputs from. `DirtyEventEntry.format ==
+/// FRAGMENT_FORMAT_V7` marks bins of this shape — readers MUST dispatch on
+/// the manifest marker, not guess the encoding.
+#[derive(Archive, Serialize, Deserialize, Debug, Clone, Default)]
 #[rkyv(derive(Debug))]
 pub struct FragmentFile {
     pub symbols: Vec<FragmentSymbol>,
     pub imports: Vec<RawImport>,
     pub export_aliases: Vec<RawExportAlias>,
+    pub records: OverlayFileRecords,
 }
 
 /// Exact v4 archive shape, retained to decode fragments written before v5.
@@ -215,6 +218,7 @@ pub fn fragment_file_from_local_graph(graph: &LocalGraph) -> FragmentFile {
             .collect(),
         imports: graph.imports.clone(),
         export_aliases: graph.export_aliases.as_deref().unwrap_or(&[]).to_vec(),
+        records: OverlayFileRecords::from_local(graph),
     }
 }
 

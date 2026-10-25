@@ -312,8 +312,12 @@ impl Engine {
                 if let Some(view) = key.and_then(|key| view_cache::read(dir, key, nodes)) {
                     return Some(view);
                 }
-                let files = crate::session::overlay_reader::decode_view_inputs(&inputs.fragments);
-                let view = OverlayView::build_with_removed(graph, &files, &inputs.tombstones)?;
+                let (files, records) =
+                    crate::session::overlay_reader::decode_view_inputs_with_records(
+                        &inputs.fragments,
+                    );
+                let view =
+                    OverlayView::build_with_records(graph, &files, &records, &inputs.tombstones)?;
                 if let Some(key) = key {
                     view_cache::write(dir, key, &view);
                 }
