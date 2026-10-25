@@ -122,7 +122,9 @@ use std::path::Path;
 /// selects by applicability; a C# call never binds a private or static
 /// candidate it cannot reach; a Spring mapping routes only on a controller
 /// class. Overlay fragments of schema34 are ignored by their fingerprint.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema35");
+/// schema36: a C# partial type has one representative part, which heritage
+/// edges target; every other part links to it with `PartOf`.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema36");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

@@ -216,6 +216,10 @@ fn test_partial_groups_two_parts_in_one_file_one_edge() {
     );
 }
 
+/// A merge-key case: its label, its two files, and the dirs that hold a
+/// `.csproj`.
+type MismatchCase<'a> = (&'a str, [(&'a str, &'a str); 2], &'a [&'a str]);
+
 /// Stands for: P-d's merge key holds for the part relation. Parts in two
 /// projects, parts of an unknown project, a `partial` beside a plain
 /// declaration, another generic arity, another declaring scope (namespace
@@ -230,7 +234,7 @@ fn test_partial_groups_merge_key_mismatch_no_part_of_edge() {
     let other_namespace = "namespace Other\n{\n    public partial class Reader\n    {\n        public void ReadAsync() {}\n    }\n}\n";
     let nested = "namespace Lib\n{\n    public partial class Outer\n    {\n        public partial class Reader\n        {\n            public void ReadAsync() {}\n        }\n    }\n}\n";
     let as_struct = "namespace Lib\n{\n    public partial struct Reader\n    {\n        public void ReadAsync() {}\n    }\n}\n";
-    let cases: [(&str, [(&str, &str); 2], &[&str]); 7] = [
+    let cases: [MismatchCase; 7] = [
         (
             "two projects",
             [

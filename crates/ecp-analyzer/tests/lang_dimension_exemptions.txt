@@ -1536,3 +1536,16 @@ call_access ruby the call access rule models C# private and static members only
 call_access rust the call access rule models C# private and static members only
 call_access swift the call access rule models C# private and static members only
 call_access typescript the call access rule models C# private and static members only
+partial_parts c only C# declares one type in partial parts across files
+partial_parts cpp only C# declares one type in partial parts across files
+partial_parts dart only C# declares one type in partial parts across files
+partial_parts go only C# declares one type in partial parts across files
+partial_parts java only C# declares one type in partial parts across files
+partial_parts javascript only C# declares one type in partial parts across files
+partial_parts kotlin only C# declares one type in partial parts across files
+partial_parts php only C# declares one type in partial parts across files
+partial_parts python only C# declares one type in partial parts across files
+partial_parts ruby only C# declares one type in partial parts across files
+partial_parts rust only C# declares one type in partial parts across files
+partial_parts swift only C# declares one type in partial parts across files
+partial_parts typescript only C# declares one type in partial parts across files

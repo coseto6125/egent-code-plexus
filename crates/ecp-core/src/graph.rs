@@ -38,7 +38,9 @@ pub const GRAPH_MAGIC: [u8; 8] = *b"ECP-RS\0\0";
 /// v17: `lexical_parents` (each lexically scoped declaration's parent node,
 ///     sorted by node), so a scoped declaration never answers a global or
 ///     file-level name lookup and its display owner names its parent chain.
-pub const GRAPH_FORMAT_VERSION: u32 = 17;
+/// v18: `RelType::PartOf` (discriminant 23) links each C# partial type
+///     part to its group's representative part.
+pub const GRAPH_FORMAT_VERSION: u32 = 18;
 
 impl std::str::FromStr for NodeKind {
     type Err = ();

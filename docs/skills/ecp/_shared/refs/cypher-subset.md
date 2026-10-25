@@ -45,7 +45,7 @@ Scoring / docs:
 
 Run `ecp schema node-kinds` for each variant's load-bearing distinction (e.g. why `Struct` is distinct from `Class`, why `Trait` is distinct from `Interface`).
 
-## RelType inventory (20 variants)
+## RelType inventory (24 variants)
 
 Containment / definition:
 `Defines`, `HasMethod`, `HasProperty`
@@ -53,8 +53,8 @@ Containment / definition:
 Type hierarchy:
 `Extends`, `Implements`, `Overrides`, `PartOf`
 
-Dispatch:
-`Calls`, `Accesses`, `References`
+Dispatch / data:
+`Calls`, `Accesses`, `References`, `ReadsField`, `QueriesTable`
 
 Routing:
 `HandlesRoute`, `Fetches`, `StepInProcess`
@@ -63,7 +63,7 @@ Imports / annotations / path-refs:
 `Imports`, `Decorates`, `UsesPathLiteral`
 
 Event / transaction:
-`Publishes`, `Subscribes`, `EventTopicMirror` (heuristic), `OpensTxScope`
+`Publishes`, `Subscribes`, `EventTopicMirror` (heuristic), `OpensTxScope`, `CompensatedBy`
 
 Heuristic schema-bridge:
 `MirrorsField` (heuristic, confidence < 0.7 — filter unless `--include-heuristic`)

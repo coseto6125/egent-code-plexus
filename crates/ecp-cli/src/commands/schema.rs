@@ -472,6 +472,7 @@ const VERSION_HISTORY: &[VersionBumpEntry] = &[
     VersionBumpEntry { version: 15, reason: "Per-Route middleware side table (route_middleware) so agents see which routes pass through which middleware, such as auth." },
     VersionBumpEntry { version: 16, reason: "Cargo crate table (workspace: each member's root, entry files and crate names) so the session overlay resolves other_crate::path::f() like a full reindex." },
     VersionBumpEntry { version: 17, reason: "Lexical-parent table (lexical_parents: each lexically scoped declaration's parent node) so a scoped declaration never answers a global or file-level name lookup." },
+    VersionBumpEntry { version: 18, reason: "PartOf RelType: each C# partial type part links to the one representative part, so a traversal from any part reaches every part's members." },
     // Future bumps append here. The is_test field on BlindSpotRecord
     // (FU-001) was added without a discriminant bump — rkyv tolerates the
     // trailing-field addition as long as nothing earlier shifts.
