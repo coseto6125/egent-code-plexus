@@ -75,3 +75,29 @@ fn test_impact_literal_ext_change_value_with_sites_has_no_note() {
     assert!(json["site_count"].as_u64().unwrap() >= 1, "{json}");
     assert!(json.get("note").is_none(), "{json}");
 }
+
+/// Stands for: a module-top literal's edge starts at the `File` node (slice
+/// P6), so the site carries its sink, and `enclosing` stays null rather than
+/// naming the file as if it were a symbol.
+#[test]
+fn test_impact_literal_module_top_site_has_sink_and_no_enclosing() {
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        tmp.path(),
+        "a.py",
+        "TOP = open('conf/top.json')\n\ndef f():\n    return open('conf/top.json')\n",
+    );
+    init_and_analyze(tmp.path());
+    let json = literal(tmp.path(), "conf/top.json");
+    let sites = json["sites"].as_array().unwrap_or_else(|| panic!("{json}"));
+    let at = |line: u64| {
+        sites
+            .iter()
+            .find(|s| s["line"] == line)
+            .unwrap_or_else(|| panic!("no site at line {line}: {json}"))
+    };
+    let top = at(1);
+    assert!(top["enclosing"].is_null(), "{json}");
+    assert_ne!(top["sink_reason"], "", "{json}");
+    assert_eq!(at(4)["enclosing"], "f", "{json}");
+}

@@ -38,18 +38,7 @@ pub(super) fn build_literal_payload(value: &str, engine: &Engine) -> Result<Valu
         let file_node = &graph.files[node.file_idx.to_native() as usize];
         let file_path = file_node.path.resolve(&graph.string_pool);
 
-        let (enclosing_name, sink_reason) = lit_edge
-            .get(&idx_u32)
-            .map(|e| {
-                let src_idx = e.source.to_native() as usize;
-                let src_name = graph.nodes[src_idx]
-                    .name
-                    .resolve(&graph.string_pool)
-                    .to_string();
-                let reason = e.reason.resolve(&graph.string_pool).to_string();
-                (Some(src_name), reason)
-            })
-            .unwrap_or((None, String::new()));
+        let (enclosing_name, sink_reason) = literal_source(graph, lit_edge.get(&idx_u32).copied());
 
         sites.push(serde_json::json!({
             "file": file_path,
@@ -87,6 +76,22 @@ enum LiteralAccess {
     ReadOnly,
     WriteOnly,
     MixedOrUnknown,
+}
+
+/// The enclosing symbol name and sink reason of a literal's
+/// `UsesPathLiteral` edge. A module-top literal's edge starts at the `File`
+/// node, which encloses no symbol, so its `enclosing` stays `None`.
+fn literal_source(
+    graph: &ecp_core::graph::ArchivedZeroCopyGraph,
+    edge: Option<&ecp_core::graph::ArchivedEdge>,
+) -> (Option<String>, String) {
+    let Some(e) = edge else {
+        return (None, String::new());
+    };
+    let src = &graph.nodes[e.source.to_native() as usize];
+    let enclosing = (NodeKind::from(&src.kind) != NodeKind::File)
+        .then(|| src.name.resolve(&graph.string_pool).to_string());
+    (enclosing, e.reason.resolve(&graph.string_pool).to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -160,18 +165,7 @@ fn collect_literal_groups(graph: &ecp_core::graph::ArchivedZeroCopyGraph) -> Vec
         let value = node.name.resolve(&graph.string_pool).to_string();
         let file_node = &graph.files[node.file_idx.to_native() as usize];
         let file = file_node.path.resolve(&graph.string_pool).to_string();
-        let (enclosing, sink_reason) = lit_edge
-            .get(&idx_u32)
-            .map(|e| {
-                let src_idx = e.source.to_native() as usize;
-                let src_name = graph.nodes[src_idx]
-                    .name
-                    .resolve(&graph.string_pool)
-                    .to_string();
-                let reason = e.reason.resolve(&graph.string_pool).to_string();
-                (Some(src_name), reason)
-            })
-            .unwrap_or((None, String::new()));
+        let (enclosing, sink_reason) = literal_source(graph, lit_edge.get(&idx_u32).copied());
 
         let group = groups.entry(value.clone()).or_insert_with(|| LiteralGroup {
             value,
