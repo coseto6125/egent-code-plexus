@@ -1,6 +1,6 @@
 use super::provider::LanguageProvider;
 use super::types::LocalGraph;
-use crate::contracts::routing::{FileRoute, FileRouter, Language, RouteOutcome, SizeCap};
+use crate::contracts::routing::{FileRoute, FileRouter, RouteOutcome, SizeCap};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::path::PathBuf;
@@ -68,19 +68,39 @@ impl AnalyzerPipeline {
 
     /// Parse a single file from in-memory bytes without touching disk.
     /// The `rel_path` is used only for routing and is stored verbatim in the
-    /// returned `LocalGraph.file_path`.
+    /// returned `LocalGraph.file_path`. Source over the cap returns the same
+    /// `file-too-large` omission that [`Self::analyze`] records.
     pub fn parse_file_raw(
         &self,
         rel_path: &std::path::Path,
         source: &[u8],
     ) -> anyhow::Result<LocalGraph> {
-        let chain = self
-            .route(rel_path)
-            .map(|route| self.provider_chain(&route))
-            .unwrap_or_default();
+        let Some(route) = self.route(rel_path) else {
+            return Err(anyhow::anyhow!("no provider for {:?}", rel_path));
+        };
+        let chain = self.provider_chain(&route);
+        if !chain.is_empty() && !route.size_cap().admits(source.len() as u64) {
+            return Ok(Self::too_large(
+                rel_path,
+                source.len() as u64,
+                route.size_cap(),
+            ));
+        }
         Self::parse_chain(&chain, rel_path, source)
             .map(|(_, result)| result)
             .unwrap_or_else(|| Err(anyhow::anyhow!("no provider for {:?}", rel_path)))
+    }
+
+    fn too_large(rel_path: &std::path::Path, len: u64, size_cap: SizeCap) -> LocalGraph {
+        LocalGraph::omitted(
+            rel_path,
+            "file-too-large",
+            format!(
+                "{len} bytes exceeds the {}-byte per-file cap, so nothing in this file is in \
+                 the graph. Raise `[index] max_file_bytes` or `ECP_MAX_FILE_BYTES` to include it.",
+                size_cap.bytes()
+            ),
+        )
     }
 
     // A non-UTF-8 path is skipped, never routed through a lossy spelling:
@@ -92,19 +112,15 @@ impl AnalyzerPipeline {
         }
     }
 
-    /// The registered providers to try for `route`, in order. A sniffed route
-    /// ends its chain before `Yaml`: a generic YAML gets no graph from the
-    /// cold index (C5 Open point 6 waits for a node-count measurement), but
-    /// an OpenAPI YAML reaches the OpenAPI provider.
+    /// The registered providers to try for `route`, in the order of
+    /// [`FileRoute::providers`].
     fn provider_chain(&self, route: &FileRoute) -> Vec<&dyn LanguageProvider> {
         route
-            .candidates()
-            .iter()
-            .filter(|language| **language != Language::Yaml)
-            .filter_map(|language| {
+            .providers()
+            .filter_map(|name| {
                 self.providers
                     .iter()
-                    .find(|provider| provider.name() == language.provider())
+                    .find(|provider| provider.name() == name)
                     .map(|provider| provider.as_ref())
             })
             .collect()
@@ -195,16 +211,10 @@ impl AnalyzerPipeline {
                         let file_len = match std::fs::metadata(&abs_path) {
                             Ok(meta) => {
                                 if !route.size_cap().admits(meta.len()) {
-                                    let _ = sender.send(LocalGraph::omitted(
+                                    let _ = sender.send(Self::too_large(
                                         &rel_path,
-                                        "file-too-large",
-                                        format!(
-                                            "{} bytes exceeds the {}-byte per-file cap, \
-                                             so nothing in this file is in the graph. Raise \
-                                             `[index] max_file_bytes` or `ECP_MAX_FILE_BYTES` to include it.",
-                                            meta.len(),
-                                            route.size_cap().bytes()
-                                        ),
+                                        meta.len(),
+                                        route.size_cap(),
                                     ));
                                     return;
                                 }
@@ -433,11 +443,42 @@ mod tests {
         unsafe { std::env::remove_var("ECP_MAX_FILE_BYTES") };
     }
 
+    /// The raw path (overlay writer, `impact --baseline`) and the walk path
+    /// agree on the cap: over it, both return the `file-too-large` omission.
+    /// Failed before this change: `parse_file_raw` parsed any length.
+    #[test]
+    fn test_parse_file_raw_over_cap_returns_file_too_large_omission() {
+        let mut pipeline =
+            AnalyzerPipeline::new().with_size_cap(SizeCap::resolve(Some("10"), None));
+        pipeline.register_provider(Box::new(TypeScriptProvider));
+
+        let big = pipeline
+            .parse_file_raw(std::path::Path::new("big.ts"), b"AAAAAAAAAAAAAAAAA")
+            .expect("an oversized routed file is an omission, not an error");
+        assert!(big.nodes.is_empty());
+        assert_eq!(
+            big.blind_spots
+                .iter()
+                .map(|b| b.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["file-too-large"]
+        );
+        assert_eq!(big.content_hash, [0u8; 8]);
+
+        let at_cap = pipeline
+            .parse_file_raw(std::path::Path::new("at_cap.ts"), b"let a = 1;")
+            .expect("a file of exactly the cap is parsed");
+        assert!(at_cap.blind_spots.is_empty());
+
+        assert!(pipeline
+            .parse_file_raw(std::path::Path::new("notes.txt"), b"AAAAAAAAAAAAAAAAA")
+            .is_err());
+    }
+
     #[test]
     fn test_route_yaml_candidates_put_kubernetes_first() {
-        let router = FileRouter::new(SizeCap::BUILT_IN);
         let first = |path: &str| {
-            let RouteOutcome::Routed(route) = router.route(path) else {
+            let RouteOutcome::Routed(route) = FileRouter::PATH_ONLY.route(path) else {
                 panic!("{path} is routed");
             };
             route

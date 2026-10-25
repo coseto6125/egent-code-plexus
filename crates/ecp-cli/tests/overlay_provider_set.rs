@@ -224,27 +224,28 @@ fn test_reanalyze_files_container_and_ci_family_parses() {
 /// set was a hand list that lacked 16 routed providers.
 #[test]
 fn test_pipeline_for_path_every_default_extension_holds_the_route_providers() {
-    let router = FileRouter::new(SizeCap::BUILT_IN);
     for &language in Language::ALL {
         for ext in language.extensions() {
             let rel = format!("src/sample.{ext}");
-            let RouteOutcome::Routed(route) = router.route(&rel) else {
+            let RouteOutcome::Routed(route) = FileRouter::PATH_ONLY.route(&rel) else {
                 panic!("{rel}: the router must route a default extension");
             };
             let expected: FxHashSet<&str> = route.providers().collect();
-            let pipeline = pipeline_for_path(Path::new(&rel))
+            let pipeline = pipeline_for_path(Path::new(&rel), SizeCap::BUILT_IN)
                 .unwrap_or_else(|| panic!("{rel}: a routed path needs an overlay pipeline"));
             assert_eq!(pipeline.provider_count(), expected.len(), "{rel}");
         }
     }
 }
 
-/// A sniffed generic YAML lists `kubernetes`, `openapi` and `yaml`; the overlay
-/// builds all three, as the cold index's `detect_needed_providers` does.
+/// A sniffed generic YAML lists the providers `kubernetes` and `openapi`; the
+/// `yaml` candidate has no graph yet (C5 open point 6), so the overlay builds
+/// two, as the cold index does.
 #[test]
-fn test_pipeline_for_path_generic_yaml_holds_every_candidate() {
-    let pipeline = pipeline_for_path(Path::new("config/app.yml")).expect("yaml routes");
-    assert_eq!(pipeline.provider_count(), 3);
+fn test_pipeline_for_path_generic_yaml_holds_kubernetes_and_openapi() {
+    let pipeline =
+        pipeline_for_path(Path::new("config/app.yml"), SizeCap::BUILT_IN).expect("yaml routes");
+    assert_eq!(pipeline.provider_count(), 2);
 }
 
 /// Unrouted, excluded, empty and whitespace-only paths get no pipeline, so the
@@ -259,7 +260,10 @@ fn test_pipeline_for_path_unrouted_excluded_and_blank_paths_return_none() {
         "",
         "   ",
     ] {
-        assert!(pipeline_for_path(Path::new(rel)).is_none(), "{rel:?}");
+        assert!(
+            pipeline_for_path(Path::new(rel), SizeCap::BUILT_IN).is_none(),
+            "{rel:?}"
+        );
     }
 }
 
@@ -270,8 +274,8 @@ fn test_pipeline_for_path_concurrent_duplicate_calls_share_one_pipeline() {
     let handles: Vec<_> = (0..4)
         .map(|i| {
             std::thread::spawn(move || {
-                pipeline_for_path(Path::new(&format!("dir{i}/x.sh"))).expect("bash routes")
-                    as *const _ as usize
+                pipeline_for_path(Path::new(&format!("dir{i}/x.sh")), SizeCap::BUILT_IN)
+                    .expect("bash routes") as *const _ as usize
             })
         })
         .collect();

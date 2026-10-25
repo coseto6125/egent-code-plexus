@@ -1,12 +1,15 @@
-//! Single source of truth for provider-`name` → constructor. `reanalyze::make_provider`
-//! (incremental path) and `admin::index::detect_needed_providers` (cold-index path) both
-//! resolve against this table instead of each re-listing its own `match` over provider
-//! names — the two paths drifting out of sync silently dropped `.yaml` from being scanned
-//! until PR #595. `ecp_core::contracts::routing::FileRouter` stays
-//! the separate source of truth for path → name; this table only maps name →
-//! constructor and includes the two providers (markdown, yaml) that path resolution
-//! never names directly, since they're reached only via the GitHub-Actions/docker-compose
-//! path specials or explicit registration in `make_pipeline`.
+//! Single source of truth for provider-`name` → constructor. Every parse path (the cold
+//! index, the incremental reanalyze, the overlay writer, `impact --baseline`) selects
+//! names with `reanalyze::provider_names_for_paths` and resolves them against this table
+//! instead of each re-listing its own `match` over provider names — the paths drifting
+//! out of sync silently dropped `.yaml` from being scanned until PR #595.
+//! `ecp_core::contracts::routing::FileRouter` stays the separate source of truth for
+//! path → name; this table only maps name → constructor.
+//!
+//! Two entries are constructible but no route lists them, so only the full
+//! `reanalyze::make_pipeline` builds them: `markdown` (no route reaches a markdown
+//! file) and `yaml` (`FileRoute::providers` omits the generic-YAML candidate until C5
+//! open point 6 lands).
 
 use ecp_analyzer::{
     astro::parser::AstroProvider, bash::parser::BashProvider, c::parser::CProvider,
@@ -94,7 +97,7 @@ pub fn make_provider(name: &str) -> Option<anyhow::Result<Box<dyn LanguageProvid
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ecp_core::contracts::routing::{FileRouter, Language, RouteOutcome, SizeCap};
+    use ecp_core::contracts::routing::{FileRouter, Language, RouteOutcome};
     use rustc_hash::FxHashSet;
 
     /// Every name a route can list must resolve to a constructible provider —
@@ -103,11 +106,12 @@ mod tests {
     /// PR #595).
     #[test]
     fn provider_constructors_test_every_routed_name_is_constructible() {
-        let router = FileRouter::new(SizeCap::BUILT_IN);
         let mut names: FxHashSet<&str> = FxHashSet::default();
         for &language in Language::ALL {
             for ext in language.extensions() {
-                if let RouteOutcome::Routed(route) = router.route(&format!("src/x.{ext}")) {
+                if let RouteOutcome::Routed(route) =
+                    FileRouter::PATH_ONLY.route(&format!("src/x.{ext}"))
+                {
                     names.extend(route.providers());
                 }
             }

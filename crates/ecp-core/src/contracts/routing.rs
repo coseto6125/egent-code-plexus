@@ -7,11 +7,14 @@
 //! decided. The extension defaults come from [`Language::extensions`], so the
 //! lookup and its reverse are one table.
 //!
-//! No production code calls these types yet. The area 6 slices replace the
-//! readers that the design note lists under "Today".
+//! The parse pipeline, the cold walk, the provider-set selection of every
+//! parse path and several analyzer passes route through [`FileRouter`]. The
+//! design note lists the readers that still decide on their own under "Today".
 
 use crate::config::DEFAULT_MAX_FILE_BYTES;
 use crate::file_category::Language as LegacyLanguage;
+use rustc_hash::FxHashMap;
+use std::sync::LazyLock;
 
 /// Declares a fieldless `#[repr(u8)]` enum and its `ALL` list from one body,
 /// so `ALL` cannot miss a variant.
@@ -260,10 +263,20 @@ impl Language {
 
     /// The language whose extension defaults hold `ext`.
     pub fn from_extension(ext: &str) -> Option<Self> {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|language| language.extensions().contains(&ext))
+        // Every walked path and every porcelain entry routes through here, so
+        // a scan over every language's extension list would run per path.
+        static BY_EXT: LazyLock<FxHashMap<&'static str, Language>> = LazyLock::new(|| {
+            Language::ALL
+                .iter()
+                .flat_map(|&language| {
+                    language
+                        .extensions()
+                        .iter()
+                        .map(move |&ext| (ext, language))
+                })
+                .collect()
+        });
+        BY_EXT.get(ext).copied()
     }
 
     /// The display name in answers. Equals today's
@@ -580,14 +593,16 @@ pub enum SizeCapSource {
     BuiltIn,
 }
 
-/// The one per-file byte cap that the cold index, the overlay and the
-/// baseline read. A file over the cap is routed but not parsed, and the
-/// reader records it as omitted.
+/// The one per-file byte cap of every parse path: the cold index, the
+/// incremental reanalyze, the overlay writer and `impact --baseline` each
+/// resolve it from the repo root with `config::resolve_size_cap`. A file over
+/// the cap is routed but not parsed, and the parse returns a graph that
+/// records it as omitted (`file-too-large`).
 ///
-/// The cap is an input of every cached parse result: the dirty manifest
-/// records [`SizeCap::bytes`], and the view cache key hashes it. A cache
-/// compares `bytes`, never `source`: one cap from two sources parses the
-/// same.
+/// The cap is not yet an input of the dirty manifest or of the view cache
+/// key, so a cap change reaches a file only when that file is parsed again.
+/// The overlay pipeline cache compares `bytes`, never `source`: one cap from
+/// two sources parses the same.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SizeCap {
     bytes: u64,
@@ -691,9 +706,14 @@ impl FileRoute {
         }
     }
 
-    /// The providers the parse may run, in try order.
+    /// The providers the parse may run, in try order. A generic YAML lists no
+    /// `yaml` provider: its graph waits on C5 open point 6 (a node-count
+    /// measurement), so no reader builds a provider that the parse never runs.
     pub fn providers(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.candidates().iter().map(|language| language.provider())
+        self.candidates()
+            .iter()
+            .filter(|language| **language != Language::Yaml)
+            .map(|language| language.provider())
     }
 
     /// The capabilities that hold before the parse: those of every candidate.
@@ -814,6 +834,10 @@ pub struct FileRouter {
 }
 
 impl FileRouter {
+    /// The router of a reader that asks only which rule, format or provider a
+    /// path reaches. The cap does not decide routing, so any cap answers alike.
+    pub const PATH_ONLY: Self = Self::new(SizeCap::BUILT_IN);
+
     pub const fn new(size_cap: SizeCap) -> Self {
         Self { size_cap }
     }
@@ -1208,7 +1232,8 @@ mod tests {
         assert_eq!(route.fixed_language(), None);
         assert_eq!(
             route.providers().collect::<Vec<_>>(),
-            vec!["kubernetes", "openapi", "yaml"]
+            vec!["kubernetes", "openapi"],
+            "the yaml candidate builds no provider until C5 open point 6 lands"
         );
         assert!(route.capabilities_before_parse().is_empty());
         assert_eq!(route.identifier_finder(), IdentifierFinder::Unsupported);

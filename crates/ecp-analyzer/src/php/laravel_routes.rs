@@ -19,7 +19,7 @@ use crate::route_detector::{clean_route_path_lax, join_route_path};
 use ecp_core::analyzer::types::{
     LocalGraph, RawImport, RawRoute, RawRouteScope, RouteInclude, Span,
 };
-use ecp_core::contracts::routing::{FileRouter, Language, SizeCap};
+use ecp_core::contracts::routing::{FileRouter, Language};
 use ecp_core::graph::NodeKind;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tree_sitter::Node;
@@ -1649,13 +1649,11 @@ impl ControllerIndex {
     fn build(local_graphs: &[LocalGraph]) -> Self {
         let mut index = Self::default();
         let mut start = 0u32;
-        // The cap does not decide the language, so any cap routes alike.
-        const ROUTER: FileRouter = FileRouter::new(SizeCap::BUILT_IN);
         for (file_idx, graph) in local_graphs.iter().enumerate() {
             let base = start;
             start += graph.nodes.len() as u32;
             let is_php = graph.file_path.to_str().is_some_and(|path| {
-                ROUTER
+                FileRouter::PATH_ONLY
                     .route(path)
                     .route()
                     .is_some_and(|route| route.fixed_language() == Some(Language::Php))

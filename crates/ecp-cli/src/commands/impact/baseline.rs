@@ -146,9 +146,13 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
     // Scoped to the providers this diff's routes list (mirrors the
     // incremental-reanalyze path) instead of `make_pipeline()`'s full
     // tree-sitter `Query` compile (~0.65s) — a 2-file diff was paying that
-    // fixed cost for ~8ms of real parse work.
+    // fixed cost for ~8ms of real parse work. The cap is the repo's, as the
+    // cold index reads it, so both sides of the diff parse what the index holds.
     let needed = provider_names_for_paths(parsed_paths.iter().map(String::as_str));
-    let pipeline = make_pipeline_for_names(needed.iter().copied());
+    let pipeline = make_pipeline_for_names(
+        needed.iter().copied(),
+        ecp_core::config::resolve_size_cap(&repo_path),
+    );
     type NewEntry = ((&'static str, String, String), (u64, u32));
     type OldEntry = ((&'static str, String, String), u64);
 

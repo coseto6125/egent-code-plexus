@@ -17,7 +17,7 @@ use ecp_core::analyzer::types::{
 pub use ecp_core::analyzer::types::{
     FUNCTION_REFERENCE_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
 };
-use ecp_core::contracts::routing::{FileRouter, Language as RouteLanguage, SizeCap};
+use ecp_core::contracts::routing::{FileRouter, Language as RouteLanguage};
 use ecp_core::file_category::determine_category;
 use ecp_core::graph::{
     BlindSpotRecord, CallMeta, Edge, ExportAliasFact, File, FileCategory, FunctionMeta, ImportFact,
@@ -1300,10 +1300,8 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
 /// already owns, and this repo has twice shipped drift from a hand-copied
 /// dispatch table (PR #141/#142, PR #595).
 fn lang_for_path(path: &str) -> Option<response_shapes::Lang> {
-    // The cap does not decide the language, so any cap routes alike. A sniffed
-    // route (generic YAML) has no fetch-shape extractor.
-    const ROUTER: FileRouter = FileRouter::new(SizeCap::BUILT_IN);
-    let route = ROUTER.route(path).route().copied()?;
+    // A sniffed route (generic YAML) has no fetch-shape extractor.
+    let route = FileRouter::PATH_ONLY.route(path).route().copied()?;
     match route.fixed_language()? {
         RouteLanguage::TypeScript => Some(response_shapes::Lang::TypeScript),
         RouteLanguage::JavaScript => Some(response_shapes::Lang::JavaScript),

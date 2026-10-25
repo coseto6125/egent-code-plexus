@@ -16,9 +16,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-/// The cap does not decide which provider a path reaches, so any cap routes alike.
-const ROUTER: FileRouter = FileRouter::new(SizeCap::BUILT_IN);
-
 /// Process-wide pipeline holding every registered provider. Test and bench
 /// callers use it; the production overlay and reanalyze paths build only the
 /// providers their paths route to ([`pipeline_for_path`],
@@ -29,27 +26,28 @@ pub fn pipeline() -> &'static AnalyzerPipeline {
     PIPELINE.get_or_init(make_pipeline)
 }
 
-/// The provider names the cold index constructs for `paths`: every provider of
-/// each path's route, so the incremental path runs the same set. An unrouted,
-/// excluded or empty path adds nothing.
+/// The provider names every parse path constructs for `paths` (the cold index,
+/// the incremental reanalyze, the overlay writer, `impact --baseline`): every
+/// provider of each path's route. An unrouted, excluded or empty path adds
+/// nothing.
 pub(crate) fn provider_names_for_paths<'a>(
     paths: impl IntoIterator<Item = &'a str>,
 ) -> FxHashSet<&'static str> {
     let mut names = FxHashSet::default();
     for path in paths {
-        if let RouteOutcome::Routed(route) = ROUTER.route(path) {
+        if let RouteOutcome::Routed(route) = FileRouter::PATH_ONLY.route(path) {
             names.extend(route.providers());
         }
     }
     names
 }
 
-/// A pipeline holding only the providers `rel_path` routes to, built once per
-/// distinct provider set and kept for the process. The overlay writer parses
-/// one file per call, so a per-call build would pay the `Query` compile each
-/// time. `None` for a path no rule routes.
-pub fn pipeline_for_path(rel_path: &Path) -> Option<&'static AnalyzerPipeline> {
-    type Cache = Mutex<FxHashMap<Vec<&'static str>, &'static AnalyzerPipeline>>;
+/// A pipeline holding only the providers `rel_path` routes to and `size_cap`,
+/// built once per distinct (provider set, cap bytes) and kept for the process.
+/// The overlay writer parses one file per call, so a per-call build would pay
+/// the `Query` compile each time. `None` for a path no rule routes.
+pub fn pipeline_for_path(rel_path: &Path, size_cap: SizeCap) -> Option<&'static AnalyzerPipeline> {
+    type Cache = Mutex<FxHashMap<(Vec<&'static str>, u64), &'static AnalyzerPipeline>>;
     static CACHE: OnceLock<Cache> = OnceLock::new();
     let mut names: Vec<&'static str> = provider_names_for_paths([rel_path.to_str()?])
         .into_iter()
@@ -62,9 +60,16 @@ pub fn pipeline_for_path(rel_path: &Path) -> Option<&'static AnalyzerPipeline> {
         .get_or_init(Cache::default)
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    Some(*cache.entry(names).or_insert_with_key(|names| {
-        &*Box::leak(Box::new(make_pipeline_for_names(names.iter().copied())))
-    }))
+    Some(
+        *cache
+            .entry((names, size_cap.bytes()))
+            .or_insert_with_key(|(names, _)| {
+                &*Box::leak(Box::new(make_pipeline_for_names(
+                    names.iter().copied(),
+                    size_cap,
+                )))
+            }),
+    )
 }
 
 /// Build the production analyzer pipeline with every registered provider, in
@@ -74,11 +79,14 @@ pub fn pipeline_for_path(rel_path: &Path) -> Option<&'static AnalyzerPipeline> {
 /// the `OnceLock::get_or_init` initializer and for tests that need an
 /// isolated pipeline.
 pub fn make_pipeline() -> AnalyzerPipeline {
-    make_pipeline_for_names(PROVIDER_CONSTRUCTORS.iter().map(|(name, _)| *name))
+    make_pipeline_for_names(
+        PROVIDER_CONSTRUCTORS.iter().map(|(name, _)| *name),
+        ecp_core::config::env_size_cap(None),
+    )
 }
 
-/// Build a pipeline holding only the named providers (dedup'd). A name with no
-/// constructor is skipped.
+/// Build a pipeline holding only the named providers (dedup'd) and the per-file
+/// cap `size_cap`. A name with no constructor is skipped.
 ///
 /// The incremental reanalyze path and `impact --baseline` use this to construct
 /// a pipeline for exactly the providers a path set routes to
@@ -87,8 +95,9 @@ pub fn make_pipeline() -> AnalyzerPipeline {
 /// parse).
 pub(crate) fn make_pipeline_for_names<'a>(
     names: impl IntoIterator<Item = &'a str>,
+    size_cap: SizeCap,
 ) -> AnalyzerPipeline {
-    let mut pipeline = AnalyzerPipeline::new();
+    let mut pipeline = AnalyzerPipeline::new().with_size_cap(size_cap);
     let mut seen: FxHashSet<&str> = FxHashSet::default();
     for name in names {
         if seen.insert(name) {
@@ -166,7 +175,12 @@ pub fn reanalyze_files(repo: &Path, scope: &DiffScope, rel_paths: &[String]) -> 
     if needed.is_empty() {
         return Vec::new();
     }
-    let pipeline = make_pipeline_for_names(needed.iter().copied());
+    // The repo's `[index] max_file_bytes`, as the cold index reads it: a dirty
+    // file the base graph holds must not turn into a `file-too-large` omission.
+    let pipeline = make_pipeline_for_names(
+        needed.iter().copied(),
+        ecp_core::config::resolve_size_cap(repo),
+    );
 
     match scope {
         DiffScope::Staged => reanalyze_staged(repo, &pipeline, rel_paths),
@@ -283,7 +297,7 @@ mod tests {
     #[test]
     fn test_make_pipeline_for_names_bash_registers_provider() {
         assert_eq!(
-            make_pipeline_for_names(["bash", "bash"]).provider_count(),
+            make_pipeline_for_names(["bash", "bash"], SizeCap::BUILT_IN).provider_count(),
             1
         );
     }
@@ -291,7 +305,7 @@ mod tests {
     #[test]
     fn test_make_pipeline_for_names_unknown_name_skipped() {
         assert_eq!(
-            make_pipeline_for_names(["no-such-provider"]).provider_count(),
+            make_pipeline_for_names(["no-such-provider"], SizeCap::BUILT_IN).provider_count(),
             0
         );
     }
@@ -302,18 +316,50 @@ mod tests {
         assert!(provider_names_for_paths(["", "   ", "README.md", "a.unknownext"]).is_empty());
     }
 
+    /// The generic-YAML candidate `yaml` has no graph yet (C5 open point 6),
+    /// so no path selects its provider.
     #[test]
-    fn test_provider_names_for_paths_sniffed_yaml_lists_every_candidate() {
+    fn test_provider_names_for_paths_sniffed_yaml_omits_yaml_provider() {
         let names = provider_names_for_paths(["k8s/deploy.yaml", "run.sh"]);
-        assert!(names.contains("kubernetes") && names.contains("yaml") && names.contains("bash"));
+        assert!(
+            names.contains("kubernetes") && names.contains("openapi") && names.contains("bash"),
+            "{names:?}"
+        );
+        assert!(!names.contains("yaml"), "{names:?}");
     }
 
     #[test]
     fn test_pipeline_for_path_same_provider_set_returns_same_pipeline() {
-        let a = pipeline_for_path(Path::new("a.sh")).expect("bash routes");
-        let b = pipeline_for_path(Path::new("dir/b.sh")).expect("bash routes");
+        let a = pipeline_for_path(Path::new("a.sh"), SizeCap::BUILT_IN).expect("bash routes");
+        let b = pipeline_for_path(Path::new("dir/b.sh"), SizeCap::BUILT_IN).expect("bash routes");
         assert!(std::ptr::eq(a, b));
         assert_eq!(a.provider_count(), 1);
-        assert!(pipeline_for_path(Path::new("notes.txt")).is_none());
+        assert!(pipeline_for_path(Path::new("notes.txt"), SizeCap::BUILT_IN).is_none());
+    }
+
+    /// The cache key holds the cap: a second cap never reuses a pipeline
+    /// built under the first, and one cap from two sources shares one.
+    #[test]
+    fn test_pipeline_for_path_distinct_cap_returns_distinct_pipeline() {
+        let built_in = pipeline_for_path(Path::new("a.sh"), SizeCap::BUILT_IN).expect("routes");
+        let lowered =
+            pipeline_for_path(Path::new("a.sh"), SizeCap::resolve(None, Some(64))).expect("routes");
+        let same_bytes = pipeline_for_path(Path::new("b.sh"), SizeCap::resolve(Some("64"), None))
+            .expect("routes");
+        assert!(!std::ptr::eq(built_in, lowered));
+        assert!(std::ptr::eq(lowered, same_bytes));
+
+        let source = "# c\n".repeat(25).into_bytes();
+        let kinds = |pipeline: &AnalyzerPipeline| -> Vec<String> {
+            pipeline
+                .parse_file_raw(Path::new("a.sh"), &source)
+                .expect("an omission is not an error")
+                .blind_spots
+                .into_iter()
+                .map(|b| b.kind)
+                .collect()
+        };
+        assert!(kinds(built_in).iter().all(|k| k != "file-too-large"));
+        assert_eq!(kinds(lowered), vec!["file-too-large".to_string()]);
     }
 }

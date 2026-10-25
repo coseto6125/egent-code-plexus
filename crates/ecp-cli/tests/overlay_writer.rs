@@ -220,7 +220,7 @@ fn provider_dispatch_covers_common_extensions() {
     use ecp_cli::reanalyze::pipeline_for_path;
     use ecp_core::contracts::routing::{FileRouter, SizeCap};
     use std::path::Path;
-    let router = FileRouter::new(SizeCap::BUILT_IN);
+    let router = FileRouter::PATH_ONLY;
     for (rel, first) in [
         ("a.ts", Some("typescript")),
         ("a.rs", Some("rust")),
@@ -237,7 +237,7 @@ fn provider_dispatch_covers_common_extensions() {
             .and_then(|route| route.providers().next());
         assert_eq!(routed, first, "{rel}");
         assert_eq!(
-            pipeline_for_path(Path::new(rel)).is_some(),
+            pipeline_for_path(Path::new(rel), SizeCap::BUILT_IN).is_some(),
             first.is_some(),
             "{rel}"
         );
