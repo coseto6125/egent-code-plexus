@@ -8,7 +8,9 @@
 
 use ecp_cli::auto_ensure::{self, test_counters, IndexNeed};
 use ecp_cli::engine::Engine;
-use ecp_cli::session::overlay_reader::{accepted_fragments, decode_view_inputs, view_inputs};
+use ecp_cli::session::overlay_reader::{
+    accepted_fragments, decode_view_inputs, decode_view_inputs_with_records, view_inputs,
+};
 use ecp_cli::session::overlay_writer::{write_dirty_events, write_dirty_fragments_from_graphs};
 use ecp_cli::session::view_cache::{self, VIEW_CACHE_FILE};
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
@@ -143,13 +145,15 @@ impl Fixture {
         .unwrap();
     }
 
-    /// The view `OverlayView::build_with_removed` makes from the current
-    /// inputs.
+    /// The view `OverlayView::build_with_records` makes from the current
+    /// inputs, as `Engine::overlay_view` builds it on a cache miss.
     fn fresh(&self, engine: &Engine) -> OverlayView {
         let inputs = view_inputs(&self.session_dir, &self.worktree).unwrap();
-        OverlayView::build_with_removed(
+        let (files, records) = decode_view_inputs_with_records(&inputs.fragments);
+        OverlayView::build_with_records(
             engine.graph().unwrap(),
-            &decode_view_inputs(&inputs.fragments),
+            &files,
+            &records,
             &inputs.tombstones,
         )
         .unwrap()
