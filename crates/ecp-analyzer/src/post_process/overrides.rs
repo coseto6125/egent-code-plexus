@@ -1,54 +1,67 @@
-//! `Overrides` edge emission — method-level override resolution.
+//! `Overrides` edge emission: a method → the same-name method of a declared
+//! base of its type.
 //!
-//! # Two-phase design
+//! # The declared base, not a same-named type
 //!
-//! **Phase 1 (per-language parsing)**: each parser stores `"__override__"`
-//! (or `"@Override"` for Java) in `RawNode.decorators` when the source
-//! carries an explicit override marker:
-//!   - Java: `@Override` annotation captured by `@decorator` query.
-//!   - Kotlin: `override` member_modifier captured as `@override_marker`.
-//!   - C#: `override` modifier captured as `@override_marker`.
-//!   - C++: `override` virtual_specifier captured as `@override_marker`.
+//! The owner type of a method is the innermost enclosing type that holds
+//! heritage ([`holds_heritage`], the kinds `enclosing_class_heritage` reads),
+//! when no callable sits between them: a local function is no member. A
+//! method declared outside its type (a Go receiver method, a Rust `impl`
+//! block member, a C++ out-of-line definition) takes the one type of its
+//! file that its `owner_class` names. The bases of that type are the ones
+//! Pass 1.9 resolved through the type's imports and scope
+//! (`SymbolTable::supertypes`), so another type that only shares a base's
+//! name is never reached. A base outside the graph (unresolved, or in a file
+//! that failed to parse) gives no edge.
 //!
-//! **Phase 2 (this module)**: after all `HasMethod` edges are in place,
-//! walk each override-candidate method, climb the class hierarchy via
-//! `Extends` / `Implements` edges (resolved from `RawNode.heritage` on the
-//! class), and for each ancestor find a method with the same name and
-//! compatible parameter arity (name + arity — cross-language type matching
-//! is infeasible without a full type system). Emit one `Overrides` edge per
-//! **immediate** ancestor match.
+//! # Evidence per language
 //!
-//! # Immediate-supertype-only design
+//! | Rule | Languages | Candidate | Edge |
+//! |---|---|---|---|
+//! | `Marked` | Java, Kotlin, C#, C++, others | a method the parser marked (`@Override`, `override`) | 1.0, `Exact` |
+//! | `Inferred` | TypeScript, JavaScript, Python, PHP, Ruby, Swift, Dart | a marked method, else any method of a type with bases | marked: 1.0; unmarked: [`NAME_MATCH_CONFIDENCE`], `Heuristic` |
+//! | `TraitImpl` | Rust | a method of an `impl Trait for T` block, which carries the trait as heritage | 1.0, `Exact`, only into that trait |
+//! | `NoConcept` | Go, C | none | no edge; Go records a [`BS_KIND_NO_OVERRIDE_CONCEPT`] BlindSpot where a method shadows one of an embedded type |
 //!
-//! For a chain `C extends B extends A` where all three define `foo()`,
-//! the edges emitted are `C.foo → B.foo` and `B.foo → A.foo`. This is
-//! correct because:
-//!   1. C overrides *B's contract*, not A's directly; a Cypher 2-hop query
-//!      retrieves the full chain when needed.
-//!   2. Emitting `C.foo → A.foo` as well would duplicate information
-//!      already derivable by transitive closure — fat edges with no new
-//!      information violate the LLM-utility filter (§B no prose, no UI cruft).
-//!   3. The Java Language Spec §8.4.8.1 defines override relative to the
-//!      immediate supertype; the same principle applies to Kotlin, C#, C++.
+//! The parsers of the `Inferred` languages capture no mandatory marker, so
+//! an unmarked method there pairs with its base by name alone, and the edge
+//! stays below `HEURISTIC_CEILING` with its own `reason` (C4 evidence
+//! classes).
 //!
-//! # Cross-file resolution
+//! # Immediate supertype only
 //!
-//! Override resolution requires the full multi-file graph: a concrete class
-//! in `Foo.java` may extend an abstract class in `Bar.java`. The `SymbolTable`
-//! global index is queried when a heritage name is not found in the same file.
+//! For `C extends B extends A` where all three define `foo()`, the edges are
+//! `C.foo → B.foo` and `B.foo → A.foo`. C overrides B's contract; a 2-hop
+//! query reads the chain, and a skip-level edge would add no fact.
+//!
+//! # Ambiguity
+//!
+//! A base that declares the name more than once (overloads) gives no edge
+//! and a [`BS_KIND_OVERRIDE_AMBIGUOUS`] BlindSpot with the count: the pass
+//! has no parameter types to pick one.
 
-use crate::framework_helpers::{span_area, span_contains};
-use crate::resolution::index::SymbolTable;
-use ecp_core::analyzer::types::{LocalGraph, RawNode};
+use crate::resolution::index::{Language, SymbolTable};
+use ecp_core::analyzer::heritage::holds_heritage;
+use ecp_core::analyzer::types::{span_contains, LocalGraph, RawNode};
 use ecp_core::contracts::raw_records::{FileOrd, RawIdx, RawIndexMap};
-use ecp_core::graph::{Edge, NodeKind, RelType};
+use ecp_core::graph::{BlindSpotRecord, Edge, File, FileCategory, NodeKind, RelType};
 use ecp_core::pool::StringPool;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::cmp::Reverse;
 
-/// `(name, span)` pair for a class/struct/interface node, used in span
-/// containment checks inside [`innermost_class`].
-type ClassEntry<'a> = (&'a str, (u32, u32, u32, u32));
-type MethodIndex = FxHashMap<(String, String), u32>;
+/// BlindSpot kind: a Go method shadows a same-name method of a type its
+/// receiver embeds. Go has no override, so no `Overrides` edge exists.
+pub const BS_KIND_NO_OVERRIDE_CONCEPT: &str = "no-override-concept";
+
+/// BlindSpot kind: a declared base declares the method name more than once.
+pub const BS_KIND_OVERRIDE_AMBIGUOUS: &str = "override-ambiguous";
+
+/// The confidence of an edge paired by name alone: `Heuristic`, below the
+/// 0.7 ceiling.
+pub const NAME_MATCH_CONFIDENCE: f32 = 0.6;
+
+const EXACT_REASON: &str = "post_process:overrides";
+const NAME_MATCH_REASON: &str = "post_process:overrides:name-in-base";
 
 /// Sentinel written by per-language parsers when the `override` keyword /
 /// annotation is present. Java writes `@Override` (the literal annotation
@@ -56,206 +69,306 @@ type MethodIndex = FxHashMap<(String, String), u32>;
 /// query capture.
 const OVERRIDE_SENTINEL: &str = "__override__";
 
-/// Java uses the literal annotation text `@Override` (exact case-sensitive
-/// string as captured from source). Also accept `@java.lang.Override` in
-/// case the user writes the fully-qualified form.
-fn is_override_marker(decorator: &str) -> bool {
-    decorator == OVERRIDE_SENTINEL || decorator == "@Override" || decorator == "@java.lang.Override"
+/// `(type slot, method name)` → the slots of the methods so named that the
+/// type declares.
+type MethodIndex = FxHashMap<(u32, String), Vec<u32>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverrideRule {
+    Marked,
+    Inferred,
+    TraitImpl,
+    NoConcept,
 }
 
-/// True when `raw_node` carries an explicit override marker in its decorators.
-fn is_override_candidate(raw_node: &RawNode) -> bool {
+fn rule_for(path: &str) -> OverrideRule {
+    match Language::from_path(path) {
+        Language::TypeScript
+        | Language::JavaScript
+        | Language::Python
+        | Language::Php
+        | Language::Ruby
+        | Language::Swift
+        | Language::Dart => OverrideRule::Inferred,
+        Language::Rust => OverrideRule::TraitImpl,
+        Language::Go | Language::C => OverrideRule::NoConcept,
+        _ => OverrideRule::Marked,
+    }
+}
+
+/// Java `@Override` (also fully qualified), Dart `@override`, Python
+/// `@override` / `@typing.override`, and the Kotlin / C# / C++ sentinel.
+fn is_override_marker(decorator: &str) -> bool {
+    decorator == OVERRIDE_SENTINEL
+        || matches!(
+            decorator.trim().trim_start_matches('@'),
+            "Override"
+                | "java.lang.Override"
+                | "override"
+                | "typing.override"
+                | "typing_extensions.override"
+        )
+}
+
+fn is_marked(raw_node: &RawNode) -> bool {
     raw_node.decorators.iter().any(|d| is_override_marker(d))
 }
 
-/// Emit `Overrides` edges for all languages.
+/// Emit `Overrides` edges for all languages, and the BlindSpots of the
+/// module doc.
 ///
-/// Requires that `HasMethod` / `Extends` / `Implements` edges have already
-/// been emitted (class_membership post-process runs first).
-///
-/// Returns the number of edges appended.
+/// Requires the supertypes of Pass 1.9 in `symbol_table`. Returns the number
+/// of edges appended.
 pub fn emit_edges(
     local_graphs: &[LocalGraph],
+    files: &[File],
     raw_map: &RawIndexMap,
-    _symbol_table: &SymbolTable,
+    symbol_table: &SymbolTable,
     string_pool: &mut StringPool,
     edges_out: &mut Vec<Edge>,
+    blind_spots: &mut Vec<BlindSpotRecord>,
 ) -> usize {
-    // Pre-index: class name → heritage list. Built once from all local graphs
-    // so we can walk ancestry across files. Key is the simple class name (not
-    // fully qualified), which is what `RawNode.heritage` stores.
-    //
-    // When the same simple name appears in multiple files (common for common
-    // base class names), we collect ALL heritage lists. Resolution later picks
-    // the first match in the SymbolTable by same-name lookup — imprecise but
-    // sufficient for practical codebases where short names are unambiguous
-    // within a language.
-    let mut class_heritage: FxHashMap<String, Vec<Vec<String>>> = FxHashMap::default();
-    for lg in local_graphs {
-        for rn in &lg.nodes {
-            if matches!(
-                rn.kind,
-                NodeKind::Class | NodeKind::Interface | NodeKind::Struct
-            ) && !rn.heritage.is_empty()
-            {
-                class_heritage
-                    .entry(rn.name.clone())
-                    .or_default()
-                    .push(rn.heritage.clone());
-            }
-        }
-    }
-    let ancestor_methods = build_ancestor_method_index(local_graphs, raw_map);
-
-    let reason = string_pool.add("post_process:overrides");
-
-    let mut emitted = 0usize;
-
-    for (file_idx, lg) in local_graphs.iter().enumerate() {
-        let file = FileOrd(file_idx as u32);
-        // Collect override candidates in this file.
-        let candidates: Vec<(usize, &RawNode)> = lg
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|n| {
-                matches!(
-                    n.1.kind,
-                    NodeKind::Method | NodeKind::Function | NodeKind::Constructor
-                ) && is_override_candidate(n.1)
-            })
-            .collect();
-
-        if candidates.is_empty() {
-            continue;
-        }
-
-        // For each override candidate, find its enclosing class (by span containment —
-        // same logic as class_membership pass1).
-        let classes: Vec<ClassEntry<'_>> = lg
-            .nodes
-            .iter()
-            .filter(|n| {
-                matches!(
-                    n.kind,
-                    NodeKind::Class | NodeKind::Interface | NodeKind::Struct
-                )
-            })
-            .map(|n| (n.name.as_str(), n.span))
-            .collect();
-
-        for (candidate_raw_idx, candidate) in candidates {
-            // Innermost enclosing class (same area-minimisation logic as class_membership).
-            let Some(class_name) = innermost_class(candidate.span, &classes) else {
-                continue;
-            };
-
-            // Walk the immediate supertype list for this class (one level only).
-            let immediate_parents = immediate_heritage(class_name, &class_heritage);
-
-            for parent_name in &immediate_parents {
-                let ancestor_method_idx =
-                    ancestor_methods.get(&(parent_name.clone(), candidate.name.clone()));
-
-                let Some(&ancestor_idx) = ancestor_method_idx else {
-                    continue;
-                };
-
-                // Candidate's own node index is the graph-local base plus
-                // raw-node index. Looking it up by name is ambiguous for
-                // overloads and same-name methods in sibling classes.
-                let Some(candidate_idx) = raw_map.node(file, RawIdx(candidate_raw_idx as u32))
-                else {
-                    continue;
-                };
-
-                if candidate_idx == ancestor_idx {
-                    continue; // self-loop guard
-                }
-
-                edges_out.push(Edge {
-                    source: candidate_idx,
-                    target: ancestor_idx,
-                    rel_type: RelType::Overrides,
-                    confidence: 1.0,
-                    reason,
-                });
-                emitted += 1;
-            }
-        }
-    }
-
-    emitted
-}
-
-fn build_ancestor_method_index(local_graphs: &[LocalGraph], raw_map: &RawIndexMap) -> MethodIndex {
-    let mut out = FxHashMap::default();
-    for (file_idx, lg) in local_graphs.iter().enumerate() {
-        let file = FileOrd(file_idx as u32);
-        let classes: Vec<ClassEntry<'_>> = lg
-            .nodes
-            .iter()
-            .filter(|n| {
-                matches!(
-                    n.kind,
-                    NodeKind::Class | NodeKind::Interface | NodeKind::Struct | NodeKind::Trait
-                )
-            })
-            .map(|n| (n.name.as_str(), n.span))
-            .collect();
-
-        for (raw_idx, node) in lg.nodes.iter().enumerate() {
-            if !matches!(
-                node.kind,
-                NodeKind::Method | NodeKind::Function | NodeKind::Constructor
-            ) {
-                continue;
-            }
-            let Some(class_name) = innermost_class(node.span, &classes) else {
-                continue;
-            };
-            let Some(slot) = raw_map.node(file, RawIdx(raw_idx as u32)) else {
-                continue;
-            };
-            out.entry((class_name.to_string(), node.name.clone()))
-                .or_insert(slot);
-        }
-    }
-    out
-}
-
-/// Return the name of the smallest class/struct/interface whose span contains
-/// `method_span`. Mirrors the innermost-class logic in `class_membership`.
-fn innermost_class<'a>(
-    method_span: (u32, u32, u32, u32),
-    classes: &[ClassEntry<'a>],
-) -> Option<&'a str> {
-    classes
+    let owners: Vec<Vec<Option<usize>>> = local_graphs
         .iter()
-        .filter(|(_, class_span)| span_contains(*class_span, method_span))
-        .min_by_key(|(_, class_span)| span_area(*class_span))
-        .map(|(name, _)| *name)
+        .map(|lg| owner_types(&lg.nodes))
+        .collect();
+    let methods = build_method_index(local_graphs, &owners, raw_map);
+    let exact_reason = string_pool.add(EXACT_REASON);
+    let name_reason = string_pool.add(NAME_MATCH_REASON);
+
+    let mut emitted: FxHashSet<(u32, u32)> = FxHashSet::default();
+    let mut reported: FxHashSet<(u32, u32)> = FxHashSet::default();
+    for (file_idx, lg) in local_graphs.iter().enumerate() {
+        let file = FileOrd(file_idx as u32);
+        let path = lg.file_path.to_string_lossy().replace('\\', "/");
+        let rule = rule_for(&path);
+        let is_test = files
+            .get(file_idx)
+            .is_some_and(|f| matches!(f.category, FileCategory::Test));
+        for (raw_idx, node) in lg.nodes.iter().enumerate() {
+            let name = node.name.trim();
+            if !node.kind.is_callable() || name.is_empty() {
+                continue;
+            }
+            let marked = is_marked(node);
+            let exact = match rule {
+                OverrideRule::Marked if !marked => continue,
+                OverrideRule::Inferred if !marked && node.kind == NodeKind::Constructor => continue,
+                OverrideRule::TraitImpl if node.heritage.is_empty() => continue,
+                OverrideRule::Marked | OverrideRule::TraitImpl => true,
+                OverrideRule::Inferred => marked,
+                OverrideRule::NoConcept => false,
+            };
+            let Some(owner) = owners[file_idx][raw_idx] else {
+                continue;
+            };
+            let (Some(owner_slot), Some(source)) = (
+                raw_map.node(file, RawIdx(owner as u32)),
+                raw_map.node(file, RawIdx(raw_idx as u32)),
+            ) else {
+                continue;
+            };
+            let Some(supertypes) = symbol_table.supertypes(owner_slot) else {
+                continue;
+            };
+            for &base in supertypes.bases.iter() {
+                // A Rust impl method implements the trait its block names,
+                // not every trait its type implements.
+                if rule == OverrideRule::TraitImpl
+                    && !node.heritage.iter().any(|h| {
+                        Some(simple_type_name(h)) == slot_name(local_graphs, raw_map, base)
+                    })
+                {
+                    continue;
+                }
+                let Some(targets) = methods.get(&(base, name.to_string())) else {
+                    continue;
+                };
+                let blind_spot = match (rule, targets.as_slice()) {
+                    (_, [target]) if *target == source => continue,
+                    (OverrideRule::NoConcept, [_]) => Some((
+                        BS_KIND_NO_OVERRIDE_CONCEPT,
+                        format!(
+                            "`{name}` shadows the `{name}` of the embedded `{}`; the language has no method override, so no Overrides edge",
+                            slot_name(local_graphs, raw_map, base).unwrap_or("")
+                        ),
+                    )),
+                    (_, [target]) => {
+                        if emitted.insert((source, *target)) {
+                            edges_out.push(Edge {
+                                source,
+                                target: *target,
+                                rel_type: RelType::Overrides,
+                                confidence: if exact { 1.0 } else { NAME_MATCH_CONFIDENCE },
+                                reason: if exact { exact_reason } else { name_reason },
+                            });
+                        }
+                        None
+                    }
+                    (_, several) => Some((
+                        BS_KIND_OVERRIDE_AMBIGUOUS,
+                        format!(
+                            "{} methods named `{name}` in base `{}`; no Overrides edge",
+                            several.len(),
+                            slot_name(local_graphs, raw_map, base).unwrap_or("")
+                        ),
+                    )),
+                };
+                if let Some((kind, hint)) = blind_spot {
+                    if reported.insert((source, base)) {
+                        blind_spots.push(BlindSpotRecord {
+                            kind: string_pool.add(kind),
+                            file_path: string_pool.add(&path),
+                            start_row: node.span.0,
+                            start_col: node.span.1,
+                            end_row: node.span.2,
+                            end_col: node.span.3,
+                            hint: string_pool.add(&hint),
+                            is_test,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    emitted.len()
 }
 
-/// Return the **immediate** supertype names for `class_name` (one hop only).
-/// Gathers from all `class_heritage` entries for that name (handles same short
-/// name in multiple files — unlikely but safe). Deduplicates via FxHashSet
-/// (O(H) vs the O(H²) `out.contains(h)` per insert).
-fn immediate_heritage(
-    class_name: &str,
-    class_heritage: &FxHashMap<String, Vec<Vec<String>>>,
-) -> Vec<String> {
-    let Some(all_heritages) = class_heritage.get(class_name) else {
-        return Vec::new();
-    };
-    let mut seen: FxHashSet<&str> = FxHashSet::default();
-    let mut out: Vec<String> = Vec::new();
-    for heritage_list in all_heritages {
-        for h in heritage_list {
-            if seen.insert(h.as_str()) {
-                out.push(h.clone());
+/// Per raw node, the raw index of its owner type (module doc), or `None`.
+///
+/// One sweep over the types and callables in source order keeps the open
+/// containers on a stack, so a file costs O(n log n), not one scan of every
+/// container per callable. Spans of one tree nest or are disjoint; between
+/// two identical spans the first stays the container.
+fn owner_types(nodes: &[RawNode]) -> Vec<Option<usize>> {
+    let is_container = |i: usize| holds_heritage(nodes[i].kind) || nodes[i].kind.is_callable();
+    let mut order: Vec<usize> = (0..nodes.len()).filter(|&i| is_container(i)).collect();
+    order.sort_by_key(|&i| {
+        let (r1, c1, r2, c2) = nodes[i].span;
+        ((r1, c1), Reverse((r2, c2)), i)
+    });
+    let mut innermost: Vec<Option<usize>> = vec![None; nodes.len()];
+    let mut stack: Vec<usize> = Vec::new();
+    for &i in &order {
+        let span = nodes[i].span;
+        while let Some(&top) = stack.last() {
+            if span_contains(nodes[top].span, span) {
+                break;
+            }
+            stack.pop();
+        }
+        match stack.last() {
+            Some(&top) if nodes[top].span == span => innermost[i] = innermost[top],
+            top => {
+                innermost[i] = top.copied();
+                stack.push(i);
+            }
+        }
+    }
+    let mut types_by_name: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
+    for (i, n) in nodes.iter().enumerate() {
+        if holds_heritage(n.kind) {
+            types_by_name.entry(n.name.as_str()).or_default().push(i);
+        }
+    }
+    (0..nodes.len())
+        .map(|i| {
+            if !nodes[i].kind.is_callable() {
+                return None;
+            }
+            match innermost[i] {
+                // A function inside a callable is a local, not a member.
+                Some(j) => holds_heritage(nodes[j].kind).then_some(j),
+                None => {
+                    let owner = nodes[i].owner_class.as_deref()?.trim();
+                    match types_by_name.get(owner)?.as_slice() {
+                        [only] => Some(*only),
+                        _ => None,
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
+fn build_method_index(
+    local_graphs: &[LocalGraph],
+    owners: &[Vec<Option<usize>>],
+    raw_map: &RawIndexMap,
+) -> MethodIndex {
+    let mut out: MethodIndex = FxHashMap::default();
+    for (file_idx, lg) in local_graphs.iter().enumerate() {
+        let file = FileOrd(file_idx as u32);
+        for (raw_idx, node) in lg.nodes.iter().enumerate() {
+            let name = node.name.trim();
+            if !matches!(node.kind, NodeKind::Method | NodeKind::Function) || name.is_empty() {
+                continue;
+            }
+            let Some(owner) = owners[file_idx][raw_idx] else {
+                continue;
+            };
+            let (Some(owner_slot), Some(slot)) = (
+                raw_map.node(file, RawIdx(owner as u32)),
+                raw_map.node(file, RawIdx(raw_idx as u32)),
+            ) else {
+                continue;
+            };
+            // A tombstoned twin maps to the survivor: one method, not two.
+            let slots = out.entry((owner_slot, name.to_string())).or_default();
+            if !slots.contains(&slot) {
+                slots.push(slot);
             }
         }
     }
     out
+}
+
+/// The name of the raw node at `slot`.
+fn slot_name<'a>(
+    local_graphs: &'a [LocalGraph],
+    raw_map: &RawIndexMap,
+    slot: u32,
+) -> Option<&'a str> {
+    let (file, raw) = raw_map.locate(slot)?;
+    local_graphs
+        .get(file.0 as usize)?
+        .nodes
+        .get(raw.index())
+        .map(|n| n.name.as_str())
+}
+
+/// The last path segment of a heritage spelling, without generic arguments:
+/// `fmt::Display` → `Display`, `Base<T>` → `Base`.
+fn simple_type_name(heritage: &str) -> &str {
+    let head = heritage.split('<').next().unwrap_or(heritage).trim();
+    head.rsplit([':', '.']).next().unwrap_or(head).trim()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_simple_type_name_path_and_generics_returns_last_segment() {
+        assert_eq!(simple_type_name("fmt::Display"), "Display");
+        assert_eq!(simple_type_name("Base<T>"), "Base");
+        assert_eq!(simple_type_name("a.b.Base"), "Base");
+        assert_eq!(simple_type_name(" Base "), "Base");
+    }
+
+    #[test]
+    fn test_is_override_marker_each_language_spelling_returns_true() {
+        for marker in [
+            "__override__",
+            "@Override",
+            "@java.lang.Override",
+            "@override",
+            "override",
+            "typing.override",
+        ] {
+            assert!(is_override_marker(marker), "{marker}");
+        }
+        assert!(!is_override_marker("@overrides"));
+        assert!(!is_override_marker("@Deprecated"));
+    }
 }

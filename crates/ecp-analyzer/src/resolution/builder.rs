@@ -3,6 +3,7 @@ use crate::fetch_shape::{
 };
 use crate::framework_helpers::Span;
 use crate::php::laravel_routes::LaravelRoutes;
+use crate::post_process::path_literal_nodes::FILE_SOURCE_PENDING;
 use crate::resolution::heuristics::{ResolutionTier, NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON};
 use crate::resolution::index::{FileMeta, Language, ResolveTarget, SymbolTable};
 use crate::resolution::resolver::{ReexportIndex, Resolver};
@@ -91,16 +92,18 @@ pub(crate) fn classify_collision(kind: NodeKind, path: &str) -> &'static str {
 
 use std::collections::HashMap;
 
-/// Per-graph output from Pass 2 parallel map: `(edges, pending_call_metas)`.
-/// `pending_call_metas` entries are `(pre_sort_edge_idx, flags, dispatch_type)`.
-type PerGraphPass2 = (Vec<Edge>, Vec<(usize, u8, String)>);
+/// Per-graph output from Pass 2 parallel map: `(edges, pending_call_metas,
+/// file_edges)`. `pending_call_metas` entries are `(pre_sort_edge_idx, flags,
+/// dispatch_type)`; `file_edges` start at the graph's `File` node, which the
+/// builder appends later (C4 Open point 3, option b).
+type PerGraphPass2 = (Vec<Edge>, Vec<(usize, u8, String)>, Vec<(FileOrd, Edge)>);
 
 /// Pass 2's stitched whole-build output. Same shape as [`PerGraphPass2`], but
 /// named apart because it is the aggregate across every graph, not one graph's
 /// share — `pass2_resolve_edges` does whole-build setup (mod-tree build,
 /// reason interning) before it fans out, so it is
 /// called once, not once per file.
-type Pass2Output = (Vec<Edge>, Vec<(usize, u8, String)>);
+type Pass2Output = (Vec<Edge>, Vec<(usize, u8, String)>, Vec<(FileOrd, Edge)>);
 
 /// Pass 1.5 output: `(route_node_idx, file_idx, route_method, route_path)`
 /// per emitted Route node, consumed by Pass 1.6's fetch-shape route index.
@@ -341,9 +344,9 @@ impl GraphBuilder {
             self.repo_root.as_deref(),
             &emitted_routes,
             &nodes,
-            &raw_map,
             &mut string_pool,
         );
+        file_edges.extend(fetches_edges);
 
         if prof {
             eprintln!(
@@ -353,9 +356,10 @@ impl GraphBuilder {
         }
         let _t_pass17 = std::time::Instant::now();
         // Pass 1.7: Entry-point scoring (cross-language).
-        let entry_edges = pass1_7_entry_points(
+        let (entry_edges, entry_blind_spots) = pass1_7_entry_points(
             &self.local_graphs,
-            &symbol_table,
+            &files,
+            &raw_map,
             &mut string_pool,
             &mut nodes,
         );
@@ -432,7 +436,7 @@ impl GraphBuilder {
         // Pass 2: resolve imports and build edges (rayon-vs-serial dual
         // path; see `pass2_resolve_edges` for the pre-computation +
         // dispatch logic).
-        let (mut edges, pending_call_metas_global) = pass2_resolve_edges(
+        let (mut edges, pending_call_metas_global, framework_file_edges) = pass2_resolve_edges(
             &self.local_graphs,
             &symbol_table,
             &mut string_pool,
@@ -443,11 +447,11 @@ impl GraphBuilder {
             self.resolver_dump_path.as_deref(),
             self.symbol_skip_set.as_ref(),
         );
+        file_edges.extend(framework_file_edges);
 
         edges.extend(route_edges);
         edges.extend(entry_edges);
         edges.extend(action_edges);
-        edges.extend(fetches_edges);
 
         emit_closure_references(
             &self.local_graphs,
@@ -489,6 +493,7 @@ impl GraphBuilder {
         // because `string_pool` was borrowed mutably in Pass 1 when they were pushed.
         all_blind_spots.extend(collision_blind_spots);
         all_blind_spots.extend(route_blind_spots);
+        all_blind_spots.extend(entry_blind_spots);
 
         if prof {
             eprintln!(
@@ -698,10 +703,12 @@ impl GraphBuilder {
         // the new edges land in out_offsets / in_offsets.
         crate::post_process::overrides::emit_edges(
             &self.local_graphs,
+            &files,
             &raw_map,
             &symbol_table,
             &mut string_pool,
             &mut edges,
+            &mut all_blind_spots,
         );
 
         // T4-7: promote `RawSchemaField` → `SchemaField` Nodes + `HasProperty`
@@ -1905,7 +1912,11 @@ fn pass1_95_controller_actions(
 ///        file in `local_graphs` scan for `fetch(url) /
 ///        axios.get(url)` literals and emit `RelType::Fetches`
 ///        edges (file_node → route_idx) with the
-///        `format_reason(keys, fetch_count)` reason payload.
+///        `format_reason(keys, fetch_count)` reason payload. The edges go
+///        out as `file_edges`: the call sites are text with no position
+///        (`fetch_urls::extract`), so the edge starts at the consumer's
+///        `File` node (C4 Open point 4, option a), also in a file with no
+///        declaration.
 ///
 /// Assumption (MVP): exact path match — `fetch('/users')` only
 /// hits a route whose path is exactly `/users`. Dynamic-segment
@@ -1917,11 +1928,10 @@ fn pass1_6_fetch_shapes(
     repo_root: Option<&std::path::Path>,
     emitted_routes: &[EmittedRoute],
     nodes: &[Node],
-    raw_map: &RawIndexMap,
     string_pool: &mut StringPool,
-) -> (Vec<RouteShape>, Vec<Edge>) {
+) -> (Vec<RouteShape>, Vec<(FileOrd, Edge)>) {
     let mut route_shapes_out: Vec<RouteShape> = Vec::new();
-    let mut fetches_edges: Vec<Edge> = Vec::new();
+    let mut fetches_edges: Vec<(FileOrd, Edge)> = Vec::new();
 
     if let Some(repo_root) = repo_root {
         // Per-file content cache — multiple routes may share a handler file
@@ -1990,17 +2000,6 @@ fn pass1_6_fetch_shapes(
                 .push((*route_idx, route_path.as_str()));
         }
 
-        // File-node index lookup: the source of a Fetches edge is the
-        // *file* (per upstream `generateId('File', filePath)`), but
-        // egent-code-plexus-rs doesn't currently create File nodes. Use the
-        // first node in the file as a reasonable proxy (typically a
-        // top-level function/class) so the edge has a real `source`.
-        // When a file has no nodes we skip it — there's nothing to
-        // attach the edge to.
-        let file_first_node: Vec<Option<u32>> = (0..local_graphs.len() as u32)
-            .map(|file| raw_map.slot(FileOrd(file), RawIdx(0)))
-            .collect();
-
         // Files that themselves emit a Route are handlers, not
         // consumers — skip them on the consumer pass to avoid
         // self-loops where a file `fetch()`es its own route.
@@ -2009,10 +2008,10 @@ fn pass1_6_fetch_shapes(
 
         // Parallel phase: pure read-only work per file.
         // Each worker reads the file directly (no shared cache) and
-        // returns (file_idx, source_node, matched, reason_str).
+        // returns (file_idx, matched, reason_str).
         // string_pool.add and Edge construction happen serially below.
         #[allow(clippy::type_complexity)]
-        let parallel_results: Vec<(u32, u32, Vec<(u32, bool)>, String)> = local_graphs
+        let parallel_results: Vec<(u32, Vec<(u32, bool)>, String)> = local_graphs
             .par_iter()
             .enumerate()
             .filter_map(|(file_idx_usize, lg)| {
@@ -2020,7 +2019,6 @@ fn pass1_6_fetch_shapes(
                 if handler_files.contains(&file_idx) {
                     return None;
                 }
-                let source_node = file_first_node[file_idx_usize]?;
                 let path_str = lg.file_path.to_string_lossy();
                 // Allowlist: extensions where `fetch_urls::extract` produces
                 // useful hits. PHP is a route-server language, not a consumer
@@ -2069,7 +2067,7 @@ fn pass1_6_fetch_shapes(
                 }
                 let fetch_count = matched.len() as u32;
                 let reason_str = format_reason(&keys, fetch_count);
-                Some((file_idx, source_node, matched, reason_str))
+                Some((file_idx, matched, reason_str))
             })
             .collect();
 
@@ -2078,19 +2076,22 @@ fn pass1_6_fetch_shapes(
         // `filter_map` drops the IndexedParallelIterator bound — so
         // parallel_results stays in file_idx order, identical to the old
         // serial loop's edge order; no extra sort needed.
-        for (_file_idx, source_node, matched, reason_str) in parallel_results {
+        for (file_idx, matched, reason_str) in parallel_results {
             let reason_ref = string_pool.add(&reason_str);
             for (route_idx, is_templated) in matched {
                 // Confidence: 0.8 for exact-path matches, 0.6 for any
                 // templated segment — caller or callee side.
                 let confidence = if is_templated { 0.6 } else { 0.8 };
-                fetches_edges.push(Edge {
-                    source: source_node,
-                    target: route_idx,
-                    rel_type: RelType::Fetches,
-                    confidence,
-                    reason: reason_ref,
-                });
+                fetches_edges.push((
+                    FileOrd(file_idx),
+                    Edge {
+                        source: FILE_SOURCE_PENDING,
+                        target: route_idx,
+                        rel_type: RelType::Fetches,
+                        confidence,
+                        reason: reason_ref,
+                    },
+                ));
             }
         }
     }
@@ -2154,17 +2155,22 @@ fn answering_routes<'p>(
 ///
 /// Emits one `NodeKind::EntryPoint` marker node per scored entry
 /// point and a `References` edge from the marker to the underlying
-/// handler (looked up by name in the same file's SymbolTable). The
-/// edge's `reason` carries the scoring provenance so downstream
-/// LLM tooling can render "this is an HTTP route handler at
-/// confidence 1.0" without re-running the scorer.
+/// handler. The scorer keeps only the handler's name, so the handler is
+/// the one node of the file so named that no same-named node encloses
+/// ([`outermost_named_slot`]); several give no marker and an
+/// [`BS_KIND_ENTRY_POINT_AMBIGUOUS`] BlindSpot. The edge's `reason`
+/// carries the scoring provenance so downstream LLM tooling can render
+/// "this is an HTTP route handler at confidence 1.0" without re-running
+/// the scorer.
 fn pass1_7_entry_points(
     local_graphs: &[LocalGraph],
-    symbol_table: &SymbolTable,
+    files: &[File],
+    raw_map: &RawIndexMap,
     string_pool: &mut StringPool,
     nodes: &mut Vec<Node>,
-) -> Vec<Edge> {
+) -> (Vec<Edge>, Vec<BlindSpotRecord>) {
     let mut entry_edges: Vec<Edge> = Vec::new();
+    let mut blind_spots: Vec<BlindSpotRecord> = Vec::new();
     for (file_idx, local_graph) in local_graphs.iter().enumerate() {
         let file_idx = file_idx as u32;
         let path_str = local_graph.file_path.to_string_lossy().replace('\\', "/");
@@ -2174,14 +2180,41 @@ fn pass1_7_entry_points(
             &local_graph.nodes,
         );
         for ep in entries {
-            let handler_idx = symbol_table.lookup_in_file(&path_str, &ep.uid);
-            let Some(handler_idx) = handler_idx else {
+            let handler_idx = match outermost_named_slot(
+                &local_graph.nodes,
+                &ep.uid,
+                raw_map,
+                FileOrd(file_idx),
+            ) {
+                Ok(slot) => slot,
                 // Handler not found in this file — happens when a
                 // RawRoute's handler name is a string literal that
                 // doesn't match any parsed symbol (e.g. an external
-                // reference). Skip silently; the EntryPoint without
-                // a target would be a dangling marker.
-                continue;
+                // reference). The EntryPoint without a target would be
+                // a dangling marker.
+                Err(0) => continue,
+                Err(candidates) => {
+                    let first = local_graph
+                        .nodes
+                        .iter()
+                        .find(|n| n.name == ep.uid)
+                        .map_or((0, 0, 0, 0), |n| n.span);
+                    blind_spots.push(BlindSpotRecord {
+                        kind: string_pool.add(BS_KIND_ENTRY_POINT_AMBIGUOUS),
+                        file_path: string_pool.add(&path_str),
+                        start_row: first.0,
+                        start_col: first.1,
+                        end_row: first.2,
+                        end_col: first.3,
+                        hint: string_pool.add(&format!(
+                            "{candidates} declarations are named `{}`; the {} entry point binds none of them",
+                            ep.uid,
+                            ep.kind.tag()
+                        )),
+                        is_test: matches!(files[file_idx as usize].category, FileCategory::Test),
+                    });
+                    continue;
+                }
             };
             let entry_name = format!("{}@{}", ep.kind.tag(), ep.uid);
             // EntryPoint UID encodes kind-tag + handler-uid in the name segment
@@ -2212,7 +2245,52 @@ fn pass1_7_entry_points(
             });
         }
     }
-    entry_edges
+    (entry_edges, blind_spots)
+}
+
+/// BlindSpot kind: an entry point's handler name matches several
+/// declarations of its file, so no marker is emitted.
+pub const BS_KIND_ENTRY_POINT_AMBIGUOUS: &str = "entry-point-ambiguous";
+
+/// The slot of the one node of `nodes` named `name` that no other node so
+/// named encloses: a class, not its own same-named constructor. Between two
+/// identical spans the lower index stays, as in `innermost_enclosing`.
+/// `Err(n)` when `n` nodes remain, `Err(0)` for an absent or blank name.
+/// Never the first of several (C4 `bind_name`).
+fn outermost_named_slot(
+    nodes: &[RawNode],
+    name: &str,
+    raw_map: &RawIndexMap,
+    file: FileOrd,
+) -> Result<u32, u32> {
+    if name.trim().is_empty() {
+        return Err(0);
+    }
+    let named: Vec<usize> = (0..nodes.len())
+        .filter(|&i| nodes[i].name == name)
+        .collect();
+    let mut slots: Vec<u32> = Vec::new();
+    for &i in &named {
+        let span = nodes[i].span;
+        let enclosed = named.iter().any(|&j| {
+            j != i
+                && ecp_core::analyzer::types::span_contains(nodes[j].span, span)
+                && (nodes[j].span != span || j < i)
+        });
+        if enclosed {
+            continue;
+        }
+        // A tombstoned twin maps to its survivor (C4 Open point 2).
+        if let Some(slot) = raw_map.node(file, RawIdx(i as u32)) {
+            if !slots.contains(&slot) {
+                slots.push(slot);
+            }
+        }
+    }
+    match slots.as_slice() {
+        [only] => Ok(*only),
+        several => Err(several.len() as u32),
+    }
 }
 
 /// Pass 1.8: FunctionMeta collection.
@@ -2880,19 +2958,36 @@ fn pass2_emit_node_edges(
 /// Emit Pass-2 framework-ref + fanout-ref edges for one `local_graph`.
 /// Reason interning is pre-baked into `reason_cache` (see Pass 2 setup);
 /// every entry that reaches this function is guaranteed to be in the map.
+///
+/// A framework ref binds its source by endpoint (C4
+/// `RecordKind::FrameworkRef`): a module-level ref (`<module>` or no name)
+/// binds the file, and its edges go to `file_edges` for the `File` node; a
+/// named one binds [`framework_ref_source`].
+#[allow(clippy::too_many_arguments)]
 fn pass2_emit_framework_and_fanout(
     resolver: &Resolver<'_>,
     symbol_table: &SymbolTable,
     local_graph: &LocalGraph,
-    start_idx: u32,
+    raw_map: &RawIndexMap,
+    file: FileOrd,
     reason_cache: &FxHashMap<String, StrRef>,
     edges: &mut Vec<Edge>,
+    file_edges: &mut Vec<(FileOrd, Edge)>,
 ) {
     let file_path_lossy = local_graph.file_path.to_string_lossy().replace('\\', "/");
+    let start_idx = file_base(raw_map, file.0);
 
     for fw_ref in &local_graph.framework_refs {
-        let source_id = symbol_table.lookup_in_file(&file_path_lossy, &fw_ref.source_name);
-        let Some(source_id) = source_id else { continue };
+        let module_level = fw_ref.source_name.trim().is_empty()
+            || fw_ref.source_name == crate::framework_helpers::MODULE_LEVEL_SOURCE;
+        let source_id = if module_level {
+            None
+        } else {
+            let Some(slot) = framework_ref_source(&local_graph.nodes, fw_ref, raw_map, file) else {
+                continue;
+            };
+            Some(slot)
+        };
         let targets = resolver.resolve_symbol(
             &local_graph.file_path,
             &fw_ref.target_name,
@@ -2910,13 +3005,17 @@ fn pass2_emit_framework_and_fanout(
             continue;
         };
         for (target_id, _) in targets {
-            edges.push(Edge {
-                source: source_id,
+            let edge = Edge {
+                source: source_id.unwrap_or(FILE_SOURCE_PENDING),
                 target: target_id,
                 rel_type: RelType::References,
                 confidence: fw_ref.confidence,
                 reason: reason_ref,
-            });
+            };
+            match source_id {
+                Some(_) => edges.push(edge),
+                None => file_edges.push((file, edge)),
+            }
         }
     }
 
@@ -2962,6 +3061,33 @@ fn pass2_emit_framework_and_fanout(
                 });
             }
         }
+    }
+}
+
+/// The source slot of a framework ref the parser named: the smallest node so
+/// named whose span holds the ref's site (Spring names the class that holds
+/// the handler), else the one node of the file so named
+/// ([`outermost_named_slot`]; FastAPI names the module-level `app`). `None`
+/// when no node or several have the name: the ref gets no edge, never the
+/// first of several.
+fn framework_ref_source(
+    nodes: &[RawNode],
+    fw_ref: &ecp_core::analyzer::types::RawFrameworkRef,
+    raw_map: &RawIndexMap,
+    file: FileOrd,
+) -> Option<u32> {
+    let enclosing = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| {
+            n.name == fw_ref.source_name
+                && ecp_core::analyzer::types::span_contains(n.span, fw_ref.span)
+        })
+        .min_by_key(|(i, n)| (crate::framework_helpers::span_area(n.span), *i))
+        .map(|(i, _)| i);
+    match enclosing {
+        Some(i) => raw_map.node(file, RawIdx(i as u32)),
+        None => outermost_named_slot(nodes, &fw_ref.source_name, raw_map, file).ok(),
     }
 }
 
@@ -3096,6 +3222,7 @@ fn pass2_resolve_edges(
     // Collected alongside edges and promoted to ZeroCopyGraph.call_metas after
     // the final edge sort remaps pre-sort indices to sorted positions.
     let mut pending_call_metas_global: Vec<(usize, u8, String)> = Vec::new();
+    let mut file_edges: Vec<(FileOrd, Edge)> = Vec::new();
 
     let edges: Vec<Edge> = if let Some(resolver) = resolver_for_dump.as_mut() {
         // Serial dump path — original loop, with reason lookups going
@@ -3141,9 +3268,11 @@ fn pass2_resolve_edges(
                     resolver,
                     symbol_table_ref,
                     local_graph,
-                    file_base(raw_map, graph_idx as u32),
+                    raw_map,
+                    FileOrd(graph_idx as u32),
                     reason_cache_ref,
                     &mut edges,
+                    &mut file_edges,
                 );
             }
         }
@@ -3173,6 +3302,7 @@ fn pass2_resolve_edges(
                 let lexical_lookup = lexical_functions(local_graph, start_idx);
                 let mut local_edges: Vec<Edge> = Vec::new();
                 let mut local_pending: Vec<(usize, u8, String)> = Vec::new();
+                let mut local_file_edges: Vec<(FileOrd, Edge)> = Vec::new();
                 let skipped = skipped_nodes(local_graph, symbol_skip_ref);
                 for (node_offset, raw_node) in local_graph.nodes.iter().enumerate() {
                     let current_node_idx = start_idx + node_offset as u32;
@@ -3205,24 +3335,27 @@ fn pass2_resolve_edges(
                         &resolver,
                         symbol_table_ref,
                         local_graph,
-                        start_idx,
+                        raw_map,
+                        FileOrd(graph_idx as u32),
                         reason_cache_ref,
                         &mut local_edges,
+                        &mut local_file_edges,
                     );
                 }
-                (local_edges, local_pending)
+                (local_edges, local_pending, local_file_edges)
             })
             .collect();
 
         // Stitch per-graph results: compute global edge offset for each graph's
         // local_pending indices, then merge into the global pending vec.
         let mut all_edges: Vec<Edge> = Vec::new();
-        for (local_edges, local_pending) in per_graph {
+        for (local_edges, local_pending, local_file_edges) in per_graph {
             let edge_offset = all_edges.len();
             for (local_idx, flags, dispatch_type) in local_pending {
                 pending_call_metas_global.push((edge_offset + local_idx, flags, dispatch_type));
             }
             all_edges.extend(local_edges);
+            file_edges.extend(local_file_edges);
         }
         all_edges
     };
@@ -3243,7 +3376,7 @@ fn pass2_resolve_edges(
         }
     }
 
-    (edges, pending_call_metas_global)
+    (edges, pending_call_metas_global, file_edges)
 }
 
 fn write_resolver_dump(

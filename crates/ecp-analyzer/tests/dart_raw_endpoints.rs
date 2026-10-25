@@ -165,3 +165,32 @@ fn test_bind_site_dart_two_same_name_methods_each_gets_own_edge() {
         vec![("load", 7)]
     );
 }
+
+const FRAMEWORK_SRC: &str = "void flutter() {}\n\nclass Home extends StatelessWidget {}\n";
+
+/// C4 `RecordKind::FrameworkRef` (slice P7): the parser detects the
+/// framework from `StatelessWidget` anywhere in the file and writes a module-level
+/// ref (`<module>`). The ref binds the file, so its `References` edge starts
+/// at the `File` node. Before P7 the source was a name lookup of `<module>`,
+/// which no node has, and the ref was dropped. The fixture declares a
+/// callable named `flutter`, the only target the ref's name resolves to.
+#[test]
+fn test_framework_ref_module_level_binds_file() {
+    let graph = build(parse(FRAMEWORK_SRC));
+    let pool = graph.string_pool.as_slice();
+    let edges: Vec<(NodeKind, String)> = graph
+        .edges
+        .iter()
+        .filter(|e| e.rel_type == RelType::References && e.reason.resolve(pool) == "flutter-widget")
+        .map(|e| {
+            (
+                graph.nodes[e.source as usize].kind,
+                graph.nodes[e.target as usize]
+                    .name
+                    .resolve(pool)
+                    .to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(edges, vec![(NodeKind::File, "flutter".to_string())]);
+}
