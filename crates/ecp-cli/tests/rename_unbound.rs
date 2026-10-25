@@ -515,6 +515,52 @@ fn test_rename_unbound_param_shadowing_leave_unbound_keeps_parameter() {
     );
 }
 
+const TS_CTOR_SHADOW: &str =
+    "export class Foo {\n    constructor(Foo: number) {\n        console.log(Foo);\n    }\n}\n";
+const TS_MAKER: &str =
+    "import { Foo } from './foo';\nexport function make() {\n    return new Foo(1);\n}\n";
+
+/// Stands for: a constructor is no referrer of its type when it is not
+/// spelled like it. Its parameter named like the type, and that parameter's
+/// use, are another binding: the rename refuses and lists lines 2 and 3.
+/// Failed at 07966e4b: the type's constructors counted as referrers, so the
+/// parameter was rewritten silently.
+#[test]
+fn test_rename_unbound_ts_constructor_param_shadowing_type_refuses() {
+    let repo = Repo::indexed(&[("foo.ts", TS_CTOR_SHADOW), ("maker.ts", TS_MAKER)]);
+
+    let out = repo.ecp(&["rename", "Foo", "Bar", "--file", "foo.ts"]);
+
+    assert_unbound_refusal(&out);
+    assert!(lists_unbound(&out, "foo.ts", 2), "{}", stdout(&out));
+    assert!(lists_unbound(&out, "foo.ts", 3), "{}", stdout(&out));
+    assert_eq!(repo.read("foo.ts"), TS_CTOR_SHADOW);
+    assert_eq!(repo.read("maker.ts"), TS_MAKER);
+}
+
+/// Stands for: `--leave-unbound` renames the class and its construction site
+/// in another file, and keeps the shadowing constructor parameter.
+#[test]
+fn test_rename_unbound_ts_constructor_param_leave_unbound_keeps_parameter() {
+    let repo = Repo::indexed(&[("foo.ts", TS_CTOR_SHADOW), ("maker.ts", TS_MAKER)]);
+
+    let out = repo.ecp(&[
+        "rename",
+        "Foo",
+        "Bar",
+        "--file",
+        "foo.ts",
+        "--leave-unbound",
+    ]);
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        repo.read("foo.ts"),
+        TS_CTOR_SHADOW.replacen("class Foo", "class Bar", 1)
+    );
+    assert_eq!(repo.read("maker.ts"), TS_MAKER.replace("Foo", "Bar"));
+}
+
 /// Stands for: a constructor is spelled like its type, so renaming the type
 /// renames the constructor and does not refuse as an unbound namesake.
 #[test]

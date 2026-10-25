@@ -244,7 +244,10 @@ impl<'a> Binding<'a> {
         let target_name = node.name(merged);
         // Every part of a C# `partial` type is the declaration, and a
         // construction's `Calls` edge lands on a constructor of any part, so
-        // the type's referrers include its constructors' referrers.
+        // the type's referrers include its constructors' referrers. A
+        // constructor itself is no referrer: its parameters may shadow the
+        // type (`constructor(Foo: number)`); the span rule below binds a
+        // constructor spelled like the type.
         let parts = merged.partial_parts(target.node);
         let types = if parts.is_empty() {
             vec![target.node]
@@ -264,7 +267,7 @@ impl<'a> Binding<'a> {
             .flat_map(|&idx| merged.constructors_of(idx))
             .collect();
         let mut files: BTreeSet<&'a str> = spans.iter().map(|(file, _)| *file).collect();
-        let mut referrers: FxHashSet<u32> = types.iter().chain(&constructors).copied().collect();
+        let mut referrers: FxHashSet<u32> = types.iter().copied().collect();
         for edge in types
             .iter()
             .chain(&constructors)
@@ -282,7 +285,11 @@ impl<'a> Binding<'a> {
             }
             // The first overload references each later one; that edge binds
             // no call of the name, so the sibling's body is not a referrer.
-            if source.name(merged) != target_name || edge.source == target.node {
+            // A constructor chaining to another (`this(...)`) is not one
+            // either.
+            if (source.name(merged) != target_name || edge.source == target.node)
+                && !constructors.contains(&edge.source)
+            {
                 referrers.insert(edge.source);
             }
         }

@@ -113,6 +113,38 @@ fn test_rename_type_java_renames_new_site() {
     );
 }
 
+/// Stands for: a constructor that chains to another (`this(1)`) leaves both
+/// constructors spelled like the type, and the construction site follows.
+#[test]
+fn test_rename_type_java_constructor_chain_renames_all() {
+    assert_rename_rewrites_construction(
+        (
+            "Foo.java",
+            "class Foo {\n    Foo() {\n        this(1);\n    }\n    Foo(int x) {\n    }\n}\n",
+        ),
+        (
+            "Maker.java",
+            "class Maker {\n    void make() {\n        Foo f = new Foo();\n    }\n}\n",
+        ),
+    );
+}
+
+/// Stands for: a Kotlin secondary constructor chaining to the primary one
+/// (`constructor() : this(0)`) does not stop the construction site.
+#[test]
+fn test_rename_type_kotlin_secondary_constructor_renames_construction_site() {
+    assert_rename_rewrites_construction(
+        (
+            "Foo.kt",
+            "class Foo(val x: Int) {\n    constructor() : this(0) {\n    }\n}\n",
+        ),
+        (
+            "Maker.kt",
+            "class Maker {\n    fun make() {\n        val f = Foo()\n    }\n}\n",
+        ),
+    );
+}
+
 #[test]
 fn test_rename_type_kotlin_renames_construction_site() {
     assert_rename_rewrites_construction(
