@@ -15,7 +15,7 @@ use ecp_core::graph_fixture::GraphFixture;
 use ecp_core::session::MergedGraph;
 use serde_json::Value;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 /// An indexed git repo with its own cache root.
@@ -48,7 +48,9 @@ impl Repo {
     }
 
     fn write(&self, rel: &str, text: &str) {
-        fs::write(self.root.join(rel), text).unwrap();
+        let path = self.root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
     }
 
     fn read(&self, rel: &str) -> String {
@@ -56,9 +58,13 @@ impl Repo {
     }
 
     fn ecp(&self, args: &[&str]) -> Output {
+        self.ecp_in(&self.root, args)
+    }
+
+    fn ecp_in(&self, cwd: &Path, args: &[&str]) -> Output {
         Command::new(ecp_bin())
             .args(args)
-            .current_dir(&self.root)
+            .current_dir(cwd)
             .env("HOME", &self.home)
             .env_remove("ECP_HOME")
             .env_remove("CLAUDE_CODE_SESSION_ID")
@@ -259,4 +265,17 @@ fn test_rename_warm_attached_graph_refuses() {
         "{err}"
     );
     assert_eq!(repo.read("lib.rs"), "pub fn alpha() {}\n");
+}
+
+/// Stands for: graph paths are relative to the worktree top, so `rename` run
+/// from a subdirectory edits the files the graph names. Failed before: it
+/// joined them onto the cwd, read nothing and edited nothing.
+#[test]
+fn test_rename_from_subdirectory_edits_files_under_worktree_top() {
+    let repo = Repo::indexed(&[("pkg/lib.py", RUN_PY)]);
+
+    let out = repo.ecp_in(&repo.root.join("pkg"), &["rename", "run", "launch"]);
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(repo.read("pkg/lib.py"), RUN_PY_RENAMED, "{}", stdout(&out));
 }

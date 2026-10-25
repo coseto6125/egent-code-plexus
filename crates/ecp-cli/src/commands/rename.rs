@@ -457,11 +457,10 @@ fn apply_markdown_rename(
 
 pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
-    let repo_root = args
-        .repo
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+    // Graph paths are relative to the worktree top, so a run from a
+    // subdirectory (or `--repo <subdir>`) joins them onto the top, not the cwd.
+    let repo_root =
+        crate::read_context::worktree_top(args.repo.as_deref().map_or(Path::new("."), Path::new));
 
     let target_symbol = match args.symbol.as_deref().or(args.symbol_flag.as_deref()) {
         Some(s) if !s.is_empty() => s.to_string(),
