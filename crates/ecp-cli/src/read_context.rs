@@ -259,6 +259,7 @@ fn facts<'a>(
         kind: node.kind(),
         file,
         line: node.start_line(),
+        end_line: node.end_line(),
         name: node.name(merged),
         qualifier: node
             .owner_class(merged)

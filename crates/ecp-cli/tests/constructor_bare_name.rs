@@ -221,6 +221,31 @@ fn test_impact_foo_dot_foo_two_overloads_stays_ambiguous() {
     assert_eq!(payload["status"], "ambiguous", "{payload}");
 }
 
+/// Stands for: a C++ constructor defined outside its class is not owned by
+/// another same-named class of its file. Failed at 9aeb1dda: `impl.cpp`
+/// holds `A::Foo` and the definition `B::Foo::Foo()`, the constructor
+/// dropped, and the bare name selected `A::Foo` (codex counterexample).
+#[test]
+fn test_impact_bare_type_cpp_out_of_class_constructor_stays_ambiguous() {
+    let repo = Repo::indexed(&[
+        (
+            "b.hpp",
+            "namespace B {\nclass Foo { public: Foo(); };\n}\n",
+        ),
+        (
+            "impl.cpp",
+            "#include \"b.hpp\"\nnamespace A {\nclass Foo {};\n}\nnamespace B {\nFoo::Foo() {}\n}\n",
+        ),
+    ]);
+
+    let out = repo.ecp(&[
+        "impact", "Foo", "--file", "impl.cpp", "--repo", ".", "--format", "json",
+    ]);
+
+    let payload = json_of(&out);
+    assert_eq!(payload["status"], "ambiguous", "{payload}");
+}
+
 /// Stands for: `rename Foo Bar` on a class with a constructor renames the
 /// class, the constructor and the construction site in another file, and
 /// leaves an unrelated `Foo` in a third file alone. Failed before: `rename`

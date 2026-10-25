@@ -777,6 +777,8 @@ pub struct CandidateFacts<'a> {
     pub file: &'a str,
     /// 1-based start line, as every command prints it.
     pub line: u32,
+    /// 1-based end line.
+    pub end_line: u32,
     pub name: &'a str,
     /// Owner segments, then lexical parent names, outermost first. Empty
     /// for a root declaration.
@@ -1151,12 +1153,13 @@ pub fn select(request: &TargetRequest, candidates: &[CandidateFacts<'_>]) -> Vec
 
 /// A bare type name (`Foo`) selects the type over its own same-named
 /// constructors (`class Foo { Foo() {} }` in C#, Java, C++, Dart). A
-/// constructor drops only when one type of the same name sits in its file
-/// at or above its line and the constructor's owner is exactly that name:
-/// the stored owner of a constructor is the bare class name and never the
-/// enclosing path, so a second same-named type in the file leaves the
-/// owner unproven and the constructor stays. A qualifier, `--kind` or
-/// `@line` in the request says the caller wants the constructor to compete.
+/// constructor drops only when its owner is exactly that name and exactly
+/// one type of the same name encloses its line: the stored owner of a
+/// constructor is the bare class name and never the enclosing path, so the
+/// enclosing span is the proof. A constructor declared outside its class
+/// (C++ `Foo::Foo() {}`) sits in no type's span and stays. A qualifier,
+/// `--kind` or `@line` in the request says the caller wants the
+/// constructor to compete.
 fn drop_owned_constructors(
     request: &TargetRequest,
     candidates: &[CandidateFacts<'_>],
@@ -1170,7 +1173,10 @@ fn drop_owned_constructors(
             && matches!(c.qualifier.as_slice(), [owner] if owner.name == c.name && owner.impl_trait.is_none())
             && {
                 let mut types = picked.iter().map(|&i| &candidates[i]).filter(|t| {
-                    t.kind.is_type() && t.name == c.name && t.file == c.file && t.line <= c.line
+                    t.kind.is_type()
+                        && t.name == c.name
+                        && t.file == c.file
+                        && (t.line..=t.end_line).contains(&c.line)
                 });
                 types.next().is_some() && types.next().is_none()
             }
@@ -1496,6 +1502,7 @@ mod tests {
             kind,
             file,
             line,
+            end_line: line,
             name,
             qualifier,
         }
@@ -2637,22 +2644,25 @@ mod tests {
     fn class<'a>(
         node: u32,
         file: &'a str,
-        line: u32,
+        lines: (u32, u32),
         qualifier: Vec<PathSegment<'a>>,
     ) -> CandidateFacts<'a> {
-        facts(node, NodeKind::Class, file, line, qualifier, "Foo")
+        CandidateFacts {
+            end_line: lines.1,
+            ..facts(node, NodeKind::Class, file, lines.0, qualifier, "Foo")
+        }
     }
 
     #[test]
     fn test_select_bare_type_single_constructor_selects_type() {
-        let named = [class(0, "a.cs", 1, vec![]), ctor(1, "a.cs", 2)];
+        let named = [class(0, "a.cs", (1, 4), vec![]), ctor(1, "a.cs", 2)];
         assert_eq!(select(&bare("Foo"), &named), vec![0]);
     }
 
     #[test]
     fn test_select_bare_type_two_overloads_both_drop() {
         let named = [
-            class(0, "a.cs", 1, vec![seg("N")]),
+            class(0, "a.cs", (1, 4), vec![seg("N")]),
             ctor(1, "a.cs", 2),
             ctor(2, "a.cs", 3),
         ];
@@ -2662,28 +2672,47 @@ mod tests {
     #[test]
     fn test_select_bare_nested_type_selects_nested_type() {
         let named = [
-            class(0, "a.java", 2, vec![seg("Outer")]),
+            class(0, "a.java", (2, 5), vec![seg("Outer")]),
             ctor(1, "a.java", 3),
         ];
         assert_eq!(select(&bare("Foo"), &named), vec![0]);
     }
 
     #[test]
-    fn test_select_bare_two_types_one_file_keeps_constructor() {
+    fn test_select_bare_two_types_one_file_drops_enclosed_constructor() {
         let named = [
-            class(0, "a.java", 1, vec![]),
-            class(1, "a.java", 5, vec![seg("Outer")]),
+            class(0, "a.java", (1, 4), vec![]),
+            class(1, "a.java", (5, 8), vec![seg("Outer")]),
             ctor(2, "a.java", 6),
         ];
-        assert_eq!(select(&bare("Foo"), &named), vec![0, 1, 2]);
+        assert_eq!(select(&bare("Foo"), &named), vec![0, 1]);
+    }
+
+    /// Stands for: a constructor declared outside its class encloses in no
+    /// same-file type, so it keeps competing. Failed before: C++
+    /// `namespace B { Foo::Foo() {} }` below `namespace A { class Foo {}; }`
+    /// dropped and the bare name selected `A::Foo`.
+    #[test]
+    fn test_select_bare_out_of_class_constructor_stays() {
+        let named = [
+            class(0, "impl.cpp", (3, 3), vec![seg("A")]),
+            ctor(1, "impl.cpp", 6),
+        ];
+        assert_eq!(select(&bare("Foo"), &named), vec![0, 1]);
+    }
+
+    #[test]
+    fn test_select_bare_type_below_constructor_keeps_constructor() {
+        let named = [ctor(0, "impl.cpp", 2), class(1, "impl.cpp", (5, 8), vec![])];
+        assert_eq!(select(&bare("Foo"), &named), vec![0, 1]);
     }
 
     #[test]
     fn test_select_bare_same_named_types_two_files_stay_ambiguous() {
         let named = [
-            class(0, "a.cs", 1, vec![]),
+            class(0, "a.cs", (1, 4), vec![]),
             ctor(1, "a.cs", 2),
-            class(2, "b.cs", 1, vec![]),
+            class(2, "b.cs", (1, 4), vec![]),
             ctor(3, "b.cs", 2),
         ];
         assert_eq!(select(&bare("Foo"), &named), vec![0, 2]);
@@ -2692,7 +2721,7 @@ mod tests {
     #[test]
     fn test_select_bare_unrelated_function_namesake_stays_ambiguous() {
         let named = [
-            class(0, "a.cs", 1, vec![]),
+            class(0, "a.cs", (1, 4), vec![]),
             ctor(1, "a.cs", 2),
             facts(2, NodeKind::Function, "b.py", 1, vec![], "Foo"),
         ];
@@ -2701,14 +2730,14 @@ mod tests {
 
     #[test]
     fn test_select_bare_constructor_in_other_file_than_type_stays() {
-        let named = [class(0, "foo.h", 1, vec![]), ctor(1, "foo.cpp", 2)];
+        let named = [class(0, "foo.h", (1, 4), vec![]), ctor(1, "foo.cpp", 2)];
         assert_eq!(select(&bare("Foo"), &named), vec![0, 1]);
     }
 
     #[test]
     fn test_select_bare_constructor_with_unrecorded_owner_stays() {
         let named = [
-            class(0, "a.cs", 1, vec![]),
+            class(0, "a.cs", (1, 4), vec![]),
             facts(1, NodeKind::Constructor, "a.cs", 2, vec![], "Foo"),
         ];
         assert_eq!(select(&bare("Foo"), &named), vec![0, 1]);
@@ -2717,7 +2746,7 @@ mod tests {
     #[test]
     fn test_select_constructor_owned_by_other_name_stays() {
         let named = [
-            class(0, "a.cs", 1, vec![]),
+            class(0, "a.cs", (1, 4), vec![]),
             facts(1, NodeKind::Constructor, "a.cs", 2, vec![seg("Bar")], "Foo"),
         ];
         assert_eq!(select(&bare("Foo"), &named), vec![0, 1]);
@@ -2726,7 +2755,7 @@ mod tests {
     #[test]
     fn test_select_explicit_kind_constructor_keeps_overloads() {
         let named = [
-            class(0, "a.cs", 1, vec![]),
+            class(0, "a.cs", (1, 4), vec![]),
             ctor(1, "a.cs", 2),
             ctor(2, "a.cs", 3),
         ];
@@ -2737,7 +2766,7 @@ mod tests {
     #[test]
     fn test_select_line_selector_reaches_constructor() {
         let named = [
-            class(0, "a.cs", 1, vec![]),
+            class(0, "a.cs", (1, 4), vec![]),
             ctor(1, "a.cs", 2),
             ctor(2, "a.cs", 3),
         ];
@@ -2748,7 +2777,7 @@ mod tests {
     #[test]
     fn test_select_qualified_foo_foo_keeps_overload_ambiguity() {
         let named = [
-            class(0, "a.cs", 1, vec![]),
+            class(0, "a.cs", (1, 4), vec![]),
             ctor(1, "a.cs", 2),
             ctor(2, "a.cs", 3),
         ];
@@ -2758,7 +2787,7 @@ mod tests {
     #[test]
     fn test_resolve_target_bare_type_with_constructor_is_unique_and_ctor_reusable() {
         let named = [
-            class(0, "a.cs", 1, vec![]),
+            class(0, "a.cs", (1, 4), vec![]),
             ctor(1, "a.cs", 2),
             ctor(2, "a.cs", 3),
         ];
