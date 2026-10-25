@@ -1,9 +1,9 @@
 use crate::commands::format::{node_kind_to_str, rel_type_to_str};
 use crate::engine::Engine;
 use crate::output::{emit_with_caveat, OutputFormat};
-use crate::read_context::{named_declarations, shell_word, target_request, text_only_target};
+use crate::read_context::{ambiguity_candidates, named_declarations, shell_word, target_request};
 use clap::Args;
-use ecp_core::contracts::identity::{resolve_target, select, TargetResolution};
+use ecp_core::contracts::identity::{resolve_target, select, Ambiguity, TargetResolution};
 use ecp_core::file_category::is_test_path;
 use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use ecp_core::session::{MergedGraph, MergedNode};
@@ -30,15 +30,31 @@ pub struct InspectArgs {
     #[arg(long)]
     pub format: Option<OutputFormat>,
 
-    /// Comma-separated list of node kinds (lowercase, e.g. `function,method`)
-    /// to keep on the *target* side of incoming/outgoing edges.
+    /// The kind of the declaration to inspect, one kind only (for example
+    /// `function`, `method`, `impl`). The command selects only the
+    /// declarations of this kind. A comma-separated list is an error. To keep
+    /// only neighbours of some kinds, use `--neighbor-kind`.
     #[arg(long)]
     pub kind: Option<String>,
 
-    /// Substring filter applied to the target file path of incoming/outgoing
-    /// edges. Case-sensitive substring match (not glob).
+    /// The file of the declaration to inspect: a path or a part of a path.
+    /// The command selects the declarations in the best match: the equal
+    /// path, then a path that ends with `/<FILE>`, then a path that holds
+    /// `<FILE>`. To keep only neighbours in some files, use `--neighbor-file`.
     #[arg(long = "file", alias = "file_path", alias = "file-path")]
     pub file_path: Option<String>,
+
+    /// Comma-separated node kinds (lowercase, for example `function,method`).
+    /// The output keeps only the edges whose other end has one of these
+    /// kinds. This flag does not change which declaration the command selects.
+    #[arg(long = "neighbor-kind", alias = "neighbor_kind")]
+    pub neighbor_kind: Option<String>,
+
+    /// A part of a path (case-sensitive, not a glob). The output keeps only
+    /// the edges whose other end is in a file whose path holds this text.
+    /// This flag does not change which declaration the command selects.
+    #[arg(long = "neighbor-file", alias = "neighbor_file")]
+    pub neighbor_file: Option<String>,
 
     /// Comma-separated list of relation types (lowercase, e.g. `calls,imports`).
     #[arg(long = "relation_types", alias = "relation-types")]
@@ -103,8 +119,10 @@ const EDGE_SECTIONS: [&str; 4] = [
 /// result — each is a `{rel_type: [{name, kind, filePath, ...}, ...]}` map.
 ///
 /// Fields removed (when constant):
-/// - `tier`: always `"unresolved"` pre-T4-7; dropping saves ~20 bytes/edge
-/// - `checks`: always `{}` pre-T4-7; empty object adds token noise without signal
+/// - `tier`: when it is the default `"unresolved"` (every edge pre-T4-7);
+///   dropping saves ~20 bytes/edge
+/// - `checks`: when it is the default `{}`; an edge whose value differs
+///   keeps its own copy
 /// - `ownerClass`: dropped when every entry across ALL edge sections has
 ///   `ownerClass: null`; when any entry has a non-null ownerClass the column
 ///   is kept because the LLM needs it to distinguish method callers
@@ -133,15 +151,18 @@ fn strip_edge_boilerplate(result: &mut serde_json::Value) {
             .unwrap_or(false)
     });
 
+    let defaults = edge_defaults();
     for &key in &section_keys {
         if let Some(section) = result.get_mut(key).and_then(|s| s.as_object_mut()) {
             for entries in section.values_mut() {
                 if let Some(arr) = entries.as_array_mut() {
                     for entry in arr.iter_mut() {
                         if let Some(obj) = entry.as_object_mut() {
-                            // Always drop: constant sentinel values.
-                            obj.remove("tier");
-                            obj.remove("checks");
+                            for field in ["tier", "checks"] {
+                                if obj.get(field) == defaults.get(field) {
+                                    obj.remove(field);
+                                }
+                            }
                             // Conditional: only drop when the column is all-null.
                             if !any_non_null_owner {
                                 obj.remove("ownerClass");
@@ -164,88 +185,37 @@ fn strip_edge_boilerplate(result: &mut serde_json::Value) {
     }
 }
 
-/// Per-edge values that never vary today (see `build_inspect_block`). JSON
-/// keeps them once at the top level of an ambiguous result instead of on every
-/// edge of every match; an edge whose value differs keeps its own copy.
+/// Per-edge values that never vary today (see `build_inspect_block`). The
+/// toon/llm output drops a field that holds its default; an edge whose value
+/// differs keeps its own copy.
 fn edge_defaults() -> serde_json::Value {
     serde_json::json!({ "tier": "unresolved", "checks": {} })
 }
 
-fn hoist_edge_defaults(block: &mut serde_json::Value) {
-    let defaults = edge_defaults();
-    for key in EDGE_SECTIONS {
-        let Some(section) = block.get_mut(key).and_then(|s| s.as_object_mut()) else {
-            continue;
-        };
-        for entry in section
-            .values_mut()
-            .filter_map(|v| v.as_array_mut())
-            .flatten()
-        {
-            let Some(obj) = entry.as_object_mut() else {
-                continue;
-            };
-            for field in ["tier", "checks"] {
-                if obj.get(field) == defaults.get(field) {
-                    obj.remove(field);
-                }
-            }
-        }
-    }
-}
-
-/// An ambiguous result repeats a block per match, so a match keeps only the
-/// sections that hold something; the result's message says an absent section is
-/// empty. The unambiguous result keeps every key, so a caller reading one symbol
-/// finds a stable shape.
-fn drop_empty_sections(block: &mut serde_json::Value) {
-    let Some(obj) = block.as_object_mut() else {
-        return;
-    };
-    obj.retain(|key, value| {
-        key == "symbol"
-            || match value {
-                serde_json::Value::Array(a) => !a.is_empty(),
-                serde_json::Value::Object(o) => !o.is_empty(),
-                _ => true,
-            }
-    });
-}
-
-/// Ambiguous result: every match as a full block. `--file` / `--kind` filter a
-/// block's neighbours, not the match list, so the hint names what does narrow it.
+/// Ambiguous result: the candidates only (C1 "Typed target result"). It holds
+/// no inspect block and no neighbourhood section, so an agent cannot carry one
+/// declaration's callers into a conclusion about another. `total` is the true
+/// candidate count; each candidate's `target` selects it alone.
 fn ambiguous_result(
-    mut blocks: Vec<serde_json::Value>,
+    ambiguity: &Ambiguity,
     name: &str,
     omitted_kinds: serde_json::Map<String, serde_json::Value>,
-    json: bool,
 ) -> serde_json::Value {
     let message = format!(
-        "Found {} symbols matching '{}'. --file and --kind filter neighbours, not the match. \
-         Re-run `ecp inspect <matches[].target>` to inspect one match. \
-         A match with a null target has no target text that selects it alone; \
-         read its filePath and startLine. A section a match omits is empty.",
-        blocks.len(),
+        "Found {} declarations matching '{}'. This answer lists candidates only and \
+         evaluates no neighbours. To inspect one, run `ecp inspect <candidates[].target>`. \
+         A candidate with a null target has no target text or filter that selects it \
+         alone: read its filePath and line.",
+        ambiguity.total(),
         name,
     );
-    for block in &mut blocks {
-        if json {
-            hoist_edge_defaults(block);
-        } else {
-            strip_edge_boilerplate(block);
-        }
-        drop_empty_sections(block);
-    }
-    let mut result = serde_json::json!({
+    serde_json::json!({
         "status": "ambiguous",
         "message": message,
-        "matches": blocks,
+        "total": ambiguity.total(),
+        "candidates": ambiguity_candidates(ambiguity),
         "omitted_kinds": omitted_kinds,
-    });
-    if json {
-        result["edge_defaults"] = edge_defaults();
-    }
-    result
+    })
 }
 
 /// Build the full inspect payload for a single merged-space node index.
@@ -636,56 +606,63 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
     }
 
     let name = name_query.unwrap();
-    // `--kind` and `--file` filter a block's neighbours, not the target, so
-    // only the target text narrows it.
-    let request = target_request(name, None, None)?;
+    // `--kind` and `--file` select the target (C1 "Target request syntax");
+    // `--neighbor-kind` and `--neighbor-file` filter its neighbours.
+    let request = target_request(name, args.kind.as_deref(), args.file_path.as_deref())
+        .map_err(|e| with_neighbor_kind_hint(e, args.kind.as_deref()))?;
+    let kind_filter = neighbor_kinds(args.neighbor_kind.as_deref())?;
 
     // Clean queries must not initialize a view or scan the graph for a delta.
     let view = engine.overlay_dir().and_then(|_| engine.overlay_view());
     let merged = MergedGraph::new(graph, view);
 
     let mut named = named_declarations(&merged, request.name());
+    let mut omitted_kinds: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
     // C1 Open point 12: when a primary type (Struct / Class / Enum / Trait /
     // Interface) matches, drop the `Impl` nodes of that name first, so
     // `inspect --name Foo` returns the struct, not "ambiguous". This is the
-    // canonical Rust pattern: `struct Foo` + `impl Foo { ... }`.
-    let picked = select(&request, &named);
-    let has_primary_type = picked.iter().any(|&i| {
-        matches!(
-            named[i].kind,
-            NodeKind::Struct
-                | NodeKind::Class
-                | NodeKind::Enum
-                | NodeKind::Trait
-                | NodeKind::Interface
-        )
-    });
-    let mut omitted_kinds: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
-    let impl_count = picked
-        .iter()
-        .filter(|&&i| named[i].kind == NodeKind::Impl)
-        .count();
-    if has_primary_type && impl_count > 0 {
-        named.retain(|c| c.kind != NodeKind::Impl);
-        omitted_kinds.insert(
-            node_kind_to_str(&NodeKind::Impl).to_string(),
-            serde_json::json!(impl_count),
-        );
+    // canonical Rust pattern: `struct Foo` + `impl Foo { ... }`. An explicit
+    // `--kind` wins: `inspect Foo --kind impl` keeps the `Impl` node.
+    if request.kind().is_none() {
+        let picked = select(&request, &named);
+        let has_primary_type = picked.iter().any(|&i| {
+            matches!(
+                named[i].kind,
+                NodeKind::Struct
+                    | NodeKind::Class
+                    | NodeKind::Enum
+                    | NodeKind::Trait
+                    | NodeKind::Interface
+            )
+        });
+        let impl_count = picked
+            .iter()
+            .filter(|&&i| named[i].kind == NodeKind::Impl)
+            .count();
+        if has_primary_type && impl_count > 0 {
+            named.retain(|c| c.kind != NodeKind::Impl);
+            omitted_kinds.insert(
+                node_kind_to_str(&NodeKind::Impl).to_string(),
+                serde_json::json!(impl_count),
+            );
+            eprintln!(
+                "note: {impl_count} Impl node(s) omitted (primary type matched); use `--kind impl` to inspect one"
+            );
+        }
     }
 
-    let matching_nodes: Vec<(u32, Option<String>)> = match resolve_target(&request, &named) {
-        TargetResolution::Unique(c) => vec![(c.node, None)],
-        TargetResolution::Ambiguous(a) => a
-            .candidates()
-            .iter()
-            .map(|c| (c.node, text_only_target(c, &named)))
-            .collect(),
+    let node_idx = match resolve_target(&request, &named) {
+        TargetResolution::Unique(c) => c.node,
+        TargetResolution::Ambiguous(a) => {
+            let result = ambiguous_result(&a, name, omitted_kinds);
+            return emit_with_caveat(&result, format, engine.caveat());
+        }
         TargetResolution::NotFound { named: n } => {
             let mut message = format!("Symbol '{name}' not found.");
             if n > 0 {
                 message.push_str(&format!(
-                    " {n} declaration(s) named '{}' exist, but none matches the owner or \
-                     @line of the target. Re-run `ecp inspect {}` to list them.",
+                    " {n} declaration(s) named '{}' exist, but none matches the owner, \
+                     @line, --kind or --file of the target. Re-run `ecp inspect {}` to list them.",
                     request.name(),
                     shell_word(request.name()),
                 ));
@@ -695,103 +672,95 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
         }
     };
 
-    // Pre-parse filters once.
-    let kind_filter = parse_csv_lower(args.kind.as_deref());
+    // Pre-parse the neighbour filters once.
     let rel_filter = parse_csv_lower(args.relation_types.as_deref());
-    let file_substr = args.file_path.as_deref().filter(|s| !s.is_empty());
+    let file_substr = args
+        .neighbor_file
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
 
-    if let [(node_idx, None)] = matching_nodes.as_slice() {
-        let block = build_inspect_block(
-            &merged,
-            *node_idx,
-            &kind_filter,
-            &rel_filter,
-            file_substr,
-            args.include_tests,
-        );
-        let mut result = serde_json::json!({
-            "status": "found",
-            "symbol": block["symbol"],
-            "incoming": block["incoming"],
-            "outgoing": block["outgoing"],
-            "processes": [],
-            "blind_spots": block["blind_spots"],
-            "impact_upstream_1hop": block["impact_upstream_1hop"],
-            "contained_methods": block["contained_methods"],
-            "contained_properties": block["contained_properties"],
-            "contained_variants": block["contained_variants"],
-            "omitted_kinds": omitted_kinds,
-        });
-        if block.get("heuristic_note").is_some() {
-            let obj = result.as_object_mut().unwrap();
-            obj.insert(
-                "heuristic_outgoing".to_string(),
-                block["heuristic_outgoing"].clone(),
-            );
-            obj.insert(
-                "heuristic_incoming".to_string(),
-                block["heuristic_incoming"].clone(),
-            );
-            obj.insert(
-                "heuristic_note".to_string(),
-                block["heuristic_note"].clone(),
-            );
-        }
-        if let Some(note) = block.get("field_readers_note") {
-            result
-                .as_object_mut()
-                .unwrap()
-                .insert("field_readers_note".to_string(), note.clone());
-        }
-        if !omitted_kinds.is_empty() {
-            let impl_n = omitted_kinds
-                .get("Impl")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            eprintln!(
-                "note: {impl_n} Impl node(s) omitted (primary type matched); use `ecp cypher` to query implementors"
-            );
-        }
-        if !matches!(format, OutputFormat::Json) {
-            strip_edge_boilerplate(&mut result);
-        }
-        return emit_with_caveat(&result, format, engine.caveat());
-    }
-
-    // Ambiguous: every match as a full block, each with the target text that
-    // selects it alone.
-    let blocks: Vec<serde_json::Value> = matching_nodes
-        .iter()
-        .map(|(node_idx, target)| {
-            let mut block = build_inspect_block(
-                &merged,
-                *node_idx,
-                &kind_filter,
-                &rel_filter,
-                file_substr,
-                args.include_tests,
-            );
-            block["target"] = serde_json::json!(target);
-            block
-        })
-        .collect();
-
-    if !omitted_kinds.is_empty() {
-        let impl_n = omitted_kinds
-            .get("Impl")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        eprintln!(
-            "note: {impl_n} Impl node(s) omitted (primary type matched); use `ecp cypher` to query implementors"
-        );
-    }
-    let result = ambiguous_result(
-        blocks,
-        name,
-        omitted_kinds,
-        matches!(format, OutputFormat::Json),
+    let block = build_inspect_block(
+        &merged,
+        node_idx,
+        &kind_filter,
+        &rel_filter,
+        file_substr,
+        args.include_tests,
     );
+    let mut result = serde_json::json!({
+        "status": "found",
+        "symbol": block["symbol"],
+        "incoming": block["incoming"],
+        "outgoing": block["outgoing"],
+        "processes": [],
+        "blind_spots": block["blind_spots"],
+        "impact_upstream_1hop": block["impact_upstream_1hop"],
+        "contained_methods": block["contained_methods"],
+        "contained_properties": block["contained_properties"],
+        "contained_variants": block["contained_variants"],
+        "omitted_kinds": omitted_kinds,
+    });
+    if block.get("heuristic_note").is_some() {
+        let obj = result.as_object_mut().unwrap();
+        obj.insert(
+            "heuristic_outgoing".to_string(),
+            block["heuristic_outgoing"].clone(),
+        );
+        obj.insert(
+            "heuristic_incoming".to_string(),
+            block["heuristic_incoming"].clone(),
+        );
+        obj.insert(
+            "heuristic_note".to_string(),
+            block["heuristic_note"].clone(),
+        );
+    }
+    if let Some(note) = block.get("field_readers_note") {
+        result
+            .as_object_mut()
+            .unwrap()
+            .insert("field_readers_note".to_string(), note.clone());
+    }
+    if !matches!(format, OutputFormat::Json) {
+        strip_edge_boilerplate(&mut result);
+    }
     emit_with_caveat(&result, format, engine.caveat())
+}
+
+/// `--neighbor-kind` as the lowercase display names the edge filter compares
+/// against. An unknown kind is an error: it would empty every section.
+fn neighbor_kinds(raw: Option<&str>) -> Result<Option<Vec<String>>, EcpError> {
+    parse_csv_lower(raw)
+        .map(|kinds| {
+            kinds
+                .iter()
+                .map(|k| {
+                    k.parse::<NodeKind>()
+                        .map(|kind| kind.as_str().to_ascii_lowercase())
+                        .map_err(|()| {
+                            EcpError::InvalidArgument(format!(
+                                "--neighbor-kind \"{k}\" is not a node kind"
+                            ))
+                        })
+                })
+                .collect()
+        })
+        .transpose()
+}
+
+/// `--kind` takes one declaration kind. A list there is most often the old
+/// neighbour filter, so the error names the flag that now carries it.
+fn with_neighbor_kind_hint(e: EcpError, kind: Option<&str>) -> EcpError {
+    match (e, kind) {
+        (EcpError::InvalidArgument(msg), Some(k)) if k.contains(',') => {
+            EcpError::InvalidArgument(format!(
+                "{msg}. To keep only neighbours of these kinds, write `--neighbor-kind {}`",
+                shell_word(k.trim()),
+            ))
+        }
+        (e, _) => e,
+    }
 }
 
 #[cfg(test)]
@@ -1090,7 +1059,7 @@ mod tests {
         });
     }
 
-    /// The `--file` filter applies to a virtual node's edges like any other.
+    /// The `--neighbor-file` filter applies to a virtual node's edges like any other.
     #[test]
     fn test_build_inspect_block_virtual_twin_file_filter_drops_unmatched_edges() {
         with_dirty_view(|merged| {
@@ -1235,82 +1204,123 @@ mod tests {
         })
     }
 
-    #[test]
-    fn test_ambiguous_result_hint_does_not_point_at_neighbour_filters() {
-        let r = ambiguous_result(
-            vec![block_with_edge("Foo")],
-            "validate",
-            Default::default(),
-            true,
-        );
-        let msg = r["message"].as_str().unwrap();
-        assert!(!msg.contains("to disambiguate"), "{msg}");
-        assert!(msg.contains("matches[].target"), "{msg}");
-    }
-
-    #[test]
-    fn test_ambiguous_result_json_hoists_constant_edge_keys_once() {
-        let r = ambiguous_result(
-            vec![block_with_edge("Foo")],
-            "validate",
-            Default::default(),
-            true,
-        );
-        assert_eq!(r["edge_defaults"], edge_defaults());
-        let calls = &r["matches"][0]["incoming"]["calls"];
-        assert!(calls[0].get("tier").is_none() && calls[0].get("checks").is_none());
-        // A non-default edge keeps its own values, and the symbol keeps ownerClass.
-        assert_eq!(calls[1]["tier"], "verified");
-        assert_eq!(calls[1]["checks"], serde_json::json!({"x": true}));
-        assert_eq!(r["matches"][0]["symbol"]["ownerClass"], "Foo");
-    }
-
-    #[test]
-    fn test_ambiguous_result_toon_has_no_edge_defaults_key() {
-        let r = ambiguous_result(
-            vec![block_with_edge("Foo")],
-            "validate",
-            Default::default(),
-            false,
-        );
-        assert!(r.get("edge_defaults").is_none());
-    }
-
-    /// Contract: an ambiguous match lists what it has. An empty section carries
-    /// no fact an agent can use, and the message tells the reader that an absent
-    /// section is empty.
-    #[test]
-    fn test_ambiguous_result_match_omits_empty_sections_and_says_so() {
-        let mut block = block_with_edge("Foo");
-        block["blind_spots"] = serde_json::json!([]);
-        block["impact_upstream_1hop"] = serde_json::json!([{"name": "c"}]);
-        block["contained_methods"] = serde_json::json!([]);
-        for json in [true, false] {
-            let r = ambiguous_result(vec![block.clone()], "validate", Default::default(), json);
-            let m = r["matches"][0].as_object().unwrap();
-            for gone in ["outgoing", "blind_spots", "contained_methods"] {
-                assert!(!m.contains_key(gone), "json={json} {gone}: {m:?}");
-            }
-            for kept in ["symbol", "incoming", "impact_upstream_1hop"] {
-                assert!(m.contains_key(kept), "json={json} {kept}: {m:?}");
-            }
-            assert!(
-                r["message"].as_str().unwrap().contains("omits is empty"),
-                "{r}"
-            );
+    /// The ambiguity of the bare name `validate` in `validate_graph`.
+    fn validate_ambiguity() -> Ambiguity {
+        let bytes = archive(&validate_graph());
+        let merged = MergedGraph::new(access(&bytes), None);
+        let request = target_request("validate", None, None).unwrap();
+        match resolve_target(&request, &named_declarations(&merged, "validate")) {
+            TargetResolution::Ambiguous(a) => a,
+            other => panic!("expected an ambiguity, got {other:?}"),
         }
     }
 
+    /// Stands for: the hint names the field that selects one candidate
+    /// (`candidates[].target`) and says that neighbours were not evaluated,
+    /// so an absent section never reads as "no callers".
     #[test]
-    fn test_edge_sections_are_the_keys_hoisting_and_stripping_visit() {
+    fn test_ambiguous_result_hint_points_at_candidate_targets() {
+        let r = ambiguous_result(&validate_ambiguity(), "validate", Default::default());
+        let msg = r["message"].as_str().unwrap();
+        assert!(msg.contains("candidates[].target"), "{msg}");
+        assert!(msg.contains("evaluates no neighbours"), "{msg}");
+        assert!(!msg.contains("matches[]"), "{msg}");
+        assert!(!msg.contains("omits is empty"), "{msg}");
+    }
+
+    /// Stands for: C1 "Typed target result" for inspect. The payload is the
+    /// status, the true count and one re-runnable target per candidate; it
+    /// holds no inspect block and no neighbourhood section.
+    #[test]
+    fn test_ambiguous_result_lists_candidates_without_blocks() {
+        let r = ambiguous_result(&validate_ambiguity(), "validate", Default::default());
+        let mut keys: Vec<&str> = r.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["candidates", "message", "omitted_kinds", "status", "total"]
+        );
+        assert_eq!(r["status"], "ambiguous");
+        assert_eq!(r["total"], 2);
+        let facts: Vec<(&str, &str, &str)> = r["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["filePath"].as_str().unwrap(),
+                    c["kind"].as_str().unwrap(),
+                    c["target"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            facts,
+            [
+                ("src/foo.py", "Method", "Foo.validate"),
+                ("src/bar.py", "Method", "Bar.validate"),
+            ]
+        );
+    }
+
+    /// Stands for: the toon/llm compression drops only the default `tier` and
+    /// `checks` of an edge. A non-default value, and the symbol's owner,
+    /// reach the reader of the one selected declaration.
+    #[test]
+    fn test_strip_edge_boilerplate_keeps_non_default_edge_values() {
+        let mut block = block_with_edge("Foo");
+        strip_edge_boilerplate(&mut block);
+        let calls = &block["incoming"]["calls"];
+        assert!(calls[0].get("tier").is_none() && calls[0].get("checks").is_none());
+        assert_eq!(calls[1]["tier"], "verified");
+        assert_eq!(calls[1]["checks"], serde_json::json!({"x": true}));
+        assert_eq!(block["symbol"]["ownerClass"], "Foo");
+        assert_eq!(edge_defaults()["tier"], "unresolved");
+    }
+
+    #[test]
+    fn test_edge_sections_are_the_keys_stripping_visits() {
         let mut block = serde_json::json!({});
         for key in EDGE_SECTIONS {
             block[key] =
                 serde_json::json!({"calls": [{"name": "c", "tier": "unresolved", "checks": {}}]});
         }
-        hoist_edge_defaults(&mut block);
+        strip_edge_boilerplate(&mut block);
         for key in EDGE_SECTIONS {
             assert!(block[key]["calls"][0].get("tier").is_none(), "{key}");
+            assert!(block[key]["calls"][0].get("checks").is_none(), "{key}");
         }
+    }
+
+    /// Stands for: a list in `--kind` is the old neighbour filter. The error
+    /// names `--neighbor-kind` so the agent moves the list there.
+    /// Stands for: `--neighbor-kind` accepts every spelling `NodeKind`
+    /// parses and compares against the display name, so `enum_variant`
+    /// keeps EnumVariant neighbours; an unknown kind fails instead of
+    /// emptying every section.
+    #[test]
+    fn test_neighbor_kinds_parses_spellings_and_rejects_unknown() {
+        assert_eq!(
+            neighbor_kinds(Some("enum_variant, Function")).unwrap(),
+            Some(vec!["enumvariant".to_string(), "function".to_string()])
+        );
+        assert_eq!(neighbor_kinds(Some(" , ")).unwrap(), None);
+        assert_eq!(neighbor_kinds(None).unwrap(), None);
+        let err = neighbor_kinds(Some("function,banana"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("\"banana\" is not a node kind"), "{err}");
+    }
+
+    #[test]
+    fn test_with_neighbor_kind_hint_list_kind_names_neighbor_flag() {
+        let kind = Some("function,method");
+        let e = target_request("caller", kind, None).unwrap_err();
+        let msg = with_neighbor_kind_hint(e, kind).to_string();
+        assert!(msg.contains("--neighbor-kind function,method"), "{msg}");
+        let e = target_request("caller", Some("banana"), None).unwrap_err();
+        let msg = with_neighbor_kind_hint(e, Some("banana")).to_string();
+        assert!(!msg.contains("--neighbor-kind"), "{msg}");
+        assert!(msg.contains("banana"), "{msg}");
     }
 }

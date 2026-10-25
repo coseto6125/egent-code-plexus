@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use ecp_core::contracts::dirty_event::{ClassifiedPath, DirtySet, SkipReason};
 use ecp_core::contracts::identity::{
     self, Ambiguity, Candidate, CandidateFacts, PathSegment, TargetRequest, TargetResolution,
+    TargetSyntaxError,
 };
 use ecp_core::contracts::routing::SizeCap;
 use ecp_core::session::{MergedGraph, MergedNode};
@@ -206,10 +207,15 @@ pub fn target_request(
         s.map(str::trim).filter(|s| !s.is_empty())
     }
     TargetRequest::parse(text, present(kind), present(file)).map_err(|e| {
-        EcpError::InvalidArgument(format!(
-            "target {text:?}: {e}. Write a name that holds `.`, `::`, `<`, `>` or `@` \
-             in backticks, for example `` `<anonymous:3:4>` ``"
-        ))
+        EcpError::InvalidArgument(match e {
+            TargetSyntaxError::UnknownKind(k) => format!(
+                "--kind {k:?} is not one node kind. Write one kind, for example `--kind method`"
+            ),
+            e => format!(
+                "target {text:?}: {e}. Write a name that holds `.`, `::`, `<`, `>` or `@` \
+                 in backticks, for example `` `<anonymous:3:4>` ``"
+            ),
+        })
     })
 }
 
@@ -298,27 +304,6 @@ pub fn target_args(request: &TargetRequest) -> String {
         out.push_str(&node_kind_to_str(&kind).to_ascii_lowercase());
     }
     out
-}
-
-/// A target text, as one shell word, that selects `c` alone among `named`
-/// with no `--file` and no `--kind`, for a command whose filters do not
-/// narrow the target (`inspect`): the reusable request when it needs neither,
-/// else the qualified name at its line. `None` when the text alone cannot
-/// separate it.
-pub fn text_only_target(c: &Candidate, named: &[CandidateFacts<'_>]) -> Option<String> {
-    if let Some(r) = c
-        .reusable
-        .as_ref()
-        .filter(|r| r.file().is_none() && r.kind().is_none())
-    {
-        return Some(shell_word(&r.render()));
-    }
-    let text = format!("{}@{}", c.display, c.line);
-    let request = TargetRequest::parse(&text, None, None).ok()?;
-    match identity::select(&request, named).as_slice() {
-        [one] if named[*one].node == c.node => Some(shell_word(&text)),
-        _ => None,
-    }
 }
 
 /// `word` as one shell word: single-quoted when it is empty or holds a

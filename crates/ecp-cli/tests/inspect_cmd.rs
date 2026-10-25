@@ -1,6 +1,8 @@
-//! Integration tests for `ecp inspect` flag surface (kind / file_path /
-//! relation_types / include_tests filtering, ambiguous-match full blocks,
-//! upstream impact summary, no UID in output).
+//! Integration tests for `ecp inspect` flag surface: `--kind` / `--file`
+//! select the target, `--neighbor-kind` / `--neighbor-file` /
+//! `--relation_types` / `--include_tests` filter its neighbours, an ambiguous
+//! name lists re-runnable candidates, upstream impact summary, no UID in
+//! output.
 
 mod common;
 
@@ -70,6 +72,8 @@ fn inspect_accepts_name_positional() {
 fn inspect_ambiguous_name_disambiguated_by_file_path() {
     // Two functions named `handler` in different files — `--name handler` is
     // ambiguous; `--file_path src/auth/` must narrow it to the auth handler.
+    // Contract: `src/auth/login.ts` stands for the declaration `--file_path`
+    // selects (C1 target filter), not a neighbour path.
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
     write(
@@ -101,34 +105,11 @@ fn inspect_ambiguous_name_disambiguated_by_file_path() {
             "json",
         ],
     );
-    // May return "found" (single match after filter applied to nodes) or
-    // "ambiguous" with one match; either way the auth file must appear.
-    let status = exact["status"].as_str().unwrap_or("");
-    assert!(
-        status == "found" || status == "ambiguous",
-        "unexpected status: {exact}"
-    );
-    if status == "found" {
-        assert!(
-            exact["symbol"]["filePath"]
-                .as_str()
-                .unwrap_or("")
-                .contains("src/auth/login.ts"),
-            "wrong file: {exact}"
-        );
-    }
+    assert_eq!(exact["status"], "found", "{exact}");
+    assert_eq!(exact["symbol"]["filePath"], "src/auth/login.ts", "{exact}");
 }
 
-#[test]
-fn inspect_kind_filter_drops_non_matching_edges() {
-    // `caller()` calls `Helper` (Class), `Helper().assist()` (Function), and
-    // `target_fn` (Function). `--kind function` must drop the Class target.
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path();
-    write(
-        repo,
-        "src/lib.py",
-        r#"class Helper:
+const KIND_FIXTURE: &str = r#"class Helper:
     def assist(self):
         return 1
 
@@ -139,19 +120,62 @@ def caller():
     h = Helper()
     h.assist()
     return target_fn()
-"#,
+"#;
+
+/// Sum of the edge entries in an `incoming` / `outgoing` section.
+fn count_entries(o: &serde_json::Map<String, Value>) -> usize {
+    o.values()
+        .filter_map(|v| v.as_array())
+        .map(|a| a.len())
+        .sum()
+}
+
+/// Contract: `--kind function` names the kind of the target declaration
+/// (`caller`), never a neighbour kind, so every neighbour section stays as
+/// the unfiltered answer has it.
+#[test]
+fn test_inspect_kind_selects_target_keeps_all_neighbours() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    write(repo, "src/lib.py", KIND_FIXTURE);
+    init_and_analyze(repo);
+
+    let unfiltered = run_json(repo, &["inspect", "caller", "--format", "json"]);
+    assert_eq!(unfiltered["status"], "found", "{unfiltered}");
+    let by_kind = run_json(
+        repo,
+        &[
+            "inspect", "caller", "--kind", "function", "--format", "json",
+        ],
     );
+    assert_eq!(by_kind["status"], "found", "{by_kind}");
+    assert_eq!(by_kind["symbol"]["name"], "caller", "{by_kind}");
+    assert_eq!(by_kind["symbol"]["kind"], "Function", "{by_kind}");
+    assert!(
+        count_entries(unfiltered["outgoing"].as_object().unwrap()) >= 2,
+        "fixture should yield ≥2 outgoing edges (Class + Function targets): {unfiltered}"
+    );
+    for section in ["outgoing", "incoming", "impact_upstream_1hop"] {
+        assert_eq!(
+            by_kind[section], unfiltered[section],
+            "--kind must not filter {section}"
+        );
+    }
+}
+
+#[test]
+fn inspect_kind_filter_drops_non_matching_edges() {
+    // `caller()` calls `Helper` (Class), `Helper().assist()` (Function), and
+    // `target_fn` (Function). `--neighbor-kind function` must drop the Class
+    // target. Contract: `function` stands for a neighbour kind here.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    write(repo, "src/lib.py", KIND_FIXTURE);
     init_and_analyze(repo);
 
     let unfiltered = run_json(repo, &["inspect", "--name", "caller", "--format", "json"]);
     assert_eq!(unfiltered["status"], "found", "{unfiltered}");
 
-    let count_entries = |o: &serde_json::Map<String, Value>| -> usize {
-        o.values()
-            .filter_map(|v| v.as_array())
-            .map(|a| a.len())
-            .sum()
-    };
     let unf_outgoing = unfiltered["outgoing"].as_object().unwrap();
     let unf_count = count_entries(unf_outgoing);
     assert!(
@@ -162,7 +186,13 @@ def caller():
     let filtered = run_json(
         repo,
         &[
-            "inspect", "--name", "caller", "--kind", "function", "--format", "json",
+            "inspect",
+            "--name",
+            "caller",
+            "--neighbor-kind",
+            "function",
+            "--format",
+            "json",
         ],
     );
     assert_eq!(filtered["status"], "found");
@@ -190,12 +220,9 @@ def caller():
     }
 }
 
-#[test]
-fn inspect_file_path_filter_keeps_substring_matches() {
-    // `caller` calls into both `src/auth/util.ts` and `src/billing/util.ts`.
-    // `--file_path src/auth/` must keep only the auth edges.
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path();
+/// `caller` in `src/lib.ts` calls into `src/auth/util.ts` and
+/// `src/billing/util.ts`.
+fn write_file_fixture(repo: &Path) {
     write(
         repo,
         "src/auth/util.ts",
@@ -218,6 +245,94 @@ export function caller() {
 }
 "#,
     );
+}
+
+/// Every neighbour name across the sections of an `outgoing` map.
+fn outgoing_names(result: &Value) -> Vec<String> {
+    result["outgoing"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|e| e["name"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// Contract: `--file` / `--file_path` select the target declaration. A path
+/// that holds no `caller` is not found; the file of `caller` selects it, and
+/// its callees in other files (`auth_helper`, `billing_helper`) stay listed.
+#[test]
+fn test_inspect_file_selects_target_keeps_cross_file_neighbours() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    write_file_fixture(repo);
+    init_and_analyze(repo);
+
+    let elsewhere = run_json(
+        repo,
+        &[
+            "inspect",
+            "caller",
+            "--file_path",
+            "src/auth/",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(elsewhere["status"], "error", "{elsewhere}");
+    let message = elsewhere["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("not found") && message.contains("1 declaration(s) named 'caller'"),
+        "{elsewhere}"
+    );
+
+    let own = run_json(
+        repo,
+        &[
+            "inspect",
+            "caller",
+            "--file",
+            "src/lib.ts",
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(own["status"], "found", "{own}");
+    assert_eq!(own["symbol"]["filePath"], "src/lib.ts", "{own}");
+    // A blank `--neighbor-file` counts as absent, like a blank `--file`.
+    let blank = run_json(
+        repo,
+        &[
+            "inspect",
+            "caller",
+            "--file",
+            "src/lib.ts",
+            "--neighbor-file",
+            " ",
+            "--format",
+            "json",
+        ],
+    );
+    for result in [&own, &blank] {
+        let names = outgoing_names(result);
+        for callee in ["auth_helper", "billing_helper"] {
+            assert!(
+                names.iter().any(|n| n == callee),
+                "{callee} missing: {result}"
+            );
+        }
+    }
+}
+
+#[test]
+fn inspect_file_path_filter_keeps_substring_matches() {
+    // `caller` calls into both `src/auth/util.ts` and `src/billing/util.ts`.
+    // `--neighbor-file src/auth/` must keep only the auth edges. Contract:
+    // `src/auth/` stands for a neighbour path here.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    write_file_fixture(repo);
     init_and_analyze(repo);
 
     let filtered = run_json(
@@ -226,7 +341,7 @@ export function caller() {
             "inspect",
             "--name",
             "caller",
-            "--file_path",
+            "--neighbor-file",
             "src/auth/",
             "--format",
             "json",
@@ -546,10 +661,12 @@ fn inspect_output_does_not_contain_uid_field() {
     );
 }
 
+/// Contract: `kind`, `filePath` and `line` stand for each candidate's
+/// identity, not for a full block. The ambiguous answer holds no `matches`
+/// and no neighbourhood section, and each `target`, run again, selects that
+/// candidate alone.
 #[test]
-fn inspect_ambiguous_returns_full_matches() {
-    // Two functions sharing a name → response must contain full inspect
-    // blocks per match (each with a `kind` field), not a candidates list.
+fn test_inspect_ambiguous_name_returns_rerunnable_candidates() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path();
     write(
@@ -568,35 +685,57 @@ fn inspect_ambiguous_returns_full_matches() {
         repo,
         &["inspect", "--name", "shared_name", "--format", "json"],
     );
+    assert_eq!(result["status"], "ambiguous", "{result}");
+    assert_eq!(result["total"], 2, "{result}");
+    for gone in [
+        "matches",
+        "symbol",
+        "incoming",
+        "outgoing",
+        "impact_upstream_1hop",
+        "blind_spots",
+    ] {
+        assert!(result.get(gone).is_none(), "{gone} present: {result}");
+    }
+    let candidates = result["candidates"].as_array().expect("candidates");
+    let mut facts: Vec<(&str, &str, u64)> = candidates
+        .iter()
+        .map(|c| {
+            (
+                c["filePath"].as_str().unwrap(),
+                c["kind"].as_str().unwrap(),
+                c["line"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    facts.sort();
     assert_eq!(
-        result["status"], "ambiguous",
-        "expected ambiguous: {result}"
+        facts,
+        [
+            ("src/alpha.ts", "Function", 1),
+            ("src/beta.ts", "Function", 1)
+        ],
+        "{result}"
     );
 
-    // Must have "matches" key (full blocks), not "candidates" (uid list).
-    let matches = result["matches"]
-        .as_array()
-        .unwrap_or_else(|| panic!("missing 'matches' array in ambiguous response: {result}"));
-    assert!(
-        matches.len() >= 2,
-        "expected ≥2 full match blocks, got {}:\n{result}",
-        matches.len()
-    );
-
-    // Each block must have a symbol.kind field (full inspect block, not just a uid).
-    for m in matches {
-        let kind = m["symbol"]["kind"].as_str();
-        assert!(
-            kind.is_some() && !kind.unwrap().is_empty(),
-            "match block missing symbol.kind: {m}"
+    for candidate in candidates {
+        let target = candidate["target"]
+            .as_str()
+            .unwrap_or_else(|| panic!("each candidate has a target: {result}"));
+        let mut args = vec!["inspect"];
+        args.extend(target.split_whitespace());
+        args.extend(["--format", "json"]);
+        let again = run_json(repo, &args);
+        assert_eq!(again["status"], "found", "{target}: {again}");
+        assert_eq!(
+            again["symbol"]["filePath"], candidate["filePath"],
+            "{target}: {again}"
+        );
+        assert_eq!(
+            again["symbol"]["startLine"], candidate["line"],
+            "{target}: {again}"
         );
     }
-
-    // Must NOT have a "candidates" key (old UID-list style).
-    assert!(
-        result["candidates"].is_null(),
-        "ambiguous response still exposes old 'candidates' key: {result}"
-    );
 }
 
 #[test]

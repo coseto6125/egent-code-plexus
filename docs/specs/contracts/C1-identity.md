@@ -123,7 +123,7 @@ line      := 1-based decimal start line
 | `` `<anonymous:3:4>` ``, `` run.`<anonymous:3:4>`.helper `` | a name or a parent written as its exact stored text. Rust, Ruby, Swift, Java, JavaScript, TypeScript, Dart, PHP, C# and Kotlin name a closure node `<anonymous:line:col>` (`rust/parser.rs:335-357`, `ruby/parser.rs:547`, `swift/parser.rs:311`, `java/parser.rs:317`, `javascript/parser.rs:350`, `dart/parser.rs:305`, `typescript/parser.rs:513`, `php/parser.rs:701`, `c_sharp/parser.rs:363`, `kotlin/parser.rs:460`). Unquoted, `<anonymous:3:4>` is a bad `<Type as Trait>` segment (`test_parse_literal_name_anonymous_closure`). |
 | `` `Walk<'s, 't>`.next `` | a `next` whose owner text is exactly `Walk<'s, 't>`. `Walk.next` matches the owners `Walk<'s, 't>` and `Walk` (`test_qualifier_literal_matches_exact_text_only`). |
 | `pad@42` | a `pad` that starts on line 42. |
-| `--kind method` | `NodeKind::from_str` of the text; an unknown kind is a syntax error. |
+| `--kind method` | `NodeKind::from_str` of the text; an unknown kind is a syntax error. `--kind function,method` is an unknown kind: `--kind` takes one kind. |
 | `--file cmd/main.go` | `\` becomes `/`, a leading `./` goes. A resolver keeps the best tier present: `Equal`, then `Suffix` (`/needle`), then `Substring`. |
 
 | Rule | Statement |
@@ -134,6 +134,8 @@ line      := 1-based decimal start line
 | `@` | Only `@` plus digits at the end, outside a literal, is a line. `route@fx` is a name. `` `a@1` `` is a name. `@0` is an error. |
 | Render | `TargetRequest::render` joins segments with `.`, prints a root as `::name` and a line as `@N`. It writes a `Literal` segment in backticks. It writes a name in backticks when the name holds `.`, `:`, `<`, `>`, `@` or a backtick. `parse(render(r))` gives back `r`'s qualifier, name and line. |
 | Reusable form | `Qualifier::of_path` writes a path segment as `Literal` when it needs backticks or its match form differs from its text, and as `Name` otherwise. So a reusable target never widens through the match form: `` `Walk<'s, 't>`.next `` selects that owner only. |
+| Target filters | `--kind` and `--file` constrain target declarations in every command, including `inspect`. `inspect` aliases `--file_path` and `--file-path` have the same target semantics as `--file`. Target filters never filter the selected declaration's neighbours. |
+| Neighbour filters | `inspect --neighbor-kind` filters neighbour kinds; `--neighbor-file` filters neighbour paths by substring. |
 
 ### Typed target result: `resolve_target(request, named)`
 
@@ -145,6 +147,7 @@ line      := 1-based decimal start line
 | None | `NotFound { named }`. `named` counts the declarations with that name before the filters: 0 means the name is not declared. |
 | Reusable target | Each candidate of an ambiguity carries `reusable`: a request that selects that candidate alone among all of `named`. It escalates from the qualified name, then adds `--file`, then `@line`, then `--kind`. `None` means no target text and no filter can separate it, for example two macro-generated nodes on one line, or two overloads of one owner on one line (`test_resolve_target_overloads_on_one_line_no_reusable`). `test_reusable_render_parse_selects_only_original_every_shape` renders each reusable target, parses the text back, and asserts that it selects the original candidate only. Its shapes: a closure name, a closure parent, `Conv<u8>` beside `Conv<u16>`, `Walk<'s, 't>` beside `Walk`, a top-level and a nested `helper`, `operator<` overloads, and a backtick in a segment. |
 | Bare name | A bare name matches top-level and scoped declarations. A top-level `helper` and a `helper` inside `outer` give `Ambiguous`; `::helper` and `outer.helper` each give `Unique` (`test_resolve_target_top_level_and_nested_helper_bare_name_ambiguous`). |
+| Ambiguity, `inspect` | On ambiguity, `inspect` returns `status: ambiguous`, the true candidate count (`total`), and `candidates`. Each candidate contains `filePath`, `kind`, `line`, and its reusable `target` arguments (`read_context::ambiguity_candidates`). `target` is null only when the supported target syntax and filters cannot distinguish that declaration. An ambiguous response contains no full inspect blocks or neighbourhood sections. Omitted neighbourhood sections mean "not evaluated", not "empty". The response preserves applicable graph caveats (`result`). |
 | Explicit kind | `--kind` filters candidates before any command display rule. `inspect A --kind impl` keeps the `Impl` node (`test_select_explicit_kind_impl_keeps_impl`); see Open point 12. |
 | Old error | `Ambiguity::to_error` builds today's `EcpError::AmbiguousSymbol` (`ecp-core/src/error.rs:22-31`) with the same fields, so the message does not change when a command adopts the type. |
 
