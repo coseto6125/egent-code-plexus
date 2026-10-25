@@ -56,15 +56,23 @@ fn access(bytes: &[u8]) -> &ArchivedZeroCopyGraph {
     rkyv::access::<ArchivedZeroCopyGraph, rkyv::rancor::Error>(bytes).unwrap()
 }
 
-/// The uid `graph` stores for each node of `local`, in node order: the node
-/// of equal kind and span, the k-th one for the k-th repeat of that key.
+/// The uid `graph` stores for each node of `local`, in node order.
 fn stored_uids(graph: &ArchivedZeroCopyGraph, local: &LocalGraph) -> Vec<u64> {
+    base_indices(graph, local)
+        .into_iter()
+        .map(|i| graph.nodes[i as usize].uid.to_native())
+        .collect()
+}
+
+/// The node of `graph` that holds each node of `local`, in node order: the
+/// node of equal kind and span, the k-th one for the k-th repeat of that key.
+fn base_indices(graph: &ArchivedZeroCopyGraph, local: &LocalGraph) -> Vec<u32> {
     let mut used: FxHashSet<usize> = FxHashSet::default();
     local
         .nodes
         .iter()
         .map(|raw| {
-            let (i, node) = graph
+            let (i, _) = graph
                 .nodes
                 .iter()
                 .enumerate()
@@ -88,7 +96,7 @@ fn stored_uids(graph: &ArchivedZeroCopyGraph, local: &LocalGraph) -> Vec<u64> {
                     )
                 });
             used.insert(i);
-            node.uid.to_native()
+            i as u32
         })
         .collect()
 }
@@ -163,8 +171,8 @@ fn assert_four_paths_equal(case: Case) {
     let provider = case.provider.as_ref();
     let (path, source) = (case.path, case.source);
     let dirty = parse(provider, path, source);
-    // The base commit holds the same file, so each virtual node replaces the
-    // base node of its own uid.
+    // The base commit holds the same file. Pairing reads anchors, not uids
+    // (`assert_overloads_pair_nothing`); this test compares uids only.
     let full_bytes = archive(&full_build(parse(provider, path, source)));
     let full_graph = access(&full_bytes);
     let full = stored_uids(full_graph, &dirty);
@@ -229,6 +237,17 @@ macro_rules! four_path_cases {
     )*};
 }
 
+// The overload fixtures that more than one test reads: two `save` members
+// of `K`, plus `audit` and `run`, which each have one declaration.
+const TS_K: &str = "class K {\n audit() {}\n save(id: number) {}\n save(name: string) { this.audit(); }\n run() { this.save(1); }\n}\n";
+const JAVA_K: &str = "class K {\n void audit() {}\n void save(int id) {}\n void save(String name) { audit(); }\n void run() { save(1); }\n}\n";
+const KOTLIN_K: &str = "class K {\n fun audit() {}\n fun save(id: Int) {}\n fun save(name: String) { audit() }\n fun run() { save(1) }\n}\n";
+const CSHARP_K: &str = "class K {\n void audit() {}\n void save(int id) {}\n void save(string name) { audit(); }\n void run() { save(1); }\n}\n";
+const RUST_K: &str = "struct K;\nimpl K {\n fn audit(&self) {}\n fn save(&self) {}\n fn run(&self) { self.save(); }\n}\nimpl A for K { fn save(&self) { self.audit(); } }\ntrait A { fn save(&self); }\n";
+const SWIFT_K: &str = "class K {\n func audit() {}\n func save(id: Int) {}\n func save(name: String) { audit() }\n func run() { save(id: 1) }\n}\n";
+const CPP_K: &str = "class K {\n void audit() {}\n void save(int id) {}\n void save(const char* name) { audit(); }\n void run() { save(1); }\n};\n";
+const DART_K: &str = "class K {\n void audit() {}\n void save(int id) {}\n void save(String name) { audit(); }\n void run() { save(1); }\n}\n";
+
 fn methods(provider: Box<dyn LanguageProvider>, path: &'static str, source: &'static str) -> Case {
     Case {
         provider,
@@ -243,7 +262,7 @@ four_path_cases! {
     test_uid_assign_typescript_overloads_four_paths_equal_uids => methods(
         Box::new(TypeScriptProvider::new().unwrap()),
         "k.ts",
-        "class K {\n audit() {}\n save(id: number) {}\n save(name: string) { this.audit(); }\n run() { this.save(1); }\n}\n",
+        TS_K,
     );
     test_uid_assign_javascript_overloads_four_paths_equal_uids => methods(
         Box::new(JavaScriptProvider::new().unwrap()),
@@ -258,17 +277,17 @@ four_path_cases! {
     test_uid_assign_java_overloads_four_paths_equal_uids => methods(
         Box::new(JavaProvider::new().unwrap()),
         "K.java",
-        "class K {\n void audit() {}\n void save(int id) {}\n void save(String name) { audit(); }\n void run() { save(1); }\n}\n",
+        JAVA_K,
     );
     test_uid_assign_kotlin_overloads_four_paths_equal_uids => methods(
         Box::new(KotlinProvider::new().unwrap()),
         "K.kt",
-        "class K {\n fun audit() {}\n fun save(id: Int) {}\n fun save(name: String) { audit() }\n fun run() { save(1) }\n}\n",
+        KOTLIN_K,
     );
     test_uid_assign_csharp_overloads_four_paths_equal_uids => methods(
         Box::new(CSharpProvider::new().unwrap()),
         "K.cs",
-        "class K {\n void audit() {}\n void save(int id) {}\n void save(string name) { audit(); }\n void run() { save(1); }\n}\n",
+        CSHARP_K,
     );
     test_uid_assign_go_overloads_four_paths_equal_uids => methods(
         Box::new(GoProvider::new().unwrap()),
@@ -278,7 +297,7 @@ four_path_cases! {
     test_uid_assign_rust_overloads_four_paths_equal_uids => methods(
         Box::new(RustProvider::new().unwrap()),
         "k.rs",
-        "struct K;\nimpl K {\n fn audit(&self) {}\n fn save(&self) {}\n fn run(&self) { self.save(); }\n}\nimpl A for K { fn save(&self) { self.audit(); } }\ntrait A { fn save(&self); }\n",
+        RUST_K,
     );
     test_uid_assign_php_overloads_four_paths_equal_uids => methods(
         Box::new(PhpProvider::new().unwrap()),
@@ -293,7 +312,7 @@ four_path_cases! {
     test_uid_assign_swift_overloads_four_paths_equal_uids => methods(
         Box::new(SwiftProvider::new().unwrap()),
         "K.swift",
-        "class K {\n func audit() {}\n func save(id: Int) {}\n func save(name: String) { audit() }\n func run() { save(id: 1) }\n}\n",
+        SWIFT_K,
     );
     test_uid_assign_c_overloads_four_paths_equal_uids => Case {
         provider: Box::new(CProvider::new().unwrap()),
@@ -305,12 +324,12 @@ four_path_cases! {
     test_uid_assign_cpp_overloads_four_paths_equal_uids => methods(
         Box::new(CppProvider::new().unwrap()),
         "k.cpp",
-        "class K {\n void audit() {}\n void save(int id) {}\n void save(const char* name) { audit(); }\n void run() { save(1); }\n};\n",
+        CPP_K,
     );
     test_uid_assign_dart_overloads_four_paths_equal_uids => methods(
         Box::new(DartProvider::new().unwrap()),
         "k.dart",
-        "class K {\n void audit() {}\n void save(int id) {}\n void save(String name) { audit(); }\n void run() { save(1); }\n}\n",
+        DART_K,
     );
 }
 
@@ -417,9 +436,13 @@ fn test_incremental_edit_one_overload_skips_unchanged_twin() {
 }
 
 /// A dirty Java file with `save(int)` / `save(String)`: each virtual
-/// overload replaces the base node of its own uid, not the first one's.
+/// overload keeps the full build's uid, but the two share an anchor, so
+/// neither replaces a base node and both base overloads are suppressed.
+/// R-PI flips this from "each replaces the base node of its own uid": the
+/// ordinal proves nothing about which overload an edit kept. A `Signature`
+/// discriminator (C1 Open point 2) would make each anchor unique again.
 #[test]
-fn test_overlay_view_java_two_save_overloads_each_replaces_own_base() {
+fn test_overlay_view_java_two_save_overloads_pair_nothing() {
     let java = JavaProvider::new().unwrap();
     let path = "K.java";
     let before = "class K {\n void save(int id) {}\n void save(String name) {}\n}\n";
@@ -447,15 +470,11 @@ fn test_overlay_view_java_two_save_overloads_each_replaces_own_base() {
             base.nodes[base_idx as usize].uid.to_native(),
             "overload {k} keeps its base uid"
         );
-        assert_eq!(
-            node.replaced_base,
-            Some(base_idx),
-            "overload {k} replaces its own base"
-        );
+        assert_eq!(node.replaced_base, None, "overload {k} replaces nothing");
         assert_eq!(
             view.redirect(base_idx),
-            Some(virt),
-            "base overload {k} redirects to it"
+            None,
+            "base overload {k} is suppressed"
         );
     }
 }
@@ -519,4 +538,247 @@ fn test_overlay_view_csharp_two_namespace_blocks_tombstones_second() {
         "the base holds one block, so the tombstone replaces nothing"
     );
     assert!(!tombstone.later_overload, "a namespace is not an overload");
+}
+
+/// One node of a view or a graph: `(merged idx, kind, name, owner, start
+/// line, end line)`, lines 1-based.
+type NodeRow = (u32, NodeKind, String, String, u32, u32);
+
+/// The nodes named `name`, keyed by the trait of the `Impl` node whose lines
+/// hold each one.
+fn by_trait(rows: &[NodeRow], name: &str) -> FxHashMap<String, u32> {
+    rows.iter()
+        .filter(|r| r.2 == name)
+        .map(|r| {
+            let block = rows
+                .iter()
+                .find(|b| b.1 == NodeKind::Impl && b.4 <= r.4 && r.5 <= b.5)
+                .unwrap_or_else(|| panic!("`{name}` at line {} is in no impl", r.4));
+            (block.3.clone(), r.0)
+        })
+        .collect()
+}
+
+fn graph_rows(graph: &ArchivedZeroCopyGraph) -> Vec<NodeRow> {
+    let pool = &graph.string_pool;
+    (0u32..)
+        .zip(graph.nodes.iter())
+        .map(|(i, n)| {
+            (
+                i,
+                NodeKind::from(&n.kind),
+                n.name.resolve(pool).to_string(),
+                n.owner_class.resolve(pool).to_string(),
+                n.span.0.to_native() + 1,
+                n.span.2.to_native() + 1,
+            )
+        })
+        .collect()
+}
+
+fn view_rows(view: &OverlayView) -> Vec<NodeRow> {
+    (view.base_len()..)
+        .zip(view.virtual_nodes())
+        .map(|(i, n)| {
+            (
+                i,
+                n.kind,
+                n.name.clone(),
+                n.owner_class.clone().unwrap_or_default(),
+                n.start_line,
+                n.end_line,
+            )
+        })
+        .collect()
+}
+
+fn fmt_impls(first: &str, second: &str) -> String {
+    let block = |t: &str| {
+        format!(
+            "impl {t} for A {{\n    fn fmt(&self) {{\n        fn pad() {{}}\n        pad();\n    }}\n}}\n"
+        )
+    };
+    format!("struct A;\n{}{}", block(first), block(second))
+}
+
+/// A dirty Rust file swaps `impl Display for A { fn fmt }` and `impl Debug
+/// for A { fn fmt }`. The two `fmt` swap stored uids, because the second in
+/// source order is overload 1, so a uid pairing would hand each base `fmt`'s
+/// clean callers to the other trait's `fmt`. The anchor carries the trait,
+/// so each base `fmt` redirects to its own trait's virtual `fmt`, and a
+/// base in-edge follows the redirect. The nested `pad` stays on its own too.
+#[test]
+fn test_overlay_view_swapped_impls_base_edges_stay_on_own_fmt() {
+    let rust = RustProvider::new().unwrap();
+    let path = "src/a.rs";
+    let before = fmt_impls("Display", "Debug");
+    let after = fmt_impls("Debug", "Display");
+    let base_bytes = archive(&full_build(parse(&rust, path, &before)));
+    let base = access(&base_bytes);
+    let full_bytes = archive(&full_build(parse(&rust, path, &after)));
+    let full = access(&full_bytes);
+    let view =
+        OverlayView::build(base, &[OverlayFileInput::from(parse(&rust, path, &after))]).unwrap();
+
+    let (base_rows, full_rows, rows) = (graph_rows(base), graph_rows(full), view_rows(&view));
+    for name in ["fmt", "pad"] {
+        let (base_of, full_of, virt_of) = (
+            by_trait(&base_rows, name),
+            by_trait(&full_rows, name),
+            by_trait(&rows, name),
+        );
+        assert_eq!(virt_of.len(), 2, "{name}: one per trait: {virt_of:?}");
+        for t in ["Display", "Debug"] {
+            let (base_idx, virt) = (base_of[t], virt_of[t]);
+            let node = view.node(virt).unwrap();
+            assert_eq!(
+                node.uid,
+                full.nodes[full_of[t] as usize].uid.to_native(),
+                "{name} of {t}: the view's uid is the full build's"
+            );
+            assert_eq!(
+                node.replaced_base,
+                Some(base_idx),
+                "{name} of {t} replaces its own trait's base node"
+            );
+            assert_eq!(
+                view.redirect(base_idx),
+                Some(virt),
+                "{name} of {t}: redirect"
+            );
+        }
+    }
+    let base_display = base.nodes[by_trait(&base_rows, "fmt")["Display"] as usize]
+        .uid
+        .to_native();
+    let virt_display = view.node(by_trait(&rows, "fmt")["Display"]).unwrap().uid;
+    assert_ne!(
+        base_display, virt_display,
+        "the fixture swaps the stored uids, so a uid pairing would cross them"
+    );
+}
+
+/// Rust tells `impl K { fn save }` and `impl A for K { fn save }` apart by
+/// the trait: two anchors, so each `save` replaces its own base node while
+/// the two keep the overload uids of the full build.
+#[test]
+fn test_overlay_view_rust_inherent_and_trait_save_each_replaces_own_base() {
+    let rust = RustProvider::new().unwrap();
+    let path = "k.rs";
+    let local = parse(&rust, path, RUST_K);
+    let base_bytes = archive(&full_build(parse(&rust, path, RUST_K)));
+    let base = access(&base_bytes);
+    let view =
+        OverlayView::build(base, &[OverlayFileInput::from(parse(&rust, path, RUST_K))]).unwrap();
+    let base_idx = base_indices(base, &local);
+    let k_saves: Vec<usize> = (0..local.nodes.len())
+        .filter(|&j| {
+            local.nodes[j].name == "save" && local.nodes[j].owner_class.as_deref() == Some("K")
+        })
+        .collect();
+    assert_eq!(k_saves.len(), 2, "the fixture's two `save` of `K`");
+    for j in k_saves {
+        let virt = view.base_len() + j as u32;
+        assert_eq!(
+            view.node(virt).unwrap().replaced_base,
+            Some(base_idx[j]),
+            "`save` {j} replaces its own base node"
+        );
+        assert_eq!(view.redirect(base_idx[j]), Some(virt));
+    }
+}
+
+/// Without a `Signature` discriminator (C1 Open point 2: no parser
+/// produces one, and the base graph stores no parameter list), two
+/// overloads of one owner share an anchor. The view gives each the full
+/// build's uid, pairs neither with a base node and suppresses both base
+/// members; a member whose anchor is unique still replaces its own base
+/// node. A `Signature` slice flips the overload half of this test.
+fn assert_overloads_pair_nothing(provider: Box<dyn LanguageProvider>, path: &str, source: &str) {
+    let provider = provider.as_ref();
+    let local = parse(provider, path, source);
+    let base_bytes = archive(&full_build(parse(provider, path, source)));
+    let base = access(&base_bytes);
+    let view = OverlayView::build(
+        base,
+        &[OverlayFileInput::from(parse(provider, path, source))],
+    )
+    .unwrap();
+    assert_eq!(
+        view_uids(&view),
+        stored_uids(base, &local),
+        "{path}: overlay view vs full build"
+    );
+    let base_idx = base_indices(base, &local);
+    let mut sets: FxHashMap<(u8, Option<&str>, &str), Vec<usize>> = FxHashMap::default();
+    for (j, raw) in local.nodes.iter().enumerate() {
+        if ecp_core::uid::keeps_overloads(raw.kind) {
+            sets.entry((
+                raw.kind as u8,
+                raw.owner_class.as_deref(),
+                raw.name.as_str(),
+            ))
+            .or_default()
+            .push(j);
+        }
+    }
+    let overloads: Vec<&Vec<usize>> = sets.values().filter(|s| s.len() > 1).collect();
+    assert_eq!(overloads.len(), 1, "{path}: the fixture's one overload set");
+    for &j in overloads[0] {
+        let virt = view.base_len() + j as u32;
+        assert_eq!(
+            view.node(virt).unwrap().replaced_base,
+            None,
+            "{path}: overload {j}"
+        );
+        assert_eq!(
+            view.redirect(base_idx[j]),
+            None,
+            "{path}: base overload {j}"
+        );
+    }
+    let unique: Vec<usize> = sets
+        .values()
+        .filter(|s| s.len() == 1)
+        .map(|s| s[0])
+        .collect();
+    assert!(
+        !unique.is_empty(),
+        "{path}: the fixture's `audit` and `run`"
+    );
+    for j in unique {
+        let virt = view.base_len() + j as u32;
+        assert_eq!(
+            view.node(virt).unwrap().replaced_base,
+            Some(base_idx[j]),
+            "{path}: member {j} has a unique anchor"
+        );
+        assert_eq!(view.redirect(base_idx[j]), Some(virt), "{path}: member {j}");
+    }
+}
+
+macro_rules! overload_pairing_cases {
+    ($($test:ident => ($provider:expr, $path:expr, $source:expr);)*) => {$(
+        #[test]
+        fn $test() {
+            assert_overloads_pair_nothing(Box::new($provider), $path, $source);
+        }
+    )*};
+}
+
+overload_pairing_cases! {
+    test_overlay_view_typescript_overloads_no_signature_pair_nothing =>
+        (TypeScriptProvider::new().unwrap(), "k.ts", TS_K);
+    test_overlay_view_java_overloads_no_signature_pair_nothing =>
+        (JavaProvider::new().unwrap(), "K.java", JAVA_K);
+    test_overlay_view_kotlin_overloads_no_signature_pair_nothing =>
+        (KotlinProvider::new().unwrap(), "K.kt", KOTLIN_K);
+    test_overlay_view_csharp_overloads_no_signature_pair_nothing =>
+        (CSharpProvider::new().unwrap(), "K.cs", CSHARP_K);
+    test_overlay_view_cpp_overloads_no_signature_pair_nothing =>
+        (CppProvider::new().unwrap(), "k.cpp", CPP_K);
+    test_overlay_view_swift_overloads_no_signature_pair_nothing =>
+        (SwiftProvider::new().unwrap(), "K.swift", SWIFT_K);
+    test_overlay_view_dart_overloads_no_signature_pair_nothing =>
+        (DartProvider::new().unwrap(), "k.dart", DART_K);
 }

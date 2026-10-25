@@ -118,7 +118,7 @@ use crate::analyzer::import_binding::{
     extension_retry, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
     import_member_fallback, owner_path_agrees, retry_name, DeclaredType, MemberOwner,
 };
-use crate::analyzer::lexical::{file_identities, stored_uid, LexicalFunctions};
+use crate::analyzer::lexical::{file_identities, LexicalFunctions};
 use crate::analyzer::outcome::{NoEdge, Resolution, Tier};
 use crate::analyzer::path_aliases::PathAliases;
 use crate::analyzer::reexport::{
@@ -142,7 +142,7 @@ use crate::analyzer::types::{
     NEAREST_COPY_REASON, OVERLOAD_SET_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON,
     VARIANT_USE_REASON,
 };
-use crate::contracts::identity::UidSlot;
+use crate::contracts::identity::{pair_by_anchor, DeclIdentity, UidSlot};
 use crate::file_category::{pick_global, FileMeta, GlobalPick, Language};
 use crate::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -295,7 +295,8 @@ const CONF_MODULE_TREE: f32 = Tier::ModuleTree.confidence();
 pub struct OverlayView {
     base_len: u32,
     nodes: Vec<ViewNode>,
-    /// base idx → virtual idx for surviving (uid-matched) symbols.
+    /// base idx → virtual idx for surviving symbols, paired by anchor
+    /// ([`pair_with_base`]).
     replaced: FxHashMap<u32, u32>,
     /// base idxs of dirty-file symbols NOT re-emitted (deleted/renamed),
     /// and every base idx of a removed file.
@@ -370,33 +371,35 @@ impl OverlayView {
             .map(String::as_str)
             .filter(|path| !rel_paths.contains(path))
             .collect();
-        let mut dirty_file_idx: FxHashSet<u32> = FxHashSet::default();
+        // A path can own several `graph.files` entries (two `LocalGraph`s
+        // of one path), so the dirty map keys each entry to its path.
+        let mut dirty_file_idx: FxHashMap<u32, &str> = FxHashMap::default();
         let mut removed_file_idx: FxHashSet<u32> = FxHashSet::default();
         for (i, f) in graph.files.iter().enumerate() {
             let path = f.path.resolve(&graph.string_pool);
             if rel_paths.contains(path) {
-                dirty_file_idx.insert(i as u32);
+                dirty_file_idx.insert(i as u32, path);
             } else if removed_paths.contains(path) {
                 removed_file_idx.insert(i as u32);
             }
         }
 
         // ── base nodes living in dirty files ──────────────────────────────
-        // Single O(N) scan, collecting only matches. uid → base idx lets the
-        // virtual-node pass detect survivors exactly (uid embeds kind, path,
-        // owner_class and name — Fragment v2 carries owner_class so methods
-        // match too, see overlay_writer). Only kinds a fragment can re-emit
-        // are collected: mask ⊆ rebuild applies to nodes too. A removed
-        // file has no parse to re-emit anything, so all of its nodes are
-        // collected; the uid holds the path, so no virtual node replaces one.
-        let mut dirty_base_by_uid: FxHashMap<u64, u32> = FxHashMap::default();
+        // Single O(N) scan, collecting only matches, per path in graph
+        // order: the virtual-node pass pairs each path's base declarations
+        // with its parse by anchor (`pair_by_anchor`). Only kinds a fragment
+        // can re-emit are collected: mask ⊆ rebuild applies to nodes too. A
+        // removed file has no parse to re-emit anything, so all of its nodes
+        // are collected; no parse names its path, so no virtual node
+        // replaces one.
+        let mut dirty_base_by_path: FxHashMap<&str, Vec<u32>> = FxHashMap::default();
         let mut dirty_base: FxHashSet<u32> = FxHashSet::default();
         if !dirty_file_idx.is_empty() || !removed_file_idx.is_empty() {
             for (i, node) in graph.nodes.iter().enumerate() {
                 let file_idx = node.file_idx.to_native();
-                if dirty_file_idx.contains(&file_idx) {
+                if let Some(&path) = dirty_file_idx.get(&file_idx) {
                     if fragment_emits(NodeKind::from(&node.kind)) {
-                        dirty_base_by_uid.insert(node.uid.to_native(), i as u32);
+                        dirty_base_by_path.entry(path).or_default().push(i as u32);
                         dirty_base.insert(i as u32);
                     }
                 } else if removed_file_idx.contains(&file_idx) {
@@ -428,7 +431,16 @@ impl OverlayView {
                     HeritageNode::span(sym),
                 )
             });
-            for (sym, identity) in file.symbols.iter().zip(identities) {
+            let pairs = pair_with_base(
+                graph,
+                &file.rel_path,
+                dirty_base_by_path
+                    .get(file.rel_path.as_str())
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+                &identities,
+            );
+            for ((sym, identity), replaced_base) in file.symbols.iter().zip(identities).zip(pairs) {
                 let virt = base_len + nodes.len() as u32;
                 let later_overload = match identity.slot {
                     UidSlot::Later { first, .. } => {
@@ -445,10 +457,8 @@ impl OverlayView {
                     UidSlot::First(_) => false,
                 };
                 let uid = identity.slot.uid();
-                // Each virtual node replaces the base node that stores its
-                // uid: a later overload its own base twin, a tombstone the
-                // base tombstone. First match wins.
-                let replaced_base = dirty_base_by_uid.get(&stored_uid(identity.slot)).copied();
+                // Two inputs of one path both pair a base node: the first
+                // one replaces it.
                 if let Some(base_idx) = replaced_base {
                     replaced.entry(base_idx).or_insert(virt);
                 }
@@ -1467,6 +1477,58 @@ impl OverlayView {
             type_ctors: cached.type_ctors.into_iter().collect(),
         })
     }
+}
+
+/// The base node each declaration of one dirty file replaces, in slice
+/// order: [`pair_by_anchor`] between the anchors of `identities` (the
+/// file's parse) and the anchors of `base` (the path's base nodes in graph
+/// order, numbered by the same [`file_identities`]). A declaration pairs
+/// only when its anchor occurs once on each side, so an overload set without
+/// a discriminator pairs nothing, and its base members are suppressed: an
+/// ordinal proves nothing about which member an edit kept.
+///
+/// A `Duplicate` row takes no part. The index tombstones it and keeps its
+/// first as the one node of that anchor, so the first still pairs. A base
+/// tombstone has an empty name, so its anchor matches no declaration.
+fn pair_with_base(
+    graph: &ArchivedZeroCopyGraph,
+    path: &str,
+    base: &[u32],
+    identities: &[DeclIdentity],
+) -> Vec<Option<u32>> {
+    let mut out = vec![None; identities.len()];
+    if base.is_empty() {
+        return out;
+    }
+    let pool = &graph.string_pool;
+    let base_anchors: Vec<u64> = file_identities(path, base, |&i| {
+        let node = &graph.nodes[i as usize];
+        (
+            NodeKind::from(&node.kind),
+            Some(node.owner_class.resolve(pool)),
+            node.name.resolve(pool),
+            (
+                node.span.0.to_native(),
+                node.span.1.to_native(),
+                node.span.2.to_native(),
+                node.span.3.to_native(),
+            ),
+        )
+    })
+    .into_iter()
+    .map(|id| id.anchor)
+    .collect();
+    let rows: Vec<usize> = (0..identities.len())
+        .filter(|&j| !matches!(identities[j].slot, UidSlot::Duplicate { .. }))
+        .collect();
+    let dirty_anchors: Vec<u64> = rows.iter().map(|&j| identities[j].anchor).collect();
+    for (&j, pair) in rows
+        .iter()
+        .zip(pair_by_anchor(&base_anchors, &dirty_anchors))
+    {
+        out[j] = pair.map(|k| base[k as usize]);
+    }
+    out
 }
 
 /// Whether a fresh parse (a fragment's `RawNode`s) can carry a node of
