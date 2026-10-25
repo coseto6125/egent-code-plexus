@@ -9,6 +9,7 @@ use crate::resolution::heuristics::{ResolutionTier, NEAREST_COPY_CONFIDENCE, NEA
 use crate::resolution::index::{DeclaredBase, FileMeta, Language, ResolveTarget, SymbolTable};
 use crate::resolution::resolver::{ReexportIndex, Resolver};
 use crate::rust::module_tree::RustWorkspaceModTree;
+use ecp_core::analyzer::csharp_extension::{self, ReceiverSite};
 use ecp_core::analyzer::lexical::{
     enclosing_types, file_identities, file_uids, later_is_arity_twin, lexical_scope_kinds,
     raw_decl, splits_by_arity, LexicalFunctions,
@@ -17,7 +18,7 @@ use ecp_core::analyzer::path_aliases::PathAliases;
 use ecp_core::analyzer::reexport::{export_filter_applies, is_ecmascript, ImportRef};
 use ecp_core::analyzer::type_ladder;
 use ecp_core::analyzer::types::{
-    owner_key, CallSite, LocalGraph, NameRef, RawImport, RawNode, RawRoute, VariantRef,
+    owner_key, BlindSpot, CallSite, LocalGraph, NameRef, RawImport, RawNode, RawRoute, VariantRef,
 };
 pub use ecp_core::analyzer::types::{
     FUNCTION_REFERENCE_REASON, VALUE_READ_REASON, VARIANT_PATTERN_REASON, VARIANT_USE_REASON,
@@ -92,20 +93,28 @@ pub(crate) fn classify_collision(kind: NodeKind, path: &str) -> &'static str {
     "uid-collision"
 }
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 /// Per-graph output from Pass 2 parallel map: `(edges, pending_call_metas,
-/// file_edges)`. `pending_call_metas` entries are `(pre_sort_edge_idx, flags,
-/// dispatch_type)`; `file_edges` start at the graph's `File` node, which the
-/// builder appends later (C4 Open point 3, option b).
-type PerGraphPass2 = (Vec<Edge>, Vec<(usize, u8, String)>, Vec<(FileOrd, Edge)>);
+/// file_edges, blind_spots)`. `pending_call_metas` entries are
+/// `(pre_sort_edge_idx, flags, dispatch_type)`; `file_edges` start at the
+/// graph's `File` node, which the builder appends later (C4 Open point 3,
+/// option b); `blind_spots` are the calls whose resolution stopped
+/// unresolved at a recorded reason.
+type PerGraphPass2 = (
+    Vec<Edge>,
+    Vec<(usize, u8, String)>,
+    Vec<(FileOrd, Edge)>,
+    Vec<BlindSpot>,
+);
 
 /// Pass 2's stitched whole-build output. Same shape as [`PerGraphPass2`], but
 /// named apart because it is the aggregate across every graph, not one graph's
 /// share — `pass2_resolve_edges` does whole-build setup (mod-tree build,
 /// reason interning) before it fans out, so it is
 /// called once, not once per file.
-type Pass2Output = (Vec<Edge>, Vec<(usize, u8, String)>, Vec<(FileOrd, Edge)>);
+type Pass2Output = PerGraphPass2;
 
 /// Pass 1.5 output: `(route_node_idx, file_idx, route_method, route_path)`
 /// per emitted Route node, consumed by Pass 1.6's fetch-shape route index.
@@ -455,17 +464,18 @@ impl GraphBuilder {
         // Pass 2: resolve imports and build edges (rayon-vs-serial dual
         // path; see `pass2_resolve_edges` for the pre-computation +
         // dispatch logic).
-        let (mut edges, pending_call_metas_global, framework_file_edges) = pass2_resolve_edges(
-            &self.local_graphs,
-            &symbol_table,
-            &mut string_pool,
-            &self.path_aliases,
-            mod_tree_ctx,
-            &reexports,
-            &raw_map,
-            self.resolver_dump_path.as_deref(),
-            self.symbol_skip_set.as_ref(),
-        );
+        let (mut edges, pending_call_metas_global, framework_file_edges, call_blind_spots) =
+            pass2_resolve_edges(
+                &self.local_graphs,
+                &symbol_table,
+                &mut string_pool,
+                &self.path_aliases,
+                mod_tree_ctx,
+                &reexports,
+                &raw_map,
+                self.resolver_dump_path.as_deref(),
+                self.symbol_skip_set.as_ref(),
+            );
         file_edges.extend(framework_file_edges);
 
         edges.extend(route_edges);
@@ -493,19 +503,19 @@ impl GraphBuilder {
         // file-level metadata for `ecp context` / `ecp index` to surface to
         // the LLM (truly unresolvable patterns like eval/dynamic-import).
         let mut all_blind_spots: Vec<BlindSpotRecord> = Vec::new();
-        for local_graph in &self.local_graphs {
-            for bs in &local_graph.blind_spots {
-                all_blind_spots.push(BlindSpotRecord {
-                    kind: string_pool.add(&bs.kind),
-                    file_path: string_pool.add(&bs.file_path.to_string_lossy().replace('\\', "/")),
-                    start_row: bs.span.0,
-                    start_col: bs.span.1,
-                    end_row: bs.span.2,
-                    end_col: bs.span.3,
-                    hint: string_pool.add(&bs.hint),
-                    is_test: bs.is_test,
-                });
-            }
+        // Pass 2's C# extension misses ride the same channel.
+        let parsed = self.local_graphs.iter().flat_map(|g| &g.blind_spots);
+        for bs in parsed.chain(&call_blind_spots) {
+            all_blind_spots.push(BlindSpotRecord {
+                kind: string_pool.add(&bs.kind),
+                file_path: string_pool.add(&bs.file_path.to_string_lossy().replace('\\', "/")),
+                start_row: bs.span.0,
+                start_col: bs.span.1,
+                end_row: bs.span.2,
+                end_col: bs.span.3,
+                hint: string_pool.add(&bs.hint),
+                is_test: bs.is_test,
+            });
         }
         // Merge D1 collision blind spots from Pass 1 (recorded before string_pool
         // was moved into ZeroCopyGraph). BlindSpotRecord StrRefs are already valid
@@ -2608,6 +2618,17 @@ fn pass1_8_function_metas(
                     if !rfm.return_type.is_empty() {
                         symbol_table.note_return_type(node_idx, &rfm.return_type);
                     }
+                    if rfm.flags & csharp_extension::EXTENSION_FLAG != 0 {
+                        // `params` alternates name and type: [1] is the
+                        // `this` parameter's type.
+                        let this_type = rfm.params.get(1).map_or("", String::as_str);
+                        symbol_table.note_csharp_extension(
+                            node_idx,
+                            &raw_node.name,
+                            this_type,
+                            rfm.flags,
+                        );
+                    }
                     let return_type = string_pool.add(&rfm.return_type);
                     let decorators: Vec<StrRef> =
                         rfm.decorators.iter().map(|s| string_pool.add(s)).collect();
@@ -2951,12 +2972,15 @@ fn csharp_base_arity(spelling: &str) -> (&str, u32) {
 struct CallReasons {
     call: StrRef,
     nearest_copy: StrRef,
+    extension_heuristic: StrRef,
 }
 
 impl CallReasons {
     fn of(self, confidence: f32) -> StrRef {
         if confidence == NEAREST_COPY_CONFIDENCE {
             self.nearest_copy
+        } else if confidence == csharp_extension::HEURISTIC_CONFIDENCE {
+            self.extension_heuristic
         } else {
             self.call
         }
@@ -3108,6 +3132,7 @@ fn pass2_emit_node_edges(
     indirect_lookup: &FxHashMap<CallMetaKey, (u8, String)>,
     lexical_lookup: &LexicalFunctions,
     pending_call_metas: &mut Vec<(usize, u8, String)>,
+    blind_spots: &mut Vec<BlindSpot>,
 ) {
     let language = Language::from_path(&local_graph.file_path.to_string_lossy());
     for base in &raw_node.heritage {
@@ -3134,6 +3159,37 @@ fn pass2_emit_node_edges(
 
     let call_heritage =
         ecp_core::analyzer::heritage::enclosing_class_heritage(raw_node, &local_graph.nodes);
+    // A C# member call whose receiver type owns no such member retries the
+    // extension methods in scope (codex ruling P-ext). A retry that binds
+    // nothing leaves a BlindSpot naming the receiver type and the member.
+    let extension_misses: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    let caller_owner = raw_node.owner_class.as_deref().and_then(owner_key);
+    let extension = |receiver: ReceiverSite<'_>, member: &str, cap: f32| -> Vec<(u32, f32)> {
+        match resolver.csharp_extension(
+            &local_graph.file_path,
+            receiver,
+            member,
+            &local_graph.imports,
+            caller_owner,
+        ) {
+            csharp_extension::Verdict::Bound { id, confidence } => vec![(id, confidence.min(cap))],
+            csharp_extension::Verdict::Unresolved(why) => {
+                let name = match receiver {
+                    ReceiverSite::Named(name) => name,
+                    ReceiverSite::Returned(callee) => {
+                        type_ladder::returned_type(symbol_table, callee).unwrap_or_default()
+                    }
+                };
+                extension_misses
+                    .borrow_mut()
+                    .push(csharp_extension::blind_spot_hint(name, member, why));
+                Vec::new()
+            }
+            csharp_extension::Verdict::NotExtension | csharp_extension::Verdict::InstanceMember => {
+                Vec::new()
+            }
+        }
+    };
     for (call_idx, raw_callee) in raw_node.calls.iter().enumerate() {
         let lookup_key = CallMetaKey::new(raw_node.span, call_idx as u32);
         let meta = indirect_lookup.get(&lookup_key);
@@ -3143,14 +3199,31 @@ fn pass2_emit_node_edges(
                 resolver.resolve_imported_call(&local_graph.file_path, site, &local_graph.imports)
             }
             Some(targets) => targets,
-            None => resolver.resolve_call(
-                &local_graph.file_path,
-                site,
-                &local_graph.imports,
-                call_heritage,
-                raw_node.owner_class.as_deref(),
-                Some(current_node_idx),
-            ),
+            None => {
+                let targets = resolver.resolve_call(
+                    &local_graph.file_path,
+                    site,
+                    &local_graph.imports,
+                    call_heritage,
+                    raw_node.owner_class.as_deref(),
+                    Some(current_node_idx),
+                );
+                // The C# parser writes `Type.member` only for a receiver it
+                // typed: `this`, `base`, a typed local or parameter.
+                match site {
+                    CallSite::Plain(callee)
+                        if targets.is_empty() && language == Language::CSharp =>
+                    {
+                        match callee.rsplit_once('.') {
+                            Some((receiver, member)) => {
+                                extension(ReceiverSite::Named(receiver), member, 1.0)
+                            }
+                            None => targets,
+                        }
+                    }
+                    _ => targets,
+                }
+            }
         };
         // `Foo.create().bar()`: `bar` on the type the one bound `create`
         // returns. Only an unknown return type permits the parser's fallback,
@@ -3167,8 +3240,8 @@ fn pass2_emit_node_edges(
                 type_ladder::ChainOutcome::Unknown => None,
                 type_ladder::ChainOutcome::Bound(target) => Some(vec![target]),
                 type_ladder::ChainOutcome::Conclusive => {
-                    let targets = if language == Language::Kotlin {
-                        resolver
+                    let targets = match language {
+                        Language::Kotlin => resolver
                             .extension_fallback(
                                 &local_graph.file_path,
                                 member,
@@ -3178,15 +3251,27 @@ fn pass2_emit_node_edges(
                             )
                             .into_iter()
                             .map(|(id, confidence)| (id, confidence.min(inner.1)))
-                            .collect()
-                    } else {
-                        Vec::new()
+                            .collect(),
+                        Language::CSharp => {
+                            extension(ReceiverSite::Returned(inner.0), member, inner.1)
+                        }
+                        _ => Vec::new(),
                     };
                     chain_failed = targets.is_empty();
                     Some(targets)
                 }
             }
         });
+        for hint in extension_misses.take() {
+            let file_path = local_graph.file_path.to_string_lossy().replace('\\', "/");
+            blind_spots.push(BlindSpot {
+                kind: csharp_extension::BS_KIND_UNRESOLVED.into(),
+                is_test: ecp_core::file_category::is_test_path(&file_path),
+                file_path: file_path.into(),
+                span: raw_node.span,
+                hint,
+            });
+        }
         for (target_id, confidence) in targets {
             if target_id == current_node_idx {
                 continue; // self-recursion edges are Louvain / process noise
@@ -3527,6 +3612,7 @@ fn pass2_resolve_edges(
     let reason_call = CallReasons {
         call: string_pool.add("call"),
         nearest_copy: string_pool.add(NEAREST_COPY_REASON),
+        extension_heuristic: string_pool.add(csharp_extension::HEURISTIC_REASON),
     };
     let reason_reads_field = string_pool.add("field_read");
     let reason_variant = VariantReasons {
@@ -3599,6 +3685,7 @@ fn pass2_resolve_edges(
     // the final edge sort remaps pre-sort indices to sorted positions.
     let mut pending_call_metas_global: Vec<(usize, u8, String)> = Vec::new();
     let mut file_edges: Vec<(FileOrd, Edge)> = Vec::new();
+    let mut call_blind_spots: Vec<BlindSpot> = Vec::new();
 
     let edges: Vec<Edge> = if let Some(resolver) = resolver_for_dump.as_mut() {
         // Serial dump path — original loop, with reason lookups going
@@ -3633,6 +3720,7 @@ fn pass2_resolve_edges(
                     lookup,
                     &lexical_lookup,
                     &mut pending_call_metas_global,
+                    &mut call_blind_spots,
                 );
                 current_node_idx += 1;
             }
@@ -3679,6 +3767,7 @@ fn pass2_resolve_edges(
                 let mut local_edges: Vec<Edge> = Vec::new();
                 let mut local_pending: Vec<(usize, u8, String)> = Vec::new();
                 let mut local_file_edges: Vec<(FileOrd, Edge)> = Vec::new();
+                let mut local_blind_spots: Vec<BlindSpot> = Vec::new();
                 let skipped = skipped_nodes(local_graph, symbol_skip_ref);
                 for (node_offset, raw_node) in local_graph.nodes.iter().enumerate() {
                     let current_node_idx = start_idx + node_offset as u32;
@@ -3702,6 +3791,7 @@ fn pass2_resolve_edges(
                         lookup,
                         &lexical_lookup,
                         &mut local_pending,
+                        &mut local_blind_spots,
                     );
                 }
                 // T7-6: skip framework/fanout edges only when ALL symbols
@@ -3718,20 +3808,26 @@ fn pass2_resolve_edges(
                         &mut local_file_edges,
                     );
                 }
-                (local_edges, local_pending, local_file_edges)
+                (
+                    local_edges,
+                    local_pending,
+                    local_file_edges,
+                    local_blind_spots,
+                )
             })
             .collect();
 
         // Stitch per-graph results: compute global edge offset for each graph's
         // local_pending indices, then merge into the global pending vec.
         let mut all_edges: Vec<Edge> = Vec::new();
-        for (local_edges, local_pending, local_file_edges) in per_graph {
+        for (local_edges, local_pending, local_file_edges, local_blind_spots) in per_graph {
             let edge_offset = all_edges.len();
             for (local_idx, flags, dispatch_type) in local_pending {
                 pending_call_metas_global.push((edge_offset + local_idx, flags, dispatch_type));
             }
             all_edges.extend(local_edges);
             file_edges.extend(local_file_edges);
+            call_blind_spots.extend(local_blind_spots);
         }
         all_edges
     };
@@ -3752,7 +3848,12 @@ fn pass2_resolve_edges(
         }
     }
 
-    (edges, pending_call_metas_global, file_edges)
+    (
+        edges,
+        pending_call_metas_global,
+        file_edges,
+        call_blind_spots,
+    )
 }
 
 fn write_resolver_dump(

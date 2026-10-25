@@ -37,6 +37,7 @@
 //! regression suite and `crates/ecp-analyzer/benches/resolver_lookup.rs` for
 //! the before/after bench numbers.
 
+use ecp_core::analyzer::csharp_extension::{self, ReceiverSite};
 use ecp_core::analyzer::import_binding::{
     extension_retry, fqn_extension, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
     import_family, import_member_fallback, may_suppress, module_head, retry_name,
@@ -1529,6 +1530,76 @@ impl<'a> Resolver<'a> {
         );
         hits.retain(|&(id, _)| self.symbol_table.is_top_level(id));
         hits
+    }
+
+    /// The C# extension retry ([`csharp_extension::resolve`]) of `member` on
+    /// a receiver whose own member lookup bound nothing. The receiver's type
+    /// is read where [`ReceiverSite`] says: a named type in `source_file`
+    /// with `raw_imports`, the type a call returns in the callee's file with
+    /// that file's imports. The candidates' scope is always the caller's:
+    /// `source_file`'s namespaces and `raw_imports`.
+    pub(crate) fn csharp_extension(
+        &self,
+        source_file: &Path,
+        receiver: ReceiverSite<'_>,
+        member: &str,
+        raw_imports: &[RawImport],
+        caller_owner: Option<&str>,
+    ) -> csharp_extension::Verdict {
+        let st = self.symbol_table;
+        let decls = st.csharp_extension_decls(member);
+        if decls.is_empty() {
+            return csharp_extension::Verdict::NotExtension;
+        }
+        let caller_file = normalize_source_path(source_file);
+        let (name, scope_file, scope_imports) = match receiver {
+            ReceiverSite::Named(name) => (name, &*caller_file, raw_imports),
+            ReceiverSite::Returned(callee) => {
+                let (Some(name), Some(file)) =
+                    (type_ladder::returned_type(st, callee), st.file_of(callee))
+                else {
+                    return csharp_extension::Verdict::NotExtension;
+                };
+                let imports = self
+                    .reexports
+                    .and_then(|index| index.modules.get(file))
+                    .map_or(&[][..], |exports| exports.imports);
+                (name, file, imports)
+            }
+        };
+        let types: Vec<u32> =
+            match st.lookup_in_file_with_kind(scope_file, name, ResolveTarget::Type) {
+                Some(id) => vec![id],
+                None => type_ladder::TypeFacts::global_candidates(
+                    st,
+                    name,
+                    ResolveTarget::Type,
+                    FileMeta::from_normalized_path(scope_file),
+                )
+                .into_iter()
+                .filter(|&id| st.namespace_return_type_visible(id, scope_file, scope_imports))
+                .collect(),
+            };
+        let namespaces: Vec<&str> = st
+            .csharp_namespaces(&caller_file)
+            .iter()
+            .map(String::as_str)
+            .collect();
+        csharp_extension::resolve(
+            st,
+            &decls,
+            csharp_extension::Receiver {
+                name,
+                types: &types,
+            },
+            member,
+            &csharp_extension::CallerScope {
+                file: &caller_file,
+                namespaces: &namespaces,
+                imports: raw_imports,
+                owner: caller_owner,
+            },
+        )
     }
 
     /// Variant that exposes the caller's enclosing-class heritage to enable

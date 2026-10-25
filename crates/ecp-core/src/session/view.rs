@@ -36,8 +36,9 @@
 //!   onto a Class / Struct's one constructor or the type) against the
 //!   archived `name_index` (O(log N) per lookup, no allocation proportional
 //!   to the graph). A nearest-copy edge keeps the index's
-//!   [`NEAREST_COPY_REASON`]; every other overlay call carries the
-//!   uncommitted-edit marker.
+//!   [`NEAREST_COPY_REASON`] and a heuristic C# extension edge the index's
+//!   [`csharp_extension::HEURISTIC_REASON`]; every other overlay call carries
+//!   the uncommitted-edit marker.
 //! - **closure references** — lexical `References` from each enclosing
 //!   callable to its anonymous closures, using the full index's span rule.
 //! - **enum-variant references** — `References` from each dirty symbol to
@@ -113,6 +114,7 @@
 //!   custom `[lib] path` gets no `crate::` / `self::` / `super::` chain.
 
 use super::import_scope::{ImportScope, Module};
+use crate::analyzer::csharp_extension::{self, ReceiverSite};
 use crate::analyzer::heritage::{enclosing_class_heritage, holds_heritage, HeritageNode};
 use crate::analyzer::import_binding::{
     extension_retry, fqn_imported_name, fqn_language, fqn_type_path, import_binding,
@@ -977,6 +979,26 @@ impl OverlayView {
                                         .filter(|&(idx, _)| is_free(&facts, idx)),
                                     );
                                 }
+                                // The index's C# extension retry of a receiver
+                                // the parser typed (`Type.member`).
+                                if resolution.call_fallbacks_allowed()
+                                    && type_member.is_none()
+                                    && caller.language == Language::CSharp
+                                {
+                                    if let Some((receiver, member)) = match site {
+                                        CallSite::Plain(callee) => callee.rsplit_once('.'),
+                                        _ => None,
+                                    } {
+                                        resolution =
+                                            Resolution::from_ladder(facts.csharp_extension_edge(
+                                                &file.rel_path,
+                                                ReceiverSite::Named(receiver),
+                                                member,
+                                                &file.imports,
+                                                owner,
+                                            ));
+                                    }
+                                }
                                 if untyped {
                                     // A Python module is a value: `api.helper()` on
                                     // an untyped receiver may call another module's
@@ -1041,6 +1063,21 @@ impl OverlayView {
                                 ) {
                                     type_ladder::ChainOutcome::Unknown => None,
                                     type_ladder::ChainOutcome::Bound(target) => Some(Some(target)),
+                                    type_ladder::ChainOutcome::Conclusive
+                                        if caller.language == Language::CSharp =>
+                                    {
+                                        let target = facts
+                                            .csharp_extension_edge(
+                                                &file.rel_path,
+                                                ReceiverSite::Returned(inner.0),
+                                                member,
+                                                &file.imports,
+                                                owner,
+                                            )
+                                            .map(|(id, confidence)| (id, confidence.min(inner.1)));
+                                        chain_failed = target.is_none();
+                                        Some(target)
+                                    }
                                     type_ladder::ChainOutcome::Conclusive => {
                                         let target = if caller.language == Language::Kotlin {
                                             resolve_callee(
@@ -1081,6 +1118,8 @@ impl OverlayView {
                             // confidence (`CallReasons::of`).
                             let reason = if confidence == NEAREST_COPY_CONFIDENCE {
                                 NEAREST_COPY_REASON
+                            } else if confidence == csharp_extension::HEURISTIC_CONFIDENCE {
+                                csharp_extension::HEURISTIC_REASON
                             } else {
                                 super::merged::OVERLAY_EDGE_REASON
                             };
@@ -1356,7 +1395,7 @@ pub const VIEW_CACHE_FORMAT: u32 = 6;
 /// Every reason [`OverlayView::build`] puts on a [`ViewEdge`]. A cached view
 /// stores each reason as its index here; a view with an unlisted reason is
 /// never stored, so it costs a build per query as before the cache.
-const VIEW_EDGE_REASONS: [&str; 9] = [
+const VIEW_EDGE_REASONS: [&str; 10] = [
     OVERLOAD_SET_REASON,
     CLOSURE_REFERENCE_REASON,
     NEAREST_COPY_REASON,
@@ -1366,6 +1405,7 @@ const VIEW_EDGE_REASONS: [&str; 9] = [
     VALUE_READ_REASON,
     FUNCTION_REFERENCE_REASON,
     "field_read",
+    csharp_extension::HEURISTIC_REASON,
 ];
 
 fn reason_index(reason: &str) -> Option<u8> {
@@ -2099,6 +2139,10 @@ struct OverlayFacts<'a> {
     /// fresh parse as the index derives its table. A virtual node has no
     /// row in the graph's table. Sparse: empty while no language opts in.
     dirty_lexical_parents: FxHashMap<u32, u32>,
+    /// C# file → the namespaces it declares (`.`-joined), the index's
+    /// `SymbolTable::csharp_namespaces`. Built on the first C# extension
+    /// question.
+    csharp_namespaces: OnceCell<FxHashMap<&'a str, Vec<&'a str>>>,
 }
 
 /// A base Rust `Impl` node: its span, its idx and the [`owner_key`] of the
@@ -2249,6 +2293,7 @@ impl<'a> OverlayFacts<'a> {
             dirty_impl_traits,
             dirty_return_types,
             dirty_lexical_parents,
+            csharp_namespaces: OnceCell::new(),
         }
     }
 
@@ -3634,6 +3679,173 @@ impl<'a> OverlayFacts<'a> {
             return type_ladder::ChainOutcome::Conclusive;
         };
         type_ladder::ChainOutcome::Bound((id, confidence.min(inner_confidence)))
+    }
+
+    /// The index's `Resolver::csharp_extension` for a dirty C# caller, the
+    /// edge only: the overlay records no BlindSpot. A dirty file's input
+    /// carries no `FunctionMeta` flags, so the overlay cannot tell whether
+    /// its methods are extension declarations: when a dirty C# file declares
+    /// a method named `member`, no edge binds where the full build may bind
+    /// one, as the full build's BlindSpot would leave the call.
+    fn csharp_extension_edge(
+        &self,
+        source: &str,
+        receiver: ReceiverSite<'_>,
+        member: &str,
+        imports: &[RawImport],
+        owner: Option<&str>,
+    ) -> Option<(u32, f32)> {
+        let dirty_namesake = self.dirty_by_name.get(member).is_some_and(|ids| {
+            ids.iter().any(|&id| {
+                self.kind_of(id) == NodeKind::Method
+                    && self.node_file(id).is_some_and(|file| {
+                        Language::from_normalized_path(file) == Language::CSharp
+                    })
+            })
+        });
+        if dirty_namesake {
+            return None;
+        }
+        let graph = self.graph;
+        let pool = &graph.string_pool;
+        let metas = &graph.function_metas;
+        let mut decls: Vec<csharp_extension::ExtensionDecl<'_>> = Vec::new();
+        for id in graph.nodes_by_name(member) {
+            if self.dirty_base.contains(&id) || self.name_of(id) != member {
+                continue;
+            }
+            let Ok(at) = metas.binary_search_by_key(&id, |meta| meta.node_idx.to_native()) else {
+                continue;
+            };
+            let meta = &metas[at];
+            let flags = meta.flags.to_native();
+            if flags & csharp_extension::EXTENSION_FLAG == 0 {
+                continue;
+            }
+            let (Some(file), Some(class)) = (self.node_file(id), self.owner_of(id)) else {
+                continue;
+            };
+            let namespace = self
+                .first_in_file(file, class, ResolveTarget::Type, None)
+                .and_then(|class_id| {
+                    type_ladder::declared_namespace(
+                        self.owner_of(class_id),
+                        self.csharp_namespaces(file).iter().copied(),
+                    )
+                });
+            decls.push(csharp_extension::ExtensionDecl {
+                id,
+                this_type: meta.params.get(1).map_or("", |ty| ty.resolve(pool)),
+                flags,
+                file,
+                class,
+                namespace,
+            });
+        }
+        if decls.is_empty() {
+            return None;
+        }
+        let held: Rc<[RawImport]>;
+        let (name, scope_file, scope_imports): (&str, &str, &[RawImport]) = match receiver {
+            ReceiverSite::Named(name) => (name, source, imports),
+            ReceiverSite::Returned(callee) => {
+                let (Some(name), Some(file)) = (
+                    type_ladder::returned_type(self, callee),
+                    self.node_file(callee),
+                ) else {
+                    return None;
+                };
+                held = self.raw_imports(file);
+                (name, file, &held[..])
+            }
+        };
+        let types: Vec<u32> = match self.first_in_file(scope_file, name, ResolveTarget::Type, None)
+        {
+            Some(id) => vec![id],
+            None => TypeFacts::global_candidates(
+                self,
+                name,
+                ResolveTarget::Type,
+                FileMeta::from_normalized_path(scope_file),
+            )
+            .into_iter()
+            .filter(|&id| {
+                self.node_file(id).is_some_and(|file| {
+                    self.scope.namespace_return_type_visible(
+                        file,
+                        self.owner_of(id),
+                        scope_file,
+                        scope_imports,
+                    )
+                })
+            })
+            .collect(),
+        };
+        let verdict = csharp_extension::resolve(
+            self,
+            &decls,
+            csharp_extension::Receiver {
+                name,
+                types: &types,
+            },
+            member,
+            &csharp_extension::CallerScope {
+                file: source,
+                namespaces: self.csharp_namespaces(source),
+                imports,
+                owner,
+            },
+        );
+        match verdict {
+            csharp_extension::Verdict::Bound { id, confidence } => Some((id, confidence)),
+            _ => None,
+        }
+    }
+
+    /// The namespaces the C# file `file` declares (`.`-joined), the index's
+    /// `SymbolTable::csharp_namespaces`: a dirty file's from its fresh parse,
+    /// a clean one's from its archived Namespace nodes.
+    fn csharp_namespaces(&self, file: &str) -> &[&'a str] {
+        self.csharp_namespaces
+            .get_or_init(|| {
+                let graph = self.graph;
+                let pool = &graph.string_pool;
+                let mut by_file: FxHashMap<&'a str, Vec<&'a str>> = FxHashMap::default();
+                let mut note = |file: &'a str, namespace: &'a str| {
+                    let declared = by_file.entry(file).or_default();
+                    if !declared.contains(&namespace) {
+                        declared.push(namespace);
+                    }
+                };
+                for (idx, node) in graph.nodes.iter().enumerate() {
+                    if NodeKind::from(&node.kind) != NodeKind::Namespace
+                        || self.dirty_base.contains(&(idx as u32))
+                    {
+                        continue;
+                    }
+                    let Some(file) = graph.files.get(node.file_idx.to_native() as usize) else {
+                        continue;
+                    };
+                    let path = file.path.resolve(pool);
+                    if Language::from_normalized_path(path) == Language::CSharp {
+                        note(path, node.name.resolve(pool));
+                    }
+                }
+                for file in self.scope.dirty() {
+                    if Language::from_normalized_path(&file.rel_path) != Language::CSharp {
+                        continue;
+                    }
+                    for symbol in &file.symbols {
+                        if symbol.kind == NodeKind::Namespace {
+                            note(file.rel_path.as_str(), symbol.name.as_str());
+                        }
+                    }
+                }
+                by_file
+            })
+            .get(file)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// The index's `SymbolTable::declares_type_beside`: `file` or a file in

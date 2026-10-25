@@ -2,6 +2,7 @@
 
 use ecp_analyzer::c_sharp::parser::CSharpProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
+use ecp_core::analyzer::csharp_extension::{EXTENSION_FLAG, GENERIC_THIS_FLAG};
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::graph::{FunctionMeta, NodeKind, ZeroCopyGraph};
 
@@ -236,6 +237,74 @@ fn csharp_test_file_category_marks_is_test() {
     let g = analyze_test_file(src);
     let m = meta(&g, "TestLogin");
     assert!(m.is_test(), "file category Test → is_test");
+}
+
+// ── extension (EXTENSION_FLAG / GENERIC_THIS_FLAG) ─────────────────────────────
+// Contract: the resolver's extension retry reads these bits, so a method the
+// flag misses never binds as an extension and a method it wrongly marks
+// would bind as one.
+
+fn ext_bits(src: &str, name: &str) -> u16 {
+    meta(&analyze(src), name).flags & (EXTENSION_FLAG | GENERIC_THIS_FLAG)
+}
+
+#[test]
+fn test_extract_csharp_extension_method_sets_extension_flag() {
+    let src = "namespace L { public static class E { public static bool Ex(this int v) { return v > 0; } } }";
+    assert_eq!(ext_bits(src, "Ex"), EXTENSION_FLAG);
+}
+
+#[test]
+fn test_extract_csharp_generic_this_sets_generic_this_flag() {
+    let src =
+        "public static class E { public static T Gx<T>(this T v) where T : class { return v; } }";
+    assert_eq!(ext_bits(src, "Gx"), EXTENSION_FLAG | GENERIC_THIS_FLAG);
+}
+
+#[test]
+fn test_extract_csharp_generic_receiver_type_argument_no_generic_this_flag() {
+    let src = "public static class E { public static int Cx<T>(this List<T> v) { return 0; } }";
+    assert_eq!(ext_bits(src, "Cx"), EXTENSION_FLAG);
+}
+
+#[test]
+fn test_extract_csharp_static_without_this_no_extension_flag() {
+    let src = "public static class E { public static int Sx(int v) { return v; } }";
+    assert_eq!(ext_bits(src, "Sx"), 0);
+}
+
+#[test]
+fn test_extract_csharp_this_param_in_non_static_class_no_extension_flag() {
+    let src = "public class E { public static int Nx(this int v) { return v; } }";
+    assert_eq!(ext_bits(src, "Nx"), 0);
+}
+
+#[test]
+fn test_extract_csharp_generic_static_class_no_extension_flag() {
+    let src = "public static class E<U> { public static int Ux(this int v) { return v; } }";
+    assert_eq!(ext_bits(src, "Ux"), 0);
+}
+
+#[test]
+fn test_extract_csharp_nested_static_class_no_extension_flag() {
+    let src = "public static class O { public static class I { public static int Ix(this int v) { return v; } } }";
+    assert_eq!(ext_bits(src, "Ix"), 0);
+}
+
+#[test]
+fn test_extract_csharp_extension_under_preprocessor_sets_extension_flag() {
+    let src = "public static class E\n{\n#if NET20\n    public static int Px(this int v) { return v; }\n#endif\n}\n";
+    assert_eq!(ext_bits(src, "Px"), EXTENSION_FLAG);
+}
+
+#[test]
+fn test_extract_csharp_extension_flag_keeps_visibility() {
+    let src = "static class E { internal static int Vx(this int v) { return v; } }";
+    let g = analyze(src);
+    let m = meta(&g, "Vx");
+    assert_eq!(m.flags & EXTENSION_FLAG, EXTENSION_FLAG);
+    assert_eq!(m.visibility(), 3, "internal");
+    assert!(m.is_static());
 }
 
 // ── sorted invariant ──────────────────────────────────────────────────────────

@@ -1,3 +1,4 @@
+use ecp_core::analyzer::csharp_extension::ExtensionDecl;
 use ecp_core::analyzer::import_binding::{
     fqn_language, owner_path_agrees, DeclaredType, MemberOwner,
 };
@@ -5,7 +6,7 @@ use ecp_core::analyzer::reexport::{is_es_module, pick_call, ExportAliasTable};
 use ecp_core::analyzer::same_file_pick::{
     self, rust_lexical_scopes, ImplMember as PickImplMember, PickFacts,
 };
-use ecp_core::analyzer::type_ladder::{return_type_key, TypeFacts};
+use ecp_core::analyzer::type_ladder::{declared_namespace, return_type_key, TypeFacts};
 use ecp_core::analyzer::types::{owner_key, RawExportAlias};
 use ecp_core::file_category::pick_global;
 pub use ecp_core::file_category::{FileMeta, GlobalPick, Language};
@@ -327,6 +328,11 @@ pub struct SymbolTable {
     /// lexical-parent table (see [`Self::note_lexical_parent`]). Sparse:
     /// empty while no language opts in.
     lexical_parents: FxHashMap<u32, u32>,
+
+    /// Method name → the C# extension methods of that name, each with its
+    /// `this` parameter's type as written and its `FunctionMeta::flags`
+    /// (see [`Self::note_csharp_extension`]). Overloads included.
+    csharp_extensions: FxHashMap<Box<str>, Vec<(u32, Box<str>, u16)>>,
 }
 
 impl SymbolTable {
@@ -619,6 +625,56 @@ impl SymbolTable {
             }
         };
         self.return_types.insert(node_id, id);
+    }
+
+    /// Record the C# extension method `node_id` named `name`
+    /// ([`ecp_core::analyzer::csharp_extension::EXTENSION_FLAG`]): the type
+    /// its `this` parameter declares and its flags.
+    pub fn note_csharp_extension(&mut self, node_id: u32, name: &str, this_type: &str, flags: u16) {
+        self.csharp_extensions
+            .entry(name.into())
+            .or_default()
+            .push((node_id, this_type.into(), flags));
+    }
+
+    /// The C# extension declarations named `name`, as
+    /// [`ecp_core::analyzer::csharp_extension::resolve`] reads them. A
+    /// declaration whose file or class the table cannot place is left out.
+    pub(crate) fn csharp_extension_decls(&self, name: &str) -> Vec<ExtensionDecl<'_>> {
+        let Some(found) = self.csharp_extensions.get(name) else {
+            return Vec::new();
+        };
+        found
+            .iter()
+            .filter_map(|(id, this_type, flags)| {
+                let file = self.file_of(*id)?;
+                let class = PickFacts::owner(self, *id)?;
+                let namespace = self
+                    .lookup_in_file_with_kind(file, class, ResolveTarget::Type)
+                    .and_then(|class_id| {
+                        declared_namespace(
+                            PickFacts::owner(self, class_id),
+                            self.csharp_namespaces(file).iter().map(String::as_str),
+                        )
+                    });
+                Some(ExtensionDecl {
+                    id: *id,
+                    this_type: &**this_type,
+                    flags: *flags,
+                    file,
+                    class,
+                    namespace,
+                })
+            })
+            .collect()
+    }
+
+    /// The namespaces `file` declares (`.`-joined), empty when none.
+    pub(crate) fn csharp_namespaces(&self, file: &str) -> &[String] {
+        self.file_namespaces
+            .get(file)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// The [`return_type_key`] the function `node_id` declares.

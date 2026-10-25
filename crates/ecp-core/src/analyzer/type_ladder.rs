@@ -282,7 +282,7 @@ pub fn visible_return_type<'q, F: TypeFacts + ?Sized>(
 /// Namespace visible from a type's owner key. A file-scoped namespace has
 /// no stamped owner, so it requires one namespace in the file. Two full
 /// namespace names with one owner key cannot be distinguished.
-fn declared_namespace<'a>(
+pub fn declared_namespace<'a>(
     owner: Option<&str>,
     namespaces: impl Iterator<Item = &'a str>,
 ) -> Option<&'a str> {
