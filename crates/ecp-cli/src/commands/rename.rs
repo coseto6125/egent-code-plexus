@@ -224,7 +224,8 @@ fn doc_text<'t>(text: &'t str, request: &TargetRequest) -> &'t str {
 /// is another binding of the same spelling: a local, a parameter, a
 /// namesake.
 struct Binding<'a> {
-    /// The target's file and every file that holds a deterministic referrer.
+    /// The file of each part of the target and every file that holds a
+    /// deterministic referrer.
     files: BTreeSet<&'a str>,
     /// Merged indices: the target and its deterministic referrers.
     referrers: FxHashSet<u32>,
@@ -240,11 +241,35 @@ impl<'a> Binding<'a> {
         let node = merged
             .node(target.node)
             .expect("the resolver answers merged-space indices");
-        let target_file = node.file_path(merged).unwrap_or_default();
         let target_name = node.name(merged);
-        let mut files = BTreeSet::from([target_file]);
-        let mut referrers = FxHashSet::from_iter([target.node]);
-        for edge in merged.in_edges(target.node) {
+        // Every part of a C# `partial` type is the declaration, and a
+        // construction's `Calls` edge lands on a constructor of any part, so
+        // the type's referrers include its constructors' referrers.
+        let parts = merged.partial_parts(target.node);
+        let types = if parts.is_empty() {
+            vec![target.node]
+        } else {
+            parts
+        };
+        let spans: Vec<(&'a str, std::ops::RangeInclusive<u32>)> = types
+            .iter()
+            .filter_map(|&idx| merged.node(idx))
+            .map(|n| {
+                let file = n.file_path(merged).unwrap_or_default();
+                (file, n.start_line()..=n.end_line())
+            })
+            .collect();
+        let constructors: Vec<u32> = types
+            .iter()
+            .flat_map(|&idx| merged.constructors_of(idx))
+            .collect();
+        let mut files: BTreeSet<&'a str> = spans.iter().map(|(file, _)| *file).collect();
+        let mut referrers: FxHashSet<u32> = types.iter().chain(&constructors).copied().collect();
+        for edge in types
+            .iter()
+            .chain(&constructors)
+            .flat_map(|&idx| merged.in_edges(idx))
+        {
             let Some(source) = merged.node(edge.source) else {
                 continue;
             };
@@ -268,20 +293,21 @@ impl<'a> Binding<'a> {
                 }
             }
         }
-        let target_lines = node.start_line()..=node.end_line();
         let callables = callable_spans(merged, &files);
         // A constructor or destructor inside the target type is spelled like the type: its
         // name is the declaration's own name, not a shadowing binding.
-        for &(start, end, idx) in callables.get(target_file).map_or(&[][..], Vec::as_slice) {
-            if target_lines.contains(&start)
-                && target_lines.contains(&end)
-                && merged.node(idx).is_some_and(|n| {
-                    let name = n.name(merged);
-                    (n.kind() == NodeKind::Constructor && name == target_name)
-                        || name.strip_prefix('~') == Some(target_name)
-                })
-            {
-                referrers.insert(idx);
+        for (file, lines) in &spans {
+            for &(start, end, idx) in callables.get(file).map_or(&[][..], Vec::as_slice) {
+                if lines.contains(&start)
+                    && lines.contains(&end)
+                    && merged.node(idx).is_some_and(|n| {
+                        let name = n.name(merged);
+                        (n.kind() == NodeKind::Constructor && name == target_name)
+                            || name.strip_prefix('~') == Some(target_name)
+                    })
+                {
+                    referrers.insert(idx);
+                }
             }
         }
         Self {
