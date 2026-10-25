@@ -301,7 +301,8 @@ fn test_route_openapi_yaml_not_kubernetes_provider() {
 /// source and records nothing.
 ///
 /// Failed before this change: the walk dropped the file with no record.
-#[cfg(unix)]
+/// Linux only: APFS refuses a non-UTF-8 name (`EILSEQ`).
+#[cfg(target_os = "linux")]
 #[test]
 fn test_cold_index_non_utf8_routed_path_omitted_with_blind_spot() {
     use std::os::unix::ffi::OsStrExt;

@@ -1190,8 +1190,16 @@ fn drain_tantivy_if_inside_worktree(
     result: &mut crate::build::orchestrator::BuildResult,
     worktree_root: &Path,
 ) -> bool {
-    let cache_root = ecp_core::registry::resolve_home_ecp();
-    if cache_root.starts_with(worktree_root) {
+    // `worktree_root` is git's top, with symlinks resolved (macOS `/var` is
+    // `/private/var`); the cache root keeps `$HOME` as spelled. Compare both
+    // resolved. This runs once per build, never on the query path.
+    let resolved = |path: &Path| {
+        fs::canonicalize(path).map_or_else(
+            |_| path.to_path_buf(),
+            |p| dunce::simplified(&p).to_path_buf(),
+        )
+    };
+    if resolved(&ecp_core::registry::resolve_home_ecp()).starts_with(resolved(worktree_root)) {
         result.join_background();
         test_counters::TANTIVY_JOIN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return true;

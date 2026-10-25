@@ -109,6 +109,31 @@ fn ensure_fresh_drains_tantivy_when_ecp_cache_inside_worktree() {
     );
 }
 
+/// `ensure_fresh` roots at git's top, which resolves symlinks; `$HOME`
+/// keeps its spelling. On macOS every temp dir is such a pair (`/var` is
+/// `/private/var`); a symlinked HOME is the same pair on Linux.
+#[cfg(unix)]
+#[test]
+fn test_ensure_fresh_home_through_symlink_cache_inside_worktree_drains() {
+    let _env_guard = lock_env();
+    let _snapshot = EnvSnapshot::take();
+
+    let tmp = TempDir::new().expect("tempdir");
+    let worktree = tmp.path().join("real");
+    fs::create_dir_all(&worktree).unwrap();
+    git_init_with_commit(&worktree);
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&worktree, &link).unwrap();
+    std::env::set_var("HOME", &link);
+    std::env::remove_var("ECP_HOME");
+
+    test_counters::reset();
+    let graph_path = link.join(".ecp").join("graph.bin");
+    auto_ensure::ensure_fresh(auto_ensure::IndexNeed::NearCurrent, &graph_path, &link).unwrap();
+
+    assert_eq!(test_counters::tantivy_join_calls(), 1);
+}
+
 #[test]
 fn ensure_fresh_skips_tantivy_drain_when_cache_outside_worktree() {
     let _env_guard = lock_env();

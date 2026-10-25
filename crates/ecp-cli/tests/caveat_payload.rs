@@ -184,7 +184,7 @@ fn test_routes_current_graph_payload_has_no_result_field() {
 /// HEAD. Git prints it, the dirty set cannot name it, and no event remains, so
 /// the gate answers `Ready`. Failed before F6: `Ready` dropped the skipped
 /// entry, so no caveat source saw it.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn test_routes_ready_graph_with_non_utf8_dirty_path_payload_has_caveat() {
     let (repo, home) = fixture();
@@ -331,15 +331,16 @@ fn test_find_exact_text_warm_attached_caveat_first_stdout_line() {
 }
 
 /// Plant an untracked file whose name is not UTF-8 on a graph built at HEAD:
-/// git prints it, the dirty set cannot name it.
-#[cfg(unix)]
+/// git prints it, the dirty set cannot name it. Linux only: APFS refuses
+/// such a name (`EILSEQ`), so macOS cannot hold the file.
+#[cfg(target_os = "linux")]
 fn plant_non_utf8_path(repo: &Path) {
     use std::os::unix::ffi::OsStrExt;
     let name = std::ffi::OsStr::from_bytes(b"caf\xe9.rs");
     std::fs::write(repo.join(name), "pub fn gamma() {}\n").unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn assert_non_utf8_caveat(payload: &serde_json::Value, what: &str) {
     let result = payload["result"].as_str().unwrap_or_default();
     assert!(
@@ -350,7 +351,7 @@ fn assert_non_utf8_caveat(payload: &serde_json::Value, what: &str) {
 
 /// Failed before this change: `find` read `Engine::caveat`, which held only
 /// the graph's staleness, so the payload had no `result`.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn test_find_ready_graph_with_non_utf8_dirty_path_payload_has_caveat() {
     let (repo, home) = fixture();
@@ -365,7 +366,7 @@ fn test_find_ready_graph_with_non_utf8_dirty_path_payload_has_caveat() {
     assert_non_utf8_caveat(&payload, "find");
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn test_impact_ready_graph_with_non_utf8_dirty_path_payload_has_caveat() {
     let (repo, home) = fixture();
@@ -381,7 +382,7 @@ fn test_impact_ready_graph_with_non_utf8_dirty_path_payload_has_caveat() {
 /// A registry selector loads its engine through `load_ensured`, which kept the
 /// engine and dropped the read context. Failed before this change: no
 /// `result`.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn test_find_bm25_registry_selector_non_utf8_dirty_path_payload_has_caveat() {
     let (repo, home) = fixture();
