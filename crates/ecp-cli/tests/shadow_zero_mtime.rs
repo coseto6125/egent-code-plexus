@@ -7,9 +7,12 @@
 //! drops the fragment on every query and the cascade never reaches a view.
 //!
 //! The caller now stats the cascade set before the parse, so the manifest
-//! holds the shadow's real mtime and the reader serves its fragment. The
-//! tests run the real CLI path (`ecp find` on the dirty tree with one session
-//! id) and read the session manifest.
+//! holds the shadow's real mtime and the reader serves its fragment. Once
+//! `util.ts` is gone, `util.js` is no longer a shadow, and each exit of
+//! `ensure_fresh` (clean tree, freshness-gate skip, full refresh) retires its
+//! entry: the reader would serve it while its mtime matches. The tests run
+//! the real CLI path (`ecp find` on the dirty tree with one session id) and
+//! read the session manifest.
 
 mod common;
 
@@ -31,7 +34,7 @@ const HOST_SESSION_VARS: [&str; 5] = [
     "CLAUDE_CODE_SESSION_ID",
 ];
 
-fn ecp(repo: &Path, home: &Path, args: &[&str]) {
+fn ecp(repo: &Path, home: &Path, args: &[&str]) -> String {
     let mut cmd = Command::new(ecp_bin());
     cmd.args(args)
         .current_dir(repo)
@@ -48,6 +51,7 @@ fn ecp(repo: &Path, home: &Path, args: &[&str]) {
         "ecp {args:?} failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 /// The session dir holding a `l1/dirty_events.json`, found under `home`.
@@ -77,11 +81,18 @@ fn mtime_ns(path: &Path) -> Option<u64> {
     Some(modified.duration_since(UNIX_EPOCH).ok()?.as_nanos() as u64)
 }
 
+const UTIL_TS: &str = "export function helper(): number {\n  return 2;\n}\n";
+
 fn setup(repo: &Path, home: &Path) {
+    setup_with(repo, home, &[("src/util.ts", UTIL_TS)]);
+}
+
+/// Indexes the committed tree, writes `edits`, and runs one query.
+fn setup_with(repo: &Path, home: &Path, edits: &[(&str, &str)]) {
     write(
         repo,
         "src/util.js",
-        "export function helper() {\n  return 1;\n}\n",
+        "function base() {\n  return 1;\n}\n\nexport function helper() {\n  return base();\n}\n",
     );
     write(
         repo,
@@ -91,11 +102,9 @@ fn setup(repo: &Path, home: &Path) {
     run_git(repo, &["init", "-q", "-b", "main"]);
     commit_all(repo, "init");
     ecp(repo, home, &["admin", "index", "--repo", "."]);
-    write(
-        repo,
-        "src/util.ts",
-        "export function helper(): number {\n  return 2;\n}\n",
-    );
+    for (rel, content) in edits {
+        write(repo, rel, content);
+    }
     ecp(repo, home, &["find", "helper", "--format", "json"]);
 }
 
@@ -105,15 +114,6 @@ fn served_paths(session: &Path, repo: &Path) -> BTreeSet<String> {
         .into_iter()
         .map(|input| input.rel_path)
         .collect()
-}
-
-fn manifest_mtime(session: &Path, rel: &str) -> u64 {
-    let manifest = DirtyEvents::read(&layout::dirty_events_path(session)).unwrap();
-    manifest
-        .entries
-        .get(rel)
-        .unwrap_or_else(|| panic!("no manifest entry for {rel}"))
-        .mtime_ns
 }
 
 #[test]
@@ -148,22 +148,58 @@ fn test_accepted_fragments_shadow_cascade_mtime_reader_keeps_file() {
     }
 }
 
+const MAIN_EDITED: &str =
+    "import { helper } from './util';\n\nexport function run() {\n  return helper() + 1;\n}\n";
+
+/// Removes `src/util.ts`, so `src/util.js` is no longer a shadow of a dirty
+/// path, after the setup query served both.
+fn remove_shadowing_file(repo: &Path, session: &Path) {
+    let served = served_paths(session, repo);
+    assert!(
+        served.contains("src/util.js"),
+        "the setup must serve the shadow: {served:?}"
+    );
+    fs::remove_file(repo.join("src/util.ts")).unwrap();
+}
+
 #[test]
-fn test_ensure_fresh_shadow_edited_after_capture_reparses() {
+fn test_ensure_fresh_shadow_sibling_removed_clean_tree_retires_shadow() {
     let repo = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     setup(repo.path(), home.path());
     let session = session_dir(home.path());
-    let before = manifest_mtime(&session, "src/util.js");
+    remove_shadowing_file(repo.path(), &session);
 
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    write(
+    let out = ecp(
         repo.path(),
-        "src/util.js",
-        "export function helper() {\n  return 3;\n}\n",
+        home.path(),
+        &["inspect", "--name", "helper", "--format", "json"],
     );
-    let edited = mtime_ns(&repo.path().join("src/util.js")).unwrap();
-    assert_ne!(edited, before, "the edit must move the file's mtime");
+
+    assert_eq!(
+        served_paths(&session, repo.path()),
+        BTreeSet::new(),
+        "a clean tree serves no fragment"
+    );
+    assert!(
+        !out.contains("l1-overlay"),
+        "util.js calls come from the base graph again: {out}"
+    );
+}
+
+#[test]
+fn test_ensure_fresh_shadow_sibling_removed_gate_skip_retires_shadow() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup_with(
+        repo.path(),
+        home.path(),
+        &[("src/util.ts", UTIL_TS), ("src/main.js", MAIN_EDITED)],
+    );
+    let session = session_dir(home.path());
+    remove_shadowing_file(repo.path(), &session);
+
+    // main.js is still dirty and its fragment current: the gate skips.
     ecp(
         repo.path(),
         home.path(),
@@ -171,9 +207,37 @@ fn test_ensure_fresh_shadow_edited_after_capture_reparses() {
     );
 
     assert_eq!(
-        manifest_mtime(&session, "src/util.js"),
-        edited,
-        "the gate must not keep the old shadow fragment"
+        served_paths(&session, repo.path()),
+        BTreeSet::from(["src/main.js".to_string()]),
     );
-    assert!(served_paths(&session, repo.path()).contains("src/util.js"));
+}
+
+#[test]
+fn test_ensure_fresh_shadow_sibling_removed_full_refresh_retires_shadow() {
+    let repo = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    setup_with(
+        repo.path(),
+        home.path(),
+        &[("src/util.ts", UTIL_TS), ("src/main.js", MAIN_EDITED)],
+    );
+    let session = session_dir(home.path());
+    remove_shadowing_file(repo.path(), &session);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    write(
+        repo.path(),
+        "src/main.js",
+        "import { helper } from './util';\n\nexport function run() {\n  return helper() + 2;\n}\n",
+    );
+
+    ecp(
+        repo.path(),
+        home.path(),
+        &["find", "helper", "--format", "json"],
+    );
+
+    assert_eq!(
+        served_paths(&session, repo.path()),
+        BTreeSet::from(["src/main.js".to_string()]),
+    );
 }

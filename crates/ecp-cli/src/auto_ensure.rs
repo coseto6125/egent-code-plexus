@@ -669,9 +669,12 @@ pub(crate) fn ensure_fresh_with_rebuild(
     match state {
         // Ready proves no source or config change, so the events are empty;
         // the probe's set still names the entries it skipped.
-        EnsureResult::Ready => Ok(Ensured::current(
-            ready_dirty.or_else(|| DirtySet::from_events(Vec::new()).ok()),
-        )),
+        EnsureResult::Ready => {
+            retire_unclaimed_entries(worktree_root, None, &[]);
+            Ok(Ensured::current(
+                ready_dirty.or_else(|| DirtySet::from_events(Vec::new()).ok()),
+            ))
+        }
         EnsureResult::Missing => {
             // A sibling is a different commit, so it is only ever an answer to
             // `NearCurrent`. Deciding here rather than unwinding a warm-attach
@@ -759,13 +762,7 @@ pub(crate) fn ensure_fresh_with_rebuild(
                 // halves too, as today's ` D` entries did: `reanalyze_files`
                 // stats each path once and skips a missing one. Config-only
                 // halves stay in the set for areas 4 and 5.
-                let rel_paths: Vec<String> = dirty
-                    .events()
-                    .iter()
-                    .flat_map(|event| event.halves())
-                    .filter(|(_, half)| half.class.is_source())
-                    .map(|(_, half)| half.path.as_str().to_owned())
-                    .collect();
+                let rel_paths = dirty_source_paths(&dirty);
                 // Freshness gate (FU-2026-06-10-f92cecba3daa): each fragment
                 // records its source file's mtime_ns in `l1/dirty_events.json`, so
                 // a dirty file whose mtime still matches was already parsed
@@ -788,6 +785,11 @@ pub(crate) fn ensure_fresh_with_rebuild(
                     if walked {
                         write_head_sha_sidecar(graph_path, worktree_root);
                     }
+                    retire_unclaimed_entries(
+                        worktree_root,
+                        gate.manifest,
+                        &dirty_source_paths(&dirty),
+                    );
                     return Ok(Ensured::refreshed(dirty, size_cap));
                 }
                 // Stat BEFORE parsing: the manifest mtime must belong to the
@@ -878,6 +880,7 @@ pub(crate) fn ensure_fresh_with_rebuild(
                     size_cap,
                 )
                 .map_err(|e| format!("L1 overlay refresh: {e}"))?;
+                retire_unclaimed_entries(worktree_root, None, &dirty_source_paths(&dirty));
                 // L1 overlay only touches dirty fragments under
                 // `<repo>/sessions/<sid>/` and does not rewrite graph.bin, but the
                 // working tree is now consistent with the indexed state of the
@@ -1348,6 +1351,9 @@ struct L1FreshnessGate {
     rel_paths: Vec<String>,
     pre_mtimes: HashMap<String, u64>,
     session_meta: Option<SessionMeta>,
+    /// The session dir and the current manifest the gate compared against,
+    /// for the retire pass on the gate-skip path.
+    manifest: Option<(PathBuf, ecp_core::session::DirtyEvents)>,
 }
 
 /// L1 freshness gate: drop dirty files whose overlay fragment is provably
@@ -1379,6 +1385,7 @@ fn retain_stale_fragments(
         rel_paths,
         pre_mtimes: HashMap::new(),
         session_meta,
+        manifest: None,
     };
     let Some(session_dir) = resolve_session_overlay_dir(worktree_root) else {
         return pass(rel_paths, None);
@@ -1448,6 +1455,72 @@ fn retain_stale_fragments(
         rel_paths: retained,
         pre_mtimes,
         session_meta: Some(meta),
+        manifest: Some((session_dir, manifest)),
+    }
+}
+
+/// The source halves of `dirty`, removed halves included: the paths the gate
+/// and the parse take, and the paths whose overlay entries stay claimed.
+fn dirty_source_paths(dirty: &DirtySet<ClassifiedPath>) -> Vec<String> {
+    dirty
+        .events()
+        .iter()
+        .flat_map(|event| event.halves())
+        .filter(|(_, half)| half.class.is_source())
+        .map(|(_, half)| half.path.as_str().to_owned())
+        .collect()
+}
+
+/// Retires every overlay entry whose path is neither in `dirty_sources` nor a
+/// shadow of one: a shadow whose dirty sibling is gone, a file reverted to
+/// its committed content. The reader would serve such an entry while its
+/// mtime matches. `dirty_sources` is the whole dirty set, not the gate's
+/// re-parse subset. `manifest` is the one the gate already read; `None`
+/// reads it here. A retire that fails only logs: the reader's mtime check
+/// still holds, and the next refresh retries.
+fn retire_unclaimed_entries(
+    worktree_root: &Path,
+    manifest: Option<(PathBuf, ecp_core::session::DirtyEvents)>,
+    dirty_sources: &[String],
+) {
+    use ecp_core::session::{layout, DirtyEvents};
+
+    let Some((session_dir, manifest)) = manifest.or_else(|| {
+        let session_dir = resolve_session_overlay_dir(worktree_root)?;
+        let manifest = DirtyEvents::read(&layout::dirty_events_path(&session_dir)).ok()?;
+        Some((session_dir, manifest))
+    }) else {
+        return;
+    };
+    let claimed: std::collections::HashSet<&str> =
+        dirty_sources.iter().map(String::as_str).collect();
+    let unclaimed: Vec<PathBuf> = manifest
+        .entries
+        .keys()
+        .filter(|path| !claimed.contains(path.as_str()))
+        .map(PathBuf::from)
+        .collect();
+    if unclaimed.is_empty() {
+        return;
+    }
+    let changed: Vec<PathBuf> = dirty_sources.iter().map(PathBuf::from).collect();
+    let shadows = ecp_analyzer::incremental::shadow_candidates::detect_shadow_candidates(
+        &changed, &unclaimed,
+    );
+    let stale: HashMap<String, Option<String>> = unclaimed
+        .into_iter()
+        .filter(|path| !shadows.contains(path))
+        .map(|path| {
+            let path = path.to_string_lossy().into_owned();
+            let fragment_id = manifest.entries[&path].fragment_id.clone();
+            (path, fragment_id)
+        })
+        .collect();
+    if stale.is_empty() {
+        return;
+    }
+    if let Err(e) = crate::session::overlay_writer::retire_entries(&session_dir, &stale) {
+        eprintln!("l1.retire failed: {e}");
     }
 }
 

@@ -1,5 +1,5 @@
 use ecp_cli::session::overlay_writer::{
-    write_dirty_events, write_dirty_fragment, write_dirty_fragments_batch,
+    retire_entries, write_dirty_events, write_dirty_fragment, write_dirty_fragments_batch,
     write_dirty_fragments_from_graphs, DirtyPathEvent, FragmentInput,
 };
 use ecp_core::contracts::dirty_event::{PathChange, PathClass};
@@ -313,4 +313,73 @@ fn test_write_dirty_events_unmerged_deleted_added_store_parsed_change() {
         .entries
         .values()
         .all(|e| e.change != PathChange::Unmerged));
+}
+
+fn write_two(session_dir: &std::path::Path) -> (String, String) {
+    let ids: Vec<String> = [("src/a.rs", "fn a() {}"), ("src/b.rs", "fn b() {}")]
+        .into_iter()
+        .map(|(rel, content)| {
+            let input = FragmentInput {
+                rel_path: rel.into(),
+                content: content.as_bytes().to_vec(),
+                mtime_ns: 1000,
+            };
+            write_dirty_fragment(session_dir, &input)
+                .unwrap()
+                .fragment_id
+        })
+        .collect();
+    (ids[0].clone(), ids[1].clone())
+}
+
+#[test]
+fn test_retire_entries_named_entry_drops_it_and_keeps_bin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let session_dir = make_session_dir(tmp.path(), "retire");
+    let (a, _) = write_two(&session_dir);
+
+    let stale = HashMap::from([("src/a.rs".to_string(), Some(a.clone()))]);
+    assert_eq!(retire_entries(&session_dir, &stale).unwrap(), 1);
+
+    let df = DirtyEvents::read(&layout::dirty_events_path(&session_dir)).unwrap();
+    assert_eq!(df.entries.keys().collect::<Vec<_>>(), ["src/b.rs"]);
+    assert!(
+        layout::fragment_path(&session_dir, &a).exists(),
+        "a bin can be shared by content hash; admin gc owns its removal"
+    );
+}
+
+#[test]
+fn test_retire_entries_rewritten_entry_other_id_stays() {
+    let tmp = tempfile::tempdir().unwrap();
+    let session_dir = make_session_dir(tmp.path(), "retire-race");
+    write_two(&session_dir);
+
+    let stale = HashMap::from([("src/a.rs".to_string(), Some("an-older-id".to_string()))]);
+    assert_eq!(retire_entries(&session_dir, &stale).unwrap(), 0);
+    let df = DirtyEvents::read(&layout::dirty_events_path(&session_dir)).unwrap();
+    assert_eq!(
+        df.entries.len(),
+        2,
+        "another process rewrote src/a.rs since"
+    );
+}
+
+#[test]
+fn test_retire_entries_last_entry_removes_manifest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let session_dir = make_session_dir(tmp.path(), "retire-all");
+    let (a, b) = write_two(&session_dir);
+
+    let stale = HashMap::from([
+        ("src/a.rs".to_string(), Some(a)),
+        ("src/b.rs".to_string(), Some(b)),
+    ]);
+    assert_eq!(retire_entries(&session_dir, &stale).unwrap(), 2);
+    assert!(!layout::dirty_events_path(&session_dir).exists());
+    assert_eq!(
+        retire_entries(&session_dir, &stale).unwrap(),
+        0,
+        "a missing manifest has nothing to retire"
+    );
 }

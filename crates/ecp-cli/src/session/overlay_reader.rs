@@ -79,11 +79,12 @@ pub fn accepted_fragments(
 ///   over another cap parsed to an omission). Treating its files as clean
 ///   (skip) is the conservative choice: the next `ensure_fresh` re-parses
 ///   every dirty file into a fresh manifest. Its tombstones are skipped too.
-/// - **mtime mismatch** — `commit_fragment_results` only ever inserts
-///   entries, so a file edited and then REVERTED keeps its (now stale)
-///   manifest entry. Serving that fragment would beat fresh base data with
-///   stale overlay data; the on-disk mtime is the cheap tell (the entry's
-///   `mtime_ns` was stat'ed at fragment-write time from the same path).
+/// - **mtime mismatch** — a file edited and then REVERTED keeps its (now
+///   stale) manifest entry until the next `ensure_fresh` retires it
+///   (`retire_unclaimed_entries`). Serving that fragment would beat fresh
+///   base data with stale overlay data; the on-disk mtime is the cheap tell
+///   (the entry's `mtime_ns` was stat'ed at fragment-write time from the
+///   same path).
 /// - **a tombstoned file is back** — the tombstone stays in the manifest
 ///   when its file comes back, so it counts only while the path is absent,
 ///   by the freshness gate's own stat rule (`mtime_ns_of` gives `None`).

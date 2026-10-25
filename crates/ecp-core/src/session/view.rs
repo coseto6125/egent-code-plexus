@@ -386,11 +386,7 @@ impl OverlayView {
 
         // ── dirty and removed file_idx sets ───────────────────────────────
         let rel_paths: FxHashSet<&str> = files.iter().map(|f| f.rel_path.as_str()).collect();
-        let removed_paths: FxHashSet<&str> = removed
-            .iter()
-            .map(String::as_str)
-            .filter(|path| !rel_paths.contains(path))
-            .collect();
+        let removed_paths: FxHashSet<&str> = removed.iter().map(String::as_str).collect();
         // A path can own several `graph.files` entries (two `LocalGraph`s
         // of one path), so the dirty map keys each entry to its path.
         let mut dirty_file_idx: FxHashMap<u32, &str> = FxHashMap::default();
