@@ -178,7 +178,10 @@ fn test_find_by_repo_dirty_overloads_result_names_hidden_declarations() {
     let fx = JavaRepo::new("rpib-by-repo");
     fx.touch_comment("src/K.java");
 
-    let payload = fx.json_in(&fx.home, &["find", "save", "--repo", "@all"]);
+    let payload = fx.json_in(
+        &fx.home,
+        &["find", "save", "--mode", "bm25", "--repo", "@all"],
+    );
 
     assert_names_hidden_save(&result_of(&payload));
 }
@@ -194,4 +197,52 @@ fn test_impact_baseline_dirty_overloads_carries_caveat() {
     let result = fx.result(&["impact", "--baseline", "HEAD", "--repo", "."]);
 
     assert_names_hidden_save(&result);
+}
+
+/// Stands for: `routes` answers from the base graph alone, so a pairing gap
+/// in the overlay hides nothing from it and its answer carries no such line.
+#[test]
+fn test_routes_dirty_overloads_no_ambiguity_caveat() {
+    let fx = JavaRepo::new("rpib-routes");
+    fx.touch_comment("src/K.java");
+
+    let result = fx.result(&["routes"]);
+
+    assert!(!result.contains(GAP_MARKER), "{result:?}");
+}
+
+/// Stands for: an `impact --batch` miss under a hidden set is no proof of
+/// absence either, so the error payload carries the same line as a hit.
+#[test]
+fn test_impact_batch_dirty_overloads_error_payload_carries_caveat() {
+    let fx = JavaRepo::new("rpib-impact-batch");
+    fx.touch_comment("src/K.java");
+
+    let mut child = fx
+        .ecp_command(&fx.repo)
+        .args(["impact", "--batch", "--repo", ".", "--format", "json"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(child.stdin.as_mut().unwrap(), b"no_such_symbol\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let start = stdout
+        .find('{')
+        .unwrap_or_else(|| panic!("no JSON in stdout: {stdout}"));
+    let payload: Value = serde_json::Deserializer::from_str(&stdout[start..])
+        .into_iter()
+        .next()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(payload["status"], "not_found", "{payload}");
+    assert_names_hidden_save(&result_of(&payload));
 }

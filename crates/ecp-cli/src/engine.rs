@@ -151,7 +151,21 @@ impl Engine {
     /// Routed into the payload's `result` field by `output::emit_with_caveat`,
     /// so a `found:false` under a stale graph is no longer indistinguishable
     /// from a definitive "does not exist".
+    ///
+    /// The unpaired-declarations line comes only from a view this query
+    /// already built: a command that answers from the base graph alone
+    /// (`routes`) hides nothing, and building the view for it is wasted work.
+    /// A command that takes the caveat before it reads the view calls
+    /// [`Engine::caveat_reading_view`].
     pub fn caveat(&self) -> Option<String> {
+        let view = self.overlay_view.get().and_then(Option::as_ref);
+        crate::output::merge_caveats(self.graph_caveat(), self.dirty_lines(None, view))
+    }
+
+    /// [`Engine::caveat`] for a command that takes the caveat before it runs
+    /// its query and then reads the overlay view (`find`, `impact --batch`):
+    /// it builds the view first.
+    pub fn caveat_reading_view(&self) -> Option<String> {
         crate::output::merge_caveats(self.graph_caveat(), self.dirty_set_caveat(None))
     }
 
@@ -184,15 +198,18 @@ impl Engine {
     /// because `find` takes the caveat before it runs the query; with no
     /// overlay input that is a single `OnceLock` read.
     pub fn dirty_set_caveat(&self, repo: Option<&str>) -> Option<String> {
+        self.dirty_lines(repo, self.overlay_view())
+    }
+
+    fn dirty_lines(&self, repo: Option<&str>, view: Option<&OverlayView>) -> Option<String> {
         let label = |line: String| match repo {
             Some(name) => format!("{name}: {line}"),
             None => line,
         };
         let unreadable = self.unreadable_changes_line();
-        let ambiguous = self
-            .overlay_view()
-            .and_then(|view| unpaired_declarations_line(view.hidden_declarations()));
-        crate::output::merge_caveats(unreadable.map(&label), ambiguous.map(&label))
+        let ambiguous =
+            view.and_then(|view| unpaired_declarations_line(view.hidden_declarations()));
+        crate::output::merge_caveats(unreadable.map(label), ambiguous.map(label))
     }
 
     fn unreadable_changes_line(&self) -> Option<String> {

@@ -327,7 +327,7 @@ fn run_batch(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
         return Ok(());
     }
 
-    let caveat = engine.caveat();
+    let caveat = engine.caveat_reading_view();
 
     for target_name in &targets {
         println!("=== target: {target_name} ===");
@@ -379,11 +379,16 @@ fn run_batch(args: ImpactArgs, engine: &Engine) -> Result<(), EcpError> {
                     EcpError::AmbiguousSymbol { .. } => "ambiguous",
                     _ => "not_found",
                 };
-                serde_json::json!({
+                let mut p = serde_json::json!({
                     "error": e.to_string(),
                     "target": target_name,
                     "status": status,
-                })
+                });
+                // A miss under a hidden set is no proof of absence either.
+                if let Some(c) = &caveat {
+                    p["result"] = serde_json::json!(c);
+                }
+                p
             }
         };
         emit_with_caveat(&payload, format, None)?;

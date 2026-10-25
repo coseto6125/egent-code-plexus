@@ -420,7 +420,10 @@ fn impact_ambiguous_symbol_exits_nonzero() {
 /// same-file methods, so naming the set must not fail as ambiguous. The first
 /// overload is the only seed: calls bind to it, and it references each later
 /// overload, so both directions still cover the whole set. Holds for a dirty
-/// file too, where the overlay rebuilds the set.
+/// file too, where the overlay rebuilds the set. The dirty answer also says
+/// that the overlay could not pair the two base `save` declarations (no
+/// `Signature` discriminator, C1 Open point 3): a caller in a clean file
+/// would be hidden, so the rows alone are no proof of completeness.
 #[test]
 fn test_impact_overloaded_name_seeds_the_set_once() {
     let tmp = tempfile::tempdir().unwrap();
@@ -451,10 +454,19 @@ fn test_impact_overloaded_name_seeds_the_set_once() {
             })
             .collect();
         assert_eq!(rows, [(0, "save", 3), (1, "run", 5)], "{state}: {up}");
-        assert!(
-            up.get("result").is_none(),
-            "{state}: one overload set is no same-name collision: {up}"
-        );
+        let result = up.get("result").and_then(|r| r.as_str());
+        match state {
+            "clean" => assert!(
+                result.is_none(),
+                "clean: one overload set is no same-name collision: {up}"
+            ),
+            _ => assert!(
+                result.is_some_and(|r| r.contains("could not pair")
+                    && r.contains("K.save x2")
+                    && !r.contains("ambiguous")),
+                "dirty: the caveat names the unpaired base set, not a collision: {up}"
+            ),
+        }
 
         let down = run_impact(tmp.path(), &["save", "--direction", "downstream"]);
         let names: Vec<&str> = down["impact"]

@@ -284,7 +284,7 @@ fn run_bm25(args: FindArgs, engine: Option<&Engine>) -> Result<(), EcpError> {
 
     if targets.is_empty() {
         let engine = cwd_engine(engine)?;
-        let caveat = engine.caveat();
+        let caveat = engine.caveat_reading_view();
         run_single(pattern, args.mode, args.kind, format, engine, None, caveat)
     } else if targets.len() == 1 {
         let target = targets.into_iter().next().unwrap();
@@ -671,7 +671,7 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
             // a stale "no match" reads as a definitive "does not exist" to a
             // stdout-only consumer such as MCP.
             if let Some(c) = merge_caveats(
-                engine.caveat(),
+                engine.caveat_reading_view(),
                 (!found).then(|| omitted_files_caveat(engine)).flatten(),
             ) {
                 println!("{c}");
@@ -712,7 +712,7 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
                 &serde_json::to_value(&result).map_err(|e| EcpError::Output(e.to_string()))?,
                 format,
                 merge_caveats(
-                    engine.caveat(),
+                    engine.caveat_reading_view(),
                     (!found).then(|| omitted_files_caveat(engine)).flatten(),
                 ),
             )
@@ -780,7 +780,7 @@ fn run_batch(args: FindArgs, engine: Option<&Engine>) -> Result<(), EcpError> {
     } else if let Some((_, local_engine)) = single_repo_engine.as_ref() {
         single_target_caveat(&targets[0], local_engine)
     } else {
-        cwd.and_then(Engine::caveat)
+        cwd.and_then(Engine::caveat_reading_view)
     };
 
     for pattern in &queries {
@@ -1537,7 +1537,7 @@ fn single_target_caveat(target: &RepoTarget, engine: &Engine) -> Option<String> 
             engine.dirty_set_caveat(None),
         )
     } else {
-        engine.caveat()
+        engine.caveat_reading_view()
     }
 }
 
