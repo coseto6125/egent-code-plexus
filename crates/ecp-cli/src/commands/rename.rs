@@ -190,8 +190,8 @@ fn doc_text<'t>(text: &'t str, request: &TargetRequest) -> &'t str {
 }
 
 /// What the graph binds to the chosen declaration. An occurrence of the name
-/// is bound when it lies in the declaration's own span, inside a function
-/// that refers to the declaration, or outside every function (imports,
+/// is bound when it lies in the declaration's own span, when its innermost
+/// enclosing function refers to the declaration, or outside every function (imports,
 /// module-level code, class bodies). An occurrence inside any other function
 /// is another binding of the same spelling: a local, a parameter, a
 /// namesake.
@@ -255,16 +255,16 @@ impl<'a> Binding<'a> {
         if file == self.target_file && self.target_lines.contains(&line) {
             return true;
         }
-        let mut enclosed = false;
-        for &(start, end, idx) in self.callables.get(file).map_or(&[][..], Vec::as_slice) {
-            if (start..=end).contains(&line) {
-                if self.referrers.contains(&idx) {
-                    return true;
-                }
-                enclosed = true;
-            }
-        }
-        !enclosed
+        // The innermost enclosing function owns the occurrence: a nested
+        // function's parameter shadows the name inside its referrer parent.
+        let innermost = self
+            .callables
+            .get(file)
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .filter(|&&(start, end, _)| (start..=end).contains(&line))
+            .min_by_key(|&&(start, end, _)| (end - start, std::cmp::Reverse(start)));
+        innermost.is_none_or(|&(_, _, idx)| self.referrers.contains(&idx))
     }
 }
 
