@@ -171,47 +171,49 @@ fn test_rename_foo_validate_leaves_bar_untouched() {
     );
 }
 
-/// Renaming a bare name (`validate`) must return 0 hits because both nodes
-/// are methods (have an owner_class) — bare-name targets resolve only
-/// module-level (top-level) symbols, not class methods.
+/// A bare name matches every declaration of that name, methods included
+/// (C1 "Target request syntax"), so `validate` names two methods here: the
+/// rename refuses the ambiguity, lists both as re-runnable targets, and edits
+/// no file. The top-level meaning has its own syntax, `::validate`, which
+/// matches nothing here because both are methods.
 #[test]
 fn test_rename_bare_name_matches_only_top_level() {
     let repo = setup_two_class_repo();
     let root = repo.path();
+    let rename = |target: &str| {
+        Command::new(ecp_bin())
+            .args(["rename", target, "check", "--repo", root.to_str().unwrap()])
+            .env("HOME", root)
+            .current_dir(root)
+            .output()
+            .expect("ecp rename spawn failed")
+    };
+    let untouched = || {
+        for file in ["foo.py", "bar.py"] {
+            let content = std::fs::read_to_string(root.join(file)).unwrap_or_default();
+            assert!(
+                content.contains("validate"),
+                "{file} was edited:\n{content}"
+            );
+        }
+    };
 
-    let out = Command::new(ecp_bin())
-        .args([
-            "rename",
-            "validate",
-            "check",
-            "--repo",
-            root.to_str().unwrap(),
-        ])
-        .env("HOME", root)
-        .current_dir(root)
-        .output()
-        .expect("ecp rename spawn failed");
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-
-    // Neither file should be modified — validate is a method in both, not
-    // a top-level function, so a bare rename must not touch either.
-    let foo_content = std::fs::read_to_string(root.join("foo.py")).unwrap_or_default();
-    let bar_content = std::fs::read_to_string(root.join("bar.py")).unwrap_or_default();
-
+    let bare = rename("validate");
+    let stdout = String::from_utf8_lossy(&bare.stdout);
+    untouched();
     assert!(
-        foo_content.contains("validate"),
-        "foo.py must be untouched for bare-name rename; foo.py=\n{foo_content}\nstdout={stdout}",
+        stdout.contains("refused")
+            && stdout.contains("Foo.validate")
+            && stdout.contains("Bar.validate"),
+        "a bare name over two methods is a refused ambiguity naming both; stdout={stdout}",
     );
+
+    let top = rename("::validate");
+    let stdout = String::from_utf8_lossy(&top.stdout);
+    untouched();
     assert!(
-        bar_content.contains("validate"),
-        "bar.py must be untouched for bare-name rename; bar.py=\n{bar_content}\nstdout={stdout}",
-    );
-    assert!(
-        stdout.contains("No occurrences")
-            || stdout.contains("0 occurrences")
-            || stdout.contains("not found"),
-        "bare-name rename against method-only graph must report no matches; stdout={stdout}",
+        stdout.contains("No occurrences"),
+        "`::validate` matches no top-level declaration; stdout={stdout}",
     );
 }
 
