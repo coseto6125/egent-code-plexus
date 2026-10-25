@@ -111,10 +111,9 @@ fn handle_event(
     if !matches!(ev.kind, EventKind::Modify(_) | EventKind::Create(_)) {
         return Ok(());
     }
+    let created = matches!(ev.kind, EventKind::Create(_));
     for path in &ev.paths {
-        // `<sessions>/<sid>/l1/dirty_events.json`: the legacy manifest an
-        // older binary writes is not today's dirty set.
-        let Some(session_dir) = manifest_session_dir(path) else {
+        let Some(session_dir) = event_session_dir(path, created) else {
             continue;
         };
         let Some(sid) = session_dir.file_name().and_then(|s| s.to_str()) else {
@@ -149,10 +148,33 @@ fn handle_event(
     Ok(())
 }
 
+/// The session whose dirty set an event on `path` changed. `created` is true
+/// for a create event.
+fn event_session_dir(path: &Path, created: bool) -> Option<&Path> {
+    // `<sessions>/<sid>/l1/dirty_events.json`: the legacy manifest an older
+    // binary writes is not today's dirty set.
+    manifest_session_dir(path).or_else(|| {
+        (created && path.is_dir())
+            .then(|| created_dir_session(path))
+            .flatten()
+    })
+}
+
 /// The session dir whose manifest `path` is, or `None` for any other path.
 fn manifest_session_dir(path: &Path) -> Option<&Path> {
     let session_dir = path.parent()?.parent()?;
     (layout::dirty_events_path(session_dir) == path).then_some(session_dir)
+}
+
+/// The session dir of a newly created `<sid>` or `<sid>/l1` that already
+/// holds a manifest. inotify watches a new directory only after its create
+/// event, so a manifest written right after `l1/` is made raises no event of
+/// its own; without this, a session's first dirty write never reaches peers.
+fn created_dir_session(dir: &Path) -> Option<&Path> {
+    [Some(dir), dir.parent()]
+        .into_iter()
+        .flatten()
+        .find(|d| layout::dirty_events_path(d).is_file())
 }
 
 /// True when the current dirty set contains a `(file, name)` absent from the
@@ -597,6 +619,51 @@ mod tests {
         ] {
             assert_eq!(manifest_session_dir(&other), None, "{}", other.display());
         }
+    }
+
+    /// Stands for: a manifest written right after its `l1/` (or its session
+    /// dir) is created still reaches peers. inotify adds the watch on a new
+    /// directory only after its create event, so the manifest's own event is
+    /// lost; the directory's create event must name the session instead.
+    /// Failed before: only the manifest path itself named a session, and the
+    /// 8-session fan-out test lost peers on the CI runner.
+    #[test]
+    fn test_event_session_dir_created_l1_with_manifest_returns_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = tmp.path().join("sessions").join("sid");
+        write_dirty(&session, &["verify_token"]);
+        let l1 = layout::dirty_events_path(&session)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+
+        assert_eq!(event_session_dir(&l1, true), Some(session.as_path()));
+        assert_eq!(event_session_dir(&session, true), Some(session.as_path()));
+        assert_eq!(
+            event_session_dir(&layout::dirty_events_path(&session), false),
+            Some(session.as_path())
+        );
+        // A modify of another file in the session, or a non-create event on
+        // the directory, names nothing: it would re-dispatch on every inbox
+        // write.
+        assert_eq!(event_session_dir(&l1, false), None);
+        assert_eq!(event_session_dir(&session.join("inbox.jsonl"), true), None);
+        let fragments = layout::fragments_dir(&session);
+        std::fs::create_dir_all(&fragments).unwrap();
+        assert_eq!(event_session_dir(&fragments, true), None);
+    }
+
+    /// A created `l1/` without a manifest yet names nothing; the manifest's
+    /// own event follows once the watch exists.
+    #[test]
+    fn test_event_session_dir_created_l1_without_manifest_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = tmp.path().join("sessions").join("sid");
+        let fragments = layout::fragments_dir(&session);
+        std::fs::create_dir_all(&fragments).unwrap();
+        let l1 = fragments.parent().unwrap();
+        assert_eq!(event_session_dir(l1, true), None);
+        assert_eq!(event_session_dir(&session, true), None);
     }
 
     /// The watcher reads our dirty set from `l1/dirty_events.json`: a file
