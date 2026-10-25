@@ -14,9 +14,16 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use ecp_core::contracts::dirty_event::{ClassifiedPath, DirtySet, SkipReason};
+use ecp_core::contracts::identity::{
+    self, Ambiguity, Candidate, CandidateFacts, PathSegment, TargetRequest, TargetResolution,
+};
 use ecp_core::contracts::routing::SizeCap;
+use ecp_core::session::{MergedGraph, MergedNode};
+use ecp_core::EcpError;
+use serde_json::{json, Value};
 
 use crate::auto_ensure::{self, EnsureFreshOutcome, Ensured, IndexNeed};
+use crate::commands::format::node_kind_to_str;
 use crate::engine::Engine;
 use crate::graph_path;
 
@@ -180,6 +187,146 @@ pub fn worktree_top(dir: &Path) -> PathBuf {
         || dir.to_path_buf(),
         |(top, _, _)| dunce::simplified(&top).to_path_buf(),
     )
+}
+
+// ── The target resolver ─────────────────────────────────────────────────────
+//
+// `impact`, `inspect` and `rename` turn the target text and its filters into
+// one declaration or a typed ambiguity here, and nowhere else (C1 "Target
+// request syntax", "Typed target result").
+
+/// The target text with the `--kind` and `--file` filters (C1 grammar). A
+/// blank filter counts as absent.
+pub fn target_request(
+    text: &str,
+    kind: Option<&str>,
+    file: Option<&str>,
+) -> Result<TargetRequest, EcpError> {
+    let present = |s: Option<&str>| s.map(str::trim).filter(|s| !s.is_empty());
+    TargetRequest::parse(text, present(kind), present(file)).map_err(|e| {
+        EcpError::InvalidArgument(format!(
+            "target {text:?}: {e}. Write a name that holds `.`, `::`, `<`, `>` or `@` \
+             in backticks, for example `` `<anonymous:3:4>` ``"
+        ))
+    })
+}
+
+/// Every declaration named `name` in merged space: the visible base nodes in
+/// node order, then the overlay's virtual nodes in view order. A base node the
+/// overlay replaced or deleted is not visible; its virtual successor, if any,
+/// answers instead. Synthetic nodes have no file and line, so they are not
+/// declarations. A later overload is a declaration like any other.
+pub fn named_declarations<'a>(merged: &MergedGraph<'a>, name: &str) -> Vec<CandidateFacts<'a>> {
+    let mut out: Vec<CandidateFacts<'a>> = merged
+        .name_candidates(name)
+        .filter_map(|i| {
+            let node = merged.node(i)?;
+            let file = node.file_path(merged)?;
+            (node.name(merged) == name && merged.base_visible(i))
+                .then(|| facts(merged, i, node, file))
+        })
+        .collect();
+    if let Some(view) = merged.view() {
+        // A file that defines one symbol twice yields two virtual nodes under
+        // one uid; the index keeps only the first.
+        let mut seen = rustc_hash::FxHashSet::default();
+        out.extend(
+            (merged.base_len()..)
+                .zip(view.virtual_nodes())
+                .filter(|(_, n)| n.name == name && seen.insert(n.uid))
+                .map(|(i, n)| facts(merged, i, MergedNode::Virtual(n), &n.rel_path)),
+        );
+    }
+    out
+}
+
+fn facts<'a>(
+    merged: &MergedGraph<'a>,
+    idx: u32,
+    node: MergedNode<'a>,
+    file: &'a str,
+) -> CandidateFacts<'a> {
+    CandidateFacts {
+        node: idx,
+        kind: node.kind(),
+        file,
+        line: node.start_line(),
+        name: node.name(merged),
+        qualifier: node
+            .owner_class(merged)
+            .map(PathSegment::from_owner)
+            .unwrap_or_default(),
+    }
+}
+
+/// The one name-to-node lookup of a graph command.
+pub fn resolve_target(merged: &MergedGraph<'_>, request: &TargetRequest) -> TargetResolution {
+    identity::resolve_target(request, &named_declarations(merged, request.name()))
+}
+
+/// The candidates of an ambiguity as a payload reads them. `target` is the
+/// command arguments that select that candidate alone, `null` when none can.
+pub fn ambiguity_candidates(ambiguity: &Ambiguity) -> Value {
+    ambiguity
+        .candidates()
+        .iter()
+        .map(|c| candidate_json(c, c.reusable.as_ref().map(target_args)))
+        .collect()
+}
+
+pub fn candidate_json(c: &Candidate, target: Option<String>) -> Value {
+    json!({
+        "filePath": c.file,
+        "kind": node_kind_to_str(&c.kind),
+        "line": c.line,
+        "target": target,
+    })
+}
+
+/// A request as command arguments: the target text, then `--file` and
+/// `--kind` when the request needs them.
+pub fn target_args(request: &TargetRequest) -> String {
+    let mut out = shell_word(&request.render());
+    if let Some(file) = request.file() {
+        out.push_str(" --file ");
+        out.push_str(&shell_word(file));
+    }
+    if let Some(kind) = request.kind() {
+        out.push_str(" --kind ");
+        out.push_str(&node_kind_to_str(&kind).to_ascii_lowercase());
+    }
+    out
+}
+
+/// A target text, as one shell word, that selects `c` alone among `named`
+/// with no `--file` and no `--kind`, for a command whose filters do not
+/// narrow the target (`inspect`): the reusable request when it needs neither,
+/// else the qualified name at its line. `None` when the text alone cannot
+/// separate it.
+pub fn text_only_target(c: &Candidate, named: &[CandidateFacts<'_>]) -> Option<String> {
+    if let Some(r) = c
+        .reusable
+        .as_ref()
+        .filter(|r| r.file().is_none() && r.kind().is_none())
+    {
+        return Some(shell_word(&r.render()));
+    }
+    let text = format!("{}@{}", c.display, c.line);
+    let request = TargetRequest::parse(&text, None, None).ok()?;
+    match identity::select(&request, named).as_slice() {
+        [one] if named[*one].node == c.node => Some(shell_word(&text)),
+        _ => None,
+    }
+}
+
+/// `word` as one shell word: single-quoted when it is empty or holds a
+/// character outside the safe set, with embedded `'` written as `'\''`.
+pub(crate) fn shell_word(word: &str) -> String {
+    let safe = |c: char| c.is_alphanumeric() || "_-./:@%+=,".contains(c);
+    if !word.is_empty() && word.chars().all(safe) {
+        return word.to_string();
+    }
+    format!("'{}'", word.replace('\'', r"'\''"))
 }
 
 fn load(path: &Path, warm_attach: bool) -> Result<Engine, ReadContextError> {

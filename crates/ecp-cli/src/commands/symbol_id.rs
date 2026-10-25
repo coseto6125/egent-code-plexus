@@ -1,7 +1,9 @@
-//! FQN (fully-qualified-name) helpers and name→node resolution for
-//! `ecp inspect`, `ecp impact` and `ecp path`.
+//! FQN (fully-qualified-name) helpers, the Tier-3 collision count, and the
+//! name→node resolution `ecp path` still uses. `ecp impact`, `ecp inspect`
+//! and `ecp rename` resolve through [`crate::read_context::resolve_target`].
 
 use crate::commands::format::{kind_to_str, node_kind_to_str};
+use ecp_core::contracts::identity::normalize_file_needle;
 use ecp_core::graph::ArchivedZeroCopyGraph;
 use ecp_core::session::OverlayView;
 
@@ -21,17 +23,6 @@ pub fn resolve_owner_class(graph: &ArchivedZeroCopyGraph, node_idx: usize) -> Op
     }
 }
 
-/// Format a fully-qualified name from an optional owner class and a bare name.
-///
-/// - `Some("Foo"), "validate"` → `"Foo.validate"`
-/// - `None, "validate"` → `"validate"`
-pub fn format_fqn(owner: Option<&str>, name: &str) -> String {
-    match owner {
-        Some(o) if !o.is_empty() => format!("{o}.{name}"),
-        _ => name.to_owned(),
-    }
-}
-
 /// Parse a `--name` / `--target` argument into an optional owner prefix and
 /// bare symbol name.
 ///
@@ -43,10 +34,6 @@ pub fn format_fqn(owner: Option<&str>, name: &str) -> String {
 /// `Node.name` (which is always a bare identifier) while everything left of
 /// the final dot becomes the owner prefix. This admits namespaced owners
 /// (`pkg.Foo`) without changing the single-level (`Foo.validate`) contract.
-///
-/// `rename` (PR #285) currently splits on the first `.` — that PR will be
-/// migrated to share this helper as a follow-up to keep dot semantics
-/// uniform across the CLI.
 pub fn split_fqn_target(s: &str) -> (Option<&str>, &str) {
     match s.rsplit_once('.') {
         Some((owner, name)) => (Some(owner), name),
@@ -63,14 +50,46 @@ fn owner_matches(actual: Option<&str>, requested: &str, file: &str) -> bool {
     })
 }
 
-/// Every merged-space index whose symbol matches `name`, paired with the count
-/// of same-named definitions seen BEFORE `--kind` / `--file` / FQN narrowing
-/// (the Tier-3 resolver-defence counter, which keys on the global name
-/// collision rather than on whichever single def the caller disambiguated to).
-/// The count is the larger of the on-disk world (surviving base defs plus
-/// working-tree-only defs) and the indexed world (every base def, including
-/// those the overlay suppressed): the index decided whether to drop bare
-/// calls from the indexed collision, which an uncommitted rename must not hide.
+/// The Tier-3 resolver-defence counter of `bare_name`: the same-named
+/// definitions the index weighed, which key on the global name collision
+/// rather than on whichever single def the caller disambiguated to. It is the
+/// larger of the on-disk world (surviving base defs plus working-tree-only
+/// defs) and the indexed world (every base def, including those the overlay
+/// suppressed): the index decided whether to drop bare calls from the indexed
+/// collision, which an uncommitted rename must not hide. A later overload is
+/// never bound by name, so it is no collision.
+pub fn same_name_def_count(
+    graph: &ArchivedZeroCopyGraph,
+    view: Option<&OverlayView>,
+    bare_name: &str,
+) -> usize {
+    let mut base_defs = 0usize;
+    let mut disk_defs = 0usize;
+    for idx in graph.name_candidates(bare_name) {
+        let node = &graph.nodes[idx as usize];
+        if node.name.resolve(&graph.string_pool) != bare_name
+            || !node.has_owning_file()
+            || graph.is_later_overload(idx)
+        {
+            continue;
+        }
+        base_defs += 1;
+        if view.is_none_or(|v| v.redirect(idx).is_some()) {
+            disk_defs += 1;
+        }
+    }
+    if let Some(v) = view {
+        disk_defs += v
+            .virtual_nodes()
+            .iter()
+            .filter(|vn| vn.replaced_base.is_none() && !vn.later_overload && vn.name == bare_name)
+            .count();
+    }
+    base_defs.max(disk_defs)
+}
+
+/// Every merged-space index whose symbol matches `name`, paired with
+/// [`same_name_def_count`].
 ///
 /// `name` takes the bare symbol or the `Owner.Method` FQN form. `kind_needle`
 /// matches the node kind case-insensitively; `file_needle` is a substring of
@@ -78,9 +97,9 @@ fn owner_matches(actual: Option<&str>, requested: &str, file: &str) -> bool {
 /// needle wins, then paths ending with `/needle` (see `narrow_to_path_suffix`),
 /// so `cmd/main.go` can pick itself over `tools/cmd/main.go`.
 ///
-/// Shared by `ecp impact` and `ecp path` so both land on the same node for the
-/// same argument: a path whose endpoints disagree with impact's target would
-/// be worse than no path at all.
+/// `ecp path` resolves its endpoints here until it moves to
+/// [`crate::read_context::resolve_target`] (plan slice F5b), which `ecp
+/// impact` uses.
 pub fn resolve_candidates(
     graph: &ArchivedZeroCopyGraph,
     view: Option<&OverlayView>,
@@ -95,8 +114,6 @@ pub fn resolve_candidates(
     let file_needle = file_needle.map(normalize_file_needle);
     let file_needle = file_needle.as_deref();
 
-    let mut base_defs = 0usize;
-    let mut disk_defs = 0usize;
     let mut matches: Vec<(usize, &str)> = Vec::new();
     // Ascending like the full scan, so the candidate list keeps node order.
     for idx in graph.name_candidates(bare_name) {
@@ -113,13 +130,11 @@ pub fn resolve_candidates(
         if !node.has_owning_file() || graph.is_later_overload(idx as u32) {
             continue;
         }
-        base_defs += 1;
         // Working-tree truth: a dirty-file symbol deleted/renamed on disk
         // (suppressed by the overlay view) is not a valid impact target.
         if view.is_some_and(|v| v.redirect(idx as u32).is_none()) {
             continue;
         }
-        disk_defs += 1;
         if let Some(ref kn) = kind_needle {
             let node_kind = kind_to_str(&node.kind).to_ascii_lowercase();
             if &node_kind != kn {
@@ -162,7 +177,6 @@ pub fn resolve_candidates(
             if vn.replaced_base.is_some() || vn.later_overload || vn.name != bare_name {
                 continue;
             }
-            disk_defs += 1;
             if let Some(ref kn) = kind_needle {
                 if &node_kind_to_str(&vn.kind).to_ascii_lowercase() != kn {
                     continue;
@@ -186,13 +200,8 @@ pub fn resolve_candidates(
     }
     (
         matches.into_iter().map(|(idx, _)| idx).collect(),
-        base_defs.max(disk_defs),
+        same_name_def_count(graph, view, bare_name),
     )
-}
-
-fn normalize_file_needle(needle: &str) -> String {
-    let needle = needle.replace('\\', "/");
-    needle.strip_prefix("./").unwrap_or(&needle).to_string()
 }
 
 /// Every substring of a shorter path is a substring of a longer one that

@@ -1,8 +1,9 @@
 use crate::commands::format::{node_kind_to_str, rel_type_to_str};
-use crate::commands::symbol_id::{resolve_owner_class, split_fqn_target};
 use crate::engine::Engine;
 use crate::output::{emit_with_caveat, OutputFormat};
+use crate::read_context::{named_declarations, shell_word, target_request, text_only_target};
 use clap::Args;
+use ecp_core::contracts::identity::{resolve_target, select, TargetResolution};
 use ecp_core::file_category::is_test_path;
 use ecp_core::graph::{ArchivedZeroCopyGraph, NodeKind, RelType};
 use ecp_core::session::{MergedGraph, MergedNode};
@@ -64,7 +65,7 @@ fn resolve_file_path<'a>(merged: &MergedGraph<'a>, node: &MergedNode<'a>) -> &'a
     node.file_path(merged).unwrap_or(SYNTHETIC_NODE_PATH)
 }
 
-/// Merged-space node behind an index that came from [`search_nodes`] or a
+/// Merged-space node behind an index that came from the target resolver or a
 /// [`MergedGraph`] edge, both of which only yield indices inside merged space.
 fn node_at<'a>(merged: &MergedGraph<'a>, idx: u32) -> MergedNode<'a> {
     merged
@@ -221,12 +222,11 @@ fn ambiguous_result(
 ) -> serde_json::Value {
     let message = format!(
         "Found {} symbols matching '{}'. --file and --kind filter neighbours, not the match. \
-         Re-run `ecp inspect --name Owner.{}` using matches[].symbol.ownerClass, \
-         or pick a match by matches[].symbol.filePath and startLine. \
-         A section a match omits is empty.",
+         Re-run `ecp inspect <matches[].target>` to inspect one match. \
+         A match with a null target has no target text that selects it alone; \
+         read its filePath and startLine. A section a match omits is empty.",
         blocks.len(),
         name,
-        name
     );
     for block in &mut blocks {
         if json {
@@ -619,52 +619,6 @@ where
         .collect()
 }
 
-/// Merged-space indices and kinds of the nodes named `bare_name` (and owned
-/// by `owner_filter`): visible base nodes in node order, then the overlay's
-/// virtual nodes in view order. A base node the overlay replaced or deleted
-/// is not visible — its virtual successor, if any, answers instead, so a
-/// dirty-file symbol reports its working-tree span and edges.
-fn search_nodes(
-    merged: &MergedGraph<'_>,
-    bare_name: &str,
-    owner_filter: Option<&str>,
-) -> Vec<(u32, NodeKind)> {
-    let owner_matches = |owner: Option<&str>| owner_filter.is_none_or(|want| owner == Some(want));
-
-    // The name index yields indices ascending, like the scan.
-    let mut hits: Vec<(u32, NodeKind)> = merged
-        .name_candidates(bare_name)
-        .filter(|&i| {
-            let node = &merged.nodes[i as usize];
-            node.name.resolve(&merged.string_pool) == bare_name
-                // Synthetic Annotation nodes (resolver-miss fallback from
-                // `decorates_edges`) carry SYNTHETIC_FILE_IDX and have no
-                // file:line; they're not meaningful inspect targets.
-                && node.has_owning_file()
-                && merged.base_visible(i)
-                && owner_matches(resolve_owner_class(merged, i as usize))
-        })
-        .map(|i| (i, NodeKind::from(&merged.nodes[i as usize].kind)))
-        .collect();
-
-    if let Some(view) = merged.view() {
-        // A file that defines one symbol twice yields two virtual nodes under
-        // one uid; the index keeps only the first, so inspect does too.
-        let mut seen = rustc_hash::FxHashSet::default();
-        hits.extend(
-            (view.base_len()..)
-                .zip(view.virtual_nodes())
-                .filter(|(_, n)| {
-                    n.name == bare_name
-                        && owner_matches(n.owner_class.as_deref())
-                        && seen.insert(n.uid)
-                })
-                .map(|(i, n)| (i, n.kind)),
-        );
-    }
-    hits
-}
-
 pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(), EcpError> {
     let graph = engine.graph().map_err(|e| EcpError::Rkyv(e.to_string()))?;
     let format = args.format.unwrap_or_default();
@@ -682,31 +636,23 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
     }
 
     let name = name_query.unwrap();
-
-    // Split `Owner.Method` form for precise targeting.
-    let (owner_filter, bare_name) = split_fqn_target(name);
+    // `--kind` and `--file` filter a block's neighbours, not the target, so
+    // only the target text narrows it.
+    let request = target_request(name, None, None)?;
 
     // Clean queries must not initialize a view or scan the graph for a delta.
     let view = engine.overlay_dir().and_then(|_| engine.overlay_view());
     let merged = MergedGraph::new(graph, view);
 
-    let matching_nodes = search_nodes(&merged, bare_name, owner_filter);
-
-    if matching_nodes.is_empty() {
-        let result = serde_json::json!({
-            "status": "error",
-            "message": format!("Symbol '{}' not found.", name)
-        });
-        return emit_with_caveat(&result, format, engine.caveat());
-    }
-
-    // When the only ambiguity is Impl vs a primary type declaration (Struct /
-    // Class / Enum / Trait) sharing the same name, suppress the Impl nodes so
-    // `inspect --name Foo` returns the struct, not "ambiguous".  This is the
+    let mut named = named_declarations(&merged, request.name());
+    // C1 Open point 12: when a primary type (Struct / Class / Enum / Trait /
+    // Interface) matches, drop the `Impl` nodes of that name first, so
+    // `inspect --name Foo` returns the struct, not "ambiguous". This is the
     // canonical Rust pattern: `struct Foo` + `impl Foo { ... }`.
-    let has_primary_type = matching_nodes.iter().any(|(_, kind)| {
+    let picked = select(&request, &named);
+    let has_primary_type = picked.iter().any(|&i| {
         matches!(
-            kind,
+            named[i].kind,
             NodeKind::Struct
                 | NodeKind::Class
                 | NodeKind::Enum
@@ -715,28 +661,38 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
         )
     });
     let mut omitted_kinds: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
-    let matching_nodes: Vec<(u32, NodeKind)> = if has_primary_type {
-        let mut impl_count: u64 = 0;
-        let kept = matching_nodes
-            .into_iter()
-            .filter(|(_, kind)| {
-                if *kind == NodeKind::Impl {
-                    impl_count += 1;
-                    false
-                } else {
-                    true
-                }
-            })
-            .collect();
-        if impl_count > 0 {
-            omitted_kinds.insert(
-                node_kind_to_str(&NodeKind::Impl).to_string(),
-                serde_json::json!(impl_count),
-            );
+    let impl_count = picked
+        .iter()
+        .filter(|&&i| named[i].kind == NodeKind::Impl)
+        .count();
+    if has_primary_type && impl_count > 0 {
+        named.retain(|c| c.kind != NodeKind::Impl);
+        omitted_kinds.insert(
+            node_kind_to_str(&NodeKind::Impl).to_string(),
+            serde_json::json!(impl_count),
+        );
+    }
+
+    let matching_nodes: Vec<(u32, Option<String>)> = match resolve_target(&request, &named) {
+        TargetResolution::Unique(c) => vec![(c.node, None)],
+        TargetResolution::Ambiguous(a) => a
+            .candidates()
+            .iter()
+            .map(|c| (c.node, text_only_target(c, &named)))
+            .collect(),
+        TargetResolution::NotFound { named: n } => {
+            let mut message = format!("Symbol '{name}' not found.");
+            if n > 0 {
+                message.push_str(&format!(
+                    " {n} declaration(s) named '{}' exist, but none matches the owner or \
+                     @line of the target. Re-run `ecp inspect {}` to list them.",
+                    request.name(),
+                    shell_word(request.name()),
+                ));
+            }
+            let result = serde_json::json!({"status": "error", "message": message});
+            return emit_with_caveat(&result, format, engine.caveat());
         }
-        kept
-    } else {
-        matching_nodes
     };
 
     // Pre-parse filters once.
@@ -744,11 +700,10 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
     let rel_filter = parse_csv_lower(args.relation_types.as_deref());
     let file_substr = args.file_path.as_deref().filter(|s| !s.is_empty());
 
-    if matching_nodes.len() == 1 {
-        let (node_idx, _) = matching_nodes[0];
+    if let [(node_idx, None)] = matching_nodes.as_slice() {
         let block = build_inspect_block(
             &merged,
-            node_idx,
+            *node_idx,
             &kind_filter,
             &rel_filter,
             file_substr,
@@ -803,18 +758,21 @@ pub fn run(args: InspectArgs, engine: &Engine, _graph_path: &Path) -> Result<(),
         return emit_with_caveat(&result, format, engine.caveat());
     }
 
-    // Ambiguous: return ALL matches as full inspect blocks (not a candidates list).
+    // Ambiguous: every match as a full block, each with the target text that
+    // selects it alone.
     let blocks: Vec<serde_json::Value> = matching_nodes
         .iter()
-        .map(|(node_idx, _)| {
-            build_inspect_block(
+        .map(|(node_idx, target)| {
+            let mut block = build_inspect_block(
                 &merged,
                 *node_idx,
                 &kind_filter,
                 &rel_filter,
                 file_substr,
                 args.include_tests,
-            )
+            );
+            block["target"] = serde_json::json!(target);
+            block
         })
         .collect();
 
@@ -860,6 +818,26 @@ mod tests {
         fx.method("src/bar.py", "Bar", "validate");
         fx.func("src/foo.py", "helper");
         fx.build()
+    }
+
+    /// The declarations the resolver lists for `name`, narrowed to `owner`
+    /// through the target text `owner.name` when given.
+    fn declarations(
+        merged: &MergedGraph<'_>,
+        name: &str,
+        owner: Option<&str>,
+    ) -> Vec<(u32, NodeKind)> {
+        let named = named_declarations(merged, name);
+        let keep: Vec<usize> = match owner {
+            Some(o) => {
+                let request = target_request(&format!("{o}.{name}"), None, None).unwrap();
+                select(&request, &named)
+            }
+            None => (0..named.len()).collect(),
+        };
+        keep.into_iter()
+            .map(|i| (named[i].node, named[i].kind))
+            .collect()
     }
 
     fn indices(hits: &[(u32, NodeKind)]) -> Vec<u32> {
@@ -979,59 +957,59 @@ mod tests {
     }
 
     #[test]
-    fn test_search_nodes_without_view_returns_base_matches_in_node_order() {
+    fn test_named_declarations_without_view_returns_base_matches_in_node_order() {
         let bytes = archive(&validate_graph());
         let merged = MergedGraph::new(access(&bytes), None);
-        assert_eq!(indices(&search_nodes(&merged, "validate", None)), [0, 1]);
+        assert_eq!(indices(&declarations(&merged, "validate", None)), [0, 1]);
         assert_eq!(
-            indices(&search_nodes(&merged, "validate", Some("Bar"))),
+            indices(&declarations(&merged, "validate", Some("Bar"))),
             [1]
         );
-        assert!(search_nodes(&merged, "missing", None).is_empty());
+        assert!(declarations(&merged, "missing", None).is_empty());
     }
 
     /// A namesake in a clean file and one in a dirty file are both listed:
     /// the clean one at its base index, the dirty one at its virtual index.
     #[test]
-    fn test_search_nodes_clean_and_dirty_namesakes_lists_both() {
+    fn test_named_declarations_clean_and_dirty_namesakes_lists_both() {
         with_dirty_view(|merged| {
             let dirty = virtual_idx(&merged, "validate");
             assert_eq!(
-                search_nodes(&merged, "validate", None),
+                declarations(&merged, "validate", None),
                 [(2, NodeKind::Method), (dirty, NodeKind::Method)]
             );
         });
     }
 
     #[test]
-    fn test_search_nodes_owner_filter_on_virtual_method_matches_virtual() {
+    fn test_named_declarations_owner_filter_on_virtual_method_matches_virtual() {
         with_dirty_view(|merged| {
             let dirty = virtual_idx(&merged, "validate");
             assert_eq!(
-                indices(&search_nodes(&merged, "validate", Some("Bar"))),
+                indices(&declarations(&merged, "validate", Some("Bar"))),
                 [dirty]
             );
             assert_eq!(
-                indices(&search_nodes(&merged, "validate", Some("Foo"))),
+                indices(&declarations(&merged, "validate", Some("Foo"))),
                 [2]
             );
-            assert!(search_nodes(&merged, "validate", Some("Nobody")).is_empty());
+            assert!(declarations(&merged, "validate", Some("Nobody")).is_empty());
         });
     }
 
     #[test]
-    fn test_search_nodes_deleted_dirty_symbol_not_found() {
+    fn test_named_declarations_deleted_dirty_symbol_not_found() {
         with_dirty_view(|merged| {
-            assert!(search_nodes(&merged, "doomed", None).is_empty());
+            assert!(declarations(&merged, "doomed", None).is_empty());
         });
     }
 
     #[test]
-    fn test_search_nodes_overlay_only_symbol_found() {
+    fn test_named_declarations_overlay_only_symbol_found() {
         with_dirty_view(|merged| {
             let fresh = virtual_idx(&merged, "fresh");
             assert_eq!(
-                search_nodes(&merged, "fresh", None),
+                declarations(&merged, "fresh", None),
                 [(fresh, NodeKind::Function)]
             );
         });
@@ -1042,7 +1020,7 @@ mod tests {
     /// index keeps the first. Methods differ: a later one is an overload with
     /// its own uid, and both stay listed.
     #[test]
-    fn test_search_nodes_same_uid_redefinition_lists_first_only() {
+    fn test_named_declarations_same_uid_redefinition_lists_first_only() {
         let bytes = archive(&dirty_graph());
         let graph = access(&bytes);
         let mut input = dirty_input();
@@ -1054,22 +1032,22 @@ mod tests {
         let view = OverlayView::build(graph, &[input]).expect("dirty view");
         let merged = MergedGraph::new(graph, Some(&view));
         let first = virtual_idx(&merged, "doomed");
-        assert_eq!(indices(&search_nodes(&merged, "doomed", None)), [first]);
+        assert_eq!(indices(&declarations(&merged, "doomed", None)), [first]);
     }
 
     /// Rejected or corrupt fragments leave no accepted input, and an empty
     /// input set builds no view: the answer is the base graph's, deleted
     /// symbol included.
     #[test]
-    fn test_search_nodes_rejected_fragment_answers_from_base() {
+    fn test_named_declarations_rejected_fragment_answers_from_base() {
         let bytes = archive(&dirty_graph());
         let graph = access(&bytes);
         let view = OverlayView::build(graph, &[]);
         assert!(view.is_none());
         let merged = MergedGraph::new(graph, view.as_ref());
-        assert_eq!(indices(&search_nodes(&merged, "validate", None)), [1, 2]);
-        assert_eq!(indices(&search_nodes(&merged, "doomed", None)), [3]);
-        assert!(search_nodes(&merged, "fresh", None).is_empty());
+        assert_eq!(indices(&declarations(&merged, "validate", None)), [1, 2]);
+        assert_eq!(indices(&declarations(&merged, "doomed", None)), [3]);
+        assert!(declarations(&merged, "fresh", None).is_empty());
     }
 
     #[test]
@@ -1191,7 +1169,7 @@ mod tests {
     /// Same hits, indices and order from the name index as from the full scan
     /// that clearing `name_index` forces, with and without a view.
     #[test]
-    fn test_search_nodes_with_index_matches_full_scan() {
+    fn test_named_declarations_with_index_matches_full_scan() {
         let fast = same_name_graph();
         let mut slow = same_name_graph();
         slow.name_index.clear();
@@ -1218,8 +1196,8 @@ mod tests {
             let slow = MergedGraph::new(slow, slow_view);
             for (name, owner) in cases {
                 assert_eq!(
-                    search_nodes(&fast, name, owner),
-                    search_nodes(&slow, name, owner),
+                    declarations(&fast, name, owner),
+                    declarations(&slow, name, owner),
                     "{name:?} owner={owner:?} view={}",
                     fast_view.is_some()
                 );
@@ -1228,10 +1206,10 @@ mod tests {
     }
 
     #[test]
-    fn test_search_nodes_shared_name_lists_every_node_ascending() {
+    fn test_named_declarations_shared_name_lists_every_node_ascending() {
         let bytes = archive(&same_name_graph());
         let merged = MergedGraph::new(access(&bytes), None);
-        let hits = indices(&search_nodes(&merged, "shared", None));
+        let hits = indices(&declarations(&merged, "shared", None));
         assert_eq!(hits.len(), 1200);
         assert!(hits.windows(2).all(|w| w[0] < w[1]), "node order");
     }
@@ -1239,10 +1217,10 @@ mod tests {
     /// The tombstone has an empty name but still owns a file: only the scan
     /// matches it, so an empty bare name must keep the scan.
     #[test]
-    fn test_search_nodes_empty_bare_name_keeps_tombstone_matches() {
+    fn test_named_declarations_empty_bare_name_keeps_tombstone_matches() {
         let bytes = archive(&same_name_graph());
         let merged = MergedGraph::new(access(&bytes), None);
-        assert_eq!(search_nodes(&merged, "", None).len(), 12);
+        assert_eq!(declarations(&merged, "", None).len(), 12);
     }
 
     fn block_with_edge(owner: &str) -> serde_json::Value {
@@ -1267,10 +1245,7 @@ mod tests {
         );
         let msg = r["message"].as_str().unwrap();
         assert!(!msg.contains("to disambiguate"), "{msg}");
-        assert!(
-            msg.contains("Owner.validate") && msg.contains("ownerClass"),
-            "{msg}"
-        );
+        assert!(msg.contains("matches[].target"), "{msg}");
     }
 
     #[test]

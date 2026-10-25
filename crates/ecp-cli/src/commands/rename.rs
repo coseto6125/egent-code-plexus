@@ -1,12 +1,14 @@
 //! `ecp rename` — AST-powered multi-lang rename.
 //!
 //! Pipeline:
-//! 1. **Plan (graph)**: load `graph.bin`, find the target node by name,
-//!    collect inbound-edge source files + the target's own file. Bails
-//!    with `error: ambiguous` if multiple nodes share the name.
-//! 2. **Verify (AST)**: tree-sitter parse each affected file,
-//!    find every `identifier` byte-range whose text matches the
-//!    target. Supported languages: Python, TypeScript/TSX, JavaScript,
+//! 1. **Plan (graph)**: resolve the target through the one target resolver
+//!    (`read_context::resolve_target`), with the overlay, collect inbound-edge
+//!    source files + the target's own file. Refuses an ambiguous target, and
+//!    refuses to write from a warm-attached graph.
+//! 2. **Verify (AST)**: tree-sitter parse each affected file, find every
+//!    `identifier` byte-range whose text matches the target, and keep the
+//!    ones the graph binds to the declaration (see [`Binding`]).
+//!    Supported languages: Python, TypeScript/TSX, JavaScript,
 //!    Rust, Java, Kotlin, C#, Go, PHP, Ruby, Swift, C, C++, Dart.
 //! 3. **Execute / Dry-run**: dry-run prints the count + a unified diff
 //!    preview to stdout and exits. Execute writes each file atomically
@@ -18,21 +20,34 @@
 //! 6. **Pre-flight collision detection**: warn if new name already exists in
 //!    the graph before the rename runs (especially in dry-run).
 
+use crate::read_context::{ambiguity_candidates, resolve_target, target_request};
 use clap::Args;
 use ecp_analyzer::identifier_finder::{find_identifier_occurrences, has_identifier_finder};
 use ecp_core::analyzer::types::IdentifierRange;
+use ecp_core::contracts::identity::{Candidate, Qualifier, TargetRequest, TargetResolution};
 use ecp_core::file_category::determine_category;
-use ecp_core::graph::FileCategory;
+use ecp_core::graph::{FileCategory, NodeKind};
 use ecp_core::registry::atomic_write_bytes;
+use ecp_core::session::MergedGraph;
 use ecp_core::EcpError;
 use regex::Regex;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-/// AST-powered multi-language rename: locates all identifier occurrences
-/// via tree-sitter and rewrites them atomically, with optional dry-run preview.
+/// AST-powered multi-language rename: locates the identifier occurrences the
+/// graph binds to one declaration via tree-sitter and rewrites them
+/// atomically, with optional dry-run preview.
+/// It edits the declaration's name, the occurrences inside its referrers, and
+/// the occurrences outside every function. It leaves an occurrence inside any
+/// other function, and lists each one in the payload's `unbound` field.
+/// When the target matches several declarations, it exits non-zero, writes
+/// nothing, and lists each declaration under `candidates` with the arguments
+/// that select it alone.
+/// Without `--dry-run` it refuses a warm-attached graph and names the
+/// reindex command.
 /// The closing toon payload gains a `result` field only when the answer carries
 /// a caveat (a warm-attached or behind-HEAD graph, or uncommitted paths that
 /// could not be read); its absence means the graph was current. It gains a
@@ -42,7 +57,8 @@ use std::path::{Path, PathBuf};
 /// instead of `risk safe; files N; usages M`.
 #[derive(Args, Debug, Clone, Serialize)]
 pub struct RenameArgs {
-    /// The symbol name to rename (equivalent to `--symbol` flag).
+    /// The declaration to rename (equivalent to `--symbol` flag): `name`,
+    /// `Owner.name`, `::name` for a declaration with no owner, or `name@LINE`.
     pub symbol: Option<String>,
 
     /// Named alias for the positional SYMBOL argument.
@@ -85,6 +101,17 @@ pub struct RenameArgs {
     /// populates real tier/check values.
     #[arg(long, default_value_t = false)]
     pub show_heuristic_mirrors: bool,
+
+    /// Select the declaration by its file path when the target matches
+    /// several. A path equal to the value wins, then a path that ends with
+    /// `/<value>`, then a path that contains it.
+    #[arg(long = "file", alias = "file_path", alias = "file-path")]
+    pub file: Option<String>,
+
+    /// Select the declaration by its kind when the target matches several:
+    /// function, method, class, struct, and the other node kinds.
+    #[arg(long)]
+    pub kind: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +143,159 @@ fn attach_not_scanned(payload: &mut serde_json::Value, not_scanned: &[NotScanned
     if !not_scanned.is_empty() {
         payload["not_scanned"] = json!(not_scanned);
     }
+}
+
+/// One occurrence of the name, 1-based line.
+#[derive(Debug, Serialize)]
+struct Site {
+    file: String,
+    line: u32,
+}
+
+/// Adds `unbound` only when it holds a site: each occurrence of the name the
+/// graph does not bind to the target, which the rename left unchanged.
+fn attach_unbound(payload: &mut serde_json::Value, unbound: &[Site]) {
+    if !unbound.is_empty() {
+        payload["unbound"] = json!(unbound);
+    }
+}
+
+fn line_of(range: &IdentifierRange) -> u32 {
+    range.row as u32 + 1
+}
+
+/// Why a rename without `--dry-run` stops on a warm-attached graph.
+const WARM_ATTACH_REFUSAL: &str = "rename refuses to write files: the graph is a warm-attach \
+     from a sibling commit, so its occurrences can be missing or misplaced. Run \
+     `ecp admin index --force --repo .`, then run the rename again. `--dry-run` answers \
+     from this graph, with a caveat.";
+
+/// The target as docs and prose spell it: the text without a root `::` or
+/// `.` and without `@line`. The markdown pass and the residual scan read it.
+fn doc_text<'t>(text: &'t str, request: &TargetRequest) -> &'t str {
+    let text = text.trim();
+    let text = match request.line() {
+        Some(line) => text
+            .strip_suffix(format!("@{line}").as_str())
+            .unwrap_or(text),
+        None => text,
+    };
+    match request.qualifier() {
+        Qualifier::Root => text
+            .strip_prefix("::")
+            .or_else(|| text.strip_prefix('.'))
+            .unwrap_or(text),
+        _ => text,
+    }
+}
+
+/// What the graph binds to the chosen declaration. An occurrence of the name
+/// is bound when it lies in the declaration's own span, inside a function
+/// that refers to the declaration, or outside every function (imports,
+/// module-level code, class bodies). An occurrence inside any other function
+/// is another binding of the same spelling: a local, a parameter, a
+/// namesake.
+struct Binding<'a> {
+    target_file: &'a str,
+    target_lines: std::ops::RangeInclusive<u32>,
+    /// The target's file and every file that holds a deterministic referrer.
+    files: BTreeSet<&'a str>,
+    /// Merged indices: the target and its deterministic referrers.
+    referrers: FxHashSet<u32>,
+    /// Function, method and constructor spans of each file in `files`:
+    /// (start line, end line, merged index).
+    callables: FxHashMap<&'a str, Vec<(u32, u32, u32)>>,
+}
+
+impl<'a> Binding<'a> {
+    /// `on_mirror` sees the far end of each heuristic edge of the target: a
+    /// heuristic edge never extends the files a rename writes.
+    fn of(merged: &MergedGraph<'a>, target: &Candidate, mut on_mirror: impl FnMut(&str)) -> Self {
+        let node = merged
+            .node(target.node)
+            .expect("the resolver answers merged-space indices");
+        let target_file = node.file_path(merged).unwrap_or_default();
+        let target_name = node.name(merged);
+        let mut files = BTreeSet::from([target_file]);
+        let mut referrers = FxHashSet::from_iter([target.node]);
+        for edge in merged.in_edges(target.node) {
+            let Some(source) = merged.node(edge.source) else {
+                continue;
+            };
+            if edge.rel_type().is_heuristic() {
+                on_mirror(source.name(merged));
+                continue;
+            }
+            if let Some(file) = source.file_path(merged) {
+                files.insert(file);
+            }
+            // The first overload references each later one; that edge binds
+            // no call of the name, so the sibling's body is not a referrer.
+            if source.name(merged) != target_name || edge.source == target.node {
+                referrers.insert(edge.source);
+            }
+        }
+        for edge in merged.out_edges(target.node) {
+            if edge.rel_type().is_heuristic() {
+                if let Some(far) = merged.node(edge.target) {
+                    on_mirror(far.name(merged));
+                }
+            }
+        }
+        Self {
+            target_file,
+            target_lines: node.start_line()..=node.end_line(),
+            callables: callable_spans(merged, &files),
+            files,
+            referrers,
+        }
+    }
+
+    fn binds(&self, file: &str, line: u32) -> bool {
+        if file == self.target_file && self.target_lines.contains(&line) {
+            return true;
+        }
+        let mut enclosed = false;
+        for &(start, end, idx) in self.callables.get(file).map_or(&[][..], Vec::as_slice) {
+            if (start..=end).contains(&line) {
+                if self.referrers.contains(&idx) {
+                    return true;
+                }
+                enclosed = true;
+            }
+        }
+        !enclosed
+    }
+}
+
+/// The function, method and constructor spans of `files` in merged space:
+/// visible base nodes, then the overlay's nodes, which carry on-disk spans
+/// for a dirty file.
+fn callable_spans<'a>(
+    merged: &MergedGraph<'a>,
+    files: &BTreeSet<&'a str>,
+) -> FxHashMap<&'a str, Vec<(u32, u32, u32)>> {
+    let callable = |kind: NodeKind| {
+        matches!(
+            kind,
+            NodeKind::Function | NodeKind::Method | NodeKind::Constructor
+        )
+    };
+    let mut out: FxHashMap<&'a str, Vec<(u32, u32, u32)>> = FxHashMap::default();
+    for idx in 0..merged.node_count() {
+        let Some(node) = merged.node(idx) else {
+            continue;
+        };
+        if !callable(node.kind()) || (idx < merged.base_len() && !merged.base_visible(idx)) {
+            continue;
+        }
+        if let Some(file) = node.file_path(merged).filter(|f| files.contains(f)) {
+            out.entry(file)
+                .or_default()
+                .push((node.start_line(), node.end_line(), idx));
+        }
+    }
+    out
 }
 
 #[derive(Debug, Serialize)]
@@ -301,22 +481,20 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
         }
     };
 
+    let request = target_request(&target_symbol, args.kind.as_deref(), args.file.as_deref())?;
     // `ast_target_name` / `ast_new_name` are the bare identifiers used for
     // tree-sitter search and byte-level rewrite.
     // "Foo.validate" → ast_target_name="validate"; "Foo.check" → ast_new_name="check"
-    // "pkg.Foo.validate" → ast_target_name="validate" (split on LAST `.` so the
-    // bare name on the right matches `Node.name`, which is always bare).
-    // Bare names pass through unchanged.
-    // TODO(#284 follow-up): migrate to shared `symbol_id::split_fqn_target`
-    // once that PR lands so rename + inspect + impact share one FQN parser.
-    let ast_target_name: &str = target_symbol
-        .rsplit_once('.')
-        .map(|(_, name)| name)
-        .unwrap_or(&target_symbol);
+    let ast_target_name: &str = request.name();
     let ast_new_name: &str = target_new_name
         .rsplit_once('.')
         .map(|(_, name)| name)
         .unwrap_or(&target_new_name);
+    let doc_target = doc_text(&target_symbol, &request);
+
+    if !args.dry_run && engine.is_stale_for_sha {
+        return Err(EcpError::InvalidArgument(WARM_ATTACH_REFUSAL.to_string()));
+    }
 
     // --- Pre-flight collision detection ---
     // Pass the bare new-name: `Node.name` stores bare identifiers only, so
@@ -334,112 +512,50 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
     // Output buffer for dry-run diff preview + execute-mode rename log.
     let mut lines: Vec<String> = Vec::new();
 
-    // Stage 1: locate target node + collect affected files.
-    //
-    // Parse `target_symbol` for owner-class qualification (split on LAST `.`):
-    //   "Foo.validate"     → owner="Foo",     name="validate"
-    //   "pkg.Foo.validate" → owner="pkg.Foo", name="validate"
-    //   "validate"         → bare name → match top-level only (owner_class empty)
-    //
-    // This isolates Foo.validate from Bar.validate (T1-11 accuracy fix).
-    // Bare names no longer match class methods — they resolve to module-level
-    // symbols only.  Callers wanting a class method must use "ClassName.method".
-
-    let target_indices: Vec<usize> = if let Some((owner, name)) = target_symbol.rsplit_once('.') {
-        let owner_len = owner.len() as u32;
-        graph
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, n)| {
-                // Fast-reject by u32 len before string resolve: cheaper than
-                // a pool dereference + strcmp when owner_class lengths differ.
-                // `has_owning_file` is also a single u32 compare; placed after
-                // length so the dominant rejection path stays the cheapest one.
-                n.owner_class.len.to_native() == owner_len
-                    && n.has_owning_file()
-                    && n.name.resolve(&graph.string_pool) == name
-                    && n.owner_class.resolve(&graph.string_pool) == owner
-            })
-            .map(|(i, _)| i)
-            .collect()
-    } else {
-        // Bare name: match only top-level symbols (owner_class is empty / len==0).
-        graph
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, n)| {
-                n.owner_class.len.to_native() == 0
-                    && n.has_owning_file()
-                    && n.name.resolve(&graph.string_pool) == target_symbol
-            })
-            .map(|(i, _)| i)
-            .collect()
+    // Stage 1: resolve the target, with the overlay, so an uncommitted
+    // declaration is found and a dirty file is read at its on-disk spans.
+    let view = engine.overlay_dir().and_then(|_| engine.overlay_view());
+    let merged = MergedGraph::new(graph, view);
+    let target = match resolve_target(&merged, &request) {
+        TargetResolution::Unique(c) => Some(c),
+        TargetResolution::NotFound { .. } => None,
+        TargetResolution::Ambiguous(a) => {
+            let payload = json!({
+                "operation": "refused",
+                "old": target_symbol,
+                "new": target_new_name,
+                "candidates": ambiguity_candidates(&a),
+            });
+            let _ = crate::output::emit_with_caveat(
+                &payload,
+                crate::output::OutputFormat::Toon,
+                engine.caveat(),
+            );
+            return Err(a.to_error(&request));
+        }
     };
 
-    // Stage 2: parse each file, find identifier occurrences.
+    // Stage 2: parse each file, find identifier occurrences, keep the bound ones.
     let mut hits: Vec<(PathBuf, Vec<IdentifierRange>)> = Vec::new();
     // Affected files the rename could not scan. Each one is reported, so a
     // reference in a `.vue` file is never mistaken for "no reference".
     let mut not_scanned: Vec<NotScanned> = Vec::new();
+    // Occurrences of the name that the graph does not bind to the target.
+    let mut unbound: Vec<Site> = Vec::new();
 
     // Heuristic mirror count + candidate names (T-H2).
     // Count is informational only — never drives mutation.
     let mut heuristic_mirror_count: usize = 0;
     let mut heuristic_mirror_names: Vec<String> = Vec::new();
 
-    if !target_indices.is_empty() {
-        let mut affected_file_idx: HashSet<usize> = HashSet::new();
-        for &target_idx in &target_indices {
-            let target_node = &graph.nodes[target_idx];
-            affected_file_idx.insert(target_node.file_idx.to_native() as usize);
-
-            // Inbound edges, single pass: deterministic edges contribute to
-            // `affected_file_idx`; heuristic ones bump the mirror counter.
-            // Rename mutation stays 100% deterministic because the file-set
-            // is only extended from non-heuristic sources.
-            let in_start = graph.in_offsets[target_idx].to_native() as usize;
-            let in_end = graph.in_offsets[target_idx + 1].to_native() as usize;
-            for i in in_start..in_end {
-                let edge_idx = graph.in_edge_idx[i].to_native() as usize;
-                let edge = &graph.edges[edge_idx];
-                if edge.rel_type.is_heuristic() {
-                    heuristic_mirror_count += 1;
-                    if args.show_heuristic_mirrors {
-                        let src_name = graph.nodes[edge.source.to_native() as usize]
-                            .name
-                            .resolve(&graph.string_pool)
-                            .to_string();
-                        heuristic_mirror_names.push(src_name);
-                    }
-                } else {
-                    let src = &graph.nodes[edge.source.to_native() as usize];
-                    if src.has_owning_file() {
-                        affected_file_idx.insert(src.file_idx.to_native() as usize);
-                    }
-                }
+    if let Some(target) = &target {
+        let binding = Binding::of(&merged, target, |name| {
+            heuristic_mirror_count += 1;
+            if args.show_heuristic_mirrors {
+                heuristic_mirror_names.push(name.to_string());
             }
-
-            // Single-hop heuristic mirror count: outbound heuristic edges.
-            let out_start = graph.out_offsets[target_idx].to_native() as usize;
-            let out_end = graph.out_offsets[target_idx + 1].to_native() as usize;
-            for edge in &graph.edges[out_start..out_end] {
-                if edge.rel_type.is_heuristic() {
-                    heuristic_mirror_count += 1;
-                    if args.show_heuristic_mirrors {
-                        let tgt_name = graph.nodes[edge.target.to_native() as usize]
-                            .name
-                            .resolve(&graph.string_pool)
-                            .to_string();
-                        heuristic_mirror_names.push(tgt_name);
-                    }
-                }
-            }
-        }
-
-        for file_idx in affected_file_idx {
-            let rel_path = graph.files[file_idx].path.resolve(&graph.string_pool);
+        });
+        for &rel_path in &binding.files {
             if !has_identifier_finder(rel_path) {
                 not_scanned.push(NotScanned::new(rel_path, NO_FINDER.to_string()));
                 continue;
@@ -452,10 +568,20 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
                     continue;
                 }
             };
-            match find_identifier_occurrences(rel_path, &bytes, ast_target_name) {
-                Some(occurrences) if !occurrences.is_empty() => hits.push((abs_path, occurrences)),
-                Some(_) => {}
-                None => not_scanned.push(NotScanned::new(rel_path, NO_FINDER.to_string())),
+            let Some(occurrences) = find_identifier_occurrences(rel_path, &bytes, ast_target_name)
+            else {
+                not_scanned.push(NotScanned::new(rel_path, NO_FINDER.to_string()));
+                continue;
+            };
+            let (bound, left): (Vec<_>, Vec<_>) = occurrences
+                .into_iter()
+                .partition(|r| binding.binds(rel_path, line_of(r)));
+            unbound.extend(left.iter().map(|r| Site {
+                file: rel_path.to_string(),
+                line: line_of(r),
+            }));
+            if !bound.is_empty() {
+                hits.push((abs_path, bound));
             }
         }
         not_scanned.sort_by(|a, b| a.file.cmp(&b.file));
@@ -464,7 +590,7 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
     let total_ast_hits: usize = hits.iter().map(|(_, r)| r.len()).sum();
 
     // Zero-occurrence case: explicit message + suggestions.
-    if target_indices.is_empty() || total_ast_hits == 0 {
+    if target.is_none() || total_ast_hits == 0 {
         if not_scanned.is_empty() {
             println!("No occurrences of \"{}\" found.", target_symbol);
         } else {
@@ -477,10 +603,10 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
 
         // Check if the name exists in doc files even though not in graph.
         let doc_hits = if args.markdown {
-            apply_markdown_rename(&repo_root, &target_symbol, &target_new_name, true)
+            apply_markdown_rename(&repo_root, doc_target, &target_new_name, true)
         } else {
             // Still scan to provide hints.
-            apply_markdown_rename(&repo_root, &target_symbol, &target_new_name, true)
+            apply_markdown_rename(&repo_root, doc_target, &target_new_name, true)
         };
         if !doc_hits.is_empty() {
             let total_doc: usize = doc_hits.iter().map(|(_, c)| c).sum();
@@ -498,7 +624,7 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
         // payload appears only with a caveat or an unscanned file, so the
         // plain output stays as is.
         let caveat = engine.caveat();
-        if caveat.is_some() || !not_scanned.is_empty() {
+        if caveat.is_some() || !not_scanned.is_empty() || !unbound.is_empty() {
             let mut payload = json!({
                 "operation": if args.dry_run { "dry-run" } else { "applied" },
                 "old": target_symbol,
@@ -506,6 +632,7 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
                 "rename_count": 0,
             });
             attach_not_scanned(&mut payload, &not_scanned);
+            attach_unbound(&mut payload, &unbound);
             let _ = crate::output::emit_with_caveat(
                 &payload,
                 crate::output::OutputFormat::Toon,
@@ -542,8 +669,7 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
 
         // Markdown pass preview.
         if args.markdown {
-            let md_changed =
-                apply_markdown_rename(&repo_root, &target_symbol, &target_new_name, true);
+            let md_changed = apply_markdown_rename(&repo_root, doc_target, &target_new_name, true);
             if !md_changed.is_empty() {
                 println!("[markdown] would update {} doc file(s):", md_changed.len());
                 for (p, c) in &md_changed {
@@ -553,18 +679,19 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
         }
 
         emit_mirror_summary(
-            &target_symbol,
+            doc_target,
             heuristic_mirror_count,
             &heuristic_mirror_names,
             args.show_heuristic_mirrors,
         );
         emit_verification_payload(
             &repo_root,
-            &target_symbol,
+            doc_target,
             &target_new_name,
             total_ast_hits,
             true,
             &not_scanned,
+            &unbound,
             engine,
         );
         return Ok(());
@@ -581,22 +708,23 @@ pub fn run(args: RenameArgs, engine: &crate::engine::Engine) -> Result<(), EcpEr
 
     // Markdown pass.
     if args.markdown {
-        apply_markdown_rename(&repo_root, &target_symbol, &target_new_name, false);
+        apply_markdown_rename(&repo_root, doc_target, &target_new_name, false);
     }
 
     emit_mirror_summary(
-        &target_symbol,
+        doc_target,
         heuristic_mirror_count,
         &heuristic_mirror_names,
         args.show_heuristic_mirrors,
     );
     emit_verification_payload(
         &repo_root,
-        &target_symbol,
+        doc_target,
         &target_new_name,
         total_ast_hits,
         false,
         &not_scanned,
+        &unbound,
         engine,
     );
     Ok(())
@@ -613,6 +741,7 @@ fn emit_verification_payload(
     rename_count: usize,
     dry_run: bool,
     not_scanned: &[NotScanned],
+    unbound: &[Site],
     engine: &crate::engine::Engine,
 ) {
     let residuals = scan_word_occurrences(repo_root, old);
@@ -627,6 +756,7 @@ fn emit_verification_payload(
         "new_distribution": new_distribution,
     });
     attach_not_scanned(&mut payload, not_scanned);
+    attach_unbound(&mut payload, unbound);
 
     // Best-effort: emit as structured JSON after main output.
     let _ = crate::output::emit_with_caveat(
