@@ -1611,13 +1611,16 @@ struct ExtractedRoutes {
 /// variable of the same file, or, through an import of the mounting file that
 /// the resolver resolves, to the router of the imported file. A mount that
 /// does not resolve is not recorded: its routes keep their own path.
+/// A router as (file index, variable name).
+type RouterRef = (u32, String);
+
 #[derive(Default)]
 struct RouteMounts {
     /// File and call span → the variable the call is made on.
     receiver_at: FxHashMap<(u32, Span), String>,
     /// A router (file, variable) → the mounts that attach it: the mounting
     /// router and the mount path.
-    mounted_on: FxHashMap<(u32, String), Vec<((u32, String), String)>>,
+    mounted_on: FxHashMap<RouterRef, Vec<(RouterRef, String)>>,
 }
 
 /// The most prefixes one router takes from its mounts: a cap against a
