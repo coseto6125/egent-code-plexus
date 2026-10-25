@@ -220,9 +220,11 @@ fn in_controller_class(verb: tree_sitter::Node, source: &[u8]) -> bool {
     };
     let decorators = |n: tree_sitter::Node| {
         let mut cursor = n.walk();
-        n.named_children(&mut cursor)
+        let found = n
+            .named_children(&mut cursor)
             .filter(|c| c.kind() == "decorator")
-            .any(is_controller)
+            .any(is_controller);
+        found
     };
     decorators(class)
         || class

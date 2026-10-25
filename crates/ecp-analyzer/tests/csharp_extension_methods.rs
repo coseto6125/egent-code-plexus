@@ -126,10 +126,12 @@ fn test_resolve_call_generic_this_extension_binds_heuristic() {
             HEURISTIC_REASON
         )]
     );
-    assert!(
-        HEURISTIC_CONFIDENCE < 0.7,
-        "a heuristic edge stays under the promotion gate"
-    );
+    const {
+        assert!(
+            HEURISTIC_CONFIDENCE < 0.7,
+            "a heuristic edge stays under the promotion gate"
+        )
+    };
 }
 
 /// Contract: the call's arguments are not parsed, so one class's overloads

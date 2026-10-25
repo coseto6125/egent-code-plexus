@@ -130,6 +130,10 @@ fn path_dirs(path: &str) -> Vec<&str> {
     parts
 }
 
+/// A C# extension method: its node id, its `this` parameter's type as
+/// written, and its `FunctionMeta::flags`.
+type CsharpExtensionDecl = (u32, Box<str>, u16);
+
 /// A high-performance global symbol index mapping node names and file locations
 /// to their corresponding globally unique node IDs.
 #[derive(Debug, Default)]
@@ -332,7 +336,7 @@ pub struct SymbolTable {
     /// Method name → the C# extension methods of that name, each with its
     /// `this` parameter's type as written and its `FunctionMeta::flags`
     /// (see [`Self::note_csharp_extension`]). Overloads included.
-    csharp_extensions: FxHashMap<Box<str>, Vec<(u32, Box<str>, u16)>>,
+    csharp_extensions: FxHashMap<Box<str>, Vec<CsharpExtensionDecl>>,
 }
 
 impl SymbolTable {
@@ -659,7 +663,7 @@ impl SymbolTable {
                     });
                 Some(ExtensionDecl {
                     id: *id,
-                    this_type: &**this_type,
+                    this_type,
                     flags: *flags,
                     file,
                     class,

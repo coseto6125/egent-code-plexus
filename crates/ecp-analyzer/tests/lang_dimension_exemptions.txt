@@ -1510,3 +1510,16 @@ visibility ruby pre-existing gap
 visibility rust pre-existing gap
 visibility swift pre-existing gap
 visibility typescript pre-existing gap
+extension_methods c no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods cpp no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods dart Dart extension-on members are covered by dart_extension_trait.rs; this dimension tests the C# static-class retry
+extension_methods go no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods java no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods javascript no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods kotlin Kotlin extension functions are top-level and resolve through the existing extension fallback (kotlin_import_bound_calls.rs)
+extension_methods php no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods python no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods ruby no extension methods: a call resolves only to members of the receiver's type or to free functions
+extension_methods rust trait methods resolve through trait impls; no static-class extension form
+extension_methods swift Swift extension members are members of the extended type (swift_extension_dedup.rs); no static-class form
+extension_methods typescript no extension methods: a call resolves only to members of the receiver's type or to free functions
