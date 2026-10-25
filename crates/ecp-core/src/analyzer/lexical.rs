@@ -72,10 +72,10 @@ pub fn file_identities<'a, T>(
             }
         })
         .collect();
-    // `canonical_path` leaves at most a doubled `./` prefix, which neither
-    // the walk nor `git status` produces, and no parent is set while no
-    // language opts in: no other `IdentityError` can arise.
-    assign_file(&path, &decls).expect("a canonical path and unscoped declarations")
+    // `canonical_path` removes every `\`, the one spelling `check_path`
+    // rejects, and no parent is set while no language opts in: no
+    // `IdentityError` can arise.
+    assign_file(&path, &decls).expect("a `/`-separated path and unscoped declarations")
 }
 
 /// The uid a node stores for `slot`: a [`UidSlot::Duplicate`] keeps its
@@ -265,6 +265,37 @@ mod tests {
             uids("src/a.rs", &decls),
             "the builder hashes the `/` form of a path"
         );
+    }
+
+    #[test]
+    fn test_file_uids_dot_backslash_name_matches_stored_path() {
+        let decls = [
+            (NodeKind::Function, None, "f"),
+            (NodeKind::Method, Some("A"), "g"),
+        ];
+        let stored = [
+            uid::compute(NodeKind::Function, "./a.rs", None, "f"),
+            uid::compute(NodeKind::Method, "./a.rs", Some("A"), "g"),
+        ];
+        assert_eq!(
+            uids(".\\a.rs", &decls),
+            stored,
+            "a Unix file named `.\\a.rs` is stored `./a.rs`, and the uid hashes that name"
+        );
+        assert_eq!(uids("./a.rs", &decls), stored);
+        assert_ne!(
+            uids("./a.rs", &decls)[0],
+            uid::compute(NodeKind::Function, "a.rs", None, "f"),
+            "`./a.rs` and `a.rs` are two files"
+        );
+    }
+
+    #[test]
+    fn test_file_uids_doubled_dot_prefix_no_panic() {
+        let decls = [(NodeKind::Function, None, "f")];
+        let stored = [uid::compute(NodeKind::Function, "././a.rs", None, "f")];
+        assert_eq!(uids(".\\.\\a.rs", &decls), stored);
+        assert_eq!(uids("././a.rs", &decls), stored);
     }
 
     #[test]

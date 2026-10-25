@@ -314,6 +314,46 @@ four_path_cases! {
     );
 }
 
+/// A Unix file named `.\K.java` is stored `./K.java`, and one named
+/// `.\.\K.java` is stored `././K.java`: the builder only turns `\` into
+/// `/`. Every path hashes that stored name, and none panics on the doubled
+/// prefix.
+#[test]
+fn test_uid_assign_dot_backslash_file_name_hashes_stored_path() {
+    let java = JavaProvider::new().unwrap();
+    let source = "class K {\n void save(int id) {}\n void save(String name) {}\n}\n";
+    for (walked, stored) in [(".\\K.java", "./K.java"), (".\\.\\K.java", "././K.java")] {
+        let dirty = parse(&java, walked, source);
+        let full_bytes = archive(&full_build(parse(&java, walked, source)));
+        let full_graph = access(&full_bytes);
+        let full = stored_uids(full_graph, &dirty);
+        let saves = named(&dirty, "save");
+        assert_eq!(saves.len(), 2, "{walked}: the fixture's two overloads");
+        let first = &dirty.nodes[saves[0]];
+        let base = ecp_core::uid::compute(first.kind, stored, first.owner_class.as_deref(), "save");
+        assert_eq!(
+            [full[saves[0]], full[saves[1]]],
+            [base, ecp_core::uid::overload(base, 1)],
+            "{walked}: the uid hashes the stored path `{stored}`"
+        );
+        let view = OverlayView::build(
+            full_graph,
+            &[OverlayFileInput::from(parse(&java, walked, source))],
+        )
+        .unwrap();
+        assert_eq!(
+            view_uids(&view),
+            full,
+            "{walked}: overlay view vs full build"
+        );
+        assert_eq!(
+            node_uids_for(&dirty),
+            full,
+            "{walked}: incremental vs full build"
+        );
+    }
+}
+
 /// The index of each node of `local` named `name`.
 fn named(local: &LocalGraph, name: &str) -> Vec<usize> {
     (0..local.nodes.len())

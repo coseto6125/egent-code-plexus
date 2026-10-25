@@ -88,7 +88,7 @@ pub enum Scope {
 /// Why a declaration key or a file's identities cannot be built.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityError {
-    /// The path holds a `\` or starts with `./`; see [`canonical_path`].
+    /// The path holds a `\`; see [`canonical_path`].
     NonCanonicalPath(String),
     /// A discriminator with empty text separates nothing.
     EmptyDiscriminator,
@@ -125,16 +125,13 @@ impl fmt::Display for IdentityError {
 impl std::error::Error for IdentityError {}
 
 /// The repo-relative, `/`-separated spelling of a path, as the builder
-/// stores it (`builder.rs` replaces `\` with `/`). Borrowed when unchanged.
+/// stores it: `builder.rs` replaces `\` with `/` and changes nothing else.
+/// A leading `./` is part of the name: a Unix file named `.\a.rs` is stored
+/// `./a.rs`. Borrowed when unchanged.
 pub fn canonical_path(path: &str) -> Cow<'_, str> {
-    let path: Cow<'_, str> = match path.contains('\\') {
+    match path.contains('\\') {
         true => Cow::Owned(path.replace('\\', "/")),
         false => Cow::Borrowed(path),
-    };
-    match path {
-        Cow::Borrowed(p) => Cow::Borrowed(p.strip_prefix("./").unwrap_or(p)),
-        Cow::Owned(s) if s.starts_with("./") => Cow::Owned(s[2..].to_string()),
-        owned => owned,
     }
 }
 
@@ -165,9 +162,9 @@ pub fn owner_match_form(owner: &str) -> Cow<'_, str> {
 }
 
 fn check_path(path: &str) -> Result<(), IdentityError> {
-    match canonical_path(path) {
-        Cow::Borrowed(p) if p.len() == path.len() => Ok(()),
-        _ => Err(IdentityError::NonCanonicalPath(path.to_string())),
+    match path.contains('\\') {
+        true => Err(IdentityError::NonCanonicalPath(path.to_string())),
+        false => Ok(()),
     }
 }
 
@@ -195,15 +192,24 @@ impl<'a> DeclKey<'a> {
         name: &'a str,
     ) -> Result<Self, IdentityError> {
         check_path(path)?;
-        let owner = owner.filter(|o| !o.is_empty());
-        Ok(Self {
+        Ok(Self::unscoped_unchecked(kind, path, owner, name))
+    }
+
+    /// [`DeclKey::unscoped`] for a path the caller has already checked.
+    fn unscoped_unchecked(
+        kind: NodeKind,
+        path: &'a str,
+        owner: Option<&'a str>,
+        name: &'a str,
+    ) -> Self {
+        Self {
             kind,
             path,
-            owner,
+            owner: owner.filter(|o| !o.is_empty()),
             name,
             scope: Scope::Unscoped,
             discriminator: None,
-        })
+        }
     }
 
     /// A declaration that the callable with anchor `parent_anchor` declares.
@@ -219,14 +225,20 @@ impl<'a> DeclKey<'a> {
         if uid::keeps_overloads(kind) {
             return Err(IdentityError::ScopedOverloadKind { kind, decl: None });
         }
-        Ok(Self {
+        Ok(Self::scoped_unchecked(kind, path, name, parent_anchor))
+    }
+
+    /// [`DeclKey::scoped`] for a path and a kind the caller has already
+    /// checked.
+    fn scoped_unchecked(kind: NodeKind, path: &'a str, name: &'a str, parent_anchor: u64) -> Self {
+        Self {
             kind,
             path,
             owner: None,
             name,
             scope: Scope::Lexical { parent_anchor },
             discriminator: None,
-        })
+        }
     }
 
     pub fn with_discriminator(self, d: Discriminator<'a>) -> Result<Self, IdentityError> {
@@ -271,18 +283,23 @@ impl<'a> DeclKey<'a> {
     /// [`DeclKey::uid`] when there is no discriminator. Overlay pairing,
     /// `diff` and a scoped child's uid read the anchor, never an ordinal.
     pub fn anchor(&self) -> u64 {
-        let base = self.uid();
-        let Some(d) = self.discriminator else {
-            return base;
-        };
-        let mut h = Xxh3::new();
-        h.update(&[ANCHOR_TAG]);
-        h.update(&base.to_le_bytes());
-        h.update(&[d.stored_tag(), 0]);
-        h.update(d.text().as_bytes());
-        h.update(&[0xFF]);
-        h.digest()
+        anchor_of(self.uid(), self.discriminator)
     }
+}
+
+/// The anchor of a declaration whose base uid is `base`: `base` itself
+/// without a discriminator, so a caller that holds the uid hashes once.
+fn anchor_of(base: u64, discriminator: Option<Discriminator<'_>>) -> u64 {
+    let Some(d) = discriminator else {
+        return base;
+    };
+    let mut h = Xxh3::new();
+    h.update(&[ANCHOR_TAG]);
+    h.update(&base.to_le_bytes());
+    h.update(&[d.stored_tag(), 0]);
+    h.update(d.text().as_bytes());
+    h.update(&[0xFF]);
+    h.digest()
 }
 
 /// The uid of a lexically scoped declaration.
@@ -349,8 +366,10 @@ pub struct DeclIdentity {
 }
 
 /// Every identity of one file's declarations, in slice order. A parent may
-/// come before or after its children in the slice.
+/// come before or after its children in the slice. A non-canonical `path`
+/// is rejected even when `decls` is empty.
 pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentity>, IdentityError> {
+    check_path(path)?;
     let n = decls.len();
     let mut anchors: Vec<Option<u64>> = vec![None; n];
     let mut base_uids = vec![0u64; n];
@@ -375,7 +394,7 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
         for &j in chain.iter().rev() {
             let d = &decls[j];
             let key = match d.parent {
-                None => DeclKey::unscoped(d.kind, path, d.owner, d.name)?,
+                None => DeclKey::unscoped_unchecked(d.kind, path, d.owner, d.name),
                 Some(p) => {
                     if d.owner.is_some_and(|o| !o.is_empty()) {
                         return Err(IdentityError::ScopedWithOwner { decl: j as u32 });
@@ -388,20 +407,23 @@ pub fn assign_file(path: &str, decls: &[FileDecl<'_>]) -> Result<Vec<DeclIdentit
                     }
                     let parent_anchor =
                         anchors[p as usize].expect("the chain resolves a parent before its child");
-                    DeclKey::scoped(d.kind, path, d.name, parent_anchor)?
+                    DeclKey::scoped_unchecked(d.kind, path, d.name, parent_anchor)
                 }
             };
             let key = match d.discriminator {
                 Some(x) => key.with_discriminator(x)?,
                 None => key,
             };
-            base_uids[j] = key.uid();
-            anchors[j] = Some(key.anchor());
+            let base = key.uid();
+            base_uids[j] = base;
+            anchors[j] = Some(anchor_of(base, key.discriminator));
         }
     }
 
-    let mut first_of: FxHashMap<u64, (u32, u32)> = FxHashMap::default();
-    let mut anchor_count: FxHashMap<u64, u32> = FxHashMap::default();
+    let mut first_of: FxHashMap<u64, (u32, u32)> =
+        FxHashMap::with_capacity_and_hasher(n, Default::default());
+    let mut anchor_count: FxHashMap<u64, u32> =
+        FxHashMap::with_capacity_and_hasher(n, Default::default());
     for a in anchors.iter().flatten() {
         *anchor_count.entry(*a).or_insert(0) += 1;
     }
@@ -1389,10 +1411,29 @@ mod tests {
     // ── declaration identity ──
 
     #[test]
-    fn test_canonical_path_backslash_and_dot_prefix_normalised() {
+    fn test_canonical_path_backslash_replaced_dot_prefix_kept() {
         assert_eq!(canonical_path("src\\a.rs"), "src/a.rs");
-        assert_eq!(canonical_path("./src/a.rs"), "src/a.rs");
+        assert_eq!(canonical_path(".\\a.rs"), "./a.rs");
+        assert_eq!(canonical_path(".\\.\\a.rs"), "././a.rs");
+        assert!(matches!(
+            canonical_path("./src/a.rs"),
+            Cow::Borrowed("./src/a.rs")
+        ));
         assert!(matches!(canonical_path("src/a.rs"), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn test_unscoped_dot_prefix_path_accepted_and_hashed_as_written() {
+        let key = DeclKey::unscoped(NodeKind::Function, "./a.rs", None, "f").unwrap();
+        assert_eq!(key.path(), "./a.rs");
+        assert_eq!(
+            key.uid(),
+            uid::compute(NodeKind::Function, "./a.rs", None, "f")
+        );
+        assert_ne!(
+            key.uid(),
+            uid::compute(NodeKind::Function, "a.rs", None, "f")
+        );
     }
 
     #[test]
@@ -1715,6 +1756,43 @@ mod tests {
     #[test]
     fn test_assign_file_empty_returns_empty() {
         assert_eq!(assign_file("a.rs", &[]), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn test_assign_file_backslash_path_rejected_with_or_without_decls() {
+        let err = Err(IdentityError::NonCanonicalPath("src\\a.rs".into()));
+        assert_eq!(assign_file("src\\a.rs", &[]), err);
+        assert_eq!(
+            assign_file("src\\a.rs", &[decl(NodeKind::Function, None, "f")]),
+            err
+        );
+    }
+
+    #[test]
+    fn test_assign_file_anchor_equals_decl_key_anchor() {
+        let mut decls = vec![
+            decl(NodeKind::Method, Some("A"), "fmt"),
+            decl(NodeKind::Method, Some("A"), "fmt"),
+            decl(NodeKind::Function, None, "pad"),
+        ];
+        decls[1].discriminator = Some(Discriminator::ImplTrait("Display"));
+        decls[2].parent = Some(1);
+        let ids = assign_file("./a.rs", &decls).unwrap();
+        let plain = DeclKey::unscoped(NodeKind::Method, "./a.rs", Some("A"), "fmt").unwrap();
+        let tagged = plain
+            .with_discriminator(Discriminator::ImplTrait("Display"))
+            .unwrap();
+        assert_eq!(ids[0].slot, UidSlot::First(plain.uid()));
+        assert_eq!(
+            ids[0].anchor,
+            plain.uid(),
+            "no discriminator: the anchor is the uid"
+        );
+        assert_eq!(ids[1].anchor, tagged.anchor());
+        assert_ne!(ids[1].anchor, plain.uid());
+        let child = DeclKey::scoped(NodeKind::Function, "./a.rs", "pad", tagged.anchor()).unwrap();
+        assert_eq!(ids[2].slot, UidSlot::First(child.uid()));
+        assert_eq!(ids[2].anchor, child.anchor());
     }
 
     #[test]

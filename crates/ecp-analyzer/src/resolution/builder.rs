@@ -1139,7 +1139,17 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
                 // An overload is a real declaration: it keeps its name and
                 // owner (shared with the first, so already pooled) under a
                 // uid of its own, and loses nothing a BlindSpot would report.
-                if ecp_core::uid::keeps_overloads(raw_node.kind) {
+                // The slot decides, as in the overlay view, so a kind that
+                // lexical scoping opts in numbers alike on both paths. A
+                // `First` slot that repeats another `LocalGraph` of the same
+                // path has no in-file slot to read; it numbers by kind, as
+                // `assign_file` numbers an unscoped declaration.
+                let keeps_overload = match identity.slot {
+                    UidSlot::Later { .. } => true,
+                    UidSlot::Duplicate { .. } => false,
+                    UidSlot::First(_) => ecp_core::uid::keeps_overloads(raw_node.kind),
+                };
+                if keeps_overload {
                     let ordinal = symbol_table.register_overload(prev_idx, file_meta);
                     let first: &Node = &nodes[prev_idx as usize];
                     nodes.push(Node {
@@ -1227,9 +1237,12 @@ fn pass1_register_nodes(local_graphs: &[LocalGraph]) -> Pass1Registration {
                 // hit the tombstone. The surviving node already owns `uid_u64`
                 // and the original `raw_node.name`; the tombstone gets bit-
                 // inverted uid (`!uid_u64`) plus empty name (StrRef::default,
-                // which resolves to "" against any pool). Bit-invert keeps the
-                // tombstone uid unique-per-collision without inventing a
-                // counter, and "" can never match a real symbol-name query.
+                // which resolves to "" against any pool). The bit-inverse
+                // never equals the survivor's uid, but it is not unique: every
+                // later duplicate of one base uid gets the same tombstone uid.
+                // Tombstones stay isolated by their empty name and their
+                // absence from the symbol table, and "" never matches a real
+                // symbol-name query.
                 symbol_table.register_tombstone(raw_node.kind, file_meta);
                 nodes.push(Node {
                     uid: ecp_core::uid::tombstone(uid_u64),
@@ -3518,8 +3531,7 @@ mod tests {
         );
         assert_eq!(
             out.nodes[1].uid, !out.nodes[0].uid,
-            "tombstone uid is the bit-inverse, so it stays unique without \
-             shadowing the survivor"
+            "tombstone uid is the bit-inverse, so it never shadows the survivor"
         );
         assert!(
             out.string_pool.resolve(&out.nodes[1].name).is_empty(),
@@ -3529,6 +3541,78 @@ mod tests {
             out.collision_blind_spots.len(),
             1,
             "the collision is reported, not silently swallowed"
+        );
+    }
+
+    #[test]
+    fn test_pass1_register_nodes_three_duplicates_share_one_tombstone_uid() {
+        let g = graph_of(
+            "dup.c",
+            vec![raw_fn("twice", 0), raw_fn("twice", 30), raw_fn("twice", 60)],
+        );
+        let out = pass1_register_nodes(std::slice::from_ref(&g));
+        let survivor = out.nodes[0].uid;
+        assert_eq!(
+            [out.nodes[1].uid, out.nodes[2].uid],
+            [!survivor, !survivor],
+            "every later duplicate of one base uid stores the same tombstone uid"
+        );
+        assert!(out.nodes[1..]
+            .iter()
+            .all(|n| out.string_pool.resolve(&n.name).is_empty()));
+        assert_eq!(
+            out.symbol_table.lookup_in_file("dup.c", "twice"),
+            Some(0),
+            "a name lookup reaches the survivor, never a tombstone"
+        );
+    }
+
+    #[test]
+    fn test_pass1_register_nodes_later_method_slot_keeps_overload_uid() {
+        let g = graph_of(
+            "A.java",
+            vec![
+                raw_decl("save", NodeKind::Method, 1, &[], Some("A")),
+                raw_decl("save", NodeKind::Method, 5, &[], Some("A")),
+            ],
+        );
+        let out = pass1_register_nodes(std::slice::from_ref(&g));
+        let first = ecp_core::uid::compute(NodeKind::Method, "A.java", Some("A"), "save");
+        assert_eq!(
+            [out.nodes[0].uid, out.nodes[1].uid],
+            [first, ecp_core::uid::overload(first, 1)],
+            "a `UidSlot::Later` slot becomes overload 1, not a tombstone"
+        );
+        assert_eq!(out.string_pool.resolve(&out.nodes[1].name), "save");
+        assert!(out.collision_blind_spots.is_empty());
+    }
+
+    #[test]
+    fn test_pass1_register_nodes_two_graphs_one_path_number_as_one_file() {
+        let graphs = [
+            graph_of(
+                "A.java",
+                vec![
+                    raw_decl("save", NodeKind::Method, 1, &[], Some("A")),
+                    raw_decl("helper", NodeKind::Function, 9, &[], None),
+                ],
+            ),
+            graph_of(
+                "A.java",
+                vec![
+                    raw_decl("save", NodeKind::Method, 1, &[], Some("A")),
+                    raw_decl("helper", NodeKind::Function, 9, &[], None),
+                ],
+            ),
+        ];
+        let out = pass1_register_nodes(&graphs);
+        let save = ecp_core::uid::compute(NodeKind::Method, "A.java", Some("A"), "save");
+        let helper = ecp_core::uid::compute(NodeKind::Function, "A.java", None, "helper");
+        assert_eq!(
+            out.nodes.iter().map(|n| n.uid).collect::<Vec<_>>(),
+            vec![save, helper, ecp_core::uid::overload(save, 1), !helper],
+            "the second graph's `First` slots repeat the first graph's nodes: \
+             the method becomes an overload and the function a tombstone"
         );
     }
 

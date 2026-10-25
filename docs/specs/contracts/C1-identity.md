@@ -1,6 +1,6 @@
 # C1: identity
 
-Status: contract, phase 1. Types: `crates/ecp-core/src/contracts/identity.rs`. No code calls them yet.
+Status: contract, phase 1. Types: `crates/ecp-core/src/contracts/identity.rs`. Landed in R2: `assign_file` numbers every file-level uid site, through `analyzer::lexical::file_identities`. Not yet adopted: the target request, the target result and the route types wait for their consuming slices.
 
 Plan row (`docs/specs/2026-10-25-architecture-direction.md`, "Contracts before code"): declaration identity, lexical parent, the target request syntax and a typed ambiguity result; route identity and handler identity as separate keys. Consumers: areas 1, 2, 5, 8, 9.
 
@@ -47,7 +47,7 @@ Functions: `canonical_path`, `owner_match_form`, `scoped_uid`, `assign_file`, `p
 
 | Field | Invariant |
 |---|---|
-| `DeclKey.path` | Repo-relative and `/`-separated, with no leading `./`. `canonical_path` gives that form. A constructor rejects any other spelling. |
+| `DeclKey.path` | Repo-relative and `/`-separated, as the builder stores it; a leading `./` is part of the name. `canonical_path` gives that form. A constructor rejects any other spelling. |
 | `DeclKey.owner` | The type, namespace or module that declares the node (meanings M1, M2 and M4 of design A §1.2). `Some("")` is `None`, as `uid::compute` already treats it. The text stays as the producer writes it, generic arguments and separators included. Identity never normalises it: the Rust `Impl` owners `Conv<u8>` and `Conv<u16>` are two owners and two uids (`test_unscoped_generic_owner_kept_as_produced`). |
 | owner match form | `owner_match_form` removes every generic argument list and the outer whitespace: `Walk<'s, 't>` gives `Walk`. Only the target resolver uses it, to compare a request segment with a path segment. It never enters a uid. |
 | `DeclKey.name` | The bare declared name, as `Node.name` stores it. |
@@ -157,9 +157,9 @@ line      := 1-based decimal start line
 
 | Fact | Produced at | Read at | Maps to |
 |---|---|---|---|
-| uid inputs | `uid::compute` (`ecp-core/src/uid.rs:17-27`) | builder Pass 1 (`ecp-analyzer/src/resolution/builder.rs:1092-1097`); overlay view (`ecp-core/src/session/view.rs:372-377`); incremental `node_uid_for` (`ecp-cli/src/incremental.rs:283-297`); builder skip sets (`builder.rs:3009`, `:3046`, `:3107`, `:3141`); `class_membership.rs:69` | `DeclKey::unscoped(...).uid()`, equal value |
+| uid inputs | `assign_file` through `file_identities` / `file_uids` (`ecp-core/src/analyzer/lexical.rs:44`, `:91`), one call per file; `DeclKey::uid` hashes with `uid::compute` (`ecp-core/src/uid.rs:17-27`) | builder Pass 1 (`ecp-analyzer/src/resolution/builder.rs:1096`); overlay view (`ecp-core/src/session/view.rs:378`); incremental `node_uids_for` (`ecp-cli/src/incremental.rs:285-293`); builder skip sets (`skipped_nodes`, `builder.rs:2911`); `class_membership.rs:69` | `DeclKey::unscoped(...).uid()`, equal value |
 | overload ordinal | builder (`builder.rs:1119-1127`, `SymbolTable::register_overload` at `resolution/index.rs:793`); overlay (`view.rs:378-385`) | `is_later_overload` recomputes `compute` and compares (`ecp-core/src/graph.rs:1483-1500`) | `UidSlot::Later`, same ordinal rule |
-| same identity, other kind | builder pushes a tombstone (`builder.rs:1100-1118` comment, D1 collision recovery) | the tombstone has an empty name | `UidSlot::Duplicate`, unchanged; see Open point 4 |
+| same identity, other kind | builder pushes a tombstone (`builder.rs:1100-1118` comment, D1 collision recovery) | the tombstone has an empty name and no symbol-table entry | `UidSlot::Duplicate`, unchanged; every tombstone of one base uid stores the same `uid::tombstone(base)`, so the uid does not separate them; see Open point 4 |
 | "keeps overloads" | `uid::keeps_overloads` (`uid.rs:33-35`): `Method`, `Constructor` | builder, view | used as is |
 | overlay pairing | `dirty_base_by_uid` (`view.rs:348-355`), lookup at `view.rs:388`: by stored uid, so by position for overloads | `ViewNode.replaced_base` (`view.rs:254`) | `pair_by_anchor`; a `Shared` anchor pairs nothing |
 | owner (M1, M2, M4) | parsers; `stamp_owner_class_by_span` (`ecp-analyzer/src/framework_helpers.rs:260`); Rust `enclosing_impl_type` (`rust/receiver_types.rs:286`), which strips the self type's generics; Rust `Impl` owner is the raw trait text, generics included (`rust/parser.rs:438-444`, `impl_trait_name` at `rust/receiver_types.rs:113-118`); Rust `Typedef` in an impl takes the same trait text (`rust/parser.rs:446-453`, `enclosing_impl_or_trait_context` at `rust/receiver_types.rs:258-273`) | `Node.owner_class` (`graph.rs:698-702`) | `DeclKey.owner`, text unchanged |

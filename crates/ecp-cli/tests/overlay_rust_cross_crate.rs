@@ -9,8 +9,10 @@
 //! index` does, then builds the overlay of a dirty caller over that index.
 //!
 //! What the fixtures do not cover: `pub use` re-export chains behind a crate
-//! head, inline `mod util { .. }` modules, and a caller file that no target
-//! root declares. The overlay walks file-backed `mod` declarations only.
+//! head, inline `mod util { .. }` modules, and `crate::` / `self::` /
+//! `super::` paths from a caller file that no target root the overlay knows
+//! declares (a custom `[lib] path` root). The overlay walks file-backed
+//! `mod` declarations only.
 
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_cli::config_parser::parse_configs;
@@ -233,6 +235,63 @@ fn test_overlay_view_dirty_rust_file_cross_crate_call_keeps_edge() {
         ("one-line edit", one_line_edit(caller)),
     ] {
         let (reindex, overlay) = reindex_and_overlay(&files, CALLER, &edited, &["t"]);
+        assert_module_tree_binds(&reindex, &[("crates/b/src/util.rs", "f")], label);
+        assert_eq!(overlay, reindex, "{label}");
+    }
+}
+
+/// Crate `a` names its lib root in `[lib] path`, so the overlay's target
+/// roots (`lib.rs`, `main.rs`, ...) do not declare the caller and it has no
+/// module chain. A crate head needs none: the edge the index binds stays.
+#[test]
+fn test_overlay_rust_cross_crate_custom_lib_path_caller_keeps_edge() {
+    const ENTRY: &str = "crates/a/src/entry.rs";
+    let caller = "pub mod util;\n\npub fn t() {\n    b::util::f();\n}\n";
+    let mut files = owned(&[
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n",
+        ),
+        (
+            "crates/a/Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\n[lib]\npath = \"src/entry.rs\"\n\n[dependencies]\nb = { path = \"../b\" }\n",
+        ),
+        ("crates/a/src/util.rs", "pub fn f() {}\n"),
+        (
+            "crates/b/Cargo.toml",
+            "[package]\nname = \"b\"\nversion = \"0.1.0\"\n",
+        ),
+        ("crates/b/src/lib.rs", "pub mod util;\n"),
+        ("crates/b/src/util.rs", "pub fn f() {}\n\npub fn g() {}\n"),
+    ]);
+    files.push((ENTRY.to_string(), caller.to_string()));
+
+    let graph = index(&files);
+    let entries: Vec<(&str, Vec<&str>)> = graph
+        .workspace
+        .scopes
+        .iter()
+        .map(|scope| {
+            (
+                scope.root.as_str(),
+                scope.entry_files.iter().map(String::as_str).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        entries,
+        vec![
+            ("crates/a", vec![ENTRY]),
+            ("crates/b", vec!["crates/b/src/lib.rs"]),
+        ],
+        "the stored lib entry is the `[lib] path`"
+    );
+
+    for (label, edited) in [
+        ("touched", caller.to_string()),
+        ("one-line edit", one_line_edit(caller)),
+    ] {
+        let (reindex, overlay) = reindex_and_overlay(&files, ENTRY, &edited, &["t"]);
         assert_module_tree_binds(&reindex, &[("crates/b/src/util.rs", "f")], label);
         assert_eq!(overlay, reindex, "{label}");
     }

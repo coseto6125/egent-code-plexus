@@ -228,9 +228,11 @@ impl RustWorkspaceModTree {
             let (tree, reexports) = build_mod_tree_and_reexports(&entry_path);
             out.add_target(&tree);
             let bins = bin_roots(&crate_dir, &entry_path);
+            let crate_canon = crate_dir.canonicalize().ok();
             rows.add_member(
                 &out.workspace_canon,
                 &crate_dir,
+                crate_canon.as_deref(),
                 crate_dir != workspace_root,
                 std::iter::once(&entry_path).chain(&bins),
                 &manifest,
@@ -249,9 +251,9 @@ impl RustWorkspaceModTree {
                 out.file_to_crate
                     .insert(file.clone(), (code_name.clone(), mod_path.clone()));
             }
-            let canon_str = crate_dir
-                .canonicalize()
-                .unwrap_or_else(|_| crate_dir.clone())
+            let canon_str = crate_canon
+                .as_deref()
+                .unwrap_or(&crate_dir)
                 .to_string_lossy()
                 .replace('\\', "/");
             let entry = (crate_dir, canon_str, tree, reexports);
@@ -1029,106 +1031,151 @@ fn parse_workspace_members(cargo_toml: &str, workspace_root: &Path) -> Vec<PathB
     members
 }
 
-/// The C2 rows [`RustWorkspaceModTree::build`] collects, in member order:
-/// each registered member's scope, the name code writes for it, and the
-/// package-name spellings it claims first.
+/// The C2 rows [`RustWorkspaceModTree::build`] collects: every member the
+/// module tree registers, in the order of its last listing.
 #[derive(Default)]
 struct CargoRows {
-    members: Vec<(Scope, String, Vec<String>)>,
+    members: Vec<CargoMember>,
+}
+
+/// One member [`RustWorkspaceModTree::build`] registers in `crates`.
+struct CargoMember {
+    /// The canonical member directory: two listings of it are one member.
+    dir: PathBuf,
+    /// `None` when the root or the lib entry does not relativise into the
+    /// repo (`members = ["../x"]`): the table holds repo-relative paths, so
+    /// the member has no row, yet it still shadows names as the index does.
+    scope: Option<Scope>,
+    /// The name code writes: the `[lib] name`, else the package name with
+    /// `-` → `_`.
+    code_name: String,
+    /// The package-name spellings beside `code_name`, before `finish`
+    /// settles which member claims each.
+    spellings: Vec<String>,
+    /// Position among the distinct members by first listing: `build` lets
+    /// the first listing claim a spelling.
+    first_listed: usize,
 }
 
 impl CargoRows {
     /// Record a member the module tree registers. `entries` are its target
-    /// roots, the lib entry first. A member outside the workspace root
-    /// (`members = ["../x"]`), or a second listing of one directory, gets no
-    /// row: the table holds repo-relative paths, one scope per root.
+    /// roots, the lib entry first. `crate_canon` is `crate_dir`
+    /// canonicalized, `None` when that fails. A second listing of one
+    /// directory moves the member to the end, as `build` lets the last
+    /// listing keep the code name.
     fn add_member<'p>(
         &mut self,
         workspace_canon: &Path,
         crate_dir: &Path,
+        crate_canon: Option<&Path>,
         under_workspace_manifest: bool,
         mut entries: impl Iterator<Item = &'p PathBuf>,
         manifest: &CrateManifest,
     ) {
-        let rel = |path: &Path| {
-            let canon = path.canonicalize().ok()?;
-            uid_path(&canon, workspace_canon)
+        let dir = crate_canon.unwrap_or(crate_dir);
+        if let Some(at) = self.members.iter().position(|member| member.dir == dir) {
+            let member = self.members.remove(at);
+            self.members.push(member);
+            return;
+        }
+        let rel = |canon: &Path| {
+            uid_path(canon, workspace_canon)
                 .ok()
                 .filter(|rel| !rel.contains('\\'))
         };
-        let Some(root) = rel(crate_dir) else {
-            return;
-        };
-        let Some(lib_entry) = entries.next().and_then(|entry| rel(entry.as_path())) else {
-            return;
-        };
-        if self.members.iter().any(|(scope, ..)| scope.root == root) {
-            return;
-        }
-        let entry_files: Vec<String> = std::iter::once(lib_entry)
-            .chain(entries.filter_map(|entry| rel(entry.as_path())))
-            .collect();
-        let manifest_path = if root.is_empty() {
-            "Cargo.toml".to_string()
-        } else {
-            format!("{root}/Cargo.toml")
-        };
-        let read = |path: String| ConfigRead {
-            path,
-            presence: ConfigPresence::Read,
-        };
-        let mut config_files = vec![read(manifest_path)];
-        if under_workspace_manifest {
-            config_files.push(read("Cargo.toml".to_string()));
-        }
-        // The same keys `build` gives `crates`: the code name, then the
-        // package spellings that no earlier member claimed.
+        let root = crate_canon.and_then(rel);
+        let lib_entry = entries
+            .next()
+            .and_then(|entry| entry.canonicalize().ok())
+            .and_then(|entry| rel(entry.as_path()));
+        let scope = root.zip(lib_entry).map(|(root, lib_entry)| {
+            let entry_files: Vec<String> = std::iter::once(lib_entry)
+                .chain(entries.filter_map(|entry| rel(entry.canonicalize().ok()?.as_path())))
+                .collect();
+            let manifest_path = if root.is_empty() {
+                "Cargo.toml".to_string()
+            } else {
+                format!("{root}/Cargo.toml")
+            };
+            let read = |path: String| ConfigRead {
+                path,
+                presence: ConfigPresence::Read,
+            };
+            let mut config_files = vec![read(manifest_path)];
+            if under_workspace_manifest {
+                config_files.push(read("Cargo.toml".to_string()));
+            }
+            Scope {
+                ecosystem: Ecosystem::Cargo,
+                root,
+                config_files,
+                membership: Membership::Subtree,
+                entry_files,
+                aliases: Vec::new(),
+                search_roots: Vec::new(),
+                dependencies: Vec::new(),
+            }
+        });
         let package_norm = manifest.name.replace('-', "_");
         let code_name = manifest
             .lib_name
             .clone()
             .unwrap_or_else(|| package_norm.clone());
-        let mut alternates = Vec::new();
+        let mut spellings = Vec::new();
         for alias in [manifest.name.clone(), package_norm] {
-            if alias != code_name
-                && !alternates.contains(&alias)
-                && !self
-                    .members
-                    .iter()
-                    .any(|(_, _, taken)| taken.contains(&alias))
-            {
-                alternates.push(alias);
+            if alias != code_name && !spellings.contains(&alias) {
+                spellings.push(alias);
             }
         }
-        let scope = Scope {
-            ecosystem: Ecosystem::Cargo,
-            root,
-            config_files,
-            membership: Membership::Subtree,
-            entry_files,
-            aliases: Vec::new(),
-            search_roots: Vec::new(),
-            dependencies: Vec::new(),
-        };
-        self.members.push((scope, code_name, alternates));
+        let first_listed = self.members.len();
+        self.members.push(CargoMember {
+            dir: dir.to_path_buf(),
+            scope,
+            code_name,
+            spellings,
+            first_listed,
+        });
     }
 
-    /// The table. Of two members with one code name, only the later keeps
-    /// its `Primary` row: `build` lets the last claimant win, and the overlay
-    /// must bind what the index binds (C2 open point 2, option a).
+    /// The table, binding what `build`'s `crates` map binds (C2 open point
+    /// 2, option a). Of two members with one code name only the later
+    /// listing keeps its `Primary` row, as the last `insert` wins. A
+    /// package spelling goes to the first member by first listing that
+    /// carries it, unless some member's code name is that spelling, as the
+    /// `or_insert` fallback does. Both rules read every member, rows or not.
     fn finish(self) -> WorkspaceFacts {
-        let mut members = self.members;
-        let shadowed: Vec<bool> = (0..members.len())
-            .map(|i| members[i + 1..].iter().any(|later| later.1 == members[i].1))
-            .collect();
-        for (member, shadowed) in members.iter_mut().zip(shadowed) {
-            if shadowed {
-                member.1.clear();
+        let members = self.members;
+        let code_names: Vec<&str> = members.iter().map(|m| m.code_name.as_str()).collect();
+        let mut by_first: Vec<usize> = (0..members.len()).collect();
+        by_first.sort_by_key(|&i| members[i].first_listed);
+        let mut taken: Vec<&str> = Vec::new();
+        let mut alternates: Vec<Vec<String>> = vec![Vec::new(); members.len()];
+        for i in by_first {
+            for alias in &members[i].spellings {
+                if !code_names.contains(&alias.as_str()) && !taken.contains(&alias.as_str()) {
+                    taken.push(alias);
+                    alternates[i].push(alias.clone());
+                }
             }
         }
-        members.sort_by(|a, b| a.0.root.cmp(&b.0.root));
+        let shadowed: Vec<bool> = (0..members.len())
+            .map(|i| code_names[i + 1..].contains(&code_names[i]))
+            .collect();
+        let mut rows: Vec<(Scope, String, Vec<String>)> = members
+            .into_iter()
+            .zip(shadowed)
+            .zip(alternates)
+            .filter_map(|((member, shadowed), alternates)| {
+                let primary = match shadowed {
+                    true => String::new(),
+                    false => member.code_name,
+                };
+                Some((member.scope?, primary, alternates))
+            })
+            .collect();
+        rows.sort_by(|a, b| a.0.root.cmp(&b.0.root));
         let mut names: Vec<ScopeName> = Vec::new();
-        for (id, (_, primary, alternates)) in members.iter().enumerate() {
+        for (id, (_, primary, alternates)) in rows.iter().enumerate() {
             let scope = ScopeId(id as u32);
             let ranked = std::iter::once((primary, NameRank::Primary))
                 .chain(alternates.iter().map(|alias| (alias, NameRank::Alternate)));
@@ -1147,7 +1194,7 @@ impl CargoRows {
             (a.ecosystem, &a.name, a.rank, a.scope).cmp(&(b.ecosystem, &b.name, b.rank, b.scope))
         });
         names.dedup();
-        let scopes = members.into_iter().map(|(scope, ..)| scope).collect();
+        let scopes = rows.into_iter().map(|(scope, ..)| scope).collect();
         // Every reader refuses a table that breaks C2's invariants, so store
         // none rather than rows nobody may read.
         WorkspaceFacts::new(scopes, names).unwrap_or_default()
@@ -1788,6 +1835,129 @@ mod tests {
         assert_eq!(
             facts.lookup_name(Ecosystem::Cargo, "dup"),
             NameLookup::Unique(ScopeId(1))
+        );
+    }
+
+    #[test]
+    fn test_workspace_facts_relisted_member_last_listing_keeps_row() {
+        let dir = make_tree(&[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"x1\", \"x2\", \"x1\"]\n",
+            ),
+            ("x1/Cargo.toml", "[package]\nname = \"dup\"\n"),
+            ("x1/src/lib.rs", ""),
+            ("x2/Cargo.toml", "[package]\nname = \"dup\"\n"),
+            ("x2/src/lib.rs", ""),
+        ]);
+        let tree = RustWorkspaceModTree::build(dir.path());
+        assert_eq!(
+            tree.crates["dup"].0,
+            dir.path().join("x1"),
+            "the index binds the last listing"
+        );
+        let facts = tree.workspace_facts();
+        assert_eq!(facts.validate(), Ok(()));
+        assert_eq!(name_rows(facts), vec![("dup", NameRank::Primary, "x1")]);
+        assert_eq!(
+            facts.lookup_name(Ecosystem::Cargo, "dup"),
+            NameLookup::Unique(ScopeId(0))
+        );
+    }
+
+    #[test]
+    fn test_workspace_facts_relisted_member_first_listing_keeps_spelling() {
+        let dir = make_tree(&[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"x1\", \"x2\", \"x1\"]\n",
+            ),
+            (
+                "x1/Cargo.toml",
+                "[package]\nname = \"pkg\"\n\n[lib]\nname = \"l1\"\n",
+            ),
+            ("x1/src/lib.rs", ""),
+            (
+                "x2/Cargo.toml",
+                "[package]\nname = \"pkg\"\n\n[lib]\nname = \"l2\"\n",
+            ),
+            ("x2/src/lib.rs", ""),
+        ]);
+        let tree = RustWorkspaceModTree::build(dir.path());
+        assert_eq!(tree.crates["pkg"].0, dir.path().join("x1"));
+        assert_eq!(
+            name_rows(tree.workspace_facts()),
+            vec![
+                ("l1", NameRank::Primary, "x1"),
+                ("l2", NameRank::Primary, "x2"),
+                ("pkg", NameRank::Alternate, "x1"),
+            ],
+            "the package spelling stays with the first listing, as in the index"
+        );
+    }
+
+    #[test]
+    fn test_workspace_facts_outside_member_shadows_inside_primary() {
+        let dir = make_tree(&[
+            (
+                "ws/Cargo.toml",
+                "[workspace]\nmembers = [\"a\", \"../ext\"]\n",
+            ),
+            (
+                "ws/a/Cargo.toml",
+                "[package]\nname = \"a\"\n\n[lib]\nname = \"util\"\n",
+            ),
+            ("ws/a/src/lib.rs", ""),
+            (
+                "ext/Cargo.toml",
+                "[package]\nname = \"ext\"\n\n[lib]\nname = \"util\"\n",
+            ),
+            ("ext/src/lib.rs", ""),
+        ]);
+        let ws = dir.path().join("ws");
+        let tree = RustWorkspaceModTree::build(&ws);
+        assert_eq!(
+            tree.crates["util"].0,
+            ws.join("../ext"),
+            "the index binds `util` to the out-of-repo member"
+        );
+        let facts = tree.workspace_facts();
+        assert_eq!(facts.validate(), Ok(()));
+        assert_eq!(name_rows(facts), vec![("a", NameRank::Alternate, "a")]);
+        assert_eq!(
+            facts.lookup_name(Ecosystem::Cargo, "util"),
+            NameLookup::Missing,
+            "the overlay must not bind `util` to `a`"
+        );
+    }
+
+    #[test]
+    fn test_workspace_facts_outside_code_name_blocks_inside_spelling() {
+        let dir = make_tree(&[
+            (
+                "ws/Cargo.toml",
+                "[workspace]\nmembers = [\"a\", \"../ext\"]\n",
+            ),
+            (
+                "ws/a/Cargo.toml",
+                "[package]\nname = \"util\"\n\n[lib]\nname = \"a_lib\"\n",
+            ),
+            ("ws/a/src/lib.rs", ""),
+            (
+                "ext/Cargo.toml",
+                "[package]\nname = \"ext\"\n\n[lib]\nname = \"util\"\n",
+            ),
+            ("ext/src/lib.rs", ""),
+        ]);
+        let ws = dir.path().join("ws");
+        let tree = RustWorkspaceModTree::build(&ws);
+        assert_eq!(tree.crates["util"].0, ws.join("../ext"));
+        let facts = tree.workspace_facts();
+        assert_eq!(name_rows(facts), vec![("a_lib", NameRank::Primary, "a")]);
+        assert_eq!(
+            facts.lookup_name(Ecosystem::Cargo, "util"),
+            NameLookup::Missing,
+            "a code name outranks a package spelling in the index, row or not"
         );
     }
 

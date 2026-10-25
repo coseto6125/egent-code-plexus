@@ -558,7 +558,10 @@ impl OverlayView {
                 let chain = rust_modules
                     .as_ref()
                     .and_then(|modules| modules.caller_chain(&file.rel_path));
-                let rust_tree = rust_modules.as_ref().zip(chain.as_deref());
+                // Without a chain, only a crate head resolves: it needs none.
+                let rust_tree = rust_modules
+                    .as_ref()
+                    .map(|modules| (modules, chain.as_deref().unwrap_or_default()));
                 // One cache per dirty file: a repeated qualified call reuses
                 // both successful and unresolved lookups without rebuilding paths.
                 let mut module_calls = FxHashMap::default();
@@ -4312,8 +4315,9 @@ struct RustModules<'a> {
     graph: &'a ArchivedZeroCopyGraph,
     dirty: FxHashMap<&'a str, &'a OverlayFileInput>,
     roots: Vec<&'a str>,
-    /// The `graph.bin` workspace facts, read once per view.
-    crates: crate::contracts::workspace::WorkspaceFacts,
+    /// The `graph.bin` workspace facts, read on the first [`Self::crate_head`]:
+    /// reading them deserializes and validates the whole table.
+    crates: OnceCell<crate::contracts::workspace::WorkspaceFacts>,
 }
 
 impl<'a> RustModules<'a> {
@@ -4353,23 +4357,25 @@ impl<'a> RustModules<'a> {
             graph,
             dirty,
             roots,
-            crates: graph.workspace_facts(),
+            crates: OnceCell::new(),
         }
     }
 
     /// The entry file of the workspace crate that code names `head`: the
-    /// index module tree's `<crate_name>::` head. `None` for a head the index
-    /// treats as external, for a name no member carries, and for a name two
-    /// members carry: the table keeps both rows and none is picked.
+    /// index module tree's `<crate_name>::` head. Of two members with one
+    /// code name, the table keeps the row of the one the index binds (the
+    /// last listing). `None` for a head the index treats as external, for a
+    /// name no row carries, and for a name two rows of one rank carry.
     fn crate_head(&self, head: &str) -> Option<&'a str> {
         use crate::contracts::workspace::{Ecosystem, NameLookup};
         if matches!(head, "std" | "core" | "alloc" | "proc_macro" | "test") {
             return None;
         }
-        let NameLookup::Unique(id) = self.crates.lookup_name(Ecosystem::Cargo, head) else {
+        let crates = self.crates.get_or_init(|| self.graph.workspace_facts());
+        let NameLookup::Unique(id) = crates.lookup_name(Ecosystem::Cargo, head) else {
             return None;
         };
-        let entry = self.crates.scope(id)?.entry_files.first()?;
+        let entry = crates.scope(id)?.entry_files.first()?;
         self.file(std::path::Path::new(entry))
     }
 
@@ -4467,15 +4473,19 @@ impl<'a> RustModules<'a> {
         found
     }
 
+    /// The file of `module` from the caller whose [`Self::caller_chain`] is
+    /// `chain`, root first. An empty `chain` (the caller's target is not
+    /// established) still resolves a workspace crate head, as the index's
+    /// module tree does for any caller; `crate`, `self`, `super` and a
+    /// child module of the caller need the chain.
     fn resolve(&self, chain: &[&'a str], module: &str) -> Option<&'a str> {
         let mut parts = module.split("::").peekable();
         let head = parts.next()?;
-        let mut at = chain.len().checked_sub(1)?;
         let mut file = match head {
             "crate" => *chain.first()?,
-            "self" => chain[at],
+            "self" => *chain.last()?,
             "super" => {
-                at = at.checked_sub(1)?;
+                let mut at = chain.len().checked_sub(2)?;
                 while parts.peek() == Some(&"super") {
                     parts.next();
                     at = at.checked_sub(1)?;
@@ -4483,7 +4493,10 @@ impl<'a> RustModules<'a> {
                 chain[at]
             }
             _ if !module.contains("::") => {
-                let Some(child) = self.child(chain[at], head) else {
+                // A declared child module of the caller comes before a crate
+                // of the same name; without a chain the caller's module is
+                // not established.
+                let Some(child) = chain.last().and_then(|&caller| self.child(caller, head)) else {
                     return self.crate_head(head);
                 };
                 // The full resolver handles simple declared heads through its
@@ -4790,7 +4803,7 @@ fn dirty_supertypes(
         }
         let caller = FileMeta::from_path(&file.rel_path);
         let chain = rust_modules.and_then(|modules| modules.caller_chain(&file.rel_path));
-        let rust_tree = rust_modules.zip(chain.as_deref());
+        let rust_tree = rust_modules.map(|modules| (modules, chain.as_deref().unwrap_or_default()));
         let is_rust = caller.language == Language::Rust;
         let mut resolve = |name: &str| {
             resolve_type(
@@ -5540,6 +5553,82 @@ mod tests {
             assert_eq!(modules.file(std::path::Path::new(path)), Some(path));
         }
         assert_eq!(modules.file(std::path::Path::new("src/missing.rs")), None);
+    }
+
+    /// Crate `b` at `b/`, entry `b/src/lib.rs` declaring `mod util`.
+    fn crate_b_graph_bytes() -> Vec<u8> {
+        use crate::contracts::workspace::{
+            ConfigPresence, ConfigRead, Ecosystem, Membership, NameRank, Scope, ScopeId, ScopeName,
+            WorkspaceFacts,
+        };
+        let mut fixture = GraphFixture::new();
+        fixture.file("b/src/lib.rs");
+        fixture.file("b/src/util.rs");
+        fixture.node(NodeKind::Module, "b/src/lib.rs", "util");
+        let mut graph = fixture.build();
+        let scope = Scope {
+            ecosystem: Ecosystem::Cargo,
+            root: "b".into(),
+            config_files: vec![ConfigRead {
+                path: "b/Cargo.toml".into(),
+                presence: ConfigPresence::Read,
+            }],
+            membership: Membership::Subtree,
+            entry_files: vec!["b/src/lib.rs".into()],
+            aliases: Vec::new(),
+            search_roots: Vec::new(),
+            dependencies: Vec::new(),
+        };
+        let name = ScopeName {
+            ecosystem: Ecosystem::Cargo,
+            name: "b".into(),
+            rank: NameRank::Primary,
+            scope: ScopeId(0),
+        };
+        graph.workspace = WorkspaceFacts::new(vec![scope], vec![name]).unwrap();
+        rkyv::to_bytes::<RkyvError>(&graph).unwrap().to_vec()
+    }
+
+    #[test]
+    fn test_rust_modules_resolve_empty_chain_crate_head_resolves() {
+        let bytes = crate_b_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let modules = RustModules::new(graph, &[]);
+        assert_eq!(modules.resolve(&[], "b::util"), Some("b/src/util.rs"));
+        assert_eq!(modules.resolve(&[], "b"), Some("b/src/lib.rs"));
+        for anchored in [
+            "crate::util",
+            "self::util",
+            "super::util",
+            "crate",
+            "self",
+            "super",
+        ] {
+            assert_eq!(modules.resolve(&[], anchored), None, "{anchored}");
+        }
+        assert_eq!(modules.resolve(&[], "std::fs"), None);
+    }
+
+    #[test]
+    fn test_rust_modules_crate_table_loaded_on_first_crate_head() {
+        let bytes = crate_b_graph_bytes();
+        let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
+        let modules = RustModules::new(graph, &[]);
+        assert!(
+            modules.crates.get().is_none(),
+            "building the view reads no table"
+        );
+        assert_eq!(modules.resolve(&[], "crate::util"), None);
+        assert!(
+            modules.crates.get().is_none(),
+            "an anchored head reads no table"
+        );
+        assert_eq!(modules.crate_head("b"), Some("b/src/lib.rs"));
+        assert_eq!(
+            modules.crates.get().map(|facts| facts.scopes.len()),
+            Some(1),
+            "the first crate head loads the stored table"
+        );
     }
 
     /// Module paths built with `PathBuf::join` carry `\\` on Windows; the
