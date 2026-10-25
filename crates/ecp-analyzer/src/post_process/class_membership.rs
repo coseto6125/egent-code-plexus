@@ -93,12 +93,18 @@ pub fn emit_edges(
             // `Const` inside it is a type member just like a class constant.
             // Retain the kind so only constants use enum owners, and the
             // generic arity so C# `Conv<T>` owns its own members, not `Conv`.
+            // An annotation type owns its members like a class; a use-site
+            // annotation (Dart `@override`) spans no member, so it owns none.
             let mut owners: Vec<Owner<'_>> = Vec::new();
             let mut classes_by_name: FxHashMap<&str, Vec<Span>> = FxHashMap::default();
             for (i, n) in raws.iter().enumerate() {
                 if matches!(
                     n.kind,
-                    NodeKind::Class | NodeKind::Struct | NodeKind::Trait | NodeKind::Interface
+                    NodeKind::Class
+                        | NodeKind::Struct
+                        | NodeKind::Trait
+                        | NodeKind::Interface
+                        | NodeKind::Annotation
                 ) {
                     owners.push((n.name.as_str(), n.kind, n.span, n.generic_arity(), i));
                     classes_by_name

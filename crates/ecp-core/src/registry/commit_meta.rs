@@ -135,7 +135,9 @@ use std::path::Path;
 /// inline route handler is recorded at its argument's span
 /// (`Unbound::Inline`), so a middleware closure never serves the route; an
 /// echo route's handler is the argument after the path; a Spring mapping is
-/// dropped only on an HTTP client (`@FeignClient`, `@HttpExchange`).
+/// dropped only on an HTTP client (`@FeignClient`, `@HttpExchange`); an
+/// annotation type (C# attribute class, Java `@interface`, Kotlin
+/// `annotation class`) owns its members.
 pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema38");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

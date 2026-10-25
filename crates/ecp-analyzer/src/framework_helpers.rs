@@ -267,7 +267,9 @@ pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
     // An enum owns the methods, constructors and fields its body declares
     // (Java, Kotlin, Dart, PHP, Swift), exactly as a class does; without it
     // they read as free functions, and a type nested in an enum took the
-    // enum's enclosing class as owner.
+    // enum's enclosing class as owner. An annotation type (C# attribute
+    // class, Java `@interface`, Kotlin `annotation class`) owns its members
+    // too; a use-site annotation (Dart `@override`) spans no member.
     let owner_spans: Vec<(String, Span)> = nodes
         .iter()
         .filter(|n| {
@@ -278,6 +280,7 @@ pub fn stamp_owner_class_by_span(nodes: &mut [RawNode]) {
                     | NodeKind::Trait
                     | NodeKind::Interface
                     | NodeKind::Enum
+                    | NodeKind::Annotation
                     | NodeKind::Namespace
                     | NodeKind::Module
             )
