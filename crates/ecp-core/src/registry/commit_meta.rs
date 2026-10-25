@@ -144,7 +144,11 @@ use std::path::Path;
 /// lexical-parent row; an HTTP verb matches a whole word of the call name;
 /// NestJS, Spring, Gin, FastAPI and JS Express routes carry their router
 /// prefix; a route's response shape comes from its handler's span.
-pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema40");
+/// schema41: a Python, JavaScript or TypeScript nested function, lambda or
+/// callback node has no owner, a scoped uid and a lexical-parent row too. A
+/// schema40 graph stores those owners, which the overlay's identity check
+/// rejects.
+pub const BUILDER_FINGERPRINT: &str = concat!("v", env!("CARGO_PKG_VERSION"), "+schema41");
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitBuildMeta {

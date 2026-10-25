@@ -1,9 +1,10 @@
 //! Slice R4b: the CLI prints an owner through the display owner and the shared
 //! resolver keeps lexically scoped nodes as candidates (design A §4.5, §4.4).
 //!
-//! Only Rust scopes a kind (R6), and the samples nest no fn, so a real build
-//! of them writes an empty lexical-parent table and the display owner of
-//! every node equals its stored owner. The scoped-node tests plant a row
+//! Rust (R6), Python, JavaScript and TypeScript (R8) scope Function; the
+//! samples nest no fn, so a real build of them writes an empty
+//! lexical-parent table and the display owner of every node equals its
+//! stored owner. The scoped-node tests plant a row
 //! through the table API, as `lexical_parent_table.rs` does.
 
 use ecp_analyzer::java::JavaProvider;

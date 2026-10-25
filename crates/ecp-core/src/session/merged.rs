@@ -914,12 +914,12 @@ mod tests {
     #[test]
     fn test_display_owner_dirty_unscoped_language_prints_stored_owner() {
         let mut fx = GraphFixture::new();
-        fx.func("app/m.py", "outer");
+        fx.func("app/m.go", "outer");
         let bytes = fx.into_bytes();
         let graph = rkyv::access::<ArchivedZeroCopyGraph, RkyvError>(&bytes).unwrap();
         let f = NodeKind::Function;
         let file = source_file(
-            "app/m.py",
+            "app/m.go",
             vec![
                 decl("outer", f, None, (1, 3), (0, 0)),
                 decl("helper", f, Some("outer"), (2, 2), (4, 0)),
@@ -927,7 +927,7 @@ mod tests {
         );
         let view = OverlayView::build(graph, &[file]).unwrap();
         let merged = MergedGraph::new(graph, Some(&view));
-        let helper = virt(&view, "app/m.py", "helper");
+        let helper = virt(&view, "app/m.go", "helper");
 
         assert_eq!(view.lexical_parent_count(), 0);
         assert_eq!(merged.lexical_parent(helper), None);

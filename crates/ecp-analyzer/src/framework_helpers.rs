@@ -8,9 +8,11 @@
 //! This module consolidates those helpers so each parser stays focused on its own
 //! grammar quirks, not span arithmetic.
 
+use ecp_core::analyzer::lexical::lexical_scope_kinds;
 use ecp_core::analyzer::types::{
     BindingKind, FrameworkId, RawExportAlias, RawFrameworkRef, RawImport, RawNode, RawTxScope,
 };
+use ecp_core::file_category::Language;
 use ecp_core::graph::NodeKind;
 
 pub use ecp_core::analyzer::types::{innermost_enclosing, span_contains, Span};
@@ -406,14 +408,18 @@ pub fn strip_python_string_quotes(raw: &str) -> Option<&str> {
 ///
 /// After `stamp_owner_class_by_span` has set `owner_class` for class members,
 /// some nodes remain with `owner_class = None` even though they are physically
-/// nested inside another function (e.g. `def wrapper()` inside a decorator
-/// outer function, `function list()` inside another JS function). Two such
-/// nodes with the same name but different outer functions share the uid
-/// `(kind, path, "", name)` → uid-collision BlindSpot.
+/// nested inside another function (a local `class Fake` in a test function,
+/// a variable). Two such nodes with the same name but different outer
+/// functions share the uid `(kind, path, "", name)` → uid-collision BlindSpot.
 ///
 /// This pass resolves that: for every node whose `owner_class` is still `None`
 /// AND whose span is wholly contained inside a `Function`/`Method` node's span,
 /// set `owner_class` to the **innermost** such enclosing function's name.
+///
+/// A kind `language` scopes lexically (`lexical_scope_kinds`: a nested
+/// `def` / `function`, a lambda or callback node) gets no owner here: its
+/// lexical parent places it and its uid hashes the parent's anchor
+/// (`ecp_core::analyzer::lexical::clear_scoped_owners`).
 ///
 /// Top-level (module-scope) definitions are untouched — they have no enclosing
 /// function, so their `owner_class` remains `None` (correct behaviour: module-
@@ -421,7 +427,8 @@ pub fn strip_python_string_quotes(raw: &str) -> Option<&str> {
 ///
 /// Complexity: O(N·F) where N = total nodes, F = function count per file.
 /// Both are small in practice (typical files: <100 nodes, <30 functions).
-pub fn stamp_owner_fn_by_span(nodes: &mut [RawNode]) {
+pub fn stamp_owner_fn_by_span(language: Language, nodes: &mut [RawNode]) {
+    let scoped = lexical_scope_kinds(language);
     // Snapshot (name, span) for all Function/Method nodes. We collect by value
     // so the subsequent mutable iteration over `nodes` doesn't borrow-conflict.
     let fn_spans: Vec<(String, Span)> = nodes
@@ -434,7 +441,7 @@ pub fn stamp_owner_fn_by_span(nodes: &mut [RawNode]) {
     }
     for node in nodes.iter_mut() {
         // Only stamp nodes that didn't receive an owner from the class pass.
-        if node.owner_class.is_some() {
+        if node.owner_class.is_some() || scoped.contains(&node.kind) {
             continue;
         }
         let span = node.span;
@@ -731,40 +738,6 @@ fn js_ts_declared_names<'s>(
             }) {
                 out.push((name, node_span(&declaration)));
             }
-        }
-    }
-}
-
-/// Preserve the full lexical function path for JS/TS closure identities.
-pub fn stamp_js_function_owners(nodes: &mut [RawNode]) {
-    stamp_owner_fn_by_span(nodes);
-    let functions: Vec<usize> = nodes
-        .iter()
-        .enumerate()
-        .filter(|(_, node)| {
-            matches!(
-                node.kind,
-                NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-            )
-        })
-        .map(|(index, _)| index)
-        .collect();
-    let spans: Vec<Span> = functions.iter().map(|&index| nodes[index].span).collect();
-    let parents = innermost_enclosing(&spans);
-    // Outer functions first: a nested path is built from its parent's stamped path.
-    let mut order: Vec<usize> = (0..functions.len()).collect();
-    order.sort_by_key(|&k| std::cmp::Reverse(span_area(spans[k])));
-    for k in order {
-        let index = functions[k];
-        if nodes[index].kind != NodeKind::Function {
-            continue;
-        }
-        if let Some(parent) = parents[k] {
-            let parent = &nodes[functions[parent]];
-            nodes[index].owner_class = Some(match &parent.owner_class {
-                Some(owner) => format!("{owner}::{}", parent.name),
-                None => parent.name.clone(),
-            });
         }
     }
 }
@@ -1189,6 +1162,54 @@ mod tests {
             owner_class: None,
             content_hash: 0,
         }
+    }
+
+    /// Stands for: the fn-name owner reaches the non-callables of a function
+    /// body only (a local class, a variable), so they keep today's uid; a
+    /// nested function or lambda of a language that scopes `Function` gets
+    /// none (slice D). A language that scopes nothing keeps the old stamp.
+    #[test]
+    fn test_stamp_owner_fn_by_span_scoped_kind_skipped_local_class_stamped() {
+        let nodes = || {
+            vec![
+                fn_node("outer", (0, 0, 20, 0), NodeKind::Function),
+                fn_node("inner", (1, 4, 10, 0), NodeKind::Function),
+                fn_node("deep", (2, 8, 4, 0), NodeKind::Function),
+                fn_node("<anonymous:6:8>", (5, 8, 5, 40), NodeKind::Function),
+                fn_node("Fake", (11, 4, 13, 0), NodeKind::Class),
+                fn_node("x", (14, 4, 14, 20), NodeKind::Variable),
+                fn_node("top", (21, 0, 22, 0), NodeKind::Function),
+            ]
+        };
+        let owners = |nodes: &[RawNode]| -> Vec<Option<String>> {
+            nodes.iter().map(|n| n.owner_class.clone()).collect()
+        };
+        let outer = || Some("outer".to_string());
+        for language in [Language::Python, Language::JavaScript, Language::TypeScript] {
+            let mut stamped = nodes();
+            stamp_owner_fn_by_span(language, &mut stamped);
+            assert_eq!(
+                owners(&stamped),
+                [None, None, None, None, outer(), outer(), None],
+                "{language:?}"
+            );
+        }
+        let mut stamped = nodes();
+        stamp_owner_fn_by_span(Language::Go, &mut stamped);
+        assert_eq!(
+            owners(&stamped),
+            [
+                None,
+                outer(),
+                Some("inner".to_string()),
+                Some("inner".to_string()),
+                outer(),
+                outer(),
+                None
+            ],
+            "control: a language that scopes nothing"
+        );
+        stamp_owner_fn_by_span(Language::Python, &mut []);
     }
 
     #[test]

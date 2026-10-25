@@ -1693,7 +1693,13 @@ impl LanguageProvider for PythonProvider {
         }
 
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
-        crate::framework_helpers::stamp_owner_fn_by_span(&mut nodes);
+        // The language `file_identities` reads off the same path, so a
+        // nested def loses its owner exactly where its uid is scoped.
+        let language = ecp_core::file_category::Language::from_path(&path.to_string_lossy());
+        crate::framework_helpers::stamp_owner_fn_by_span(language, &mut nodes);
+        // Last owner step: a nested def or lambda node has a lexical parent
+        // and no owner (invariant I1), whatever the class pass gave it.
+        ecp_core::analyzer::lexical::clear_scoped_owners(language, &mut nodes);
 
         // T4-7 refactor: `RawSchemaField` now stores owned `Box<str>` so the
         // per-file parser scope can drop cleanly without dangling-pool risk.

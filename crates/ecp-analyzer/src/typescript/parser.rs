@@ -984,7 +984,13 @@ impl LanguageProvider for TypeScriptProvider {
             &mut imports,
         );
         crate::framework_helpers::stamp_owner_class_by_span(&mut nodes);
-        crate::framework_helpers::stamp_js_function_owners(&mut nodes);
+        // The language `file_identities` reads off the same path, so a
+        // nested function loses its owner exactly where its uid is scoped.
+        let language = ecp_core::file_category::Language::from_path(&path.to_string_lossy());
+        crate::framework_helpers::stamp_owner_fn_by_span(language, &mut nodes);
+        // Last owner step: a nested function or callback node has a lexical
+        // parent and no owner (invariant I1), whatever the class pass gave it.
+        ecp_core::analyzer::lexical::clear_scoped_owners(language, &mut nodes);
 
         let tx_scopes =
             collect_typeorm_transactional_scopes(&nodes, &[NodeKind::Method, NodeKind::Function]);

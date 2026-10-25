@@ -3,9 +3,10 @@
 //! name-tier candidate source drops it, on the build side (`SymbolTable`)
 //! and on the overlay side (`OverlayView`).
 //!
-//! Only Rust opts in (`lexical_scope_kinds(Rust)` is `[Function]`, slice R6),
-//! so a real build writes rows for Rust files alone. The filter tests plant a
-//! scoped node through the table API, so they hold for any language.
+//! Rust (slice R6), Python, JavaScript and TypeScript (slice R8) opt in
+//! (`lexical_scope_kinds` is `[Function]`), so a real build writes rows for
+//! those files alone. The filter tests plant a scoped node through the table
+//! API, so they hold for any language.
 
 use ecp_analyzer::python::PythonProvider;
 use ecp_analyzer::resolution::builder::GraphBuilder;
@@ -67,13 +68,13 @@ fn access(bytes: &[u8]) -> &ArchivedZeroCopyGraph {
 }
 
 /// Stands for: a full build writes one row per scoped node of an opted-in
-/// language, and a reader of the written `graph.bin` gets it back. The Rust
-/// `inner` has the parent `outer` and prints the display owner `outer` with
-/// an empty stored owner (I1); the Python and TypeScript `inner` opt out, so
-/// they and every other node have no row and print the stored owner. Before
-/// R6 the table was empty for all three files.
+/// language, and a reader of the written `graph.bin` gets it back. The Rust,
+/// Python and TypeScript `inner` each have the parent `outer` and print the
+/// display owner `outer` with an empty stored owner (I1); every other node
+/// has no row and prints the stored owner. Before R6 the table was empty for
+/// all three files; before R8 it held the Rust row alone.
 #[test]
-fn test_graph_bin_lexical_parent_table_rust_only_row_round_trip() {
+fn test_graph_bin_lexical_parent_table_rust_python_ts_rows_round_trip() {
     let graph = build(&NESTED);
     let pool = graph.string_pool.as_slice();
     // Setup: each file holds an `inner` function inside `outer`, so the
@@ -113,18 +114,19 @@ fn test_graph_bin_lexical_parent_table_rust_only_row_round_trip() {
             })
             .unwrap_or_else(|| panic!("setup: {path} declares `{name}`")) as u32
     };
-    let (rs_outer, rs_inner) = (
-        in_file("src/lib.rs", "outer"),
-        in_file("src/lib.rs", "inner"),
-    );
+    let mut rows: Vec<(u32, u32)> = NESTED
+        .iter()
+        .map(|&(path, _)| (in_file(path, "inner"), in_file(path, "outer")))
+        .collect();
+    rows.sort_unstable();
     assert_eq!(
         graph
             .lexical_parents
             .iter()
             .map(|f| (f.node_idx, f.parent_idx))
             .collect::<Vec<_>>(),
-        [(rs_inner, rs_outer)],
-        "one row: the Rust `inner`"
+        rows,
+        "one row per file: its `inner`"
     );
 
     let tmp = tempfile::tempdir().unwrap();
@@ -134,16 +136,18 @@ fn test_graph_bin_lexical_parent_table_rust_only_row_round_trip() {
     let archived = engine.graph().unwrap();
     let pool = archived.string_pool.as_slice();
     assert_eq!(archived.nodes.len(), graph.nodes.len());
-    assert_eq!(archived.lexical_parents.len(), 1);
-    assert_eq!(archived.lexical_parent(rs_inner), Some(rs_outer));
-    assert!(archived.is_lexically_scoped(rs_inner));
-    assert_eq!(
-        archived.nodes[rs_inner as usize].owner_class.resolve(pool),
-        "",
-        "a scoped node stores no owner"
-    );
-    assert_eq!(archived.display_owner(rs_inner).as_deref(), Some("outer"));
-    for idx in (0..archived.nodes.len() as u32).filter(|&idx| idx != rs_inner) {
+    assert_eq!(archived.lexical_parents.len(), 3);
+    for &(inner, outer) in &rows {
+        assert_eq!(archived.lexical_parent(inner), Some(outer));
+        assert!(archived.is_lexically_scoped(inner));
+        assert_eq!(
+            archived.nodes[inner as usize].owner_class.resolve(pool),
+            "",
+            "a scoped node stores no owner"
+        );
+        assert_eq!(archived.display_owner(inner).as_deref(), Some("outer"));
+    }
+    for idx in (0..archived.nodes.len() as u32).filter(|&idx| rows.iter().all(|r| r.0 != idx)) {
         assert_eq!(archived.lexical_parent(idx), None, "node {idx}");
         assert!(!archived.is_lexically_scoped(idx), "node {idx}");
         let owner = archived.nodes[idx as usize].owner_class.resolve(pool);

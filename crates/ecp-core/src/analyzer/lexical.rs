@@ -1,9 +1,9 @@
 //! Lexical call scoping: a bare call binds the innermost named function in
-//! scope before any name tier. JS / TS admit every file-level function too;
-//! a language that opts in through [`lexical_scope_kinds`] (Rust) admits
-//! only its scoped functions ([`LexicalAdmission`]). Full indexing (Pass 2)
-//! and the session overlay build this same index over one file's
-//! declarations.
+//! scope before any name tier. Every language that opts in through
+//! [`lexical_scope_kinds`] admits its scoped functions; JS / TS admit every
+//! file-level function too, Rust and Python only the scoped ones
+//! ([`LexicalAdmission`]). Full indexing (Pass 2) and the session overlay
+//! build this same index over one file's declarations.
 //!
 //! The same lexical facts feed declaration identity: [`file_identities`]
 //! numbers one file's declarations for every path that stores a uid.
@@ -24,12 +24,28 @@ use std::path::Path;
 
 /// The kinds `language` scopes under their enclosing callable (design A
 /// §4.2): such a node's uid hashes its parent's anchor instead of an owner.
-/// Rust opts in its nested `fn` and closure nodes (slice C); slices D and E
-/// add the other languages.
+/// Rust opts in its nested `fn` and closure nodes (slice C); Python, JS and
+/// TS their nested functions, lambda and callback nodes and, in JS / TS,
+/// an arrow function a local `const` holds (slice D). Slice E adds the
+/// other languages.
 pub fn lexical_scope_kinds(language: Language) -> &'static [NodeKind] {
     match language {
-        Language::Rust => &[NodeKind::Function],
+        Language::Rust | Language::Python | Language::JavaScript | Language::TypeScript => {
+            &[NodeKind::Function]
+        }
         _ => &[],
+    }
+}
+
+/// The lexical tier of a `language` file: JS / TS admit their file-level
+/// functions too, any other language that scopes a kind
+/// ([`lexical_scope_kinds`]) its scoped nodes only; `None` for a language
+/// with no lexical tier.
+fn lexical_admission(language: Language) -> Option<LexicalAdmission> {
+    match language {
+        Language::JavaScript | Language::TypeScript => Some(LexicalAdmission::ScopedAndFileLevel),
+        _ if !lexical_scope_kinds(language).is_empty() => Some(LexicalAdmission::ScopedOnly),
+        _ => None,
     }
 }
 
@@ -297,13 +313,13 @@ pub fn file_uids<'a, T>(
 /// Which functions the lexical tier of one file admits (design A §4.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LexicalAdmission {
-    /// JS / TS: every function nested in a callable, plus every file-level
+    /// JS / TS: every node [`lexical_parents`] scopes, plus every file-level
     /// function without an owner, whose scope is the whole file.
     ScopedAndFileLevel,
-    /// A language that opts in through [`lexical_scope_kinds`]: only the
-    /// nodes [`lexical_parents`] scopes. An unscoped function stays with the
-    /// name tiers, so a module member (`mod tests { fn helper() }`) is
-    /// picked there, as before.
+    /// Rust, Python: only the nodes [`lexical_parents`] scopes. An unscoped
+    /// function stays with the name tiers, so a module member (`mod tests {
+    /// fn helper() }`) or a Python module-level `helper` is picked there, as
+    /// before.
     ScopedOnly,
 }
 
@@ -319,85 +335,60 @@ pub struct LexicalFunctions {
 impl LexicalFunctions {
     /// The index over `symbols`, one file's declarations in source order as
     /// `(kind, name, has_owner, span)`. The i-th declaration's id is
-    /// `start + i`. A JS / TS file admits
-    /// [`LexicalAdmission::ScopedAndFileLevel`]; a file whose language
-    /// scopes a kind ([`lexical_scope_kinds`]) admits
-    /// [`LexicalAdmission::ScopedOnly`]; any other file gets an empty index.
+    /// `start + i`. Each node [`lexical_parents`] scopes is a candidate with
+    /// its parent's span as its scope, so the index and the identity rule
+    /// ([`file_identities`]) read one parent derivation. Under
+    /// [`LexicalAdmission::ScopedAndFileLevel`] (JS / TS) a file-level
+    /// function without an owner joins with the whole file as its scope.
+    /// Under [`LexicalAdmission::ScopedOnly`] a name with no scoped node gets
+    /// no entry, so [`Self::targets`] leaves it to the name tiers. A file
+    /// whose language has no lexical tier gets an empty index.
     pub fn new<'a>(
         path: &Path,
         symbols: impl Iterator<Item = (NodeKind, &'a str, bool, Span)>,
         start: u32,
     ) -> Self {
-        if !matches!(
-            path.extension().and_then(|ext| ext.to_str()),
-            Some("js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts")
-        ) {
-            let scoped = lexical_scope_kinds(Language::from_path(&path.to_string_lossy()));
-            return match scoped.is_empty() {
-                true => Self::default(),
-                false => Self::scoped_only(symbols, start, scoped),
-            };
-        }
-        let mut index = Self {
-            admission: Some(LexicalAdmission::ScopedAndFileLevel),
-            ..Self::default()
+        let language = Language::from_path(&path.to_string_lossy());
+        let Some(admission) = lexical_admission(language) else {
+            return Self::default();
         };
-        let functions: Vec<_> = symbols
-            .enumerate()
-            .filter(|(_, (kind, ..))| {
-                matches!(
-                    kind,
-                    NodeKind::Function | NodeKind::Method | NodeKind::Constructor
-                )
-            })
-            .collect();
-        let spans: Vec<Span> = functions.iter().map(|(_, (.., span))| *span).collect();
-        let parents = innermost_enclosing(&spans);
-        for (k, &(offset, (kind, name, has_owner, _))) in functions.iter().enumerate() {
-            if kind != NodeKind::Function {
-                continue;
-            }
-            // The entry exists even when no candidate joins it: a class's
-            // own function named like the callee still keeps the call off
-            // the name tiers.
-            let candidates = index.by_name.entry(name.to_string()).or_default();
-            let parent = parents[k].map(|parent| spans[parent]);
-            if parent.is_some() || !has_owner {
-                candidates.push((parent, start + offset as u32));
-            }
-        }
-        index
-    }
-
-    /// [`LexicalAdmission::ScopedOnly`]: each node [`lexical_parents`]
-    /// scopes, with its parent's span as its scope. A name with no scoped
-    /// node gets no entry, so [`Self::targets`] leaves it to the name tiers.
-    fn scoped_only<'a>(
-        symbols: impl Iterator<Item = (NodeKind, &'a str, bool, Span)>,
-        start: u32,
-        scoped: &[NodeKind],
-    ) -> Self {
-        let mut index = Self {
-            admission: Some(LexicalAdmission::ScopedOnly),
-            ..Self::default()
-        };
-        let symbols: Vec<(NodeKind, &str, Span)> = symbols
-            .map(|(kind, name, _, span)| (kind, name, span))
-            .collect();
+        let symbols: Vec<(NodeKind, &str, bool, Span)> = symbols.collect();
         let decls: Vec<(NodeKind, Span)> = symbols
             .iter()
-            .map(|&(kind, _, span)| (kind, span))
+            .map(|&(kind, _, _, span)| (kind, span))
             .collect();
-        for (offset, parent) in lexical_parents(&decls, scoped).into_iter().enumerate() {
-            if let Some(parent) = parent {
-                index
-                    .by_name
-                    .entry(symbols[offset].1.to_string())
-                    .or_default()
-                    .push((Some(decls[parent as usize].1), start + offset as u32));
+        let parents = lexical_parents(&decls, lexical_scope_kinds(language));
+        let mut by_name: FxHashMap<String, Vec<(Option<Span>, u32)>> = FxHashMap::default();
+        for (offset, (&(kind, name, has_owner, _), parent)) in
+            symbols.iter().zip(parents).enumerate()
+        {
+            let scope = parent.map(|parent| decls[parent as usize].1);
+            let id = start + offset as u32;
+            match admission {
+                LexicalAdmission::ScopedOnly => {
+                    if scope.is_some() {
+                        by_name
+                            .entry(name.to_string())
+                            .or_default()
+                            .push((scope, id));
+                    }
+                }
+                LexicalAdmission::ScopedAndFileLevel if kind == NodeKind::Function => {
+                    // The entry exists even when no candidate joins it: a
+                    // class's own function named like the callee still
+                    // keeps the call off the name tiers.
+                    let candidates = by_name.entry(name.to_string()).or_default();
+                    if scope.is_some() || !has_owner {
+                        candidates.push((scope, id));
+                    }
+                }
+                LexicalAdmission::ScopedAndFileLevel => {}
             }
         }
-        index
+        Self {
+            by_name,
+            admission: Some(admission),
+        }
     }
 
     fn scope_size(scope: Option<Span>) -> (u32, i64) {
@@ -457,21 +448,26 @@ impl LexicalFunctions {
     }
 
     /// The scoped function a bare name reference from `caller` reads
-    /// (`xs.iter().for_each(helper)` inside `outer`), under
-    /// [`LexicalAdmission::ScopedOnly`]: the one candidate [`Self::targets`]
-    /// binds. `None` leaves the reference to the name tiers: no visible
-    /// candidate, two in one scope, a constant reference (it never names a
-    /// function), and every JS / TS reference.
+    /// (`xs.iter().for_each(helper)` inside `outer`, JS `setTimeout(helper)`
+    /// inside `outer`): the one candidate [`Self::targets`] binds, when that
+    /// candidate is scoped. `None` leaves the reference to the name tiers:
+    /// no visible candidate, two in one scope, a constant reference (it
+    /// never names a function), and a JS / TS file-level winner, which the
+    /// name tiers bind as before. The name tiers never return a scoped node
+    /// (invariant I5), so only this tier reaches one.
     pub fn name_ref_target(&self, caller: Span, name_ref: NameRef<'_>) -> Option<u32> {
-        if self.admission != Some(LexicalAdmission::ScopedOnly)
-            || name_ref.kind == NameRefKind::Constant
-        {
+        if self.admission.is_none() || name_ref.kind == NameRefKind::Constant {
             return None;
         }
-        match self.targets(caller, name_ref.name)?.as_slice() {
-            [(target, _)] => Some(*target),
-            _ => None,
-        }
+        let target = match self.targets(caller, name_ref.name)?.as_slice() {
+            [(target, _)] => *target,
+            _ => return None,
+        };
+        self.by_name
+            .get(name_ref.name)?
+            .iter()
+            .any(|&(scope, id)| id == target && scope.is_some())
+            .then_some(target)
     }
 }
 
@@ -857,9 +853,6 @@ mod tests {
     #[test]
     fn test_lexical_scope_kinds_before_opt_in_returns_empty() {
         for language in [
-            Language::TypeScript,
-            Language::JavaScript,
-            Language::Python,
             Language::Java,
             Language::Kotlin,
             Language::CSharp,
@@ -878,6 +871,144 @@ mod tests {
     #[test]
     fn test_lexical_scope_kinds_rust_returns_function_only() {
         assert_eq!(lexical_scope_kinds(Language::Rust), [NodeKind::Function]);
+    }
+
+    /// Stands for: slice D opts Python, JS and TS in with `Function` only;
+    /// JS / TS keep the file-level admission, Python takes Rust's.
+    #[test]
+    fn test_lexical_scope_kinds_python_js_ts_return_function_only() {
+        for language in [Language::Python, Language::JavaScript, Language::TypeScript] {
+            assert_eq!(
+                lexical_scope_kinds(language),
+                [NodeKind::Function],
+                "{language:?}"
+            );
+        }
+        assert_eq!(
+            lexical_admission(Language::Python),
+            Some(LexicalAdmission::ScopedOnly)
+        );
+        assert_eq!(
+            lexical_admission(Language::JavaScript),
+            Some(LexicalAdmission::ScopedAndFileLevel)
+        );
+        assert_eq!(
+            lexical_admission(Language::TypeScript),
+            Some(LexicalAdmission::ScopedAndFileLevel)
+        );
+        assert_eq!(lexical_admission(Language::Go), None);
+    }
+
+    /// `def helper` (line 0); `class A` (lines 1-9) with `def m` (lines
+    /// 2-5) nesting `def helper` (line 3) and `def n` (lines 6-8); `def
+    /// outer` (lines 10-14) nesting `def helper` (line 11) and a lambda
+    /// node (line 12); in `path`, ids from 10.
+    fn python_nested(path: &str) -> LexicalFunctions {
+        index(
+            path,
+            &[
+                (NodeKind::Function, "helper", false, (0, 0, 0, 20)),
+                (NodeKind::Class, "A", false, (1, 0, 9, 1)),
+                (NodeKind::Method, "m", true, (2, 4, 5, 5)),
+                (NodeKind::Function, "helper", false, (3, 8, 3, 30)),
+                (NodeKind::Method, "n", true, (6, 4, 8, 5)),
+                (NodeKind::Function, "outer", false, (10, 0, 14, 1)),
+                (NodeKind::Function, "helper", false, (11, 4, 11, 30)),
+                (
+                    NodeKind::Function,
+                    "<anonymous:13:8>",
+                    false,
+                    (12, 8, 12, 40),
+                ),
+            ],
+        )
+    }
+
+    /// Stands for: Python is `ScopedOnly`. Inside `A.m` and inside `outer`
+    /// (and its lambda) the nested `helper` wins; from `A.n`, which sees no
+    /// nested `helper`, the tier returns `None` so the name tiers bind the
+    /// module-level one; a method-syntax site never reaches a nested def.
+    #[test]
+    fn test_targets_python_scoped_only_nested_binds_other_method_returns_none() {
+        let lex = python_nested("pkg/a.py");
+        assert_eq!(lex.targets((4, 8, 4, 20), "helper"), Some(vec![(13, 1.0)]));
+        assert_eq!(lex.targets((7, 8, 7, 20), "helper"), None, "A.n");
+        assert_eq!(
+            lex.targets((13, 4, 13, 20), "helper"),
+            Some(vec![(16, 1.0)])
+        );
+        assert_eq!(
+            lex.targets((12, 8, 12, 40), "helper"),
+            Some(vec![(16, 1.0)]),
+            "the lambda inside `outer`"
+        );
+        assert_eq!(lex.targets((15, 0, 15, 9), "helper"), None, "module level");
+        assert_eq!(
+            lex.targets((13, 4, 13, 20), "outer"),
+            None,
+            "unscoped: no entry"
+        );
+        assert_eq!(
+            lex.call_targets((4, 8, 4, 20), CallSite::UntypedMember("helper")),
+            None
+        );
+        assert_eq!(
+            python_nested("pkg/a.pyi").targets((4, 8, 4, 20), "helper"),
+            Some(vec![(13, 1.0)]),
+            "a stub file is Python too"
+        );
+    }
+
+    /// Stands for: JS / TS read `lexical_parents`, the parent derivation the
+    /// uid reads: the nested `helper` in `A.m` scopes to `m`, the one in
+    /// `outer` to `outer` and is visible from the callback inside `outer`,
+    /// and `A.n` keeps the file-level `helper` (`ScopedAndFileLevel`). Every
+    /// extension the router maps to JS / TS gets the tier; a file the router
+    /// maps to neither gets none.
+    #[test]
+    fn test_new_js_ts_extensions_scope_by_lexical_parents() {
+        for path in ["a.js", "a.jsx", "a.mjs", "a.cjs", "a.ts", "a.tsx"] {
+            let lex = python_nested(path);
+            assert_eq!(
+                lex.targets((4, 8, 4, 20), "helper"),
+                Some(vec![(13, 1.0)]),
+                "{path}"
+            );
+            assert_eq!(
+                lex.targets((7, 8, 7, 20), "helper"),
+                Some(vec![(10, 1.0)]),
+                "{path}: `A.n` binds the file-level helper"
+            );
+            assert_eq!(
+                lex.targets((12, 8, 12, 40), "helper"),
+                Some(vec![(16, 1.0)]),
+                "{path}"
+            );
+        }
+        for path in ["a.vue", "a.svelte", "a.go"] {
+            assert_eq!(
+                python_nested(path).targets((4, 8, 4, 20), "helper"),
+                None,
+                "{path}: no lexical tier"
+            );
+        }
+    }
+
+    #[test]
+    fn test_new_empty_file_or_whitespace_name_returns_none() {
+        for path in ["a.py", "a.ts"] {
+            let lex = index(path, &[]);
+            assert_eq!(lex.targets((0, 0, 0, 9), "helper"), None, "{path}");
+        }
+        let lex = index(
+            "a.py",
+            &[
+                (NodeKind::Function, "outer", false, (0, 0, 4, 1)),
+                (NodeKind::Function, " ", false, (1, 4, 1, 20)),
+            ],
+        );
+        assert_eq!(lex.targets((2, 4, 2, 9), " "), Some(vec![(11, 1.0)]));
+        assert_eq!(lex.targets((2, 4, 2, 9), "helper"), None);
     }
 
     /// `fn helper` (line 0), `fn outer` (lines 1-5) with a nested `fn
@@ -953,7 +1084,7 @@ mod tests {
     }
 
     #[test]
-    fn test_name_ref_target_rust_value_binds_constant_and_js_return_none() {
+    fn test_name_ref_target_rust_value_binds_constant_returns_none() {
         let caller = (3, 4, 3, 12);
         let value = NameRef {
             name: "helper",
@@ -976,7 +1107,45 @@ mod tests {
             None,
             "invisible: the name tiers decide"
         );
-        assert_eq!(rust_nested("src/a.js").name_ref_target(caller, value), None);
+    }
+
+    /// Stands for: a JS / TS / Python reference to a visible nested
+    /// function (`setTimeout(helper)` inside `outer`) binds it here, since
+    /// the name tiers never return a scoped node (I5); a JS file-level
+    /// winner stays with the name tiers, as before R8. Before R8 the JS arm
+    /// returned `None` for every reference: the nested function carried
+    /// the owner `outer` and the name tiers could see it.
+    #[test]
+    fn test_name_ref_target_js_py_scoped_binds_file_level_returns_none() {
+        let caller = (3, 4, 3, 12);
+        let value = NameRef {
+            name: "helper",
+            kind: NameRefKind::Value,
+        };
+        for path in ["src/a.js", "src/a.ts", "src/a.py"] {
+            assert_eq!(
+                rust_nested(path).name_ref_target(caller, value),
+                Some(12),
+                "{path}"
+            );
+            assert_eq!(
+                rust_nested(path).name_ref_target(
+                    caller,
+                    NameRef {
+                        kind: NameRefKind::Constant,
+                        ..value
+                    }
+                ),
+                None,
+                "{path}: a constant never names a function"
+            );
+        }
+        assert_eq!(
+            rust_nested("src/a.js").name_ref_target((7, 4, 7, 12), value),
+            None,
+            "the file-level winner: the name tiers decide"
+        );
+        assert_eq!(rust_nested("src/a.go").name_ref_target(caller, value), None);
     }
 
     fn raw(kind: NodeKind, name: &str, owner: Option<&str>, span: Span) -> RawNode {
@@ -1038,17 +1207,54 @@ mod tests {
                 None,
             ]
         );
-        let mut python = nodes();
-        clear_scoped_owners(Language::Python, &mut python);
-        assert!(python
+        let mut go = nodes();
+        clear_scoped_owners(Language::Go, &mut go);
+        assert!(go
             .iter()
             .zip(nodes())
             .all(|(a, b)| a.owner_class == b.owner_class));
         clear_scoped_owners(Language::Rust, &mut []);
     }
 
+    /// Stands for: invariant I1 in Python, JS and TS. A def nested in a
+    /// method loses the class owner the span pass gave it, a def nested in
+    /// a def loses the function owner, two levels deep included; the
+    /// method, a local class and a variable keep theirs.
     #[test]
-    fn test_new_non_ecmascript_path_returns_empty_index() {
+    fn test_clear_scoped_owners_python_js_ts_scoped_cleared_unscoped_kept() {
+        let nodes = || {
+            vec![
+                raw(NodeKind::Class, "A", None, (0, 0, 10, 1)),
+                raw(NodeKind::Method, "m", Some("A"), (1, 4, 9, 5)),
+                raw(NodeKind::Function, "helper", Some("A"), (2, 8, 8, 9)),
+                raw(NodeKind::Function, "deep", Some("A"), (3, 12, 4, 13)),
+                raw(NodeKind::Class, "Local", Some("helper"), (5, 12, 6, 13)),
+                raw(NodeKind::Variable, "x", Some("helper"), (7, 12, 7, 20)),
+            ]
+        };
+        for language in [Language::Python, Language::JavaScript, Language::TypeScript] {
+            let mut cleared = nodes();
+            clear_scoped_owners(language, &mut cleared);
+            let owners: Vec<Option<&str>> =
+                cleared.iter().map(|n| n.owner_class.as_deref()).collect();
+            assert_eq!(
+                owners,
+                [None, Some("A"), None, None, Some("helper"), Some("helper")],
+                "{language:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_new_non_lexical_language_path_returns_empty_index() {
+        let lex = index("a.go", &[(NodeKind::Function, "f", false, (0, 0, 0, 9))]);
+        assert_eq!(lex.targets((1, 0, 1, 9), "f"), None);
+    }
+
+    /// Stands for: a Python module-level function is unscoped, so the
+    /// `ScopedOnly` tier leaves a call to it to the name tiers.
+    #[test]
+    fn test_new_python_module_level_function_returns_none() {
         let lex = index("a.py", &[(NodeKind::Function, "f", false, (0, 0, 0, 9))]);
         assert_eq!(lex.targets((1, 0, 1, 9), "f"), None);
     }
