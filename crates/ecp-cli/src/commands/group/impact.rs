@@ -198,6 +198,9 @@ fn emit_toon(
     cross_depth_warning: Option<&str>,
     caveat: Option<&str>,
 ) {
+    if let Some(c) = caveat {
+        println!("{c}");
+    }
     println!("group         {}", args.name);
     println!("target        {}", args.target);
     println!("direct        {}", local.direct_count());
@@ -212,9 +215,6 @@ fn emit_toon(
     }
     if let Some(warn) = cross_depth_warning {
         eprintln!("note: {warn}");
-    }
-    if let Some(c) = caveat {
-        eprintln!("note: {c}");
     }
 }
 

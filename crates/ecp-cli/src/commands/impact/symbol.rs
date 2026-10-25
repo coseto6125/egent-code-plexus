@@ -349,7 +349,7 @@ pub(super) fn impact_by_name(
             hidden_edges: hidden_edges_total,
             hidden_heuristic_edges: hidden_heuristic_total,
             hidden_test_callers: hidden_test_total,
-            ambiguity_caveat,
+            payload_caveat: ambiguity_caveat,
         },
     ))
 }

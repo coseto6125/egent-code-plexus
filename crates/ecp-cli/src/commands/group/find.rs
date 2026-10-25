@@ -243,7 +243,7 @@ fn emit_concat(per_repo: &[(String, Vec<Hit>)], json: bool, caveat: Option<&str>
         println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
     } else {
         if let Some(c) = caveat {
-            eprintln!("note: {c}");
+            println!("{c}");
         }
         for (repo, hits) in per_repo {
             println!("=== {repo} ({} hits) ===", hits.len());
@@ -298,7 +298,7 @@ fn emit_rrf(
         println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
     } else {
         if let Some(c) = caveat {
-            eprintln!("note: {c}");
+            println!("{c}");
         }
         for r in &merged {
             let h = r.hit;

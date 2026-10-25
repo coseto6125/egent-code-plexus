@@ -37,6 +37,8 @@ struct BaselineComputation {
     /// heuristic / coverage enrichment entirely. Callers must replicate
     /// that early return rather than run enrichment over the empty payload.
     no_changes: bool,
+    /// Changed paths left out of the comparison: a side crossed the size cap.
+    capped_paths: Vec<String>,
 }
 
 /// In-process typed accessor for the baseline envelope, used by
@@ -51,13 +53,26 @@ pub fn build_baseline_payload(
     compute_baseline(args, engine).map(|c| c.payload)
 }
 
-pub(super) fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result<Value, EcpError> {
+/// The payload plus its caveat: the changed paths whose size crosses the
+/// per-file cap, which the diff could not compare.
+pub(super) fn impact_with_baseline(
+    args: &ImpactArgs,
+    engine: &Engine,
+) -> Result<(Value, Option<String>), EcpError> {
     let comp = compute_baseline(args, engine)?;
     let mut result =
         serde_json::to_value(&comp.payload).map_err(|e| EcpError::Serialization(e.to_string()))?;
     if comp.no_changes {
-        return Ok(result);
+        return Ok((result, None));
     }
+    let caveat = (!comp.capped_paths.is_empty()).then(|| {
+        format!(
+            "{} changed file(s) exceed the per-file size cap, so their symbols were not \
+             compared: {}. Raise `[index] max_file_bytes` or `ECP_MAX_FILE_BYTES` to include them.",
+            comp.capped_paths.len(),
+            comp.capped_paths.join(", ")
+        )
+    });
 
     attach_hidden_edges(&mut result, comp.hidden_edges_total);
     attach_hidden_test_callers(&mut result, comp.hidden_test_total);
@@ -86,7 +101,7 @@ pub(super) fn impact_with_baseline(args: &ImpactArgs, engine: &Engine) -> Result
         result["coverage"] = build_coverage_json(analyses);
     }
 
-    Ok(result)
+    Ok((result, caveat))
 }
 
 fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComputation, EcpError> {
@@ -122,6 +137,7 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
             rel_filter: None,
             effective_include_tests: false,
             no_changes: true,
+            capped_paths: vec![],
         });
     }
 
@@ -156,17 +172,25 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
     type NewEntry = ((&'static str, String, String), (u64, u32));
     type OldEntry = ((&'static str, String, String), u64);
 
-    let per_file: Vec<(Vec<NewEntry>, Vec<OldEntry>)> = parsed_paths
+    // A side over the size cap parses to an omission with no nodes. Comparing
+    // it with the other side would report every symbol as added or removed,
+    // so such a path is left out of the comparison and named in the caveat.
+    let over_cap = |lg: &ecp_core::analyzer::types::LocalGraph| {
+        lg.blind_spots.iter().any(|b| b.kind == "file-too-large")
+    };
+    let per_file: Vec<(Vec<NewEntry>, Vec<OldEntry>, bool)> = parsed_paths
         .par_iter()
         .map(|rel_path| {
             let mut new_local: Vec<NewEntry> = Vec::new();
             let mut old_local: Vec<OldEntry> = Vec::new();
+            let mut capped = false;
 
             let abs = repo_path.join(rel_path);
             if abs.exists() {
                 if let Ok(src) = std::fs::read(&abs) {
                     let rel_pb = PathBuf::from(rel_path);
                     if let Ok(lg) = pipeline.parse_file_raw(&rel_pb, &src) {
+                        capped |= over_cap(&lg);
                         let lines: Vec<&[u8]> = src.split(|&b| b == b'\n').collect();
                         for raw in &lg.nodes {
                             if matches!(raw.kind, NodeKind::File | NodeKind::Process) {
@@ -186,6 +210,7 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
             if let Some(old_src) = head_blob_at(&repo_path, rel_path, baseline_ref) {
                 let rel_pb = PathBuf::from(rel_path);
                 if let Ok(lg) = pipeline.parse_file_raw(&rel_pb, &old_src) {
+                    capped |= over_cap(&lg);
                     let lines: Vec<&[u8]> = old_src.split(|&b| b == b'\n').collect();
                     for raw in &lg.nodes {
                         if matches!(raw.kind, NodeKind::File | NodeKind::Process) {
@@ -198,15 +223,25 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
                 }
             }
 
-            (new_local, old_local)
+            if capped {
+                new_local.clear();
+                old_local.clear();
+            }
+            (new_local, old_local, capped)
         })
         .collect();
 
-    let total_new = per_file.iter().map(|(n, _)| n.len()).sum();
-    let total_old = per_file.iter().map(|(_, o)| o.len()).sum();
+    let capped_paths: Vec<String> = parsed_paths
+        .iter()
+        .zip(&per_file)
+        .filter(|(_, (_, _, capped))| *capped)
+        .map(|(path, _)| path.clone())
+        .collect();
+    let total_new = per_file.iter().map(|(n, _, _)| n.len()).sum();
+    let total_old = per_file.iter().map(|(_, o, _)| o.len()).sum();
     let mut new_map: HashMap<SymbolKey, (u64, u32)> = HashMap::with_capacity(total_new);
     let mut old_map: HashMap<SymbolKey, u64> = HashMap::with_capacity(total_old);
-    for (new_local, old_local) in per_file {
+    for (new_local, old_local, _) in per_file {
         new_map.extend(new_local);
         old_map.extend(old_local);
     }
@@ -396,6 +431,7 @@ fn compute_baseline(args: &ImpactArgs, engine: &Engine) -> Result<BaselineComput
         rel_filter,
         effective_include_tests,
         no_changes: false,
+        capped_paths,
     })
 }
 

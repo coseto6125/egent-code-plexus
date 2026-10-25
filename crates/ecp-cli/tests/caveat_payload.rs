@@ -306,6 +306,30 @@ fn test_routes_text_warm_attached_caveat_first_line() {
     assert!(first.contains(WARM_ATTACH_NOTE), "got: {stdout}");
 }
 
+/// `find --mode exact --format text` printed its caveat on stderr only, so a
+/// stdout-only consumer (MCP) read a stale miss as definitive. Contract: the
+/// caveat is the first stdout line.
+#[test]
+fn test_find_exact_text_warm_attached_caveat_first_stdout_line() {
+    let (repo, home) = fixture();
+    make_warm_attached(repo.path());
+    let out = run_ecp(
+        repo.path(),
+        home.path(),
+        &[
+            "find",
+            "no_such_symbol_zz",
+            "--mode",
+            "exact",
+            "--format",
+            "text",
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let first = stdout.lines().next().unwrap_or_default();
+    assert!(first.contains(WARM_ATTACH_NOTE), "got: {stdout}");
+}
+
 /// Plant an untracked file whose name is not UTF-8 on a graph built at HEAD:
 /// git prints it, the dirty set cannot name it.
 #[cfg(unix)]

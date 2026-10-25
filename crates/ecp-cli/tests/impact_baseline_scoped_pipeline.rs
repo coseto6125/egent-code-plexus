@@ -219,3 +219,51 @@ fn markdown_file_in_diff_reports_path_but_contributes_no_symbols() {
         "markdown must not contribute changed_symbols (matches pre-fix dead-dispatch behavior); got {symbols:?}"
     );
 }
+
+/// Python source of `funcs` small functions, padded with a trailing comment
+/// to exactly `len` bytes.
+fn padded_python(funcs: usize, len: usize) -> String {
+    let mut src: String = (0..funcs)
+        .map(|i| format!("def func_{i}():\n    return {i}\n\n"))
+        .collect();
+    src.push('#');
+    src.push_str(&"x".repeat(len - src.len() - 1));
+    src
+}
+
+/// A changed file whose new side crosses the 1 MiB built-in size cap parses
+/// to an omission with no symbols. Compared with the old side, every one of
+/// its functions read as `removed` (a fabricated blast radius) and the payload
+/// said nothing. The file is now left out of the comparison and named in the
+/// `result` caveat.
+#[test]
+fn test_impact_baseline_file_crosses_size_cap_not_compared_caveat_names_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    run_git(repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("big.py"), padded_python(50, 1_040_000)).unwrap();
+    std::fs::write(repo.join("small.py"), PY_V1).unwrap();
+    git_commit(repo, "v1");
+    std::fs::write(repo.join("big.py"), padded_python(50, 1_050_000)).unwrap();
+    std::fs::write(repo.join("small.py"), PY_V2).unwrap();
+    git_commit(repo, "v2");
+    ecp_index(repo);
+
+    let payload = run_impact_baseline(repo);
+    let changed = payload["changed_symbols"]
+        .as_array()
+        .expect("changed_symbols");
+    assert!(
+        changed.iter().all(|s| s["file_path"] != "big.py"),
+        "an over-cap file must not be diffed: {changed:?}"
+    );
+    assert!(
+        changed.iter().any(|s| s["name"] == "helper"),
+        "the under-cap file is still diffed: {changed:?}"
+    );
+    let caveat = payload["result"].as_str().unwrap_or_default();
+    assert!(
+        caveat.contains("big.py"),
+        "caveat must name the file: {payload}"
+    );
+}

@@ -288,7 +288,7 @@ fn normalize_source_path(path: &Path) -> Cow<'_, str> {
 
 /// Resolver outcome tier captured per `resolve_symbol` call when the dump
 /// is enabled. Distinct from [`ResolutionTier`] because that enum models
-/// only resolution *successes* (and has the unused `Fallback(...)` arm),
+/// only resolution *successes*,
 /// whereas the dump also needs to record the `Unresolved` outcome to let
 /// the verification harness compute false negatives.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]

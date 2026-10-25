@@ -31,7 +31,7 @@
 use crate::commands::format::kind_to_str;
 use crate::commands::graph_csr::iter_incoming_edges_filtered;
 use crate::engine::Engine;
-use crate::output::{emit_with_caveat, OutputFormat};
+use crate::output::{emit_with_caveat, merge_caveats, OutputFormat};
 use clap::{Args, ValueEnum};
 use ecp_analyzer::resolution::index::Language;
 use ecp_core::graph::{
@@ -667,13 +667,14 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
     match format {
         OutputFormat::Text => {
             // The JSON/toon paths carry the staleness caveat in the `result`
-            // field; text (the default format) must say it too, or a stale
-            // "no match" reads as a definitive "does not exist".
+            // field; text (the default format) prints it first on stdout, or
+            // a stale "no match" reads as a definitive "does not exist" to a
+            // stdout-only consumer such as MCP.
             if let Some(c) = merge_caveats(
                 engine.caveat(),
-                (!found).then(|| omitted_files_caveat(engine)),
+                (!found).then(|| omitted_files_caveat(engine)).flatten(),
             ) {
-                eprintln!("note: {c}");
+                println!("{c}");
             }
             if !found {
                 println!("no match for: {pattern}");
@@ -712,7 +713,7 @@ fn run_exact_or_fuzzy(args: FindArgs, engine: &Engine, mode: FindMode) -> Result
                 format,
                 merge_caveats(
                     engine.caveat(),
-                    (!found).then(|| omitted_files_caveat(engine)),
+                    (!found).then(|| omitted_files_caveat(engine)).flatten(),
                 ),
             )
         }
@@ -840,8 +841,9 @@ impl ScoreSource {
 pub struct Hit {
     pub repo: Option<String>,
     pub score: f32,
-    /// Which ranker produced `score`. Annotation only — does not change
-    /// the score value or the sort order.
+    /// Which ranker produced `score`. An exact-name `Substring` row (score
+    /// 1.0) sorts ahead of every other row ([`exact_substring`]); otherwise
+    /// the score orders.
     pub score_source: ScoreSource,
     pub kind: String,
     pub file: String,
@@ -945,8 +947,9 @@ impl BucketedResults {
     }
 
     fn partition(mut hits: Vec<Hit>) -> Self {
-        // Sort overall by descending score before partitioning so each bucket
-        // gets the best representatives across repos.
+        // Sort exact-name substring rows first, then by descending score,
+        // before partitioning so each bucket gets the best representatives
+        // across repos.
         hits.sort_by(|a, b| {
             exact_substring_first(a, b).then_with(|| {
                 b.score
@@ -1007,7 +1010,9 @@ fn run_single(
     // on the miss path, so a hit pays nothing.
     let caveat = merge_caveats(
         caveat,
-        (!buckets.is_any_hit()).then(|| omitted_files_caveat(engine)),
+        (!buckets.is_any_hit())
+            .then(|| omitted_files_caveat(engine))
+            .flatten(),
     );
     let summary = if truncated_total > (MULTI_CAP as u64) {
         eprintln!("note: search truncated — {truncated_total} matches found, {MULTI_CAP} kept");
@@ -1018,17 +1023,6 @@ fn run_single(
         None
     };
     emit_bucketed_with_metadata(&buckets, format, summary, truncated_total, caveat)
-}
-
-/// Join a staleness caveat with an omission caveat, keeping whichever exist.
-/// The inner `Option` lets a caller say "not applicable here" without
-/// evaluating the second one.
-fn merge_caveats(base: Option<String>, extra: Option<Option<String>>) -> Option<String> {
-    match (base, extra.flatten()) {
-        (Some(a), Some(b)) => Some(format!("{a}; {b}")),
-        (Some(a), None) => Some(a),
-        (None, b) => b,
-    }
 }
 
 /// How many files the index left out, phrased for a model that just got a
@@ -1538,7 +1532,7 @@ fn run_multi(
 /// the commit dir the target picked.
 fn single_target_caveat(target: &RepoTarget, engine: &Engine) -> Option<String> {
     if engine.behind_head {
-        crate::output::merge_caveats(
+        merge_caveats(
             stale_graph_caveat(&[target.display_name.as_str()]),
             engine.unreadable_changes_caveat(),
         )
@@ -1632,7 +1626,7 @@ pub fn compute_multi_with_engines(
         }
     }
 
-    // Drain heap in descending score order.
+    // Drain heap: exact-name substring rows first, then descending score.
     let mut ordered: Vec<OrderedHit> = heap.into_iter().map(|r| r.0).collect();
     ordered.sort_by_key(|b| std::cmp::Reverse((b.exact_substring, b.score_bits)));
 
@@ -2007,7 +2001,7 @@ fn stale_repos_caveat(
                 .map(|c| format!("{name}: {c}"))
         })
         .fold(stale_graph_caveat(&stale), |acc, line| {
-            crate::output::merge_caveats(acc, Some(line))
+            merge_caveats(acc, Some(line))
         })
 }
 
