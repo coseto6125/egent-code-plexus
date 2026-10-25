@@ -53,7 +53,7 @@
 //!
 //! | Signature | Languages | Applies | Skipped | No edge |
 //! |---|---|---|---|---|
-//! | typed | Java, Kotlin, C#, C++, Swift | equal arity, equal parameter types (whitespace stripped, generics as text) | another arity, another type | a side without meta, a blank parameter type, a type difference through a base with type arguments; C++: a base method not declared virtual |
+//! | typed | Java, Kotlin, C#, C++, Swift | equal arity, equal parameter types (whitespace stripped, generics as text) | another arity, another type | a side without meta, a blank parameter type, a type difference through a base with type arguments; C++: a base method not declared virtual; C#: parameter types that differ only in a nullable annotation (`string?` is `string`, `int?` is not `int`) |
 //! | arity | TypeScript, PHP, Dart | equal arity, or a visible rest parameter (name only) | — | another arity |
 //! | lenient | Python, Ruby, JavaScript | equal arity; another arity or no meta by name only | — | — |
 //!
@@ -173,7 +173,12 @@ enum Lookup {
 enum Signature {
     /// An overloading language: equal arity and equal parameter types.
     /// `virtual_only` (C++) also requires a virtual base method.
-    Typed { virtual_only: bool },
+    /// `nullable_annotations` (C#): `string?` and `string` are one type, but
+    /// `int?` and `int` are two, and the text cannot tell them apart.
+    Typed {
+        virtual_only: bool,
+        nullable_annotations: bool,
+    },
     /// No overloading, and the compiler checks the override: an arity
     /// difference without a visible rest parameter is reported, not paired.
     Arity,
@@ -209,15 +214,26 @@ fn rules_for(path: &str) -> Option<Rules> {
     let per_base = Lookup::Chain(Chain::PerBase);
     let typed = Typed {
         virtual_only: false,
+        nullable_annotations: false,
     };
     let (rule, lookup, signature, statics) = match Language::from_path(path) {
-        Language::Java | Language::Kotlin | Language::CSharp => {
-            (Marked, per_base, typed, Statics::Never)
-        }
+        Language::Java | Language::Kotlin => (Marked, per_base, typed, Statics::Never),
+        Language::CSharp => (
+            Marked,
+            per_base,
+            Typed {
+                virtual_only: false,
+                nullable_annotations: true,
+            },
+            Statics::Never,
+        ),
         Language::Cpp => (
             Marked,
             per_base,
-            Typed { virtual_only: true },
+            Typed {
+                virtual_only: true,
+                nullable_annotations: false,
+            },
             Statics::Never,
         ),
         // `class func` carries the static flag, and it overrides.
@@ -260,6 +276,8 @@ enum Ambiguity {
     NotComparable,
     /// A C++ base method not declared virtual: it may hide, not override.
     NotVirtual,
+    /// C# parameter types that differ only in a nullable annotation.
+    Nullable,
     /// A parameter count differs where the language has no overloading.
     Arity { base: usize, own: usize },
 }
@@ -299,6 +317,17 @@ fn same_type(a: &str, b: &str) -> bool {
         .eq(b.chars().filter(|c| !c.is_whitespace()))
 }
 
+/// Type texts equal once whitespace and every `?` are gone: `string?`,
+/// `List<int?>`.
+fn same_but_nullable(a: &str, b: &str) -> bool {
+    let bare = |s: &str| {
+        s.chars()
+            .filter(|c| !c.is_whitespace() && *c != '?')
+            .collect::<Vec<_>>()
+    };
+    bare(a) == bare(b)
+}
+
 /// The method being looked up, against the declarations of its name.
 #[derive(Debug, Clone, Copy)]
 struct Matcher<'a> {
@@ -328,14 +357,20 @@ impl Matcher<'_> {
         };
         let (own_arity, base_arity) = (arity(own), arity(base));
         match self.signature {
-            Signature::Typed { virtual_only } => {
+            Signature::Typed {
+                virtual_only,
+                nullable_annotations,
+            } => {
                 if own_arity != base_arity {
                     return Fit::Skip;
                 }
                 let mut blank = false;
+                let mut nullable = false;
                 for (a, b) in own.params.iter().zip(&base.params).skip(1).step_by(2) {
                     if a.trim().is_empty() || b.trim().is_empty() {
                         blank = true;
+                    } else if nullable_annotations && same_but_nullable(a, b) {
+                        nullable |= !same_type(a, b);
                     } else if !same_type(a, b) {
                         return if generic {
                             Fit::Unknown(Ambiguity::NotComparable)
@@ -346,6 +381,8 @@ impl Matcher<'_> {
                 }
                 if blank {
                     Fit::Unknown(Ambiguity::NotComparable)
+                } else if nullable {
+                    Fit::Unknown(Ambiguity::Nullable)
                 } else if virtual_only && base.flags & FunctionMeta::FLAG_VIRTUAL == 0 {
                     Fit::Unknown(Ambiguity::NotVirtual)
                 } else {
@@ -655,6 +692,9 @@ pub fn emit_edges(
                                 ),
                                 Ambiguity::NotVirtual => format!(
                                     "`{name}` in base `{base}` is not declared virtual; no Overrides edge"
+                                ),
+                                Ambiguity::Nullable => format!(
+                                    "`{name}` in base `{base}` differs only in nullable annotations, which may name another value type; no Overrides edge"
                                 ),
                                 Ambiguity::Arity { base: theirs, own } => format!(
                                     "`{name}` in base `{base}` takes {theirs} parameters, this `{name}` takes {own}; no Overrides edge"
@@ -1330,6 +1370,7 @@ mod tests {
 
     const TYPED: Signature = Signature::Typed {
         virtual_only: false,
+        nullable_annotations: false,
     };
 
     /// Stands for: in an overloading language the signature picks the
@@ -1388,12 +1429,46 @@ mod tests {
         );
     }
 
+    /// Stands for: C# parameter types that differ only in `?` may be one
+    /// reference type or two value types, so the pair is undecided; a real
+    /// type difference beside it still skips. Kotlin keeps `?` in the type.
+    #[test]
+    fn test_fit_csharp_nullable_annotation_only_returns_nullable() {
+        let csharp = Signature::Typed {
+            virtual_only: false,
+            nullable_annotations: true,
+        };
+        let own = meta(0, &["s", "string", "xs", "List<int>"]);
+        let m = matcher(csharp, Statics::Never, Some(&own));
+        assert_eq!(
+            m.fit(Some(&meta(0, &["s", "string?", "xs", "List<int?>"])), false),
+            Fit::Unknown(Ambiguity::Nullable)
+        );
+        assert_eq!(
+            m.fit(Some(&meta(0, &["s", "string?", "xs", "List<long>"])), false),
+            Fit::Skip,
+            "a real type difference wins"
+        );
+        assert_eq!(
+            m.fit(Some(&meta(0, &["s", "string", "xs", "List<int>"])), false),
+            Fit::Match { confirmed: true }
+        );
+        let kotlin = matcher(TYPED, Statics::Never, Some(&own));
+        assert_eq!(
+            kotlin.fit(Some(&meta(0, &["s", "string?", "xs", "List<int>"])), false),
+            Fit::Skip
+        );
+    }
+
     /// Stands for: C++ binds a base method only when it is virtual.
     #[test]
     fn test_fit_cpp_non_virtual_base_returns_not_virtual() {
         let own = meta(FunctionMeta::FLAG_VIRTUAL, &[]);
         let m = matcher(
-            Signature::Typed { virtual_only: true },
+            Signature::Typed {
+                virtual_only: true,
+                nullable_annotations: false,
+            },
             Statics::Never,
             Some(&own),
         );

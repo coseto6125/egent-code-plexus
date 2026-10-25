@@ -89,12 +89,17 @@ fn test_overrides_csharp_pragma_in_base_list_is_no_base() {
         &ecp_analyzer::c_sharp::parser::CSharpProvider::new().unwrap(),
         &[(
             "App/C.cs",
-            "namespace App {\n    public abstract class A {\n        public abstract void Run(int n);\n    }\n    public class C :\n#pragma warning disable 618\n        A\n#pragma warning restore 618\n    {\n        public override void Run(int n) {}\n    }\n}\n",
+            "namespace App {\n    public abstract class A {\n        public abstract void Run(int n);\n    }\n    public interface I {\n        void Stop();\n    }\n    public class C :\n#pragma warning disable 618\n        A,\n#pragma warning restore 618\n        I\n    {\n        public override void Run(int n) {}\n        public void Stop() {}\n    }\n}\n",
         )],
     );
     assert_eq!(
+        overrides_support::heritage_confidences(&graph, "C").len(),
+        2,
+        "both real bases, A and I, stay heritage"
+    );
+    assert_eq!(
         overrides_support::override_rows(&graph),
-        [(9, 2)],
+        [(13, 2)],
         "C.Run -> A.Run"
     );
     assert!(
@@ -102,4 +107,31 @@ fn test_overrides_csharp_pragma_in_base_list_is_no_base() {
         "{:?}",
         overrides_support::override_blind_spots(&graph)
     );
+}
+
+/// Stands for: C# parameter types that differ only in a nullable annotation
+/// (`string?` against `string`) may be one type (a reference type) or two
+/// (`int?` is `Nullable<int>`). The lookup stops at that declaration with an
+/// `override-ambiguous` BlindSpot: no edge, and no edge past it to the
+/// grandparent's exact `Bind(string)` (codex P7 acceptance ruling, P-b).
+#[test]
+fn test_overrides_csharp_nullable_annotation_only_reports_ambiguous() {
+    use ecp_analyzer::post_process::overrides::BS_KIND_OVERRIDE_AMBIGUOUS;
+    let graph = overrides_support::graph_of(
+        &ecp_analyzer::c_sharp::parser::CSharpProvider::new().unwrap(),
+        &[(
+            "App/C.cs",
+            "namespace App {\n    public abstract class A {\n        public virtual void Bind(string s) {}\n    }\n    public abstract class B : A {\n        public abstract void Bind(string? s);\n    }\n    public class C : B {\n        public override void Bind(string s) {}\n    }\n}\n",
+        )],
+    );
+    assert_eq!(
+        overrides_support::override_rows(&graph),
+        [],
+        "C.Bind stops at B.Bind(string?): no edge, and none past B to A.Bind(string)"
+    );
+    let spots = overrides_support::override_blind_spots(&graph);
+    let mine: Vec<_> = spots.iter().filter(|s| s.2 == 8).collect();
+    assert_eq!(mine.len(), 1, "{spots:?}");
+    assert_eq!(mine[0].0, BS_KIND_OVERRIDE_AMBIGUOUS, "{spots:?}");
+    assert!(mine[0].3.contains("nullable"), "{}", mine[0].3);
 }
