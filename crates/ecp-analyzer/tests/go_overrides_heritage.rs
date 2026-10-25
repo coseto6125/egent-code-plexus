@@ -62,3 +62,26 @@ fn test_overrides_go_method_without_embedded_namesake_records_nothing() {
         "`Run` shadows nothing, so no BlindSpot"
     );
 }
+
+/// Stands for: Go records the embedding shadow as `no-override-concept`
+/// and nothing else — no edge, and no override-lookup gap for an embedded
+/// type outside the graph.
+#[test]
+fn test_overrides_go_embedded_shadow_reports_no_concept() {
+    let graph = graph_of(
+        &GoProvider::new().unwrap(),
+        &[(
+            "b/child.go",
+            "package b\n\nimport \"sync\"\n\ntype Base struct{}\n\nfunc (b Base) Run() {}\n\ntype Child struct {\n\tBase\n\tsync.Mutex\n}\n\nfunc (c Child) Run() {}\n",
+        )],
+    );
+    assert!(overrides(&graph).is_empty(), "{:?}", overrides(&graph));
+    let spots = overrides_support::override_blind_spots(&graph);
+    assert_eq!(spots.len(), 1, "{spots:?}");
+    let (kind, file, row, hint) = &spots[0];
+    assert_eq!(
+        (kind.as_str(), file.as_str(), *row),
+        (BS_KIND_NO_OVERRIDE_CONCEPT, "b/child.go", 13)
+    );
+    assert!(hint.contains("`Run`") && hint.contains("`Base`"), "{hint}");
+}

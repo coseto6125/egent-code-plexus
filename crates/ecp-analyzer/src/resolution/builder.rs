@@ -5,7 +5,7 @@ use crate::framework_helpers::Span;
 use crate::php::laravel_routes::LaravelRoutes;
 use crate::post_process::path_literal_nodes::FILE_SOURCE_PENDING;
 use crate::resolution::heuristics::{ResolutionTier, NEAREST_COPY_CONFIDENCE, NEAREST_COPY_REASON};
-use crate::resolution::index::{FileMeta, Language, ResolveTarget, SymbolTable};
+use crate::resolution::index::{DeclaredBase, FileMeta, Language, ResolveTarget, SymbolTable};
 use crate::resolution::resolver::{ReexportIndex, Resolver};
 use crate::rust::module_tree::RustWorkspaceModTree;
 use ecp_core::analyzer::lexical::{
@@ -409,7 +409,7 @@ impl GraphBuilder {
             &reexports,
             &raw_map,
         );
-        symbol_table.build_supertypes(declared_supertypes);
+        symbol_table.build_declared_bases(declared_supertypes);
         let supertype_table = record_supertypes(&symbol_table);
         let action_edges = pass1_95_controller_actions(
             &laravel,
@@ -2513,9 +2513,10 @@ fn lexical_functions(graph: &LocalGraph, start_index: u32) -> LexicalFunctions {
     )
 }
 
-/// Pass 1.9: declared supertypes, as `(type_id, base)` pairs in declared
-/// order (`None` = the base resolved to no project type), for
-/// [`SymbolTable::build_supertypes`].
+/// Pass 1.9: declared supertypes, as `(type_id, base)` rows in declared
+/// order, each base with every project type it resolved to and the
+/// resolver's confidence (none = the base resolved to no project type), for
+/// [`SymbolTable::build_declared_bases`].
 ///
 /// Each base goes through the same `resolve_symbol(.., ResolveTarget::Type)`
 /// call Pass 2 makes for `Extends` / `Implements`, with the same path aliases
@@ -2538,8 +2539,8 @@ fn pass1_9_supertypes(
     mod_tree_ctx: Option<(&RustWorkspaceModTree, &std::path::Path)>,
     reexports: &ReexportIndex<'_>,
     raw_map: &RawIndexMap,
-) -> Vec<(u32, Option<u32>)> {
-    let per_graph: Vec<Vec<(u32, Option<u32>)>> = local_graphs
+) -> Vec<(u32, DeclaredBase)> {
+    let per_graph: Vec<Vec<(u32, DeclaredBase)>> = local_graphs
         .par_iter()
         .enumerate()
         .map(|(file_idx, lg)| {
@@ -2559,7 +2560,7 @@ fn pass1_9_supertypes(
             let is_rust = Language::from_path(&lg.file_path.to_string_lossy()) == Language::Rust;
             // One `impl Trait for O` block repeats its heritage on every
             // method; the cache keeps that to one resolve per name per file.
-            let mut bases_cache: FxHashMap<&str, Vec<u32>> = FxHashMap::default();
+            let mut bases_cache: FxHashMap<&str, Box<[(u32, f32)]>> = FxHashMap::default();
             let mut subject_cache: FxHashMap<&str, Option<u32>> = FxHashMap::default();
             let mut out = Vec::new();
             for (offset, raw) in lg.nodes.iter().enumerate() {
@@ -2590,14 +2591,16 @@ fn pass1_9_supertypes(
                     continue;
                 };
                 for base in &raw.heritage {
-                    let resolved = bases_cache.entry(base.as_str()).or_insert_with(|| {
-                        resolve_type(base).into_iter().map(|(id, _)| id).collect()
-                    });
-                    if resolved.is_empty() {
-                        out.push((subject, None));
-                    } else {
-                        out.extend(resolved.iter().map(|&id| (subject, Some(id))));
-                    }
+                    let candidates = bases_cache
+                        .entry(base.as_str())
+                        .or_insert_with(|| resolve_type(base).into_boxed_slice());
+                    out.push((
+                        subject,
+                        DeclaredBase {
+                            spelling: base.as_str().into(),
+                            candidates: candidates.clone(),
+                        },
+                    ));
                 }
             }
             out
@@ -3871,7 +3874,7 @@ mod tests {
             &ReexportIndex::default(),
             &raw_map_of(graphs),
         );
-        st.build_supertypes(declared);
+        st.build_declared_bases(declared);
         st
     }
 
@@ -3955,6 +3958,30 @@ mod tests {
         assert!(
             st.supertypes(3).is_none(),
             "a Python method is not a subject"
+        );
+    }
+
+    /// Stands for: the `Overrides` pass reads each declared base's spelling,
+    /// slot and resolver confidence from Pass 1.9, which `Supertypes` drops.
+    #[test]
+    fn test_pass1_9_supertypes_declared_bases_keep_spelling_and_confidence() {
+        let st = table_with_supertypes(&python_heritage_graphs());
+        let puppy = st.declared_bases(1);
+        let spellings: Vec<&str> = puppy.iter().map(|b| &*b.spelling).collect();
+        assert_eq!(spellings, ["ExternalMixin", "AnimalBase", "WagMixin"]);
+        assert!(
+            puppy[0].candidates.is_empty(),
+            "the external mixin keeps its slot"
+        );
+        let kennel = st.declared_bases(2);
+        assert_eq!(
+            &*kennel[0].candidates,
+            &[(1u32, 1.0f32)],
+            "a same-file base binds at the exact tier"
+        );
+        assert!(
+            kennel[1].candidates[0].1 < 1.0,
+            "a cross-file base with no import binds below it: {kennel:?}"
         );
     }
 

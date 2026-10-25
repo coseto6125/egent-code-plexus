@@ -12,7 +12,8 @@ pub struct SchemaArgs {
 
 #[derive(Subcommand, Clone)]
 pub enum SchemaCommands {
-    /// Per-language BlindSpot emitter inventory.
+    /// Per-language BlindSpot emitter inventory, plus the kinds that
+    /// graph-wide passes record for every language (`cross_language_kinds`).
     ///
     /// Distinguishes "no blind spot in this diff" from "ecp doesn't detect
     /// this dispatch pattern in this language yet" — exactly the
@@ -59,7 +60,20 @@ struct LangEntry {
 #[derive(Serialize)]
 struct BlindspotsReport {
     languages: &'static [LangEntry],
+    cross_language_kinds: &'static [&'static str],
 }
+
+/// BlindSpot kinds that graph-wide passes record for any language: the
+/// `Overrides` lookup and the entry-point handler pick. Referenced from the
+/// emitters, so a renamed kind cannot drift from this inventory.
+const CROSS_LANGUAGE_KINDS: &[&str] = &[
+    ecp_analyzer::post_process::overrides::BS_KIND_NO_OVERRIDE_CONCEPT,
+    ecp_analyzer::post_process::overrides::BS_KIND_OVERRIDE_AMBIGUOUS,
+    ecp_analyzer::post_process::overrides::BS_KIND_OVERRIDE_BASE_UNRESOLVED,
+    ecp_analyzer::post_process::overrides::BS_KIND_OVERRIDE_BASE_AMBIGUOUS,
+    ecp_analyzer::post_process::overrides::BS_KIND_OVERRIDE_HIERARCHY_INCOMPLETE,
+    ecp_analyzer::resolution::builder::BS_KIND_ENTRY_POINT_AMBIGUOUS,
+];
 
 /// Per-lang inventory. Hardcoded because the per-parser `BLIND_SPEC`
 /// tables are `pub(crate)` and reflecting them at runtime is overkill for
@@ -193,6 +207,7 @@ pub fn run(args: SchemaArgs) -> Result<(), EcpError> {
 fn blindspots(args: FormatArgs) -> Result<(), EcpError> {
     let report = BlindspotsReport {
         languages: LANGUAGES,
+        cross_language_kinds: CROSS_LANGUAGE_KINDS,
     };
     emit(args.format, &report, print_blindspots_text)
 }
@@ -217,6 +232,13 @@ fn print_blindspots_text(report: &BlindspotsReport) {
             lang.blind_kinds.join(", ")
         );
     }
+    println!(
+        "{:<16} {:<9} {:<9} {}",
+        "(all)",
+        "yes",
+        "-",
+        report.cross_language_kinds.join(", ")
+    );
 }
 
 /// Generic JSON/text dispatcher — keeps each subcommand's run-fn trivial.
@@ -304,7 +326,7 @@ const RELTYPES: &[RelTypeEntry] = &[
     RelTypeEntry { rel: RelType::Subscribes, name: "Subscribes", utility: "A", note: "Consumer (@KafkaListener / SQS receive) → EventTopic. Pair with Publishes for cross-service event flow." },
     RelTypeEntry { rel: RelType::EventTopicMirror, name: "EventTopicMirror", utility: "B", note: "Heuristic: EventTopic → SchemaField when payload shape inferable. Confidence < 0.85." },
     RelTypeEntry { rel: RelType::OpensTxScope, name: "OpensTxScope", utility: "A", note: "Opener Function/Method → its TransactionScope node. Query as (f)-[:OpensTxScope]->(s:TransactionScope); same forward convention as Publishes/Subscribes." },
-    RelTypeEntry { rel: RelType::Overrides, name: "Overrides", utility: "A", note: "Method-level override (Java @Override, Kotlin override fun, C# override, C++ virtual-match). Distinct from class-level Extends." },
+    RelTypeEntry { rel: RelType::Overrides, name: "Overrides", utility: "A", note: "Method → nearest same-name declaration along its type's declared bases (override marker: Exact; name match: Heuristic). Gaps are override-* BlindSpots. Distinct from class-level Extends." },
     RelTypeEntry { rel: RelType::Decorates, name: "Decorates", utility: "A", note: "Decorator/attribute → decorated symbol (Python @decorator, Java/Kotlin @annotation, C# attribute, Rust attribute macro). 10-language emission." },
     RelTypeEntry { rel: RelType::UsesPathLiteral, name: "UsesPathLiteral", utility: "A", note: "Function/Method/Const → PathLiteral; File for a module-top or class-field site. Drives `ecp impact --literal <value>` to find every read/write site touching a filesystem path or config key. 14-language emission." },
     RelTypeEntry { rel: RelType::CompensatedBy, name: "CompensatedBy", utility: "C", note: "Heuristic Saga compensation: compensator → operation it rolls back. reason encodes evidence (saga:calls-back 0.8 / saga:name-only 0.6). Shown by default in heuristic_callers; --no-heuristic suppresses." },
@@ -519,15 +541,28 @@ mod tests {
     #[test]
     fn blind_kinds_are_unique_globally() {
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for lang in LANGUAGES {
-            for kind in lang.blind_kinds {
-                assert!(
-                    seen.insert(kind),
-                    "duplicate blind kind `{}` across languages",
-                    kind
-                );
-            }
+        let per_language = LANGUAGES.iter().flat_map(|lang| lang.blind_kinds.iter());
+        for kind in per_language.chain(CROSS_LANGUAGE_KINDS) {
+            assert!(
+                seen.insert(kind),
+                "duplicate blind kind `{}` across languages",
+                kind
+            );
         }
+    }
+
+    /// Stands for: an agent reading `schema blindspots` sees every kind the
+    /// `Overrides` pass can record, so an override BlindSpot is never an
+    /// unknown kind.
+    #[test]
+    fn cross_language_kinds_list_every_override_kind() {
+        for kind in ecp_analyzer::post_process::overrides::BS_KINDS {
+            assert!(
+                CROSS_LANGUAGE_KINDS.contains(&kind),
+                "`{kind}` missing from cross_language_kinds"
+            );
+        }
+        assert!(CROSS_LANGUAGE_KINDS.contains(&"entry-point-ambiguous"));
     }
 
     // ── reltypes invariants ─────────────────────────────────────────────

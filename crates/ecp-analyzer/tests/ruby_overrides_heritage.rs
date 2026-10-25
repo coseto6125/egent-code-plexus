@@ -24,3 +24,21 @@ fn test_overrides_ruby_two_same_named_bases_binds_declared_one() {
         Evidence::Heuristic,
     );
 }
+
+/// Stands for: Ruby looks a method up through `ancestors` — the included
+/// modules, last first, then the superclass — so `C.m` binds `M.m`, not
+/// the superclass's `B.m`.
+#[test]
+fn test_overrides_ruby_ancestor_lookup_preserves_order() {
+    let graph = overrides_support::graph_of(
+        &ecp_analyzer::ruby::parser::RubyProvider::new().unwrap(),
+        &[(
+            "c.rb",
+            "module M\n  def m\n  end\nend\n\nclass B\n  def m\n  end\nend\n\nclass C < B\n  include M\n  def m\n  end\nend\n",
+        )],
+    );
+    let edges = overrides_support::overrides(&graph);
+    assert_eq!(edges.len(), 1, "C.m -> M.m only; got {edges:?}");
+    assert_eq!((edges[0].0.line, edges[0].1.line), (12, 1), "{edges:?}");
+    overrides_support::assert_evidence(&edges[0], Evidence::Heuristic);
+}

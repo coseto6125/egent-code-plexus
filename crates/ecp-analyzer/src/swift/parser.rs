@@ -555,6 +555,9 @@ impl LanguageProvider for SwiftProvider {
                     // alongside Java static-import aliases. The attribute node
                     // is nested under `(modifiers)` (not a direct
                     // `function_declaration` child), so walk the subtree.
+                    if k == NodeKind::Method && has_override_modifier(root, source) {
+                        decorators.push("__override__".to_string());
+                    }
                     if k == NodeKind::Function || k == NodeKind::Method {
                         if let Some(ext) = find_objc_rename_attribute(root, source) {
                             imports.push(RawImport {
@@ -768,6 +771,24 @@ fn swift_decl_keyword(class_decl: tree_sitter::Node<'_>) -> &'static str {
         }
     }
     "class"
+}
+
+/// True when the `modifiers` of `decl` hold `override`. Swift requires the
+/// modifier on a class member that overrides a superclass member, so the
+/// `Overrides` pass reads it as the marker, as it reads Kotlin's.
+fn has_override_modifier(decl: tree_sitter::Node<'_>, source: &[u8]) -> bool {
+    let mut cursor = decl.walk();
+    let found = decl
+        .children(&mut cursor)
+        .filter(|child| child.kind() == "modifiers")
+        .any(|modifiers| {
+            let mut inner = modifiers.walk();
+            let found = modifiers.children(&mut inner).any(|m| {
+                m.kind() == "member_modifier" && m.utf8_text(source).is_ok_and(|t| t == "override")
+            });
+            found
+        });
+    found
 }
 
 /// Return true when `func_node` (a `function_declaration`) is directly nested inside

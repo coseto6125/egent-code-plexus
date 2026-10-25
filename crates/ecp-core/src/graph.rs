@@ -552,22 +552,22 @@ pub enum RelType {
     OpensTxScope,
     /// Method-level override edge. Source is a concrete method
     /// (`Function` / `Method` / `Constructor`) on a subtype; target is the
-    /// corresponding method on the *immediate* supertype or interface that the
-    /// source overrides. Distinct from class-level `Extends` / `Implements`
+    /// nearest same-name declaration along the declared bases of the
+    /// source's type. Distinct from class-level `Extends` / `Implements`
     /// — those link `Class`/`Interface` nodes, while `Overrides` links method
     /// nodes. LLM-utility (A) Graph completeness: refactoring a base method
     /// must find every overriding implementation; without this edge the only
     /// option is grep-and-pray. (C) Edge semantics: `Extends` carries a
     /// different meaning (type hierarchy) and cannot substitute.
     ///
-    /// Target is the **immediate** supertype's method, not a transitive
-    /// ancestor. For `C extends B extends A; A.foo; B.foo; C.foo` the edges
-    /// are `C.foo → B.foo` and `B.foo → A.foo`; querying the full chain
-    /// requires two hops, which is the correct semantic (C overrides B's
-    /// contract, not A's directly).
+    /// Target is the **nearest** declaration, per the language's lookup
+    /// order. For `C extends B extends A; A.foo; B.foo; C.foo` the edges
+    /// are `C.foo → B.foo` and `B.foo → A.foo` (C overrides B's contract,
+    /// not A's directly); when B lacks `foo`, the edge is `C.foo → A.foo`.
+    /// A gap on the way (unresolved or ambiguous base, overload, cycle)
+    /// gives an `override-*` BlindSpot instead of an edge past it.
     ///
-    /// Languages: Java (`@Override`), Kotlin (`override fun`), C# (`override`
-    /// modifier), C++ (`override` specifier or virtual-matched signature).
+    /// Languages and evidence: `ecp_analyzer::post_process::overrides`.
     /// Appended at the END to preserve rkyv discriminants for existing
     /// `graph.bin` files.
     Overrides,

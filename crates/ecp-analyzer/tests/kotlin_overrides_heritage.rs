@@ -21,3 +21,21 @@ fn test_overrides_kotlin_two_same_named_bases_binds_declared_one() {
         Evidence::Exact,
     );
 }
+
+/// Stands for: a marked override binds the nearest declaration two levels
+/// up when the middle base lacks it, at `Exact` 1.0.
+#[test]
+fn test_overrides_kotlin_grandparent_resolves_target() {
+    let graph = overrides_support::graph_of(
+        &ecp_analyzer::kotlin::parser::KotlinProvider::new().unwrap(),
+        &[(
+            "C.kt",
+            "open class A {\n    open fun run() {}\n}\nopen class B : A() {\n}\nclass C : B() {\n    override fun run() {}\n}\n",
+        )],
+    );
+    let edges = overrides_support::overrides(&graph);
+    assert_eq!(edges.len(), 1, "C.run -> A.run; got {edges:?}");
+    assert_eq!((edges[0].0.line, edges[0].1.line), (6, 1), "{edges:?}");
+    overrides_support::assert_evidence(&edges[0], Evidence::Exact);
+    assert_eq!(edges[0].2, 1.0);
+}

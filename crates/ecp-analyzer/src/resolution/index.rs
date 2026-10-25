@@ -40,6 +40,20 @@ impl Supertypes {
     }
 }
 
+/// One declared base of a type, as the supertypes pre-pass resolved it.
+/// [`Supertypes`] flattens the bases to ids. A member lookup also needs the
+/// spelling a candidate came from, how many candidates it had, and how
+/// strongly the resolver bound each one (the `Overrides` pass).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeclaredBase {
+    /// The heritage spelling the parser recorded.
+    pub spelling: Box<str>,
+    /// The project types the spelling resolved to, each with the resolver's
+    /// confidence, in resolver order. Never the declaring type. Empty when
+    /// the spelling resolved to no project type.
+    pub candidates: Box<[(u32, f32)]>,
+}
+
 /// A Rust callable declared in an `impl` block ([`SymbolTable::note_impl_member`]).
 #[derive(Debug, Clone, Copy)]
 struct ImplMember {
@@ -217,6 +231,12 @@ pub struct SymbolTable {
     /// supertypes pre-pass, after Pass 1 and before Pass 2. Types with no
     /// declared heritage have no entry.
     supertypes: FxHashMap<u32, Supertypes>,
+
+    /// Declared bases per type id, in declared order, with each base's
+    /// candidates and their resolver confidence. Filled with `supertypes` by
+    /// [`Self::build_declared_bases`]. Analyzer-side only: no graph table
+    /// stores it.
+    declared_bases: FxHashMap<u32, Vec<DeclaredBase>>,
 
     /// The `impl` block and implemented trait of each Rust member, see
     /// [`Self::note_impl_member`]. Sparse: only Rust callables declared in
@@ -1464,6 +1484,53 @@ impl SymbolTable {
             .collect();
     }
 
+    /// Replace the supertypes map and the declared bases from the pre-pass
+    /// rows `(type_id, base)` in declared order. The supertypes are the ones
+    /// [`Self::build_supertypes`] derives from the same rows. A candidate
+    /// that is the declaring type, or that repeats, is dropped; a base left
+    /// with no candidate that way is dropped too, as `build_supertypes`
+    /// drops it. A spelling repeated with the same candidates collapses to
+    /// its first position.
+    pub fn build_declared_bases(&mut self, declared: Vec<(u32, DeclaredBase)>) {
+        let mut pairs: Vec<(u32, Option<u32>)> = Vec::with_capacity(declared.len());
+        let mut out: FxHashMap<u32, Vec<DeclaredBase>> = FxHashMap::default();
+        for (ty, base) in declared {
+            if base.candidates.is_empty() {
+                pairs.push((ty, None));
+            } else {
+                pairs.extend(base.candidates.iter().map(|&(id, _)| (ty, Some(id))));
+            }
+            let mut candidates: Vec<(u32, f32)> = Vec::with_capacity(base.candidates.len());
+            for &(id, confidence) in base.candidates.iter() {
+                if id != ty && !candidates.iter().any(|&(seen, _)| seen == id) {
+                    candidates.push((id, confidence));
+                }
+            }
+            if candidates.is_empty() && !base.candidates.is_empty() {
+                continue;
+            }
+            let base = DeclaredBase {
+                spelling: base.spelling,
+                candidates: candidates.into_boxed_slice(),
+            };
+            let list = out.entry(ty).or_default();
+            if !list.contains(&base) {
+                list.push(base);
+            }
+        }
+        self.build_supertypes(pairs);
+        self.declared_bases = out;
+    }
+
+    /// Declared bases of `type_id` in declared order; empty when it declares
+    /// no heritage.
+    pub fn declared_bases(&self, type_id: u32) -> &[DeclaredBase] {
+        self.declared_bases
+            .get(&type_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
     /// Declared supertypes of `type_id`; `None` when it declares no heritage.
     pub fn supertypes(&self, type_id: u32) -> Option<&Supertypes> {
         self.supertypes.get(&type_id)
@@ -2593,6 +2660,44 @@ mod tests {
             Some(0),
             "an external base listed first precedes every project base"
         );
+    }
+
+    fn declared(spelling: &str, candidates: &[(u32, f32)]) -> DeclaredBase {
+        DeclaredBase {
+            spelling: spelling.into(),
+            candidates: candidates.into(),
+        }
+    }
+
+    /// Stands for: the `Overrides` pass reads the same bases that the
+    /// receiver-typing ladder reads, plus each base's spelling, candidate
+    /// count and resolver confidence.
+    #[test]
+    fn test_build_declared_bases_rows_keep_supertypes_and_candidates() {
+        let mut st = SymbolTable::new();
+        st.build_declared_bases(vec![
+            (0, declared("External", &[])),
+            (0, declared("Base", &[(1, 1.0)])),
+            (0, declared("Dup", &[(2, 0.7), (3, 0.7), (2, 0.7)])),
+            (0, declared("Base", &[(1, 1.0)])),
+            (0, declared("Itself", &[(0, 1.0)])),
+            (4, declared("  ", &[])),
+        ]);
+        let s = st.supertypes(0).unwrap();
+        assert_eq!(&*s.bases, &[1, 2, 3], "build_supertypes over the same rows");
+        assert_eq!(s.first_unresolved, Some(0));
+        let bases = st.declared_bases(0);
+        assert_eq!(
+            bases,
+            &[
+                declared("External", &[]),
+                declared("Base", &[(1, 1.0)]),
+                declared("Dup", &[(2, 0.7), (3, 0.7)]),
+            ],
+            "a repeat collapses, a self base is dropped, an empty base stays"
+        );
+        assert_eq!(st.declared_bases(4), &[declared("  ", &[])]);
+        assert!(st.declared_bases(9).is_empty(), "no heritage, no bases");
     }
 
     #[test]

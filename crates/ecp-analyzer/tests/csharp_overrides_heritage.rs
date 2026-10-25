@@ -21,3 +21,38 @@ fn test_overrides_csharp_two_same_named_bases_binds_declared_one() {
         Evidence::Exact,
     );
 }
+
+/// Stands for: a declared base that names several project types (the
+/// stand-in for C# partial parts and duplicated source trees) binds none of
+/// them: no edge to the first candidate, one `override-base-ambiguous`
+/// BlindSpot with the candidate count.
+#[test]
+fn test_overrides_csharp_ambiguous_base_reports_blindspot() {
+    use ecp_analyzer::post_process::overrides::BS_KIND_OVERRIDE_BASE_AMBIGUOUS;
+    let copy = "namespace Lib {\n    public class Base {\n        public virtual void Run() {}\n    }\n}\n";
+    let graph = overrides_support::graph_of(
+        &ecp_analyzer::c_sharp::parser::CSharpProvider::new().unwrap(),
+        &[
+            ("guava/Base.cs", copy),
+            ("android/guava/Base.cs", copy),
+            (
+                "app/Child.cs",
+                "using Lib;\nnamespace App {\n    public class Child : Base {\n        public override void Run() {}\n    }\n}\n",
+            ),
+        ],
+    );
+    let edges = overrides_support::overrides(&graph);
+    assert!(edges.is_empty(), "no edge to either copy: {edges:?}");
+    let spots = overrides_support::override_blind_spots(&graph);
+    assert_eq!(spots.len(), 1, "{spots:?}");
+    let (kind, file, row, hint) = &spots[0];
+    assert_eq!(
+        (kind.as_str(), file.as_str(), *row),
+        (BS_KIND_OVERRIDE_BASE_AMBIGUOUS, "app/Child.cs", 3),
+        "{spots:?}"
+    );
+    assert!(
+        hint.contains("`Base`") && hint.contains("2 candidate types"),
+        "{hint}"
+    );
+}

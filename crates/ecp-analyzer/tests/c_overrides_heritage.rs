@@ -44,3 +44,22 @@ fn test_overrides_c_two_same_named_bases_binds_declared_one() {
         );
     }
 }
+
+/// Stands for: C has no override, so two same-named functions in two files
+/// give no edge and no BlindSpot of any override kind.
+#[test]
+fn test_overrides_c_same_name_emits_no_edge() {
+    let graph = graph_of(
+        &CProvider::new().unwrap(),
+        &[
+            ("a/run.c", "void run(void) {}\n"),
+            (
+                "b/run.c",
+                "struct Base { int x; };\nstruct Child { struct Base base; };\nvoid run(void) {}\n",
+            ),
+        ],
+    );
+    assert!(overrides(&graph).is_empty(), "{:?}", overrides(&graph));
+    let spots = overrides_support::override_blind_spots(&graph);
+    assert!(spots.is_empty(), "{spots:?}");
+}

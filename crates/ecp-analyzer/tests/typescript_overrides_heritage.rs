@@ -36,3 +36,24 @@ fn test_overrides_typescript_base_named_twice_emits_one_edge() {
     assert_eq!(edges.len(), 1, "one edge, not one per mention: {edges:?}");
     assert_eq!((edges[0].1.name.as_str(), edges[0].1.line), ("run", 1));
 }
+
+/// Stands for: an unmarked method binds the nearest declaration two levels
+/// up, at the name-match confidence, never `Exact`.
+#[test]
+fn test_overrides_typescript_grandparent_emits_heuristic() {
+    let graph = graph_of(
+        &ecp_analyzer::typescript::TypeScriptProvider::new().unwrap(),
+        &[(
+            "c.ts",
+            "export class A {\n  run(): void {}\n}\nexport class B extends A {}\nexport class C extends B {\n  run(): void {}\n}\n",
+        )],
+    );
+    let edges = overrides(&graph);
+    assert_eq!(edges.len(), 1, "C.run -> A.run; got {edges:?}");
+    assert_eq!((edges[0].0.line, edges[0].1.line), (5, 1), "{edges:?}");
+    overrides_support::assert_evidence(&edges[0], Evidence::Heuristic);
+    assert_eq!(
+        edges[0].2,
+        ecp_analyzer::post_process::overrides::NAME_MATCH_CONFIDENCE
+    );
+}

@@ -7,6 +7,7 @@
 //! quiet across all dialects.
 #![allow(dead_code)]
 
+use ecp_analyzer::post_process::overrides::BS_KINDS;
 use ecp_analyzer::resolution::builder::GraphBuilder;
 use ecp_core::analyzer::provider::LanguageProvider;
 use ecp_core::analyzer::types::{LocalGraph, RawNode};
@@ -108,6 +109,60 @@ pub fn blind_spots(graph: &ZeroCopyGraph, kind: &str) -> Vec<(String, u32, Strin
             )
         })
         .collect()
+}
+
+/// `(kind, file, 0-based start row, hint)` of every BlindSpot of every kind
+/// the `Overrides` pass records.
+pub fn override_blind_spots(graph: &ZeroCopyGraph) -> Vec<(String, String, u32, String)> {
+    BS_KINDS
+        .iter()
+        .flat_map(|kind| {
+            blind_spots(graph, kind)
+                .into_iter()
+                .map(move |(file, row, hint)| (kind.to_string(), file, row, hint))
+        })
+        .collect()
+}
+
+/// The confidence of every `Extends` / `Implements` edge from a type named
+/// `child`: the resolver confidence Pass 1.9 also gave its base.
+pub fn heritage_confidences(graph: &ZeroCopyGraph, child: &str) -> Vec<f32> {
+    let pool = graph.string_pool.as_slice();
+    graph
+        .edges
+        .iter()
+        .filter(|e| matches!(e.rel_type, RelType::Extends | RelType::Implements))
+        .filter(|e| graph.nodes[e.source as usize].name.resolve(pool) == child)
+        .map(|e| e.confidence)
+        .collect()
+}
+
+/// `(source row, target row)` of every `Overrides` edge, sorted: the shape
+/// of a single-file fixture, where rows tell the methods apart.
+pub fn override_rows(graph: &ZeroCopyGraph) -> Vec<(u32, u32)> {
+    let mut rows: Vec<(u32, u32)> = overrides(graph)
+        .iter()
+        .map(|(source, target, _, _)| (source.line, target.line))
+        .collect();
+    rows.sort_unstable();
+    rows
+}
+
+/// Asserts `edge` reads back as `evidence` with that class's `reason`.
+pub fn assert_evidence(edge: &(End, End, f32, String), evidence: Evidence) {
+    let (stored, expected_reason) = match evidence {
+        Evidence::Exact => (StoredEvidence::Exact, "post_process:overrides"),
+        Evidence::Heuristic => (
+            StoredEvidence::Heuristic,
+            "post_process:overrides:name-in-base",
+        ),
+    };
+    assert_eq!(
+        StoredEvidence::of_stored(edge.2, RelType::Overrides),
+        stored,
+        "{edge:?}"
+    );
+    assert_eq!(edge.3, expected_reason, "{edge:?}");
 }
 
 /// How the pass pairs an override with its base in a language (the rule

@@ -21,3 +21,29 @@ fn test_overrides_javascript_two_same_named_bases_binds_declared_one() {
         Evidence::Heuristic,
     );
 }
+
+/// Stands for: an external base is a reported gap at each method that may
+/// override it, never a silent "no override".
+#[test]
+fn test_overrides_javascript_unresolved_base_reports_blindspot() {
+    use ecp_analyzer::post_process::overrides::BS_KIND_OVERRIDE_BASE_UNRESOLVED;
+    let graph = overrides_support::graph_of(
+        &ecp_analyzer::javascript::parser::JavaScriptProvider::new().unwrap(),
+        &[("c.js", "export class C extends External {\n  run() {}\n}\n")],
+    );
+    let edges = overrides_support::overrides(&graph);
+    assert!(edges.is_empty(), "{edges:?}");
+    let spots = overrides_support::override_blind_spots(&graph);
+    assert_eq!(spots.len(), 1, "{spots:?}");
+    let (kind, file, row, hint) = &spots[0];
+    assert_eq!(
+        (kind.as_str(), file.as_str(), *row),
+        (BS_KIND_OVERRIDE_BASE_UNRESOLVED, "c.js", 1)
+    );
+    assert!(
+        hint.contains("`External`")
+            && hint.contains("(0 same-named candidates)")
+            && hint.contains("`run`"),
+        "{hint}"
+    );
+}
