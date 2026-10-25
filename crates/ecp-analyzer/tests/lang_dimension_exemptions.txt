@@ -853,6 +853,19 @@ owner_collision php pre-existing gap
 owner_collision ruby pre-existing gap
 owner_collision rust pre-existing gap
 owner_collision swift pre-existing gap
+parent_identity c no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity cpp no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity csharp no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity dart no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity go no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity java no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity javascript no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity kotlin no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity php no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity python no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity ruby no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity swift no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
+parent_identity typescript no `impl Trait for Type` block: the ImplTrait discriminator is Rust-only
 path_literals csharp pre-existing gap
 pointer_return_methods c pre-existing gap
 pointer_return_methods csharp pre-existing gap
