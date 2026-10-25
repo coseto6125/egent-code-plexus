@@ -81,6 +81,96 @@ const GO_SYMBOL_PRAGMAS: &[&str] = &[
     "embed",
 ];
 
+/// The path prefix a route call `g.GET("/x", ...)` inherits from the router
+/// groups it hangs on: `g := r.Group("/v1")`, `u := g.Group("/users")` gives
+/// `/v1/users`. The declaration is the last `:=` / `=` of the receiver name
+/// before the call inside the enclosing function. `None` for a receiver with
+/// no such declaration, and for a `Group` whose first argument is not a
+/// string literal: an unknown prefix is no prefix, never a guessed one.
+fn go_group_prefix(call: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
+    fn last_group_call<'a>(
+        scope: tree_sitter::Node<'a>,
+        name: &str,
+        before: usize,
+        source: &[u8],
+    ) -> Option<tree_sitter::Node<'a>> {
+        let mut found = None;
+        let mut stack = vec![scope];
+        while let Some(node) = stack.pop() {
+            if node.start_byte() >= before {
+                continue;
+            }
+            if matches!(
+                node.kind(),
+                "short_var_declaration" | "assignment_statement"
+            ) {
+                let single = |side: Option<tree_sitter::Node<'a>>| {
+                    side.filter(|l| l.named_child_count() == 1)
+                        .and_then(|l| l.named_child(0))
+                };
+                let lhs = single(node.child_by_field_name("left"));
+                let rhs = single(node.child_by_field_name("right"));
+                if let (Some(lhs), Some(rhs)) = (lhs, rhs) {
+                    let is_receiver = lhs.utf8_text(source).ok() == Some(name);
+                    let is_later = found.map_or(true, |f| f.start_byte() < rhs.start_byte());
+                    if is_receiver && is_later {
+                        found = Some(rhs);
+                    }
+                }
+            }
+            let mut cursor = node.walk();
+            stack.extend(node.named_children(&mut cursor));
+        }
+        found
+    }
+
+    fn prefix_of(call: tree_sitter::Node<'_>, source: &[u8], depth: usize) -> Option<Vec<String>> {
+        let receiver = call
+            .child_by_field_name("function")?
+            .child_by_field_name("operand")
+            .filter(|o| o.kind() == "identifier")?;
+        let name = receiver.utf8_text(source).ok()?;
+        let scope = std::iter::successors(call.parent(), |n| n.parent()).find(|n| {
+            matches!(
+                n.kind(),
+                "function_declaration" | "method_declaration" | "func_literal" | "source_file"
+            )
+        })?;
+        let decl = last_group_call(scope, name, call.start_byte(), source)
+            .filter(|d| d.kind() == "call_expression")?;
+        let is_group = decl
+            .child_by_field_name("function")
+            .and_then(|f| f.child_by_field_name("field"))
+            .and_then(|f| f.utf8_text(source).ok())
+            == Some("Group");
+        if !is_group || depth == 0 {
+            return None;
+        }
+        let literal = decl
+            .child_by_field_name("arguments")?
+            .named_child(0)
+            .filter(|a| {
+                matches!(
+                    a.kind(),
+                    "interpreted_string_literal" | "raw_string_literal"
+                )
+            })?
+            .utf8_text(source)
+            .ok()?
+            .trim_matches(['"', '`'])
+            .to_string();
+        let mut outer = prefix_of(decl, source, depth - 1).unwrap_or_default();
+        outer.push(literal);
+        Some(outer)
+    }
+
+    let prefixes = prefix_of(call, source, 8)?;
+    let joined = prefixes.iter().fold(String::new(), |joined, prefix| {
+        ecp_core::contracts::identity::join_route_path(&joined, prefix)
+    });
+    Some(joined)
+}
+
 /// Walk preceding sibling `comment` nodes and collect known symbol-level
 /// `//go:` directives. See `GO_SYMBOL_PRAGMAS` for the allowlist and
 /// rationale for what is excluded.
@@ -865,6 +955,12 @@ impl LanguageProvider for GoProvider {
                             std::str::from_utf8(&source[p_node.start_byte()..p_node.end_byte()])
                                 .unwrap_or("");
                         let path_str = path_raw.trim_matches(|c| c == '"' || c == '`').to_string();
+                        let path_str = match go_group_prefix(span_node, source) {
+                            Some(prefix) => {
+                                ecp_core::contracts::identity::join_route_path(&prefix, &path_str)
+                            }
+                            None => path_str,
+                        };
                         let start = span_node.start_position();
                         let end = span_node.end_position();
                         route_arguments

@@ -203,24 +203,41 @@ fn decorator_name(decorator: &str) -> (String, &str) {
 /// `@ApiController` marks a controller too. Pass 1.5 and the entry-point
 /// scorer both read this.
 pub fn node_decorator_routes(node: &RawNode, nodes: &[RawNode]) -> Vec<DetectedRoute> {
+    let owner = owner_class(node, nodes);
     let mut client = None;
     node.decorators
         .iter()
         .filter(|decorator| {
             !decorator_name(decorator).0.ends_with("mapping")
-                || !*client.get_or_insert_with(|| in_http_client(node, nodes))
+                || !*client.get_or_insert_with(|| in_http_client(owner))
         })
-        .flat_map(|decorator| detect_all_from_decorator(decorator))
+        .flat_map(|decorator| {
+            let routes = detect_all_from_decorator(decorator);
+            let prefixes = match (routes.is_empty(), owner) {
+                (false, Some(class)) => class_route_prefixes(class, &decorator_name(decorator).0),
+                _ => Vec::new(),
+            };
+            if prefixes.is_empty() {
+                return routes;
+            }
+            prefixes
+                .iter()
+                .flat_map(|prefix| {
+                    routes.iter().map(|route| DetectedRoute {
+                        method: route.method.clone(),
+                        path: ecp_core::contracts::identity::join_route_path(prefix, &route.path),
+                    })
+                })
+                .collect()
+        })
         .collect()
 }
 
-/// Whether the innermost class or interface around `node` named like its
-/// owner carries `@FeignClient` or `@HttpExchange`. A node with no owner,
-/// or whose owner is not in `nodes`, is no client: nothing proves it.
-fn in_http_client(node: &RawNode, nodes: &[RawNode]) -> bool {
-    let Some(owner) = node.owner_class.as_deref() else {
-        return false;
-    };
+/// The innermost class or interface around `node` named like its owner. A
+/// node with no owner, or whose owner is not in `nodes`, has none: nothing
+/// proves it.
+fn owner_class<'a>(node: &RawNode, nodes: &'a [RawNode]) -> Option<&'a RawNode> {
+    let owner = node.owner_class.as_deref()?;
     nodes
         .iter()
         .filter(|n| {
@@ -229,12 +246,95 @@ fn in_http_client(node: &RawNode, nodes: &[RawNode]) -> bool {
                 && span_contains(n.span, node.span)
         })
         .min_by_key(|n| span_area(n.span))
-        .is_some_and(|class| {
-            class
-                .decorators
-                .iter()
-                .any(|d| matches!(decorator_name(d).0.as_str(), "feignclient" | "httpexchange"))
+}
+
+/// Whether `owner` carries `@FeignClient` or `@HttpExchange`.
+fn in_http_client(owner: Option<&RawNode>) -> bool {
+    owner.is_some_and(|class| {
+        class
+            .decorators
+            .iter()
+            .any(|d| matches!(decorator_name(d).0.as_str(), "feignclient" | "httpexchange"))
+    })
+}
+
+/// The path prefixes a class puts on the route of one of its methods whose
+/// decorator is named `method_decorator` (lowercase). A Spring `*Mapping`
+/// method takes the class `@RequestMapping` paths; a verb-named NestJS
+/// method (`@Get`) takes the class `@Controller` paths. A class that has
+/// several paths gives several prefixes, one route each. Empty when the
+/// class names none.
+fn class_route_prefixes(class: &RawNode, method_decorator: &str) -> Vec<String> {
+    let spring = method_decorator.ends_with("mapping");
+    class
+        .decorators
+        .iter()
+        .flat_map(|decorator| match spring {
+            true => spring_class_prefixes(decorator),
+            false => nest_controller_prefixes(decorator),
         })
+        .collect()
+}
+
+/// The paths of a class-level Spring `@RequestMapping("/api")`,
+/// `@RequestMapping(value = {"/a", "/b"})`; empty for any other decorator.
+fn spring_class_prefixes(decorator: &str) -> Vec<String> {
+    let (name, trimmed) = decorator_name(decorator);
+    if name != "requestmapping" {
+        return Vec::new();
+    }
+    extract_string_args(trimmed)
+        .into_iter()
+        .filter(|p| looks_like_path(p))
+        .collect()
+}
+
+/// The paths of a NestJS `@Controller('users')`, `@Controller(['a', 'b'])`
+/// and `@Controller({ path: 'users' })`; empty for any other decorator, for
+/// `@Controller()` and for a blank path. The route decorator pass and the
+/// TypeScript parser both read it, so one endpoint gets one path.
+pub fn nest_controller_prefixes(decorator: &str) -> Vec<String> {
+    let (name, trimmed) = decorator_name(decorator);
+    if name != "controller" {
+        return Vec::new();
+    }
+    let args = trimmed
+        .split_once('(')
+        .map_or("", |(_, args)| args.trim_start());
+    let scoped = match args.starts_with('{') {
+        true => object_path_value(args),
+        false => args,
+    };
+    extract_string_args(scoped)
+        .into_iter()
+        .filter(|p| !p.trim().is_empty())
+        .collect()
+}
+
+/// The value text of the `path` key of an object literal: a string or an
+/// array. Empty when the object has no `path` key.
+fn object_path_value(object: &str) -> &str {
+    for (at, _) in object.match_indices("path") {
+        let before = object[..at].chars().next_back();
+        if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        let after = object[at + 4..]
+            .trim_start_matches(['"', '\''])
+            .trim_start();
+        let Some(rest) = after.strip_prefix(':') else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        return match rest.chars().next() {
+            Some('[') => &rest[..rest.find(']').map_or(rest.len(), |i| i + 1)],
+            Some(quote @ ('"' | '\'')) => {
+                &rest[..rest[1..].find(quote).map_or(rest.len(), |i| i + 2)]
+            }
+            _ => "",
+        };
+    }
+    ""
 }
 
 /// The HTTP verbs a decorator names, in source order. A verb-named decorator
@@ -288,6 +388,25 @@ pub fn detect_from_decorator(decorator: &str) -> Option<DetectedRoute> {
     detect_all_from_decorator(decorator).into_iter().next()
 }
 
+/// The HTTP verb a call name ends in, on a whole word of the name: `get`,
+/// `router.delete`, `MapDelete` and `HttpGET` name a verb; `getTarget`,
+/// `outputs`, `deleted` and `posted_at` only contain one.
+fn verb_of_call_name(name: &str) -> Option<&'static str> {
+    let last = name
+        .rsplit(|c: char| !c.is_alphanumeric())
+        .find(|s| !s.is_empty())?;
+    let mut word_start = 0;
+    let mut prev_lower = false;
+    for (i, c) in last.char_indices() {
+        if c.is_uppercase() && prev_lower {
+            word_start = i;
+        }
+        prev_lower = c.is_lowercase() || c.is_ascii_digit();
+    }
+    let word = last[word_start..].to_lowercase();
+    HTTP_METHODS.iter().copied().find(|&m| m == word)
+}
+
 pub fn detect_from_call(raw: &RawRoute) -> Option<DetectedRoute> {
     let lower = raw.method.to_lowercase();
 
@@ -327,7 +446,7 @@ pub fn detect_from_call(raw: &RawRoute) -> Option<DetectedRoute> {
         });
     }
 
-    let method = HTTP_METHODS.iter().find(|&&m| lower.contains(m))?;
+    let method = verb_of_call_name(&raw.method)?;
 
     // Raw path may arrive wrapped in `"…"` / `'…'` because Python / TS
     // tree-sitter `string` nodes carry the literal quote bytes. Peel them
@@ -404,24 +523,22 @@ pub fn clean_route_path_lax(raw_with_quotes: &str) -> Option<String> {
     }
 }
 
-/// Route path segments joined the way a router with groups joins a group
-/// prefix to a route path (Laravel `prefix`): each segment trimmed of `/`,
-/// empty segments dropped, one leading `/`. `["admin/", "/users"]` gives
-/// `/admin/users`; no non-empty segment gives `/`.
-pub fn join_route_path<'a>(segments: impl IntoIterator<Item = &'a str>) -> String {
-    let mut path = String::new();
-    for part in segments
-        .into_iter()
-        .flat_map(|segment| segment.split('/'))
-        .filter(|part| !part.is_empty())
-    {
-        path.push('/');
-        path.push_str(part);
+/// Route path segments of nested router groups (Laravel `prefix`), folded
+/// left to right through the one prefix rule, C1 `join_route_path`. Every
+/// segment but the last is a group prefix, so its trailing `/` never
+/// reaches the route path; the last segment keeps C1's trailing-`/` rule.
+/// No non-empty segment gives `/`.
+pub fn join_route_segments<'a>(segments: impl IntoIterator<Item = &'a str>) -> String {
+    use ecp_core::contracts::identity::join_route_path;
+    let mut segments = segments.into_iter().peekable();
+    let mut joined = String::new();
+    while let Some(segment) = segments.next() {
+        joined = join_route_path(&joined, segment);
+        if segments.peek().is_some() {
+            joined.truncate(joined.trim_end_matches('/').len());
+        }
     }
-    if path.is_empty() {
-        path.push('/');
-    }
-    path
+    join_route_path(&joined, "")
 }
 
 /// BlindSpot kind of a route whose registration names a handler that binds
@@ -971,20 +1088,110 @@ mod tests {
     }
 
     #[test]
-    fn test_join_route_path_stray_slashes_joins_with_single_slashes() {
+    fn test_join_route_segments_stray_slashes_keeps_c1_trailing_slash() {
         assert_eq!(
-            join_route_path(["/admin/", "import", "/award/"]),
-            "/admin/import/award"
+            join_route_segments(["/admin/", "import", "/award/"]),
+            "/admin/import/award/"
         );
     }
 
     #[test]
-    fn test_join_route_path_empty_segments_returns_root() {
-        assert_eq!(join_route_path(["", "/", ""]), "/");
+    fn test_join_route_segments_empty_segments_returns_root() {
+        assert_eq!(join_route_segments(["", "/", ""]), "/");
+        assert_eq!(join_route_segments(Vec::<&str>::new()), "/");
+        assert_eq!(join_route_segments(["  "]), "/");
     }
 
     #[test]
-    fn test_join_route_path_empty_prefix_keeps_path() {
-        assert_eq!(join_route_path(["", "/users/{id}"]), "/users/{id}");
+    fn test_join_route_segments_empty_prefix_keeps_path() {
+        assert_eq!(join_route_segments(["", "/users/{id}"]), "/users/{id}");
+        assert_eq!(join_route_segments(["/", "/users"]), "/users");
+    }
+
+    #[test]
+    fn test_join_route_segments_slash_only_tail_matches_c1() {
+        assert_eq!(join_route_segments(["/api", "/"]), "/api/");
+        assert_eq!(join_route_segments(["/api", ""]), "/api");
+    }
+
+    #[test]
+    fn test_join_route_segments_prefix_trailing_slash_never_reaches_path() {
+        assert_eq!(join_route_segments(["/api/", "v1/", ""]), "/api/v1");
+        assert_eq!(
+            join_route_segments(["/api/", "v1/", "users/"]),
+            "/api/v1/users/"
+        );
+    }
+
+    fn call(method: &str, path: &str) -> RawRoute {
+        RawRoute {
+            method: method.to_string(),
+            path: path.to_string(),
+            handler: None,
+            span: (0, 0, 0, 0),
+            scope: None,
+        }
+    }
+
+    fn verb(method: &str) -> Option<String> {
+        detect_from_call(&call(method, "/x")).map(|r| r.method)
+    }
+
+    #[test]
+    fn test_detect_from_call_mapdelete_returns_delete() {
+        assert_eq!(verb("MapDelete").as_deref(), Some("DELETE"));
+        assert_eq!(verb("MapGet").as_deref(), Some("GET"));
+        assert_eq!(verb("router.delete").as_deref(), Some("DELETE"));
+        assert_eq!(verb("GET").as_deref(), Some("GET"));
+        assert_eq!(verb("patch").as_deref(), Some("PATCH"));
+    }
+
+    #[test]
+    fn test_detect_from_call_verb_substring_names_return_none() {
+        for name in [
+            "getTarget",
+            "outputs",
+            "deleted",
+            "posted",
+            "puts",
+            "patchwork",
+            "headers",
+            "output",
+            "",
+            "   ",
+        ] {
+            assert_eq!(verb(name), None, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn test_detect_from_call_input_with_get_in_the_middle_returns_none() {
+        assert_eq!(verb("MapDeleteAll"), None);
+    }
+
+    #[test]
+    fn test_nest_controller_prefixes_forms_return_each_path() {
+        assert_eq!(nest_controller_prefixes("@Controller('users')"), ["users"]);
+        assert_eq!(
+            nest_controller_prefixes("@Controller([\"a\", 'b'])"),
+            ["a", "b"]
+        );
+        assert_eq!(
+            nest_controller_prefixes("@Controller({ path: ['a', 'b'], host: 'h' })"),
+            ["a", "b"]
+        );
+        assert_eq!(
+            nest_controller_prefixes("@Controller({ host: 'h', path: 'p' })"),
+            ["p"]
+        );
+    }
+
+    #[test]
+    fn test_nest_controller_prefixes_absent_blank_or_other_returns_empty() {
+        assert!(nest_controller_prefixes("@Controller()").is_empty());
+        assert!(nest_controller_prefixes("@Controller").is_empty());
+        assert!(nest_controller_prefixes("@Controller(' ')").is_empty());
+        assert!(nest_controller_prefixes("@Controller({ host: 'h' })").is_empty());
+        assert!(nest_controller_prefixes("@Injectable('x')").is_empty());
     }
 }

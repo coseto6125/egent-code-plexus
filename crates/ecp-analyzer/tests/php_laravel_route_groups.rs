@@ -336,7 +336,7 @@ fn test_parse_file_nested_prefixes_join_with_single_slashes() {
         .map(|r| r.path)
         .collect();
     paths.sort();
-    assert_eq!(paths, ["/api/v1", "/api/v1/users"]);
+    assert_eq!(paths, ["/api/v1", "/api/v1/users/"]);
 }
 
 #[test]

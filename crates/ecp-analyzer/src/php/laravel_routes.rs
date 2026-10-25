@@ -15,7 +15,7 @@
 use super::parser::{walk_to_scoped_root_scope, PHP_ROUTER_SCOPES};
 use crate::framework_helpers::node_span;
 use crate::resolution::index::{SymbolTable, MAX_HERITAGE_DEPTH};
-use crate::route_detector::{clean_route_path_lax, join_route_path};
+use crate::route_detector::{clean_route_path_lax, join_route_segments};
 use ecp_core::analyzer::types::{
     LocalGraph, RawImport, RawRoute, RawRouteScope, RouteInclude, Span,
 };
@@ -245,7 +245,7 @@ impl SiteScope {
             return clean_route_path_lax(raw_path);
         }
         let tail = clean_route_path_lax(raw_path).unwrap_or_default();
-        Some(join_route_path(
+        Some(join_route_segments(
             self.prefixes
                 .iter()
                 .map(String::as_str)
@@ -634,7 +634,7 @@ fn resource_sites(
             }
             segments.push(action.suffix);
             let route = RouteSite {
-                path: join_route_path(segments),
+                path: join_route_segments(segments),
                 scope: site.scope.clone(),
                 handler: RawRoute::named_handler(Some(&format!("{class}@{}", action.action))),
             };
@@ -1117,11 +1117,10 @@ fn compose_namespace(outer: Option<&str>, inner: Option<&str>) -> Option<String>
 
 /// Prefix segments joined as a route path, empty when they hold none.
 fn join_prefix<'a>(segments: impl IntoIterator<Item = &'a str>) -> String {
-    let path = join_route_path(segments);
-    if path == "/" {
-        String::new()
-    } else {
-        path
+    let path = join_route_segments(segments);
+    match path.trim_end_matches('/') {
+        "" => String::new(),
+        trimmed => trimmed.to_string(),
     }
 }
 
@@ -1340,7 +1339,7 @@ impl LaravelRoutes {
         includes
             .iter()
             .map(|include| {
-                let path = join_route_path([include.prefix.as_str(), path]);
+                let path = join_route_segments([include.prefix.as_str(), path]);
                 include.promote(scope, path, handler)
             })
             .collect()

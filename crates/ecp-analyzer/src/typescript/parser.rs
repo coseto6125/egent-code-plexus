@@ -192,22 +192,22 @@ fn body_has_call(node: tree_sitter::Node) -> bool {
     false
 }
 
-/// Whether the class around a route decorator carries `@Controller`. The
-/// grammar puts a class's decorators on the class declaration, or on the
-/// export statement for `@Controller() export class`.
-fn in_controller_class(verb: tree_sitter::Node, source: &[u8]) -> bool {
-    let Some(class) = std::iter::successors(verb.parent(), |n| n.parent()).find(|n| {
+/// The `@Controller` prefixes of the class around a route decorator: `None`
+/// when the class carries no `@Controller`, an empty list when it carries
+/// one without a path (`@Controller()`), and one entry per path otherwise
+/// ([`crate::route_detector::nest_controller_prefixes`], the reader the
+/// route decorator pass uses too). The grammar puts a class's decorators on
+/// the class declaration, or on the export statement for
+/// `@Controller() export class`.
+fn controller_prefixes(verb: tree_sitter::Node, source: &[u8]) -> Option<Vec<String>> {
+    let class = std::iter::successors(verb.parent(), |n| n.parent()).find(|n| {
         matches!(
             n.kind(),
             "class_declaration" | "abstract_class_declaration" | "class"
         )
-    }) else {
-        return false;
-    };
-    let is_controller = |decorator: tree_sitter::Node| {
-        let Some(expr) = decorator.named_child(0) else {
-            return false;
-        };
+    })?;
+    let controller_call = |decorator: tree_sitter::Node| -> Option<Vec<String>> {
+        let expr = decorator.named_child(0)?;
         let callee = match expr.kind() {
             "call_expression" => expr.child_by_field_name("function"),
             _ => Some(expr),
@@ -216,20 +216,36 @@ fn in_controller_class(verb: tree_sitter::Node, source: &[u8]) -> bool {
             "member_expression" => c.child_by_field_name("property").unwrap_or(c),
             _ => c,
         });
-        name.and_then(|n| n.utf8_text(source).ok()) == Some("Controller")
+        if name.and_then(|n| n.utf8_text(source).ok()) != Some("Controller") {
+            return None;
+        }
+        let text = decorator.utf8_text(source).ok()?;
+        Some(crate::route_detector::nest_controller_prefixes(text))
     };
-    let decorators = |n: tree_sitter::Node| {
+    let find = |n: tree_sitter::Node| {
         let mut cursor = n.walk();
         let found = n
             .named_children(&mut cursor)
             .filter(|c| c.kind() == "decorator")
-            .any(is_controller);
+            .find_map(controller_call);
         found
     };
-    decorators(class)
-        || class
+    find(class).or_else(|| {
+        class
             .parent()
-            .is_some_and(|p| p.kind() == "export_statement" && decorators(p))
+            .filter(|p| p.kind() == "export_statement")
+            .and_then(find)
+    })
+}
+
+/// A NestJS route path under one `@Controller` prefix. An empty prefix
+/// leaves the method path as written; any other goes through the one
+/// prefix rule, C1 `join_route_path`.
+fn nestjs_route_path(prefix: &str, path: &str) -> String {
+    match prefix.trim().is_empty() {
+        true => path.to_string(),
+        false => ecp_core::contracts::identity::join_route_path(prefix, path),
+    }
 }
 
 /// The name of the method a route decorator decorates, from the decorator's
@@ -772,20 +788,26 @@ impl LanguageProvider for TypeScriptProvider {
             // `has_nestjs` import flag is known (a few lines later in this
             // function — we can't gate here because import processing
             // happens in the same match loop).
-            if let (Some(verb_node), Some(path_node)) = (
-                nestjs_decorator_verb_node.filter(|verb| in_controller_class(*verb, source)),
-                nestjs_decorator_path_node,
-            ) {
-                if let (Ok(verb_str), Ok(path_str)) = (
+            if let (Some(verb_node), Some(path_node)) =
+                (nestjs_decorator_verb_node, nestjs_decorator_path_node)
+            {
+                if let (Some(prefixes), Ok(verb_str), Ok(path_str)) = (
+                    controller_prefixes(verb_node, source),
                     std::str::from_utf8(&source[verb_node.start_byte()..verb_node.end_byte()]),
                     std::str::from_utf8(&source[path_node.start_byte()..path_node.end_byte()]),
                 ) {
-                    pending_nestjs_decorator_routes.push((
-                        verb_str.to_uppercase(),
-                        path_str.to_string(),
-                        node_span(&verb_node),
-                        decorated_method_name(verb_node, source),
-                    ));
+                    let prefixes = match prefixes.is_empty() {
+                        true => vec![String::new()],
+                        false => prefixes,
+                    };
+                    for prefix in prefixes {
+                        pending_nestjs_decorator_routes.push((
+                            verb_str.to_uppercase(),
+                            nestjs_route_path(&prefix, path_str),
+                            node_span(&verb_node),
+                            decorated_method_name(verb_node, source),
+                        ));
+                    }
                 }
             }
         }

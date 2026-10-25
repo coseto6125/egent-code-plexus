@@ -110,18 +110,21 @@ export class UsersController {
 "#;
 
 /// The method decorator and the NestJS registration record both describe
-/// `GET /list`; on HEAD each minted a Route node with the same uid.
+/// `GET /users/list`; on HEAD each minted a Route node with the same uid.
 #[test]
 fn test_route_nestjs_one_node_per_route() {
     let g = build("src/users.controller.ts", NESTJS);
     assert_eq!(
         route_names(&g),
-        vec!["GET /:id", "GET /list", "POST /create"],
+        vec!["GET /users/:id", "GET /users/list", "POST /users/create"],
         "one Route node per (file, verb, path)"
     );
-    assert_eq!(handlers(&g, "GET /list"), vec![("list".into(), 6, "named")]);
     assert_eq!(
-        handlers(&g, "POST /create"),
+        handlers(&g, "GET /users/list"),
+        vec![("list".into(), 6, "named")]
+    );
+    assert_eq!(
+        handlers(&g, "POST /users/create"),
         vec![("create".into(), 11, "named")]
     );
 }
@@ -131,7 +134,10 @@ fn test_route_nestjs_one_node_per_route() {
 #[test]
 fn test_route_nestjs_bare_path_binds_decorated_method() {
     let g = build("src/users.controller.ts", NESTJS);
-    assert_eq!(handlers(&g, "GET /:id"), vec![("find".into(), 16, "named")]);
+    assert_eq!(
+        handlers(&g, "GET /users/:id"),
+        vec![("find".into(), 16, "named")]
+    );
     assert_eq!(handler_spots(&g), Vec::<(String, String)>::new());
 }
 
@@ -159,8 +165,11 @@ export class NotAController {
 }
 "#;
     let g = build("src/users.controller.ts", src);
-    assert_eq!(route_names(&g), vec!["GET /:id"]);
-    assert_eq!(handlers(&g, "GET /:id"), vec![("find".into(), 6, "named")]);
+    assert_eq!(route_names(&g), vec!["GET /users/:id"]);
+    assert_eq!(
+        handlers(&g, "GET /users/:id"),
+        vec![("find".into(), 6, "named")]
+    );
 }
 
 /// `list` is both a class member (first in the file) and a top-level
