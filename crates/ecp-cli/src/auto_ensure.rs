@@ -737,7 +737,7 @@ pub(crate) fn ensure_fresh_with_rebuild(
                                     }
                                 })
                                 .collect();
-                        classify_dirty(DirtySet::from_modified(paths, skipped))
+                        classify_dirty(DirtySet::from_modified(paths, skipped)).without_other()
                     }
                 };
                 // Every source half reaches the gate and the parse, removed
@@ -2083,6 +2083,31 @@ mod fingerprint_drift_tests {
                 path_lossy: "bad\u{FFFD}.py".into(),
                 reason: SkipReason::NotUtf8,
             }]
+        );
+    }
+
+    /// The porcelain shortcut drops "other" events before it returns the set;
+    /// the walk must hand the caller the same set for the same tree.
+    #[test]
+    fn test_ensure_fresh_with_rebuild_walk_other_file_beside_source_returns_source_only() {
+        if rerun_in_child(
+            "ECP_AUTO_ENSURE_WALK_OTHER_CHILD",
+            "auto_ensure::fingerprint_drift_tests::test_ensure_fresh_with_rebuild_walk_other_file_beside_source_returns_source_only",
+        ) {
+            return;
+        }
+        use ecp_core::contracts::dirty_event::PathClass;
+        use std::ffi::OsStr;
+        let set = walked_dirty_set(
+            "walk-other-test",
+            &[OsStr::new("a.py"), OsStr::new("data.csv")],
+        );
+        assert_eq!(
+            set.events(),
+            &[DirtyEvent::Modified(ClassifiedPath {
+                path: RepoPath::new("a.py").unwrap(),
+                class: PathClass::SOURCE,
+            })]
         );
     }
 
